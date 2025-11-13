@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 
 export { JazzInspectorInternal } from "./viewer/new-app.js";
 export { PageStack } from "./viewer/page-stack.js";
@@ -29,6 +29,15 @@ export function JazzInspector({ position = "right" }: { position?: Position }) {
   const context = useJazzContext<Account>();
   const localNode = context.node;
   const me = "me" in context ? context.me : undefined;
+
+  const [isCSR, setIsCSR] = useState(false);
+  useEffect(() => {
+    setIsCSR(true);
+  }, []);
+
+  if (!isCSR) {
+    return null;
+  }
 
   return (
     <JazzInspectorInternal
