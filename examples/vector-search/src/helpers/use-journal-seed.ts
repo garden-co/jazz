@@ -50,19 +50,12 @@ export const useJournalSeed = ({
         for (const entry of entriesDataBatch) {
           const embedding = await createEmbedding(entry.c);
 
-          const journalEntry = JournalEntry.create(
-            {
-              text: entry.c,
-              feelings: entry.f,
-              topics: entry.t,
-              embedding: Embedding.create(embedding, {
-                owner: journalEntries?.$jazz.owner,
-              }),
-            },
-            { owner: journalEntries?.$jazz.owner },
-          );
-
-          newEntriesBatch.push(journalEntry);
+          newEntriesBatch.push({
+            text: entry.c,
+            feelings: entry.f,
+            topics: entry.t,
+            embedding,
+          });
         }
 
         setProgress((progress) => ({
