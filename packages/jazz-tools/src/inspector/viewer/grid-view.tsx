@@ -12,6 +12,7 @@ import { Card, CardBody, CardHeader } from "../ui/card.js";
 import { Grid } from "../ui/grid.js";
 import { Icon } from "../ui/icon.js";
 import { Text } from "../ui/text.js";
+import { isWriter } from "../utils/permissions.js";
 
 function GridItem({
   entry,
@@ -115,7 +116,7 @@ function GridItem({
             <Text strong>{key}</Text>
           )}
         </div>
-        {coValue && (
+        {coValue && isWriter(coValue.group.myRole()) && (
           <ActionButtons>
             <EditButton
               onClick={handleEditClick}
