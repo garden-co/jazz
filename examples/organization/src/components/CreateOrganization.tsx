@@ -1,4 +1,3 @@
-import { Group } from "jazz-tools";
 import { useAccount, useCoState } from "jazz-tools/react";
 import { useState } from "react";
 import { useNavigate } from "react-router";
