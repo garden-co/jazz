@@ -37,7 +37,7 @@ export function WriteOnlyRole() {
   const addNewItem = async () => {
     if (!coList.$isLoaded) return;
 
-    const group = coList.$jazz.owner as Group;
+    const group = coList.$jazz.owner;
     const coMap = SharedCoMap.create({ value: "" }, { owner: group });
 
     coList.$jazz.push(coMap);
@@ -46,7 +46,7 @@ export function WriteOnlyRole() {
   const revokeAccess = () => {
     if (!coList.$isLoaded) return;
 
-    const coListGroup = coList.$jazz.owner as Group;
+    const coListGroup = coList.$jazz.owner;
 
     for (const member of coListGroup.members) {
       if (
