@@ -3,26 +3,25 @@ import { createWebSocketPeer } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { Hono } from "hono";
 import { CoMap, coField } from "jazz-tools";
-import { Account } from "jazz-tools";
+import { Account, co, z } from "jazz-tools";
 import { startWorker } from "jazz-tools/worker";
 
 const app = new Hono();
 
-class MyAccountRoot extends CoMap {
-  text = coField.string;
-}
+const MyAccountRoot = co.map({ text: z.string() });
 
-class MyAccount extends Account {
-  root = coField.ref(MyAccountRoot);
-
-  migrate(): void {
-    if (this.root === undefined) {
-      this.$jazz.set("root", {
+const MyAccount = co
+  .account({
+    root: MyAccountRoot,
+    profile: co.profile(),
+  })
+  .withMigration((account) => {
+    if (!account.$jazz.has("root")) {
+      account.$jazz.set("root", {
         text: "Hello world!",
       });
     }
-  }
-}
+  });
 
 const syncServer = "wss://cloud.jazz.tools/?key=jazz@jazz.tools";
 

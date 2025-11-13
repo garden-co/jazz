@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { Embedding, JournalEntry, JournalEntryList } from "../schema";
+import { JournalEntryList } from "../schema";
 
 export function useCreateEntry({
   createEmbedding,

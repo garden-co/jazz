@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { Embedding, JournalEntry, JournalEntryList } from "../schema";
+import { JournalEntryList } from "../schema";
 
 const fetchJournalEntries = async () => {
   const response = await fetch("/datasets/journal/data-hou8Ux.json");
