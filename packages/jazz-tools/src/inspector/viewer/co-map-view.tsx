@@ -6,6 +6,7 @@ import { Button, Icon, Input, Modal } from "../ui";
 import { styled } from "goober";
 import { restoreCoMapToTimestamp } from "../utils/history";
 import { CoValueEditor } from "./co-value-editor.js";
+import { isWriter } from "../utils/permissions";
 
 export function CoMapView({
   coValue,
@@ -27,7 +28,11 @@ export function CoMapView({
         coValue={coValue}
       />
       <div>
-        <AddPropertyModal coValue={coValue} node={node} />{" "}
+        <AddPropertyModal
+          disabled={!isWriter(coValue.group.myRole())}
+          coValue={coValue}
+          node={node}
+        />{" "}
         <RestoreSnapshotModal coValue={coValue} />
       </div>
     </>
@@ -37,9 +42,11 @@ export function CoMapView({
 function AddPropertyModal({
   coValue,
   node,
+  disabled,
 }: {
   coValue: RawCoMap;
   node: LocalNode;
+  disabled: boolean;
 }) {
   const [isAddPropertyModalOpen, setIsAddPropertyModalOpen] = useState(false);
   const [propertyName, setPropertyName] = useState("");
@@ -59,9 +66,10 @@ function AddPropertyModal({
       <Button
         title="Add Property"
         variant="secondary"
+        disabled={disabled}
         onClick={openAddPropertyModal}
       >
-        <Icon name="edit" />
+        <Icon name="add" />
       </Button>
 
       <Modal
@@ -132,6 +140,8 @@ function RestoreSnapshotModal({ coValue }: { coValue: RawCoMap }) {
     setIsRestoreModalOpen(false);
   };
 
+  const canRestore = isWriter(coValue.group.myRole());
+
   return (
     <>
       <Button title="Timeline" variant="secondary" onClick={openRestoreModal}>
@@ -146,7 +156,7 @@ function RestoreSnapshotModal({ coValue }: { coValue: RawCoMap }) {
         cancelText="Cancel"
         onConfirm={handleRestore}
         onCancel={handleClose}
-        showButtons={timestamps.length > 1}
+        showButtons={timestamps.length > 1 && canRestore}
       >
         {timestamps.length > 1 && (
           <>
@@ -167,18 +177,20 @@ function RestoreSnapshotModal({ coValue }: { coValue: RawCoMap }) {
               </TimestampDisplay>
             </RangeContainer>
 
-            <CheckboxContainer>
-              <CheckboxInput
-                type="checkbox"
-                id="remove-unknown-properties"
-                checked={removeUnknownProperties}
-                onChange={(e) => setRemoveUnknownProperties(e.target.checked)}
-              />
-              <CheckboxLabel htmlFor="remove-unknown-properties">
-                Remove unknown properties (properties that don't exist in the
-                selected snapshot)
-              </CheckboxLabel>
-            </CheckboxContainer>
+            {canRestore && (
+              <CheckboxContainer>
+                <CheckboxInput
+                  type="checkbox"
+                  id="remove-unknown-properties"
+                  checked={removeUnknownProperties}
+                  onChange={(e) => setRemoveUnknownProperties(e.target.checked)}
+                />
+                <CheckboxLabel htmlFor="remove-unknown-properties">
+                  Remove unknown properties (properties that don't exist in the
+                  selected snapshot)
+                </CheckboxLabel>
+              </CheckboxContainer>
+            )}
           </>
         )}
 

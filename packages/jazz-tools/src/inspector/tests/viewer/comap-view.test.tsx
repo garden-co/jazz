@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, assert, beforeAll, describe, expect, it } from "vitest";
 import { createJazzTestAccount, setupJazzTestSync } from "jazz-tools/testing";
 import { co, z } from "jazz-tools";
 import {
@@ -576,6 +576,314 @@ describe("CoMapView", async () => {
         const previewPre = preview.parentElement?.querySelector("pre");
         expect(previewPre?.textContent).toContain('"counter": 3');
       });
+    });
+  });
+
+  describe("Permissions", () => {
+    it("should disable Add Property button for reader account", async () => {
+      const reader = await createJazzTestAccount();
+      const group = co.group().create({ owner: account });
+      group.addMember(reader, "reader");
+
+      const schema = co.map({
+        pet: z.string(),
+      });
+
+      const value = schema.create({ pet: "dog" }, group);
+
+      const valueOnReader = await schema.load(value.$jazz.id, {
+        loadAs: reader,
+      });
+      assert(valueOnReader.$isLoaded);
+      const data = valueOnReader.$jazz.raw.toJSON() as JsonObject;
+
+      render(
+        <CoMapView
+          coValue={valueOnReader.$jazz.raw}
+          data={data}
+          node={reader.$jazz.localNode}
+          onNavigate={() => {}}
+        />,
+      );
+
+      const addButton = screen.getByTitle("Add Property");
+      expect(addButton).toBeDefined();
+      expect((addButton as HTMLButtonElement).disabled).toBe(true);
+    });
+
+    it("should enable Add Property button for writer account", async () => {
+      const writer = await createJazzTestAccount();
+      const group = co.group().create({ owner: account });
+      group.addMember(writer, "writer");
+
+      const schema = co.map({
+        pet: z.string(),
+      });
+
+      const value = schema.create({ pet: "dog" }, group);
+
+      const valueOnWriter = await schema.load(value.$jazz.id, {
+        loadAs: writer,
+      });
+      assert(valueOnWriter.$isLoaded);
+      const data = valueOnWriter.$jazz.raw.toJSON() as JsonObject;
+
+      render(
+        <CoMapView
+          coValue={valueOnWriter.$jazz.raw}
+          data={data}
+          node={writer.$jazz.localNode}
+          onNavigate={() => {}}
+        />,
+      );
+
+      const addButton = screen.getByTitle("Add Property");
+      expect(addButton).toBeDefined();
+      expect((addButton as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    it("should hide restore buttons for reader account when multiple timestamps exist", async () => {
+      const reader = await createJazzTestAccount();
+      const group = co.group().create({ owner: account });
+      group.addMember(reader, "reader");
+
+      const schema = co.map({
+        pet: z.string(),
+      });
+
+      const value = schema.create({ pet: "dog" }, group);
+      await sleep(2);
+      value.$jazz.set("pet", "cat");
+
+      const valueOnReader = await schema.load(value.$jazz.id, {
+        loadAs: reader,
+      });
+      assert(valueOnReader.$isLoaded);
+      const data = valueOnReader.$jazz.raw.toJSON() as JsonObject;
+
+      render(
+        <CoMapView
+          coValue={valueOnReader.$jazz.raw}
+          data={data}
+          node={reader.$jazz.localNode}
+          onNavigate={() => {}}
+        />,
+      );
+
+      const restoreButton = screen.getByTitle("Timeline");
+      fireEvent.click(restoreButton);
+
+      await waitFor(() => {
+        expect(screen.getByText("Select Timestamp")).toBeDefined();
+      });
+
+      expect(screen.queryByText("Restore")).toBeNull();
+      expect(screen.queryByRole("checkbox")).toBeNull();
+    });
+
+    it("should show restore buttons for writer account when multiple timestamps exist", async () => {
+      const writer = await createJazzTestAccount();
+      const group = co.group().create({ owner: account });
+      group.addMember(writer, "writer");
+
+      const schema = co.map({
+        pet: z.string(),
+      });
+
+      const value = schema.create({ pet: "dog" }, group);
+      await sleep(2);
+      value.$jazz.set("pet", "cat");
+
+      const valueOnWriter = await schema.load(value.$jazz.id, {
+        loadAs: writer,
+      });
+      assert(valueOnWriter.$isLoaded);
+      const data = valueOnWriter.$jazz.raw.toJSON() as JsonObject;
+
+      render(
+        <CoMapView
+          coValue={valueOnWriter.$jazz.raw}
+          data={data}
+          node={writer.$jazz.localNode}
+          onNavigate={() => {}}
+        />,
+      );
+
+      const restoreButton = screen.getByTitle("Timeline");
+      fireEvent.click(restoreButton);
+
+      await waitFor(() => {
+        expect(screen.getByText("Restore")).toBeDefined();
+      });
+
+      expect(screen.getByRole("checkbox")).toBeDefined();
+    });
+
+    it("should hide edit buttons in GridView for reader account", async () => {
+      const reader = await createJazzTestAccount();
+      const group = co.group().create({ owner: account });
+      group.addMember(reader, "reader");
+
+      const schema = co.map({
+        pet: z.string(),
+        age: z.number(),
+      });
+
+      const value = schema.create({ pet: "dog", age: 10 }, group);
+
+      const valueOnReader = await schema.load(value.$jazz.id, {
+        loadAs: reader,
+      });
+      assert(valueOnReader.$isLoaded);
+      const data = valueOnReader.$jazz.raw.toJSON() as JsonObject;
+
+      render(
+        <CoMapView
+          coValue={valueOnReader.$jazz.raw}
+          data={data}
+          node={reader.$jazz.localNode}
+          onNavigate={() => {}}
+        />,
+      );
+
+      expect(screen.getByText("pet")).toBeDefined();
+      expect(screen.getByText("age")).toBeDefined();
+
+      const editButtons = screen.queryAllByLabelText("Edit");
+      const deleteButtons = screen.queryAllByLabelText("Delete");
+
+      expect(editButtons).toHaveLength(0);
+      expect(deleteButtons).toHaveLength(0);
+    });
+
+    it("should show edit buttons in GridView for writer account", async () => {
+      const writer = await createJazzTestAccount();
+      const group = co.group().create({ owner: account });
+      group.addMember(writer, "writer");
+
+      const schema = co.map({
+        pet: z.string(),
+        age: z.number(),
+      });
+
+      const value = schema.create({ pet: "dog", age: 10 }, group);
+
+      const valueOnWriter = await schema.load(value.$jazz.id, {
+        loadAs: writer,
+      });
+      assert(valueOnWriter.$isLoaded);
+      const data = valueOnWriter.$jazz.raw.toJSON() as JsonObject;
+
+      render(
+        <CoMapView
+          coValue={valueOnWriter.$jazz.raw}
+          data={data}
+          node={writer.$jazz.localNode}
+          onNavigate={() => {}}
+        />,
+      );
+
+      expect(screen.getByText("pet")).toBeDefined();
+      expect(screen.getByText("age")).toBeDefined();
+
+      const editButtons = screen.queryAllByLabelText("Edit");
+      const deleteButtons = screen.queryAllByLabelText("Delete");
+
+      expect(editButtons.length).toBeGreaterThan(0);
+      expect(deleteButtons.length).toBeGreaterThan(0);
+    });
+
+    it("should enable Add Property button for admin account", async () => {
+      const admin = await createJazzTestAccount();
+      const group = co.group().create({ owner: account });
+      group.addMember(admin, "admin");
+
+      const schema = co.map({
+        pet: z.string(),
+      });
+
+      const value = schema.create({ pet: "dog" }, group);
+
+      const valueOnAdmin = await schema.load(value.$jazz.id, {
+        loadAs: admin,
+      });
+      assert(valueOnAdmin.$isLoaded);
+      const data = valueOnAdmin.$jazz.raw.toJSON() as JsonObject;
+
+      render(
+        <CoMapView
+          coValue={valueOnAdmin.$jazz.raw}
+          data={data}
+          node={admin.$jazz.localNode}
+          onNavigate={() => {}}
+        />,
+      );
+
+      const addButton = screen.getByTitle("Add Property");
+      expect(addButton).toBeDefined();
+      expect((addButton as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    it("should enable Add Property button for manager account", async () => {
+      const manager = await createJazzTestAccount();
+      const group = co.group().create({ owner: account });
+      group.addMember(manager, "manager");
+
+      const schema = co.map({
+        pet: z.string(),
+      });
+
+      const value = schema.create({ pet: "dog" }, group);
+
+      const valueOnManager = await schema.load(value.$jazz.id, {
+        loadAs: manager,
+      });
+      assert(valueOnManager.$isLoaded);
+      const data = valueOnManager.$jazz.raw.toJSON() as JsonObject;
+
+      render(
+        <CoMapView
+          coValue={valueOnManager.$jazz.raw}
+          data={data}
+          node={manager.$jazz.localNode}
+          onNavigate={() => {}}
+        />,
+      );
+
+      const addButton = screen.getByTitle("Add Property");
+      expect(addButton).toBeDefined();
+      expect((addButton as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    it("should enable Add Property button for writeOnly account", async () => {
+      const writeOnly = await createJazzTestAccount();
+      const group = co.group().create({ owner: account });
+      group.addMember(writeOnly, "writeOnly");
+
+      const schema = co.map({
+        pet: z.string(),
+      });
+
+      const value = schema.create({ pet: "dog" }, group);
+
+      const valueOnWriteOnly = await schema.load(value.$jazz.id, {
+        loadAs: writeOnly,
+      });
+      assert(valueOnWriteOnly.$isLoaded);
+      const data = valueOnWriteOnly.$jazz.raw.toJSON() as JsonObject;
+
+      render(
+        <CoMapView
+          coValue={valueOnWriteOnly.$jazz.raw}
+          data={data}
+          node={writeOnly.$jazz.localNode}
+          onNavigate={() => {}}
+        />,
+      );
+
+      const addButton = screen.getByTitle("Add Property");
+      expect(addButton).toBeDefined();
+      expect((addButton as HTMLButtonElement).disabled).toBe(false);
     });
   });
 });
