@@ -1,4 +1,4 @@
-import { describe, bench } from "vitest";
+import { beforeEach, describe, bench } from "vitest";
 import * as localTools from "jazz-tools";
 import * as publishedTools from "jazz-tools-latest";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
@@ -32,6 +32,8 @@ async function createSchema(
     threadId: tools.z.string().optional(),
   });
 
+  const Messages = tools.co.list(Message);
+
   const ctx = await tools.createJazzContextForNewAccount({
     creationProps: {
       name: "Test Account",
@@ -42,6 +44,7 @@ async function createSchema(
 
   return {
     Message,
+    Messages,
     sampleReactions,
     sampleHiddenIn,
     Group: tools.Group,
@@ -54,57 +57,57 @@ const schema = await createSchema(localTools, WasmCrypto);
 // @ts-expect-error
 const schemaLatest = await createSchema(publishedTools, WasmCryptoLatest);
 
-const message = schema.Message.create(
-  {
-    content: "A".repeat(1024),
-    createdAt: new Date(),
-    updatedAt: new Date(),
-    hiddenIn: sampleHiddenIn,
-    reactions: sampleReactions,
-    author: "user123",
-  },
-  schema.Group.create(schema.account).makePublic(),
-);
-
-schema.account.$jazz.localNode.internalDeleteCoValue(message.$jazz.raw.id);
-schemaLatest.account.$jazz.localNode.internalDeleteCoValue(
-  message.$jazz.raw.id,
-);
-
 describe("Message.create", () => {
-  bench(
-    "current version",
-    () => {
-      schema.Message.create(
-        {
-          content: "A".repeat(1024),
-          createdAt: new Date(),
-          updatedAt: new Date(),
-          hiddenIn: sampleHiddenIn,
-          reactions: sampleReactions,
-          author: "user123",
-        },
-        schema.Group.create(schema.account),
-      );
-    },
-    { iterations: 2000, warmupIterations: 500 },
-  );
+  beforeEach(async () => {
+    // @ts-expect-error
+    globalThis.gc();
+  });
 
   bench(
     "Jazz 0.19.2",
     () => {
-      schemaLatest.Message.create(
-        {
-          content: "A".repeat(1024),
-          createdAt: new Date(),
-          updatedAt: new Date(),
-          hiddenIn: sampleHiddenIn,
-          reactions: sampleReactions,
-          author: "user123",
-        },
-        schemaLatest.Group.create(schemaLatest.account),
-      );
+      const group = schemaLatest.Group.create(schemaLatest.account);
+      const messages = schemaLatest.Messages.create([], { owner: group });
+      for (let i = 0; i < 1000; i++) {
+        messages.$jazz.push(
+          schemaLatest.Message.create(
+            {
+              content: "A".repeat(1024),
+              createdAt: new Date(),
+              updatedAt: new Date(),
+              hiddenIn: sampleHiddenIn,
+              reactions: sampleReactions,
+              author: "user123",
+            },
+            group,
+          ),
+        );
+      }
     },
-    { iterations: 2000, warmupIterations: 500 },
+    { iterations: 5, warmupIterations: 2 },
+  );
+
+  bench(
+    "current version",
+    () => {
+      const group = schema.Group.create(schema.account);
+      const messages = schema.Messages.create([], { owner: group });
+      for (let i = 0; i < 1000; i++) {
+        messages.$jazz.push(
+          schema.Message.create(
+            {
+              content: "A".repeat(1024),
+              createdAt: new Date(),
+              updatedAt: new Date(),
+              hiddenIn: sampleHiddenIn,
+              reactions: sampleReactions,
+              author: "user123",
+            },
+            group,
+          ),
+        );
+      }
+    },
+    { iterations: 5, warmupIterations: 2 },
   );
 });
