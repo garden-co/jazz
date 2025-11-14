@@ -43,9 +43,7 @@
     "test": "jest",
     "typecheck": "tsc",
     "lint": "eslint \"**/*.{js,ts,tsx}\"",
-    "clean": "del-cli android/build example/android/build example/android/app/build example/ios/build lib",
-    "prepare": "bob build",
-    "release": "release-it --only-version"
+    "prepare": "bob build"
   },
   "keywords": [
     "react-native",
@@ -54,7 +52,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/antoniomuso/cojson-core-rn.git"
+    "url": "git+https://https://github.com/garden-co/jazz.git"
   },
   "author": "Antonio Musolino <antoniomusolino007@gmail.com> (https://github.com/antoniomuso)",
   "license": "MIT",
@@ -95,9 +93,6 @@
     "react": "*",
     "react-native": "*"
   },
-  "workspaces": [
-    "example"
-  ],
   "packageManager": "pnpm@10.16.1",
   "jest": {
     "preset": "react-native",
