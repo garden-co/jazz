@@ -41,6 +41,11 @@ jobs:
         with:
           name: cojson-core-rn-android
           path: crates/cojson-core-rn
+      
+      - name: List React Native Android artifacts
+        run: |
+          ls -R crates/cojson-core-rn/android/src/main/jniLibs
+        shell: bash
 
       - name: Create Output Directory
         run: |
