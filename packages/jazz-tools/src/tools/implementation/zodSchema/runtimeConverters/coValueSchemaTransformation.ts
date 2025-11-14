@@ -39,6 +39,88 @@ import {
   schemaFieldToCoFieldDef,
 } from "./schemaFieldToCoFieldDef.js";
 
+const hydratedSchemaCache = new WeakMap<object, unknown>();
+
+type FieldEntry = [PropertyKey, () => unknown];
+
+function getHydrationCacheKey(schema: AnyCoreCoValueSchema) {
+  if (
+    (typeof schema === "object" && schema !== null) ||
+    typeof schema === "function"
+  ) {
+    return schema as object;
+  }
+  return undefined;
+}
+
+function buildFieldEntries(def: {
+  shape: Record<string, SchemaField>;
+  catchall?: SchemaField;
+}): FieldEntry[] {
+  const entries: FieldEntry[] = [];
+  const shape = def.shape;
+
+  for (const fieldName of Object.keys(shape)) {
+    const descriptor = Object.getOwnPropertyDescriptor(shape, fieldName);
+    if (!descriptor) continue;
+
+    const resolveSchemaField = () =>
+      (descriptor.get
+        ? descriptor.get.call(shape)
+        : descriptor.value) as SchemaField;
+
+    entries.push([fieldName, makeLazyCoFieldDef(resolveSchemaField)]);
+  }
+
+  if (def.catchall) {
+    entries.push([
+      coField.items,
+      makeLazyCoFieldDef(() => def.catchall as SchemaField),
+    ]);
+  }
+
+  return entries;
+}
+
+type MutableTarget = Record<string | number | symbol, unknown>;
+
+function assignFieldEntries(target: object, entries: FieldEntry[]) {
+  const mutableTarget = target as MutableTarget;
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (!entry) continue;
+    const [fieldName, getFieldDef] = entry;
+    mutableTarget[fieldName] = getFieldDef();
+  }
+}
+
+function makeLazyCoFieldDef(resolver: () => SchemaField) {
+  let cached: unknown;
+  let resolved = false;
+  return () => {
+    if (!resolved) {
+      cached = schemaFieldToCoFieldDef(resolver());
+      resolved = true;
+    }
+
+    return cached;
+  };
+}
+
+function createFieldEntriesResolver(def: {
+  shape: Record<string, SchemaField>;
+  catchall?: SchemaField;
+}) {
+  let cachedEntries: FieldEntry[] | undefined;
+  return () => {
+    if (!cachedEntries) {
+      cachedEntries = buildFieldEntries(def);
+    }
+
+    return cachedEntries;
+  };
+}
+
 // Note: if you're editing this function, edit the `isAnyCoValueSchema`
 // function in `zodReExport.ts` as well
 export function isAnyCoValueSchema(
@@ -72,88 +154,111 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
     return schema as any;
   }
 
-  if (schema.builtin === "CoOptional") {
-    throw new Error(
-      `co.optional() of collaborative types is not supported as top-level schema: ${JSON.stringify(schema)}`,
-    );
-  } else if (schema.builtin === "CoMap" || schema.builtin === "Account") {
-    const def = schema.getDefinition();
-    const ClassToExtend = schema.builtin === "Account" ? Account : CoMap;
+  const cacheKey = getHydrationCacheKey(schema);
 
-    const coValueClass = class ZCoMap extends ClassToExtend {
-      constructor(options: { fromRaw: RawCoMap } | undefined) {
-        super(options);
-        for (const [fieldName, fieldType] of Object.entries(def.shape)) {
-          (this as any)[fieldName] = schemaFieldToCoFieldDef(
-            fieldType as SchemaField,
-          );
-        }
-        if (def.catchall) {
-          (this as any)[coField.items] = schemaFieldToCoFieldDef(
-            def.catchall as SchemaField,
-          );
-        }
-      }
-    };
-
-    const coValueSchema =
-      ClassToExtend === Account
-        ? new AccountSchema(schema as any, coValueClass as any)
-        : new CoMapSchema(schema as any, coValueClass as any);
-
-    return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
-  } else if (schema.builtin === "CoList") {
-    const element = schema.element;
-    const coValueClass = class ZCoList extends CoList {
-      constructor(options: { fromRaw: RawCoList } | undefined) {
-        super(options);
-        (this as any)[coField.items] = schemaFieldToCoFieldDef(
-          element as SchemaField,
-        );
-      }
-    };
-
-    const coValueSchema = new CoListSchema(element, coValueClass as any);
-
-    return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
-  } else if (schema.builtin === "CoFeed") {
-    const coValueClass = CoFeed.Of(
-      schemaFieldToCoFieldDef(schema.element as SchemaField),
-    );
-    const coValueSchema = new CoFeedSchema(schema.element, coValueClass);
-    return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
-  } else if (schema.builtin === "FileStream") {
-    const coValueClass = FileStream;
-    return new FileStreamSchema(coValueClass) as CoValueSchemaFromCoreSchema<S>;
-  } else if (schema.builtin === "CoVector") {
-    const dimensions = schema.dimensions;
-
-    const coValueClass = class CoVectorWithDimensions extends CoVector {
-      protected static requiredDimensionsCount = dimensions;
-    };
-
-    return new CoVectorSchema(
-      dimensions,
-      coValueClass,
-    ) as CoValueSchemaFromCoreSchema<S>;
-  } else if (schema.builtin === "CoPlainText") {
-    const coValueClass = CoPlainText;
-    return new PlainTextSchema(coValueClass) as CoValueSchemaFromCoreSchema<S>;
-  } else if (schema.builtin === "CoRichText") {
-    const coValueClass = CoRichText;
-    return new RichTextSchema(coValueClass) as CoValueSchemaFromCoreSchema<S>;
-  } else if (schema.builtin === "CoDiscriminatedUnion") {
-    const coValueClass = SchemaUnion.Of(schemaUnionDiscriminatorFor(schema));
-    const coValueSchema = new CoDiscriminatedUnionSchema(schema, coValueClass);
-    return coValueSchema as CoValueSchemaFromCoreSchema<S>;
-  } else if (schema.builtin === "Group") {
-    return new GroupSchema() as CoValueSchemaFromCoreSchema<S>;
-  } else {
-    const notReachable: never = schema;
-    throw new Error(
-      `Unsupported zod CoValue type for top-level schema: ${JSON.stringify(notReachable, undefined, 2)}`,
-    );
+  if (cacheKey) {
+    const cached = hydratedSchemaCache.get(cacheKey) as
+      | CoValueSchemaFromCoreSchema<AnyCoreCoValueSchema>
+      | undefined;
+    if (cached) {
+      return cached as CoValueSchemaFromCoreSchema<S>;
+    }
   }
+
+  const hydratedSchema = (() => {
+    if (schema.builtin === "CoOptional") {
+      throw new Error(
+        `co.optional() of collaborative types is not supported as top-level schema: ${JSON.stringify(schema)}`,
+      );
+    } else if (schema.builtin === "CoMap" || schema.builtin === "Account") {
+      const def = schema.getDefinition();
+      const defForFields = {
+        shape: def.shape as Record<string, SchemaField>,
+        catchall: def.catchall as SchemaField | undefined,
+      };
+      const ClassToExtend = schema.builtin === "Account" ? Account : CoMap;
+      const getFieldEntries = createFieldEntriesResolver(defForFields);
+
+      const coValueClass = class ZCoMap extends ClassToExtend {
+        constructor(options: { fromRaw: RawCoMap } | undefined) {
+          super(options);
+          assignFieldEntries(this, getFieldEntries());
+        }
+      };
+
+      const coValueSchema =
+        ClassToExtend === Account
+          ? new AccountSchema(schema as any, coValueClass as any)
+          : new CoMapSchema(schema as any, coValueClass as any);
+
+      return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
+    } else if (schema.builtin === "CoList") {
+      const element = schema.element;
+      const listFieldEntries: FieldEntry[] = [
+        [coField.items, makeLazyCoFieldDef(() => element as SchemaField)],
+      ];
+      const coValueClass = class ZCoList extends CoList {
+        constructor(options: { fromRaw: RawCoList } | undefined) {
+          super(options);
+          assignFieldEntries(this, listFieldEntries);
+        }
+      };
+
+      const coValueSchema = new CoListSchema(element, coValueClass as any);
+
+      return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
+    } else if (schema.builtin === "CoFeed") {
+      const coValueClass = CoFeed.Of(
+        schemaFieldToCoFieldDef(schema.element as SchemaField),
+      );
+      const coValueSchema = new CoFeedSchema(schema.element, coValueClass);
+      return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
+    } else if (schema.builtin === "FileStream") {
+      const coValueClass = FileStream;
+      return new FileStreamSchema(
+        coValueClass,
+      ) as CoValueSchemaFromCoreSchema<S>;
+    } else if (schema.builtin === "CoVector") {
+      const dimensions = schema.dimensions;
+
+      const coValueClass = class CoVectorWithDimensions extends CoVector {
+        protected static requiredDimensionsCount = dimensions;
+      };
+
+      return new CoVectorSchema(
+        dimensions,
+        coValueClass,
+      ) as CoValueSchemaFromCoreSchema<S>;
+    } else if (schema.builtin === "CoPlainText") {
+      const coValueClass = CoPlainText;
+      return new PlainTextSchema(
+        coValueClass,
+      ) as CoValueSchemaFromCoreSchema<S>;
+    } else if (schema.builtin === "CoRichText") {
+      const coValueClass = CoRichText;
+      return new RichTextSchema(coValueClass) as CoValueSchemaFromCoreSchema<S>;
+    } else if (schema.builtin === "CoDiscriminatedUnion") {
+      const coValueClass = SchemaUnion.Of(schemaUnionDiscriminatorFor(schema));
+      const coValueSchema = new CoDiscriminatedUnionSchema(
+        schema,
+        coValueClass,
+      );
+      return coValueSchema as CoValueSchemaFromCoreSchema<S>;
+    } else if (schema.builtin === "Group") {
+      return new GroupSchema() as CoValueSchemaFromCoreSchema<S>;
+    } else {
+      const notReachable: never = schema;
+      throw new Error(
+        `Unsupported zod CoValue type for top-level schema: ${JSON.stringify(notReachable, undefined, 2)}`,
+      );
+    }
+  })();
+
+  if (cacheKey) {
+    hydratedSchemaCache.set(cacheKey, hydratedSchema);
+  }
+
+  return hydratedSchema;
 }
 
 /**

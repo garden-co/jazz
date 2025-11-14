@@ -60,16 +60,40 @@ function makeCodecCoField(
   });
 }
 
-export function schemaFieldToCoFieldDef(schema: SchemaField) {
+const schemaFieldCache = new WeakMap<object, unknown>();
+
+function getCacheKey(schema: SchemaField) {
+  if (
+    (typeof schema === "object" && schema !== null) ||
+    typeof schema === "function"
+  ) {
+    return schema as object;
+  }
+  return undefined;
+}
+
+export function schemaFieldToCoFieldDef(schema: SchemaField): any {
+  const cacheKey = getCacheKey(schema);
+
+  if (cacheKey) {
+    const cached = schemaFieldCache.get(cacheKey);
+    if (cached !== undefined) {
+      return cached as never;
+    }
+  }
+
   if (isCoValueClass(schema)) {
-    return coField.ref(schema);
+    return cacheResult(cacheKey, coField.ref(schema));
   } else if (isCoValueSchema(schema)) {
     if (schema.builtin === "CoOptional") {
-      return coField.ref(schema.getCoValueClass(), {
-        optional: true,
-      });
+      return cacheResult(
+        cacheKey,
+        coField.ref(schema.getCoValueClass(), {
+          optional: true,
+        }),
+      );
     }
-    return coField.ref(schema.getCoValueClass());
+    return cacheResult(cacheKey, coField.ref(schema.getCoValueClass()));
   } else {
     if ("_zod" in schema) {
       const zodSchemaDef = schema._zod.def;
@@ -90,29 +114,35 @@ export function schemaFieldToCoFieldDef(schema: SchemaField) {
         // Primitive coField types support null and undefined as values,
         // so we can just return the inner type here and rely on support
         // for null/undefined at the type level
-        return coFieldDef;
+        return cacheResult(cacheKey, coFieldDef);
       } else if (zodSchemaDef.type === "string") {
-        return coField.string;
+        return cacheResult(cacheKey, coField.string);
       } else if (zodSchemaDef.type === "number") {
-        return coField.number;
+        return cacheResult(cacheKey, coField.number);
       } else if (zodSchemaDef.type === "boolean") {
-        return coField.boolean;
+        return cacheResult(cacheKey, coField.boolean);
       } else if (zodSchemaDef.type === "null") {
-        return coField.null;
+        return cacheResult(cacheKey, coField.null);
       } else if (zodSchemaDef.type === "enum") {
-        return coField.string;
+        return cacheResult(cacheKey, coField.string);
       } else if (zodSchemaDef.type === "readonly") {
-        return schemaFieldToCoFieldDef(
-          (schema as unknown as ZodReadonly).def.innerType as SchemaField,
+        return cacheResult(
+          cacheKey,
+          schemaFieldToCoFieldDef(
+            (schema as unknown as ZodReadonly).def.innerType as SchemaField,
+          ),
         );
       } else if (zodSchemaDef.type === "date") {
-        return coField.optional.Date;
+        return cacheResult(cacheKey, coField.optional.Date);
       } else if (zodSchemaDef.type === "template_literal") {
-        return coField.string;
+        return cacheResult(cacheKey, coField.string);
       } else if (zodSchemaDef.type === "lazy") {
         // Mostly to support z.json()
-        return schemaFieldToCoFieldDef(
-          (schema as unknown as ZodLazy).unwrap() as SchemaField,
+        return cacheResult(
+          cacheKey,
+          schemaFieldToCoFieldDef(
+            (schema as unknown as ZodLazy).unwrap() as SchemaField,
+          ),
         );
       } else if (
         zodSchemaDef.type === "default" ||
@@ -122,9 +152,12 @@ export function schemaFieldToCoFieldDef(schema: SchemaField) {
           "z.default()/z.catch() are not supported in collaborative schemas. They will be ignored.",
         );
 
-        return schemaFieldToCoFieldDef(
-          (schema as unknown as ZodDefault | ZodCatch).def
-            .innerType as SchemaField,
+        return cacheResult(
+          cacheKey,
+          schemaFieldToCoFieldDef(
+            (schema as unknown as ZodDefault | ZodCatch).def
+              .innerType as SchemaField,
+          ),
         );
       } else if (zodSchemaDef.type === "literal") {
         if (
@@ -140,11 +173,14 @@ export function schemaFieldToCoFieldDef(schema: SchemaField) {
         ) {
           throw new Error("z.literal() with bigint is not supported");
         }
-        return coField.literal(
-          ...(zodSchemaDef.values as Exclude<
-            (typeof zodSchemaDef.values)[number],
-            undefined | null | bigint
-          >[]),
+        return cacheResult(
+          cacheKey,
+          coField.literal(
+            ...(zodSchemaDef.values as Exclude<
+              (typeof zodSchemaDef.values)[number],
+              undefined | null | bigint
+            >[]),
+          ),
         );
       } else if (
         zodSchemaDef.type === "object" ||
@@ -153,10 +189,10 @@ export function schemaFieldToCoFieldDef(schema: SchemaField) {
         zodSchemaDef.type === "tuple" ||
         zodSchemaDef.type === "intersection"
       ) {
-        return coField.json();
+        return cacheResult(cacheKey, coField.json());
       } else if (zodSchemaDef.type === "union") {
         if (isUnionOfPrimitivesDeeply(schema)) {
-          return coField.json();
+          return cacheResult(cacheKey, coField.json());
         } else {
           throw new Error(
             "z.union()/z.discriminatedUnion() of collaborative types is not supported. Use co.discriminatedUnion() instead.",
@@ -183,8 +219,11 @@ export function schemaFieldToCoFieldDef(schema: SchemaField) {
           throw error;
         }
 
-        return makeCodecCoField(
-          schema as z.core.$ZodCodec<z.core.$ZodType, z.core.$ZodType>,
+        return cacheResult(
+          cacheKey,
+          makeCodecCoField(
+            schema as z.core.$ZodCodec<z.core.$ZodType, z.core.$ZodType>,
+          ),
         );
       } else {
         throw new Error(
@@ -195,4 +234,11 @@ export function schemaFieldToCoFieldDef(schema: SchemaField) {
       throw new Error(`Unsupported zod type: ${schema}`);
     }
   }
+}
+
+function cacheResult<T>(cacheKey: object | undefined, value: T): T {
+  if (cacheKey) {
+    schemaFieldCache.set(cacheKey, value);
+  }
+  return value;
 }
