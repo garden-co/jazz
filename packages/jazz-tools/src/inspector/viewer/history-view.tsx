@@ -115,7 +115,9 @@ function getTransactionChanges(
   if (tx.isValid === false && tx.tx.privacy === "private") {
     const readKey = coValue.core.getReadKey(tx.tx.keyUsed);
     if (!readKey) {
-      throw new Error("Read key not found");
+      return [
+        `Unable to decrypt transaction: read key ${tx.tx.keyUsed} not found.`,
+      ];
     }
 
     return (
