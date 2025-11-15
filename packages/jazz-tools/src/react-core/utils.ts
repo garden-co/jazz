@@ -11,18 +11,3 @@ export function getCurrentAccountFromContextManager<Acc extends Account>(
 
   return "me" in context ? context.me : context.guest;
 }
-
-export function subscribeToContextManager<Acc extends Account>(
-  contextManager: JazzContextManager<Acc, any>,
-  callback: () => () => void,
-) {
-  let unsub = () => {};
-
-  const handler = () => {
-    unsub();
-    unsub = callback();
-  };
-
-  handler();
-  return contextManager.subscribe(handler);
-}

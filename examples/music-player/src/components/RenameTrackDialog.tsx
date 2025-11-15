@@ -12,32 +12,35 @@ import {
 import { Input } from "@/components/ui/input";
 import { useState } from "react";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { CoValueRef } from "jazz-tools/react";
 
 interface EditTrackDialogProps {
-  track: MusicTrack;
+  trackTitle: string;
+  trackRef: CoValueRef<MusicTrack>;
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
   onDelete: () => void;
 }
 
 export function EditTrackDialog({
-  track,
+  trackTitle,
+  trackRef,
   isOpen,
   onOpenChange,
   onDelete,
 }: EditTrackDialogProps) {
-  const [newTitle, setNewTitle] = useState(track.title);
+  const [newTitle, setNewTitle] = useState(trackTitle);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
 
   function handleSave() {
-    if (track && newTitle.trim()) {
-      updateMusicTrackTitle(track, newTitle.trim());
+    if (newTitle.trim()) {
+      updateMusicTrackTitle(trackRef.current, newTitle.trim());
       onOpenChange(false);
     }
   }
 
   function handleCancel() {
-    setNewTitle(track?.title || "");
+    setNewTitle(trackTitle);
     onOpenChange(false);
   }
 
@@ -63,7 +66,7 @@ export function EditTrackDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Edit Track</DialogTitle>
-          <DialogDescription>Edit "{track?.title}".</DialogDescription>
+          <DialogDescription>Edit "{trackTitle}".</DialogDescription>
         </DialogHeader>
         <form className="py-4" onSubmit={handleSave}>
           <Input
@@ -96,7 +99,7 @@ export function EditTrackDialog({
         isOpen={isDeleteConfirmOpen}
         onOpenChange={setIsDeleteConfirmOpen}
         title="Delete Track"
-        description={`Are you sure you want to delete "${track.title}"? This action cannot be undone.`}
+        description={`Are you sure you want to delete "${trackTitle}"? This action cannot be undone.`}
         confirmText="Delete"
         cancelText="Cancel"
         onConfirm={handleDeleteConfirm}
