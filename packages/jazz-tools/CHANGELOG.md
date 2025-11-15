@@ -1,5 +1,15 @@
 # jazz-tools
 
+## 0.19.3
+
+### Patch Changes
+
+- cddbfdb: Fix co.discriminatedUnion load for React Native
+- 114e4ce: Show invalid transaction in inspector even if they are not decryptable
+  - cojson@0.19.3
+  - cojson-storage-indexeddb@0.19.3
+  - cojson-transport-ws@0.19.3
+
 ## 0.19.2
 
 ### Patch Changes
