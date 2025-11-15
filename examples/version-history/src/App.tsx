@@ -1,4 +1,4 @@
-import { Account, CoPlainText, Group } from "jazz-tools";
+import { Account } from "jazz-tools";
 import { useAccount, useCoState, useLogOut } from "jazz-tools/react";
 import { useState } from "react";
 import { IssueComponent } from "./Issue.tsx";
@@ -25,21 +25,12 @@ function App() {
   }
 
   const createIssue = () => {
-    const group = Group.create();
-    group.addMember("everyone", "writer");
-
-    const newIssue = Issue.create(
-      {
-        title: "Buy terrarium",
-        description: CoPlainText.create(
-          "Make sure it's big enough for 10 snails.",
-          group,
-        ),
-        estimate: 5,
-        status: "backlog",
-      },
-      group,
-    );
+    const newIssue = Issue.create({
+      title: "Buy terrarium",
+      description: "Make sure it's big enough for 10 snails.",
+      estimate: 5,
+      status: "backlog",
+    });
     setIssueID(newIssue.$jazz.id);
     window.history.pushState({}, "", `?issue=${newIssue.$jazz.id}`);
   };

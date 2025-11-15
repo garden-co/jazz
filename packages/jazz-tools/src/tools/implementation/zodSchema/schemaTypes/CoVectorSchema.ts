@@ -9,6 +9,10 @@ import {
 } from "../../../internal.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreCoValueSchema } from "./CoValueSchema.js";
+import {
+  DEFAULT_SCHEMA_PERMISSIONS,
+  SchemaPermissions,
+} from "../schemaPermissions.js";
 
 export interface CoreCoVectorSchema extends CoreCoValueSchema {
   builtin: "CoVector";
@@ -30,6 +34,11 @@ export class CoVectorSchema implements CoreCoVectorSchema {
   readonly collaborative = true as const;
   readonly builtin = "CoVector" as const;
   readonly resolveQuery = true as const;
+
+  /**
+   * Permissions to be used when creating or composing CoValues
+   */
+  permissions: SchemaPermissions = DEFAULT_SCHEMA_PERMISSIONS;
 
   constructor(
     public dimensions: number,
@@ -56,7 +65,9 @@ export class CoVectorSchema implements CoreCoVectorSchema {
     vector: number[] | Float32Array,
     options?: { owner: Account | Group } | Account | Group,
   ): CoVectorInstance {
-    return this.coValueClass.create(vector, options);
+    return this.coValueClass.create(vector, options, {
+      configureImplicitGroupOwner: this.permissions.onCreate,
+    });
   }
 
   /**
@@ -98,6 +109,15 @@ export class CoVectorSchema implements CoreCoVectorSchema {
 
   optional(): CoOptionalSchema<this> {
     return coOptionalDefiner(this);
+  }
+
+  /**
+   * Configure permissions to be used when creating or composing CoValues
+   */
+  withPermissions(permissions: SchemaPermissions): CoVectorSchema {
+    const copy = new CoVectorSchema(this.dimensions, this.coValueClass);
+    copy.permissions = permissions;
+    return copy;
   }
 }
 

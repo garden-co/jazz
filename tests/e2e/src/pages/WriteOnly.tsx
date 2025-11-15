@@ -1,13 +1,14 @@
-import { Account, CoList, CoMap, Group, ID, coField } from "jazz-tools";
+import { Account, Group, ID, co } from "jazz-tools";
 import { createInviteLink } from "jazz-tools/react";
 import { useAcceptInvite, useCoState } from "jazz-tools/react";
 import { useState } from "react";
+import { z } from "zod/v4";
 
-class SharedCoMap extends CoMap {
-  value = coField.string;
-}
+const SharedCoMap = co.map({ value: z.string() });
+type SharedCoMap = co.loaded<typeof SharedCoMap>;
 
-class SharedCoList extends CoList.Of(coField.ref(SharedCoMap)) {}
+const SharedCoList = co.list(SharedCoMap);
+type SharedCoList = co.loaded<typeof SharedCoList>;
 
 export function WriteOnlyRole() {
   const [id, setId] = useState<ID<SharedCoList> | undefined>(undefined);

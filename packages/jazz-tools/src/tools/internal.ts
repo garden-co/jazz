@@ -17,6 +17,7 @@ export * from "./coValues/coPlainText.js";
 export * from "./coValues/coRichText.js";
 export * from "./coValues/schemaUnion.js";
 export * from "./coValues/coVector.js";
+export * from "./coValues/coValueClassMetadata.js";
 
 export type * from "./subscribe/types.js";
 
@@ -53,6 +54,7 @@ export * from "./implementation/zodSchema/typeConverters/InstanceOfSchemaCoValue
 export * from "./implementation/zodSchema/typeConverters/CoFieldSchemaInit.js";
 export * from "./implementation/zodSchema/runtimeConverters/coValueSchemaTransformation.js";
 export * from "./implementation/zodSchema/runtimeConverters/schemaFieldToCoFieldDef.js";
+export * from "./implementation/zodSchema/schemaPermissions.js";
 export * from "./coValues/extensions/imageDef.js";
 
 export * from "./implementation/ContextManager.js";
