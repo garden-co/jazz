@@ -14,18 +14,38 @@ on:
       - ".github/actions/source-code/**"
       - ".github/workflows/e2e-rn-test.yml"
       - "examples/chat-rn-expo/**"
+      - "crates/cojson-core-rn/**"
       - "packages/**"
 
 jobs:
+  build-rn:
+    name: Build React Native Android
+    uses: ./.github/workflows/rn-build-reusable.yml
+    with:
+      concurrency: e2e-rn-test-rn
+      disableAndroid: false
+      disableIOS: true
+
   e2e-tests:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-
+    needs: [build-rn]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Source Code
         uses: ./.github/actions/source-code/
+      
+      - name: Download React Native Android artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: cojson-core-rn-android
+          path: crates/cojson-core-rn
+      
+      - name: List React Native Android artifacts
+        run: |
+          ls -R crates/cojson-core-rn/android/src/main/jniLibs
+        shell: bash
 
       - name: Create Output Directory
         run: |

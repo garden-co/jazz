@@ -10,6 +10,7 @@ import { apiKey } from "./apiKey";
 import { ChatScreen } from "./chat";
 import { HandleInviteScreen } from "./invite";
 import { theme } from "./theme";
+import { RNCrypto } from "jazz-tools/react-native-core/crypto/RNCrypto";
 
 type RootStackParamList = {
   ChatScreen: undefined;
@@ -53,6 +54,7 @@ function App() {
         sync={{
           peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
         }}
+        CryptoProvider={RNCrypto}
       >
         <NavigationContainer ref={navigationRef} theme={theme}>
           <Stack.Navigator initialRouteName={initialRoute}>
