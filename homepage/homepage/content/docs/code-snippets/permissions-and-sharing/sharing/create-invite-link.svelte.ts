@@ -6,6 +6,5 @@ const organization = Organization.create({
 
 // #region Basic
 import { createInviteLink } from "jazz-tools/svelte";
-
 const inviteLink = createInviteLink(organization, "writer");
 // #endregion
