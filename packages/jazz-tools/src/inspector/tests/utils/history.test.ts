@@ -403,7 +403,7 @@ describe("restoreCoMapToTimestamp", async () => {
 });
 
 describe("getTransactionChanges", async () => {
-  const account = await setupJazzTestSync();
+  const account = await createJazzTestAccount();
 
   describe("CoMap transactions", () => {
     it("should return changes for CoMap transactions", async () => {
