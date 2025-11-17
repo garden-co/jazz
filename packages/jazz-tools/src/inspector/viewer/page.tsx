@@ -3,6 +3,7 @@ import {
   LocalNode,
   RawCoList,
   RawCoMap,
+  RawCoPlainText,
   RawCoStream,
   RawCoValue,
   RawGroup,
@@ -142,7 +143,13 @@ function View(
   }
 
   if (type === "coplaintext") {
-    return <CoPlainTextView data={snapshot} />;
+    return (
+      <CoPlainTextView
+        data={snapshot}
+        coValue={value as RawCoPlainText}
+        node={node}
+      />
+    );
   }
 
   if (type === "colist") {
