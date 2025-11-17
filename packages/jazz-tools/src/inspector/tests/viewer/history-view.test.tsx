@@ -17,6 +17,8 @@ import { HistoryView } from "../../viewer/history-view";
 import { setup } from "goober";
 import React from "react";
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 function extractAction(row: HTMLElement | null | undefined) {
   if (!row) return "";
   // index 0: author, index 1: action, index 2: timestamp
@@ -30,7 +32,6 @@ function extractActions(): string[] {
 
 describe("HistoryView", async () => {
   const account = await setupJazzTestSync();
-  const account2 = await createJazzTestAccount();
 
   beforeAll(() => {
     // setup goober
@@ -270,7 +271,138 @@ describe("HistoryView", async () => {
     });
   });
 
-  describe("co.group", () => {
+  describe("co.plaintext", () => {
+    it("should render co.plaintext initial append in a single row", async () => {
+      const value = co.plainText().create("hello", account);
+      render(
+        <HistoryView coValue={value.$jazz.raw} node={value.$jazz.localNode} />,
+      );
+
+      expect(extractActions()).toEqual(['"hello" has been appended']);
+    });
+
+    it("should render co.plaintext appends in a single row", async () => {
+      const value = co.plainText().create("hello", account);
+      value.$jazz.applyDiff("hello world");
+      value.$jazz.applyDiff("hello world!");
+
+      expect(value.$jazz.raw.toString()).toEqual("hello world!");
+
+      render(
+        <HistoryView coValue={value.$jazz.raw} node={value.$jazz.localNode} />,
+      );
+
+      const history = [
+        '"hello" has been appended',
+        '" world" has been inserted after "o"',
+        '"!" has been inserted after " "', // it is after " " because previous action is reversed
+      ].toReversed(); // Default sort is descending
+
+      expect(extractActions()).toEqual(history);
+    });
+
+    it("should render co.plaintext delete in tail", async () => {
+      const value = co.plainText().create("hello", account);
+      value.$jazz.applyDiff("hell");
+
+      expect(value.$jazz.raw.toString()).toEqual("hell");
+
+      render(
+        <HistoryView coValue={value.$jazz.raw} node={value.$jazz.localNode} />,
+      );
+
+      const history = [
+        '"hello" has been appended',
+        '"o" has been deleted',
+      ].toReversed(); // Default sort is descending
+
+      expect(extractActions()).toEqual(history);
+    });
+
+    it("should render co.plaintext delete in head", async () => {
+      const value = co.plainText().create("hello", account);
+      value.$jazz.applyDiff("ello");
+
+      expect(value.$jazz.raw.toString()).toEqual("ello");
+
+      render(
+        <HistoryView coValue={value.$jazz.raw} node={value.$jazz.localNode} />,
+      );
+
+      const history = [
+        '"hello" has been appended',
+        '"h" has been deleted',
+      ].toReversed(); // Default sort is descending
+
+      expect(extractActions()).toEqual(history);
+    });
+
+    it("should render co.plaintext delete history of multiple old insertions in a single row", async () => {
+      const value = co.plainText().create("hello", account);
+      await sleep(2);
+      value.$jazz.applyDiff("hello world");
+      await sleep(2);
+      value.$jazz.applyDiff("hed");
+
+      expect(value.$jazz.raw.toString()).toEqual("hed");
+
+      render(
+        <HistoryView coValue={value.$jazz.raw} node={value.$jazz.localNode} />,
+      );
+
+      const history = [
+        '"hello" has been appended',
+        '" world" has been inserted after "o"',
+        '"lod" has been deleted',
+        '" worl" has been deleted',
+      ].toReversed(); // Default sort is descending
+
+      expect(extractActions()).toEqual(history);
+    });
+
+    it("should render co.plaintext insertBefore in history", async () => {
+      const value = co.plainText().create("world", account);
+      await sleep(2);
+      value.insertBefore(0, "Hello, ");
+
+      expect(value.$jazz.raw.toString()).toEqual("Hello, world");
+
+      render(
+        <HistoryView coValue={value.$jazz.raw} node={value.$jazz.localNode} />,
+      );
+
+      const history = [
+        '"world" has been appended',
+        '"H" has been inserted before "w"',
+        '"ello, " has been inserted after "H"',
+      ].toReversed(); // Default sort is descending
+
+      expect(extractActions()).toEqual(history);
+    });
+
+    it("should render co.plaintext insertAfter in history", async () => {
+      const value = co.plainText().create("world", account);
+      await sleep(2);
+      value.insertAfter(0, "Hello, ");
+
+      expect(value.$jazz.raw.toString()).toEqual("wHello, orld");
+
+      render(
+        <HistoryView coValue={value.$jazz.raw} node={value.$jazz.localNode} />,
+      );
+
+      const history = [
+        '"world" has been appended',
+        '"Hello, " has been inserted after "w"',
+      ].toReversed(); // Default sort is descending
+
+      expect(extractActions()).toEqual(history);
+    });
+  });
+
+  describe("co.group", async () => {
+    const account2 = await createJazzTestAccount();
+
     it("should render co.group changes", async () => {
       const group = co.group().create(account);
 
