@@ -74,14 +74,14 @@ jobs:
         id: android-emulator
         uses: ./.github/actions/android-emulator/
         with:
-          api-level: 29
+          api-level: 30
 
       - name: Test App
         uses: reactivecircus/android-emulator-runner@v2
         id: e2e_test
         continue-on-error: true
         with:
-          api-level: 29
+          api-level: 30
           force-avd-creation: false
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-metrics
           disable-animations: true
