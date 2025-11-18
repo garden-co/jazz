@@ -1,5 +1,28 @@
 # cojson
 
+## 0.19.3
+
+### Patch Changes
+
+- cojson-core-wasm@0.19.3
+- cojson-core-napi@0.19.3
+
+## 0.19.2
+
+### Patch Changes
+
+- 7e76313: Prevent CoValues adding themselves as dependencies
+  - cojson-core-wasm@0.19.2
+  - cojson-core-napi@0.19.2
+
+## 0.19.1
+
+### Patch Changes
+
+- afd2ded: Reuse the same instance of the raw coValue view on invalidation from permissions
+  - cojson-core-wasm@0.19.1
+  - cojson-core-napi@0.19.1
+
 ## 0.19.0
 
 ### Patch Changes

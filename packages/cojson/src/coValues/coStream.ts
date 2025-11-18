@@ -9,7 +9,6 @@ import { isAccountID } from "../typeUtils/isAccountID.js";
 import { isCoValue } from "../typeUtils/isCoValue.js";
 import { RawAccountID } from "./account.js";
 import { RawGroup } from "./group.js";
-import { Transaction } from "../coValueCore/verifiedState.js";
 import { RawCoID } from "../ids.js";
 
 export type BinaryStreamInfo = {
@@ -52,20 +51,33 @@ export class RawCoStreamView<
   id: CoID<this>;
   type = "costream" as const;
   core: AvailableCoValueCore;
+
+  /** The internal state of RawCoStream */
   items: {
     [key: SessionID]: CoStreamItem<Item>[];
   };
-  /** @internal */
   knownTransactions: Record<RawCoID, number>;
-  readonly _item!: Item;
-
   totalValidTransactions: number = 0;
+  version: number = 0;
+
+  private resetInternalState() {
+    this.items = {};
+    this.knownTransactions = { [this.core.id]: 0 };
+    this.totalValidTransactions = 0;
+  }
 
   constructor(core: AvailableCoValueCore) {
     this.id = core.id as CoID<this>;
     this.core = core;
     this.items = {};
     this.knownTransactions = { [core.id]: 0 };
+    this.processNewTransactions();
+  }
+
+  rebuildFromCore() {
+    this.version++;
+
+    this.resetInternalState();
     this.processNewTransactions();
   }
 

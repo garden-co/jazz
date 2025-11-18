@@ -119,7 +119,7 @@ export function createUnloadedCoValue<T extends CoValue>(
 
 export function loadCoValueWithoutMe<
   V extends CoValue,
-  const R extends RefsToResolve<V>,
+  const R extends RefsToResolve<V> = true,
 >(
   cls: CoValueClass<V>,
   id: ID<CoValue>,
@@ -263,7 +263,7 @@ export function parseSubscribeRestArgs<
 
 export function subscribeToCoValueWithoutMe<
   V extends CoValue,
-  const R extends RefsToResolve<V>,
+  const R extends RefsToResolve<V> = true,
 >(
   cls: CoValueClass<V>,
   id: ID<CoValue>,
@@ -283,7 +283,7 @@ export function subscribeToCoValueWithoutMe<
 
 export function subscribeToCoValue<
   V extends CoValue,
-  const R extends RefsToResolve<V>,
+  const R extends RefsToResolve<V> = true,
 >(
   cls: CoValueClass<V>,
   id: ID<CoValue>,

@@ -956,3 +956,31 @@ describe("CoList Branching", () => {
     `);
   });
 });
+
+test("the list should rebuild when the group permissions change", async () => {
+  const alice = setupTestNode({
+    connected: true,
+  });
+  const group = alice.node.createGroup();
+  const list = group.createList();
+
+  list.append("fromAdmin");
+
+  const bob = setupTestNode({
+    connected: true,
+  });
+
+  const listOnBob = await loadCoValueOrFail(bob.node, list.id);
+
+  expect(listOnBob.get(0)).toEqual(undefined);
+  expect(listOnBob.totalValidTransactions).toEqual(0);
+
+  group.addMember("everyone", "reader");
+
+  await waitFor(() => {
+    expect(listOnBob.get(0)).toEqual("fromAdmin");
+  });
+
+  expect(listOnBob.version).toEqual(1);
+  expect(listOnBob.totalValidTransactions).toEqual(1);
+});

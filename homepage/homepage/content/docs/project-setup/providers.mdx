@@ -1,0 +1,256 @@
+export const metadata = {
+  description: "Configure your JazzReactProvider - the core component that connects your app to Jazz, handling sync, storage, account schema, and auth.",
+};
+
+import { Alert, CodeGroup, ContentByFramework, TabbedCodeGroup, TabbedCodeGroupItem, ReactLogo, SvelteLogo, RNLogo, ExpoLogo } from "@/components/forMdx";
+import GetAPIKey from "@/components/docs/snippets/GetAPIKey.mdx";
+
+# Providers
+
+<ContentByFramework framework="react">
+`<JazzReactProvider />` is the core component that connects your React application to Jazz. It handles:
+</ContentByFramework>
+
+<ContentByFramework framework="svelte">
+`<JazzSvelteProvider />` is the core component that connects your Svelte application to Jazz. It handles:
+</ContentByFramework>
+
+<ContentByFramework framework="react-native">
+`<JazzReactNativeProvider />` is the core component that connects your React Native application to Jazz. It handles:
+</ContentByFramework>
+
+<ContentByFramework framework="expo">
+`<JazzExpoProvider />` is the core component that connects your Expo application to Jazz. It handles:
+</ContentByFramework>
+
+- **Data Synchronization**: Manages connections to peers and the Jazz cloud
+- **Local Storage**: Persists data locally between app sessions
+- **Schema Types**: Provides APIs for the [AccountSchema](/docs/core-concepts/schemas/accounts-and-migrations)
+- **Authentication**: Connects your authentication system to Jazz
+
+<ContentByFramework framework="react">
+Our [Chat example app](https://jazz.tools/examples#chat) provides a complete implementation of JazzReactProvider with authentication and real-time data sync.
+</ContentByFramework>
+
+<ContentByFramework framework="svelte">
+Our [File Share example app](https://github.com/garden-co/jazz/blob/main/examples/file-share-svelte/src/routes/%2Blayout.svelte) provides an implementation of JazzSvelteProvider with authentication and real-time data sync.
+</ContentByFramework>
+
+## Setting up the Provider
+
+The provider accepts several configuration options:
+
+<TabbedCodeGroup id="config-options" savedPreferenceKey="framework">
+<TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
+  ```tsx app.tsx#Basic
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
+```svelte svelte.svelte
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="React Native" value="react-native" icon={<RNLogo />} preferWrap>
+```tsx app-rn.tsx#Basic
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Expo" value="react-native-expo" icon={<ExpoLogo />} preferWrap>
+```tsx app-expo.tsx#Basic
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+<Alert className="mt-4" variant="info" title="Tip">
+<GetAPIKey hideFileName={true} hideCodeGroup={true} />
+</Alert>
+
+## Provider Options
+
+### Sync Options
+
+The `sync` property configures how your application connects to the Jazz network:
+
+<CodeGroup>
+  ```ts sync-config.ts
+```
+</CodeGroup>
+
+See [Authentication States](/docs/key-features/authentication/authentication-states#controlling-sync-for-different-authentication-states) for more details on how the `when` property affects synchronization based on authentication state.
+
+### Account Schema
+
+The `AccountSchema` property defines your application's account structure:
+
+<TabbedCodeGroup id="schema" savedPreferenceKey="framework">
+<TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
+```tsx app.tsx#Basic
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
+```svelte svelte.svelte
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="React Native" value="react-native" icon={<RNLogo />} preferWrap>
+```tsx app-rn.tsx#Basic
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Expo" value="react-native-expo" icon={<ExpoLogo />} preferWrap>
+```tsx app-expo.tsx#Basic
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+### Additional Options
+
+The provider accepts these additional options:
+
+<ContentByFramework framework="react-native">
+- `kvStore`
+  - `MMKVStoreAdapter` (default)
+- `AccountSchema`
+  - `Account` (default)
+- `CryptoProvider`
+  - `PureJSCrypto` (default) - Pure JavaScript crypto provider
+  - `RNQuickCrypto` - C++ accelerated crypto provider
+</ContentByFramework>
+
+<ContentByFramework framework="react-native-expo">
+  - `kvStore`
+    - `ExpoSecureStoreAdapter` (default)
+  - `AccountSchema`
+    - `Account` (default)
+  - `CryptoProvider`
+    - `PureJSCrypto` (default) - Pure JavaScript crypto provider
+    - `RNQuickCrypto` - C++ accelerated crypto provider
+</ContentByFramework>
+
+<ContentByFramework framework={['react', 'svelte']}>
+<TabbedCodeGroup id="additional-options" savedPreferenceKey="framework">
+  <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
+  ```tsx app.tsx#AllOptions
+  ```
+  </TabbedCodeGroupItem>
+  <TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
+  ```svelte all-options.svelte
+  ```
+  </TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+See [Authentication States](/docs/key-features/authentication/authentication-states) for more information on authentication states, guest mode, and handling anonymous accounts.
+</ContentByFramework>
+
+## Authentication
+
+<ContentByFramework framework={['react', 'svelte']}>
+The Jazz Provider works with various authentication methods to enable users to access their data across multiple devices. For a complete guide to authentication, see our [Authentication Overview](/docs/key-features/authentication/overview).
+</ContentByFramework>
+
+<ContentByFramework framework="react-native">
+The Provider works with various authentication methods, with PassphraseAuth being the easiest way to get started for development and testing. For authentication details, refer to our [Authentication Overview](/docs/key-features/authentication/overview) guide.
+
+The authentication hooks must always be used inside the Provider component.
+
+Implementing PassphraseAuth is straightforward:
+
+1. Import the [wordlist](https://github.com/bitcoinjs/bip39/tree/a7ecbfe2e60d0214ce17163d610cad9f7b23140c/src/wordlists) for generating recovery phrases
+2. Use the `usePassphraseAuth` hook to handle authentication
+3. Create simple registration and sign-in screens
+
+<TabbedCodeGroup id="passphrase-auth" savedPreferenceKey="framework">
+  <TabbedCodeGroupItem label="React Native" value="react-native" icon={<RNLogo />} preferWrap>
+```tsx passphrase-rn.tsx#Passphrase
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Expo" value="react-native-expo" icon={<ExpoLogo />} preferWrap>
+```tsx passphrase-expo.tsx#Passphrase
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+## Local Persistence [!framework=react-native,expo]
+</ContentByFramework>
+
+<ContentByFramework framework="react-native">
+Jazz for React Native includes built-in local persistence using SQLite. This implementation uses:
+
+- **Database Storage**: `@op-engineering/op-sqlite` - A high-performance SQLite implementation
+- **Key-Value Storage**: `react-native-mmkv` - A fast key-value storage system
+
+</ContentByFramework>
+
+<ContentByFramework framework="react-native-expo">
+Jazz for Expo includes built-in local persistence using SQLite. Following Expo's best practices, the Expo implementation uses:
+
+- **Database Storage**: `expo-sqlite` - Expo's official SQLite module
+- **Key-Value Storage**: `expo-secure-store` - Expo's secure storage system
+</ContentByFramework>
+
+<ContentByFramework framework={['react-native', 'react-native-expo']}>
+Local persistence is enabled by default with no additional configuration required. Your data will automatically persist across app restarts.
+
+## Quick Crypto [!framework=react-native,react-native-expo]
+
+For accelerated crypto operations, you can use the `RNQuickCrypto` crypto provider.
+
+To use it, install the following Packages:
+
+<CodeGroup>
+```bash
+pnpm add react-native-quick-crypto@1.0.0-beta.18 react-native-nitro-modules react-native-fast-encoder
+```
+</CodeGroup>
+
+Then add the following to your provider:
+
+<TabbedCodeGroup id="quick-crypto" savedPreferenceKey="framework">
+  <TabbedCodeGroupItem label="React Native" value="react-native" icon={<RNLogo />} preferWrap>
+```tsx quickcrypto-rn.tsx#QC
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Expo" value="react-native-expo" icon={<ExpoLogo />} preferWrap>
+```tsx quickcrypto-expo.tsx#QC
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+</ContentByFramework>
+<ContentByFramework framework="react-native">
+For configuration, add the following settings:
+
+<CodeGroup>
+```ruby
+# ios/Podfile
+ENV['SODIUM_ENABLED'] = '1'
+```
+</CodeGroup>
+and
+<CodeGroup>
+```groovy
+// android/gradle.properties
+sodiumEnabled=true
+```
+</CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework="react-native-expo">
+  For configuration, use the RNQC Expo config plugin:
+
+  <CodeGroup>
+  ```json
+  {
+    "expo": {
+      "plugins": [
+        [
+          "react-native-quick-crypto",
+          {
+            "sodiumEnabled": true
+          }
+        ]
+      ]
+    }
+  }
+  ```
+  </CodeGroup>
+</ContentByFramework>
+
+## Need Help?
+
+If you have questions about configuring the Jazz Provider for your specific use case, [join our Discord community](https://discord.gg/utDMjHYg42) for help.

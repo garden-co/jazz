@@ -99,9 +99,7 @@ describe("Group invites", () => {
     await newMember.node.acceptInvite(group.id, inviteSecret);
 
     await waitFor(() => {
-      expect(
-        expectMap(personOnNewMemberNode.core.getCurrentContent()).get("name"),
-      ).toEqual("John Doe");
+      expect(personOnNewMemberNode.get("name")).toEqual("John Doe");
     });
 
     const groupOnNewMemberNode = await loadCoValueOrFail(
@@ -137,9 +135,7 @@ describe("Group invites", () => {
     await newMember.node.acceptInvite(group.id, inviteSecret);
 
     await waitFor(() => {
-      expect(
-        expectMap(personOnNewMemberNode.core.getCurrentContent()).get("name"),
-      ).toEqual("John Doe");
+      expect(personOnNewMemberNode.get("name")).toEqual("John Doe");
     });
 
     const groupOnNewMemberNode = await loadCoValueOrFail(
@@ -220,9 +216,7 @@ describe("Group invites", () => {
     await newMember.node.acceptInvite(group.id, inviteSecret);
 
     await waitFor(() => {
-      expect(
-        expectMap(personOnNewMemberNode.core.getCurrentContent()).get("name"),
-      ).toEqual("John Doe");
+      expect(personOnNewMemberNode.get("name")).toEqual("John Doe");
     });
 
     const groupOnNewMemberNode = await loadCoValueOrFail(
@@ -246,9 +240,7 @@ describe("Group invites", () => {
     const personOnReaderNode = await loadCoValueOrFail(reader.node, person.id);
 
     await waitFor(() => {
-      expect(
-        expectMap(personOnReaderNode.core.getCurrentContent()).get("name"),
-      ).toEqual("John Doe");
+      expect(personOnReaderNode.get("name")).toEqual("John Doe");
     });
   });
 
@@ -278,9 +270,7 @@ describe("Group invites", () => {
     await newMember.node.acceptInvite(group.id, inviteSecret);
 
     await waitFor(() => {
-      expect(
-        expectMap(personOnNewMemberNode.core.getCurrentContent()).get("name"),
-      ).toEqual("John Doe");
+      expect(personOnNewMemberNode.get("name")).toEqual("John Doe");
     });
 
     const groupOnNewMemberNode = await loadCoValueOrFail(
@@ -304,9 +294,7 @@ describe("Group invites", () => {
     const personOnReaderNode = await loadCoValueOrFail(reader.node, person.id);
 
     await waitFor(() => {
-      expect(
-        expectMap(personOnReaderNode.core.getCurrentContent()).get("name"),
-      ).toEqual("John Doe");
+      expect(personOnReaderNode.get("name")).toEqual("John Doe");
     });
   });
 
@@ -411,7 +399,7 @@ describe("Group invites", () => {
     // First add member as reader
     const memberAccount = await loadCoValueOrFail(admin.node, member.accountID);
     group.addMember(memberAccount, "reader");
-    await group.removeMember(memberAccount);
+    group.removeMember(memberAccount);
 
     // Create a new reader invite
     const inviteSecret = group.createInvite("reader");

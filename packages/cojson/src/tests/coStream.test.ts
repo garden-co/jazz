@@ -517,3 +517,31 @@ describe("Binary stream order", () => {
     expect(testView.testCompareItems(itemB, itemA)).toBeGreaterThan(0);
   });
 });
+
+test("the stream should rebuild when the group permissions change", async () => {
+  const alice = setupTestNode({
+    connected: true,
+  });
+  const group = alice.node.createGroup();
+  const stream = group.createStream();
+
+  stream.push("fromAdmin");
+
+  const bob = setupTestNode({
+    connected: true,
+  });
+
+  const streamOnBob = await loadCoValueOrFail(bob.node, stream.id);
+
+  expect(Object.keys(streamOnBob.toJSON()).length).toEqual(0);
+  expect(streamOnBob.totalValidTransactions).toEqual(0);
+
+  group.addMember("everyone", "reader");
+
+  await waitFor(() => {
+    expect(streamOnBob.getSingleStream()).toEqual(["fromAdmin"]);
+  });
+
+  expect(streamOnBob.version).toEqual(1);
+  expect(streamOnBob.totalValidTransactions).toEqual(1);
+});

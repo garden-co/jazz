@@ -112,6 +112,49 @@ describe("Creating a CoVector", async () => {
 
     expect(embedding.$jazz.owner).toEqual(group);
   });
+
+  describe("nested inside a container CoValue", async () => {
+    test("from an array of numbers", () => {
+      const VectorMap = co.map({
+        embedding: EmbeddingSchema,
+      });
+
+      const container = VectorMap.create({
+        embedding: [1, 2, 3],
+      });
+
+      expect(container.embedding).toBeInstanceOf(CoVector);
+      expect(Array.from(container.embedding)).toEqual([1, 2, 3]);
+      const vectorOwner = container.embedding.$jazz.owner;
+      expect(
+        vectorOwner.getParentGroups().map((group) => group.$jazz.id),
+      ).toContain(container.$jazz.owner.$jazz.id);
+
+      container.$jazz.set("embedding", [4, 5, 6]);
+      expect(Array.from(container.embedding)).toEqual([4, 5, 6]);
+    });
+
+    test("from a Float32Array", () => {
+      const VectorList = co.list(EmbeddingSchema);
+
+      const list = VectorList.create([new Float32Array([1, 2, 3])]);
+
+      const vector = list[0];
+      assert(vector);
+      expect(vector).toBeInstanceOf(CoVector);
+      expect(Array.from(vector)).toEqual([1, 2, 3]);
+      const vectorOwner = vector.$jazz.owner;
+      expect(
+        vectorOwner.getParentGroups().map((group) => group.$jazz.id),
+      ).toContain(list.$jazz.owner.$jazz.id);
+
+      list.$jazz.push(new Float32Array([4, 5, 6]));
+
+      const vector2 = list[1];
+      assert(vector2);
+      expect(Array.from(vector2)).toEqual([4, 5, 6]);
+    });
+  });
 });
 
 describe("CoVector structure", async () => {

@@ -11,14 +11,7 @@ Let's use the following schema to see how we can use the edit history.
 
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-// ---cut---
-const Task = co.map({
-    title: z.string(),
-    status: z.literal(["todo", "in-progress", "completed"]),
-});
-export type Task = co.loaded<typeof Task>;
+```ts schema.ts#Basic
 ```
 </CodeGroup>
 
@@ -28,32 +21,7 @@ Every CoValue has a `$jazz.getEdits()` method that contains the complete history
 how to get the edit history for `task.status`:
 
 <CodeGroup>
-```ts twoslash
-import { createJazzTestAccount } from "jazz-tools/testing";
-import { co, z } from "jazz-tools";
-
-const me = await createJazzTestAccount();
-
-const Task = co.map({
-  title: z.string(),
-  status: z.literal(["todo", "in-progress", "completed"]),
-});
-
-const task = Task.create({ title: "New task", status: "todo" }, { owner: me });
-// ---cut---
-// Access edit history for a field
-task.$jazz.getEdits().status
-// Returns the latest edit
-
-task.$jazz.getEdits().status?.all
-// Returns array of all edits in chronological order
-
-// Check if edits exist
-const statusEdits = task.$jazz.getEdits().status;
-if (statusEdits && statusEdits.by?.profile.$isLoaded) {
-  const name = statusEdits.by.profile.name;
-  console.log(`Last changed by ${name}`);
-}
+```ts index.ts#GetEdits
 ```
 </CodeGroup>
 
@@ -62,26 +30,7 @@ if (statusEdits && statusEdits.by?.profile.$isLoaded) {
 Each edit contains:
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-import { createJazzTestAccount } from "jazz-tools/testing";
-
-const me = await createJazzTestAccount();
-
-const Task = co.map({
-  title: z.string(),
-  status: z.literal(["todo", "in-progress", "completed"]),
-});
-
-const task = Task.create({ title: "New task", status: "todo" }, { owner: me });
-task.$jazz.set("status", "in-progress");
-// ---cut---
-const edit = task.$jazz.getEdits().status;
-
-// The edit object contains:
-edit?.value     // The new value: "in-progress"
-edit?.by        // Account that made the change
-edit?.madeAt    // Date when the change occurred
+```ts index.ts#EditDetails
 ```
 </CodeGroup>
 
@@ -92,24 +41,7 @@ edit?.madeAt    // Date when the change occurred
 Get the most recent change to a field:
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-import { createJazzTestAccount } from "jazz-tools/testing";
-
-const me = await createJazzTestAccount();
-
-const Task = co.map({
-  title: z.string(),
-  status: z.literal(["todo", "in-progress", "completed"]),
-});
-
-const task = Task.create({ title: "New task", status: "todo" }, { owner: me });
-// ---cut---
-// Direct access to latest edit
-const latest = task.$jazz.getEdits().title;
-if (latest) {
-  console.log(`Title is now "${latest.value}"`);
-}
+```ts index.ts#Latest
 ```
 </CodeGroup>
 
@@ -118,30 +50,7 @@ if (latest) {
 Get the complete history for a field:
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-import { createJazzTestAccount } from "jazz-tools/testing";
-
-const me = await createJazzTestAccount();
-
-const Task = co.map({
-  title: z.string(),
-  status: z.literal(["todo", "in-progress", "completed"]),
-});
-
-const task = Task.create({ title: "New task", status: "todo" }, { owner: me });
-task.$jazz.set("status", "in-progress");
-task.$jazz.set("status", "completed");
-// ---cut---
-// Get all edits (chronologically)
-const allStatusEdits = task.$jazz.getEdits().status?.all || [];
-
-allStatusEdits.forEach((edit, index) => {
-  console.log(`Edit ${index}: ${edit.value} at ${edit.madeAt.toISOString()}`);
-});
-// Edit 0: todo at 2025-05-22T13:00:00.000Z
-// Edit 1: in-progress at 2025-05-22T14:00:00.000Z  
-// Edit 2: completed at 2025-05-22T15:30:00.000Z
+```ts index.ts#All
 ```
 </CodeGroup>
 
@@ -150,24 +59,7 @@ allStatusEdits.forEach((edit, index) => {
 The first edit contains the initial value:
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-import { createJazzTestAccount } from "jazz-tools/testing";
-
-const me = await createJazzTestAccount();
-
-const Task = co.map({
-  title: z.string(),
-  status: z.literal(["todo", "in-progress", "completed"]),
-});
-
-const task = Task.create({ title: "New task", status: "todo" }, { owner: me });
-task.$jazz.set("status", "in-progress");
-// ---cut---
-const allEdits = task.$jazz.getEdits().status?.all || [];
-const initialValue = allEdits[0]?.value;
-console.log(`Started as: ${initialValue}`);
-// Started as: todo
+```ts index.ts#Initial
 ```
 </CodeGroup>
 
@@ -176,16 +68,7 @@ console.log(`Started as: ${initialValue}`);
 To show created date and last updated date, use the `$jazz.createdAt` and `$jazz.lastUpdatedAt` getters.
 
 <CodeGroup>
-```tsx twoslash
-import { co, z } from "jazz-tools";
-const Task = co.map({
-    title: z.string(),
-    status: z.literal(["todo", "in-progress", "completed"]),
-});
-const task = Task.create({ title: "New task", status: "todo" });
-// ---cut---
-console.log(new Date(task.$jazz.createdAt));
-console.log(new Date(task.$jazz.lastUpdatedAt));
+```tsx index.ts#CreatedAtLastUpdatedAt
 ```
 </CodeGroup>
 
@@ -199,7 +82,7 @@ console.log(new Date(task.$jazz.lastUpdatedAt));
 
 For practical implementations using history, see [History Patterns](/docs/reference/design-patterns/history-patterns):
 - Building audit logs
-- Creating activity feeds  
+- Creating activity feeds
 - Implementing undo/redo
 - Showing change indicators
 - Querying historical data

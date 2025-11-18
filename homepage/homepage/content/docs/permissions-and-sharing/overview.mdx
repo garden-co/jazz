@@ -72,7 +72,7 @@ it will be removed in a future release.
       <td>✅</td>
       <td>✅</td>
       <td>✅</td>
-      <td>✅<sup>*</sup></td>
+      <td>✅<sup>**</sup></td>
       <td>❌</td>
     </tr>
     <tr>
@@ -97,10 +97,7 @@ it will be removed in a future release.
 Here's how you can create a `Group`.
 
 <CodeGroup>
-```tsx twoslash
-import { Group } from "jazz-tools";
-
-const group = Group.create();
+```ts index.ts#Basic
 ```
 </CodeGroup>
 
@@ -111,43 +108,10 @@ But if you already know their ID, you can add them directly (see below).
 
 ## Adding group members by ID
 
-You can add group members by ID by using `Account.load` and `Group.addMember`.
+You can add group members by ID by using `co.account().load` and `Group.addMember`.
 
 <CodeGroup>
-```tsx twoslash
-const bobsID = "co_z123";
-
-// ---cut---
-import { Group, co } from "jazz-tools";
-
-const group = Group.create();
-
-const bob = await co.account().load(bobsID);
-
-if (bob.$isLoaded) {
-  group.addMember(bob, "writer");
-}
-```
-</CodeGroup>
-
-**Note:** 
-- Both `Account.load(id)` and `co.account().load(id)` do the same thing — they load an account from its ID.
-
-<CodeGroup>
-```tsx twoslash
-const bobsID = "co_z123";
-import { Group } from "jazz-tools";
-const group = Group.create();
-
-// ---cut---
-import { ID, Account, co } from "jazz-tools";
-
-const bob = await Account.load(bobsID);
-// Or: const bob = await co.account().load(bobsID);
-
-if (bob.$isLoaded) {
-  group.addMember(bob, "writer");
-}
+```tsx index.ts#AddMember
 ```
 </CodeGroup>
 
@@ -156,13 +120,7 @@ if (bob.$isLoaded) {
 To change a member's role, use the `addMember` method.
 
 <CodeGroup>
-```ts twoslash
-import { Group } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const bob = await createJazzTestAccount();
-const group = Group.create();
-// ---cut---
-group.addMember(bob, "reader");
+```ts index.ts#ChangeRole
 ```
 </CodeGroup>
 
@@ -175,13 +133,7 @@ Bob just went from a writer to a reader.
 To remove a member, use the `removeMember` method.
 
 <CodeGroup>
-```ts twoslash
-import { Group } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const bob = await createJazzTestAccount();
-const group = Group.create();
-// ---cut---
-group.removeMember(bob);
+```ts index.ts#RemoveMember
 ```
 </CodeGroup>
 
@@ -195,21 +147,7 @@ Rules:
 You can get the group of an existing CoValue by using `coValue.$jazz.owner`.
 
 <CodeGroup>
-```ts twoslash
-import { createJazzTestAccount } from 'jazz-tools/testing';
-import { co, z } from "jazz-tools";
-const existingCoValue = await createJazzTestAccount();
-
-const MyCoMap = co.map({
-  color: z.string(),
-});
-
-// ---cut---
-const group = existingCoValue.$jazz.owner;
-const newValue = MyCoMap.create(
-  { color: "red"},
-  { owner: group }
-);
+```ts index.ts#GetGroup
 ```
 </CodeGroup>
 
@@ -218,56 +156,13 @@ const newValue = MyCoMap.create(
 You can check the permissions of an account on a CoValue by using the `canRead`, `canWrite`, `canManage` and `canAdmin` methods.
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-
-const MyCoMap = co.map({
-  color: z.string(),
-});
-// ---cut---
-const value = await MyCoMap.create({ color: "red"})
-const me = await co.account().getMe();
-
-if (me.canAdmin(value)) {
-  console.log("I can add users of any role"); 
-} else if (me.canManage(value)) {
-  console.log("I can share value with others");
-} else if (me.canWrite(value)) {
-  console.log("I can edit value");
-} else if (me.canRead(value)) {
-  console.log("I can view value");
-} else {
-  console.log("I cannot access value");
-}
+```ts index.ts#CheckPermissions
 ```
 </CodeGroup>
 
 To check the permissions of another account, you need to load it first:
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-
-const MyCoMap = co.map({
-  color: z.string(),
-});
-const account = await createJazzTestAccount();
-const accountID = account.$jazz.id;
-// ---cut---
-const value = await MyCoMap.create({ color: "red"})
-const bob = await co.account().load(accountID);
-
-if (bob.$isLoaded) {
-  if (bob.canAdmin(value)) {
-    console.log("Bob can share value with others");
-  } else if (bob.canWrite(value)) {
-    console.log("Bob can edit value");
-  } else if (bob.canRead(value)) {
-    console.log("Bob can view value");
-  } else {
-    console.log("Bob cannot access value");
-  }
-}
+```ts index.ts#CheckPermissionsAlice
 ```
 </CodeGroup>

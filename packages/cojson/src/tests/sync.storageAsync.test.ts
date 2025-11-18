@@ -640,4 +640,111 @@ describe("client syncs with a server with storage", () => {
     await client.node.syncManager.waitForAllCoValuesSync();
     await client2.node.syncManager.waitForAllCoValuesSync();
   });
+
+  test("large parent group streaming from storage", async () => {
+    const syncServer = setupTestNode({
+      isSyncServer: true,
+    });
+    const { storage } = await syncServer.addAsyncStorage({
+      ourName: "syncServer",
+    });
+
+    const alice = setupTestNode();
+    alice.connectToSyncServer({
+      syncServer: syncServer.node,
+    });
+
+    const parentGroup = alice.node.createGroup();
+    const group = alice.node.createGroup();
+    group.extend(parentGroup);
+
+    const map = group.createMap();
+
+    fillCoMapWithLargeData(parentGroup);
+
+    parentGroup.addMember("everyone", "reader");
+
+    map.set("hello", "world");
+
+    await map.core.waitForSync();
+    await parentGroup.core.waitForSync();
+
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        ParentGroup: parentGroup.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | CONTENT ParentGroup header: true new: After: 0 New: 3",
+        "client -> server | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server | CONTENT Map header: true new: ",
+        "client -> server | CONTENT ParentGroup header: false new: After: 3 New: 73 expectContentUntil: header/205",
+        "client -> server | CONTENT ParentGroup header: false new: After: 76 New: 73",
+        "client -> server | CONTENT ParentGroup header: false new: After: 149 New: 56",
+        "client -> server | CONTENT Map header: false new: After: 0 New: 1",
+        "server -> client | KNOWN ParentGroup sessions: header/3",
+        "syncServer -> storage | CONTENT ParentGroup header: true new: After: 0 New: 3",
+        "server -> client | KNOWN Group sessions: header/5",
+        "syncServer -> storage | CONTENT Group header: true new: After: 0 New: 5",
+        "server -> client | KNOWN Map sessions: header/0",
+        "syncServer -> storage | CONTENT Map header: true new: ",
+        "server -> client | KNOWN ParentGroup sessions: header/76",
+        "syncServer -> storage | CONTENT ParentGroup header: false new: After: 3 New: 73",
+        "server -> client | KNOWN ParentGroup sessions: header/149",
+        "syncServer -> storage | CONTENT ParentGroup header: false new: After: 76 New: 73",
+        "server -> client | KNOWN ParentGroup sessions: header/205",
+        "syncServer -> storage | CONTENT ParentGroup header: false new: After: 149 New: 56",
+        "server -> client | KNOWN Map sessions: header/1",
+        "syncServer -> storage | CONTENT Map header: false new: After: 0 New: 1",
+      ]
+    `);
+
+    SyncMessagesLog.clear();
+
+    syncServer.restart();
+    syncServer.addStorage({
+      ourName: "syncServer",
+      storage,
+    });
+
+    const bob = setupTestNode();
+    bob.connectToSyncServer({
+      syncServer: syncServer.node,
+      ourName: "bob",
+    });
+
+    const mapOnBob = await loadCoValueOrFail(bob.node, map.id);
+
+    expect(mapOnBob.get("hello")).toEqual("world");
+
+    expect(
+      SyncMessagesLog.getMessages({
+        ParentGroup: parentGroup.core,
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "bob -> server | LOAD Map sessions: empty",
+        "syncServer -> storage | LOAD Map sessions: empty",
+        "storage -> syncServer | CONTENT ParentGroup header: true new: After: 0 New: 76 expectContentUntil: header/205",
+        "storage -> syncServer | CONTENT ParentGroup header: true new: After: 76 New: 73",
+        "storage -> syncServer | CONTENT ParentGroup header: true new: After: 149 New: 56",
+        "storage -> syncServer | CONTENT Group header: true new: After: 0 New: 5",
+        "storage -> syncServer | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> bob | CONTENT ParentGroup header: true new: After: 0 New: 76 expectContentUntil: header/205",
+        "server -> bob | CONTENT ParentGroup header: false new: After: 76 New: 73",
+        "server -> bob | CONTENT ParentGroup header: false new: After: 149 New: 56",
+        "server -> bob | CONTENT Group header: true new: After: 0 New: 5",
+        "server -> bob | CONTENT Map header: true new: After: 0 New: 1",
+        "bob -> server | KNOWN ParentGroup sessions: header/76",
+        "bob -> server | KNOWN ParentGroup sessions: header/149",
+        "bob -> server | KNOWN ParentGroup sessions: header/205",
+        "bob -> server | KNOWN Group sessions: header/5",
+        "bob -> server | KNOWN Map sessions: header/1",
+      ]
+    `);
+  });
 });

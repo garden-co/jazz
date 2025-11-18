@@ -1,4 +1,11 @@
-import { beforeAll, describe, expect, expectTypeOf, test } from "vitest";
+import {
+  assert,
+  beforeAll,
+  describe,
+  expect,
+  expectTypeOf,
+  test,
+} from "vitest";
 import {
   Account,
   co,
@@ -102,6 +109,27 @@ describe("Schema.resolved()", () => {
 
       expect(TestAccountWithName.resolveQuery).toEqual({
         profile: true,
+      });
+    });
+
+    test("to a DiscriminatedUnion schema", () => {
+      const Pet = co.discriminatedUnion("type", [
+        co.map({
+          type: z.literal("dog"),
+          name: co.plainText(),
+        }),
+        co.map({
+          type: z.literal("cat"),
+          name: co.plainText(),
+        }),
+      ]);
+
+      const PetWithName = Pet.resolved({
+        name: true,
+      });
+
+      expect(PetWithName.resolveQuery).toEqual({
+        name: true,
       });
     });
   });
@@ -233,6 +261,47 @@ describe("Schema.resolved()", () => {
         assertLoaded(loadedAccount);
         expect(loadedAccount.profile.$isLoaded).toBe(true);
         expect(loadedAccount.profile.name).toBe("Hermes Puggington");
+      });
+
+      test("for DiscriminatedUnion", async () => {
+        const Person = co.map({
+          name: co.plainText(),
+        });
+        const Dog = co.map({
+          type: z.literal("dog"),
+          name: co.plainText(),
+          owner: Person,
+        });
+        const Cat = co.map({
+          type: z.literal("cat"),
+          name: co.plainText(),
+        });
+        const Pet = co.discriminatedUnion("type", [Dog, Cat]).resolved({
+          name: true,
+          owner: {
+            name: true,
+          },
+        });
+
+        const dog = Dog.create(
+          {
+            type: "dog",
+            name: "Rex",
+            owner: { name: "Lewis" },
+          },
+          publicGroup,
+        );
+
+        const loadedDiscriminatedUnion = await Pet.load(dog.$jazz.id, {
+          loadAs: clientAccount,
+        });
+
+        assertLoaded(loadedDiscriminatedUnion);
+        expect(loadedDiscriminatedUnion.name.$isLoaded).toBe(true);
+        expect(loadedDiscriminatedUnion.name.toUpperCase()).toBe("REX");
+
+        assert(loadedDiscriminatedUnion.type === "dog");
+        expect(loadedDiscriminatedUnion.owner.name.toUpperCase()).toBe("LEWIS");
       });
     });
 

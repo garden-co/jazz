@@ -1,5 +1,36 @@
 # jazz-tools
 
+## 0.19.3
+
+### Patch Changes
+
+- cddbfdb: Fix co.discriminatedUnion load for React Native
+- 114e4ce: Show invalid transaction in inspector even if they are not decryptable
+  - cojson@0.19.3
+  - cojson-storage-indexeddb@0.19.3
+  - cojson-transport-ws@0.19.3
+
+## 0.19.2
+
+### Patch Changes
+
+- ef24afb: Support creating CoVectors using plain `number[]` or `Float32Array` objects inside CoValue containers
+- 5f2b34b: Inline editing and snapshot restore for CoMaps in the inspector
+- Updated dependencies [7e76313]
+  - cojson@0.19.2
+  - cojson-storage-indexeddb@0.19.2
+  - cojson-transport-ws@0.19.2
+
+## 0.19.1
+
+### Patch Changes
+
+- f444bd9: Add `resolve` support for `co.discriminatedUnion`
+- Updated dependencies [afd2ded]
+  - cojson@0.19.1
+  - cojson-storage-indexeddb@0.19.1
+  - cojson-transport-ws@0.19.1
+
 ## 0.19.0
 
 ### Minor Changes

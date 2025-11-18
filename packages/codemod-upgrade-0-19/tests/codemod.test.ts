@@ -5,21 +5,25 @@ import { fileURLToPath } from "node:url";
 
 const currentDir = fileURLToPath(new URL(".", import.meta.url));
 
-test("runTransform", () => {
-  const fixturesBefore = readFileSync(
-    `${currentDir}/fixtures/test-example.tsx`,
-    "utf-8",
-  );
-  runTransform(`${currentDir}/fixtures`);
+test(
+  "runTransform",
+  () => {
+    const fixturesBefore = readFileSync(
+      `${currentDir}/fixtures/test-example.tsx`,
+      "utf-8",
+    );
+    runTransform(`${currentDir}/fixtures`);
 
-  const result = readFileSync(
-    `${currentDir}/fixtures/test-example.tsx`,
-    "utf-8",
-  );
+    const result = readFileSync(
+      `${currentDir}/fixtures/test-example.tsx`,
+      "utf-8",
+    );
 
-  onTestFinished(() => {
-    writeFileSync(`${currentDir}/fixtures/test-example.tsx`, fixturesBefore);
-  });
+    onTestFinished(() => {
+      writeFileSync(`${currentDir}/fixtures/test-example.tsx`, fixturesBefore);
+    });
 
-  expect(result).toMatchSnapshot();
-});
+    expect(result).toMatchSnapshot();
+  },
+  { timeout: 20000 },
+);

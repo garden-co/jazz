@@ -329,8 +329,7 @@ describe("roleOf", () => {
       expect(mapOnNode2.get("test")).toEqual("Written from everyone");
 
       await waitFor(async () => {
-        const updatedMap = expectMap(mapOnNode2.core.getCurrentContent());
-        expect(updatedMap.get("fromAdmin")).toEqual("Written from admin");
+        expect(mapOnNode2.get("fromAdmin")).toEqual("Written from admin");
       });
     });
 
@@ -374,9 +373,8 @@ describe("roleOf", () => {
       expect(mapOnNode2.get("test")).toEqual("Updated after the upgrade");
 
       await waitFor(async () => {
-        const updatedMap = expectMap(mapOnNode2.core.getCurrentContent());
         // Get the new content after the invalidation caused by group update
-        expect(updatedMap.get("fromAdmin")).toEqual("Written from admin");
+        expect(mapOnNode2.get("fromAdmin")).toEqual("Written from admin");
       });
     });
 

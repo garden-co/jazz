@@ -55,52 +55,52 @@ export class RawCoList<
   type: "colist" | "coplaintext" = "colist" as const;
   /** @category 6. Meta */
   core: AvailableCoValueCore;
-  /** @internal */
-  afterStart: OpID[];
-  /** @internal */
-  beforeEnd: OpID[];
-  /** @internal */
+
+  /** The internal state of the RawCoList */
+  afterStart: OpID[] = [];
+  beforeEnd: OpID[] = [];
   insertions: {
     [sessionID: SessionID]: {
       [txIdx: number]: {
         [changeIdx: number]: InsertionEntry<Item>;
       };
     };
-  };
-  /** @internal */
+  } = {};
   deletionsByInsertion: {
     [deletedSessionID: SessionID]: {
       [deletedTxIdx: number]: {
         [deletedChangeIdx: number]: DeletionEntry[];
       };
     };
-  };
-  /** @category 6. Meta */
-  readonly _item!: Item;
-
-  /** @internal */
+  } = {};
   _cachedEntries?: {
     value: Item;
     madeAt: number;
     opID: OpID;
   }[];
-  /** @internal */
-  knownTransactions: Record<RawCoID, number>;
+  knownTransactions: Record<RawCoID, number> = {};
+  version: number = 0;
+  lastValidTransaction: number | undefined;
   totalValidTransactions: number = 0;
 
-  lastValidTransaction: number | undefined;
+  private resetInternalState() {
+    this.afterStart = [];
+    this.beforeEnd = [];
+    this.insertions = {};
+    this.deletionsByInsertion = {};
+    this._cachedEntries = undefined;
+    this.knownTransactions = { [this.core.id]: 0 };
+    this.lastValidTransaction = undefined;
+    this.totalValidTransactions = 0;
+  }
+
+  /** @category 6. Meta */
+  readonly _item!: Item;
 
   /** @internal */
   constructor(core: AvailableCoValueCore) {
     this.id = core.id as CoID<this>;
     this.core = core;
-
-    this.insertions = {};
-    this.deletionsByInsertion = {};
-    this.afterStart = [];
-    this.beforeEnd = [];
-    this.knownTransactions = { [core.id]: 0 };
-
     this.processNewTransactions();
   }
 
@@ -281,6 +281,13 @@ export class RawCoList<
     }
 
     this.totalValidTransactions += transactions.length;
+  }
+
+  rebuildFromCore() {
+    this.version += 1;
+
+    this.resetInternalState();
+    this.processNewTransactions();
   }
 
   /** @category 6. Meta */
@@ -657,20 +664,6 @@ export class RawCoList<
       privacy,
     );
     this.processNewTransactions();
-  }
-
-  /** @internal */
-  rebuildFromCore() {
-    const listAfter = new RawCoList(this.core) as this;
-
-    this.afterStart = listAfter.afterStart;
-    this.beforeEnd = listAfter.beforeEnd;
-    this.insertions = listAfter.insertions;
-    this.lastValidTransaction = listAfter.lastValidTransaction;
-    this.knownTransactions = listAfter.knownTransactions;
-    this.totalValidTransactions = listAfter.totalValidTransactions;
-    this.deletionsByInsertion = listAfter.deletionsByInsertion;
-    this._cachedEntries = undefined;
   }
 }
 

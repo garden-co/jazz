@@ -397,7 +397,7 @@ export class CoList<out Item = any>
         });
       },
       onUpdateWhenFound(value) {
-        value.$jazz.applyDiff(options.value);
+        (value as Resolved<L>).$jazz.applyDiff(options.value);
       },
     });
   }

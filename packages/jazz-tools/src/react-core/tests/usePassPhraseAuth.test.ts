@@ -119,7 +119,7 @@ describe("usePassphraseAuth", () => {
         const me = useAccount();
         const logOut = useLogOut();
 
-        if (me) {
+        if (me.$isLoaded) {
           if (!accounts.includes(me.$jazz.id)) {
             accounts.push(me.$jazz.id);
           }

@@ -28,7 +28,7 @@ const ModalContent = styled("dialog")`
   &::backdrop {
     background-color: rgba(0, 0, 0, 0.7);
   }
-  
+
 `;
 
 const ModalHeader = styled("div")`
@@ -65,11 +65,11 @@ const CloseButton = styled("button")`
   justify-content: center;
   min-width: 2rem;
   min-height: 2rem;
-  
+
   &:hover {
     background-color: var(--j-foreground);
   }
-  
+
   &:focus-visible {
     outline: 2px solid var(--j-border-focus);
     outline-offset: 2px;

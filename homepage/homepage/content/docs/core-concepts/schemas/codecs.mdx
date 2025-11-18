@@ -16,29 +16,7 @@ To use a Zod `z.codec()` with Jazz, your encoder must encode the data into a JSO
 This is means that the `Input` type shall map to the JSON-compatible type, and `Output` will map to your custom type.
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-// ---cut---
-class Greeter {
-  constructor(public name: string) {}
-
-  greet() {
-    console.log(`Hello, ${this.name}!`);
-  }
-}
-
-const schema = co.map({
-  greeter: z.codec(z.string(), z.z.instanceof(Greeter), {
-    encode: (value) => value.name,
-    decode: (value) => new Greeter(value),
-  }),
-});
-
-const porter = schema.create({
-  greeter: new Greeter("Alice"),
-});
-
-porter.greeter.greet();
+```ts core-concepts/schemas/codecs/greeter.ts
 ```
 </CodeGroup>
 

@@ -1,7 +1,7 @@
 export const metadata = {
   description: "Integrate Better Auth with your Jazz app to authenticate users."
 };
-import { Alert, CodeGroup, ContentByFramework } from "@/components/forMdx";
+import { Alert, CodeGroup, ContentByFramework, FileName } from "@/components/forMdx";
 
 # Better Auth authentication
 
@@ -89,23 +89,9 @@ The `jazz-tools/better-auth/auth` plugin provides both server-side and client-si
 
 Add the `jazzPlugin` to the Better Auth instance:
 
+<FileName>src/lib/auth.ts</FileName>
 <CodeGroup>
-```typescript
-// src/lib/auth.ts
-import { betterAuth } from "better-auth";
-import { jazzPlugin } from "jazz-tools/better-auth/auth/server";
-
-// Your Better Auth server configuration
-export const auth = betterAuth({
-  // Add the Jazz plugin
-  plugins: [
-    jazzPlugin(),
-    // other server plugins
-  ],
-
-  // rest of the Better Auth configuration
-  // like database, email/password authentication, social providers, etc.
-});
+```ts auth.ts
 ```
 </CodeGroup>
 
@@ -119,20 +105,12 @@ Now run [migrations](https://www.better-auth.com/docs/concepts/database#running-
 
 Create the Better Auth client with the Jazz plugin:
 
+<FileName>src/lib/auth-client.ts</FileName>
+
+{/* TODO: 'use client' only for React */}
+
 <CodeGroup>
-```typescript
-// src/lib/auth-client.ts
-"use client";
-
-import { createAuthClient } from "better-auth/client";
-import { jazzPluginClient } from "jazz-tools/better-auth/auth/client";
-
-export const betterAuthClient = createAuthClient({
-  plugins: [
-    jazzPluginClient(),
-    // other client plugins
-  ],
-});
+```ts auth-client.ts
 ```
 </CodeGroup>
 
@@ -141,22 +119,7 @@ export const betterAuthClient = createAuthClient({
 Wrap your app with the `AuthProvider`, passing the `betterAuthClient` instance:
 
 <CodeGroup>
-```typescript
-// src/App.tsx
-"use client";
-
-import { AuthProvider } from "jazz-tools/better-auth/auth/react";
-import { betterAuthClient } from "@/lib/auth-client";
-
-
-export function App() {
-  return (
-    /* Other providers (e.g. your Jazz Provider) */
-    <AuthProvider betterAuthClient={betterAuthClient}>
-      {/* your app */}
-    </AuthProvider>
-  );
-}
+```ts app.tsx
 ```
 </CodeGroup>
 
@@ -172,12 +135,7 @@ export function App() {
 Set JazzContext and AuthSecretStorage in the Better Auth client:
 
 <CodeGroup>
-```ts
-const jazzContext = // get the singleton from your own implementation
-const authSecretStorage = // get the singleton from your own implementation
-
-betterAuthClient.jazz.setJazzContext(jazzContext);
-betterAuthClient.jazz.setAuthSecretStorage(authSecretStorage);
+```ts index.ts#Basic
 ```
 </CodeGroup>
 
@@ -190,39 +148,14 @@ The Jazz plugin intercepts the Better Auth client's calls, so you can use the Be
 Here is how to sign up with email and password, and transform an anonymous Jazz account into a logged in user authenticated by Better Auth:
 
 <CodeGroup>
-```ts
-import { betterAuthClient } from "@/lib/auth-client";
-
-await betterAuthClient.signUp.email(
-  {
-    email: "email@example.com",
-    password: "password",
-    name: "John Doe",
-  },
-  {
-    onSuccess: async () => {
-      // Don't forget to update the profile's name. It's not done automatically.
-      if (account?.me?.profile) {
-        account.me.profile.$jazz.set("name", "John Doe");
-      }
-    },
-  }
-);
+```ts index.ts#SignUp
 ```
 </CodeGroup>
 
 You can then use the `signIn` and `signOut` methods on the `betterAuthClient`:
 
 <CodeGroup>
-```ts
-import { betterAuthClient } from "@/lib/auth-client";
-
-await betterAuthClient.signIn.email({
-  email: "email@example.com",
-  password: "password",
-});
-
-await betterAuthClient.signOut();
+```ts index.ts#SignInOut
 ```
 </CodeGroup>
 
@@ -238,22 +171,6 @@ You can use Better Auth's [native methods](https://www.better-auth.com/docs/basi
 Better Auth provides [database hooks](https://www.better-auth.com/docs/reference/options#databasehooks) to run code when things happen. When using the Jazz, the user's Jazz account ID is always available in the `user` object. This means you can access it anywhere in Better Auth hooks.
 
 <CodeGroup>
-```ts
-import { betterAuth } from "better-auth";
-import { jazzPlugin } from "jazz-tools/better-auth/auth/server";
-
-export const auth = betterAuth({
-  plugins: [jazzPlugin()],
-  databaseHooks: {
-    user: {
-      create: {
-        async after(user) {
-          // Here we can send a welcome email to the user
-          console.log("User created with Jazz Account ID:", user.accountID);
-        },
-      },
-    },
-  },
-});
+```ts auth.ts#WithHooks
 ```
 </CodeGroup>

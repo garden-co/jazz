@@ -15,17 +15,7 @@ The [Journal example](https://github.com/garden-co/jazz/tree/main/examples/vecto
 CoVectors are defined using `co.vector()`, and are often used as fields in a CoMap within a CoList (making it easy to perform vector search across list items).
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-
-const Embedding = co.vector(384); // Define 384-dimensional embedding
-
-const Document = co.map({
-  content: z.string(),
-  embedding: Embedding,
-});
-
-export const DocumentsList = co.list(Document);
+```ts index.ts#Basic
 ```
 </CodeGroup>
 
@@ -37,27 +27,7 @@ The number of dimensions matches the embedding model used in your app. Many smal
 You can create vectors in your Jazz application from an array of numbers, or Float32Array instance.
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-const Embedding = co.vector(384); 
-const Document = co.map({
-  content: z.string(),
-  embedding: Embedding,
-});
-export const DocumentsList = co.list(Document);
-const documents = DocumentsList.create([]);
-const createEmbedding: (text: string) => Promise<number[]> = async () => ([]);
-
-// ---cut---
-// Generate embeddings (bring your own embeddings model)
-const vectorData = await createEmbedding("Text");
-
-const newDocument = Document.create({
-  content: "Text",
-  embedding: Embedding.create(vectorData),
-});
-
-documents.$jazz.push(newDocument);
+  ```ts index.ts#Create
 ```
 </CodeGroup>
 
@@ -66,19 +36,7 @@ documents.$jazz.push(newDocument);
 Like other CoValues, you can specify ownership when creating CoVectors.
 
 <CodeGroup>
-```ts twoslash
-import { Group, co, z } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-const colleagueAccount = await createJazzTestAccount();
-const vector: number[] = [];
-
-// ---cut---
-// Create with shared ownership
-const teamGroup = Group.create();
-teamGroup.addMember(colleagueAccount, "writer");
-
-const teamList = co.vector(384).create(vector, { owner: teamGroup });
+```ts index.ts#Ownership
 ```
 </CodeGroup>
 
@@ -87,7 +45,6 @@ See [Groups as permission scopes](/docs/permissions-and-sharing/overview) for mo
 ### Immutability
 
 CoVectors cannot be changed after creation. Instead, create a new CoVector with the updated values and replace the previous one.
-
 
 ## Semantic Search
 
@@ -102,120 +59,15 @@ You can load your data using the `.load` method, then compute and sort the resul
 
 <TabbedCodeGroup id="vectorsearch" default="react" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-```ts twoslash
-import { co, z } from "jazz-tools";
-const Document = co.map({
-  content: z.string(),
-  embedding: co.vector(384),
-});
-export const DocumentsList = co.list(Document);
-const documents = DocumentsList.create([]);
-const documentsListId: string = 'co_876TBN';
-
-type YourCustomHook = { queryEmbedding: number[] | null; createQueryEmbedding: (text: string) => Promise<number[]> }
-const useCreateEmbedding: () => YourCustomHook =
-  () => ({
-    queryEmbedding: null,
-    createQueryEmbedding: async (s) => ([]),
-  });
-
-// ---cut---
-import { useCoState } from "jazz-tools/react";
-
-const { queryEmbedding, createQueryEmbedding } = useCreateEmbedding();
-
-const foundDocuments = useCoState(
-  DocumentsList,
-  documentsListId,
-  {
-    resolve: { 
-      $each: { embedding: true }
-    },
-    select(documents) {
-      if (!documents.$isLoaded) return;
-
-      // If no query embedding, return all entries
-      if (!queryEmbedding) return documents.map((value) => ({ value }));
-
-      return documents
-        .map((value) => ({
-          value,
-          similarity: value.embedding.$jazz.cosineSimilarity(queryEmbedding), // [!code ++]
-        }))
-        .sort((a, b) => b.similarity - a.similarity)
-        .filter((result) => result.similarity > 0.5);
-    },
-  },
-);
+```tsx react-snippet.tsx#SemanticSearch
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="VanillaJS" value="vanilla" icon={<VanillaLogo />} preferWrap>
-```ts twoslash
-import { co, z } from "jazz-tools";
-const Document = co.map({
-  content: z.string(),
-  embedding: co.vector(384),
-});
-export const DocumentsList = co.list(Document);
-const documentsListId: string = 'co_876TBN';
-const createEmbedding: (text: string) => Promise<number[]> = async () => ([]);
-
-// ---cut---
-// 1) Load your documents
-const documents = await DocumentsList.load(documentsListId, {
-  resolve: { 
-    $each: { embedding: true }
-  }
-})
-
-// 2) Obtain vector for your search query
-const queryEmbedding = await createEmbedding("search query");
-
-// 3) Sort documents by vector similarity
-const similarDocuments = documents.$isLoaded
-  ? documents
-      .map((value) => ({
-        value,
-        similarity: value.embedding.$jazz.cosineSimilarity(queryEmbedding), // [!code ++]
-      }))
-      .sort((a, b) => b.similarity - a.similarity)
-      .filter((result) => result.similarity > 0.5)
-  : undefined;
+```ts index.ts#SemanticSearch
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Svelte" value="svelte" className="[&_span]:[tab-size:2]" icon={<SvelteLogo />} preferWrap>
-```svelte
-<script lang="ts">
-  import { CoState } from "jazz-tools/svelte";
-
-  export let queryEmbedding: number[] | null;
-  export let documentsListId: string;
-
-  // 1) Load your documents
-  const documents = new CoState(DocumentsList, documentsListId, {
-    resolve: {
-      $each: { embedding: true },
-    }
-  });
-
-  // 2) Sort documents by vector similarity
-  const foundDocuments = $derived((() => {
-    const docs = documents.current;
-    if (!docs.$isLoaded) return;
-
-    if (!queryEmbedding) {
-      return docs.map((value) => ({ value }));
-    }
-
-    return docs
-      .map((value) => ({
-        value,
-        similarity: value.embedding.$jazz.cosineSimilarity(queryEmbedding), // [!code ++]
-      }))
-      .sort((a, b) => b.similarity - a.similarity)
-      .filter((result) => result.similarity > 0.5);
-  })());
-</script>
+```ts svelte.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
@@ -255,7 +107,7 @@ Alternatively, you can generate embeddings using server-side or commercial APIs 
 
 ### Changing embedding models
 
-**Always use the same embedding model for all vectors you intend to compare.**  
+**Always use the same embedding model for all vectors you intend to compare.**
 Mixing vectors from different models (or even different versions of the same model) will result in meaningless similarity scores, as the vector spaces are not compatible.
 
 If you need to switch models, consider storing the model identifier alongside each vector, and re-embedding your data as needed.

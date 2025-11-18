@@ -1,13 +1,16 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
-import { CoPlainText, Loaded, co, z } from "../exports.js";
+import { CoPlainText, Group, Loaded, co, loadCoValue, z } from "../exports.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { assertLoaded, waitFor } from "./utils.js";
+import type { Account } from "jazz-tools";
 
 describe("co.discriminatedUnion", () => {
+  let account: Account;
+
   beforeEach(async () => {
     await setupJazzTestSync();
 
-    await createJazzTestAccount({
+    account = await createJazzTestAccount({
       isCurrentActiveAccount: true,
       creationProps: { name: "Hermes Puggington" },
     });
@@ -266,7 +269,7 @@ describe("co.discriminatedUnion", () => {
     expect(referenceItem.children[0]?.type).toEqual("note");
   });
 
-  test("load CoValue instances using the DiscriminatedUnion schema", async () => {
+  test("load CoValue instances using the DiscriminatedUnion schema without resolve", async () => {
     const Dog = co.map({
       type: z.literal("dog"),
     });
@@ -281,7 +284,40 @@ describe("co.discriminatedUnion", () => {
     expect(loadedPet.type).toEqual("dog");
   });
 
-  test("subscribe to CoValue instances using the DiscriminatedUnion schema", async () => {
+  test("load CoValue instances using the DiscriminatedUnion schema with deep resolve", async () => {
+    const Person = co.map({
+      name: z.string(),
+    });
+    const Dog = co.map({
+      type: z.literal("dog"),
+      owner: Person,
+    });
+    const Cat = co.map({
+      type: z.literal("cat"),
+      owner: Person,
+    });
+    const Pet = co.discriminatedUnion("type", [Dog, Cat]);
+
+    const dog = Dog.create({
+      type: "dog",
+      owner: Person.create({
+        name: "John Doe",
+      }),
+    });
+
+    const loadedPet = await Pet.load(dog.$jazz.id, {
+      resolve: {
+        owner: true,
+      },
+    });
+
+    assertLoaded(loadedPet);
+
+    expect(loadedPet?.type).toEqual("dog");
+    expect(loadedPet?.owner.name).toEqual("John Doe");
+  });
+
+  test("subscribe to CoValue instances using the DiscriminatedUnion schema without resolve", async () => {
     const Person = co.map({
       name: z.string(),
     });
@@ -319,7 +355,41 @@ describe("co.discriminatedUnion", () => {
     expect(updates[0]?.name).toEqual("Rex");
   });
 
-  test("should work when one of the options has a dicriminated union field", async () => {
+  test("subscribe to CoValue instances using the DiscriminatedUnion schema with deep resolve", async () => {
+    const Person = co.map({
+      name: z.string(),
+    });
+    const Dog = co.map({
+      type: z.literal("dog"),
+      owner: Person,
+    });
+    const Cat = co.map({
+      type: z.literal("cat"),
+      owner: Person,
+    });
+    const Pet = co.discriminatedUnion("type", [Dog, Cat]);
+
+    const dog = Dog.create({
+      type: "dog",
+      owner: Person.create({
+        name: "John Doe",
+      }),
+    });
+
+    const spy = vi.fn();
+    Pet.subscribe(dog.$jazz.id, { resolve: { owner: true } }, (pet) => {
+      expect(pet.owner.name).toEqual("John Doe");
+      spy(pet);
+    });
+
+    expect(spy).not.toHaveBeenCalled();
+
+    await waitFor(() => expect(spy).toHaveBeenCalled());
+
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  test("should work when one of the options has a discriminated union field", async () => {
     const Collie = co.map({
       type: z.literal("collie"),
     });
@@ -370,5 +440,277 @@ describe("co.discriminatedUnion", () => {
 
     assertLoaded(loadedAnimal);
     expect(loadedAnimal.type).toEqual("collie");
+  });
+
+  test("load co.discriminatedUnion with deep resolve using loadCoValue", async () => {
+    const Person = co.map({
+      name: z.string(),
+    });
+    const Dog = co.map({
+      type: z.literal("dog"),
+      owner: Person,
+    });
+    const Cat = co.map({
+      type: z.literal("cat"),
+    });
+
+    const Pet = co.discriminatedUnion("type", [Dog, Cat]);
+
+    const dog = Dog.create({
+      type: "dog",
+      owner: Person.create({ name: "John Doe" }),
+    });
+
+    const loadedPet = await loadCoValue(Pet.getCoValueClass(), dog.$jazz.id, {
+      resolve: { owner: true },
+      loadAs: account,
+    });
+
+    assertLoaded(loadedPet);
+
+    if (loadedPet.type === "dog") {
+      expect(loadedPet.owner.name).toEqual("John Doe");
+    }
+  });
+
+  test("load co.discriminatedUnion with non-matching deep resolve", async () => {
+    const Person = co.map({
+      name: z.string(),
+    });
+    const Dog = co.map({
+      type: z.literal("dog"),
+      owner: Person,
+    });
+    const Cat = co.map({
+      type: z.literal("cat"),
+    });
+    const Pet = co.discriminatedUnion("type", [Dog, Cat]);
+
+    const cat = Cat.create({
+      type: "cat",
+    });
+
+    const loadedPet = await Pet.load(cat.$jazz.id, {
+      resolve: { owner: true },
+    });
+
+    assertLoaded(loadedPet);
+
+    expect(loadedPet.type).toEqual("cat");
+    // @ts-expect-error - no owner on Cat
+    expect(loadedPet.owner).toBeUndefined();
+  });
+
+  test("load co.discriminatedUnion list with different schemas on deep resolved fields", async () => {
+    // Schema without nested CoValues
+    const Bird = co.map({
+      type: z.literal("bird"),
+      species: z.string(),
+    });
+    const Person = co.map({
+      name: z.string(),
+      bird: Bird,
+    });
+    // Schema with a nested CoValue
+    const Dog = co.map({
+      type: z.literal("dog"),
+      friend: Person,
+    });
+    // Same attribute (friend) with a completely different schema (list)
+    const Cat = co.map({
+      type: z.literal("cat"),
+      get friend() {
+        return co.list(Cat);
+      },
+    });
+    const Pet = co.discriminatedUnion("type", [Dog, Cat, Bird]);
+    const Pets = co.list(Pet);
+
+    const bird = Bird.create({
+      type: "bird",
+      species: "Parrot",
+    });
+
+    const dog = Dog.create({
+      type: "dog",
+      friend: Person.create({ name: "John Doe", bird }),
+    });
+
+    const cat = Cat.create({
+      type: "cat",
+      friend: [{ type: "cat", friend: [{ type: "cat", friend: [] }] }],
+    });
+
+    const pets = Pets.create([dog, cat, bird]);
+
+    const loadedPets = await Pets.load(pets.$jazz.id, {
+      resolve: { $each: { friend: { $each: { friend: true }, bird: true } } },
+    });
+
+    assertLoaded(loadedPets);
+
+    for (const pet of loadedPets) {
+      if (pet.type === "dog") {
+        expect(pet.friend.name).toEqual("John Doe");
+        expect(pet.friend.bird.species).toEqual("Parrot");
+        // @ts-expect-error - no species on Person
+        expect(pet.friend.species).toBeUndefined();
+      } else if (pet.type === "cat") {
+        expect(pet.friend[0]?.type).toEqual("cat");
+        // @ts-expect-error - no name on Bird
+        expect(pet.friend.name).toBeUndefined();
+      }
+    }
+  });
+
+  test("ensureLoaded on co.discriminatedUnion members", async () => {
+    const Person = co.map({
+      name: z.string(),
+    });
+    const Dog = co.map({
+      type: z.literal("dog"),
+      owner: Person,
+    });
+    const Cat = co.map({
+      type: z.literal("cat"),
+      friend: Person,
+    });
+    const Pet = co.discriminatedUnion("type", [Dog, Cat]);
+
+    const dog = Dog.create({
+      type: "dog",
+      owner: Person.create({ name: "John Doe" }),
+    });
+
+    const cat = Cat.create({
+      type: "cat",
+      friend: Person.create({ name: "Jane Doe" }),
+    });
+
+    const pet = await Pet.load(dog.$jazz.id);
+
+    assertLoaded(pet);
+
+    // @ts-expect-error - can't use ensureLoaded before narrowing
+    pet.$jazz.ensureLoaded({
+      resolve: { owner: true },
+    });
+
+    if (pet.type === "dog") {
+      const loadedPet = await pet.$jazz.ensureLoaded({
+        resolve: { owner: true },
+      });
+
+      expect(loadedPet.owner.name).toEqual("John Doe");
+    }
+  });
+
+  describe("Deep loading mutually exclusive nested CoMaps", async () => {
+    const Breed = co.map({
+      type: z.enum(["collie", "border-collie"]),
+    });
+    const Dog = co.map({
+      type: z.literal("dog"),
+      breed: Breed,
+    });
+
+    const Ocean = co.map({
+      name: z.enum(["atlantic", "pacific"]),
+    });
+    const Shark = co.map({
+      type: z.literal("shark"),
+      ocean: Ocean,
+    });
+
+    const Animal = co.discriminatedUnion("type", [Dog, Shark]);
+    const Species = co.list(Animal);
+
+    let species: Loaded<typeof Species>;
+
+    beforeEach(async () => {
+      const group = Group.create();
+      group.makePublic();
+
+      species = Species.create(
+        [
+          {
+            type: "dog",
+            breed: {
+              type: "collie",
+            },
+          },
+          {
+            type: "shark",
+            ocean: {
+              name: "atlantic",
+            },
+          },
+        ],
+        group,
+      );
+    });
+
+    test("co.discriminatedUnion should load with deeply resolved mutually exclusive nested CoMaps", async () => {
+      const loadedSpecies = await Species.load(species.$jazz.id, {
+        resolve: {
+          $each: {
+            breed: true,
+            ocean: true,
+          },
+        },
+      });
+
+      assertLoaded(loadedSpecies);
+
+      // @ts-expect-error - type needs to be narrowed
+      expect(loadedSpecies[0]?.breed.type).toEqual("collie");
+      // @ts-expect-error - type needs to be narrowed
+      expect(loadedSpecies[1]?.ocean.name).toEqual("atlantic");
+
+      for (const animal of loadedSpecies) {
+        if (animal.type === "dog") {
+          expect(animal.breed.type).toBeDefined();
+          // @ts-expect-error - no ocean property on Dog
+          expect(animal.ocean).toBeUndefined();
+        } else if (animal.type === "shark") {
+          expect(animal.ocean.name).toBeDefined();
+          // @ts-expect-error - no breed property on Shark
+          expect(animal.breed).toBeUndefined();
+        }
+      }
+    });
+
+    test("co.discriminatedUnion should load with deeply resolved nested CoMaps with another account as owner", async () => {
+      const alice = await createJazzTestAccount({
+        creationProps: { name: "Alice" },
+        isCurrentActiveAccount: false,
+      });
+
+      const loadedSpecies = await Species.load(species.$jazz.id, {
+        loadAs: alice,
+        resolve: {
+          $each: {
+            breed: true,
+            ocean: true,
+          },
+        },
+      });
+
+      console.log(loadedSpecies.$isLoaded);
+
+      assertLoaded(loadedSpecies);
+
+      for (const animal of loadedSpecies) {
+        if (animal.type === "dog") {
+          expect(animal.breed.type).toBeDefined();
+          // @ts-expect-error - no ocean on Dog
+          expect(animal.ocean).toBeUndefined();
+        } else if (animal.type === "shark") {
+          expect(animal.ocean.name).toBeDefined();
+          // @ts-expect-error - no breed on Shark
+          expect(animal.breed).toBeUndefined();
+        }
+      }
+    });
   });
 });

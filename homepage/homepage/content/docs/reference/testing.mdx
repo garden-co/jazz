@@ -13,57 +13,22 @@ Jazz provides some key helpers that you can use to simplify writing complex test
 
 ### `setupJazzTestSync`
 
-This should normally be the first thing you call in your test setup, for example in a `beforeEach` or `beforeAll` block. This function sets up an in-memory sync node for the test session, which is needed in case you want to test data synchronisation functionality. Test data is not persisted, and no clean-up is needed between test runs. 
+This should normally be the first thing you call in your test setup, for example in a `beforeEach` or `beforeAll` block. This function sets up an in-memory sync node for the test session, which is needed in case you want to test data synchronisation functionality. Test data is not persisted, and no clean-up is needed between test runs.
 
 <CodeGroup>
-```ts twoslash
-import { co } from 'jazz-tools';
-import { beforeEach, describe, expect, test } from "vitest";
-import { createJazzTestAccount, setupJazzTestSync } from 'jazz-tools/testing';
-const MyAccountSchema = co.account({
-  profile: co.profile(),
-  root: co.map({})
-});
-// ---cut---
-describe("My app's tests", () => {
-  beforeEach(async () => {
-    await setupJazzTestSync();
-  });
-
-  test("I can create a test account", async () => {
-    // See below for details on createJazzTestAccount()
-    const account1 = await createJazzTestAccount({
-      AccountSchema: MyAccountSchema,
-      isCurrentActiveAccount: true
-    });
-    expect(account1).not.toBeUndefined();
-    // ...
-  });
-});
+```ts index.ts#SetupJazzTestSync
 ```
 </CodeGroup>
 
 ### `createJazzTestAccount`
-After you've created the initial account using `setupJazzTestSync`, you'll typically want to create user accounts for running your tests. 
+After you've created the initial account using `setupJazzTestSync`, you'll typically want to create user accounts for running your tests.
 
 You can use `createJazzTestAccount()` to create an account and link it to the sync node. By default, this account will become the currently active account (effectively the 'logged in' account).
 
 You can use it like this:
 
 <CodeGroup>
-```ts twoslash
-import { co } from 'jazz-tools';
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const MyAccountSchema = co.account({
-  profile: co.profile(),
-  root: co.map({})
-});
-// ---cut---
-const account = await createJazzTestAccount({
-  AccountSchema: MyAccountSchema,
-  isCurrentActiveAccount: true,
-  creationProps: {},
-});
+```ts index.ts#CreateTestAccount
 ```
 </CodeGroup>
 
@@ -74,17 +39,7 @@ This option allows you to provide a custom account schema to the utility to be u
 This option (disabled by default) allows you to quickly switch to the newly created account when it is created.
 
 <CodeGroup preferWrap>
-```ts twoslash
-import { co } from 'jazz-tools';
-import { createJazzTestAccount } from 'jazz-tools/testing';
-// ---cut---
-const account1 = await createJazzTestAccount({ 
-  isCurrentActiveAccount: true,
-});
-const group1 = co.group().create(); // Group is owned by account1;
-
-const account2 = await createJazzTestAccount();
-const group2 = co.group().create(); // Group is still owned by account1;
+```ts index.ts#CurrentlyActive
 ```
 </CodeGroup>
 
@@ -100,45 +55,7 @@ Use `setActiveAccount()` to switch between active accounts during a test run.
 You can use this to test your app with multiple accounts.
 
 <CodeGroup preferWrap>
-```ts twoslash
-import { co, z } from 'jazz-tools';
-import { assertLoaded, createJazzTestAccount, setActiveAccount } from 'jazz-tools/testing';
-const MyMap = co.map({
-  text: z.string()
-})
-function expect (actual?: any) {
-    return { 
-      toBe (expected?: any) {
-        return null;
-      },
-      toThrow() {
-        return null;
-      }
-    }
-};
-// ---cut---
-const account1 = await createJazzTestAccount({ 
-  isCurrentActiveAccount: true,
-});
-const account2 = await createJazzTestAccount();
-
-const group1 = co.group().create(); // Group is owned by account1;
-group1.addMember(account2, 'reader');
-
-const myMap = MyMap.create({
-  text: "Created by account1"
-}, { owner: group1 });
-const myMapId = myMap.$jazz.id;
-
-setActiveAccount(account2);
-// myMap is still loaded as account1, so we need to load again as account2
-const myMapFromAccount2 = await MyMap.load(myMapId);
-
-assertLoaded(myMapFromAccount2);
-expect(myMapFromAccount2.text)
-  .toBe('Created by account1');
-expect(() => myMapFromAccount2.$jazz.set('text', 'Updated by account2'))
-  .toThrow();
+```ts index.ts#SetActiveAccount
 ```
 </CodeGroup>
 
@@ -146,31 +63,12 @@ expect(() => myMapFromAccount2.$jazz.set('text', 'Updated by account2'))
 If you need to test how a particular piece of code behaves when run without an active account.
 
 <CodeGroup preferWrap>
-```ts twoslash
-import { co } from 'jazz-tools';
-import { createJazzTestAccount, runWithoutActiveAccount } from 'jazz-tools/testing';
-function expect (actual?: any) {
-    return { 
-      toBe (expected?: any) {
-        return null;
-      },
-      toThrow() {
-        return null;
-      }
-    }
-};
-// ---cut---
-const account1 = await createJazzTestAccount({
-  isCurrentActiveAccount: true,
-});
-runWithoutActiveAccount(() => {
-  expect(() => co.group().create()).toThrow(); // can't create new group
-});
+```ts index.ts#RunWithoutAccount
 ```
 </CodeGroup>
 
 ## Managing Context
-To test UI components, you may need to create a mock Jazz context. 
+To test UI components, you may need to create a mock Jazz context.
 
 <ContentByFramework framework="react">
   In most cases, you'd use this for initialising a provider. You can see how we [initialise a test provider for React tests here](https://github.com/garden-co/jazz/blob/main/packages/jazz-tools/src/react-core/testing.tsx), or see how you could [integrate with `@testing-library/react` here](https://github.com/garden-co/jazz/blob/main/packages/jazz-tools/src/react-core/tests/testUtils.tsx).
@@ -188,7 +86,7 @@ The `TestJazzContextManager` mocks the `JazzContextManager` to allow you to inst
 You'll normally use either:
 
 * `TestJazzContextManager.fromAccount(account, props?)` to simulate a logged-in context. You can pass `isAuthenticated: false` as an option to simulate an [anonymous user](docs/key-features/authentication/authentication-states#anonymous-authentication).
-* `TestJazzContextManager.fromGuest({ guest }, props?)` allows you to simulate a [guest context](/docs/key-features/authentication/authentication-states#guest-mode).
+* `TestJazzContextManager.fromGuest({ guest }, props?)` to simulate a [guest context](/docs/key-features/authentication/authentication-states#guest-mode).
 
 You can also use `TestJazzContextManager.fromAccountOrGuest()` to allow you to pass either.
 </ContentByFramework>

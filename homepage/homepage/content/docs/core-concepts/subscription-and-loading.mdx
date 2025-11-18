@@ -33,71 +33,11 @@ The `CoState` class allows you to reactively subscribe to CoValues in your Svelt
 
 <TabbedCodeGroup id="usecostate" default="react" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-```tsx
-import { useCoState } from "jazz-tools/react";
-
-function ProjectView({ projectId }: { projectId: string }) {
-  // Subscribe to a project and resolve its tasks
-  const project = useCoState(Project, projectId, {
-    resolve: { tasks: { $each: true } } // Tell Jazz to load each task in the list
-  });
-  
-  if (!project.$isLoaded) {
-    switch (project.$jazz.loadingState) {
-      case "unauthorized":
-        return "Project not accessible";
-      case "unavailable":
-        return "Project not found";
-      case "loading":
-        return "Loading project...";
-    }
-  }
-
-  return (
-    <div>
-      <h1>{project.name}</h1>
-      <ul>
-        {project.tasks.map((task) => (
-          <li key={task.$jazz.id}>{task.title}</li>
-        ))}
-      </ul>
-    </div>
-  );
-}
+```tsx ProjectView.tsx#Basic
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
-```svelte
-<script lang="ts">
-  import { CoState } from "jazz-tools/svelte";
-
-  const { projectId } : { projectId: string } = $props();
-
-  // Subscribe to a project and resolve its tasks
-  const project = new CoState(Project, projectId, {
-    resolve: { tasks: { $each: true } } // Tell Jazz to load each task in the list
-  });
-</script>
-
-{#if !project.current.$isLoaded}
-  switch (project.current.$jazz.loadingState) {
-    case "unauthorized":
-      return "Project not accessible";
-    case "unavailable":
-      return "Project not found";
-    case "loading":
-      return "Loading project...";
-  }
-{:else}
-  <div>
-    <h1>{project.current.name}</h1>
-    <ul>
-      {#each project.current.tasks as task (task.$jazz.id)}
-        <li>{task.title}</li>
-      {/each}
-    </ul>
-  </div>
-{/if}
+```svelte ProjectView.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
@@ -114,43 +54,11 @@ function ProjectView({ projectId }: { projectId: string }) {
 
 <TabbedCodeGroup id="useaccount" default="react" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-```tsx
-import { useAccount } from "jazz-tools/react";
-
-function ProjectList() {
-  const me = useAccount(MyAppAccount, {
-    resolve: { profile: true }
-  })
-
-  if (!me.$isLoaded) {
-    return "Loading...";
-  }
-
-  return (
-    <div>
-      <h1>{me.profile.name}'s projects</h1>
-    </div>
-  );
-}
+```tsx ProjectList.tsx
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
-```svelte
-<script lang="ts">
-  import { AccountCoState } from "jazz-tools/svelte";
-
-  const account = new AccountCoState(MyAppAccount, {
-    resolve: { profile: true }
-  });
-</script>
-
-{#if !account.current.$isLoaded}
-  Loading...
-{:else}
-  <div>
-    <h1>{account.current.profile.name}'s projects</h1>
-  </div>
-{/if}
+```svelte ProjectList.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
@@ -181,88 +89,20 @@ This is particularly the case when working with [CoMaps](/docs/core-concepts/cov
 A `resolve` query tells Jazz how deeply to load data for your app to use. We can use `true` to tell Jazz to shallowly load the tasks list here. Note that this does *not* cause the tasks themselves to load, just the CoList that holds the tasks.
 
 <CodeGroup>
-```ts
-const Task = co.map({
-  title: z.string(),
-  description: co.plainText().optional(),
-  get subtasks() { return co.list(Task).optional() }
-});
-
-const Project = co.map({
-  name: z.string(),
-  tasks: co.list(Task)
-});
-
-const project = await Project.load(projectId);
-if (!project.$isLoaded) throw new Error("Project not found or not accessible");
-
-// This will be loaded
-project.name; // string
-
-// This *may not be loaded*, and *may not be accessible*
-project.tasks; // ListOfTasks | NotLoaded<ListOfTasks>
-
-const projectWithTasksShallow = await Project.load(projectId, {
-  resolve: {
-    tasks: true
-  }
-});
-if (!projectWithTasksShallow.$isLoaded) throw new Error("Project not found or not accessible");
-
-// This list of tasks will be shallowly loaded
-projectWithTasksShallow.tasks; // ListOfTasks
-// We can access the properties of the shallowly loaded list
-projectWithTasksShallow.tasks.length; // number
-// This *may not be loaded*, and *may not be accessible*
-projectWithTasksShallow.tasks[0]; // Task | NotLoaded<Task>
+```ts ResolveQueries.ts#Basic
 ```
 </CodeGroup>
 
 We can use an `$each` expression to tell Jazz to load the items in a list.
 
 <CodeGroup>
-```ts
-const projectWithTasks = await Project.load(projectId, {
-  resolve: {
-    tasks: {
-      $each: true
-    }
-  }
-});
-if (!projectWithTasks.$isLoaded) throw new Error("Project not found or not accessible");
-
-// The task will be loaded
-projectWithTasks.tasks[0]; // Task
-// Primitive fields are always loaded
-projectWithTasks.tasks[0].title; // string
-// References on the Task may not be loaded
-projectWithTasks.tasks[0].subtasks; // ListOfTasks | NotLoaded<ListOfTasks>
-// CoTexts are CoValues too
-projectWithTasks.tasks[0].description; // CoPlainText | NotLoaded<CoPlainText>
+```ts ResolveQueries.ts#Each
 ```
 </CodeGroup>
 We can also build a query that *deeply resolves* to multiple levels:
 
 <CodeGroup>
-```ts
-const projectDeep = await Project.load(projectId, {
-  resolve: {
-    tasks: {
-      $each: {
-        subtasks: {
-          $each: true
-        },
-        description: true
-      }
-    }
-  }
-});
-if (!projectDeep.$isLoaded) throw new Error("Project not found or not accessible");
-
-// Primitive fields are always loaded
-projectDeep.tasks[0].subtasks[0].title; // string
-// The description will be loaded as well
-projectDeep.tasks[0].description; // CoPlainText
+```ts ResolveQueries.ts#Deep
 ```
 </CodeGroup>
 
@@ -278,27 +118,12 @@ The syntax for resolve queries is shared throughout Jazz. As well as using them 
 
 <TabbedCodeGroup id="resolve" default="react" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-```tsx
-const projectWithTasksShallow = useCoState(Project, projectId, {
-  resolve: {
-    tasks: true
-  }
-});
+```tsx ProjectView.tsx#ShallowLoad
+
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
-```svelte
-<script lang="ts">
-  import { CoState } from "jazz-tools/svelte";
-
-  export let projectId: string;
-
-  const projectWithTasksShallow = new CoState(Project, projectId, {
-    resolve: {
-      tasks: true
-    }
-  });
-</script>
+```svelte ShallowLoad.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
@@ -329,44 +154,21 @@ project.tasks[0].description; // CoPlainText
 A load operation will be successful **only** if all references requested (both optional and required) could be successfully loaded. If any reference cannot be loaded, the entire load operation will return a not-loaded CoValue to avoid potential inconsistencies.
 
 <CodeGroup preferWrap>
-```ts
-// If permissions on description are restricted:
-const task = await Task.load(taskId, {
-  resolve: { description: true }
-});
-task.$isLoaded // false
-task.$jazz.loadingState // "unauthorized"
+```ts ResolveQueries.ts#Unauthorized
 ```
 </CodeGroup>
 
 This is also true if **any** element of a list is inaccessible, even if all the others can be loaded.
 
 <CodeGroup preferWrap>
-```ts
-// One task in the list has restricted permissions
-const project = await Project.load(projectId, {
-  resolve: { tasks: { $each: true } }
-});
-
-project.$isLoaded // false
-project.$jazz.loadingState // "unauthorized"
+```ts ResolveQueries.ts#NoCatch
 ```
 </CodeGroup>
 
 Loading will be successful if all requested references are loaded. Non-requested references may or may not be available.
 
 <CodeGroup preferWrap>
-```ts
-// One task in the list has restricted permissions
-const project = await Project.load(projectId, {
-  resolve: true
-});
-if (!project.$isLoaded) throw new Error("Project not found or not accessible");
-
-// Assuming the user has permissions on the project, this load will succeed, even if the user cannot load one of the tasks in the list
-project.$isLoaded // true
-// Tasks may not be loaded since we didn't request them
-project.tasks.$isLoaded // may be false
+```ts ResolveQueries.ts#ShallowNoCatch
 ```
 </CodeGroup>
 
@@ -407,16 +209,7 @@ For example, in case of a `project` (which the user can access) with three `task
 
 If some of your list items may not be accessible, you can skip loading them by specifying `$onError: 'catch'`. Inaccessible items will be not-loaded CoValues, while accessible items load properly.
 <CodeGroup preferWrap>
-```ts
-// Inaccessible tasks will not be loaded, but the project will
-const project = await Project.load(projectId, {
-	resolve: { tasks: { $each: { $onError: 'catch' } } }
-});
-if (!project.$isLoaded) throw new Error("Project not found or not accessible");
-
-project.tasks[0].$isLoaded; // true
-project.tasks[1].$isLoaded; // true
-project.tasks[2].$isLoaded; // false (caught by $onError)
+```ts ResolveQueries.ts#SkipInaccessible
 ```
 </CodeGroup>
 #### Scenario 2: Handling Inaccessible Nested References
@@ -426,40 +219,13 @@ An `$onError` applies only in the block where it's defined. If you need to handl
 This load will fail, because the `$onError` is defined only for the `task.description`, not for failures in loading the `task` itself.
 
 <CodeGroup preferWrap>
-```ts
-const project = await Project.load(projectId, {
-	resolve: {
-		tasks: {
-			$each: { description: { $onError: 'catch' } },
-		}
-	}
-});
-
-// The load fails because task[2] is inaccessible and no $onError caught it.
-project.$isLoaded // false
+```ts ResolveQueries.ts#NestedInaccessible
 ```
 </CodeGroup>
 We can fix this by adding handlers at both levels
 
 <CodeGroup preferWrap>
-```ts
-const project = await Project.load(projectId, {
-	resolve: {
-		tasks: {
-			$each: { 
-				description: { $onError: 'catch' }, // catch errors loading task descriptions
-				$onError: 'catch' // catch errors loading tasks too
-			},
-		}
-	}
-});
-
-project.$isLoaded // true
-project.tasks[0].$isLoaded;                // true
-project.tasks[0].description.$isLoaded;    // true
-project.tasks[1].$isLoaded;                // true
-project.tasks[1].description.$isLoaded;    // false (caught by the inner handler)
-project.tasks[2].$isLoaded;                // false (caught by the outer handler)
+```ts ResolveQueries.ts#MultipleCatch
 ```
 </CodeGroup>
 
@@ -471,51 +237,11 @@ The `co.loaded` type is especially useful when passing data between components, 
 
 <TabbedCodeGroup id="coloaded" default="react" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-```tsx
-type ProjectWithTasks = co.loaded<typeof Project,
-  {
-    tasks: {
-      $each: true
-    };
-  }
->;
-
-// In case the project prop isn't loaded as required, TypeScript will warn
-function TaskList({ project }: { project: ProjectWithTasks }) {
-  // TypeScript knows tasks are loaded, so this is type-safe
-  return (
-    <ul>
-      {project.tasks.map((task) => (
-        <li key={task.$jazz.id}>{task.title}</li>
-      ))}
-    </ul>
-  );
-}
+```tsx TaskList.tsx
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
-```svelte
-<script lang="ts">
-  import { co } from "jazz-tools";
-
-  type ProjectWithTasks = co.loaded<typeof Project,
-    {
-      tasks: {
-        $each: true
-      };
-    }
-  >;
-
-  const { project } : { project: ProjectWithTasks } = $props();
-</script>
-
-<!-- In case the project prop isn't loaded as required, TypeScript will warn -->
-<!-- TypeScript knows tasks are loaded, so this is type-safe -->
-<ul>
-  {#each project.tasks as task (task.$jazz.id)}
-    <li>{task.title}</li>
-  {/each}
-</ul>
+```svelte TaskList.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
@@ -529,32 +255,14 @@ If you have a CoValue's ID, you can subscribe to it anywhere in your code using 
 **Note:** Manual subscriptions are best suited for vanilla JavaScript&hairsp;—&hairsp;for example in server-side code or tests. Inside front-end components, we recommend using a subscription hook.
 
 <CodeGroup preferWrap>
-```ts
-// Subscribe by ID
-const unsubscribe = Task.subscribe(taskId, {}, (updatedTask) => {
-  console.log("Updated task:", updatedTask);
-});
-
-// Always clean up when finished
-unsubscribe();
+```ts index.ts#ManualSubscription
 ```
 </CodeGroup>
 
 You can also subscribe to an existing CoValue instance using the `$jazz.subscribe` method.
 
 <CodeGroup preferWrap>
-```ts
-const myTask = Task.create({
-  title: 'My new task',
-});
-
-// Subscribe using $jazz.subscribe
-const unsubscribe = myTask.$jazz.subscribe((updatedTask) => {
-  console.log("Updated task:", updatedTask);
-});
-
-// Always clean up when finished
-unsubscribe();
+```ts index.ts#SubscriptionInstanceMethod
 ```
 </CodeGroup>
 
@@ -562,51 +270,13 @@ unsubscribe();
 
 ## Selectors [!framework=react,react-native,react-native-expo]
 Sometimes, you only need to react to changes in specific parts of a CoValue. In those cases, you can provide a `select` function to specify what data you are interested in,
-and an optional `equalityFn` option to control re-renders. 
+and an optional `equalityFn` option to control re-renders.
 
 - `select`: extract the fields you care about
 - `equalityFn`: (optional) control when data should be considered equal
 
 <CodeGroup>
-```tsx
-import { useCoState } from "jazz-tools/react";
-
-function ProjectView({ projectId }: { projectId: string }) {
-  // Subscribe to a project
-  const project = useCoState(Project, projectId, {
-    resolve: {
-      tasks: true
-    },
-    select: (project) => {
-      if (!project.$isLoaded) return project.$jazz.loadingState;
-      return {
-        name: project.name,
-        taskCount: project.tasks.length,
-      };
-    },
-    // Only re-render if the name or the number of tasks change
-    equalityFn: (a, b) =>
-      a?.name === b?.name && a?.taskCount === b?.taskCount
-  });
-  
-  if (typeof project === 'string') {
-    switch (project) {
-      case "unauthorized":
-        return "Project not accessible";
-      case "unavailable":
-        return "Project not found";
-      case "loading":
-        return "Loading...";
-    }
-  }
-
-  return (
-    <div>
-      <h1>{project.name}</h1>
-      <small>{project.taskCount} task(s)</small>
-    </div>
-  );
-}
+```tsx ProjectView.tsx#Selector
 ```
 </CodeGroup>
 
@@ -615,24 +285,7 @@ By default, the return values of the select function will be compared using `Obj
 You can also use `useAccount` in the same way, to subscribe to only the changes in a user's account you are interested in.
 
 <CodeGroup>
-```tsx
-import { useAccount } from "jazz-tools/react";
-
-function ProfileName() {
-  // Only re-renders when the profile name changes
-    const profileName = useAccount(MyAppAccount, {
-    resolve: {
-      profile: true,
-    },
-    select: (account) => account.$isLoaded ? account.profile.name : "Loading...",
-  });
-
-  return (
-    <div>
-      {profileName}
-    </div>
-  );
-}
+```tsx ProjectView.tsx#UseAccountWithSelector
 ```
 </CodeGroup>
 </ContentByFramework>
@@ -642,26 +295,7 @@ function ProfileName() {
 In most cases, you'll have specified the depth of data you need in a `resolve` query when you first load or subscribe to a CoValue. However, sometimes you might have a CoValue instance which is not loaded deeply enough, or you're not sure how deeply loaded it is. In this case, you need to make sure data is loaded before proceeding with an operation. The `$jazz.ensureLoaded` method lets you guarantee that a CoValue and its referenced data are loaded to a specific depth (i.e. with nested references resolved):
 
 <CodeGroup preferWrap>
-```ts
-async function completeAllTasks(projectId: string) {
-  // Load the project
-  const project = await Project.load(projectId, { resolve: true });
-  if (!project.$isLoaded) return;
-
-  // Ensure tasks are deeply loaded
-  const loadedProject = await project.$jazz.ensureLoaded({
-    resolve: {
-      tasks: {
-        $each: true,
-      },
-    },
-  });
-
-  // Now we can safely access and modify tasks
-  loadedProject.tasks.forEach((task, i) => {
-    task.$jazz.set("title", `Task ${i}`);
-  });
-}
+```ts index.ts#EnsureLoaded
 ```
 </CodeGroup>
 

@@ -35,22 +35,7 @@ Define your data schema using [CoValues](/docs/core-concepts/covalues/overview) 
 <FileName>src/lib/schema.ts</FileName>
 </ContentByFramework>
 <CodeGroup>
-```ts
-import { co, z } from "jazz-tools";
-
-export const TodoItem = co.map({
-  title: z.string(),
-  completed: z.boolean(),
-});
-
-export const AccountRoot = co.map({
-  todos: co.list(TodoItem),
-});
-
-export const MyAppAccount = co.account({
-  root: AccountRoot,
-  profile: co.profile(),
-});
+```ts project-setup/schema.ts
 ```
 </CodeGroup>
 
@@ -113,33 +98,11 @@ export async function createVanillaJazzApp<
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-```tsx
-import { JazzReactProvider } from "jazz-tools/react";
-import { MyAppAccount } from "./schema";
-
-createRoot(document.getElementById("root")!).render(
-  <JazzReactProvider
-    sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
-    AccountSchema={MyAppAccount}
-  >
-    <App />
-  </JazzReactProvider>
-);
+```tsx project-setup/app.tsx
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
-```svelte
-<script lang="ts">
-  import { JazzSvelteProvider } from "jazz-tools/svelte";
-  let { children } = $props();
-
-  // Example configuration for authentication and peer connection
-  let sync = { peer: `wss://cloud.jazz.tools/?key=${apiKey}` };
-</script>
-
-<JazzSvelteProvider {sync} AccountSchema={MyAccount}>
-  {@render children?.()}
-</JazzSvelteProvider>
+```svelte project-setup/+layout.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
@@ -195,41 +158,16 @@ In order to tell Jazz to allow children to be loaded even in an account-less con
 <FileName>app/components/JazzWrapper.tsx</FileName>
 </ContentByFramework>
 <ContentByFramework framework="svelte">
-<FileName>src/routes/layout.svelte</FileName>
+<FileName>src/routes/+layout.svelte</FileName>
 </ContentByFramework>
 <ContentByFramework framework={['react', 'svelte']}>
 <TabbedCodeGroup savedPreferenceKey="framework" id="add-ssr">
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-```tsx
-import { JazzReactProvider } from "jazz-tools/react";
-import { MyAppAccount } from "./schema";
-
-export function JazzWrapper({ children }: { children: React.ReactNode }) {
-  return (
-    <JazzReactProvider
-      enableSSR // Renders the components tree in the server using an agent
-      sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
-      AccountSchema={MyAppAccount}
-    >
-      {children}
-    </JazzReactProvider>
-  );
-}
+```ts project-setup/JazzWrapper.tsx
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
-```svelte
-<script lang="ts">
-  import { JazzSvelteProvider } from "jazz-tools/svelte";
-  import { apiKey } from "$lib/apiKey";
-
-  let { children } = $props();
-  const sync = { peer: `wss://cloud.jazz.tools/?key=${apiKey}` };
-</script>
-
-<JazzSvelteProvider {sync} enableSSR>
-  {@render children?.()}
-</JazzSvelteProvider>
+```svelte project-setup/+layout-with-ssr.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
@@ -254,63 +192,11 @@ In order to actually load and render data, you need to tell Jazz how to do this 
 
 <TabbedCodeGroup savedPreferenceKey="framework" id="ssr-page">
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-```tsx
-import { createSSRJazzAgent } from "jazz-tools/ssr";
-import { TodoItem } from "./schema";
-
-// In order to avoid creating a new agent for every page, if you have more than one page which will be rendered server-side, the agent can be exported from a single centralised module.
-export const jazzSSR = createSSRJazzAgent({
-  peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
-});
-
-export default async function ServerSidePage(props: {
-  params: Promise<{ itemId: string }>;
-}) {
-  const { itemId } = await props.params;
-  const item = await TodoItem.load(itemId, {
-    loadAs: jazzSSR,
-  });
-
-  return (
-    <div className="flex flex-col items-center justify-center h-screen gap-4">
-      <h1 className="text-2xl font-bold">SSR rendering example with Jazz</h1>
-      <div className="text-sm text-gray-500 w-1/2 text-center">
-        This is a server component!
-      </div>
-      <label>
-        {item.$isLoaded && <div className="text-sm">Item title "{item.title}"</div>}
-      </label>
-    </div>
-  );
-}
+```tsx project-setup/page.tsx
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
-```svelte
-<script lang="ts">
-  import { page } from '$app/state';
-  import { createSSRJazzAgent } from "jazz-tools/ssr";
-  import { TodoItem } from "./schema";
-
-  const itemId = $derived(page.params.itemId);
-  // In order to avoid creating a new agent for every page, if you have more than one page which will be rendered server-side, the agent can be exported from a single centralised module.
-  const jazzSSR = createSSRJazzAgent({
-    peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
-  });
-  const item = $derived(TodoItem.load(itemId, {
-    loadAs: jazzSSR,
-  }));
-</script>
-
-<div class="flex flex-col items-center justify-center h-screen gap-4">
-  <h1 class="text-2xl font-bold">SSR rendering example with Jazz</h1>
-  <div class="text-sm text-gray-500 w-1/2 text-center">
-    This component can render on the server!
-  </div>
-  <label>
-    <div class="text-sm">Item title {#await item then item}"{item.$isLoaded ? item.title : ""}"{/await}</div>
-  </label>
-</div>
+```svelte project-setup/+page.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>

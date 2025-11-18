@@ -2,7 +2,7 @@ export const metadata = {
   description: "Learn how to handle forms in Jazz for creating and updating CoValues."
 };
 
-import { Alert, CodeGroup } from "@/components/forMdx";
+import { Alert, CodeGroup, FileName } from "@/components/forMdx";
 
 # How to write forms with Jazz
 
@@ -15,7 +15,7 @@ This guide shows you a simple and powerful way to implement forms for creating a
 To update a CoValue, we simply assign the new value directly as changes happen. These changes are synced to the server.
 
 <CodeGroup>
-```tsx
+```tsx index.tsx#Basic
 <input
   type="text"
   value={order.name}
@@ -35,62 +35,19 @@ When creating a CoValue, we can use a partial version that allows us to build up
 Let's say we have a CoValue called `BubbleTeaOrder`. We can create a partial version,
 `PartialBubbleTeaOrder`, which has some fields made optional so we can build up the data incrementally.
 
+<FileName>schema.ts</FileName>
 <CodeGroup>
-```tsx twoslash
-import { co, z } from "jazz-tools";
-// ---cut---
-// schema.ts
-export const BubbleTeaOrder = co.map({
-  name: z.string(),
-});
-export type BubbleTeaOrder = co.loaded<typeof BubbleTeaOrder>;
-
-export const PartialBubbleTeaOrder = BubbleTeaOrder.partial();
-export type PartialBubbleTeaOrder = co.loaded<typeof PartialBubbleTeaOrder>;
+```ts schema.ts
 ```
 </CodeGroup>
 
+{/* TODO: add other frameworks */}
 ## Writing the components in React
 
 Let's write the form component that will be used for both create and update.
 
 <CodeGroup>
-```tsx twoslash
-import * as React from "react";
-import { co, z } from "jazz-tools";
-
-export const BubbleTeaOrder = co.map({
-  name: z.string(),
-});
-export type BubbleTeaOrder = co.loaded<typeof BubbleTeaOrder>;
-
-export const PartialBubbleTeaOrder = BubbleTeaOrder.partial();
-export type PartialBubbleTeaOrder = co.loaded<typeof PartialBubbleTeaOrder>;
-// ---cut---
-// OrderForm.tsx
-export function OrderForm({
-  order,
-  onSave
-}: {
-  order: BubbleTeaOrder | PartialBubbleTeaOrder;
-  onSave?: (e: React.FormEvent<HTMLFormElement>) => void;
-}) {
-  return (
-    <form onSubmit={onSave || (e => e.preventDefault())}>
-      <label>
-        Name
-        <input
-          type="text"
-          value={order.name || ""}
-          onChange={(e) => order.$jazz.set("name", e.target.value)}
-          required
-        />
-      </label>
-
-      {onSave && <button type="submit">Submit</button>}
-    </form>
-  );
-}
+```tsx OrderForm.tsx#OrderForm
 ```
 </CodeGroup>
 
@@ -99,46 +56,7 @@ export function OrderForm({
 To make the edit form, simply pass the `BubbleTeaOrder`. Changes are automatically saved as you type.
 
 <CodeGroup>
-```tsx twoslash
-import { co, z } from "jazz-tools";
-import { useCoState } from "jazz-tools/react";
-import * as React from "react";
-
-export const BubbleTeaOrder = co.map({
-  name: z.string(),
-});
-export type BubbleTeaOrder = co.loaded<typeof BubbleTeaOrder>;
-
-export const PartialBubbleTeaOrder = BubbleTeaOrder.partial();
-export type PartialBubbleTeaOrder = co.loaded<typeof PartialBubbleTeaOrder>;
-
-export function OrderForm({
-  order,
-}: {
-  order: PartialBubbleTeaOrder;
-}) {
-  return (
-    <form onSubmit={e => e.preventDefault()}>
-      <label>
-        Name
-        <input
-          type="text"
-          value={order.name}
-          onChange={(e) => order.$jazz.set("name", e.target.value)}
-        />
-      </label>
-    </form>
-  );
-}
-// ---cut---
-// EditOrder.tsx
-export function EditOrder(props: { id: string }) {
-  const order = useCoState(BubbleTeaOrder, props.id);
-
-  if (!order.$isLoaded) return;
-
-  return <OrderForm order={order} />;
-}
+```tsx OrderForm.tsx#EditForm
 ```
 </CodeGroup>
 
@@ -152,77 +70,7 @@ For the create form, we need to:
 Here's how that looks like:
 
 <CodeGroup>
-```tsx twoslash
-import { co, z } from "jazz-tools";
-import { useCoState, useAccount } from "jazz-tools/react";
-import * as React from "react";
-import { useState } from "react";
-
-export const BubbleTeaOrder = co.map({
-  name: z.string(),
-});
-export type BubbleTeaOrder = co.loaded<typeof BubbleTeaOrder>;
-
-export const PartialBubbleTeaOrder = BubbleTeaOrder.partial();
-export type PartialBubbleTeaOrder = co.loaded<typeof PartialBubbleTeaOrder>;
-
-export const AccountRoot = co.map({
-  orders: co.list(BubbleTeaOrder),
-});
-
-export const JazzAccount = co.account({
-  root: AccountRoot,
-  profile: co.profile(),
-});
-
-export function OrderForm({
-  order,
-  onSave,
-}: {
-  order: BubbleTeaOrder | PartialBubbleTeaOrder;
-  onSave?: (e: React.FormEvent<HTMLFormElement>) => void;
-}) {
-  return (
-    <form onSubmit={onSave || (e => e.preventDefault())}>
-      <label>
-        Name
-        <input
-          type="text"
-          value={order.name || ""}
-          onChange={(e) => order.$jazz.set("name", e.target.value)}
-          required
-        />
-      </label>
-
-      {onSave && <button type="submit">Submit</button>}
-    </form>
-  );
-}
-// ---cut---
-// CreateOrder.tsx
-export function CreateOrder(props: { id: string }) {
-  const orders = useAccount(JazzAccount, {
-    resolve: { root: { orders: true } },
-    select: (account) => account.$isLoaded ? account.root.orders : undefined,
-  });
-
-  const newOrder = useCoState(PartialBubbleTeaOrder, props.id);
-
-  if (!newOrder.$isLoaded || !orders) return;
-
-  const handleSave = (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-
-    // Convert to real order and add to the list
-    // Note: the name field is marked as required in the form, so we can assume that has been set in this case
-    // In a more complex form, you would need to validate the partial value before storing it
-    orders.$jazz.push(newOrder as BubbleTeaOrder);
-  };
-
-  return (
-    <OrderForm order={newOrder} onSave={handleSave} />
-  );
-}
+```tsx OrderForm.tsx#CreateOrder
 ```
 </CodeGroup>
 
@@ -231,44 +79,7 @@ export function CreateOrder(props: { id: string }) {
 If you need a save button for editing (rather than automatic saving), you can use Jazz's branching feature. The example app shows how to create a private branch for editing that can be merged back when the user saves:
 
 <CodeGroup>
-```tsx
-import { useCoState } from "jazz-tools/react";
-import { Group } from "jazz-tools";
-import { useState, useMemo } from "react";
-
-export function EditOrderWithSave(props: { id: string }) {
-  // Create a new group for the branch, so that every time we open the edit page,
-  // we create a new private branch
-  const owner = useMemo(() => Group.create(), []);
-
-  const order = useCoState(BubbleTeaOrder, props.id, {
-    resolve: {
-      addOns: { $each: true },
-      instructions: true,
-    },
-    unstable_branch: {
-      name: "edit-order",
-      owner,
-    },
-  });
-
-  function handleSave(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    if (!order.$isLoaded) return;
-
-    // Merge the branch back to the original
-    order.$jazz.unstable_merge();
-    // Navigate away or show success message
-  }
-
-  function handleCancel() {
-    // Navigate away without saving - the branch will be discarded
-  }
-
-  if (!order.$isLoaded) return;
-
-  return <OrderForm order={order} onSave={handleSave} onCancel={handleCancel} />;
-}
+```tsx OrderForm.tsx#EditOrderWithSave
 ```
 </CodeGroup>
 

@@ -301,10 +301,7 @@ export const docNavigationItems = [
           {
             name: "Sharing",
             href: "/docs/permissions-and-sharing/sharing",
-            done: {
-              react: 100,
-              svelte: 100,
-            },
+            done: 100,
           },
           {
             name: "Cascading Permissions",

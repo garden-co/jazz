@@ -26,7 +26,7 @@ Clear, simple explanation of the mechanism behind this auth method.
 
 <ContentByFramework framework="react">
 <CodeGroup>
-```tsx twoslash
+```tsx
 // Code example here
 ```
 

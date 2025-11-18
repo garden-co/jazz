@@ -49,6 +49,7 @@ export class SubscriptionScope<D extends CoValue> {
   autoloadedKeys = new Set<string>();
   skipInvalidKeys = new Set<string>();
   totalValidTransactions = 0;
+  version = 0;
   migrated = false;
   migrating = false;
   closed = false;
@@ -172,9 +173,7 @@ export class SubscriptionScope<D extends CoValue> {
     } else {
       const hasChanged =
         update.totalValidTransactions !== this.totalValidTransactions ||
-        // Checking the identity of the raw value makes us cover the cases where the group
-        // has been updated and the coValues that don't update the totalValidTransactions value (e.g. FileStream)
-        this.value.value.$jazz.raw !== update;
+        update.version !== this.version;
 
       if (this.loadChildren()) {
         this.updateValue(createCoValue(this.schema, update, this));
@@ -184,6 +183,7 @@ export class SubscriptionScope<D extends CoValue> {
     }
 
     this.totalValidTransactions = update.totalValidTransactions;
+    this.version = update.version;
 
     this.silenceUpdates = false;
     this.triggerUpdate();
@@ -594,17 +594,6 @@ export class SubscriptionScope<D extends CoValue> {
     const descriptor = map.$jazz.getDescriptor(key);
 
     if (!descriptor) {
-      this.childErrors.set(
-        key,
-        new JazzError(undefined, CoValueLoadingState.UNAVAILABLE, [
-          {
-            code: "validationError",
-            message: `The ref ${key} requested on ${map.constructor.name} is not defined in the schema`,
-            params: {},
-            path: [key],
-          },
-        ]),
-      );
       return undefined;
     }
 

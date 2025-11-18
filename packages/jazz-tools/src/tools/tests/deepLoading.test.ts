@@ -361,55 +361,49 @@ test("Deep loading a record-like coMap", async () => {
   expect(recordLoaded.key2?.list).toBeTruthy();
 });
 
-test("The resolve type doesn't accept extra keys", async () => {
-  expect.assertions(1);
-
+test("The resolve type doesn't accept extra keys, but the load resolves anyway", async () => {
   const me = await CustomAccount.create({
     creationProps: { name: "Hermes Puggington" },
     crypto: Crypto,
   });
 
-  try {
-    const meLoaded = await me.$jazz.ensureLoaded({
-      resolve: {
-        // @ts-expect-error
-        profile: { stream: true, extraKey: true },
-        // @ts-expect-error
-        root: { list: true, extraKey: true },
-      },
-    });
+  const meLoaded = await me.$jazz.ensureLoaded({
+    resolve: {
+      // @ts-expect-error
+      profile: { stream: true, extraKey: true },
+      // @ts-expect-error
+      root: { list: true, extraKey: true },
+    },
+  });
 
-    await me.$jazz.ensureLoaded({
-      resolve: {
-        // @ts-expect-error
-        root: { list: { $each: true, extraKey: true } },
-      },
-    });
+  await me.$jazz.ensureLoaded({
+    resolve: {
+      // @ts-expect-error
+      root: { list: { $each: true, extraKey: true } },
+    },
+  });
 
-    await me.$jazz.ensureLoaded({
-      resolve: {
-        root: { list: true },
-        // @ts-expect-error
-        extraKey: true,
-      },
-    });
+  await me.$jazz.ensureLoaded({
+    resolve: {
+      root: { list: true },
+      // @ts-expect-error
+      extraKey: true,
+    },
+  });
 
-    // using assignment to check type compatibility
-    const _T:
-      | (Loaded<typeof CustomAccount> & {
-          profile: Loaded<typeof CustomProfile> & {
-            stream: Loaded<typeof TestFeed>;
-            extraKey: never;
-          };
-          root: Loaded<typeof TestMap> & {
-            list: Loaded<typeof TestList>;
-            extraKey: never;
-          };
-        })
-      | null = meLoaded;
-  } catch (e) {
-    expect(e).toBeInstanceOf(Error);
-  }
+  // using assignment to check type compatibility
+  const _T:
+    | (Loaded<typeof CustomAccount> & {
+        profile: Loaded<typeof CustomProfile> & {
+          stream: Loaded<typeof TestFeed>;
+          extraKey: never;
+        };
+        root: Loaded<typeof TestMap> & {
+          list: Loaded<typeof TestList>;
+          extraKey: never;
+        };
+      })
+    | null = meLoaded;
 });
 
 test("The resolve type accepts keys from optional fields", async () => {
@@ -435,7 +429,7 @@ test("The resolve type accepts keys from optional fields", async () => {
   expect(pets[0]?.owner?.name).toEqual("Rex");
 });
 
-test("The resolve type doesn't accept keys from discriminated unions", async () => {
+test("The resolve type accepts keys from discriminated unions", async () => {
   const Person = co.map({
     name: z.string(),
   });
@@ -449,24 +443,25 @@ test("The resolve type doesn't accept keys from discriminated unions", async () 
   const Pet = co.discriminatedUnion("type", [Dog, Cat]);
   const Pets = co.list(Pet);
 
-  const pets = await Pets.create([
+  const pets = Pets.create([
     Dog.create({ type: "dog", owner: Person.create({ name: "Rex" }) }),
+    Cat.create({ type: "cat" }),
   ]);
 
   await pets.$jazz.ensureLoaded({
-    resolve: {
-      $each: true,
-    },
-  });
-
-  await pets.$jazz.ensureLoaded({
-    // @ts-expect-error cannot resolve owner
     resolve: { $each: { owner: true } },
   });
 
   expect(pets).toBeTruthy();
-  if (pets?.[0]?.type === "dog") {
-    expect(pets[0].owner?.name).toEqual("Rex");
+
+  for (const pet of pets) {
+    if (pet.type === "dog") {
+      expect(pet.owner?.name).toEqual("Rex");
+    } else {
+      expect("owner" in pet).toEqual(false);
+      // @ts-expect-error - this should still not appear in the types
+      expect(pet.owner).toBeUndefined();
+    }
   }
 });
 
@@ -1110,7 +1105,7 @@ test("throw when calling ensureLoaded on a ref that's required but missing", asy
   ).rejects.toThrow("Failed to deeply load CoValue " + root.$jazz.id);
 });
 
-test("throw when calling ensureLoaded on a ref that is not defined in the schema", async () => {
+test("returns the value when calling ensureLoaded on a ref that is not defined in the schema", async () => {
   const JazzRoot = co.map({});
 
   const me = await Account.create({
@@ -1120,12 +1115,13 @@ test("throw when calling ensureLoaded on a ref that is not defined in the schema
 
   const root = JazzRoot.create({}, { owner: me });
 
-  await expect(
-    root.$jazz.ensureLoaded({
-      // @ts-expect-error missing required ref
-      resolve: { profile: true },
-    }),
-  ).rejects.toThrow("Failed to deeply load CoValue " + root.$jazz.id);
+  const loadedRoot = await JazzRoot.load(root.$jazz.id, {
+    // @ts-expect-error missing required ref
+    resolve: { profile: true },
+    loadAs: me,
+  });
+
+  expect(loadedRoot.$jazz.loadingState).toBe(CoValueLoadingState.LOADED);
 });
 
 test("should not throw when calling ensureLoaded a record with a deleted ref", async () => {

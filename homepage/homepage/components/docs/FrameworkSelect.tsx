@@ -10,8 +10,7 @@ import {
   DropdownMenu,
 } from "@garden-co/design-system/src/components/organisms/Dropdown";
 import clsx from "clsx";
-import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   TAB_CHANGE_EVENT,
@@ -22,7 +21,6 @@ import {
 export function FrameworkSelect({
   onSelect,
   size = "md",
-  routerPush = true,
   className,
 }: {
   onSelect?: (framework: Framework) => void;
@@ -30,18 +28,60 @@ export function FrameworkSelect({
   routerPush?: boolean;
   className?: string;
 }) {
-  const router = useRouter();
   const defaultFramework = useFramework();
   const [selectedFramework, setSelectedFramework] =
     useState<Framework>(defaultFramework);
   const [initialized, setInitialized] = useState(false);
+  const selectedFrameworkRef = useRef(selectedFramework);
 
-  const path = usePathname();
-  const pathRef = useRef(path);
+  const onSelectRef = useRef(onSelect);
+  useEffect(() => {
+    onSelectRef.current = onSelect;
+  }, [onSelect]);
+
+  const selectFramework = useCallback(
+    (newFramework: Framework, shouldDispatch = true) => {
+      if (selectedFrameworkRef.current === newFramework) return;
+
+      selectedFrameworkRef.current = newFramework;
+      setSelectedFramework(newFramework);
+      onSelectRef.current && onSelectRef.current(newFramework);
+      localStorage.setItem("_tcgpref_framework", newFramework);
+
+      if (shouldDispatch) {
+        // Dispatch event to notify other components (including useFramework)
+        // The useFramework hook will handle the actual navigation
+        window.dispatchEvent(
+          new CustomEvent(TAB_CHANGE_EVENT, {
+            detail: {
+              key: "framework",
+              value: newFramework,
+            },
+          }),
+        );
+      }
+    },
+    [],
+  );
+
+  const handleTabChange = useCallback(
+    (event: CustomEvent<TabChangeEventDetail>) => {
+      if (isFrameworkChange(event.detail)) {
+        selectFramework(event.detail.value as Framework, false);
+      }
+    },
+    [selectFramework],
+  );
 
   useEffect(() => {
-    pathRef.current = path;
-  }, [path]);
+    window.addEventListener(TAB_CHANGE_EVENT, handleTabChange as EventListener);
+    return () => {
+      window.removeEventListener(
+        TAB_CHANGE_EVENT,
+        handleTabChange as EventListener,
+      );
+    };
+  }, [handleTabChange]);
 
   useEffect(() => {
     if (!initialized) {
@@ -51,42 +91,24 @@ export function FrameworkSelect({
   }, [defaultFramework, initialized]);
 
   useEffect(() => {
-    window.addEventListener(TAB_CHANGE_EVENT, handleTabChange);
-    return () => {
-      window.removeEventListener(TAB_CHANGE_EVENT, handleTabChange);
-    };
-  }, []);
+    selectedFrameworkRef.current = selectedFramework;
+  }, [selectedFramework]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      window.dispatchEvent(
-        new CustomEvent(TAB_CHANGE_EVENT, {
-          detail: {
-            key: "framework",
-            value: defaultFramework,
-          },
-        }),
-      );
+      if (selectedFrameworkRef.current !== defaultFramework) {
+        window.dispatchEvent(
+          new CustomEvent(TAB_CHANGE_EVENT, {
+            detail: {
+              key: "framework",
+              value: defaultFramework,
+            },
+          }),
+        );
+      }
     }, 0);
     return () => clearTimeout(timer);
   }, [defaultFramework]);
-
-  const selectFramework = (newFramework: Framework, shouldNavigate = true) => {
-    setSelectedFramework(newFramework);
-    onSelect && onSelect(newFramework);
-    localStorage.setItem("_tcgpref_framework", newFramework);
-    if (!shouldNavigate) return;
-    const newPath =
-      path.split("/").toSpliced(2, 1, newFramework).join("/") +
-      window.location.hash;
-    routerPush && router.replace(newPath, { scroll: true });
-  };
-
-  const handleTabChange = (event: CustomEvent<TabChangeEventDetail>) => {
-    if (isFrameworkChange(event.detail)) {
-      selectFramework(event.detail.value as Framework, false);
-    }
-  };
 
   return (
     <Dropdown>
