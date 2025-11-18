@@ -584,6 +584,7 @@ describe("CoFeed Branching", async () => {
       branch.$jazz.push("honey");
 
       // Verify we get the updated branch data
+      await waitFor(() => expect(updates).toHaveLength(2));
       expect(updates[1]?.perAccount[me.$jazz.id]?.value).toBe("honey");
 
       // Verify original is still unchanged

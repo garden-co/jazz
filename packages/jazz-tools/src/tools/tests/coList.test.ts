@@ -3,16 +3,11 @@ import { assert, beforeEach, describe, expect, test, vi } from "vitest";
 import { Account, Group, subscribeToCoValue, z } from "../index.js";
 import {
   Loaded,
-  activeAccountContext,
   co,
   coValueClassFromCoValueClassOrSchema,
   CoValueLoadingState,
 } from "../internal.js";
-import {
-  createJazzTestAccount,
-  runWithoutActiveAccount,
-  setupJazzTestSync,
-} from "../testing.js";
+import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { assertLoaded, setupTwoNodes, waitFor } from "./utils.js";
 
 const Crypto = await WasmCrypto.create();
@@ -682,7 +677,7 @@ describe("CoList applyDiff operations", async () => {
     expect(list.$jazz.raw.asArray()).toEqual(["e", "c", "new", "y", "x"]);
   });
 
-  test("applyDiff should emit a single update", () => {
+  test("applyDiff should emit a single update", async () => {
     const TestMap = co.map({
       type: z.string(),
     });
@@ -710,6 +705,13 @@ describe("CoList applyDiff operations", async () => {
     updateFn.mockClear();
 
     list.$jazz.applyDiff([bread]);
+
+    await waitFor(() => {
+      expect(updateFn).toHaveBeenCalled();
+    });
+
+    // Wait a bit more to ensure that no other async updates are triggered
+    await new Promise((resolve) => setTimeout(resolve, 10));
 
     expect(updateFn).toHaveBeenCalledTimes(1);
 

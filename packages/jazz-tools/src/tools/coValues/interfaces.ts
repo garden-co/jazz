@@ -26,7 +26,6 @@ import {
   NotLoaded,
   activeAccountContext,
   coValueClassFromCoValueClassOrSchema,
-  getSubscriptionScope,
   inspect,
 } from "../internal.js";
 import type { BranchDefinition } from "../subscribe/types.js";
@@ -337,18 +336,9 @@ export function subscribeToCoValue<
     }
   };
 
-  let shouldDefer = !options.syncResolution;
-
-  rootNode.setListener((value) => {
-    if (shouldDefer) {
-      shouldDefer = false;
-      Promise.resolve().then(() => {
-        handleUpdate(value);
-      });
-    } else {
-      handleUpdate(value);
-    }
-  });
+  rootNode.deferredUpdates = !options.syncResolution;
+  rootNode.subscribe(handleUpdate);
+  rootNode.triggerUpdate("high");
 
   function unsubscribe() {
     unsubscribed = true;
