@@ -86,10 +86,10 @@ export function ChatDemoSection() {
   const user1 = "Alice";
   const user2 = "Bob";
 
-  const [server1, setServer1] = useState<string | null>();
-  const [server2, setServer2] = useState<string | null>();
-  const [shareUrl, setShareUrl] = useState<string | null>();
-  const [qrCode, setQrCode] = useState<string | null>();
+  const [server1, setServer1] = useState<string | undefined>();
+  const [server2, setServer2] = useState<string | undefined>();
+  const [shareUrl, setShareUrl] = useState<string>("");
+  const [qrCode, setQrCode] = useState<string>("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=");
 
   let [copyCount, setCopyCount] = useState(0);
   let copied = copyCount > 0;
@@ -157,10 +157,8 @@ export function ChatDemoSection() {
       return server2Url.toString();
     }
 
-    return null;
+    return undefined;
   }, [chatId, server2]);
-
-  if (!server1) return null;
 
   const copyUrl = () => {
     if (shareUrl) {
@@ -180,14 +178,12 @@ export function ChatDemoSection() {
             title="Jazz chat demo user 1"
             className="chat-1 md:-mt-12"
           />
-          {server2WithSameChatId && (
-            <Iframe
-              src={server2WithSameChatId}
-              user={user2}
-              title="Jazz chat demo user 2"
-              className="chat-2 md:-mt-2"
-            />
-          )}
+          <Iframe
+            src={server2WithSameChatId}
+            user={user2}
+            title="Jazz chat demo user 2"
+            className="chat-2 md:-mt-2"
+          />
         </div>
 
         <Prose className="hidden md:block">
@@ -206,7 +202,7 @@ export function ChatDemoSection() {
           </p>
         </Prose>
       </div>
-      {chatId && shareUrl && (
+
         <div className="mt-6 flex flex-col justify-between gap-6 text-center md:col-span-4 md:col-start-9 md:mt-0">
           <div>
             <h2 className="mb-2 hidden font-display text-xl font-semibold tracking-tight text-stone-950 dark:text-white md:block md:text-2xl">
@@ -218,13 +214,12 @@ export function ChatDemoSection() {
             </p>
           </div>
 
-          {qrCode && (
             <img
               src={qrCode}
-              className="mx-auto hidden size-48 rounded-lg border md:block"
+              className="mx-auto hidden size-48 rounded-lg border md:block bg-white"
               alt="Scan this QR code to join the chat"
             />
-          )}
+
           <div className="hidden items-center gap-2 md:flex">
             <div className="h-px w-full border-t" />
             <p className="whitespace-nowrap">or copy the URL</p>
@@ -259,7 +254,7 @@ export function ChatDemoSection() {
             </button>
           </div>
         </div>
-      )}
+
     </div>
   );
 }
