@@ -4,6 +4,7 @@ import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
 import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
 import { SectionHeader } from "@garden-co/design-system/src/components/molecules/SectionHeader";
 import { H3 } from "@garden-co/design-system/src/components/atoms/Headings";
+import { BetterAuthLogo } from "../icons/BetterAuthLogo";
 
 const features = [
   {
@@ -78,9 +79,10 @@ const features = [
       </>
     ),
     illustration: (
-      <div className="flex justify-center gap-4 text-black dark:text-white">
-        <Icon size="5xl" name="faceId" className="h-16 w-auto" />
+      <div className="flex justify-center items-center gap-4 text-black dark:text-white">
+        <BetterAuthLogo className="h-20 w-auto" />
         <ClerkLogo className="h-16 w-auto py-0.5" />
+        <Icon size="5xl" name="faceId" className="h-16 w-auto" />
         <Icon size="5xl" name="touchId" className="h-16 w-auto" />
       </div>
     ),
@@ -115,6 +117,30 @@ export function FeaturesSection() {
               <div className="mt-auto">
                 <H3 className="mb-1">{title}</H3>
                 <Prose size="md">{description}</Prose>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function FeaturesSectionSparse() {
+  return (
+    <div className="bg-stone-100 py-12 dark:bg-black/30 lg:py-16">
+      <div className="container">
+        <div className="grid gap-4 sm:grid-cols-2 lg:gap-8">
+          {features.map(({ title, description, illustration }) => (
+            <div
+              key={title}
+              className="grid rounded-xl border p-4 shadow-xs sm:p-6"
+            >
+              <div className="pb flex min-h-48 w-full items-center justify-center">
+                {illustration}
+              </div>
+              <div className="mt-auto">
+                <H3 className="mb-1">{title}</H3>
               </div>
             </div>
           ))}

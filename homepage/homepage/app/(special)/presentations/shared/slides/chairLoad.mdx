@@ -1,0 +1,11 @@
+```ts
+import { Chair } from "./chairSchema";
+
+export function GET(request: Request) {
+  const id = request.url.split("/").pop();
+
+  const chair = await Chair.load(id);
+
+  return new Response(JSON.stringify(chair));
+}
+```
