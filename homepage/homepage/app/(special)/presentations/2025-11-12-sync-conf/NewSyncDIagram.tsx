@@ -43,7 +43,7 @@ export function EvenSimplerNewSyncDiagram() {
   );
 }
 
-export function SimpleNewSyncDiagram({ authority }: { authority?: boolean }) {
+export function SimpleNewSyncDiagram({ authority }: { authority?: 1 | 2 }) {
   return (
     <ArcherContainer
       strokeColor="white"
@@ -61,7 +61,7 @@ export function SimpleNewSyncDiagram({ authority }: { authority?: boolean }) {
           regionId="us-east-1"
           upstreamId="core"
           edgeClassName={clsx(
-            authority ? "outline-3 outline-teal-500" : "border-stone-500",
+            authority === 1 ? "outline-3 outline-teal-500"  : "border-stone-500",
           )}
         >
           <BrowserNode
@@ -74,7 +74,11 @@ export function SimpleNewSyncDiagram({ authority }: { authority?: boolean }) {
             upstreamId="edgeServer-us-east-1"
           />
         </EdgeServerWithClients>
-        <EdgeServerWithClients regionId="us-west-1" upstreamId="core">
+        <EdgeServerWithClients regionId="us-west-1" upstreamId="core"
+        edgeClassName={clsx(
+           authority === 2 ? "outline-3 outline-teal-500" : "border-stone-500",
+        )}
+        >
           <BrowserNode
             id="browser-1-us-west-1"
             upstreamId="edgeServer-us-west-1"

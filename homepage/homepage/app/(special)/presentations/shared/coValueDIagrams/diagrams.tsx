@@ -127,7 +127,7 @@ function HeaderContent({
       <pre
         className={clsx(
           "grid grid-cols-2 leading-6 gap-x-40",
-          highlightOwner ? "text-white" : "text-stone-300",
+          highlightOwner ? "text-stone-700" : "text-stone-300",
         )}
       >
         {headerLines.map((line, index) => (
