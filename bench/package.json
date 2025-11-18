@@ -3,16 +3,20 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@mitata/counters": "0.0.8",
     "cojson": "workspace:*",
-    "cojson-latest": "npm:cojson@0.19.2",
+    "cojson-latest": "npm:cojson@latest",
     "jazz-tools": "workspace:*",
-    "jazz-tools-latest": "npm:jazz-tools@0.19.2",
+    "jazz-tools-latest": "npm:jazz-tools@latest",
+    "mitata": "^1.0.11",
     "vitest": "catalog:default"
   },
   "scripts": {
-    "bench": "vitest bench"
+    "bench": "vitest bench",
+    "bench:message-create": "NODE_OPTIONS=\"--expose-gc\" pnpm exec tsx ./comap.create.jazz-tools.bench.ts"
   },
   "devDependencies": {
+    "tsx": "^4.19.3",
     "vitest": "catalog:default"
   }
 }

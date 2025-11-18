@@ -142,21 +142,31 @@ importers:
 
   bench:
     dependencies:
+      '@mitata/counters':
+        specifier: 0.0.8
+        version: 0.0.8
       cojson:
         specifier: workspace:*
         version: link:../packages/cojson
       cojson-latest:
-        specifier: npm:cojson@0.19.2
-        version: cojson@0.19.2
+        specifier: npm:cojson@latest
+        version: cojson@0.19.3
       jazz-tools:
         specifier: workspace:*
         version: link:../packages/jazz-tools
       jazz-tools-latest:
-        specifier: npm:jazz-tools@0.19.2
-        version: jazz-tools@0.19.2(68f7a3ac23d8845d11a369ae92f7f0fa)
+        specifier: npm:jazz-tools@latest
+        version: jazz-tools@0.19.3(68f7a3ac23d8845d11a369ae92f7f0fa)
+      mitata:
+        specifier: ^1.0.11
+        version: 1.0.34
       vitest:
         specifier: catalog:default
         version: 3.2.4(@types/debug@4.1.12)(@types/node@24.10.0)(@vitest/browser@3.2.4)(@vitest/ui@3.2.4)(happy-dom@20.0.7)(jiti@2.5.1)(jsdom@25.0.1)(lightningcss@1.30.2)(msw@2.10.4(@types/node@24.10.0)(typescript@5.9.2))(terser@5.44.1)(tsx@4.20.3)(yaml@2.8.1)
+    devDependencies:
+      tsx:
+        specifier: ^4.19.3
+        version: 4.20.3
 
   crates/cojson-core-napi:
     devDependencies:
@@ -6237,6 +6247,9 @@ packages:
   '@microsoft/tsdoc@0.15.1':
     resolution: {integrity: sha512-4aErSrCR/On/e5G2hDP0wjooqDdauzEbIq8hIkIe5pXV0rtWJZvdCEKL0ykZxex+IxIwBp0eGeV48hQN07dXtw==}
 
+  '@mitata/counters@0.0.8':
+    resolution: {integrity: sha512-f11w0Y1ETFlarDP7CePj8Z+y8Gv5Ax4gMxWsEwrqh0kH/YIY030Ezx5SUJeQg0YPTZ2OHKGcLG1oGJbIqHzaJA==}
+
   '@mswjs/interceptors@0.39.2':
     resolution: {integrity: sha512-RuzCup9Ct91Y7V79xwCb146RaBRHZ7NBbrIUySumd1rpKqHL5OonaqrGIbug5hNwP/fRyxFMA6ISgw4FTtYFYg==}
     engines: {node: '>=18'}
@@ -10623,67 +10636,67 @@ packages:
   code-block-writer@13.0.3:
     resolution: {integrity: sha512-Oofo0pq3IKnsFtuHqSF7TqBfr71aeyZDVJ0HpmqB7FBM2qEigL0iPONSCZSO9pE9dZTAxANe5XHG9Uy0YMv8cg==}
 
-  cojson-core-napi-darwin-arm64@0.19.2:
-    resolution: {integrity: sha512-tZGVhKfCfmUOc6u1u32sKE4TM7BIBsIOb2a+GbXPfmB36UarOAjbsINKT7LMsHX5azAv6arcH7t+ysMCFV7gVg==}
+  cojson-core-napi-darwin-arm64@0.19.3:
+    resolution: {integrity: sha512-hVXlMsMGclagY6uAfNAoIj7Z+BaW8EDf9OrAuoc+51+rwvrkrB9BLoDJ3mRH1bKU3vJH4AErLPYf42UqmiRGtw==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [arm64]
     os: [darwin]
 
-  cojson-core-napi-darwin-x64@0.19.2:
-    resolution: {integrity: sha512-9fdmEsCJsf9QCmM2aa3MyAnceWoCvSH8Ap0fglCdlI2JYMf87Ar7fXO9Ce2Q4LAqZenGXlp09AvcYqemZ0YPZQ==}
+  cojson-core-napi-darwin-x64@0.19.3:
+    resolution: {integrity: sha512-ZeB158KX4qytvi2gzs15XTdRcs0vZRsnZoybXdnhzZUDGxSy3Zu/MhSU+q3ygnzlB2LltYcILuDwwJiTHBKC7A==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [x64]
     os: [darwin]
 
-  cojson-core-napi-linux-arm-gnueabihf@0.19.2:
-    resolution: {integrity: sha512-PMDPQTPzMBFm7ljwKqgXLloUp1Dmnc93cjmyEF7n8DU+9bKCVgGqNVUkwCKu8YBNGaCuOZehT0/5rw2FCAbKxA==}
+  cojson-core-napi-linux-arm-gnueabihf@0.19.3:
+    resolution: {integrity: sha512-Zl79dNnyEcrt1hVTJr9c1eX933/Sk1uCC1JqiOBjtoCdaW2T4TOdKer/Qlntqr6grF/eEzblLSMpc75WMf9fTQ==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [arm]
     os: [linux]
 
-  cojson-core-napi-linux-arm64-gnu@0.19.2:
-    resolution: {integrity: sha512-EIuYes2FdMcsVukqnCl+PXebixRrzUClHYwEtZ4hBB2E8pIiUWj3nkAmry2JM3hm9taApeFMIqFlYkB4mLpuXg==}
+  cojson-core-napi-linux-arm64-gnu@0.19.3:
+    resolution: {integrity: sha512-RQ1/p1FDR7XrtS+LlQSh6GUJGTqZ6IaNGzA2QPhKoo+y7KvhtWeeEen8MeHVa6i1vxurszlobOlgbkXC/aMDOg==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
-  cojson-core-napi-linux-arm64-musl@0.19.2:
-    resolution: {integrity: sha512-MzNq6afOESsRXWucn/Xl+yyI5zZxI6WQXQZM/LHfmb6BvJX+e26Ay/e/wgkpZcqE5f+IbyhFpB1fyTUzVtZwnw==}
+  cojson-core-napi-linux-arm64-musl@0.19.3:
+    resolution: {integrity: sha512-l43lqMHtyhUziAdM8lLlzWO3gVcZK/RKmx7Z//fLE76UMyrY+jA4B9b46v8sWIaIrydoXHKYof+MrSlEBzCBdw==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [arm64]
     os: [linux]
     libc: [musl]
 
-  cojson-core-napi-linux-x64-gnu@0.19.2:
-    resolution: {integrity: sha512-rbgjn941elOmrLf2olWvDSOM1qCFDnCT21gy+ozc0TDvzfhXtznzGIXMD/bxzUdISNH0XV2Bd5Z/BrCRBn5slg==}
+  cojson-core-napi-linux-x64-gnu@0.19.3:
+    resolution: {integrity: sha512-AfepbdsvSo1UEs8BtBeKBs3jlAYDLKPMfF5/IwZ5oA49MkNrC39EmIK1sPbUrIC5xWaFbYUFUCUx4bkL33nDTw==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
 
-  cojson-core-napi-linux-x64-musl@0.19.2:
-    resolution: {integrity: sha512-fWTGBBVI3UVliXsbM2d6b5rg3b3vcITKVAsae7PaxIMLVcANwkiftAhqGR/NmdbFG/llfg/j4G70w/PBoPUITA==}
+  cojson-core-napi-linux-x64-musl@0.19.3:
+    resolution: {integrity: sha512-jwl1efXxnJTDO29VDfbuuQIfMN3tRskbZF/AKrA06HaCJqyZIi0GeKQmxs/M+5bNe8bruCKWgvUBZ72ybnASsA==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [x64]
     os: [linux]
     libc: [musl]
 
-  cojson-core-napi@0.19.2:
-    resolution: {integrity: sha512-8dOMngDyNM1j/dtR6CPlbk1NTvb+6HHVEXK234j4+msGeY/f0ynNxuGTNyMledUw9ZV+c3khJlxpIKUJt2HXYw==}
+  cojson-core-napi@0.19.3:
+    resolution: {integrity: sha512-D/E+oGcL+J4+eOAXaB8FvM2Hq1gVwbt4mHTLjgFP1Ezdxw89Ib+cV4gh8tZtVR6Ui2OOdyjhUDNlYDD5M3Rhyg==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
 
-  cojson-core-wasm@0.19.2:
-    resolution: {integrity: sha512-qGj79gabEZeQ8rW7aRS7NNVXUpyVbA5RTsPR8cQWGCBDppUOMCqq2HCOTZOA0St8EXCkmIW7E14PYR4rPmzxCA==}
+  cojson-core-wasm@0.19.3:
+    resolution: {integrity: sha512-cfYtOnaOYOH4z1vT/EJPPtQI2XyvhS/6AKyiMJvFdD+hxHL6T6yYLuJL0wLoeXnJt/mMtGFqEhDLdrLkEV5Vew==}
 
-  cojson-storage-indexeddb@0.19.2:
-    resolution: {integrity: sha512-13CjaJXbnJTSVCkNk3vQhj7F9nuloNkAnUvSpgiDxFlFl498wyW6sKT7qQxH2HyYxT8vy0XKH3xyOAqphB2SZw==}
+  cojson-storage-indexeddb@0.19.3:
+    resolution: {integrity: sha512-gD4oOoUX8YuOpg+3UqWo9akxUZ5QvueAMaD2N3/PcSn6ztyHp7oAzpgi1s90olKlWa/bzLhk5JR3pCg7EGW0HQ==}
 
-  cojson-transport-ws@0.19.2:
-    resolution: {integrity: sha512-oA9YmED9BuzvfaHthd3BjbuNY2NQGx/SYPHv0hYYIlFVL5fwv3jK111Jf/lvbuTdQeBCYMNjTBLSBuyntVNTYA==}
+  cojson-transport-ws@0.19.3:
+    resolution: {integrity: sha512-rhOcSUCoIUXpKxM3VWcfyAr6lSquBfn/o+s/X4TBF8GY4EYVq2sy3zJs/n4PjC/w+yQnWmV88BzcE3YkWFw6Qg==}
 
-  cojson@0.19.2:
-    resolution: {integrity: sha512-B/QAS5OdNjjKbOOteJrWpOQSsR3uWxoFbUkF5a8NxemNZec3gvIkSPvucDQiJuacruOjzZx8p+8hzbQ1vUuwIw==}
+  cojson@0.19.3:
+    resolution: {integrity: sha512-ZXSRY/+14nbcHRlp7pVqkCmi8dzSsnRP6XrCDzd7g6R/ncm6sq0ucQOqbS7evJVAPfEEFIDQKnioojD2M14fAA==}
 
   collect-v8-coverage@1.0.3:
     resolution: {integrity: sha512-1L5aqIkwPfiodaMgQunkF1zRhNqifHBmtbbbxcr6yVxxBnliw4TDOW6NxpO8DJLgJ16OT+Y4ztZqP6p/FtXnAw==}
@@ -12856,8 +12869,8 @@ packages:
     engines: {node: '>=10'}
     hasBin: true
 
-  jazz-tools@0.19.2:
-    resolution: {integrity: sha512-yLUEozMZwENWScthknWDpz7SvL7FPwWKxWMYcVojXrIs71EkdPse7h7ThO2MDtTbB3EtZ8Mb69Dk5DZRWAqqJQ==}
+  jazz-tools@0.19.3:
+    resolution: {integrity: sha512-+wx8mrgxYRQgx7fokS5CDsi7YMzmzo9QT6qTkOhaL950OqTjTtdZP5EEbs2jApHZYAm5fnByyYHkxDahfatQlA==}
     peerDependencies:
       '@bam.tech/react-native-image-resizer': '*'
       '@op-engineering/op-sqlite': '*'
@@ -14081,6 +14094,9 @@ packages:
   minizlib@3.1.0:
     resolution: {integrity: sha512-KZxYo1BUkWD2TVFLr0MQoM8vUUigWD3LlD83a/75BqC+4qE0Hb1Vo5v1FgcfaNXvfXzr+5EhQ6ing/CaBijTlw==}
     engines: {node: '>= 18'}
+
+  mitata@1.0.34:
+    resolution: {integrity: sha512-Mc3zrtNBKIMeHSCQ0XqRLo1vbdIx1wvFV9c8NJAiyho6AjNfMY8bVhbS12bwciUdd1t4rj8099CH3N3NFahaUA==}
 
   mitt@3.0.1:
     resolution: {integrity: sha512-vKivATfr97l2/QBCYAkXYDbrIWPM2IIKEl7YPhjCvKlG3kE2gm+uBo6nEXK3M5/Ffh/FLpKExzOQ3JJoJGFKBw==}
@@ -22927,6 +22943,8 @@ snapshots:
 
   '@microsoft/tsdoc@0.15.1': {}
 
+  '@mitata/counters@0.0.8': {}
+
   '@mswjs/interceptors@0.39.2':
     dependencies:
       '@open-draft/deferred-promise': 2.2.0
@@ -28522,57 +28540,57 @@ snapshots:
 
   code-block-writer@13.0.3: {}
 
-  cojson-core-napi-darwin-arm64@0.19.2:
+  cojson-core-napi-darwin-arm64@0.19.3:
     optional: true
 
-  cojson-core-napi-darwin-x64@0.19.2:
+  cojson-core-napi-darwin-x64@0.19.3:
     optional: true
 
-  cojson-core-napi-linux-arm-gnueabihf@0.19.2:
+  cojson-core-napi-linux-arm-gnueabihf@0.19.3:
     optional: true
 
-  cojson-core-napi-linux-arm64-gnu@0.19.2:
+  cojson-core-napi-linux-arm64-gnu@0.19.3:
     optional: true
 
-  cojson-core-napi-linux-arm64-musl@0.19.2:
+  cojson-core-napi-linux-arm64-musl@0.19.3:
     optional: true
 
-  cojson-core-napi-linux-x64-gnu@0.19.2:
+  cojson-core-napi-linux-x64-gnu@0.19.3:
     optional: true
 
-  cojson-core-napi-linux-x64-musl@0.19.2:
+  cojson-core-napi-linux-x64-musl@0.19.3:
     optional: true
 
-  cojson-core-napi@0.19.2:
+  cojson-core-napi@0.19.3:
     optionalDependencies:
-      cojson-core-napi-darwin-arm64: 0.19.2
-      cojson-core-napi-darwin-x64: 0.19.2
-      cojson-core-napi-linux-arm-gnueabihf: 0.19.2
-      cojson-core-napi-linux-arm64-gnu: 0.19.2
-      cojson-core-napi-linux-arm64-musl: 0.19.2
-      cojson-core-napi-linux-x64-gnu: 0.19.2
-      cojson-core-napi-linux-x64-musl: 0.19.2
+      cojson-core-napi-darwin-arm64: 0.19.3
+      cojson-core-napi-darwin-x64: 0.19.3
+      cojson-core-napi-linux-arm-gnueabihf: 0.19.3
+      cojson-core-napi-linux-arm64-gnu: 0.19.3
+      cojson-core-napi-linux-arm64-musl: 0.19.3
+      cojson-core-napi-linux-x64-gnu: 0.19.3
+      cojson-core-napi-linux-x64-musl: 0.19.3
 
-  cojson-core-wasm@0.19.2: {}
+  cojson-core-wasm@0.19.3: {}
 
-  cojson-storage-indexeddb@0.19.2:
+  cojson-storage-indexeddb@0.19.3:
     dependencies:
-      cojson: 0.19.2
+      cojson: 0.19.3
 
-  cojson-transport-ws@0.19.2:
+  cojson-transport-ws@0.19.3:
     dependencies:
       '@opentelemetry/api': 1.9.0
-      cojson: 0.19.2
+      cojson: 0.19.3
 
-  cojson@0.19.2:
+  cojson@0.19.3:
     dependencies:
       '@noble/ciphers': 1.3.0
       '@noble/curves': 1.9.1
       '@noble/hashes': 1.8.0
       '@opentelemetry/api': 1.9.0
       '@scure/base': 1.2.1
-      cojson-core-napi: 0.19.2
-      cojson-core-wasm: 0.19.2
+      cojson-core-napi: 0.19.3
+      cojson-core-wasm: 0.19.3
       unicode-segmenter: 0.12.0
 
   collect-v8-coverage@1.0.3:
@@ -31201,16 +31219,16 @@ snapshots:
       filelist: 1.0.4
       picocolors: 1.1.1
 
-  jazz-tools@0.19.2(68f7a3ac23d8845d11a369ae92f7f0fa):
+  jazz-tools@0.19.3(68f7a3ac23d8845d11a369ae92f7f0fa):
     dependencies:
       '@manuscripts/prosemirror-recreate-steps': 0.1.4
       '@scure/base': 1.2.1
       '@scure/bip39': 1.5.0
       '@tiptap/core': 2.12.0(@tiptap/pm@2.12.0)
       clsx: 2.1.1
-      cojson: 0.19.2
-      cojson-storage-indexeddb: 0.19.2
-      cojson-transport-ws: 0.19.2
+      cojson: 0.19.3
+      cojson-storage-indexeddb: 0.19.3
+      cojson-transport-ws: 0.19.3
       fast-myers-diff: 3.2.0
       goober: 2.1.18(csstype@3.1.3)
       prosemirror-example-setup: 1.2.3
@@ -32876,6 +32894,8 @@ snapshots:
   minizlib@3.1.0:
     dependencies:
       minipass: 7.1.2
+
+  mitata@1.0.34: {}
 
   mitt@3.0.1: {}
 

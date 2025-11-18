@@ -1,16 +1,18 @@
-import { beforeEach, describe, bench } from "vitest";
+import { bench, group, run } from "mitata";
 import * as localTools from "jazz-tools";
-import * as publishedTools from "jazz-tools-latest";
-import { WasmCrypto } from "cojson/crypto/WasmCrypto";
-import { WasmCrypto as WasmCryptoLatest } from "cojson-latest/crypto/WasmCrypto";
+import * as latestPublishedTools from "jazz-tools-latest";
+import { WasmCrypto as LocalWasmCrypto } from "cojson/crypto/WasmCrypto";
+import { WasmCrypto as LatestPublishedWasmCrypto } from "cojson-latest/crypto/WasmCrypto";
 
 const sampleReactions = ["👍", "❤️", "😄", "🎉"];
 const sampleHiddenIn = ["user1", "user2", "user3"];
+const MESSAGE_COUNT = 1000;
 
-// Define the schemas based on the provided Message schema
+type SchemaRuntime = Awaited<ReturnType<typeof createSchema>>;
+
 async function createSchema(
   tools: typeof localTools,
-  wasmCrypto: typeof WasmCrypto,
+  wasmCrypto: typeof LocalWasmCrypto,
 ) {
   const Embed = tools.co.map({
     url: tools.z.string(),
@@ -49,65 +51,68 @@ async function createSchema(
     sampleHiddenIn,
     Group: tools.Group,
     account: ctx.account,
+    localNode: ctx.node,
   };
 }
 
-const schema = await createSchema(localTools, WasmCrypto);
+async function runMessageCreation(schemaDef: SchemaRuntime) {
+  const group = schemaDef.Group.create(schemaDef.account);
+  const messages = schemaDef.Messages.create([], { owner: group });
+  const messagesToAdd = Array.from({ length: MESSAGE_COUNT }, (_, i) => i).map(
+    () =>
+      schemaDef.Message.create(
+        schemaDef.Message.create(
+          {
+            content: "A".repeat(1024),
+            createdAt: new Date(),
+            updatedAt: new Date(),
+            hiddenIn: sampleHiddenIn,
+            reactions: sampleReactions,
+            author: "user123",
+          },
+          group,
+        ),
+      ),
+  );
+  messages.$jazz.push(...messagesToAdd);
+  await messages.$jazz.waitForSync();
+  await schemaDef.localNode.gracefulShutdown();
+}
 
-// @ts-expect-error
-const schemaLatest = await createSchema(publishedTools, WasmCryptoLatest);
+function registerBenchmark(label: string, tools: any, wasmCrypto: any) {
+  bench(function* () {
+    yield {
+      [0]() {
+        return createSchema(tools, wasmCrypto);
+      },
+      async bench(schemaDef: SchemaRuntime) {
+        await runMessageCreation(schemaDef);
+      },
+    };
+  })
+    .name(label)
+    .gc("inner");
+}
 
-describe("Message.create", () => {
-  beforeEach(async () => {
-    // @ts-expect-error
-    globalThis.gc();
-  });
-
-  bench(
+group("Message.create × 1000 entries", () => {
+  // Note: Benchmark runs affect subsequent runs
+  // This is minimized by:
+  // - waiting for CoValues to be synced before completing a benchmark run
+  // - using a fresh CoValue schema on each benchmark run
+  // - running the garbage collector between runs
+  // Still, some impact remains. Expect the first benchmark to be ~2% faster than the second one.
+  registerBenchmark(
     "Jazz 0.19.2",
-    () => {
-      const group = schemaLatest.Group.create(schemaLatest.account);
-      const messages = schemaLatest.Messages.create([], { owner: group });
-      for (let i = 0; i < 1000; i++) {
-        messages.$jazz.push(
-          schemaLatest.Message.create(
-            {
-              content: "A".repeat(1024),
-              createdAt: new Date(),
-              updatedAt: new Date(),
-              hiddenIn: sampleHiddenIn,
-              reactions: sampleReactions,
-              author: "user123",
-            },
-            group,
-          ),
-        );
-      }
-    },
-    { iterations: 5, warmupIterations: 2 },
+    latestPublishedTools,
+    LatestPublishedWasmCrypto,
   );
-
-  bench(
-    "current version",
-    () => {
-      const group = schema.Group.create(schema.account);
-      const messages = schema.Messages.create([], { owner: group });
-      for (let i = 0; i < 1000; i++) {
-        messages.$jazz.push(
-          schema.Message.create(
-            {
-              content: "A".repeat(1024),
-              createdAt: new Date(),
-              updatedAt: new Date(),
-              hiddenIn: sampleHiddenIn,
-              reactions: sampleReactions,
-              author: "user123",
-            },
-            group,
-          ),
-        );
-      }
-    },
-    { iterations: 5, warmupIterations: 2 },
-  );
+  registerBenchmark("current version", localTools, LocalWasmCrypto);
 });
+
+if (!globalThis.gc) {
+  console.warn(
+    "Run this benchmark with NODE_OPTIONS=--expose-gc so Mitata can force GC between runs.",
+  );
+}
+
+await run();
