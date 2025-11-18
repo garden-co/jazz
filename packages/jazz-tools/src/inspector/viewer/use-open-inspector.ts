@@ -5,6 +5,7 @@ const STORAGE_KEY = "jazz-inspector-open";
 export function useOpenInspector() {
   const [open, setOpen] = useState(() => {
     // Initialize from localStorage if available
+    if (typeof window === "undefined") return false;
     const stored = localStorage.getItem(STORAGE_KEY);
     return stored ? JSON.parse(stored) : false;
   });

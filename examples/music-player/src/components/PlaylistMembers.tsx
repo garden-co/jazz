@@ -1,33 +1,23 @@
-import { useState } from "react";
-import { Group } from "jazz-tools";
 import { Member } from "./Member";
-import { MemberAccessModal } from "./MemberAccessModal";
 
 interface PlaylistMembersProps {
   memberIds: string[];
-  group: Group;
   size?: "sm" | "md" | "lg";
+  onClick: () => void;
   className?: string;
 }
 
 export function PlaylistMembers({
   memberIds,
-  group,
   size = "md",
   className = "",
+  onClick,
 }: PlaylistMembersProps) {
-  const [isModalOpen, setIsModalOpen] = useState(false);
-
   if (!memberIds || memberIds.length === 0) return null;
-
-  const handleMembersClick = () => {
-    setIsModalOpen(true);
-  };
-
   return (
     <>
       <button
-        onClick={handleMembersClick}
+        onClick={onClick}
         className={`flex items-center space-x-2 hover:scale-105 transition-transform duration-200 cursor-pointer ${className}`}
         title="Click to manage playlist members"
       >
@@ -45,12 +35,6 @@ export function PlaylistMembers({
           ({memberIds.length} member{memberIds.length !== 1 ? "s" : ""})
         </span>
       </button>
-
-      <MemberAccessModal
-        isOpen={isModalOpen}
-        onOpenChange={setIsModalOpen}
-        group={group}
-      />
     </>
   );
 }

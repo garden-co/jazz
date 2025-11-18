@@ -31,7 +31,11 @@ export type {
   RefsToResolve,
   RefsToResolveStrict,
   CoMapInit_DEPRECATED as CoMapInit,
+  CoMapEdit,
+  CoMapEdits,
+  LastAndAllCoMapEdits,
   CoFeedEntry,
+  SingleCoFeedEntry,
   TextPos,
   AccountClass,
   AccountCreationProps,
@@ -48,6 +52,8 @@ export {
   CoPlainText,
   CoRichText,
   Account,
+  assertLoaded,
+  getLoadedOrUndefined,
   isControlledAccount,
   loadCoValue,
   subscribeToCoValue,
@@ -56,6 +62,8 @@ export {
   exportCoValue,
   importContentPieces,
   Ref,
+  createUnloadedCoValue,
+  unstable_loadUnique,
 } from "./internal.js";
 
 export {
@@ -102,8 +110,12 @@ export type * from "./types.js";
 export {
   coValueClassFromCoValueClassOrSchema,
   type InstanceOfSchema,
-  type InstanceOfSchemaCoValuesNullable,
+  type InstanceOfSchemaCoValuesMaybeLoaded,
+  type SchemaResolveQuery,
   type CoValueClassOrSchema,
+  CoValueLoadingState,
+  type MaybeLoaded,
+  type NotLoaded,
   type Loaded,
   type BaseAccountShape,
   type DefaultAccountShape,
@@ -116,5 +128,10 @@ export {
   experimental_defineRequest,
   JazzRequestError,
   isJazzRequestError,
+  authenticateRequest,
+  generateAuthToken,
+  parseAuthToken,
   type HttpRoute,
 } from "./coValues/request.js";
+
+export * from "./ssr/index.js";

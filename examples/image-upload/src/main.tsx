@@ -10,6 +10,7 @@ import { JazzAccount } from "./schema.ts";
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <JazzReactProvider
+      authSecretStorageKey="examples/image-upload"
       sync={{
         peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
       }}

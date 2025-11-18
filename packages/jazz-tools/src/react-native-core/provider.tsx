@@ -20,6 +20,7 @@ export type JazzProviderProps<
 > = {
   children: React.ReactNode;
   kvStore?: KvStore;
+  authSecretStorageKey?: string;
 } & JazzContextManagerProps<S>;
 
 /** @category Context & Hooks */
@@ -39,11 +40,12 @@ export function JazzProviderCore<
   onAnonymousAccountDiscarded,
   kvStore,
   CryptoProvider,
+  authSecretStorageKey,
 }: JazzProviderProps<S>) {
   setupKvStore(kvStore);
 
   const [contextManager] = React.useState(
-    () => new ReactNativeContextManager<S>(),
+    () => new ReactNativeContextManager<S>({ authSecretStorageKey }),
   );
 
   const onLogOutRefCallback = useRefCallback(onLogOut);

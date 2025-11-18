@@ -1,11 +1,21 @@
-import { assert, beforeEach, describe, expect, test } from "vitest";
+import {
+  assert,
+  beforeEach,
+  describe,
+  expect,
+  onTestFinished,
+  test,
+  vi,
+} from "vitest";
 import {
   createTestNode,
   setupTestNode,
   loadCoValueOrFail,
+  setupTestAccount,
+  waitFor,
 } from "./testUtils.js";
 import { expectList, expectMap, expectPlainText } from "../coValue.js";
-import { RawCoMap } from "../exports.js";
+import { RawAccount, RawCoMap } from "../exports.js";
 
 let jazzCloud: ReturnType<typeof setupTestNode>;
 
@@ -237,6 +247,7 @@ describe("Branching Logic", () => {
       loadedBranch2.core.mergeBranch();
 
       await loadedBranch2.core.waitForSync();
+      await new Promise((resolve) => setTimeout(resolve, 5));
 
       branch1.core.mergeBranch();
 
@@ -288,6 +299,385 @@ describe("Branching Logic", () => {
       await loadedBranchMergeResult.waitForSync();
 
       expect(plainText.toString()).toEqual("hello world people");
+    });
+
+    test("should preserve the conflict resolution that was applied to the branch", async () => {
+      const dateNowMock = vi.spyOn(Date, "now");
+
+      dateNowMock.mockReturnValue(1);
+
+      const client = setupTestNode({
+        connected: true,
+      });
+      const group = client.node.createGroup();
+      const map = group.createMap();
+      const branchName = "feature-branch";
+
+      onTestFinished(() => {
+        dateNowMock.mockRestore();
+      });
+
+      // Add initial transactions to original map
+      map.set("value", 1, "trusting");
+
+      // Create branch from original map
+      const branch = expectMap(
+        map.core.createBranch(branchName, group.id).getCurrentContent(),
+      );
+
+      dateNowMock.mockReturnValue(2);
+
+      // Add new transaction to branch
+      branch.set("value", 2, "trusting");
+
+      const newSession = client.spawnNewSession();
+
+      const loadedBranch = await loadCoValueOrFail(newSession.node, branch.id);
+
+      dateNowMock.mockReturnValue(3);
+
+      loadedBranch.set("value", 3, "trusting");
+
+      expect(loadedBranch.get("value")).toBe(3);
+
+      await loadedBranch.core.waitForSync();
+
+      // Push back the change, so it doesn't win the conflict
+      dateNowMock.mockReturnValue(1);
+
+      branch.set("value", 4, "trusting");
+
+      expect(branch.get("value")).toBe(3);
+
+      dateNowMock.mockReturnValue(4);
+      branch.core.mergeBranch();
+
+      // The conflict resolution should be preserved, so we should have 3 and not 4
+      expect(map.get("value")).toBe(3);
+    });
+
+    test("should preserve the original madeAt of the branch", async () => {
+      const client = setupTestNode();
+      const group = client.node.createGroup();
+      const map = group.createMap();
+
+      // Add initial transactions to original map
+      map.set("value", 1, "trusting");
+
+      // Create branch from original map
+      const branch = expectMap(
+        map.core.createBranch("feature-branch", group.id).getCurrentContent(),
+      );
+
+      // Add new transaction to branch
+      branch.set("value", 2, "trusting");
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      const result = branch.core.mergeBranch();
+
+      // The merge should be successful
+      expect(map.get("value")).toBe(2);
+
+      const lastBranchTransaction = branch.core
+        .getValidSortedTransactions()
+        .at(-1);
+      const lastMapTransaction = result
+        .getValidSortedTransactions()
+        .findLast((tx) => tx.txID.branch === branch.id);
+
+      expect(lastMapTransaction?.currentMadeAt).not.toBe(
+        lastMapTransaction?.madeAt,
+      );
+
+      expect(lastBranchTransaction?.madeAt).toBe(lastMapTransaction?.madeAt);
+    });
+
+    test("should not load the merged transactions into the branch (regression test)", async () => {
+      const client = setupTestNode();
+      const group = client.node.createGroup();
+      const map = group.createMap();
+
+      // Add initial transactions to original map
+      map.set("value", 1, "trusting");
+
+      // Create branch from original map
+      const branch = expectMap(
+        map.core.createBranch("feature-branch", group.id).getCurrentContent(),
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      // Add new transaction to branch
+      branch.set("value", 2, "trusting");
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      const result = branch.core.mergeBranch();
+
+      // The merge should be successful
+      expect(map.get("value")).toBe(2);
+
+      const lastBranchTransaction = branch.core
+        .getValidSortedTransactions()
+        .at(-1);
+      expect(lastBranchTransaction?.madeAt).toBe(
+        lastBranchTransaction?.currentMadeAt,
+      );
+
+      const lastMapTransaction = result
+        .getValidSortedTransactions()
+        .findLast((tx) => tx.txID.branch === branch.id);
+      expect(lastMapTransaction?.madeAt).not.toBe(
+        lastMapTransaction?.currentMadeAt,
+      );
+    });
+
+    test("write permissions should be validated against the time of the merge and not the original madeAt", async () => {
+      const alice = setupTestNode({
+        connected: true,
+      });
+      const bob = await setupTestAccount({
+        connected: true,
+      });
+      const group = alice.node.createGroup();
+      const map = group.createMap();
+      const branchName = "feature-branch";
+
+      map.set("value", 1, "trusting");
+
+      const branch = expectMap(
+        map.core.createBranch(branchName, group.id).getCurrentContent(),
+      );
+
+      branch.set("value", 2, "trusting");
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      // Grant writer rights to bob after the changes inside the branche
+      group.addMember(
+        await loadCoValueOrFail(alice.node, bob.accountID),
+        "writer",
+      );
+
+      const loadedBranch = await loadCoValueOrFail(bob.node, branch.id);
+
+      // Bob merges the branch
+      const mergeResult = loadedBranch.core.mergeBranch();
+
+      // The merge should be successful
+      expect(expectMap(mergeResult.getCurrentContent()).get("value")).toBe(2);
+    });
+
+    test("should reject edits from kicked out member even with timestamp manipulation", async () => {
+      const alice = setupTestNode({
+        connected: true,
+      });
+      const bob = await setupTestAccount({
+        connected: true,
+      });
+      const group = alice.node.createGroup();
+      const map = group.createMap();
+
+      group.addMember(
+        await loadCoValueOrFail(alice.node, bob.accountID),
+        "writer",
+      );
+      const timeOnInvitation = Date.now();
+
+      const bobMap = await loadCoValueOrFail(bob.node, map.id);
+
+      bobMap.set("value", 1, "trusting");
+
+      await bobMap.core.waitForSync();
+
+      const bobGroup = bob.node.createGroup();
+      const branch = expectMap(
+        bobMap.core
+          .createBranch("feature-branch", bobGroup.id)
+          .getCurrentContent(),
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      // Alice sets value to 2 and downgrade bob to reader
+      map.set("value", 2, "trusting");
+      group.addMember(
+        await loadCoValueOrFail(alice.node, bob.accountID),
+        "reader",
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      branch.set("value", 3, "trusting");
+
+      // Bob attempts to make an edit after being kicked out by modifying the merge time
+      const dateNowMock = vi.spyOn(Date, "now");
+      dateNowMock.mockReturnValue(timeOnInvitation + 1);
+
+      const mergeResult = branch.core.mergeBranch();
+
+      dateNowMock.mockRestore();
+
+      // Wait for the full sync to complete
+      await waitFor(() => {
+        expect(mergeResult.knownState().sessions).toEqual(
+          map.core.knownState().sessions,
+        );
+      });
+
+      expect(expectMap(map.core.getCurrentContent()).get("value")).toBe(2);
+    });
+
+    test("should alias the txID when a transaction comes from a merge", async () => {
+      const client = setupTestNode({
+        connected: true,
+      });
+      const group = client.node.createGroup();
+      const map = group.createMap();
+
+      map.set("key", "value");
+
+      const branch = map.core
+        .createBranch("feature-branch", group.id)
+        .getCurrentContent() as RawCoMap;
+      branch.set("branchKey", "branchValue");
+
+      const originalTxID = branch.core
+        .getValidTransactions({
+          skipBranchSource: true,
+          ignorePrivateTransactions: false,
+        })
+        .at(-1)?.txID;
+
+      branch.core.mergeBranch();
+
+      map.set("key2", "value2");
+
+      const validSortedTransactions = map.core.getValidSortedTransactions();
+
+      // Only the merged transaction should have the txId changed
+      const mergedTransactionIdx = validSortedTransactions.findIndex(
+        (tx) => tx.txID.branch,
+      );
+
+      expect(
+        validSortedTransactions[mergedTransactionIdx - 1]?.txID.branch,
+      ).toBe(undefined);
+      expect(validSortedTransactions[mergedTransactionIdx]?.txID).toEqual(
+        originalTxID,
+      );
+      expect(
+        validSortedTransactions[mergedTransactionIdx + 1]?.txID.branch,
+      ).toBe(undefined);
+    });
+  });
+
+  describe("Branching permissions", () => {
+    test("should allow the creation of private branches to accounts with read access to the source group", async () => {
+      const alice = setupTestNode({
+        connected: true,
+      });
+      const bob = await setupTestAccount({
+        connected: true,
+      });
+      const group = alice.node.createGroup();
+      group.addMember(
+        await loadCoValueOrFail(alice.node, bob.accountID),
+        "reader",
+      );
+      const map = group.createMap();
+      map.set("key", "alice");
+
+      const bobGroup = bob.node.createGroup();
+
+      const mapOnBob = await loadCoValueOrFail(bob.node, map.id);
+
+      const branch = expectMap(
+        mapOnBob.core
+          .createBranch("feature-branch", bobGroup.id)
+          .getCurrentContent(),
+      );
+
+      expect(mapOnBob.core.branches).toEqual([
+        {
+          branch: "feature-branch",
+          ownerId: bobGroup.id,
+        },
+      ]);
+
+      expect(branch.id).not.toBe(map.id);
+      expect(branch.get("key")).toBe("alice");
+      expect(branch.core.getGroup().id).toBe(bobGroup.id);
+      expect(branch.core.getGroup().myRole()).toBe("admin");
+      branch.set("key", "bob");
+
+      expect(branch.get("key")).toBe("bob");
+    });
+
+    test("an account with write access to the source and read access to the branch should be able to merge a branch created by a reader", async () => {
+      const alice = await setupTestAccount({
+        connected: true,
+      });
+      const bob = await setupTestAccount({
+        connected: true,
+      });
+      const group = alice.node.createGroup();
+      group.addMember(
+        await loadCoValueOrFail(alice.node, bob.accountID),
+        "reader",
+      );
+      const map = group.createMap();
+      map.set("key", "alice");
+
+      const bobGroup = bob.node.createGroup();
+      bobGroup.addMember(
+        await loadCoValueOrFail(bob.node, alice.accountID),
+        "reader",
+      );
+
+      const mapOnBob = await loadCoValueOrFail(bob.node, map.id);
+
+      const branch = expectMap(
+        mapOnBob.core
+          .createBranch("feature-branch", bobGroup.id)
+          .getCurrentContent(),
+      );
+
+      branch.set("key", "bob");
+
+      expect(branch.get("key")).toBe("bob");
+
+      const branchOnAlice = await loadCoValueOrFail(alice.node, branch.id);
+      branchOnAlice.core.mergeBranch();
+
+      expect(map.get("key")).toBe("bob");
+    });
+
+    test("should not allow the creation of public branches to accounts with read access", async () => {
+      const alice = setupTestNode({
+        connected: true,
+      });
+      const bob = await setupTestAccount({
+        connected: true,
+      });
+      const group = alice.node.createGroup();
+      group.addMember(
+        await loadCoValueOrFail(alice.node, bob.accountID),
+        "reader",
+      );
+      const map = group.createMap();
+      map.set("key", "alice");
+
+      const mapOnBob = await loadCoValueOrFail(bob.node, map.id);
+
+      const branch = expectMap(
+        mapOnBob.core.createBranch("feature-branch").getCurrentContent(),
+      );
+
+      expect(mapOnBob.core.branches).toEqual([]);
+
+      expect(branch.id).toBe(map.id);
     });
   });
 
@@ -558,49 +948,6 @@ describe("Branching Logic", () => {
 
       expect(aliceBranch.core.branchStart).toEqual(bobBranch.core.branchStart);
     });
-  });
-
-  test("should alias the txID when a transaction comes from a merge", async () => {
-    const client = setupTestNode({
-      connected: true,
-    });
-    const group = client.node.createGroup();
-    const map = group.createMap();
-
-    map.set("key", "value");
-
-    const branch = map.core
-      .createBranch("feature-branch", group.id)
-      .getCurrentContent() as RawCoMap;
-    branch.set("branchKey", "branchValue");
-
-    const originalTxID = branch.core
-      .getValidTransactions({
-        skipBranchSource: true,
-        ignorePrivateTransactions: false,
-      })
-      .at(-1)?.txID;
-
-    branch.core.mergeBranch();
-
-    map.set("key2", "value2");
-
-    const validSortedTransactions = map.core.getValidSortedTransactions();
-
-    // Only the merged transaction should have the txId changed
-    const mergedTransactionIdx = validSortedTransactions.findIndex(
-      (tx) => tx.txID.branch,
-    );
-
-    expect(validSortedTransactions[mergedTransactionIdx - 1]?.txID.branch).toBe(
-      undefined,
-    );
-    expect(validSortedTransactions[mergedTransactionIdx]?.txID).toEqual(
-      originalTxID,
-    );
-    expect(validSortedTransactions[mergedTransactionIdx + 1]?.txID.branch).toBe(
-      undefined,
-    );
   });
 
   describe("hasBranch", () => {

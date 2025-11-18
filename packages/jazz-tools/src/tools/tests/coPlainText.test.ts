@@ -1,6 +1,6 @@
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { Channel } from "queueueue";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import {
   Account,
   cojsonInternals,
@@ -94,6 +94,30 @@ describe("CoPlainText", () => {
         text.$jazz.applyDiff(`😊👋 안녕!`);
         expect(text.toString()).toEqual(`😊👋 안녕!`);
       });
+
+      test("applyDiff should emit a single update", () => {
+        const Text = co.plainText();
+
+        const text = Text.create(`😊`, { owner: me });
+
+        const updateFn = vi.fn();
+
+        const unsubscribe = Text.subscribe(
+          text.$jazz.id,
+          {
+            loadAs: me,
+          },
+          updateFn,
+        );
+
+        updateFn.mockClear();
+
+        text.$jazz.applyDiff(`😊👋 안녕!`);
+
+        expect(updateFn).toHaveBeenCalledTimes(1);
+
+        unsubscribe();
+      });
     });
 
     describe("Properties", () => {
@@ -181,7 +205,7 @@ describe("CoPlainText", () => {
             secret: me.$jazz.localNode.getCurrentAgent().agentSecret,
           },
           sessionProvider: randomSessionProvider,
-          peersToLoadFrom: [initialAsPeer],
+          peers: [initialAsPeer],
           crypto: Crypto,
           asActiveAccount: true,
         });
@@ -213,7 +237,7 @@ describe("CoPlainText", () => {
           secret: me.$jazz.localNode.getCurrentAgent().agentSecret,
         },
         sessionProvider: randomSessionProvider,
-        peersToLoadFrom: [initialAsPeer],
+        peers: [initialAsPeer],
         crypto: Crypto,
         asActiveAccount: true,
       });

@@ -1,5 +1,8 @@
-import type { ImageDefinition } from "jazz-tools";
-import { CreateImageOptions } from "./create-image-factory";
+import type { ImageDefinition, Loaded } from "jazz-tools";
+import type {
+  CreateImageOptions,
+  CreateImageReturnType,
+} from "./create-image-factory";
 
 export * from "./exports";
 
@@ -38,7 +41,7 @@ export * from "./exports";
 export declare function createImage(
   imageBlobOrFile: Blob | File,
   options?: CreateImageOptions,
-): Promise<ImageDefinition>;
+): Promise<CreateImageReturnType>;
 
 /**
  * Creates an ImageDefinition from an image file path with built-in UX features.
@@ -66,4 +69,4 @@ export declare function createImage(
 export declare function createImage(
   filePath: string,
   options?: CreateImageOptions,
-): Promise<ImageDefinition>;
+): Promise<CreateImageReturnType>;

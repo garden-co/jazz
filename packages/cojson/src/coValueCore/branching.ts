@@ -1,9 +1,11 @@
-import type { CoValueCore } from "../exports.js";
+import { logger, type CoValueCore } from "../exports.js";
 import type { RawCoID, SessionID } from "../ids.js";
 import { type AvailableCoValueCore, idforHeader } from "./coValueCore.js";
 import type { CoValueHeader } from "./verifiedState.js";
-import type { CoValueKnownState } from "../sync.js";
-import { combineKnownStateSessions } from "../knownState.js";
+import {
+  combineKnownStateSessions,
+  KnownStateSessions,
+} from "../knownState.js";
 
 /**
  * Commit to identify the starting point of the branch
@@ -11,7 +13,7 @@ import { combineKnownStateSessions } from "../knownState.js";
  * In case of clonflicts, the first commit of this kind is considered the source of truth
  */
 export type BranchStartCommit = {
-  from: CoValueKnownState["sessions"];
+  from: KnownStateSessions;
 };
 
 /**
@@ -27,6 +29,7 @@ export type BranchPointerCommit = {
  */
 export type MergedTransactionMetadata = {
   mi: number; // Transaction index and marker of a merge commit
+  t?: number; // The difference between the current time and the madeAt value of the original transaction. Used to calculate the original madeAt of the transaction, stored this way to reduce the size of the meta information.
   s?: SessionID;
   b?: RawCoID;
 };
@@ -35,7 +38,7 @@ export type MergedTransactionMetadata = {
  * Merge commit located in a branch to track how many transactions have already been merged
  */
 export type MergeCommit = {
-  merged: CoValueKnownState["sessions"];
+  merged: KnownStateSessions;
   branch: RawCoID;
 };
 
@@ -142,6 +145,20 @@ export function createBranch(
     return coValue;
   }
 
+  const myRole = coValue.safeGetGroup()?.myRole();
+
+  // We allow branch creation to accounts with at least read access to the source group
+  if (!myRole || (myRole === "reader" && !ownerId)) {
+    logger.warn(
+      "Trying to create a branch without enough access rights, returning the source coValue",
+    );
+    return coValue;
+  }
+
+  // Accounts without write access store the branch pointer unencrypted to make it possible to handle it as a special case
+  // in the permissions checks
+  const privacy = myRole === "reader" ? "trusting" : "private";
+
   const header = getBranchHeader({
     type: coValue.verified.header.type,
     branchName: name,
@@ -158,7 +175,7 @@ export function createBranch(
   } satisfies BranchStartCommit);
 
   // Create a branch pointer, to identify that we created a branch
-  coValue.makeTransaction([], "private", {
+  coValue.makeTransaction([], privacy, {
     branch: name,
     ownerId,
   } satisfies BranchPointerCommit);
@@ -213,13 +230,10 @@ export function mergeBranch(branch: CoValueCore): CoValueCore {
 
   // Look for previous merge commits, to see which transactions needs to be merged
   // Done mostly for performance reasons, as we could merge all the transactions every time and nothing would change
-  let mergedTransactions = {} as CoValueKnownState["sessions"];
+  let mergedTransactions = {} as KnownStateSessions;
   for (const item of target.getMergeCommits()) {
     if (item.branch === branch.id) {
-      mergedTransactions = combineKnownStateSessions(
-        mergedTransactions,
-        item.merged,
-      );
+      combineKnownStateSessions(mergedTransactions, item.merged);
     }
   }
 
@@ -242,11 +256,20 @@ export function mergeBranch(branch: CoValueCore): CoValueCore {
   // To reduce the cost of the meta we skip the repeated information
   let lastSessionId: string | undefined = undefined;
   let lastBranchId: string | undefined = undefined;
+  let lastOriginalMadeAt: number = 0;
+
+  const now = Date.now();
 
   for (const tx of branchValidTransactions) {
     const mergeMeta: MergedTransactionMetadata = {
       mi: tx.txID.txIndex,
     };
+
+    // We compress the original made at, to reduce the size of the meta information
+    if (tx.madeAt !== lastOriginalMadeAt) {
+      // Storing the diff with madeAt to consume less bytes in the meta information
+      mergeMeta.t = now - tx.madeAt;
+    }
 
     if (lastSessionId !== tx.txID.sessionID) {
       mergeMeta.s = tx.txID.sessionID;
@@ -256,16 +279,17 @@ export function mergeBranch(branch: CoValueCore): CoValueCore {
       mergeMeta.b = tx.txID.branch;
     }
 
-    target.makeTransaction(tx.changes, tx.tx.privacy, mergeMeta, tx.madeAt);
+    target.makeTransaction(tx.changes, tx.tx.privacy, mergeMeta, now);
     lastSessionId = tx.txID.sessionID;
     lastBranchId = tx.txID.branch;
+    lastOriginalMadeAt = tx.madeAt;
   }
 
   // Track the merged transactions for the branch, so future merges will know which transactions have already been merged
   // Store only the diff of sessions between the branch and already merged transactions
   const currentSessions = branch.knownState().sessions;
   const prevMergedSessions = mergedTransactions;
-  const diff = {} as CoValueKnownState["sessions"];
+  const diff = {} as KnownStateSessions;
 
   for (const [sessionId, count] of Object.entries(currentSessions) as [
     SessionID,

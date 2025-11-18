@@ -21,6 +21,7 @@ export type JazzProviderProps<
   children: React.ReactNode;
   enableSSR?: boolean;
   fallback?: React.ReactNode | null;
+  authSecretStorageKey?: string;
 } & JazzContextManagerProps<S>;
 
 /** @category Context & Hooks */
@@ -40,11 +41,13 @@ export function JazzReactProvider<
   onAnonymousAccountDiscarded,
   enableSSR,
   fallback = null,
+  authSecretStorageKey,
 }: JazzProviderProps<S>) {
   const [contextManager] = React.useState(
     () =>
       new JazzBrowserContextManager<S>({
         useAnonymousFallback: enableSSR,
+        authSecretStorageKey,
       }),
   );
 

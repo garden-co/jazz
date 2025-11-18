@@ -2,7 +2,6 @@ import { UpDownCounter, metrics } from "@opentelemetry/api";
 import {
   createContentMessage,
   exceedsRecommendedSize,
-  getTransactionSize,
 } from "../coValueContentMessage.js";
 import {
   CoValueCore,
@@ -11,12 +10,13 @@ import {
   type StorageAPI,
   logger,
 } from "../exports.js";
+import { NewContentMessage } from "../sync.js";
+import { StorageKnownState } from "./knownState.js";
 import {
   CoValueKnownState,
-  NewContentMessage,
   emptyKnownState,
-} from "../sync.js";
-import { StorageKnownState } from "./knownState.js";
+  setSessionCounter,
+} from "../knownState.js";
 import {
   collectNewTxs,
   getDependedOnCoValues,
@@ -96,7 +96,11 @@ export class StorageApiSync implements StorageAPI {
     knownState.header = true;
 
     for (const sessionRow of allCoValueSessions) {
-      knownState.sessions[sessionRow.sessionID] = sessionRow.lastIdx;
+      setSessionCounter(
+        knownState.sessions,
+        sessionRow.sessionID,
+        sessionRow.lastIdx,
+      );
     }
 
     this.loadedCoValues.add(coValueRow.id);
@@ -105,7 +109,7 @@ export class StorageApiSync implements StorageAPI {
 
     if (contentStreaming) {
       this.streamingCounter.add(1);
-      contentMessage.expectContentUntil = knownState["sessions"];
+      contentMessage.expectContentUntil = knownState.sessions;
     }
 
     for (const sessionRow of allCoValueSessions) {
@@ -260,7 +264,11 @@ export class StorageApiSync implements StorageAPI {
         );
 
         if (sessionRow) {
-          knownState.sessions[sessionRow.sessionID] = sessionRow.lastIdx;
+          setSessionCounter(
+            knownState.sessions,
+            sessionRow.sessionID,
+            sessionRow.lastIdx,
+          );
         }
 
         if ((sessionRow?.lastIdx || 0) < (msg.new[sessionID]?.after || 0)) {
@@ -272,7 +280,7 @@ export class StorageApiSync implements StorageAPI {
             sessionRow,
             storedCoValueRowID,
           );
-          knownState.sessions[sessionID] = newLastIdx;
+          setSessionCounter(knownState.sessions, sessionID, newLastIdx);
         }
       });
     }

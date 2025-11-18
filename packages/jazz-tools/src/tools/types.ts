@@ -26,6 +26,8 @@ export type JazzAuthContext<Acc extends Account> = {
   logOut: () => Promise<void>;
   done: () => void;
   isAuthenticated?: boolean;
+  addConnectionListener: (listener: (connected: boolean) => void) => () => void;
+  connected: () => boolean;
 };
 
 export type JazzGuestContext = {
@@ -36,6 +38,8 @@ export type JazzGuestContext = {
   logOut: () => void;
   done: () => void;
   isAuthenticated?: boolean;
+  addConnectionListener: (listener: (connected: boolean) => void) => () => void;
+  connected: () => boolean;
 };
 
 export type JazzContextType<Acc extends Account> =

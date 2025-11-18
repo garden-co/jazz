@@ -26,6 +26,8 @@ type PlatformSpecificAuthContext<Acc extends Account> = {
   node: LocalNode;
   logOut: () => Promise<void>;
   done: () => void;
+  addConnectionListener: (listener: (connected: boolean) => void) => () => void;
+  connected: () => boolean;
 };
 
 type PlatformSpecificGuestContext = {
@@ -33,6 +35,8 @@ type PlatformSpecificGuestContext = {
   node: LocalNode;
   logOut: () => Promise<void>;
   done: () => void;
+  addConnectionListener: (listener: (connected: boolean) => void) => () => void;
+  connected: () => boolean;
 };
 
 type PlatformSpecificContext<Acc extends Account> =
@@ -41,7 +45,7 @@ type PlatformSpecificContext<Acc extends Account> =
 
 function getAnonymousFallback() {
   const context = createAnonymousJazzContext({
-    peersToLoadFrom: [],
+    peers: [],
     crypto: new PureJSCrypto(),
   });
 
@@ -52,6 +56,8 @@ function getAnonymousFallback() {
     logOut: async () => {},
     isAuthenticated: false,
     authenticate: async () => {},
+    addConnectionListener: () => () => {},
+    connected: () => false,
     register: async () => {
       throw new Error("Not implemented");
     },
@@ -65,13 +71,17 @@ export class JazzContextManager<
   protected value: JazzContextType<Acc> | undefined;
   protected context: PlatformSpecificContext<Acc> | undefined;
   protected props: P | undefined;
-  protected authSecretStorage = new AuthSecretStorage();
+  protected authSecretStorage;
   protected keepContextOpen = false;
   contextPromise: Promise<void> | undefined;
   protected authenticatingAccountID: string | null = null;
 
-  constructor(opts?: { useAnonymousFallback?: boolean }) {
+  constructor(opts?: {
+    useAnonymousFallback?: boolean;
+    authSecretStorageKey?: string;
+  }) {
     KvStoreContext.getInstance().initialize(this.getKvStore());
+    this.authSecretStorage = new AuthSecretStorage(opts?.authSecretStorageKey);
 
     if (opts?.useAnonymousFallback) {
       this.value = getAnonymousFallback();
@@ -134,6 +144,8 @@ export class JazzContextManager<
       authenticate: this.authenticate,
       register: this.register,
       logOut: this.logOut,
+      addConnectionListener: context.addConnectionListener,
+      connected: context.connected,
     };
 
     if (authProps?.credentials) {

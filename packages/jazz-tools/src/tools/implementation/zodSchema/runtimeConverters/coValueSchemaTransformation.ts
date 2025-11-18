@@ -1,23 +1,25 @@
 import { RawCoList, RawCoMap } from "cojson";
 import {
   Account,
+  AccountSchema,
   CoDiscriminatedUnionSchema,
   CoFeed,
   CoFeedSchema,
   CoList,
   CoListSchema,
   CoMap,
+  CoMapSchema,
   CoPlainText,
   CoRichText,
   CoValueClass,
   FileStream,
   FileStreamSchema,
+  CoVectorSchema,
   PlainTextSchema,
   SchemaUnion,
-  enrichAccountSchema,
-  enrichCoMapSchema,
   isCoValueClass,
   Group,
+  CoVector,
 } from "../../../internal.js";
 import { coField } from "../../schema.js";
 
@@ -96,8 +98,8 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
 
     const coValueSchema =
       ClassToExtend === Account
-        ? enrichAccountSchema(schema as any, coValueClass as any)
-        : enrichCoMapSchema(schema as any, coValueClass as any);
+        ? new AccountSchema(schema as any, coValueClass as any)
+        : new CoMapSchema(schema as any, coValueClass as any);
 
     return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoList") {
@@ -123,6 +125,17 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
   } else if (schema.builtin === "FileStream") {
     const coValueClass = FileStream;
     return new FileStreamSchema(coValueClass) as CoValueSchemaFromCoreSchema<S>;
+  } else if (schema.builtin === "CoVector") {
+    const dimensions = schema.dimensions;
+
+    const coValueClass = class CoVectorWithDimensions extends CoVector {
+      protected static requiredDimensionsCount = dimensions;
+    };
+
+    return new CoVectorSchema(
+      dimensions,
+      coValueClass,
+    ) as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoPlainText") {
     const coValueClass = CoPlainText;
     return new PlainTextSchema(coValueClass) as CoValueSchemaFromCoreSchema<S>;

@@ -1,10 +1,10 @@
+import { NativeModules } from "react-native";
 import type ImageResizerType from "@bam.tech/react-native-image-resizer";
+import type ImageManipulatorType from "expo-image-manipulator";
 import type { Account, Group } from "jazz-tools";
 import { FileStream } from "jazz-tools";
 import { Image } from "react-native";
 import { createImageFactory } from "../create-image-factory";
-
-let ImageResizer: typeof ImageResizerType | undefined;
 
 /**
  * Creates an ImageDefinition from an image file path with built-in UX features.
@@ -45,19 +45,27 @@ export const createImage = createImageFactory(
   },
 );
 
-async function getResizer(): Promise<typeof ImageResizerType> {
-  if (!ImageResizer) {
-    try {
-      ImageResizer = (await import("@bam.tech/react-native-image-resizer"))
-        .default;
-    } catch (e) {
-      throw new Error(
-        "ImageResizer is not installed, please run `npm install @bam.tech/react-native-image-resizer`",
-      );
-    }
-  }
+async function getResizer(): Promise<
+  typeof ImageResizerType | typeof ImageManipulatorType
+> {
+  try {
+    const rnImageResizer = await import("@bam.tech/react-native-image-resizer");
 
-  return ImageResizer;
+    if (rnImageResizer.default !== undefined) {
+      return rnImageResizer.default;
+    }
+  } catch (e) {}
+
+  try {
+    const expoImageManipulator = await import("expo-image-manipulator");
+    if (expoImageManipulator.ImageManipulator !== undefined) {
+      return expoImageManipulator;
+    }
+  } catch (e) {}
+
+  throw new Error(
+    "No resizer lib found. Please install `@bam.tech/react-native-image-resizer` or `expo-image-manipulator`",
+  );
 }
 
 async function getImageSize(
@@ -71,15 +79,37 @@ async function getImageSize(
 async function getPlaceholderBase64(filePath: string): Promise<string> {
   const ImageResizer = await getResizer();
 
-  const { uri } = await ImageResizer.createResizedImage(
-    filePath,
-    8,
-    8,
-    "PNG",
-    100,
-  );
+  if ("createResizedImage" in ImageResizer) {
+    const { uri } = await ImageResizer.createResizedImage(
+      filePath,
+      8,
+      8,
+      "PNG",
+      100,
+    );
 
-  return imageUrlToBase64(uri);
+    return imageUrlToBase64(uri);
+  } else {
+    const ctx = ImageResizer.ImageManipulator.manipulate(filePath);
+
+    ctx.resize({ width: 8, height: 8 });
+
+    const im = await ctx.renderAsync();
+    const result = await im.saveAsync({
+      base64: true,
+      format: ImageResizer.SaveFormat.PNG,
+    });
+
+    const base64 = result.base64;
+
+    if (!base64) {
+      throw new Error(
+        "Failed to get generate placeholder using expo-image-manipulator",
+      );
+    }
+
+    return base64;
+  }
 }
 
 async function resize(
@@ -91,15 +121,30 @@ async function resize(
 
   const mimeType = await getMimeType(filePath);
 
-  const { uri } = await ImageResizer.createResizedImage(
-    filePath,
-    width,
-    height,
-    contentTypeToFormat(mimeType),
-    80,
-  );
+  if ("createResizedImage" in ImageResizer) {
+    const { uri } = await ImageResizer.createResizedImage(
+      filePath,
+      width,
+      height,
+      contentTypeToFormat(mimeType),
+      80,
+    );
 
-  return uri;
+    return uri;
+  } else {
+    const ctx = ImageResizer.ImageManipulator.manipulate(filePath);
+    ctx.resize({ width: width, height: height });
+
+    const mime = contentTypeToFormat(mimeType);
+
+    const im = await ctx.renderAsync();
+    const result = await im.saveAsync({
+      format: ImageResizer.SaveFormat[mime],
+      compress: 0.8,
+    });
+
+    return result.uri;
+  }
 }
 
 function getMimeType(filePath: string): Promise<string> {

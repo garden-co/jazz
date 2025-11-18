@@ -1,39 +1,55 @@
-import { PeerKnownStates, ReadonlyPeerKnownStates } from "./PeerKnownStates.js";
+import { PeerKnownState } from "./coValueCore/PeerKnownState.js";
 import { RawCoID, SessionID } from "./ids.js";
+import { CoValueKnownState } from "./knownState.js";
 import { logger } from "./logger.js";
-import { CoValueKnownState, Peer, SyncMessage } from "./sync.js";
+import { Peer, SyncMessage } from "./sync.js";
 
 export class PeerState {
-  constructor(
-    private peer: Peer,
-    knownStates: ReadonlyPeerKnownStates | undefined,
-  ) {
-    this._knownStates = knownStates?.clone() ?? new PeerKnownStates();
-    this._optimisticKnownStates = knownStates?.clone() ?? new PeerKnownStates();
-  }
-
   /**
    * Here we to collect all the known states that a given peer has told us about.
    *
    * This can be used to safely track the sync state of a coValue in a given peer.
    */
-  readonly _knownStates: PeerKnownStates;
+  private readonly _knownStates: Map<RawCoID, PeerKnownState>;
 
-  get knownStates(): ReadonlyPeerKnownStates {
-    return this._knownStates;
+  constructor(
+    private peer: Peer,
+    knownStates: Map<RawCoID, PeerKnownState> | undefined,
+  ) {
+    this._knownStates = knownStates ?? new Map();
+  }
+
+  getKnownState(id: RawCoID) {
+    return this._knownStates.get(id)?.value();
+  }
+
+  getOptimisticKnownState(id: RawCoID) {
+    return this._knownStates.get(id)?.optimisticValue();
+  }
+
+  isCoValueSubscribedToPeer(id: RawCoID) {
+    return this._knownStates.has(id);
   }
 
   /**
-   * This one collects the known states "optimistically".
-   * We use it to keep track of the content we have sent to a given peer.
+   * Closes the current peer state and creates a new one from a given peer,
+   * keeping the same known states.
    *
-   * The main difference with knownState is that this is updated when the content is sent to the peer without
-   * waiting for any acknowledgement from the peer.
+   * This is used to create a new peer state when a peer reconnects.
    */
-  readonly _optimisticKnownStates: PeerKnownStates;
+  newPeerStateFrom(peer: Peer) {
+    if (!this.closed) {
+      this.gracefulShutdown();
+    }
 
-  get optimisticKnownStates(): ReadonlyPeerKnownStates {
-    return this._optimisticKnownStates;
+    const knownStates = new Map<RawCoID, PeerKnownState>();
+    // On reconnect, we reset all the optimistic known states
+    // because we can't know if those syncs were successful or not
+    for (const knownState of this._knownStates.values()) {
+      knownStates.set(knownState.id, knownState.cloneWithoutOptimistic());
+    }
+
+    return new PeerState(peer, knownStates);
   }
 
   readonly toldKnownState: Set<RawCoID> = new Set();
@@ -48,35 +64,72 @@ export class PeerState {
     this.toldKnownState.add(id);
   }
 
+  private getOrCreateKnownState(id: RawCoID) {
+    let knownState = this._knownStates.get(id);
+
+    if (!knownState) {
+      knownState = new PeerKnownState(id, this.peer.id);
+      this._knownStates.set(id, knownState);
+    }
+
+    return knownState;
+  }
+
   updateHeader(id: RawCoID, header: boolean) {
-    this._knownStates.updateHeader(id, header);
-    this._optimisticKnownStates.updateHeader(id, header);
+    const knownState = this.getOrCreateKnownState(id);
+    knownState.updateHeader(header);
+    this.triggerUpdate(id, knownState);
   }
 
   combineWith(id: RawCoID, value: CoValueKnownState) {
-    this._knownStates.combineWith(id, value);
-    this._optimisticKnownStates.combineWith(id, value);
+    const knownState = this.getOrCreateKnownState(id);
+    knownState.combineWith(value);
+    this.triggerUpdate(id, knownState);
   }
 
   combineOptimisticWith(id: RawCoID, value: CoValueKnownState) {
-    this._optimisticKnownStates.combineWith(id, value);
+    const knownState = this.getOrCreateKnownState(id);
+    knownState.combineOptimisticWith(value);
+    this.triggerUpdate(id, knownState);
   }
 
-  updateSessionCounter(id: RawCoID, sessionId: SessionID, value: number) {
-    this._knownStates.updateSessionCounter(id, sessionId, value);
-    this._optimisticKnownStates.updateSessionCounter(id, sessionId, value);
+  setKnownState(id: RawCoID, payload: CoValueKnownState | "empty") {
+    const knownState = this.getOrCreateKnownState(id);
+    knownState.set(payload);
+    this.triggerUpdate(id, knownState);
   }
 
-  setKnownState(id: RawCoID, knownState: CoValueKnownState | "empty") {
-    this._knownStates.set(id, knownState);
-    this._optimisticKnownStates.set(id, knownState);
+  /**
+   * Emit a change event for a given coValue.
+   *
+   * This is used to notify subscribers that the known state of a coValue has changed,
+   * but the known state of the peer has not.
+   */
+  emitCoValueChange(id: RawCoID) {
+    if (this.peer.role === "client" && !this.isCoValueSubscribedToPeer(id)) {
+      return;
+    }
+
+    const knownState = this.getOrCreateKnownState(id);
+    this.triggerUpdate(id, knownState);
   }
 
-  setOptimisticKnownState(
-    id: RawCoID,
-    knownState: CoValueKnownState | "empty",
+  listeners = new Set<(id: RawCoID, value: PeerKnownState) => void>();
+
+  private triggerUpdate(id: RawCoID, value: PeerKnownState) {
+    for (const listener of this.listeners) {
+      listener(id, value);
+    }
+  }
+
+  subscribeToKnownStatesUpdates(
+    listener: (id: RawCoID, value: PeerKnownState) => void,
   ) {
-    this._optimisticKnownStates.set(id, knownState);
+    this.listeners.add(listener);
+
+    return () => {
+      this.listeners.delete(listener);
+    };
   }
 
   get id() {

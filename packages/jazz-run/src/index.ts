@@ -6,6 +6,9 @@ import { Console, Effect } from "effect";
 import { createWorkerAccount } from "./createWorkerAccount.js";
 import { startSyncServer } from "./startSyncServer.js";
 import { serverDefaults } from "./config.js";
+import { startWorker } from "jazz-tools/worker";
+import { RegistryState, WebhookRegistry } from "jazz-webhook";
+import { co } from "jazz-tools";
 
 const jazzTools = Command.make("jazz-tools");
 
@@ -106,8 +109,201 @@ const startSyncServerCommand = Command.make(
   },
 );
 
+const webhookRunCommand = Command.make(
+  "run",
+  {
+    peer: peerOption,
+  },
+  ({ peer }) => {
+    return Effect.gen(function* () {
+      const webhookRegistrySecret = process.env.JAZZ_WEBHOOK_REGISTRY_SECRET;
+
+      if (!webhookRegistrySecret) {
+        throw new Error("JAZZ_WEBHOOK_REGISTRY_SECRET is not set");
+      }
+
+      const [registryID, registryAccountID, registryAccountSecret] =
+        webhookRegistrySecret.split("__");
+
+      if (!registryID || !registryAccountID || !registryAccountSecret) {
+        throw new Error("Invalid JAZZ_WEBHOOK_REGISTRY_SECRET");
+      }
+
+      const { worker, shutdownWorker } = yield* Effect.promise(() =>
+        startWorker({
+          syncServer: peer,
+          accountID: registryAccountID,
+          accountSecret: registryAccountSecret,
+        }),
+      );
+
+      const webhook = yield* Effect.promise(() =>
+        WebhookRegistry.loadAndStart(registryID),
+      );
+
+      yield* Effect.addFinalizer(() => Effect.sync(() => webhook.shutdown()));
+      yield* Effect.addFinalizer(() => Effect.promise(() => shutdownWorker()));
+
+      yield* Console.log(
+        `Webhook registry ${registryID} running as ${registryAccountID}`,
+      );
+
+      // Wait until interrupt
+      yield* Effect.never;
+    }).pipe(Effect.scoped);
+  },
+);
+
+const grantRegistrationRights = ({
+  peer,
+  accountID,
+  webhookRegistrySecret,
+}: {
+  peer: string;
+  accountID: string;
+  webhookRegistrySecret?: string;
+}) => {
+  return Effect.gen(function* () {
+    webhookRegistrySecret =
+      webhookRegistrySecret || process.env.JAZZ_WEBHOOK_REGISTRY_SECRET;
+
+    if (!webhookRegistrySecret) {
+      throw new Error("JAZZ_WEBHOOK_REGISTRY_SECRET is not set");
+    }
+
+    const [registryID, registryAccountID, registryAccountSecret] =
+      webhookRegistrySecret.split("__");
+
+    if (!registryID || !registryAccountID || !registryAccountSecret) {
+      throw new Error("Invalid JAZZ_WEBHOOK_REGISTRY_SECRET");
+    }
+
+    const { worker, shutdownWorker } = yield* Effect.promise(() =>
+      startWorker({
+        syncServer: peer,
+        accountID: registryAccountID,
+        accountSecret: registryAccountSecret,
+      }),
+    );
+
+    const registry = yield* Effect.promise(() =>
+      RegistryState.load(registryID),
+    );
+
+    const account = yield* Effect.promise(() => co.account().load(accountID));
+
+    if (!account.$isLoaded) {
+      throw new Error("Account not found");
+    }
+
+    if (!registry.$isLoaded) {
+      throw new Error("Couldn't load registry with ID " + registryID);
+    }
+
+    registry.$jazz.owner.addMember(account, "writer");
+
+    yield* Console.error(
+      "Webhook registration rights granted to " +
+        accountID +
+        " for registry " +
+        registryID +
+        " ✅",
+    );
+
+    yield* Effect.promise(() => shutdownWorker());
+  });
+};
+
+const accountIDOption = Options.text("accountID").pipe(Options.withAlias("a"));
+
+const webhookGrantCommand = Command.make(
+  "grant",
+  {
+    peer: peerOption,
+    accountID: accountIDOption,
+  },
+  grantRegistrationRights,
+);
+
+const webhookRevokeCommand = Command.make(
+  "revoke",
+  {
+    peer: peerOption,
+    accountID: accountIDOption,
+  },
+  ({ peer, accountID }) => {
+    return Effect.gen(function* () {
+      yield* Console.log("NOT IMPLEMENTED");
+    });
+  },
+);
+
+const grantOption = Options.text("grant")
+  .pipe(Options.withAlias("g"))
+  .pipe(Options.optional);
+
+const webhookCreateRegistryCommand = Command.make(
+  "create-registry",
+  {
+    peer: peerOption,
+    grant: grantOption,
+  },
+  ({ peer, grant }) => {
+    return Effect.gen(function* () {
+      const { accountID, agentSecret } = yield* Effect.promise(() =>
+        createWorkerAccount({ name: "Webhook Worker", peer }),
+      );
+
+      const { worker, shutdownWorker } = yield* Effect.promise(() =>
+        startWorker({
+          syncServer: peer,
+          accountID,
+          accountSecret: agentSecret,
+        }),
+      );
+
+      const registryGroup = co.group().create({ owner: worker });
+      const registry = WebhookRegistry.createRegistry(registryGroup);
+      const webhookRegistrySecret =
+        registry.$jazz.id + "__" + accountID + "__" + agentSecret;
+
+      yield* Console.log(
+        "# Credentials for *running* the Jazz webhook registry:",
+      );
+      yield* Console.log(
+        "JAZZ_WEBHOOK_REGISTRY_SECRET=" + webhookRegistrySecret,
+      );
+      yield* Console.log("# Registry ID for *registering* webhooks:");
+      yield* Console.log("JAZZ_WEBHOOK_REGISTRY_ID=" + registry.$jazz.id);
+
+      yield* Effect.promise(() => shutdownWorker());
+
+      if (grant._tag === "Some") {
+        yield* grantRegistrationRights({
+          peer,
+          accountID: grant.value,
+          webhookRegistrySecret,
+        });
+      }
+    });
+  },
+);
+
+const webhookCommand = Command.make("webhook").pipe(
+  Command.withSubcommands([
+    webhookRunCommand,
+    webhookCreateRegistryCommand,
+    webhookGrantCommand,
+    webhookRevokeCommand,
+  ]),
+);
+
 const command = jazzTools.pipe(
-  Command.withSubcommands([accountCommand, startSyncServerCommand]),
+  Command.withSubcommands([
+    accountCommand,
+    startSyncServerCommand,
+    webhookCommand,
+  ]),
 );
 
 const cli = Command.run(command, {

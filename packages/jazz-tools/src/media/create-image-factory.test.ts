@@ -24,6 +24,24 @@ describe("createImage", async () => {
     vi.clearAllMocks();
   });
 
+  it("should return a loaded image definition", async () => {
+    const imageBlob = new Blob(
+      [Uint8Array.from(OnePixel, (c) => c.charCodeAt(0))],
+      { type: "image/png" },
+    );
+
+    getImageSize.mockResolvedValue({ width: 1, height: 1 });
+
+    const image = await createImage(imageBlob, { owner: account });
+
+    // ensure `original` is loaded
+    function typeMatch(value: { original: FileStream }) {
+      return value;
+    }
+
+    typeMatch(image);
+  });
+
   it("should create a single original image if all settings are off", async () => {
     const imageBlob = new Blob(
       [Uint8Array.from(OnePixel, (c) => c.charCodeAt(0))],
@@ -56,7 +74,7 @@ describe("createImage", async () => {
 
     getImageSize.mockResolvedValue({ width: 1, height: 1 });
     getPlaceholderBase64.mockResolvedValue(
-      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==",
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
     );
 
     const image = await createImage(imageBlob, {
@@ -186,7 +204,7 @@ describe("createImage", async () => {
 
 // 1x1 png
 const OnePixel = atob(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==",
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
 );
 
 // Image 1920x400

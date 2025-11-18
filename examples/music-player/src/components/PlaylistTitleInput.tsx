@@ -19,18 +19,20 @@ export function PlaylistTitleInput({
     setLocalPlaylistTitle(evt.target.value);
   }
 
+  const playlistTitle = playlist.$isLoaded ? playlist.title : "";
+
   function handleFoucsIn() {
     setIsEditing(true);
-    setLocalPlaylistTitle(playlist?.title ?? "");
+    setLocalPlaylistTitle(playlistTitle);
   }
 
   function handleFocusOut() {
     setIsEditing(false);
     setLocalPlaylistTitle("");
-    playlist && updatePlaylistTitle(playlist, localPlaylistTitle);
+    playlist.$isLoaded && updatePlaylistTitle(playlist, localPlaylistTitle);
   }
 
-  const inputValue = isEditing ? localPlaylistTitle : (playlist?.title ?? "");
+  const inputValue = isEditing ? localPlaylistTitle : playlistTitle;
 
   return (
     <input

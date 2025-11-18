@@ -1,0 +1,136 @@
+import { Alert, CodeGroup, ContentByFramework, FileName, ReactLogo, SvelteLogo, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
+import RunDevServer from '@/components/docs/snippets/RunDevServer.mdx'
+import StuckCTA from '@/components/docs/snippets/StuckCTA.mdx'
+
+export const metadata = {
+  description: "Add server-side rendering to your Jazz app."
+};
+
+# Add Server-Side Rendering to your App
+
+This guide will take your simple client-side app to the next level by showing you how to create a server-rendered page to publish your data to the world.
+
+<Alert variant="info" className="mt-4 flex gap-2 items-center">
+  If you haven't gone through the [front-end Quickstart](/docs/quickstart), you might find this guide a bit confusing. If you're looking for a quick reference, you might find [this page](/docs/project-setup#ssr-integration) more helpful!
+</Alert>
+
+## Creating an agent
+For Jazz to access data on the server, we need to create an SSR agent, which is effectively a read-only user which can access public data stored in Jazz.
+
+We can create this user using the `createSSRJazzAgent` function. In this example, we'll create a new file and export the agent, which allows us to import and use the same agent in multiple pages.
+
+<ContentByFramework framework="react">
+<FileName>app/jazzSSR.ts</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+<FileName>src/lib/jazzSSR.ts</FileName>
+</ContentByFramework>
+<CodeGroup className="mt-4 [&_span]:[tab-size:2]" preferWrap>
+```ts jazzSSR.ts
+```
+</CodeGroup>
+
+## Telling Jazz to use the SSR agent
+
+Normally, Jazz expects a logged in user (or an anonymous user) to be accessing data. We can use the `enableSSR` setting to tell Jazz that this may not be the case, and the data on the page may be being accessed by an agent.
+
+<ContentByFramework framework="react">
+<FileName>app/components/JazzWrapper.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+<FileName>src/routes/+layout.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup savedPreferenceKey="framework" id="enable-ssr">
+<TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
+```tsx JazzWrapper.tsx
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
+```svelte +layout.svelte
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+## Making your data public
+
+By default, when you create data in Jazz, it's private and only accessible to the account that created it.
+
+However, the SSR agent is credential-less and unauthenticated, so it can only read data which has been made public. Although Jazz allows you to define [complex, role-based permissions](/docs/permissions-and-sharing/overview), here, we'll focus on making the CoValues public.
+
+<FileName>app/schema.ts</FileName>
+<CodeGroup preferWrap>
+```ts schema.ts
+```
+</CodeGroup>
+
+## Creating a server-rendered page
+
+Now let's set up a page which will be read by the agent we created earlier, and rendered fully on the server.
+
+<ContentByFramework framework="react">
+<FileName>app/festival/[festivalId]/page.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+<FileName>src/routes/festival/[festivalId]/+page.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup savedPreferenceKey="framework" id="add-wrapper">
+<TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
+```tsx page.tsx
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
+```svelte +page.svelte
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+<ContentByFramework framework="react">
+<Alert variant="info" className="mt-4">
+  TypeScript might not recognise that `params` is a promise. This is a new feature in Next.js 15, which you can [read more about here](https://nextjs.org/docs/messages/sync-dynamic-apis).
+</Alert>
+</ContentByFramework>
+
+## Linking to your server-rendered page
+
+The last step is to link to your server-rendered page from your `Festival` component so that you can find it easily!
+
+<ContentByFramework framework="react">
+<FileName>app/components/Festival.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+<FileName>lib/components/Festival.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup savedPreferenceKey="framework" id="link-to-page">
+<TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
+```tsx Festival.tsx
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
+```svelte Festival.svelte
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+## Start your app
+Let's fire up your app and see if it works!
+
+<RunDevServer />
+
+If everything's going according to plan, your app will load with the home page. You can click the link to your server-rendered page to see your data - fully rendered on the server!
+
+**Congratulations! 🎉** You've now set up server-side rendering in your React app. You can use this same pattern to render any page on the server.
+
+### Not working?
+- Did you add `enableSSR` to the provider?
+- Did you add `loadAs: jazzSSR` to `Festival.load`?
+- Did you add the migrations to make the data public?
+
+<StuckCTA />
+
+## Next steps
+- Learn more about how to [manage complex permissions](/docs/permissions-and-sharing/overview) using groups and roles
+- Dive deeper into the collaborative data structures we call [CoValues](/docs/core-concepts/covalues/overview)
+- Learn more about migrations in the [accounts and migrations docs](/docs/core-concepts/schemas/accounts-and-migrations)

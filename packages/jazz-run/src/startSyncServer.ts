@@ -46,7 +46,9 @@ export const startSyncServer = async ({
     localNode.setStorage(storage);
   }
 
-  localNode.enableGarbageCollector();
+  localNode.enableGarbageCollector({
+    garbageCollectGroups: true,
+  });
 
   wss.on("connection", function connection(ws, req) {
     // ping/pong for the connection liveness

@@ -10,14 +10,16 @@ import { ControlledAccount, ControlledAgent } from "../coValues/account.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import {
   type AgentSecret,
+  AnyRawCoValue,
   type CoID,
   type CoValueCore,
-  CryptoProvider,
   type RawAccount,
+  RawAccountID,
+  RawCoMap,
   type RawCoValue,
   StorageAPI,
 } from "../exports.js";
-import type { RawCoID, SessionID } from "../ids.js";
+import type { SessionID } from "../ids.js";
 import { LocalNode } from "../localNode.js";
 import { connectedPeers } from "../streamUtils.js";
 import type { Peer, SyncMessage } from "../sync.js";
@@ -25,6 +27,8 @@ import { expectGroup } from "../typeUtils/expectGroup.js";
 import { toSimplifiedMessages } from "./messagesTestUtils.js";
 import { createAsyncStorage, createSyncStorage } from "./testStorage.js";
 import { PureJSCrypto } from "../crypto/PureJSCrypto.js";
+import { CoValueHeader } from "../coValueCore/verifiedState.js";
+import { idforHeader } from "../coValueCore/coValueCore.js";
 
 let Crypto = await WasmCrypto.create();
 
@@ -70,33 +74,11 @@ export async function createTwoConnectedNodes(
   node1Role: Peer["role"],
   node2Role: Peer["role"],
 ) {
-  // Connect nodes initially
-  const [node1ToNode2Peer, node2ToNode1Peer] = connectedPeers(
-    "node1ToNode2",
-    "node2ToNode1",
-    {
-      peer1role: node2Role,
-      peer2role: node1Role,
-    },
-  );
-
-  const node1 = await LocalNode.withNewlyCreatedAccount({
-    peersToLoadFrom: [node1ToNode2Peer],
-    crypto: Crypto,
-    creationProps: { name: "Client" },
-  });
-
-  const node2 = await LocalNode.withNewlyCreatedAccount({
-    peersToLoadFrom: [node2ToNode1Peer],
-    crypto: Crypto,
-    creationProps: { name: "Server" },
-  });
+  const [node1, node2] = await createNConnectedNodes(node1Role, node2Role);
 
   return {
-    node1,
-    node2,
-    node1ToNode2Peer,
-    node2ToNode1Peer,
+    node1: node1!,
+    node2: node2!,
   };
 }
 
@@ -105,62 +87,40 @@ export async function createThreeConnectedNodes(
   node2Role: Peer["role"],
   node3Role: Peer["role"],
 ) {
-  const [node1ToNode2Peer, node2ToNode1Peer] = connectedPeers(
-    "node1ToNode2",
-    "node2ToNode1",
-    {
-      peer1role: node2Role,
-      peer2role: node1Role,
-    },
+  const [node1, node2, node3] = await createNConnectedNodes(
+    node1Role,
+    node2Role,
+    node3Role,
   );
-
-  const [node1ToNode3Peer, node3ToNode1Peer] = connectedPeers(
-    "node1ToNode3",
-    "node3ToNode1",
-    {
-      peer1role: node3Role,
-      peer2role: node1Role,
-    },
-  );
-
-  const [node2ToNode3Peer, node3ToNode2Peer] = connectedPeers(
-    "node2ToNode3",
-    "node3ToNode2",
-    {
-      peer1role: node3Role,
-      peer2role: node2Role,
-    },
-  );
-
-  const node1 = await LocalNode.withNewlyCreatedAccount({
-    peersToLoadFrom: [node1ToNode2Peer, node1ToNode3Peer],
-    crypto: Crypto,
-    creationProps: { name: "Node 1" },
-  });
-
-  const node2 = await LocalNode.withNewlyCreatedAccount({
-    peersToLoadFrom: [node2ToNode1Peer, node2ToNode3Peer],
-    crypto: Crypto,
-    creationProps: { name: "Node 2" },
-  });
-
-  const node3 = await LocalNode.withNewlyCreatedAccount({
-    peersToLoadFrom: [node3ToNode1Peer, node3ToNode2Peer],
-    crypto: Crypto,
-    creationProps: { name: "Node 3" },
-  });
 
   return {
-    node1,
-    node2,
-    node3,
-    node1ToNode2Peer,
-    node2ToNode1Peer,
-    node1ToNode3Peer,
-    node3ToNode1Peer,
-    node2ToNode3Peer,
-    node3ToNode2Peer,
+    node1: node1!,
+    node2: node2!,
+    node3: node3!,
   };
+}
+
+export async function createNConnectedNodes(...nodeRoles: Peer["role"][]) {
+  const nodes = await Promise.all(
+    Array.from({ length: nodeRoles.length }, async (_, i) => {
+      return LocalNode.withNewlyCreatedAccount({
+        peers: [],
+        crypto: Crypto,
+        creationProps: { name: `Node ${i + 1}` },
+      });
+    }),
+  );
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      connectTwoPeers(
+        nodes[i]!.node,
+        nodes[j]!.node,
+        nodeRoles[i]!,
+        nodeRoles[j]!,
+      );
+    }
+  }
+  return nodes;
 }
 
 export function connectTwoPeers(
@@ -582,6 +542,13 @@ export function setupTestNode(
         isSyncServer: opts.isSyncServer,
       });
     },
+    disconnect: () => {
+      const allPeers = Object.values(node.syncManager.peers);
+      allPeers.forEach((peer) => {
+        peer.gracefulShutdown();
+      });
+      node.syncManager.peers = {};
+    },
   };
 
   return ctx;
@@ -592,14 +559,34 @@ export async function setupTestAccount(
     isSyncServer?: boolean;
     connected?: boolean;
     storage?: StorageAPI;
+    accountID?: RawAccountID;
+    accountSecret?: AgentSecret;
   } = {},
 ) {
-  const ctx = await LocalNode.withNewlyCreatedAccount({
-    peersToLoadFrom: [],
-    crypto: Crypto,
-    creationProps: { name: "Client" },
-    storage: opts.storage,
-  });
+  const ctx =
+    opts.accountSecret && opts.accountID
+      ? {
+          node: await LocalNode.withLoadedAccount({
+            peers: [
+              getSyncServerConnectedPeer({
+                peerId: opts.accountID,
+              }).peer,
+            ],
+            crypto: Crypto,
+            storage: opts.storage,
+            accountID: opts.accountID,
+            accountSecret: opts.accountSecret,
+            sessionID: Crypto.newRandomSessionID(opts.accountID),
+          }),
+          accountID: opts.accountID,
+          accountSecret: opts.accountSecret,
+        }
+      : await LocalNode.withNewlyCreatedAccount({
+          peers: [],
+          crypto: Crypto,
+          creationProps: { name: "Client" },
+          storage: opts.storage,
+        });
 
   if (opts.isSyncServer) {
     syncServer.current = ctx.node;
@@ -612,7 +599,7 @@ export async function setupTestAccount(
   }) {
     const { peer, peerStateOnServer, peerOnServer } =
       getSyncServerConnectedPeer({
-        peerId: ctx.node.getCurrentAgent().id,
+        peerId: ctx.node.currentSessionID,
         syncServerName: opts?.syncServerName,
         ourName: opts?.ourName,
         syncServer: opts?.syncServer,
@@ -669,6 +656,13 @@ export async function setupTestAccount(
     connectToSyncServer,
     addStorage,
     addAsyncStorage,
+    spawnNewSession: () => {
+      return setupTestAccount({
+        accountID: ctx.accountID,
+        accountSecret: ctx.accountSecret,
+        connected: true,
+      });
+    },
     disconnect: () => {
       const allPeers = ctx.node.syncManager.getPeers(ctx.accountID);
       allPeers.forEach((peer) => {
@@ -756,12 +750,46 @@ export function createAccountInNode(node: LocalNode) {
   });
 
   const accountCoreEntry = node.getCoValue(accountOnTempNode.id);
-  accountCoreEntry.internalMarkMagicallyAvailable(
-    accountOnTempNode.core.verified,
-  );
+
+  const content = accountOnTempNode.core.newContentSince(undefined)?.[0]!;
+
+  node.syncManager.handleNewContent(content, "import");
 
   return new ControlledAccount(
     accountCoreEntry.getCurrentContent() as RawAccount,
     accountOnTempNode.core.node.agentSecret,
   );
+}
+
+export function createUnloadedCoValue(
+  node: LocalNode,
+  type: AnyRawCoValue["type"] = "comap",
+) {
+  const header = {
+    type,
+    ruleset: { type: "ownedByGroup", group: node.getCurrentAccountOrAgentID() },
+    meta: null,
+    ...node.crypto.createdNowUnique(),
+  } as CoValueHeader;
+
+  const id = idforHeader(header, node.crypto);
+
+  const state = node.getCoValue(id);
+
+  return { coValue: state, id, header };
+}
+
+export function fillCoMapWithLargeData(map: RawCoMap) {
+  const dataSize = 1 * 1024 * 200;
+  const chunkSize = 1024; // 1KB chunks
+  const chunks = dataSize / chunkSize;
+
+  const value = Buffer.alloc(chunkSize, `value$`).toString("base64");
+
+  for (let i = 0; i < chunks; i++) {
+    const key = `key${i}`;
+    map.set(key, value, "trusting");
+  }
+
+  return map;
 }

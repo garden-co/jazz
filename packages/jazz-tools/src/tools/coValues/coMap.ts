@@ -10,12 +10,15 @@ import {
 } from "cojson";
 import {
   AnonymousJazzAgent,
+  AsLoaded,
+  LoadedAndRequired,
   CoFieldInit,
   CoValue,
   CoValueClass,
   getCoValueOwner,
   Group,
   ID,
+  MaybeLoaded,
   PartialOnUndefined,
   RefEncoded,
   RefIfCoValue,
@@ -28,11 +31,12 @@ import {
   SubscribeRestArgs,
   TypeSym,
   BranchDefinition,
-} from "../internal.js";
-import {
+  getIdFromHeader,
+  internalLoadUnique,
   Account,
   CoValueBase,
   CoValueJazzApi,
+  CoValueLoadingState,
   ItemsSym,
   Ref,
   RegisteredSchemas,
@@ -52,7 +56,7 @@ import {
   subscribeToExistingCoValue,
 } from "../internal.js";
 
-type CoMapEdit<V> = {
+export type CoMapEdit<V> = {
   value?: V;
   ref?: RefIfCoValue<V>;
   by: Account | null;
@@ -60,9 +64,9 @@ type CoMapEdit<V> = {
   key?: string;
 };
 
-type LastAndAllCoMapEdits<V> = CoMapEdit<V> & { all: CoMapEdit<V>[] };
+export type LastAndAllCoMapEdits<V> = CoMapEdit<V> & { all: CoMapEdit<V>[] };
 
-type CoMapEdits<M extends CoMap> = {
+export type CoMapEdits<M extends CoMap> = {
   [Key in CoKeys<M>]?: LastAndAllCoMapEdits<M[Key]>;
 };
 
@@ -373,7 +377,7 @@ export class CoMap extends CoValueBase implements CoValue {
       loadAs?: Account | AnonymousJazzAgent;
       skipRetry?: boolean;
     },
-  ): Promise<Resolved<M, R> | null> {
+  ): Promise<MaybeLoaded<Resolved<M, R>>> {
     return loadCoValueWithoutMe(this, id, options);
   }
 
@@ -433,19 +437,17 @@ export class CoMap extends CoValueBase implements CoValue {
     ownerID: ID<Account> | ID<Group>,
     as?: Account | Group | AnonymousJazzAgent,
   ) {
-    return CoMap._findUnique(unique, ownerID, as);
+    const header = CoMap._getUniqueHeader(unique, ownerID);
+
+    return getIdFromHeader(header, as);
   }
 
   /** @internal */
-  static _findUnique<M extends CoMap>(
-    this: CoValueClass<M>,
+  static _getUniqueHeader(
     unique: CoValueUniqueness["uniqueness"],
     ownerID: ID<Account> | ID<Group>,
-    as?: Account | Group | AnonymousJazzAgent,
   ) {
-    as ||= activeAccountContext.get();
-
-    const header = {
+    return {
       type: "comap" as const,
       ruleset: {
         type: "ownedByGroup" as const,
@@ -454,15 +456,12 @@ export class CoMap extends CoValueBase implements CoValue {
       meta: null,
       uniqueness: unique,
     };
-    const crypto =
-      as[TypeSym] === "Anonymous" ? as.node.crypto : as.$jazz.localNode.crypto;
-    return cojsonInternals.idforHeader(header, crypto) as ID<M>;
   }
 
   /**
    * Given some data, updates an existing CoMap or initialises a new one if none exists.
    *
-   * Note: This method respects resolve options, and thus can return `null` if the references cannot be resolved.
+   * Note: This method respects resolve options, and thus can return a not-loaded value if the references cannot be resolved.
    *
    * @example
    * ```ts
@@ -495,33 +494,25 @@ export class CoMap extends CoValueBase implements CoValue {
       owner: Account | Group;
       resolve?: RefsToResolveStrict<M, R>;
     },
-  ): Promise<Resolved<M, R> | null> {
-    const mapId = CoMap._findUnique(
+  ): Promise<MaybeLoaded<Resolved<M, R>>> {
+    const header = CoMap._getUniqueHeader(
       options.unique,
       options.owner.$jazz.id,
-      options.owner.$jazz.loadedAs,
     );
-    let map: Resolved<M, R> | null = await loadCoValueWithoutMe(this, mapId, {
-      ...options,
-      loadAs: options.owner.$jazz.loadedAs,
-      skipRetry: true,
-    });
-    if (!map) {
-      const instance = new this();
-      map = CoMap._createCoMap(instance, options.value, {
-        owner: options.owner,
-        unique: options.unique,
-      }) as Resolved<M, R>;
-    } else {
-      (map as M).$jazz.applyDiff(
-        options.value as unknown as Partial<CoMapInit<M>>,
-      );
-    }
 
-    return await loadCoValueWithoutMe(this, mapId, {
-      ...options,
-      loadAs: options.owner.$jazz.loadedAs,
-      skipRetry: true,
+    return internalLoadUnique(this, {
+      header,
+      owner: options.owner,
+      resolve: options.resolve,
+      onCreateWhenMissing: () => {
+        (this as any).create(options.value, {
+          owner: options.owner,
+          unique: options.unique,
+        });
+      },
+      onUpdateWhenFound(value) {
+        value.$jazz.applyDiff(options.value);
+      },
     });
   }
 
@@ -530,11 +521,14 @@ export class CoMap extends CoValueBase implements CoValue {
    * @param unique The unique identifier of the CoMap to load.
    * @param ownerID The ID of the owner of the CoMap.
    * @param options Additional options for loading the CoMap.
-   * @returns The loaded CoMap, or null if unavailable.
+   * @returns The loaded CoMap, or an not-loaded value if unavailable.
    *
    * @deprecated Use `co.map(...).loadUnique` instead.
    */
-  static loadUnique<M extends CoMap, const R extends RefsToResolve<M> = true>(
+  static async loadUnique<
+    M extends CoMap,
+    const R extends RefsToResolve<M> = true,
+  >(
     this: CoValueClass<M>,
     unique: CoValueUniqueness["uniqueness"],
     ownerID: ID<Account> | ID<Group>,
@@ -542,12 +536,20 @@ export class CoMap extends CoValueBase implements CoValue {
       resolve?: RefsToResolveStrict<M, R>;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<Resolved<M, R> | null> {
-    return loadCoValueWithoutMe(
-      this,
-      CoMap._findUnique(unique, ownerID, options?.loadAs),
-      { ...options, skipRetry: true },
-    );
+  ): Promise<MaybeLoaded<Resolved<M, R>>> {
+    const header = CoMap._getUniqueHeader(unique, ownerID);
+
+    const owner = await Group.load(ownerID, {
+      loadAs: options?.loadAs,
+    });
+
+    if (!owner.$isLoaded) return owner;
+
+    return internalLoadUnique(this, {
+      header,
+      owner,
+      resolve: options?.resolve,
+    });
   }
 }
 
@@ -756,15 +758,14 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
    **/
   get refs(): Simplify<
     {
-      [Key in CoKeys<M> as NonNullable<M[Key]> extends CoValue
+      [Key in CoKeys<M> as LoadedAndRequired<M[Key]> extends CoValue
         ? Key
         : never]?: RefIfCoValue<M[Key]>;
     } & {
-      [Key in CoKeys<M> as M[Key] extends undefined
-        ? never
-        : M[Key] extends CoValue
-          ? Key
-          : never]: RefIfCoValue<M[Key]>;
+      // Non-loaded CoValue refs (i.e. refs with type CoValue | null) are still required refs
+      [Key in CoKeys<M> as AsLoaded<M[Key]> extends CoValue
+        ? Key
+        : never]: RefIfCoValue<M[Key]>;
     }
   > {
     return makeRefs<CoKeys<this>>(

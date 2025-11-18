@@ -19,4 +19,11 @@ export const products = [
     url: "https://hendapp.com",
     imageUrl: "/hend.png",
   },
+  {
+    name: "Tilly",
+    description:
+      "A relationship journal so simple that you actually use it.",
+    url: "https://tilly.social/",
+    imageUrl: "/tilly-screen.png",
+  },
 ];

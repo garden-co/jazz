@@ -1,0 +1,15 @@
+{
+  "ignoreCommand": "npx turbo-ignore",
+  "headers": [
+    {
+      "source": "/datasets/journal/data-hou8Ux.json",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        },
+        { "key": "Content-Type", "value": "application/json; charset=utf-8" }
+      ]
+    }
+  ]
+}

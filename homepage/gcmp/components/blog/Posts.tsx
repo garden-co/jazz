@@ -5,7 +5,7 @@ import Link from "next/link";
 
 export function Posts() {
   return (
-    <div className="grid md:grid-cols-3 gap-8">
+    <div className="grid grid-cols-1 gap-8 md:grid-cols-3">
       {posts.map((post) => (
         <div className="flex flex-col gap-2" key={post.meta.slug}>
           <PostCoverImage

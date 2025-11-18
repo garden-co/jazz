@@ -336,6 +336,28 @@ describe("Better-Auth client plugin", () => {
     );
   });
 
+  it("should log out from Jazz when the session is null", async () => {
+    const credentials = await authSecretStorage.get();
+    assert(credentials, "Jazz credentials are not available");
+
+    await jazzContextManager.authenticate({
+      ...credentials,
+      provider: "better-auth",
+    });
+    await authSecretStorage.set({
+      ...credentials,
+      provider: "better-auth",
+    });
+
+    expect(authSecretStorage.isAuthenticated).toBe(true);
+
+    customFetchImpl.mockResolvedValue(new Response(JSON.stringify(null)));
+
+    await authClient.getSession();
+
+    expect(authSecretStorage.isAuthenticated).toBe(false);
+  });
+
   describe("Race condition handling", () => {
     it("should handle multiple concurrent get-session calls without errors", async () => {
       const credentials = await authSecretStorage.get();

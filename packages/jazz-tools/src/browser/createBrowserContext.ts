@@ -53,14 +53,16 @@ async function setupPeers(options: BaseBrowserContextOptions) {
 
   const { useIndexedDB } = getStorageOptions(options.storage);
 
-  const peersToLoadFrom: Peer[] = [];
+  const peers: Peer[] = [];
 
   const storage = useIndexedDB ? await getIndexedDBStorage() : undefined;
 
   if (options.sync.when === "never") {
     return {
+      addConnectionListener: () => () => {},
+      connected: () => false,
       toggleNetwork: () => {},
-      peersToLoadFrom,
+      peers,
       storage,
       setNode: () => {},
       crypto,
@@ -74,11 +76,11 @@ async function setupPeers(options: BaseBrowserContextOptions) {
       if (node) {
         node.syncManager.addPeer(peer);
       } else {
-        peersToLoadFrom.push(peer);
+        peers.push(peer);
       }
     },
     removePeer: (peer) => {
-      peersToLoadFrom.splice(peersToLoadFrom.indexOf(peer), 1);
+      peers.splice(peers.indexOf(peer), 1);
     },
   });
 
@@ -100,7 +102,17 @@ async function setupPeers(options: BaseBrowserContextOptions) {
 
   return {
     toggleNetwork,
-    peersToLoadFrom,
+    addConnectionListener(listener: (connected: boolean) => void) {
+      wsPeer.subscribe(listener);
+
+      return () => {
+        wsPeer.unsubscribe(listener);
+      };
+    },
+    connected() {
+      return wsPeer.connected;
+    },
+    peers,
     storage,
     setNode,
     crypto,
@@ -110,12 +122,19 @@ async function setupPeers(options: BaseBrowserContextOptions) {
 export async function createJazzBrowserGuestContext(
   options: BaseBrowserContextOptions,
 ) {
-  const { toggleNetwork, peersToLoadFrom, setNode, crypto, storage } =
-    await setupPeers(options);
+  const {
+    toggleNetwork,
+    peers,
+    setNode,
+    crypto,
+    storage,
+    addConnectionListener,
+    connected,
+  } = await setupPeers(options);
 
   const context = await createAnonymousJazzContext({
     crypto,
-    peersToLoadFrom,
+    peers,
     storage,
   });
 
@@ -134,6 +153,8 @@ export async function createJazzBrowserGuestContext(
     logOut: () => {
       return context.logOut();
     },
+    addConnectionListener,
+    connected,
   };
 }
 
@@ -153,8 +174,15 @@ export async function createJazzBrowserContext<
     | (AccountClass<Account> & CoValueFromRaw<Account>)
     | AnyAccountSchema,
 >(options: BrowserContextOptions<S>) {
-  const { toggleNetwork, peersToLoadFrom, setNode, crypto, storage } =
-    await setupPeers(options);
+  const {
+    toggleNetwork,
+    peers,
+    setNode,
+    crypto,
+    storage,
+    addConnectionListener,
+    connected,
+  } = await setupPeers(options);
 
   let unsubscribeAuthUpdate = () => {};
 
@@ -177,7 +205,7 @@ export async function createJazzBrowserContext<
   const context = await createJazzContext({
     credentials: options.credentials,
     newAccountProps: options.newAccountProps,
-    peersToLoadFrom,
+    peers,
     storage,
     crypto,
     defaultProfileName: options.defaultProfileName,
@@ -202,6 +230,8 @@ export async function createJazzBrowserContext<
       unsubscribeAuthUpdate();
       return context.logOut();
     },
+    addConnectionListener,
+    connected,
   };
 }
 

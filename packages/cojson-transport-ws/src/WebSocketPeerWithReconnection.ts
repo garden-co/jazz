@@ -29,6 +29,9 @@ export class WebSocketPeerWithReconnection {
   enabled = false;
   closed = true;
 
+  // We use this state to feed the Connection Status hooks
+  connected = false;
+
   currentPeer: Peer | undefined = undefined;
   private unsubscribeNetworkChange: (() => void) | undefined = undefined;
 
@@ -112,6 +115,7 @@ export class WebSocketPeerWithReconnection {
       role: "server",
       onClose: () => {
         this.closed = true;
+        this.connected = false;
         for (const listener of this.onConnectionChangeListeners) {
           listener(false);
         }
@@ -119,6 +123,7 @@ export class WebSocketPeerWithReconnection {
       },
       onSuccess: () => {
         this.closed = false;
+        this.connected = true;
         for (const listener of this.onConnectionChangeListeners) {
           listener(true);
         }
@@ -134,6 +139,8 @@ export class WebSocketPeerWithReconnection {
   enable = () => {
     if (this.enabled) return;
 
+    // Optimistically set the connected state to true
+    this.connected = true;
     this.enabled = true;
     this.startConnection();
   };

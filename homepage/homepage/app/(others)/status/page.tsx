@@ -4,14 +4,27 @@ import { clsx } from "clsx";
 import type { Metadata } from "next";
 import { Fragment } from "react";
 
-const title = "Status";
+const metaTags = {
+  title: "Status",
+  description: "View Jazz system status and latency across probes",
+  url: "https://jazz.tools",
+}
 
 export const dynamic = "force-static";
 
 export const metadata: Metadata = {
-  title,
+  title: metaTags.title,
+  description: metaTags.description,
   openGraph: {
-    title,
+    title: metaTags.title,
+    description: metaTags.description,
+    images: [
+      {
+        url: `${metaTags.url}/api/opengraph-image?title=${encodeURIComponent(metaTags.title)}`,
+        height: 630,
+        alt: metaTags.title,
+      },
+    ],
   },
 };
 
@@ -29,6 +42,7 @@ const PROBES = [
   "Spain",
   "UAE",
   "Zurich",
+  "Frankfurt",
 ] as const;
 
 interface DataRow {
@@ -72,7 +86,9 @@ const query = async () => {
             type: "prometheus",
             uid: "grafanacloud-prom",
           },
-          expr: `avg_over_time(probe_success{instance="https://mesh.jazz.tools/self-sync-check", job="self-sync-check", probe=~"${PROBES.join("|")}"}[$__range])`,
+          expr: `sum  by (probe) (sum_over_time(probe_success{instance="https://mesh.jazz.tools/self-sync-check", job="self-sync-check", probe=~"${PROBES.join("|")}"}[$__range]))
+          /
+          sum  by (probe) (count_over_time(probe_success{instance="https://mesh.jazz.tools/self-sync-check", job="self-sync-check", probe=~"${PROBES.join("|")}"}[$__range]))`,
           instant: true,
           range: false,
           refId: "up_ratio",
@@ -82,7 +98,7 @@ const query = async () => {
             type: "prometheus",
             uid: "grafanacloud-prom",
           },
-          expr: `sum_over_time(probe_success{instance="https://mesh.jazz.tools/self-sync-check", job="self-sync-check", probe=~"${PROBES.join("|")}"}[$__interval])`,
+          expr: `sum by (probe) (sum_over_time(probe_success{instance="https://mesh.jazz.tools/self-sync-check", job="self-sync-check", probe=~"${PROBES.join("|")}"}[$__interval]))`,
           instant: false,
           range: true,
           interval: intervalMin + "m",
@@ -93,7 +109,7 @@ const query = async () => {
             type: "prometheus",
             uid: "grafanacloud-prom",
           },
-          expr: `count_over_time(probe_success{instance="https://mesh.jazz.tools/self-sync-check", job="self-sync-check", probe=~"${PROBES.join("|")}"}[$__interval])`,
+          expr: `sum by (probe) (count_over_time(probe_success{instance="https://mesh.jazz.tools/self-sync-check", job="self-sync-check", probe=~"${PROBES.join("|")}"}[$__interval]))`,
           instant: false,
           range: true,
           interval: intervalMin + "m",
@@ -104,7 +120,7 @@ const query = async () => {
             type: "prometheus",
             uid: "grafanacloud-prom",
           },
-          expr: `1000 * sum(avg_over_time(probe_duration_seconds{instance="https://mesh.jazz.tools/self-sync-check", job="self-sync-check", probe=~"${PROBES.join("|")}"}[$__interval])) by (probe) / 2`,
+          expr: `1000 * sum by (probe) (avg_over_time(probe_duration_seconds{instance="https://mesh.jazz.tools/self-sync-check", job="self-sync-check", probe=~"${PROBES.join("|")}"}[$__interval])) / 2`,
           instant: false,
           range: true,
           interval: intervalMin + "m",
@@ -190,6 +206,7 @@ const query = async () => {
       case "Spain":
       case "Zurich":
       case "UAE":
+      case "Frankfurt":
         return { ...acc, EMEA: { ...acc["EMEA"], [label]: row } };
       case "North Virginia":
       case "North California":

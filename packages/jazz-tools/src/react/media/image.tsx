@@ -1,4 +1,4 @@
-import { ImageDefinition } from "jazz-tools";
+import { CoValueLoadingState, ImageDefinition } from "jazz-tools";
 import {
   type JSX,
   forwardRef,
@@ -51,6 +51,13 @@ export type ImageProps = Omit<
    * ```
    */
   height?: number | "original";
+  /**
+   * A custom placeholder to display while an image is loading. This will
+   * be passed as the src of the img tag, so a data URL works well here.
+   * This will be used as a fallback if no images are ready and no placeholder
+   * is available otherwise.
+   */
+  placeholder?: string;
 };
 
 /**
@@ -69,16 +76,26 @@ export type ImageProps = Omit<
  *       height={100}
  *       alt="Avatar"
  *       style={{ borderRadius: "50%", objectFit: "cover" }}
+         placeholder={myPlaceholder}
  *     />
  *   );
  * }
  * ```
  */
+
 export const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
   { imageId, width, height, ...props },
   ref,
 ) {
-  const image = useCoState(ImageDefinition, imageId);
+  const image = useCoState(ImageDefinition, imageId, {
+    select: (image) => {
+      if (image.$isLoaded) {
+        return image;
+      } else if (image.$jazz.loadingState === CoValueLoadingState.LOADING) {
+        return undefined;
+      } else return null;
+    },
+  });
   const lastBestImage = useRef<[string, string] | null>(null);
 
   /**
@@ -140,6 +157,8 @@ export const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
       return lazyPlaceholder;
     }
 
+    if (image === undefined)
+      return "data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==";
     if (!image) return undefined;
 
     const bestImage = highestResAvailable(
@@ -148,7 +167,7 @@ export const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
       dimensions.height || dimensions.width || 9999,
     );
 
-    if (!bestImage) return image.placeholderDataURL;
+    if (!bestImage) return image.placeholderDataURL ?? props?.placeholder;
     if (lastBestImage.current?.[0] === bestImage.image.$jazz.id)
       return lastBestImage.current?.[1];
 
@@ -161,7 +180,7 @@ export const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
       return url;
     }
 
-    return image.placeholderDataURL;
+    return image.placeholderDataURL ?? props?.placeholder;
   }, [image, dimensions.width, dimensions.height, waitingLazyLoading]);
 
   const onThresholdReached = useCallback(() => {
@@ -204,7 +223,7 @@ function getEmptyPixelBlob() {
       [
         Uint8Array.from(
           atob(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==",
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
           ),
           (c) => c.charCodeAt(0),
         ),

@@ -4,7 +4,7 @@ import { assert, beforeEach, describe, expect, test, vi } from "vitest";
 import { Group, co, subscribeToCoValue, z } from "../exports.js";
 
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
-import { waitFor } from "./utils.js";
+import { assertLoaded, waitFor } from "./utils.js";
 
 beforeEach(async () => {
   cojsonInternals.CO_VALUE_LOADING_CONFIG.RETRY_DELAY = 1000;
@@ -45,7 +45,7 @@ describe("CoMap Branching", async () => {
         unstable_branch: { name: "feature-branch" },
       });
 
-      assert(branchPerson);
+      assertLoaded(branchPerson);
 
       // Edit the branch
       branchPerson.$jazz.applyDiff({
@@ -107,7 +107,7 @@ describe("CoMap Branching", async () => {
         unstable_branch: { name: "feature-branch" },
       });
 
-      assert(branchPerson);
+      assertLoaded(branchPerson);
 
       // Edit the branch
       branchPerson.$jazz.applyDiff({
@@ -161,7 +161,7 @@ describe("CoMap Branching", async () => {
         unstable_branch: { name: "no-changes-branch" },
       });
 
-      assert(branchPerson);
+      assertLoaded(branchPerson);
 
       // Verify branch has same values as original
       expect(branchPerson.name).toBe("John Doe");
@@ -201,7 +201,7 @@ describe("CoMap Branching", async () => {
         unstable_branch: { name: "shared-branch" },
       });
 
-      assert(branch1);
+      assertLoaded(branch1);
 
       branch1.$jazz.applyDiff({
         name: "John Smith",
@@ -213,7 +213,7 @@ describe("CoMap Branching", async () => {
         unstable_branch: { name: "shared-branch" },
       });
 
-      assert(branch2);
+      assertLoaded(branch2);
 
       // Both branches should have the same changes
       expect(branch1.name).toBe("John Smith");
@@ -267,7 +267,7 @@ describe("CoMap Branching", async () => {
         loadAs: alice,
       });
 
-      assert(branch1);
+      assertLoaded(branch1);
 
       originalPerson.$jazz.applyDiff({
         name: "John Smith",
@@ -280,7 +280,7 @@ describe("CoMap Branching", async () => {
         loadAs: bob,
       });
 
-      assert(branch2);
+      assertLoaded(branch2);
 
       // Both branches should have the same changes
       expect(branch1.name).toBe("John Doe");
@@ -337,7 +337,7 @@ describe("CoMap Branching", async () => {
         unstable_branch: { name: "double-merge-branch" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       branch.$jazz.applyDiff({
         name: "John Smith",
@@ -392,7 +392,7 @@ describe("CoMap Branching", async () => {
         loadAs: alice,
       });
 
-      assert(branch1);
+      assertLoaded(branch1);
 
       branch1.$jazz.applyDiff({
         name: "John Smith",
@@ -404,7 +404,7 @@ describe("CoMap Branching", async () => {
         loadAs: bob,
       });
 
-      assert(branch2);
+      assertLoaded(branch2);
 
       branch2.$jazz.applyDiff({
         age: 31,
@@ -464,8 +464,7 @@ describe("CoMap Branching", async () => {
         unstable_branch: { name: "load-by-id-branch" },
       });
 
-      assert(branch);
-
+      assertLoaded(branch);
       expect(branch.$jazz.id).toBe(originalPerson.$jazz.id);
     });
 
@@ -492,7 +491,7 @@ describe("CoMap Branching", async () => {
         unstable_branch: { name: "conflict-branch" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       // User 1 creates a branch and makes changes
       branch.$jazz.applyDiff({
@@ -544,7 +543,7 @@ describe("CoMap Branching", async () => {
         unstable_branch: { name: "align-branch" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       branch.$jazz.applyDiff({
         name: "John Smith",
@@ -565,7 +564,7 @@ describe("CoMap Branching", async () => {
         unstable_branch: { name: "align-branch" },
       });
 
-      assert(loadedBranch);
+      assertLoaded(loadedBranch);
 
       expect(loadedBranch.name).toBe("John Smith");
       expect(loadedBranch.age).toBe(30);
@@ -623,7 +622,7 @@ describe("CoMap Branching", async () => {
         unstable_branch: { name: "large-doc-edit" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       // Make extensive changes to the branch
       branch.$jazz.applyDiff({
@@ -646,7 +645,7 @@ describe("CoMap Branching", async () => {
         },
       });
 
-      assert(loadedLargeDoc);
+      assertLoaded(loadedLargeDoc);
 
       // Verify original is unchanged
       expect(loadedLargeDoc.title).toBe("Large Document");
@@ -703,7 +702,7 @@ describe("CoMap Branching", async () => {
         unstable_branch: { name: "subscribe-branch" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       const spy = vi.fn();
       branch.$jazz.subscribe(
@@ -774,7 +773,7 @@ describe("CoMap Branching", async () => {
         unstable_branch: { name: "ensure-loaded-branch" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       branch.$jazz.applyDiff({
         name: "John Smith",
@@ -834,7 +833,7 @@ describe("CoMap Branching", async () => {
         unstable_branch: { name: "schema-subscribe-branch" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       branch.$jazz.applyDiff({
         name: "John Smith",

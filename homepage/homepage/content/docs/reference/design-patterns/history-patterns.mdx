@@ -1,0 +1,47 @@
+import { CodeGroup } from "@/components/forMdx";
+export const metadata = { title: "History Patterns" };
+
+# History Patterns
+
+Jazz's automatic history tracking enables powerful patterns for building collaborative features. Here's how to implement common history-based functionality.
+
+## Audit Logs
+
+Build a complete audit trail showing all changes to your data:
+
+<CodeGroup>
+```ts index.ts#AuditLogs
+```
+</CodeGroup>
+
+## Activity Feeds
+
+Show recent activity across your application:
+
+<CodeGroup>
+```ts index.ts#GetRecentActivity
+```
+</CodeGroup>
+
+## Change Indicators
+
+Show when something was last updated:
+
+<CodeGroup>
+```ts index.ts#GetLastUpdated
+```
+</CodeGroup>
+
+## Finding Specific Changes
+
+Query history for specific events:
+
+<CodeGroup>
+```ts index.ts#QueryHistory
+```
+</CodeGroup>
+
+## Further Reading
+
+- [History](/docs/key-features/history) - Complete reference for the history API
+- [Subscription & Loading](/docs/core-concepts/subscription-and-loading) - Ensure CoValues are loaded before accessing history

@@ -31,11 +31,11 @@ export const Route = createFileRoute("/_authenticated/game/$gameId")({
   loader: async ({ context: { me }, params: { gameId } }) => {
     const game = await Game.load(gameId, {
       resolve: {
-        player1: true,
-        player2: true,
+        player1: { account: true },
+        player2: { account: true },
       },
     });
-    if (!game) {
+    if (!game.$isLoaded) {
       throw redirect({ to: "/" });
     }
 
@@ -46,7 +46,7 @@ export const Route = createFileRoute("/_authenticated/game/$gameId")({
 function RouteComponent() {
   const { gameId, loaderGame } = Route.useLoaderData();
 
-  const isPlayer1 = loaderGame.player1?.account?.isMe;
+  const isPlayer1 = loaderGame.player1.account.isMe;
   const player = isPlayer1 ? "player1" : "player2";
 
   const [playSelection, setPlaySelection] = useState<
@@ -54,7 +54,12 @@ function RouteComponent() {
   >(loaderGame[player]?.playSelection);
   const sendInboxMessage = experimental_useInboxSender(WORKER_ID);
 
-  const game = useCoState(Game, gameId);
+  const game = useCoState(Game, gameId, {
+    resolve: {
+      player1: true,
+      player2: true,
+    },
+  });
 
   useEffect(() => {
     let gameCompleted = Boolean(loaderGame.outcome);
@@ -68,7 +73,7 @@ function RouteComponent() {
     });
   }, []);
 
-  if (!game) {
+  if (!game.$isLoaded) {
     return null;
   }
 
@@ -101,16 +106,16 @@ function RouteComponent() {
           <CardTitle>Jazz, Paper, Scissors!</CardTitle>
           <span>Welcome {isPlayer1 ? "Player 1" : "Player 2"}</span>
           <span>
-            {game?.player1Score ?? 0} - {game?.player2Score ?? 0}
+            {game.player1Score} - {game.player2Score}
           </span>
         </CardHeader>
         {gameComplete ? (
           <>
             <div className="border">
               Game Over,{" "}
-              {game?.outcome === player
+              {game.outcome === player
                 ? "You Win!"
-                : game?.outcome === "draw"
+                : game.outcome === "draw"
                   ? "It's a Draw!"
                   : "You Lose!"}
             </div>

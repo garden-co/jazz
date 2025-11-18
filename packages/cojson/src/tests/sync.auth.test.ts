@@ -30,7 +30,7 @@ describe("LocalNode auth sync", () => {
       creationProps: {
         name: "new-account",
       },
-      peersToLoadFrom: [peer],
+      peers: [peer],
       crypto: Crypto,
     });
 
@@ -74,7 +74,7 @@ describe("LocalNode auth sync", () => {
       creationProps: {
         name: "new-account",
       },
-      peersToLoadFrom: [peer],
+      peers: [peer],
       crypto: Crypto,
       async migration(account) {
         const root = account.createMap();
@@ -143,7 +143,7 @@ describe("LocalNode auth sync", () => {
         creationProps: {
           name: "new-account",
         },
-        peersToLoadFrom: [newAccountPeer],
+        peers: [newAccountPeer],
         crypto: Crypto,
       });
 
@@ -155,7 +155,7 @@ describe("LocalNode auth sync", () => {
     const node = await LocalNode.withLoadedAccount({
       accountID,
       accountSecret,
-      peersToLoadFrom: [existingAccountPeer],
+      peers: [existingAccountPeer],
       sessionID: undefined,
       crypto: Crypto,
     });
@@ -210,7 +210,7 @@ describe("LocalNode auth sync", () => {
       creationProps: {
         name: "new-account",
       },
-      peersToLoadFrom: [newAccountPeer],
+      peers: [newAccountPeer],
       crypto: Crypto,
     });
 
@@ -225,7 +225,7 @@ describe("LocalNode auth sync", () => {
     const node = await LocalNode.withLoadedAccount({
       accountID,
       accountSecret,
-      peersToLoadFrom: [existingAccountPeer],
+      peers: [existingAccountPeer],
       sessionID: undefined,
       crypto: Crypto,
     });

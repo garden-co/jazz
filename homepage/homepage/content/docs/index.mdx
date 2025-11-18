@@ -1,5 +1,4 @@
-import { CodeGroup, ContentByFramework, JazzLogo } from "@/components/forMdx";
-import { Alert } from "@garden-co/design-system/src/components/atoms/Alert";
+import { Alert, CodeGroup, ContentByFramework, JazzLogo } from "@/components/forMdx";
 
 export const metadata = {
   title: "Documentation",
@@ -17,9 +16,9 @@ It also provides auth, orgs & teams, real-time multiplayer, edit histories, perm
 
 ## Quickstart
 
-**Want to learn the basics?** Check out our [quickstart guide](/docs/getting-started/quickstart) for a step-by-step guide to building a simple app with Jazz.
+**Want to learn the basics?** Check out our [quickstart guide](/docs/quickstart) for a step-by-step guide to building a simple app with Jazz.
 
-**Just want to get started?** You can use [`create-jazz-app`](/docs/tools/create-jazz-app) to create a new Jazz project from one of our starter templates or example apps:
+**Just want to get started?** You can use [`create-jazz-app`](/docs/tooling-and-resources/create-jazz-app) to create a new Jazz project from one of our starter templates or example apps:
 
 <CodeGroup>
   ```sh
@@ -27,15 +26,27 @@ It also provides auth, orgs & teams, real-time multiplayer, edit histories, perm
   ```
 </CodeGroup>
 
+<ContentByFramework framework="react">
+  **Using an LLM?** <a href="/react/llms-full.txt" download>Add our llms.txt</a> to your context window!
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  **Using an LLM?** <a href="/svelte/llms-full.txt" download>Add our llms.txt</a> to your context window!
+</ContentByFramework>
+<ContentByFramework framework="react-native">
+  **Using an LLM?** <a href="/react-native/llms-full.txt" download>Add our llms.txt</a> to your context window!
+</ContentByFramework>
+<ContentByFramework framework="react-native-expo">
+  **Using an LLM?** <a href="/react-native-expo/llms-full.txt" download>Add our llms.txt</a> to your context window!
+</ContentByFramework>
+<ContentByFramework framework="vanilla">
+  **Using an LLM?** <a href="/vanilla/llms-full.txt" download>Add our llms.txt</a> to your context window!
+</ContentByFramework>
+
+
 <Alert variant="info" className="mt-4 flex gap-2 items-center">
  Requires at least Node.js v20.
- See our [Troubleshooting Guide](https://jazz.tools/docs/troubleshooting) for quick fixes.
+ See our [Troubleshooting Guide](/docs/troubleshooting) for quick fixes.
 </Alert>
-
-{/* <ContentByFramework framework="react">
-Or you can follow this [React step-by-step guide](/docs/react/guide) where we walk you through building an issue tracker app.
-
-</ContentByFramework> */}
 
 ## How it works
 
@@ -52,14 +63,14 @@ Have a look at our [example apps](/examples) for inspiration and to see what's p
 
 ## Core concepts
 
-Learn how to structure your data using [collaborative values](/docs/schemas/covalues) — the building blocks that make Jazz apps work.
+Learn how to structure your data using [collaborative values](/docs/core-concepts/covalues/overview) — the building blocks that make Jazz apps work.
 
 ## Sync and storage
 
-Sync and persist your data by setting up [sync and storage infrastructure](/docs/sync-and-storage) using Jazz Cloud, or host it yourself.
+Sync and persist your data by setting up [sync and storage infrastructure](/docs/core-concepts/sync-and-storage) using Jazz Cloud, or host it yourself.
 
 ## Going deeper
 
-Get better results with AI by [importing the Jazz docs](/docs/ai-tools) into your context window.
+Get better results with AI by [importing the Jazz docs](/docs/tooling-and-resources/ai-tools) into your context window.
 
 If you have any questions or need assistance, please don't hesitate to reach out to us on [Discord](https://discord.gg/utDMjHYg42). We'd love to help you get started.

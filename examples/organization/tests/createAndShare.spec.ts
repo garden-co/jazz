@@ -1,4 +1,4 @@
-import { BrowserContext, expect, test } from "@playwright/test";
+import { type BrowserContext, expect, test } from "@playwright/test";
 
 test("create a new organization and share", async ({
   page: marioPage,

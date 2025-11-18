@@ -1,4 +1,7 @@
-import { type AdapterDebugLogs, createAdapter } from "better-auth/adapters";
+import {
+  createAdapterFactory,
+  type DBAdapterDebugLogOption,
+} from "better-auth/adapters";
 import type { Account } from "jazz-tools";
 import { startWorker } from "jazz-tools/worker";
 import {
@@ -7,14 +10,14 @@ import {
   SessionRepository,
   VerificationRepository,
   AccountRepository,
-} from "./repository";
+} from "./repository/index.js";
 import { createJazzSchema, tableItem2Record } from "./schema.js";
 
 export interface JazzAdapterConfig {
   /**
    * Helps you debug issues with the adapter.
    */
-  debugLogs?: AdapterDebugLogs;
+  debugLogs?: DBAdapterDebugLogOption;
   /**
    * The sync server to use.
    */
@@ -60,8 +63,8 @@ export interface JazzAdapterConfig {
  */
 export const JazzBetterAuthDatabaseAdapter = (
   config: JazzAdapterConfig,
-): ReturnType<typeof createAdapter> =>
-  createAdapter({
+): ReturnType<typeof createAdapterFactory> =>
+  createAdapterFactory({
     config: {
       adapterId: "jazz-tools-adapter", // A unique identifier for the adapter.
       adapterName: "Jazz Tools Adapter", // The name of the adapter.
@@ -77,7 +80,7 @@ export const JazzBetterAuthDatabaseAdapter = (
 
       let worker: Account | undefined = undefined;
 
-      async function getWorker() {
+      async function getWorker(): Promise<Account> {
         if (worker) {
           return worker;
         }
@@ -93,7 +96,7 @@ export const JazzBetterAuthDatabaseAdapter = (
 
         worker = result.worker;
 
-        return worker;
+        return result.worker;
       }
 
       async function initRepository(

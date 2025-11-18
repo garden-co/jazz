@@ -10,12 +10,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Loaded } from "jazz-tools";
 import { useState } from "react";
 import { ConfirmDialog } from "./ConfirmDialog";
 
 interface EditTrackDialogProps {
-  track: Loaded<typeof MusicTrack>;
+  track: MusicTrack;
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
   onDelete: () => void;

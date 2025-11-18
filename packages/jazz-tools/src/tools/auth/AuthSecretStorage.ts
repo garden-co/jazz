@@ -3,6 +3,7 @@ import type { Account } from "../coValues/account.js";
 import type { ID } from "../internal.js";
 import { AuthCredentials } from "../types.js";
 import KvStoreContext from "./KvStoreContext.js";
+import { z } from "zod/v4";
 
 const STORAGE_KEY = "jazz-logged-in-secret";
 
@@ -24,20 +25,26 @@ export class AuthSecretStorage {
   private listeners: Set<(isAuthenticated: boolean) => void>;
   public isAuthenticated: boolean;
 
-  constructor() {
+  constructor(private storageKey: string = STORAGE_KEY) {
+    z.string().nonempty().parse(storageKey);
+
     this.listeners = new Set();
     this.isAuthenticated = false;
+  }
+
+  getStorageKey(): string {
+    return this.storageKey;
   }
 
   async migrate() {
     const kvStore = KvStoreContext.getInstance().getStorage();
 
-    if (!(await kvStore.get(STORAGE_KEY))) {
+    if (!(await kvStore.get(this.storageKey))) {
       const demoAuthSecret = await kvStore.get("demo-auth-logged-in-secret");
       if (demoAuthSecret) {
         const parsed = JSON.parse(demoAuthSecret);
         await kvStore.set(
-          STORAGE_KEY,
+          this.storageKey,
           JSON.stringify({
             accountID: parsed.accountID,
             accountSecret: parsed.accountSecret,
@@ -51,7 +58,7 @@ export class AuthSecretStorage {
       if (clerkAuthSecret) {
         const parsed = JSON.parse(clerkAuthSecret);
         await kvStore.set(
-          STORAGE_KEY,
+          this.storageKey,
           JSON.stringify({
             accountID: parsed.accountID,
             accountSecret: parsed.secret,
@@ -62,14 +69,14 @@ export class AuthSecretStorage {
       }
     }
 
-    const value = await kvStore.get(STORAGE_KEY);
+    const value = await kvStore.get(this.storageKey);
 
     if (value) {
       const parsed = JSON.parse(value);
 
       if ("secret" in parsed) {
         await kvStore.set(
-          STORAGE_KEY,
+          this.storageKey,
           JSON.stringify({
             accountID: parsed.accountID,
             secretSeed: parsed.secretSeed,
@@ -83,7 +90,7 @@ export class AuthSecretStorage {
 
   async get(): Promise<AuthCredentials | null> {
     const kvStore = KvStoreContext.getInstance().getStorage();
-    const data = await kvStore.get(STORAGE_KEY);
+    const data = await kvStore.get(this.storageKey);
 
     if (!data) return null;
 
@@ -106,7 +113,7 @@ export class AuthSecretStorage {
   async setWithoutNotify(payload: AuthSetPayload) {
     const kvStore = KvStoreContext.getInstance().getStorage();
     await kvStore.set(
-      STORAGE_KEY,
+      this.storageKey,
       JSON.stringify({
         accountID: payload.accountID,
         secretSeed: payload.secretSeed
@@ -148,7 +155,7 @@ export class AuthSecretStorage {
 
   async clearWithoutNotify() {
     const kvStore = KvStoreContext.getInstance().getStorage();
-    await kvStore.delete(STORAGE_KEY);
+    await kvStore.delete(this.storageKey);
   }
 
   async clear() {

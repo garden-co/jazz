@@ -1,0 +1,39 @@
+export const metadata = {
+  description: "Get answers to common questions about Jazz and our commitment to open source."
+};
+
+# Frequently Asked Questions
+
+## How established is Jazz?
+
+Jazz is backed by fantastic angel and institutional investors with experience and know-how in devtools and has been in development since 2020.
+
+## Will Jazz be around long-term?
+
+We're committed to Jazz being around for a long time! We understand that when you choose Jazz for your projects, you're investing time and making a significant architectural choice, and we take that responsibility seriously.
+That's why we've designed Jazz with longevity in mind from the start:
+
+- The open source nature of our sync server means you'll always be able to run your own infrastructure
+- Your data remains accessible even if our cloud services change
+- We're designing the protocol as an open specification
+
+This approach creates a foundation that can continue regardless of any single company's involvement. The local-first architecture means your apps will always work, even offline, and your data remains yours.
+
+## How secure is my data?
+
+Jazz encrypts all your data by default using modern cryptographic standards. Every transaction is cryptographically signed, and data is encrypted using industry-standard algorithms including BLAKE3 hashing, Ed25519 signatures, and XSalsa20 stream ciphers.
+
+Key features of Jazz's security:
+
+- **Privacy by default**: Your data is encrypted even on Jazz Cloud servers
+- **Automatic key rotation**: When members are removed from Groups, encryption keys rotate automatically
+- **Verifiable authenticity**: Every change is cryptographically signed
+- **Zero-trust architecture**: Only people you explicitly grant access can read your data
+
+For technical details, see our [encryption documentation](/docs/reference/encryption).
+
+## Does Jazz use Non-standard cryptography?
+
+Jazz uses BLAKE3, XSalsa20, and Ed25519, which are all widely published and publicly reviewed standard cryptographic algorithms.
+
+Although we're not lawyers, and so can't give legal advice, we believe that Jazz does not use 'Non-standard cryptography' as defined in the [BIS requirements](https://www.ecfr.gov/current/title-15/subtitle-B/chapter-VII/subchapter-C/part-772#p-772.1(Non-standard%20cryptography)) and therefore the requirements for publishing Jazz apps in the Apple App Store.

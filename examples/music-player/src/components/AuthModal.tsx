@@ -1,4 +1,3 @@
-import { MusicaAccount } from "@/1_schema";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -7,8 +6,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { useAccount, usePasskeyAuth } from "jazz-tools/react";
+import { usePasskeyAuth } from "jazz-tools/react";
 import { useState } from "react";
+import { useAccountSelector } from "@/components/AccountProvider.tsx";
 
 interface AuthModalProps {
   open: boolean;
@@ -18,18 +18,8 @@ interface AuthModalProps {
 export function AuthModal({ open, onOpenChange }: AuthModalProps) {
   const [isSignUp, setIsSignUp] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  const { me } = useAccount(MusicaAccount, {
-    resolve: {
-      root: {
-        rootPlaylist: {
-          tracks: {
-            $each: true,
-          },
-        },
-      },
-      profile: true,
-    },
+  const profileName = useAccountSelector({
+    select: (me) => (me.$isLoaded ? me.profile.name : undefined),
   });
 
   const auth = usePasskeyAuth({
@@ -46,7 +36,9 @@ export function AuthModal({ open, onOpenChange }: AuthModalProps) {
 
     try {
       if (isSignUp) {
-        await auth.signUp(me?.profile.name || "");
+        if (profileName) {
+          await auth.signUp(profileName);
+        }
       } else {
         await auth.logIn();
       }
@@ -64,9 +56,12 @@ export function AuthModal({ open, onOpenChange }: AuthModalProps) {
     }
   };
 
-  const shouldShowTransferRootPlaylist =
-    !isSignUp &&
-    me?.root.rootPlaylist.tracks.some((track) => !track.isExampleTrack);
+  const shouldShowTransferRootPlaylist = useAccountSelector({
+    select: (me) =>
+      !isSignUp &&
+      me.$isLoaded &&
+      me.root.rootPlaylist.tracks.some((track) => !track.isExampleTrack),
+  });
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

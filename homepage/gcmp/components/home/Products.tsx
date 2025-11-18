@@ -17,17 +17,17 @@ function ComingSoon({ children }: { children: React.ReactNode }) {
 
 export default function Products() {
   return (
-    <div className="grid gap-5">
+    <div className="grid gap-5 mb-16 mt-14">
       <H2>Theses & Products</H2>
       <GappedGrid>
         <GridCard>
           <H3>Distributed state is too hard.</H3>
-          <P>
+          <p>
             Having state all over the place is the hardest part of every app.
             What if it didn&apos;t have to be?
-          </P>
+          </p>
 
-          <div className="mt-8 space-y-3">
+          <div className="mt-8 flex flex-col gap-3">
             <div className="flex items-center justify-between gap-4">
               <JazzLogo className="h-10 w-auto" />
               <div>
@@ -40,31 +40,31 @@ export default function Products() {
                 </Button>
               </div>
             </div>
-            <P>
+            <p>
               Jazz is an open-source toolkit for sync & secure collaborative
               data.
-            </P>
+            </p>
           </div>
         </GridCard>
 
         <GridCard>
           <H3>Software is places, not apps.</H3>
-          <P>
+          <p>
             People inhabit software. This means we can architect virtual places
             to be fit for humans.
-          </P>
+          </p>
 
-          <div className="mt-8 space-y-3">
+          <div className="mt-8 flex flex-col gap-3">
             <div className="flex items-center justify-between gap-4">
               <GardenLogo className="h-11 w-auto" />
               <div>
                 <ComingSoon>Coming 2025</ComingSoon>
               </div>
             </div>
-            <P>
+            <p>
               Garden is a home to think in. A note-taking space for your
               thoughts, projects and dreams.
-            </P>
+            </p>
           </div>
         </GridCard>
 
@@ -75,7 +75,7 @@ export default function Products() {
               to be fit for humans.
             </P>
 
-            <div className="mt-8 space-y-3">
+            <div className="mt-8 flex flex-col gap-3">
               <div className="flex items-center justify-between gap-4">
                 <GardenLogo className="h-10 w-auto" />
                 <div>
@@ -96,7 +96,7 @@ export default function Products() {
             possibilities visceral.
           </P>
 
-          <div className="mt-8 space-y-3">
+          <div className="mt-8 flex flex-col gap-3">
             <div className="flex items-center justify-between gap-4">
               <TilescapeLogo className="h-10 w-auto" />
               <div>

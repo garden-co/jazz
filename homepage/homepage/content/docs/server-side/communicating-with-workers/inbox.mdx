@@ -1,0 +1,73 @@
+export const metadata = {
+  description: "How to use the Inbox API to communicate with Server Workers using experimental_useInboxSender and inbox.subscribe."
+};
+
+import { Alert, CodeGroup } from "@/components/forMdx";
+
+# Inbox API with Server Workers
+
+The Inbox API provides a message-based communication system for Server Workers in Jazz.
+
+It works on top of the Jazz APIs and uses sync to transfer messages between the client and the server.
+
+## Setting up the Inbox API
+
+### Define the inbox message schema
+
+Define the inbox message schema in your schema file:
+
+<CodeGroup>
+```ts schema.ts#BookTicketMessageSchema
+```
+</CodeGroup>
+
+Any kind of CoMap is valid as an inbox message.
+
+### Setting up the Server Worker
+
+Run a server worker and subscribe to the `inbox`:
+
+<CodeGroup>
+```ts index.ts#Basic
+```
+</CodeGroup>
+
+### Handling multiple message types
+
+`inbox.subscribe` should be called once per worker instance.
+
+If you need to handle multiple message types, you can use the `co.discriminatedUnion` function to create a union of the message types.
+
+<CodeGroup>
+```ts schema.ts#UnionSchema
+```
+</CodeGroup>
+
+And check the message type in the handler:
+
+<CodeGroup>
+```ts index.ts#WithUnionSchema
+```
+</CodeGroup>
+
+## Sending messages from the client
+
+### Using the Inbox Sender hook
+
+Use `experimental_useInboxSender` to send messages from React components:
+
+{/* TODO: other frameworks ? Inbox API is not really supported for anything other than React */}
+<CodeGroup>
+```ts react-snippet.tsx
+```
+</CodeGroup>
+
+The `sendInboxMessage` API returns a Promise that waits for the message to be handled by a Worker.
+A message is considered to be handled when the Promise returned by `inbox.subscribe` resolves.
+The value returned will be the id of the CoValue returned in the `inbox.subscribe` resolved promise.
+
+## Deployment considerations
+
+Multi-region deployments are not supported when using the Inbox API.
+
+If you need to split the workload across multiple regions, you can use the [HTTP API](/docs/server-side/communicating-with-workers/http-requests) instead.

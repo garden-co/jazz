@@ -19,7 +19,7 @@ export function FileDownloadLink(
   const { children, href } = props;
 
   return (
-    <div className="inline-flex items-center font-medium text-stone-900 rounded-md border p-3 shadow-sm dark:text-white dark:bg-stone-925 flex py-2 rounded-lg ">
+    <div className="inline-flex items-center font-medium text-stone-900 rounded-md border p-3 shadow-xs dark:text-white dark:bg-stone-925 flex py-2 rounded-lg ">
       <Icon name="file" size="sm" className="mr-2" />
       {children}
 

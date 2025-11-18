@@ -1,5 +1,312 @@
 # jazz-tools
 
+## 0.19.3
+
+### Patch Changes
+
+- cddbfdb: Fix co.discriminatedUnion load for React Native
+- 114e4ce: Show invalid transaction in inspector even if they are not decryptable
+  - cojson@0.19.3
+  - cojson-storage-indexeddb@0.19.3
+  - cojson-transport-ws@0.19.3
+
+## 0.19.2
+
+### Patch Changes
+
+- ef24afb: Support creating CoVectors using plain `number[]` or `Float32Array` objects inside CoValue containers
+- 5f2b34b: Inline editing and snapshot restore for CoMaps in the inspector
+- Updated dependencies [7e76313]
+  - cojson@0.19.2
+  - cojson-storage-indexeddb@0.19.2
+  - cojson-transport-ws@0.19.2
+
+## 0.19.1
+
+### Patch Changes
+
+- f444bd9: Add `resolve` support for `co.discriminatedUnion`
+- Updated dependencies [afd2ded]
+  - cojson@0.19.1
+  - cojson-storage-indexeddb@0.19.1
+  - cojson-transport-ws@0.19.1
+
+## 0.19.0
+
+### Minor Changes
+
+- 26386d9: Add explicit CoValue loading states:
+  - Add `$isLoaded` field to discriminate between loaded and unloaded CoValues
+  - Add `$jazz.loadingState` field to provide additional info about the loading state
+  - All methods and functions that load CoValues now return a `MaybeLoaded<CoValue>` instead of `CoValue | null | undefined`
+  - Rename `$onError: null` to `$onError: "catch"`
+  - Split the `useAccount` hook into three separate hooks:
+    - `useAccount`: now only returns an Account CoValue
+    - `useLogOut`: returns a function for logging out of the current account
+    - `useAgent`: returns the current agent
+  - Add a `select` option (and an optional `equalityFn`) to `useAccount` and `useCoState`, and remove `useAccountWithSelector` and `useCoStateWithSelector`.
+  - Allow specifying resolve queries at the schema level. Those queries will be used when loading CoValues, if no other resolve query is provided.
+
+### Patch Changes
+
+- cojson@0.19.0
+- cojson-storage-indexeddb@0.19.0
+- cojson-transport-ws@0.19.0
+
+## 0.18.38
+
+### Patch Changes
+
+- 349ca48: feat: Invalid transaction's error messages are now shown in the inspector
+- Updated dependencies [349ca48]
+- Updated dependencies [68781a0]
+  - cojson@0.18.38
+  - cojson-storage-indexeddb@0.18.38
+  - cojson-transport-ws@0.18.38
+
+## 0.18.37
+
+### Patch Changes
+
+- feecdae: chore: Inspector now prints correctly json fields in covalue history
+- a841071: chore: Inspector's raw data and covalue history are now collapsible
+- 68e0b26: chore: ErrorBoundary around inspector to handle render errors
+- Updated dependencies [0e923d1]
+- Updated dependencies [fd89225]
+  - cojson@0.18.37
+  - cojson-storage-indexeddb@0.18.37
+  - cojson-transport-ws@0.18.37
+
+## 0.18.36
+
+### Patch Changes
+
+- Updated dependencies [af3fe4c]
+  - cojson@0.18.36
+  - cojson-storage-indexeddb@0.18.36
+  - cojson-transport-ws@0.18.36
+
+## 0.18.35
+
+### Patch Changes
+
+- Updated dependencies [d47ac6d]
+  - cojson@0.18.35
+  - cojson-storage-indexeddb@0.18.35
+  - cojson-transport-ws@0.18.35
+
+## 0.18.34
+
+### Patch Changes
+
+- 7a64465: fix: Image's lazy loading placeholder transparency in React Image component
+- Updated dependencies [4a79953]
+- Updated dependencies [d7e5cc8]
+  - cojson@0.18.34
+  - cojson-storage-indexeddb@0.18.34
+  - cojson-transport-ws@0.18.34
+
+## 0.18.33
+
+### Patch Changes
+
+- df0045e: fix: Image's lazy loading placeholder trasparency
+- 5ffe0a9: - Wait for the full download of all the dependency graph before running the migrations
+  - Re-enable the progressive child key rotation
+- Updated dependencies [5ffe0a9]
+  - cojson@0.18.33
+  - cojson-storage-indexeddb@0.18.33
+  - cojson-transport-ws@0.18.33
+
+## 0.18.32
+
+### Patch Changes
+
+- 314c199: feat: CoValue's history is now visible in inspector
+- Updated dependencies [8f47a9e]
+- Updated dependencies [2c7013a]
+  - cojson@0.18.32
+  - cojson-transport-ws@0.18.32
+  - cojson-storage-indexeddb@0.18.32
+
+## 0.18.31
+
+### Patch Changes
+
+- Updated dependencies [7c2b7b8]
+  - cojson@0.18.31
+  - cojson-storage-indexeddb@0.18.31
+  - cojson-transport-ws@0.18.31
+
+## 0.18.30
+
+### Patch Changes
+
+- b3dbcaa: feat: inspector's group view now shows parents/children groups, with addMember/removeMember features
+- 75d452e: Allow users to specify custom placeholders to be used while images are loading
+- 346c5fb: Add `.optional()` method to Account schema
+- 354895b: Wait for the full download of groups on load and subscribe
+- 162757c: Export `z.record` and `z.intersection` as part of jazz-tools
+- d08b7e2: feat: introduced new "manager" role who can invite and remove members, and being removed by admins.
+- ad19280: fix: visual bug on "delete my local data" button in inspector on mobile viewports
+- Updated dependencies [ad83da2]
+- Updated dependencies [d08b7e2]
+  - cojson@0.18.30
+  - cojson-storage-indexeddb@0.18.30
+  - cojson-transport-ws@0.18.30
+
+## 0.18.29
+
+### Patch Changes
+
+- cc7efc8: Fix upsertUnique when the account doesn't have access to the value
+- f55d17f: fix inspector component in non-React apps
+  - cojson@0.18.29
+  - cojson-storage-indexeddb@0.18.29
+  - cojson-transport-ws@0.18.29
+
+## 0.18.28
+
+### Patch Changes
+
+- 8cbbe0e: Fixed a race condition on upsertUnique that was leading to a "provideHeader" error
+- 14806c8: Add `useLogOut` hook
+- Updated dependencies [e8880dc]
+- Updated dependencies [d83b5e3]
+- Updated dependencies [5320349]
+  - cojson@0.18.28
+  - cojson-storage-indexeddb@0.18.28
+  - cojson-transport-ws@0.18.28
+
+## 0.18.27
+
+### Patch Changes
+
+- 6c6eb35: feat: enabled the usage of "expo-image-manipulator" as resize engine in react-native
+- 6ca0b59: feat: Add generateAuthToken and authenticateRequest
+- 88c5f1c: fix: createImage return type now has the original image already loaded
+  - cojson@0.18.27
+  - cojson-storage-indexeddb@0.18.27
+  - cojson-transport-ws@0.18.27
+
+## 0.18.26
+
+### Patch Changes
+
+- 4e0ea26: Added new CoVector type of CoValue
+- Updated dependencies [f956cd3]
+  - cojson@0.18.26
+  - cojson-storage-indexeddb@0.18.26
+  - cojson-transport-ws@0.18.26
+
+## 0.18.25
+
+### Patch Changes
+
+- 4036737: "peersToLoadFrom" renamed to only "peers"
+- 8ae7d71: feat: AuthSecretStorage's key is now configurable to handle multiple Jazz's apps on the same origin
+- b1d0081: Simplified getting invite secrets for groups
+- 36a5c58: Don't log unavailable errors when `loadUnique` or `upsertUnique` are used
+- 94e7d89: Added more options to the create-jazz-app tool
+- Updated dependencies [4036737]
+  - cojson@0.18.25
+  - cojson-storage-indexeddb@0.18.25
+  - cojson-transport-ws@0.18.25
+
+## 0.18.24
+
+### Patch Changes
+
+- f4c4ee9: fix: Account.create() type now accepts peersToLoadFrom and initialAgentSecret"
+- a15e2ba: Expose subscription scope react hooks and new `createCoValueSubscriptionContext` and `createAccountSubscriptionContext` helper functions
+- Updated dependencies [b09785e]
+  - cojson@0.18.24
+  - cojson-storage-indexeddb@0.18.24
+  - cojson-transport-ws@0.18.24
+
+## 0.18.23
+
+### Patch Changes
+
+- a0c8a2d: fix napi crypto export
+  - cojson@0.18.23
+  - cojson-storage-indexeddb@0.18.23
+  - cojson-transport-ws@0.18.23
+
+## 0.18.22
+
+### Patch Changes
+
+- 22200ac: Inspector now shows the CoID of list items and handles unavailable items correctly
+- 1e20db6: Added cojson-core-napi
+- Updated dependencies [1e20db6]
+  - cojson@0.18.22
+  - cojson-storage-indexeddb@0.18.22
+  - cojson-transport-ws@0.18.22
+
+## 0.18.21
+
+### Patch Changes
+
+- 6819f20: Implements SSR options for SvelteKit
+  - cojson@0.18.21
+  - cojson-storage-indexeddb@0.18.21
+  - cojson-transport-ws@0.18.21
+
+## 0.18.20
+
+### Patch Changes
+
+- c34a793: Allow usage of z.codec with custom encoders in CoValues
+- 2c01529: Increased passkey challenge length to improve compatibility with KeePassXC
+- 7b0facc: Upgrade Zod to 4.1
+- 47c7dd3: fix: regenerate InboxSender when active account changes
+- d0e2210: Batch subscribe updates during the applyDiff execution
+- Updated dependencies [e75b3d6]
+- Updated dependencies [ecf4967]
+- Updated dependencies [d0e2210]
+  - cojson@0.18.20
+  - cojson-storage-indexeddb@0.18.20
+  - cojson-transport-ws@0.18.20
+
+## 0.18.19
+
+### Patch Changes
+
+- f88db5f: Ensure subscription scope is cached for each CoValue
+- 8eac2fc: Fix refs in partially loaded CoMaps being incorrectly marked as optional
+- 08b6c03: fix: keep sync between Better Auth's session and Jazz's
+  - cojson@0.18.19
+  - cojson-storage-indexeddb@0.18.19
+  - cojson-transport-ws@0.18.19
+
+## 0.18.18
+
+### Patch Changes
+
+- f2f478a: Add connection status API for React and Svelte
+
+  - **React**: Added `useSyncConnectionStatus()` hook that returns the current connection status to the Jazz sync server
+  - **Svelte**: Added `SyncConnectionStatus` class that provides reactive connection status monitoring
+
+- ed7e353: Bugfix: wait for full streaming before triggering migrations on comap
+- 1698d41: Add `unstable_branch` option to useAccountWithSelector
+- Updated dependencies [ed7e353]
+  - cojson@0.18.18
+  - cojson-storage-indexeddb@0.18.18
+  - cojson-transport-ws@0.18.18
+
+## 0.18.17
+
+### Patch Changes
+
+- 75d1afa: Fix an issue where a flash of alt text displays while an image definition is loading from storage
+- 8aa4acd: Optimized the inactive subscriptions, improving performance of updates on created and loaded values by 2.5x
+- Updated dependencies [925da72]
+  - cojson@0.18.17
+  - cojson-storage-indexeddb@0.18.17
+  - cojson-transport-ws@0.18.17
+
 ## 0.18.16
 
 ### Patch Changes

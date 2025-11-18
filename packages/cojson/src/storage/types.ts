@@ -4,7 +4,8 @@ import type {
 } from "../coValueCore/verifiedState.js";
 import { Signature } from "../crypto/crypto.js";
 import type { CoValueCore, RawCoID, SessionID } from "../exports.js";
-import { CoValueKnownState, NewContentMessage } from "../sync.js";
+import { NewContentMessage } from "../sync.js";
+import { CoValueKnownState } from "../knownState.js";
 
 export type CorrectionCallback = (
   correction: CoValueKnownState,

@@ -1,4 +1,4 @@
-import { Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
 import { createWebSocketPeer } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import {
@@ -20,7 +20,7 @@ export async function createAccount() {
     crypto: await WasmCrypto.create(),
     sessionProvider: randomSessionProvider,
     authSecretStorage: new AuthSecretStorage(),
-    peersToLoadFrom: [
+    peers: [
       createWebSocketPeer({
         id: "upstream",
         role: "server",

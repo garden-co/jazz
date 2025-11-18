@@ -1,32 +1,35 @@
 import "jazz-tools/load-edge-wasm";
 import { createWebSocketPeer } from "cojson-transport-ws";
-import { CoMap, coField } from "jazz-tools";
+import { CoMap, coField, co, z } from "jazz-tools";
 import { Account } from "jazz-tools";
 import { startWorker } from "jazz-tools/worker";
 import { NextResponse } from "next/server";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 
-class MyAccountRoot extends CoMap {
-  text = coField.string;
-}
-class MyAccount extends Account {
-  root = coField.ref(MyAccountRoot);
+const MyAccountRoot = co.map({
+  text: z.string(),
+});
 
-  migrate(): void {
-    if (this.root === undefined) {
-      //@ts-ignore
-      this.$jazz.set("root", {
+const MyAccount = co
+  .account({
+    root: MyAccountRoot,
+    profile: co.profile(),
+  })
+  .withMigration((account) => {
+    if (!account.$jazz.has("root")) {
+      account.$jazz.set("root", {
         text: "Hello world!",
       });
     }
-  }
-}
+  });
 
 export const runtime = "edge"; // 'nodejs' is the default
+
 const syncServer = "wss://cloud.jazz.tools/?key=jazz@jazz.tools";
 
 export async function GET(request: Request) {
   const crypto = await WasmCrypto.create();
+
   const peer = createWebSocketPeer({
     id: "upstream",
     websocket: new WebSocket(syncServer),
@@ -35,7 +38,7 @@ export async function GET(request: Request) {
 
   const account = await Account.create({
     creationProps: { name: "Cloudflare test account" },
-    peersToLoadFrom: [peer],
+    peers: [peer],
     crypto,
   });
 

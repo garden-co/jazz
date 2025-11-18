@@ -13,17 +13,35 @@ describe("Image", async () => {
   vi.spyOn(Account, "getMe").mockReturnValue(account);
 
   describe("initial rendering", () => {
-    it("should render nothing if coValue is not found", async () => {
+    it("should render a blank placeholder while waiting for the coValue to load", async () => {
       const { container } = render(
         <Image imageId="co_zMTubMby3QiKDYnW9e2BEXW7Xaq" alt="test" />,
         { account },
       );
+
       const img = container.querySelector("img");
       expect(img).toBeDefined();
       expect(img!.getAttribute("width")).toBe(null);
       expect(img!.getAttribute("height")).toBe(null);
       expect(img!.alt).toBe("test");
-      expect(img!.src).toBe("");
+      expect(img!.src).toBe(
+        "data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==",
+      );
+    });
+
+    it("should render nothing if coValue is not found", async () => {
+      const { container } = render(
+        <Image imageId="co_zMTubMby3QiKDYnW9e2BEXW7Xaq" alt="test" />,
+        { account },
+      );
+      await waitFor(() => {
+        const img = container.querySelector("img");
+        expect(img).toBeDefined();
+        expect(img!.getAttribute("width")).toBe(null);
+        expect(img!.getAttribute("height")).toBe(null);
+        expect(img!.alt).toBe("test");
+        expect(img!.src).toBe("");
+      });
     });
 
     it("should render an empty image if the image is not loaded yet", async () => {
@@ -81,6 +99,100 @@ describe("Image", async () => {
       const img = container.querySelector("img");
       expect(img).toBeDefined();
       expect(img!.src).toBe(placeholderDataUrl);
+    });
+
+    it("should not override actual placeholders", async () => {
+      const placeholderDataUrl =
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+      const customPlaceholder =
+        "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiIGNsYXNzPSJsdWNpZGUgbHVjaWRlLXVzZXItaWNvbiBsdWNpZGUtdXNlciI+PHBhdGggZD0iTTE5IDIxdi0yYTQgNCAwIDAgMC00LTRIOWE0IDQgMCAwIDAtNCA0djIiLz48Y2lyY2xlIGN4PSIxMiIgY3k9IjciIHI9IjQiLz48L3N2Zz4=";
+
+      const original = FileStream.create({ owner: account });
+      original.start({ mimeType: "image/jpeg" });
+      // Don't end original, so it has no chunks
+
+      const im = ImageDefinition.create(
+        {
+          original,
+          originalSize: [100, 100],
+          progressive: false,
+          placeholderDataURL: placeholderDataUrl,
+        },
+        {
+          owner: account,
+        },
+      );
+
+      const { container } = render(
+        <Image
+          imageId={im.$jazz.id}
+          alt="test"
+          placeholder={customPlaceholder}
+        />,
+        {
+          account,
+        },
+      );
+
+      const img = container.querySelector("img");
+      expect(img).toBeDefined();
+      expect(img!.src).toBe(placeholderDataUrl);
+    });
+
+    it("should show custom placeholder while loading and replace with loaded image", async () => {
+      const createObjectURLSpy = vi
+        .spyOn(URL, "createObjectURL")
+        .mockImplementation((blob) => {
+          if (!(blob instanceof Blob)) {
+            throw new Error("Blob expected");
+          }
+          return `blob:test-${blob.size}`;
+        });
+
+      const customPlaceholder =
+        "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiIGNsYXNzPSJsdWNpZGUgbHVjaWRlLXVzZXItaWNvbiBsdWNpZGUtdXNlciI+PHBhdGggZD0iTTE5IDIxdi0yYTQgNCAwIDAgMC00LTRIOWE0IDQgMCAwIDAtNCA0djIiLz48Y2lyY2xlIGN4PSIxMiIgY3k9IjciIHI9IjQiLz48L3N2Zz4=";
+
+      // Create an image with no chunks initially (loading state)
+      const original = FileStream.create({ owner: account });
+      original.start({ mimeType: "image/jpeg" });
+      // Don't end original, so it has no chunks
+
+      const im = ImageDefinition.create(
+        {
+          original,
+          originalSize: [100, 100],
+          progressive: false,
+        },
+        {
+          owner: account,
+        },
+      );
+
+      const { container } = render(
+        <Image
+          imageId={im.$jazz.id}
+          alt="test-loading-custom-placeholder"
+          placeholder={customPlaceholder}
+        />,
+        { account },
+      );
+
+      // Initially should show custom placeholder
+      let img = container.querySelector("img");
+      expect(img).toBeDefined();
+      expect(img!.src).toBe(customPlaceholder);
+
+      // Now add the actual image data
+      const imageData = await createDummyFileStream(100, account);
+      im.$jazz.set("100x100", imageData);
+
+      // Wait for the image to load and replace the placeholder
+      await waitFor(() => {
+        img = container.querySelector("img");
+        expect(img!.src).toBe("blob:test-100");
+      });
+
+      expect(createObjectURLSpy).toHaveBeenCalledTimes(1);
     });
 
     it("should render the original image once loaded", async () => {
@@ -549,7 +661,7 @@ describe("Image", async () => {
 
       const img = container.querySelector("img");
       expect(img).toBeDefined();
-      expect(img!.src).toBe("blob:test-70");
+      expect(img!.src).toBe("blob:test-68");
     });
 
     it("should load the image when threshold is reached", async () => {

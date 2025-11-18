@@ -1,53 +1,65 @@
-import { useCoState } from "jazz-tools/react";
 import { useParams } from "react-router";
 import { Layout } from "./Layout.tsx";
 import { CreateProject } from "./components/CreateProject.tsx";
 import { Heading } from "./components/Heading.tsx";
 import { InviteLink } from "./components/InviteLink.tsx";
 import { OrganizationMembers } from "./components/OrganizationMembers.tsx";
-import { Organization } from "./schema.ts";
+import {
+  OrganizationProvider,
+  useOrganizationSelector,
+} from "./components/OrganizationProvider.ts";
+import { ProjectList } from "./components/ProjectList.tsx";
 
 export function OrganizationPage() {
   const paramOrganizationId = useParams<{ organizationId: string }>()
     .organizationId;
 
-  const organization = useCoState(Organization, paramOrganizationId, {
-    resolve: { projects: true },
+  return (
+    <OrganizationProvider
+      id={paramOrganizationId}
+      loadingFallback={<p>Loading organization...</p>}
+      unavailableFallback={
+        <div className="h-full flex items-center justify-center">
+          <div className="text-center">
+            <h1 className="text-2xl font-bold">
+              You don't have access to this organization
+            </h1>
+            <a href="/#" className="text-blue-500">
+              Go back to home
+            </a>
+          </div>
+        </div>
+      }
+    >
+      <OrganizationPageContent />
+    </OrganizationProvider>
+  );
+}
+
+function OrganizationPageContent() {
+  const organizationName = useOrganizationSelector({
+    select: (organization) => organization.name,
   });
 
-  if (organization === undefined) return <p>Loading organization...</p>;
-  if (organization === null) {
-    return (
-      <div className="h-full flex items-center justify-center">
-        <div className="text-center">
-          <h1 className="text-2xl font-bold">
-            You don't have access to this organization
-          </h1>
-          <a href="/#" className="text-blue-500">
-            Go back to home
-          </a>
-        </div>
-      </div>
-    );
-  }
+  const isOrganizationAdmin = useOrganizationSelector({
+    select: (organization) => organization.$jazz.owner?.myRole() === "admin",
+  });
 
   return (
     <Layout>
       <div className="grid gap-8">
-        <Heading text={`Welcome to ${organization.name} organization!`} />
+        <Heading text={`Welcome to ${organizationName} organization!`} />
 
         <div className="rounded-lg border shadow-sm bg-white dark:bg-stone-925">
           <div className="border-b px-4 py-5 sm:px-6">
             <div className="flex justify-between items-center">
               <h2>Members</h2>
 
-              {organization.$jazz.owner?.myRole() === "admin" && (
-                <InviteLink organization={organization} />
-              )}
+              {isOrganizationAdmin && <InviteLink />}
             </div>
           </div>
           <div className="divide-y">
-            <OrganizationMembers organization={organization} />
+            <OrganizationMembers />
           </div>
         </div>
 
@@ -56,24 +68,9 @@ export function OrganizationPage() {
             <h2>Projects</h2>
           </div>
           <div className="divide-y">
-            {organization.projects.length > 0 ? (
-              organization.projects.map((project) =>
-                project ? (
-                  <strong
-                    key={project.$jazz.id}
-                    className="px-4 py-5 sm:px-6 font-medium block"
-                  >
-                    {project.name}
-                  </strong>
-                ) : null,
-              )
-            ) : (
-              <p className="col-span-full text-center px-4 py-8 sm:px-6">
-                You have no projects yet.
-              </p>
-            )}
+            <ProjectList />
             <div className="p-4 sm:p-6">
-              <CreateProject organization={organization} />
+              <CreateProject />
             </div>
           </div>
         </div>

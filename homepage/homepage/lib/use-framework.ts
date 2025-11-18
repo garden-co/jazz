@@ -1,12 +1,27 @@
-import { DEFAULT_FRAMEWORK, Framework, isValidFramework } from "@/content/framework";
-import { useParams } from "next/navigation";
+"use client";
+import {
+  DEFAULT_FRAMEWORK,
+  Framework,
+  isValidFramework,
+} from "@/content/framework";
+import { useParams, usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { TAB_CHANGE_EVENT, isFrameworkChange } from "@garden-co/design-system/src/types/tabbed-code-group";
+import {
+  TAB_CHANGE_EVENT,
+  isFrameworkChange,
+} from "@garden-co/design-system/src/types/tabbed-code-group";
+
+// Global tracking to prevent multiple simultaneous redirects
+// (since useFramework is called by multiple components on the same page)
+let isRedirecting = false;
+let lastRedirectedTo = "";
 
 export const useFramework = () => {
+  const pathname = usePathname();
   const { framework } = useParams<{ framework?: string }>();
   const [savedFramework, setSavedFramework] = useState<Framework | null>(null);
   const [mounted, setMounted] = useState(false);
+  const router = useRouter();
 
   useEffect(() => {
     setMounted(true);
@@ -28,23 +43,36 @@ export const useFramework = () => {
         }
       }
     };
-
-    if (typeof window !== "undefined") {
-      window.addEventListener(TAB_CHANGE_EVENT as any, handleTabChange);
-      return () => {
-        window.removeEventListener(TAB_CHANGE_EVENT as any, handleTabChange);
-      };
-    }
+    window.addEventListener(TAB_CHANGE_EVENT as any, handleTabChange);
+    return () =>
+      window.removeEventListener(TAB_CHANGE_EVENT as any, handleTabChange);
   }, []);
 
-  // Prioritize savedFramework (from events) over URL parameters
-  if (mounted && savedFramework) {
-    return savedFramework;
-  }
+  useEffect(() => {
+    if (!mounted || !savedFramework || !pathname.startsWith("/docs")) return;
 
-  if (framework && isValidFramework(framework)) {
-    return framework;
-  }
+    const parts = pathname.split("/");
+    const newPath = parts.toSpliced(2, 1, savedFramework).join("/");
 
+    // Don't redirect if already redirecting or if we just redirected to this path
+    if (isRedirecting || lastRedirectedTo === newPath) return;
+
+    if (parts[2] !== savedFramework) {
+      isRedirecting = true;
+      lastRedirectedTo = newPath;
+      router.replace(newPath, { scroll: false });
+      // Reset the flag after navigation completes
+      const timeout = setTimeout(() => {
+        isRedirecting = false;
+      }, 200);
+      return () => {
+        clearTimeout(timeout);
+        isRedirecting = false;
+      };
+    }
+  }, [mounted, savedFramework, pathname, router]);
+
+  if (mounted && savedFramework) return savedFramework;
+  if (framework && isValidFramework(framework)) return framework;
   return DEFAULT_FRAMEWORK;
 };

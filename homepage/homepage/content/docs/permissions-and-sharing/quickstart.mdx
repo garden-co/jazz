@@ -1,0 +1,168 @@
+import { Alert, CodeGroup, ContentByFramework, FileName, ReactLogo, SvelteLogo, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
+import RunDevServer from "@/components/docs/snippets/RunDevServer.mdx";
+import StuckCTA from "@/components/docs/snippets/StuckCTA.mdx";
+
+export const metadata = {
+  description: "Add collaboration features to your Jazz app."
+};
+
+# Add Collaboration to your App
+
+This guide will take your festival app to the next level by showing you how to use invite links to collaborate with others.
+
+<Alert variant="info" className="mt-4 flex gap-2 items-center">
+  If you haven't gone through the [front-end Quickstart](/docs/quickstart), you might find this guide a bit confusing.
+</Alert>
+
+## Understanding Groups
+Jazz uses Groups to manage how users are able to access data. Each group member normally has one of three primary 'roles': `reader`, `writer`, or `admin`.
+
+You can add users to groups manually, or you can use invite links to allow people to join groups themselves. Invite links work even for unauthenticated users!
+
+## Create an invite link
+Let's create an invite link that others can use to access our data. We'll create an invite link that allows others to make updates to our festival.
+
+When we create a link, we can choose what level of permission to grant. Here, we want others to be able to collaborate, so we'll grant `writer` permissions.
+
+<ContentByFramework framework="react">
+  <FileName>app/components/Festival.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/lib/components/Festival.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="create-invite-link">
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
+```tsx FestivalWithoutProp.tsx
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```svelte FestivalWithoutProp.svelte
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+## Accept an invite
+Now we need to set up a way for Jazz to handle the links for the users who are following them.
+
+Jazz provides a handler which we can add to our `Festival` component to accept the invite. This will automatically fire when there's an invite link in the URL, and grant the user the right accesses.
+
+<ContentByFramework framework="react">
+  <FileName>app/components/Festival.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/lib/components/Festival.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup savedPreferenceKey="framework" id="accept-invite">
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
+```tsx FestivalWithAccept.tsx
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```svelte FestivalWithAccept.svelte
+
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+<ContentByFramework framework="react">
+<details>
+<summary>Already completed the server-side rendering guide?</summary>
+
+You'll need to make a small change to your structure because the invite handler can only run on the client.
+
+<FileName>app/components/Festival.tsx</FileName>
+<CodeGroup>
+```tsx FestivalWithSSR.tsx
+```
+</CodeGroup>
+
+You'll also need to be aware that the server agent can only render public CoValues, and the schema above does not publicly share any data (neither bands nor festivals).
+
+</details>
+</ContentByFramework>
+
+## Create the festival page
+Now we need to create the festival page, so that we can view other people's festivals and collaborate with them.
+
+### Update our Festival component
+We're going to continue updating our existing `Festival` component so that it can optionally take a prop for the festival ID.
+
+<ContentByFramework framework="react">
+  <FileName>app/components/Festival.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/lib/components/Festival.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup default="react" savedPreferenceKey="framework">
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
+```tsx Festival.tsx
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
+```svelte Festival.svelte
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+### Update our New Band component
+
+We'll also update our `NewBand` component so that it can take a prop for the festival ID, which will make it reusable on our home page and the new festival page.
+
+<ContentByFramework framework="react">
+  <FileName>app/components/NewBand.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/lib/components/NewBand.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup default="react" savedPreferenceKey="framework"
+>
+<TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
+```tsx NewBand.tsx
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
+```svelte NewBand.svelte
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+### Create a route
+
+<ContentByFramework framework="react">
+  <FileName>app/festival/[festivalId]/page.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/routes/festival/[festivalId]/+page.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup savedPreferenceKey="framework" id="create-festival-page">
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
+```tsx page.tsx
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```svelte +page.svelte
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+## Put it all together
+
+Now we can test it out by inviting someone to collaborate on our festival.
+
+1. Open your app and sign in.
+2. Open a new incognito window and sign up with a new passkey.
+3. From your first browser tab, create an invite link for the festival.
+4. You should be able to invite someone to collaborate on the festival.
+5. Paste the invite link into the incognito window. You should be able to add bands to the festival!
+
+**Congratulations! 🎉** You've added public sharing to your app! You've learned what groups are, and how Jazz manages permissions, as well as how to invite others to collaborate on data in your app with you.
+
+## Next steps
+- Learn how to [authenticate users](/docs/key-features/authentication/quickstart) so you can access data wherever you are.
+- Discover how you can use [groups as members of other groups](/docs/permissions-and-sharing/cascading-permissions) to build advanced permissions structures.
+- Find out how to [use server workers](/docs/server-side/quickstart) to build more complex applications

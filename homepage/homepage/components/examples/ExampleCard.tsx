@@ -12,12 +12,12 @@ export function ExampleCard({
   return (
     <div className={clsx(className, "col-span-2 flex flex-col")}>
       {illustration && (
-        <div className="mb-3 aspect-[16/9] overflow-hidden w-full rounded-md bg-white border dark:bg-stone-925 sm:aspect-[2/1] md:aspect-[3/2]">
+        <div className="mb-3 aspect-video overflow-hidden w-full rounded-md bg-white border dark:bg-stone-925 sm:aspect-2/1 md:aspect-3/2">
           {illustration}
         </div>
       )}
 
-      <div className="flex-1 space-y-2 mb-2">
+      <div className="flex-1 flex flex-col gap-2 mb-2">
         <h3 className="font-medium text-stone-900 dark:text-white leading-none">
           {name}
         </h3>

@@ -16,6 +16,7 @@ import { startWorker } from "jazz-tools/worker";
 import { createWorkerAccount, startSyncServer } from "./sync-utils.js";
 import { JazzBetterAuthDatabaseAdapter } from "../index.js";
 import { TableItem } from "../schema.js";
+import { assertLoaded } from "jazz-tools/testing";
 
 describe("JazzBetterAuthDatabaseAdapter tests", async () => {
   describe("better-auth internal tests", async () => {
@@ -197,9 +198,7 @@ describe("JazzBetterAuthDatabaseAdapter tests", async () => {
         },
       });
 
-      assert(db);
-      assert(db.group);
-      assert(db.tables);
+      assertLoaded(db);
 
       // Create a new worker account
       const newWorkerAccount = await createWorkerAccount({
@@ -208,7 +207,7 @@ describe("JazzBetterAuthDatabaseAdapter tests", async () => {
       });
 
       const newWorkerRef = await Account.load(newWorkerAccount.accountID);
-      assert(newWorkerRef);
+      assertLoaded(newWorkerRef);
 
       // Add the new worker to the group
       db.group.addMember(newWorkerRef, "admin");

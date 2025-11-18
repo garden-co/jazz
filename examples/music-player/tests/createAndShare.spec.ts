@@ -1,4 +1,4 @@
-import { BrowserContext, test } from "@playwright/test";
+import { type BrowserContext, test, expect } from "@playwright/test";
 import { HomePage } from "./pages/HomePage";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -138,4 +138,74 @@ test("create a new playlist, share, then remove track", async ({
   await marioHome.navigateToPlaylist("Save the princess");
   await marioHome.notExpectMusicTrack("Super Mario World");
   await luigiHome.notExpectMusicTrack("Super Mario World");
+});
+
+test("create a new playlist, share with manager role who will add and remove a reader", async ({
+  page: marioPage,
+  browser,
+}) => {
+  // Create playlist with a song and share
+  await marioPage.goto("/");
+  const marioHome = new HomePage(marioPage);
+
+  await marioHome.fillUsername("Mario");
+  await marioPage.keyboard.press("Enter");
+
+  await marioHome.expectMusicTrack("Example song");
+  await marioHome.editTrackTitle("Example song", "Super Mario World");
+  await marioHome.createPlaylist("Save the princess");
+  await marioHome.navigateToPlaylist("All tracks");
+  await marioHome.addTrackToPlaylist("Super Mario World", "Save the princess");
+  await marioHome.navigateToPlaylist("Save the princess");
+  await marioHome.expectMusicTrack("Super Mario World");
+  await marioHome.signUp();
+  const managerInviteUrl = await marioHome.getShareLink("manager");
+
+  await sleep(4000); // Wait for the sync to complete
+
+  // Retrieve shared playlist
+  const luigiContext = await browser.newContext();
+  await mockAuthenticator(luigiContext);
+  const luigiPage = await luigiContext.newPage();
+  await luigiPage.goto("/");
+  const luigiHome = new HomePage(luigiPage);
+
+  await luigiHome.fillUsername("Luigi");
+  await luigiPage.keyboard.press("Enter");
+
+  await luigiHome.signUp();
+
+  await luigiPage.goto(managerInviteUrl);
+  await luigiHome.expectMusicTrack("Super Mario World");
+
+  const readerInviteUrl = await luigiHome.getShareLink("reader");
+
+  await sleep(4000); // Wait for the sync to complete
+
+  const peachContext = await browser.newContext();
+  await mockAuthenticator(peachContext);
+  const peachPage = await peachContext.newPage();
+  await peachPage.goto("/");
+  const peachHome = new HomePage(peachPage);
+
+  await peachHome.fillUsername("Peach");
+  await peachPage.keyboard.press("Enter");
+
+  await peachHome.signUp();
+
+  await peachPage.goto(readerInviteUrl);
+  await peachHome.expectMusicTrack("Super Mario World");
+
+  await expect(
+    peachPage.getByRole("button", { name: "Share" }),
+  ).not.toBeVisible();
+
+  await marioHome.removeMember(2); // Peach
+  await marioHome.removeMember(1); // Luigi
+
+  await sleep(4000); // Wait for the sync to complete
+
+  // Expect that the track is removed from the playlist
+  await luigiHome.assertPlaylistNotExists("Save the princess");
+  await peachHome.assertPlaylistNotExists("Save the princess");
 });

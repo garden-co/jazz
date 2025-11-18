@@ -6,11 +6,8 @@ import { describe, expect, onTestFinished, test, vi } from "vitest";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import { CoID, LocalNode, RawCoID, RawCoMap, logger } from "../exports.js";
 import { CoValueCore } from "../exports.js";
-import {
-  CoValueKnownState,
-  NewContentMessage,
-  emptyKnownState,
-} from "../sync.js";
+import { NewContentMessage } from "../sync.js";
+import { CoValueKnownState, emptyKnownState } from "../knownState.js";
 import { createSyncStorage } from "./testStorage.js";
 import { loadCoValueOrFail, randomAgentAndSessionID } from "./testUtils.js";
 
@@ -29,7 +26,7 @@ function getNewContentSince(
     throw new Error(`CoValue ${coValue.id} is not verified`);
   }
 
-  const contentMessage = coValue.verified.newContentSince(knownState)?.[0];
+  const contentMessage = coValue.newContentSince(knownState)?.[0];
 
   if (!contentMessage) {
     throw new Error(`No new content available for coValue ${coValue.id}`);
@@ -155,7 +152,7 @@ describe("StorageApiSync", () => {
 
       // Verify that storage known state is updated after load
       const updatedKnownState = storage.getKnownState(group.id);
-      expect(updatedKnownState).toEqual(group.core.verified.knownState());
+      expect(updatedKnownState).toEqual(group.core.knownState());
 
       const groupOnNode = await loadCoValueOrFail(node, group.id);
 
@@ -196,7 +193,7 @@ describe("StorageApiSync", () => {
 
       // Verify that storage known state is updated after load
       const updatedKnownState = storage.getKnownState(group.id);
-      expect(updatedKnownState).toEqual(group.core.verified.knownState());
+      expect(updatedKnownState).toEqual(group.core.knownState());
 
       const groupOnNode = await loadCoValueOrFail(node, group.id);
       expect(groupOnNode.get("everyone")).toEqual("reader");
@@ -223,7 +220,7 @@ describe("StorageApiSync", () => {
 
       // Verify that storage known state is updated after store
       const updatedKnownState = storage.getKnownState(group.id);
-      expect(updatedKnownState).toEqual(group.core.verified.knownState());
+      expect(updatedKnownState).toEqual(group.core.knownState());
 
       node.setStorage(storage);
 
@@ -240,7 +237,6 @@ describe("StorageApiSync", () => {
 
       // Create a real group and add a member to create transactions
       const group = fixturesNode.createGroup();
-      const knownState = group.core.verified.knownState();
 
       group.addMember("everyone", "reader");
 
@@ -258,7 +254,7 @@ describe("StorageApiSync", () => {
 
       // Verify that storage known state is updated after store
       const updatedKnownState = storage.getKnownState(group.id);
-      expect(updatedKnownState).toEqual(group.core.verified.knownState());
+      expect(updatedKnownState).toEqual(group.core.knownState());
 
       node.setStorage(storage);
 
@@ -271,14 +267,14 @@ describe("StorageApiSync", () => {
       const { node, storage } = await createTestNode();
 
       const group = fixturesNode.createGroup();
-      const knownState = group.core.verified.knownState();
+      const knownState = group.core.knownState();
 
       group.addMember("everyone", "reader");
 
       const contentMessage = getNewContentSince(group.core, knownState);
       const correctionCallback = vi.fn((known) => {
         expect(known).toEqual(emptyKnownState(group.id));
-        return group.core.verified.newContentSince(known);
+        return group.core.newContentSince(known);
       });
 
       // Get initial known state
@@ -292,7 +288,7 @@ describe("StorageApiSync", () => {
 
       // Verify that storage known state is updated after store with correction
       const updatedKnownState = storage.getKnownState(group.id);
-      expect(updatedKnownState).toEqual(group.core.verified.knownState());
+      expect(updatedKnownState).toEqual(group.core.knownState());
 
       node.setStorage(storage);
       const groupOnNode = await loadCoValueOrFail(node, group.id);
@@ -322,7 +318,7 @@ describe("StorageApiSync", () => {
       const contentMessage = getNewContentSince(group.core, knownState);
       const correctionCallback = vi.fn((known) => {
         expect(known).toEqual(initialKnownState);
-        return group.core.verified.newContentSince(known);
+        return group.core.newContentSince(known);
       });
 
       // Get initial storage known state
@@ -342,7 +338,7 @@ describe("StorageApiSync", () => {
 
       // Verify that storage known state is updated after store with correction
       const finalKnownState = storage.getKnownState(group.id);
-      expect(finalKnownState).toEqual(group.core.verified.knownState());
+      expect(finalKnownState).toEqual(group.core.knownState());
 
       node.setStorage(storage);
       const groupOnNode = await loadCoValueOrFail(node, group.id);
@@ -522,8 +518,8 @@ describe("StorageApiSync", () => {
       // Verify that storage known states are updated after load
       const updatedGroupKnownState = storage.getKnownState(group.id);
       const updatedMapKnownState = storage.getKnownState(map.id);
-      expect(updatedGroupKnownState).toEqual(group.core.verified.knownState());
-      expect(updatedMapKnownState).toEqual(map.core.verified.knownState());
+      expect(updatedGroupKnownState).toEqual(group.core.knownState());
+      expect(updatedMapKnownState).toEqual(map.core.knownState());
 
       node.setStorage(storage);
       const mapOnNode = await loadCoValueOrFail(node, map.id);
@@ -559,7 +555,7 @@ describe("StorageApiSync", () => {
 
       // Verify group known state is updated after first load
       const afterGroupLoad = storage.getKnownState(group.id);
-      expect(afterGroupLoad).toEqual(group.core.verified.knownState());
+      expect(afterGroupLoad).toEqual(group.core.knownState());
 
       // Then load the map - the group dependency should already be loaded
       await storage.load(map.id, callback, done);
@@ -576,7 +572,7 @@ describe("StorageApiSync", () => {
 
       // Verify map known state is updated after second load
       const finalMapKnownState = storage.getKnownState(map.id);
-      expect(finalMapKnownState).toEqual(map.core.verified.knownState());
+      expect(finalMapKnownState).toEqual(map.core.knownState());
 
       node.setStorage(storage);
       const mapOnNode = await loadCoValueOrFail(node, map.id);

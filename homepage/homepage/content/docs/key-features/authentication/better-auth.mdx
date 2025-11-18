@@ -1,0 +1,176 @@
+export const metadata = {
+  description: "Integrate Better Auth with your Jazz app to authenticate users."
+};
+import { Alert, CodeGroup, ContentByFramework, FileName } from "@/components/forMdx";
+
+# Better Auth authentication
+
+[Better Auth](https://better-auth.com/) is a self-hosted, framework-agnostic authentication and authorisation framework for TypeScript.
+
+You can integrate Better Auth with your Jazz app, allowing your Jazz user's account keys to be saved with the corresponding Better Auth user.
+
+## How it works
+
+When using Better Auth authentication:
+1. Users sign up or sign in through Better Auth's authentication system
+2. Jazz securely stores the user's account keys with Better Auth
+3. When logging in, Jazz retrieves these keys from Better Auth
+4. Once authenticated, users can work offline with full Jazz functionality
+
+This authentication method is not fully local-first, as login and signup need to be done online, but once authenticated, users can use all of Jazz's features without needing to be online.
+
+## Authentication methods and plugins
+
+Better Auth supports several authentication methods and plugins. The Jazz plugin has not been tested with all of them yet. Here is the compatibility matrix:
+
+<table>
+  <thead>
+    <tr>
+      <th>Better Auth method/plugin</th>
+      <th>Jazz plugin</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Email/Password</td>
+      <td>✅</td>
+    </tr>
+    <tr>
+      <td>Social Providers</td>
+      <td>✅</td>
+    </tr>
+    <tr>
+      <td>Username</td>
+      <td>❓</td>
+    </tr>
+    <tr>
+      <td>Anonymous</td>
+      <td>❓</td>
+    </tr>
+    <tr>
+      <td>Phone Number</td>
+      <td>❓</td>
+    </tr>
+    <tr>
+      <td>Magic Link</td>
+      <td>❓</td>
+    </tr>
+    <tr>
+      <td>Email OTP</td>
+      <td>✅</td>
+    </tr>
+    <tr>
+      <td>Passkey</td>
+      <td>❓</td>
+    </tr>
+    <tr>
+      <td>One Tap</td>
+      <td>❓</td>
+    </tr>
+  </tbody>
+</table>
+
+✅: tested and working
+❓: not tested yet
+❌: not supported
+
+## Getting started
+
+First of all, follow the [Better Auth documentation](https://www.better-auth.com/docs/installation) to install Better Auth:
+- Install the dependency and set env variables
+- Create the betterAuth instance in the common `auth.ts` file, using the database adapter you want. {/* here the assist for next Jazz database adapter */}
+- Set up the authentication methods you want to use
+- Mount the handler in the API route
+- Create the client instance in the common `auth-client.ts` file
+
+The `jazz-tools/better-auth/auth` plugin provides both server-side and client-side integration for Better Auth with Jazz. Here's how to set it up:
+
+### Server Setup
+
+Add the `jazzPlugin` to the Better Auth instance:
+
+<FileName>src/lib/auth.ts</FileName>
+<CodeGroup>
+```ts auth.ts
+```
+</CodeGroup>
+
+Now run [migrations](https://www.better-auth.com/docs/concepts/database#running-migrations) to add the new fields to the users table.
+
+<Alert variant="warning" className="mt-4" title="Note">
+  The server-side plugin intercepts the custom header `x-jazz-auth` sent by client-side plugin. If server is behind a proxy, the header must be forwarded. If the server runs on a different origin than the client, the header must be allowed for cross-origin requests.
+</Alert>
+
+### Client Setup
+
+Create the Better Auth client with the Jazz plugin:
+
+<FileName>src/lib/auth-client.ts</FileName>
+
+{/* TODO: 'use client' only for React */}
+
+<CodeGroup>
+```ts auth-client.ts
+```
+</CodeGroup>
+
+<ContentByFramework framework={["react", "react-native", "react-native-expo"]}>
+
+Wrap your app with the `AuthProvider`, passing the `betterAuthClient` instance:
+
+<CodeGroup>
+```ts app.tsx
+```
+</CodeGroup>
+
+<Alert variant="warning" className="mt-4" title="Important">
+  The AuthProvider component uses the `better-auth/client` package, not `better-auth/react`.
+  To verify the authentication state in your app, see <a href="#authentication-states" aria-label="Jump to Authentication states section">Authentication states</a>.
+</Alert>
+
+</ContentByFramework>
+
+<ContentByFramework framework={["vanilla", "svelte"]}>
+
+Set JazzContext and AuthSecretStorage in the Better Auth client:
+
+<CodeGroup>
+```ts index.ts#Basic
+```
+</CodeGroup>
+
+</ContentByFramework>
+
+## Authentication methods
+
+The Jazz plugin intercepts the Better Auth client's calls, so you can use the Better Auth [methods](https://www.better-auth.com/docs/basic-usage) as usual.
+
+Here is how to sign up with email and password, and transform an anonymous Jazz account into a logged in user authenticated by Better Auth:
+
+<CodeGroup>
+```ts index.ts#SignUp
+```
+</CodeGroup>
+
+You can then use the `signIn` and `signOut` methods on the `betterAuthClient`:
+
+<CodeGroup>
+```ts index.ts#SignInOut
+```
+</CodeGroup>
+
+## Authentication states
+
+Although Better Auth is not fully local-first, the Jazz client plugin tries to keep Jazz's authentication state in sync with Better Auth's. The best practice to check if the user is authenticated is using Jazz's methods [as described here](/docs/key-features/authentication/authentication-states#detecting-authentication-state).
+
+You can use Better Auth's [native methods](https://www.better-auth.com/docs/basic-usage#session) if you need to check the Better Auth state directly.
+
+
+## Server-side hooks
+
+Better Auth provides [database hooks](https://www.better-auth.com/docs/reference/options#databasehooks) to run code when things happen. When using the Jazz, the user's Jazz account ID is always available in the `user` object. This means you can access it anywhere in Better Auth hooks.
+
+<CodeGroup>
+```ts auth.ts#WithHooks
+```
+</CodeGroup>

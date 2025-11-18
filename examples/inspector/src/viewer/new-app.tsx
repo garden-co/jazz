@@ -87,7 +87,7 @@ export default function CoJsonViewerApp() {
           accountID: currentAccount.id,
           accountSecret: currentAccount.secret,
           sessionID: crypto.newRandomSessionID(currentAccount.id),
-          peersToLoadFrom: [wsPeer],
+          peers: [wsPeer],
           crypto,
           migration: async () => {
             console.log("Not running any migration in inspector");

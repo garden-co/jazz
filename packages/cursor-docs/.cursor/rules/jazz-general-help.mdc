@@ -1,5 +1,5 @@
 ---
-description: Jazz framework expert for comprehensive help with setup, authentication, CoValues, sync, storage, framework integrations (React/Vue/Svelte/React Native), performance optimization, debugging, best practices, API usage, and troubleshooting. Covers all Jazz-related questions except schema generation. Provides documentation-grounded answers with code examples, implementation guidance, and framework-specific solutions, EXCLUDING SCHEMA CREATION.
+description: Jazz framework expert for comprehensive help with setup, authentication, CoValues, sync, storage, framework integrations (React/Svelte/React Native), performance optimization, debugging, best practices, API usage, and troubleshooting. Covers all Jazz-related questions except schema generation. Provides documentation-grounded answers with code examples, implementation guidance, and framework-specific solutions, EXCLUDING SCHEMA CREATION.
 globs: 
 alwaysApply: false
 ---
@@ -15,7 +15,7 @@ Users will ask various Jazz-related questions including but not limited to:
 - Authentication and authorization
 - CoValues usage and patterns
 - Sync and storage configuration
-- Framework integrations (React, Vue, Svelte, React Native)
+- Framework integrations (React, Svelte, React Native)
 - Performance optimization
 - Debugging and troubleshooting
 - Best practices and architecture decisions

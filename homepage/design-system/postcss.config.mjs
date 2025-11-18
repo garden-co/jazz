@@ -1,7 +1,8 @@
 /** @type {import('postcss-load-config').Config} */
 const config = {
   plugins: {
-    tailwindcss: {},
+    "@tailwindcss/postcss": {},
+    "@csstools/postcss-oklab-function": { preserve: true },
   },
 };
 

@@ -8,13 +8,72 @@ import {
   setupTestNode,
   waitFor,
 } from "./testUtils.js";
+import { AccountRole } from "../permissions.js";
 
 beforeEach(async () => {
   SyncMessagesLog.clear();
   setupTestNode({ isSyncServer: true });
 });
 
+// [fromRole, toRole, canCreateInvite]
+const CAN_CREATE_INVITE_MATRIX: [AccountRole, AccountRole, boolean][] = [
+  ["admin", "admin", true],
+  ["admin", "manager", true],
+  ["admin", "writer", true],
+  ["admin", "reader", true],
+  ["admin", "writeOnly", true],
+
+  ["manager", "admin", false],
+  ["manager", "manager", false],
+  ["manager", "writer", true],
+  ["manager", "reader", true],
+  ["manager", "writeOnly", true],
+
+  ["writer", "admin", false],
+  ["writer", "manager", false],
+  ["writer", "writer", false],
+  ["writer", "reader", false],
+  ["writer", "writeOnly", false],
+
+  ["reader", "admin", false],
+  ["reader", "manager", false],
+  ["reader", "writer", false],
+  ["reader", "reader", false],
+  ["reader", "writeOnly", false],
+
+  ["writeOnly", "admin", false],
+  ["writeOnly", "manager", false],
+  ["writeOnly", "writer", false],
+  ["writeOnly", "reader", false],
+  ["writeOnly", "writeOnly", false],
+];
+
 describe("Group invites", () => {
+  for (const [fromRole, toRole, canCreateInvite] of CAN_CREATE_INVITE_MATRIX) {
+    test(`${fromRole} should ${canCreateInvite ? "be able" : "not be able"} to create an invite for ${toRole}`, async () => {
+      const admin = await setupTestAccount({
+        connected: true,
+      });
+
+      const group = admin.node.createGroup();
+
+      const adminOnAdminNode = await loadCoValueOrFail(
+        admin.node,
+        admin.accountID,
+      );
+
+      group.addMember(adminOnAdminNode, fromRole);
+
+      if (canCreateInvite) {
+        expect(group.createInvite(toRole)).toBeDefined();
+      } else {
+        expect(() => {
+          group.createInvite(toRole);
+        }).toThrow(`Failed to set role ${toRole}Invite to`);
+      }
+    });
+  }
+
   test("should be able to accept a reader invite", async () => {
     const admin = await setupTestAccount({
       connected: true,
@@ -40,9 +99,7 @@ describe("Group invites", () => {
     await newMember.node.acceptInvite(group.id, inviteSecret);
 
     await waitFor(() => {
-      expect(
-        expectMap(personOnNewMemberNode.core.getCurrentContent()).get("name"),
-      ).toEqual("John Doe");
+      expect(personOnNewMemberNode.get("name")).toEqual("John Doe");
     });
 
     const groupOnNewMemberNode = await loadCoValueOrFail(
@@ -78,9 +135,7 @@ describe("Group invites", () => {
     await newMember.node.acceptInvite(group.id, inviteSecret);
 
     await waitFor(() => {
-      expect(
-        expectMap(personOnNewMemberNode.core.getCurrentContent()).get("name"),
-      ).toEqual("John Doe");
+      expect(personOnNewMemberNode.get("name")).toEqual("John Doe");
     });
 
     const groupOnNewMemberNode = await loadCoValueOrFail(
@@ -161,9 +216,7 @@ describe("Group invites", () => {
     await newMember.node.acceptInvite(group.id, inviteSecret);
 
     await waitFor(() => {
-      expect(
-        expectMap(personOnNewMemberNode.core.getCurrentContent()).get("name"),
-      ).toEqual("John Doe");
+      expect(personOnNewMemberNode.get("name")).toEqual("John Doe");
     });
 
     const groupOnNewMemberNode = await loadCoValueOrFail(
@@ -187,9 +240,61 @@ describe("Group invites", () => {
     const personOnReaderNode = await loadCoValueOrFail(reader.node, person.id);
 
     await waitFor(() => {
-      expect(
-        expectMap(personOnReaderNode.core.getCurrentContent()).get("name"),
-      ).toEqual("John Doe");
+      expect(personOnReaderNode.get("name")).toEqual("John Doe");
+    });
+  });
+
+  test("should be able to accept a manager invite", async () => {
+    const admin = await setupTestAccount({
+      connected: true,
+    });
+
+    const newMember = await setupTestAccount({
+      connected: true,
+    });
+
+    const group = admin.node.createGroup();
+
+    const person = group.createMap({
+      name: "John Doe",
+    });
+
+    const inviteSecret = group.createInvite("manager");
+
+    const personOnNewMemberNode = await loadCoValueOrFail(
+      newMember.node,
+      person.id,
+    );
+    expect(personOnNewMemberNode.get("name")).toEqual(undefined);
+
+    await newMember.node.acceptInvite(group.id, inviteSecret);
+
+    await waitFor(() => {
+      expect(personOnNewMemberNode.get("name")).toEqual("John Doe");
+    });
+
+    const groupOnNewMemberNode = await loadCoValueOrFail(
+      newMember.node,
+      group.id,
+    );
+
+    expect(groupOnNewMemberNode.roleOf(newMember.accountID)).toEqual("manager");
+
+    // Verify admin access by adding another member
+    const reader = await setupTestAccount({
+      connected: true,
+    });
+
+    const readerOnNewMemberNode = await loadCoValueOrFail(
+      newMember.node,
+      reader.accountID,
+    );
+    groupOnNewMemberNode.addMember(readerOnNewMemberNode, "reader");
+
+    const personOnReaderNode = await loadCoValueOrFail(reader.node, person.id);
+
+    await waitFor(() => {
+      expect(personOnReaderNode.get("name")).toEqual("John Doe");
     });
   });
 
@@ -229,15 +334,9 @@ describe("Group invites", () => {
     });
 
     const group = admin.node.createGroup();
-    const person = group.createMap({
-      name: "John Doe",
-    });
 
     // First add member as admin
-    const memberAccount = await loadCoValueOrFail(
-      member.node,
-      member.accountID,
-    );
+    const memberAccount = await loadCoValueOrFail(admin.node, member.accountID);
     group.addMember(memberAccount, "admin");
 
     // Create a reader invite
@@ -249,8 +348,6 @@ describe("Group invites", () => {
     const groupOnMemberNode = await loadCoValueOrFail(member.node, group.id);
     expect(groupOnMemberNode.roleOf(member.accountID)).toEqual("admin");
   });
-
-  logger.setLevel(LogLevel.DEBUG);
 
   test("invites should be able to upgrade the role of an existing member", async () => {
     const admin = await setupTestAccount({
@@ -264,10 +361,7 @@ describe("Group invites", () => {
     const group = admin.node.createGroup();
 
     // First add member as reader
-    const memberAccount = await loadCoValueOrFail(
-      member.node,
-      member.accountID,
-    );
+    const memberAccount = await loadCoValueOrFail(admin.node, member.accountID);
     group.addMember(memberAccount, "reader");
 
     // Create an admin invite
@@ -284,10 +378,7 @@ describe("Group invites", () => {
     const reader = await setupTestAccount({
       connected: true,
     });
-    const readerAccount = await loadCoValueOrFail(
-      member.node,
-      reader.accountID,
-    );
+    const readerAccount = await loadCoValueOrFail(admin.node, reader.accountID);
     groupOnMemberNode.addMember(readerAccount, "reader");
   });
 
@@ -306,12 +397,9 @@ describe("Group invites", () => {
     });
 
     // First add member as reader
-    const memberAccount = await loadCoValueOrFail(
-      member.node,
-      member.accountID,
-    );
+    const memberAccount = await loadCoValueOrFail(admin.node, member.accountID);
     group.addMember(memberAccount, "reader");
-    await group.removeMember(memberAccount);
+    group.removeMember(memberAccount);
 
     // Create a new reader invite
     const inviteSecret = group.createInvite("reader");

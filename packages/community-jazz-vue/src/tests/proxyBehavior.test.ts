@@ -1,9 +1,10 @@
 // @vitest-environment happy-dom
 
 import { Group, co, z } from "jazz-tools";
+import { assertLoaded } from "jazz-tools/testing";
 import { beforeAll, describe, expect, it } from "vitest";
 import { isProxy, nextTick, toRaw } from "vue";
-import { useAccount, useCoState } from "../composables.js";
+import { useAccount, useAgent, useCoState, useLogOut } from "../composables.js";
 import { createJazzTestAccount } from "../testing.js";
 import { withJazzTestSetup } from "./testUtils.js";
 
@@ -70,9 +71,8 @@ describe("Proxy Behavior Verification", () => {
     expect(isProxy(result.value)).toBe(false);
 
     // Properties should also not be proxies
-    if (result.value) {
-      expect(isProxy(result.value.content)).toBe(false);
-    }
+    assertLoaded(result.value);
+    expect(isProxy(result.value.content)).toBe(false);
   });
 
   it("should handle nested object access without proxy issues", async () => {
@@ -102,8 +102,8 @@ describe("Proxy Behavior Verification", () => {
     await nextTick();
 
     // Should be able to access deeply nested properties without proxy issues
-    const me = accountResult.me.value;
-    expect(me).toBeDefined();
+    const me = accountResult.value;
+    assertLoaded(me);
     expect(me?.root).toBeDefined();
     expect(me?.root?.testMap).toBeDefined();
     expect(me?.root?.testMap?.content).toBe("nested content");
@@ -132,6 +132,7 @@ describe("Proxy Behavior Verification", () => {
     );
 
     // Initial state
+    assertLoaded(result.value);
     expect(result.value?.content).toBe("initial content");
     expect(isProxy(result.value)).toBe(false);
 
@@ -165,7 +166,7 @@ describe("Proxy Behavior Verification", () => {
 
     // User should be able to use the object directly without toRaw()
     const jazzObject = result.value;
-    expect(jazzObject).toBeDefined();
+    assertLoaded(jazzObject);
 
     // Should be able to call Jazz methods directly
     expect(() => {
@@ -174,34 +175,39 @@ describe("Proxy Behavior Verification", () => {
     }).not.toThrow();
 
     // Should not need toRaw() to access properties
-    expect(jazzObject?.content).toBe("test content");
+    expect(jazzObject.content).toBe("test content");
   });
 
   it("should handle context manager objects without proxy issues", async () => {
     const account = await createJazzTestAccount();
 
-    const [result] = withJazzTestSetup(() => useAccount(), {
+    const [loadedAccount] = withJazzTestSetup(() => useAccount(), {
+      account,
+    });
+    const [agent] = withJazzTestSetup(() => useAgent(), {
+      account,
+    });
+    const [logOut] = withJazzTestSetup(() => useLogOut(), {
       account,
     });
 
     // The account object should not be a proxy
-    expect(isProxy(result.me.value)).toBe(false);
+    expect(isProxy(loadedAccount.value)).toBe(false);
 
     // The agent should be accessible and usable without toRaw() calls
-    expect(result.agent).toBeDefined();
-    expect(typeof result.agent).toBe("object");
+    expect(typeof agent).toBe("object");
 
     // Should be able to access agent properties without proxy issues
     expect(() => {
-      const agentType = result.agent.$type$; // Access agent property
+      const agentType = agent.$type$; // Access agent property
       expect(agentType).toBeDefined();
     }).not.toThrow();
 
     // LogOut function should work without proxy issues
-    expect(typeof result.logOut).toBe("function");
+    expect(typeof logOut).toBe("function");
     expect(() => {
       // Should be able to call without toRaw()
-      result.logOut.toString(); // Safe way to test function access
+      logOut.toString(); // Safe way to test function access
     }).not.toThrow();
   });
 
@@ -264,11 +270,12 @@ describe("Proxy Behavior Verification", () => {
     await nextTick();
 
     // Both account and project should work without proxy issues
-    expect(isProxy(accountResult.me.value)).toBe(false);
+    expect(isProxy(accountResult.value)).toBe(false);
     expect(isProxy(projectResult.value)).toBe(false);
 
     // Should be able to access properties without toRaw()
-    expect(accountResult.me.value?.$jazz.id).toBeDefined();
-    expect(projectResult.value?.content).toBe("new project");
+    expect(accountResult.value?.$jazz.id).toBeDefined();
+    assertLoaded(projectResult.value);
+    expect(projectResult.value.content).toBe("new project");
   });
 });

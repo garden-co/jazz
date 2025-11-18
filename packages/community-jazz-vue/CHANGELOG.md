@@ -1,5 +1,278 @@
 # jazz-react
 
+## 0.19.3
+
+### Patch Changes
+
+- Updated dependencies [cddbfdb]
+- Updated dependencies [114e4ce]
+  - jazz-tools@0.19.3
+  - cojson@0.19.3
+
+## 0.19.2
+
+### Patch Changes
+
+- Updated dependencies [ef24afb]
+- Updated dependencies [7e76313]
+- Updated dependencies [5f2b34b]
+  - jazz-tools@0.19.2
+  - cojson@0.19.2
+
+## 0.19.1
+
+### Patch Changes
+
+- Updated dependencies [f444bd9]
+- Updated dependencies [afd2ded]
+  - jazz-tools@0.19.1
+  - cojson@0.19.1
+
+## 0.19.0
+
+### Minor Changes
+
+- 26386d9: Add explicit CoValue loading states:
+  - Add `$isLoaded` field to discriminate between loaded and unloaded CoValues
+  - Add `$jazz.loadingState` field to provide additional info about the loading state
+  - All methods and functions that load CoValues now return a `MaybeLoaded<CoValue>` instead of `CoValue | null | undefined`
+  - Rename `$onError: null` to `$onError: "catch"`
+  - Split the `useAccount` hook into three separate hooks:
+    - `useAccount`: now only returns an Account CoValue
+    - `useLogOut`: returns a function for logging out of the current account
+    - `useAgent`: returns the current agent
+  - Add a `select` option (and an optional `equalityFn`) to `useAccount` and `useCoState`, and remove `useAccountWithSelector` and `useCoStateWithSelector`.
+  - Allow specifying resolve queries at the schema level. Those queries will be used when loading CoValues, if no other resolve query is provided.
+
+### Patch Changes
+
+- Updated dependencies [26386d9]
+  - jazz-tools@0.19.0
+  - cojson@0.19.0
+
+## 0.18.38
+
+### Patch Changes
+
+- Updated dependencies [349ca48]
+- Updated dependencies [68781a0]
+- Updated dependencies [349ca48]
+  - cojson@0.18.38
+  - jazz-tools@0.18.38
+
+## 0.18.37
+
+### Patch Changes
+
+- Updated dependencies [0e923d1]
+- Updated dependencies [feecdae]
+- Updated dependencies [fd89225]
+- Updated dependencies [a841071]
+- Updated dependencies [68e0b26]
+  - cojson@0.18.37
+  - jazz-tools@0.18.37
+
+## 0.18.36
+
+### Patch Changes
+
+- Updated dependencies [af3fe4c]
+  - cojson@0.18.36
+  - jazz-tools@0.18.36
+
+## 0.18.35
+
+### Patch Changes
+
+- Updated dependencies [d47ac6d]
+  - cojson@0.18.35
+  - jazz-tools@0.18.35
+
+## 0.18.34
+
+### Patch Changes
+
+- Updated dependencies [4a79953]
+- Updated dependencies [7a64465]
+- Updated dependencies [d7e5cc8]
+  - cojson@0.18.34
+  - jazz-tools@0.18.34
+
+## 0.18.33
+
+### Patch Changes
+
+- df0045e: fix: Image's lazy loading placeholder trasparency
+- Updated dependencies [df0045e]
+- Updated dependencies [5ffe0a9]
+  - jazz-tools@0.18.33
+  - cojson@0.18.33
+
+## 0.18.32
+
+### Patch Changes
+
+- Updated dependencies [8f47a9e]
+- Updated dependencies [314c199]
+  - cojson@0.18.32
+  - jazz-tools@0.18.32
+
+## 0.18.31
+
+### Patch Changes
+
+- Updated dependencies [7c2b7b8]
+  - cojson@0.18.31
+  - jazz-tools@0.18.31
+
+## 0.18.30
+
+### Patch Changes
+
+- Updated dependencies [b3dbcaa]
+- Updated dependencies [75d452e]
+- Updated dependencies [ad83da2]
+- Updated dependencies [346c5fb]
+- Updated dependencies [354895b]
+- Updated dependencies [162757c]
+- Updated dependencies [d08b7e2]
+- Updated dependencies [ad19280]
+  - jazz-tools@0.18.30
+  - cojson@0.18.30
+
+## 0.18.29
+
+### Patch Changes
+
+- Updated dependencies [cc7efc8]
+- Updated dependencies [f55d17f]
+  - jazz-tools@0.18.29
+  - cojson@0.18.29
+
+## 0.18.28
+
+### Patch Changes
+
+- Updated dependencies [8cbbe0e]
+- Updated dependencies [14806c8]
+- Updated dependencies [e8880dc]
+- Updated dependencies [d83b5e3]
+- Updated dependencies [5320349]
+  - jazz-tools@0.18.28
+  - cojson@0.18.28
+
+## 0.18.27
+
+### Patch Changes
+
+- Updated dependencies [6c6eb35]
+- Updated dependencies [6ca0b59]
+- Updated dependencies [88c5f1c]
+  - jazz-tools@0.18.27
+  - cojson@0.18.27
+
+## 0.18.26
+
+### Patch Changes
+
+- Updated dependencies [4e0ea26]
+- Updated dependencies [f956cd3]
+  - jazz-tools@0.18.26
+  - cojson@0.18.26
+
+## 0.18.25
+
+### Patch Changes
+
+- 197f4aa: Fixed the AccountSchema prop type
+- Updated dependencies [4036737]
+- Updated dependencies [8ae7d71]
+- Updated dependencies [b1d0081]
+- Updated dependencies [36a5c58]
+- Updated dependencies [94e7d89]
+  - jazz-tools@0.18.25
+  - cojson@0.18.25
+
+## 0.18.24
+
+### Patch Changes
+
+- Updated dependencies [f4c4ee9]
+- Updated dependencies [a15e2ba]
+- Updated dependencies [b09785e]
+  - jazz-tools@0.18.24
+  - cojson@0.18.24
+
+## 0.18.23
+
+### Patch Changes
+
+- Updated dependencies [a0c8a2d]
+  - jazz-tools@0.18.23
+  - cojson@0.18.23
+
+## 0.18.22
+
+### Patch Changes
+
+- Updated dependencies [22200ac]
+- Updated dependencies [1e20db6]
+  - jazz-tools@0.18.22
+  - cojson@0.18.22
+
+## 0.18.21
+
+### Patch Changes
+
+- Updated dependencies [6819f20]
+  - jazz-tools@0.18.21
+  - cojson@0.18.21
+
+## 0.18.20
+
+### Patch Changes
+
+- Updated dependencies [c34a793]
+- Updated dependencies [e75b3d6]
+- Updated dependencies [2c01529]
+- Updated dependencies [ecf4967]
+- Updated dependencies [7b0facc]
+- Updated dependencies [47c7dd3]
+- Updated dependencies [d0e2210]
+  - jazz-tools@0.18.20
+  - cojson@0.18.20
+
+## 0.18.19
+
+### Patch Changes
+
+- Updated dependencies [f88db5f]
+- Updated dependencies [8eac2fc]
+- Updated dependencies [08b6c03]
+  - jazz-tools@0.18.19
+  - cojson@0.18.19
+
+## 0.18.18
+
+### Patch Changes
+
+- Updated dependencies [ed7e353]
+- Updated dependencies [f2f478a]
+- Updated dependencies [ed7e353]
+- Updated dependencies [1698d41]
+  - cojson@0.18.18
+  - jazz-tools@0.18.18
+
+## 0.18.17
+
+### Patch Changes
+
+- Updated dependencies [925da72]
+- Updated dependencies [75d1afa]
+- Updated dependencies [8aa4acd]
+  - cojson@0.18.17
+  - jazz-tools@0.18.17
+
 ## 0.18.16
 
 ### Patch Changes

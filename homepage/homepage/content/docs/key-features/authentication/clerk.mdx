@@ -1,0 +1,88 @@
+export const metadata = {
+  description: "Integrate Clerk with your Jazz app to authenticate users. This method combines Clerk's comprehensive authentication services with Jazz's local-first capabilities."
+};
+
+import { CodeGroup, ContentByFramework, FileName, ReactLogo, ExpoLogo, RNLogo, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
+
+# Clerk Authentication
+
+Jazz can be integrated with [Clerk](https://clerk.com/) to authenticate users. This method combines Clerk's comprehensive authentication services with Jazz's local-first capabilities.
+
+## How it works
+
+When using Clerk authentication:
+1. Users sign up or sign in through Clerk's authentication system
+2. Jazz securely stores the user's account keys with Clerk
+3. When logging in, Jazz retrieves these keys from Clerk
+4. Once authenticated, users can work offline with full Jazz functionality
+
+This authentication method is not fully local-first, as login and signup need to be done online, but once authenticated, users can use all of Jazz's features without needing to be online.
+
+## Key benefits
+
+- **Rich auth options**: Email/password, social logins, multi-factor authentication
+- **User management**: Complete user administration dashboard
+- **Familiar sign-in**: Standard auth flows users already know
+- **OAuth providers**: Google, GitHub, and other popular providers
+- **Enterprise features**: SSO, SAML, and other advanced options
+
+## Implementation
+
+<ContentByFramework framework="react">
+Use `<JazzReactProviderWithClerk />` to wrap your app:
+</ContentByFramework>
+
+<ContentByFramework framework="react-native-expo">
+Use `<JazzExpoProviderWithClerk />` to wrap your app.
+</ContentByFramework>
+
+<FileName>App.tsx</FileName>
+
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="wrap-in-provider" className="mb-4">
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
+```tsx react-snippet.tsx#Basic
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ExpoLogo />} label="Expo" value="react-native-expo" preferWrap>
+```tsx expo.tsx#Basic
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+<FileName>AuthButton.tsx</FileName>
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="wrap-in-provider" >
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
+```tsx react-snippet.tsx#AuthButton
+```
+
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ExpoLogo />} label="Expo" value="react-native-expo" preferWrap>
+```tsx expo.tsx#AuthButton
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+## Examples
+
+You can explore Jazz with Clerk integration in our [example projects](/examples). For more Clerk-specific demos, visit [Clerk's documentation](https://clerk.com/docs).
+
+## When to use Clerk
+
+Clerk authentication is ideal when:
+
+- You need an existing user management system
+- You want to integrate with other Clerk features (roles, permissions)
+- You require email/password authentication with verification
+- You need OAuth providers (Google, GitHub, etc.)
+- You want to avoid users having to manage passphrases
+
+## Limitations and considerations
+
+- **Online requirement**: Initial signup/login requires internet connectivity
+- **Third-party dependency**: Relies on Clerk's services for authentication
+- **Not fully local-first**: Initial authentication requires a server
+- **Platform support**: Not available on all platforms
+
+## Additional resources
+
+- [Clerk Documentation](https://clerk.com/docs)

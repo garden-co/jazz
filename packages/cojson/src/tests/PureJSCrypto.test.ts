@@ -4,7 +4,6 @@ import {
   setCurrentTestCryptoProvider,
   setupTestNode,
   setupTestAccount,
-  randomAgentAndSessionID,
 } from "./testUtils";
 import { PureJSCrypto } from "../crypto/PureJSCrypto";
 import { stableStringify } from "../jsonStringify";
@@ -118,8 +117,7 @@ describe("PureJSCrypto", () => {
       true,
     );
 
-    const content =
-      mapInOtherSession.core.verified.newContentSince(undefined)?.[0];
+    const content = mapInOtherSession.core.newContentSince(undefined)?.[0];
     assert(content);
 
     client.node.syncManager.handleNewContent(content, "storage");

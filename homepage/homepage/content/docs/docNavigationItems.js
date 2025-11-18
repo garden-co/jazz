@@ -1,31 +1,24 @@
-/** @satisfies {DocNavigationSection[]} */
+/** @type {@import('./docNavigationItemsTypes').DocNavigationSection[]} */
 export const docNavigationItems = [
   {
     // welcome to jazz
     name: "Getting started",
+    href: "/docs",
     items: [
       {
-        // what is jazz, supported environments, where to start (guide, examples, project setup)
-        name: "Introduction",
+        // what is Jazz, supported environments, where to start (guide, examples, project setup)
+        name: "Overview",
         href: "/docs",
         done: 100,
-        excludeFromNavigation: true,
-      }, {
-        name: "Quickstart",
-        href: "/docs/getting-started/quickstart",
-        done: 100,
       },
-      { name: "FAQs", href: "/docs/faq", done: 100 },
       {
-        name: "Troubleshooting",
-        href: "/docs/troubleshooting",
-        done: 100,
+        name: "Quickstart",
+        href: "/docs/quickstart",
+        done: {
+          react: 100,
+          svelte: 100,
+        },
       },
-    ],
-  },
-  {
-    name: "Project setup",
-    items: [
       {
         name: "Installation",
         href: "/docs/project-setup",
@@ -35,24 +28,14 @@ export const docNavigationItems = [
           "react-native": 100,
           "react-native-expo": 100,
           svelte: 100,
+          vanilla: 100,
         },
       },
       {
-        // jazz mesh, setting api key, free plan, unlimited
-        name: "Sync and storage",
-        href: "/docs/sync-and-storage",
+        name: "Troubleshooting",
+        href: "/docs/troubleshooting",
         done: 100,
       },
-      {
-        name: "Providers",
-        href: "/docs/project-setup/providers",
-        done: {
-          react: 100,
-          "react-native": 100,
-          "react-native-expo": 100,
-          svelte: 100,
-        },
-      }
     ],
   },
   {
@@ -60,6 +43,11 @@ export const docNavigationItems = [
     collapse: true,
     prefix: "/docs/upgrade",
     items: [
+      {
+        name: "0.19.0 - Explicit loading states",
+        href: "/docs/upgrade/0-19-0",
+        done: 100,
+      },
       {
         name: "0.18.0 - New `$jazz` field in CoValues",
         href: "/docs/upgrade/0-18-0",
@@ -107,7 +95,7 @@ export const docNavigationItems = [
       // },
       // {
       //   // upgrade guides
-      //   name: "0.10.0 - New authentication flow",
+      //   name: "0.10.0 - New key-features/authentication flow",
       //   href: "/docs/upgrade/0-10-0",
       //   done: 100,
       // },
@@ -141,166 +129,210 @@ export const docNavigationItems = [
     ],
   },
   {
-    name: "Defining schemas",
+    name: "Core Concepts",
+    done: 100,
+    prefix: "/docs/core-concepts",
     items: [
       {
         name: "CoValues",
-        href: "/docs/schemas/covalues",
-        done: 20,
+        done: 100,
+        collapse: true,
+        startClosed: true,
+        items: [
+          {
+            name: "Overview",
+            href: "/docs/core-concepts/covalues/overview",
+            done: 100,
+          },
+          {
+            name: "CoMaps",
+            href: "/docs/core-concepts/covalues/comaps",
+            done: 100,
+          },
+          {
+            name: "CoLists",
+            href: "/docs/core-concepts/covalues/colists",
+            done: 100,
+          },
+          {
+            name: "CoFeeds",
+            href: "/docs/core-concepts/covalues/cofeeds",
+            done: 100,
+          },
+          {
+            name: "CoTexts",
+            href: "/docs/core-concepts/covalues/cotexts",
+            done: 100,
+          },
+          {
+            name: "FileStreams",
+            href: "/docs/core-concepts/covalues/filestreams",
+            done: 80,
+          },
+          {
+            name: "CoVectors",
+            href: "/docs/core-concepts/covalues/covectors",
+            done: 100,
+          },
+          {
+            name: "ImageDefinitions",
+            href: "/docs/core-concepts/covalues/imagedef",
+            done: {
+              react: 100,
+              "react-native": 100,
+              "react-native-expo": 100,
+              vanilla: 100,
+              svelte: 100,
+            },
+          },
+        ],
       },
       {
-        name: "Accounts & migrations",
-        href: "/docs/schemas/accounts-and-migrations",
-        done: 20,
+        name: "Schemas",
+        done: 100,
+        collapse: true,
+        items: [
+          {
+            name: "Connecting CoValues",
+            href: "/docs/core-concepts/schemas/connecting-covalues",
+            done: 100,
+          },
+          {
+            name: "Accounts & migrations",
+            href: "/docs/core-concepts/schemas/accounts-and-migrations",
+            done: 20,
+          },
+          {
+            name: "Schema Unions",
+            href: "/docs/core-concepts/schemas/schemaunions",
+            done: 100,
+          },
+          {
+            name: "Codecs",
+            href: "/docs/core-concepts/schemas/codecs",
+            done: 100,
+          },
+        ],
+      },
+      {
+        name: "Subscriptions & Deep Loading",
+        href: "/docs/core-concepts/subscription-and-loading",
+        done: 100,
+      },
+      {
+        // jazz mesh, setting api key, free plan, unlimited
+        name: "Sync and storage",
+        href: "/docs/core-concepts/sync-and-storage",
+        done: 100,
       },
     ],
   },
   {
-    name: "Using CoValues",
+    name: "Key Features",
+    done: 100,
+    prefix: "/docs/key-features",
     items: [
       {
-        name: "CoMaps",
-        href: "/docs/using-covalues/comaps",
-        done: 100,
+        name: "Authentication",
+        startClosed: true,
+        collapse: true,
+        items: [
+          {
+            name: "Overview",
+            href: "/docs/key-features/authentication/overview",
+            done: 100,
+          },
+          {
+            name: "Quickstart",
+            href: "/docs/key-features/authentication/quickstart",
+            done: {
+              react: 100,
+              svelte: 100,
+            },
+          },
+
+          {
+            name: "Authentication States",
+            href: "/docs/key-features/authentication/authentication-states",
+            done: 100,
+          },
+          {
+            name: "Passkey",
+            href: "/docs/key-features/authentication/passkey",
+            done: 100,
+          },
+          {
+            name: "Passphrase",
+            href: "/docs/key-features/authentication/passphrase",
+            done: 100,
+          },
+          {
+            name: "Clerk",
+            href: "/docs/key-features/authentication/clerk",
+            done: 100,
+          },
+          {
+            name: "Better Auth",
+            href: "/docs/key-features/authentication/better-auth",
+            done: 100,
+          },
+          {
+            name: "Better Auth Database Adapter",
+            href: "/docs/key-features/authentication/better-auth-database-adapter",
+            done: 100,
+          },
+        ],
       },
       {
-        name: "CoLists",
-        href: "/docs/using-covalues/colists",
-        done: 100,
-      },
-      {
-        name: "CoFeeds",
-        href: "/docs/using-covalues/cofeeds",
-        done: 100,
-      },
-      {
-        name: "CoTexts",
-        href: "/docs/using-covalues/cotexts",
-        done: 100,
-      },
-      {
-        name: "FileStreams",
-        href: "/docs/using-covalues/filestreams",
-        done: 80,
-      },
-      {
-        name: "ImageDefinition",
-        href: "/docs/using-covalues/imagedef",
-        done: {
-          react: 100,
-          "react-native": 100,
-          "react-native-expo": 100,
-          vanilla: 100,
-          svelte: 100,
-        },
-      },
-      {
-        name: "Connecting CoValues",
-        href: "/docs/using-covalues/connecting-covalues",
-        done: 100,
-      },
-      {
-        name: "Schema Unions",
-        href: "/docs/using-covalues/schemaunions",
-        done: 100,
-      },
-      {
-        name: "Subscriptions & Deep Loading",
-        href: "/docs/using-covalues/subscription-and-loading",
-        done: 80,
+        name: "Permissions & sharing",
+        collapse: true,
+        startClosed: true,
+        items: [
+          {
+            name: "Overview",
+            href: "/docs/permissions-and-sharing/overview",
+            done: 100,
+          },
+          {
+            name: "Quickstart",
+            href: "/docs/permissions-and-sharing/quickstart",
+            done: 100,
+          },
+          {
+            name: "Sharing",
+            href: "/docs/permissions-and-sharing/sharing",
+            done: 100,
+          },
+          {
+            name: "Cascading Permissions",
+            href: "/docs/permissions-and-sharing/cascading-permissions",
+            done: 100,
+          },
+        ],
       },
       {
         name: "Version control",
-        href: "/docs/using-covalues/version-control",
+        href: "/docs/key-features/version-control",
         done: 100,
       },
       {
         name: "History",
-        href: "/docs/using-covalues/history",
+        href: "/docs/key-features/history",
         done: 100,
       },
     ],
   },
   {
-    name: "Groups, permissions & sharing",
+    name: "Server-Side Development",
+    prefix: "/docs/server-side",
     items: [
       {
-        name: "Groups as permission scopes",
-        href: "/docs/groups/intro",
-        done: 10,
-      },
-      {
-        name: "Public sharing & invites",
-        href: "/docs/groups/sharing",
-        done: 10,
-      },
-      {
-        name: "Groups as members",
-        href: "/docs/groups/inheritance",
-        done: 100,
-      },
-    ],
-  },
-  {
-    name: "Authentication",
-    items: [
-      {
-        name: "Overview",
-        href: "/docs/authentication/overview",
-        done: 100,
-      },
-      {
-        name: "Authentication States",
-        href: "/docs/authentication/authentication-states",
-        done: 100,
-      },
-      // {
-      //   name: "Jazz Cloud",
-      //   href: "/docs/authentication/jazz-cloud",
-      //   done: {
-      //     react: 100,
-      //     vanilla: 100,
-      //     "react-native-expo": 100,
-      //   },
-      // },
-      {
-        name: "Passkey",
-        href: "/docs/authentication/passkey",
-        done: 100,
-      },
-      {
-        name: "Passphrase",
-        href: "/docs/authentication/passphrase",
-        done: 100,
-      },
-      {
-        name: "Clerk",
-        href: "/docs/authentication/clerk",
-        done: 100,
-      },
-      {
-        name: "Better Auth",
-        href: "/docs/authentication/better-auth",
-        done: 100,
-      },
-      {
-        name: "Jazz database adapter for Better Auth",
-        href: "/docs/authentication/better-auth-database-adapter",
-        done: 100,
-      },
-      {
-        name: "Writing your own",
-        href: "/docs/authentication/writing-your-own",
-        done: 0,
-      },
-    ],
-  },
-  {
-    name: "Server-side",
-    items: [{
         name: "Quickstart",
         href: "/docs/server-side/quickstart",
-        done: 100,
+        done: {
+          react: 100,
+          svelte: 100,
+        },
       },
       {
         name: "Setup",
@@ -309,73 +341,127 @@ export const docNavigationItems = [
       },
       {
         name: "Communicating with workers",
-        href: "/docs/server-side/communicating-with-workers",
         done: 100,
+        prefix: "/docs/server-side/communicating-with-workers",
+        startClosed: true,
+        collapse: true,
+        items: [
+          {
+            name: "Overview",
+            href: "/docs/server-side/communicating-with-workers/overview",
+            done: 100,
+          },
+          {
+            name: "JazzRPC",
+            href: "/docs/server-side/jazz-rpc",
+            done: 100,
+          },
+          {
+            name: "HTTP requests",
+            href: "/docs/server-side/communicating-with-workers/http-requests",
+            done: 100,
+          },
+          {
+            name: "Inbox API",
+            href: "/docs/server-side/communicating-with-workers/inbox",
+            done: 100,
+          },
+        ],
       },
       {
-        name: "HTTP requests",
-        href: "/docs/server-side/http-requests",
-        done: 100,
-      },
-      {
-        name: "Inbox",
-        href: "/docs/server-side/inbox",
-        done: 100,
-      },
-    ],
-  },
-  {
-    name: "Design patterns",
-    items: [
-      {
-        name: "Forms",
-        href: "/docs/design-patterns/form",
-        done: 100,
-      },
-      {
-        name: "Organization/Team",
-        href: "/docs/design-patterns/organization",
-        done: 80,
-      },
-      {
-        name: "History Patterns",
-        href: "/docs/design-patterns/history-patterns",
-        done: 100,
-      },
-    ],
-  },
-  {
-    name: "Tools",
-    items: [
-      {
-        name: "AI tools",
-        href: "/docs/ai-tools",
-        done: 100,
-      },
-      {
-        name: "create-jazz-app",
-        href: "/docs/tools/create-jazz-app",
-        done: 100,
-      },
-      {
-        name: "Inspector",
-        href: "/docs/inspector",
+        name: "Server-side rendering",
+        href: "/docs/server-side/ssr",
         done: 100,
       },
     ],
   },
   {
-    name: "Resources",
+    name: "Project setup",
+    prefix: "/docs/project-setup",
     items: [
       {
-        name: "Encryption",
-        href: "/docs/resources/encryption",
-        done: 100,
+        name: "Providers",
+        href: "/docs/project-setup/providers",
+        done: {
+          react: 100,
+          "react-native": 100,
+          "react-native-expo": 100,
+          svelte: 100,
+        },
+      },
+    ],
+  },
+  {
+    name: "Tooling & Resources",
+    prefix: "/docs/tooling-and-resources",
+    items: [
+      {
+        name: "Developer Tools",
+        items: [
+          {
+            name: "create-jazz-app",
+            href: "/docs/tooling-and-resources/create-jazz-app",
+            done: 100,
+          },
+          {
+            name: "Inspector",
+            href: "/docs/tooling-and-resources/inspector",
+            done: 100,
+          },
+          {
+            name: "AI tools (llms.txt)",
+            href: "/docs/tooling-and-resources/ai-tools",
+            done: 100,
+          },
+        ],
       },
       {
-        name: "Jazz under the hood",
-        href: "/docs/jazz-under-the-hood",
-        done: 0,
+        name: "Reference",
+        prefix: "/docs/reference",
+        items: [
+          {
+            name: "FAQs",
+            href: "/docs/reference/faq",
+            done: 100,
+          },
+          {
+            name: "Encryption",
+            href: "/docs/reference/encryption",
+            done: 100,
+          },
+          {
+            name: "Testing",
+            href: "/docs/reference/testing",
+            done: 100,
+          },
+          {
+            name: "Performance tips",
+            href: "/docs/reference/performance",
+            done: 100,
+          },
+          {
+            name: "Design patterns",
+            collapse: true,
+            prefix: "/docs/reference/design-patterns",
+            items: [
+              {
+                name: "Forms",
+                href: "/docs/reference/design-patterns/form",
+                done: 100,
+              },
+              {
+                name: "Organization/Team",
+                href: "/docs/reference/design-patterns/organization",
+                done: 100,
+              },
+              {
+                name: "History Patterns",
+                href: "/docs/reference/design-patterns/history-patterns",
+                done: 100,
+              },
+            ],
+          },
+        ],
       },
     ],
   },
@@ -386,9 +472,23 @@ const flatItems = docNavigationItems
   .filter((item) => !item.excludeFromNavigation);
 
 export const flatItemsWithNavLinks = flatItems.map((item, index) => {
+  const findNextWithHref = (startIndex) => {
+    for (let i = startIndex + 1; i < flatItems.length; i++) {
+      if (flatItems[i].href) return flatItems[i];
+    }
+    return null;
+  };
+
+  const findPreviousWithHref = (startIndex) => {
+    for (let i = startIndex - 1; i >= 0; i--) {
+      if (flatItems[i].href) return flatItems[i];
+    }
+    return null;
+  };
+
   return {
     ...item,
-    next: item.next === null ? null : flatItems[index + 1],
-    previous: item.previous === null ? null : flatItems[index - 1],
+    next: item.next === null ? null : findNextWithHref(index),
+    previous: item.previous === null ? null : findPreviousWithHref(index),
   };
 });

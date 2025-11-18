@@ -55,7 +55,7 @@ export function createJazzSchema(schema: BetterAuthDbSchema): JazzSchema {
         },
       );
 
-      if (!dbRoot) {
+      if (!dbRoot.$isLoaded) {
         // Create a group for the first time
         // it will be the owner of the all tables and data
         const adminGroup = Group.create({ owner: account });

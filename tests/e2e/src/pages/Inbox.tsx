@@ -1,4 +1,4 @@
-import { Account, CoMap, Group, ID, Inbox, coField } from "jazz-tools";
+import { Account, Group, Inbox, co, z } from "jazz-tools";
 import {
   useAccount,
   experimental_useInboxSender as useInboxSender,
@@ -6,24 +6,25 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { createCredentiallessIframe } from "../lib/createCredentiallessIframe";
 
-export class PingPong extends CoMap {
-  ping = coField.json<number>();
-  pong = coField.optional.json<number>();
-}
+export const PingPong = co.map({
+  ping: z.number(),
+  pong: z.number().optional(),
+});
+export type PingPong = co.loaded<typeof PingPong>;
 
 function getIdParam() {
   const url = new URL(window.location.href);
-  return (url.searchParams.get("id") as ID<Account> | undefined) ?? undefined;
+  return url.searchParams.get("id") ?? undefined;
 }
 
 export function InboxPage() {
   const [id] = useState(getIdParam);
-  const { me } = useAccount();
+  const me = useAccount();
   const [pingPong, setPingPong] = useState<PingPong | null>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   useEffect(() => {
-    if (!me) return;
+    if (!me.$isLoaded) return;
 
     let unsubscribe = () => {};
     let unmounted = false;
@@ -58,7 +59,7 @@ export function InboxPage() {
       if (!id) return;
       const account = await Account.load(id);
 
-      if (!account) return;
+      if (!account.$isLoaded) return;
 
       const group = Group.create();
       group.addMember(account, "writer");
@@ -71,7 +72,7 @@ export function InboxPage() {
   }, [id]);
 
   const handlePingPong = () => {
-    if (!me || id) return;
+    if (!me.$isLoaded || id) return;
 
     iframeRef.current?.remove();
 

@@ -279,3 +279,31 @@ test("totalValidTransactions should return the number of valid transactions proc
     mapOnOtherClient.core.getCurrentContent().totalValidTransactions,
   ).toEqual(2);
 });
+
+test("the map should rebuild when the group permissions change", async () => {
+  const alice = setupTestNode({
+    connected: true,
+  });
+  const group = alice.node.createGroup();
+  const map = group.createMap();
+
+  map.set("fromAdmin", "Written from admin");
+
+  const bob = setupTestNode({
+    connected: true,
+  });
+
+  const mapOnBob = await loadCoValueOrFail(bob.node, map.id);
+
+  expect(mapOnBob.get("fromAdmin")).toEqual(undefined);
+  expect(mapOnBob.totalValidTransactions).toEqual(0);
+
+  group.addMember("everyone", "reader");
+
+  await waitFor(() => {
+    expect(mapOnBob.get("fromAdmin")).toEqual("Written from admin");
+  });
+
+  expect(mapOnBob.version).toEqual(1);
+  expect(mapOnBob.totalValidTransactions).toEqual(1);
+});

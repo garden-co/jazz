@@ -4,7 +4,7 @@ import { HeroHeader } from "@garden-co/design-system/src/components/molecules/He
 
 export default function Home() {
   return (
-    <div className="container space-y-16">
+    <div className="container">
       <HeroHeader
         title="Software is too hard."
         slogan="Computers are magic. So why do we put up with so much complexity? We believe just a few new ideas can make all the difference."

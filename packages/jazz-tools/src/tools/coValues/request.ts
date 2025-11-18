@@ -14,6 +14,8 @@ import {
   CoMapSchemaInit,
   CoValueClass,
   CoreCoMapSchema,
+  CoValueLoadingState,
+  createUnloadedCoValue,
   Group,
   Loaded,
   ResolveQuery,
@@ -25,7 +27,7 @@ import {
   importContentPieces,
   loadCoValue,
 } from "../internal.js";
-import { isCoValueId } from "../lib/id.js";
+import { isCoValueId } from "../lib/utils.js";
 import { Account } from "./account.js";
 
 type MessageShape = Record<string, AnyZodOrCoValueSchema>;
@@ -172,13 +174,16 @@ async function serializeMessagePayload({
   };
 }
 
+const coIdSchema = z.custom<`co_z${string}`>(isCoValueId);
+const signatureSchema = z.custom<`signature_z${string}`>(
+  (value) => typeof value === "string" && value.startsWith("signature_z"),
+);
+
 const requestSchema = z.object({
   contentPieces: z.array(z.json()),
-  id: z.custom<`co_z${string}`>(isCoValueId),
+  id: coIdSchema,
   createdAt: z.number(),
-  authToken: z.custom<`signature_z${string}`>(
-    (value) => typeof value === "string" && value.startsWith("signature_z"),
-  ),
+  authToken: signatureSchema,
   signerID: z.custom<`signer_z${string}`>(
     (value) => typeof value === "string" && value.startsWith("signer_z"),
   ),
@@ -286,7 +291,7 @@ async function handleMessagePayload({
     loadAs,
   });
 
-  if (!madeBy) {
+  if (!madeBy.$isLoaded) {
     throw new JazzRequestError("Creator account not found", 400);
   }
 
@@ -298,7 +303,7 @@ async function handleMessagePayload({
     loadAs,
   });
 
-  if (!value) {
+  if (!value.$isLoaded) {
     throw new JazzRequestError("Value not found", 400);
   }
 
@@ -372,7 +377,7 @@ export class HttpRoute<
     const as = options?.owner ?? Account.getMe();
 
     const target = await loadWorkerAccountOrGroup(this.workerId, as);
-    if (!target) {
+    if (!target.$isLoaded) {
       throw new JazzRequestError("Worker account not found", 400);
     }
 
@@ -616,7 +621,7 @@ async function loadWorkerAccountOrGroup(id: string, loadAs: Account) {
   const coValue = await node.loadCoValueCore(id as `co_z${string}`);
 
   if (!coValue.isAvailable()) {
-    return null;
+    return createUnloadedCoValue(id, CoValueLoadingState.UNAVAILABLE);
   }
 
   const content = coValue.getCurrentContent();
@@ -630,4 +635,185 @@ async function loadWorkerAccountOrGroup(id: string, loadAs: Account) {
   return Group.load(content.id, {
     loadAs,
   });
+}
+
+function defaultGetToken(request: Request) {
+  const headerValue = request.headers.get("Authorization");
+  if (headerValue?.startsWith("Jazz ")) {
+    return headerValue.replace("Jazz ", "");
+  }
+
+  if (headerValue) {
+    console.warn(
+      "An Authorization header was found, but it did not start with 'Jazz '. If this is intentional, you can specify the location of the token using the `getToken` option.",
+    );
+  }
+
+  return undefined;
+}
+
+/**
+ * Authenticates a Request by verifying a signed authentication token.
+ *
+ * - If a token is not provided, the returned account is `undefined` and no error is returned.
+ * - If a valid token is provided, the signer account is returned.
+ * - If an invalid token is provided, an error is returned detailing the validation error, and the returned account is `undefined`.
+ *
+ * @see {@link generateAuthToken} for generating a token.
+ *
+ * Note: This function does not perform any authorization checks, it only verifies if - **when provided** - a token is valid. It is up to the caller to perform any additional authorization checks, if needed.
+ *
+ * @param request - The request to authenticate.
+ * @param options - The options for the authentication.
+ * @param options.expiration - The expiration time of the token in milliseconds, defaults to 1 minute.
+ * @param options.loadAs - The account to load the token from, defaults to the current active account.
+ * @param options.getToken - If specified, this function will be used to get the token from the request. By default the token is expected to be in the `Authorization` header in the form of `Jazz <token>`.
+ * @returns The account if it is valid, otherwise an error.
+ *
+ * @example
+ * ```ts
+ * const { account, error } = await authenticateRequest(request);
+ * if (error) {
+ *   return new Response(JSON.stringify(error), { status: 401 });
+ * }
+ * ```
+ */
+export async function authenticateRequest(
+  request: Request,
+  options?: {
+    expiration?: number;
+    loadAs?: Account;
+    getToken?: (request: Request) => string | undefined | null;
+  },
+): Promise<
+  | {
+      account?: Account;
+      error?: never;
+    }
+  | {
+      account?: never;
+      error: { message: string; details?: unknown };
+    }
+> {
+  const token = options?.getToken?.(request) ?? defaultGetToken(request);
+
+  if (!token) {
+    return {};
+  }
+
+  const { account, error } = await parseAuthToken(token, {
+    loadAs: options?.loadAs,
+    expiration: options?.expiration ?? 1000 * 60,
+  });
+
+  if (error) {
+    return { error };
+  }
+
+  return { account, error };
+}
+
+/**
+ * Generates an authentication token for a given account. This token can be used to authenticate a request. See {@link authenticateRequest} for more details.
+ *
+ * @param as - The account to generate the token for, defaults to the current active account.
+ * @returns The authentication token.
+ *
+ * @example Make a fetch request with the token
+ * ```ts
+ * const token = generateAuthToken();
+ * const response = await fetch(url, {
+ *   headers: {
+ *     Authorization: `Jazz ${token}`,
+ *   },
+ * });
+ * ```
+ */
+
+export function generateAuthToken(as?: Account) {
+  const account = as ?? Account.getMe();
+  const node = account.$jazz.localNode;
+  const crypto = node.crypto;
+
+  const agent = node.getCurrentAgent();
+  const signerSecret = agent.currentSignerSecret();
+
+  const createdAt = Date.now();
+
+  const signPayload = crypto.secureHash({
+    id: account.$jazz.id,
+    createdAt,
+  });
+
+  const authToken = crypto.sign(signerSecret, signPayload);
+
+  return `${authToken}~${account.$jazz.id}~${createdAt}`;
+}
+
+export async function parseAuthToken(
+  authToken: string,
+  options?: { loadAs?: Account; expiration?: number },
+): Promise<
+  | { account: Account; error?: never }
+  | { account?: never; error: { message: string; details?: unknown } }
+> {
+  const expiration = options?.expiration ?? 1_000 * 60; // 1 minute
+
+  const parsed = z
+    .tuple([signatureSchema, coIdSchema, z.string().transform(Number)])
+    .safeParse(authToken.split("~"));
+
+  if (!parsed.success) {
+    return {
+      error: {
+        message: "Invalid token",
+        details: parsed.error,
+      },
+    };
+  }
+
+  const [signature, id, createdAt] = parsed.data;
+
+  if (createdAt + expiration < Date.now()) {
+    return {
+      error: {
+        message: "Token expired",
+      },
+    };
+  }
+
+  const account = await Account.load(id, { loadAs: options?.loadAs });
+
+  if (!account.$isLoaded) {
+    return {
+      error: {
+        message: "Failed to load account",
+        details: { id },
+      },
+    };
+  }
+
+  const node = account.$jazz.localNode;
+  const crypto = node.crypto;
+
+  // Verify the signature of the message to prevent tampering
+  const signPayload = crypto.secureHash({
+    id: account.$jazz.id,
+    createdAt: Number(createdAt),
+  });
+
+  const agentID = account.$jazz.raw.currentAgentID();
+  const signerID = crypto.getAgentSignerID(agentID);
+
+  if (!crypto.verify(signature, signPayload, signerID)) {
+    return {
+      error: {
+        message: "Invalid signature",
+      },
+    };
+  }
+
+  return {
+    account,
+  };
 }

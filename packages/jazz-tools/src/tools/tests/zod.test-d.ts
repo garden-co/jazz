@@ -10,7 +10,6 @@ describe("CoValue and Zod schema compatibility", () => {
 
     const Person = co.map({
       // @ts-expect-error: cannot use z.record with a CoValue schema
-      // (z.record is not exported by jazz-tools)
       pets: z.record(z.string(), Dog),
     });
   });
@@ -68,7 +67,6 @@ describe("CoValue and Zod schema compatibility", () => {
 
     const Person = co.map({
       // @ts-expect-error: cannot use z.intersection with a CoValue schema
-      // (z.intersection is not exported by jazz-tools)
       pets: z.intersection(Dog, Cat),
     });
   });

@@ -14,8 +14,7 @@
     "@react-spring/web": "^9.7.5",
     "jazz-tools": "workspace:*",
     "react": "catalog:react",
-    "react-dom": "catalog:react",
-    "zod": "3.25.76"
+    "react-dom": "catalog:react"
   },
   "devDependencies": {
     "@biomejs/biome": "catalog:default",

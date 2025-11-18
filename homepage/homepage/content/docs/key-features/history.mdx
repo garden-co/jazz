@@ -1,0 +1,88 @@
+import { CodeGroup } from "@/components/forMdx";
+export const metadata = { title: "History" };
+
+# History
+
+Jazz tracks every change to your data automatically. See who changed what, when they did it, and even look at your data from any point in the past.
+
+See the [version history example](https://github.com/garden-co/jazz/tree/main/examples/version-history) for reference.
+
+Let's use the following schema to see how we can use the edit history.
+
+
+<CodeGroup>
+```ts schema.ts#Basic
+```
+</CodeGroup>
+
+## The $jazz.getEdits() method
+
+Every CoValue has a `$jazz.getEdits()` method that contains the complete history for each field. Here's
+how to get the edit history for `task.status`:
+
+<CodeGroup>
+```ts index.ts#GetEdits
+```
+</CodeGroup>
+
+## Edit Structure
+
+Each edit contains:
+
+<CodeGroup>
+```ts index.ts#EditDetails
+```
+</CodeGroup>
+
+## Accessing History
+
+### Latest Edit
+
+Get the most recent change to a field:
+
+<CodeGroup>
+```ts index.ts#Latest
+```
+</CodeGroup>
+
+### All Edits
+
+Get the complete history for a field:
+
+<CodeGroup>
+```ts index.ts#All
+```
+</CodeGroup>
+
+### Initial Values
+
+The first edit contains the initial value:
+
+<CodeGroup>
+```ts index.ts#Initial
+```
+</CodeGroup>
+
+### Created Date and Last Updated Date
+
+To show created date and last updated date, use the `$jazz.createdAt` and `$jazz.lastUpdatedAt` getters.
+
+<CodeGroup>
+```tsx index.ts#CreatedAtLastUpdatedAt
+```
+</CodeGroup>
+
+## Requirements
+
+- CoValues must be loaded to access history (see [Subscription & Loading](/docs/core-concepts/subscription-and-loading))
+- History is only available for fields defined in your schema
+- Edit arrays are ordered chronologically (oldest to newest)
+
+## Common Patterns
+
+For practical implementations using history, see [History Patterns](/docs/reference/design-patterns/history-patterns):
+- Building audit logs
+- Creating activity feeds
+- Implementing undo/redo
+- Showing change indicators
+- Querying historical data

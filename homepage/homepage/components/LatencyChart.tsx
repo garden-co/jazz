@@ -67,8 +67,8 @@ export default function LatencyChart({ latencyOverTime, upOverTime, upCountOverT
         </HoverCard.Trigger>
         <HoverCard.Content className="border border-stone-500 bg-white dark:bg-black shadow-lg absolute w-[150px] -ml-[75px] l-[50%] rounded-md p-2">
           <HoverCard.Arrow className="fill-stone-500" />
-          <p>
-            <span className="font-semibold">No data</span>
+          <p className="text-sm text-center">
+            No data
           </p>
         </HoverCard.Content>
       </HoverCard.Root>
@@ -105,7 +105,7 @@ export default function LatencyChart({ latencyOverTime, upOverTime, upCountOverT
               <div className="p-[0.5px]">
                 <div
                   className={cn(
-                    "h-4 w-1 lg:w-2 rounded-sm hover:opacity-50",
+                    "h-4 w-1 lg:w-2 rounded-xs hover:opacity-50",
                     valueClass,
                   )}
                 />

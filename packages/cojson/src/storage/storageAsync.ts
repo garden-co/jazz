@@ -10,11 +10,12 @@ import {
   logger,
 } from "../exports.js";
 import { StoreQueue } from "../queue/StoreQueue.js";
+import { NewContentMessage } from "../sync.js";
 import {
   CoValueKnownState,
-  NewContentMessage,
   emptyKnownState,
-} from "../sync.js";
+  setSessionCounter,
+} from "../knownState.js";
 import { StorageKnownState } from "./knownState.js";
 import {
   collectNewTxs,
@@ -93,7 +94,11 @@ export class StorageApiAsync implements StorageAPI {
     knownState.header = true;
 
     for (const sessionRow of allCoValueSessions) {
-      knownState.sessions[sessionRow.sessionID] = sessionRow.lastIdx;
+      setSessionCounter(
+        knownState.sessions,
+        sessionRow.sessionID,
+        sessionRow.lastIdx,
+      );
     }
 
     this.loadedCoValues.add(coValueRow.id);
@@ -101,7 +106,7 @@ export class StorageApiAsync implements StorageAPI {
     let contentMessage = createContentMessage(coValueRow.id, coValueRow.header);
 
     if (contentStreaming) {
-      contentMessage.expectContentUntil = knownState["sessions"];
+      contentMessage.expectContentUntil = knownState.sessions;
     }
 
     for (const sessionRow of allCoValueSessions) {
@@ -282,14 +287,17 @@ export class StorageApiAsync implements StorageAPI {
         );
 
         if (sessionRow) {
-          knownState.sessions[sessionRow.sessionID] = sessionRow.lastIdx;
+          setSessionCounter(
+            knownState.sessions,
+            sessionRow.sessionID,
+            sessionRow.lastIdx,
+          );
         }
 
         const lastIdx = sessionRow?.lastIdx || 0;
         const after = msg.new[sessionID]?.after || 0;
 
         if (lastIdx < after) {
-          knownState.sessions[sessionID] = lastIdx;
           invalidAssumptions = true;
         } else {
           const newLastIdx = await this.putNewTxs(
@@ -298,7 +306,7 @@ export class StorageApiAsync implements StorageAPI {
             sessionRow,
             storedCoValueRowID,
           );
-          knownState.sessions[sessionID] = newLastIdx;
+          setSessionCounter(knownState.sessions, sessionID, newLastIdx);
         }
       });
     }

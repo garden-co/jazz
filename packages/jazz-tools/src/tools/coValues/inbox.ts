@@ -11,13 +11,14 @@ import {
   type Account,
   CoValue,
   CoValueClassOrSchema,
+  CoValueLoadingState,
   ID,
   InstanceOfSchema,
   activeAccountContext,
   coValueClassFromCoValueClassOrSchema,
   loadCoValue,
 } from "../internal.js";
-import { isCoValueId } from "../lib/id.js";
+import { isCoValueId } from "../lib/utils.js";
 
 export type InboxInvite = `${CoID<MessagesStream>}/${InviteSecret}`;
 type TxKey = `${SessionID}/${number}`;
@@ -224,7 +225,7 @@ export class Inbox {
       messageId: CoID<InboxMessage<CoValue, any>>,
     ) => {
       const message = await node.load(messageId);
-      if (message === "unavailable") {
+      if (message === CoValueLoadingState.UNAVAILABLE) {
         throw new Error(`Inbox: message ${messageId} is unavailable`);
       }
 
@@ -293,12 +294,12 @@ export class Inbox {
 
     const handleNewMessages = () => {
       for (const tx of messagesFeed.getNewItems()) {
-        const accountID = getAccountIDfromSessionID(tx.txID.sessionID);
+        const accountID = getAccountIDfromSessionID(tx.currentTxID.sessionID);
 
         if (!accountID) {
           console.warn(
             "Received message from unknown account",
-            tx.txID.sessionID,
+            tx.currentTxID.sessionID,
           );
           continue;
         }
@@ -309,7 +310,8 @@ export class Inbox {
           continue;
         }
 
-        const txKey = `${tx.txID.sessionID}/${tx.txID.txIndex}` as const;
+        const txKey =
+          `${tx.currentTxID.sessionID}/${tx.currentTxID.txIndex}` as const;
 
         if (processed.has(txKey)) {
           continue;
@@ -330,7 +332,7 @@ export class Inbox {
   static async load(account: Account) {
     const profile = account.profile;
 
-    if (!profile) {
+    if (!profile.$isLoaded) {
       throw new Error("Account profile should already be loaded");
     }
 
@@ -342,7 +344,7 @@ export class Inbox {
 
     const root = await node.load(profile.inbox as CoID<InboxRoot>);
 
-    if (root === "unavailable") {
+    if (root === CoValueLoadingState.UNAVAILABLE) {
       throw new Error("Inbox not found");
     }
 
@@ -353,9 +355,9 @@ export class Inbox {
     ]);
 
     if (
-      messages === "unavailable" ||
-      processed === "unavailable" ||
-      failed === "unavailable"
+      messages === CoValueLoadingState.UNAVAILABLE ||
+      processed === CoValueLoadingState.UNAVAILABLE ||
+      failed === CoValueLoadingState.UNAVAILABLE
     ) {
       throw new Error("Inbox not found");
     }
@@ -420,22 +422,22 @@ export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
       inboxOwnerID as unknown as CoID<RawAccount>,
     );
 
-    if (inboxOwnerRaw === "unavailable") {
+    if (inboxOwnerRaw === CoValueLoadingState.UNAVAILABLE) {
       throw new Error("Failed to load the inbox owner");
     }
 
     const inboxOwnerProfileRaw = await node.load(inboxOwnerRaw.get("profile")!);
 
-    if (inboxOwnerProfileRaw === "unavailable") {
+    if (inboxOwnerProfileRaw === CoValueLoadingState.UNAVAILABLE) {
       throw new Error("Failed to load the inbox owner profile");
     }
 
+    const inboxOwnerRole = inboxOwnerProfileRaw.group.roleOf(
+      currentAccount.$jazz.raw.id,
+    );
+
     if (
-      inboxOwnerProfileRaw.group.roleOf(currentAccount.$jazz.raw.id) !==
-        "reader" &&
-      inboxOwnerProfileRaw.group.roleOf(currentAccount.$jazz.raw.id) !==
-        "writer" &&
-      inboxOwnerProfileRaw.group.roleOf(currentAccount.$jazz.raw.id) !== "admin"
+      !["reader", "writer", "admin", "manager"].includes(inboxOwnerRole ?? "")
     ) {
       throw new Error(
         "Insufficient permissions to access the inbox, make sure its user profile is publicly readable.",
@@ -452,7 +454,7 @@ export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
 
     const messages = await node.load(id);
 
-    if (messages === "unavailable") {
+    if (messages === CoValueLoadingState.UNAVAILABLE) {
       throw new Error("Inbox not found");
     }
 

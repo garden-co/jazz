@@ -16,19 +16,20 @@ export * from "./coValues/inbox.js";
 export * from "./coValues/coPlainText.js";
 export * from "./coValues/coRichText.js";
 export * from "./coValues/schemaUnion.js";
+export * from "./coValues/coVector.js";
 
 export type * from "./subscribe/types.js";
 
 export * from "./coValues/deepLoading.js";
 export * from "./implementation/anonymousJazzAgent.js";
 export * from "./implementation/activeAccountContext.js";
-export * from "./implementation/errors.js";
 export * from "./implementation/refs.js";
 export * from "./implementation/schema.js";
 export * from "./subscribe/SubscriptionScope.js";
 export * from "./subscribe/types.js";
 export * from "./subscribe/index.js";
 export * from "./lib/cache.js";
+export * from "./lib/utils.js";
 export * from "./lib/utilityTypes.js";
 export * from "./implementation/createContext.js";
 
@@ -43,11 +44,12 @@ export * from "./implementation/zodSchema/schemaTypes/CoListSchema.js";
 export * from "./implementation/zodSchema/schemaTypes/CoFeedSchema.js";
 export * from "./implementation/zodSchema/schemaTypes/AccountSchema.js";
 export * from "./implementation/zodSchema/schemaTypes/FileStreamSchema.js";
+export * from "./implementation/zodSchema/schemaTypes/CoVectorSchema.js";
 export * from "./implementation/zodSchema/schemaTypes/PlainTextSchema.js";
 export * from "./implementation/zodSchema/typeConverters/InstanceOrPrimitiveOfSchema.js";
-export * from "./implementation/zodSchema/typeConverters/InstanceOrPrimitiveOfSchemaCoValuesNullable.js";
+export * from "./implementation/zodSchema/typeConverters/InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded.js";
 export * from "./implementation/zodSchema/typeConverters/InstanceOfSchema.js";
-export * from "./implementation/zodSchema/typeConverters/InstanceOfSchemaCoValuesNullable.js";
+export * from "./implementation/zodSchema/typeConverters/InstanceOfSchemaCoValuesMaybeLoaded.js";
 export * from "./implementation/zodSchema/typeConverters/CoFieldSchemaInit.js";
 export * from "./implementation/zodSchema/runtimeConverters/coValueSchemaTransformation.js";
 export * from "./implementation/zodSchema/runtimeConverters/schemaFieldToCoFieldDef.js";

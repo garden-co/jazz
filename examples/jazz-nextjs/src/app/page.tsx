@@ -5,7 +5,7 @@ import { useAccount } from "jazz-tools/react";
 import Link from "next/link";
 
 export default function Home() {
-  const { me } = useAccount(Account, {
+  const me = useAccount(Account, {
     resolve: {
       profile: true,
     },
@@ -25,9 +25,9 @@ export default function Home() {
         </div>
         <input
           className="border-2 border-gray-300 rounded-md p-2 w-full"
-          value={me?.profile.name ?? ""}
+          value={me.$isLoaded ? me.profile.name : ""}
           onChange={(e) => {
-            if (!me) {
+            if (!me.$isLoaded) {
               return;
             }
 
@@ -36,7 +36,7 @@ export default function Home() {
         />
       </label>
       <Link
-        href={`/profile/${me?.profile.$jazz.id}`}
+        href={`/profile/${me.$isLoaded ? me.profile.$jazz.id : ""}`}
         className="bg-blue-500 text-white px-4 py-2 rounded-md"
       >
         Your profile name in a Server Component

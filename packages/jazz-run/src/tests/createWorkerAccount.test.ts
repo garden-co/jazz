@@ -44,7 +44,7 @@ describe("createWorkerAccount - integration tests", () => {
     const crypto = await WasmCrypto.create();
     const { node } = await LocalNode.withNewlyCreatedAccount({
       creationProps: { name: "test" },
-      peersToLoadFrom: [peer],
+      peers: [peer],
       crypto,
     });
 
@@ -69,7 +69,7 @@ describe("createWorkerAccount - integration tests", () => {
     const crypto = await WasmCrypto.create();
     const { node } = await LocalNode.withNewlyCreatedAccount({
       creationProps: { name: "test" },
-      peersToLoadFrom: [peer],
+      peers: [peer],
       crypto,
     });
 

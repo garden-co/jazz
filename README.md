@@ -1,6 +1,12 @@
-# Jazz - Build local-first apps
+# Jazz - The database that syncs
 
- **Jazz is an open-source toolkit for building apps with *distributed state.***
+**Jazz is a new kind of distributed database that runs across your frontend, containers, serverless functions and its own cloud.**
+
+It syncs data, files and LLM streams instantly and feels like reactive local JSON state.
+
+Built-in auth, orgs, multiplayer, edit history, permissions, encryption, offline support and more.
+
+Self-host or use Jazz Cloud for zero-config magic. Open source (MIT)
 
 ## Getting started
 

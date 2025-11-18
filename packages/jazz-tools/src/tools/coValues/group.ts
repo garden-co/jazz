@@ -1,17 +1,20 @@
 import {
   RawAccount,
+  isAccountRole,
   type AccountRole,
   type AgentID,
   type Everyone,
+  type InviteSecret,
   type RawAccountID,
   type RawGroup,
   type Role,
 } from "cojson";
 import {
-  BranchDefinition,
+  AnonymousJazzAgent,
   CoValue,
   CoValueClass,
   ID,
+  MaybeLoaded,
   RefEncoded,
   RefsToResolve,
   RefsToResolveStrict,
@@ -106,13 +109,16 @@ export class Group extends CoValueBase implements CoValue {
    */
   addMember(
     member: Group,
-    role?: "reader" | "writer" | "admin" | "inherit",
+    role?: "reader" | "writer" | "admin" | "manager" | "inherit",
   ): void;
-  addMember(member: Group | Account, role: "reader" | "writer" | "admin"): void;
+  addMember(
+    member: Group | Account,
+    role: "reader" | "writer" | "admin" | "manager",
+  ): void;
   addMember(
     member: Group | Everyone | Account,
     role?: AccountRole | "inherit",
-  ) {
+  ): void {
     if (isGroupValue(member)) {
       if (role === "writeOnly")
         throw new Error("Cannot add group as member with write-only role");
@@ -156,12 +162,7 @@ export class Group extends CoValueBase implements CoValue {
 
       const role = this.$jazz.raw.roleOf(accountID);
 
-      if (
-        role === "admin" ||
-        role === "writer" ||
-        role === "reader" ||
-        role === "writeOnly"
-      ) {
+      if (isAccountRole(role)) {
         const ref = new Ref<Account>(
           accountID,
           this.$jazz.loadedAs,
@@ -247,9 +248,12 @@ export class Group extends CoValueBase implements CoValue {
    */
   extend(
     parent: Group,
-    roleMapping?: "reader" | "writer" | "admin" | "inherit",
+    roleMapping?: "reader" | "writer" | "admin" | "manager" | "inherit",
   ): this {
-    this.$jazz.raw.extend(parent.$jazz.raw, roleMapping);
+    this.$jazz.raw.extend(
+      parent.$jazz.raw,
+      roleMapping as "reader" | "writer" | "admin" | "manager" | "inherit",
+    );
     return this;
   }
 
@@ -271,8 +275,11 @@ export class Group extends CoValueBase implements CoValue {
   static load<G extends Group, const R extends RefsToResolve<G>>(
     this: CoValueClass<G>,
     id: ID<G>,
-    options?: { resolve?: RefsToResolveStrict<G, R>; loadAs?: Account },
-  ): Promise<Resolved<G, R> | null> {
+    options?: {
+      resolve?: RefsToResolveStrict<G, R>;
+      loadAs?: Account | AnonymousJazzAgent;
+    },
+  ): Promise<MaybeLoaded<Resolved<G, R>>> {
     return loadCoValueWithoutMe(this, id, options);
   }
 
@@ -298,6 +305,29 @@ export class Group extends CoValueBase implements CoValue {
   ): () => void {
     const { options, listener } = parseSubscribeRestArgs(args);
     return subscribeToCoValueWithoutMe<G, R>(this, id, options, listener);
+  }
+
+  /** @category Invites
+   * Creates a group invite
+   * @param id The ID of the group to create an invite for
+   * @param options Optional configuration
+   * @param options.role The role to grant to the accepter of the invite. Defaults to 'reader'
+   * @param options.loadAs The account to use when loading the group. Defaults to the current account
+   * @returns An invite secret, (a string starting with "inviteSecret_"). Can be
+   * accepted using `Account.acceptInvite()`
+   */
+  static async createInvite<G extends Group>(
+    this: CoValueClass<G>,
+    id: ID<G>,
+    options?: { role?: AccountRole; loadAs?: Account },
+  ): Promise<InviteSecret> {
+    const group = await loadCoValueWithoutMe(this, id, {
+      loadAs: options?.loadAs,
+    });
+    if (!group.$isLoaded) {
+      throw new Error(`Group with id ${id} not found`);
+    }
+    return group.$jazz.createInvite(options?.role ?? "reader");
   }
 }
 
@@ -348,6 +378,15 @@ export class GroupJazzApi<G extends Group> extends CoValueJazzApi<G> {
   ): () => void {
     const { options, listener } = parseSubscribeRestArgs(args);
     return subscribeToExistingCoValue(this.group, options, listener);
+  }
+
+  /**
+   * Create an invite to this group
+   *
+   * @category Invites
+   */
+  createInvite(role: AccountRole = "reader"): InviteSecret {
+    return this.raw.createInvite(role);
   }
 
   /**

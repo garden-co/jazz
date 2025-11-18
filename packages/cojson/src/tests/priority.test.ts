@@ -1,11 +1,9 @@
 import { describe, expect, test } from "vitest";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
-import { LocalNode } from "../localNode.js";
 import { CO_VALUE_PRIORITY, getPriorityFromHeader } from "../priority.js";
 import {
   createAccountInNode,
   nodeWithRandomAgentAndSessionID,
-  randomAgentAndSessionID,
 } from "./testUtils.js";
 
 const Crypto = await WasmCrypto.create();

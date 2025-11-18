@@ -16,7 +16,11 @@ import {
   frameworkToAuthExamples,
   frameworks,
 } from "./config.js";
-import { type PackageManager, getPkgManager } from "./utils.js";
+import {
+  type PackageManager,
+  getFrameworkSpecificDocsUrl,
+  getPkgManager,
+} from "./utils.js";
 import { parseCatalogDefinitions, resolveCatalogVersion } from "./catalog.js";
 
 // Handle SIGINT (Ctrl+C) gracefully
@@ -30,6 +34,7 @@ type ScaffoldOptions = {
   template: FrameworkAuthPair | string;
   projectName: string;
   packageManager: PackageManager;
+  framework: Framework;
   apiKey?: string;
   git?: boolean;
 };
@@ -117,6 +122,7 @@ async function scaffoldProject({
   packageManager,
   apiKey,
   git,
+  framework,
 }: ScaffoldOptions): Promise<void> {
   const starterConfig = frameworkToAuthExamples[
     template as FrameworkAuthPair
@@ -127,7 +133,6 @@ async function scaffoldProject({
   };
 
   let devCommand = "dev";
-
   if (!starterConfig.repo) {
     throw new Error(
       `Starter template ${starterConfig.name} is not yet implemented`,
@@ -307,7 +312,7 @@ async function scaffoldProject({
         const metroConfig = `const { getDefaultConfig } = require("expo/metro-config");
 const config = getDefaultConfig(__dirname);
 
-config.resolver.sourceExts = ["mjs", "js", "json", "ts", "tsx"];
+config.resolver.sourceExts = ["mjs", "js", "json", "ts", "tsx", "cjs"];
 config.resolver.requireCycleIgnorePatterns = [/(^|\\/|\\\\)node_modules($|\\/|\\\\)/];
 
 module.exports = config;`;
@@ -368,6 +373,12 @@ module.exports = mergeConfig(getDefaultConfig(__dirname), config);`;
 
     // Clean up temp directory
     fs.rmSync(tempDocsDir, { recursive: true, force: true });
+    const urlToFetch = getFrameworkSpecificDocsUrl(framework);
+    const response = await fetch(urlToFetch);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const text = await response.text();
+    fs.writeFileSync(`${projectName}/.cursor/docs/llms-full.md`, text, "utf-8");
+    docsSpinner.succeed(chalk.green("Fetched latest llms-full.md"));
   } catch (error) {
     docsSpinner.fail(chalk.red("Failed to add .cursor directory"));
     throw error;
@@ -448,6 +459,7 @@ async function promptUser(
   console.log(chalk.blue.bold("Let's create your Jazz app! 🎷\n"));
 
   const questions = [];
+  let framework: Framework = partialOptions.framework ?? "react";
 
   if (
     partialOptions.framework &&
@@ -463,8 +475,6 @@ async function promptUser(
   }
 
   if (!partialOptions.example && !partialOptions.starter) {
-    let framework = partialOptions.framework;
-
     if (!partialOptions.framework) {
       const answers = await inquirer.prompt([
         {
@@ -544,6 +554,7 @@ async function promptUser(
   return {
     ...answers,
     ...partialOptions,
+    framework,
     template:
       answers.starter || partialOptions.starter || partialOptions.example,
   } as ScaffoldOptions;

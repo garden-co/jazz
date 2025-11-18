@@ -1,12 +1,14 @@
-import { waitFor } from "@testing-library/dom";
 import { cojsonInternals, emptyKnownState } from "cojson";
 import { assert, beforeEach, expect, test } from "vitest";
-import { Account, Group, co, z } from "../exports.js";
+import { Account, Group, co, exportCoValue, z } from "../exports.js";
+import { CoValueLoadingState } from "../internal.js";
 import {
   createJazzTestAccount,
+  disableJazzTestSync,
   getPeerConnectedToTestSyncServer,
   setupJazzTestSync,
 } from "../testing.js";
+import { assertLoaded, waitFor } from "./utils.js";
 
 cojsonInternals.CO_VALUE_LOADING_CONFIG.RETRY_DELAY = 10;
 
@@ -29,17 +31,17 @@ test("load a value", async () => {
   const alice = await createJazzTestAccount();
 
   const john = await Person.load(map.$jazz.id, { loadAs: alice });
-  expect(john).not.toBeNull();
+  assertLoaded(john);
   expect(john?.name).toBe("John");
 });
 
-test("return null if id is invalid", async () => {
+test("return 'unavailable' if id is invalid", async () => {
   const Person = co.map({
     name: z.string(),
   });
 
   const john = await Person.load("test");
-  expect(john).toBeNull();
+  expect(john.$jazz.loadingState).toBe(CoValueLoadingState.UNAVAILABLE);
 });
 
 test("load a missing optional value (co.optional)", async () => {
@@ -63,8 +65,7 @@ test("load a missing optional value (co.optional)", async () => {
     resolve: { dog: true },
   });
 
-  assert(john);
-
+  assertLoaded(john);
   expect(john.name).toBe("John");
   expect(john.dog).toBeUndefined();
 });
@@ -90,8 +91,7 @@ test("load a missing optional value (Schema.optional)", async () => {
     resolve: { dog: true },
   });
 
-  assert(john);
-
+  assertLoaded(john);
   expect(john.name).toBe("John");
   expect(john.dog).toBeUndefined();
 });
@@ -123,8 +123,7 @@ test("load a missing optional value (optional discrminatedUnion)", async () => {
     resolve: { pet: true },
   });
 
-  assert(john);
-
+  assertLoaded(john);
   expect(john.name).toBe("John");
   expect(john.pet).toBeUndefined();
 });
@@ -159,11 +158,11 @@ test("retry an unavailable value", async () => {
   );
 
   const john = await promise;
-  expect(john).not.toBeNull();
-  expect(john?.name).toBe("John");
+  assertLoaded(john);
+  expect(john.name).toBe("John");
 });
 
-test("returns null if the value is unavailable after retries", async () => {
+test("returns 'unavailable' if the value is unavailable after retries", async () => {
   const Person = co.map({
     name: z.string(),
   });
@@ -185,7 +184,7 @@ test("returns null if the value is unavailable after retries", async () => {
 
   const john = await Person.load(map.$jazz.id, { loadAs: alice });
 
-  expect(john).toBeNull();
+  expect(john.$jazz.loadingState).toBe(CoValueLoadingState.UNAVAILABLE);
 });
 
 test("load works even when the coValue access is granted after the creation", async () => {
@@ -203,8 +202,8 @@ test("load works even when the coValue access is granted after the creation", as
 
   const mapOnBob = await Person.load(map.$jazz.id, { loadAs: bob });
 
-  expect(mapOnBob).not.toBeNull();
-  expect(mapOnBob?.name).toBe("John");
+  assertLoaded(mapOnBob);
+  expect(mapOnBob.name).toBe("John");
 });
 
 test("load a large coValue", async () => {
@@ -258,8 +257,7 @@ test("load a large coValue", async () => {
     },
   });
 
-  assert(loadedDataset);
-
+  assertLoaded(loadedDataset);
   expect(loadedDataset.metadata.name).toBe("Large Dataset");
   expect(loadedDataset.metadata.description).toBe(
     "A dataset with many entries for testing large coValue loading",
@@ -269,4 +267,209 @@ test("load a large coValue", async () => {
   expect(loadedDataset.data.$jazz.raw.core.knownState()).toEqual(
     largeMap.data.$jazz.raw.core.knownState(),
   );
+});
+
+test("should wait for the full streaming of the group", async () => {
+  disableJazzTestSync();
+
+  const alice = await createJazzTestAccount({
+    isCurrentActiveAccount: true,
+    creationProps: { name: "Hermes Puggington" },
+  });
+
+  const Person = co.map({
+    name: z.string(),
+    update: z.number(),
+  });
+
+  const group = Group.create();
+
+  const person = Person.create(
+    {
+      name: "Bob",
+      update: 1,
+    },
+    group,
+  );
+
+  // Make the group to grow big enough to trigger the streaming
+  for (let i = 0; i <= 300; i++) {
+    group.$jazz.raw.rotateReadKey();
+  }
+
+  group.addMember("everyone", "reader");
+
+  const bob = await createJazzTestAccount({
+    isCurrentActiveAccount: true,
+  });
+
+  const personContent = await exportCoValue(Person, person.$jazz.id, {
+    loadAs: alice,
+  });
+  assert(personContent);
+
+  const lastGroupPiece = personContent.findLast(
+    (content) => content.id === group.$jazz.id,
+  );
+  assert(lastGroupPiece);
+
+  for (const content of personContent.filter(
+    (content) => content !== lastGroupPiece,
+  )) {
+    bob.$jazz.localNode.syncManager.handleNewContent(content, "import");
+  }
+
+  // Simulate the streaming delay on the last piece of the group
+  setTimeout(() => {
+    bob.$jazz.localNode.syncManager.handleNewContent(lastGroupPiece, "import");
+  }, 10);
+
+  // Load the value and expect the migration to run only once
+  const loadedPerson = await Person.load(person.$jazz.id, { loadAs: bob });
+
+  assertLoaded(loadedPerson);
+  expect(loadedPerson.$jazz.owner.$jazz.raw.core.verified.isStreaming()).toBe(
+    false,
+  );
+});
+
+test("should wait for the full streaming of the parent groups", async () => {
+  disableJazzTestSync();
+
+  const alice = await createJazzTestAccount({
+    isCurrentActiveAccount: true,
+    creationProps: { name: "Hermes Puggington" },
+  });
+
+  const Person = co.map({
+    name: z.string(),
+    update: z.number(),
+  });
+
+  const parentGroup = Group.create();
+  const group = Group.create();
+
+  const person = Person.create(
+    {
+      name: "Bob",
+      update: 1,
+    },
+    group,
+  );
+
+  // Make the parent group to grow big enough to trigger the streaming
+  for (let i = 0; i <= 300; i++) {
+    parentGroup.$jazz.raw.rotateReadKey();
+  }
+
+  group.addMember(parentGroup);
+  parentGroup.addMember("everyone", "reader");
+
+  const bob = await createJazzTestAccount({
+    isCurrentActiveAccount: true,
+  });
+
+  const personContent = await exportCoValue(Person, person.$jazz.id, {
+    loadAs: alice,
+  });
+  assert(personContent);
+
+  const lastParentGroupPiece = personContent.findLast(
+    (content) => content.id === parentGroup.$jazz.id,
+  );
+  assert(lastParentGroupPiece);
+
+  for (const content of personContent.filter(
+    (content) => content !== lastParentGroupPiece,
+  )) {
+    bob.$jazz.localNode.syncManager.handleNewContent(content, "import");
+  }
+
+  // Simulate the streaming delay on the last piece of the parent group
+  setTimeout(() => {
+    bob.$jazz.localNode.syncManager.handleNewContent(
+      lastParentGroupPiece,
+      "import",
+    );
+  }, 10);
+
+  // Load the value and expect the migration to run only once
+  const loadedPerson = await Person.load(person.$jazz.id, { loadAs: bob });
+
+  assertLoaded(loadedPerson);
+  expect(loadedPerson.$jazz.owner.$jazz.raw.core.verified.isStreaming()).toBe(
+    false,
+  );
+});
+
+test("should correctly reject the load if after the group streaming the account has no access", async () => {
+  disableJazzTestSync();
+
+  const alice = await createJazzTestAccount({
+    isCurrentActiveAccount: true,
+    creationProps: { name: "Hermes Puggington" },
+  });
+
+  const Person = co.map({
+    name: z.string(),
+    update: z.number(),
+  });
+
+  const group = Group.create();
+
+  const person = Person.create(
+    {
+      name: "Bob",
+      update: 1,
+    },
+    group,
+  );
+
+  group.addMember("everyone", "reader");
+
+  for (let i = 0; i <= 150; i++) {
+    group.$jazz.raw.rotateReadKey();
+  }
+
+  group.removeMember("everyone");
+
+  const bob = await createJazzTestAccount({
+    isCurrentActiveAccount: true,
+  });
+
+  const personContent = await exportCoValue(Person, person.$jazz.id, {
+    loadAs: alice,
+  });
+  assert(personContent);
+
+  const lastGroupPiece = personContent.findLast(
+    (content) => content.id === group.$jazz.id,
+  );
+  assert(lastGroupPiece);
+
+  for (const content of personContent.filter(
+    (content) => content !== lastGroupPiece,
+  )) {
+    bob.$jazz.localNode.syncManager.handleNewContent(content, "import");
+  }
+
+  // Simulate the streaming delay on the last piece of the group
+  setTimeout(() => {
+    bob.$jazz.localNode.syncManager.handleNewContent(lastGroupPiece, "import");
+  }, 10);
+
+  // Load the value and expect the migration to run only once
+  const loadedPerson = await Person.load(person.$jazz.id, { loadAs: bob });
+  expect(loadedPerson.$isLoaded).toEqual(false);
+  expect(loadedPerson.$jazz.loadingState).toEqual(
+    CoValueLoadingState.UNAVAILABLE,
+  );
+
+  await waitFor(async () => {
+    const loadedPerson = await Person.load(person.$jazz.id, { loadAs: bob });
+    expect(loadedPerson.$isLoaded).toEqual(false);
+    expect(loadedPerson.$jazz.loadingState).toEqual(
+      CoValueLoadingState.UNAUTHORIZED,
+    );
+  });
 });

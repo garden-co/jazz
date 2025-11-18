@@ -5,7 +5,10 @@ import { RawCoID } from "./ids.js";
 export class GarbageCollector {
   private readonly interval: ReturnType<typeof setInterval>;
 
-  constructor(private readonly coValues: Map<RawCoID, CoValueCore>) {
+  constructor(
+    private readonly coValues: Map<RawCoID, CoValueCore>,
+    private readonly garbageCollectGroups: boolean,
+  ) {
     this.interval = setInterval(() => {
       this.collect();
     }, GARBAGE_COLLECTOR_CONFIG.INTERVAL);
@@ -33,7 +36,7 @@ export class GarbageCollector {
       const timeSinceLastAccessed = currentTime - verified.lastAccessed;
 
       if (timeSinceLastAccessed > GARBAGE_COLLECTOR_CONFIG.MAX_AGE) {
-        coValue.unmount();
+        coValue.unmount(this.garbageCollectGroups);
       }
     }
   }

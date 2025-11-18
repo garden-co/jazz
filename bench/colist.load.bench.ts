@@ -1,90 +1,150 @@
 import { describe, bench } from "vitest";
-import * as tools from "jazz-tools";
-import * as toolsLatest from "jazz-tools-latest";
+
+import * as cojson from "cojson";
+import * as cojsonFromNpm from "cojson-latest";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { WasmCrypto as WasmCryptoLatest } from "cojson-latest/crypto/WasmCrypto";
+import { NapiCrypto } from "cojson/crypto/NapiCrypto";
 import { PureJSCrypto } from "cojson/crypto/PureJSCrypto";
 import { PureJSCrypto as PureJSCryptoLatest } from "cojson-latest/crypto/PureJSCrypto";
 
-// Define the schemas based on the provided Message schema
-async function createSchema(
-  { co, Group, z, createJazzContextForNewAccount }: typeof tools,
-  WasmCrypto: typeof WasmCryptoLatest,
-) {
-  const List = co.list(z.string());
-
-  const ctx = await createJazzContextForNewAccount({
-    creationProps: {
-      name: "Test Account",
-    },
-    peersToLoadFrom: [],
-    crypto: await WasmCrypto.create(),
-  });
-
-  return {
-    List,
-    Group,
-    account: ctx.account,
-  };
-}
-
 const PUREJS = false;
 
+const crypto = PUREJS ? await PureJSCrypto.create() : await WasmCrypto.create();
+const napiCrypto = await NapiCrypto.create();
+const cryptoFromNpm = PUREJS
+  ? await PureJSCryptoLatest.create()
+  : await WasmCryptoLatest.create();
+
+const NUM_ITEMS = 1000;
+
+function generateFixtures(module: typeof cojson, crypto: any) {
+  const account = module.LocalNode.internalCreateAccount({
+    crypto,
+  });
+
+  const group = account.core.node.createGroup();
+  const list = group.createList();
+
+  for (let i = 0; i <= NUM_ITEMS; i++) {
+    list.append("A");
+  }
+
+  for (let i = NUM_ITEMS; i > 0; i--) {
+    if (i % 3 === 0) {
+      list.delete(i);
+    } else if (i % 3 === 1) {
+      list.replace(i, "B");
+    }
+  }
+
+  return list;
+}
+
+const list = generateFixtures(cojson, crypto);
+const listNAPI = generateFixtures(cojson, napiCrypto);
 // @ts-expect-error
-const schema = await createSchema(tools, PUREJS ? PureJSCrypto : WasmCrypto);
-const schemaLatest = await createSchema(
-  toolsLatest as any,
-  // @ts-expect-error
-  PUREJS ? PureJSCryptoLatest : WasmCryptoLatest,
-);
+const listFromNpm = generateFixtures(cojsonFromNpm, cryptoFromNpm);
 
-const list = schema.List.create(
-  [],
-  schema.Group.create(schema.account).makePublic(),
-);
+const content = list.core.verified?.newContentSince(undefined) ?? [];
+const contentNAPI = listNAPI.core.verified?.newContentSince(undefined) ?? [];
+const contentFromNpm =
+  listFromNpm.core.verified?.newContentSince(undefined) ?? [];
 
-for (let i = 0; i < 1000; i++) {
-  list.$jazz.push("A");
-}
+describe("list import", () => {
+  function importList(list: any, content: any) {
+    list.core.node.getCoValue(list.id).unmount();
+    for (const msg of content) {
+      list.core.node.syncManager.handleNewContent(msg, "storage");
+    }
+  }
 
-for (let i = 0; i < 100; i++) {
-  const index = Math.floor(Math.random() * list.length);
-  list.$jazz.set(index, "B");
-}
-
-list.$jazz.remove(() => Math.random() < 0.3);
-
-const content = await tools.exportCoValue(schema.List, list.$jazz.id, {
-  loadAs: schema.account,
-});
-tools.importContentPieces(content ?? [], schema.account as any);
-toolsLatest.importContentPieces(content ?? [], schemaLatest.account as any);
-
-describe("list loading", () => {
   bench(
     "current version",
     () => {
-      const node = schema.account.$jazz.localNode;
+      importList(list, content);
+    },
+    { iterations: 500 },
+  );
 
-      const coValue = node.expectCoValueLoaded(list.$jazz.id as any);
+  bench(
+    "current version (NAPI)",
+    () => {
+      importList(listNAPI, contentNAPI);
+    },
+    { iterations: 500 },
+  );
 
-      coValue.getCurrentContent();
-      // @ts-expect-error
-      coValue._cachedContent = undefined;
+  bench(
+    "Jazz 0.18.18",
+    () => {
+      importList(listFromNpm, contentFromNpm);
+    },
+    { iterations: 500 },
+  );
+});
+
+describe("list import + content load", () => {
+  function loadList(list: any, content: any) {
+    list.core.node.getCoValue(list.id).unmount();
+    for (const msg of content) {
+      list.core.node.syncManager.handleNewContent(msg, "storage");
+    }
+    const coValue = list.core.node.getCoValue(list.id);
+    coValue.getCurrentContent();
+  }
+
+  bench(
+    "current version",
+    () => {
+      loadList(list, content);
+    },
+    { iterations: 500 },
+  );
+
+  bench(
+    "current version (NAPI)",
+    () => {
+      loadList(listNAPI, contentNAPI);
+    },
+    { iterations: 500 },
+  );
+
+  bench(
+    "Jazz 0.18.18",
+    () => {
+      loadList(listFromNpm, contentFromNpm);
+    },
+    { iterations: 500 },
+  );
+});
+
+describe("list updating", () => {
+  const list = generateFixtures(cojson, crypto);
+  const listNAPI = generateFixtures(cojson, napiCrypto);
+  // @ts-expect-error
+  const listFromNpm = generateFixtures(cojsonFromNpm, cryptoFromNpm);
+
+  bench(
+    "current version",
+    () => {
+      list.append("A");
     },
     { iterations: 5000 },
   );
 
   bench(
-    "Jazz 0.18.5",
+    "current version (NAPI)",
     () => {
-      const node = schemaLatest.account.$jazz.localNode;
+      listNAPI.append("A");
+    },
+    { iterations: 5000 },
+  );
 
-      const coValue = node.expectCoValueLoaded(list.$jazz.id as any);
-
-      coValue.getCurrentContent();
-      // @ts-expect-error
-      coValue._cachedContent = undefined;
+  bench(
+    "Jazz 0.18.18",
+    () => {
+      listFromNpm.append("A");
     },
     { iterations: 5000 },
   );

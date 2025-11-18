@@ -1,25 +1,25 @@
-import { Loaded } from "jazz-tools";
 import { useState } from "react";
-import { Organization, Project } from "../schema.ts";
+import { Project } from "../schema.ts";
+import { useOrganizationSelector } from "./OrganizationProvider.ts";
 
-export function CreateProject({
-  organization,
-}: {
-  organization: Loaded<typeof Organization>;
-}) {
+export function CreateProject() {
+  const organizationOwner = useOrganizationSelector({
+    select: (organization) => organization.$jazz.owner,
+  });
+
+  const projects = useOrganizationSelector({
+    select: (organization) => organization.projects,
+  });
+
   const [name, setName] = useState<string>("");
 
   const onSave = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
 
-    if (!organization?.projects) return;
-
     if (name.length > 0) {
-      const project = Project.create(
-        { name },
-        { owner: organization.$jazz.owner },
-      );
-      organization.projects.$jazz.push(project);
+      const project = Project.create({ name }, { owner: organizationOwner });
+
+      projects.$jazz.push(project);
       setName("");
     }
   };

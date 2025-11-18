@@ -1,23 +1,27 @@
-import { Page, expect } from "@playwright/test";
+import { type Locator, type Page, expect } from "@playwright/test";
 
 export class HomePage {
-  constructor(public page: Page) {}
+  page: Page;
+  newPlaylistButton: Locator;
+  playlistTitleInput: Locator;
+  loginButton: Locator;
+  logoutButton: Locator;
 
-  newPlaylistButton = this.page.getByRole("button", {
-    name: "New Playlist",
-  });
-
-  playlistTitleInput = this.page.getByRole("textbox", {
-    name: "Playlist title",
-  });
-
-  loginButton = this.page.getByRole("button", {
-    name: "Sign up",
-  });
-
-  logoutButton = this.page.getByRole("button", {
-    name: "Sign out",
-  });
+  constructor(page: Page) {
+    this.page = page;
+    this.newPlaylistButton = this.page.getByRole("button", {
+      name: "New Playlist",
+    });
+    this.playlistTitleInput = this.page.getByRole("textbox", {
+      name: "Playlist title",
+    });
+    this.loginButton = this.page.getByRole("button", {
+      name: "Sign up",
+    });
+    this.logoutButton = this.page.getByRole("button", {
+      name: "Sign out",
+    });
+  }
 
   async fillUsername(username: string) {
     await this.page.getByRole("textbox", { name: "Username" }).fill(username);
@@ -89,18 +93,37 @@ export class HomePage {
       .click();
   }
 
+  async assertPlaylistNotExists(playlistTitle: string) {
+    await expect(
+      this.page.getByRole("button", { name: playlistTitle }),
+    ).not.toBeVisible();
+  }
+
   async navigateToHome() {
     await this.page
       .getByRole("button", {
-        name: "All tracks",
+        name: "Go to all tracks",
       })
       .click();
   }
 
-  async getShareLink() {
+  async getShareLink(role: string = "reader") {
     await this.page
       .getByRole("button", {
         name: "Share",
+      })
+      .click();
+
+    await this.page
+      .getByRole("dialog")
+      .locator("section")
+      .filter({ hasText: `Invite new members` })
+      .getByRole("button", { name: role })
+      .click();
+
+    await this.page
+      .getByRole("button", {
+        name: "Get invite link",
       })
       .click();
 
@@ -110,7 +133,47 @@ export class HomePage {
 
     expect(inviteUrl).toBeTruthy();
 
+    await this.page
+      .getByRole("button", {
+        name: "Close",
+      })
+      .first()
+      .click();
+
     return inviteUrl;
+  }
+
+  async removeMember(index: number) {
+    await this.page
+      .getByRole("button", {
+        name: "Share",
+      })
+      .click();
+
+    const countBefore = await this.page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Remove" })
+      .count();
+
+    await this.page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Remove" })
+      .nth(index)
+      .click();
+
+    expect(
+      await this.page
+        .getByRole("dialog")
+        .getByRole("button", { name: "Remove" })
+        .count(),
+    ).toBe(countBefore - 1);
+
+    await this.page
+      .getByRole("button", {
+        name: "Close",
+      })
+      .first()
+      .click();
   }
 
   async addTrackToPlaylist(trackTitle: string, playlistTitle: string) {

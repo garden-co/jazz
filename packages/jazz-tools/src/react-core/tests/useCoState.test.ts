@@ -5,12 +5,15 @@ import {
   Account,
   CoRichText,
   CoValue,
+  CoValueLoadingState,
   Group,
   ID,
   Loaded,
+  MaybeLoaded,
   co,
   z,
 } from "jazz-tools";
+import { assertLoaded } from "jazz-tools/testing";
 import { assert, beforeEach, describe, expect, expectTypeOf, it } from "vitest";
 import { useCoState } from "../index.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
@@ -44,10 +47,11 @@ describe("useCoState", () => {
       account,
     });
 
-    expect(result.current?.value).toBe("123");
+    assertLoaded(result.current);
+    expect(result.current.value).toBe("123");
   });
 
-  it("should return null on invalid id", async () => {
+  it("should return an 'unavailable' value on invalid id", async () => {
     const TestMap = co.map({
       value: z.string(),
     });
@@ -60,10 +64,12 @@ describe("useCoState", () => {
       account,
     });
 
-    expect(result.current).toBeUndefined();
+    expect(result.current.$jazz.loadingState).toBe(CoValueLoadingState.LOADING);
 
     await waitFor(() => {
-      expect(result.current).toBeNull();
+      expect(result.current.$jazz.loadingState).toBe(
+        CoValueLoadingState.UNAVAILABLE,
+      );
     });
   });
 
@@ -84,13 +90,14 @@ describe("useCoState", () => {
       account,
     });
 
-    expect(result.current?.value).toBe("123");
+    assertLoaded(result.current);
+    expect(result.current.value).toBe("123");
 
     act(() => {
       map.$jazz.set("value", "456");
     });
 
-    expect(result.current?.value).toBe("456");
+    expect(result.current.value).toBe("456");
   });
 
   it("should load nested values if requested", async () => {
@@ -126,8 +133,9 @@ describe("useCoState", () => {
       },
     );
 
-    expect(result.current?.value).toBe("123");
-    expect(result.current?.nested.value).toBe("456");
+    assertLoaded(result.current);
+    expect(result.current.value).toBe("123");
+    expect(result.current.nested.value).toBe("456");
   });
 
   it("should load nested values on access even if not requested", async () => {
@@ -155,11 +163,13 @@ describe("useCoState", () => {
       account,
     });
 
-    expect(result.current?.value).toBe("123");
-    expect(result.current?.nested?.value).toBe("456");
+    assertLoaded(result.current);
+    expect(result.current.value).toBe("123");
+    assertLoaded(result.current.nested);
+    expect(result.current.nested.value).toBe("456");
   });
 
-  it("should return null if the coValue is not found", async () => {
+  it("should return an 'unavailable' value if the coValue is not found", async () => {
     const TestMap = co.map({
       value: z.string(),
     });
@@ -168,24 +178,26 @@ describe("useCoState", () => {
       value: "123",
     });
 
-    const account = await createJazzTestAccount({
-      isCurrentActiveAccount: true,
-    });
+    const viewerAccount = await createJazzTestAccount();
 
-    for (const peer of account.$jazz.localNode.syncManager.getClientPeers()) {
+    for (const peer of viewerAccount.$jazz.localNode.syncManager.getServerPeers(
+      viewerAccount.$jazz.raw.id,
+    )) {
       peer.gracefulShutdown();
     }
 
     const { result } = renderHook(() => useCoState(TestMap, map.$jazz.id), {
-      account,
+      account: viewerAccount,
     });
 
     await waitFor(() => {
-      expect(result.current).toBeNull();
+      expect(result.current.$jazz.loadingState).toBe(
+        CoValueLoadingState.UNAVAILABLE,
+      );
     });
   });
 
-  it("should return null if the coValue is not accessible", async () => {
+  it("should return an 'unauthorized' value if the coValue is not accessible", async () => {
     const TestMap = co.map({
       value: z.string(),
     });
@@ -210,11 +222,13 @@ describe("useCoState", () => {
     });
 
     await waitFor(() => {
-      expect(result.current).toBeNull();
+      expect(result.current.$jazz.loadingState).toBe(
+        CoValueLoadingState.UNAUTHORIZED,
+      );
     });
   });
 
-  it("should not return null if the coValue is shared with everyone", async () => {
+  it("should return a 'loaded' value if the coValue is shared with everyone", async () => {
     const TestMap = co.map({
       value: z.string(),
     });
@@ -242,7 +256,8 @@ describe("useCoState", () => {
     });
 
     await waitFor(() => {
-      expect(result.current?.value).toBe("123");
+      assertLoaded(result.current);
+      expect(result.current.value).toBe("123");
     });
   });
 
@@ -273,19 +288,24 @@ describe("useCoState", () => {
     });
 
     await waitFor(() => {
-      expect(result.current).toBeNull();
+      expect(result.current.$jazz.loadingState).toBe(
+        CoValueLoadingState.UNAUTHORIZED,
+      );
     });
 
     group.addMember("everyone", "reader");
 
     await waitFor(() => {
-      expect(result.current).not.toBeNull();
+      expect(result.current.$jazz.loadingState).not.toBe(
+        CoValueLoadingState.UNAUTHORIZED,
+      );
     });
 
-    expect(result.current?.value).toBe("123");
+    assertLoaded(result.current);
+    expect(result.current.value).toBe("123");
   });
 
-  it("should return a null value when the coValue becomes inaccessible", async () => {
+  it("should return an 'unauthorized' value when the coValue becomes inaccessible", async () => {
     const TestMap = co.map({
       value: z.string(),
     });
@@ -322,18 +342,22 @@ describe("useCoState", () => {
     group.removeMember(account);
 
     await waitFor(() => {
-      expect(result.current).toBeNull();
+      expect(result.current.$jazz.loadingState).toBe(
+        CoValueLoadingState.UNAUTHORIZED,
+      );
     });
   });
 
-  it("should return a null value when the coValue becomes inaccessible", async () => {
+  it("should return a 'unavailable' value when no id is provided", async () => {
     const TestMap = co.map({
       value: z.string(),
     });
 
     const { result } = renderHook(() => useCoState(TestMap, undefined));
 
-    expect(result.current).toBeNull();
+    expect(result.current.$jazz.loadingState).toBe(
+      CoValueLoadingState.UNAVAILABLE,
+    );
   });
 
   it("should update when an inner coValue is updated", async () => {
@@ -382,14 +406,17 @@ describe("useCoState", () => {
     );
 
     await waitFor(() => {
-      expect(result.current).not.toBeUndefined();
+      expect(result.current.$jazz.loadingState).toBe(
+        CoValueLoadingState.UNAUTHORIZED,
+      );
     });
 
-    expect(result.current?.nested).toBeUndefined();
     group.addMember("everyone", "reader");
 
     await waitFor(() => {
-      expect(result.current?.nested?.value).toBe("456");
+      assertLoaded(result.current);
+      assert(result.current.nested);
+      expect(result.current.nested.value).toBe("456");
     });
   });
 
@@ -406,11 +433,11 @@ describe("useCoState", () => {
       useCoState(TestMap, map.$jazz.id as ID<CoValue>),
     );
     expectTypeOf(result).toEqualTypeOf<{
-      current: Loaded<typeof TestMap> | null | undefined;
+      current: MaybeLoaded<Loaded<typeof TestMap>>;
     }>();
   });
 
-  it("should set the value to undefined when the id is set to undefined", () => {
+  it("should set the value to 'unavailable' when the id is set to undefined", () => {
     const TestMap = co.map({
       value: z.string(),
     });
@@ -426,11 +453,14 @@ describe("useCoState", () => {
       },
     );
 
-    expect(result.current?.value).toBe("123");
+    assertLoaded(result.current);
+    expect(result.current.value).toBe("123");
 
     rerender({ id: undefined });
 
-    expect(result.current?.value).toBeUndefined();
+    expect(result.current.$jazz.loadingState).toBe(
+      CoValueLoadingState.UNAVAILABLE,
+    );
   });
 
   it("should only render once when loading a list of values", async () => {
@@ -491,7 +521,7 @@ describe("useCoState", () => {
       loadAs: john,
     });
 
-    assert(janeOnJohn);
+    assertLoaded(janeOnJohn);
 
     const group = Group.create(john);
     group.addMember(janeOnJohn, "reader");
@@ -504,15 +534,27 @@ describe("useCoState", () => {
     );
 
     const { result } = renderHook(
-      () => useCoState(Dog, dog.$jazz.id)?.$jazz.owner.members,
+      () => {
+        const loadedDog = useCoState(Dog, dog.$jazz.id);
+        if (!loadedDog.$isLoaded) {
+          return undefined;
+        }
+        return loadedDog.$jazz.owner.members;
+      },
       {
         account: john,
       },
     );
 
     await waitFor(() => {
-      expect(result.current?.[0]?.account?.profile?.name).toBe("John Doe");
-      expect(result.current?.[1]?.account?.profile?.name).toBe("Jane Doe");
+      const johnsAccount = result.current?.[0]?.account;
+      const janesAccount = result.current?.[1]?.account;
+      assert(johnsAccount);
+      assert(janesAccount);
+      assertLoaded(johnsAccount.profile);
+      assertLoaded(janesAccount.profile);
+      expect(johnsAccount.profile.name).toBe("John Doe");
+      expect(janesAccount.profile.name).toBe("Jane Doe");
     });
   });
 
@@ -560,6 +602,79 @@ describe("useCoState", () => {
     expect(renderings).toEqual([true]);
   });
 
+  it("should use the schema's resolve query if no resolve query is provided", async () => {
+    const Person = co.map({
+      name: co.plainText(),
+    });
+    const PersonWithName = Person.resolved({ name: true });
+
+    const group = Group.create();
+    group.addMember("everyone", "writer");
+
+    const person = Person.create(
+      {
+        name: "John Doe",
+      },
+      group,
+    );
+
+    const account = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const { result } = renderHook(
+      () => {
+        return useCoState(PersonWithName, person.$jazz.id);
+      },
+      {
+        account,
+      },
+    );
+
+    await waitFor(() => {
+      expect(result.current).not.toBeNull();
+    });
+
+    assertLoaded(result.current);
+    expect(result.current.name.toUpperCase()).toBe("JOHN DOE");
+  });
+
+  it("schema resolve queries can be defined inside React components", async () => {
+    const Person = co.map({
+      name: co.plainText(),
+    });
+    const group = Group.create();
+    group.addMember("everyone", "writer");
+
+    const person = Person.create(
+      {
+        name: "John Doe",
+      },
+      group,
+    );
+
+    const account = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const { result } = renderHook(
+      () => {
+        // Defining the schema's resolve query inside useCoState
+        return useCoState(Person.resolved({ name: true }), person.$jazz.id);
+      },
+      {
+        account,
+      },
+    );
+
+    await waitFor(() => {
+      expect(result.current).not.toBeNull();
+    });
+
+    assertLoaded(result.current);
+    expect(result.current.name.toUpperCase()).toBe("JOHN DOE");
+  });
+
   it("should work with branches - create branch, edit and merge", async () => {
     const Person = co.map({
       name: z.string(),
@@ -605,7 +720,7 @@ describe("useCoState", () => {
 
     const branchPerson = result.current.branch;
 
-    assert(branchPerson);
+    assertLoaded(branchPerson);
 
     act(() => {
       branchPerson.$jazz.applyDiff({
@@ -615,22 +730,31 @@ describe("useCoState", () => {
       });
     });
 
+    const updatedBranchPerson = result.current.branch;
+    assertLoaded(updatedBranchPerson);
+
     // Verify the branch has the changes
-    expect(result.current?.branch?.name).toBe("John Smith");
-    expect(result.current?.branch?.age).toBe(31);
-    expect(result.current?.branch?.email).toBe("john.smith@example.com");
+    expect(updatedBranchPerson.name).toBe("John Smith");
+    expect(updatedBranchPerson.age).toBe(31);
+    expect(updatedBranchPerson.email).toBe("john.smith@example.com");
+
+    const mainPerson = result.current.main;
+    assertLoaded(mainPerson);
 
     // Verify the original is unchanged
-    expect(result.current?.main?.name).toBe("John Doe");
-    expect(result.current?.main?.age).toBe(30);
-    expect(result.current?.main?.email).toBe("john@example.com");
+    expect(mainPerson.name).toBe("John Doe");
+    expect(mainPerson.age).toBe(30);
+    expect(mainPerson.email).toBe("john@example.com");
 
     // Merge the branch back
     await branchPerson.$jazz.unstable_merge();
 
+    const updatedMainPerson = result.current.main;
+    assertLoaded(updatedMainPerson);
+
     // Verify the original now has the merged changes
-    expect(result.current?.main?.name).toBe("John Smith");
-    expect(result.current?.main?.age).toBe(31);
-    expect(result.current?.main?.email).toBe("john.smith@example.com");
+    expect(updatedMainPerson.name).toBe("John Smith");
+    expect(updatedMainPerson.age).toBe(31);
+    expect(updatedMainPerson.email).toBe("john.smith@example.com");
   });
 });

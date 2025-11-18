@@ -1,6 +1,6 @@
 import { CoID, RawCoValue } from "../coValue.js";
 import { AvailableCoValueCore } from "../coValueCore/coValueCore.js";
-import { AgentID, SessionID, TransactionID } from "../ids.js";
+import { AgentID, SessionID, TransactionID, RawCoID } from "../ids.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfromSessionID.js";
 import { isCoValue } from "../typeUtils/isCoValue.js";
@@ -55,55 +55,52 @@ export class RawCoList<
   type: "colist" | "coplaintext" = "colist" as const;
   /** @category 6. Meta */
   core: AvailableCoValueCore;
-  /** @internal */
-  afterStart: OpID[];
-  /** @internal */
-  beforeEnd: OpID[];
-  /** @internal */
+
+  /** The internal state of the RawCoList */
+  afterStart: OpID[] = [];
+  beforeEnd: OpID[] = [];
   insertions: {
     [sessionID: SessionID]: {
       [txIdx: number]: {
         [changeIdx: number]: InsertionEntry<Item>;
       };
     };
-  };
-  /** @internal */
+  } = {};
   deletionsByInsertion: {
     [deletedSessionID: SessionID]: {
       [deletedTxIdx: number]: {
         [deletedChangeIdx: number]: DeletionEntry[];
       };
     };
-  };
-  /** @category 6. Meta */
-  readonly _item!: Item;
-
-  /** @internal */
+  } = {};
   _cachedEntries?: {
     value: Item;
     madeAt: number;
     opID: OpID;
   }[];
-  /** @internal */
-  knownTransactions: Set<Transaction>;
+  knownTransactions: Record<RawCoID, number> = {};
+  version: number = 0;
+  lastValidTransaction: number | undefined;
+  totalValidTransactions: number = 0;
 
-  get totalValidTransactions() {
-    return this.knownTransactions.size;
+  private resetInternalState() {
+    this.afterStart = [];
+    this.beforeEnd = [];
+    this.insertions = {};
+    this.deletionsByInsertion = {};
+    this._cachedEntries = undefined;
+    this.knownTransactions = { [this.core.id]: 0 };
+    this.lastValidTransaction = undefined;
+    this.totalValidTransactions = 0;
   }
 
-  lastValidTransaction: number | undefined;
+  /** @category 6. Meta */
+  readonly _item!: Item;
 
   /** @internal */
   constructor(core: AvailableCoValueCore) {
     this.id = core.id as CoID<this>;
     this.core = core;
-
-    this.insertions = {};
-    this.deletionsByInsertion = {};
-    this.afterStart = [];
-    this.beforeEnd = [];
-    this.knownTransactions = new Set<Transaction>();
-
     this.processNewTransactions();
   }
 
@@ -282,6 +279,15 @@ export class RawCoList<
     } else {
       this.lastValidTransaction = lastValidTransaction;
     }
+
+    this.totalValidTransactions += transactions.length;
+  }
+
+  rebuildFromCore() {
+    this.version += 1;
+
+    this.resetInternalState();
+    this.processNewTransactions();
   }
 
   /** @category 6. Meta */
@@ -658,19 +664,6 @@ export class RawCoList<
       privacy,
     );
     this.processNewTransactions();
-  }
-
-  /** @internal */
-  rebuildFromCore() {
-    const listAfter = new RawCoList(this.core) as this;
-
-    this.afterStart = listAfter.afterStart;
-    this.beforeEnd = listAfter.beforeEnd;
-    this.insertions = listAfter.insertions;
-    this.lastValidTransaction = listAfter.lastValidTransaction;
-    this.knownTransactions = listAfter.knownTransactions;
-    this.deletionsByInsertion = listAfter.deletionsByInsertion;
-    this._cachedEntries = undefined;
   }
 }
 

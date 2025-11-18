@@ -9,12 +9,13 @@
 </template>
 
 <script setup lang="ts">
-import { useAccount } from "community-jazz-vue";
+import { useAccount, useLogOut } from "community-jazz-vue";
 import { useRouter } from "vue-router";
 import AppContainer from "./components/AppContainer.vue";
 import TopBar from "./components/TopBar.vue";
 
-const { me, logOut } = useAccount();
+const me = useAccount();
+const logOut = useLogOut();
 const router = useRouter();
 
 async function logoutHandler() {

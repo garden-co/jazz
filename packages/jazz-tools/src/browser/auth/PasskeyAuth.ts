@@ -122,7 +122,7 @@ export class BrowserPasskeyAuth {
     try {
       await navigator.credentials.create({
         publicKey: {
-          challenge: this.crypto.randomBytes(20),
+          challenge: new Uint8Array(this.crypto.randomBytes(20)),
           rp: {
             name: this.appName,
             id: this.appHostname,
@@ -156,7 +156,7 @@ export class BrowserPasskeyAuth {
     try {
       const value = await navigator.credentials.get({
         publicKey: {
-          challenge: Uint8Array.from([0, 1, 2]),
+          challenge: new Uint8Array(this.crypto.randomBytes(20)),
           rpId: this.appHostname,
           allowCredentials: [],
           timeout: 60000,

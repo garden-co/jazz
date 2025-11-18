@@ -14,31 +14,25 @@ export function EditOrder(props: { id: string }) {
   const owner = useMemo(() => Group.create(), []);
 
   const order = useCoState(BubbleTeaOrder, props.id, {
-    resolve: {
-      addOns: {
-        $each: true,
-      },
-      instructions: true,
-    },
     unstable_branch: {
       name: "edit-order",
       owner,
     },
   });
 
+  if (!order.$isLoaded) return;
+  const loadedOrder = order;
+
   function handleSave(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (!order) return;
 
-    order.$jazz.unstable_merge();
+    loadedOrder.$jazz.unstable_merge();
     router.navigate("/");
   }
 
   function handleCancel() {
     router.navigate("/");
   }
-
-  if (!order) return;
 
   return (
     <>

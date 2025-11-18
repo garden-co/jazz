@@ -6,6 +6,7 @@ const STORAGE_KEY = "jazz-inspector-paths";
 
 export function usePagePath(defaultPath?: PageInfo[]) {
   const [path, setPath] = useState<PageInfo[]>(() => {
+    if (typeof window === "undefined") return [];
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored) {
       try {

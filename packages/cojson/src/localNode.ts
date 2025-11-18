@@ -1,4 +1,3 @@
-import { Result, err, ok } from "neverthrow";
 import { GarbageCollector } from "./GarbageCollector.js";
 import type { CoID } from "./coValue.js";
 import type { RawCoValue } from "./coValue.js";
@@ -10,7 +9,6 @@ import {
 import {
   type CoValueHeader,
   type CoValueUniqueness,
-  VerifiedState,
 } from "./coValueCore/verifiedState.js";
 import {
   AccountMeta,
@@ -31,7 +29,7 @@ import {
   type RawGroup,
   secretSeedFromInviteSecret,
 } from "./coValues/group.js";
-import { CO_VALUE_LOADING_CONFIG, GARBAGE_COLLECTOR_CONFIG } from "./config.js";
+import { CO_VALUE_LOADING_CONFIG } from "./config.js";
 import { AgentSecret, CryptoProvider } from "./crypto/crypto.js";
 import { AgentID, RawCoID, SessionID, isAgentID } from "./ids.js";
 import { logger } from "./logger.js";
@@ -40,6 +38,8 @@ import { Peer, PeerID, SyncManager } from "./sync.js";
 import { accountOrAgentIDfromSessionID } from "./typeUtils/accountOrAgentIDfromSessionID.js";
 import { expectGroup } from "./typeUtils/expectGroup.js";
 import { canBeBranched } from "./coValueCore/branching.js";
+import { connectedPeers } from "./streamUtils.js";
+import { emptyKnownState } from "./knownState.js";
 
 /** A `LocalNode` represents a local view of a set of loaded `CoValue`s, from the perspective of a particular account (or primitive cryptographic agent).
 
@@ -81,12 +81,15 @@ export class LocalNode {
     this.crypto = crypto;
   }
 
-  enableGarbageCollector() {
+  enableGarbageCollector(opts?: { garbageCollectGroups?: boolean }) {
     if (this.garbageCollector) {
       return;
     }
 
-    this.garbageCollector = new GarbageCollector(this.coValues);
+    this.garbageCollector = new GarbageCollector(
+      this.coValues,
+      opts?.garbageCollectGroups ?? false,
+    );
   }
 
   setStorage(storage: StorageAPI) {
@@ -99,14 +102,20 @@ export class LocalNode {
   }
 
   hasCoValue(id: RawCoID) {
-    return this.coValues.has(id);
+    const coValue = this.coValues.get(id);
+
+    if (!coValue) {
+      return false;
+    }
+
+    return coValue.loadingState !== "unknown";
   }
 
   getCoValue(id: RawCoID) {
     let entry = this.coValues.get(id);
 
     if (!entry) {
-      entry = CoValueCore.fromID(id, this);
+      entry = new CoValueCore(id, this);
       this.coValues.set(id, entry);
     }
 
@@ -117,16 +126,6 @@ export class LocalNode {
 
   allCoValues() {
     return this.coValues.values();
-  }
-
-  private putCoValue(
-    id: RawCoID,
-    verified: VerifiedState,
-    { forceOverwrite = false }: { forceOverwrite?: boolean } = {},
-  ): AvailableCoValueCore {
-    const entry = this.getCoValue(id);
-    entry.internalMarkMagicallyAvailable(verified, { forceOverwrite });
-    return entry as AvailableCoValueCore;
   }
 
   internalDeleteCoValue(id: RawCoID) {
@@ -178,13 +177,13 @@ export class LocalNode {
   static internalCreateAccount(opts: {
     crypto: CryptoProvider;
     initialAgentSecret?: AgentSecret;
-    peersToLoadFrom?: Peer[];
+    peers?: Peer[];
     storage?: StorageAPI;
   }): RawAccount {
     const {
       crypto,
       initialAgentSecret = crypto.newRandomAgentSecret(),
-      peersToLoadFrom = [],
+      peers = [],
     } = opts;
     const accountHeader = accountHeaderForInitialAgentSecret(
       initialAgentSecret,
@@ -202,7 +201,7 @@ export class LocalNode {
       node.setStorage(opts.storage);
     }
 
-    for (const peer of peersToLoadFrom) {
+    for (const peer of peers) {
       node.syncManager.addPeer(peer);
     }
 
@@ -236,14 +235,14 @@ export class LocalNode {
   /** @category 2. Node Creation */
   static async withNewlyCreatedAccount({
     creationProps,
-    peersToLoadFrom,
+    peers,
     migration,
     crypto,
     initialAgentSecret = crypto.newRandomAgentSecret(),
     storage,
   }: {
     creationProps: { name: string };
-    peersToLoadFrom?: Peer[];
+    peers?: Peer[];
     migration?: RawAccountMigration<AccountMeta>;
     crypto: CryptoProvider;
     initialAgentSecret?: AgentSecret;
@@ -257,7 +256,7 @@ export class LocalNode {
     const account = LocalNode.internalCreateAccount({
       crypto,
       initialAgentSecret,
-      peersToLoadFrom,
+      peers,
       storage,
     });
     const node = account.core.node;
@@ -299,7 +298,7 @@ export class LocalNode {
     accountID,
     accountSecret,
     sessionID,
-    peersToLoadFrom,
+    peers,
     crypto,
     migration,
     storage,
@@ -307,7 +306,7 @@ export class LocalNode {
     accountID: RawAccountID;
     accountSecret: AgentSecret;
     sessionID: SessionID | undefined;
-    peersToLoadFrom: Peer[];
+    peers: Peer[];
     crypto: CryptoProvider;
     migration?: RawAccountMigration<AccountMeta>;
     storage?: StorageAPI;
@@ -323,7 +322,7 @@ export class LocalNode {
         node.setStorage(storage);
       }
 
-      for (const peer of peersToLoadFrom) {
+      for (const peer of peers) {
         node.syncManager.addPeer(peer);
       }
 
@@ -371,13 +370,19 @@ export class LocalNode {
 
     const id = idforHeader(header, this.crypto);
 
-    const coValue = this.putCoValue(
-      id,
-      new VerifiedState(id, this.crypto, header),
-    );
+    const coValue = this.getCoValue(id);
+
+    coValue.provideHeader(header);
+
+    if (!coValue.hasVerifiedContent()) {
+      throw new Error("CoValue not available after providing header");
+    }
 
     this.garbageCollector?.trackCoValueAccess(coValue);
-    this.syncManager.syncHeader(coValue.verified);
+    this.syncManager.syncLocalTransaction(
+      coValue.verified,
+      emptyKnownState(id),
+    );
 
     return coValue;
   }
@@ -624,27 +629,30 @@ export class LocalNode {
       return;
     }
 
+    const groupCoreAsDifferentAgent = await this.loadCoValueAsDifferentAgent(
+      group.id,
+      inviteAgentSecret,
+    );
+
     const groupAsInvite = expectGroup(
-      this.loadCoValueAsDifferentAgent(
-        group.id,
-        inviteAgentSecret,
-      ).getCurrentContent(),
+      groupCoreAsDifferentAgent.getCurrentContent(),
     );
 
     groupAsInvite.addMemberInternal(
       account,
       inviteRole === "adminInvite"
         ? "admin"
-        : inviteRole === "writerInvite"
-          ? "writer"
-          : inviteRole === "writeOnlyInvite"
-            ? "writeOnly"
-            : "reader",
+        : inviteRole === "managerInvite"
+          ? "manager"
+          : inviteRole === "writerInvite"
+            ? "writer"
+            : inviteRole === "writeOnlyInvite"
+              ? "writeOnly"
+              : "reader",
     );
 
     const contentPieces =
-      groupAsInvite.core.verified.newContentSince(group.core.knownState()) ??
-      [];
+      groupAsInvite.core.newContentSince(group.core.knownState()) ?? [];
 
     // Import the new transactions to the current localNode
     for (const contentPiece of contentPieces) {
@@ -680,12 +688,9 @@ export class LocalNode {
   }
 
   /** @internal */
-  resolveAccountAgent(
-    id: RawAccountID | AgentID,
-    expectation?: string,
-  ): Result<AgentID, ResolveAccountAgentError> {
+  resolveAccountAgent(id: RawAccountID | AgentID, expectation?: string) {
     if (isAgentID(id)) {
-      return ok(id);
+      return { value: id, error: undefined };
     }
 
     let coValue: AvailableCoValueCore;
@@ -693,12 +698,7 @@ export class LocalNode {
     try {
       coValue = this.expectCoValueLoaded(id, expectation);
     } catch (e) {
-      return err({
-        type: "ErrorLoadingCoValueCore",
-        expectation,
-        id,
-        error: e,
-      } satisfies LoadCoValueCoreError);
+      return { value: undefined, error: e };
     }
 
     if (
@@ -708,14 +708,15 @@ export class LocalNode {
       !("type" in coValue.verified.header.meta) ||
       coValue.verified.header.meta.type !== "account"
     ) {
-      return err({
-        type: "UnexpectedlyNotAccount",
-        expectation,
-        id,
-      } satisfies UnexpectedlyNotAccountError);
+      return {
+        value: undefined,
+        error: new Error(`Unexpectedly not account: ${expectation}`),
+      };
     }
 
-    return ok((coValue.getCurrentContent() as RawAccount).currentAgentID());
+    const account = coValue.getCurrentContent() as RawAccount;
+
+    return { value: account.currentAgentID(), error: undefined };
   }
 
   createGroup(
@@ -755,7 +756,7 @@ export class LocalNode {
     return group;
   }
 
-  loadCoValueAsDifferentAgent(
+  async loadCoValueAsDifferentAgent(
     id: RawCoID,
     secret: AgentSecret,
     accountId?: RawAccountID | AgentID,
@@ -768,44 +769,34 @@ export class LocalNode {
       this.crypto,
     );
 
-    newNode.cloneVerifiedStateFrom(this, id);
+    await newNode.loadVerifiedStateFrom(this, id);
 
     return newNode.expectCoValueLoaded(id);
   }
 
   /** @internal */
-  cloneVerifiedStateFrom(otherNode: LocalNode, id: RawCoID) {
-    const coValuesIdsToCopy = [id];
+  async loadVerifiedStateFrom(otherNode: LocalNode, id: RawCoID) {
+    const connection = connectedPeers("source-" + id, "target-" + id, {
+      peer1role: "server",
+      peer2role: "client",
+    });
 
-    // Scan all the dependencies and add them to the list
-    for (let i = 0; i < coValuesIdsToCopy.length; i++) {
-      const coValueID = coValuesIdsToCopy[i]!;
-      const coValue = otherNode.getCoValue(coValueID);
+    this.syncManager.addPeer(connection[0], true);
+    otherNode.syncManager.addPeer(connection[1], true);
 
-      if (!coValue.isAvailable()) {
-        continue;
-      }
+    const coValue = this.getCoValue(id);
 
-      for (const dep of coValue.getDependedOnCoValues()) {
-        coValuesIdsToCopy.push(dep);
-      }
+    const peerState = this.syncManager.peers[connection[0].id];
+
+    if (!peerState) {
+      throw new Error("Peer state not found");
     }
 
-    // Copy the coValue all the dependencies by following the dependency order
-    while (coValuesIdsToCopy.length > 0) {
-      const coValueID = coValuesIdsToCopy.pop()!;
-      const coValue = otherNode.getCoValue(coValueID);
+    coValue.loadFromPeers([peerState]);
 
-      if (!coValue.isAvailable()) {
-        continue;
-      }
+    await coValue.waitForAvailable();
 
-      if (this.coValues.get(coValueID)?.isAvailable()) {
-        continue;
-      }
-
-      this.putCoValue(coValueID, coValue.verified);
-    }
+    peerState.gracefulShutdown();
   }
 
   /**

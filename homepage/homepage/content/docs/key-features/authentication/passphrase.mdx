@@ -1,0 +1,76 @@
+export const metadata = {
+  description: "Passphrase authentication lets users log into any device using a recovery phrase consisting of multiple words (similar to cryptocurrency wallets). "
+};
+
+import { CodeGroup, ContentByFramework, ExpoLogo, ReactLogo, SvelteLogo, RNLogo, TabbedCodeGroup, TabbedCodeGroupItem, VanillaLogo } from "@/components/forMdx";
+
+# Passphrase Authentication
+
+Passphrase authentication lets users log into any device using a recovery phrase consisting of multiple words (similar to cryptocurrency wallets). Users are responsible for storing this passphrase safely.
+
+## How it works
+
+When a user creates an account with passphrase authentication:
+
+1. Jazz generates a unique recovery phrase derived from the user's cryptographic keys
+2. This phrase consists of words from a wordlist
+3. Users save this phrase and enter it when logging in on new devices
+
+You can use one of the ready-to-use wordlists from the [BIP39 repository](https://github.com/bitcoinjs/bip39/tree/a7ecbfe2e60d0214ce17163d610cad9f7b23140c/src/wordlists) or create your own. If you do decide to create your own wordlist, it's recommended to use at least 2048 unique words (or some higher power of two).
+
+## Key benefits
+
+- **Portable**: Works across any device, even without browser or OS support
+- **User-controlled**: User manages their authentication phrase
+- **Flexible**: Works with any wordlist you choose
+- **Offline capable**: No external dependencies
+
+## Implementation
+You can implement passphrase authentication in your application quickly and easily:
+
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="use-passphrase">
+  <TabbedCodeGroupItem icon={<VanillaLogo />} label="Vanilla" value="vanilla" preferWrap>
+  ```ts AuthModal.ts#PassphraseAuth
+  ```
+  </TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
+```tsx AuthModal.tsx#Basic
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```svelte AuthModal.svelte
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<RNLogo />} label="React Native" value="react-native" preferWrap>
+```tsx AuthModalRN.tsx#Basic
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ExpoLogo />} label="Expo" value="react-native-expo" preferWrap>
+```tsx AuthModalRN.tsx#Basic
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+## Examples
+
+You can see passphrase authentication in our [passphrase example](https://passphrase.demo.jazz.tools/) or the [todo list demo](https://todo.demo.jazz.tools/).
+
+## When to use Passphrases
+
+Passphrase authentication is ideal when:
+
+- You need to support older browsers without WebAuthn capabilities
+- Your users need to access the app on many different devices
+- You want a fallback authentication method alongside passkeys
+
+## Limitations and considerations
+
+- **User responsibility**: Users must securely store their passphrase
+- **Recovery concerns**: If a user loses their passphrase, they cannot recover their account
+- **Security risk**: Anyone with the passphrase can access the account
+- **User experience**: Requires users to enter a potentially long phrase
+
+Make sure to emphasize to your users:
+1. Store the passphrase in a secure location (password manager, written down in a safe place)
+2. The passphrase is the only way to recover their account
+3. Anyone with the passphrase can access the account

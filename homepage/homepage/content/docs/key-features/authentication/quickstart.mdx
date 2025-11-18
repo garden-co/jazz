@@ -1,0 +1,173 @@
+import { Alert, CodeGroup, ContentByFramework, FileName, ReactLogo, SvelteLogo, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
+import RunDevServer from "@/components/docs/snippets/RunDevServer.mdx";
+import StuckCTA from "@/components/docs/snippets/StuckCTA.mdx";
+
+export const metadata = {
+  description: "Add authentication to your Jazz app."
+};
+
+# Add Authentication to your App
+
+This guide will show you how you can access your data on multiple devices by signing in to your app.
+
+<Alert variant="info" className="mt-4 flex gap-2 items-center">
+  If you haven't gone through the [front-end Quickstart](/docs/quickstart), you might find this guide a bit confusing. If you're looking for a quick reference, you might find [this page](/docs/key-features/authentication/overview) or our [Passkey Auth example app](https://github.com/gardencmp/jazz/tree/main/starters/react-passkey-auth) more helpful!
+</Alert>
+
+## Add passkey authentication
+Jazz has a built-in passkey authentication component that you can use to add authentication to your app. This is the easiest way to get started with securely authenticating users into your application. By adding this component, when users access your app, they'll be greeted with an input where they can enter their name, and create a passkey.
+
+<ContentByFramework framework="react">
+  <FileName>app/components/JazzWrapper.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/routes/+layout.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup savedPreferenceKey="framework" id="add-passkey-auth">
+<TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
+  ```tsx JazzWrapper.tsx
+  ```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
+```svelte +layout.svelte
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+<ContentByFramework framework="react">
+<details>
+<summary>Already completed the server-side rendering guide?</summary>
+
+You'll need to make a couple of small changes to your structure in order for this to work on the server. In particular, we only want to display the passkey auth UI on the client, otherwise, we should just render on the child.
+
+<FileName>app/components/JazzWrapper.tsx</FileName>
+<CodeGroup preferWrap>
+```tsx JazzWrapperSSR.tsx
+```
+</CodeGroup>
+You'll also need to be aware that the server agent can only render public CoValues.
+</details>
+</ContentByFramework>
+
+## Give it a go!
+... what, already?! Yes! Run your app and try creating a passkey and logging in!
+
+<RunDevServer />
+
+### Not working?
+- Did you add `<PasskeyAuthBasicUI>` *inside* your provider?
+- Does it wrap all the children?
+- Are you running your app in a <a href="https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts" target="_blank" rel="noopener noreferrer">secure context</a> (either HTTPS or localhost)?
+
+<StuckCTA />
+
+## Add a recovery method
+
+Passkeys are very convenient for your users because they offer a secure alternative to traditional authentication methods and they're normally synchronised across devices automatically by the user's browser or operating system.
+
+However, they're not available everywhere, and in case the user loses or deletes their passkey by mistake, they won't be able to access their account.
+
+So, let's add a secondary login method using a passphrase. You can integrate [as many different authentication methods as you like](https://github.com/garden-co/jazz/tree/main/examples/multiauth) in your app.
+
+### Create an `Auth` component
+
+The `PasskeyAuthBasicUI` component is not customisable, so we'll implement our own Auth component so that we can extend it.
+
+<ContentByFramework framework="react">
+  <FileName>app/components/Auth.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/lib/components/Auth.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="custom-auth">
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
+```tsx Auth.tsx
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```svelte Auth.svelte
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+### Use your new component
+<ContentByFramework framework="react">
+  <FileName>app/components/JazzWrapper.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/routes/+layout.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup savedPreferenceKey="framework" id="add-passkey-auth">
+<TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
+  ```tsx JazzWrapperWithAuth.tsx
+  ```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
+```svelte +layout-with-auth.svelte
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+### Show recovery key
+
+Jazz allows you to generate a passphrase from a wordlist which can be used to log in to an account. This passphrase will work regardless of how the account was originally created (passkey, Clerk, BetterAuth, etc.). Each account will always have the same recovery key.
+
+You can get started with a wordlist [from here](https://github.com/bitcoinjs/bip39/tree/master/src/wordlists). For example, you could save the `english.json` file in your project and format it as a JavaScript export.
+
+<FileName>wordlist.ts</FileName>
+<CodeGroup>
+```ts
+export const wordlist = [
+  "abandon",
+  // ... many more words
+  "zoo"
+];
+```
+</CodeGroup>
+
+We'll import this, and add a textarea into our auth component which will show the recovery key for the current user's account.
+
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="recovery-key">
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
+```tsx AuthWithPassphrase.tsx
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```svelte AuthWithPassphrase.svelte
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+<Alert variant="warning" title="Security Warning" className="mt-4">
+This 'recovery key' is a method of authenticating into an account, and if compromised, it *cannot* be changed! You should impress on your users the importance of keeping this key secret.
+</Alert>
+
+
+### Allow users to log in with the recovery key
+
+Now you're displaying a recovery key to users, so we'll allow users to login using a saved recovery key by extending the Auth component a little further.
+
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="log-in-with-recovery-key">
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
+```tsx AuthWithPassphraseLogin.tsx
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```svelte AuthWithPassphraseLogin.svelte
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+<Alert variant="info" title="Tip" className="mt-4">
+Although we're presenting this as a 'recovery key' here, this key could also be used as the primary method of authenticating users into your app. You could even completely remove passkey support if you wanted.
+</Alert>
+
+**Congratulations! 🎉** You've added authentication to your app, allowing your users to log in from multiple devices, and you've added a recovery method, allowing users to make sure they never lose access to their account.
+
+## Next steps
+- Check out how to [use other types of authentication](/docs/key-features/authentication/overview#available-authentication-methods)
+- Learn more about [sharing and collaboration](/docs/permissions-and-sharing/quickstart)
+- Find out how to [use server workers](/docs/server-side/quickstart) to build more complex applications

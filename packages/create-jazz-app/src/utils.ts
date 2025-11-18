@@ -1,3 +1,5 @@
+import { frameworks, type Framework } from "./config.js";
+
 export type PackageManager = "npm" | "yarn" | "pnpm" | "bun" | "deno";
 
 export function getPkgManager(): PackageManager {
@@ -20,4 +22,10 @@ export function getPkgManager(): PackageManager {
   }
 
   return "npm";
+}
+
+export function getFrameworkSpecificDocsUrl(framework: Framework) {
+  const frameworkForDocs = frameworks.find((f) => f.value === framework)?.docs;
+  if (!frameworkForDocs) throw new Error("An invalid framework was specified.");
+  return `https://jazz.tools/${frameworkForDocs}/llms-full.txt`;
 }

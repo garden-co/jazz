@@ -9,6 +9,7 @@ import { apiKey } from "./apiKey";
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <JazzReactProvider
+      authSecretStorageKey="examples/reactions"
       sync={{
         peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
       }}

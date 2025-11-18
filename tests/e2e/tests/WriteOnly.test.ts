@@ -1,4 +1,4 @@
-import { Browser, Page, expect, test } from "@playwright/test";
+import { type Browser, type Page, expect, test } from "@playwright/test";
 
 test.describe("WriteOnly role", () => {
   test("should share simple coValues", async ({ page, browser }) => {

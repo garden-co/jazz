@@ -1,7 +1,6 @@
-import { useToast } from "@/hooks/use-toast";
-import { createInviteLink, useAccount, useCoState } from "jazz-tools/react";
+import { useCoState } from "jazz-tools/react";
 import { useParams } from "react-router";
-import { MusicaAccount, Playlist } from "./1_schema";
+import { PlaylistWithTracks } from "./1_schema";
 import { uploadMusicTracks } from "./4_actions";
 import { MediaPlayer } from "./5_useMediaPlayer";
 import { FileUploadButton } from "./components/FileUploadButton";
@@ -9,25 +8,19 @@ import { MusicTrackRow } from "./components/MusicTrackRow";
 import { PlayerControls } from "./components/PlayerControls";
 import { EditPlaylistModal } from "./components/EditPlaylistModal";
 import { PlaylistMembers } from "./components/PlaylistMembers";
+import { MemberAccessModal } from "./components/MemberAccessModal";
 import { SidePanel } from "./components/SidePanel";
 import { Button } from "./components/ui/button";
 import { SidebarInset, SidebarTrigger } from "./components/ui/sidebar";
 import { usePlayState } from "./lib/audio/usePlayState";
 import { useState } from "react";
+import { useAccountSelector } from "@/components/AccountProvider.tsx";
 
 export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
-  /**
-   * `me` represents the current user account, which will determine
-   *  access rights to CoValues. We get it from the top-level provider `<WithJazz/>`.
-   */
-  const { me } = useAccount(MusicaAccount, {
-    resolve: { root: { rootPlaylist: true, playlists: true } },
-  });
-
   const playState = usePlayState();
   const isPlaying = playState.value === "play";
-  const { toast } = useToast();
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [isMembersModalOpen, setIsMembersModalOpen] = useState(false);
 
   async function handleFileLoad(files: FileList) {
     /**
@@ -38,31 +31,28 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
   }
 
   const params = useParams<{ playlistId: string }>();
-  const playlistId = params.playlistId ?? me?.root.$jazz.refs.rootPlaylist.id;
+  const playlistId = useAccountSelector({
+    select: (me) =>
+      params.playlistId ??
+      (me.$isLoaded ? me.root.$jazz.refs.rootPlaylist.id : undefined),
+  });
 
-  const playlist = useCoState(Playlist, playlistId, {
-    resolve: {
-      tracks: {
-        $each: true,
-      },
-    },
+  const playlist = useCoState(PlaylistWithTracks, playlistId, {
+    select: (playlist) => (playlist.$isLoaded ? playlist : undefined),
   });
 
   const membersIds = playlist?.$jazz.owner.members.map((member) => member.id);
   const isRootPlaylist = !params.playlistId;
-  const isPlaylistOwner = playlist && me?.canAdmin(playlist);
-  const isActivePlaylist = playlistId === me?.root.activePlaylist?.$jazz.id;
+  const canEdit = useAccountSelector({
+    select: (me) => Boolean(playlist && me.canWrite(playlist)),
+  });
+  const isActivePlaylist = useAccountSelector({
+    select: (me) =>
+      me.$isLoaded && playlistId === me.root.activePlaylist?.$jazz.id,
+  });
 
-  const handlePlaylistShareClick = async () => {
-    if (!isPlaylistOwner) return;
-
-    const inviteLink = createInviteLink(playlist, "reader");
-
-    await navigator.clipboard.writeText(inviteLink);
-
-    toast({
-      title: "Invite link copied into the clipboard",
-    });
+  const handlePlaylistShareClick = () => {
+    setIsMembersModalOpen(true);
   };
 
   const handleEditClick = () => {
@@ -87,7 +77,7 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
                 {membersIds && playlist && (
                   <PlaylistMembers
                     memberIds={membersIds}
-                    group={playlist.$jazz.owner}
+                    onClick={() => setIsMembersModalOpen(true)}
                   />
                 )}
               </div>
@@ -100,7 +90,7 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
                   </FileUploadButton>
                 </>
               )}
-              {!isRootPlaylist && (
+              {!isRootPlaylist && canEdit && (
                 <>
                   <Button onClick={handleEditClick} variant="outline">
                     Edit
@@ -140,6 +130,15 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
         isOpen={isEditModalOpen}
         onClose={() => setIsEditModalOpen(false)}
       />
+
+      {/* Members Management Modal */}
+      {playlist && (
+        <MemberAccessModal
+          isOpen={isMembersModalOpen}
+          onOpenChange={setIsMembersModalOpen}
+          playlist={playlist}
+        />
+      )}
     </SidebarInset>
   );
 }

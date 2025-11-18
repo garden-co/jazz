@@ -1,0 +1,283 @@
+# This workflow builds and tests the cojson-core-napi package using NAPI across multiple platforms.
+name: Build and Test cojson-core-napi (NAPI)
+env:
+  DEBUG: napi:*
+  PATH_BUILD: crates/cojson-core-napi
+  APP_NAME: cojson-core-napi
+  MACOSX_DEPLOYMENT_TARGET: '10.13'
+  CARGO_INCREMENTAL: '1'
+  TARGET_CC: 'clang'
+'on':
+  workflow_call:
+    inputs:
+      concurrency:
+        type: string
+        description: The concurrency group to use for the workflow.
+        default: napi
+      disableTest:
+        type: boolean
+        description: Whether to disable the test step.
+        default: false
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.concurrency }}
+  cancel-in-progress: true
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: setup pnpm
+        uses: pnpm/action-setup@v4
+      - name: Install
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Install dependencies
+        run: pnpm install
+      - name: Linting
+        run: pnpm exec turbo lint --filter=cojson-core-napi
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: macos-latest
+            target: x86_64-apple-darwin
+            build: pnpm build:napi --target x86_64-apple-darwin
+          # - host: windows-latest
+          #   build: pnpm build:napi --target x86_64-pc-windows-msvc
+          #   target: x86_64-pc-windows-msvc
+          # - host: windows-latest
+          #   build: pnpm build:napi --target i686-pc-windows-msvc
+          #   target: i686-pc-windows-msvc
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            build: pnpm build:napi --target x86_64-unknown-linux-gnu --use-napi-cross
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            build: pnpm build:napi --target x86_64-unknown-linux-musl -x
+          - host: macos-latest
+            target: aarch64-apple-darwin
+            build: pnpm build:napi --target aarch64-apple-darwin
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            build: pnpm build:napi --target aarch64-unknown-linux-gnu --use-napi-cross
+          - host: ubuntu-latest
+            target: armv7-unknown-linux-gnueabihf
+            build: pnpm build:napi --target armv7-unknown-linux-gnueabihf --use-napi-cross
+          # - host: ubuntu-latest
+          #   target: aarch64-linux-android
+          #   build: pnpm --shell-emulator build:napi --target aarch64-linux-android
+          # - host: ubuntu-latest
+          #   target: armv7-linux-androideabi
+          #   build: pnpm --shell-emulator build:napi --target armv7-linux-androideabi
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            build: pnpm build:napi --target aarch64-unknown-linux-musl -x
+          # - host: windows-latest
+          #   target: aarch64-pc-windows-msvc
+          #   build: pnpm build:napi --target aarch64-pc-windows-msvc
+    name: stable - ${{ matrix.settings.target }} - node@22
+    runs-on: ${{ matrix.settings.host }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: setup pnpm
+        uses: pnpm/action-setup@v4
+      - name: Setup node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.settings.target }}
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ~/.napi-rs
+            ${{ env.PATH_BUILD }}/.cargo-cache
+            ${{ env.PATH_BUILD }}/target/
+          key: ${{ matrix.settings.target }}-cargo-${{ matrix.settings.host }}
+      - uses: mlugg/setup-zig@v2
+        if: ${{ contains(matrix.settings.target, 'musl') }}
+        with:
+          version: 0.14.1
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        if: ${{ contains(matrix.settings.target, 'musl') }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          tool: cargo-zigbuild
+      - name: Setup toolchain
+        run: ${{ matrix.settings.setup }}
+        if: ${{ matrix.settings.setup }}
+        shell: bash
+      - name: Install dependencies
+        run: pnpm install
+      - name: Build
+        run: ${{ matrix.settings.build }}
+        shell: bash
+        env:
+          ANDROID_NDK_LATEST_HOME: /usr/local/lib/android/sdk/ndk/28.2.13676358
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: |
+            ${{ env.PATH_BUILD }}/${{ env.APP_NAME }}.*.node
+          if-no-files-found: error
+  upload-index-js:
+    name: Upload index.js
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Source Code
+        uses: ./.github/actions/source-code/
+      - name: Install dependencies
+        run: pnpm build:napi
+      - name: Upload index.js
+        uses: actions/upload-artifact@v4
+        with:
+          name: index.js
+          overwrite: true
+          path: ${{ env.PATH_BUILD }}/index.js
+  test-macOS-windows-binding:
+    name: Test bindings on ${{ matrix.settings.target }} - node@${{ matrix.node }}
+    if: ${{ !inputs.disableTest }}
+    needs:
+      - build
+      - upload-index-js
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          # - host: windows-latest
+          #   target: x86_64-pc-windows-msvc
+          #   architecture: x64
+          # Skipping ARM Windows for now as wasmPack doesn't support it yet
+          # - host: windows-11-arm
+          #   target: aarch64-pc-windows-msvc
+          #   architecture: arm64
+          - host: macos-latest
+            target: aarch64-apple-darwin
+            architecture: arm64
+          - host: macos-latest
+            target: x86_64-apple-darwin
+            architecture: x64
+        node:
+          - '20'
+          - '22'
+    runs-on: ${{ matrix.settings.host }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: setup pnpm
+        uses: pnpm/action-setup@v4
+      - name: Setup node
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+          architecture: ${{ matrix.settings.architecture }}
+      - name: Install dependencies
+        run: pnpm install
+      - name: Download artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: ${{ env.PATH_BUILD }}/.
+      - name: Download index.js
+        uses: actions/download-artifact@v5
+        with:
+          name: index.js
+          path: ${{ env.PATH_BUILD }}/.
+      - name: List packages
+        run: ls -R ${{ env.PATH_BUILD }}
+        shell: bash
+      - name: Test bindings
+        run: cd ${{ env.PATH_BUILD }} && pnpm test:ci && cd -
+        shell: bash
+  test-linux-binding:
+    name: Test ${{ matrix.target }} - node@${{ matrix.node }}
+    if: ${{ !inputs.disableTest }}
+    needs:
+      - build
+      - upload-index-js
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-gnu
+          - aarch64-unknown-linux-musl
+          - armv7-unknown-linux-gnueabihf
+        node:
+          - '20'
+          - '22'
+    runs-on: ${{ contains(matrix.target, 'aarch64') && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: setup pnpm
+        uses: pnpm/action-setup@v4
+      - name: Setup node
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      - name: Output docker params
+        id: docker
+        run: |
+          node -e "
+            if ('${{ matrix.target }}'.startsWith('aarch64')) {
+              console.log('PLATFORM=linux/arm64')
+            } else if ('${{ matrix.target }}'.startsWith('armv7')) {
+              console.log('PLATFORM=linux/arm/v7')
+            } else {
+              console.log('PLATFORM=linux/amd64')
+            }
+          " >> $GITHUB_OUTPUT
+          node -e "
+            if ('${{ matrix.target }}'.endsWith('-musl')) {
+              console.log('IMAGE=node:${{ matrix.node }}-alpine')
+            } else {
+              console.log('IMAGE=node:${{ matrix.node }}-slim')
+            }
+          " >> $GITHUB_OUTPUT
+          echo "PNPM_STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_OUTPUT
+      - name: Install dependencies
+        run: pnpm install --force
+      - name: Download artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: bindings-${{ matrix.target }}
+          path: ${{ env.PATH_BUILD }}/.
+      - name: Download index.js
+        uses: actions/download-artifact@v5
+        with:
+          name: index.js
+          path: ${{ env.PATH_BUILD }}/.
+      - name: List packages
+        run: ls -R .
+        shell: bash
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        if: ${{ contains(matrix.target, 'armv7') }}
+        with:
+          platforms: all
+      - run: docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+        if: ${{ contains(matrix.target, 'armv7') }}
+      - name: Test bindings
+        uses: addnab/docker-run-action@v3
+        with:
+          image: ${{ steps.docker.outputs.IMAGE }}
+          options: '-v ${{ github.workspace }}:${{ github.workspace }} -w ${{ github.workspace }} --platform ${{ steps.docker.outputs.PLATFORM }}'
+          run: cd ${{ env.PATH_BUILD }} && npm run test:ci && cd -

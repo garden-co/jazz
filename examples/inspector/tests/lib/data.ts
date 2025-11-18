@@ -3,7 +3,7 @@ import {
   Issue,
   Organization,
   Project,
-  ReactionType,
+  type ReactionType,
   ReactionsList,
 } from "./schema";
 

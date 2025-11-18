@@ -1,3 +1,5 @@
+// If we're updating here, don't forget to update in next.config.mjs as well
+
 export enum Framework {
   React = "react",
   ReactNative = "react-native",

@@ -1,5 +1,189 @@
 # cojson-transport-nodejs-ws
 
+## 0.19.3
+
+### Patch Changes
+
+- cojson@0.19.3
+
+## 0.19.2
+
+### Patch Changes
+
+- Updated dependencies [7e76313]
+  - cojson@0.19.2
+
+## 0.19.1
+
+### Patch Changes
+
+- Updated dependencies [afd2ded]
+  - cojson@0.19.1
+
+## 0.19.0
+
+### Patch Changes
+
+- cojson@0.19.0
+
+## 0.18.38
+
+### Patch Changes
+
+- Updated dependencies [349ca48]
+- Updated dependencies [68781a0]
+  - cojson@0.18.38
+
+## 0.18.37
+
+### Patch Changes
+
+- Updated dependencies [0e923d1]
+- Updated dependencies [fd89225]
+  - cojson@0.18.37
+
+## 0.18.36
+
+### Patch Changes
+
+- Updated dependencies [af3fe4c]
+  - cojson@0.18.36
+
+## 0.18.35
+
+### Patch Changes
+
+- Updated dependencies [d47ac6d]
+  - cojson@0.18.35
+
+## 0.18.34
+
+### Patch Changes
+
+- Updated dependencies [4a79953]
+- Updated dependencies [d7e5cc8]
+  - cojson@0.18.34
+
+## 0.18.33
+
+### Patch Changes
+
+- Updated dependencies [5ffe0a9]
+  - cojson@0.18.33
+
+## 0.18.32
+
+### Patch Changes
+
+- 2c7013a: Allow providing a custom meter for usage tracking
+- Updated dependencies [8f47a9e]
+  - cojson@0.18.32
+
+## 0.18.31
+
+### Patch Changes
+
+- Updated dependencies [7c2b7b8]
+  - cojson@0.18.31
+
+## 0.18.30
+
+### Patch Changes
+
+- Updated dependencies [ad83da2]
+- Updated dependencies [d08b7e2]
+  - cojson@0.18.30
+
+## 0.18.29
+
+### Patch Changes
+
+- cojson@0.18.29
+
+## 0.18.28
+
+### Patch Changes
+
+- Updated dependencies [e8880dc]
+- Updated dependencies [d83b5e3]
+- Updated dependencies [5320349]
+  - cojson@0.18.28
+
+## 0.18.27
+
+### Patch Changes
+
+- cojson@0.18.27
+
+## 0.18.26
+
+### Patch Changes
+
+- Updated dependencies [f956cd3]
+  - cojson@0.18.26
+
+## 0.18.25
+
+### Patch Changes
+
+- Updated dependencies [4036737]
+  - cojson@0.18.25
+
+## 0.18.24
+
+### Patch Changes
+
+- Updated dependencies [b09785e]
+  - cojson@0.18.24
+
+## 0.18.23
+
+### Patch Changes
+
+- cojson@0.18.23
+
+## 0.18.22
+
+### Patch Changes
+
+- Updated dependencies [1e20db6]
+  - cojson@0.18.22
+
+## 0.18.21
+
+### Patch Changes
+
+- cojson@0.18.21
+
+## 0.18.20
+
+### Patch Changes
+
+- Updated dependencies [e75b3d6]
+- Updated dependencies [ecf4967]
+- Updated dependencies [d0e2210]
+  - cojson@0.18.20
+
+## 0.18.19
+
+### Patch Changes
+
+- cojson@0.18.19
+
+## 0.18.18
+
+### Patch Changes
+
+- Updated dependencies [ed7e353]
+  - cojson@0.18.18
+
+## 0.18.17
+
+### Patch Changes
+
+- Updated dependencies [925da72]
+  - cojson@0.18.17
+
 ## 0.18.16
 
 ### Patch Changes

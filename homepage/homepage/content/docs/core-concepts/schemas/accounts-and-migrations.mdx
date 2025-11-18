@@ -1,0 +1,137 @@
+export const metadata = {
+  description: "Define the structure of every account in your app and handle data migrations."
+};
+
+import { Alert, CodeGroup, ComingSoon, ContentByFramework, ExpoLogo, RNLogo, ReactLogo, SvelteLogo, TabbedCodeGroup, TabbedCodeGroupItem, VanillaLogo } from "@/components/forMdx";
+
+# Accounts & Migrations
+
+## CoValues as a graph of data rooted in accounts
+
+Compared to traditional relational databases with tables and foreign keys,
+Jazz is more like a graph database, or GraphQL APIs &mdash;
+where CoValues can arbitrarily refer to each other and you can resolve references without having to do a join.
+(See [Subscribing & deep loading](/docs/core-concepts/subscription-and-loading)).
+
+To find all data related to a user, the account acts as a root node from where you can resolve all the data they have access to.
+These root references are modeled explicitly in your schema, distinguishing between data that is typically public
+(like a user's profile) and data that is private (like their messages).
+
+### `Account.root` - private data a user cares about
+
+Every Jazz app that wants to refer to per-user data needs to define a custom root `CoMap` schema and declare it in a custom `Account` schema as the `root` field:
+
+<CodeGroup>
+```ts schema.ts#Basic
+```
+</CodeGroup>
+
+### `Account.profile` - public data associated with a user
+
+The built-in `Account` schema class comes with a default `profile` field, which is a CoMap (in a Group with `"everyone": "reader"` - so publicly readable permissions)
+that is set up for you based on the username the `AuthMethod` provides on account creation.
+
+Their pre-defined schemas roughly look like this:
+
+<CodeGroup>
+```ts core-concepts/schemas/accounts-and-migrations/schema.ts#Account
+```
+</CodeGroup>
+
+If you want to keep the default `co.profile()` schema, but customise your account's private `root`, you can use `co.profile()` without options.
+
+If you want to extend the `profile` to contain additional fields (such as an avatar `co.image()`), you can declare your own profile schema class using `co.profile({...})`. A `co.profile({...})` is a [type of CoMap](/docs/core-concepts/covalues/comaps), so you can add fields in the same way:
+
+<CodeGroup>
+```ts core-concepts/schemas/accounts-and-migrations/schema.ts#Profile
+```
+</CodeGroup>
+
+<Alert variant="info" className="mt-4 flex gap-2 items-center">
+  When using custom profile schemas, you need to take care of initializing the `profile` field in a migration,
+  and set up the correct permissions for it. See [Adding/changing fields to root and profile](#addingchanging-fields-to-root-and-profile).
+</Alert>
+
+## Resolving CoValues starting at `profile` or `root`
+<ContentByFramework framework={["react", "react-native", "react-native-expo"]}>
+To use per-user data in your app, you typically use `useAccount` with your custom Account schema and specify which references to resolve using a resolve query (see [Subscribing & deep loading](/docs/core-concepts/subscription-and-loading)).
+
+Jazz will deduplicate loads, so you can safely use `useAccount` multiple times throughout your app without any performance overhead to ensure each component has exactly the data it needs.
+</ContentByFramework>
+
+<ContentByFramework framework="svelte">
+To use per-user data in your app, you typically use `AccountCoState` with your custom Account schema and specify which references to resolve using a resolve query (see [Subscribing & deep loading](/docs/core-concepts/subscription-and-loading)).
+
+Jazz will deduplicate loads, so you can safely use `AccountCoState` multiple times throughout your app without any performance overhead to ensure each component has exactly the data it needs.
+</ContentByFramework>
+
+<ContentByFramework framework="vanilla">
+To use per-user data in your app, you typically use your custom Account schema with a `.subscribe()` call, and specify which references to resolve using a resolve query (see [Subscribing & deep loading](/docs/core-concepts/subscription-and-loading)).
+
+Jazz will deduplicate loads, so you can safely use this pattern multiple times throughout your app without any performance overhead to ensure each part of your app has exactly the data it needs.
+</ContentByFramework>
+
+<TabbedCodeGroup id="account-resolution" default="react" savedPreferenceKey="framework">
+  <TabbedCodeGroupItem label="Vanilla" value="vanilla" icon={<VanillaLogo />} preferWrap>
+  ```ts dashboard.ts
+  ```
+  </TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
+```tsx DashboardPageComponent.tsx#Main
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
+```svelte DashboardPageComponent.svelte
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="React Native" value="react-native" icon={<RNLogo />} preferWrap>
+```tsx DashboardPageComponent.tsx#ReactNative
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Expo" value="react-native-expo" icon={<ExpoLogo />} preferWrap>
+```tsx DashboardPageComponent.tsx#ReactNative
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+
+## Populating and evolving `root` and `profile` schemas with migrations
+
+As you develop your app, you'll likely want to
+
+- initialise data in a user's `root` and `profile`
+- add more data to your `root` and `profile` schemas
+
+You can achieve both by overriding the `migrate()` method on your `Account` schema class.
+
+### When migrations run
+
+Migrations are run after account creation and every time a user logs in.
+Jazz waits for the migration to finish before passing the account to your app's context.
+
+### Initialising user data after account creation
+
+<CodeGroup>
+```ts core-concepts/schemas/accounts-and-migrations/schema.ts#WithMigration
+```
+</CodeGroup>
+
+### Adding/changing fields to `root` and `profile`
+
+To add new fields to your `root` or `profile` schemas, amend their corresponding schema classes with new fields,
+and then implement a migration that will populate the new fields for existing users (by using initial data, or by using existing data from old fields).
+
+To do deeply nested migrations, you might need to use the asynchronous `$jazz.ensureLoaded()` method before determining whether the field already exists, or is simply not loaded yet.
+
+Now let's say we want to add a `myBookmarks` field to the `root` schema:
+
+<CodeGroup>
+```ts core-concepts/schemas/accounts-and-migrations/schema-add-fields.ts#ExtendedMigration
+```
+</CodeGroup>
+
+### Guidance on building robust schemas
+
+Once you've published a schema, you should only ever add fields to it. This is because you have no way of ensuring that a new schema is distributed to all clients, especially if you're building a local-first app.
+
+You should plan to be able to handle data from users using any former schema version that you have published for your app.

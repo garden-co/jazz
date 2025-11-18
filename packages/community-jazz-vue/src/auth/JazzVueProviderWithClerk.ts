@@ -46,7 +46,7 @@ export const JazzVueProviderWithClerk = defineComponent({
       required: true,
     },
     AccountSchema: {
-      type: Function as unknown as PropType<
+      type: [Function, Object] as unknown as PropType<
         (AccountClass<Account> & CoValueFromRaw<Account>) | AnyAccountSchema
       >,
       required: false,
@@ -72,7 +72,7 @@ export const JazzVueProviderWithClerk = defineComponent({
       required: false,
     },
     onAnonymousAccountDiscarded: {
-      type: Function as PropType<(anonymousAccount: any) => Promise<void>>,
+      type: Function as PropType<(anonymousAccount: Account) => Promise<void>>,
       required: false,
     },
     enableSSR: {

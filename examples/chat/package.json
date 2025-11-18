@@ -18,7 +18,7 @@
     "lucide-react": "^0.536.0",
     "react": "catalog:react",
     "react-dom": "catalog:react",
-    "zod": "3.25.76"
+    "react-jazzicon": "^1.0.4"
   },
   "devDependencies": {
     "@playwright/test": "^1.50.1",

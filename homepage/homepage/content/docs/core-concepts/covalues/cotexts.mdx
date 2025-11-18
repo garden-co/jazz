@@ -1,0 +1,170 @@
+import { CodeGroup, ContentByFramework } from "@/components/forMdx";
+
+export const metadata = {
+  description: "co.plainText() and co.richText() enable real-time collaborative text editing. They provide fine-grained control over text edits, and efficient merging of concurrent changes."
+};
+
+# CoTexts
+
+Jazz provides two CoValue types for collaborative text editing, collectively referred to as "CoText" values:
+
+- **`co.plainText()`** for simple text editing without formatting
+- **`co.richText()`** for rich text with HTML-based formatting (extends `co.plainText()`)
+
+Both types enable real-time collaborative editing of text content while maintaining consistency across multiple users.
+
+**Note:** If you're looking for a quick way to add rich text editing to your app, check out [our prosemirror plugin](#using-rich-text-with-prosemirror).
+
+<CodeGroup>
+```ts index.ts#Basic
+```
+</CodeGroup>
+
+For a full example of CoTexts in action, see [our Richtext example app](https://github.com/garden-co/jazz/tree/main/examples/richtext-prosemirror), which shows plain text and rich text editing.
+
+## `co.plainText()` vs `z.string()`
+
+While `z.string()` is perfect for simple text fields, `co.plainText()` is the right choice when you need:
+
+- Frequent text edits that aren't just replacing the whole field
+- Fine-grained control over text edits (inserting, deleting at specific positions)
+- Multiple users editing the same text simultaneously
+- Character-by-character collaboration
+- Efficient merging of concurrent changes
+
+Both support real-time updates, but `co.plainText()` provides specialized tools for collaborative editing scenarios.
+
+## Creating CoText Values
+
+CoText values are typically used as fields in your schemas:
+
+<CodeGroup>
+```ts index.ts#Comparison
+```
+</CodeGroup>
+
+Create a CoText value with a simple string:
+
+<CodeGroup>
+```ts index.ts#StringInitial
+```
+</CodeGroup>
+
+### Ownership
+
+Like other CoValues, you can specify ownership when creating CoTexts.
+
+<CodeGroup>
+```ts index.ts#Ownership
+```
+</CodeGroup>
+
+See [Groups as permission scopes](/docs/permissions-and-sharing/overview) for more information on how to use groups to control access to CoText values.
+
+## Reading Text
+
+CoText values work similarly to JavaScript strings:
+
+<CodeGroup>
+```ts index.ts#Reading
+```
+</CodeGroup>
+
+<ContentByFramework framework="react">
+When using CoTexts in JSX, you can read the text directly:
+<CodeGroup>
+```tsx react-snippet.tsx#JSX
+```
+</CodeGroup>
+</ContentByFramework>
+
+## Making Edits
+
+Insert and delete text with intuitive methods:
+
+<CodeGroup>
+```ts index.ts#Editing
+```
+</CodeGroup>
+
+### Applying Diffs
+
+Use `applyDiff` to efficiently update text with minimal changes:
+
+<CodeGroup>
+```ts index.ts#ApplyDiff
+```
+</CodeGroup>
+
+Perfect for handling user input in form controls:
+
+<ContentByFramework framework="react">
+<CodeGroup>
+```ts react-snippet.tsx#TextEditor
+```
+</CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework="vanilla">
+<CodeGroup>
+```ts vanilla.ts#PlainText
+```
+</CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework="svelte">
+<CodeGroup>
+  ```svelte svelte.svelte
+  ```
+</CodeGroup>
+</ContentByFramework>
+
+## Using Rich Text with ProseMirror
+
+Jazz provides a dedicated plugin for integrating `co.richText()` with the popular ProseMirror editor that enables bidirectional synchronization between your co.richText() instances and ProseMirror editors.
+
+### ProseMirror Plugin Features
+
+- **Bidirectional Sync**: Changes in the editor automatically update the `co.richText()` and vice versa
+- **Real-time Collaboration**: Multiple users can edit the same document simultaneously
+- **HTML Conversion**: Automatically converts between HTML (used by `co.richText()`) and ProseMirror's document model
+
+### Installation
+
+<CodeGroup>
+```bash
+pnpm add prosemirror-view \
+  prosemirror-state \
+  prosemirror-schema-basic
+```
+</CodeGroup>
+
+### Integration
+
+<ContentByFramework framework="react-native">
+We don't currently have a React Native-specific example, but you need help you can [request one](https://github.com/garden-co/jazz/issues/new), or ask on [Discord](https://discord.gg/utDMjHYg42).
+</ContentByFramework>
+
+<ContentByFramework framework="react-native-expo">
+We don't currently have a React Native Expo-specific example, but you need help please [request one](https://github.com/garden-co/jazz/issues/new), or ask on [Discord](https://discord.gg/utDMjHYg42).
+</ContentByFramework>
+
+<ContentByFramework framework={["react", "react-native", "react-native-expo"]}>
+For use with React:
+<CodeGroup>
+```tsx react-snippet.tsx#RichTextEditor
+```
+</CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework="svelte">
+We don't currently have a Svelte-specific example, but you need help you can [request one](https://github.com/garden-co/jazz/issues/new), or ask on [Discord](https://discord.gg/utDMjHYg42).
+</ContentByFramework>
+
+<ContentByFramework framework={["vanilla", "svelte", "react-native", "react-native-expo"]}>
+For use without a framework:
+<CodeGroup>
+```ts vanilla.ts#RichText
+```
+</CodeGroup>
+</ContentByFramework>

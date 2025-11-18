@@ -2,8 +2,7 @@ export const metadata = {
   description: "Learn how to set up Jazz in your React Native application."
 };
 
-import { CodeGroup } from "@/components/forMdx";
-import { Alert } from "@garden-co/design-system/src/components/atoms/Alert";
+import { Alert, CodeGroup } from "@/components/forMdx";
 
 # React Native Installation and Setup
 
@@ -61,13 +60,13 @@ npm i -S jazz-tools
 If you are not working within a monorepo, create a new file `metro.config.js` in the root of your project with the following content:
 
 <CodeGroup>
-```ts twoslash
+```ts
 // metro.config.js
 const { getDefaultConfig, mergeConfig } = require('@react-native/metro-config');
 
 const config = {
   resolver: {
-    sourceExts: ["mjs", "js", "json", "ts", "tsx"],
+    sourceExts: ["mjs", "js", "json", "ts", "tsx", "cjs"],
     requireCycleIgnorePatterns: [/(^|\/|\\)node_modules($|\/|\\)/]
   }
 };
@@ -81,7 +80,7 @@ module.exports = mergeConfig(getDefaultConfig(__dirname), config);
 For monorepos, use the following `metro.config.js`:
 
 <CodeGroup>
-```ts twoslash
+```ts
 // metro.config.js
 const path = require("path");
 const { makeMetroConfig } = require("@rnx-kit/metro-config");
@@ -111,7 +110,7 @@ module.exports = makeMetroConfig({
     resolveRequest: MetroSymlinksResolver(),
     extraNodeModules,
     nodeModulesPaths,
-    sourceExts: ["mjs", "js", "json", "ts", "tsx"],
+    sourceExts: ["mjs", "js", "json", "ts", "tsx", "cjs"],
   },
   watchFolders,
 });
@@ -142,7 +141,7 @@ module.exports = makeMetroConfig({
 Create a file `polyfills.js` at the project root with the following content:
 
 <CodeGroup>
-```ts twoslash
+```ts
 // @noErrors: 7016
 // polyfills.js
 import { polyfillGlobal } from 'react-native/Libraries/Utilities/PolyfillFunctions';
@@ -158,9 +157,7 @@ import 'react-native-get-random-values'; // polyfill getRandomValues
 Update `index.js`:
 
 <CodeGroup>
-```ts twoslash
-// @noErrors: 2307
-// index.js
+```ts
 import { AppRegistry } from 'react-native';
 import App from './App';
 import { name as appName } from './app.json';
@@ -184,15 +181,15 @@ Lastly, ensure that the `"main"` field in your `package.json` points to `index.j
 
 ## Authentication
 
-Jazz provides authentication to help users access their data across multiple devices. For details on implementing authentication, check our [Authentication Overview](/docs/authentication/overview) guide and see the [React Native Chat Demo](https://github.com/garden-co/jazz/tree/main/examples/chat-rn) for a complete example.
+Jazz provides authentication to help users access their data across multiple devices. For details on implementing authentication, check our [Authentication Overview](/docs/key-features/authentication/overview) guide and see the [React Native Chat Demo](https://github.com/garden-co/jazz/tree/main/examples/chat-rn) for a complete example.
 
 ## Next Steps
 
 Now that you've set up your React Native project for Jazz, you'll need to:
 
-1. [Set up the Jazz Provider](/docs/react-native/project-setup/providers) - Configure how your app connects to Jazz
-2. [Add authentication](/docs/authentication/overview) (optional) - Enable users to access data across devices
-3. Define your schema - See the [schema docs](/docs/schemas/covalues) for more information
+1. [Set up the Jazz Provider](/docs/project-setup/providers) - Configure how your app connects to Jazz
+2. [Add authentication](/docs/key-features/authentication/overview) (optional) - Enable users to access data across devices
+3. Define your schema - See the [schema docs](/docs/core-concepts/covalues/overview) for more information
 4. Run your app:
 
 <CodeGroup>

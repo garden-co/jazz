@@ -4,7 +4,7 @@ import {
   PeerSyncStateListenerCallback,
 } from "../SyncStateManager.js";
 import { connectedPeers } from "../streamUtils.js";
-import { emptyKnownState } from "../sync.js";
+import { emptyKnownState } from "../exports.js";
 import {
   SyncMessagesLog,
   loadCoValueOrFail,
@@ -39,15 +39,14 @@ describe("SyncStateManager", () => {
     const unsubscribe = subscriptionManager.subscribeToUpdates(updateSpy);
 
     await waitFor(() => {
-      return subscriptionManager.getCurrentSyncState(peerState.id, map.core.id)
-        .uploaded;
+      return subscriptionManager.isSynced(peerState, map.core.id);
     });
+
+    const newPeerState = client.node.syncManager.peers[peerState.id]!;
 
     expect(updateSpy).toHaveBeenCalledWith(
       peerState.id,
-      client.node.syncManager.peers[peerState.id]!.knownStates.get(
-        map.core.id,
-      )!,
+      newPeerState.getKnownState(map.core.id)!,
       { uploaded: true },
     );
 
@@ -91,14 +90,11 @@ describe("SyncStateManager", () => {
     });
 
     await waitFor(() => {
-      return subscriptionManager.getCurrentSyncState(peerState.id, map.core.id)
-        .uploaded;
+      return subscriptionManager.isSynced(peerState, map.core.id);
     });
 
     expect(updateToJazzCloudSpy).toHaveBeenLastCalledWith(
-      client.node.syncManager.peers[peerState.id]!.knownStates.get(
-        map.core.id,
-      )!,
+      peerState.getKnownState(map.core.id)!,
       { uploaded: true },
     );
 
@@ -120,20 +116,13 @@ describe("SyncStateManager", () => {
 
     const subscriptionManager = client.node.syncManager.syncState;
 
-    expect(
-      subscriptionManager.getCurrentSyncState(peerState.id, map.core.id)
-        .uploaded,
-    ).toBe(false);
+    expect(subscriptionManager.isSynced(peerState, map.core.id)).toBe(false);
 
     await waitFor(() => {
-      return subscriptionManager.getCurrentSyncState(peerState.id, map.core.id)
-        .uploaded;
+      return subscriptionManager.isSynced(peerState, map.core.id);
     });
 
-    expect(
-      subscriptionManager.getCurrentSyncState(peerState.id, map.core.id)
-        .uploaded,
-    ).toBe(true);
+    expect(subscriptionManager.isSynced(peerState, map.core.id)).toBe(true);
   });
 
   test("unsubscribe stops receiving updates", async () => {
@@ -160,8 +149,7 @@ describe("SyncStateManager", () => {
     anyUpdateSpy.mockClear();
 
     await waitFor(() => {
-      return subscriptionManager.getCurrentSyncState(peerState.id, map.core.id)
-        .uploaded;
+      return subscriptionManager.isSynced(peerState, map.core.id);
     });
 
     expect(anyUpdateSpy).not.toHaveBeenCalled();
@@ -171,7 +159,7 @@ describe("SyncStateManager", () => {
     // Setup nodes
     const client = setupTestNode({ connected: true });
     const serverNode = jazzCloud.node;
-    const { peer, peerOnServer } = client.connectToSyncServer();
+    const { peerState, peerStateOnServer } = client.connectToSyncServer();
 
     // Create test data
     const group = client.node.createGroup();
@@ -181,55 +169,37 @@ describe("SyncStateManager", () => {
 
     // Initially should not be synced
     expect(
-      client.node.syncManager.syncState.getCurrentSyncState(
-        peer.id,
-        map.core.id,
-      ),
-    ).toEqual({ uploaded: false });
+      client.node.syncManager.syncState.isSynced(peerState, map.core.id),
+    ).toEqual(false);
 
     // Wait for full sync
     await map.core.waitForSync();
 
     expect(
-      client.node.syncManager.syncState.getCurrentSyncState(
-        peer.id,
-        map.core.id,
-      ),
-    ).toEqual({ uploaded: true });
+      client.node.syncManager.syncState.isSynced(peerState, map.core.id),
+    ).toEqual(true);
 
     const mapOnServer = await loadCoValueOrFail(serverNode, map.id);
 
     mapOnServer.set("key2", "value2", "trusting");
 
     expect(
-      client.node.syncManager.syncState.getCurrentSyncState(
-        peer.id,
-        map.core.id,
-      ),
-    ).toEqual({ uploaded: true });
+      client.node.syncManager.syncState.isSynced(peerState, map.core.id),
+    ).toEqual(true);
 
     expect(
-      serverNode.syncManager.syncState.getCurrentSyncState(
-        peerOnServer.id,
-        map.core.id,
-      ),
-    ).toEqual({ uploaded: false });
+      serverNode.syncManager.syncState.isSynced(peerStateOnServer, map.core.id),
+    ).toEqual(false);
 
     await mapOnServer.core.waitForSync();
 
     expect(
-      client.node.syncManager.syncState.getCurrentSyncState(
-        peer.id,
-        map.core.id,
-      ),
-    ).toEqual({ uploaded: true });
+      client.node.syncManager.syncState.isSynced(peerState, map.core.id),
+    ).toEqual(true);
 
     expect(
-      serverNode.syncManager.syncState.getCurrentSyncState(
-        peerOnServer.id,
-        map.core.id,
-      ),
-    ).toEqual({ uploaded: true });
+      serverNode.syncManager.syncState.isSynced(peerStateOnServer, map.core.id),
+    ).toEqual(true);
   });
 
   test("should skip non-persistent closed peers", async () => {
@@ -333,9 +303,9 @@ describe("SyncStateManager", () => {
       [
         "server -> client | CONTENT Map header: true new: After: 0 New: 1",
         "client -> server | LOAD Group sessions: empty",
-        "client -> server | KNOWN Map sessions: header/1",
         "server -> client | CONTENT Group header: true new: After: 0 New: 3",
         "client -> server | KNOWN Group sessions: header/3",
+        "client -> server | KNOWN Map sessions: header/1",
       ]
     `);
   });

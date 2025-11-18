@@ -38,6 +38,10 @@ export function filterListByWhere<T>(
         return Array.isArray(value)
           ? (value as (string | number | boolean | Date)[]).includes(itemValue)
           : false;
+      case "not_in":
+        return Array.isArray(value)
+          ? !(value as (string | number | boolean | Date)[]).includes(itemValue)
+          : false;
       case "contains":
         return typeof itemValue === "string" && typeof value === "string"
           ? itemValue.includes(value)

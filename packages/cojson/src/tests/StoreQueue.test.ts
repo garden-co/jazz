@@ -1,6 +1,7 @@
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { StoreQueue } from "../queue/StoreQueue.js";
-import type { CoValueKnownState, NewContentMessage } from "../sync.js";
+import { NewContentMessage } from "../sync.js";
+import { CoValueKnownState } from "../knownState.js";
 
 function createMockNewContentMessage(id: string): NewContentMessage {
   return {

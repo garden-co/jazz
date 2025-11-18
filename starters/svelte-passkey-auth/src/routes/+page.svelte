@@ -14,10 +14,10 @@
 
 <div class="text-center">
   <h1>
-    Welcome{#if me?.profile?.firstName}, {me?.profile.firstName}{/if}!
+    Welcome{#if me.$isLoaded && me.profile.firstName}, {me.profile.firstName}{/if}!
   </h1>
-  {#if me?.root}
-    <p>As of today, you are {getUserAge(me?.root)} years old.</p>
+  {#if me.$isLoaded}
+    <p>As of today, you are {getUserAge(me.root)} years old.</p>
   {/if}
 </div>
 

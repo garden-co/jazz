@@ -1,44 +1,56 @@
-import { type Page, expect } from "@playwright/test";
+import { type Page, type Locator, expect } from "@playwright/test";
 
 export class HomePage {
-  constructor(public page: Page) {}
+  page: Page;
+  usernameInput: Locator;
+  emailInput: Locator;
+  passwordInput: Locator;
+  confirmPasswordInput: Locator;
+  signUpButton: Locator;
+  signInButton: Locator;
+  signUpLink: Locator;
+  signInLink: Locator;
+  logoutButton: Locator;
 
-  usernameInput = this.page.getByRole("textbox", {
-    name: "Name",
-    exact: true,
-  });
-  emailInput = this.page.getByRole("textbox", {
-    name: "Email",
-    exact: true,
-  });
-  passwordInput = this.page.getByRole("textbox", {
-    name: "Password",
-    exact: true,
-  });
-  confirmPasswordInput = this.page.getByRole("textbox", {
-    name: "Confirm password",
-    exact: true,
-  });
-  signUpButton = this.page.getByRole("button", {
-    name: "Sign up",
-    exact: true,
-  });
-  signInButton = this.page.getByRole("button", {
-    name: "Sign in",
-    exact: true,
-  });
-  signUpLink = this.page.getByRole("link", {
-    name: "Sign up",
-    exact: true,
-  });
-  signInLink = this.page.getByRole("link", {
-    name: "Sign in",
-    exact: true,
-  });
-  logoutButton = this.page.getByRole("button", {
-    name: "Sign out",
-    exact: true,
-  });
+  constructor(page: Page) {
+    this.page = page;
+    this.usernameInput = this.page.getByRole("textbox", {
+      name: "Name",
+      exact: true,
+    });
+    this.emailInput = this.page.getByRole("textbox", {
+      name: "Email",
+      exact: true,
+    });
+    this.passwordInput = this.page.getByRole("textbox", {
+      name: "Password",
+      exact: true,
+    });
+    this.confirmPasswordInput = this.page.getByRole("textbox", {
+      name: "Confirm password",
+      exact: true,
+    });
+    this.signUpButton = this.page.getByRole("button", {
+      name: "Sign up",
+      exact: true,
+    });
+    this.signInButton = this.page.getByRole("button", {
+      name: "Sign in",
+      exact: true,
+    });
+    this.signUpLink = this.page.getByRole("link", {
+      name: "Sign up",
+      exact: true,
+    });
+    this.signInLink = this.page.getByRole("link", {
+      name: "Sign in",
+      exact: true,
+    });
+    this.logoutButton = this.page.getByRole("button", {
+      name: "Sign out",
+      exact: true,
+    });
+  }
 
   async signUpEmail(name: string, email: string, password: string) {
     await this.usernameInput.fill(name);

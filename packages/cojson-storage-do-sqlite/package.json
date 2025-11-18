@@ -1,0 +1,28 @@
+{
+  "name": "cojson-storage-do-sqlite",
+  "type": "module",
+  "version": "0.19.3",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "license": "MIT",
+  "dependencies": {
+    "cojson": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250214.0",
+    "@cloudflare/vitest-pool-workers": "^0.9.10",
+    "execa": "^9.5.2",
+    "typescript": "catalog:default",
+    "wrangler": "^4.37.0"
+  },
+  "peerDependencies": {
+    "@cloudflare/workers-types": "^4.20250214.0"
+  },
+  "scripts": {
+    "dev": "tsc --watch --sourceMap --outDir dist",
+    "format-and-lint": "biome check .",
+    "format-and-lint:fix": "biome check . --write",
+    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist"
+  },
+  "gitHead": "33c27053293b4801b968c61d5c4c989f93a67d13"
+}

@@ -72,6 +72,26 @@ describe("garbage collector", () => {
     client.addStorage({
       ourName: "client",
     });
+    client.node.enableGarbageCollector({
+      garbageCollectGroups: true,
+    });
+
+    const group = client.node.createGroup();
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    client.node.garbageCollector?.collect();
+
+    expect(client.node.getCoValue(group.id).isAvailable()).toBe(false);
+    expect(client.node.getCoValue(client.accountID).isAvailable()).toBe(false);
+  });
+
+  test("group or account coValues are garbage collected if garbageCollectGroups is true", async () => {
+    const client = await setupTestAccount();
+
+    client.addStorage({
+      ourName: "client",
+    });
     client.node.enableGarbageCollector();
 
     const group = client.node.createGroup();

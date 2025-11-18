@@ -16,8 +16,13 @@ import {
   coValueClassFromCoValueClassOrSchema,
   createAnonymousJazzContext,
   createJazzContext,
+  CoValue,
+  LoadedAndRequired,
+  MaybeLoaded,
   randomSessionProvider,
 } from "./internal.js";
+
+export { assertLoaded } from "./lib/utils.js";
 
 const syncServer: { current: LocalNode | null; asyncPeers: boolean } = {
   current: null,
@@ -112,7 +117,7 @@ export async function createJazzTestAccount<
     },
     initialAgentSecret: crypto.agentSecretFromSecretSeed(secretSeed),
     crypto,
-    peersToLoadFrom: peers,
+    peers: peers,
     migration: async (rawAccount, _node, creationProps) => {
       if (isMigrationActive) {
         throw new Error(
@@ -185,12 +190,29 @@ export function runWithoutActiveAccount<Result>(
 export async function createJazzTestGuest() {
   const ctx = await createAnonymousJazzContext({
     crypto: await PureJSCrypto.create(),
-    peersToLoadFrom: [],
+    peers: [],
   });
 
   return {
     guest: ctx.agent,
   };
+}
+
+export class MockConnectionStatus {
+  static connected: boolean = true;
+  static connectionListeners = new Set<(isConnected: boolean) => void>();
+  static setIsConnected(isConnected: boolean) {
+    MockConnectionStatus.connected = isConnected;
+    for (const listener of MockConnectionStatus.connectionListeners) {
+      listener(isConnected);
+    }
+  }
+  static addConnectionListener(listener: (isConnected: boolean) => void) {
+    MockConnectionStatus.connectionListeners.add(listener);
+    return () => {
+      MockConnectionStatus.connectionListeners.delete(listener);
+    };
+  }
 }
 
 export type TestJazzContextManagerProps<Acc extends Account> =
@@ -249,6 +271,10 @@ export class TestJazzContextManager<
           await storage.clear();
           node.gracefulShutdown();
         },
+        addConnectionListener: (listener) => {
+          return MockConnectionStatus.addConnectionListener(listener);
+        },
+        connected: () => MockConnectionStatus.connected,
       },
       {
         credentials,
@@ -274,6 +300,10 @@ export class TestJazzContextManager<
       logOut: async () => {
         node.gracefulShutdown();
       },
+      addConnectionListener: (listener) => {
+        return MockConnectionStatus.addConnectionListener(listener);
+      },
+      connected: () => MockConnectionStatus.connected,
     });
 
     return context;
@@ -293,7 +323,7 @@ export class TestJazzContextManager<
       credentials: authProps?.credentials,
       defaultProfileName: props.defaultProfileName,
       newAccountProps: authProps?.newAccountProps,
-      peersToLoadFrom: [getPeerConnectedToTestSyncServer()],
+      peers: [getPeerConnectedToTestSyncServer()],
       crypto: await TestJSCrypto.create(),
       sessionProvider: randomSessionProvider,
       authSecretStorage: this.getAuthSecretStorage(),
@@ -309,6 +339,10 @@ export class TestJazzContextManager<
       logOut: () => {
         return context.logOut();
       },
+      addConnectionListener: (listener: (isConnected: boolean) => void) => {
+        return MockConnectionStatus.addConnectionListener(listener);
+      },
+      connected: () => MockConnectionStatus.connected,
     };
   }
 }
@@ -355,4 +389,11 @@ export async function setupJazzTestSync({
   syncServer.asyncPeers = asyncPeers;
 
   return account;
+}
+
+export function disableJazzTestSync() {
+  if (syncServer.current) {
+    syncServer.current.gracefulShutdown();
+  }
+  syncServer.current = null;
 }

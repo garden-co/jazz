@@ -10,9 +10,9 @@ export function HairlineBleedGrid({ children }: { children: React.ReactNode }) {
         "rounded-xl",
         "overflow-hidden",
         "bg-stone-50 dark:bg-stone-950",
-        "[&>*]:rounded-none",
-        "[&>*]:border-none",
-        "[&>*]:bg-stone-100 [&>*]:dark:bg-stone-900",
+        "*:rounded-none",
+        "*:border-none",
+        "*:bg-stone-100 dark:*:bg-stone-900",
       )}
     >
       {children}

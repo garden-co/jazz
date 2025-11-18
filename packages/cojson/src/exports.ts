@@ -3,6 +3,7 @@ import { type RawCoValue } from "./coValue.js";
 import {
   CoValueCore,
   idforHeader,
+  enablePermissionErrors,
   type AvailableCoValueCore,
 } from "./coValueCore/coValueCore.js";
 import { CoValueUniqueness } from "./coValueCore/verifiedState.js";
@@ -60,14 +61,14 @@ import { AgentSecret, textDecoder, textEncoder } from "./crypto/crypto.js";
 import type { AgentID, RawCoID, SessionID } from "./ids.js";
 import type { JsonObject, JsonValue } from "./jsonValue.js";
 import type * as Media from "./media.js";
-import { disablePermissionErrors } from "./permissions.js";
+import { isAccountRole } from "./permissions.js";
 import type { Peer, SyncMessage } from "./sync.js";
 import {
   DisconnectedError,
   SyncManager,
-  emptyKnownState,
   hwrServerPeerSelector,
 } from "./sync.js";
+import { emptyKnownState } from "./knownState.js";
 
 import {
   getContentMessageSize,
@@ -85,6 +86,7 @@ import { LogLevel, logger } from "./logger.js";
 import { CO_VALUE_PRIORITY, getPriorityFromHeader } from "./priority.js";
 import { getDependedOnCoValues } from "./storage/syncUtils.js";
 import { canBeBranched } from "./coValueCore/branching.js";
+import type { PeerState } from "./PeerState.js";
 
 type Value = JsonValue | AnyRawCoValue;
 
@@ -110,7 +112,7 @@ export const cojsonInternals = {
   getPriorityFromHeader,
   getGroupDependentKeyList,
   getGroupDependentKey,
-  disablePermissionErrors,
+  enablePermissionErrors,
   SyncManager,
   CO_VALUE_LOADING_CONFIG,
   CO_VALUE_PRIORITY,
@@ -169,6 +171,7 @@ export {
   base64URLtoBytes,
   bytesToBase64url,
   hwrServerPeerSelector,
+  isAccountRole,
 };
 
 export type {
@@ -182,6 +185,7 @@ export type {
   OpID,
   AccountRole,
   AvailableCoValueCore,
+  PeerState,
 };
 
 export * from "./storage/index.js";
@@ -189,7 +193,7 @@ export * from "./storage/index.js";
 // biome-ignore format: off
 // eslint-disable-next-line @typescript-eslint/no-namespace
 export namespace CojsonInternalTypes {
-  export type CoValueKnownState = import("./sync.js").CoValueKnownState;
+  export type CoValueKnownState = import("./knownState.js").CoValueKnownState;
   export type CoJsonValue<T> = import("./jsonValue.js").CoJsonValue<T>;
   export type DoneMessage = import("./sync.js").DoneMessage;
   export type Encrypted<T extends JsonValue, N extends JsonValue> = import("./crypto/crypto.js").Encrypted<T, N>;

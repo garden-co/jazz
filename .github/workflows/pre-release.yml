@@ -11,8 +11,17 @@ on:
     types: [opened, synchronize, reopened, labeled]
 
 jobs:
+  build_napi:
+    name: Build NAPI
+    uses: ./.github/workflows/napi-build-reusable.yml
+    if: contains(github.event.pull_request.labels.*.name, 'pre-release')
+    with:
+      concurrency: pre-release-napi
+      disableTest: true
+
   pre-release:
     if: contains(github.event.pull_request.labels.*.name, 'pre-release')
+    needs: [build_napi]
     runs-on: ubuntu-latest
 
     steps:
@@ -25,8 +34,25 @@ jobs:
       - name: Pnpm Build
         run: pnpm turbo build --filter="./packages/*"
 
+      - name: Build NAPI
+        run: pnpm turbo build:napi
+
+      - name: Download NAPI Artifacts (binaries) from build_napi workflow
+        uses: actions/download-artifact@v5
+        with:
+          path: crates/cojson-core-napi/artifacts
+
+      - name: Move artifacts and copy binaries into corresponding binary package inside npm directory
+        run: pnpm artifacts
+        working-directory: crates/cojson-core-napi/artifacts
+      
+      - name: List NAPI packages and binaries
+        run: ls .
+        shell: bash
+        working-directory: crates/cojson-core-napi
+
       - name: Pre publish
-        run: pnpm exec pkg-pr-new publish --json output.json --comment=off "./crates/cojson-core-wasm" "./packages/*" 
+        run: pnpm exec pkg-pr-new publish --json output.json --comment=off "./crates/cojson-core-napi/npm/*" "./crates/cojson-core-napi" "./crates/cojson-core-wasm" "./packages/*" 
 
       - name: Post or update comment
         uses: actions/github-script@v6

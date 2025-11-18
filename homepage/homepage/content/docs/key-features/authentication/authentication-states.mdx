@@ -1,0 +1,177 @@
+export const metadata = {
+  description: "Learn about Jazz's authentication states: anonymous, guest, and fully authenticated."
+};
+
+import { CodeGroup, ContentByFramework, RNLogo, ExpoLogo, VanillaLogo, SvelteLogo, ReactLogo, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
+
+# Authentication States
+
+Jazz provides three distinct authentication states that determine how users interact with your app: **Anonymous Authentication**, **Guest Mode**, and **Authenticated Account**.
+
+## Anonymous Authentication
+
+When a user loads a Jazz application for the first time, we create a new Account by generating keys and storing them locally:
+
+- Users have full accounts with unique IDs
+- Data persists between sessions on the same device
+- Can be upgraded to a full account (passkey, passphrase, etc.)
+- Data syncs across the network (if enabled)
+
+## Authenticated Account
+
+**Authenticated Account** provides full multi-device functionality:
+
+- Persistent identity across multiple devices
+- Full access to all application features
+- Data can sync across all user devices
+- Multiple authentication methods available
+
+## Guest Mode
+
+**Guest Mode** provides a completely accountless context:
+
+- No persistent identity or account
+- Only provides access to publicly readable content
+- Cannot save or sync user-specific data
+- Suitable for read-only access to public resources
+
+## Detecting Authentication State
+
+You can detect the current authentication state using `useAgent` and `useIsAuthenticated`.
+
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="detect-auth">
+<TabbedCodeGroupItem icon={<VanillaLogo />} label="Vanilla" value="vanilla" preferWrap>
+```tsx vanilla.ts#Basic
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
+```tsx react-snippet.tsx#Basic
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```svelte svelte.svelte
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<RNLogo />} label="React Native" value="react-native" preferWrap>
+```tsx rn.tsx#Basic
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ExpoLogo />} label="Expo" value="react-native-expo" preferWrap>
+```tsx expo.tsx#Basic
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+## Migrating data from anonymous to authenticated account
+
+When a user signs up, their anonymous account is transparently upgraded to an authenticated account, preserving all their data.
+
+However, if a user has been using your app anonymously and later logs in with an existing account, their anonymous account data would normally be discarded. To prevent data loss, you can use the `onAnonymousAccountDiscarded` handler.
+
+This example from our [music player example app](https://github.com/garden-co/jazz/tree/main/examples/music-player) shows how to migrate data:
+
+<CodeGroup>
+```ts schema.ts#OnAnonymousAccountDiscarded
+```
+</CodeGroup>
+
+To see how this works, try uploading a song in the [music player demo](https://music.demo.jazz.tools/) and then log in with an existing account.
+
+## Provider Configuration for Authentication
+
+You can configure how authentication states work in your app with the [JazzReactProvider](/docs/project-setup/providers/). The provider offers several options that impact authentication behavior:
+
+- `guestMode`: Enable/disable Guest Mode
+- `onAnonymousAccountDiscarded`: Handle data migration when switching accounts
+- `sync.when`: Control when data synchronization happens
+- `defaultProfileName`: Set default name for new user profiles
+
+For detailed information on all provider options, see [Provider Configuration options](/docs/project-setup/providers/#additional-options).
+
+## Controlling sync for different authentication states
+
+You can control network sync with [Providers](/docs/project-setup/providers/) based on authentication state:
+
+- `when: "always"`: Sync is enabled for both Anonymous Authentication and Authenticated Account
+- `when: "signedUp"`: Sync is enabled when the user is authenticated
+- `when: "never"`: Sync is disabled, content stays local
+
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="sync-settings">
+<TabbedCodeGroupItem icon={<VanillaLogo />} label="Vanilla" value="vanilla" preferWrap>
+```tsx vanilla.ts#SyncSettings
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
+```tsx react-snippet.tsx#SyncSettings
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```svelte provider-sync.svelte
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<RNLogo />} label="React Native" value="react-native" preferWrap>
+```tsx rn.tsx#SyncSettings
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ExpoLogo />} label="Expo" value="react-native-expo" preferWrap>
+```tsx expo.tsx#SyncSettings
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+### Disable sync for Anonymous Authentication
+
+You can disable network sync to make your app local-only under specific circumstances.
+
+For example, you may want to give users with Anonymous Authentication the opportunity to try your app locally-only (incurring no sync traffic), then enable network sync only when the user is fully authenticated.
+
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="anon-auth">
+<TabbedCodeGroupItem icon={<VanillaLogo />} label="Vanilla" value="vanilla" preferWrap>
+```tsx vanilla.ts#DisableAnonSync
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
+```tsx react-snippet.tsx#DisableAnonSync
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```svelte disable-anon-sync.svelte
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<RNLogo />} label="React Native" value="react-native" preferWrap>
+```tsx rn.tsx#DisableAnonSync
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ExpoLogo />} label="Expo" value="react-native-expo" preferWrap>
+```tsx expo.tsx#DisableAnonSync
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+<ContentByFramework framework={['react', 'react-native', 'react-native-expo', 'svelte']}>
+
+### Configuring Guest Mode Access [!framework=react,react-native,react-native-expo,svelte]
+
+You can configure Guest Mode access with the `guestMode` prop for [Providers](/docs/project-setup/providers/).
+
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="guest-mode">
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
+```tsx react-snippet.tsx#GuestModeAccess
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```svelte guest-mode.svelte
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<RNLogo />} label="React Native" value="react-native" preferWrap>
+```tsx rn.tsx#GuestModeAccess
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ExpoLogo />} label="Expo" value="react-native-expo" preferWrap>
+```tsx expo.tsx#GuestModeAccess
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+</ContentByFramework>
+
+For more complex behaviours, you can manually control sync by statefully switching when between `"always"` and `"never"`.

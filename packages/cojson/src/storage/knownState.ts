@@ -1,7 +1,10 @@
-import { getIsUploaded } from "../SyncStateManager.js";
 import { type CoValueCore } from "../exports.js";
 import { RawCoID } from "../ids.js";
-import { CoValueKnownState, emptyKnownState } from "../sync.js";
+import {
+  CoValueKnownState,
+  emptyKnownState,
+  areCurrentSessionsInSyncWith,
+} from "../knownState.js";
 
 /**
  * Track how much data we have stored inside our storage
@@ -84,5 +87,8 @@ function isInSync(
     return false;
   }
 
-  return getIsUploaded(knownState.sessions, knownStateFromStorage.sessions);
+  return areCurrentSessionsInSyncWith(
+    knownState.sessions,
+    knownStateFromStorage.sessions,
+  );
 }

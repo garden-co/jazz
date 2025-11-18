@@ -299,33 +299,55 @@ describe("Better-Auth server plugin", async () => {
     });
 
     it("should create a new account with jazz auth when using social provider", async () => {
-      const response = await auth.api.signInSocial({
-        body: {
-          provider: providerId,
-          callbackURL: "http://localhost:3000/api/auth/sign-in/social/callback",
-          newUserCallbackURL:
-            "http://localhost:3000/api/auth/sign-in/social/callback",
-        },
-        headers: {
-          "x-jazz-auth": JSON.stringify({
-            accountID: "123",
-            secretSeed: [1, 2, 3],
-            accountSecret: "123",
+      const signInReq = new Request(
+        "http://localhost:3000/api/auth/sign-in/social",
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-jazz-auth": JSON.stringify({
+              accountID: "123",
+              secretSeed: [1, 2, 3],
+              accountSecret: "123",
+            }),
+          },
+          body: JSON.stringify({
+            provider: providerId,
+            callbackURL:
+              "http://localhost:3000/api/auth/sign-in/social/callback",
+            newUserCallbackURL:
+              "http://localhost:3000/api/auth/sign-in/social/callback",
           }),
         },
-      });
+      );
 
-      const oauthres = await fetch(response.url as string, {
+      const signInRes = await auth.handler(signInReq);
+      const signInData = await signInRes.json();
+
+      // Extract cookies from the response
+      const cookies = signInRes.headers.getSetCookie();
+      const cookieHeader = cookies.join("; ");
+
+      const oauthres = await fetch(signInData.url as string, {
         redirect: "manual",
+        headers: cookieHeader ? { cookie: cookieHeader } : {},
       });
 
       const resURL = new URL(oauthres.headers.get("Location") as string);
 
-      const callbackRes = await auth.handler(new Request(resURL));
+      // Pass the cookies to the callback request
+      const callbackReq = new Request(resURL);
+      if (cookieHeader) {
+        callbackReq.headers.set("cookie", cookieHeader);
+      }
+      const callbackRes = await auth.handler(callbackReq);
 
-      expect(callbackRes.headers.getSetCookie()[0]).toMatch(
-        "better-auth.session_token=",
+      const setCookies = callbackRes.headers.getSetCookie();
+      const sessionCookie = setCookies.find((c) =>
+        c.includes("better-auth.session_token="),
       );
+      expect(sessionCookie).toBeDefined();
+      expect(sessionCookie).toMatch("better-auth.session_token=");
 
       expect(accountCreationSpy).toHaveBeenCalledTimes(1);
       expect(accountCreationSpy).toHaveBeenCalledWith(

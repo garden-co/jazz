@@ -7,11 +7,10 @@ import { NodejsLogo } from "@/components/icons/NodejsLogo";
 import { ReactLogo } from "@/components/icons/ReactLogo";
 import { ReactNativeLogo } from "@/components/icons/ReactNativeLogo";
 import { SvelteLogo } from "@/components/icons/SvelteLogo";
-import { GappedGrid } from "@garden-co/design-system/src/components/molecules/GappedGrid";
 import Link from "next/link";
 import React from "react";
 
-const frameworks = [
+const environments = [
   {
     name: "JavaScript",
     icon: JavascriptLogo,
@@ -37,9 +36,6 @@ const frameworks = [
     icon: SvelteLogo,
     href: "/docs/svelte",
   },
-];
-
-const serverWorkers = [
   {
     name: "Node.js",
     icon: NodejsLogo,
@@ -56,51 +52,35 @@ const serverWorkers = [
   {
     name: "CF Workers",
     icon: CloudflareWorkerLogo,
-  }
+  },
 ];
 
 export function SupportedEnvironmentsSection() {
   return (
-    <>
-      <h2 className="sr-only">Supported environments</h2>
-      <GappedGrid>
-        {[
-          {
-            label: "Build apps with",
-            items: frameworks,
-          },
-          {
-            label: "Optionally add server workers",
-            items: serverWorkers,
-          },
-        ].map(({ label, items }) => (
-          <div className="col-span-2 lg:col-span-3" key={label}>
-            <h3 className="mb-4 text-highlight font-medium">{label}</h3>
-            <div className="flex gap-x-6 gap-y-3  flex-col lg:flex-row">
-              {items.map(({ name, icon: Icon, href }) => {
-                if (href) {
-                  return (
-                    <Link
-                      href={href}
-                      key={name}
-                      className="flex items-center gap-2 grayscale hover:grayscale-0"
-                    >
-                      <Icon className="size-6" />
-                      {name}
-                    </Link>
-                  );
-                }
-                return (
-                  <div key={name} className="flex items-center gap-2 grayscale">
-                    <Icon className="size-6" />
-                    {name}
-                  </div>
-                );
-              })}
-            </div>
+    <div className="container flex flex-wrap justify-center gap-4 py-12 md:gap-6 lg:pt-24">
+      {environments.map(({ name, icon: Icon, href }) => {
+        if (href) {
+          return (
+            <Link
+              href={href}
+              key={name}
+              className="flex items-center gap-2 grayscale hover:grayscale-0"
+            >
+              <Icon className="size-6" />
+              <span className="hidden md:block">{name}</span>
+            </Link>
+          );
+        }
+        return (
+          <div
+            key={name}
+            className="flex items-center justify-center gap-2 grayscale"
+          >
+            <Icon className="size-6" />
+            <span className="hidden md:block">{name}</span>
           </div>
-        ))}
-      </GappedGrid>
-    </>
+        );
+      })}
+    </div>
   );
 }

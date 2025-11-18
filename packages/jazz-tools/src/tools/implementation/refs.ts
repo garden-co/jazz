@@ -1,14 +1,17 @@
 import { type Account } from "../coValues/account.js";
-import type {
+import {
   AnonymousJazzAgent,
   CoValue,
   ID,
   RefEncoded,
-} from "../internal.js";
-import {
+  SubscriptionScope,
+  LoadedAndRequired,
   accessChildById,
+  CoValueLoadingState,
   getSubscriptionScope,
   isRefEncoded,
+  createUnloadedCoValue,
+  MaybeLoaded,
 } from "../internal.js";
 
 export class Ref<out V extends CoValue> {
@@ -23,33 +26,60 @@ export class Ref<out V extends CoValue> {
     }
   }
 
-  async load(): Promise<V | null> {
+  async load(): Promise<MaybeLoaded<V>> {
     const subscriptionScope = getSubscriptionScope(this.parent);
 
-    subscriptionScope.subscribeToId(this.id, this.schema);
+    let node: SubscriptionScope<CoValue> | undefined;
 
-    const node = subscriptionScope.childNodes.get(this.id);
+    /**
+     * If the parent subscription scope is closed, we can't use it
+     * to subscribe to the child id, so we create a detached subscription scope
+     * that is going to be destroyed immediately after the load
+     */
+    if (subscriptionScope.closed) {
+      node = new SubscriptionScope<CoValue>(
+        subscriptionScope.node,
+        true,
+        this.id,
+        this.schema,
+        subscriptionScope.skipRetry,
+        subscriptionScope.bestEffortResolution,
+        subscriptionScope.unstable_branch,
+      );
+    } else {
+      subscriptionScope.subscribeToId(this.id, this.schema);
+
+      node = subscriptionScope.childNodes.get(this.id);
+    }
 
     if (!node) {
-      return null;
+      return createUnloadedCoValue(this.id, CoValueLoadingState.LOADING);
     }
 
     const value = node.value;
 
-    if (value?.type === "loaded") {
+    if (value?.type === CoValueLoadingState.LOADED) {
       return value.value as V;
     } else {
       return new Promise((resolve) => {
         const unsubscribe = node.subscribe((value) => {
-          if (value?.type === "loaded") {
+          if (value?.type === CoValueLoadingState.LOADED) {
             unsubscribe();
             resolve(value.value as V);
-          } else if (value?.type === "unavailable") {
+          } else if (value?.type === CoValueLoadingState.UNAVAILABLE) {
             unsubscribe();
-            resolve(null);
-          } else if (value?.type === "unauthorized") {
+            resolve(
+              createUnloadedCoValue(this.id, CoValueLoadingState.UNAVAILABLE),
+            );
+          } else if (value?.type === CoValueLoadingState.UNAUTHORIZED) {
             unsubscribe();
-            resolve(null);
+            resolve(
+              createUnloadedCoValue(this.id, CoValueLoadingState.UNAUTHORIZED),
+            );
+          }
+
+          if (subscriptionScope.closed) {
+            node.destroy();
           }
         });
       });
@@ -120,6 +150,6 @@ export function makeRefs<Keys extends string | number>(
   });
 }
 
-export type RefIfCoValue<V> = NonNullable<V> extends CoValue
-  ? Ref<NonNullable<V>>
+export type RefIfCoValue<V> = LoadedAndRequired<V> extends CoValue
+  ? Ref<LoadedAndRequired<V>>
   : never;

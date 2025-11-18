@@ -379,17 +379,11 @@ export class PureJSSessionLog implements SessionLogImpl {
         tx: { sessionID: this.sessionID, txIndex: txIndex },
       };
 
-      const nOnce = this.crypto.generateJsonNonce(nOnceMaterial);
-
-      const ciphertext = base64URLtoBytes(
-        tx.encryptedChanges.substring("encrypted_U".length),
+      return this.crypto.decryptRaw(
+        tx.encryptedChanges,
+        keySecret,
+        nOnceMaterial,
       );
-      const keySecretBytes = base58.decode(
-        keySecret.substring("keySecret_z".length),
-      );
-      const plaintext = xsalsa20(keySecretBytes, nOnce, ciphertext);
-
-      return textDecoder.decode(plaintext);
     } else {
       return tx.changes;
     }
@@ -415,17 +409,7 @@ export class PureJSSessionLog implements SessionLogImpl {
         tx: { sessionID: this.sessionID, txIndex: txIndex },
       };
 
-      const nOnce = this.crypto.generateJsonNonce(nOnceMaterial);
-
-      const ciphertext = base64URLtoBytes(
-        tx.meta.substring("encrypted_U".length),
-      );
-      const keySecretBytes = base58.decode(
-        keySecret.substring("keySecret_z".length),
-      );
-      const plaintext = xsalsa20(keySecretBytes, nOnce, ciphertext);
-
-      return textDecoder.decode(plaintext);
+      return this.crypto.decryptRaw(tx.meta, keySecret, nOnceMaterial);
     } else {
       return tx.meta;
     }

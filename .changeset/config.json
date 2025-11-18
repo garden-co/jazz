@@ -9,10 +9,20 @@
       "cojson-core-wasm",
       "cojson-storage-indexeddb",
       "cojson-storage-sqlite",
+      "cojson-storage-do-sqlite",
       "cojson-transport-ws",
       "jazz-run",
       "jazz-tools",
-      "community-jazz-vue"
+      "jazz-webhook",
+      "community-jazz-vue",
+      "cojson-core-napi",
+      "cojson-core-napi-darwin-x64",
+      "cojson-core-napi-linux-x64-gnu",
+      "cojson-core-napi-linux-x64-musl",
+      "cojson-core-napi-linux-arm64-gnu",
+      "cojson-core-napi-linux-arm-gnueabihf",
+      "cojson-core-napi-darwin-arm64",
+      "cojson-core-napi-linux-arm64-musl"
     ]
   ],
   "access": "public",

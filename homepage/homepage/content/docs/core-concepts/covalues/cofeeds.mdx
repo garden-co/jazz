@@ -1,0 +1,147 @@
+export const metadata = {
+  description: "CoFeeds are append-only data structures that track entries from different user sessions and accounts. Best for activity logs, presence indicators, notifications, and more."
+};
+
+import { CodeGroup, ContentByFramework } from "@/components/forMdx";
+
+# CoFeeds
+
+CoFeeds are append-only data structures that track entries from different user sessions and accounts. Unlike other CoValues where everyone edits the same data, CoFeeds maintain separate streams for each session.
+
+Each account can have multiple sessions (different browser tabs, devices, or app instances), making CoFeeds ideal for building features like activity logs, presence indicators, and notification systems.
+
+The following examples demonstrate a practical use of CoFeeds:
+- [Multi-cursors](https://github.com/garden-co/jazz/tree/main/examples/multi-cursors) - track user presence on a canvas with multiple cursors and out of bounds indicators
+- [Reactions](https://github.com/garden-co/jazz/tree/main/examples/reactions) - store per-user emoji reaction using a CoFeed
+
+## Creating CoFeeds
+
+CoFeeds are defined by specifying the type of items they'll contain, similar to how you define CoLists:
+
+<CodeGroup>
+```ts index.ts#Basic
+```
+</CodeGroup>
+
+### Ownership
+
+Like other CoValues, you can specify ownership when creating CoFeeds.
+
+<CodeGroup>
+```ts index.ts#WithOwner
+```
+</CodeGroup>
+
+ See [Groups as permission scopes](/docs/permissions-and-sharing/overview) for more information on how to use groups to control access to CoFeeds.
+
+## Reading from CoFeeds
+
+Since CoFeeds are made of entries from users over multiple sessions, you can access entries in different ways - from a specific user's session or from their account as a whole.
+
+### Per-Session Access
+
+To retrieve entries from a session:
+
+<CodeGroup>
+```ts index.ts#SessionFeed
+```
+</CodeGroup>
+
+For convenience, you can also access the latest entry from the current session with `inCurrentSession`:
+
+<CodeGroup>
+```ts index.ts#InCurrentSession
+```
+</CodeGroup>
+
+### Per-Account Access
+
+To retrieve entries from a specific account (with entries from all sessions combined) use `perAccount`:
+
+<CodeGroup>
+```ts index.ts#AccountFeed
+```
+</CodeGroup>
+
+For convenience, you can also access the latest entry from the current account with `byMe`:
+
+<CodeGroup>
+```ts index.ts#ByMe
+```
+</CodeGroup>
+
+### Feed Entries
+
+#### All Entries
+
+To retrieve all entries from a CoFeed:
+
+<CodeGroup>
+```ts index.ts#AllEntries
+```
+</CodeGroup>
+
+#### Latest Entry
+
+To retrieve the latest entry from a CoFeed, ie. the last update:
+
+<CodeGroup>
+```ts index.ts#GetLatest
+```
+</CodeGroup>
+
+## Writing to CoFeeds
+
+CoFeeds are append-only; you can add new items, but not modify existing ones. This creates a chronological record of events or activities.
+
+### Adding Items
+
+<CodeGroup>
+```ts index.ts#PushToFeed
+```
+</CodeGroup>
+
+Each item is automatically associated with the current user's session. You don't need to specify which session the item belongs to - Jazz handles this automatically.
+
+### Understanding Session Context
+
+Each entry is automatically added to the current session's feed. When a user has multiple open sessions (like both a mobile app and web browser), each session creates its own separate entries:
+
+<CodeGroup>
+```ts index.ts#MultiFeed
+```
+</CodeGroup>
+
+## Metadata
+
+CoFeeds support metadata, which is useful for tracking information about the feed itself.
+
+### By
+
+The `by` property is the account that made the entry.
+
+<CodeGroup>
+```ts index.ts#By
+```
+</CodeGroup>
+
+### MadeAt
+
+The `madeAt` property is a timestamp of when the entry was added to the feed.
+
+<CodeGroup>
+```ts index.ts#MadeAt
+```
+</CodeGroup>
+
+## Best Practices
+
+### When to Use CoFeeds
+
+- **Use CoFeeds when**:
+  - You need to track per-user/per-session data
+  - Time-based information matters (activity logs, presence)
+
+- **Consider alternatives when**:
+  - Data needs to be collaboratively edited (use CoMaps or CoLists)
+  - You need structured relationships (use CoMaps/CoLists with references)

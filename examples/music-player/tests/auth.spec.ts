@@ -1,4 +1,4 @@
-import { BrowserContext, test } from "@playwright/test";
+import { type BrowserContext, test } from "@playwright/test";
 import { HomePage } from "./pages/HomePage";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));

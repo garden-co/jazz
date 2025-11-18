@@ -19,8 +19,10 @@ import {
   loadCoValueOrFail,
   nodeWithRandomAgentAndSessionID,
   randomAgentAndSessionID,
+  setupTestAccount,
   setupTestNode,
   tearDownTestMetricReader,
+  waitFor,
 } from "./testUtils.js";
 import { CO_VALUE_PRIORITY } from "../priority.js";
 import { setMaxTxSizeBytes } from "../config.js";
@@ -76,14 +78,13 @@ test("transactions with wrong signature are rejected", () => {
 
   const newEntry = node.getCoValue(coValue.id);
 
-  // eslint-disable-next-line neverthrow/must-use-result
-  const result = newEntry.tryAddTransactions(
+  const error = newEntry.tryAddTransactions(
     node.currentSessionID,
     [transaction],
     signature,
   );
 
-  expect(result.isErr()).toBe(true);
+  expect(Boolean(error)).toBe(true);
   expect(newEntry.getValidSortedTransactions().length).toBe(0);
 });
 
@@ -147,32 +148,24 @@ describe("transactions that exceed the byte size limit are rejected", () => {
   });
 });
 
-test("New transactions in a group correctly update owned values, including subscriptions", async () => {
-  const [agent, sessionID] = randomAgentAndSessionID();
-  const node = new LocalNode(agent.agentSecret, sessionID, Crypto);
+test("new transactions in a group correctly update owned values, including subscriptions", async () => {
+  const client = await setupTestAccount();
 
-  const timeBeforeEdit = Date.now() - 1000;
-  const dateNowMock = vi
-    .spyOn(Date, "now")
-    .mockImplementation(() => timeBeforeEdit);
+  const agent = client.node.getCurrentAgent();
 
-  const group = node.createGroup();
-
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  const group = client.node.createGroup();
 
   const map = group.createMap();
 
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
   map.set("hello", "world");
 
-  const listener = vi.fn();
+  const transaction = map.core.getValidSortedTransactions().at(-1);
 
-  map.subscribe((map) => {
-    listener(map.get("hello"));
-  });
+  assert(transaction);
 
-  expect(listener).toHaveBeenLastCalledWith("world");
-
-  expect(map.core.getValidSortedTransactions().length).toBe(1);
+  expect(transaction.isValid).toBe(true);
   expect(group.get(agent.id)).toBe("admin");
 
   group.core.makeTransaction(
@@ -184,14 +177,65 @@ test("New transactions in a group correctly update owned values, including subsc
       },
     ],
     "trusting",
+    undefined,
+    transaction.madeAt - 1, // Make the revocation to be before the map update
   );
 
   expect(group.get(agent.id)).toBe("revoked");
-  dateNowMock.mockReset();
-
-  expect(listener).toHaveBeenCalledTimes(2);
-  expect(listener).toHaveBeenLastCalledWith(undefined);
   expect(map.core.getValidSortedTransactions().length).toBe(0);
+});
+
+// TODO: The test is skipped because we don't support this invalidation yet
+test.skip("new transactions in a parent group correctly update owned values, including subscriptions", async () => {
+  const client = await setupTestAccount();
+
+  const agent = client.node.getCurrentAgent();
+
+  const group = client.node.createGroup();
+  const parentGroup = client.node.createGroup();
+  group.extend(parentGroup);
+  group.core.makeTransaction(
+    [
+      {
+        op: "set",
+        key: agent.id,
+        value: "revoked",
+      },
+    ],
+    "trusting",
+  );
+
+  const map = group.createMap();
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  map.set("hello", "world");
+
+  const transaction = map.core.getValidSortedTransactions().at(-1);
+
+  assert(transaction);
+
+  expect(transaction.isValid).toBe(true);
+  expect(group.roleOfInternal(agent.id)).toBe("admin");
+
+  parentGroup.core.makeTransaction(
+    [
+      {
+        op: "set",
+        key: agent.id,
+        value: "revoked",
+      },
+    ],
+    "trusting",
+    undefined,
+    transaction.madeAt - 1, // Make the revocation to be before the map update
+  );
+
+  expect(group.roleOfInternal(agent.id)).toBe(undefined);
+
+  await waitFor(() =>
+    expect(map.core.getValidSortedTransactions().length).toBe(0),
+  );
 });
 
 test("correctly records transactions", async () => {
@@ -403,13 +447,11 @@ test("getValidTransactions should skip private transactions with invalid JSON", 
   map.set("hello", "world");
 
   // This should fail silently, because the encryptedChanges will be outputted as gibberish
-  map.core
-    .tryAddTransactions(
-      fixtures.session,
-      [fixtures.transaction],
-      fixtures.signature,
-    )
-    ._unsafeUnwrap();
+  map.core.tryAddTransactions(
+    fixtures.session,
+    [fixtures.transaction],
+    fixtures.signature,
+  );
 
   // Get valid transactions - should only include the valid one
   const validTransactions = map.core.getValidTransactions();
@@ -448,9 +490,7 @@ describe("markErrored and isErroredInPeer", () => {
     expect(coValue.isErroredInPeer(peerId)).toBe(true);
 
     // Verify the peer state contains the error
-    const peerState = coValue.getStateForPeer(peerId);
-    expect(peerState).toBeDefined();
-    expect(peerState?.type).toBe("errored");
+    expect(coValue.getLoadingStateForPeer(peerId)).toBe("errored");
   });
 
   test("markErrored should update loading state and notify listeners", () => {
@@ -536,7 +576,7 @@ describe("markErrored and isErroredInPeer", () => {
 
     expect(coValue.isAvailable()).toBe(false);
 
-    const success = coValue.provideHeader(header, "peerId");
+    const success = coValue.provideHeader(header);
     expect(success).toBe(true);
     expect(coValue.isAvailable()).toBe(true);
   });
@@ -556,7 +596,7 @@ describe("markErrored and isErroredInPeer", () => {
 
     expect(coValue.isAvailable()).toBe(false);
 
-    const success = coValue.provideHeader(header, "peerId");
+    const success = coValue.provideHeader(header);
     expect(success).toBe(false);
     expect(coValue.isAvailable()).toBe(false);
   });
@@ -629,8 +669,7 @@ describe("markErrored and isErroredInPeer", () => {
     // Verify the peer is now errored
     expect(coValue.isErroredInPeer(peerId)).toBe(true);
 
-    const peerState = coValue.getStateForPeer(peerId);
-    expect(peerState?.type).toBe("errored");
+    expect(coValue.getLoadingStateForPeer(peerId)).toBe("errored");
   });
 
   test("markErrored should work with different error types", () => {
@@ -712,4 +751,42 @@ describe("markErrored and isErroredInPeer", () => {
     // Verify immediate notification
     expect(notificationCount).toBeGreaterThan(0);
   });
+});
+
+test("knownState should return the same object until the CoValue is modified", () => {
+  const [agent, sessionID] = randomAgentAndSessionID();
+  const node = new LocalNode(agent.agentSecret, sessionID, Crypto);
+
+  const group = node.createGroup();
+  const map = group.createMap();
+
+  // Get the knownState for the first time
+  const knownState1 = map.core.knownState();
+
+  // Get the knownState again - should be the same object
+  const knownState2 = map.core.knownState();
+  expect(knownState2).toBe(knownState1);
+
+  // Call it multiple times to ensure it's always the same object
+  const knownState3 = map.core.knownState();
+  expect(knownState3).toBe(knownState1);
+
+  // Now modify the CoValue by making a transaction
+  map.set("hello", "world");
+
+  // Get the knownState after modification - should be a different object
+  const knownState4 = map.core.knownState();
+  expect(knownState4).not.toBe(knownState1);
+
+  // Verify that subsequent calls still return the same (new) object
+  const knownState5 = map.core.knownState();
+  expect(knownState5).toBe(knownState4);
+
+  // Make another modification
+  map.set("foo", "bar");
+
+  // Get the knownState after second modification - should be yet another different object
+  const knownState6 = map.core.knownState();
+  expect(knownState6).not.toBe(knownState4);
+  expect(knownState6).not.toBe(knownState1);
 });

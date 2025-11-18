@@ -30,8 +30,6 @@ export function JazzInspector({ position = "right" }: { position?: Position }) {
   const localNode = context.node;
   const me = "me" in context ? context.me : undefined;
 
-  if (process.env.NODE_ENV !== "development") return null;
-
   return (
     <JazzInspectorInternal
       position={position}

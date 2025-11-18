@@ -14,6 +14,11 @@
       "types": "./dist/testing.d.ts",
       "default": "./dist/testing.js"
     },
+    "./ssr": {
+      "@jazz-tools/source": "./src/tools/ssr/index.ts",
+      "types": "./dist/tools/ssr/ssr.d.ts",
+      "default": "./dist/tools/ssr.js"
+    },
     "./browser": {
       "@jazz-tools/source": "./src/browser/index.ts",
       "types": "./dist/browser/index.d.ts",
@@ -77,15 +82,15 @@
       "types": "./dist/react/index.d.ts",
       "default": "./dist/react/index.js"
     },
-    "./react/testing": {
-      "@jazz-tools/source": "./src/react/testing.tsx",
-      "types": "./dist/react/testing.d.ts",
-      "default": "./dist/react/testing.js"
-    },
     "./react/ssr": {
       "@jazz-tools/source": "./src/react/ssr.ts",
       "types": "./dist/react/ssr.d.ts",
       "default": "./dist/react/ssr.js"
+    },
+    "./react/testing": {
+      "@jazz-tools/source": "./src/react/testing.tsx",
+      "types": "./dist/react/testing.d.ts",
+      "default": "./dist/react/testing.js"
     },
     "./react-core": {
       "@jazz-tools/source": "./src/react-core/index.ts",
@@ -173,11 +178,16 @@
       "@jazz-tools/source": "./src/worker/edge-wasm.ts",
       "types": "./dist/worker/edge-wasm.d.ts",
       "default": "./dist/worker/edge-wasm.js"
+    },
+    "./napi": {
+      "@jazz-tools/source": "./src/worker/napi-crypto.ts",
+      "types": "./dist/worker/napi-crypto.d.ts",
+      "default": "./dist/worker/napi-crypto.js"
     }
   },
   "type": "module",
   "license": "MIT",
-  "version": "0.18.16",
+  "version": "0.19.3",
   "dependencies": {
     "@manuscripts/prosemirror-recreate-steps": "^0.1.4",
     "@scure/base": "1.2.1",
@@ -188,7 +198,7 @@
     "cojson-storage-indexeddb": "workspace:*",
     "cojson-transport-ws": "workspace:*",
     "fast-myers-diff": "^3.2.0",
-    "goober": "^2.1.16",
+    "goober": "^2.1.18",
     "prosemirror-example-setup": "^1.2.2",
     "prosemirror-menu": "^1.2.4",
     "prosemirror-model": "^1.21.1",
@@ -196,13 +206,14 @@
     "prosemirror-state": "^1.4.3",
     "prosemirror-transform": "^1.9.0",
     "use-sync-external-store": "^1.5.0",
-    "zod": "3.25.76"
+    "zod": "4.1.11"
   },
   "scripts": {
     "check": "tsc --noEmit",
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
     "dev": "tsup --watch --dts",
+    "bench": "vitest bench --run --root ../../ --project jazz-tools",
     "test": "vitest --run --root ../../ --project jazz-tools",
     "test:watch": "vitest --watch --root ../../ --project jazz-tools",
     "types": "tsc --outDir dist",
@@ -235,6 +246,7 @@
     "@op-engineering/op-sqlite": "*",
     "@react-native-community/netinfo": "*",
     "better-auth": "^1.3.2",
+    "expo-image-manipulator": "*",
     "expo-file-system": "*",
     "expo-secure-store": "*",
     "expo-sqlite": "*",
@@ -259,6 +271,9 @@
       "optional": true
     },
     "better-auth": {
+      "optional": true
+    },
+    "expo-image-manipulator": {
       "optional": true
     },
     "expo-file-system": {

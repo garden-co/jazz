@@ -1,12 +1,8 @@
-import {
-  addTransactionToContentMessage,
-  createContentMessage,
-} from "../coValueContentMessage.js";
-import { Transaction, VerifiedState } from "../coValueCore/verifiedState.js";
-import { Signature } from "../crypto/crypto.js";
-import { RawCoID, SessionID } from "../ids.js";
+import { knownStateFromContent } from "../coValueContentMessage.js";
+import { VerifiedState } from "../coValueCore/verifiedState.js";
+import { RawCoID } from "../ids.js";
+import { combineKnownStateSessions, CoValueKnownState } from "../knownState.js";
 import { NewContentMessage } from "../sync.js";
-import { LinkedList } from "./LinkedList.js";
 
 /**
  * This queue is used to batch the sync of local transactions while preserving the order of updates between CoValues.
@@ -18,65 +14,78 @@ import { LinkedList } from "./LinkedList.js";
  * 2. If we do multiple updates on the same CoMap, the updates will be batched because it's safe to do so.
  */
 export class LocalTransactionsSyncQueue {
-  private readonly queue = new LinkedList<NewContentMessage>();
+  private batch: NewContentMessage[] = [];
+  private firstChunks = new Map<RawCoID, NewContentMessage>();
+  private lastUpdatedValue: VerifiedState | undefined;
+  private lastUpdatedValueKnownState: CoValueKnownState | undefined;
 
   constructor(private readonly sync: (content: NewContentMessage) => void) {}
 
-  syncHeader = (coValue: VerifiedState) => {
-    const lastPendingSync = this.queue.tail?.value;
-
-    if (lastPendingSync?.id === coValue.id) {
-      return;
-    }
-
-    this.enqueue(createContentMessage(coValue.id, coValue.header));
-  };
-
   syncTransaction = (
     coValue: VerifiedState,
-    transaction: Transaction,
-    sessionID: SessionID,
-    signature: Signature,
-    txIdx: number,
+    knownStateBefore: CoValueKnownState,
   ) => {
-    const lastPendingSync = this.queue.tail?.value;
-    const lastSignatureIdx = coValue.getLastSignatureCheckpoint(sessionID);
-    const isSignatureCheckpoint =
-      lastSignatureIdx > -1 && lastSignatureIdx === txIdx;
+    const lastUpdatedValue = this.lastUpdatedValue;
+    const lastUpdatedValueKnownState = this.lastUpdatedValueKnownState;
 
-    if (lastPendingSync?.id === coValue.id && !isSignatureCheckpoint) {
-      addTransactionToContentMessage(
-        lastPendingSync,
-        transaction,
-        sessionID,
-        signature,
-        txIdx,
-      );
+    if (lastUpdatedValue && lastUpdatedValueKnownState) {
+      if (lastUpdatedValue.id === coValue.id) {
+        return;
+      }
 
+      this.addContentToBatch(lastUpdatedValue, lastUpdatedValueKnownState);
+    }
+
+    this.lastUpdatedValue = coValue;
+    this.lastUpdatedValueKnownState = knownStateBefore;
+
+    for (const trackingSet of this.dirtyCoValuesTrackingSets) {
+      trackingSet.add(coValue.id);
+    }
+
+    this.scheduleNextBatch();
+  };
+
+  private addContentToBatch(
+    coValue: VerifiedState,
+    knownStateBefore: CoValueKnownState,
+  ) {
+    const content = coValue.newContentSince(knownStateBefore);
+
+    if (!content) {
       return;
     }
 
-    const content = createContentMessage(coValue.id, coValue.header, false);
-
-    addTransactionToContentMessage(
-      content,
-      transaction,
-      sessionID,
-      signature,
-      txIdx,
-    );
-
-    this.enqueue(content);
-  };
-
-  enqueue(content: NewContentMessage) {
-    this.queue.push(content);
-
-    this.processPendingSyncs();
-
-    for (const trackingSet of this.dirtyCoValuesTrackingSets) {
-      trackingSet.add(content.id);
+    for (const piece of content) {
+      this.batch.push(piece);
     }
+  }
+
+  private nextBatchScheduled = false;
+  scheduleNextBatch() {
+    if (this.nextBatchScheduled) return;
+
+    this.nextBatchScheduled = true;
+
+    queueMicrotask(() => {
+      if (this.lastUpdatedValue && this.lastUpdatedValueKnownState) {
+        this.addContentToBatch(
+          this.lastUpdatedValue,
+          this.lastUpdatedValueKnownState,
+        );
+      }
+      const batch = this.batch;
+
+      this.lastUpdatedValue = undefined;
+      this.lastUpdatedValueKnownState = undefined;
+      this.firstChunks = new Map();
+      this.batch = [];
+      this.nextBatchScheduled = false;
+
+      for (const content of batch) {
+        this.sync(content);
+      }
+    });
   }
 
   private dirtyCoValuesTrackingSets: Set<Set<RawCoID>> = new Set();
@@ -105,23 +114,4 @@ export class LocalTransactionsSyncQueue {
       },
     };
   };
-
-  private processingSyncs = false;
-  processPendingSyncs() {
-    if (this.processingSyncs) return;
-
-    this.processingSyncs = true;
-
-    queueMicrotask(() => {
-      while (this.queue.head) {
-        const content = this.queue.head.value;
-
-        this.sync(content);
-
-        this.queue.shift();
-      }
-
-      this.processingSyncs = false;
-    });
-  }
 }

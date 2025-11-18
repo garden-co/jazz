@@ -257,8 +257,8 @@ export function PagefindSearch() {
   if (!open) return null;
 
   return (
-    <Dialog open={open} onClose={close} className="!p-0">
-      <DialogBody className="!mt-0">
+    <Dialog open={open} onClose={close} className="p-0!">
+      <DialogBody className="mt-0!">
         <Combobox
           onChange={(result: PagefindResult | PagefindSubResult) => {
             if (result) {
@@ -284,7 +284,7 @@ export function PagefindSearch() {
                 "col-start-1 row-start-1",
                 "text-highlight placeholder:text-stone-500 sm:bg-stone-100 sm:dark:bg-stone-925",
                 "w-full pl-11 pr-4 py-2.5 rounded-xl sm:rounded-lg",
-                "outline-none focus-visible:outline-none",
+                "outline-hidden focus-visible:outline-hidden",
               )}
               placeholder="Search documentation..."
               onChange={(e) => handleSearch(e.target.value)}
@@ -308,11 +308,11 @@ export function PagefindSearch() {
             {results.length > 0 ? (
               <ComboboxOptions className="border-t divide-y max-h-[calc(100vh-84px)] sm:max-h-[600px] overflow-y-auto overflow-x-hidden overscroll-contain">
                 {results.map((result) => (
-                  <div className="space-y-1 p-2">
+                  <div className="flex flex-col gap-1 p-2">
                     <ComboboxOption
                       key={result.id}
                       value={result}
-                      className="cursor-default flex gap-3 items-center group data-[focus]:bg-stone-100 rounded-lg p-2 dark:data-[focus]:bg-stone-900"
+                      className="cursor-default flex gap-3 items-center group data-focus:bg-stone-100 rounded-lg p-2 dark:data-focus:bg-stone-900"
                     >
                       <Icon name="file" className="shrink-0" />
                       <div>
@@ -342,7 +342,7 @@ export function PagefindSearch() {
                           <ComboboxOption
                             key={subResult.id}
                             value={subResult}
-                            className="group cursor-default flex gap-3 items-center group data-[focus]:bg-stone-100 rounded-lg p-2 dark:data-[focus]:bg-stone-900"
+                            className="group cursor-default flex gap-3 items-center group data-focus:bg-stone-100 rounded-lg p-2 dark:data-focus:bg-stone-900"
                           >
                             <Icon name="hash" className="shrink-0" />
                             <div>

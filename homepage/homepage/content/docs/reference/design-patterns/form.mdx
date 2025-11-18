@@ -1,0 +1,98 @@
+export const metadata = {
+  description: "Learn how to handle forms in Jazz for creating and updating CoValues."
+};
+
+import { Alert, CodeGroup, FileName } from "@/components/forMdx";
+
+# How to write forms with Jazz
+
+This guide shows you a simple and powerful way to implement forms for creating and updating CoValues.
+
+[See the full example here.](https://github.com/garden-co/jazz/tree/main/examples/form)
+
+## Updating a CoValue
+
+To update a CoValue, we simply assign the new value directly as changes happen. These changes are synced to the server.
+
+<CodeGroup>
+```tsx index.tsx#Basic
+<input
+  type="text"
+  value={order.name}
+  onChange={(e) => order.$jazz.set("name", e.target.value)}
+/>
+```
+</CodeGroup>
+
+It's that simple!
+
+## Creating a CoValue
+
+When creating a CoValue, we can use a partial version that allows us to build up the data before submitting.
+
+### Using a Partial CoValue
+
+Let's say we have a CoValue called `BubbleTeaOrder`. We can create a partial version,
+`PartialBubbleTeaOrder`, which has some fields made optional so we can build up the data incrementally.
+
+<FileName>schema.ts</FileName>
+<CodeGroup>
+```ts schema.ts
+```
+</CodeGroup>
+
+{/* TODO: add other frameworks */}
+## Writing the components in React
+
+Let's write the form component that will be used for both create and update.
+
+<CodeGroup>
+```tsx OrderForm.tsx#OrderForm
+```
+</CodeGroup>
+
+### Writing the edit form
+
+To make the edit form, simply pass the `BubbleTeaOrder`. Changes are automatically saved as you type.
+
+<CodeGroup>
+```tsx OrderForm.tsx#EditForm
+```
+</CodeGroup>
+
+### Writing the create form
+
+For the create form, we need to:
+1. Create a partial order.
+2. Edit the partial order.
+3. Convert the partial order to a "real" order on submit.
+
+Here's how that looks like:
+
+<CodeGroup>
+```tsx OrderForm.tsx#CreateOrder
+```
+</CodeGroup>
+
+## Editing with a save button
+
+If you need a save button for editing (rather than automatic saving), you can use Jazz's branching feature. The example app shows how to create a private branch for editing that can be merged back when the user saves:
+
+<CodeGroup>
+```tsx OrderForm.tsx#EditOrderWithSave
+```
+</CodeGroup>
+
+This approach creates a private branch using `unstable_branch` with a unique owner group. The user can edit the branch without affecting the original data, and changes are only persisted when they click save via `unstable_merge()`.
+
+<Alert variant="info" className="mt-4 flex gap-2 items-center">
+  <strong>Important:</strong> Version control is currently unstable and we may ship breaking changes in patch releases.
+</Alert>
+
+
+## Handling different types of data
+
+Forms can be more complex than just a single string field, so we've put together an example app that shows you
+how to handle single-select, multi-select, date, boolean inputs, and rich text.
+
+[See the full example here.](https://github.com/garden-co/jazz/tree/main/examples/form)

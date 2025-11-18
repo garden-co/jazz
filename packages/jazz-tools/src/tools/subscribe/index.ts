@@ -1,5 +1,7 @@
 import type { CoValue, CoValueClass, RefEncoded } from "../internal.js";
+import { createUnloadedCoValue } from "../internal.js";
 import { SubscriptionScope } from "./SubscriptionScope.js";
+import { CoValueLoadingState } from "./types.js";
 
 export function getSubscriptionScope<D extends CoValue>(value: D) {
   const subscriptionScope = value.$jazz._subscriptionScope;
@@ -18,11 +20,13 @@ export function getSubscriptionScope<D extends CoValue>(value: D) {
   });
 
   Object.defineProperty(value.$jazz, "_subscriptionScope", {
-    value: subscriptionScope,
+    value: newSubscriptionScope,
     writable: false,
     enumerable: false,
     configurable: false,
   });
+
+  newSubscriptionScope.destroy();
 
   return newSubscriptionScope;
 }
@@ -42,16 +46,25 @@ export function accessChildByKey<D extends CoValue>(
 ) {
   const subscriptionScope = getSubscriptionScope(parent);
 
+  const node = subscriptionScope.childNodes.get(childId);
+
   if (!subscriptionScope.isSubscribedToId(childId)) {
     subscriptionScope.subscribeToKey(key);
+  } else if (node && node.closed) {
+    node.pullValue((value) =>
+      subscriptionScope.handleChildUpdate(childId, value),
+    );
   }
 
   const value = subscriptionScope.childValues.get(childId);
 
-  if (value?.type === "loaded") {
+  if (value?.type === CoValueLoadingState.LOADED) {
     return value.value;
   } else {
-    return null;
+    return createUnloadedCoValue(
+      childId,
+      value?.type ?? CoValueLoadingState.LOADING,
+    );
   }
 }
 
@@ -74,9 +87,12 @@ export function accessChildById<D extends CoValue>(
 
   const value = subscriptionScope.childValues.get(childId);
 
-  if (value?.type === "loaded") {
+  if (value?.type === CoValueLoadingState.LOADED) {
     return value.value;
   } else {
-    return null;
+    return createUnloadedCoValue(
+      childId,
+      value?.type ?? CoValueLoadingState.LOADING,
+    );
   }
 }

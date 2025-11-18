@@ -1,3 +1,4 @@
+import { assert } from "vitest";
 import { AccountClass, isControlledAccount } from "../coValues/account";
 
 import { CoID, LocalNode, RawCoValue } from "cojson";
@@ -8,7 +9,13 @@ import {
   createJazzContextFromExistingCredentials,
   randomSessionProvider,
 } from "../index";
-import { CoValueFromRaw } from "../internal";
+import {
+  CoValue,
+  CoValueFromRaw,
+  CoValueLoadingState,
+  MaybeLoaded,
+  LoadedAndRequired,
+} from "../internal";
 
 const Crypto = await WasmCrypto.create();
 
@@ -38,7 +45,7 @@ export async function setupAccount() {
         secret: me.$jazz.localNode.getCurrentAgent().agentSecret,
       },
       sessionProvider: randomSessionProvider,
-      peersToLoadFrom: [initialAsPeer],
+      peers: [initialAsPeer],
       crypto: Crypto,
       asActiveAccount: true,
     });
@@ -61,7 +68,7 @@ export async function setupTwoNodes(options?: {
   );
 
   const client = await LocalNode.withNewlyCreatedAccount({
-    peersToLoadFrom: [serverAsPeer],
+    peers: [serverAsPeer],
     crypto: Crypto,
     creationProps: { name: "Client" },
     migration: async (rawAccount, _node, creationProps) => {
@@ -74,7 +81,7 @@ export async function setupTwoNodes(options?: {
   });
 
   const server = await LocalNode.withNewlyCreatedAccount({
-    peersToLoadFrom: [clientAsPeer],
+    peers: [clientAsPeer],
     crypto: Crypto,
     creationProps: { name: "Server" },
     migration: async (rawAccount, _node, creationProps) => {
@@ -133,8 +140,14 @@ export async function loadCoValueOrFail<V extends RawCoValue>(
   id: CoID<V>,
 ): Promise<V> {
   const value = await node.load(id);
-  if (value === "unavailable") {
+  if (value === CoValueLoadingState.UNAVAILABLE) {
     throw new Error("CoValue not found");
   }
   return value;
+}
+
+export function assertLoaded<T extends MaybeLoaded<CoValue>>(
+  coValue: T,
+): asserts coValue is LoadedAndRequired<T> {
+  assert(coValue.$isLoaded, "CoValue is not loaded");
 }

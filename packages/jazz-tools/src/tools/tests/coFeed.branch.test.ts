@@ -3,7 +3,7 @@ import { assert, beforeEach, describe, expect, test, vi } from "vitest";
 import { Group, co, z } from "../exports.js";
 
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
-import { waitFor } from "./utils.js";
+import { assertLoaded, waitFor } from "./utils.js";
 
 beforeEach(async () => {
   cojsonInternals.CO_VALUE_LOADING_CONFIG.RETRY_DELAY = 1000;
@@ -40,7 +40,7 @@ describe("CoFeed Branching", async () => {
         unstable_branch: { name: "feature-branch" },
       });
 
-      assert(branchFeed);
+      assertLoaded(branchFeed);
 
       expect(branchFeed.$jazz.branchName).toBe("feature-branch");
       expect(branchFeed.$jazz.isBranched).toBe(true);
@@ -84,7 +84,7 @@ describe("CoFeed Branching", async () => {
         unstable_branch: { name: "feature-branch" },
       });
 
-      assert(branchFeed);
+      assertLoaded(branchFeed);
 
       expect(branchFeed.$jazz.branchName).toBe("feature-branch");
       expect(branchFeed.$jazz.isBranched).toBe(true);
@@ -129,7 +129,7 @@ describe("CoFeed Branching", async () => {
         unstable_branch: { name: "no-changes-branch" },
       });
 
-      assert(branchFeed);
+      assertLoaded(branchFeed);
 
       expect(branchFeed.$jazz.branchName).toBe("no-changes-branch");
       expect(branchFeed.$jazz.isBranched).toBe(true);
@@ -159,7 +159,7 @@ describe("CoFeed Branching", async () => {
         unstable_branch: { name: "shared-branch" },
       });
 
-      assert(branch1);
+      assertLoaded(branch1);
 
       branch1.$jazz.push("jam");
 
@@ -167,7 +167,7 @@ describe("CoFeed Branching", async () => {
         unstable_branch: { name: "shared-branch" },
       });
 
-      assert(branch2);
+      assertLoaded(branch2);
 
       expect(branch1.perAccount[me.$jazz.id]?.value).toEqual("jam");
       expect(branch2.perAccount[me.$jazz.id]?.value).toEqual("jam");
@@ -202,7 +202,7 @@ describe("CoFeed Branching", async () => {
         loadAs: alice,
       });
 
-      assert(branch1);
+      assertLoaded(branch1);
 
       originalFeed.$jazz.push("jam");
 
@@ -212,7 +212,7 @@ describe("CoFeed Branching", async () => {
         loadAs: bob,
       });
 
-      assert(branch2);
+      assertLoaded(branch2);
 
       // Both branches should have the same changes
       expect(branch1.perAccount[me.$jazz.id]?.value).toEqual("butter");
@@ -247,18 +247,29 @@ describe("CoFeed Branching", async () => {
         Group.create(me).makePublic("writer"),
       );
 
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
       const branch = await TestStream.load(originalFeed.$jazz.id, {
         unstable_branch: { name: "double-merge-branch" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       branch.$jazz.push("jam");
 
       // First merge
       branch.$jazz.unstable_merge();
 
-      expect(originalFeed.perAccount[me.$jazz.id]?.value).toEqual("jam");
+      const feed = await TestStream.load(originalFeed.$jazz.id);
+      assertLoaded(feed);
+
+      if (feed.perAccount[me.$jazz.id]?.value !== "jam") {
+        console.log(feed.$jazz.raw.items, feed.perAccount[me.$jazz.id]?.value);
+      }
+
+      expect(feed.perAccount[me.$jazz.id]?.value).toEqual("jam");
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
 
       // Make more changes to the branch
       branch.$jazz.push("cheese");
@@ -267,10 +278,8 @@ describe("CoFeed Branching", async () => {
       branch.$jazz.unstable_merge();
 
       // Verify all changes are applied
-      expect(originalFeed.perAccount[me.$jazz.id]?.value).toEqual("cheese");
-      expect(originalFeed.perSession[me.$jazz.sessionID]?.value).toEqual(
-        "cheese",
-      );
+      expect(feed.perAccount[me.$jazz.id]?.value).toEqual("cheese");
+      expect(feed.perSession[me.$jazz.sessionID]?.value).toEqual("cheese");
     });
 
     test("two users merge different branches with different edits", async () => {
@@ -290,7 +299,7 @@ describe("CoFeed Branching", async () => {
         loadAs: alice,
       });
 
-      assert(branch1);
+      assertLoaded(branch1);
 
       branch1.$jazz.push("jam");
 
@@ -300,7 +309,7 @@ describe("CoFeed Branching", async () => {
         loadAs: bob,
       });
 
-      assert(branch2);
+      assertLoaded(branch2);
 
       branch2.$jazz.push("cheese");
       branch2.$jazz.push("honey");
@@ -340,8 +349,7 @@ describe("CoFeed Branching", async () => {
         unstable_branch: { name: "load-by-id-branch" },
       });
 
-      assert(branch);
-
+      assertLoaded(branch);
       expect(branch.$jazz.id).toBe(originalFeed.$jazz.id);
     });
 
@@ -357,7 +365,7 @@ describe("CoFeed Branching", async () => {
         unstable_branch: { name: "conflict-branch" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       branch.$jazz.push("jam");
       branch.$jazz.push("cheese");
@@ -389,7 +397,7 @@ describe("CoFeed Branching", async () => {
         unstable_branch: { name: "align-branch" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       branch.$jazz.push("jam");
 
@@ -405,7 +413,7 @@ describe("CoFeed Branching", async () => {
         unstable_branch: { name: "align-branch" },
       });
 
-      assert(loadedBranch);
+      assertLoaded(loadedBranch);
 
       expect(loadedBranch.perAccount[me.$jazz.id]?.value).toEqual("jam");
     });
@@ -428,7 +436,7 @@ describe("CoFeed Branching", async () => {
         unstable_branch: { name: "text-feed-edit" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       // Make extensive changes to the branch
       branch.$jazz.push(Text.create("jam"));
@@ -440,7 +448,7 @@ describe("CoFeed Branching", async () => {
         },
       });
 
-      assert(loadedTextFeed);
+      assertLoaded(loadedTextFeed);
 
       // Verify original is unchanged
       expect(loadedTextFeed.perAccount[me.$jazz.id]?.value?.toString()).toBe(
@@ -473,7 +481,7 @@ describe("CoFeed Branching", async () => {
         unstable_branch: { name: "subscribe-branch" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       const spy = vi.fn();
       const unsubscribe = branch.$jazz.subscribe((feed, unsubscribe) => {
@@ -516,7 +524,7 @@ describe("CoFeed Branching", async () => {
         unstable_branch: { name: "ensure-loaded-branch" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       branch.$jazz.push("jam");
       branch.$jazz.push("cheese");
@@ -550,7 +558,7 @@ describe("CoFeed Branching", async () => {
         unstable_branch: { name: "schema-subscribe-branch" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       branch.$jazz.push("jam");
       branch.$jazz.push("cheese");
@@ -598,7 +606,7 @@ describe("CoFeed Branching", async () => {
         unstable_branch: { name: "nullable-branch" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       // Edit the branch
       branch.$jazz.push("jam");
@@ -639,7 +647,7 @@ describe("CoFeed Branching", async () => {
         unstable_branch: { name: "nested-feed-branch" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       // Make changes to the branch
       const newTwiceNested = TwiceNestedStream.create(["bread"], {
@@ -652,24 +660,41 @@ describe("CoFeed Branching", async () => {
       branch.$jazz.push(newNested);
 
       // Verify the original is unchanged
-      expect(
-        originalFeed.perAccount[me.$jazz.id]?.value?.perAccount[me.$jazz.id]
-          ?.value?.perAccount[me.$jazz.id]?.value,
-      ).toEqual("milk");
+      const myTopLevelStream = originalFeed.perAccount[me.$jazz.id];
+      assert(myTopLevelStream);
+      assertLoaded(myTopLevelStream.value);
+      const myNestedStream = myTopLevelStream.value.perAccount[me.$jazz.id];
+      assert(myNestedStream);
+      assertLoaded(myNestedStream.value);
+      expect(myNestedStream.value.perAccount[me.$jazz.id]?.value).toEqual(
+        "milk",
+      );
 
       // Verify the branch has the changes
+      const myBranchedTopLevelStream = branch.perAccount[me.$jazz.id];
+      assert(myBranchedTopLevelStream);
+      assertLoaded(myBranchedTopLevelStream.value);
+      const myBranchedNestedStream =
+        myBranchedTopLevelStream.value.perAccount[me.$jazz.id];
+      assert(myBranchedNestedStream);
+      assertLoaded(myBranchedNestedStream.value);
       expect(
-        branch.perAccount[me.$jazz.id]?.value?.perAccount[me.$jazz.id]?.value
-          ?.perAccount[me.$jazz.id]?.value,
+        myBranchedNestedStream.value.perAccount[me.$jazz.id]?.value,
       ).toEqual("bread");
 
       // Merge the branch
       branch.$jazz.unstable_merge();
 
       // Verify the original now has the merged changes
+      const myOriginalTopLevelStream = originalFeed.perAccount[me.$jazz.id];
+      assert(myOriginalTopLevelStream);
+      assertLoaded(myOriginalTopLevelStream.value);
+      const myOriginalNestedStream =
+        myOriginalTopLevelStream.value.perAccount[me.$jazz.id];
+      assert(myOriginalNestedStream);
+      assertLoaded(myOriginalNestedStream.value);
       expect(
-        originalFeed.perAccount[me.$jazz.id]?.value?.perAccount[me.$jazz.id]
-          ?.value?.perAccount[me.$jazz.id]?.value,
+        myOriginalNestedStream.value.perAccount[me.$jazz.id]?.value,
       ).toEqual("bread");
     });
   });

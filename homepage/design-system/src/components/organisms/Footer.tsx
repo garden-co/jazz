@@ -38,6 +38,7 @@ export function Footer({
           <div className="col-span-full sm:col-span-6 md:col-span-8">
             <Link href="https://garden.co" target="_blank">
               {logo}
+              <span className="sr-only">Garden Computing Homepage</span>
             </Link>
           </div>
           <p className="col-span-full sm:col-span-6 md:col-span-4 text-sm sm:text-base">
@@ -72,11 +73,13 @@ export function Footer({
             </div>
           ))}
 
-          <Copyright className="text-sm order-last col-span-full self-center md:col-span-10 md:order-none" />
+          <div className="col-span-full flex gap-8 justify-between md:items-center flex-col-reverse md:flex-row">
+            <Copyright />
 
-          <div className="col-span-full flex items-center justify-between gap-6 md:col-span-2">
-            <SocialLinks {...socials}></SocialLinks>
-            <ThemeToggle className="hidden md:block" />
+            <div className="flex items-center justify-between gap-6">
+              <SocialLinks {...socials}></SocialLinks>
+              <ThemeToggle className="hidden md:block" />
+            </div>
           </div>
         </div>
       </div>

@@ -1,5 +1,30 @@
 # create-jazz-app
 
+## 0.2.1
+
+### Patch Changes
+
+- 4b8d29f: Fetch only the appropriate llms-full.txt for the framework
+
+## 0.2.0
+
+### Minor Changes
+
+- 94e7d89: Added more options to the create-jazz-app tool
+
+## 0.1.30
+
+### Patch Changes
+
+- 57450ea: Dynamically fetch the current llms-full.txt to add to context
+
+## 0.1.29
+
+### Patch Changes
+
+- 0e63af1: fix: add missing dependency for `expo-sqlite` in the React Native starter app
+- ee03a3d: fix: create-jazz-app not working with RN after Zod v4 upgrade
+
 ## 0.1.28
 
 ### Patch Changes

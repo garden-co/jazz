@@ -1,0 +1,57 @@
+import { CodeGroup } from '@/components/forMdx';
+
+export const metadata = {
+  description: "Advanced performance tips for using Jazz."
+};
+
+# Tips for maximising Jazz performance
+
+## Use the best crypto implementation for your platform
+
+The fastest implementations are (in order):
+
+1. [Node-API crypto](/docs/server-side/setup#node-api) (only available in some Node/Deno environments) or [RNQuickCrypto on React Native](/docs/react-native/project-setup/providers#quick-crypto)
+2. [WASM crypto](/docs/server-side/setup#wasm-on-edge-runtimes)
+3. JavaScript fallback (slowest, but most compatible)
+
+Check whether your environment supports Node-API.
+Some edge runtimes may not enable WASM by default.
+
+## Minimise group extensions
+
+Group extensions make it easy to cascade permissions and they’re fast enough for most cases.
+However, performance can slow down when many parent groups need to load in the dependency chain.
+To avoid this, create and reuse groups manually when their permissions stay the same for both CoValues over time.
+
+**Note**: Implicit CoValue creation extends groups automatically. Be careful about how you create nested CoValues if you are likely to build long dependency chains.
+
+<CodeGroup>
+```ts index.ts#ImplicitVsExplicit
+```
+</CodeGroup>
+
+## Choose simple datatypes where possible
+CoValues will always be slightly slower to load than their primitive counterparts. For most cases, this is negligible.
+
+In data-heavy apps where lots of data has to be loaded at the same time, you can choose to trade off some of the flexibility of CoValues for speed by opting for primitive data types.
+
+### `z.string()` vs CoTexts
+In case you use a CoText, Jazz will enable character-by-character collaboration possibilities for you. However, in many cases, users do not expect to be able to collaborate on the text itself, and are happy with replacing the whole string at once, especially shorter strings. In this case, you could use a `z.string()` for better performance.
+
+Examples:
+  - names
+  - URLs
+  - phone numbers
+
+### `z.object()/z.tuple()` vs CoMaps
+CoMaps allow granular updates to objects based on individual keys. If you expect your whole object to be updated at once, you could consider using the `z.object()` or `z.tuple()` type. Note that if you use these methods, you must replace the whole value if you choose to update it.
+
+Examples:
+ - locations/co-ordinates
+ - data coming from external sources
+ - data which is rarely changed after it is created
+
+<CodeGroup>
+```ts index.ts#ZObjectsZTuples
+```
+</CodeGroup>

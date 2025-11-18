@@ -14,6 +14,7 @@ import {
 } from "../testing";
 import { cojsonInternals, LocalNode } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
+import { assertLoaded } from "./utils";
 
 const Message = co.map({
   text: z.string(),
@@ -163,7 +164,8 @@ describe("Inbox", () => {
     const resultId = await inboxSender.sendMessage(message);
 
     const result = await Message.load(resultId, { loadAs: receiver });
-    expect(result?.text).toBe("Responded from the inbox");
+    assertLoaded(result);
+    expect(result.text).toBe("Responded from the inbox");
 
     unsubscribe();
   });
@@ -424,7 +426,7 @@ describe("Inbox", () => {
     const node = await LocalNode.withLoadedAccount({
       accountID: accountId as any,
       accountSecret: accountSecret,
-      peersToLoadFrom: [getPeerConnectedToTestSyncServer()],
+      peers: [getPeerConnectedToTestSyncServer()],
       crypto: receiver.$jazz.localNode.crypto,
       sessionID: sessionID,
     });
@@ -495,7 +497,7 @@ describe("Inbox", () => {
     const node = await LocalNode.withLoadedAccount({
       accountID: accountId as any,
       accountSecret: accountSecret,
-      peersToLoadFrom: [getPeerConnectedToTestSyncServer()],
+      peers: [getPeerConnectedToTestSyncServer()],
       crypto: receiver.$jazz.localNode.crypto,
       sessionID: sessionID,
     });

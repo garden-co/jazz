@@ -1,4 +1,4 @@
-import { Group, Loaded, co, z } from "jazz-tools";
+import { Group, co, z } from "jazz-tools";
 import { getRandomUsername } from "./util";
 
 export const Project = co.map({
@@ -9,15 +9,15 @@ export const Organization = co.map({
   name: z.string(),
   projects: co.list(Project),
 });
+export type Organization = co.loaded<typeof Organization>;
 
 export const DraftOrganization = co.map({
   name: z.optional(z.string()),
   projects: co.list(Project),
 });
+export type DraftOrganization = co.loaded<typeof DraftOrganization>;
 
-export function validateDraftOrganization(
-  org: Loaded<typeof DraftOrganization>,
-) {
+export function validateDraftOrganization(org: DraftOrganization) {
   const errors: string[] = [];
 
   if (!org.name) {
@@ -87,3 +87,7 @@ export const JazzAccount = co
       });
     }
   });
+
+export const JazzAccountWithOrganizations = JazzAccount.resolved({
+  root: { organizations: { $each: { $onError: "catch" } } },
+});

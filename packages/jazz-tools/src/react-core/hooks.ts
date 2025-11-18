@@ -13,20 +13,25 @@ import {
   AnyAccountSchema,
   CoValue,
   CoValueClassOrSchema,
-  Group,
+  CoValueLoadingState,
   InboxSender,
   InstanceOfSchema,
   JazzContextManager,
   JazzContextType,
   Loaded,
+  MaybeLoaded,
+  NotLoaded,
   ResolveQuery,
   ResolveQueryStrict,
+  SchemaResolveQuery,
   SubscriptionScope,
   coValueClassFromCoValueClassOrSchema,
+  createUnloadedCoValue,
   type BranchDefinition,
 } from "jazz-tools";
 import { JazzContext, JazzContextManagerContext } from "./provider.js";
 import { getCurrentAccountFromContextManager } from "./utils.js";
+import { CoValueSubscription } from "./types.js";
 
 export function useJazzContext<Acc extends Account>() {
   const value = useContext(JazzContext) as JazzContextType<Acc>;
@@ -82,9 +87,10 @@ export function useIsAuthenticated() {
   );
 }
 
-function useCoValueSubscription<
+export function useCoValueSubscription<
   S extends CoValueClassOrSchema,
-  const R extends ResolveQuery<S>,
+  // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+  const R extends ResolveQuery<S> = SchemaResolveQuery<S>,
 >(
   Schema: S,
   id: string | undefined | null,
@@ -114,10 +120,12 @@ function useCoValueSubscription<
       };
     }
 
+    const resolve = getResolveQuery(Schema, options?.resolve);
+
     const node = contextManager.getCurrentValue()!.node;
     const subscription = new SubscriptionScope<any>(
       node,
-      options?.resolve ?? true,
+      resolve,
       id,
       {
         ref: coValueClassFromCoValueClassOrSchema(Schema),
@@ -161,7 +169,43 @@ function useCoValueSubscription<
     });
   }, [Schema, id, contextManager, branchName, branchOwnerId]);
 
-  return subscription.subscription;
+  return subscription.subscription as CoValueSubscription<S, R>;
+}
+
+function getSubscriptionValue<C extends CoValue>(
+  subscription: SubscriptionScope<C> | null,
+): MaybeLoaded<C> {
+  if (!subscription) {
+    return createUnloadedCoValue("", CoValueLoadingState.UNAVAILABLE);
+  }
+  const value = subscription.getCurrentValue();
+  if (typeof value === "string") {
+    return createUnloadedCoValue(subscription.id, value);
+  }
+  return value;
+}
+
+function useGetCurrentValue<C extends CoValue>(
+  subscription: SubscriptionScope<C> | null,
+) {
+  const previousValue = useRef<MaybeLoaded<CoValue> | undefined>(undefined);
+
+  return useCallback(() => {
+    const currentValue = getSubscriptionValue(subscription);
+    // Avoid re-renders if the value is not loaded and didn't change
+    if (
+      previousValue.current !== undefined &&
+      previousValue.current.$jazz.id === currentValue.$jazz.id &&
+      !previousValue.current.$isLoaded &&
+      !currentValue.$isLoaded &&
+      previousValue.current.$jazz.loadingState ===
+        currentValue.$jazz.loadingState
+    ) {
+      return previousValue.current as MaybeLoaded<C>;
+    }
+    previousValue.current = currentValue;
+    return currentValue;
+  }, [subscription]);
 }
 
 /**
@@ -171,7 +215,38 @@ function useCoValueSubscription<
  * handles the subscription lifecycle (subscribe on mount, unsubscribe on unmount).
  * It also supports deep loading of nested CoValues through resolve queries.
  *
- * @returns The loaded CoValue, or `undefined` if loading, or `null` if not found/not accessible
+ * The {@param options.select} function allows returning only specific parts of the CoValue data,
+ * which helps reduce unnecessary re-renders by narrowing down the returned data.
+ * Additionally, you can provide a custom {@param options.equalityFn} to further optimize
+ * performance by controlling when the component should re-render based on the selected data.
+ *
+ * @returns The loaded CoValue, or an {@link NotLoaded} value. Use `$isLoaded` to check whether the
+ * CoValue is loaded, or use {@link MaybeLoaded.$jazz.loadingState} to get the detailed loading state.
+ * If a selector function is provided, returns the result of the selector function.
+ *
+ * @example
+ * ```tsx
+ * // Select only specific fields to reduce re-renders
+ * const Project = co.map({
+ *   name: z.string(),
+ *   description: z.string(),
+ *   tasks: co.list(Task),
+ *   lastModified: z.date(),
+ * });
+ *
+ * function ProjectTitle({ projectId }: { projectId: string }) {
+ *   // Only re-render when the project name changes, not other fields
+ *   const projectName = useCoState(
+ *     Project,
+ *     projectId,
+ *     {
+ *       select: (project) => !project.$isLoading ? project.name : "Loading...",
+ *     }
+ *   );
+ *
+ *   return <h1>{projectName}</h1>;
+ * }
+ * ```
  *
  * @example
  * ```tsx
@@ -190,10 +265,15 @@ function useCoValueSubscription<
  *     },
  *   });
  *
- *   if (!project) {
- *     return project === null
- *       ? "Project not found or not accessible"
- *       : "Loading project...";
+ *   if (!project.$isLoaded) {
+ *     switch (project.$jazz.loadingState) {
+ *       case "unauthorized":
+ *         return "Project not accessible";
+ *       case "unavailable":
+ *         return "Project not found";
+ *       case "loading":
+ *         return "Loading project...";
+ *     }
  *   }
  *
  *   return (
@@ -223,14 +303,19 @@ function useCoValueSubscription<
  *   const task = useCoState(Task, taskId, {
  *     resolve: {
  *       assignee: true,
- *       subtasks: { $each: { $onError: null } },
+ *       subtasks: { $each: { $onError: 'catch' } },
  *     },
  *   });
  *
- *   if (!task) {
- *     return task === null
- *       ? "Task not found or not accessible"
- *       : "Loading task...";
+ *   if (!task.$isLoaded) {
+ *     switch (task.$jazz.loadingState) {
+ *       case "unauthorized":
+ *         return "Task not accessible";
+ *       case "unavailable":
+ *         return "Task not found";
+ *       case "loading":
+ *         return "Loading task...";
+ *     }
  *   }
  *
  *   return (
@@ -239,100 +324,11 @@ function useCoValueSubscription<
  *       {task.assignee && <p>Assigned to: {task.assignee.name}</p>}
  *       <ul>
  *         {task.subtasks.map((subtask, index) => (
- *           subtask ? <li key={subtask.id}>{subtask.title}</li> : <li key={index}>Inaccessible subtask</li>
+ *           subtask.$isLoaded ? <li key={subtask.id}>{subtask.title}</li> : <li key={index}>Inaccessible subtask</li>
  *         ))}
  *       </ul>
  *     </div>
  *   );
- * }
- * ```
- *
- * For more examples, see the [subscription and deep loading](https://jazz.tools/docs/react/using-covalues/subscription-and-loading) documentation.
- */
-export function useCoState<
-  S extends CoValueClassOrSchema,
-  const R extends ResolveQuery<S> = true,
->(
-  /** The CoValue schema or class constructor */
-  Schema: S,
-  /** The ID of the CoValue to subscribe to. If `undefined`, returns `null` */
-  id: string | undefined,
-  /** Optional configuration for the subscription */
-  options?: {
-    /** Resolve query to specify which nested CoValues to load */
-    resolve?: ResolveQueryStrict<S, R>;
-    /**
-     * Create or load a branch for isolated editing.
-     *
-     * Branching lets you take a snapshot of the current state and start modifying it without affecting the canonical/shared version.
-     * It's a fork of your data graph: the same schema, but with diverging values.
-     *
-     * The checkout of the branch is applied on all the resolved values.
-     *
-     * @param name - A unique name for the branch. This identifies the branch
-     *   and can be used to switch between different branches of the same CoValue.
-     * @param owner - The owner of the branch. Determines who can access and modify
-     *   the branch. If not provided, the branch is owned by the current user.
-     *
-     * For more info see the [branching](https://jazz.tools/docs/react/using-covalues/version-control) documentation.
-     */
-    unstable_branch?: BranchDefinition;
-  },
-): Loaded<S, R> | undefined | null {
-  const subscription = useCoValueSubscription(Schema, id, options);
-
-  const value = React.useSyncExternalStore<Loaded<S, R> | undefined | null>(
-    React.useCallback(
-      (callback) => {
-        if (!subscription) {
-          return () => {};
-        }
-
-        return subscription.subscribe(callback);
-      },
-      [subscription],
-    ),
-    () => (subscription ? subscription.getCurrentValue() : null),
-    () => (subscription ? subscription.getCurrentValue() : null),
-  );
-
-  return value;
-}
-
-/**
- * React hook for subscribing to CoValues with selective data extraction and custom equality checking.
- *
- * This hook extends `useCoState` by allowing you to select only specific parts of the CoValue data
- * through a selector function, which helps reduce unnecessary re-renders by narrowing down the
- * returned data. Additionally, you can provide a custom equality function to further optimize
- * performance by controlling when the component should re-render based on the selected data.
- *
- * The hook automatically handles the subscription lifecycle and supports deep loading of nested
- * CoValues through resolve queries, just like `useCoState`.
- *
- * @returns The result of the selector function applied to the loaded CoValue data
- *
- * @example
- * ```tsx
- * // Select only specific fields to reduce re-renders
- * const Project = co.map({
- *   name: z.string(),
- *   description: z.string(),
- *   tasks: co.list(Task),
- *   lastModified: z.date(),
- * });
- *
- * function ProjectTitle({ projectId }: { projectId: string }) {
- *   // Only re-render when the project name changes, not other fields
- *   const projectName = useCoStateWithSelector(
- *     Project,
- *     projectId,
- *     {
- *       select: (project) => project?.name ?? "Loading...",
- *     }
- *   );
- *
- *   return <h1>{projectName}</h1>;
  * }
  * ```
  *
@@ -342,13 +338,13 @@ export function useCoState<
  * const TaskList = co.list(Task);
  *
  * function TaskCount({ listId }: { listId: string }) {
- *   const taskStats = useCoStateWithSelector(
+ *   const taskStats = useCoState(
  *     TaskList,
  *     listId,
  *     {
  *       resolve: { $each: true },
  *       select: (tasks) => {
- *         if (!tasks) return { total: 0, completed: 0 };
+ *         if (!tasks.$isLoaded) return { total: 0, completed: 0 };
  *         return {
  *           total: tasks.length,
  *           completed: tasks.filter(task => task.completed).length,
@@ -367,72 +363,24 @@ export function useCoState<
  * }
  * ```
  *
- * @example
- * ```tsx
- * // Combine with deep loading and complex selectors
- * const Team = co.map({
- *   name: z.string(),
- *   members: co.list(TeamMember),
- *   projects: co.list(Project),
- * });
- *
- * function TeamSummary({ teamId }: { teamId: string }) {
- *   const summary = useCoStateWithSelector(
- *     Team,
- *     teamId,
- *     {
- *       resolve: {
- *         members: { $each: true },
- *         projects: { $each: { tasks: { $each: true } } },
- *       },
- *       select: (team) => {
- *         if (!team) return null;
- *
- *         const totalTasks = team.projects.reduce(
- *           (sum, project) => sum + project.tasks.length,
- *           0
- *         );
- *
- *         return {
- *           teamName: team.name,
- *           memberCount: team.members.length,
- *           projectCount: team.projects.length,
- *           totalTasks,
- *         };
- *       },
- *     }
- *   );
- *
- *   if (!summary) return <div>Loading team summary...</div>;
- *
- *   return (
- *     <div>
- *       <h2>{summary.teamName}</h2>
- *       <p>{summary.memberCount} members</p>
- *       <p>{summary.projectCount} projects</p>
- *       <p>{summary.totalTasks} total tasks</p>
- *     </div>
- *   );
- * }
- * ```
- *
  * For more examples, see the [subscription and deep loading](https://jazz.tools/docs/react/using-covalues/subscription-and-loading) documentation.
  */
-export function useCoStateWithSelector<
+export function useCoState<
   S extends CoValueClassOrSchema,
-  TSelectorReturn,
-  const R extends ResolveQuery<S> = true,
+  // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+  const R extends ResolveQuery<S> = SchemaResolveQuery<S>,
+  TSelectorReturn = MaybeLoaded<Loaded<S, R>>,
 >(
   /** The CoValue schema or class constructor */
   Schema: S,
-  /** The ID of the CoValue to subscribe to. If `undefined`, returns the result of selector called with `null` */
+  /** The ID of the CoValue to subscribe to. If `undefined`, returns an `unavailable` value */
   id: string | undefined,
   /** Optional configuration for the subscription */
-  options: {
+  options?: {
     /** Resolve query to specify which nested CoValues to load */
     resolve?: ResolveQueryStrict<S, R>;
     /** Select which value to return */
-    select: (value: Loaded<S, R> | undefined | null) => TSelectorReturn;
+    select?: (value: MaybeLoaded<Loaded<S, R>>) => TSelectorReturn;
     /** Equality function to determine if the selected value has changed, defaults to `Object.is` */
     equalityFn?: (a: TSelectorReturn, b: TSelectorReturn) => boolean;
     /**
@@ -454,9 +402,10 @@ export function useCoStateWithSelector<
   },
 ): TSelectorReturn {
   const subscription = useCoValueSubscription(Schema, id, options);
+  const getCurrentValue = useGetCurrentValue(subscription);
 
-  return useSyncExternalStoreWithSelector<
-    Loaded<S, R> | undefined | null,
+  const value = useSyncExternalStoreWithSelector<
+    MaybeLoaded<Loaded<S, R>>,
     TSelectorReturn
   >(
     React.useCallback(
@@ -469,16 +418,54 @@ export function useCoStateWithSelector<
       },
       [subscription],
     ),
-    () => (subscription ? subscription.getCurrentValue() : null),
-    () => (subscription ? subscription.getCurrentValue() : null),
-    options.select,
-    options.equalityFn ?? Object.is,
+    getCurrentValue,
+    getCurrentValue,
+    options?.select ?? ((value) => value as TSelectorReturn),
+    options?.equalityFn ?? Object.is,
+  );
+
+  return value;
+}
+
+export function useSubscriptionSelector<
+  S extends CoValueClassOrSchema,
+  // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+  const R extends ResolveQuery<S> = SchemaResolveQuery<S>,
+  TSelectorReturn = MaybeLoaded<Loaded<S, R>>,
+>(
+  subscription: CoValueSubscription<S, R>,
+  options?: {
+    select?: (value: MaybeLoaded<Loaded<S, R>>) => TSelectorReturn;
+    equalityFn?: (a: TSelectorReturn, b: TSelectorReturn) => boolean;
+  },
+) {
+  const getCurrentValue = useGetCurrentValue(subscription);
+
+  return useSyncExternalStoreWithSelector<
+    MaybeLoaded<Loaded<S, R>>,
+    TSelectorReturn
+  >(
+    React.useCallback(
+      (callback) => {
+        if (!subscription) {
+          return () => {};
+        }
+
+        return subscription.subscribe(callback);
+      },
+      [subscription],
+    ),
+    getCurrentValue,
+    getCurrentValue,
+    options?.select ?? ((value) => value as TSelectorReturn),
+    options?.equalityFn ?? Object.is,
   );
 }
 
-function useAccountSubscription<
+export function useAccountSubscription<
   S extends AccountClass<Account> | AnyAccountSchema,
-  const R extends ResolveQuery<S>,
+  // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+  const R extends ResolveQuery<S> = SchemaResolveQuery<S>,
 >(
   Schema: S,
   options?: {
@@ -499,8 +486,7 @@ function useAccountSubscription<
       };
     }
 
-    // We don't need type validation here, since it's mostly to help users on public API
-    const resolve: any = options?.resolve ?? true;
+    const resolve = getResolveQuery(Schema, options?.resolve);
 
     const node = contextManager.getCurrentValue()!.node;
     const subscription = new SubscriptionScope<any>(
@@ -547,26 +533,59 @@ function useAccountSubscription<
     });
   }, [Schema, contextManager, branchName, branchOwnerId]);
 
-  return subscription.subscription;
+  return subscription.subscription as CoValueSubscription<S, R>;
 }
 
 /**
- * React hook for accessing the current user's account and authentication state.
- * 
- * This hook provides access to the current user's account profile and root data,
- * along with authentication utilities. It automatically handles subscription to
- * the user's account data and provides a logout function.
- * 
- * @returns An object containing:
- * - `me`: The loaded account data, or `undefined` if loading, or `null` if not authenticated
- * - `agent`: The current agent (anonymous or authenticated user). Can be used as `loadAs` parameter for load and subscribe methods.
- * - `logOut`: Function to log out the current user
-
+ * React hook for accessing the current user's account.
+ *
+ * This hook provides access to the current user's account profile and root data.
+ * It automatically handles the subscription lifecycle and supports deep loading of nested
+ * CoValues through resolve queries.
+ *
+ * The {@param options.select} function allows returning only specific parts of the account data,
+ * which helps reduce unnecessary re-renders by narrowing down the returned data.
+ * Additionally, you can provide a custom {@param options.equalityFn} to further optimize
+ * performance by controlling when the component should re-render based on the selected data.
+ *
+ * @returns The account data, or an {@link NotLoaded} value. Use `$isLoaded` to check whether the
+ * CoValue is loaded, or use {@link MaybeLoaded.$jazz.loadingState} to get the detailed loading state.
+ * If a selector function is provided, returns the result of the selector function.
+ *
+ * @example
+ * ```tsx
+ * // Select only specific fields to reduce re-renders
+ * const MyAppAccount = co.account({
+ *   profile: co.profile(),
+ *   root: co.map({
+ *     name: z.string(),
+ *     email: z.string(),
+ *     lastLogin: z.date(),
+ *   }),
+ * });
+ *
+ * function UserProfile({ accountId }: { accountId: string }) {
+ *   // Only re-render when the profile name changes, not other fields
+ *   const profileName = useAccount(
+ *     MyAppAccount,
+ *     {
+ *       resolve: {
+ *         profile: true,
+ *         root: true,
+ *       },
+ *       select: (account) => account.$isLoaded ? account.profile.name : "Loading...",
+ *     }
+ *   );
+ *
+ *   return <h1>{profileName}</h1>;
+ * }
+ * ```
+ *
  * @example
  * ```tsx
  * // Deep loading with resolve queries
  * function ProjectListWithDetails() {
- *   const { me } = useAccount(MyAppAccount, {
+ *   const me = useAccount(MyAppAccount, {
  *     resolve: {
  *       profile: true,
  *       root: {
@@ -578,13 +597,18 @@ function useAccountSubscription<
  *       },
  *     },
  *   });
- * 
- *   if (!me) {
- *     return me === null
- *       ? <div>Failed to load your projects</div>
- *       : <div>Loading...</div>;
+ *
+ *   if (!me.$isLoaded) {
+ *     switch (me.$jazz.loadingState) {
+ *       case "unauthorized":
+ *         return "Account not accessible";
+ *       case "unavailable":
+ *         return "Account not found";
+ *       case "loading":
+ *         return "Loading account...";
+ *     }
  *   }
- * 
+ *
  *   return (
  *     <div>
  *       <h1>{me.profile.name}'s projects</h1>
@@ -599,11 +623,13 @@ function useAccountSubscription<
  *   );
  * }
  * ```
- * 
+ *
  */
 export function useAccount<
   A extends AccountClass<Account> | AnyAccountSchema,
-  R extends ResolveQuery<A> = true,
+  // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+  const R extends ResolveQuery<A> = SchemaResolveQuery<A>,
+  TSelectorReturn = MaybeLoaded<Loaded<A, R>>,
 >(
   /** The account schema to use. Defaults to the base Account schema */
   AccountSchema: A = Account as unknown as A,
@@ -611,6 +637,10 @@ export function useAccount<
   options?: {
     /** Resolve query to specify which nested CoValues to load from the account */
     resolve?: ResolveQueryStrict<A, R>;
+    /** Select which value to return from the account data */
+    select?: (account: MaybeLoaded<Loaded<A, R>>) => TSelectorReturn;
+    /** Equality function to determine if the selected value has changed, defaults to `Object.is` */
+    equalityFn?: (a: TSelectorReturn, b: TSelectorReturn) => boolean;
     /**
      * Create or load a branch for isolated editing.
      *
@@ -628,103 +658,12 @@ export function useAccount<
      */
     unstable_branch?: BranchDefinition;
   },
-): {
-  me: Loaded<A, R> | undefined | null;
-  agent: AnonymousJazzAgent | Loaded<A, true>;
-  logOut: () => void;
-} {
-  const contextManager = useJazzContextManager<InstanceOfSchema<A>>();
-  const subscription = useAccountSubscription(AccountSchema, options);
-
-  const agent = getCurrentAccountFromContextManager(contextManager);
-
-  const value = React.useSyncExternalStore<Loaded<A, R> | undefined | null>(
-    React.useCallback(
-      (callback) => {
-        if (!subscription) {
-          return () => {};
-        }
-
-        return subscription.subscribe(callback);
-      },
-      [subscription],
-    ),
-    () => (subscription ? subscription.getCurrentValue() : null),
-    () => (subscription ? subscription.getCurrentValue() : null),
-  );
-
-  return {
-    me: value,
-    agent,
-    logOut: contextManager.logOut,
-  };
-}
-
-/**
- * React hook for accessing the current user's account with selective data extraction and custom equality checking.
- *
- * This hook extends `useAccount` by allowing you to select only specific parts of the account data
- * through a selector function, which helps reduce unnecessary re-renders by narrowing down the
- * returned data. Additionally, you can provide a custom equality function to further optimize
- * performance by controlling when the component should re-render based on the selected data.
- *
- * The hook automatically handles the subscription lifecycle and supports deep loading of nested
- * CoValues through resolve queries, just like `useAccount`.
- *
- * @returns The result of the selector function applied to the loaded account data
- *
- * @example
- * ```tsx
- * // Select only specific fields to reduce re-renders
- * const MyAppAccount = co.account({
- *   profile: co.profile(),
- *   root: co.map({
- *     name: z.string(),
- *     email: z.string(),
- *     lastLogin: z.date(),
- *   }),
- * });
- *
- * function UserProfile({ accountId }: { accountId: string }) {
- *   // Only re-render when the profile name changes, not other fields
- *   const profileName = useAccountWithSelector(
- *     MyAppAccount,
- *     {
- *       resolve: {
- *         profile: true,
- *         root: true,
- *       },
- *       select: (account) => account?.profile?.name ?? "Loading...",
- *     }
- *   );
- *
- *   return <h1>{profileName}</h1>;
- * }
- * ```
- *
- * For more examples, see the [subscription and deep loading](https://jazz.tools/docs/react/using-covalues/subscription-and-loading) documentation.
- */
-export function useAccountWithSelector<
-  A extends AccountClass<Account> | AnyAccountSchema,
-  TSelectorReturn,
-  R extends ResolveQuery<A> = true,
->(
-  /** The account schema to use. Defaults to the base Account schema */
-  AccountSchema: A = Account as unknown as A,
-  /** Configuration for the subscription and selection */
-  options: {
-    /** Resolve query to specify which nested CoValues to load from the account */
-    resolve?: ResolveQueryStrict<A, R>;
-    /** Select which value to return from the account data */
-    select: (account: Loaded<A, R> | undefined | null) => TSelectorReturn;
-    /** Equality function to determine if the selected value has changed, defaults to `Object.is` */
-    equalityFn?: (a: TSelectorReturn, b: TSelectorReturn) => boolean;
-  },
 ): TSelectorReturn {
   const subscription = useAccountSubscription(AccountSchema, options);
+  const getCurrentValue = useGetCurrentValue(subscription);
 
   return useSyncExternalStoreWithSelector<
-    Loaded<A, R> | undefined | null,
+    MaybeLoaded<Loaded<A, R>>,
     TSelectorReturn
   >(
     React.useCallback(
@@ -737,11 +676,35 @@ export function useAccountWithSelector<
       },
       [subscription],
     ),
-    () => (subscription ? subscription.getCurrentValue() : null),
-    () => (subscription ? subscription.getCurrentValue() : null),
-    options.select,
-    options.equalityFn ?? Object.is,
+    getCurrentValue,
+    getCurrentValue,
+    options?.select ?? ((value) => value as TSelectorReturn),
+    options?.equalityFn ?? Object.is,
   );
+}
+
+/**
+ * Returns a function for logging out of the current account.
+ */
+export function useLogOut(): () => void {
+  const contextManager = useJazzContextManager();
+  return contextManager.logOut;
+}
+
+/**
+ * React hook for accessing the current agent. An agent can either be:
+ * - an Authenticated Account, if the user is logged in
+ * - an Anonymous Account, if the user didn't log in
+ * - or an anonymous agent, if in guest mode
+ *
+ * The agent can be used as the `loadAs` parameter for load and subscribe methods.
+ */
+export function useAgent<
+  A extends AccountClass<Account> | AnyAccountSchema = typeof Account,
+>(): AnonymousJazzAgent | Loaded<A, true> {
+  const contextManager = useJazzContextManager<InstanceOfSchema<A>>();
+  const agent = getCurrentAccountFromContextManager(contextManager);
+  return agent as AnonymousJazzAgent | Loaded<A, true>;
 }
 
 export function experimental_useInboxSender<
@@ -770,7 +733,8 @@ export function experimental_useInboxSender<
 
       let inbox = await inboxRef.current;
 
-      if (inbox.owner.id !== inboxOwnerID) {
+      // Regenerate the InboxSender if the inbox owner or current account changes
+      if (inbox.owner.id !== inboxOwnerID || inbox.currentAccount !== me) {
         const req = InboxSender.load<I, O>(inboxOwnerID, me);
         inboxRef.current = req;
         inbox = await req;
@@ -778,8 +742,49 @@ export function experimental_useInboxSender<
 
       return inbox.sendMessage(message);
     },
-    [inboxOwnerID],
+    [inboxOwnerID, me.$jazz.id],
   );
 
   return sendMessage;
+}
+
+/**
+ * Hook that returns the current connection status to the Jazz sync server.
+ *
+ * @returns `true` when connected to the server, `false` when disconnected
+ *
+ * @remarks
+ * On connection drop, this hook will return `false` only when Jazz detects the disconnection
+ * after 5 seconds of not receiving a ping from the server.
+ */
+export function useSyncConnectionStatus() {
+  const context = useJazzContext();
+
+  const connected = useSyncExternalStore(
+    useCallback(
+      (callback) => {
+        return context.addConnectionListener(callback);
+      },
+      [context],
+    ),
+    () => context.connected(),
+    () => context.connected(),
+  );
+
+  return connected;
+}
+
+function getResolveQuery(
+  Schema: CoValueClassOrSchema,
+  // We don't need type validation here, since this is an internal API
+  resolveQuery?: ResolveQuery<any>,
+): ResolveQuery<any> {
+  if (resolveQuery) {
+    return resolveQuery;
+  }
+  // Check the schema is a CoValue schema (and not a CoValue class)
+  if ("resolveQuery" in Schema) {
+    return Schema.resolveQuery;
+  }
+  return true;
 }

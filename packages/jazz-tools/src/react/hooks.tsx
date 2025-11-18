@@ -50,6 +50,10 @@ export {
   experimental_useInboxSender,
   useJazzContext,
   useAccount,
-  useCoStateWithSelector,
-  useAccountWithSelector,
+  useAgent,
+  useLogOut,
+  useSyncConnectionStatus,
+  useCoValueSubscription,
+  useAccountSubscription,
+  useSubscriptionSelector,
 } from "jazz-tools/react-core";

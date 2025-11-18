@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 
 import { CoMap, Group, ID, co, coField, z } from "jazz-tools";
+import { assertLoaded } from "jazz-tools/testing";
 import { describe, expect, it } from "vitest";
 import { createInviteLink, useAcceptInvite } from "../index.js";
 import { createJazzTestAccount, linkAccounts } from "../testing.js";
@@ -50,6 +51,7 @@ describe("useAcceptInvite", () => {
       loadAs: account,
     });
 
-    expect(accepted?.value).toEqual("hello");
+    assertLoaded(accepted);
+    expect(accepted.value).toEqual("hello");
   });
 });

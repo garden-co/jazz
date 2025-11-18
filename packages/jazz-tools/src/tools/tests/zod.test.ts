@@ -369,6 +369,18 @@ describe("co.map and Zod schema compatibility", () => {
       expect(map.person).toEqual({ name: "John" });
     });
 
+    it("should handle record fields", async () => {
+      const schema = co.map({
+        record: z.record(z.string(), z.string()),
+      });
+      const account = await createJazzTestAccount();
+      const map = schema.create(
+        { record: { key1: "value1", key2: "value2" } },
+        account,
+      );
+      expect(map.record).toEqual({ key1: "value1", key2: "value2" });
+    });
+
     it("should handle tuple fields", async () => {
       const schema = co.map({
         tuple: z.tuple([z.string(), z.number(), z.boolean()]),
@@ -402,46 +414,37 @@ describe("co.map and Zod schema compatibility", () => {
       expect(map2.value).toBe(42);
     });
 
-    // it("should handle discriminated unions of primitives", async () => {
-    //   const schema = co.map({
-    //     result: z.discriminatedUnion("status", [
-    //       z.object({ status: z.literal("success"), data: z.string() }),
-    //       z.object({ status: z.literal("failed"), error: z.string() }),
-    //     ]),
-    //   });
-    //   const account = await createJazzTestAccount();
-    //   const successMap = schema.create(
-    //     { result: { status: "success", data: "data" } },
-    //     account,
-    //   );
-    //   const failedMap = schema.create(
-    //     { result: { status: "failed", error: "error" } },
-    //     account,
-    //   );
-    //   expect(successMap.result).toEqual({ status: "success", data: "data" });
-    //   expect(failedMap.result).toEqual({ status: "failed", error: "error" });
-    // });
+    it("should handle discriminated unions of primitives", async () => {
+      const schema = co.map({
+        result: z.discriminatedUnion("status", [
+          z.object({ status: z.literal("success"), data: z.string() }),
+          z.object({ status: z.literal("failed"), error: z.string() }),
+        ]),
+      });
+      const account = await createJazzTestAccount();
+      const successMap = schema.create(
+        { result: { status: "success", data: "data" } },
+        account,
+      );
+      const failedMap = schema.create(
+        { result: { status: "failed", error: "error" } },
+        account,
+      );
+      expect(successMap.result).toEqual({ status: "success", data: "data" });
+      expect(failedMap.result).toEqual({ status: "failed", error: "error" });
+    });
 
-    // it("should handle intersections", async () => {
-    //   const schema = co.map({
-    //     value: z.intersection(
-    //       z.union([z.number(), z.string()]),
-    //       z.union([z.number(), z.boolean()])
-    //     ),
-    //   });
-    //   const account = await createJazzTestAccount();
-    //   const map = schema.create({ value: 42 }, account);
-    //   expect(map.value).toBe(42);
-    // });
-
-    // it("should handle record types", async () => {
-    //   const schema = co.map({
-    //     cache: z.record(z.string(), z.string()),
-    //   });
-    //   const account = await createJazzTestAccount();
-    //   const map = schema.create({ cache: { key1: "value1", key2: "value2" } }, account);
-    //   expect(map.cache).toEqual({ key1: "value1", key2: "value2" });
-    // });
+    it("should handle intersections", async () => {
+      const schema = co.map({
+        value: z.intersection(
+          z.union([z.number(), z.string()]),
+          z.union([z.number(), z.boolean()]),
+        ),
+      });
+      const account = await createJazzTestAccount();
+      const map = schema.create({ value: 42 }, account);
+      expect(map.value).toBe(42);
+    });
 
     it("should handle refined types", async () => {
       const schema = co.map({
@@ -509,6 +512,137 @@ describe("co.map and Zod schema compatibility", () => {
       const account = await createJazzTestAccount();
       const map = schema.create({ readonly: { name: "John" } }, account);
       expect(map.readonly).toEqual({ name: "John" });
+    });
+  });
+
+  describe("Codec types", () => {
+    class DateRange {
+      constructor(
+        public start: Date,
+        public end: Date,
+      ) {}
+
+      isDateInRange(date: Date) {
+        return date >= this.start && date <= this.end;
+      }
+    }
+
+    const dateRangeCodec = z.codec(
+      z.tuple([z.string(), z.string()]),
+      z.z.instanceof(DateRange),
+      {
+        encode: (value) =>
+          [value.start.toISOString(), value.end.toISOString()] as [
+            string,
+            string,
+          ],
+        decode: ([start, end]) => {
+          return new DateRange(new Date(start), new Date(end));
+        },
+      },
+    );
+
+    it("should handle codec field", async () => {
+      const schema = co.map({
+        range: dateRangeCodec,
+      });
+
+      const map = schema.create({
+        range: new DateRange(new Date("2025-01-01"), new Date("2025-01-31")),
+      });
+
+      expect(map.range.isDateInRange(new Date("2025-01-15"))).toEqual(true);
+    });
+
+    it("should handle codec field with RegExp", async () => {
+      const schema = co.map({
+        regexp: z.codec(z.string(), z.z.instanceof(RegExp), {
+          encode: (value) => value.toString(),
+          decode: (value) => {
+            const [, pattern, flags] = value.match(/^\/(.*)\/([a-z]*)$/i)!;
+            if (!pattern) throw new Error("Invalid RegExp string");
+            return new RegExp(pattern, flags);
+          },
+        }),
+      });
+
+      const map = schema.create({
+        regexp: /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/,
+      });
+
+      expect(map.regexp.test("2001-01-31")).toEqual(true);
+    });
+
+    it("should handle optional codec field", async () => {
+      const schema = co.map({
+        range: dateRangeCodec.optional(),
+      });
+      const map = schema.create({});
+
+      expect(map.range).toBeUndefined();
+      expect(map.$jazz.has("range")).toEqual(false);
+    });
+
+    it("should handle nullable codec field", async () => {
+      const schema = co.map({
+        range: dateRangeCodec.nullable(),
+      });
+      const map = schema.create({ range: null });
+
+      expect(map.range).toBeNull();
+
+      map.$jazz.set(
+        "range",
+        new DateRange(new Date("2025-01-01"), new Date("2025-01-31")),
+      );
+      expect(map.range?.isDateInRange(new Date("2025-01-15"))).toEqual(true);
+    });
+
+    it("should handle nullish codec field", async () => {
+      const schema = co.map({
+        range: dateRangeCodec.nullish(),
+      });
+
+      const map = schema.create({});
+      expect(map.range).toBeUndefined();
+      expect(map.$jazz.has("range")).toEqual(false);
+
+      map.$jazz.set("range", undefined);
+      expect(map.range).toBeUndefined();
+      expect(map.$jazz.has("range")).toEqual(true);
+
+      map.$jazz.set("range", null);
+      expect(map.range).toBeNull();
+
+      map.$jazz.set(
+        "range",
+        new DateRange(new Date("2025-01-01"), new Date("2025-01-31")),
+      );
+      expect(map.range?.isDateInRange(new Date("2025-01-15"))).toEqual(true);
+    });
+
+    it("should not handle codec field with unsupported inner field", async () => {
+      const schema = co.map({
+        record: z.codec(
+          z.z.map(z.string(), z.string()),
+          z.z.record(z.string(), z.string()),
+          {
+            encode: (value) => new Map(Object.entries(value)),
+            decode: (value) => Object.fromEntries(value.entries()),
+          },
+        ),
+      });
+
+      expect(() =>
+        schema.create({
+          record: {
+            key1: "value1",
+            key2: "value2",
+          },
+        }),
+      ).toThrow(
+        "z.codec() is only supported if the input schema is already supported. Unsupported zod type: map",
+      );
     });
   });
 });

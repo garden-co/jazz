@@ -1,0 +1,84 @@
+import { Alert, CodeGroup, ContentByFramework } from "@/components/forMdx";
+
+export const metadata = {
+  description: "Schema unions allow you to create types that can be one of several different schemas, similar to TypeScript union types."
+};
+
+# Schema Unions
+
+Schema unions allow you to create types that can be one of several different schemas, similar to TypeScript union types.
+They use a discriminator field to determine which specific schema an instance represents at runtime, enabling type-safe polymorphism in your Jazz applications.
+
+The following operations are not available in schema unions:
+
+* `$jazz.ensureLoaded`&hairsp;—&hairsp;use the union schema's `load` method, or narrow the type first
+* `$jazz.subscribe`&hairsp;—&hairsp;use the union schema's `subscribe` method
+* `$jazz.set`&hairsp;—&hairsp;use `$jazz.applyDiff`
+
+## Creating schema unions
+
+Schema unions are defined with `co.discriminatedUnion()` by providing an array of schemas and a discriminator field.
+The discriminator field must be a `z.literal()`.
+
+<CodeGroup>
+```ts schema.ts#SchemaUnion
+```
+</CodeGroup>
+
+To instantiate a schema union, just use the `create` method of one of the member schemas:
+
+<CodeGroup>
+```ts index.ts#Dashboard
+```
+</CodeGroup>
+
+You can also use plain JSON objects, and let Jazz infer the concrete type from the discriminator field:
+
+<CodeGroup>
+```ts index.ts#DashboardFromJSON
+```
+</CodeGroup>
+
+## Narrowing unions
+
+When working with schema unions, you can access any property that is common to all members of the union.
+To access properties specific to a particular union member, you need to narrow the type.
+You can do this using a [TypeScript type guard](https://www.typescriptlang.org/docs/handbook/2/narrowing.html) on the discriminator field:
+
+<CodeGroup>
+```ts index.ts#NarrowingUnions
+```
+</CodeGroup>
+
+## Loading schema unions
+
+You can load an instance of a schema union using its ID, without having to know its concrete type:
+
+<CodeGroup>
+```ts index.ts#LoadWidget
+```
+</CodeGroup>
+
+## Nested schema unions
+
+You can create complex hierarchies by nesting discriminated unions within other unions:
+
+<CodeGroup>
+```ts schema.ts#NestedUnions
+```
+</CodeGroup>
+
+## Limitations with schema unions
+
+Schema unions have some limitations that you should be aware of. They are due to TypeScript behaviour with type unions: when the type members of the union have methods with generic parameters, TypeScript will not allow calling those methods on the union type. This affects some of the methods on the `$jazz` namespace.
+
+Note that these methods may still work at runtime, but their use is not recommended as you will lose type safety.
+
+### `$jazz.ensureLoaded` and `$jazz.subscribe` require type narrowing
+
+The `$jazz.ensureLoaded` and `$jazz.subscribe` methods are not supported directly on a schema union unless you first narrow the type using the discriminator.
+
+### Updating union fields
+
+You can't use `$jazz.set` to modify a schema union's fields (even if the field is present in all the union members).
+Use `$jazz.applyDiff` instead.

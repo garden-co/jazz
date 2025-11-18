@@ -37,7 +37,7 @@ describe("co.optional", () => {
     });
   });
 
-  test("can use schem.optional() on all CoValue schemas but co.optional()", () => {
+  test("can use schema.optional() on all CoValue schemas but co.optional()", async () => {
     const Option1 = co.map({ type: z.literal("1") });
     const Option2 = co.map({ type: z.literal("2") });
     const Schema = co.map({
@@ -49,6 +49,7 @@ describe("co.optional", () => {
       map: co.map({ field: z.string() }).optional(),
       list: co.list(z.string()).optional(),
       feed: co.feed(z.string()).optional(),
+      account: co.account().optional(),
       union: co.discriminatedUnion("type", [Option1, Option2]).optional(),
     });
 
@@ -62,6 +63,7 @@ describe("co.optional", () => {
     expect(schema.map).toBeUndefined();
     expect(schema.list).toBeUndefined();
     expect(schema.feed).toBeUndefined();
+    expect(schema.account).toBeUndefined();
     expect(schema.union).toBeUndefined();
 
     schema.$jazz.set(
@@ -91,6 +93,11 @@ describe("co.optional", () => {
     );
     schema.$jazz.set("list", Schema.shape.list.innerType.create([]));
     schema.$jazz.set("feed", Schema.shape.feed.innerType.create([]));
+    const loadedAccount = await co
+      .account()
+      .getMe()
+      .$jazz.ensureLoaded({ resolve: { profile: true, root: true } });
+    schema.$jazz.set("account", loadedAccount);
     schema.$jazz.set("union", Option1.create({ type: "1" }));
 
     expect(schema.plainText?.toString()).toEqual("Hello");
@@ -101,6 +108,7 @@ describe("co.optional", () => {
     expect(schema.map?.field).toEqual("hello");
     expect(schema.list).toEqual([]);
     expect(schema.feed).not.toBeUndefined();
+    expect(schema.account?.profile.name).toEqual("Hermes Puggington");
     expect(schema.union?.type).toEqual("1");
   });
 

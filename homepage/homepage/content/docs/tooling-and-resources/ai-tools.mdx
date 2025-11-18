@@ -1,0 +1,62 @@
+import { ContentByFramework, FileDownloadLink, CodeGroup } from '@/components/forMdx'
+
+export const metadata = {
+  description: "Learn how to leverage AI tools when building Jazz apps. Use llms.txt to help LLMs understand Jazz."
+};
+
+# Using AI to build Jazz apps
+
+AI tools, particularly large language models (LLMs), can accelerate your development with Jazz. Searching docs, responding to questions and even helping you write code are all things that LLMs are starting to get good at.
+
+However, Jazz is a rapidly evolving framework, so sometimes AI might get things a little wrong.
+
+To help the LLMs, we provide the Jazz documentation in a txt file that is optimized for use with AI tools, like Cursor.
+
+<ContentByFramework framework="react">
+<FileDownloadLink href="/react/llms-full.txt">llms-full.txt</FileDownloadLink>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileDownloadLink href="/svelte/llms-full.txt">llms-full.txt</FileDownloadLink>
+</ContentByFramework>
+<ContentByFramework framework="react-native">
+  <FileDownloadLink href="/react-native/llms-full.txt">llms-full.txt</FileDownloadLink>
+</ContentByFramework>
+<ContentByFramework framework="react-native-expo">
+  <FileDownloadLink href="/react-native-expo/llms-full.txt">llms-full.txt</FileDownloadLink>
+</ContentByFramework>
+<ContentByFramework framework="vanilla">
+  <FileDownloadLink href="/vanilla/llms-full.txt">llms-full.txt</FileDownloadLink>
+</ContentByFramework>
+
+
+## Setting up AI tools
+
+Every tool is different, but generally, you'll need to either paste the contents of the [llms-full.txt](https://jazz.tools/llms-full.txt) file directly in your prompt, or attach the file to the tool.
+
+### ChatGPT and v0
+
+Upload the txt file in your prompt.
+
+![ChatGPT prompt with llms-full.txt attached](/chatgpt-with-llms-full-txt.jpg)
+
+### Cursor
+
+1. Go to Settings > Cursor Settings > Features > Docs
+2. Click "Add new doc"
+3. Enter the following URL:
+
+<CodeGroup>
+```
+https://jazz.tools/llms-full.txt
+```
+</CodeGroup>
+
+## llms.txt convention
+
+We follow the llms.txt [proposed standard](https://llmstxt.org/) for providing documentation to AI tools at inference time that helps them understand the context of the code you're writing.
+
+## Limitations and considerations
+
+AI is amazing, but it's not perfect. What works well this week could break next week (or be twice as good).
+
+We're keen to keep up with changes in tooling to help support you building the best apps, but if you need help from humans (or you have issues getting set up), please let us know on [Discord](https://discord.gg/utDMjHYg42).

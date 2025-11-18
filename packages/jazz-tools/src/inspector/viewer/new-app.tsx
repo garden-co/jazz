@@ -91,8 +91,8 @@ export function JazzInspectorInternal({
     <InspectorContainer as={GlobalStyles} style={{ zIndex: 999 }}>
       <HeaderContainer>
         <Breadcrumbs path={path} onBreadcrumbClick={goToIndex} />
-        <Form onSubmit={handleCoValueIdSubmit}>
-          {path.length !== 0 && (
+        {path.length !== 0 && (
+          <Form onSubmit={handleCoValueIdSubmit}>
             <Input
               label="CoValue ID"
               style={{ fontFamily: "monospace" }}
@@ -101,8 +101,8 @@ export function JazzInspectorInternal({
               value={coValueId}
               onChange={(e) => setCoValueId(e.target.value as CoID<RawCoValue>)}
             />
-          )}
-        </Form>
+          </Form>
+        )}
         <DeleteLocalData />
         <Button variant="plain" type="button" onClick={() => setOpen(false)}>
           Close

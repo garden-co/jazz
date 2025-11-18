@@ -217,24 +217,24 @@ test("When adding large transactions (small fraction of MAX_RECOMMENDED_TX_SIZE)
   expect(sessionEntry.signatureAfter[10]).not.toBeDefined();
   expect(sessionEntry.signatureAfter[11]).not.toBeDefined();
 
-  const newContent = coValue.verified.newContentSince({
+  const newContent = coValue.newContentSince({
     id: coValue.id,
     header: false,
     sessions: {},
   })!;
 
-  expect(newContent.length).toEqual(5);
+  expect(newContent.length).toEqual(4);
   expect(newContent[0]!.header).toBeDefined();
-  expect(newContent[1]!.new[node.currentSessionID]!.lastSignature).toEqual(
+  expect(newContent[0]!.new[node.currentSessionID]!.lastSignature).toEqual(
     sessionEntry.signatureAfter[3],
   );
-  expect(newContent[2]!.new[node.currentSessionID]!.lastSignature).toEqual(
+  expect(newContent[1]!.new[node.currentSessionID]!.lastSignature).toEqual(
     sessionEntry.signatureAfter[6],
   );
-  expect(newContent[3]!.new[node.currentSessionID]!.lastSignature).toEqual(
+  expect(newContent[2]!.new[node.currentSessionID]!.lastSignature).toEqual(
     sessionEntry.signatureAfter[9],
   );
-  expect(newContent[4]!.new[node.currentSessionID]!.lastSignature).toEqual(
+  expect(newContent[3]!.new[node.currentSessionID]!.lastSignature).toEqual(
     sessionEntry.lastSignature,
   );
 });
@@ -286,24 +286,24 @@ test("When adding large transactions (bigger than MAX_RECOMMENDED_TX_SIZE), we s
   expect(sessionEntry.signatureAfter[3]).toBeDefined();
   expect(sessionEntry.signatureAfter[4]).not.toBeDefined();
 
-  const newContent = coValue.verified.newContentSince({
+  const newContent = coValue.newContentSince({
     id: coValue.id,
     header: false,
     sessions: {},
   })!;
 
-  expect(newContent.length).toEqual(5);
+  expect(newContent.length).toEqual(4);
   expect(newContent[0]!.header).toBeDefined();
-  expect(newContent[1]!.new[node.currentSessionID]!.lastSignature).toEqual(
+  expect(newContent[0]!.new[node.currentSessionID]!.lastSignature).toEqual(
     sessionEntry.signatureAfter[1],
   );
-  expect(newContent[2]!.new[node.currentSessionID]!.lastSignature).toEqual(
+  expect(newContent[1]!.new[node.currentSessionID]!.lastSignature).toEqual(
     sessionEntry.signatureAfter[2],
   );
-  expect(newContent[3]!.new[node.currentSessionID]!.lastSignature).toEqual(
+  expect(newContent[2]!.new[node.currentSessionID]!.lastSignature).toEqual(
     sessionEntry.signatureAfter[3],
   );
-  expect(newContent[4]!.new[node.currentSessionID]!.lastSignature).toEqual(
+  expect(newContent[3]!.new[node.currentSessionID]!.lastSignature).toEqual(
     sessionEntry.lastSignature,
   );
 });
@@ -516,4 +516,32 @@ describe("Binary stream order", () => {
     expect(testView.testCompareItems(itemA, itemB)).toBeLessThan(0);
     expect(testView.testCompareItems(itemB, itemA)).toBeGreaterThan(0);
   });
+});
+
+test("the stream should rebuild when the group permissions change", async () => {
+  const alice = setupTestNode({
+    connected: true,
+  });
+  const group = alice.node.createGroup();
+  const stream = group.createStream();
+
+  stream.push("fromAdmin");
+
+  const bob = setupTestNode({
+    connected: true,
+  });
+
+  const streamOnBob = await loadCoValueOrFail(bob.node, stream.id);
+
+  expect(Object.keys(streamOnBob.toJSON()).length).toEqual(0);
+  expect(streamOnBob.totalValidTransactions).toEqual(0);
+
+  group.addMember("everyone", "reader");
+
+  await waitFor(() => {
+    expect(streamOnBob.getSingleStream()).toEqual(["fromAdmin"]);
+  });
+
+  expect(streamOnBob.version).toEqual(1);
+  expect(streamOnBob.totalValidTransactions).toEqual(1);
 });

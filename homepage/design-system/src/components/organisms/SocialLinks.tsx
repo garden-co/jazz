@@ -40,12 +40,16 @@ const socials = [
   },
 ];
 
-export function SocialLinks(props: SocialLinksProps & { className?: string }) {
+export function SocialLinks(
+  props: SocialLinksProps & {
+    className?: string;
+  },
+) {
   return (
     <div
       className={clsx(
         props.className,
-        "inline-flex gap-3 items-center sm:gap-6",
+        "inline-flex gap-3 items-center sm:gap-4 lg:gap-6",
       )}
     >
       {socials.map(
@@ -56,7 +60,7 @@ export function SocialLinks(props: SocialLinksProps & { className?: string }) {
               href={props[social.key as keyof SocialLinksProps]}
               target="_blank"
               rel="noreferrer"
-              className="flex hover:text-stone-900 hover:dark:text-white"
+              className="flex hover:text-stone-900 dark:hover:text-white"
             >
               <social.icon size={social.size} />
               <span className="sr-only">{social.name}</span>

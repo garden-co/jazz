@@ -22,59 +22,55 @@ const {
   syncServer: "wss://cloud.jazz.tools/?key=jazz-paper-scissors@garden.co ",
 });
 
-inbox.subscribe(
-  InboxMessage,
-  async (message, senderID) => {
-    const playerAccount = await co.account().load(senderID, { loadAs: worker });
-    if (!playerAccount) {
-      return;
-    }
+inbox.subscribe(InboxMessage, async (message, senderID) => {
+  const playerAccount = await co.account().load(senderID, { loadAs: worker });
+  if (!playerAccount.$isLoaded) {
+    return;
+  }
 
-    switch (message.type) {
-      case "play":
-        handlePlayIntent(senderID, message);
-        break;
+  switch (message.type) {
+    case "play":
+      handlePlayIntent(senderID, message);
+      break;
 
-      case "newGame":
-        handleNewGameIntent(senderID, message);
-        break;
+    case "newGame":
+      handleNewGameIntent(senderID, message);
+      break;
 
-      case "createGame":
-        const waitingRoomGroup = Group.create({ owner: worker });
-        waitingRoomGroup.addMember("everyone", "reader");
-        const waitingRoom = WaitingRoom.create(
-          { account1: playerAccount },
-          { owner: waitingRoomGroup },
-        );
+    case "createGame":
+      const waitingRoomGroup = Group.create({ owner: worker });
+      waitingRoomGroup.addMember("everyone", "reader");
+      const waitingRoom = WaitingRoom.create(
+        { account1: playerAccount },
+        { owner: waitingRoomGroup },
+      );
 
-        console.log("waiting room created with id:", waitingRoom.$jazz.id);
-        return waitingRoom;
+      console.log("waiting room created with id:", waitingRoom.$jazz.id);
+      return waitingRoom;
 
-      case "joinGame":
-        const joinGameRequest = message;
-        if (
-          !joinGameRequest.waitingRoom ||
-          !joinGameRequest.waitingRoom.account1
-        ) {
-          console.error("No waiting room in join game request");
-          return;
-        }
+    case "joinGame":
+      const joinGameRequest = message;
+      if (
+        !joinGameRequest.waitingRoom ||
+        !joinGameRequest.waitingRoom.account1
+      ) {
+        console.error("No waiting room in join game request");
+        return;
+      }
 
-        // @ts-expect-error - https://github.com/garden-co/jazz/issues/1332
-        joinGameRequest.waitingRoom.account2 = playerAccount;
+      // @ts-expect-error - https://github.com/garden-co/jazz/issues/1332
+      joinGameRequest.waitingRoom.$jazz.set("account2", playerAccount);
 
-        const game = await createGame({
-          account1: joinGameRequest.waitingRoom.account1,
-          account2: joinGameRequest.waitingRoom.account2!,
-        });
-        console.log("game created with id:", game.$jazz.id);
+      const game = await createGame({
+        account1: joinGameRequest.waitingRoom.account1,
+        account2: joinGameRequest.waitingRoom.account2!,
+      });
+      console.log("game created with id:", game.$jazz.id);
 
-        joinGameRequest.waitingRoom.$jazz.set("game", game);
-        return joinGameRequest.waitingRoom.game;
-    }
-  },
-  { retries: 3 },
-);
+      joinGameRequest.waitingRoom.$jazz.set("game", game);
+      return joinGameRequest.waitingRoom.game;
+  }
+});
 
 console.log("worker", worker.$jazz.id, "started");
 
@@ -135,7 +131,7 @@ async function handleNewGameIntent(_: string, message: NewGameIntent) {
     },
   });
 
-  if (!game) {
+  if (!game.$isLoaded) {
     throw new Error("Game not found");
   }
 
@@ -165,7 +161,7 @@ async function handlePlayIntent(_: string, message: PlayIntent) {
     },
   });
 
-  if (!game) {
+  if (!game.$isLoaded) {
     throw new Error("Game not found");
   }
 

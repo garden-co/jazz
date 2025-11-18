@@ -39,4 +39,5 @@ export {
   linkAccounts,
   setActiveAccount,
   setupJazzTestSync,
+  MockConnectionStatus,
 } from "jazz-tools/testing";

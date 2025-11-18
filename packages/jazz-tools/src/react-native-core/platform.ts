@@ -46,7 +46,7 @@ async function setupPeers(options: BaseReactNativeContextOptions) {
   const crypto = await CryptoProvider.create();
   let node: LocalNode | undefined = undefined;
 
-  const peersToLoadFrom: Peer[] = [];
+  const peers: Peer[] = [];
 
   const storage =
     options.storage && options.storage !== "disabled"
@@ -56,7 +56,9 @@ async function setupPeers(options: BaseReactNativeContextOptions) {
   if (options.sync.when === "never") {
     return {
       toggleNetwork: () => {},
-      peersToLoadFrom,
+      addConnectionListener: () => () => {},
+      connected: () => false,
+      peers,
       setNode: () => {},
       crypto,
       storage,
@@ -70,11 +72,11 @@ async function setupPeers(options: BaseReactNativeContextOptions) {
       if (node) {
         node.syncManager.addPeer(peer);
       } else {
-        peersToLoadFrom.push(peer);
+        peers.push(peer);
       }
     },
     removePeer: (peer) => {
-      peersToLoadFrom.splice(peersToLoadFrom.indexOf(peer), 1);
+      peers.splice(peers.indexOf(peer), 1);
     },
   });
 
@@ -96,7 +98,15 @@ async function setupPeers(options: BaseReactNativeContextOptions) {
 
   return {
     toggleNetwork,
-    peersToLoadFrom,
+    addConnectionListener(listener: (connected: boolean) => void) {
+      wsPeer.subscribe(listener);
+
+      return () => {
+        wsPeer.unsubscribe(listener);
+      };
+    },
+    connected: () => wsPeer.connected,
+    peers,
     setNode,
     crypto,
     storage,
@@ -106,12 +116,19 @@ async function setupPeers(options: BaseReactNativeContextOptions) {
 export async function createJazzReactNativeGuestContext(
   options: BaseReactNativeContextOptions,
 ) {
-  const { toggleNetwork, peersToLoadFrom, setNode, crypto, storage } =
-    await setupPeers(options);
+  const {
+    toggleNetwork,
+    peers,
+    setNode,
+    crypto,
+    storage,
+    addConnectionListener,
+    connected,
+  } = await setupPeers(options);
 
   const context = createAnonymousJazzContext({
     crypto,
-    peersToLoadFrom,
+    peers,
     storage,
   });
 
@@ -130,6 +147,8 @@ export async function createJazzReactNativeGuestContext(
     logOut: () => {
       return context.logOut();
     },
+    addConnectionListener,
+    connected,
   };
 }
 
@@ -149,8 +168,15 @@ export async function createJazzReactNativeContext<
     | (AccountClass<Account> & CoValueFromRaw<Account>)
     | AnyAccountSchema,
 >(options: ReactNativeContextOptions<S>) {
-  const { toggleNetwork, peersToLoadFrom, setNode, crypto, storage } =
-    await setupPeers(options);
+  const {
+    toggleNetwork,
+    peers,
+    setNode,
+    crypto,
+    storage,
+    addConnectionListener,
+    connected,
+  } = await setupPeers(options);
 
   let unsubscribeAuthUpdate = () => {};
 
@@ -176,7 +202,7 @@ export async function createJazzReactNativeContext<
   const context = await createJazzContext({
     credentials: options.credentials,
     newAccountProps: options.newAccountProps,
-    peersToLoadFrom,
+    peers,
     crypto,
     defaultProfileName: options.defaultProfileName,
     AccountSchema: options.AccountSchema,
@@ -201,6 +227,8 @@ export async function createJazzReactNativeContext<
       unsubscribeAuthUpdate();
       return context.logOut();
     },
+    addConnectionListener,
+    connected,
   };
 }
 

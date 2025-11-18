@@ -17,14 +17,18 @@ import {
   TypeSym,
   activeAccountContext,
   coValueClassFromCoValueClassOrSchema,
+  CoValueLoadingState,
+  exportCoValue,
+  MaybeLoaded,
 } from "../internal.js";
 import {
   createJazzTestAccount,
+  disableJazzTestSync,
   getPeerConnectedToTestSyncServer,
   runWithoutActiveAccount,
   setupJazzTestSync,
 } from "../testing.js";
-import { setupTwoNodes, waitFor } from "./utils.js";
+import { assertLoaded, setupTwoNodes, waitFor } from "./utils.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -499,7 +503,7 @@ describe("CoMap", async () => {
       });
 
       expect(loadedPersonA).not.toBeNull();
-      assert(loadedPersonA);
+      assertLoaded(loadedPersonA);
 
       const personB = Person.create({
         name: "Jane",
@@ -846,9 +850,11 @@ describe("CoMap", async () => {
         loadAs: clientAccount,
       });
 
-      assert(loadedPerson);
+      assertLoaded(loadedPerson);
       expect(loadedPerson.$jazz.has("name")).toBe(true);
-      expect(loadedPerson.name).toBeNull();
+      expect(loadedPerson.name.$jazz.loadingState).toBe(
+        CoValueLoadingState.LOADING,
+      );
     });
 
     test("should return true even if the viewer doesn't have access to the referenced CoValue", async () => {
@@ -870,9 +876,11 @@ describe("CoMap", async () => {
         loadAs: userB,
       });
 
-      assert(loadedPerson);
+      assertLoaded(loadedPerson);
       expect(loadedPerson.$jazz.has("name")).toBe(true);
-      expect(loadedPerson.name).toBeNull();
+      expect(loadedPerson.name.$jazz.loadingState).toBe(
+        CoValueLoadingState.LOADING,
+      );
     });
   });
 
@@ -937,7 +945,7 @@ describe("CoMap resolution", async () => {
       },
     });
 
-    assert(loadedPerson);
+    assertLoaded(loadedPerson);
     expect(loadedPerson.dog.name).toEqual("Rex");
   });
 
@@ -961,8 +969,9 @@ describe("CoMap resolution", async () => {
 
     const loadedPerson = await Person.load(person.$jazz.id);
 
-    assert(loadedPerson);
-    expect(loadedPerson.dog?.name).toEqual("Rex");
+    assertLoaded(loadedPerson);
+    assertLoaded(loadedPerson.dog);
+    expect(loadedPerson.dog.name).toEqual("Rex");
   });
 
   test("loading a remotely available map with deep resolve", async () => {
@@ -998,7 +1007,7 @@ describe("CoMap resolution", async () => {
       loadAs: userB,
     });
 
-    assert(loadedPerson);
+    assertLoaded(loadedPerson);
     expect(loadedPerson.dog.name).toEqual("Rex");
   });
 
@@ -1031,10 +1040,11 @@ describe("CoMap resolution", async () => {
       loadAs: userB,
     });
 
-    assert(loadedPerson);
+    assertLoaded(loadedPerson);
 
     await waitFor(() => {
-      expect(loadedPerson.dog?.name).toEqual("Rex");
+      assertLoaded(loadedPerson.dog);
+      expect(loadedPerson.dog.name).toEqual("Rex");
     });
   });
 
@@ -1082,7 +1092,9 @@ describe("CoMap resolution", async () => {
       skipRetry: true,
     });
 
-    expect(loadedPerson).toBeNull();
+    expect(loadedPerson.$jazz.loadingState).toBe(
+      CoValueLoadingState.UNAVAILABLE,
+    );
   });
 
   test("loading a remotely available map with skipRetry set to false", async () => {
@@ -1143,11 +1155,36 @@ describe("CoMap resolution", async () => {
     const loadedPerson = await promise;
 
     expect(resolved).toBe(true);
-    assert(loadedPerson);
+    assertLoaded(loadedPerson);
 
     await waitFor(() => {
-      expect(loadedPerson.dog?.name).toEqual("Rex");
+      assertLoaded(loadedPerson.dog);
+      expect(loadedPerson.dog.name).toEqual("Rex");
     });
+  });
+
+  test("obtaining coMap refs", async () => {
+    const Dog = co.map({
+      name: z.string().optional(),
+      breed: z.string(),
+      owner: co.plainText(),
+      get parent() {
+        return co.optional(Dog);
+      },
+    });
+
+    const dog = Dog.create({
+      name: "Rex",
+      breed: "Labrador",
+      owner: "John",
+      parent: { name: "Fido", breed: "Labrador", owner: "Jane" },
+    });
+
+    const refs = dog.$jazz.refs;
+
+    expect(Object.keys(refs)).toEqual(["owner", "parent"]);
+    expect(refs.owner.id).toEqual(dog.owner.$jazz.id);
+    expect(refs.parent?.id).toEqual(dog.parent!.$jazz.id);
   });
 
   test("accessing the value refs", async () => {
@@ -1179,13 +1216,13 @@ describe("CoMap resolution", async () => {
       loadAs: userB,
     });
 
-    assert(loadedPerson);
+    assertLoaded(loadedPerson);
 
-    expect(loadedPerson.$jazz.refs.dog?.id).toBe(person.dog!.$jazz.id);
+    expect(loadedPerson.$jazz.refs.dog.id).toBe(person.dog.$jazz.id);
 
-    const dog = await loadedPerson.$jazz.refs.dog?.load();
+    const dog = await loadedPerson.$jazz.refs.dog.load();
 
-    assert(dog);
+    assertLoaded(dog);
 
     expect(dog.name).toEqual("Rex");
   });
@@ -1267,13 +1304,17 @@ describe("CoMap resolution", async () => {
 
     expect(spy).toHaveBeenCalledTimes(1);
 
-    expect(updates[0]?.dog?.name).toEqual("Rex");
+    assert(updates[0]);
+    assertLoaded(updates[0].dog);
+    expect(updates[0].dog.name).toEqual("Rex");
 
-    person.dog!.$jazz.set("name", "Fido");
+    person.dog.$jazz.set("name", "Fido");
 
     await waitFor(() => expect(spy).toHaveBeenCalledTimes(2));
 
-    expect(updates[1]?.dog?.name).toEqual("Fido");
+    assert(updates[1]);
+    assertLoaded(updates[1].dog);
+    expect(updates[1].dog.name).toEqual("Fido");
 
     expect(spy).toHaveBeenCalledTimes(2);
   });
@@ -1312,15 +1353,19 @@ describe("CoMap resolution", async () => {
     expect(spy).toHaveBeenCalled();
     expect(spy).toHaveBeenCalledTimes(1);
 
-    expect(updates[0]?.dog?.name).toEqual("Rex");
+    assert(updates[0]);
+    assertLoaded(updates[0].dog);
+    expect(updates[0].dog.name).toEqual("Rex");
 
     expect(spy).toHaveBeenCalledTimes(1);
 
-    person.dog!.$jazz.set("name", "Fido");
+    person.dog.$jazz.set("name", "Fido");
 
     expect(spy).toHaveBeenCalledTimes(2);
 
-    expect(updates[1]?.dog?.name).toEqual("Fido");
+    assert(updates[1]);
+    assertLoaded(updates[1].dog);
+    expect(updates[1].dog.name).toEqual("Fido");
 
     expect(spy).toHaveBeenCalledTimes(2);
   });
@@ -1426,14 +1471,18 @@ describe("CoMap resolution", async () => {
     expect(spy).toHaveBeenCalledTimes(1);
 
     await waitFor(() => {
-      expect(updates[0]?.dog?.name).toEqual("Rex");
+      assert(updates[0]);
+      assertLoaded(updates[0].dog);
+      expect(updates[0].dog.name).toEqual("Rex");
     });
 
-    person.dog!.$jazz.set("name", "Fido");
+    person.dog.$jazz.set("name", "Fido");
 
     await waitFor(() => expect(spy).toHaveBeenCalledTimes(3));
 
-    expect(updates[1]?.dog?.name).toEqual("Fido");
+    assert(updates[1]);
+    assertLoaded(updates[1].dog);
+    expect(updates[1].dog.name).toEqual("Fido");
 
     expect(spy).toHaveBeenCalledTimes(3);
   });
@@ -1807,440 +1856,7 @@ describe("CoMap Typescript validation", async () => {
 
     const loadedMap = await serverNode.load(map.$jazz.raw.id);
 
-    expect(loadedMap).not.toBe("unavailable");
-  });
-});
-
-describe("Creating and finding unique CoMaps", async () => {
-  test("Creating and finding unique CoMaps", async () => {
-    const group = Group.create();
-
-    const Person = co.map({
-      name: z.string(),
-      _height: z.number(),
-      birthday: z.date(),
-      color: z.string(),
-    });
-
-    const alice = Person.create(
-      {
-        name: "Alice",
-        _height: 100,
-        birthday: new Date("1990-01-01"),
-        color: "red",
-      },
-      { owner: group, unique: { name: "Alice" } },
-    );
-
-    const foundAlice = await Person.loadUnique(
-      { name: "Alice" },
-      group.$jazz.id,
-    );
-    expect(foundAlice).toEqual(alice);
-  });
-
-  test("manual upserting pattern", async () => {
-    // Schema
-    const Event = co.map({
-      title: z.string(),
-      identifier: z.string(),
-      external_id: z.string(),
-    });
-
-    // Data
-    const sourceData = {
-      title: "Test Event Title",
-      identifier: "test-event-identifier",
-      _id: "test-event-external-id",
-    };
-    const workspace = Group.create();
-
-    // Pattern
-    let activeEvent = await Event.loadUnique(
-      { identifier: sourceData.identifier },
-      workspace.$jazz.id,
-    );
-    if (!activeEvent) {
-      activeEvent = Event.create(
-        {
-          title: sourceData.title,
-          identifier: sourceData.identifier,
-          external_id: sourceData._id,
-        },
-        workspace,
-      );
-    } else {
-      activeEvent.$jazz.applyDiff({
-        title: sourceData.title,
-        identifier: sourceData.identifier,
-        external_id: sourceData._id,
-      });
-    }
-    expect(activeEvent).toEqual({
-      title: sourceData.title,
-      identifier: sourceData.identifier,
-      external_id: sourceData._id,
-    });
-  });
-
-  test("upserting a non-existent value", async () => {
-    // Schema
-    const Event = co.map({
-      title: z.string(),
-      identifier: z.string(),
-      external_id: z.string(),
-    });
-
-    // Data
-    const sourceData = {
-      title: "Test Event Title",
-      identifier: "test-event-identifier",
-      _id: "test-event-external-id",
-    };
-    const workspace = Group.create();
-
-    // Upserting
-    const activeEvent = await Event.upsertUnique({
-      value: {
-        title: sourceData.title,
-        identifier: sourceData.identifier,
-        external_id: sourceData._id,
-      },
-      unique: sourceData.identifier,
-      owner: workspace,
-    });
-    expect(activeEvent).toEqual({
-      title: sourceData.title,
-      identifier: sourceData.identifier,
-      external_id: sourceData._id,
-    });
-  });
-
-  test("upserting without an active account", async () => {
-    const account = activeAccountContext.get();
-
-    // Schema
-    const Event = co.map({
-      title: z.string(),
-      identifier: z.string(),
-      external_id: z.string(),
-    });
-
-    // Data
-    const sourceData = {
-      title: "Test Event Title",
-      identifier: "test-event-identifier",
-      _id: "test-event-external-id",
-    };
-
-    const activeEvent = await runWithoutActiveAccount(() => {
-      return Event.upsertUnique({
-        value: {
-          title: sourceData.title,
-          identifier: sourceData.identifier,
-          external_id: sourceData._id,
-        },
-        unique: sourceData.identifier,
-        owner: account,
-      });
-    });
-
-    expect(activeEvent).toEqual({
-      title: sourceData.title,
-      identifier: sourceData.identifier,
-      external_id: sourceData._id,
-    });
-
-    assert(activeEvent);
-
-    expect(activeEvent.$jazz.owner).toEqual(account);
-  });
-
-  test("upserting an existing value", async () => {
-    // Schema
-    const Event = co.map({
-      title: z.string(),
-      identifier: z.string(),
-      external_id: z.string(),
-    });
-
-    // Data
-    const oldSourceData = {
-      title: "Old Event Title",
-      identifier: "test-event-identifier",
-      _id: "test-event-external-id",
-    };
-    const newSourceData = {
-      title: "New Event Title",
-      identifier: "test-event-identifier",
-      _id: "test-event-external-id",
-    };
-    expect(oldSourceData.identifier).toEqual(newSourceData.identifier);
-    const workspace = Group.create();
-    const oldActiveEvent = Event.create(
-      {
-        title: oldSourceData.title,
-        identifier: oldSourceData.identifier,
-        external_id: oldSourceData._id,
-      },
-      workspace,
-    );
-
-    // Upserting
-    const activeEvent = await Event.upsertUnique({
-      value: {
-        title: newSourceData.title,
-        identifier: newSourceData.identifier,
-        external_id: newSourceData._id,
-      },
-      unique: newSourceData.identifier,
-      owner: workspace,
-    });
-    expect(activeEvent).toEqual({
-      title: newSourceData.title,
-      identifier: newSourceData.identifier,
-      external_id: newSourceData._id,
-    });
-    expect(activeEvent).not.toEqual(oldActiveEvent);
-  });
-
-  test("upserting a non-existent value with resolve", async () => {
-    const Project = co.map({
-      name: z.string(),
-    });
-    const Organisation = co.map({
-      name: z.string(),
-      projects: co.list(Project),
-    });
-    const workspace = Group.create();
-
-    const myOrg = await Organisation.upsertUnique({
-      value: {
-        name: "My organisation",
-        projects: co.list(Project).create(
-          [
-            Project.create(
-              {
-                name: "My project",
-              },
-              workspace,
-            ),
-          ],
-          workspace,
-        ),
-      },
-      unique: { name: "My organisation" },
-      owner: workspace,
-      resolve: {
-        projects: {
-          $each: true,
-        },
-      },
-    });
-    assert(myOrg);
-    expect(myOrg).not.toBeNull();
-    expect(myOrg.name).toEqual("My organisation");
-    expect(myOrg.projects.length).toBe(1);
-    expect(myOrg.projects[0]).toMatchObject({
-      name: "My project",
-    });
-  });
-
-  test("upserting an existing value with resolve", async () => {
-    const Project = co.map({
-      name: z.string(),
-    });
-    const Organisation = co.map({
-      name: z.string(),
-      projects: co.list(Project),
-    });
-    const workspace = Group.create();
-    const initialProject = await Project.upsertUnique({
-      value: {
-        name: "My project",
-      },
-      unique: { unique: "First project" },
-      owner: workspace,
-    });
-    assert(initialProject);
-    expect(initialProject).not.toBeNull();
-    expect(initialProject.name).toEqual("My project");
-
-    const myOrg = await Organisation.upsertUnique({
-      value: {
-        name: "My organisation",
-        projects: co.list(Project).create([initialProject], workspace),
-      },
-      unique: { name: "My organisation" },
-      owner: workspace,
-      resolve: {
-        projects: {
-          $each: true,
-        },
-      },
-    });
-    assert(myOrg);
-    expect(myOrg).not.toBeNull();
-    expect(myOrg.name).toEqual("My organisation");
-    expect(myOrg.projects.length).toBe(1);
-    expect(myOrg.projects.at(0)?.name).toEqual("My project");
-
-    const updatedProject = await Project.upsertUnique({
-      value: {
-        name: "My updated project",
-      },
-      unique: { unique: "First project" },
-      owner: workspace,
-    });
-
-    assert(updatedProject);
-    expect(updatedProject).not.toBeNull();
-    expect(updatedProject).toEqual(initialProject);
-    expect(updatedProject.name).toEqual("My updated project");
-    expect(myOrg.projects.length).toBe(1);
-    expect(myOrg.projects.at(0)?.name).toEqual("My updated project");
-  });
-
-  test("upserting a partially loaded value on an new value with resolve", async () => {
-    const Project = co.map({
-      name: z.string(),
-    });
-    const Organisation = co.map({
-      name: z.string(),
-      projects: co.list(Project),
-    });
-    const publicAccess = Group.create();
-    publicAccess.addMember("everyone", "writer");
-
-    const initialProject = await Project.upsertUnique({
-      value: {
-        name: "My project",
-      },
-      unique: { unique: "First project" },
-      owner: publicAccess,
-    });
-    assert(initialProject);
-    expect(initialProject).not.toBeNull();
-    expect(initialProject.name).toEqual("My project");
-
-    const fullProjectList = co
-      .list(Project)
-      .create([initialProject], publicAccess);
-
-    const account = await createJazzTestAccount({
-      isCurrentActiveAccount: true,
-    });
-
-    const shallowProjectList = await co
-      .list(Project)
-      .load(fullProjectList.$jazz.id, {
-        loadAs: account,
-      });
-    assert(shallowProjectList);
-
-    const publicAccessAsNewAccount = await Group.load(publicAccess.$jazz.id, {
-      loadAs: account,
-    });
-    assert(publicAccessAsNewAccount);
-
-    const updatedOrg = await Organisation.upsertUnique({
-      value: {
-        name: "My organisation",
-        projects: shallowProjectList,
-      },
-      unique: { name: "My organisation" },
-      owner: publicAccessAsNewAccount,
-      resolve: {
-        projects: {
-          $each: true,
-        },
-      },
-    });
-
-    assert(updatedOrg);
-
-    expect(updatedOrg.projects.$jazz.id).toEqual(fullProjectList.$jazz.id);
-    expect(updatedOrg.projects.length).toBe(1);
-    expect(updatedOrg.projects.at(0)?.name).toEqual("My project");
-  });
-
-  test("upserting a partially loaded value on an existing value with resolve", async () => {
-    const Project = co.map({
-      name: z.string(),
-    });
-    const Organisation = co.map({
-      name: z.string(),
-      projects: co.list(Project),
-    });
-    const publicAccess = Group.create();
-    publicAccess.addMember("everyone", "writer");
-
-    const initialProject = await Project.upsertUnique({
-      value: {
-        name: "My project",
-      },
-      unique: { unique: "First project" },
-      owner: publicAccess,
-    });
-    assert(initialProject);
-    expect(initialProject).not.toBeNull();
-    expect(initialProject.name).toEqual("My project");
-
-    const myOrg = await Organisation.upsertUnique({
-      value: {
-        name: "My organisation",
-        projects: co.list(Project).create([], publicAccess),
-      },
-      unique: { name: "My organisation" },
-      owner: publicAccess,
-      resolve: {
-        projects: {
-          $each: true,
-        },
-      },
-    });
-    assert(myOrg);
-
-    const fullProjectList = co
-      .list(Project)
-      .create([initialProject], publicAccess);
-
-    const account = await createJazzTestAccount({
-      isCurrentActiveAccount: true,
-    });
-
-    const shallowProjectList = await co
-      .list(Project)
-      .load(fullProjectList.$jazz.id, {
-        loadAs: account,
-      });
-    assert(shallowProjectList);
-
-    const publicAccessAsNewAccount = await Group.load(publicAccess.$jazz.id, {
-      loadAs: account,
-    });
-    assert(publicAccessAsNewAccount);
-
-    const updatedOrg = await Organisation.upsertUnique({
-      value: {
-        name: "My organisation",
-        projects: shallowProjectList,
-      },
-      unique: { name: "My organisation" },
-      owner: publicAccessAsNewAccount,
-      resolve: {
-        projects: {
-          $each: true,
-        },
-      },
-    });
-
-    assert(updatedOrg);
-
-    expect(updatedOrg.projects.$jazz.id).toEqual(fullProjectList.$jazz.id);
-    expect(updatedOrg.projects.length).toBe(1);
-    expect(updatedOrg.projects.at(0)?.name).toEqual("My project");
-    expect(updatedOrg.$jazz.id).toEqual(myOrg.$jazz.id);
+    expect(loadedMap).not.toBe(CoValueLoadingState.UNAVAILABLE);
   });
 
   test("complex discriminated union", () => {
@@ -2429,9 +2045,10 @@ describe("CoMap migration", () => {
 
     const loadedPerson = await Person.load(person.$jazz.id);
 
-    expect(loadedPerson?.name).toEqual("Bob");
-    expect(loadedPerson?.age).toEqual(20);
-    expect(loadedPerson?.version).toEqual(2);
+    assertLoaded(loadedPerson);
+    expect(loadedPerson.name).toEqual("Bob");
+    expect(loadedPerson.age).toEqual(20);
+    expect(loadedPerson.version).toEqual(2);
   });
 
   test("should handle group updates", async () => {
@@ -2458,8 +2075,9 @@ describe("CoMap migration", () => {
 
     const loadedPerson = await Person.load(person.$jazz.id);
 
-    expect(loadedPerson?.name).toEqual("Bob");
-    expect(loadedPerson?.version).toEqual(2);
+    assertLoaded(loadedPerson);
+    expect(loadedPerson.name).toEqual("Bob");
+    expect(loadedPerson.version).toEqual(2);
 
     const anotherAccount = await createJazzTestAccount();
 
@@ -2467,7 +2085,8 @@ describe("CoMap migration", () => {
       loadAs: anotherAccount,
     });
 
-    expect(loadedPersonFromAnotherAccount?.name).toEqual("Bob");
+    assertLoaded(loadedPersonFromAnotherAccount);
+    expect(loadedPersonFromAnotherAccount.name).toEqual("Bob");
   });
 
   test("should throw an error if a migration is async", async () => {
@@ -2553,11 +2172,149 @@ describe("CoMap migration", () => {
     });
 
     // Migration should run on both the person and their friend
-    expect(loaded?.name).toEqual("Bob");
-    expect(loaded?.age).toEqual(20);
-    expect(loaded?.version).toEqual(2);
-    expect(loaded?.friend?.name).toEqual("Charlie");
-    expect(loaded?.friend?.version).toEqual(2);
+    assertLoaded(loaded);
+    expect(loaded.name).toEqual("Bob");
+    expect(loaded.age).toEqual(20);
+    expect(loaded.version).toEqual(2);
+    expect(loaded.friend?.name).toEqual("Charlie");
+    expect(loaded.friend?.version).toEqual(2);
+  });
+
+  test("should wait for the full streaming before running the migration", async () => {
+    disableJazzTestSync();
+    const alice = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+      creationProps: { name: "Hermes Puggington" },
+    });
+
+    const migration = vi.fn();
+    const Person = co
+      .map({
+        name: z.string(),
+        update: z.number(),
+      })
+      .withMigration((person) => {
+        migration(person.update);
+      });
+
+    const person = Person.create({
+      name: "Bob",
+      update: 1,
+    });
+
+    person.$jazz.owner.addMember("everyone", "reader");
+
+    // Pump the value to reach streaming
+    for (let i = 0; i <= 300; i++) {
+      person.$jazz.raw.assign({
+        name: "1".repeat(1024),
+        update: i,
+      });
+    }
+
+    const bob = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const personContent = await exportCoValue(Person, person.$jazz.id, {
+      loadAs: alice,
+    });
+    assert(personContent);
+
+    migration.mockClear();
+
+    const lastPiece = personContent.pop();
+    assert(lastPiece);
+
+    for (const content of personContent) {
+      bob.$jazz.localNode.syncManager.handleNewContent(content, "storage");
+    }
+
+    // Simulate the streaming delay on the last piece
+    setTimeout(() => {
+      bob.$jazz.localNode.syncManager.handleNewContent(lastPiece, "storage");
+    }, 10);
+
+    // Load the value and expect the migration to run only once
+    const loadedPerson = await Person.load(person.$jazz.id, { loadAs: bob });
+    assert(loadedPerson);
+    expect(migration).toHaveBeenCalledTimes(1);
+    expect(migration).toHaveBeenCalledWith(300);
+  });
+
+  test("should run only when the group is fully loaded", async () => {
+    disableJazzTestSync();
+
+    const alice = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+      creationProps: { name: "Hermes Puggington" },
+    });
+    const migration = vi.fn();
+
+    const Person = co
+      .map({
+        name: z.string(),
+        update: z.number(),
+      })
+      .withMigration((person) => {
+        migration({
+          groupStreaming:
+            person.$jazz.owner.$jazz.raw.core.verified.isStreaming(),
+        });
+      });
+
+    const group = Group.create();
+
+    const person = Person.create(
+      {
+        name: "Bob",
+        update: 1,
+      },
+      group,
+    );
+
+    for (let i = 0; i <= 300; i++) {
+      group.$jazz.raw.rotateReadKey();
+    }
+
+    group.addMember("everyone", "reader");
+
+    const bob = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const personContent = await exportCoValue(Person, person.$jazz.id, {
+      loadAs: alice,
+    });
+    assert(personContent);
+
+    // Upload and unmount, to force the streaming download
+    migration.mockClear();
+
+    const lastGroupPiece = personContent.findLast(
+      (content) => content.id === group.$jazz.id,
+    );
+    assert(lastGroupPiece);
+
+    for (const content of personContent.filter(
+      (content) => content !== lastGroupPiece,
+    )) {
+      bob.$jazz.localNode.syncManager.handleNewContent(content, "import");
+    }
+
+    // Simulate the streaming delay on the last piece of the group
+    setTimeout(() => {
+      bob.$jazz.localNode.syncManager.handleNewContent(
+        lastGroupPiece,
+        "import",
+      );
+    }, 10);
+
+    // Load the value and expect the migration to run only once
+    const loadedPerson = await Person.load(person.$jazz.id, { loadAs: bob });
+    assert(loadedPerson);
+    expect(migration).toHaveBeenCalledTimes(1);
+    expect(migration).toHaveBeenCalledWith({ groupStreaming: false });
   });
 });
 
@@ -2797,7 +2554,7 @@ describe("Updating a nested reference", () => {
       },
     });
 
-    assert(loadedGame);
+    assertLoaded(loadedGame);
 
     // Create a play selection
     const playSelection = PlaySelection.create({ value: "rock", group }, group);
@@ -2865,7 +2622,7 @@ describe("Updating a nested reference", () => {
       },
     });
 
-    assert(loadedGame);
+    assertLoaded(loadedGame);
 
     // Create a play selection
     const playSelection = PlaySelection.create({ value: "scissors" });

@@ -23,7 +23,7 @@ import {
   getPeerConnectedToTestSyncServer,
   setupJazzTestSync,
 } from "../testing";
-import { loadCoValueOrFail } from "./utils";
+import { assertLoaded, loadCoValueOrFail } from "./utils";
 const Crypto = await WasmCrypto.create();
 
 KvStoreContext.getInstance().initialize(new InMemoryKVStore());
@@ -51,7 +51,7 @@ describe("createContext methods", () => {
 
       const context = await createJazzContextFromExistingCredentials({
         credentials,
-        peersToLoadFrom: [getPeerConnectedToTestSyncServer()],
+        peers: [getPeerConnectedToTestSyncServer()],
         crypto: Crypto,
         sessionProvider: randomSessionProvider,
         asActiveAccount: true,
@@ -83,7 +83,7 @@ describe("createContext methods", () => {
 
       const context = await createJazzContextFromExistingCredentials({
         credentials,
-        peersToLoadFrom: [getPeerConnectedToTestSyncServer()],
+        peers: [getPeerConnectedToTestSyncServer()],
         crypto: Crypto,
         AccountSchema: CustomAccount,
         sessionProvider: randomSessionProvider,
@@ -107,7 +107,7 @@ describe("createContext methods", () => {
           accountID: account.$jazz.id,
           secret: account.$jazz.localNode.getCurrentAgent().agentSecret,
         },
-        peersToLoadFrom: [getPeerConnectedToTestSyncServer()],
+        peers: [getPeerConnectedToTestSyncServer()],
         crypto: Crypto,
         sessionProvider: randomSessionProvider,
         onLogOut,
@@ -131,7 +131,7 @@ describe("createContext methods", () => {
           accountID: account.$jazz.id,
           secret: account.$jazz.localNode.getCurrentAgent().agentSecret,
         },
-        peersToLoadFrom: [getPeerConnectedToTestSyncServer()],
+        peers: [getPeerConnectedToTestSyncServer()],
         crypto: Crypto,
         sessionProvider: randomSessionProvider,
         asActiveAccount: true,
@@ -152,7 +152,7 @@ describe("createContext methods", () => {
           accountID: account.$jazz.id,
           secret: account.$jazz.localNode.getCurrentAgent().agentSecret,
         },
-        peersToLoadFrom: [getPeerConnectedToTestSyncServer()],
+        peers: [getPeerConnectedToTestSyncServer()],
         crypto: Crypto,
         sessionProvider: randomSessionProvider,
         asActiveAccount: true,
@@ -171,7 +171,7 @@ describe("createContext methods", () => {
           accountID: account.$jazz.id,
           secret: account.$jazz.localNode.getCurrentAgent().agentSecret,
         },
-        peersToLoadFrom: [getPeerConnectedToTestSyncServer()],
+        peers: [getPeerConnectedToTestSyncServer()],
         crypto: Crypto,
         sessionProvider: randomSessionProvider,
         asActiveAccount: false,
@@ -185,12 +185,13 @@ describe("createContext methods", () => {
     test("creates new account with provided props", async () => {
       const context = await createJazzContextForNewAccount({
         creationProps: { name: "New User" },
-        peersToLoadFrom: [],
+        peers: [],
         crypto: Crypto,
       });
 
       expect(context.account).toBeDefined();
-      expect(context.account.profile?.name).toBe("New User");
+      assertLoaded(context.account.profile);
+      expect(context.account.profile.name).toBe("New User");
     });
 
     test("uses initial agent secret when provided", async () => {
@@ -199,7 +200,7 @@ describe("createContext methods", () => {
       const context = await createJazzContextForNewAccount({
         creationProps: { name: "New User" },
         initialAgentSecret: initialSecret,
-        peersToLoadFrom: [],
+        peers: [],
         crypto: Crypto,
       });
 
@@ -216,7 +217,7 @@ describe("createContext methods", () => {
 
       const context = await createJazzContextForNewAccount({
         creationProps: { name: "New User" },
-        peersToLoadFrom: [],
+        peers: [],
         crypto: Crypto,
         AccountSchema: CustomAccount,
       });
@@ -229,7 +230,7 @@ describe("createContext methods", () => {
     test("sets the active account to the new account", async () => {
       const context = await createJazzContextForNewAccount({
         creationProps: { name: "New User" },
-        peersToLoadFrom: [],
+        peers: [],
         crypto: Crypto,
       });
       expect(activeAccountContext.get()).toBe(context.account);
@@ -239,7 +240,7 @@ describe("createContext methods", () => {
   describe("createAnonymousJazzContext", () => {
     test("creates anonymous context", async () => {
       const context = await createAnonymousJazzContext({
-        peersToLoadFrom: [],
+        peers: [],
         crypto: Crypto,
       });
 
@@ -257,7 +258,7 @@ describe("createContext methods", () => {
       coMap.set("test", "test", "trusting");
 
       const context = await createAnonymousJazzContext({
-        peersToLoadFrom: [getPeerConnectedToTestSyncServer()],
+        peers: [getPeerConnectedToTestSyncServer()],
         crypto: Crypto,
       });
 
@@ -268,7 +269,7 @@ describe("createContext methods", () => {
 
     test("sets the guest mode", async () => {
       await createAnonymousJazzContext({
-        peersToLoadFrom: [],
+        peers: [],
         crypto: Crypto,
       });
 
@@ -281,7 +282,7 @@ describe("createContext methods", () => {
   describe("createJazzContext", () => {
     test("creates new account when no credentials exist", async () => {
       const context = await createJazzContext({
-        peersToLoadFrom: [],
+        peers: [],
         crypto: Crypto,
         authSecretStorage,
         sessionProvider: randomSessionProvider,
@@ -294,7 +295,7 @@ describe("createContext methods", () => {
     test("uses existing credentials when available", async () => {
       // First create an account and store credentials
       const initialContext = await createJazzContext({
-        peersToLoadFrom: [getPeerConnectedToTestSyncServer()],
+        peers: [getPeerConnectedToTestSyncServer()],
         crypto: Crypto,
         authSecretStorage,
         sessionProvider: randomSessionProvider,
@@ -302,7 +303,7 @@ describe("createContext methods", () => {
 
       // Create new context with same storage
       const newContext = await createJazzContext({
-        peersToLoadFrom: [getPeerConnectedToTestSyncServer()],
+        peers: [getPeerConnectedToTestSyncServer()],
         crypto: Crypto,
         authSecretStorage,
         sessionProvider: randomSessionProvider,
@@ -316,13 +317,14 @@ describe("createContext methods", () => {
         newAccountProps: {
           creationProps: { name: "Custom User" },
         },
-        peersToLoadFrom: [],
+        peers: [],
         crypto: Crypto,
         authSecretStorage,
         sessionProvider: randomSessionProvider,
       });
 
-      expect(context.account.profile?.name).toBe("Custom User");
+      assertLoaded(context.account.profile);
+      expect(context.account.profile.name).toBe("Custom User");
     });
 
     test("uses initial agent secret when provided", async () => {
@@ -341,7 +343,7 @@ describe("createContext methods", () => {
         newAccountProps: {
           secret: initialSecret,
         },
-        peersToLoadFrom: [],
+        peers: [],
         crypto: Crypto,
         authSecretStorage,
         sessionProvider: randomSessionProvider,
@@ -365,7 +367,7 @@ describe("createContext methods", () => {
         .withMigration(async () => {});
 
       const context = await createJazzContext({
-        peersToLoadFrom: [],
+        peers: [],
         crypto: Crypto,
         authSecretStorage,
         sessionProvider: randomSessionProvider,

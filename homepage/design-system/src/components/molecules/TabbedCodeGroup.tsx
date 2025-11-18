@@ -246,7 +246,7 @@ export function TabbedCodeGroupItem({
   ...props
 }: TabbedCodeGroupItemProps) {
   return (
-    <CodeGroup className={className} {...props}>
+    <CodeGroup className={clsx("[&_span]:[tab-size:2]", className)} {...props}>
       {children}
     </CodeGroup>
   );

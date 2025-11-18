@@ -1,4 +1,12 @@
-import { CoID, LocalNode, RawCoList, RawCoStream, RawCoValue } from "cojson";
+import {
+  CoID,
+  LocalNode,
+  RawCoList,
+  RawCoMap,
+  RawCoStream,
+  RawCoValue,
+  RawGroup,
+} from "cojson";
 import { styled } from "goober";
 import React from "react";
 import { Badge } from "../ui/badge.js";
@@ -15,6 +23,8 @@ import { TableView } from "./table-viewer.js";
 import { TypeIcon } from "./type-icon.js";
 import { PageInfo } from "./types.js";
 import { resolveCoValue, useResolvedCoValue } from "./use-resolve-covalue.js";
+import { HistoryView } from "./history-view.js";
+import { CoMapView } from "./co-map-view.js";
 
 interface PageContainerProps extends React.HTMLAttributes<HTMLDivElement> {
   isTopLevel?: boolean;
@@ -117,7 +127,14 @@ function View(
   }
 
   if (extendedType === "group") {
-    return <GroupView data={snapshot} node={node} onNavigate={onNavigate} />;
+    return (
+      <GroupView
+        coValue={value}
+        data={snapshot}
+        node={node}
+        onNavigate={onNavigate}
+      />
+    );
   }
 
   if (extendedType === "account") {
@@ -148,6 +165,17 @@ function View(
 
   if (extendedType === "record") {
     return <TableView data={snapshot} node={node} onNavigate={onNavigate} />;
+  }
+
+  if (type === "comap") {
+    return (
+      <CoMapView
+        coValue={value as RawCoMap}
+        data={snapshot}
+        node={node}
+        onNavigate={onNavigate}
+      />
+    );
   }
 
   return <GridView data={snapshot} onNavigate={onNavigate} node={node} />;
@@ -226,6 +254,7 @@ export function Page(props: PageProps) {
             </Text>
           </>
         )}
+        {value && <HistoryView coValue={value} node={node} />}
       </ContentContainer>
     </PageContainer>
   );

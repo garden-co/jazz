@@ -1,6 +1,6 @@
 import { StorageAPI } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { assert, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   Account,
   AccountClass,
@@ -28,6 +28,7 @@ import {
   coValueClassFromCoValueClassOrSchema,
 } from "../internal";
 import {
+  assertLoaded,
   createJazzTestAccount,
   getPeerConnectedToTestSyncServer,
   setupJazzTestSync,
@@ -56,7 +57,7 @@ class TestJazzContextManager<Acc extends Account> extends JazzContextManager<
       credentials: authProps?.credentials,
       defaultProfileName: props.defaultProfileName,
       newAccountProps: authProps?.newAccountProps,
-      peersToLoadFrom: [getPeerConnectedToTestSyncServer()],
+      peers: [getPeerConnectedToTestSyncServer()],
       crypto: Crypto,
       sessionProvider: randomSessionProvider,
       authSecretStorage: this.getAuthSecretStorage(),
@@ -73,6 +74,8 @@ class TestJazzContextManager<Acc extends Account> extends JazzContextManager<
       logOut: async () => {
         await context.logOut();
       },
+      addConnectionListener: () => () => {},
+      connected: () => false,
     };
   }
 }
@@ -80,14 +83,12 @@ class TestJazzContextManager<Acc extends Account> extends JazzContextManager<
 describe("ContextManager", () => {
   let manager: TestJazzContextManager<Account>;
   let authSecretStorage: AuthSecretStorage;
-  let storage: StorageAPI;
 
   function getCurrentValue() {
     return manager.getCurrentValue() as JazzAuthContext<Account>;
   }
 
   beforeEach(async () => {
-    storage = await createAsyncStorage({});
     KvStoreContext.getInstance().initialize(new InMemoryKVStore());
     authSecretStorage = new AuthSecretStorage();
     await authSecretStorage.clear();
@@ -101,7 +102,8 @@ describe("ContextManager", () => {
 
     const context = getCurrentValue();
 
-    expect(context.me.profile?.name).toBe("Anonymous user");
+    assertLoaded(context.me.profile);
+    expect(context.me.profile.name).toBe("Anonymous user");
     expect(context.node).toBeDefined();
     expect(manager.getCurrentValue()).toBeDefined();
   });
@@ -113,7 +115,8 @@ describe("ContextManager", () => {
 
     const context = getCurrentValue();
 
-    expect(context.me.profile?.name).toBe("Test User");
+    assertLoaded(context.me.profile);
+    expect(context.me.profile.name).toBe("Test User");
     expect(context.node).toBeDefined();
     expect(manager.getCurrentValue()).toBeDefined();
   });
@@ -489,7 +492,10 @@ describe("ContextManager", () => {
       },
     });
 
-    expect(me.root.transferredRoot?.value).toBe("Hello");
+    const transferredRoot = me.root.transferredRoot;
+    assert(transferredRoot);
+    assertLoaded(transferredRoot);
+    expect(transferredRoot.value).toBe("Hello");
   });
 
   test("handles registration of new account", async () => {
@@ -501,7 +507,8 @@ describe("ContextManager", () => {
 
     expect(accountId).toBeDefined();
     const context = getCurrentValue();
-    expect(context.me.profile?.name).toBe("Test User");
+    assertLoaded(context.me.profile);
+    expect(context.me.profile.name).toBe("Test User");
     expect(context.me.$jazz.id).toBe(accountId);
   });
 
@@ -539,6 +546,16 @@ describe("ContextManager", () => {
     await expect(
       manager.register(secret, { name: "Test User" }),
     ).rejects.toThrow("Props required");
+  });
+
+  describe("configurable storage key", () => {
+    test("uses the configured storage key", async () => {
+      const KEY = "test-auth-secret";
+      const manager = new TestJazzContextManager<Account>({
+        authSecretStorageKey: KEY,
+      });
+      expect(manager.getAuthSecretStorage().getStorageKey()).toBe(KEY);
+    });
   });
 
   describe("Race condition handling", () => {

@@ -30,6 +30,65 @@ describe("Group", () => {
     expect(group.getRoleOf("everyone")).toBe("reader");
   });
 
+  describe("Invitations", () => {
+    it("should create invitations as an instance method", () => {
+      const group = co.group().create();
+      const invite = group.$jazz.createInvite();
+      expect(invite.startsWith("inviteSecret_")).toBeTruthy();
+    });
+
+    it("should create invitations as an static method", async () => {
+      const group = co.group().create();
+      const groupId = group.$jazz.id;
+      const invite = await Group.createInvite(groupId);
+      expect(invite.startsWith("inviteSecret_")).toBeTruthy();
+    });
+
+    it("should correctly create invitations for users of different roles", async () => {
+      const currentUser = Account.getMe();
+      const group = co.group().create();
+      const invites = {
+        reader: group.$jazz.createInvite("reader"),
+        writeOnly: group.$jazz.createInvite("writeOnly"),
+        writer: group.$jazz.createInvite("writer"),
+        admin: group.$jazz.createInvite("admin"),
+      };
+
+      expect(group.getRoleOf(currentUser.$jazz.id)).toBe("admin");
+
+      for (const [role, inviteSecret] of Object.entries(invites)) {
+        const newUser = await createJazzTestAccount({
+          isCurrentActiveAccount: true,
+        });
+        expect(group.getRoleOf(newUser.$jazz.id)).toBeUndefined();
+        await newUser.acceptInvite(group.$jazz.id, inviteSecret);
+        expect(group.getRoleOf(newUser.$jazz.id)).toBe(role);
+      }
+    });
+
+    it("should create invitations with loadAs option", async () => {
+      const group = co.group().create();
+      const groupId = group.$jazz.id;
+
+      const otherAccount = await createJazzTestAccount();
+      group.addMember(otherAccount, "admin");
+
+      const invite = await Group.createInvite(groupId, {
+        role: "writer",
+        loadAs: otherAccount,
+      });
+
+      expect(invite.startsWith("inviteSecret_")).toBeTruthy();
+    });
+
+    it("should create invitations via co.group() schema wrapper", async () => {
+      const group = co.group().create();
+      const groupId = group.$jazz.id;
+      const invite = await co.group().createInvite(groupId, { role: "writer" });
+      expect(invite.startsWith("inviteSecret_")).toBeTruthy();
+    });
+  });
+
   describe("TypeScript", () => {
     it("should correctly type the resolve query", async () => {
       const group = co.group().create();

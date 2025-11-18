@@ -1,9 +1,21 @@
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { assert, beforeEach, describe, expect, test } from "vitest";
 import { CoMap, Group, z } from "../exports.js";
-import { Account, Loaded, Ref, co } from "../internal.js";
+import {
+  Account,
+  Loaded,
+  MaybeLoaded,
+  Ref,
+  co,
+  CoValueLoadingState,
+} from "../internal.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
-import { loadCoValueOrFail, setupTwoNodes, waitFor } from "./utils.js";
+import {
+  assertLoaded,
+  loadCoValueOrFail,
+  setupTwoNodes,
+  waitFor,
+} from "./utils.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -31,9 +43,9 @@ describe("Custom accounts and groups", async () => {
       .withMigration((account, creationProps?: { name: string }) => {
         // making sure that the inferred type of account.root & account.profile considers the root/profile not being loaded
         type R = typeof account.root;
-        const _r: R = {} as Loaded<typeof Root> | null;
+        const _r: R = {} as MaybeLoaded<Loaded<typeof Root>>;
         type P = typeof account.profile;
-        const _p: P = {} as Loaded<typeof CustomProfile> | null;
+        const _p: P = {} as MaybeLoaded<Loaded<typeof CustomProfile>>;
         if (creationProps) {
           const profileGroup = Group.create({ owner: account });
           profileGroup.addMember("everyone", "reader");
@@ -65,8 +77,10 @@ describe("Custom accounts and groups", async () => {
     const meAsMember = group.members.find(
       (member) => member.id === me.$jazz.id,
     );
-    assert(meAsMember?.account);
-    expect((meAsMember?.account).profile?.name).toBe("Hermes Puggington");
+    const memberAccount = meAsMember?.account;
+    assert(memberAccount);
+    assertLoaded(memberAccount.profile);
+    expect(memberAccount.profile.name).toBe("Hermes Puggington");
   });
 });
 
@@ -97,7 +111,8 @@ describe("Group inheritance", () => {
     const mapAsReader = await TestMap.load(mapInChild.$jazz.id, {
       loadAs: reader,
     });
-    expect(mapAsReader?.title).toBe("In Child");
+    assertLoaded(mapAsReader);
+    expect(mapAsReader.title).toBe("In Child");
 
     await parentGroup.removeMember(reader);
 
@@ -107,7 +122,9 @@ describe("Group inheritance", () => {
       const mapAsReaderAfterUpdate = await TestMap.load(mapInChild.$jazz.id, {
         loadAs: reader,
       });
-      expect(mapAsReaderAfterUpdate).toBe(null);
+      expect(mapAsReaderAfterUpdate.$jazz.loadingState).toBe(
+        CoValueLoadingState.UNAUTHORIZED,
+      );
     });
   });
 
@@ -138,7 +155,8 @@ describe("Group inheritance", () => {
     const mapAsReader = await TestMap.load(mapInGrandChild.$jazz.id, {
       loadAs: reader,
     });
-    expect(mapAsReader?.title).toBe("In Grand Child");
+    assertLoaded(mapAsReader);
+    expect(mapAsReader.title).toBe("In Grand Child");
 
     await grandParentGroup.removeMember(reader);
 
@@ -152,7 +170,9 @@ describe("Group inheritance", () => {
         loadAs: reader,
       },
     );
-    expect(mapAsReaderAfterUpdate).toBe(null);
+    expect(mapAsReaderAfterUpdate.$jazz.loadingState).toBe(
+      CoValueLoadingState.UNAUTHORIZED,
+    );
   });
 
   test("Group.getParentGroups should return the parent groups", async () => {
@@ -196,7 +216,7 @@ describe("Group inheritance", () => {
 
     const loadedGroup = await serverNode.load(group.$jazz.raw.id);
 
-    expect(loadedGroup).not.toBe("unavailable");
+    expect(loadedGroup).not.toBe(CoValueLoadingState.UNAVAILABLE);
   });
 
   test("everyone is valid only for reader, writer and writeOnly roles", () => {
@@ -275,8 +295,8 @@ describe("Group inheritance", () => {
     const loadedAlice = await Account.load(alice.$jazz.id);
     const loadedBob = await Account.load(bob.$jazz.id);
 
-    assert(loadedBob);
-    assert(loadedAlice);
+    assertLoaded(loadedBob);
+    assertLoaded(loadedAlice);
 
     const parentGroup = Group.create();
     // `parentGroup` has `alice` as a writer
@@ -331,9 +351,10 @@ describe("Group inheritance", () => {
       const task = board.columns[0]![0]!;
 
       const boardAsWriter = await Board.load(board.$jazz.id, { loadAs: me });
-      expect(boardAsWriter?.title).toEqual("My board");
+      assertLoaded(boardAsWriter);
+      expect(boardAsWriter.title).toEqual("My board");
       const taskAsWriter = await Task.load(task.$jazz.id, { loadAs: me });
-      expect(taskAsWriter?.toString()).toEqual("Task 1.1");
+      expect(taskAsWriter.toString()).toEqual("Task 1.1");
     });
 
     test("nested CoValues inherit permissions from the referencing CoValue", async () => {
@@ -351,7 +372,9 @@ describe("Group inheritance", () => {
       const boardAsReader = await Board.load(board.$jazz.id, {
         loadAs: reader,
       });
-      expect(boardAsReader).toBeNull();
+      expect(boardAsReader.$jazz.loadingState).toBe(
+        CoValueLoadingState.UNAUTHORIZED,
+      );
     });
   });
 });
@@ -481,6 +504,9 @@ describe("Account permissions", () => {
     const group = Group.create({ owner: admin });
     const testObject = CoMap.create({}, { owner: group });
 
+    const manager = await co.account().createAs(admin, {
+      creationProps: { name: "Manager" },
+    });
     const writer = await co.account().createAs(admin, {
       creationProps: { name: "Writer" },
     });
@@ -492,11 +518,13 @@ describe("Account permissions", () => {
     });
 
     // Set up roles
+    group.addMember(manager, "manager");
     group.addMember(writer, "writer");
     group.addMember(reader, "reader");
     group.addMember(writeOnly, "writeOnly");
 
     // Test canRead permissions
+    expect(manager.canRead(testObject)).toBe(true);
     expect(admin.canRead(testObject)).toBe(true);
     expect(writer.canRead(testObject)).toBe(true);
     expect(reader.canRead(testObject)).toBe(true);
@@ -513,6 +541,9 @@ describe("Account permissions", () => {
     const group = Group.create({ owner: admin });
     const testObject = CoMap.create({}, { owner: group });
 
+    const manager = await co.account().createAs(admin, {
+      creationProps: { name: "Manager" },
+    });
     const writer = await co.account().createAs(admin, {
       creationProps: { name: "Writer" },
     });
@@ -524,11 +555,13 @@ describe("Account permissions", () => {
     });
 
     // Set up roles
+    group.addMember(manager, "manager");
     group.addMember(writer, "writer");
     group.addMember(reader, "reader");
     group.addMember(writeOnly, "writeOnly");
 
     // Test canWrite permissions
+    expect(manager.canWrite(testObject)).toBe(true);
     expect(admin.canWrite(testObject)).toBe(true);
     expect(writer.canWrite(testObject)).toBe(true);
     expect(reader.canWrite(testObject)).toBe(false);
@@ -538,12 +571,16 @@ describe("Account permissions", () => {
   test("canAdmin permissions for different roles", async () => {
     // Create test accounts
     const admin = await co.account().create({
-      creationProps: { name: "Admin" },
+      creationProps: { name: "Super Admin" },
       crypto: Crypto,
     });
 
     const group = Group.create({ owner: admin });
     const testObject = CoMap.create({}, { owner: group });
+
+    const manager = await co.account().createAs(admin, {
+      creationProps: { name: "Admin" },
+    });
 
     const writer = await co.account().createAs(admin, {
       creationProps: { name: "Writer" },
@@ -556,15 +593,55 @@ describe("Account permissions", () => {
     });
 
     // Set up roles
+    group.addMember(manager, "manager");
     group.addMember(writer, "writer");
     group.addMember(reader, "reader");
     group.addMember(writeOnly, "writeOnly");
 
     // Test canAdmin permissions
     expect(admin.canAdmin(testObject)).toBe(true);
+    expect(manager.canAdmin(testObject)).toBe(false);
     expect(writer.canAdmin(testObject)).toBe(false);
     expect(reader.canAdmin(testObject)).toBe(false);
     expect(writeOnly.canAdmin(testObject)).toBe(false);
+  });
+
+  test("canManage permissions for different roles", async () => {
+    // Create test accounts
+    const admin = await co.account().create({
+      creationProps: { name: "Super Admin" },
+      crypto: Crypto,
+    });
+
+    const group = Group.create({ owner: admin });
+    const testObject = CoMap.create({}, { owner: group });
+
+    const manager = await co.account().createAs(admin, {
+      creationProps: { name: "Admin" },
+    });
+
+    const writer = await co.account().createAs(admin, {
+      creationProps: { name: "Writer" },
+    });
+    const reader = await co.account().createAs(admin, {
+      creationProps: { name: "Reader" },
+    });
+    const writeOnly = await co.account().createAs(admin, {
+      creationProps: { name: "WriteOnly" },
+    });
+
+    // Set up roles
+    group.addMember(manager, "manager");
+    group.addMember(writer, "writer");
+    group.addMember(reader, "reader");
+    group.addMember(writeOnly, "writeOnly");
+
+    // Test canManage permissions
+    expect(admin.canManage(testObject)).toBe(true);
+    expect(manager.canManage(testObject)).toBe(true);
+    expect(writer.canManage(testObject)).toBe(false);
+    expect(reader.canManage(testObject)).toBe(false);
+    expect(writeOnly.canManage(testObject)).toBe(false);
   });
 
   test("permissions for non-members", async () => {
@@ -584,6 +661,7 @@ describe("Account permissions", () => {
     expect(nonMember.canRead(testObject)).toBe(false);
     expect(nonMember.canWrite(testObject)).toBe(false);
     expect(nonMember.canAdmin(testObject)).toBe(false);
+    expect(nonMember.canManage(testObject)).toBe(false);
   });
 
   describe("permissions over Groups and Accounts", () => {
@@ -808,6 +886,106 @@ describe("Account permissions", () => {
         const group = Group.create({ owner: otherAccount });
 
         expect(account.canAdmin(group)).toBe(false);
+      });
+    });
+
+    describe("manage", () => {
+      test("can manage Account if it's itself", async () => {
+        const account = await co.account().create({
+          creationProps: { name: "Test Account" },
+          crypto: Crypto,
+        });
+        expect(account.canManage(account)).toBe(true);
+      });
+
+      test("cannot manage other accounts", async () => {
+        const account = await co.account().create({
+          creationProps: { name: "Test Account" },
+          crypto: Crypto,
+        });
+        const otherAccount = await co.account().create({
+          creationProps: { name: "Other Account" },
+          crypto: Crypto,
+        });
+        expect(account.canManage(otherAccount)).toBe(false);
+      });
+
+      test("can manage Group if it's an manage for that group", async () => {
+        const account = await co.account().create({
+          creationProps: { name: "Test Account" },
+          crypto: Crypto,
+        });
+        const otherAccount = await co.account().create({
+          creationProps: { name: "Other Account" },
+          crypto: Crypto,
+        });
+        const group = Group.create({ owner: otherAccount });
+
+        group.addMember(account, "manager");
+
+        expect(account.canManage(group)).toBe(true);
+      });
+
+      test("cannot manage Group if it's a writer for that group", async () => {
+        const account = await co.account().create({
+          creationProps: { name: "Test Account" },
+          crypto: Crypto,
+        });
+        const otherAccount = await co.account().create({
+          creationProps: { name: "Other Account" },
+          crypto: Crypto,
+        });
+        const group = Group.create({ owner: otherAccount });
+
+        group.addMember(account, "writer");
+
+        expect(account.canManage(group)).toBe(false);
+      });
+
+      test("cannot manage Group if it has writeOnly permissions for that group", async () => {
+        const account = await co.account().create({
+          creationProps: { name: "Test Account" },
+          crypto: Crypto,
+        });
+        const otherAccount = await co.account().create({
+          creationProps: { name: "Other Account" },
+          crypto: Crypto,
+        });
+        const group = Group.create({ owner: otherAccount });
+
+        group.addMember(account, "writeOnly");
+
+        expect(account.canManage(group)).toBe(false);
+      });
+
+      test("cannot manage Group if it's a reader for that group", async () => {
+        const account = await co.account().create({
+          creationProps: { name: "Test Account" },
+          crypto: Crypto,
+        });
+        const otherAccount = await co.account().create({
+          creationProps: { name: "Other Account" },
+          crypto: Crypto,
+        });
+        const group = Group.create({ owner: otherAccount });
+
+        group.addMember(account, "reader");
+
+        expect(account.canManage(group)).toBe(false);
+      });
+
+      test("cannot manage Group if it has no permissions for that group", async () => {
+        const account = await co.account().create({
+          creationProps: { name: "Test Account" },
+          crypto: Crypto,
+        });
+        const otherAccount = await co.account().create({
+          creationProps: { name: "Other Account" },
+          crypto: Crypto,
+        });
+        const group = Group.create({ owner: otherAccount });
+
+        expect(account.canManage(group)).toBe(false);
       });
     });
   });

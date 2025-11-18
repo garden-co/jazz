@@ -1,3 +1,4 @@
+import { AccountRole } from "cojson";
 import {
   Account,
   CoValue,
@@ -19,7 +20,7 @@ export { LocalStorageKVStore } from "./auth/LocalStorageKVStore.js";
 /** @category Invite Links */
 export function createInviteLink<C extends CoValue>(
   value: C,
-  role: "reader" | "writer" | "admin" | "writeOnly",
+  role: AccountRole,
   // default to same address as window.location, but without hash
   {
     baseURL = window.location.href.replace(/#.*$/, ""),

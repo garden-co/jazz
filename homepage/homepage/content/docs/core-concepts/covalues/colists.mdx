@@ -1,0 +1,129 @@
+import { CodeGroup, ContentByFramework } from "@/components/forMdx";
+
+export const metadata = {
+  description: "CoLists are ordered collections that work like JavaScript arrays. They provide indexed access, iteration methods, and length properties."
+};
+
+# CoLists
+
+CoLists are ordered collections that work like JavaScript arrays. They provide indexed access, iteration methods, and length properties, making them perfect for managing sequences of items.
+
+## Creating CoLists
+
+CoLists are defined by specifying the type of items they contain:
+
+<CodeGroup preferWrap>
+```ts index.ts#Basic
+```
+</CodeGroup>
+
+To create a `CoList`:
+
+<CodeGroup>
+```ts index.ts#Create
+```
+</CodeGroup>
+
+### Ownership
+
+Like other CoValues, you can specify ownership when creating CoLists.
+
+<CodeGroup>
+```ts index.ts#WithOwner
+```
+</CodeGroup>
+
+See [Groups as permission scopes](/docs/permissions-and-sharing/overview) for more information on how to use groups to control access to CoLists.
+
+## Reading from CoLists
+
+CoLists support standard array access patterns:
+
+<CodeGroup>
+```ts index.ts#ArrayAccess
+```
+</CodeGroup>
+
+## Updating CoLists
+
+Methods to update a CoList's items are grouped inside the `$jazz` namespace:
+
+<CodeGroup>
+```ts index.ts#Updating
+```
+</CodeGroup>
+
+### Soft Deletion
+You can do a soft deletion by using a deleted flag, then creating a helper method that explicitly filters out items where the deleted property is true.
+
+<CodeGroup>
+```ts soft-deletions.ts#SoftDeletion
+```
+</CodeGroup>
+
+There are several benefits to soft deletions:
+- **recoverablity** - Nothing is truly deleted, so recovery is possible in the future
+- **data integrity** - Relationships can be maintained between current and deleted values
+- **auditable** - The data can still be accessed, good for audit trails and checking compliance
+
+### Deleting Items
+
+Jazz provides two methods to retain or remove items from a CoList:
+
+<CodeGroup>
+```ts index.ts#Deletion
+```
+</CodeGroup>
+
+You can also remove specific items by index with `splice`, or remove the first or last item with `pop` or `shift`:
+
+<CodeGroup>
+```ts index.ts#SpliceAndShift
+```
+</CodeGroup>
+
+### Array Methods
+
+`CoList`s support the standard JavaScript array methods you already know. Methods that mutate the array
+are grouped inside the `$jazz` namespace.
+
+<CodeGroup>
+```ts index.ts#PushFindFilter
+```
+</CodeGroup>
+
+### Type Safety
+
+CoLists maintain type safety for their items:
+
+<CodeGroup>
+```ts index.ts#TypeSafety
+```
+</CodeGroup>
+## Best Practices
+
+### Common Patterns
+
+#### List Rendering
+
+CoLists work well with UI rendering libraries:
+
+<CodeGroup>
+```ts TaskList.tsx
+```
+</CodeGroup>
+
+#### Managing Relations
+
+CoLists can be used to create one-to-many relationships:
+
+<CodeGroup>
+```ts relations.ts
+```
+</CodeGroup>
+
+#### Set-like Collections
+
+CoLists, like JavaScript arrays, allow you to insert the same item multiple times. In some cases, you might want to have a collection of unique items (similar to a set). To achieve this, you can use a CoRecord with entries keyed on a unique identifier (for example, the CoValue ID).
+
+You can read [more about this pattern here](/docs/core-concepts/covalues/comaps#creating-set-like-collections).

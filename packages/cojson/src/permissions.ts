@@ -1,6 +1,5 @@
 import { CoID } from "./coValue.js";
 import { CoValueCore } from "./coValueCore/coValueCore.js";
-import { Transaction } from "./coValueCore/verifiedState.js";
 import { RawAccount, RawAccountID, RawProfile } from "./coValues/account.js";
 import { MapOpPayload, RawCoMap } from "./coValues/coMap.js";
 import {
@@ -9,21 +8,16 @@ import {
   ParentGroupReferenceRole,
   RawGroup,
   isInheritableRole,
+  isSelfExtension,
 } from "./coValues/group.js";
 import { KeyID } from "./crypto/crypto.js";
 import {
   AgentID,
   ParentGroupReference,
   RawCoID,
-  SessionID,
-  TransactionID,
   getParentGroupId,
 } from "./ids.js";
-import { parseJSON } from "./jsonStringify.js";
 import { JsonValue } from "./jsonValue.js";
-import { logger } from "./logger.js";
-import { CoValueKnownState } from "./sync.js";
-import { accountOrAgentIDfromSessionID } from "./typeUtils/accountOrAgentIDfromSessionID.js";
 import { expectGroup } from "./typeUtils/expectGroup.js";
 
 export type PermissionsDef =
@@ -45,6 +39,10 @@ export type AccountRole =
    */
   | "admin"
   /**
+   * Can read and write, invite and revoke members except admin
+   */
+  | "manager"
+  /**
    * Can only write to the group's CoValues and read their own changes
    */
   | "writeOnly";
@@ -52,36 +50,32 @@ export type AccountRole =
 export type Role =
   | AccountRole
   | "revoked"
+  | "managerInvite"
   | "adminInvite"
   | "writerInvite"
   | "readerInvite"
   | "writeOnlyInvite";
 
-type ValidTransactionsResult = { txID: TransactionID; tx: Transaction };
-type MemberState = { [agent: RawAccountID | AgentID]: Role; [EVERYONE]?: Role };
-
-let logPermissionErrors = true;
-
-export function disablePermissionErrors() {
-  logPermissionErrors = false;
+export function isAccountRole(role?: Role): role is AccountRole {
+  return (
+    role === "manager" ||
+    role === "admin" ||
+    role === "writer" ||
+    role === "reader" ||
+    role === "writeOnly"
+  );
 }
 
-function logPermissionError(
-  message: string,
-  attributes?: Record<string, JsonValue>,
-) {
-  if (logPermissionErrors === false) {
-    return;
-  }
-
-  logger.debug("Permission error: " + message, attributes);
+function canAdmin(role: Role | undefined): boolean {
+  return role === "admin" || role === "manager";
 }
 
-export function determineValidTransactions(coValue: CoValueCore) {
+export function determineValidTransactions(coValue: CoValueCore): void {
   if (!coValue.isAvailable()) {
     throw new Error("determineValidTransactions CoValue is not available");
   }
 
+  // The CoValue is a group
   if (coValue.verified.header.ruleset.type === "group") {
     const initialAdmin = coValue.verified.header.ruleset.initialAdmin;
     if (!initialAdmin) {
@@ -89,7 +83,11 @@ export function determineValidTransactions(coValue: CoValueCore) {
     }
 
     determineValidTransactionsForGroup(coValue, initialAdmin);
-  } else if (coValue.verified.header.ruleset.type === "ownedByGroup") {
+    return;
+  }
+
+  // The CoValue is owned by a group
+  if (coValue.verified.header.ruleset.type === "ownedByGroup") {
     const groupContent = expectGroup(
       coValue.node
         .expectCoValueLoaded(
@@ -103,22 +101,20 @@ export function determineValidTransactions(coValue: CoValueCore) {
       throw new Error("Group must be a map");
     }
 
-    for (const tx of coValue.verifiedTransactions) {
-      if (tx.isValidated) {
-        continue;
-      }
-
-      tx.isValidated = true;
-      const wasValid = tx.isValid;
-
-      const groupAtTime = groupContent.atTime(tx.madeAt);
+    for (const tx of coValue.toValidateTransactions) {
+      // We use the original made at to get the group at the original time when the transaction was made
+      // madeAt might be changed by the meta field (e.g. merged transactions), and so can't be used for permissions checks
+      const groupAtTime = groupContent.atTime(tx.currentMadeAt);
       const effectiveTransactor = agentInAccountOrMemberInGroup(
         tx.author,
         groupAtTime,
       );
 
       if (!effectiveTransactor) {
-        tx.isValid = false;
+        tx.markInvalid("Transactor not found in group", {
+          transactor: tx.author,
+          group: groupAtTime.toJSON(),
+        });
         continue;
       }
 
@@ -126,27 +122,50 @@ export function determineValidTransactions(coValue: CoValueCore) {
         groupAtTime.roleOfInternal(effectiveTransactor);
 
       if (
-        transactorRoleAtTxTime !== "admin" &&
-        transactorRoleAtTxTime !== "writer" &&
-        transactorRoleAtTxTime !== "writeOnly"
+        transactorRoleAtTxTime === "reader" &&
+        tx.meta?.branch &&
+        tx.meta?.ownerId
       ) {
-        tx.isValid = false;
+        // Force the changes and meta to only contain the branch pointer information
+        tx.meta = {
+          branch: tx.meta.branch,
+          ownerId: tx.meta.ownerId,
+        };
+        tx.changes = [];
+        tx.markValid();
         continue;
       }
 
-      tx.isValid = true;
+      if (
+        transactorRoleAtTxTime !== "admin" &&
+        transactorRoleAtTxTime !== "manager" &&
+        transactorRoleAtTxTime !== "writer" &&
+        transactorRoleAtTxTime !== "writeOnly"
+      ) {
+        tx.markInvalid("Transactor has no write permissions", {
+          transactor: tx.author,
+          transactorRole: transactorRoleAtTxTime ?? "undefined",
+        });
+        continue;
+      }
+
+      tx.markValid();
     }
-  } else if (coValue.verified.header.ruleset.type === "unsafeAllowAll") {
-    for (const tx of coValue.verifiedTransactions) {
-      tx.isValid = true;
-      tx.isValidated = true;
-    }
-  } else {
-    throw new Error(
-      "Unknown ruleset type " +
-        (coValue.verified.header.ruleset as { type: string }).type,
-    );
+    return;
   }
+
+  // The CoValue has unsafeAllowAll ruleset
+  if (coValue.verified.header.ruleset.type === "unsafeAllowAll") {
+    for (const tx of coValue.toValidateTransactions) {
+      tx.markValid();
+    }
+    return;
+  }
+
+  throw new Error(
+    "Unknown ruleset type " +
+      (coValue.verified.header.ruleset as { type: string }).type,
+  );
 }
 
 function isHigherRole(a: Role, b: Role | undefined) {
@@ -155,105 +174,94 @@ function isHigherRole(a: Role, b: Role | undefined) {
   if (b === "admin") return false;
   if (a === "admin") return true;
 
+  if (b === "manager") return false;
+  if (a === "manager") return true;
+
   return a === "writer" && b === "reader";
 }
 
-function resolveMemberStateFromParentReference(
-  coValue: CoValueCore,
-  memberState: MemberState,
-  parentReference: ParentGroupReference,
-  roleMapping: ParentGroupReferenceRole,
-  extendChain: Set<CoValueCore["id"]>,
-) {
-  const parentGroup = coValue.node.expectCoValueLoaded(
-    getParentGroupId(parentReference),
-    "Expected parent group to be loaded",
-  );
+class MemberRoleResolver {
+  private parentGroups = new Map<RawGroup, ParentGroupReferenceRole>();
+  private memberRoles = new Map<RawAccountID | AgentID | Everyone, Role>();
 
-  if (parentGroup.verified.header.ruleset.type !== "group") {
-    return;
+  setDirectRole(member: RawAccountID | AgentID | Everyone, role: Role) {
+    this.memberRoles.set(member, role);
   }
 
-  // Skip circular references
-  if (extendChain.has(parentGroup.id)) {
-    return;
+  removeMember(member: RawAccountID | AgentID | Everyone) {
+    this.memberRoles.delete(member);
   }
 
-  const initialAdmin = parentGroup.verified.header.ruleset.initialAdmin;
-
-  if (!initialAdmin) {
-    throw new Error("Group must have initialAdmin");
+  addParentGroup(parentGroup: RawGroup, roleMapping: ParentGroupReferenceRole) {
+    this.parentGroups.set(parentGroup, roleMapping);
   }
 
-  extendChain.add(parentGroup.id);
+  removeParentGroup(parentGroup: RawGroup) {
+    this.parentGroups.delete(parentGroup);
+  }
 
-  const { memberState: parentGroupMemberState } =
-    determineValidTransactionsForGroup(parentGroup, initialAdmin, extendChain);
+  getDirectRole(member: RawAccountID | AgentID | Everyone) {
+    return this.memberRoles.get(member);
+  }
 
-  for (const agent of Object.keys(parentGroupMemberState) as Array<
-    keyof MemberState
-  >) {
-    const parentRole = parentGroupMemberState[agent];
-    const currentRole = memberState[agent];
+  getRoleAtTime(member: RawAccountID | AgentID | Everyone, time: number) {
+    let role = this.memberRoles.get(member);
 
-    if (isInheritableRole(parentRole)) {
-      if (roleMapping !== "extend" && isHigherRole(roleMapping, currentRole)) {
-        memberState[agent] = roleMapping;
-      } else if (isHigherRole(parentRole, currentRole)) {
-        memberState[agent] = parentRole;
+    for (const [parentGroup, roleMapping] of this.parentGroups.entries()) {
+      const parentRole = parentGroup.atTime(time).roleOfInternal(member);
+
+      if (!parentRole || !isInheritableRole(parentRole)) {
+        continue;
+      }
+
+      const resolvedParentRole =
+        roleMapping === "extend" ? parentRole : roleMapping;
+
+      if (isHigherRole(resolvedParentRole, role)) {
+        role = resolvedParentRole;
       }
     }
+
+    return role;
   }
 }
 
 function determineValidTransactionsForGroup(
   coValue: CoValueCore,
   initialAdmin: RawAccountID | AgentID,
-  extendChain?: Set<CoValueCore["id"]>,
-): { memberState: MemberState } {
-  coValue.verifiedTransactions.sort((a, b) => {
-    return a.madeAt - b.madeAt;
-  });
+): void {
+  coValue.verifiedTransactions.sort(coValue.compareTransactions);
 
-  const memberState: MemberState = {};
   const writeOnlyKeys: Record<RawAccountID | AgentID, KeyID> = {};
-  const validTransactions: ValidTransactionsResult[] = [];
-
   const writeKeys = new Set<string>();
+  const memberRoleResolver = new MemberRoleResolver();
 
   for (const transaction of coValue.verifiedTransactions) {
     const transactor = transaction.author;
 
-    transaction.isValidated = true;
+    const transactorRole = memberRoleResolver.getRoleAtTime(
+      transactor,
+      transaction.currentMadeAt,
+    );
 
     const tx = transaction.tx;
 
     if (tx.privacy === "private") {
-      if (memberState[transactor] === "admin") {
-        transaction.isValid = true;
+      if (transactorRole === "admin") {
+        transaction.markValid();
         continue;
       } else {
-        logPermissionError(
+        transaction.markInvalid(
           "Only admins can make private transactions in groups",
         );
         continue;
       }
     }
 
-    let changes = transaction.changes;
+    const changes = transaction.changes;
 
     if (!changes) {
-      try {
-        changes = parseJSON(tx.changes);
-        transaction.changes = changes;
-      } catch (e) {
-        logPermissionError("Invalid JSON in transaction", {
-          id: coValue.id,
-          tx,
-        });
-        transaction.hasInvalidChanges = true;
-        continue;
-      }
+      continue;
     }
 
     const change = changes[0] as
@@ -265,104 +273,109 @@ function determineValidTransactionsForGroup(
       | MapOpPayload<`child_${CoID<RawGroup>}`, CoID<RawGroup>>;
 
     if (changes.length !== 1) {
-      logPermissionError("Group transaction must have exactly one change");
-      transaction.isValid = false;
+      transaction.markInvalid("Group transaction must have exactly one change");
       continue;
     }
 
     if (change.op !== "set") {
-      logPermissionError("Group transaction must set a role or readKey");
-      transaction.isValid = false;
+      transaction.markInvalid("Group transaction must set a role or readKey");
       continue;
     }
 
     if (change.key === "readKey") {
-      if (memberState[transactor] !== "admin") {
-        logPermissionError("Only admins can set readKeys");
-        transaction.isValid = false;
+      if (!canAdmin(transactorRole)) {
+        transaction.markInvalid("Only admins can set readKeys");
         continue;
       }
 
-      transaction.isValid = true;
+      transaction.markValid();
       continue;
     } else if (change.key === "profile") {
-      if (memberState[transactor] !== "admin") {
-        logPermissionError("Only admins can set profile");
-        transaction.isValid = false;
+      if (!canAdmin(transactorRole)) {
+        transaction.markInvalid("Only admins can set profile");
         continue;
       }
 
-      transaction.isValid = true;
+      transaction.markValid();
       continue;
     } else if (change.key === "root") {
-      if (memberState[transactor] !== "admin") {
-        logPermissionError("Only admins can set root");
+      if (!canAdmin(transactorRole)) {
+        transaction.markInvalid("Only admins can set root");
         continue;
       }
 
-      transaction.isValid = true;
+      transaction.markValid();
       continue;
     } else if (
       isKeyForKeyField(change.key) ||
       isKeyForAccountField(change.key)
     ) {
       if (
-        memberState[transactor] !== "admin" &&
-        memberState[transactor] !== "adminInvite" &&
-        memberState[transactor] !== "writerInvite" &&
-        memberState[transactor] !== "readerInvite" &&
-        memberState[transactor] !== "writeOnlyInvite" &&
+        transactorRole !== "admin" &&
+        transactorRole !== "adminInvite" &&
+        transactorRole !== "manager" &&
+        transactorRole !== "managerInvite" &&
+        transactorRole !== "writerInvite" &&
+        transactorRole !== "readerInvite" &&
+        transactorRole !== "writeOnlyInvite" &&
         !isOwnWriteKeyRevelation(change.key, transactor, writeOnlyKeys)
       ) {
-        logPermissionError("Only admins can reveal keys");
-        transaction.isValid = false;
+        transaction.markInvalid("Only admins and managers can reveal keys");
         continue;
       }
 
-      // TODO: check validity of agents who the key is revealed to?
-      transaction.isValid = true;
+      transaction.markValid();
       continue;
     } else if (isParentExtension(change.key)) {
-      if (memberState[transactor] !== "admin") {
-        logPermissionError("Only admins can set parent extensions");
-        transaction.isValid = false;
+      if (!canAdmin(transactorRole)) {
+        transaction.markInvalid(
+          "Only admins and managers can set parent extensions",
+        );
         continue;
       }
 
-      extendChain = extendChain ?? new Set([]);
+      const parentGroupId = getParentGroupId(change.key);
 
-      resolveMemberStateFromParentReference(
-        coValue,
-        memberState,
-        change.key,
-        change.value as ParentGroupReferenceRole,
-        extendChain,
+      const parentGroupCore = coValue.node.expectCoValueLoaded(
+        parentGroupId,
+        "Expected parent group to be loaded",
       );
 
-      // Circular reference detected, drop all the transactions involved
-      if (extendChain.has(coValue.id)) {
-        logPermissionError(
-          "Circular extend detected, dropping the transaction",
-        );
-        transaction.isValid = false;
+      if (!parentGroupCore.isGroup()) {
+        transaction.markInvalid("Parent group is not a group");
         continue;
       }
 
-      transaction.isValid = true;
+      const parentGroup = expectGroup(parentGroupCore.getCurrentContent());
+
+      if (isSelfExtension(coValue, parentGroup)) {
+        transaction.markInvalid("Parent group is a circular dependency");
+        continue;
+      }
+
+      const value = change.value as ParentGroupReferenceRole;
+
+      if (value === "revoked") {
+        memberRoleResolver.removeParentGroup(parentGroup);
+      } else {
+        memberRoleResolver.addParentGroup(parentGroup, value);
+      }
+
+      transaction.markValid();
       continue;
     } else if (isChildExtension(change.key)) {
-      transaction.isValid = true;
+      transaction.markInvalid("Child extensions are not allowed anymore");
       continue;
     } else if (isWriteKeyForMember(change.key)) {
       const memberKey = getAccountOrAgentFromWriteKeyForMember(change.key);
 
       if (
-        memberState[transactor] !== "admin" &&
-        memberState[transactor] !== "writeOnlyInvite" &&
+        transactorRole !== "admin" &&
+        transactorRole !== "manager" &&
+        transactorRole !== "writeOnlyInvite" &&
         memberKey !== transactor
       ) {
-        logPermissionError("Only admins can set writeKeys");
-        transaction.isValid = false;
+        transaction.markInvalid("Only admins and managers can set writeKeys");
         continue;
       }
 
@@ -376,17 +389,16 @@ function determineValidTransactionsForGroup(
        * write keys, otherwise they could hide a write key to other writeOnly users
        * blocking them from accessing the group.ß
        */
-      if (writeKeys.has(change.key) && memberState[transactor] !== "admin") {
-        logPermissionError(
+      if (writeKeys.has(change.key) && !canAdmin(transactorRole)) {
+        transaction.markInvalid(
           "Write key already exists and can't be overridden by invite",
         );
-        transaction.isValid = false;
         continue;
       }
 
       writeKeys.add(change.key);
 
-      transaction.isValid = true;
+      transaction.markValid();
       continue;
     }
 
@@ -394,100 +406,152 @@ function determineValidTransactionsForGroup(
     const assignedRole = change.value;
 
     if (
-      change.value !== "admin" &&
-      change.value !== "writer" &&
-      change.value !== "reader" &&
-      change.value !== "writeOnly" &&
-      change.value !== "revoked" &&
-      change.value !== "adminInvite" &&
-      change.value !== "writerInvite" &&
-      change.value !== "readerInvite" &&
-      change.value !== "writeOnlyInvite"
+      assignedRole !== "admin" &&
+      assignedRole !== "manager" &&
+      assignedRole !== "writer" &&
+      assignedRole !== "reader" &&
+      assignedRole !== "writeOnly" &&
+      assignedRole !== "revoked" &&
+      assignedRole !== "managerInvite" &&
+      assignedRole !== "adminInvite" &&
+      assignedRole !== "writerInvite" &&
+      assignedRole !== "readerInvite" &&
+      assignedRole !== "writeOnlyInvite"
     ) {
-      logPermissionError("Group transaction must set a valid role");
-      transaction.isValid = false;
+      transaction.markInvalid("Group transaction must set a valid role");
       continue;
     }
 
     if (
       affectedMember === EVERYONE &&
       !(
-        change.value === "reader" ||
-        change.value === "writer" ||
-        change.value === "writeOnly" ||
-        change.value === "revoked"
+        assignedRole === "reader" ||
+        assignedRole === "writer" ||
+        assignedRole === "writeOnly" ||
+        assignedRole === "revoked"
       )
     ) {
-      logPermissionError(
+      transaction.markInvalid(
         "Everyone can only be set to reader, writer, writeOnly or revoked",
       );
-      transaction.isValid = false;
       continue;
     }
 
-    const isFirstSelfAppointment =
-      !memberState[transactor] &&
-      transactor === initialAdmin &&
-      change.op === "set" &&
-      change.key === transactor &&
-      change.value === "admin";
-
-    const currentAccountId = coValue.node.getCurrentAccountOrAgentID();
-
-    const isSelfRevoke =
-      currentAccountId === change.key &&
-      transactor === currentAccountId &&
-      change.value === "revoked";
-
-    if (!isFirstSelfAppointment && !isSelfRevoke) {
-      if (memberState[transactor] === "admin") {
-        if (
-          memberState[affectedMember] === "admin" &&
-          affectedMember !== transactor &&
-          assignedRole !== "admin"
-        ) {
-          logPermissionError("Admins can only demote themselves.");
-          transaction.isValid = false;
-          continue;
-        }
-      } else if (memberState[transactor] === "adminInvite") {
-        if (change.value !== "admin") {
-          logPermissionError("AdminInvites can only create admins.");
-          transaction.isValid = false;
-          continue;
-        }
-      } else if (memberState[transactor] === "writerInvite") {
-        if (change.value !== "writer") {
-          logPermissionError("WriterInvites can only create writers.");
-          transaction.isValid = false;
-          continue;
-        }
-      } else if (memberState[transactor] === "readerInvite") {
-        if (change.value !== "reader") {
-          logPermissionError("ReaderInvites can only create reader.");
-          transaction.isValid = false;
-          continue;
-        }
-      } else if (memberState[transactor] === "writeOnlyInvite") {
-        if (change.value !== "writeOnly") {
-          logPermissionError("WriteOnlyInvites can only create writeOnly.");
-          transaction.isValid = false;
-          continue;
-        }
-      } else {
-        logPermissionError(
-          "Group transaction must be made by current admin or invite",
-        );
-        transaction.isValid = false;
-        continue;
+    function markTransactionSetRoleAsValid(
+      change: MapOpPayload<RawAccountID | AgentID | Everyone, Role>,
+    ) {
+      if (change.op !== "set") {
+        throw new Error("Expected set operation");
       }
+
+      memberRoleResolver.setDirectRole(change.key, change.value);
+      transaction.markValid();
     }
 
-    memberState[affectedMember] = change.value;
-    transaction.isValid = true;
-  }
+    // is first self promotion to admin
+    if (
+      transactorRole === undefined &&
+      transactor === initialAdmin &&
+      affectedMember === transactor &&
+      assignedRole === "admin"
+    ) {
+      markTransactionSetRoleAsValid(change);
+      continue;
+    }
 
-  return { memberState };
+    // if I'm self revoking, it is always valid
+    if (transactor === change.key && change.value === "revoked") {
+      markTransactionSetRoleAsValid(change);
+      continue;
+    }
+
+    const affectedMemberRole = memberRoleResolver.getRoleAtTime(
+      affectedMember,
+      transaction.currentMadeAt,
+    );
+
+    /**
+     * Admins can't:
+     * - demote other admins
+     */
+    if (transactorRole === "admin") {
+      if (
+        affectedMemberRole === "admin" &&
+        assignedRole !== "admin" &&
+        affectedMember !== transactor
+      ) {
+        transaction.markInvalid("Admins can't demote admins.");
+        continue;
+      }
+
+      markTransactionSetRoleAsValid(change);
+      continue;
+    }
+
+    /**
+     * Managers can't:
+     * - demote other admins
+     * - invite new admins
+     * - promote to admin
+     */
+    if (transactorRole === "manager") {
+      if (affectedMemberRole === "admin") {
+        transaction.markInvalid("Managers can't demote admins.");
+        continue;
+      }
+      if (change.value === "admin") {
+        transaction.markInvalid("Managers can't promote to admin.");
+        continue;
+      }
+
+      if (change.value === "adminInvite") {
+        transaction.markInvalid("Managers can't invite admins.");
+        continue;
+      }
+      if (change.value === "managerInvite") {
+        transaction.markInvalid("Managers can't invite managers.");
+        continue;
+      }
+
+      markTransactionSetRoleAsValid(change);
+      continue;
+    }
+
+    if (transactorRole === "adminInvite") {
+      if (change.value !== "admin") {
+        transaction.markInvalid("AdminInvites can only create admins.");
+        continue;
+      }
+    } else if (transactorRole === "managerInvite") {
+      if (change.value !== "manager") {
+        transaction.markInvalid("managerInvite can only create managers.");
+        continue;
+      }
+    } else if (transactorRole === "writerInvite") {
+      if (change.value !== "writer") {
+        transaction.markInvalid("WriterInvites can only create writers.");
+        continue;
+      }
+    } else if (transactorRole === "readerInvite") {
+      if (change.value !== "reader") {
+        transaction.markInvalid("ReaderInvites can only create reader.");
+        continue;
+      }
+    } else if (transactorRole === "writeOnlyInvite") {
+      if (change.value !== "writeOnly") {
+        transaction.markInvalid("WriteOnlyInvites can only create writeOnly.");
+        continue;
+      }
+    } else {
+      transaction.markInvalid(
+        "Group transaction must be made by current admin, manager, or invite",
+      );
+      continue;
+    }
+
+    memberRoleResolver.setDirectRole(affectedMember, change.value);
+    transaction.markValid();
+  }
 }
 
 function agentInAccountOrMemberInGroup(

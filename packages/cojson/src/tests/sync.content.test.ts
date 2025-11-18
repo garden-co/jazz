@@ -54,7 +54,7 @@ describe("handling content messages", () => {
         syncServer: edge.node,
       });
 
-    client2PeerStateOnEdge.setOptimisticKnownState(map.core.id, {
+    client2PeerStateOnEdge.setKnownState(map.core.id, {
       id: map.core.id,
       header: false,
       sessions: {},
@@ -126,7 +126,7 @@ describe("handling content messages", () => {
       skipReconciliation: true,
     });
 
-    core2PeerStateOnEdge.setOptimisticKnownState(map.core.id, {
+    core2PeerStateOnEdge.setKnownState(map.core.id, {
       id: map.core.id,
       header: false,
       sessions: {},

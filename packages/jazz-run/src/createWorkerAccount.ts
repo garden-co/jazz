@@ -20,7 +20,7 @@ export const createWorkerAccount = async ({
 
   const account = await Account.create({
     creationProps: { name },
-    peersToLoadFrom: [peer],
+    peers: [peer],
     crypto,
   });
 

@@ -35,7 +35,7 @@
 
   // Function to merge current branch into main
   function mergeBranch() {
-    if (person.current && currentBranch !== 'main') {
+    if (person.current.$isLoaded && currentBranch !== 'main') {
       person.current.$jazz.unstable_merge();
       // Switch back to main after merge
       currentBranch = 'main';
@@ -47,7 +47,7 @@
   <!-- Person Selection -->
   <div class="section">
     <h3>Person Selection</h3>
-    {#each me.current?.root?.people?.$jazz.refs || [] as ref, index}
+    {#each me.current.$isLoaded ? me.current.root.people.$jazz.refs : [] as ref, index}
       <button
         onclick={() => {
           id = ref.id;
@@ -56,7 +56,8 @@
     {/each}
     <button
       onclick={() => {
-        console.log(person.current?.name);
+        if (!person.current.$isLoaded) return;
+        console.log(person.current.name);
       }}>Log person</button
     >
     <button
@@ -119,38 +120,39 @@
   </div>
 </div>
 
-{#if person.current}
+{#if person.current.$isLoaded}
+  {@const loadedPerson = person.current}
   <div class="section">
     <h3>Person Details</h3>
     <div class="person-info">
       <div class="branch-status" data-testid="branch-status">
         <strong>Branch Status:</strong>
-        {person.current.$jazz.isBranched ? `Branch: ${person.current.$jazz.branchName}` : 'Main branch'}
+        {loadedPerson.$jazz.isBranched ? `Branch: ${loadedPerson.$jazz.branchName}` : 'Main branch'}
       </div>
       
       <div class="person-fields">
         <label>
           Name
           <input type="text" bind:value={
-            () => person.current!.name,
-            newValue => person.current!.$jazz.set("name", newValue)
+            () => loadedPerson.name,
+            newValue => loadedPerson.$jazz.set("name", newValue)
           } />
         </label>
         <label>
           Dog
           <input type="text" bind:value={
-            () => person.current!.dog.name,
-            newValue => person.current!.dog.$jazz.set("name", newValue)
+            () => loadedPerson.dog.name,
+            newValue => loadedPerson.dog.$jazz.set("name", newValue)
           } />
         </label>
       </div>
       
       <div class="display-values">
         <div data-testid="person-name">
-          <strong>Name:</strong> {person.current.name}
+          <strong>Name:</strong> {loadedPerson.name}
         </div>
         <div data-testid="person-dog-name">
-          <strong>Dog:</strong> {person.current.dog.name}
+          <strong>Dog:</strong> {loadedPerson.dog.name}
         </div>
       </div>
     </div>

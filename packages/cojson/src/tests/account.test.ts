@@ -64,7 +64,7 @@ test("Can create account with one node, and then load it on another", async () =
     accountID,
     accountSecret,
     sessionID: Crypto.newRandomSessionID(accountID),
-    peersToLoadFrom: [node1asPeer],
+    peers: [node1asPeer],
     crypto: Crypto,
   });
 
@@ -104,7 +104,7 @@ test("Should migrate the root from private to trusting", async () => {
     accountID,
     accountSecret,
     sessionID: Crypto.newRandomSessionID(accountID),
-    peersToLoadFrom: [peers1[0]],
+    peers: [peers1[0]],
     crypto: Crypto,
   });
 
@@ -126,7 +126,7 @@ test("Should migrate the root from private to trusting", async () => {
     accountID,
     accountSecret,
     sessionID: Crypto.newRandomSessionID(accountID),
-    peersToLoadFrom: [peers2[0]],
+    peers: [peers2[0]],
     crypto: Crypto,
   });
 

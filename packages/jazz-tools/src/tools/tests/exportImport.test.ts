@@ -7,6 +7,7 @@ import {
   createJazzTestGuest,
   setupJazzTestSync,
 } from "../testing.js";
+import { assertLoaded } from "./utils.js";
 
 cojsonInternals.CO_VALUE_LOADING_CONFIG.RETRY_DELAY = 10;
 
@@ -291,9 +292,9 @@ describe("importContentPieces", () => {
 
     // Verify bob can now access the person
     const importedPerson = await Person.load(person.$jazz.id, { loadAs: bob });
-    expect(importedPerson).not.toBeNull();
-    expect(importedPerson?.name).toBe("John");
-    expect(importedPerson?.age).toBe(30);
+    assertLoaded(importedPerson);
+    expect(importedPerson.name).toBe("John");
+    expect(importedPerson.age).toBe(30);
   });
 
   test("imports content pieces with nested references", async () => {
@@ -339,11 +340,11 @@ describe("importContentPieces", () => {
       loadAs: bob,
     });
 
-    expect(importedPerson).not.toBeNull();
-    expect(importedPerson?.name).toBe("John");
-    expect(importedPerson?.address).not.toBeNull();
-    expect(importedPerson?.address.street).toBe("123 Main St");
-    expect(importedPerson?.address.city).toBe("New York");
+    assertLoaded(importedPerson);
+    expect(importedPerson.name).toBe("John");
+    expect(importedPerson.address).not.toBeNull();
+    expect(importedPerson.address.street).toBe("123 Main St");
+    expect(importedPerson.address.city).toBe("New York");
   });
 
   test("imports content pieces to anonymous agent", async () => {
@@ -376,8 +377,8 @@ describe("importContentPieces", () => {
     const importedPerson = await Person.load(person.$jazz.id, {
       loadAs: guest,
     });
-    expect(importedPerson).not.toBeNull();
-    expect(importedPerson?.name).toBe("John");
+    assertLoaded(importedPerson);
+    expect(importedPerson.name).toBe("John");
   });
 
   test("imports content pieces without specifying loadAs (uses current account)", async () => {
@@ -410,8 +411,8 @@ describe("importContentPieces", () => {
 
     // Verify bob can access the person
     const importedPerson = await Person.load(person.$jazz.id, { loadAs: bob });
-    expect(importedPerson).not.toBeNull();
-    expect(importedPerson?.name).toBe("John");
+    assertLoaded(importedPerson);
+    expect(importedPerson.name).toBe("John");
   });
 
   test("handles empty content pieces array", async () => {
@@ -452,8 +453,8 @@ describe("importContentPieces", () => {
 
     // Should still work correctly
     const importedPerson = await Person.load(person.$jazz.id, { loadAs: bob });
-    expect(importedPerson).not.toBeNull();
-    expect(importedPerson?.name).toBe("John");
+    assertLoaded(importedPerson);
+    expect(importedPerson.name).toBe("John");
   });
 
   test("imports content pieces with complex nested structure", async () => {
@@ -534,7 +535,7 @@ describe("importContentPieces", () => {
       loadAs: bob,
     });
 
-    expect(importedBlog).not.toBeNull();
+    assertLoaded(importedBlog);
     expect(importedBlog?.name).toBe("My Blog");
     expect(importedBlog?.posts.length).toBe(1);
     expect(importedBlog?.posts[0]?.title).toBe("My First Post");

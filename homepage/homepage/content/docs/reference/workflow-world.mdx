@@ -1,0 +1,289 @@
+export const metadata = {
+  description: "Learn how to use Jazz as a World to support Vercel Workflows"
+};
+
+import { Alert, CodeGroup, FileName, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
+import GetAPIKey from "@/components/docs/snippets/GetAPIKey.mdx";
+import RunDevServer from "@/components/docs/snippets/RunDevServer.mdx";
+
+
+# Jazz Workflow World
+
+Vercel Workflows allow developers to create durable, reliable, observable functions using TypeScript.
+
+You can use a simple, declarative API to define and use your workflows, replacing hand-rolled queues and custom retries.
+
+[Learn more about using Workflow](https://useworkflow.dev/), or
+
+## Getting started
+
+We recommend using Jazz Cloud as a backend for your workflows. Your workflow state will be persisted using Jazz, allowing you to run and deploy your apps without any additional infrastructure.
+
+## Get your free API key
+
+<GetAPIKey />
+
+Set your API key in your .env.local or production environment variables.
+
+<FileName>.env.local</FileName>
+*(or add to your production environment variables)*
+<CodeGroup>
+```bash
+JAZZ_API_KEY=<your-app-api-key>
+WORKFLOW_TARGET_WORLD=workflow-world-jazz
+```
+</CodeGroup>
+
+## Install the Jazz Workflow World
+
+Install the Jazz Workflow World, and add `WORKFLOW_TARGET_WORLD=workflow-world-jazz` to your `.env.local` file (or your production environment variables) to take use the Jazz Workflow World for running your workflows.
+
+<TabbedCodeGroup default="pnpm" savedPreferenceKey="package-manager" id="install-jazz-workflow-world">
+<TabbedCodeGroupItem label="npm">
+```sh
+npm add workflow-world-jazz
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="pnpm">
+```sh
+pnpm add workflow-world-jazz
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+## Create a worker
+
+Head over to https://dashboard.jazz.tools/ and create a new app. Once your app is ready, you'll see the option to *Create Worker Group*. This will do two things:
+
+1. Create a group, with a group ID, a master account ID, and a master account secret. This account is used for revocation and rotation of workers, and should *not* be used as a normal worker.
+2. Create a normal worker with an ID and a secret, which can be used to run your workflows.
+
+<Alert variant="info" title="Note">
+  Secrets displayed in the Jazz dashboard will only appear once. Make sure to save them somewhere secure. If you lose them, you will need to create a new worker group.
+</Alert>
+
+Click to create a worker group. Save **all** these details securely!
+
+## Add your worker ID and secret to your environment variables
+
+<FileName>.env.local</FileName>
+*(or add to your production environment variables)*
+<CodeGroup>
+```bash
+JAZZ_API_KEY=<your-app-api-key>
+WORKFLOW_TARGET_WORLD=workflow-world-jazz
+JAZZ_WORKER_ACCOUNT=<your-worker-id>
+JAZZ_WORKER_SECRET=<your-worker-secret>
+```
+</CodeGroup>
+
+## Set up webhooks
+
+### For local development
+
+Run the following command to configure a local webhook registry (which is needed to progress the workflow from your development environment). The webhook registry details will be added automatically to your environment variables.
+
+<TabbedCodeGroup default="pnpm" savedPreferenceKey="package-manager" id="create-registry">
+<TabbedCodeGroupItem label="npm">
+```sh
+npx env-cmd -f .env.local -x npx jazz-run webhook create-registry --grant \$JAZZ_WORKER_ACCOUNT >> .env.local
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="pnpm">
+```sh
+pnpx env-cmd -f .env.local -x -- pnpx jazz-run webhook create-registry --grant \$JAZZ_WORKER_ACCOUNT >> .env.local
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+<details>
+  <summary>What's this?</summary>
+
+  A webhook registry is a service that allows you to respond to state changes in your workflow. Let's break this down.
+
+  * `env-cmd -f .env.local -x`&hairsp;—&hairsp; allows the `jazz-run` tool to read the environment variables you've already set in your `.env.local` file
+  * `jazz-run webhook create-registry`&hairsp;—&hairsp;creates a registry
+  * `--grant \$JAZZ_WORKER_ACCOUNT`&hairsp;—&hairsp;grants access to the worker you just created (where the `\` is escaping the dollar sign in the terminal).
+
+</details>
+
+Once your webhook registry is configured, you can start it up using the following command:
+
+<TabbedCodeGroup default="pnpm" savedPreferenceKey="package-manager" id="run-registry">
+<TabbedCodeGroupItem label="npm">
+```sh
+npx env-cmd -f .env.local npx jazz-run webhook run
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="pnpm">
+```sh
+pnpx env-cmd -f .env.local -- pnpx jazz-run webhook run
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+<CodeGroup>
+```bash
+```
+</CodeGroup>
+
+<details>
+  <summary>What's this?</summary>
+
+  Same as above, but this time, we're actually running the webhook registry server
+
+  * `env-cmd -f .env.local -x`&hairsp;—&hairsp;allows the `jazz-run` tool to read the environment variables you've already set in your `.env.local` file
+  * `jazz-run webhook run`&hairsp;—&hairsp;runs a server hosting the webhooks.
+
+</details>
+
+### For production
+
+On the https://dashboard.jazz.tools/ dashboard, you can turn on the *Enable Webhooks* toggle. You'll see a new environment variable added to your *Worker Environment Variables*: `JAZZ_WEBHOOK_REGISTRY_ID`. Add this to your production environment variables, along with `JAZZ_WEBHOOK_ENDPOINT`, which should be the URL of your production application's public URL.
+
+## Develop your workflows
+
+You can now run your app, and start using workflows!
+
+<RunDevServer />
+
+## Self-hosting
+
+You can also host the sync server and webhook registry yourself using our open-source sync server.
+
+### Run your sync server
+
+You can run a sync server from the command line using the following command:
+
+<TabbedCodeGroup default="pnpm" savedPreferenceKey="package-manager" id="run-sync">
+<TabbedCodeGroupItem label="npm">
+```sh
+npx jazz-run sync
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="pnpm">
+```sh
+pnpm --allow-build=better-sqlite3 dlx jazz-run sync
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+Your sync server will start by default at `http://localhost:4200`. In case you are running the sync server in production, we recommend using a reverse proxy. In this case, replace `localhost:4200` from this point on with the public URL for your sync server.
+
+### Create a worker account
+
+You can create a worker account locally from the terminal:
+
+<TabbedCodeGroup default="pnpm" savedPreferenceKey="package-manager" id="run-sync">
+<TabbedCodeGroupItem label="npm">
+```sh
+npx jazz-run account create --peer http://localhost:4200 --name "Workflow Worker" >> .env.local
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="pnpm">
+```sh
+pnpx jazz-run account create --peer http://localhost:4200 --name "Workflow Worker" >> .env.local
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+### Create a webhook registry
+
+As you're running the sync server outside the Jazz cloud, you'll need to host your own webhook registry. You can create a webhook registry locally from the terminal:
+
+<TabbedCodeGroup default="pnpm" savedPreferenceKey="package-manager" id="sh-registry">
+<TabbedCodeGroupItem label="npm">
+  ```sh
+  npx env-cmd -f .env.local -x npx jazz-run webhook create-registry --peer http://localhost:4200 --grant \$JAZZ_WORKER_ACCOUNT >> .env.local
+  ```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="pnpm">
+```sh
+pnpx env-cmd -f .env.local -x -- pnpx jazz-run webhook create-registry --peer http://localhost:4200 --grant \$JAZZ_WORKER_ACCOUNT >> .env.local
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+
+### Tell Jazz about your sync server
+
+Your `.env.local` file should now contain all the environment variables you need to run your app, except for the URL of the sync server.
+
+Add `JAZZ_SYNC_SERVER=http://localhost:4200` to your `.env.local` file.
+
+Your `.env.local` file should look like this:
+
+<FileName>.env.local</FileName>
+<CodeGroup>
+```bash
+WORKFLOW_TARGET_WORLD=workflow-world-jazz
+JAZZ_WORKER_ACCOUNT=<your-worker-id>
+JAZZ_WORKER_SECRET=<your-worker-secret>
+JAZZ_WEBHOOK_REGISTRY_ID=<your-webhook-registry-id>
+JAZZ_WEBHOOK_REGISTRY_SECRET=<your-webhook-registry-secret>
+JAZZ_SYNC_SERVER=http://localhost:4200
+```
+</CodeGroup>
+
+### Develop your workflows
+
+You can now run your app, and start using workflows!
+
+<RunDevServer />
+
+### Deploying to production
+
+In order to deploy your app to production, you will need to have both the sync server and the webhook registry available as long-running processes, with the correct environment variables set.
+
+## Reference guide for environment variables
+
+<table>
+    <thead>
+        <tr>
+            <th>Variable</th>
+            <th>Description</th>
+            <th>Default</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>`WORKFLOW_TARGET_WORLD`</td>
+            <td>Set to `'workflow-world-jazz'` to use this world</td>
+            <td>-</td>
+        </tr>
+        <tr>
+            <td>`JAZZ_API_KEY`</td>
+            <td>Jazz API key   (if using Jazz Cloud)</td>
+            <td>-</td>
+        </tr>
+        <tr>
+            <td>`JAZZ_WORKER_ACCOUNT`</td>
+            <td>Jazz account that will own all of the workflow data</td>
+            <td>-</td>
+        </tr>
+        <tr>
+            <td>`JAZZ_WORKER_SECRET`</td>
+            <td>Secret for the worker account</td>
+            <td>-</td>
+        </tr>
+        <tr>
+            <td>`JAZZ_WEBHOOK_REGISTRY_ID`</td>
+            <td>CoValue ID for the webhook registry</td>
+            <td>-</td>
+        </tr>
+        <tr>
+            <td>`JAZZ_WEBHOOK_REGISTRY_SECRET`</td>
+            <td>Secret for the webhook registry (only if self-hosting)</td>
+            <td>-</td>
+        </tr>
+        <tr>
+            <td>`JAZZ_SYNC_SERVER`</td>
+            <td>Sync server URL (only if self-hosting)</td>
+            <td>Jazz Cloud (`wss://cloud.jazz.tools/?key=${JAZZ_API_KEY}`)</td>
+        </tr>
+        <tr>
+            <td>`JAZZ_WEBHOOK_ENDPOINT`</td>
+            <td>The endpoint where webhooks should get delivered</td>
+            <td>`http://localhost:${PORT}` or `http://localhost:3000` if `PORT` is not set</td>
+        </tr>
+    </tbody>
+</table>

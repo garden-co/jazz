@@ -37,7 +37,7 @@ app.get("/", async (c) => {
 
   const account = await Account.create({
     creationProps: { name: "Cloudflare test account" },
-    peersToLoadFrom: [peer],
+    peers: [peer],
     crypto,
   });
 

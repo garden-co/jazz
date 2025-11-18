@@ -1,0 +1,83 @@
+export const metadata = {
+  description: "Learn how to share a set of data between users through organizations."
+};
+
+import { CodeGroup, FileName, ReactLogo, SvelteLogo, ExpoLogo, RNLogo, VanillaLogo, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
+
+# How to share data between users through Organizations
+
+This guide shows you how to share a set of CoValues between users. Different apps have different names for this concept, such as "teams" or "workspaces".
+
+We'll use the term Organization.
+
+[See the full example here.](https://github.com/garden-co/jazz/tree/main/examples/organization)
+
+## Defining the schema for an Organization
+
+Create a CoMap shared by the users of the same organization to act as a root (or "main database") for the shared data within an organization.
+
+For this example, users within an `Organization` will be sharing `Project`s.
+
+<FileName>schema.ts</FileName>
+<CodeGroup>
+```ts permissions-and-sharing/sharing/schema.ts#Basic
+```
+</CodeGroup>
+
+Learn more about [defining schemas](/docs/core-concepts/covalues/overview).
+
+## Adding a list of Organizations to the user's Account
+
+Let's add the list of `Organization`s to the user's Account `root` so they can access them.
+
+<CodeGroup>
+```tsx permissions-and-sharing/sharing/schema.ts#AddToAccount
+```
+</CodeGroup>
+
+This schema now allows users to create `Organization`s and add `Project`s to them.
+
+[See the schema for the example app here.](https://github.com/garden-co/jazz/blob/main/examples/organization/src/schema.ts)
+
+## Adding members to an Organization
+
+Here are different ways to add members to an `Organization`.
+
+- Send users an invite link.
+- [The user requests to join.](/docs/permissions-and-sharing/sharing#requesting-invites)
+
+This guide and the example app show you the first method.
+
+### Adding members through invite links
+
+Here's how you can generate an [invite link](/docs/permissions-and-sharing/sharing#invites).
+
+When the user accepts the invite, add the `Organization` to the user's `organizations` list.
+
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="accept-invite">
+  <TabbedCodeGroupItem icon={<VanillaLogo />} label="Vanilla" value="vanilla" preferWrap>
+  ```ts permissions-and-sharing/sharing/create-invite-link.ts#ConsumeLink
+  ```
+  </TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
+```tsx permissions-and-sharing/sharing/react-snippet.tsx#AcceptInvite
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```tsx permissions-and-sharing/sharing/svelte.svelte
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<RNLogo />} label="React Native" value="react-native" preferWrap>
+```tsx permissions-and-sharing/sharing/rn.tsx#AcceptInvite
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ExpoLogo />} label="Expo" value="react-native-expo" preferWrap>
+```ts permissions-and-sharing/sharing/expo.tsx#AcceptInvite
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+## Further reading
+
+- [Allowing users to request an invite to join a Group](/docs/permissions-and-sharing/sharing#requesting-invites)
+- [Groups as permission scopes](/docs/permissions-and-sharing/overview#adding-group-members-by-id)

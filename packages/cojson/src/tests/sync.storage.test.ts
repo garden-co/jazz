@@ -8,19 +8,18 @@ import {
   vi,
 } from "vitest";
 
-import { setMaxRecommendedTxSize } from "../config";
 import { emptyKnownState } from "../exports";
 import {
   SyncMessagesLog,
   TEST_NODE_CONFIG,
   createTestMetricReader,
+  fillCoMapWithLargeData,
   loadCoValueOrFail,
   setupTestNode,
   tearDownTestMetricReader,
   waitFor,
 } from "./testUtils";
 import { stableStringify } from "../jsonStringify";
-import { determineValidTransactions } from "../permissions";
 
 // We want to simulate a real world communication that happens asynchronously
 TEST_NODE_CONFIG.withAsyncPeers = true;
@@ -30,7 +29,6 @@ describe("client with storage syncs with server", () => {
 
   beforeEach(async () => {
     SyncMessagesLog.clear();
-    setMaxRecommendedTxSize(100 * 1024);
     jazzCloud = setupTestNode({
       isSyncServer: true,
     });
@@ -139,11 +137,11 @@ describe("client with storage syncs with server", () => {
         "client -> storage | LOAD Map sessions: empty",
         "storage -> client | KNOWN Map sessions: empty",
         "client -> server | LOAD Map sessions: empty",
-        "server -> client | CONTENT ParentGroup header: true new: After: 0 New: 6",
+        "server -> client | CONTENT ParentGroup header: true new: After: 0 New: 5",
         "server -> client | CONTENT Group header: true new: After: 0 New: 5",
         "server -> client | CONTENT Map header: true new: After: 0 New: 1",
-        "client -> server | KNOWN ParentGroup sessions: header/6",
-        "client -> storage | CONTENT ParentGroup header: true new: After: 0 New: 6",
+        "client -> server | KNOWN ParentGroup sessions: header/5",
+        "client -> storage | CONTENT ParentGroup header: true new: After: 0 New: 5",
         "client -> server | KNOWN Group sessions: header/5",
         "client -> storage | CONTENT Group header: true new: After: 0 New: 5",
         "client -> server | KNOWN Map sessions: header/1",
@@ -339,7 +337,6 @@ describe("client syncs with a server with storage", () => {
   });
 
   test("loading a large coValue from storage", async () => {
-    setMaxRecommendedTxSize(1000);
     const client = setupTestNode();
 
     client.connectToSyncServer({
@@ -355,15 +352,7 @@ describe("client syncs with a server with storage", () => {
 
     const largeMap = group.createMap();
 
-    // Generate a large amount of data (about 100MB)
-    const chunks = 100;
-
-    const value = "1".repeat(10);
-
-    for (let i = 0; i < chunks; i++) {
-      const key = `key${i}`;
-      largeMap.set(key, value, "trusting");
-    }
+    fillCoMapWithLargeData(largeMap);
 
     await largeMap.core.waitForSync();
 
@@ -383,28 +372,20 @@ describe("client syncs with a server with storage", () => {
       [
         "client -> storage | CONTENT Group header: true new: After: 0 New: 5",
         "client -> server | CONTENT Group header: true new: After: 0 New: 5",
-        "client -> storage | CONTENT Map header: true new: After: 0 New: 20",
-        "client -> server | CONTENT Map header: true new: After: 0 New: 20",
-        "client -> storage | CONTENT Map header: false new: After: 20 New: 21",
-        "client -> server | CONTENT Map header: false new: After: 20 New: 21",
-        "client -> storage | CONTENT Map header: false new: After: 41 New: 21",
-        "client -> server | CONTENT Map header: false new: After: 41 New: 21",
-        "client -> storage | CONTENT Map header: false new: After: 62 New: 21",
-        "client -> server | CONTENT Map header: false new: After: 62 New: 21",
-        "client -> storage | CONTENT Map header: false new: After: 83 New: 17",
-        "client -> server | CONTENT Map header: false new: After: 83 New: 17",
+        "client -> storage | CONTENT Map header: true new: After: 0 New: 73 expectContentUntil: header/200",
+        "client -> server | CONTENT Map header: true new: After: 0 New: 73 expectContentUntil: header/200",
+        "client -> storage | CONTENT Map header: false new: After: 73 New: 73",
+        "client -> server | CONTENT Map header: false new: After: 73 New: 73",
+        "client -> storage | CONTENT Map header: false new: After: 146 New: 54",
+        "client -> server | CONTENT Map header: false new: After: 146 New: 54",
         "server -> client | KNOWN Group sessions: header/5",
         "server -> storage | CONTENT Group header: true new: After: 0 New: 5",
-        "server -> client | KNOWN Map sessions: header/20",
-        "server -> storage | CONTENT Map header: true new: After: 0 New: 20",
-        "server -> client | KNOWN Map sessions: header/41",
-        "server -> storage | CONTENT Map header: false new: After: 20 New: 21",
-        "server -> client | KNOWN Map sessions: header/62",
-        "server -> storage | CONTENT Map header: false new: After: 41 New: 21",
-        "server -> client | KNOWN Map sessions: header/83",
-        "server -> storage | CONTENT Map header: false new: After: 62 New: 21",
-        "server -> client | KNOWN Map sessions: header/100",
-        "server -> storage | CONTENT Map header: false new: After: 83 New: 17",
+        "server -> client | KNOWN Map sessions: header/73",
+        "server -> storage | CONTENT Map header: true new: After: 0 New: 73",
+        "server -> client | KNOWN Map sessions: header/146",
+        "server -> storage | CONTENT Map header: false new: After: 73 New: 73",
+        "server -> client | KNOWN Map sessions: header/200",
+        "server -> storage | CONTENT Map header: false new: After: 146 New: 54",
       ]
     `);
 
@@ -437,7 +418,7 @@ describe("client syncs with a server with storage", () => {
     expect(streamingCounterDuringLoad).toBe(1);
 
     const mapOnClient2 = await promise;
-    await mapOnClient2.core.waitForSync();
+    await mapOnClient2.core.waitForFullStreaming();
 
     // Test streaming counter after loading is complete (should be 0)
     await waitFor(async () => {
@@ -457,13 +438,12 @@ describe("client syncs with a server with storage", () => {
         "client -> storage | LOAD Map sessions: empty",
         "storage -> client | CONTENT Group header: true new: After: 0 New: 5",
         "client -> server | LOAD Group sessions: header/5",
-        "storage -> client | CONTENT Map header: true new: After: 0 New: 41 expectContentUntil: header/100",
-        "client -> server | LOAD Map sessions: header/100",
+        "storage -> client | CONTENT Map header: true new: After: 0 New: 73 expectContentUntil: header/200",
+        "client -> server | LOAD Map sessions: header/200",
         "server -> client | KNOWN Group sessions: header/5",
-        "server -> client | KNOWN Map sessions: header/100",
-        "storage -> client | CONTENT Map header: true new: After: 41 New: 21",
-        "storage -> client | CONTENT Map header: true new: After: 62 New: 21",
-        "storage -> client | CONTENT Map header: true new: After: 83 New: 17",
+        "server -> client | KNOWN Map sessions: header/200",
+        "storage -> client | CONTENT Map header: true new: After: 73 New: 73",
+        "storage -> client | CONTENT Map header: true new: After: 146 New: 54",
       ]
     `);
   });
@@ -485,20 +465,11 @@ describe("client syncs with a server with storage", () => {
     const largeMap = group.createMap();
 
     // Generate a large amount of data (about 100MB)
-    const dataSize = 1 * 200 * 1024;
-    const chunkSize = 1024; // 1KB chunks
-    const chunks = dataSize / chunkSize;
-
-    const value = Buffer.alloc(chunkSize, `value$`).toString("base64");
-
-    for (let i = 0; i < chunks; i++) {
-      const key = `key${i}`;
-      largeMap.set(key, value, "trusting");
-    }
+    fillCoMapWithLargeData(largeMap);
 
     await largeMap.core.waitForSync();
 
-    const newContentChunks = largeMap.core.verified.newContentSince(
+    const newContentChunks = largeMap.core.newContentSince(
       emptyKnownState(largeMap.id),
     );
 
@@ -611,7 +582,7 @@ describe("client syncs with a server with storage", () => {
     SyncMessagesLog.clear(); // We want to focus on the sync messages happening from now
 
     // Import the group in the client, to have the dependencies availble and test that the import persists on storage
-    const groupContent = group.core.verified.newContentSince(undefined)?.[0];
+    const groupContent = group.core.newContentSince(undefined)?.[0];
     assert(groupContent);
     client.node.syncManager.handleNewContent(groupContent, "import");
     expect(storage.getKnownState(groupContent.id)).toEqual(
@@ -619,7 +590,7 @@ describe("client syncs with a server with storage", () => {
     );
 
     // Export the map content with the two sessions
-    const mapContent = mapOnBob.core.verified.newContentSince(undefined)?.[0];
+    const mapContent = mapOnBob.core.newContentSince(undefined)?.[0];
     assert(mapContent);
 
     // Tamper Bob's session
@@ -650,8 +621,9 @@ describe("client syncs with a server with storage", () => {
   });
 
   test("should store values with no transactions", async () => {
-    const alice = setupTestNode({
-      connected: true,
+    const alice = setupTestNode();
+    alice.connectToSyncServer({
+      ourName: "alice",
     });
     const group = alice.node.createGroup();
     group.addMember("everyone", "writer");
@@ -666,8 +638,6 @@ describe("client syncs with a server with storage", () => {
     const { storage } = bob.addStorage({
       ourName: "bob",
     });
-
-    SyncMessagesLog.clear(); // We want to focus on the sync messages happening from now
 
     await loadCoValueOrFail(bob.node, map.id);
 
@@ -685,9 +655,15 @@ describe("client syncs with a server with storage", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
+        "alice -> server | CONTENT Group header: true new: After: 0 New: 5",
+        "alice -> server | CONTENT Map header: true new: ",
         "bob -> storage | LOAD Map sessions: empty",
         "storage -> bob | KNOWN Map sessions: empty",
         "bob -> server | LOAD Map sessions: empty",
+        "server -> alice | KNOWN Group sessions: header/5",
+        "server -> storage | CONTENT Group header: true new: After: 0 New: 5",
+        "server -> alice | KNOWN Map sessions: header/0",
+        "server -> storage | CONTENT Map header: true new: ",
         "server -> bob | CONTENT Group header: true new: After: 0 New: 5",
         "server -> bob | CONTENT Map header: true new: ",
         "bob -> server | KNOWN Group sessions: header/5",
@@ -696,5 +672,174 @@ describe("client syncs with a server with storage", () => {
         "bob -> storage | CONTENT Map header: true new: ",
       ]
     `);
+  });
+
+  test("when falling back to network, we should never emit unavailable", async () => {
+    const client = setupTestNode({
+      connected: true,
+    });
+
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    group.addMember("everyone", "reader");
+    map.set("hello", "world");
+
+    await map.core.waitForSync();
+
+    const newSession = client.spawnNewSession();
+    newSession.addStorage({
+      ourName: "newSession",
+    });
+
+    const coValue = newSession.node.getCoValue(map.id);
+    const spy = vi.fn();
+    coValue.subscribe((core) => {
+      spy(core.loadingState);
+    });
+
+    await newSession.node.loadCoValueCore(map.id, undefined, true);
+
+    expect(spy).not.toHaveBeenCalledWith("unavailable");
+    expect(coValue.loadingState).toBe("available");
+
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | CONTENT Group header: true new: After: 0 New: 3",
+        "client -> server | CONTENT Map header: true new: ",
+        "client -> server | CONTENT Group header: false new: After: 3 New: 2",
+        "client -> server | CONTENT Map header: false new: After: 0 New: 1",
+        "server -> client | KNOWN Group sessions: header/3",
+        "server -> storage | CONTENT Group header: true new: After: 0 New: 3",
+        "server -> client | KNOWN Map sessions: header/0",
+        "server -> storage | CONTENT Map header: true new: ",
+        "server -> client | KNOWN Group sessions: header/5",
+        "server -> storage | CONTENT Group header: false new: After: 3 New: 2",
+        "server -> client | KNOWN Map sessions: header/1",
+        "server -> storage | CONTENT Map header: false new: After: 0 New: 1",
+        "newSession -> storage | LOAD Map sessions: empty",
+        "storage -> newSession | KNOWN Map sessions: empty",
+        "client -> server | LOAD Map sessions: empty",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 5",
+        "server -> client | CONTENT Map header: true new: After: 0 New: 1",
+        "client -> server | KNOWN Group sessions: header/5",
+        "newSession -> storage | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server | KNOWN Map sessions: header/1",
+        "newSession -> storage | CONTENT Map header: true new: After: 0 New: 1",
+      ]
+    `);
+  });
+
+  test("large parent group streaming from storage", async () => {
+    const syncServer = setupTestNode({
+      isSyncServer: true,
+    });
+    const { storage } = syncServer.addStorage({
+      ourName: "syncServer",
+    });
+
+    const alice = setupTestNode();
+    alice.connectToSyncServer({
+      syncServer: syncServer.node,
+    });
+
+    const parentGroup = alice.node.createGroup();
+    const group = alice.node.createGroup();
+    group.extend(parentGroup);
+
+    const map = group.createMap();
+
+    fillCoMapWithLargeData(parentGroup);
+
+    parentGroup.addMember("everyone", "reader");
+
+    map.set("hello", "world");
+
+    await map.core.waitForSync();
+    await parentGroup.core.waitForSync();
+
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        ParentGroup: parentGroup.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | CONTENT ParentGroup header: true new: After: 0 New: 3",
+        "client -> server | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server | CONTENT Map header: true new: ",
+        "client -> server | CONTENT ParentGroup header: false new: After: 3 New: 73 expectContentUntil: header/205",
+        "client -> server | CONTENT ParentGroup header: false new: After: 76 New: 73",
+        "client -> server | CONTENT ParentGroup header: false new: After: 149 New: 56",
+        "client -> server | CONTENT Map header: false new: After: 0 New: 1",
+        "server -> client | KNOWN ParentGroup sessions: header/3",
+        "syncServer -> storage | CONTENT ParentGroup header: true new: After: 0 New: 3",
+        "server -> client | KNOWN Group sessions: header/5",
+        "syncServer -> storage | CONTENT Group header: true new: After: 0 New: 5",
+        "server -> client | KNOWN Map sessions: header/0",
+        "syncServer -> storage | CONTENT Map header: true new: ",
+        "server -> client | KNOWN ParentGroup sessions: header/76",
+        "syncServer -> storage | CONTENT ParentGroup header: false new: After: 3 New: 73",
+        "server -> client | KNOWN ParentGroup sessions: header/149",
+        "syncServer -> storage | CONTENT ParentGroup header: false new: After: 76 New: 73",
+        "server -> client | KNOWN ParentGroup sessions: header/205",
+        "syncServer -> storage | CONTENT ParentGroup header: false new: After: 149 New: 56",
+        "server -> client | KNOWN Map sessions: header/1",
+        "syncServer -> storage | CONTENT Map header: false new: After: 0 New: 1",
+      ]
+    `);
+
+    SyncMessagesLog.clear();
+
+    syncServer.restart();
+    syncServer.addStorage({
+      ourName: "syncServer",
+      storage,
+    });
+
+    const bob = setupTestNode();
+    bob.connectToSyncServer({
+      syncServer: syncServer.node,
+      ourName: "bob",
+    });
+
+    let mapOnBob = await loadCoValueOrFail(bob.node, map.id);
+
+    await mapOnBob.core.waitForAsync((value) => value.isCompletelyDownloaded());
+
+    expect(
+      SyncMessagesLog.getMessages({
+        ParentGroup: parentGroup.core,
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "bob -> server | LOAD Map sessions: empty",
+        "syncServer -> storage | LOAD Map sessions: empty",
+        "storage -> syncServer | CONTENT ParentGroup header: true new: After: 0 New: 76 expectContentUntil: header/205",
+        "storage -> syncServer | CONTENT Group header: true new: After: 0 New: 5",
+        "storage -> syncServer | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> bob | CONTENT ParentGroup header: true new: After: 0 New: 76 expectContentUntil: header/205",
+        "server -> bob | CONTENT Group header: true new: After: 0 New: 5",
+        "server -> bob | CONTENT Map header: true new: After: 0 New: 1",
+        "storage -> syncServer | CONTENT ParentGroup header: true new: After: 76 New: 73",
+        "server -> bob | CONTENT ParentGroup header: false new: After: 76 New: 73 expectContentUntil: header/205",
+        "bob -> server | KNOWN ParentGroup sessions: header/76",
+        "bob -> server | KNOWN Group sessions: header/5",
+        "bob -> server | KNOWN Map sessions: header/1",
+        "bob -> server | KNOWN ParentGroup sessions: header/149",
+        "storage -> syncServer | CONTENT ParentGroup header: true new: After: 149 New: 56",
+        "server -> bob | CONTENT ParentGroup header: false new: After: 149 New: 56",
+        "bob -> server | KNOWN ParentGroup sessions: header/205",
+      ]
+    `);
+
+    expect(mapOnBob.get("hello")).toEqual("world");
   });
 });

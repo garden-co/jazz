@@ -46,6 +46,8 @@ import {
   UsersIcon,
   WifiOffIcon,
   XIcon,
+  QrCodeIcon,
+  ServerIcon,
 } from "lucide-react";
 
 import clsx from "clsx";
@@ -102,10 +104,10 @@ export const icons = {
   user: UserIcon,
   group: UsersIcon,
   search: SearchIcon,
-
+  qrcode: QrCodeIcon,
   previous: ChevronLeftIcon,
   next: ChevronRightIcon,
-
+  server: ServerIcon,
   // text editor icons
   bold: BoldIcon,
   italic: ItalicIcon,
@@ -200,7 +202,7 @@ export function Icon({
 
   const roundedClasses = {
     xs: "rounded-xs",
-    sm: "rounded-sm",
+    sm: "rounded-xs",
     md: "rounded-md",
     lg: "rounded-lg",
     xl: "rounded-xl",

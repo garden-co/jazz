@@ -1,5 +1,4 @@
-import { ContentByFramework, CodeGroup } from '@/components/forMdx'
-import { Alert } from "@garden-co/design-system/src/components/atoms/Alert";
+import { Alert, ContentByFramework, CodeGroup } from '@/components/forMdx'
 
 export const metadata = {
   title: "Setup troubleshooting",
@@ -31,6 +30,16 @@ nvm use 20
 ```
 </CodeGroup>
 ---
+
+### Required TypeScript Configuration
+
+In order to build successfully with TypeScript, you must ensure that you have the following options configured (either in your `tsconfig.json` or using the command line):
+
+* `skipLibCheck` must be `true`
+* `exactOptionalPropertyTypes` must be `false`
+
+---
+
 ## npx jazz-run: command not found
 If, when running:
 <CodeGroup>
@@ -64,6 +73,7 @@ npx clear-npx-cache
 npx jazz-run sync
 ```
 </CodeGroup>
+
 ---
 ### Node 18 workaround (rebuilding the native module)
 

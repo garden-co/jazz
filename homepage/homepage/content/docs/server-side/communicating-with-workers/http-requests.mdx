@@ -1,0 +1,101 @@
+export const metadata = {
+    description: "How to use HTTP requests to communicate with Server Workers using Web API"
+};
+
+import { Alert, CodeGroup } from "@/components/forMdx";
+
+# HTTP Requests with Server Workers
+
+HTTP requests are the simplest way to communicate with Server Workers. While they don't provide all the features of [JazzRPC](/docs/server-side/jazz-rpc), they are a good solution when all you need is basic authentication.
+
+They work by generating a short-lived token with `generateAuthToken` and attaching it to the request headers as `Authorization: Jazz <token>`.
+The server can then verify the token with `authenticateRequest` and get the account that the request was made by.
+
+<Alert variant="info" className="mt-4" title="Note">
+  While the token is cryptographically secure, using non secure connections still makes you vulnerable to MITM attacks as - unlike JazzRPC - the request is not signed.
+
+  Replay attacks are mitigated by token expiration (default to 1 minute), but it's up to you to ensure that the token is not reused.
+
+  It is recommended to use HTTPS whenever possible.
+</Alert>
+
+## Creating a Request
+
+You can use any method to create a request; the most common is the `fetch` API.
+
+By default, the token is expected to be in the `Authorization` header in the form of `Jazz <token>`.
+
+<CodeGroup>
+```ts index.ts#Basic
+```
+</CodeGroup>
+
+## Authenticating requests
+
+You can use the `authenticateRequest` function to authenticate requests.
+
+Attempting to authenticate a request without a token doesn't fail; it returns `account` as `undefined`. For endpoints that **require** authentication, ensure `account` is defined in addition to any permission checks you may need.
+
+<CodeGroup>
+```ts index.ts#GetRequest
+```
+</CodeGroup>
+
+## Multi-account environments
+
+If you are using multiple accounts in your environment - for instance if your server starts multiple workers - or in general if you need to send and  authenticate requests as a specific account, you can specify which one to use when generating the token or when authenticating the request.
+
+
+### Making a request as a specific account
+
+`generateAuthToken` accepts an optional account parameter, so you can generate a token for a specific account.
+
+<CodeGroup>
+```ts index.ts#GenerateAsAccount
+```
+</CodeGroup>
+
+### Authenticating a request as a specific account
+
+Similarly, specify the account used to verify the token via the `loadAs` option:
+
+<CodeGroup>
+```ts index.ts#VerifyAsAccount
+```
+</CodeGroup>
+
+## Custom token expiration
+
+You can specify the expiration time of the token using the `expiration` option. The default expiration time is 1 minute.
+
+<CodeGroup>
+```ts index.ts#CustomExpiration
+```
+</CodeGroup>
+
+## Custom token location
+
+While using the `Authorization` header using the `Jazz <token>` format is the most common way to send the token, you can provide the token in any other way you want.
+
+For example, you can send the token in the `x-jazz-auth-token` header:
+
+<CodeGroup>
+```ts index.ts#CustomLocation
+```
+</CodeGroup>
+
+Then you can specify the location of the token using the `getToken` option:
+
+<CodeGroup>
+```ts index.ts#GetToken
+```
+</CodeGroup>
+
+## Manual token parsing
+
+If you need to manually parse a token from a string, you can use the `parseAuthToken` function.
+
+<CodeGroup>
+```ts index.ts#ManualTokenParsing
+```
+</CodeGroup>

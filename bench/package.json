@@ -4,11 +4,12 @@
   "type": "module",
   "dependencies": {
     "cojson": "workspace:*",
-    "jazz-tools": "workspace:*",
-    "cojson-latest": "npm:cojson@0.18.5",
-    "jazz-tools-latest": "npm:jazz-tools@0.18.5"
+    "vitest": "catalog:default"
   },
   "scripts": {
     "bench": "vitest bench"
+  },
+  "devDependencies": {
+    "vitest": "catalog:default"
   }
 }

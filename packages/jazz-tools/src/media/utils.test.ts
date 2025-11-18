@@ -253,6 +253,11 @@ describe("loadImageBySize", async () => {
     return imageDef;
   };
 
+  it("return null if the image cannot be loaded", async () => {
+    const result = await loadImageBySize("invalid-id", 256, 256);
+    expect(result).toBeNull();
+  });
+
   it("returns original if progressive is false", async () => {
     const imageDef = await createImageDef([[1920, 1080]], false);
     const result = await loadImageBySize(imageDef, 256, 256);

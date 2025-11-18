@@ -1,16 +1,11 @@
-import { type InviteSecret, cojsonInternals } from "cojson";
+import { AccountRole, type InviteSecret, cojsonInternals } from "cojson";
 import { Account } from "../coValues/account.js";
-import type {
-  CoValue,
-  CoValueClass,
-  CoValueClassOrSchema,
-  ID,
-} from "../internal.js";
+import type { CoValue, CoValueClassOrSchema } from "../internal.js";
 
 /** @category Invite Links */
 export function createInviteLink<C extends CoValue>(
   value: C,
-  role: "reader" | "writer" | "admin" | "writeOnly",
+  role: AccountRole,
   baseURL: string,
   valueHint?: string,
 ): string {

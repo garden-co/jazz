@@ -1,5 +1,6 @@
 import { CoValueCore, LocalNode } from "../exports";
-import { CoValueKnownState, NewContentMessage, SyncMessage } from "../sync";
+import { NewContentMessage, SyncMessage } from "../sync";
+import { CoValueKnownState } from "../knownState.js";
 
 function simplifySessions(msg: Pick<CoValueKnownState, "sessions" | "header">) {
   const count = Object.values(msg.sessions).reduce(
