@@ -1,0 +1,15 @@
+```ts
+import { Chair } from "./chairSchema";
+
+export function GET(request: Request) {
+  const id = request.url.split("/").pop();
+
+  Chair.subscribe((chair) => {
+    sendEmail({
+      topic: "Chair design changed AGAIN",
+      body: `We're now doing ${chair.color}` +
+            ` and ${chair.height} tall 🙄`,
+    });
+  });
+}
+```

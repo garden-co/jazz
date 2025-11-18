@@ -1,0 +1,13 @@
+```tsx
+import { Chair } from "./chairSchema";
+
+export function ChairComponent({ id }: { id: string }) {
+  const chair = useCoState(Chair, id);
+
+  return (
+    <div>
+      <p>{chair.color}</p>
+      <p>{chair.height}</p>
+    </div>
+  );
+}

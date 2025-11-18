@@ -62,12 +62,10 @@ export default function RootLayout({
           defaultTheme="system"
           enableSystem
           disableTransitionOnChange
-        > 
+        >
           {children}
-          <JazzFooter />
-          <PagefindSearch />
         </ThemeProvider>
-      </body> 
+      </body>
     </html>
   );
 }

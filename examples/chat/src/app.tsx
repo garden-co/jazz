@@ -125,7 +125,7 @@ createRoot(document.getElementById("root")!).render(
       <JazzReactProvider
         authSecretStorageKey="examples/chat"
         sync={{
-          peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+          peer: `ws://10.10.0.1:4200`,
         }}
         defaultProfileName={defaultProfileName}
       >
