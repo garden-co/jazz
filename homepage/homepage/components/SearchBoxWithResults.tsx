@@ -132,7 +132,7 @@ export function SearchBoxWithResults({ searchTerms }: { searchTerms: string }) {
   const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(true);
   const [results, setResults] = useState<PagefindResult[]>([]);
-  const currentFramework = useFramework();
+  const { framework: currentFramework } = useFramework();
 
   useEffect(() => {
     async function loadPagefind() {
