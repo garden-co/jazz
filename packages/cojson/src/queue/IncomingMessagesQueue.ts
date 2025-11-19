@@ -133,10 +133,18 @@ export class IncomingMessagesQueue {
         currentTimer - lastTimer >
         SYNC_SCHEDULER_CONFIG.INCOMING_MESSAGES_TIME_BUDGET
       ) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        await waitForNextTick();
       }
     }
 
     this.processing = false;
   }
+}
+
+// Use setImmediate if available, otherwise use queueMicrotask
+let waitForNextTick = () =>
+  new Promise<void>((resolve) => queueMicrotask(resolve));
+
+if (typeof setImmediate === "function") {
+  waitForNextTick = () => new Promise<void>((resolve) => setImmediate(resolve));
 }
