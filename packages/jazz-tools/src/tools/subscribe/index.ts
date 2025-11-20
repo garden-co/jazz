@@ -1,4 +1,9 @@
-import type { CoValue, CoValueClass, RefEncoded } from "../internal.js";
+import type {
+  CoValue,
+  CoValueClass,
+  MaybeLoaded,
+  RefEncoded,
+} from "../internal.js";
 import { createUnloadedCoValue } from "../internal.js";
 import { SubscriptionScope } from "./SubscriptionScope.js";
 import { CoValueLoadingState } from "./types.js";
@@ -56,16 +61,13 @@ export function accessChildByKey<D extends CoValue>(
     );
   }
 
-  const value = subscriptionScope.childValues.get(childId);
+  const childNode = subscriptionScope.childNodes.get(childId);
 
-  if (value?.type === CoValueLoadingState.LOADED) {
-    return value.value;
-  } else {
-    return createUnloadedCoValue(
-      childId,
-      value?.type ?? CoValueLoadingState.LOADING,
-    );
+  if (!childNode) {
+    return createUnloadedCoValue(childId, CoValueLoadingState.UNAVAILABLE);
   }
+
+  return childNode.getCurrentValue();
 }
 
 /**
@@ -77,22 +79,19 @@ export function accessChildByKey<D extends CoValue>(
  * Used for refs that never change (e.g. CoFeed entries, CoMap edits)
  */
 export function accessChildById<D extends CoValue>(
-  parent: D,
+  parent: CoValue,
   childId: string,
-  schema: RefEncoded<CoValue>,
+  schema: RefEncoded<D>,
 ) {
   const subscriptionScope = getSubscriptionScope(parent);
 
   subscriptionScope.subscribeToId(childId, schema);
 
-  const value = subscriptionScope.childValues.get(childId);
+  const childNode = subscriptionScope.childNodes.get(childId);
 
-  if (value?.type === CoValueLoadingState.LOADED) {
-    return value.value;
-  } else {
-    return createUnloadedCoValue(
-      childId,
-      value?.type ?? CoValueLoadingState.LOADING,
-    );
+  if (!childNode) {
+    return createUnloadedCoValue<D>(childId, CoValueLoadingState.UNAVAILABLE);
   }
+
+  return childNode.getCurrentValue() as MaybeLoaded<D>;
 }
