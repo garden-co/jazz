@@ -21,6 +21,16 @@ async function createSchema(
     image: tools.z.string().optional(),
   });
 
+  const Dog = tools.co.map({
+    type: tools.z.literal("dog"),
+    breed: tools.z.string(),
+  });
+  const Cat = tools.co.map({
+    type: tools.z.literal("cat"),
+    color: tools.z.string(),
+  });
+  const Pet = tools.co.discriminatedUnion("type", [Dog, Cat]);
+
   const Message = tools.co.map({
     content: tools.z.string(),
     createdAt: tools.z.date(),
@@ -32,6 +42,7 @@ async function createSchema(
     embeds: tools.co.optional(tools.co.list(Embed)),
     author: tools.z.string().optional(),
     threadId: tools.z.string().optional(),
+    pet: Pet,
   });
 
   const Messages = tools.co.list(Message);
@@ -68,6 +79,10 @@ async function runMessageCreation(schemaDef: SchemaRuntime) {
           hiddenIn: sampleHiddenIn,
           reactions: sampleReactions,
           author: "user123",
+          pet: {
+            type: "dog",
+            breed: "Labrador",
+          },
         },
         group,
       ),
@@ -80,12 +95,6 @@ async function runMessageCreation(schemaDef: SchemaRuntime) {
 await cronometro(
   {
     "Message.create × 1000 entries - jazz-tools@latest": {
-      async before() {
-        // Force GC before setup if available
-        if (globalThis.gc) {
-          globalThis.gc();
-        }
-      },
       async test() {
         const schemaDef = await createSchema(
           // @ts-expect-error
@@ -93,31 +102,17 @@ await cronometro(
           LatestPublishedWasmCrypto,
         );
         await runMessageCreation(schemaDef);
-        // Force GC after each iteration if available
-        if (globalThis.gc) {
-          globalThis.gc();
-        }
       },
     },
     "Message.create × 1000 entries - jazz-tools@workspace": {
-      async before() {
-        // Force GC before setup if available
-        if (globalThis.gc) {
-          globalThis.gc();
-        }
-      },
       async test() {
         const schemaDef = await createSchema(localTools, LocalWasmCrypto);
         await runMessageCreation(schemaDef);
-        // Force GC after each iteration if available
-        if (globalThis.gc) {
-          globalThis.gc();
-        }
       },
     },
   },
   {
-    iterations: 10,
+    iterations: 8,
     warmup: true,
     print: {
       colors: true,
