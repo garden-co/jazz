@@ -1,4 +1,4 @@
-import { bench, group, run } from "mitata";
+import cronometro from "cronometro";
 import * as localTools from "jazz-tools";
 import * as latestPublishedTools from "jazz-tools-latest";
 import { WasmCrypto as LocalWasmCrypto } from "cojson/crypto/WasmCrypto";
@@ -61,17 +61,15 @@ async function runMessageCreation(schemaDef: SchemaRuntime) {
   const messagesToAdd = Array.from({ length: MESSAGE_COUNT }, (_, i) => i).map(
     () =>
       schemaDef.Message.create(
-        schemaDef.Message.create(
-          {
-            content: "A".repeat(1024),
-            createdAt: new Date(),
-            updatedAt: new Date(),
-            hiddenIn: sampleHiddenIn,
-            reactions: sampleReactions,
-            author: "user123",
-          },
-          group,
-        ),
+        {
+          content: "A".repeat(1024),
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          hiddenIn: sampleHiddenIn,
+          reactions: sampleReactions,
+          author: "user123",
+        },
+        group,
       ),
   );
   messages.$jazz.push(...messagesToAdd);
@@ -79,40 +77,57 @@ async function runMessageCreation(schemaDef: SchemaRuntime) {
   await schemaDef.localNode.gracefulShutdown();
 }
 
-function registerBenchmark(label: string, tools: any, wasmCrypto: any) {
-  bench(function* () {
-    yield {
-      [0]() {
-        return createSchema(tools, wasmCrypto);
+await cronometro(
+  {
+    "Message.create × 1000 entries - jazz-tools@latest": {
+      async before() {
+        // Force GC before setup if available
+        if (globalThis.gc) {
+          globalThis.gc();
+        }
       },
-      async bench(schemaDef: SchemaRuntime) {
+      async test() {
+        const schemaDef = await createSchema(
+          // @ts-expect-error
+          latestPublishedTools,
+          LatestPublishedWasmCrypto,
+        );
         await runMessageCreation(schemaDef);
+        // Force GC after each iteration if available
+        if (globalThis.gc) {
+          globalThis.gc();
+        }
       },
-    };
-  })
-    .name(label)
-    .gc("inner");
-}
-
-group("Message.create × 1000 entries", () => {
-  // Note: Benchmark runs affect subsequent runs
-  // This is minimized by:
-  // - waiting for CoValues to be synced before completing a benchmark run
-  // - using a fresh CoValue schema on each benchmark run
-  // - running the garbage collector between runs
-  // Still, some impact remains. Expect the first benchmark to be ~2% faster than the second one.
-  registerBenchmark(
-    "Jazz 0.19.2",
-    latestPublishedTools,
-    LatestPublishedWasmCrypto,
-  );
-  registerBenchmark("current version", localTools, LocalWasmCrypto);
-});
+    },
+    "Message.create × 1000 entries - jazz-tools@workspace": {
+      async before() {
+        // Force GC before setup if available
+        if (globalThis.gc) {
+          globalThis.gc();
+        }
+      },
+      async test() {
+        const schemaDef = await createSchema(localTools, LocalWasmCrypto);
+        await runMessageCreation(schemaDef);
+        // Force GC after each iteration if available
+        if (globalThis.gc) {
+          globalThis.gc();
+        }
+      },
+    },
+  },
+  {
+    iterations: 10,
+    warmup: true,
+    print: {
+      colors: true,
+      compare: true,
+    },
+  },
+);
 
 if (!globalThis.gc) {
   console.warn(
-    "Run this benchmark with NODE_OPTIONS=--expose-gc so Mitata can force GC between runs.",
+    "Run this benchmark with NODE_OPTIONS=--expose-gc so cronometro can force GC between runs.",
   );
 }
-
-await run();
