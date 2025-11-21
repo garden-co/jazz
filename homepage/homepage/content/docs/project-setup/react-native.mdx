@@ -42,7 +42,7 @@ If you intend to build for iOS, you can accept the invitation to install CocoaPo
 npm install @react-native-community/netinfo @bam.tech/react-native-image-resizer
 
 # React Native polyfills
-npm i -S @azure/core-asynciterator-polyfill react-native-url-polyfill readable-stream react-native-get-random-values @op-engineering/op-sqlite react-native-mmkv
+npm i -S @azure/core-asynciterator-polyfill react-native-url-polyfill readable-stream react-native-get-random-values @op-engineering/op-sqlite react-native-mmkv react-native-fast-encoder
 
 # Jazz dependencies
 npm i -S jazz-tools
@@ -151,6 +151,15 @@ polyfillGlobal("ReadableStream", () => ReadableStream); // polyfill ReadableStre
 import "@azure/core-asynciterator-polyfill"; // polyfill Async Iterator
 import "@bacons/text-decoder/install"; // polyfill Text Decoder
 import 'react-native-get-random-values'; // polyfill getRandomValues
+import TextEncoder from 'react-native-fast-encoder'
+
+// The 'react-native-fast-encoder' package does not automatically install the polyfill, so we need to do it manually
+const originalTextEncoder = new window.TextEncoder()
+window.TextEncoder = TextEncoder;
+window.TextDecoder = TextEncoder;
+TextEncoder.prototype.encodeInto = (source: string, destination: Uint8Array<ArrayBufferLike>) => {
+  return originalTextEncoder.encodeInto(source, destination)
+}
 ```
 </CodeGroup>
 
