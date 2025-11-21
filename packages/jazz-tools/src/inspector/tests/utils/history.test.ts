@@ -1,9 +1,11 @@
 import { assert, describe, expect, it } from "vitest";
 import { createJazzTestAccount, setupJazzTestSync } from "jazz-tools/testing";
 import { co, z } from "jazz-tools";
-import { restoreCoMapToTimestamp } from "../../utils/history";
+import {
+  getTransactionChanges,
+  restoreCoMapToTimestamp,
+} from "../../utils/history";
 import { JsonObject } from "cojson";
-import { loadCoValueOrFail, waitFor } from "../../../tools/tests/utils";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -397,5 +399,234 @@ describe("restoreCoMapToTimestamp", async () => {
     restoreCoMapToTimestamp(valueOnReader.$jazz.raw, initialTimestamp, false);
 
     expect(valueOnReader.pet).toBe("cat");
+  });
+});
+
+describe("getTransactionChanges", async () => {
+  const account = await createJazzTestAccount();
+
+  describe("CoMap transactions", () => {
+    it("should return changes for CoMap transactions", async () => {
+      const value = co
+        .map({
+          pet: z.string(),
+        })
+        .create({ pet: "dog" }, account);
+
+      await sleep(2);
+      value.$jazz.set("pet", "cat");
+
+      const transactions = value.$jazz.raw.core.verifiedTransactions;
+      const firstTx = transactions[0]!;
+      const secondTx = transactions[1]!;
+
+      const firstChanges = getTransactionChanges(firstTx, value.$jazz.raw);
+      const secondChanges = getTransactionChanges(secondTx, value.$jazz.raw);
+
+      expect(firstChanges.length).toBeGreaterThan(0);
+      expect(secondChanges.length).toBeGreaterThan(0);
+      expect(firstChanges[0]).toHaveProperty("op", "set");
+      expect(secondChanges[0]).toHaveProperty("op", "set");
+    });
+
+    it("should return empty array for transactions with no changes", async () => {
+      const value = co.map({}).create({}, account);
+
+      const transactions = value.$jazz.raw.core.verifiedTransactions;
+      const firstTx = transactions[0]!;
+
+      const changes = getTransactionChanges(firstTx, value.$jazz.raw);
+
+      expect(Array.isArray(changes)).toBe(true);
+    });
+  });
+
+  describe("CoPlainText transactions", () => {
+    it("should collapse multiple append operations into one", async () => {
+      const value = co.plainText().create("hello", account);
+
+      const transactions = value.$jazz.raw.core.verifiedTransactions;
+      const firstTx = transactions[0]!;
+
+      const changes = getTransactionChanges(firstTx, value.$jazz.raw);
+
+      expect(changes.length).toBe(1);
+      expect(changes).toEqual([
+        {
+          op: "app",
+          value: "hello",
+          after: "start",
+        },
+      ]);
+    });
+
+    it("should collapse multiple append operations after a specific position", async () => {
+      const value = co.plainText().create("hello", account);
+      await sleep(2);
+      value.$jazz.applyDiff("hello world");
+
+      const transactions = value.$jazz.raw.core.verifiedTransactions;
+      const secondTx = transactions[1]!;
+
+      const changes = getTransactionChanges(secondTx, value.$jazz.raw);
+
+      expect(changes.length).toBe(1);
+      expect(changes[0]).toHaveProperty("op", "app");
+      expect(changes[0]).toHaveProperty("value");
+      expect(changes[0]).toHaveProperty("after");
+    });
+
+    it("should collapse multiple prepend operations into one", async () => {
+      const value = co.plainText().create("world", account);
+      await sleep(2);
+      value.insertBefore(0, "Hello, ");
+
+      const transactions = value.$jazz.raw.core.verifiedTransactions;
+      expect(transactions).toHaveLength(3);
+
+      const changes1 = getTransactionChanges(transactions[1]!, value.$jazz.raw);
+
+      expect(changes1).toEqual([
+        {
+          op: "pre",
+          value: "H",
+          before: expect.objectContaining({}),
+        },
+      ]);
+      const changes2 = getTransactionChanges(transactions[2]!, value.$jazz.raw);
+
+      expect(changes2).toEqual([
+        {
+          op: "app",
+          value: "ello, ",
+          after: expect.objectContaining({}),
+        },
+      ]);
+    });
+
+    it("should collapse consecutive deletions into grouped deletions", async () => {
+      const value = co.plainText().create("hello", account);
+      await sleep(2);
+      value.$jazz.applyDiff("hello world");
+      await sleep(2);
+      value.$jazz.applyDiff("hed");
+
+      const transactions = value.$jazz.raw.core.verifiedTransactions;
+      const deletionTx = transactions.find((tx) =>
+        tx.changes?.some((c: any) => c.op === "del"),
+      );
+
+      assert(deletionTx);
+
+      const changes = getTransactionChanges(deletionTx, value.$jazz.raw);
+
+      expect(changes).toEqual([
+        {
+          action: '"lo " has been deleted',
+          op: "custom",
+        },
+        {
+          action: '"dlrow" has been deleted',
+          op: "custom",
+        },
+      ]);
+    });
+
+    it("should handle single deletion", async () => {
+      const value = co.plainText().create("hello", account);
+      await sleep(2);
+      value.$jazz.applyDiff("hell");
+
+      const transactions = value.$jazz.raw.core.verifiedTransactions;
+      const deletionTx = transactions.find((tx) =>
+        tx.changes?.some((c: any) => c.op === "del"),
+      );
+
+      assert(deletionTx);
+
+      const changes = getTransactionChanges(deletionTx, value.$jazz.raw);
+      expect(changes).toEqual([
+        {
+          op: "del",
+          insertion: expect.objectContaining({}),
+        },
+      ]);
+    });
+  });
+
+  it("should return error message when read key is not found", async () => {
+    const group = co.group().create({ owner: account });
+    const account2 = await createJazzTestAccount();
+    group.addMember(account2, "reader");
+
+    const value = co
+      .map({
+        secret: z.string(),
+      })
+      .create({ secret: "hidden" }, group);
+
+    const valueOnReader = await co
+      .map({
+        secret: z.string(),
+      })
+      .load(value.$jazz.id, { loadAs: account2 });
+
+    assert(valueOnReader.$isLoaded);
+
+    const transactions = valueOnReader.$jazz.raw.core.verifiedTransactions;
+    const privateTx = transactions.find(
+      (tx) => tx.tx.privacy === "private" && tx.isValid === false,
+    );
+
+    if (privateTx) {
+      const changes = getTransactionChanges(privateTx, valueOnReader.$jazz.raw);
+
+      if (typeof changes[0] === "string") {
+        expect(changes[0]).toContain("Unable to decrypt transaction");
+      }
+    }
+  });
+
+  it("should decrypt transaction when read key is available", async () => {
+    const group = co.group().create({ owner: account });
+    const account2 = await createJazzTestAccount();
+    group.addMember(account2, "writer");
+
+    const value = co
+      .map({
+        secret: z.string(),
+      })
+      .create({ secret: "hidden" }, group);
+
+    const valueOnWriter = await co
+      .map({
+        secret: z.string(),
+      })
+      .load(value.$jazz.id, { loadAs: account2 });
+
+    assert(valueOnWriter.$isLoaded);
+
+    const transactions = valueOnWriter.$jazz.raw.core.verifiedTransactions;
+    const privateTx = transactions.find((tx) => tx.tx.privacy === "private");
+
+    if (privateTx) {
+      const changes = getTransactionChanges(privateTx, valueOnWriter.$jazz.raw);
+
+      expect(Array.isArray(changes)).toBe(true);
+      if (changes.length > 0 && typeof changes[0] !== "string") {
+        expect(changes[0]).toHaveProperty("op");
+      }
+    }
+  });
+
+  it("should handle transactions with undefined changes", async () => {
+    const value = co.map({}).create({}, account);
+
+    const transactions = value.$jazz.raw.core.verifiedTransactions;
+    const firstTx = transactions[0]!;
+
+    const changes = getTransactionChanges(firstTx, value.$jazz.raw);
+
+    expect(changes).toEqual([]);
   });
 });

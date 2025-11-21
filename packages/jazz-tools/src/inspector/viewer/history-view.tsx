@@ -3,9 +3,9 @@ import { useMemo } from "react";
 import { styled } from "goober";
 import { AccountOrGroupText } from "./account-or-group-text";
 import { DataTable, ColumnDef } from "../ui/data-table";
-import type { VerifiedTransaction } from "cojson/dist/coValueCore/coValueCore.js";
 import { Icon, Accordion } from "../ui";
 import * as TransactionChanges from "../utils/transactions-changes";
+import { getTransactionChanges } from "../utils/history";
 
 type HistoryEntry = {
   id: string;
@@ -106,30 +106,6 @@ export function HistoryView({
       />
     </Accordion>
   );
-}
-
-function getTransactionChanges(
-  tx: VerifiedTransaction,
-  coValue: RawCoValue,
-): JsonValue[] {
-  if (tx.isValid === false && tx.tx.privacy === "private") {
-    const readKey = coValue.core.getReadKey(tx.tx.keyUsed);
-    if (!readKey) {
-      return [
-        `Unable to decrypt transaction: read key ${tx.tx.keyUsed} not found.`,
-      ];
-    }
-
-    return (
-      coValue.core.verified.decryptTransaction(
-        tx.txID.sessionID,
-        tx.txID.txIndex,
-        readKey,
-      ) ?? []
-    );
-  }
-
-  return tx.changes ?? (tx.tx as any).changes ?? [];
 }
 
 function getHistory(coValue: RawCoValue): HistoryEntry[] {
@@ -238,6 +214,10 @@ function mapTransactionToAction(
 
   if (TransactionChanges.isPropertyDeletion(change)) {
     return `Property "${change.key}" has been deleted`;
+  }
+
+  if ((change as any).op === "custom") {
+    return (change as any).action;
   }
 
   return "Unknown action: " + JSON.stringify(change);
