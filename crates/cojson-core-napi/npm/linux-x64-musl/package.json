@@ -1,6 +1,6 @@
 {
   "name": "cojson-core-napi-linux-x64-musl",
-  "version": "0.19.3",
+  "version": "0.19.4",
   "cpu": [
     "x64"
   ],

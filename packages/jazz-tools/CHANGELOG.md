@@ -1,5 +1,16 @@
 # jazz-tools
 
+## 0.19.4
+
+### Patch Changes
+
+- 78dfffd: Optimize CoValue creation by caching schema->coField transformations
+- e02e14c: Improved readability for CoPlainText's history in inspector
+- 3aaba61: Inline edit for CoPlainTexts in inspector
+  - cojson@0.19.4
+  - cojson-storage-indexeddb@0.19.4
+  - cojson-transport-ws@0.19.4
+
 ## 0.19.3
 
 ### Patch Changes
