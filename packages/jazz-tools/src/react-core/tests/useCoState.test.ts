@@ -13,9 +13,9 @@ import {
   co,
   z,
 } from "jazz-tools";
-import { assertLoaded } from "jazz-tools/testing";
+import { assertLoaded, disableJazzTestSync } from "jazz-tools/testing";
 import { assert, beforeEach, describe, expect, expectTypeOf, it } from "vitest";
-import { useCoState } from "../index.js";
+import { useCoState, useLogOut } from "../index.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { act, renderHook, waitFor } from "./testUtils.js";
 
@@ -756,5 +756,105 @@ describe("useCoState", () => {
     expect(updatedMainPerson.name).toBe("John Smith");
     expect(updatedMainPerson.age).toBe(31);
     expect(updatedMainPerson.email).toBe("john.smith@example.com");
+  });
+
+  it("should preload the value when provided", async () => {
+    disableJazzTestSync();
+
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+      email: z.string(),
+    });
+
+    const group = Group.create();
+    group.addMember("everyone", "writer");
+
+    const originalPerson = Person.create(
+      {
+        name: "John Doe",
+        age: 30,
+        email: "john@example.com",
+      },
+      group,
+    );
+
+    const bob = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const exportedPerson = originalPerson.$jazz.export();
+    let renderCount = 0;
+
+    const { result } = renderHook(
+      () => {
+        renderCount++;
+        return useCoState(Person, originalPerson.$jazz.id, {
+          preloaded: exportedPerson,
+        });
+      },
+      {
+        account: bob,
+      },
+    );
+
+    expect(renderCount).toBe(1);
+
+    assertLoaded(result.current);
+    expect(result.current.name).toBe("John Doe");
+    expect(result.current.age).toBe(30);
+    expect(result.current.email).toBe("john@example.com");
+  });
+
+  it("preload should work when changing the account", async () => {
+    disableJazzTestSync();
+
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+      email: z.string(),
+    });
+
+    const group = Group.create();
+    group.addMember("everyone", "writer");
+
+    const originalPerson = Person.create(
+      {
+        name: "John Doe",
+        age: 30,
+        email: "john@example.com",
+      },
+      group,
+    );
+
+    await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const exportedPerson = originalPerson.$jazz.export();
+    let renderCount = 0;
+
+    const { result } = renderHook(() => {
+      renderCount++;
+      const person = useCoState(Person, originalPerson.$jazz.id, {
+        preloaded: exportedPerson,
+      });
+
+      return { person, logout: useLogOut() };
+    });
+
+    // Required to perform the logout
+    await setupJazzTestSync();
+
+    await act(async () => {
+      result.current.logout();
+    });
+
+    expect(renderCount).toBe(2);
+
+    assertLoaded(result.current.person);
+    expect(result.current.person.name).toBe("John Doe");
+    expect(result.current.person.age).toBe(30);
+    expect(result.current.person.email).toBe("john@example.com");
   });
 });
