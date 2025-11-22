@@ -1,11 +1,62 @@
 export const meta = {
   slug: "what-is-jazz",
   title: "What is Jazz?",
-  subtitle: "(A framework for local-first state & permissions)",
-  date: "2024-12-27",
+  subtitle: "(A fresh take on what a database is)",
+  date: "2025-11-18",
   coverImage: "/posts/post2.svg",
   author: {
     name: "Anselm Eickhoff",
     image: "/team/anselm.jpg",
   },
 };
+
+
+At Garden Computing, we're building Jazz, which we recently learned is a database.
+
+In this post, I'll tell you the story of why I started Jazz,
+how it works, and how it's different from other databases.
+
+## The trigger: becoming local-first radicalized
+
+What you need to know about me is that in my time in the B2B SaaS mines,
+I've seen and built a lot of apps, each with their own unique stack, all of which sucked.
+
+But then in 2019 or so, I **learned** about Figma and Notion, and they sucked slightly less.
+Because they were much more multi-player than your average app,
+but at the same time felt more like a high-fidelity desktop app.
+
+Then the same year, I discovered Ink & Switch, and the idea of local-first software,
+and it radicalized me. I immediately wanted to build my own local-first Notion,
+so I started looking for tools, because I knew none of the horrible SaaS stacks I knew
+would be able to handle it.
+
+Luckily, it turned out that Ink & Switch also was *making* those tools,
+so I discovered Automerge, and I immediately knew that I had struck gold,
+because at the time it was just good enough to reveal its potential,
+and just bad enough that I got nerd-sniped into building my own thing.
+
+{/* When I started building Jazz, I didn’t mean to build a new database. I was radicalized by the new movement of “local-first”, ready to get rid of the entire idea of a backend stack.
+
+This is the story of how I discovered local-first and then slowly de-radicalized myself, re-shaping the ideas I had come across into a what I now call a new database.
+
+## Trigger 1: having to re-invent the data layer for each app
+
+For most of my professional life, I helped companies with full-stack work and product design, often taking whole apps from zero to one.
+
+I always start building apps by defining the data schema. Even before mocking up any UI you typically know what things people will be handling in your app and how they relate to each other.
+
+> Show me your flowcharts and conceal your tables, and I shall continue to be mystified. Show me your tables, and I won't usually need your flowcharts
+
+Everything after that, the stuff between the UI and the data schema “should be” easy. But it isn’t.
+
+What typically follows is an overwhelming puzzle of tech choices and deployment worries just to assemble your stack.
+
+And even if you "just use Postgres for everything" there are so many implementation details to decide. At the most extreme, I've routinely worked with PostGraphile to standardize away as much of the backend as possible
+
+## Trigger 2: a new class of apps raising the bar
+
+I started building Jazz soon after I started using Notion and Figma. It was immediately clear to me…
+
+In the rest of the post, I will lay out different facets of what make Jazz different - roughly in the order I encountered and designed them, and roughly in the order I think they matter to you if you’re curious to learn Jazz.
+
+## Globally Reactive */}
