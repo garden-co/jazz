@@ -17,8 +17,8 @@ import type {
 import {
   coValueClassFromCoValueClassOrSchema,
   subscribeToCoValue,
-  createUnloadedCoValue,
   CoValueLoadingState,
+  getUnloadedCoValueWithoutId,
 } from "jazz-tools";
 import { untrack } from "svelte";
 import { createSubscriber } from "svelte/reactivity";
@@ -55,11 +55,9 @@ export class CoState<
   // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
   R extends ResolveQuery<V> = SchemaResolveQuery<V>,
 > {
-  #value: MaybeLoaded<Loaded<V, R>> = createUnloadedCoValue(
-    "",
+  #value: MaybeLoaded<Loaded<V, R>> = getUnloadedCoValueWithoutId(
     CoValueLoadingState.LOADING,
   );
-  #previousValue: MaybeLoaded<CoValue> | undefined = undefined;
   #ctx = getJazzContext<InstanceOfSchema<AccountClass<Account>>>();
   #id: CoStateId;
   #subscribe: () => void;
@@ -86,9 +84,9 @@ export class CoState<
       const options = this.#options;
 
       return untrack(() => {
-        if (!ctx || !id) {
+        if (!id) {
           return this.update(
-            createUnloadedCoValue(id ?? "", CoValueLoadingState.UNAVAILABLE),
+            getUnloadedCoValueWithoutId(CoValueLoadingState.UNAVAILABLE),
           );
         }
         const agent = "me" in ctx ? ctx.me : ctx.guest;
@@ -101,15 +99,11 @@ export class CoState<
             // @ts-expect-error The resolve query type isn't compatible with the coValueClassFromCoValueClassOrSchema conversion
             resolve,
             loadAs: agent,
-            onUnavailable: () => {
-              this.update(
-                createUnloadedCoValue(id, CoValueLoadingState.UNAVAILABLE),
-              );
+            onUnavailable: (value) => {
+              this.update(value);
             },
-            onUnauthorized: () => {
-              this.update(
-                createUnloadedCoValue(id, CoValueLoadingState.UNAUTHORIZED),
-              );
+            onUnauthorized: (value) => {
+              this.update(value);
             },
             syncResolution: true,
             unstable_branch: options?.unstable_branch,
@@ -130,7 +124,6 @@ export class CoState<
     if (shouldSkipUpdate(value, this.#value)) {
       return;
     }
-    this.#previousValue = value;
     this.#value = value;
     this.#update();
   }
@@ -148,11 +141,10 @@ export class AccountCoState<
   // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
   R extends ResolveQuery<A> = SchemaResolveQuery<A>,
 > {
-  #value: MaybeLoaded<Loaded<A, R>> = createUnloadedCoValue(
-    "",
+  #value: MaybeLoaded<Loaded<A, R>> = getUnloadedCoValueWithoutId(
     CoValueLoadingState.LOADING,
   );
-  #ctx = getJazzContext<InstanceOfSchema<A>>();
+  #ctx = getJazzContext<InstanceOfSchema<AccountClass<Account>>>();
   #subscribe: () => void;
   #options: CoStateOptions<A, R> | undefined;
   #update = () => {};
@@ -174,9 +166,9 @@ export class AccountCoState<
       const options = this.#options;
 
       return untrack(() => {
-        if (!ctx || !("me" in ctx)) {
+        if (!("me" in ctx)) {
           return this.update(
-            createUnloadedCoValue("", CoValueLoadingState.UNAVAILABLE),
+            getUnloadedCoValueWithoutId(CoValueLoadingState.UNAVAILABLE),
           );
         }
 
@@ -189,21 +181,11 @@ export class AccountCoState<
           {
             resolve,
             loadAs: me,
-            onUnavailable: () => {
-              this.update(
-                createUnloadedCoValue(
-                  me.$jazz.id,
-                  CoValueLoadingState.UNAVAILABLE,
-                ),
-              );
+            onUnavailable: (value) => {
+              this.update(value);
             },
-            onUnauthorized: () => {
-              this.update(
-                createUnloadedCoValue(
-                  me.$jazz.id,
-                  CoValueLoadingState.UNAUTHORIZED,
-                ),
-              );
+            onUnauthorized: (value) => {
+              this.update(value);
             },
             syncResolution: true,
             unstable_branch: options?.unstable_branch,

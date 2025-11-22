@@ -14,8 +14,6 @@ import {
   CoMapSchemaInit,
   CoValueClass,
   CoreCoMapSchema,
-  CoValueLoadingState,
-  createUnloadedCoValue,
   Group,
   Loaded,
   ResolveQuery,
@@ -377,9 +375,6 @@ export class HttpRoute<
     const as = options?.owner ?? Account.getMe();
 
     const target = await loadWorkerAccountOrGroup(this.workerId, as);
-    if (!target.$isLoaded) {
-      throw new JazzRequestError("Worker account not found", 400);
-    }
 
     const response = await fetch(this.url, {
       method: "POST",
@@ -621,20 +616,29 @@ async function loadWorkerAccountOrGroup(id: string, loadAs: Account) {
   const coValue = await node.loadCoValueCore(id as `co_z${string}`);
 
   if (!coValue.isAvailable()) {
-    return createUnloadedCoValue(id, CoValueLoadingState.UNAVAILABLE);
+    throw new JazzRequestError("Worker account not found", 400);
   }
 
   const content = coValue.getCurrentContent();
 
   if (content instanceof RawAccount) {
-    return Account.load(content.id, {
+    const account = await Account.load(content.id, {
       loadAs,
     });
+    if (!account.$isLoaded) {
+      throw new JazzRequestError("Worker account not found", 400);
+    }
+    return account;
   }
 
-  return Group.load(content.id, {
+  const group = await Group.load(content.id, {
     loadAs,
   });
+
+  if (!group.$isLoaded) {
+    throw new JazzRequestError("Worker group not found", 400);
+  }
+  return group;
 }
 
 function defaultGetToken(request: Request) {

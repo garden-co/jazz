@@ -1051,13 +1051,16 @@ function getEditFromRaw(
           )
         : undefined,
     get by() {
-      return (
-        rawEdit.by &&
-        accessChildById(target, rawEdit.by, {
-          ref: Account,
-          optional: false,
-        })
-      );
+      if (!rawEdit.by) return null;
+
+      const account = accessChildById(target, rawEdit.by, {
+        ref: Account,
+        optional: false,
+      }) as Account;
+
+      if (!account.$isLoaded) return null;
+
+      return account;
     },
     madeAt: rawEdit.at,
     key,

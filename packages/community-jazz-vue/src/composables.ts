@@ -214,21 +214,11 @@ export function useCoState<
           {
             resolve: options?.resolve as any,
             loadAs: safeLoadAsAgent,
-            onUnavailable: () => {
-              updateState(
-                createUnloadedCoValue(
-                  currentId,
-                  CoValueLoadingState.UNAVAILABLE,
-                ),
-              );
+            onUnavailable: (value) => {
+              updateState(value);
             },
-            onUnauthorized: () => {
-              updateState(
-                createUnloadedCoValue(
-                  currentId,
-                  CoValueLoadingState.UNAUTHORIZED,
-                ),
-              );
+            onUnauthorized: (value) => {
+              updateState(value);
             },
             syncResolution: true,
           },

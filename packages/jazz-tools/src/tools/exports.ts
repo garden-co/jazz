@@ -64,6 +64,7 @@ export {
   Ref,
   createUnloadedCoValue,
   unstable_loadUnique,
+  getUnloadedCoValueWithoutId,
 } from "./internal.js";
 
 export {
