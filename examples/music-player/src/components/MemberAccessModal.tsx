@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useToast } from "@/hooks/use-toast";
 import { Account, Group } from "jazz-tools";
-import { useCoState, createInviteLink } from "jazz-tools/react";
+import { useCoState, createInviteLink, CoValueRef } from "jazz-tools/react";
 import {
   Dialog,
   DialogContent,
@@ -28,11 +28,12 @@ import { Member } from "./Member";
 interface MemberAccessModalProps {
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
-  playlist: Playlist;
+  playlistOwnerId: string;
+  playlistRef: CoValueRef<Playlist>;
 }
 
 export function MemberAccessModal(props: MemberAccessModalProps) {
-  const group = useCoState(Group, props.playlist.$jazz.owner.$jazz.id);
+  const group = useCoState(Group, props.playlistOwnerId);
   const [selectedRole, setSelectedRole] = useState<
     "reader" | "writer" | "manager"
   >("reader");
@@ -107,14 +108,17 @@ export function MemberAccessModal(props: MemberAccessModalProps) {
     return (
       isManager &&
       (member.$jazz.id === currentUser?.$jazz.id ||
-        !member.canAdmin(props.playlist))
+        !member.canAdmin(props.playlistRef.current))
     );
   };
 
   const handleGetInviteLink = async () => {
     if (!isManager) return;
 
-    const inviteLink = createInviteLink(props.playlist, selectedRole);
+    const inviteLink = createInviteLink(
+      props.playlistRef.current,
+      selectedRole,
+    );
     await navigator.clipboard.writeText(inviteLink);
 
     toast({
