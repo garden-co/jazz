@@ -61,6 +61,15 @@ export function accessChildByKey<D extends CoValue>(
     );
   }
 
+  // TODO: this doesn't check the subscription tree loading state
+  // so if one of the children is loading, it will return the loading state
+  // instead of the latest loaded state
+  const value = subscriptionScope.childValues.get(childId);
+
+  if (value?.type === CoValueLoadingState.LOADED) {
+    return value.value;
+  }
+
   const childNode = subscriptionScope.childNodes.get(childId);
 
   if (!childNode) {
@@ -86,6 +95,13 @@ export function accessChildById<D extends CoValue>(
   const subscriptionScope = getSubscriptionScope(parent);
 
   subscriptionScope.subscribeToId(childId, schema);
+
+  const value = subscriptionScope.childValues.get(childId);
+
+  // TODO: this doesn't check the subscription tree loading state
+  if (value?.type === CoValueLoadingState.LOADED) {
+    return value.value;
+  }
 
   const childNode = subscriptionScope.childNodes.get(childId);
 

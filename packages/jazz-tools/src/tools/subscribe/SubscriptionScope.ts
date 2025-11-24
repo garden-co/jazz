@@ -295,6 +295,8 @@ export class SubscriptionScope<D extends CoValue> {
       $jazz: {
         id: this.id,
         loadingState: reason,
+        // @ts-expect-error - This is a private property
+        _subscriptionScope: this,
       },
       $isLoaded: false,
     };
