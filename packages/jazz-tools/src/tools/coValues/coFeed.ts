@@ -512,13 +512,16 @@ function entryFromRawEntry<Item>(
       }
     },
     get by() {
-      return (
-        accountID &&
-        accessChildById(accessFrom, accountID, {
-          ref: Account,
-          optional: false,
-        })
-      );
+      if (!accountID) return null;
+
+      const account = accessChildById(accessFrom, accountID, {
+        ref: Account,
+        optional: false,
+      }) as Account;
+
+      if (!account.$isLoaded) return null;
+
+      return account;
     },
     madeAt: rawEntry.at,
     tx: rawEntry.tx,

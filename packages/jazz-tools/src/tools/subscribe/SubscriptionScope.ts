@@ -6,6 +6,7 @@ import {
   type CoValue,
   type ID,
   MaybeLoaded,
+  NotLoaded,
   type RefEncoded,
   type RefsToResolve,
   TypeSym,
@@ -283,7 +284,43 @@ export class SubscriptionScope<D extends CoValue> {
     return this.pendingLoadedChildren.size === 0;
   }
 
-  getCurrentValue(): D | NotLoadedCoValueState {
+  unloadedValue: NotLoaded<D> | undefined;
+
+  private getUnloadedValue(reason: NotLoadedCoValueState): NotLoaded<D> {
+    if (this.unloadedValue?.$jazz.loadingState === reason) {
+      return this.unloadedValue;
+    }
+
+    const unloadedValue: NotLoaded<D> = {
+      $jazz: {
+        id: this.id,
+        loadingState: reason,
+        // @ts-expect-error - This is a private property
+        _subscriptionScope: this,
+      },
+      $isLoaded: false,
+    };
+
+    this.unloadedValue = unloadedValue;
+
+    return unloadedValue;
+  }
+
+  getCurrentValue(): MaybeLoaded<D> {
+    const rawValue = this.getCurrentRawValue();
+
+    if (
+      rawValue === CoValueLoadingState.UNAUTHORIZED ||
+      rawValue === CoValueLoadingState.UNAVAILABLE ||
+      rawValue === CoValueLoadingState.LOADING
+    ) {
+      return this.getUnloadedValue(rawValue);
+    }
+
+    return rawValue;
+  }
+
+  getCurrentRawValue(): D | NotLoadedCoValueState {
     if (
       this.value.type === CoValueLoadingState.UNAUTHORIZED ||
       this.value.type === CoValueLoadingState.UNAVAILABLE
@@ -406,7 +443,7 @@ export class SubscriptionScope<D extends CoValue> {
     this.subscription.pullValue();
 
     // Check if the value is now available
-    const value = this.getCurrentValue();
+    const value = this.getCurrentRawValue();
 
     // If the value is available, trigger the listener
     if (typeof value !== "string") {

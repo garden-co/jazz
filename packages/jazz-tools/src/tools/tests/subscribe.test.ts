@@ -1296,6 +1296,75 @@ describe("subscribeToCoValue", () => {
     expect(result.data.length).toBe(chunks + 1);
     expect(result.data[chunks]).toBe("new entry");
   });
+
+  it.fails(
+    "should return the latest loaded state when a deeply loaded child becomes not accessible",
+    async () => {
+      const Dog = co.map({
+        name: z.string(),
+      });
+
+      const Person = co.map({
+        name: z.string(),
+        dog: Dog,
+      });
+
+      const reader = await createJazzTestAccount({
+        isCurrentActiveAccount: true,
+      });
+
+      const creator = await createJazzTestAccount({
+        isCurrentActiveAccount: true,
+      });
+
+      const dogGroup = Group.create(creator);
+      dogGroup.addMember(reader, "reader");
+
+      const everyone = Group.create(creator);
+      everyone.addMember("everyone", "reader");
+
+      const dog = Dog.create({ name: "Giggino" }, dogGroup);
+      const person = Person.create({ name: "Guido", dog }, everyone);
+
+      let result = null as Loaded<typeof Person, { dog: true }> | null;
+
+      const updateFn = vi.fn().mockImplementation((value) => {
+        result = value;
+      });
+
+      const unsubscribe = subscribeToCoValue(
+        coValueClassFromCoValueClassOrSchema(Person),
+        person.$jazz.id,
+        {
+          loadAs: reader,
+          resolve: {
+            dog: true,
+          },
+        },
+        updateFn,
+      );
+
+      onTestFinished(unsubscribe);
+
+      await waitFor(() => {
+        assert(result);
+        expect(result.name).toBe("Guido");
+        assertLoaded(result.dog);
+        expect(result.dog.name).toBe("Giggino");
+      });
+
+      // Make the dog not accessible by removing the reader from the dog's group
+      dogGroup.removeMember(reader);
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      assert(result);
+
+      // The parent & child loading state should be in sync, but because the child loading state
+      // is mutable it becomes not loaded while the parent is still loaded
+      expect(result.$isLoaded).toBe(result.dog.$isLoaded);
+    },
+  );
 });
 
 describe("getSubscriptionScope", () => {
