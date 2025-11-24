@@ -3,7 +3,6 @@ import {
   AnyZodOrCoValueSchema,
   BranchDefinition,
   CoFeed,
-  coValueClassMetadata,
   Group,
   hydrateCoreCoValueSchema,
   MaybeLoaded,
@@ -66,7 +65,9 @@ export class CoFeedSchema<
     init: CoFeedSchemaInit<T>,
     options?: { owner: Account | Group } | Account | Group,
   ): CoFeedInstance<T> {
-    return this.coValueClass.create(init as any, options) as CoFeedInstance<T>;
+    return this.coValueClass.create(init as any, options, {
+      configureImplicitGroupOwner: this.permissions.onCreate,
+    }) as CoFeedInstance<T>;
   }
 
   load<
@@ -184,9 +185,6 @@ export class CoFeedSchema<
     // @ts-expect-error TS cannot infer that the resolveQuery type is valid
     copy.resolveQuery = resolveQuery ?? this.resolveQuery;
     copy.permissions = permissions ?? this.permissions;
-    coValueClassMetadata.set(copy.coValueClass, {
-      configureImplicitGroupOwner: copy.permissions.onCreate,
-    });
     return copy;
   }
 }

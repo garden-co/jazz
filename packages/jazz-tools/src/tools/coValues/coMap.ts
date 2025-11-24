@@ -15,7 +15,6 @@ import {
   CoFieldInit,
   CoValue,
   CoValueClass,
-  coValueClassMetadata,
   getCoValueOwner,
   Group,
   ID,
@@ -179,10 +178,13 @@ export class CoMap extends CoValueBase implements CoValue {
         }
       | Account
       | Group,
+    schemaConfiguration?: {
+      configureImplicitGroupOwner?: (newGroup: Group) => void;
+    },
   ) {
     const instance = new this();
 
-    return CoMap._createCoMap(instance, init, options);
+    return CoMap._createCoMap(instance, init, options, schemaConfiguration);
   }
 
   /**
@@ -252,11 +254,13 @@ export class CoMap extends CoValueBase implements CoValue {
         }
       | Account
       | Group,
+    schemaConfiguration?: {
+      configureImplicitGroupOwner?: (newGroup: Group) => void;
+    },
   ): M {
     const { owner, uniqueness } = parseCoValueCreateOptions(
       options,
-      coValueClassMetadata.get(instance.constructor)
-        ?.configureImplicitGroupOwner,
+      schemaConfiguration?.configureImplicitGroupOwner,
     );
 
     Object.defineProperties(instance, {

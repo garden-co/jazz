@@ -17,7 +17,6 @@ export * from "./coValues/coPlainText.js";
 export * from "./coValues/coRichText.js";
 export * from "./coValues/schemaUnion.js";
 export * from "./coValues/coVector.js";
-export * from "./coValues/coValueClassMetadata.js";
 
 export type * from "./subscribe/types.js";
 

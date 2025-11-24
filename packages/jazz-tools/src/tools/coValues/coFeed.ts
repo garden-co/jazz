@@ -16,7 +16,6 @@ import {
   CoValue,
   CoValueClass,
   CoValueLoadingState,
-  coValueClassMetadata,
   getCoValueOwner,
   Group,
   ID,
@@ -220,10 +219,13 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
     this: CoValueClass<S>,
     init: S extends CoFeed<infer Item> ? Item[] : never,
     options?: { owner: Account | Group } | Account | Group,
+    schemaConfiguration?: {
+      configureImplicitGroupOwner?: (newGroup: Group) => void;
+    },
   ) {
     const { owner } = parseCoValueCreateOptions(
       options,
-      coValueClassMetadata.get(this)?.configureImplicitGroupOwner,
+      schemaConfiguration?.configureImplicitGroupOwner,
     );
     const raw = owner.$jazz.raw.createStream();
     const instance = new this({ fromRaw: raw });

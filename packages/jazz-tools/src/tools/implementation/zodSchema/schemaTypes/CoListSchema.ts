@@ -12,7 +12,6 @@ import {
   SubscribeListenerOptions,
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
-  coValueClassMetadata,
 } from "../../../internal.js";
 import { CoValueUniqueness } from "cojson";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
@@ -75,7 +74,9 @@ export class CoListSchema<
       | Account
       | Group,
   ): CoListInstance<T> {
-    return this.coValueClass.create(items as any, options) as CoListInstance<T>;
+    return this.coValueClass.create(items as any, options, {
+      configureImplicitGroupOwner: this.permissions.onCreate,
+    }) as CoListInstance<T>;
   }
 
   load<
@@ -227,9 +228,6 @@ export class CoListSchema<
     // @ts-expect-error TS cannot infer that the resolveQuery type is valid
     copy.resolveQuery = resolveQuery ?? this.resolveQuery;
     copy.permissions = permissions ?? this.permissions;
-    coValueClassMetadata.set(copy.coValueClass, {
-      configureImplicitGroupOwner: copy.permissions.onCreate,
-    });
     return copy;
   }
 }

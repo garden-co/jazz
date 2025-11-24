@@ -7,7 +7,6 @@ import {
   CoValue,
   CoValueClass,
   CoValueJazzApi,
-  coValueClassMetadata,
   getCoValueOwner,
   Group,
   ID,
@@ -170,12 +169,14 @@ export class CoList<out Item = any>
         }
       | Account
       | Group,
+    schemaConfiguration?: {
+      configureImplicitGroupOwner?: (newGroup: Group) => void;
+    },
   ) {
     const instance = new this();
     const { owner, uniqueness } = parseCoValueCreateOptions(
       options,
-      coValueClassMetadata.get(instance.constructor)
-        ?.configureImplicitGroupOwner,
+      schemaConfiguration?.configureImplicitGroupOwner,
     );
 
     Object.defineProperties(instance, {
