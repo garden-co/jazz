@@ -63,8 +63,11 @@ export class IDBClient implements DBClientInterfaceAsync {
     coValueRowId: number,
     sessionID: SessionID,
   ): Promise<StoredSessionRow | undefined> {
-    return queryIndexedDbStore(this.db, "sessions", (store) =>
-      store.index("uniqueSessions").get([coValueRowId, sessionID]),
+    return this.makeRequest((tx) =>
+      tx
+        .getObjectStore("sessions")
+        .index("uniqueSessions")
+        .get([coValueRowId, sessionID]),
     );
   }
 
