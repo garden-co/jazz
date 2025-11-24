@@ -10,13 +10,7 @@ import {
   DropdownMenu,
 } from "@garden-co/design-system/src/components/organisms/Dropdown";
 import clsx from "clsx";
-import { useCallback, useEffect, useRef, useState } from "react";
-
-import {
-  TAB_CHANGE_EVENT,
-  isFrameworkChange,
-  type TabChangeEventDetail,
-} from "@garden-co/design-system/src/types/tabbed-code-group";
+import { useRef, useEffect } from "react";
 
 export function FrameworkSelect({
   onSelect,
@@ -28,87 +22,17 @@ export function FrameworkSelect({
   routerPush?: boolean;
   className?: string;
 }) {
-  const defaultFramework = useFramework();
-  const [selectedFramework, setSelectedFramework] =
-    useState<Framework>(defaultFramework);
-  const [initialized, setInitialized] = useState(false);
-  const selectedFrameworkRef = useRef(selectedFramework);
-
+  const { framework, setFramework } = useFramework();
   const onSelectRef = useRef(onSelect);
+
   useEffect(() => {
     onSelectRef.current = onSelect;
   }, [onSelect]);
 
-  const selectFramework = useCallback(
-    (newFramework: Framework, shouldDispatch = true) => {
-      if (selectedFrameworkRef.current === newFramework) return;
-
-      selectedFrameworkRef.current = newFramework;
-      setSelectedFramework(newFramework);
-      onSelectRef.current && onSelectRef.current(newFramework);
-      localStorage.setItem("_tcgpref_framework", newFramework);
-
-      if (shouldDispatch) {
-        // Dispatch event to notify other components (including useFramework)
-        // The useFramework hook will handle the actual navigation
-        window.dispatchEvent(
-          new CustomEvent(TAB_CHANGE_EVENT, {
-            detail: {
-              key: "framework",
-              value: newFramework,
-            },
-          }),
-        );
-      }
-    },
-    [],
-  );
-
-  const handleTabChange = useCallback(
-    (event: CustomEvent<TabChangeEventDetail>) => {
-      if (isFrameworkChange(event.detail)) {
-        selectFramework(event.detail.value as Framework, false);
-      }
-    },
-    [selectFramework],
-  );
-
-  useEffect(() => {
-    window.addEventListener(TAB_CHANGE_EVENT, handleTabChange as EventListener);
-    return () => {
-      window.removeEventListener(
-        TAB_CHANGE_EVENT,
-        handleTabChange as EventListener,
-      );
-    };
-  }, [handleTabChange]);
-
-  useEffect(() => {
-    if (!initialized) {
-      setSelectedFramework(defaultFramework);
-      setInitialized(true);
-    }
-  }, [defaultFramework, initialized]);
-
-  useEffect(() => {
-    selectedFrameworkRef.current = selectedFramework;
-  }, [selectedFramework]);
-
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      if (selectedFrameworkRef.current !== defaultFramework) {
-        window.dispatchEvent(
-          new CustomEvent(TAB_CHANGE_EVENT, {
-            detail: {
-              key: "framework",
-              value: defaultFramework,
-            },
-          }),
-        );
-      }
-    }, 0);
-    return () => clearTimeout(timer);
-  }, [defaultFramework]);
+  const handleSelect = (newFramework: Framework) => {
+    setFramework(newFramework);
+    onSelectRef.current?.(newFramework);
+  };
 
   return (
     <Dropdown>
@@ -123,23 +47,23 @@ export function FrameworkSelect({
         intent="default"
       >
         <span className="w-full overflow-hidden text-ellipsis text-nowrap text-left">
-          {frameworkNames[selectedFramework].label}
+          {frameworkNames[framework].label}
         </span>
         <Icon name="chevronDown" size="sm" />
       </DropdownButton>
       <DropdownMenu className="w-(--button-width) z-50" anchor="bottom start">
-        {Object.entries(frameworkNames).map(([key, framework]) => (
+        {Object.entries(frameworkNames).map(([key, frameworkInfo]) => (
           <DropdownItem
             className={clsx(
               "items-baseline",
               size === "sm" && "text-nowrap text-xs",
-              selectedFramework === key && "text-primary dark:text-primary",
+              framework === key && "text-primary dark:text-primary",
             )}
             key={key}
-            onClick={() => selectFramework(key as Framework)}
+            onClick={() => handleSelect(key as Framework)}
           >
-            {framework.label}
-            {framework.experimental && (
+            {frameworkInfo.label}
+            {frameworkInfo.experimental && (
               <span className="ml-1 text-xs text-stone-500">
                 (experimental)
               </span>
