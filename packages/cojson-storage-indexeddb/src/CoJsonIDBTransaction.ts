@@ -40,6 +40,10 @@ export class CoJsonIDBTransaction {
     };
   }
 
+  rollback() {
+    this.tx.abort();
+  }
+
   startedAt = performance.now();
   isReusable() {
     const delta = performance.now() - this.startedAt;
