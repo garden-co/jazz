@@ -5,4 +5,8 @@ members = [
     "cojson-core",
     "cojson-core-wasm",
     "cojson-core-napi",
+    "cojson-core-rn/rust"
 ]
+
+[workspace.dependencies]
+uniffi = "0.29"
