@@ -67,33 +67,26 @@ async function createSchema(
 }
 
 async function runMessageCreation(schemaDef: SchemaRuntime) {
-  const group = schemaDef.Group.create(schemaDef.account);
-  const messages = schemaDef.Messages.create([], { owner: group });
-  const messagesToAdd = Array.from({ length: MESSAGE_COUNT }, (_, i) => i).map(
-    () =>
-      schemaDef.Message.create(
-        {
-          content: "A".repeat(1024),
-          createdAt: new Date(),
-          updatedAt: new Date(),
-          hiddenIn: sampleHiddenIn,
-          reactions: sampleReactions,
-          author: "user123",
-          pet: {
-            type: "dog",
-            breed: "Labrador",
-          },
-        },
-        group,
-      ),
-  );
-  messages.$jazz.push(...messagesToAdd);
+  for (let i = 0; i < 500; i++) {
+    schemaDef.Message.create({
+      content: "A".repeat(1024),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      hiddenIn: sampleHiddenIn,
+      reactions: sampleReactions,
+      author: "user123",
+      pet: {
+        type: "dog",
+        breed: "Labrador",
+      },
+    });
+  }
 }
 
 let schemaDef: SchemaRuntime;
 await cronometro(
   {
-    "Message.create × 1000 entries - jazz-tools@latest": {
+    "CoMap.create - jazz-tools@latest": {
       async before() {
         schemaDef = await createSchema(
           // @ts-expect-error
@@ -108,7 +101,7 @@ await cronometro(
         await schemaDef.localNode.gracefulShutdown();
       },
     },
-    "Message.create × 1000 entries - jazz-tools@workspace": {
+    "CoMap.create - jazz-tools@workspace": {
       async before() {
         schemaDef = await createSchema(localTools, LocalWasmCrypto);
       },
@@ -121,7 +114,7 @@ await cronometro(
     },
   },
   {
-    iterations: 8,
+    iterations: 20,
     warmup: true,
     print: {
       colors: true,
