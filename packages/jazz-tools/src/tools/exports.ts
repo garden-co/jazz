@@ -65,6 +65,7 @@ export {
   createUnloadedCoValue,
   unstable_loadUnique,
   getUnloadedCoValueWithoutId,
+  setDefaultSchemaPermissions,
 } from "./internal.js";
 
 export {

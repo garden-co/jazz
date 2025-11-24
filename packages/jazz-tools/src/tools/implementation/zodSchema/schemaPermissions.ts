@@ -50,9 +50,17 @@ export type SchemaPermissions = {
   onInlineCreate?: OnInlineCreateOptions;
 };
 
-export const DEFAULT_SCHEMA_PERMISSIONS: SchemaPermissions = {
+export let DEFAULT_SCHEMA_PERMISSIONS: SchemaPermissions = {
   onInlineCreate: "extendsContainer",
 };
+
+/**
+ * Update the default schema permissions for all new CoValue schemas.
+ * Schemas created before calling this function will not be affected.
+ */
+export function setDefaultSchemaPermissions(permissions: SchemaPermissions) {
+  DEFAULT_SCHEMA_PERMISSIONS = permissions;
+}
 
 /**
  * Parsed {@link SchemaPermissions}, used by CoValue classes to set up permissions for referenced CoValues.
@@ -127,6 +135,6 @@ function parseOnInlineCreate(
   };
 }
 
-export const DEFAULT_REF_PERMISSIONS: RefPermissions = schemaToRefPermissions(
-  DEFAULT_SCHEMA_PERMISSIONS,
-);
+export function getDefaultRefPermissions(): RefPermissions {
+  return schemaToRefPermissions(DEFAULT_SCHEMA_PERMISSIONS);
+}

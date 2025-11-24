@@ -1,21 +1,31 @@
-import { assert, beforeAll, describe, expect, test } from "vitest";
-import { Account, co, CoValueLoadingState, Group, z } from "../exports";
+import { afterEach, assert, beforeAll, describe, expect, test } from "vitest";
+import {
+  Account,
+  co,
+  CoValueLoadingState,
+  Group,
+  setDefaultSchemaPermissions,
+  z,
+} from "../exports";
 import {
   assertLoaded,
   createJazzTestAccount,
   setupJazzTestSync,
 } from "../testing";
 
+beforeAll(async () => {
+  await setupJazzTestSync();
+  await createJazzTestAccount({
+    isCurrentActiveAccount: true,
+    creationProps: { name: "Hermes Puggington" },
+  });
+});
+
 describe("Schema.withPermissions()", () => {
   let me: Account;
   let anotherAccount: Account;
-  beforeAll(async () => {
-    await setupJazzTestSync();
-    await createJazzTestAccount({
-      isCurrentActiveAccount: true,
-      creationProps: { name: "Hermes Puggington" },
-    });
 
+  beforeAll(async () => {
     me = Account.getMe();
     anotherAccount = await Account.createAs(Account.getMe(), {
       creationProps: { name: "Another Account" },
@@ -605,5 +615,40 @@ describe("Schema.withPermissions()", () => {
     expect(TestMapWithName.permissions).toEqual({
       onInlineCreate: "extendsContainer",
     });
+  });
+});
+
+describe("setDefaultSchemaPermissions", () => {
+  afterEach(() => {
+    setDefaultSchemaPermissions({
+      onInlineCreate: "extendsContainer",
+    });
+  });
+
+  test("can set the default permissions for all schemas", () => {
+    setDefaultSchemaPermissions({
+      onInlineCreate: "sameAsContainer",
+    });
+
+    const TestMap = co.map({
+      name: co.plainText(),
+    });
+
+    const map = TestMap.create({ name: "Hello" });
+    expect(map.name.$jazz.owner.$jazz.id).toEqual(map.$jazz.owner.$jazz.id);
+  });
+
+  test("does not modify permissions for existing schemas", () => {
+    const ExistingMap = co.map({
+      name: co.plainText(),
+    });
+    setDefaultSchemaPermissions({
+      onInlineCreate: "sameAsContainer",
+    });
+
+    const map = ExistingMap.create({ name: "Hello" });
+    expect(
+      map.name.$jazz.owner.getParentGroups().map((group) => group.$jazz.id),
+    ).toContain(map.$jazz.owner.$jazz.id);
   });
 });

@@ -3,7 +3,7 @@ import {
   CoValueClass,
   isCoValueClass,
   schemaToRefPermissions,
-  DEFAULT_REF_PERMISSIONS,
+  getDefaultRefPermissions,
   SchemaPermissions,
   RefPermissions,
   type NewInlineOwnerStrategy,
@@ -89,7 +89,7 @@ export function schemaFieldToCoFieldDef(schema: SchemaField): CoFieldDef {
     return cacheSchemaField(
       schema,
       coField.ref(schema, {
-        permissions: DEFAULT_REF_PERMISSIONS,
+        permissions: getDefaultRefPermissions(),
       }),
     );
   } else if (isCoValueSchema(schema)) {
@@ -261,7 +261,7 @@ function schemaFieldPermissions(schema: CoreCoValueSchema): RefPermissions {
   }
   return "permissions" in schema
     ? schemaToRefPermissions(schema.permissions as SchemaPermissions)
-    : DEFAULT_REF_PERMISSIONS;
+    : getDefaultRefPermissions();
 }
 
 // TODO: refactor to avoid duplication with `schemaUnionDiscriminatorFor`
@@ -271,7 +271,7 @@ function discriminatedUnionFieldPermissions(
   const definition = schema.getDefinition();
   const discriminatorKey = definition.discriminator;
 
-  const fallbackStrategy = DEFAULT_REF_PERMISSIONS.newInlineOwnerStrategy;
+  const fallbackStrategy = getDefaultRefPermissions().newInlineOwnerStrategy;
   const valueToStrategy = new Map<unknown, NewInlineOwnerStrategy>();
 
   for (const option of definition.options) {
