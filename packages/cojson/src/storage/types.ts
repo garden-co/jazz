@@ -61,33 +61,11 @@ export type SignatureAfterRow = {
   signature: Signature;
 };
 
-export interface DBClientInterfaceAsync {
-  getCoValue(
-    coValueId: string,
-  ): Promise<StoredCoValueRow | undefined> | undefined;
-
-  upsertCoValue(
-    id: string,
-    header?: CoValueHeader,
-  ): Promise<number | undefined>;
-
-  getCoValueSessions(coValueRowId: number): Promise<StoredSessionRow[]>;
-
+export interface DBTransactionInterfaceAsync {
   getSingleCoValueSession(
     coValueRowId: number,
     sessionID: SessionID,
   ): Promise<StoredSessionRow | undefined>;
-
-  getNewTransactionInSession(
-    sessionRowId: number,
-    fromIdx: number,
-    toIdx: number,
-  ): Promise<TransactionRow[]>;
-
-  getSignatures(
-    sessionRowId: number,
-    firstNewTxIdx: number,
-  ): Promise<SignatureAfterRow[]>;
 
   addSessionUpdate({
     sessionUpdate,
@@ -112,32 +90,41 @@ export interface DBClientInterfaceAsync {
     idx: number;
     signature: Signature;
   }): Promise<unknown>;
-
-  transaction(callback: () => unknown): Promise<unknown>;
 }
 
-export interface DBClientInterfaceSync {
-  getCoValue(coValueId: string): StoredCoValueRow | undefined;
+export interface DBClientInterfaceAsync {
+  getCoValue(
+    coValueId: string,
+  ): Promise<StoredCoValueRow | undefined> | undefined;
 
-  upsertCoValue(id: string, header?: CoValueHeader): number | undefined;
+  upsertCoValue(
+    id: string,
+    header?: CoValueHeader,
+  ): Promise<number | undefined>;
 
-  getCoValueSessions(coValueRowId: number): StoredSessionRow[];
-
-  getSingleCoValueSession(
-    coValueRowId: number,
-    sessionID: SessionID,
-  ): StoredSessionRow | undefined;
+  getCoValueSessions(coValueRowId: number): Promise<StoredSessionRow[]>;
 
   getNewTransactionInSession(
     sessionRowId: number,
     fromIdx: number,
     toIdx: number,
-  ): TransactionRow[];
+  ): Promise<TransactionRow[]>;
 
   getSignatures(
     sessionRowId: number,
     firstNewTxIdx: number,
-  ): Pick<SignatureAfterRow, "idx" | "signature">[];
+  ): Promise<SignatureAfterRow[]>;
+
+  transaction(
+    callback: (tx: DBTransactionInterfaceAsync) => Promise<unknown>,
+  ): Promise<unknown>;
+}
+
+export interface DBTransactionInterfaceSync {
+  getSingleCoValueSession(
+    coValueRowId: number,
+    sessionID: SessionID,
+  ): StoredSessionRow | undefined;
 
   addSessionUpdate({
     sessionUpdate,
@@ -162,6 +149,25 @@ export interface DBClientInterfaceSync {
     idx: number;
     signature: Signature;
   }): number | undefined | unknown;
+}
 
-  transaction(callback: () => unknown): unknown;
+export interface DBClientInterfaceSync {
+  getCoValue(coValueId: string): StoredCoValueRow | undefined;
+
+  upsertCoValue(id: string, header?: CoValueHeader): number | undefined;
+
+  getCoValueSessions(coValueRowId: number): StoredSessionRow[];
+
+  getNewTransactionInSession(
+    sessionRowId: number,
+    fromIdx: number,
+    toIdx: number,
+  ): TransactionRow[];
+
+  getSignatures(
+    sessionRowId: number,
+    firstNewTxIdx: number,
+  ): Pick<SignatureAfterRow, "idx" | "signature">[];
+
+  transaction(callback: (tx: DBTransactionInterfaceSync) => unknown): unknown;
 }

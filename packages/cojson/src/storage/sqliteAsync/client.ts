@@ -8,6 +8,7 @@ import { logger } from "../../logger.js";
 import type { NewContentMessage } from "../../sync.js";
 import type {
   DBClientInterfaceAsync,
+  DBTransactionInterfaceAsync,
   SessionRow,
   SignatureAfterRow,
   StoredCoValueRow,
@@ -31,7 +32,9 @@ export function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unknown error";
 }
 
-export class SQLiteClientAsync implements DBClientInterfaceAsync {
+export class SQLiteClientAsync
+  implements DBClientInterfaceAsync, DBTransactionInterfaceAsync
+{
   private readonly db: SQLiteDatabaseDriverAsync;
 
   constructor(db: SQLiteDatabaseDriverAsync) {
@@ -194,7 +197,9 @@ export class SQLiteClientAsync implements DBClientInterfaceAsync {
     );
   }
 
-  async transaction(operationsCallback: () => unknown) {
-    return this.db.transaction(operationsCallback);
+  async transaction(
+    operationsCallback: (tx: DBTransactionInterfaceAsync) => Promise<unknown>,
+  ) {
+    return this.db.transaction(() => operationsCallback(this));
   }
 }
