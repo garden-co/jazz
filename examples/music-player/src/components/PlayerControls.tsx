@@ -3,7 +3,7 @@ import { MediaPlayer } from "@/5_useMediaPlayer";
 import { useMediaEndListener } from "@/lib/audio/useMediaEndListener";
 import { usePlayState } from "@/lib/audio/usePlayState";
 import { useKeyboardListener } from "@/lib/useKeyboardListener";
-import { useCoState } from "jazz-tools/react";
+import { useSuspenseCoState } from "jazz-tools/react-core";
 import { Pause, Play, SkipBack, SkipForward } from "lucide-react";
 import WaveformCanvas from "./WaveformCanvas";
 import { Button } from "./ui/button";
@@ -15,14 +15,12 @@ export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
 
   const activePlaylistTitle = useAccountSelector({
     select: (me) =>
-      me.$isLoaded && me.root.activePlaylist?.$isLoaded
+      me.root.activePlaylist.$isLoaded
         ? (me.root.activePlaylist.title ?? "All tracks")
         : "All tracks",
   });
 
-  const activeTrack = useCoState(MusicTrack, mediaPlayer.activeTrackId);
-
-  if (!activeTrack.$isLoaded) return null;
+  const activeTrack = useSuspenseCoState(MusicTrack, mediaPlayer.activeTrackId);
 
   const activeTrackTitle = activeTrack.title;
 

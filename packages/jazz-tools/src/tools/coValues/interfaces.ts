@@ -21,12 +21,10 @@ import {
   ResolveQueryStrict,
   Resolved,
   SubscriptionScope,
-  type SubscriptionValue,
   TypeSym,
   NotLoaded,
   activeAccountContext,
   coValueClassFromCoValueClassOrSchema,
-  getSubscriptionScope,
   inspect,
 } from "../internal.js";
 import type { BranchDefinition } from "../subscribe/types.js";
@@ -107,31 +105,25 @@ export function isCoValueClass<V extends CoValue>(
  */
 export type ID<T> = string;
 
-const unloadedCoValueStates = new Map<
-  NotLoadedCoValueState,
-  NotLoaded<CoValue>
->();
+const unloadedCoValueStates = new Map<NotLoadedCoValueState, NotLoaded<any>>();
 
-export function getUnloadedCoValueWithoutId<T extends CoValue>(
+export function getUnloadedCoValueWithoutId<T = any>(
   loadingState: NotLoadedCoValueState,
 ): NotLoaded<T> {
-  const value = unloadedCoValueStates.get(loadingState);
+  const value = unloadedCoValueStates.get(loadingState) as NotLoaded<T>;
   if (value) {
     return value;
   }
-  const newValue = createUnloadedCoValue("", loadingState);
+  const newValue = new NotLoaded<T>("", loadingState);
   unloadedCoValueStates.set(loadingState, newValue);
   return newValue;
 }
 
-export function createUnloadedCoValue<T extends CoValue>(
+export function createUnloadedCoValue<T>(
   id: ID<T>,
   loadingState: NotLoadedCoValueState,
 ): NotLoaded<T> {
-  return {
-    $jazz: { id, loadingState },
-    $isLoaded: false,
-  };
+  return new NotLoaded(id, loadingState);
 }
 
 export function loadCoValueWithoutMe<
@@ -303,8 +295,8 @@ export function subscribeToCoValue<
   options: {
     resolve?: RefsToResolveStrict<V, R>;
     loadAs: Account | AnonymousJazzAgent;
-    onUnavailable?: (value: NotLoaded<V>) => void;
-    onUnauthorized?: (value: NotLoaded<V>) => void;
+    onUnavailable?: (value: NotLoaded<Resolved<V, R>>) => void;
+    onUnauthorized?: (value: NotLoaded<Resolved<V, R>>) => void;
     syncResolution?: boolean;
     skipRetry?: boolean;
     unstable_branch?: BranchDefinition;
@@ -343,7 +335,7 @@ export function subscribeToCoValue<
 
     switch (value.$jazz.loadingState) {
       case CoValueLoadingState.UNAVAILABLE:
-        options.onUnavailable?.(value);
+        options.onUnavailable?.(value as NotLoaded<Resolved<V, R>>);
 
         // Don't log unavailable errors when `loadUnique` or `upsertUnique` are used
         if (!options.skipRetry) {
@@ -351,7 +343,7 @@ export function subscribeToCoValue<
         }
         break;
       case CoValueLoadingState.UNAUTHORIZED:
-        options.onUnauthorized?.(value);
+        options.onUnauthorized?.(value as NotLoaded<Resolved<V, R>>);
         console.error(value.toString());
         break;
     }

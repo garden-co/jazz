@@ -1,7 +1,7 @@
 import { Playlist } from "@/1_schema";
 import { updatePlaylistTitle } from "@/4_actions";
 import { cn } from "@/lib/utils";
-import { useCoState } from "jazz-tools/react";
+import { useSuspenseCoState } from "jazz-tools/react-core";
 import { ChangeEvent, useState } from "react";
 
 export function PlaylistTitleInput({
@@ -11,7 +11,7 @@ export function PlaylistTitleInput({
   playlistId: string | undefined;
   className?: string;
 }) {
-  const playlist = useCoState(Playlist, playlistId);
+  const playlist = useSuspenseCoState(Playlist, playlistId);
   const [isEditing, setIsEditing] = useState(false);
   const [localPlaylistTitle, setLocalPlaylistTitle] = useState("");
 
@@ -19,7 +19,7 @@ export function PlaylistTitleInput({
     setLocalPlaylistTitle(evt.target.value);
   }
 
-  const playlistTitle = playlist.$isLoaded ? playlist.title : "";
+  const playlistTitle = playlist.title;
 
   function handleFoucsIn() {
     setIsEditing(true);

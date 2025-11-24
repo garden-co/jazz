@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useToast } from "@/hooks/use-toast";
 import { Account, Group } from "jazz-tools";
-import { useCoState, createInviteLink } from "jazz-tools/react";
+import { createInviteLink } from "jazz-tools/react";
+import { useSuspenseCoState } from "jazz-tools/react-core";
 import {
   Dialog,
   DialogContent,
@@ -32,13 +33,11 @@ interface MemberAccessModalProps {
 }
 
 export function MemberAccessModal(props: MemberAccessModalProps) {
-  const group = useCoState(Group, props.playlist.$jazz.owner.$jazz.id);
+  const group = useSuspenseCoState(Group, props.playlist.$jazz.owner.$jazz.id);
   const [selectedRole, setSelectedRole] = useState<
     "reader" | "writer" | "manager"
   >("reader");
   const { toast } = useToast();
-
-  if (!group.$isLoaded) return null;
 
   // Get all members from the group
   const members = group.members.map((m) => m.account);

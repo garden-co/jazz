@@ -1,4 +1,4 @@
-import { useCoState } from "jazz-tools/react";
+import { useSuspenseCoState } from "jazz-tools/react-core";
 import { useParams } from "react-router";
 import { PlaylistWithTracks } from "./1_schema";
 import { uploadMusicTracks } from "./4_actions";
@@ -32,14 +32,10 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
 
   const params = useParams<{ playlistId: string }>();
   const playlistId = useAccountSelector({
-    select: (me) =>
-      params.playlistId ??
-      (me.$isLoaded ? me.root.$jazz.refs.rootPlaylist.id : undefined),
+    select: (me) => params.playlistId ?? me.root.$jazz.refs.rootPlaylist.id,
   });
 
-  const playlist = useCoState(PlaylistWithTracks, playlistId, {
-    select: (playlist) => (playlist.$isLoaded ? playlist : undefined),
-  });
+  const playlist = useSuspenseCoState(PlaylistWithTracks, playlistId);
 
   const membersIds = playlist?.$jazz.owner.members.map((member) => member.id);
   const isRootPlaylist = !params.playlistId;

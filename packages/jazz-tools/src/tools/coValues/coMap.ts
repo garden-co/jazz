@@ -54,6 +54,8 @@ import {
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
+  loadCoValue,
+  createUnloadedCoValue,
 } from "../internal.js";
 
 export type CoMapEdit<V> = {
@@ -539,11 +541,15 @@ export class CoMap extends CoValueBase implements CoValue {
   ): Promise<MaybeLoaded<Resolved<M, R>>> {
     const header = CoMap._getUniqueHeader(unique, ownerID);
 
-    const owner = await Group.load(ownerID, {
-      loadAs: options?.loadAs,
+    const owner = await loadCoValue(Group, ownerID, {
+      loadAs: options?.loadAs ?? activeAccountContext.get(),
     });
 
-    if (!owner.$isLoaded) return owner;
+    if (!owner.$isLoaded)
+      return createUnloadedCoValue<Resolved<M, R>>(
+        "",
+        CoValueLoadingState.UNAVAILABLE,
+      );
 
     return internalLoadUnique(this, {
       header,

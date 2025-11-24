@@ -13,6 +13,7 @@ import {
   unstable_mergeBranch,
 } from "../internal.js";
 import { Group, TypeSym } from "../internal.js";
+import { resolvedPromise } from "./promise.js";
 
 /** @internal */
 export abstract class CoValueBase implements CoValue {
@@ -56,6 +57,10 @@ export abstract class CoValueJazzApi<V extends CoValue> {
       value: `instance-${Math.random().toString(36).slice(2)}`,
       enumerable: false,
     });
+  }
+
+  get promise(): Promise<V> {
+    return resolvedPromise(this.coValue);
   }
 
   get id(): string {

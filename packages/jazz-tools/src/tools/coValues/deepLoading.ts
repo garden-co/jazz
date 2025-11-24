@@ -1,9 +1,16 @@
 import { SessionID } from "cojson";
-import { CoValueLoadingState, ItemsSym, TypeSym } from "../internal.js";
+import {
+  CoValueLoadingState,
+  Group,
+  ItemsSym,
+  SubscriptionScope,
+  TypeSym,
+} from "../internal.js";
 import { type Account } from "./account.js";
 import { CoFeedEntry } from "./coFeed.js";
 import { type CoKeys } from "./coMap.js";
 import { type CoValue, type ID } from "./interfaces.js";
+import { rejectedPromise } from "./promise.js";
 
 /**
  * Returns a boolean for whether the given type is a union.
@@ -34,16 +41,44 @@ export type MaybeLoaded<T> = T | NotLoaded<T>;
 /**
  * A CoValue that is not loaded.
  */
-export type NotLoaded<T> = {
-  $jazz: {
-    id: ID<T>;
+export class NotLoaded<T> {
+  $isLoaded = false as const;
+  $jazz: NotLoadedJazzApi<T>;
+
+  constructor(
+    id: string,
     loadingState:
       | typeof CoValueLoadingState.LOADING
       | typeof CoValueLoadingState.UNAVAILABLE
-      | typeof CoValueLoadingState.UNAUTHORIZED;
-  };
-  $isLoaded: false;
-};
+      | typeof CoValueLoadingState.UNAUTHORIZED,
+    _subscriptionScope?: SubscriptionScope<any>,
+  ) {
+    this.$jazz = new NotLoadedJazzApi(id, loadingState, _subscriptionScope);
+  }
+}
+
+class NotLoadedJazzApi<T> {
+  #promise: Promise<unknown> | undefined;
+
+  constructor(
+    public readonly id: string,
+    public readonly loadingState:
+      | typeof CoValueLoadingState.LOADING
+      | typeof CoValueLoadingState.UNAVAILABLE
+      | typeof CoValueLoadingState.UNAUTHORIZED,
+    public _subscriptionScope?: SubscriptionScope<any>,
+  ) {}
+
+  get promise(): Promise<unknown> {
+    if (this.#promise) {
+      return this.#promise;
+    }
+    this.#promise =
+      this._subscriptionScope?.getPromise() ??
+      rejectedPromise<T>(this.loadingState);
+    return this.#promise;
+  }
+}
 
 /**
  * Narrows a maybe-loaded, optional CoValue to a loaded and required CoValue.

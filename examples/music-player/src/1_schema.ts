@@ -132,4 +132,11 @@ export const MusicaAccountWithPlaylists = MusicaAccount.resolved({
   },
 });
 
+export const MusicaAccountWithProfile = MusicaAccount.resolved({
+  profile: true,
+});
+export type MusicaAccountWithProfile = co.loaded<
+  typeof MusicaAccountWithProfile
+>;
+
 /** Walkthrough: Continue with ./2_main.tsx */

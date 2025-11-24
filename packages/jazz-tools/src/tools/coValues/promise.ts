@@ -1,34 +1,19 @@
-export class CoValuePromise<T> extends Promise<T> {
+export class CoValuePromise<out T> extends Promise<T> {
   status: "pending" | "fulfilled" | "rejected" = "pending";
   value: T | undefined;
   reason: unknown | undefined;
+}
 
-  static getRejected<T = never>(reason?: unknown): CoValuePromise<T> {
-    return new CoValuePromise<T>((resolve, reject) => {
-      reject(reason);
-    });
-  }
+export function resolvedPromise<T>(value: T): CoValuePromise<T> {
+  const promise = CoValuePromise.resolve(value) as CoValuePromise<T>;
+  promise.status = "fulfilled";
+  promise.value = value;
+  return promise;
+}
 
-  static getFulfilled<T>(value: T): CoValuePromise<T> {
-    return new CoValuePromise<T>((resolve) => {
-      resolve(value);
-    });
-  }
-
-  constructor(
-    executor: (
-      resolve: (value: T) => void,
-      reject: (reason?: unknown) => void,
-    ) => void,
-  ) {
-    super((resolve, reject) => {
-      const _resolve = (value: T) => {
-        resolve(value);
-      };
-      const _reject = (reason?: unknown) => {
-        reject(reason);
-      };
-      executor(_resolve, _reject);
-    });
-  }
+export function rejectedPromise<T>(reason: unknown): CoValuePromise<T> {
+  const promise = CoValuePromise.reject(reason) as CoValuePromise<T>;
+  promise.status = "rejected";
+  promise.reason = reason;
+  return promise;
 }
