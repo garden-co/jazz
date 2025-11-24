@@ -13,7 +13,6 @@ import {
   putIndexedDbStore,
   queryIndexedDbStore,
 } from "./CoJsonIDBTransaction.js";
-import { StoreName } from "./CoJsonIDBTransaction.js";
 
 export class IDBClient implements DBClientInterfaceAsync {
   private db;
@@ -25,22 +24,14 @@ export class IDBClient implements DBClientInterfaceAsync {
     this.db = db;
   }
 
-  makeRequest<T>(
+  getActiveReadWriteTransaction<T>(
     handler: (txEntry: CoJsonIDBTransaction) => IDBRequest<T>,
   ): Promise<T> {
     if (this.activeTransaction) {
       return this.activeTransaction.handleRequest<T>(handler);
     }
 
-    if (this.autoBatchingTransaction?.isReusable()) {
-      return this.autoBatchingTransaction.handleRequest<T>(handler);
-    }
-
-    const tx = new CoJsonIDBTransaction(this.db);
-
-    this.autoBatchingTransaction = tx;
-
-    return tx.handleRequest<T>(handler);
+    throw new Error("No active transaction");
   }
 
   async getCoValue(coValueId: RawCoID): Promise<StoredCoValueRow | undefined> {
@@ -63,7 +54,7 @@ export class IDBClient implements DBClientInterfaceAsync {
     coValueRowId: number,
     sessionID: SessionID,
   ): Promise<StoredSessionRow | undefined> {
-    return this.makeRequest((tx) =>
+    return this.getActiveReadWriteTransaction((tx) =>
       tx
         .getObjectStore("sessions")
         .index("uniqueSessions")
@@ -118,7 +109,7 @@ export class IDBClient implements DBClientInterfaceAsync {
     sessionUpdate: SessionRow;
     sessionRow?: StoredSessionRow;
   }): Promise<number> {
-    return this.makeRequest<number>(
+    return this.getActiveReadWriteTransaction<number>(
       (tx) =>
         tx.getObjectStore("sessions").put(
           sessionRow?.rowID
@@ -136,7 +127,7 @@ export class IDBClient implements DBClientInterfaceAsync {
     idx: number,
     newTransaction: CojsonInternalTypes.Transaction,
   ) {
-    await this.makeRequest((tx) =>
+    await this.getActiveReadWriteTransaction((tx) =>
       tx.getObjectStore("transactions").add({
         ses: sessionRowID,
         idx,
@@ -154,7 +145,7 @@ export class IDBClient implements DBClientInterfaceAsync {
     idx: number;
     signature: CojsonInternalTypes.Signature;
   }) {
-    return this.makeRequest((tx) =>
+    return this.getActiveReadWriteTransaction((tx) =>
       tx.getObjectStore("signatureAfter").put({
         ses: sessionRowID,
         idx,
