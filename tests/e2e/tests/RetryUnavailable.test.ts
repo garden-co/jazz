@@ -1,8 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 test.describe("Retry unavailable states", () => {
-  // TODO: Fix this flaky test
-  test.skip("should retry unavailable values", async ({ page, browser }) => {
+  test("should retry unavailable values", async ({ page, browser }) => {
     const context = page.context();
 
     await page.goto("/retry-unavailable?userName=SuperMario");

@@ -1,3 +1,4 @@
+import { SyncConfig } from "jazz-tools";
 import { JazzReactProvider } from "jazz-tools/react";
 
 const url = new URL(window.location.href);
@@ -20,14 +21,17 @@ function getUserInfo() {
   return url.searchParams.get("userName") ?? "Mister X";
 }
 
+function getSyncConfig(): SyncConfig {
+  const syncWhen = url.searchParams.get("syncWhen") ?? "always";
+
+  return {
+    peer: `${peer}?key=${key}`,
+    when: syncWhen as "always" | "signedUp" | "never",
+  };
+}
+
 export function AuthAndJazz({ children }: { children: React.ReactNode }) {
   return (
-    <JazzReactProvider
-      sync={{
-        peer: `${peer}?key=${key}`,
-      }}
-    >
-      {children}
-    </JazzReactProvider>
+    <JazzReactProvider sync={getSyncConfig()}>{children}</JazzReactProvider>
   );
 }
