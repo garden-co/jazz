@@ -16,7 +16,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
-import { useAccount, useCoState } from "jazz-tools/react";
+import { useAccount, useCoStateAndRef } from "jazz-tools/react";
 import { MoreHorizontal, Pause, Play } from "lucide-react";
 import { Fragment, useCallback, useState } from "react";
 import { EditTrackDialog } from "./RenameTrackDialog";
@@ -39,7 +39,9 @@ export function MusicTrackRow({
   onClick: (track: MusicTrack) => void;
   index: number;
 }) {
-  const track = useCoState(MusicTrack, trackId);
+  const [trackTitle, trackRef] = useCoStateAndRef(MusicTrack, trackId, {
+    select: (track) => (track.$isLoaded ? track.title : ""),
+  });
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
@@ -52,31 +54,31 @@ export function MusicTrackRow({
   });
 
   const isActiveTrack = useAccountSelector({
-    select: (me) => me.$isLoaded && me.root.activeTrack?.$jazz.id === trackId,
+    select: (me) => me.root.activeTrack?.$jazz.id === trackId,
   });
 
   const canEditTrack = useAccountSelector({
-    select: (me) => me.$isLoaded && track.$isLoaded && me.canWrite(track),
+    select: (me) => trackRef.current.$isLoaded && me.canWrite(trackRef.current),
   });
 
   function handleTrackClick() {
-    if (!track.$isLoaded) return;
-    onClick(track);
+    if (!trackRef.current.$isLoaded) return;
+    onClick(trackRef.current);
   }
 
   function handleAddToPlaylist(playlist: Playlist) {
-    if (!track.$isLoaded) return;
-    addTrackToPlaylist(playlist, track);
+    if (!trackRef.current.$isLoaded) return;
+    addTrackToPlaylist(playlist, trackRef.current);
   }
 
   function handleRemoveFromPlaylist(playlist: Playlist) {
-    if (!track.$isLoaded) return;
-    removeTrackFromPlaylist(playlist, track);
+    if (!trackRef.current.$isLoaded) return;
+    removeTrackFromPlaylist(playlist, trackRef.current);
   }
 
   function deleteTrack() {
-    if (!track.$isLoaded) return;
-    removeTrackFromAllPlaylists(track);
+    if (!trackRef.current.$isLoaded) return;
+    removeTrackFromAllPlaylists(trackRef.current);
   }
 
   function handleEdit() {
@@ -89,7 +91,6 @@ export function MusicTrackRow({
   }, []);
 
   const showWaveform = isHovered || isActiveTrack;
-  const trackTitle = track.$isLoaded ? track.title : "";
 
   return (
     <li
@@ -137,10 +138,10 @@ export function MusicTrackRow({
       </button>
 
       {/* Waveform that appears on hover */}
-      {track.$isLoaded && showWaveform && (
+      {showWaveform && (
         <div className="flex-1 min-w-0 px-2 items-center hidden md:flex">
           <Waveform
-            track={track}
+            trackId={trackId}
             height={20}
             className="opacity-70 w-full"
             showProgress={isActiveTrack}
@@ -188,9 +189,10 @@ export function MusicTrackRow({
           </DropdownMenu>
         </div>
       )}
-      {track.$isLoaded && isEditDialogOpen && (
+      {trackRef.$isLoaded && isEditDialogOpen && (
         <EditTrackDialog
-          track={track}
+          trackTitle={trackTitle}
+          trackRef={trackRef}
           isOpen={isEditDialogOpen}
           onOpenChange={setIsEditDialogOpen}
           onDelete={deleteTrack}

@@ -9,22 +9,11 @@ import {
   createJazzTestGuest,
   setupJazzTestSync,
 } from "../testing.js";
-import { act, renderHook } from "./testUtils.js";
-import { useRef } from "react";
+import { act, renderHook, useRenderCount } from "./testUtils.js";
 
 beforeEach(async () => {
   await setupJazzTestSync();
 });
-
-const useRenderCount = <T>(hook: () => T) => {
-  const renderCountRef = useRef(0);
-  const result = hook();
-  renderCountRef.current = renderCountRef.current + 1;
-  return {
-    renderCount: renderCountRef.current,
-    result,
-  };
-};
 
 describe("useAccount", () => {
   it("should return the correct selected value", async () => {

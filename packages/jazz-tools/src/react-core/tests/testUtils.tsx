@@ -4,8 +4,8 @@ import {
   render,
   renderHook,
 } from "@testing-library/react";
-import { Account, AnonymousJazzAgent, AuthSecretStorage } from "jazz-tools";
-import React from "react";
+import { Account, AnonymousJazzAgent } from "jazz-tools";
+import React, { useRef } from "react";
 import { JazzTestProvider } from "../testing.js";
 
 type JazzExtendedOptions = {
@@ -47,6 +47,16 @@ const customRenderHook = <TProps, TResult>(
   };
 
   return renderHook(callback, { wrapper: AllTheProviders, ...options });
+};
+
+export const useRenderCount = <T,>(hook: () => T) => {
+  const renderCountRef = useRef(0);
+  const result = hook();
+  renderCountRef.current = renderCountRef.current + 1;
+  return {
+    renderCount: renderCountRef.current,
+    result,
+  };
 };
 
 // re-export everything

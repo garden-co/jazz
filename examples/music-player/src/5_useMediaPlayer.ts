@@ -15,8 +15,7 @@ export function useMediaPlayer() {
   const [loading, setLoading] = useState<string | null>(null);
 
   const activeTrackId = useAccountSelector({
-    select: (me) =>
-      me.$isLoaded ? me.root.$jazz.refs.activeTrack?.id : undefined,
+    select: (me) => me.root.$jazz.refs.activeTrack?.id,
   });
   // Reference used to avoid out-of-order track loads
   const lastLoadedTrackId = useRef<string | null>(null);

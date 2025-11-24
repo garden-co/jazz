@@ -8,6 +8,8 @@ export {
   createCoValueSubscriptionContext,
   createAccountSubscriptionContext,
   type CoValueSubscription,
+  type CoValueRef,
+  type MaybeLoadedCoValueRef,
 } from "jazz-tools/react-core";
 
 export { SQLiteDatabaseDriverAsync } from "cojson";

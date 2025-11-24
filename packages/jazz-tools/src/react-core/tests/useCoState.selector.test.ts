@@ -5,8 +5,7 @@ import { Account, co, Loaded, z } from "jazz-tools";
 import { beforeEach, describe, expect, expectTypeOf, it } from "vitest";
 import { useCoState } from "../index.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
-import { renderHook, waitFor } from "./testUtils.js";
-import { useRef } from "react";
+import { renderHook, waitFor, useRenderCount } from "./testUtils.js";
 
 beforeEach(async () => {
   await setupJazzTestSync();
@@ -17,16 +16,6 @@ beforeEach(async () => {
 });
 
 cojsonInternals.setCoValueLoadingRetryDelay(300);
-
-const useRenderCount = <T>(hook: () => T) => {
-  const renderCountRef = useRef(0);
-  const result = hook();
-  renderCountRef.current = renderCountRef.current + 1;
-  return {
-    renderCount: renderCountRef.current,
-    result,
-  };
-};
 
 describe("useCoState", () => {
   it("should not re-render when a nested coValue is updated and not selected", async () => {

@@ -1,6 +1,6 @@
 import { Playlist } from "@/1_schema";
 import { updatePlaylistTitle } from "@/4_actions";
-import { useCoState } from "jazz-tools/react";
+import { useCoStateAndRef } from "jazz-tools/react";
 import { ChangeEvent, useState, useEffect } from "react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -17,29 +17,31 @@ export function EditPlaylistModal({
   isOpen,
   onClose,
 }: EditPlaylistModalProps) {
-  const playlist = useCoState(Playlist, playlistId);
+  const [playlistTitle, playlistRef] = useCoStateAndRef(Playlist, playlistId, {
+    select: (playlist) => (playlist.$isLoaded ? playlist.title : undefined),
+  });
   const [localPlaylistTitle, setLocalPlaylistTitle] = useState("");
 
   // Reset local title when modal opens or playlist changes
   useEffect(() => {
-    if (isOpen && playlist.$isLoaded) {
-      setLocalPlaylistTitle(playlist.title);
+    if (isOpen && playlistTitle !== undefined) {
+      setLocalPlaylistTitle(playlistTitle);
     }
-  }, [isOpen, playlist]);
+  }, [isOpen, playlistTitle]);
 
   function handleTitleChange(evt: ChangeEvent<HTMLInputElement>) {
     setLocalPlaylistTitle(evt.target.value);
   }
 
   function handleSave() {
-    if (playlist.$isLoaded && localPlaylistTitle.trim()) {
-      updatePlaylistTitle(playlist, localPlaylistTitle.trim());
+    if (playlistRef.current.$isLoaded && localPlaylistTitle.trim()) {
+      updatePlaylistTitle(playlistRef.current, localPlaylistTitle.trim());
       onClose();
     }
   }
 
   function handleCancel() {
-    setLocalPlaylistTitle(playlist.$isLoaded ? playlist.title : "");
+    setLocalPlaylistTitle(playlistTitle ?? "");
     onClose();
   }
 

@@ -1,4 +1,3 @@
-import { MusicaAccount } from "@/1_schema";
 import { deletePlaylist } from "@/4_actions";
 import {
   Sidebar,
@@ -12,19 +11,18 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import { useAccount } from "jazz-tools/react";
 import { Home, Music, Plus, Trash2 } from "lucide-react";
 import { useNavigate, useParams } from "react-router";
 import { useState } from "react";
 import { AuthButton } from "./AuthButton";
 import { CreatePlaylistModal } from "./CreatePlaylistModal";
+import { useAccountSelector } from "@/components/AccountProvider.tsx";
 
 export function SidePanel() {
   const { playlistId } = useParams();
   const navigate = useNavigate();
-  const playlists = useAccount(MusicaAccount, {
-    resolve: { root: { playlists: { $each: { $onError: "catch" } } } },
-    select: (me) => (me.$isLoaded ? me.root.playlists : undefined),
+  const playlists = useAccountSelector({
+    select: (me) => me.root.playlists,
   });
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
 
