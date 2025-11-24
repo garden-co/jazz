@@ -39,7 +39,7 @@ function example1() {
     peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
     // Controls when sync is enabled for
     // both Anonymous Authentication and Authenticated Account
-    when: "always", // or "signedUp" or "never"
+    when: "always", // or "signedUp" or "never"—use with caution. See warning below
   }}
 >
   <App />
@@ -58,7 +58,7 @@ function example2() {
   sync={{
     peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
     // This makes the app work in local mode when using Anonymous Authentication
-    when: "signedUp",
+    when: "signedUp", // use with caution
   }}
 >
   <App />
@@ -78,8 +78,6 @@ function example3() {
   guestMode={true}
   sync={{
     peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
-    // Only sync for authenticated users
-    when: "signedUp",
   }}
 >
   <App />
