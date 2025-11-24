@@ -11,8 +11,8 @@
     "vitest": "catalog:default"
   },
   "scripts": {
-    "bench": "vitest bench",
-    "bench:message-create": "NODE_OPTIONS=\"--expose-gc\" pnpm exec tsx ./comap.create.jazz-tools.bench.ts"
+    "bench:cojson": "vitest bench",
+    "bench:jazz-tools": "pnpm exec tsx ./jazz-tools/comap.create.jazz-tools.bench.ts"
   },
   "devDependencies": {
     "tsx": "^4.19.3",

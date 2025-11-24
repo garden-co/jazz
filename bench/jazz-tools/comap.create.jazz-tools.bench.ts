@@ -88,26 +88,35 @@ async function runMessageCreation(schemaDef: SchemaRuntime) {
       ),
   );
   messages.$jazz.push(...messagesToAdd);
-  await messages.$jazz.waitForSync();
-  await schemaDef.localNode.gracefulShutdown();
 }
 
+let schemaDef: SchemaRuntime;
 await cronometro(
   {
     "Message.create × 1000 entries - jazz-tools@latest": {
-      async test() {
-        const schemaDef = await createSchema(
+      async before() {
+        schemaDef = await createSchema(
           // @ts-expect-error
           latestPublishedTools,
           LatestPublishedWasmCrypto,
         );
+      },
+      async test() {
         await runMessageCreation(schemaDef);
+      },
+      async after() {
+        await schemaDef.localNode.gracefulShutdown();
       },
     },
     "Message.create × 1000 entries - jazz-tools@workspace": {
+      async before() {
+        schemaDef = await createSchema(localTools, LocalWasmCrypto);
+      },
       async test() {
-        const schemaDef = await createSchema(localTools, LocalWasmCrypto);
         await runMessageCreation(schemaDef);
+      },
+      async after() {
+        await schemaDef.localNode.gracefulShutdown();
       },
     },
   },
@@ -118,11 +127,9 @@ await cronometro(
       colors: true,
       compare: true,
     },
+    onTestError: (testName, error) => {
+      console.error(`\n❌ Error in test "${testName}":`);
+      console.error(error);
+    },
   },
 );
-
-if (!globalThis.gc) {
-  console.warn(
-    "Run this benchmark with NODE_OPTIONS=--expose-gc so cronometro can force GC between runs.",
-  );
-}

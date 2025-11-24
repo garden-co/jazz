@@ -34,7 +34,7 @@
     "vitest": "catalog:default"
   },
   "scripts": {
-    "bench": "NODE_OPTIONS='--expose-gc' vitest bench",
+    "bench": "vitest bench",
     "dev": "turbo dev",
     "build": "turbo build && cd homepage/homepage && turbo build",
     "build:packages": "turbo build --filter='./packages/*'",
