@@ -74,6 +74,16 @@ The `sync` property configures how your application connects to the Jazz network
 ```
 </CodeGroup>
 
+<ContentByFramework framework="react-native-expo">
+<Alert variant="warning" title="iOS Credential Persistence" className="mt-4">
+  When using `sync: 'never'` or `sync: 'signedUp'`, like all other data, the user's account exists only on their device, and is deleted if the user uninstalls your app. On iOS though, login credentials are saved to the Keychain, and are not deleted when the app is uninstalled. 
+  
+  If a user reinstalls your app, Jazz will try to re-use these credentials to sign in to an account that no longer exists, which will cause errors. 
+  
+  To avoid this, consider using `sync: 'always'` for your iOS users, or let them know they'll need to remove their credentials from Keychain before reinstalling.
+</Alert>
+</ContentByFramework>
+
 See [Authentication States](/docs/key-features/authentication/authentication-states#controlling-sync-for-different-authentication-states) for more details on how the `when` property affects synchronization based on authentication state.
 
 ### Account Schema
