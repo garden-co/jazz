@@ -1,9 +1,10 @@
 <script lang="ts">
   import { JazzSvelteProvider } from "jazz-tools/svelte";
   import { apiKey } from "$lib/apiKey";
+  import { SyncConfig } from "jazz-tools";
 
   let { children } = $props();
-  const sync = { peer: `wss://cloud.jazz.tools/?key=${apiKey}` };
+  const sync: SyncConfig = { peer: `wss://cloud.jazz.tools/?key=${apiKey}` };
 </script>
 
 <!--[!code ++:1]-->
