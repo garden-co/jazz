@@ -15,7 +15,7 @@ import {
   setupJazzTestSync,
 } from "jazz-tools/testing";
 import { beforeEach, describe, expect, expectTypeOf, it } from "vitest";
-import type { ComputedRef, Ref, ShallowRef } from "vue";
+import { nextTick, ref, type Ref } from "vue";
 import { useCoState } from "../index.js";
 import { waitFor, withJazzTestSetup } from "./testUtils.js";
 
@@ -199,5 +199,75 @@ describe("useCoState", () => {
     expectTypeOf(result).toEqualTypeOf<
       Ref<MaybeLoaded<co.loaded<typeof TestMap>>>
     >();
+  });
+
+  it("should accept ref input", async () => {
+    const TestMap = co.map({
+      content: z.string(),
+    });
+
+    const account = await createJazzTestAccount();
+
+    const map1 = TestMap.create(
+      {
+        content: "123",
+      },
+      { owner: account },
+    );
+    const map2 = TestMap.create(
+      {
+        content: "456",
+      },
+      { owner: account },
+    );
+
+    const id = ref(map1.$jazz.id);
+    const [result] = withJazzTestSetup(() => useCoState(TestMap, id, {}), {
+      account,
+    });
+
+    assertLoaded(result.value);
+    expect(result.value.content).toBe("123");
+    id.value = map2.$jazz.id;
+    await nextTick();
+    assertLoaded(result.value);
+    expect(result.value.content).toBe("456");
+  });
+
+  it("should accept getter input", async () => {
+    const TestMap = co.map({
+      content: z.string(),
+    });
+
+    const account = await createJazzTestAccount();
+
+    const map1 = TestMap.create(
+      {
+        content: "123",
+      },
+      { owner: account },
+    );
+    const map2 = TestMap.create(
+      {
+        content: "456",
+      },
+      { owner: account },
+    );
+
+    // simulate a getter here, in a vue app you would use a getter to access props
+    const id = ref(map1.$jazz.id);
+    const [result] = withJazzTestSetup(
+      () => useCoState(TestMap, () => id.value, {}),
+      {
+        account,
+      },
+    );
+
+    assertLoaded(result.value);
+    expect(result.value.content).toBe("123");
+    id.value = map2.$jazz.id;
+    await nextTick();
+    assertLoaded(result.value);
+    expect(result.value.content).toBe("456");
   });
 });
