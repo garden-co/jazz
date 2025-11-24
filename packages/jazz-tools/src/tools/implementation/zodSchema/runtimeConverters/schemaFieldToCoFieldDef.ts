@@ -86,19 +86,28 @@ export function schemaFieldToCoFieldDef(schema: SchemaField): CoFieldDef {
   }
 
   if (isCoValueClass(schema)) {
-    return coField.ref(schema, {
-      permissions: DEFAULT_REF_PERMISSIONS,
-    });
+    return cacheSchemaField(
+      schema,
+      coField.ref(schema, {
+        permissions: DEFAULT_REF_PERMISSIONS,
+      }),
+    );
   } else if (isCoValueSchema(schema)) {
     if (schema.builtin === "CoOptional") {
-      return coField.ref(schema.getCoValueClass(), {
-        optional: true,
-        permissions: schemaFieldPermissions(schema),
-      });
+      return cacheSchemaField(
+        schema,
+        coField.ref(schema.getCoValueClass(), {
+          optional: true,
+          permissions: schemaFieldPermissions(schema),
+        }),
+      );
     }
-    return coField.ref(schema.getCoValueClass(), {
-      permissions: schemaFieldPermissions(schema),
-    });
+    return cacheSchemaField(
+      schema,
+      coField.ref(schema.getCoValueClass(), {
+        permissions: schemaFieldPermissions(schema),
+      }),
+    );
   } else {
     if ("_zod" in schema) {
       const zodSchemaDef = schema._zod.def;
