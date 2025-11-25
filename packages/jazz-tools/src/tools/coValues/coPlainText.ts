@@ -92,15 +92,15 @@ export class CoPlainText extends String implements CoValue {
   static create<T extends CoPlainText>(
     this: CoValueClass<T>,
     text: string,
-    options?: { owner: Account | Group } | Account | Group,
-    schemaConfiguration?: {
-      configureImplicitGroupOwner?: (newGroup: Group) => void;
-    },
+    options?:
+      | {
+          owner: Account | Group;
+          configureImplicitGroupOwner?: (newGroup: Group) => void;
+        }
+      | Account
+      | Group,
   ) {
-    const { owner } = parseCoValueCreateOptions(
-      options,
-      schemaConfiguration?.configureImplicitGroupOwner,
-    );
+    const { owner } = parseCoValueCreateOptions(options);
     return new this({ text, owner });
   }
 

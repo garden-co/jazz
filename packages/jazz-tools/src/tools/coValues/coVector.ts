@@ -110,10 +110,13 @@ export class CoVector
   static create<S extends CoVector>(
     this: CoValueClass<S> & typeof CoVector,
     vector: number[] | Float32Array,
-    options?: { owner?: Account | Group } | Account | Group,
-    schemaConfiguration?: {
-      configureImplicitGroupOwner?: (newGroup: Group) => void;
-    },
+    options?:
+      | {
+          owner?: Account | Group;
+          configureImplicitGroupOwner?: (newGroup: Group) => void;
+        }
+      | Account
+      | Group,
   ) {
     const vectorAsFloat32Array =
       vector instanceof Float32Array ? vector : new Float32Array(vector);
@@ -132,10 +135,7 @@ export class CoVector
       );
     }
 
-    const { owner } = parseCoValueCreateOptions(
-      options,
-      schemaConfiguration?.configureImplicitGroupOwner,
-    );
+    const { owner } = parseCoValueCreateOptions(options);
     const coVector = new this({ owner });
     coVector.setVectorData(vectorAsFloat32Array);
 

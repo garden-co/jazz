@@ -218,15 +218,15 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   static create<S extends CoFeed>(
     this: CoValueClass<S>,
     init: S extends CoFeed<infer Item> ? Item[] : never,
-    options?: { owner: Account | Group } | Account | Group,
-    schemaConfiguration?: {
-      configureImplicitGroupOwner?: (newGroup: Group) => void;
-    },
+    options?:
+      | {
+          owner: Account | Group;
+          configureImplicitGroupOwner?: (newGroup: Group) => void;
+        }
+      | Account
+      | Group,
   ) {
-    const { owner } = parseCoValueCreateOptions(
-      options,
-      schemaConfiguration?.configureImplicitGroupOwner,
-    );
+    const { owner } = parseCoValueCreateOptions(options);
     const raw = owner.$jazz.raw.createStream();
     const instance = new this({ fromRaw: raw });
 
@@ -748,16 +748,15 @@ export class FileStream extends CoValueBase implements CoValue {
    */
   static create<S extends FileStream>(
     this: CoValueClass<S>,
-    options?: { owner?: Account | Group } | Account | Group,
-    schemaConfiguration?: {
-      // TODO extract to a new type
-      configureImplicitGroupOwner?: (newGroup: Group) => void;
-    },
+    options?:
+      | {
+          owner?: Account | Group;
+          configureImplicitGroupOwner?: (newGroup: Group) => void;
+        }
+      | Account
+      | Group,
   ) {
-    const { owner } = parseCoValueCreateOptions(
-      options,
-      schemaConfiguration?.configureImplicitGroupOwner,
-    );
+    const { owner } = parseCoValueCreateOptions(options);
     return new this({ owner });
   }
 
@@ -885,13 +884,11 @@ export class FileStream extends CoValueBase implements CoValue {
     options?:
       | {
           owner?: Account | Group;
+          configureImplicitGroupOwner?: (newGroup: Group) => void;
           onProgress?: (progress: number) => void;
         }
       | Account
       | Group,
-    schemaConfiguration?: {
-      configureImplicitGroupOwner?: (newGroup: Group) => void;
-    },
   ): Promise<FileStream> {
     const arrayBuffer = await blob.arrayBuffer();
     return this.createFromArrayBuffer(
@@ -899,7 +896,6 @@ export class FileStream extends CoValueBase implements CoValue {
       blob.type,
       blob instanceof File ? blob.name : undefined,
       options,
-      schemaConfiguration,
     );
   }
 
@@ -922,15 +918,13 @@ export class FileStream extends CoValueBase implements CoValue {
     options?:
       | {
           owner?: Account | Group;
+          configureImplicitGroupOwner?: (newGroup: Group) => void;
           onProgress?: (progress: number) => void;
         }
       | Account
       | Group,
-    schemaConfiguration?: {
-      configureImplicitGroupOwner?: (newGroup: Group) => void;
-    },
   ): Promise<FileStream> {
-    const stream = this.create(options, schemaConfiguration);
+    const stream = this.create(options);
     const onProgress =
       options && "onProgress" in options ? options.onProgress : undefined;
 

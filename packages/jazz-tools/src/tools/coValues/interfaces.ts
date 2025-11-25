@@ -429,16 +429,20 @@ export function parseCoValueCreateOptions(
   options:
     | {
         owner?: Account | Group;
+        configureImplicitGroupOwner?: (newGroup: Group) => void;
         unique?: CoValueUniqueness["uniqueness"];
       }
     | Account
     | Group
     | undefined,
-  configureImplicitGroupOwner?: (newGroup: Group) => void,
 ): {
   owner: Group;
   uniqueness?: CoValueUniqueness;
 } {
+  const configureImplicitGroupOwner =
+    options && "configureImplicitGroupOwner" in options
+      ? options.configureImplicitGroupOwner
+      : undefined;
   const createNewGroup = () => {
     const newGroup = Group.create();
     configureImplicitGroupOwner?.(newGroup);

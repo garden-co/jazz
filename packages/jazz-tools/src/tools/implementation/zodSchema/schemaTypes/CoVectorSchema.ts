@@ -6,6 +6,7 @@ import {
   InstanceOrPrimitiveOfSchema,
   InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded,
   coOptionalDefiner,
+  mergeCreateOptionsWithSchemaPermissions,
 } from "../../../internal.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreCoValueSchema } from "./CoValueSchema.js";
@@ -65,9 +66,11 @@ export class CoVectorSchema implements CoreCoVectorSchema {
     vector: number[] | Float32Array,
     options?: { owner: Account | Group } | Account | Group,
   ): CoVectorInstance {
-    return this.coValueClass.create(vector, options, {
-      configureImplicitGroupOwner: this.permissions.onCreate,
-    });
+    const optionsWithPermissions = mergeCreateOptionsWithSchemaPermissions(
+      options,
+      this.permissions,
+    );
+    return this.coValueClass.create(vector, optionsWithPermissions);
   }
 
   /**

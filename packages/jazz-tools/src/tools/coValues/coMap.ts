@@ -174,17 +174,15 @@ export class CoMap extends CoValueBase implements CoValue {
     options?:
       | {
           owner?: Account | Group;
+          configureImplicitGroupOwner?: (newGroup: Group) => void;
           unique?: CoValueUniqueness["uniqueness"];
         }
       | Account
       | Group,
-    schemaConfiguration?: {
-      configureImplicitGroupOwner?: (newGroup: Group) => void;
-    },
   ) {
     const instance = new this();
 
-    return CoMap._createCoMap(instance, init, options, schemaConfiguration);
+    return CoMap._createCoMap(instance, init, options);
   }
 
   /**
@@ -250,18 +248,13 @@ export class CoMap extends CoValueBase implements CoValue {
     options?:
       | {
           owner?: Account | Group;
+          configureImplicitGroupOwner?: (newGroup: Group) => void;
           unique?: CoValueUniqueness["uniqueness"];
         }
       | Account
       | Group,
-    schemaConfiguration?: {
-      configureImplicitGroupOwner?: (newGroup: Group) => void;
-    },
   ): M {
-    const { owner, uniqueness } = parseCoValueCreateOptions(
-      options,
-      schemaConfiguration?.configureImplicitGroupOwner,
-    );
+    const { owner, uniqueness } = parseCoValueCreateOptions(options);
 
     Object.defineProperties(instance, {
       $jazz: {

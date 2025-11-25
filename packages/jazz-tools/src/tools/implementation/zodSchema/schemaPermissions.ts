@@ -1,4 +1,4 @@
-import { Group, type GroupRole } from "../../internal.js";
+import { Account, Group, TypeSym, type GroupRole } from "../../internal.js";
 
 /**
  * Callback to configure a CoValue's group when using `.create()` without providing an explicit owner.
@@ -137,4 +137,22 @@ function parseOnInlineCreate(
 
 export function getDefaultRefPermissions(): RefPermissions {
   return schemaToRefPermissions(DEFAULT_SCHEMA_PERMISSIONS);
+}
+
+export function mergeCreateOptionsWithSchemaPermissions<
+  T extends { owner?: Account | Group },
+>(
+  options?: T | Account | Group,
+  schemaPermissions?: SchemaPermissions,
+): T & { configureImplicitGroupOwner?: (newGroup: Group) => void } {
+  if (!options || TypeSym in options) {
+    return {
+      ...(options && TypeSym in options ? { owner: options } : {}),
+      configureImplicitGroupOwner: schemaPermissions?.onCreate,
+    } as T & { configureImplicitGroupOwner?: (newGroup: Group) => void };
+  }
+  return {
+    ...options,
+    configureImplicitGroupOwner: schemaPermissions?.onCreate,
+  };
 }

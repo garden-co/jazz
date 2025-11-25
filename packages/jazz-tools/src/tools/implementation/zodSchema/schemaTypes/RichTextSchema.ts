@@ -6,6 +6,7 @@ import {
   MaybeLoaded,
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
+  mergeCreateOptionsWithSchemaPermissions,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
@@ -46,9 +47,11 @@ export class RichTextSchema implements CoreRichTextSchema {
     text: string,
     options?: { owner: Account | Group } | Account | Group,
   ): CoRichText {
-    return this.coValueClass.create(text, options, {
-      configureImplicitGroupOwner: this.permissions.onCreate,
-    });
+    const optionsWithPermissions = mergeCreateOptionsWithSchemaPermissions(
+      options,
+      this.permissions,
+    );
+    return this.coValueClass.create(text, optionsWithPermissions);
   }
 
   load(

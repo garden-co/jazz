@@ -165,19 +165,14 @@ export class CoList<out Item = any>
     options?:
       | {
           owner: Account | Group;
+          configureImplicitGroupOwner?: (newGroup: Group) => void;
           unique?: CoValueUniqueness["uniqueness"];
         }
       | Account
       | Group,
-    schemaConfiguration?: {
-      configureImplicitGroupOwner?: (newGroup: Group) => void;
-    },
   ) {
     const instance = new this();
-    const { owner, uniqueness } = parseCoValueCreateOptions(
-      options,
-      schemaConfiguration?.configureImplicitGroupOwner,
-    );
+    const { owner, uniqueness } = parseCoValueCreateOptions(options);
 
     Object.defineProperties(instance, {
       $jazz: {
