@@ -10,6 +10,7 @@ import {
   type RefEncoded,
   type RefsToResolve,
   TypeSym,
+  createUnloadedCoValue,
   instantiateRefEncodedFromRaw,
   isRefEncoded,
 } from "../internal.js";
@@ -291,15 +292,7 @@ export class SubscriptionScope<D extends CoValue> {
       return this.unloadedValue;
     }
 
-    const unloadedValue: NotLoaded<D> = {
-      $jazz: {
-        id: this.id,
-        loadingState: reason,
-        // @ts-expect-error - This is a private property
-        _subscriptionScope: this,
-      },
-      $isLoaded: false,
-    };
+    const unloadedValue: NotLoaded<D> = createUnloadedCoValue(this.id, reason);
 
     this.unloadedValue = unloadedValue;
 
