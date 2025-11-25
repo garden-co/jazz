@@ -1169,6 +1169,28 @@ test("should not throw when calling ensureLoaded a record with a deleted ref", a
   unsub();
 });
 
+test("should not throw when calling ensureLoaded a record with a non-existent key if there's a catch block", async () => {
+  const Person = co.record(
+    z.string(),
+    co.map({
+      name: z.string(),
+      breed: z.string(),
+    }),
+  );
+
+  const person = Person.create({});
+
+  const loadedPerson = await person.$jazz.ensureLoaded({
+    resolve: {
+      ["pet1"]: {
+        $onError: "catch",
+      },
+    },
+  });
+
+  expect(loadedPerson.pet1).toBeUndefined();
+});
+
 // This was a regression that ocurred when we migrated `DeeplyLoaded` to use explicit loading states.
 // Keeping this test to prevent it from happening again.
 test("deep loaded CoList nested inside another CoValue can be iterated over", async () => {

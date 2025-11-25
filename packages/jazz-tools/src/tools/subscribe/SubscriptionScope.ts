@@ -627,6 +627,12 @@ export class SubscriptionScope<D extends CoValue> {
       return undefined;
     }
 
+    // Check if $onError: "catch" is specified for this key
+    const skipInvalid = typeof depth === "object" && depth.$onError === "catch";
+    if (skipInvalid) {
+      this.skipInvalidKeys.add(key);
+    }
+
     const id = map.$jazz.raw.get(key) as string | undefined;
     const descriptor = map.$jazz.getDescriptor(key);
 
