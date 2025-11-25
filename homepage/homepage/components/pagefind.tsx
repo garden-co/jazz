@@ -135,7 +135,7 @@ const prioritizeResultsByFramework = (
 };
 
 export const usePagefindSearch = singletonHook(
-  { open: false, setOpen: () => {} },
+  { open: false, setOpen: () => { } },
   () => {
     const [open, setOpen] = useState(false);
     return { open, setOpen };
@@ -173,8 +173,12 @@ export function PagefindSearch() {
   const listRef = useRef<HTMLDivElement>(null);
   const { framework: currentFramework } = useFramework();
   const pathname = usePathname();
-
+  const [success, setSuccess] = useState(false);
   const close = () => {
+    if (!success) {
+      track("Docs search - no result", { query, source: pathname });
+    }
+    setSuccess(false);
     setOpen(false);
     setQuery("");
   };
@@ -222,7 +226,7 @@ export function PagefindSearch() {
           console.warn("Failed to load Pagefind:", e);
           window.pagefind = {
             search: async () => ({ results: [] }),
-            options: async () => {},
+            options: async () => { },
           };
         }
       }
@@ -269,6 +273,7 @@ export function PagefindSearch() {
                 const { path, hash } = processSubUrl(result.url);
                 url = `${path}${hash}`;
               }
+              setSuccess(true);
               navigateToUrl(url, close);
               track("Docs search", {
                 query,
