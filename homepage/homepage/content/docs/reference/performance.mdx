@@ -30,6 +30,10 @@ To avoid this, create and reuse groups manually when their permissions stay the 
 ```
 </CodeGroup>
 
+You can also configure Jazz to reuse the container CoValue's owner when creating nested CoValues:
+```ts index.ts#ReuseOwnerOnInlineCreation
+```
+
 ## Choose simple datatypes where possible
 CoValues will always be slightly slower to load than their primitive counterparts. For most cases, this is negligible.
 
