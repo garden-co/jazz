@@ -12,7 +12,12 @@ import {
 } from "../../../internal.js";
 import { coField } from "../../schema.js";
 import { CoreCoValueSchema } from "../schemaTypes/CoValueSchema.js";
-import { isUnionOfPrimitivesDeeply } from "../unionUtils.js";
+import {
+  isUnionOfPrimitivesDeeply,
+  getFlattenedUnionOptions,
+  getDiscriminatorValuesForOption,
+  resolveDiscriminantValue,
+} from "../unionUtils.js";
 import {
   ZodCatch,
   ZodDefault,
@@ -264,21 +269,19 @@ function schemaFieldPermissions(schema: CoreCoValueSchema): RefPermissions {
     : getDefaultRefPermissions();
 }
 
-// TODO: refactor to avoid duplication with `schemaUnionDiscriminatorFor`
 function discriminatedUnionFieldPermissions(
   schema: CoreCoDiscriminatedUnionSchema<DiscriminableCoValueSchemas>,
 ): RefPermissions {
-  const definition = schema.getDefinition();
-  const discriminatorKey = definition.discriminator;
+  const discriminatorKey = schema.getDefinition().discriminator;
+  const allOptions = getFlattenedUnionOptions(schema);
 
-  const fallbackStrategy = getDefaultRefPermissions().newInlineOwnerStrategy;
   const valueToStrategy = new Map<unknown, NewInlineOwnerStrategy>();
-
-  for (const option of definition.options) {
+  for (const option of allOptions) {
     const optionPermissions = schemaFieldPermissions(option);
-    const optionDefinition = option.getDefinition();
-    const discriminatorValues =
-      optionDefinition.discriminatorMap?.[discriminatorKey];
+    const discriminatorValues = getDiscriminatorValuesForOption(
+      option,
+      discriminatorKey,
+    );
 
     if (!discriminatorValues) {
       continue;
@@ -290,6 +293,8 @@ function discriminatedUnionFieldPermissions(
       }
     }
   }
+
+  const fallbackStrategy = getDefaultRefPermissions().newInlineOwnerStrategy;
 
   const newInlineOwnerStrategy: NewInlineOwnerStrategy = (
     createNewGroup,
@@ -307,26 +312,4 @@ function discriminatedUnionFieldPermissions(
   };
 
   return { newInlineOwnerStrategy };
-}
-
-function resolveDiscriminantValue(
-  init: unknown,
-  discriminatorKey: string,
-): unknown {
-  if (init == null) {
-    return undefined;
-  }
-
-  if (init instanceof Map) {
-    return init.get(discriminatorKey);
-  }
-
-  if (typeof init === "object") {
-    const record = init as Record<string, unknown>;
-    if (discriminatorKey in record) {
-      return record[discriminatorKey];
-    }
-  }
-
-  return undefined;
 }
