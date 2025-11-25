@@ -3,14 +3,17 @@
 import { useState } from 'react';
 import { track } from "@vercel/analytics";
 import { Button } from "@garden-co/design-system/src/components/atoms/Button";
+import { usePathname } from "next/navigation";
 
 export function FeedbackAffordances() {
   const [option, setOption] = useState<'helpful' | 'not_helpful' | null>(null);
+  const pathname = usePathname();
+
   const handleClick = (type: 'helpful' | 'not_helpful') => {
     // If the user is changing their feedback, let them, otherwise block them from voting again
     if (option === type) return;
     setOption(type);
-    track('Docs feedback', { feedback: type });
+    track('Docs feedback', { feedback: type, page: pathname });
   };
 
   return (
