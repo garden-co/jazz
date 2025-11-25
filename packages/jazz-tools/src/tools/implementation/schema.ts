@@ -103,18 +103,17 @@ function optionalRef<C extends CoValueClass>(
   return ref(arg, { optional: true, permissions: options.permissions });
 }
 
-// TODO this is a breaking change (!!!)
 function ref<C extends CoValueClass>(
   arg: C | ((raw: InstanceType<C>["$jazz"]["raw"]) => C),
-  options: { permissions: RefPermissions },
+  options: { permissions?: RefPermissions },
 ): InstanceType<C> | null;
 function ref<C extends CoValueClass>(
   arg: C | ((raw: InstanceType<C>["$jazz"]["raw"]) => C),
-  options: { optional: true; permissions: RefPermissions },
+  options: { optional: true; permissions?: RefPermissions },
 ): InstanceType<C> | null | undefined;
 function ref<
   C extends CoValueClass,
-  Options extends { optional?: boolean; permissions: RefPermissions },
+  Options extends { optional?: boolean; permissions?: RefPermissions },
 >(
   arg: C | ((raw: InstanceType<C>["$jazz"]["raw"]) => C),
   options: Options,
