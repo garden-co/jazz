@@ -1,8 +1,7 @@
-import { Account, Group, ID, co } from "jazz-tools";
+import { Account, Group, ID, co, z } from "jazz-tools";
 import { createInviteLink } from "jazz-tools/react";
 import { useAcceptInvite, useCoState } from "jazz-tools/react";
 import { useState } from "react";
-import { z } from "zod/v4";
 
 const SharedCoMap = co.map({ value: z.string() });
 type SharedCoMap = co.loaded<typeof SharedCoMap>;
