@@ -19,6 +19,7 @@ export {
   useCoValueSubscription,
   useAccountSubscription,
   useSubscriptionSelector,
+  useSuspenseCoState,
 } from "jazz-tools/react-core";
 
 export function useAcceptInviteNative<S extends CoValueClassOrSchema>({

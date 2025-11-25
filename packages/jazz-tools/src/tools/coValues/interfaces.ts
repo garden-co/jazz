@@ -42,29 +42,31 @@ export interface CoValueFromRaw<V extends CoValue> {
   fromRaw(raw: V["$jazz"]["raw"]): V;
 }
 
+export interface ICoValueJazzApi {
+  id: ID<CoValue>;
+  /** @category Content */
+  loadingState: typeof CoValueLoadingState.LOADED;
+  /** @category Collaboration */
+  owner?: Group;
+  /** @internal */
+  readonly loadedAs: Account | AnonymousJazzAgent;
+  /** @category Internals */
+  raw: RawCoValue;
+  /** @internal */
+  _subscriptionScope?: SubscriptionScope<CoValue>;
+  isBranched: boolean;
+  branchName: string | undefined;
+  unstable_merge: () => void;
+  promise: Promise<unknown>;
+}
+
 /** @category Abstract interfaces */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export interface CoValue {
   /** @category Type Helpers */
   [TypeSym]: string;
 
-  $jazz: {
-    /** @category Content */
-    readonly id: ID<CoValue>;
-    /** @category Content */
-    loadingState: typeof CoValueLoadingState.LOADED;
-    /** @category Collaboration */
-    owner?: Group;
-    /** @internal */
-    readonly loadedAs: Account | AnonymousJazzAgent;
-    /** @category Internals */
-    raw: RawCoValue;
-    /** @internal */
-    _subscriptionScope?: SubscriptionScope<CoValue>;
-    isBranched: boolean;
-    branchName: string | undefined;
-    unstable_merge: () => void;
-  };
+  $jazz: ICoValueJazzApi;
   /**
    * Whether the CoValue is loaded. Can be used to distinguish between loaded and {@link NotLoaded} CoValues.
    * For more information about the CoValue's loading state, use {@link $jazz.loadingState}.

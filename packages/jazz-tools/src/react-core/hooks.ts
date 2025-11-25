@@ -1,6 +1,5 @@
 import { useSyncExternalStoreWithSelector } from "use-sync-external-store/shim/with-selector";
 import React, {
-  use,
   useCallback,
   useContext,
   useRef,
@@ -33,6 +32,7 @@ import {
 import { JazzContext, JazzContextManagerContext } from "./provider.js";
 import { getCurrentAccountFromContextManager } from "./utils.js";
 import { CoValueSubscription } from "./types.js";
+import { use } from "./use.js";
 
 export function useJazzContext<Acc extends Account>() {
   const value = useContext(JazzContext) as JazzContextType<Acc>;
@@ -440,14 +440,44 @@ export function useSuspenseCoState<
     unstable_branch?: BranchDefinition;
   },
 ): TSelectorReturn {
-  const { select, ...rest } = options ?? {};
+  const subscription = useCoValueSubscription(Schema, id, options);
+  const getCurrentValue = useGetCurrentValue(subscription);
 
-  // @ts-expect-error fixthis
-  const value = useCoState<S, R, MaybeLoaded<Loaded<S, R>>>(Schema, id, rest);
+  const valueToSuspend = useSyncExternalStore<MaybeLoaded<Loaded<S, R>>>(
+    React.useCallback(
+      (callback) => {
+        if (!subscription) {
+          return () => {};
+        }
 
-  // @ts-expect-error fixthis
-  const loadedValue = use(value.$jazz.promise) as Loaded<S, R>;
-  return select ? select(loadedValue) : (loadedValue as TSelectorReturn);
+        return subscription.subscribe(callback);
+      },
+      [subscription],
+    ),
+    getCurrentValue,
+    getCurrentValue,
+  );
+
+  use(valueToSuspend.$jazz.promise);
+
+  const value = useSyncExternalStoreWithSelector<Loaded<S, R>, TSelectorReturn>(
+    React.useCallback(
+      (callback) => {
+        if (!subscription) {
+          return () => {};
+        }
+
+        return subscription.subscribe(callback);
+      },
+      [subscription],
+    ),
+    getCurrentValue,
+    getCurrentValue,
+    options?.select ?? ((value) => value as TSelectorReturn),
+    options?.equalityFn ?? Object.is,
+  );
+
+  return value;
 }
 
 export function useSubscriptionSelector<
@@ -689,6 +719,78 @@ export function useAccount<
     MaybeLoaded<Loaded<A, R>>,
     TSelectorReturn
   >(
+    React.useCallback(
+      (callback) => {
+        if (!subscription) {
+          return () => {};
+        }
+
+        return subscription.subscribe(callback);
+      },
+      [subscription],
+    ),
+    getCurrentValue,
+    getCurrentValue,
+    options?.select ?? ((value) => value as TSelectorReturn),
+    options?.equalityFn ?? Object.is,
+  );
+}
+
+export function useSuspenseAccount<
+  A extends AccountClass<Account> | AnyAccountSchema,
+  // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+  const R extends ResolveQuery<A> = SchemaResolveQuery<A>,
+  TSelectorReturn = Loaded<A, R>,
+>(
+  /** The account schema to use. Defaults to the base Account schema */
+  AccountSchema: A = Account as unknown as A,
+  /** Optional configuration for the subscription */
+  options?: {
+    /** Resolve query to specify which nested CoValues to load from the account */
+    resolve?: ResolveQueryStrict<A, R>;
+    /** Select which value to return from the account data */
+    select?: (account: Loaded<A, R>) => TSelectorReturn;
+    /** Equality function to determine if the selected value has changed, defaults to `Object.is` */
+    equalityFn?: (a: TSelectorReturn, b: TSelectorReturn) => boolean;
+    /**
+     * Create or load a branch for isolated editing.
+     *
+     * Branching lets you take a snapshot of the current state and start modifying it without affecting the canonical/shared version.
+     * It's a fork of your data graph: the same schema, but with diverging values.
+     *
+     * The checkout of the branch is applied on all the resolved values.
+     *
+     * @param name - A unique name for the branch. This identifies the branch
+     *   and can be used to switch between different branches of the same CoValue.
+     * @param owner - The owner of the branch. Determines who can access and modify
+     *   the branch. If not provided, the branch is owned by the current user.
+     *
+     * For more info see the [branching](https://jazz.tools/docs/react/using-covalues/version-control) documentation.
+     */
+    unstable_branch?: BranchDefinition;
+  },
+): TSelectorReturn {
+  const subscription = useAccountSubscription(AccountSchema, options);
+  const getCurrentValue = useGetCurrentValue(subscription);
+
+  const valueToSuspend = useSyncExternalStore<MaybeLoaded<Loaded<A, R>>>(
+    React.useCallback(
+      (callback) => {
+        if (!subscription) {
+          return () => {};
+        }
+
+        return subscription.subscribe(callback);
+      },
+      [subscription],
+    ),
+    getCurrentValue,
+    getCurrentValue,
+  );
+
+  use(valueToSuspend.$jazz.promise);
+
+  return useSyncExternalStoreWithSelector<Loaded<A, R>, TSelectorReturn>(
     React.useCallback(
       (callback) => {
         if (!subscription) {
