@@ -23,6 +23,11 @@ import type {
 } from "./types.js";
 import { CoValueLoadingState, NotLoadedCoValueState } from "./types.js";
 import { createCoValue, myRoleForRawValue } from "./utils.js";
+import {
+  CoValuePromise,
+  rejectedPromise,
+  resolvedPromise,
+} from "../coValues/promise.js";
 
 export class SubscriptionScope<D extends CoValue> {
   childNodes = new Map<string, SubscriptionScope<CoValue>>();
@@ -286,20 +291,40 @@ export class SubscriptionScope<D extends CoValue> {
 
   unloadedValue: NotLoaded<D> | undefined;
 
+  getPromise(): Promise<D> {
+    const currentValue = this.getCurrentValue();
+
+    if (currentValue.$isLoaded) {
+      return resolvedPromise(currentValue);
+    }
+
+    if (currentValue.$jazz.loadingState !== CoValueLoadingState.LOADING) {
+      return rejectedPromise(currentValue.$jazz.loadingState);
+    }
+
+    return new Promise<D>((resolve, reject) => {
+      const unsubscribe = this.subscribe(() => {
+        const currentValue = this.getCurrentValue();
+
+        if (currentValue.$isLoaded) {
+          unsubscribe();
+          resolve(currentValue);
+        } else if (
+          currentValue.$jazz.loadingState !== CoValueLoadingState.LOADING
+        ) {
+          unsubscribe();
+          reject(currentValue.$jazz.loadingState);
+        }
+      });
+    });
+  }
+
   private getUnloadedValue(reason: NotLoadedCoValueState): NotLoaded<D> {
     if (this.unloadedValue?.$jazz.loadingState === reason) {
       return this.unloadedValue;
     }
 
-    const unloadedValue: NotLoaded<D> = {
-      $jazz: {
-        id: this.id,
-        loadingState: reason,
-        // @ts-expect-error - This is a private property
-        _subscriptionScope: this,
-      },
-      $isLoaded: false,
-    };
+    const unloadedValue: NotLoaded<D> = new NotLoaded(this.id, reason, this);
 
     this.unloadedValue = unloadedValue;
 

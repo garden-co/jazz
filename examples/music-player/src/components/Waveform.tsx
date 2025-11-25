@@ -1,7 +1,7 @@
 import { MusicTrack, MusicTrackWaveform } from "@/1_schema";
 import { usePlayerCurrentTime } from "@/lib/audio/usePlayerCurrentTime";
 import { cn } from "@/lib/utils";
-import { useCoState } from "jazz-tools/react";
+import { useSuspenseCoState } from "jazz-tools/react-core";
 
 export function Waveform(props: {
   track: MusicTrack;
@@ -10,21 +10,11 @@ export function Waveform(props: {
   showProgress?: boolean;
 }) {
   const { track, height } = props;
-  const waveform = useCoState(
+  const waveform = useSuspenseCoState(
     MusicTrackWaveform,
     track.$jazz.refs.waveform?.id,
   );
   const currentTime = usePlayerCurrentTime();
-
-  if (!waveform.$isLoaded) {
-    return (
-      <div
-        style={{
-          height,
-        }}
-      />
-    );
-  }
 
   const duration = track.duration;
   const waveformData = waveform.data;

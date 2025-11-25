@@ -1,10 +1,10 @@
 import { Playlist } from "@/1_schema";
 import { updatePlaylistTitle } from "@/4_actions";
-import { useCoState } from "jazz-tools/react";
 import { ChangeEvent, useState, useEffect } from "react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
+import { useSuspenseCoState } from "jazz-tools/react-core";
 
 interface EditPlaylistModalProps {
   playlistId: string | undefined;
@@ -17,12 +17,12 @@ export function EditPlaylistModal({
   isOpen,
   onClose,
 }: EditPlaylistModalProps) {
-  const playlist = useCoState(Playlist, playlistId);
+  const playlist = useSuspenseCoState(Playlist, playlistId);
   const [localPlaylistTitle, setLocalPlaylistTitle] = useState("");
 
   // Reset local title when modal opens or playlist changes
   useEffect(() => {
-    if (isOpen && playlist.$isLoaded) {
+    if (isOpen) {
       setLocalPlaylistTitle(playlist.title);
     }
   }, [isOpen, playlist]);
@@ -32,14 +32,14 @@ export function EditPlaylistModal({
   }
 
   function handleSave() {
-    if (playlist.$isLoaded && localPlaylistTitle.trim()) {
+    if (localPlaylistTitle.trim()) {
       updatePlaylistTitle(playlist, localPlaylistTitle.trim());
       onClose();
     }
   }
 
   function handleCancel() {
-    setLocalPlaylistTitle(playlist.$isLoaded ? playlist.title : "");
+    setLocalPlaylistTitle(playlist.title);
     onClose();
   }
 

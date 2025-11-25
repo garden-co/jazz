@@ -16,7 +16,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
-import { useAccount, useCoState } from "jazz-tools/react";
+import { useAccount } from "jazz-tools/react";
+import { useSuspenseCoState } from "jazz-tools/react-core";
 import { MoreHorizontal, Pause, Play } from "lucide-react";
 import { Fragment, useCallback, useState } from "react";
 import { EditTrackDialog } from "./RenameTrackDialog";
@@ -39,7 +40,7 @@ export function MusicTrackRow({
   onClick: (track: MusicTrack) => void;
   index: number;
 }) {
-  const track = useCoState(MusicTrack, trackId);
+  const track = useSuspenseCoState(MusicTrack, trackId);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
@@ -137,7 +138,7 @@ export function MusicTrackRow({
       </button>
 
       {/* Waveform that appears on hover */}
-      {track.$isLoaded && showWaveform && (
+      {showWaveform && (
         <div className="flex-1 min-w-0 px-2 items-center hidden md:flex">
           <Waveform
             track={track}

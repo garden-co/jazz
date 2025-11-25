@@ -1,10 +1,10 @@
 import { ControlledAccount, LocalNode, type RawCoValue } from "cojson";
 import {
   AnonymousJazzAgent,
+  ICoValueJazzApi,
   CoValue,
   CoValueClass,
   CoValueLoadingState,
-  ID,
   RegisteredSchemas,
   type SubscriptionScope,
   coValueClassFromCoValueClassOrSchema,
@@ -13,6 +13,7 @@ import {
   unstable_mergeBranch,
 } from "../internal.js";
 import { Group, TypeSym } from "../internal.js";
+import { resolvedPromise } from "./promise.js";
 
 /** @internal */
 export abstract class CoValueBase implements CoValue {
@@ -46,7 +47,9 @@ export abstract class CoValueBase implements CoValue {
   }
 }
 
-export abstract class CoValueJazzApi<V extends CoValue> {
+export abstract class CoValueJazzApi<V extends CoValue>
+  implements ICoValueJazzApi
+{
   /** @category Internals */
   declare _instanceID: string;
   declare _subscriptionScope: SubscriptionScope<CoValue> | undefined;
@@ -56,6 +59,10 @@ export abstract class CoValueJazzApi<V extends CoValue> {
       value: `instance-${Math.random().toString(36).slice(2)}`,
       enumerable: false,
     });
+  }
+
+  get promise(): Promise<unknown> {
+    return resolvedPromise(this.coValue);
   }
 
   get id(): string {

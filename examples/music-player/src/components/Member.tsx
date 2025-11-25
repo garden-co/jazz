@@ -1,6 +1,6 @@
-import { useCoState } from "jazz-tools/react";
-import { MusicaAccount } from "@/1_schema";
+import { MusicaAccountWithProfile } from "@/1_schema";
 import { Image } from "jazz-tools/react";
+import { useSuspenseCoState } from "jazz-tools/react-core";
 
 interface MemberProps {
   accountId: string;
@@ -15,19 +15,7 @@ export function Member({
   showTooltip = true,
   className = "",
 }: MemberProps) {
-  const account = useCoState(MusicaAccount, accountId, {
-    resolve: { profile: true },
-  });
-
-  if (!account.$isLoaded) {
-    return (
-      <div
-        className={`rounded-full bg-gray-200 border-2 border-white flex items-center justify-center ${getSizeClasses(size)} ${className}`}
-      >
-        <span className="text-gray-500 text-xs">👤</span>
-      </div>
-    );
-  }
+  const account = useSuspenseCoState(MusicaAccountWithProfile, accountId);
 
   const avatar = account.profile.avatar;
   const name = account.profile.name || "Unknown User";

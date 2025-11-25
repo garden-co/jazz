@@ -16,9 +16,9 @@ import type {
 } from "jazz-tools";
 import {
   coValueClassFromCoValueClassOrSchema,
-  subscribeToCoValue,
   CoValueLoadingState,
   getUnloadedCoValueWithoutId,
+  SubscriptionScope,
 } from "jazz-tools";
 import { untrack } from "svelte";
 import { createSubscriber } from "svelte/reactivity";
@@ -55,7 +55,7 @@ export class CoState<
   // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
   R extends ResolveQuery<V> = SchemaResolveQuery<V>,
 > {
-  #value: MaybeLoaded<Loaded<V, R>> = getUnloadedCoValueWithoutId(
+  #value: MaybeLoaded<Loaded<V, R>> = getUnloadedCoValueWithoutId<Loaded<V, R>>(
     CoValueLoadingState.LOADING,
   );
   #ctx = getJazzContext<InstanceOfSchema<AccountClass<Account>>>();
@@ -86,35 +86,37 @@ export class CoState<
       return untrack(() => {
         if (!id) {
           return this.update(
-            getUnloadedCoValueWithoutId(CoValueLoadingState.UNAVAILABLE),
+            getUnloadedCoValueWithoutId<Loaded<V, R>>(CoValueLoadingState.UNAVAILABLE),
           );
         }
         const agent = "me" in ctx ? ctx.me : ctx.guest;
         const resolve = getResolveQuery(Schema, options?.resolve);
+        
+        const localNode = "node" in agent ? agent.node : agent.$jazz.localNode;
+        const schema = coValueClassFromCoValueClassOrSchema(Schema);
 
-        const unsubscribe = subscribeToCoValue(
-          coValueClassFromCoValueClassOrSchema(Schema),
+        const scope = new SubscriptionScope<CoValue>(
+          localNode,
+          // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+          resolve,
           id,
           {
-            // @ts-expect-error The resolve query type isn't compatible with the coValueClassFromCoValueClassOrSchema conversion
-            resolve,
-            loadAs: agent,
-            onUnavailable: (value) => {
-              this.update(value);
-            },
-            onUnauthorized: (value) => {
-              this.update(value);
-            },
-            syncResolution: true,
-            unstable_branch: options?.unstable_branch,
+            ref: schema,
+            optional: false,
           },
-          (value) => {
-            this.update(value as Loaded<V, R>);
-          },
+          false,
+          true,
+          options?.unstable_branch,
         );
+        
+        this.update(scope.getCurrentValue() as MaybeLoaded<Loaded<V, R>>);
+
+        scope.subscribe(() => {
+          this.update(scope.getCurrentValue() as MaybeLoaded<Loaded<V, R>>);
+        });
 
         return () => {
-          unsubscribe();
+          scope.destroy();
         };
       });
     });
@@ -141,7 +143,7 @@ export class AccountCoState<
   // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
   R extends ResolveQuery<A> = SchemaResolveQuery<A>,
 > {
-  #value: MaybeLoaded<Loaded<A, R>> = getUnloadedCoValueWithoutId(
+  #value: MaybeLoaded<Loaded<A, R>> = getUnloadedCoValueWithoutId<Loaded<A, R>>(
     CoValueLoadingState.LOADING,
   );
   #ctx = getJazzContext<InstanceOfSchema<AccountClass<Account>>>();
@@ -168,35 +170,35 @@ export class AccountCoState<
       return untrack(() => {
         if (!("me" in ctx)) {
           return this.update(
-            getUnloadedCoValueWithoutId(CoValueLoadingState.UNAVAILABLE),
+            getUnloadedCoValueWithoutId<Loaded<A, R>>(CoValueLoadingState.UNAVAILABLE),
           );
         }
 
         const me = ctx.me;
-        const resolve = getResolveQuery(Schema, options?.resolve);
+        const schema = coValueClassFromCoValueClassOrSchema(Schema);
 
-        const unsubscribe = subscribeToCoValue(
-          coValueClassFromCoValueClassOrSchema(Schema),
+        const scope = new SubscriptionScope<Account>(
+          me.$jazz.localNode,
+          // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+          resolve,
           me.$jazz.id,
           {
-            resolve,
-            loadAs: me,
-            onUnavailable: (value) => {
-              this.update(value);
-            },
-            onUnauthorized: (value) => {
-              this.update(value);
-            },
-            syncResolution: true,
-            unstable_branch: options?.unstable_branch,
+            ref: schema,
+            optional: false,
           },
-          (value) => {
-            this.update(value as Loaded<A, R>);
-          },
+          false,
+          true,
+          options?.unstable_branch,
         );
+        
+        this.update(scope.getCurrentValue() as MaybeLoaded<Loaded<A, R>>);
+
+        scope.subscribe(() => {
+          this.update(scope.getCurrentValue() as MaybeLoaded<Loaded<A, R>>);
+        });
 
         return () => {
-          unsubscribe();
+          scope.destroy();
         };
       });
     });
@@ -236,8 +238,8 @@ export class AccountCoState<
 }
 
 function shouldSkipUpdate(
-  newValue: MaybeLoaded<CoValue>,
-  previousValue: MaybeLoaded<CoValue>,
+  newValue: MaybeLoaded<any>,
+  previousValue: MaybeLoaded<any>,
 ) {
   if (previousValue === newValue) return true;
   // Avoid re-renders if the value is not loaded and didn't change
