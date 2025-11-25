@@ -1,5 +1,17 @@
 # durable-object
 
+## 0.0.12
+
+### Patch Changes
+
+- Updated dependencies [78dfffd]
+- Updated dependencies [de2f8b5]
+- Updated dependencies [763977a]
+- Updated dependencies [e02e14c]
+- Updated dependencies [3aaba61]
+  - jazz-tools@0.19.4
+  - cojson-storage-do-sqlite@0.19.4
+
 ## 0.0.11
 
 ### Patch Changes

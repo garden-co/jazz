@@ -1,5 +1,19 @@
 # jazz-tools
 
+## 0.19.4
+
+### Patch Changes
+
+- 78dfffd: Optimize CoValue creation by caching schema->coField transformations
+- de2f8b5: Ensured ensureLoaded properly handles $onError in resolve queries
+- 763977a: In the inspector, accounts are now identified by header's meta type
+- e02e14c: Improved readability for CoPlainText's history in inspector
+- 3aaba61: Inline edit for CoPlainTexts in inspector
+- Updated dependencies [8778937]
+  - cojson-storage-indexeddb@0.19.4
+  - cojson@0.19.4
+  - cojson-transport-ws@0.19.4
+
 ## 0.19.3
 
 ### Patch Changes
