@@ -1,10 +1,10 @@
 import DocsLayout from "@/components/docs/DocsLayout";
 import { DocNav } from "@/components/docs/DocsNav";
+import { FeedbackAffordances } from "@/components/docs/FeedbackAffordances";
 import { HelpLinks } from "@/components/docs/HelpLinks";
 import { PreviousNextLinks } from "@/components/docs/PreviousNextLinks";
 import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
 import { Toc } from "@stefanprobst/rehype-extract-toc";
-import { error } from "console";
 
 export function DocProse({ children }: { children: React.ReactNode }) {
   return (
@@ -151,7 +151,9 @@ export async function DocPage({ framework, slug }: { framework: string; slug?: s
       <DocsLayout nav={<DocNav />} tocItems={tocItems} pagefindLowPriority={slug?.length ? slug[0] === "upgrade" : false}>
         <DocProse>
           <Content />
-          <div className="divide-y mt-12">
+          <FeedbackAffordances />
+
+          <div className="divide-y">
             <HelpLinks className="lg:hidden pb-4" />
             <PreviousNextLinks slug={slug} framework={framework} />
           </div>
