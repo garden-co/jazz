@@ -1,5 +1,13 @@
 # cojson
 
+## 0.19.5
+
+### Patch Changes
+
+- 343c2e4: Improve the permission checks performance by optimizing the parent groups retrival
+  - cojson-core-wasm@0.19.5
+  - cojson-core-napi@0.19.5
+
 ## 0.19.4
 
 ### Patch Changes
