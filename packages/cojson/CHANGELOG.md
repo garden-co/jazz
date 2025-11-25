@@ -1,5 +1,27 @@
 # cojson
 
+## 0.19.4
+
+### Patch Changes
+
+- cojson-core-wasm@0.19.4
+- cojson-core-napi@0.19.4
+
+## 0.19.3
+
+### Patch Changes
+
+- cojson-core-wasm@0.19.3
+- cojson-core-napi@0.19.3
+
+## 0.19.2
+
+### Patch Changes
+
+- 7e76313: Prevent CoValues adding themselves as dependencies
+  - cojson-core-wasm@0.19.2
+  - cojson-core-napi@0.19.2
+
 ## 0.19.1
 
 ### Patch Changes

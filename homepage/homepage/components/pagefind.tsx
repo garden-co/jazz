@@ -171,7 +171,7 @@ export function PagefindSearch() {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<PagefindResult[]>([]);
   const listRef = useRef<HTMLDivElement>(null);
-  const currentFramework = useFramework();
+  const { framework: currentFramework } = useFramework();
   const pathname = usePathname();
 
   const close = () => {

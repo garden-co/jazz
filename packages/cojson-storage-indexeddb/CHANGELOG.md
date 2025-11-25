@@ -1,5 +1,25 @@
 # cojson-storage-indexeddb
 
+## 0.19.4
+
+### Patch Changes
+
+- 8778937: Fixed "unable to add key to index 'uniqueSessions'" when using a Jazz app in multiple tabs
+  - cojson@0.19.4
+
+## 0.19.3
+
+### Patch Changes
+
+- cojson@0.19.3
+
+## 0.19.2
+
+### Patch Changes
+
+- Updated dependencies [7e76313]
+  - cojson@0.19.2
+
 ## 0.19.1
 
 ### Patch Changes

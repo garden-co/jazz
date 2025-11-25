@@ -121,3 +121,9 @@ CoLists can be used to create one-to-many relationships:
 ```ts relations.ts
 ```
 </CodeGroup>
+
+#### Set-like Collections
+
+CoLists, like JavaScript arrays, allow you to insert the same item multiple times. In some cases, you might want to have a collection of unique items (similar to a set). To achieve this, you can use a CoRecord with entries keyed on a unique identifier (for example, the CoValue ID).
+
+You can read [more about this pattern here](/docs/core-concepts/covalues/comaps#creating-set-like-collections).

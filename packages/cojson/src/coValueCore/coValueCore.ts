@@ -405,6 +405,10 @@ export class CoValueCore {
   missingDependencies = new Set<RawCoID>();
 
   isCircularDependency(dependency: CoValueCore) {
+    if (dependency.id === this.id) {
+      return true;
+    }
+
     const visited = new Set<RawCoID>();
     const stack = [dependency];
 

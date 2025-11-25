@@ -106,6 +106,23 @@ export function isCoValueClass<V extends CoValue>(
  */
 export type ID<T> = string;
 
+const unloadedCoValueStates = new Map<
+  NotLoadedCoValueState,
+  NotLoaded<CoValue>
+>();
+
+export function getUnloadedCoValueWithoutId<T extends CoValue>(
+  loadingState: NotLoadedCoValueState,
+): NotLoaded<T> {
+  const value = unloadedCoValueStates.get(loadingState);
+  if (value) {
+    return value;
+  }
+  const newValue = createUnloadedCoValue("", loadingState);
+  unloadedCoValueStates.set(loadingState, newValue);
+  return newValue;
+}
+
 export function createUnloadedCoValue<T extends CoValue>(
   id: ID<T>,
   loadingState: NotLoadedCoValueState,
@@ -158,12 +175,8 @@ export function loadCoValue<
         loadAs: options.loadAs,
         syncResolution: true,
         skipRetry: options.skipRetry,
-        onUnavailable: () => {
-          resolve(createUnloadedCoValue(id, CoValueLoadingState.UNAVAILABLE));
-        },
-        onUnauthorized: () => {
-          resolve(createUnloadedCoValue(id, CoValueLoadingState.UNAUTHORIZED));
-        },
+        onUnavailable: resolve,
+        onUnauthorized: resolve,
         unstable_branch: options.unstable_branch,
       },
       (value, unsubscribe) => {
@@ -214,8 +227,8 @@ export type SubscribeListenerOptions<
 > = {
   resolve?: RefsToResolveStrict<V, R>;
   loadAs?: Account | AnonymousJazzAgent;
-  onUnauthorized?: () => void;
-  onUnavailable?: () => void;
+  onUnauthorized?: (value: NotLoaded<V>) => void;
+  onUnavailable?: (value: NotLoaded<V>) => void;
   unstable_branch?: BranchDefinition;
 };
 
@@ -289,8 +302,8 @@ export function subscribeToCoValue<
   options: {
     resolve?: RefsToResolveStrict<V, R>;
     loadAs: Account | AnonymousJazzAgent;
-    onUnavailable?: () => void;
-    onUnauthorized?: () => void;
+    onUnavailable?: (value: NotLoaded<V>) => void;
+    onUnauthorized?: (value: NotLoaded<V>) => void;
     syncResolution?: boolean;
     skipRetry?: boolean;
     unstable_branch?: BranchDefinition;
@@ -317,35 +330,42 @@ export function subscribeToCoValue<
     options.unstable_branch,
   );
 
-  const handleUpdate = (value: SubscriptionValue<V, any>) => {
+  const handleUpdate = () => {
     if (unsubscribed) return;
 
-    if (value.type === CoValueLoadingState.UNAVAILABLE) {
-      options.onUnavailable?.();
+    const value = rootNode.getCurrentValue();
 
-      // Don't log unavailable errors when `loadUnique` or `upsertUnique` are used
-      if (!options.skipRetry) {
+    if (value.$isLoaded) {
+      listener(value as Resolved<V, R>, unsubscribe);
+      return;
+    }
+
+    switch (value.$jazz.loadingState) {
+      case CoValueLoadingState.UNAVAILABLE:
+        options.onUnavailable?.(value);
+
+        // Don't log unavailable errors when `loadUnique` or `upsertUnique` are used
+        if (!options.skipRetry) {
+          console.error(value.toString());
+        }
+        break;
+      case CoValueLoadingState.UNAUTHORIZED:
+        options.onUnauthorized?.(value);
         console.error(value.toString());
-      }
-    } else if (value.type === CoValueLoadingState.UNAUTHORIZED) {
-      options.onUnauthorized?.();
-
-      console.error(value.toString());
-    } else if (value.type === CoValueLoadingState.LOADED) {
-      listener(value.value as Resolved<V, R>, unsubscribe);
+        break;
     }
   };
 
   let shouldDefer = !options.syncResolution;
 
-  rootNode.setListener((value) => {
+  rootNode.setListener(() => {
     if (shouldDefer) {
       shouldDefer = false;
       Promise.resolve().then(() => {
-        handleUpdate(value);
+        handleUpdate();
       });
     } else {
-      handleUpdate(value);
+      handleUpdate();
     }
   });
 
@@ -365,8 +385,8 @@ export function subscribeToExistingCoValue<
   options:
     | {
         resolve?: RefsToResolveStrict<V, R>;
-        onUnavailable?: () => void;
-        onUnauthorized?: () => void;
+        onUnavailable?: (value: NotLoaded<V>) => void;
+        onUnauthorized?: (value: NotLoaded<V>) => void;
         unstable_branch?: BranchDefinition;
       }
     | undefined,
@@ -725,7 +745,7 @@ function loadContentPiecesFromSubscription(
 
   const currentValue = subscription.getCurrentValue();
 
-  if (typeof currentValue !== "string") {
+  if (currentValue.$isLoaded) {
     const core = currentValue.$jazz.raw.core as AvailableCoValueCore;
     loadContentPiecesFromCoValue(core, valuesExported, contentPieces);
   }

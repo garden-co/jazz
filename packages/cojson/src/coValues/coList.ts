@@ -6,7 +6,6 @@ import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfrom
 import { isCoValue } from "../typeUtils/isCoValue.js";
 import { RawAccountID } from "./account.js";
 import { RawGroup } from "./group.js";
-import { Transaction } from "../coValueCore/verifiedState.js";
 
 export type OpID = TransactionID & { changeIdx: number };
 
@@ -73,6 +72,14 @@ export class RawCoList<
       };
     };
   } = {};
+
+  /** @internal */
+  atTimeFilter?: number = undefined;
+
+  /** @category 6. Meta */
+  readonly _item!: Item;
+
+  /** @internal */
   _cachedEntries?: {
     value: Item;
     madeAt: number;
@@ -94,14 +101,19 @@ export class RawCoList<
     this.totalValidTransactions = 0;
   }
 
-  /** @category 6. Meta */
-  readonly _item!: Item;
-
   /** @internal */
-  constructor(core: AvailableCoValueCore) {
+  constructor(core: AvailableCoValueCore, atTimeFilter?: number) {
     this.id = core.id as CoID<this>;
     this.core = core;
-    this.processNewTransactions();
+
+    this.insertions = {};
+    this.deletionsByInsertion = {};
+    this.afterStart = [];
+    this.beforeEnd = [];
+    this.knownTransactions = { [core.id]: 0 };
+    this.atTimeFilter = atTimeFilter;
+
+    this._processNewTransactions();
   }
 
   private getInsertionsEntry(opID: OpID) {
@@ -188,6 +200,13 @@ export class RawCoList<
   }
 
   processNewTransactions() {
+    if (this.isTimeTravelEntity()) {
+      throw new Error("Cannot process transactions on a time travel entity");
+    }
+    this._processNewTransactions();
+  }
+
+  private _processNewTransactions() {
     const transactions = this.core.getValidSortedTransactions({
       ignorePrivateTransactions: false,
       knownTransactions: this.knownTransactions,
@@ -202,6 +221,9 @@ export class RawCoList<
     this._cachedEntries = undefined;
 
     for (const { txID, changes, madeAt } of transactions) {
+      if (this.isFilteredOut(madeAt)) {
+        continue;
+      }
       lastValidTransaction = Math.max(lastValidTransaction ?? 0, madeAt);
       oldestValidTransaction = Math.min(
         oldestValidTransaction ?? Infinity,
@@ -290,6 +312,17 @@ export class RawCoList<
     this.processNewTransactions();
   }
 
+  isTimeTravelEntity() {
+    return Boolean(this.atTimeFilter);
+  }
+
+  private isFilteredOut(time: number): boolean {
+    if (this.atTimeFilter === undefined) {
+      return false;
+    }
+    return time > this.atTimeFilter;
+  }
+
   /** @category 6. Meta */
   get headerMeta(): Meta {
     return this.core.verified.header.meta as Meta;
@@ -305,8 +338,8 @@ export class RawCoList<
    *
    * @category 4. Time travel
    */
-  atTime(_time: number): this {
-    throw new Error("Not yet implemented");
+  atTime(time: number): this {
+    return new RawCoList(this.core, time) as this;
   }
 
   /**

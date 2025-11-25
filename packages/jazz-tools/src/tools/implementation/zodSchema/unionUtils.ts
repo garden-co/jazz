@@ -108,10 +108,9 @@ export function schemaUnionDiscriminatorFor(
           const coValueSchema = hydrateCoreCoValueSchema(option as any);
           const coValueClass = coValueSchema.getCoValueClass() as typeof CoMap;
 
-          const dummyFieldNames = allNestedRefKeys
-            .keys()
-            .filter((key) => !optionDef.shape[key])
-            .toArray();
+          const dummyFieldNames = Array.from(allNestedRefKeys).filter(
+            (key) => !optionDef.shape[key],
+          );
 
           if (dummyFieldNames.length === 0) {
             return coValueClass;

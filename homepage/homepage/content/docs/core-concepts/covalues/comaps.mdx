@@ -253,3 +253,19 @@ It's also possible to combine the create+load operation using `CoMap.upsertUniqu
   - To make dynamic renaming possible, you can create an indirection where a stable CoMap identified by a specific value of `unique` is simply a pointer to another CoMap with a normal, dynamic CoValue ID. This pointer can then be updated as desired by users with the corresponding permissions.
 
 - This way of introducing identifiers allows for very fast lookup of individual CoMaps by identifier, but it doesn't let you enumerate all the CoMaps identified this way within a `Group`. If you also need enumeration, consider using a global `co.record()` that maps from identifier to a CoMap, which you then do lookups in (this requires at least a shallow load of the entire `co.record()`, but this should be fast for up to 10s of 1000s of entries)
+
+#### Creating Set-like Collections
+
+You can use CoRecords as a way to create set-like collections, by keying the CoRecord on the item's CoValue ID. You can then use static `Object` methods to iterate over the CoRecord, effectively allowing you to treat it as a set.
+
+<CodeGroup>
+  ```ts record.ts#RecordAsSet
+  ```
+</CodeGroup>
+
+You can choose a loading strategy for the CoRecord. Use $each when you need all item properties to be immediately available. In general, it is enough to shallowly load a CoRecord to access its keys, and then load the values of those keys as needed (for example, by passing the keys as strings to a child component).
+
+<CodeGroup>
+  ```ts record.ts#DeeplyLoadingKeys
+  ```
+</CodeGroup>

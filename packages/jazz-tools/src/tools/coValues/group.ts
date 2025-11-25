@@ -178,7 +178,11 @@ export class Group extends CoValueBase implements CoValue {
           ref,
           get account() {
             // Accounts values are non-nullable because are loaded as dependencies
-            return accessChildById(group, accountID, refEncodedAccountSchema);
+            return accessChildById(
+              group,
+              accountID,
+              refEncodedAccountSchema,
+            ) as Account;
           },
         });
       }
@@ -410,7 +414,7 @@ export function getCoValueOwner(coValue: CoValue): Group {
     ref: RegisteredSchemas["Group"],
     optional: false,
   });
-  if (!group) {
+  if (!group.$isLoaded) {
     throw new Error("CoValue has no owner");
   }
   return group;

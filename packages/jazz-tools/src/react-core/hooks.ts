@@ -27,8 +27,8 @@ import {
   SchemaResolveQuery,
   SubscriptionScope,
   coValueClassFromCoValueClassOrSchema,
-  createUnloadedCoValue,
   importContentPieces,
+  getUnloadedCoValueWithoutId,
   type BranchDefinition,
 } from "jazz-tools";
 import { JazzContext, JazzContextManagerContext } from "./provider.js";
@@ -199,39 +199,15 @@ function useImportCoValueContent(
   }
 }
 
-function getSubscriptionValue<C extends CoValue>(
-  subscription: SubscriptionScope<C> | null,
-): MaybeLoaded<C> {
-  if (!subscription) {
-    return createUnloadedCoValue("", CoValueLoadingState.UNAVAILABLE);
-  }
-  const value = subscription.getCurrentValue();
-  if (typeof value === "string") {
-    return createUnloadedCoValue(subscription.id, value);
-  }
-  return value;
-}
-
 function useGetCurrentValue<C extends CoValue>(
   subscription: SubscriptionScope<C> | null,
 ) {
-  const previousValue = useRef<MaybeLoaded<CoValue> | undefined>(undefined);
-
   return useCallback(() => {
-    const currentValue = getSubscriptionValue(subscription);
-    // Avoid re-renders if the value is not loaded and didn't change
-    if (
-      previousValue.current !== undefined &&
-      previousValue.current.$jazz.id === currentValue.$jazz.id &&
-      !previousValue.current.$isLoaded &&
-      !currentValue.$isLoaded &&
-      previousValue.current.$jazz.loadingState ===
-        currentValue.$jazz.loadingState
-    ) {
-      return previousValue.current as MaybeLoaded<C>;
+    if (!subscription) {
+      return getUnloadedCoValueWithoutId(CoValueLoadingState.UNAVAILABLE);
     }
-    previousValue.current = currentValue;
-    return currentValue;
+
+    return subscription.getCurrentValue();
   }, [subscription]);
 }
 

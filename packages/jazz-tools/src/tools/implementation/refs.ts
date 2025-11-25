@@ -53,29 +53,21 @@ export class Ref<out V extends CoValue> {
     }
 
     if (!node) {
-      return createUnloadedCoValue(this.id, CoValueLoadingState.LOADING);
+      return createUnloadedCoValue(this.id, CoValueLoadingState.UNAVAILABLE);
     }
 
-    const value = node.value;
+    const value = node.getCurrentValue();
 
-    if (value?.type === CoValueLoadingState.LOADED) {
-      return value.value as V;
+    if (value.$isLoaded) {
+      return value as V;
     } else {
       return new Promise((resolve) => {
         const unsubscribe = node.subscribe((value) => {
-          if (value?.type === CoValueLoadingState.LOADED) {
+          const currentValue = node.getCurrentValue();
+
+          if (currentValue.$jazz.loadingState !== CoValueLoadingState.LOADING) {
             unsubscribe();
-            resolve(value.value as V);
-          } else if (value?.type === CoValueLoadingState.UNAVAILABLE) {
-            unsubscribe();
-            resolve(
-              createUnloadedCoValue(this.id, CoValueLoadingState.UNAVAILABLE),
-            );
-          } else if (value?.type === CoValueLoadingState.UNAUTHORIZED) {
-            unsubscribe();
-            resolve(
-              createUnloadedCoValue(this.id, CoValueLoadingState.UNAUTHORIZED),
-            );
+            resolve(currentValue as V);
           }
 
           if (subscriptionScope.closed) {
@@ -86,7 +78,7 @@ export class Ref<out V extends CoValue> {
     }
   }
 
-  get value(): V | null | undefined {
+  get value(): MaybeLoaded<V> {
     return accessChildById(this.parent, this.id, this.schema);
   }
 }

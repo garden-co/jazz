@@ -21,6 +21,10 @@ pnpm ios
 
 This will set up and launch the app on iOS. For Android, you can skip `pnpm pods` and replace the last command with `pnpm android`.
 
+## iOS Permissions
+
+You'll need to make sure that the appropriate entry is added to `Info.plist` for iOS (NSPhotoLibraryUsageDescription) in order for the app to access the user's photo library.
+
 ## Creation
 
 This was created using the following command:

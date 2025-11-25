@@ -23,17 +23,18 @@ import {
 import { consumeInviteLinkFromWindowLocation } from "jazz-tools/browser";
 import {
   type ComputedRef,
+  type MaybeRefOrGetter,
   type Ref,
   type ShallowRef,
   computed,
   inject,
   markRaw,
-  nextTick,
   onMounted,
   onUnmounted,
   ref,
   shallowRef,
   toRaw,
+  toValue,
   watch,
 } from "vue";
 
@@ -157,11 +158,11 @@ export function useCoState<
   const R extends ResolveQuery<S> = true,
 >(
   Schema: S,
-  id: string | undefined,
+  id: MaybeRefOrGetter<string | undefined>,
   options?: { resolve?: ResolveQueryStrict<S, R> },
 ): Ref<MaybeLoaded<Loaded<S, R>>> {
   const state: ShallowRef<MaybeLoaded<Loaded<S, R>>> = shallowRef(
-    createUnloadedCoValue(id ?? "", CoValueLoadingState.LOADING),
+    createUnloadedCoValue(toValue(id) ?? "", CoValueLoadingState.LOADING),
   );
   const context = useJazzContext();
 
@@ -179,7 +180,7 @@ export function useCoState<
   };
 
   watch(
-    [() => id, context],
+    [() => toValue(id), context],
     ([currentId, currentContext]) => {
       if (unsubscribe) {
         unsubscribe();
@@ -214,21 +215,11 @@ export function useCoState<
           {
             resolve: options?.resolve as any,
             loadAs: safeLoadAsAgent,
-            onUnavailable: () => {
-              updateState(
-                createUnloadedCoValue(
-                  currentId,
-                  CoValueLoadingState.UNAVAILABLE,
-                ),
-              );
+            onUnavailable: (value) => {
+              updateState(value);
             },
-            onUnauthorized: () => {
-              updateState(
-                createUnloadedCoValue(
-                  currentId,
-                  CoValueLoadingState.UNAUTHORIZED,
-                ),
-              );
+            onUnauthorized: (value) => {
+              updateState(value);
             },
             syncResolution: true,
           },
@@ -313,7 +304,7 @@ export function useAcceptInvite<S extends CoValueClassOrSchema>({
 export function experimental_useInboxSender<
   I extends CoValue,
   O extends CoValue | undefined,
->(inboxOwnerID: string | undefined) {
+>(inboxOwnerID: MaybeRefOrGetter<string | undefined>) {
   const context = useJazzContext();
 
   if (!context.value) {
@@ -332,17 +323,21 @@ export function experimental_useInboxSender<
   const inboxRef = ref<Promise<InboxSender<I, O>> | undefined>(undefined);
 
   const sendMessage = async (message: I) => {
-    if (!inboxOwnerID) throw new Error("Inbox owner ID is required");
+    const resolvedInboxOwnerID = toValue(inboxOwnerID);
+    if (!resolvedInboxOwnerID) throw new Error("Inbox owner ID is required");
 
     if (!inboxRef.value) {
-      const inbox = InboxSender.load<I, O>(inboxOwnerID, toRaw(me.value));
+      const inbox = InboxSender.load<I, O>(
+        resolvedInboxOwnerID,
+        toRaw(me.value),
+      );
       inboxRef.value = inbox;
     }
 
     let inbox = await inboxRef.value;
 
-    if (inbox.owner.id !== inboxOwnerID) {
-      const req = InboxSender.load<I, O>(inboxOwnerID, toRaw(me.value));
+    if (inbox.owner.id !== resolvedInboxOwnerID) {
+      const req = InboxSender.load<I, O>(resolvedInboxOwnerID, toRaw(me.value));
       inboxRef.value = req;
       inbox = await req;
     }
@@ -351,7 +346,7 @@ export function experimental_useInboxSender<
   };
 
   watch(
-    () => inboxOwnerID,
+    () => toValue(inboxOwnerID),
     () => {
       inboxRef.value = undefined;
     },

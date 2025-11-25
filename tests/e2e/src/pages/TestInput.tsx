@@ -1,34 +1,48 @@
-import { CoMap, Group, ID, coField } from "jazz-tools";
-import { useAccount, useCoState } from "jazz-tools/react";
+import { Group, co, z } from "jazz-tools";
+import { useCoState, usePassphraseAuth } from "jazz-tools/react";
 import { useEffect, useState } from "react";
+import { wordlist } from "../wordlist";
 
-export class InputTestCoMap extends CoMap {
-  title = coField.string;
+export const InputTestCoMap = co.map({
+  title: z.string(),
+});
+
+function getIdParam() {
+  const url = new URL(window.location.href);
+  return url.searchParams.get("id") ?? undefined;
 }
 
 export function TestInput() {
-  const [id, setId] = useState<ID<InputTestCoMap> | undefined>(undefined);
+  const [id, setId] = useState(getIdParam);
   const coMap = useCoState(InputTestCoMap, id);
-  const me = useAccount();
+  const auth = usePassphraseAuth({ wordlist });
 
   useEffect(() => {
-    if (!me.$isLoaded || id) return;
+    if (id) return;
 
-    const group = Group.create({ owner: me });
+    const group = Group.create();
 
     group.addMember("everyone", "writer");
+    const map = InputTestCoMap.create({ title: "" }, { owner: group });
 
-    setId(InputTestCoMap.create({ title: "" }, { owner: group }).$jazz.id);
-  }, [me]);
+    setId(map.$jazz.id);
+
+    const url = new URL(window.location.href);
+    url.searchParams.set("id", map.$jazz.id);
+    history.pushState({}, "", url.toString());
+  }, [id]);
 
   if (!coMap.$isLoaded) return null;
 
   return (
-    <input
-      value={coMap.title}
-      onChange={(e) => {
-        coMap.$jazz.set("title", e.target.value);
-      }}
-    />
+    <>
+      <button onClick={() => auth.signUp()}>Sign Up</button>
+      <input
+        value={coMap.title}
+        onChange={(e) => {
+          coMap.$jazz.set("title", e.target.value);
+        }}
+      />
+    </>
   );
 }

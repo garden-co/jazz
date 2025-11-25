@@ -19,7 +19,6 @@ await me.$jazz.ensureLoaded({
 
 // #region Basic
 import { createImage } from "jazz-tools/media";
-// @ts-expect-error Don't want to install, I'm OK with any typing.
 import { launchImageLibrary } from "react-native-image-picker";
 
 async function handleImagePicker() {
@@ -29,10 +28,15 @@ async function handleImagePicker() {
     quality: 1,
   });
 
-  if (!result.didCancel && result.assets && result.assets.length > 0 && me.profile.$isLoaded) {
+  if (
+    !result.didCancel &&
+    result.assets &&
+    result.assets.length > 0 &&
+    me.profile.$isLoaded
+  ) {
     // Creates ImageDefinition with a blurry placeholder, limited to 1024px on the longest side, and multiple resolutions automatically.
     // See the options below for more details.
-    const image = await createImage(result.assets[0].uri, {
+    const image = await createImage(result.assets[0].uri ?? "", {
       owner: me.$jazz.owner,
       maxSize: 1024,
       placeholder: "blur",
