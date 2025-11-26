@@ -1,11 +1,5 @@
 import * as Clipboard from "expo-clipboard";
-import {
-  Account,
-  co,
-  CoMapEdit,
-  getLoadedOrUndefined,
-  Group,
-} from "jazz-tools";
+import { Account, getLoadedOrUndefined, Group } from "jazz-tools";
 import { useEffect, useRef, useState } from "react";
 import React, {
   Button,
@@ -32,7 +26,9 @@ export default function ChatScreen() {
   const logOut = useLogOut();
   const [chatId, setChatId] = useState<string>();
   const [chatIdInput, setChatIdInput] = useState<string>();
-  const loadedChat = useCoState(Chat, chatId, { resolve: { $each: true } });
+  const loadedChat = useCoState(Chat, chatId, {
+    resolve: { $each: { text: true } },
+  });
   const [message, setMessage] = useState("");
   const [imageUploading, setImageUploading] = useState(false);
   const spinAnim = useRef(new Animated.Value(0)).current;
@@ -141,6 +137,10 @@ export default function ChatScreen() {
 
   const renderMessageItem = ({ item }: { item: Message }) => {
     const isMe = item.$jazz.getEdits()?.text?.by?.isMe;
+    const lastEdit = item.$jazz.getEdits()?.text;
+    const lastEditor = lastEdit?.by?.profile;
+    const lastEditorName = getLoadedOrUndefined(lastEditor)?.name;
+
     return (
       <View
         style={[
@@ -155,7 +155,7 @@ export default function ChatScreen() {
               { textAlign: isMe ? "right" : "left" },
             ]}
           >
-            {getEditorName(item?.$jazz.getEdits()?.text)}
+            {lastEditorName}
           </Text>
         ) : null}
         <View style={styles.messageContent}>
@@ -166,19 +166,12 @@ export default function ChatScreen() {
               height="original"
             />
           )}
-          <Text style={styles.messageText}>{item.text}</Text>
+          <Text style={styles.messageText}>{item.text.toString()}</Text>
           <Text style={[styles.messageTime, { marginTop: !isMe ? 8 : 4 }]}>
-            {item?.$jazz
-              .getEdits()
-              ?.text?.madeAt?.getHours()
-              .toString()
-              .padStart(2, "0")}
-            :
-            {item?.$jazz
-              .getEdits()
-              ?.text?.madeAt?.getMinutes()
-              .toString()
-              .padStart(2, "0")}
+            {new Date(item.$jazz.createdAt).toLocaleTimeString("en-US", {
+              hour: "2-digit",
+              minute: "2-digit",
+            })}
           </Text>
         </View>
       </View>
@@ -305,13 +298,6 @@ export default function ChatScreen() {
       )}
     </View>
   );
-}
-
-function getEditorName(edit?: CoMapEdit<unknown>): string | undefined {
-  if (!edit?.by?.profile || !edit.by.profile.$isLoaded) {
-    return;
-  }
-  return edit.by.profile.name;
 }
 
 const styles = StyleSheet.create({

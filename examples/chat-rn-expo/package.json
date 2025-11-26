@@ -25,6 +25,7 @@
     "react-native-get-random-values": "^1.11.0",
     "react-native-image-picker": "^8.2.1",
     "react-native-nitro-modules": "0.26.4",
+    "react-native-quick-crypto": "1.0.0-beta.21",
     "readable-stream": "^4.7.0"
   },
   "devDependencies": {
