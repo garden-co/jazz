@@ -2429,8 +2429,8 @@ importers:
         specifier: '*'
         version: 0.80.0(@babel/core@7.28.5)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0)
       react-native-fast-encoder:
-        specifier: ^0.2.0
-        version: 0.2.0(react-native@0.80.0(@babel/core@7.28.5)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+        specifier: ^0.3.1
+        version: 0.3.1(react-native@0.80.0(@babel/core@7.28.5)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
       react-native-mmkv:
         specifier: ^3.3.0
         version: 3.3.0(react-native@0.80.0(@babel/core@7.28.5)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
@@ -15420,6 +15420,13 @@ packages:
       react: 19.1.0
       react-native: '*'
 
+  react-native-fast-encoder@0.3.1:
+    resolution: {integrity: sha512-D5ZEbffxayZImtUUErbNod+7IvJITkxTCPZAQTFg6lrSjl/443Mk5CvT9nKpJC1w4cg2llWk6QP8nczij5ClcQ==}
+    engines: {node: '>= 18.0.0'}
+    peerDependencies:
+      react: 19.1.0
+      react-native: '*'
+
   react-native-get-random-values@1.11.0:
     resolution: {integrity: sha512-4BTbDbRmS7iPdhYLRcz3PGFIpFJBwNZg9g42iwa2P6FOv9vZj/xJc678RZXnLNZzd0qd7Q3CCF6Yd+CU2eoXKQ==}
     peerDependencies:
@@ -25230,9 +25237,7 @@ snapshots:
       metro-runtime: 0.83.2
     transitivePeerDependencies:
       - '@babel/core'
-      - bufferutil
       - supports-color
-      - utf-8-validate
 
   '@react-native/metro-config@0.81.0(@babel/core@7.28.5)':
     dependencies:
@@ -34353,13 +34358,6 @@ snapshots:
       react: 19.1.0
       react-dom: 19.1.0(react@19.1.0)
 
-  react-native-fast-encoder@0.2.0(react-native@0.80.0(@babel/core@7.28.5)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
-    dependencies:
-      big-integer: 1.6.52
-      flatbuffers: 2.0.6
-      react: 19.1.0
-      react-native: 0.80.0(@babel/core@7.28.5)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0)
-
   react-native-fast-encoder@0.2.0(react-native@0.81.0(@babel/core@7.28.5)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.28.5))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
     dependencies:
       big-integer: 1.6.52
@@ -34367,6 +34365,13 @@ snapshots:
       react: 19.1.0
       react-native: 0.81.0(@babel/core@7.28.5)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.28.5))(@types/react@19.1.0)(react@19.1.0)
     optional: true
+
+  react-native-fast-encoder@0.3.1(react-native@0.80.0(@babel/core@7.28.5)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
+    dependencies:
+      big-integer: 1.6.52
+      flatbuffers: 2.0.6
+      react: 19.1.0
+      react-native: 0.80.0(@babel/core@7.28.5)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0)
 
   react-native-get-random-values@1.11.0(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0)):
     dependencies:
