@@ -26,7 +26,6 @@ import {
   NotLoaded,
   activeAccountContext,
   coValueClassFromCoValueClassOrSchema,
-  getSubscriptionScope,
   inspect,
 } from "../internal.js";
 import type { BranchDefinition } from "../subscribe/types.js";
@@ -709,6 +708,31 @@ export async function exportCoValue<
 
   return contentPieces;
 }
+
+export function exportCoValueFromSubscription<V>(
+  subscription: SubscriptionScope<CoValue>,
+): ExportedCoValue<V> {
+  const valuesExported = new Set<string>();
+  const contentPieces: CojsonInternalTypes.NewContentMessage[] = [];
+
+  loadContentPiecesFromSubscription(
+    subscription,
+    valuesExported,
+    contentPieces,
+  );
+
+  return {
+    id: subscription.id as ExportedID<V>,
+    contentPieces,
+  };
+}
+
+export type ExportedID<V> = string & { _exportedID: V };
+
+export type ExportedCoValue<V> = {
+  id: ExportedID<V>; // This is used for branding the export type
+  contentPieces: CojsonInternalTypes.NewContentMessage[];
+};
 
 function loadContentPiecesFromSubscription(
   subscription: SubscriptionScope<any>,

@@ -14,6 +14,7 @@ import {
   CoValue,
   CoValueClassOrSchema,
   CoValueLoadingState,
+  ExportedCoValue,
   InboxSender,
   InstanceOfSchema,
   JazzContextManager,
@@ -26,6 +27,7 @@ import {
   SchemaResolveQuery,
   SubscriptionScope,
   coValueClassFromCoValueClassOrSchema,
+  importContentPieces,
   getUnloadedCoValueWithoutId,
   type BranchDefinition,
 } from "jazz-tools";
@@ -100,6 +102,7 @@ export function useCoValueSubscription<
   },
 ) {
   const contextManager = useJazzContextManager();
+  const agent = useAgent();
 
   const createSubscription = () => {
     if (!id) {
@@ -137,39 +140,63 @@ export function useCoValueSubscription<
     );
 
     return {
-      subscription,
+      value: subscription,
       contextManager,
       id,
       Schema,
       branchName: options?.unstable_branch?.name,
       branchOwnerId: options?.unstable_branch?.owner?.$jazz.id,
+      agent,
     };
   };
 
-  const [subscription, setSubscription] = React.useState(createSubscription);
+  const subscriptionRef = React.useRef<null | ReturnType<
+    typeof createSubscription
+  >>(null);
+
+  if (!subscriptionRef.current) {
+    subscriptionRef.current = createSubscription();
+  }
 
   const branchName = options?.unstable_branch?.name;
   const branchOwnerId = options?.unstable_branch?.owner?.$jazz.id;
 
-  React.useLayoutEffect(() => {
-    if (
-      subscription.contextManager !== contextManager ||
-      subscription.id !== id ||
-      subscription.Schema !== Schema ||
-      subscription.branchName !== branchName ||
-      subscription.branchOwnerId !== branchOwnerId
-    ) {
-      subscription.subscription?.destroy();
-      setSubscription(createSubscription());
+  let subscription = subscriptionRef.current;
+
+  // Check if the subscription needs to be updated
+  // because one of the dependencies has changed
+  if (
+    subscription.contextManager !== contextManager ||
+    subscription.id !== id ||
+    subscription.Schema !== Schema ||
+    subscription.branchName !== branchName ||
+    subscription.branchOwnerId !== branchOwnerId ||
+    subscription.agent !== agent
+  ) {
+    subscription.value?.destroy();
+    subscriptionRef.current = createSubscription();
+    subscription = subscriptionRef.current;
+  }
+
+  // Subscribe to the context manager to react to auth changes
+  return subscription.value as CoValueSubscription<S, R>;
+}
+
+function useImportCoValueContent<V>(
+  id: string | undefined | null,
+  content?: ExportedCoValue<V>,
+) {
+  const agent = useAgent();
+  const preloadExecuted = useRef<typeof agent | null>(null);
+  if (content && preloadExecuted.current !== agent && id) {
+    if (content.id === id) {
+      importContentPieces(content.contentPieces, agent);
+    } else {
+      console.warn("Preloaded value ID does not match the subscription ID");
     }
 
-    return contextManager.subscribe(() => {
-      subscription.subscription?.destroy();
-      setSubscription(createSubscription());
-    });
-  }, [Schema, id, contextManager, branchName, branchOwnerId]);
-
-  return subscription.subscription as CoValueSubscription<S, R>;
+    preloadExecuted.current = agent;
+  }
 }
 
 function useGetCurrentValue<C extends CoValue>(
@@ -375,8 +402,11 @@ export function useCoState<
      * For more info see the [branching](https://jazz.tools/docs/react/using-covalues/version-control) documentation.
      */
     unstable_branch?: BranchDefinition;
+    preloaded?: ExportedCoValue<Loaded<S, R>>;
   },
 ): TSelectorReturn {
+  useImportCoValueContent(id, options?.preloaded);
+
   const subscription = useCoValueSubscription(Schema, id, options);
   const getCurrentValue = useGetCurrentValue(subscription);
 
@@ -679,8 +709,22 @@ export function useAgent<
   A extends AccountClass<Account> | AnyAccountSchema = typeof Account,
 >(): AnonymousJazzAgent | Loaded<A, true> {
   const contextManager = useJazzContextManager<InstanceOfSchema<A>>();
-  const agent = getCurrentAccountFromContextManager(contextManager);
-  return agent as AnonymousJazzAgent | Loaded<A, true>;
+
+  const getCurrentValue = () =>
+    getCurrentAccountFromContextManager(contextManager) as
+      | AnonymousJazzAgent
+      | Loaded<A, true>;
+
+  return React.useSyncExternalStore(
+    useCallback(
+      (callback) => {
+        return contextManager.subscribe(callback);
+      },
+      [contextManager],
+    ),
+    getCurrentValue,
+    getCurrentValue,
+  );
 }
 
 export function experimental_useInboxSender<

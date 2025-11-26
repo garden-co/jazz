@@ -40,6 +40,7 @@ export type {
   AccountClass,
   AccountCreationProps,
   BaseProfileShape,
+  ExportedCoValue,
 } from "./internal.js";
 
 export {
