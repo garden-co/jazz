@@ -93,15 +93,19 @@ export class AccountSchema<
     );
   }
 
-  /** @internal */
+  // Create an account via worker, useful to generate controlled accounts from the server
   createAs(
-    as: Account,
+    worker: Account,
     options: {
       creationProps: { name: string };
+      onCreate?: (
+        account: AccountInstance<Shape>,
+        worker: Account,
+      ) => Promise<void>;
     },
   ): Promise<AccountInstance<Shape>> {
     // @ts-expect-error
-    return this.coValueClass.createAs(as, options);
+    return this.coValueClass.createAs(worker, options);
   }
 
   unstable_merge<
