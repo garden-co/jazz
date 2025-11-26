@@ -15,6 +15,7 @@ import {
   CoValueLoadingState,
   MaybeLoaded,
   LoadedAndRequired,
+  AccountSchema,
 } from "../internal";
 
 const Crypto = await WasmCrypto.create();
@@ -150,4 +151,30 @@ export function assertLoaded<T extends MaybeLoaded<CoValue>>(
   coValue: T,
 ): asserts coValue is LoadedAndRequired<T> {
   assert(coValue.$isLoaded, "CoValue is not loaded");
+}
+
+export async function createAccountAs<S extends AccountSchema<any, any>>(
+  schema: S,
+  as: Account,
+  options: {
+    creationProps: { name: string };
+  },
+) {
+  const connectedPeers = cojsonInternals.connectedPeers(
+    "creatingAccount",
+    "createdAccount",
+    { peer1role: "server", peer2role: "client" },
+  );
+
+  as.$jazz.localNode.syncManager.addPeer(connectedPeers[1]);
+
+  const account = await schema.create({
+    creationProps: options.creationProps,
+    crypto: as.$jazz.localNode.crypto,
+    peers: [connectedPeers[0]],
+  });
+
+  await account.$jazz.waitForAllCoValuesSync();
+
+  return account;
 }

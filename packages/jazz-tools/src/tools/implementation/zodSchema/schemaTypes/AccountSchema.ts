@@ -103,7 +103,8 @@ export class AccountSchema<
         worker: Account,
       ) => Promise<void>;
     },
-  ): Promise<AccountInstance<Shape>> {
+    // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+  ): Promise<Loaded<AccountSchema<Shape>, DefaultResolveQuery>> {
     // @ts-expect-error
     return this.coValueClass.createAs(worker, options);
   }

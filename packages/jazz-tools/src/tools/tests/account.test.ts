@@ -479,6 +479,12 @@ describe("createAs", () => {
         assertLoaded(account.root);
         expect(account.root.value).toBe("migration-set");
 
+        // It should be possible to add the worker as a member of the root
+        account.root.$jazz.owner.addMember(loadedWorker, "writer");
+        expect(account.root.$jazz.owner.getRoleOf(loadedWorker.$jazz.id)).toBe(
+          "writer",
+        );
+
         // Set root from worker in onCreate
         account.$jazz.set("root", workerRoot);
       },
