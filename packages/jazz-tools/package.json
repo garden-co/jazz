@@ -253,7 +253,7 @@
     "react": "*",
     "react-dom": "*",
     "react-native": "*",
-    "react-native-fast-encoder": "^0.2.0",
+    "react-native-fast-encoder": "^0.3.1",
     "react-native-mmkv": "^3.3.0",
     "react-native-nitro-modules": "^0.26.4",
     "react-native-quick-crypto": "^1.0.0-beta.21",
