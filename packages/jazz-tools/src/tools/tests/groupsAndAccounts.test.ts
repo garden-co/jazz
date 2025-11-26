@@ -12,6 +12,7 @@ import {
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import {
   assertLoaded,
+  createAccountAs,
   loadCoValueOrFail,
   setupTwoNodes,
   waitFor,
@@ -100,7 +101,7 @@ describe("Group inheritance", () => {
 
     group.addMember(parentGroup);
 
-    const reader = await co.account().createAs(me, {
+    const reader = await createAccountAs(co.account(), me, {
       creationProps: { name: "Reader" },
     });
 
@@ -141,7 +142,7 @@ describe("Group inheritance", () => {
     group.addMember(parentGroup);
     parentGroup.addMember(grandParentGroup);
 
-    const reader = await co.account().createAs(me, {
+    const reader = await createAccountAs(co.account(), me, {
       creationProps: { name: "Reader" },
     });
 
@@ -359,7 +360,7 @@ describe("Group inheritance", () => {
 
     test("nested CoValues inherit permissions from the referencing CoValue", async () => {
       const me = co.account().getMe();
-      const reader = await co.account().createAs(me, {
+      const reader = await createAccountAs(co.account(), me, {
         creationProps: { name: "Reader" },
       });
 
@@ -504,16 +505,16 @@ describe("Account permissions", () => {
     const group = Group.create({ owner: admin });
     const testObject = CoMap.create({}, { owner: group });
 
-    const manager = await co.account().createAs(admin, {
+    const manager = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Manager" },
     });
-    const writer = await co.account().createAs(admin, {
+    const writer = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Writer" },
     });
-    const reader = await co.account().createAs(admin, {
+    const reader = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Reader" },
     });
-    const writeOnly = await co.account().createAs(admin, {
+    const writeOnly = await createAccountAs(co.account(), admin, {
       creationProps: { name: "WriteOnly" },
     });
 
@@ -541,16 +542,16 @@ describe("Account permissions", () => {
     const group = Group.create({ owner: admin });
     const testObject = CoMap.create({}, { owner: group });
 
-    const manager = await co.account().createAs(admin, {
+    const manager = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Manager" },
     });
-    const writer = await co.account().createAs(admin, {
+    const writer = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Writer" },
     });
-    const reader = await co.account().createAs(admin, {
+    const reader = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Reader" },
     });
-    const writeOnly = await co.account().createAs(admin, {
+    const writeOnly = await createAccountAs(co.account(), admin, {
       creationProps: { name: "WriteOnly" },
     });
 
@@ -578,17 +579,17 @@ describe("Account permissions", () => {
     const group = Group.create({ owner: admin });
     const testObject = CoMap.create({}, { owner: group });
 
-    const manager = await co.account().createAs(admin, {
+    const manager = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Admin" },
     });
 
-    const writer = await co.account().createAs(admin, {
+    const writer = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Writer" },
     });
-    const reader = await co.account().createAs(admin, {
+    const reader = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Reader" },
     });
-    const writeOnly = await co.account().createAs(admin, {
+    const writeOnly = await createAccountAs(co.account(), admin, {
       creationProps: { name: "WriteOnly" },
     });
 
@@ -616,17 +617,17 @@ describe("Account permissions", () => {
     const group = Group.create({ owner: admin });
     const testObject = CoMap.create({}, { owner: group });
 
-    const manager = await co.account().createAs(admin, {
+    const manager = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Admin" },
     });
 
-    const writer = await co.account().createAs(admin, {
+    const writer = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Writer" },
     });
-    const reader = await co.account().createAs(admin, {
+    const reader = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Reader" },
     });
-    const writeOnly = await co.account().createAs(admin, {
+    const writeOnly = await createAccountAs(co.account(), admin, {
       creationProps: { name: "WriteOnly" },
     });
 
@@ -653,7 +654,7 @@ describe("Account permissions", () => {
     const group = Group.create({ owner: admin });
     const testObject = CoMap.create({}, { owner: group });
 
-    const nonMember = await co.account().createAs(admin, {
+    const nonMember = await createAccountAs(co.account(), admin, {
       creationProps: { name: "NonMember" },
     });
 

@@ -269,29 +269,53 @@ export class Account extends CoValueBase implements CoValue {
    */
   static async createAs<A extends Account>(
     this: CoValueClass<A> & typeof Account,
-    as: Account,
+    worker: Account,
     options: {
       creationProps: { name: string };
+      onCreate?: (account: A, worker: Account) => Promise<void>;
     },
   ) {
-    // TODO: is there a cleaner way to do this?
+    const crypto = worker.$jazz.localNode.crypto;
+
     const connectedPeers = cojsonInternals.connectedPeers(
       "creatingAccount",
-      "createdAccount",
+      crypto.uniquenessForHeader(), // Use a unique id for the client peer, so we don't have clashes in the worker node
       { peer1role: "server", peer2role: "client" },
     );
 
-    as.$jazz.localNode.syncManager.addPeer(connectedPeers[1]);
+    worker.$jazz.localNode.syncManager.addPeer(connectedPeers[1]);
 
     const account = await this.create<A>({
       creationProps: options.creationProps,
-      crypto: as.$jazz.localNode.crypto,
+      crypto,
       peers: [connectedPeers[0]],
     });
 
+    // Load the worker inside the account node
+    const loadedWorker = await Account.load(worker.$jazz.id, {
+      loadAs: account,
+    });
+
+    // This should never happen, because the two accounts are linked
+    if (!loadedWorker.$isLoaded)
+      throw new Error("Unable to load the worker account");
+
+    // The onCreate hook can be helpful to define inline logic, such as querying the DB
+    if (options.onCreate) await options.onCreate(account, loadedWorker);
+
     await account.$jazz.waitForAllCoValuesSync();
 
-    return account;
+    const createdAccount = await this.load(account.$jazz.id, {
+      loadAs: worker,
+    });
+
+    if (!createdAccount.$isLoaded)
+      throw new Error("Unable to load the created account");
+
+    // Close the account node, to avoid leaking memory
+    account.$jazz.localNode.gracefulShutdown();
+
+    return createdAccount;
   }
 
   static fromNode<A extends Account>(
