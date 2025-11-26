@@ -182,9 +182,9 @@ export function useCoValueSubscription<
   return subscription.value as CoValueSubscription<S, R>;
 }
 
-function useImportCoValueContent(
+function useImportCoValueContent<V>(
   id: string | undefined | null,
-  content?: ExportedCoValue,
+  content?: ExportedCoValue<V>,
 ) {
   const agent = useAgent();
   const preloadExecuted = useRef<typeof agent | null>(null);
@@ -402,7 +402,7 @@ export function useCoState<
      * For more info see the [branching](https://jazz.tools/docs/react/using-covalues/version-control) documentation.
      */
     unstable_branch?: BranchDefinition;
-    preloaded?: ExportedCoValue;
+    preloaded?: ExportedCoValue<Loaded<S, R>>;
   },
 ): TSelectorReturn {
   useImportCoValueContent(id, options?.preloaded);

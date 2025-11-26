@@ -1,12 +1,12 @@
 import { TodoList } from "@/app/TodoList";
 import { jazzSSR } from "@/jazzSSR";
-import { JazzAccount } from "@/schema";
+import { JazzAccountWithTodos } from "@/schema";
 
 export default async function ServerSidePage(props: {
   params: Promise<{ id: string }>;
 }) {
   const { id } = await props.params;
-  const account = await JazzAccount.load(id, {
+  const account = await JazzAccountWithTodos.load(id, {
     loadAs: jazzSSR,
   });
 

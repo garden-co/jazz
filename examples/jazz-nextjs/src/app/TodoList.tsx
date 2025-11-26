@@ -1,6 +1,6 @@
 "use client";
 
-import { JazzAccount } from "@/schema";
+import { JazzAccountWithTodos } from "@/schema";
 import { CoPlainText, ExportedCoValue } from "jazz-tools";
 import { useAgent, useCoState } from "jazz-tools/react-core";
 
@@ -9,10 +9,10 @@ export function TodoList({
   preloaded,
 }: {
   id: string;
-  preloaded?: ExportedCoValue;
+  preloaded?: ExportedCoValue<JazzAccountWithTodos>;
 }) {
   const me = useAgent();
-  const list = useCoState(JazzAccount, id, {
+  const list = useCoState(JazzAccountWithTodos, id, {
     preloaded,
     select: (account) => {
       if (!account.$isLoaded) return account;

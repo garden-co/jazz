@@ -709,9 +709,9 @@ export async function exportCoValue<
   return contentPieces;
 }
 
-export function exportCoValueFromSubscription(
+export function exportCoValueFromSubscription<V>(
   subscription: SubscriptionScope<CoValue>,
-): ExportedCoValue {
+): ExportedCoValue<V> {
   const valuesExported = new Set<string>();
   const contentPieces: CojsonInternalTypes.NewContentMessage[] = [];
 
@@ -722,13 +722,15 @@ export function exportCoValueFromSubscription(
   );
 
   return {
-    id: subscription.id,
+    id: subscription.id as ExportedID<V>,
     contentPieces,
   };
 }
 
-export type ExportedCoValue = {
-  id: string;
+export type ExportedID<V> = string & { _exportedID: V };
+
+export type ExportedCoValue<V> = {
+  id: ExportedID<V>; // This is used for branding the export type
   contentPieces: CojsonInternalTypes.NewContentMessage[];
 };
 

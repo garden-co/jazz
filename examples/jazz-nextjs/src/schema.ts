@@ -1,4 +1,4 @@
-import { co, Group, z } from "jazz-tools";
+import { co, Group, Loaded, z } from "jazz-tools";
 
 export const TodoProfile = co
   .profile({
@@ -37,7 +37,9 @@ export const JazzAccount = co
     if (!profile.$jazz.has("todos")) {
       profile.$jazz.set("todos", []);
     }
-  })
-  .resolved({
-    profile: TodoProfile.resolveQuery,
   });
+
+export const JazzAccountWithTodos = JazzAccount.resolved({
+  profile: TodoProfile.resolveQuery,
+});
+export type JazzAccountWithTodos = co.loaded<typeof JazzAccountWithTodos>;

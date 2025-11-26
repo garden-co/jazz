@@ -4,7 +4,7 @@ import {
   CoValue,
   CoValueClass,
   CoValueLoadingState,
-  ID,
+  ExportedCoValue,
   RegisteredSchemas,
   type SubscriptionScope,
   coValueClassFromCoValueClassOrSchema,
@@ -159,7 +159,7 @@ export abstract class CoValueJazzApi<V extends CoValue> {
     unstable_mergeBranch(subscriptionScope);
   }
 
-  export() {
+  export(): ExportedCoValue<V> {
     const subscriptionScope = getSubscriptionScope(this.coValue);
 
     return exportCoValueFromSubscription(
