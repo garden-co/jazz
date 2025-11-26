@@ -115,7 +115,7 @@ function updateRootTsconfig(mappingsByDir) {
 
   config.compilerOptions ??= {};
   config.compilerOptions.paths = allPaths;
-  config.exclude = ["node_modules"];
+  config.exclude = ["node_modules", "**/*test*/**"];
   fs.writeFileSync(TSCONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
 }
 
