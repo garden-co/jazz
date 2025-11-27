@@ -6,7 +6,7 @@ import { describe, bench } from "vitest";
 import {
   useAccountSubscription,
   useSubscriptionSelector,
-  useAccountWithSelector,
+  useAccount,
   CoValueSubscription,
 } from "../index.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
@@ -23,11 +23,16 @@ await createJazzTestAccount({
 const AccountSchema = co.account();
 
 const AccountName = () => {
-  const name = useAccountWithSelector(AccountSchema, {
+  const name = useAccount(AccountSchema, {
     resolve: {
       profile: true,
     },
-    select: (account) => account?.profile?.name,
+    select: (account) => {
+      if (!account.$isLoaded) {
+        return null;
+      }
+      return account.profile.name;
+    },
   });
 
   if (!name) return null;
@@ -41,7 +46,12 @@ const AccountNameFromSubscription = ({
   subscription: CoValueSubscription<typeof AccountSchema, { profile: true }>;
 }) => {
   const name = useSubscriptionSelector(subscription, {
-    select: (account) => account?.profile?.name,
+    select: (account) => {
+      if (!account.$isLoaded) {
+        return null;
+      }
+      return account.profile.name;
+    },
   });
 
   if (!name) return null;
@@ -199,9 +209,12 @@ describe("deeply resolved coMaps", async () => {
   }) => {
     const allProjectsTasks = useSubscriptionSelector(subscription, {
       select: (account) => {
-        return account?.root.organizations.flatMap((org) =>
-          org?.projects.flatMap((project) =>
-            project?.[taskListType]?.flatMap((task) => task),
+        if (!account.$isLoaded) {
+          return null;
+        }
+        return account.root.organizations.flatMap((org) =>
+          org.projects.flatMap((project) =>
+            project[taskListType].flatMap((task) => task),
           ),
         );
       },
@@ -210,7 +223,7 @@ describe("deeply resolved coMaps", async () => {
     return (
       <div>
         {allProjectsTasks?.map((task) => (
-          <div key={task?.$jazz.id}>{task?.title}</div>
+          <div key={task.$jazz.id}>{task.title}</div>
         ))}
       </div>
     );
@@ -266,7 +279,7 @@ describe("deeply resolved coMaps", async () => {
   }: {
     taskListType: "tasks" | "draftTasks" | "deletedTasks";
   }) => {
-    const subscription = useAccountWithSelector(AccountSchema, {
+    const subscription = useAccount(AccountSchema, {
       resolve: {
         root: {
           organizations: {
@@ -282,18 +295,22 @@ describe("deeply resolved coMaps", async () => {
           },
         },
       },
-      select: (account) =>
-        account?.root.organizations.flatMap((org) =>
-          org?.projects.flatMap((project) =>
-            project?.[taskListType]?.flatMap((task) => task),
+      select: (account) => {
+        if (!account.$isLoaded) {
+          return null;
+        }
+        return account.root.organizations.flatMap((org) =>
+          org.projects.flatMap((project) =>
+            project[taskListType].flatMap((task) => task),
           ),
-        ),
+        );
+      },
     });
 
     return (
       <div>
         {subscription?.map((task) => (
-          <div key={task?.$jazz.id}>{task?.title}</div>
+          <div key={task.$jazz.id}>{task.title}</div>
         ))}
       </div>
     );

@@ -5,6 +5,7 @@ import {
   CoreCoListSchema,
   CoreCoMapSchema,
   CoreCoRecordSchema,
+  CoreCoVectorSchema,
   CorePlainTextSchema,
   Simplify,
 } from "../../../internal.js";
@@ -33,13 +34,15 @@ export type CoFieldSchemaInit<S extends CoValueClass | AnyZodOrCoValueSchema> =
                 ? CoListSchemaInit<T>
                 : S extends CoreCoFeedSchema<infer T>
                   ? CoFeedSchemaInit<T>
-                  : S extends CorePlainTextSchema | CoreRichTextSchema
-                    ? string
-                    : S extends CoreCoOptionalSchema<infer T>
-                      ? CoFieldSchemaInit<T> | undefined
-                      : S extends CoDiscriminatedUnionSchema<infer Members>
-                        ? CoFieldSchemaInit<Members[number]>
-                        : never)
+                  : S extends CoreCoVectorSchema
+                    ? CoVectorSchemaInit
+                    : S extends CorePlainTextSchema | CoreRichTextSchema
+                      ? string
+                      : S extends CoreCoOptionalSchema<infer T>
+                        ? CoFieldSchemaInit<T> | undefined
+                        : S extends CoDiscriminatedUnionSchema<infer Members>
+                          ? CoFieldSchemaInit<Members[number]>
+                          : never)
     : S extends z.core.$ZodType
       ? TypeOfZodSchema<S>
       : S extends CoValueClass
@@ -75,6 +78,8 @@ export type CoListSchemaInit<T extends AnyZodOrCoValueSchema> = Simplify<
 export type CoFeedSchemaInit<T extends AnyZodOrCoValueSchema> = Simplify<
   ReadonlyArray<CoFieldSchemaInit<T>>
 >;
+
+export type CoVectorSchemaInit = ReadonlyArray<number> | Float32Array;
 
 /**
  * The convenience type for extracting the init type of a CoValue schema.

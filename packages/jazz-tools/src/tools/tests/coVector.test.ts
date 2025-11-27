@@ -8,7 +8,7 @@ import {
   co,
 } from "../internal.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
-import { setupTwoNodes, waitFor } from "./utils.js";
+import { assertLoaded, setupTwoNodes, waitFor } from "./utils.js";
 
 let me: ControlledAccount;
 
@@ -111,6 +111,49 @@ describe("Creating a CoVector", async () => {
     const embedding = EmbeddingSchema.create([1, 2, 3], group);
 
     expect(embedding.$jazz.owner).toEqual(group);
+  });
+
+  describe("nested inside a container CoValue", async () => {
+    test("from an array of numbers", () => {
+      const VectorMap = co.map({
+        embedding: EmbeddingSchema,
+      });
+
+      const container = VectorMap.create({
+        embedding: [1, 2, 3],
+      });
+
+      expect(container.embedding).toBeInstanceOf(CoVector);
+      expect(Array.from(container.embedding)).toEqual([1, 2, 3]);
+      const vectorOwner = container.embedding.$jazz.owner;
+      expect(
+        vectorOwner.getParentGroups().map((group) => group.$jazz.id),
+      ).toContain(container.$jazz.owner.$jazz.id);
+
+      container.$jazz.set("embedding", [4, 5, 6]);
+      expect(Array.from(container.embedding)).toEqual([4, 5, 6]);
+    });
+
+    test("from a Float32Array", () => {
+      const VectorList = co.list(EmbeddingSchema);
+
+      const list = VectorList.create([new Float32Array([1, 2, 3])]);
+
+      const vector = list[0];
+      assert(vector);
+      expect(vector).toBeInstanceOf(CoVector);
+      expect(Array.from(vector)).toEqual([1, 2, 3]);
+      const vectorOwner = vector.$jazz.owner;
+      expect(
+        vectorOwner.getParentGroups().map((group) => group.$jazz.id),
+      ).toContain(list.$jazz.owner.$jazz.id);
+
+      list.$jazz.push(new Float32Array([4, 5, 6]));
+
+      const vector2 = list[1];
+      assert(vector2);
+      expect(Array.from(vector2)).toEqual([4, 5, 6]);
+    });
   });
 });
 
@@ -508,7 +551,7 @@ describe("CoVector loading & availability", async () => {
       loadAs: alice,
     });
 
-    assert(loadedVector);
+    assertLoaded(loadedVector);
     expect(loadedVector.length).toBe(3);
     expect(loadedVector[0]).toBe(9);
     expect(loadedVector[1]).toBe(8);
@@ -541,7 +584,7 @@ describe("CoVector loading & availability", async () => {
       loadAs: alice,
     });
 
-    assert(loadedVector);
+    assertLoaded(loadedVector);
     expect(loadedVector).toBeInstanceOf(CoVector);
     expect(loadedVector.length).toBe(elementsForKb(kb));
     expect(loadedVector.every((item) => item === 0.5)).toBe(true);
@@ -696,14 +739,16 @@ describe("CoVector in subscription", async () => {
 
         expect(updatesCallback).toHaveBeenCalledTimes(1);
 
-        expect(updates[0]?.[0]?.content).toEqual(
-          "Call GET to retrieve document",
-        );
-        expect(updates[0]?.[1]?.content).toEqual(
+        assert(updates[0]?.[0]);
+        assertLoaded(updates[0][0]);
+        assert(updates[0]?.[1]);
+        assertLoaded(updates[0][1]);
+        expect(updates[0][0].content).toEqual("Call GET to retrieve document");
+        expect(updates[0][1].content).toEqual(
           "Call POST to create a new document",
         );
-        expect(updates[0]?.[0]?.embedding?.toString()).toBe("1,2,3");
-        expect(updates[0]?.[1]?.embedding?.toString()).toBe("4,5,6");
+        expect(updates[0][0].embedding?.toString()).toBe("1,2,3");
+        expect(updates[0][1].embedding?.toString()).toBe("4,5,6");
 
         // Update the second document's embedding
         docs[1]!.$jazz.set(
@@ -713,8 +758,12 @@ describe("CoVector in subscription", async () => {
 
         await waitFor(() => expect(updatesCallback).toHaveBeenCalledTimes(2));
 
-        expect(updates[1]?.[0]?.embedding?.toString()).toBe("1,2,3");
-        expect(updates[1]?.[1]?.embedding?.toString()).toBe("7,8,9");
+        assert(updates[1]?.[0]);
+        assertLoaded(updates[1][0]);
+        assert(updates[1]?.[1]);
+        assertLoaded(updates[1][1]);
+        expect(updates[1][0].embedding?.toString()).toBe("1,2,3");
+        expect(updates[1][1].embedding?.toString()).toBe("7,8,9");
 
         expect(updatesCallback).toHaveBeenCalledTimes(2);
       });
@@ -838,8 +887,12 @@ describe("CoVector in subscription", async () => {
         await waitFor(() => expect(updatesCallback).toHaveBeenCalled());
 
         await waitFor(() => {
-          expect(updates[0]?.[0]?.embedding?.toString()).toBe("1,2,3");
-          expect(updates[0]?.[1]?.embedding?.toString()).toBe("4,5,6");
+          assert(updates[0]?.[0]);
+          assertLoaded(updates[0][0]);
+          assert(updates[0]?.[1]);
+          assertLoaded(updates[0][1]);
+          expect(updates[0][0].embedding?.toString()).toBe("1,2,3");
+          expect(updates[0][1].embedding?.toString()).toBe("4,5,6");
         });
 
         // Update the second document's embedding
@@ -850,8 +903,12 @@ describe("CoVector in subscription", async () => {
 
         await waitFor(() => expect(updatesCallback).toHaveBeenCalledTimes(7));
 
-        expect(updates[1]?.[0]?.embedding?.toString()).toBe("1,2,3");
-        expect(updates[1]?.[1]?.embedding?.toString()).toBe("7,8,9");
+        assert(updates[1]?.[0]);
+        assertLoaded(updates[1][0]);
+        assert(updates[1]?.[1]);
+        assertLoaded(updates[1][1]);
+        expect(updates[1][0].embedding?.toString()).toBe("1,2,3");
+        expect(updates[1][1].embedding?.toString()).toBe("7,8,9");
 
         expect(updatesCallback).toHaveBeenCalledTimes(7);
       });

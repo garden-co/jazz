@@ -1,5 +1,6 @@
 import { useAccount } from "jazz-tools/react";
 import { useEffect, useState } from "react";
+import { CursorAccount } from "./schema";
 import { Logo } from "./Logo";
 import Container from "./components/Container";
 import { getName } from "./utils/getName";
@@ -9,12 +10,12 @@ const cursorFeedIDToLoad = import.meta.env.VITE_CURSOR_FEED_ID;
 const groupIDToLoad = import.meta.env.VITE_GROUP_ID;
 
 function App() {
-  const { me } = useAccount();
+  const me = useAccount(CursorAccount, { resolve: { profile: true } });
   const [loaded, setLoaded] = useState(false);
   const [cursorFeedID, setCursorFeedID] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!me?.$jazz.id) return;
+    if (!me.$isLoaded) return;
     const loadCursorFeed = async () => {
       const id = await loadCursorContainer(
         me,
@@ -27,7 +28,10 @@ function App() {
       }
     };
     loadCursorFeed();
-  }, [me?.$jazz.id]);
+  }, [me.$jazz.id, me.$isLoaded]);
+
+  const profileName = me.$isLoaded ? me.profile.name : undefined;
+  const sessionID = me.$isLoaded ? me.$jazz.sessionID : undefined;
 
   return (
     <>
@@ -42,9 +46,9 @@ function App() {
       <footer className="fixed bottom-4 right-4 flex items-center gap-4">
         <input
           type="text"
-          value={getName(me?.profile?.name, me?.$jazz.sessionID)}
+          value={getName(profileName, sessionID)}
           onChange={(e) => {
-            if (!me?.profile) return;
+            if (!me.$isLoaded) return;
             me.profile.$jazz.set("name", e.target.value);
           }}
           placeholder="Your name"

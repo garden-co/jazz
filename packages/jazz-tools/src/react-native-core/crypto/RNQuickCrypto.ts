@@ -6,9 +6,30 @@ import {
   bytesToBase64url,
 } from "cojson";
 import { CojsonInternalTypes, cojsonInternals } from "cojson";
-import { PureJSCrypto } from "cojson/dist/crypto/PureJSCrypto"; // Importing from dist to not rely on the exports field
-import { Ed, xsalsa20 } from "react-native-quick-crypto";
+import { PureJSCrypto, Blake3State } from "cojson/dist/crypto/PureJSCrypto"; // Importing from dist to not rely on the exports field
+import { Ed, xsalsa20, blake3, Blake3 } from "react-native-quick-crypto";
 const { stableStringify } = cojsonInternals;
+
+class Blake3StateAdapter implements Blake3State {
+  private instance: Blake3;
+
+  constructor(instance: Blake3) {
+    this.instance = instance;
+  }
+
+  update(buf: Uint8Array) {
+    this.instance.update(buf);
+    return this;
+  }
+
+  digest() {
+    return this.instance.digest();
+  }
+
+  clone() {
+    return new Blake3StateAdapter(this.instance.copy());
+  }
+}
 
 export class RNQuickCrypto extends PureJSCrypto {
   ed: Ed;
@@ -20,6 +41,15 @@ export class RNQuickCrypto extends PureJSCrypto {
 
   static async create(): Promise<RNQuickCrypto> {
     return new RNQuickCrypto();
+  }
+
+  createStreamingHash(): Blake3State {
+    const instance = blake3.create({});
+    return new Blake3StateAdapter(instance);
+  }
+
+  blake3HashOnce(data: Uint8Array) {
+    return blake3(data);
   }
 
   newEd25519SigningKey(): Uint8Array {

@@ -1,9 +1,9 @@
 import { apiKey } from "@/apiKey.ts";
 import { getRandomUsername, inIframe, onChatLoad } from "@/util.ts";
 import { useIframeHashRouter } from "hash-slash";
-import { Group } from "jazz-tools";
+import { co, getLoadedOrUndefined, Group } from "jazz-tools";
 import { JazzInspector } from "jazz-tools/inspector";
-import { JazzReactProvider, useAccount } from "jazz-tools/react";
+import { JazzReactProvider, useAccount, useLogOut } from "jazz-tools/react";
 import { StrictMode, useId, useMemo, useState, useEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import Jazzicon from "react-jazzicon";
@@ -22,13 +22,20 @@ function stringToSeed(str: string): number {
   return Math.abs(hash);
 }
 
+const AccountWithProfile = co.account().resolved({
+  profile: true,
+});
+
 export function App() {
-  const { me, logOut } = useAccount();
+  const me = useAccount(AccountWithProfile);
+  const logOut = useLogOut();
   const router = useIframeHashRouter();
   const inputId = useId();
   const [localValue, setLocalValue] = useState("");
   const [inputWidth, setInputWidth] = useState(120);
   const spanRef = useRef<HTMLSpanElement>(null);
+
+  const profile = getLoadedOrUndefined(me)?.profile;
 
   const avatarSeed = useMemo(() => {
     if (!me?.$jazz?.id) return 0;
@@ -36,8 +43,8 @@ export function App() {
   }, [me?.$jazz?.id]);
 
   useEffect(() => {
-    setLocalValue(me?.profile?.name ?? "");
-  }, [me?.profile?.name]);
+    setLocalValue(profile?.name ?? "");
+  }, [profile?.name]);
 
   useEffect(() => {
     if (spanRef.current) {
@@ -85,8 +92,8 @@ export function App() {
             className="bg-transparent text-lg outline-none min-w-0 max-w-full"
             onChange={(e) => {
               setLocalValue(e.target.value);
-              if (!me?.profile) return;
-              me.profile.$jazz.set("name", e.target.value);
+              if (!profile) return;
+              profile.$jazz.set("name", e.target.value);
             }}
             placeholder={usernamePlaceholder}
           />

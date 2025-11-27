@@ -24,6 +24,7 @@ export class CoOptionalSchema<
   readonly getDefinition = () => ({
     innerType: this.innerType,
   });
+  readonly resolveQuery = true as const;
 
   constructor(public readonly innerType: Shape) {}
 

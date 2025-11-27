@@ -15,34 +15,7 @@ JazzRPC is the most straightforward and complete way to securely communicate wit
 Use `experimental_defineRequest` to define your API schema:
 
 <CodeGroup>
-```ts
-import { experimental_defineRequest, z } from "jazz-tools";
-import { Event, Ticket } from "./schema";
-
-const workerId = process.env.NEXT_PUBLIC_JAZZ_WORKER_ACCOUNT!;
-
-export const bookEventTicket = experimental_defineRequest({
-  url: "/api/book-event-ticket",
-  // The id of the worker Account or Group
-  workerId,
-  // The schema definition of the data we send to the server
-  request: {
-    schema: {
-      event: Event,
-    },
-    // The data that will be considered as "loaded" in the server input
-    resolve: {
-      event: { reservations: true },
-    },
-  },
-  // The schema definition of the data we expect to receive from the server
-  response: {
-    schema: { ticket: Ticket },
-    // The data that will be considered as "loaded" in the client response
-    // It defines the content that the server directly sends to the client, without involving the sync server
-    resolve: { ticket: true },
-  },
-});
+```ts bookEventTicket.ts#Basic
 ```
 </CodeGroup>
 
@@ -51,14 +24,7 @@ export const bookEventTicket = experimental_defineRequest({
 We need to start a Server Worker instance that will be able to sync data with the sync server, and handle the requests.
 
 <CodeGroup>
-```ts
-import { startWorker } from "jazz-tools/worker";
-
-export const jazzServer = await startWorker({
-  syncServer: "wss://cloud.jazz.tools/?key=your-api-key",
-  accountID: process.env.JAZZ_WORKER_ACCOUNT,
-  accountSecret: process.env.JAZZ_WORKER_SECRET,
-});
+```ts jazzServer.ts#Basic
 ```
 </CodeGroup>
 
@@ -69,33 +35,7 @@ export const jazzServer = await startWorker({
 Create API routes to handle the defined RPC requests. Here's an example using Next.js API routes:
 
 <CodeGroup>
-```ts
-import { jazzServer } from "@/jazzServer";
-import { bookEventTicket, Ticket, Event } from "@/schema";
-import { JazzRequestError } from "jazz-tools";
-
-export async function POST(request: Request) {
-  return bookEventTicket.handle(
-    request,
-    jazzServer.worker,
-    async ({ event }, madeBy) => {
-      const ticketGroup = Group.create(jazzServer.worker);
-      const ticket = Ticket.create({
-        account: madeBy,
-        event,
-      });
-
-      // Give access to the ticket to the client
-      ticketGroup.addMember(madeBy, "reader");
-
-      event.reservations.push(ticket);
-
-      return {
-        ticket,
-      };
-    },
-  );
-}
+```ts server.ts#Basic
 ```
 </CodeGroup>
 
@@ -106,15 +46,7 @@ export async function POST(request: Request) {
 Make requests from the client using the defined API:
 
 <CodeGroup>
-```ts
-import { bookEventTicket, Ticket, Event } from "@/schema";
-import { isJazzRequestError } from "jazz-tools";
-
-export async function sendEventBookingRequest(event: Event) {
-  const { ticket } = await bookEventTicket.send({ event });
-
-  return ticket;
-}
+```ts client.ts
 ```
 </CodeGroup>
 
@@ -125,39 +57,7 @@ export async function sendEventBookingRequest(event: Event) {
 Use `JazzRequestError` to return proper HTTP error responses:
 
 <CodeGroup>
-```ts
-import { jazzServer } from "@/jazzServer";
-import { bookEventTicket, Ticket, Event } from "@/schema";
-import { JazzRequestError } from "jazz-tools";
-
-export async function POST(request: Request) {
-  return bookEventTicket.handle(
-    request,
-    jazzServer.worker,
-    async ({ event }, madeBy) => {
-      // Check if the event is full
-      if (event.reservations.length >= event.capacity) {
-        // The JazzRequestError is propagated to the client, use it for any validation errors
-        throw new JazzRequestError("Event is full", 400);
-      }
-
-      const ticketGroup = Group.create(jazzServer.worker);
-      const ticket = Ticket.create({
-        account: madeBy,
-        event,
-      });
-
-      // Give access to the ticket to the client
-      ticketGroup.addMember(madeBy, "reader");
-
-      event.reservations.push(ticket);
-
-      return {
-        ticket,
-      };
-    },
-  );
-}
+```ts server.ts#ErrorHandling
 ```
 </CodeGroup>
 
@@ -172,23 +72,7 @@ export async function POST(request: Request) {
 Handle errors on the client side:
 
 <CodeGroup>
-```ts
-import { bookEventTicket, Ticket, Event } from "@/schema";
-import { isJazzRequestError } from "jazz-tools";
-
-export async function sendEventBookingRequest(event: Event) {
-  try {
-    const { ticket } = await bookEventTicket.send({ event });
-
-    return ticket;
-  } catch (error) {
-    // This works as a type guard, so you can easily get the error message and details
-    if (isJazzRequestError(error)) {
-      alert(error.message);
-      return;
-    }
-  }
-}
+```ts client.ts#ErrorHandling
 ```
 </CodeGroup>
 

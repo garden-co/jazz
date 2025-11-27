@@ -30,7 +30,7 @@ function MemberItem({
   role: string;
   group: Group;
 }) {
-  const { me } = useAccount();
+  const me = useAccount();
 
   const canRemoveMember =
     group.myRole() === "admin" && account.$jazz.id !== me?.$jazz.id;
@@ -41,11 +41,11 @@ function MemberItem({
     }
   }
 
+  const name = account.profile.$isLoaded ? account.profile.name : undefined;
   return (
     <div className="px-4 py-5 sm:px-6 flex justify-between items-center">
       <div>
-        <strong className="font-medium">{account.profile?.name}</strong> ({role}
-        )
+        <strong className="font-medium">{name}</strong> ({role})
       </div>
       {canRemoveMember && (
         <button

@@ -4,6 +4,7 @@ import {
   BranchDefinition,
   CoPlainText,
   Group,
+  MaybeLoaded,
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
 } from "../../../internal.js";
@@ -19,12 +20,14 @@ export function createCoreCoPlainTextSchema(): CorePlainTextSchema {
   return {
     collaborative: true as const,
     builtin: "CoPlainText" as const,
+    resolveQuery: true as const,
   };
 }
 
 export class PlainTextSchema implements CorePlainTextSchema {
   readonly collaborative = true as const;
   readonly builtin = "CoPlainText" as const;
+  readonly resolveQuery = true as const;
 
   constructor(private coValueClass: typeof CoPlainText) {}
 
@@ -47,7 +50,7 @@ export class PlainTextSchema implements CorePlainTextSchema {
       loadAs: Account | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
     },
-  ): Promise<CoPlainText | null> {
+  ): Promise<MaybeLoaded<CoPlainText>> {
     return this.coValueClass.load(id, options);
   }
 

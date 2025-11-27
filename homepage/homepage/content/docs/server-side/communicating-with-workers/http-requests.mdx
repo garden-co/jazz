@@ -26,14 +26,7 @@ You can use any method to create a request; the most common is the `fetch` API.
 By default, the token is expected to be in the `Authorization` header in the form of `Jazz <token>`.
 
 <CodeGroup>
-```ts twoslash
-import { generateAuthToken } from "jazz-tools";
-
-const response = await fetch('https://example.com', {
-  headers: {
-    Authorization: `Jazz ${generateAuthToken()}`,
-  },
-});
+```ts index.ts#Basic
 ```
 </CodeGroup>
 
@@ -44,33 +37,7 @@ You can use the `authenticateRequest` function to authenticate requests.
 Attempting to authenticate a request without a token doesn't fail; it returns `account` as `undefined`. For endpoints that **require** authentication, ensure `account` is defined in addition to any permission checks you may need.
 
 <CodeGroup>
-```ts twoslash
-import { authenticateRequest } from "jazz-tools";
-import { startWorker } from "jazz-tools/worker";
-
-export async function GET(request: Request) {
-  const worker = await startWorker({
-    syncServer: "wss://cloud.jazz.tools/?key=your-api-key",
-    accountID: process.env.JAZZ_WORKER_ACCOUNT,
-    accountSecret: process.env.JAZZ_WORKER_SECRET,
-    asActiveAccount: true,
-  });
-
-  const { account, error } = await authenticateRequest(request);
-
-  // There was an error validating the token (e.g., invalid or expired)
-  if (error) {
-    return new Response(JSON.stringify(error), { status: 401 });
-  }
-
-  if (!account) {
-    return new Response("Unauthorized", { status: 401 });
-  }
-
-  return new Response(JSON.stringify({
-    message: `The request was made by ${account.$jazz.id}`
-  }));
-}
+```ts index.ts#GetRequest
 ```
 </CodeGroup>
 
@@ -84,18 +51,7 @@ If you are using multiple accounts in your environment - for instance if your se
 `generateAuthToken` accepts an optional account parameter, so you can generate a token for a specific account.
 
 <CodeGroup>
-```ts twoslash
-import { Account } from "jazz-tools";
-// @ts-ignore
-const account: Account = {};
-// ---cut---
-import { generateAuthToken } from "jazz-tools";
-
-const response = await fetch('https://example.com', {
-  headers: {
-    Authorization: `Jazz ${generateAuthToken(account)}`,
-  },
-});
+```ts index.ts#GenerateAsAccount
 ```
 </CodeGroup>
 
@@ -104,19 +60,7 @@ const response = await fetch('https://example.com', {
 Similarly, specify the account used to verify the token via the `loadAs` option:
 
 <CodeGroup>
-```ts twoslash
-import { authenticateRequest } from "jazz-tools";
-import { startWorker } from "jazz-tools/worker";
-
-export async function GET(request: Request) {
-  const { worker } = await startWorker({
-    syncServer: "wss://cloud.jazz.tools/?key=your-api-key",
-    accountID: process.env.JAZZ_WORKER_ACCOUNT,
-    accountSecret: process.env.JAZZ_WORKER_SECRET,
-  });
-
-  const { account, error } = await authenticateRequest(request, { loadAs: worker });
-}
+```ts index.ts#VerifyAsAccount
 ```
 </CodeGroup>
 
@@ -125,14 +69,7 @@ export async function GET(request: Request) {
 You can specify the expiration time of the token using the `expiration` option. The default expiration time is 1 minute.
 
 <CodeGroup>
-```ts twoslash
-import { authenticateRequest } from "jazz-tools";
-
-export async function GET(request: Request) {
-  const { account, error } = await authenticateRequest(request, {
-    expiration: 1000 * 60 * 60 * 24 // 24 hours
-  });
-}
+```ts index.ts#CustomExpiration
 ```
 </CodeGroup>
 
@@ -143,42 +80,22 @@ While using the `Authorization` header using the `Jazz <token>` format is the mo
 For example, you can send the token in the `x-jazz-auth-token` header:
 
 <CodeGroup>
-```ts twoslash
-import { generateAuthToken } from "jazz-tools";
-
-const response = await fetch('https://example.com', {
-  headers: {
-    "x-jazz-auth-token": generateAuthToken(),
-  },
-});
+```ts index.ts#CustomLocation
 ```
 </CodeGroup>
 
 Then you can specify the location of the token using the `getToken` option:
 
 <CodeGroup>
-```ts twoslash
-import { authenticateRequest } from "jazz-tools";
-
-
-export async function GET(request: Request) {
-  const { account, error } = await authenticateRequest(request, {
-    getToken: (request) => request.headers.get("x-jazz-auth-token"),
-  });
-}
+```ts index.ts#GetToken
 ```
 </CodeGroup>
 
-## Addendum: Manual token parsing
+## Manual token parsing
 
 If you need to manually parse a token from a string, you can use the `parseAuthToken` function.
 
 <CodeGroup>
-```ts twoslash
-import { parseAuthToken, generateAuthToken } from "jazz-tools";
-
-const myToken = generateAuthToken();
-
-const { account, error } = await parseAuthToken(myToken);
+```ts index.ts#ManualTokenParsing
 ```
 </CodeGroup>

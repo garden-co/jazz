@@ -1,13 +1,14 @@
-import { waitFor } from "@testing-library/dom";
 import { cojsonInternals, emptyKnownState } from "cojson";
 import { assert, beforeEach, expect, test } from "vitest";
 import { Account, Group, co, exportCoValue, z } from "../exports.js";
+import { CoValueLoadingState } from "../internal.js";
 import {
   createJazzTestAccount,
   disableJazzTestSync,
   getPeerConnectedToTestSyncServer,
   setupJazzTestSync,
 } from "../testing.js";
+import { assertLoaded, waitFor } from "./utils.js";
 
 cojsonInternals.CO_VALUE_LOADING_CONFIG.RETRY_DELAY = 10;
 
@@ -30,17 +31,17 @@ test("load a value", async () => {
   const alice = await createJazzTestAccount();
 
   const john = await Person.load(map.$jazz.id, { loadAs: alice });
-  expect(john).not.toBeNull();
+  assertLoaded(john);
   expect(john?.name).toBe("John");
 });
 
-test("return null if id is invalid", async () => {
+test("return 'unavailable' if id is invalid", async () => {
   const Person = co.map({
     name: z.string(),
   });
 
   const john = await Person.load("test");
-  expect(john).toBeNull();
+  expect(john.$jazz.loadingState).toBe(CoValueLoadingState.UNAVAILABLE);
 });
 
 test("load a missing optional value (co.optional)", async () => {
@@ -64,8 +65,7 @@ test("load a missing optional value (co.optional)", async () => {
     resolve: { dog: true },
   });
 
-  assert(john);
-
+  assertLoaded(john);
   expect(john.name).toBe("John");
   expect(john.dog).toBeUndefined();
 });
@@ -91,8 +91,7 @@ test("load a missing optional value (Schema.optional)", async () => {
     resolve: { dog: true },
   });
 
-  assert(john);
-
+  assertLoaded(john);
   expect(john.name).toBe("John");
   expect(john.dog).toBeUndefined();
 });
@@ -124,8 +123,7 @@ test("load a missing optional value (optional discrminatedUnion)", async () => {
     resolve: { pet: true },
   });
 
-  assert(john);
-
+  assertLoaded(john);
   expect(john.name).toBe("John");
   expect(john.pet).toBeUndefined();
 });
@@ -160,11 +158,11 @@ test("retry an unavailable value", async () => {
   );
 
   const john = await promise;
-  expect(john).not.toBeNull();
-  expect(john?.name).toBe("John");
+  assertLoaded(john);
+  expect(john.name).toBe("John");
 });
 
-test("returns null if the value is unavailable after retries", async () => {
+test("returns 'unavailable' if the value is unavailable after retries", async () => {
   const Person = co.map({
     name: z.string(),
   });
@@ -186,7 +184,7 @@ test("returns null if the value is unavailable after retries", async () => {
 
   const john = await Person.load(map.$jazz.id, { loadAs: alice });
 
-  expect(john).toBeNull();
+  expect(john.$jazz.loadingState).toBe(CoValueLoadingState.UNAVAILABLE);
 });
 
 test("load works even when the coValue access is granted after the creation", async () => {
@@ -204,8 +202,8 @@ test("load works even when the coValue access is granted after the creation", as
 
   const mapOnBob = await Person.load(map.$jazz.id, { loadAs: bob });
 
-  expect(mapOnBob).not.toBeNull();
-  expect(mapOnBob?.name).toBe("John");
+  assertLoaded(mapOnBob);
+  expect(mapOnBob.name).toBe("John");
 });
 
 test("load a large coValue", async () => {
@@ -259,8 +257,7 @@ test("load a large coValue", async () => {
     },
   });
 
-  assert(loadedDataset);
-
+  assertLoaded(loadedDataset);
   expect(loadedDataset.metadata.name).toBe("Large Dataset");
   expect(loadedDataset.metadata.description).toBe(
     "A dataset with many entries for testing large coValue loading",
@@ -329,9 +326,8 @@ test("should wait for the full streaming of the group", async () => {
 
   // Load the value and expect the migration to run only once
   const loadedPerson = await Person.load(person.$jazz.id, { loadAs: bob });
-  expect(loadedPerson).not.toBeNull();
-  assert(loadedPerson);
 
+  assertLoaded(loadedPerson);
   expect(loadedPerson.$jazz.owner.$jazz.raw.core.verified.isStreaming()).toBe(
     false,
   );
@@ -399,9 +395,8 @@ test("should wait for the full streaming of the parent groups", async () => {
 
   // Load the value and expect the migration to run only once
   const loadedPerson = await Person.load(person.$jazz.id, { loadAs: bob });
-  expect(loadedPerson).not.toBeNull();
-  assert(loadedPerson);
 
+  assertLoaded(loadedPerson);
   expect(loadedPerson.$jazz.owner.$jazz.raw.core.verified.isStreaming()).toBe(
     false,
   );
@@ -465,5 +460,16 @@ test("should correctly reject the load if after the group streaming the account 
 
   // Load the value and expect the migration to run only once
   const loadedPerson = await Person.load(person.$jazz.id, { loadAs: bob });
-  expect(loadedPerson).toBeNull();
+  expect(loadedPerson.$isLoaded).toEqual(false);
+  expect(loadedPerson.$jazz.loadingState).toEqual(
+    CoValueLoadingState.UNAVAILABLE,
+  );
+
+  await waitFor(async () => {
+    const loadedPerson = await Person.load(person.$jazz.id, { loadAs: bob });
+    expect(loadedPerson.$isLoaded).toEqual(false);
+    expect(loadedPerson.$jazz.loadingState).toEqual(
+      CoValueLoadingState.UNAUTHORIZED,
+    );
+  });
 });

@@ -3,6 +3,7 @@ import type { CoID } from "../coValue.js";
 import type {
   AvailableCoValueCore,
   CoValueCore,
+  DecryptedTransaction,
 } from "../coValueCore/coValueCore.js";
 import type { CoValueUniqueness } from "../coValueCore/verifiedState.js";
 import type {
@@ -161,6 +162,40 @@ function rotateReadKeyIfNeeded(group: RawGroup) {
   }
 }
 
+class TimeBasedEntry<T> {
+  changes: { madeAt: number; value: T }[] = [];
+
+  addChange(madeAt: number, value: T) {
+    const changes = this.changes;
+    const newChange = { madeAt, value };
+    // Insert the change in chronological order
+    // Find the correct position by searching backwards from the end
+    let insertIndex = changes.length;
+    while (insertIndex > 0 && changes[insertIndex - 1]!.madeAt > madeAt) {
+      insertIndex--;
+    }
+
+    // Insert at the correct position to maintain chronological order
+    if (insertIndex === changes.length) {
+      changes.push(newChange);
+    } else {
+      changes.splice(insertIndex, 0, newChange);
+    }
+  }
+
+  getLatest() {
+    return this.changes[this.changes.length - 1]?.value;
+  }
+
+  getAtTime(atTime?: number) {
+    if (atTime === undefined) {
+      return this.getLatest();
+    }
+
+    return this.changes.findLast((change) => change.madeAt <= atTime)?.value;
+  }
+}
+
 /** A `Group` is a scope for permissions of its members (`"reader" | "writer" | "admin"`), applying to objects owned by that group.
  *
  *  A `Group` object exposes methods for permission management and allows you to create new CoValues owned by that group.
@@ -189,6 +224,19 @@ export class RawGroup<
 
   _lastReadableKeyId?: KeyID;
 
+  // Not using class field initializers because they run after that the CoMap constructor
+  // calls processNewTransactions, which would reset the parentGroupsChanges map
+  private declare parentGroupsChanges: Map<
+    CoID<RawGroup>,
+    TimeBasedEntry<ParentGroupReferenceRole>
+  >;
+
+  protected resetInternalState() {
+    super.resetInternalState();
+    this.parentGroupsChanges = new Map();
+    this._lastReadableKeyId = undefined;
+  }
+
   constructor(
     core: AvailableCoValueCore,
     options?: {
@@ -198,6 +246,45 @@ export class RawGroup<
     super(core, options);
     this.crypto = core.node.crypto;
     this.migrate();
+  }
+
+  // We override the handleNewTransaction hook from CoMap to build the parent group cache
+  override handleNewTransaction(transaction: DecryptedTransaction): void {
+    if (!this.parentGroupsChanges) {
+      this.parentGroupsChanges = new Map();
+    }
+
+    // Build parent group cache incrementally
+    for (const changeValue of transaction.changes) {
+      const change = changeValue as {
+        op: "set" | "del";
+        key: string;
+        value?: any;
+      };
+      if (change.op === "set" && isParentGroupReference(change.key)) {
+        this.updateParentGroupCache(
+          change.key,
+          change.value as ParentGroupReferenceRole,
+          transaction.madeAt,
+        );
+      }
+    }
+  }
+
+  private updateParentGroupCache(
+    key: string,
+    value: any,
+    timestamp: number,
+  ): void {
+    const parentGroupId = key.substring(7) as CoID<RawGroup>; // Remove 'parent_' prefix
+
+    let entry = this.parentGroupsChanges.get(parentGroupId);
+    if (!entry) {
+      entry = new TimeBasedEntry<ParentGroupReferenceRole>();
+      this.parentGroupsChanges.set(parentGroupId, entry);
+    }
+
+    entry.addChange(timestamp, value as ParentGroupReferenceRole);
   }
 
   migrate() {
@@ -247,15 +334,13 @@ export class RawGroup<
 
     let roleInfo: Role | undefined = roleHere;
 
-    for (const key of Object.keys(this.ops)) {
-      if (!isParentGroupReference(key)) continue;
+    for (const [parentGroupId, entry] of this.parentGroupsChanges.entries()) {
+      const role = entry.getAtTime(this.atTimeFilter);
 
-      const group = this.getParentGroupFromKey(key, this.atTimeFilter);
+      if (!role || role === "revoked") continue;
 
-      if (!group) continue;
-
-      const role = this.get(key) ?? "extend";
-      const parentRole = group.roleOfInternal(accountID);
+      const parentGroup = this.getParentGroup(parentGroupId, this.atTimeFilter);
+      const parentRole = parentGroup.roleOfInternal(accountID);
 
       if (!isInheritableRole(parentRole)) {
         continue;
@@ -277,13 +362,9 @@ export class RawGroup<
     return roleInfo;
   }
 
-  getParentGroupFromKey(key: ParentGroupReference, atTime?: number) {
-    if (this.get(key) === "revoked") {
-      return null;
-    }
-
+  getParentGroup(id: CoID<RawGroup>, atTime?: number) {
     const parent = this.core.node.expectCoValueLoaded(
-      getParentGroupId(key),
+      id,
       "Expected parent group to be loaded",
     );
 
@@ -296,21 +377,15 @@ export class RawGroup<
     }
   }
 
-  getParentGroups(atTime?: number) {
+  getParentGroups() {
     const groups: RawGroup[] = [];
 
-    for (const key of Object.keys(this.ops)) {
-      if (!isParentGroupReference(key)) continue;
+    for (const [parentGroupId, entry] of this.parentGroupsChanges.entries()) {
+      const role = entry.getAtTime(this.atTimeFilter);
 
-      const group = this.getParentGroupFromKey(key, atTime);
+      if (!role || role === "revoked") continue;
 
-      if (group) {
-        if (atTime) {
-          groups.push(group.atTime(atTime));
-        } else {
-          groups.push(group);
-        }
-      }
+      groups.push(this.getParentGroup(parentGroupId, this.atTimeFilter));
     }
 
     return groups;

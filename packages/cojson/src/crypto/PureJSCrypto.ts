@@ -29,7 +29,11 @@ import {
 } from "./crypto.js";
 import { ControlledAccountOrAgent } from "../coValues/account.js";
 
-type Blake3State = ReturnType<typeof blake3.create>;
+export type Blake3State = {
+  update: (buf: Uint8Array) => Blake3State;
+  digest: () => Uint8Array;
+  clone: () => Blake3State;
+};
 
 const x25519SharedSecretCache = new Map<string, Uint8Array>();
 
@@ -67,6 +71,10 @@ export class PureJSCrypto extends CryptoProvider<Blake3State> {
     return new PureJSCrypto();
   }
 
+  createStreamingHash(): Blake3State {
+    return blake3.create({});
+  }
+
   blake3HashOnce(data: Uint8Array) {
     return blake3(data);
   }
@@ -75,7 +83,7 @@ export class PureJSCrypto extends CryptoProvider<Blake3State> {
     data: Uint8Array,
     { context }: { context: Uint8Array },
   ) {
-    return blake3.create({}).update(context).update(data).digest();
+    return this.createStreamingHash().update(context).update(data).digest();
   }
 
   generateNonce(input: Uint8Array): Uint8Array {
@@ -224,7 +232,7 @@ export class PureJSSessionLog implements SessionLogImpl {
     private readonly signerID: SignerID | undefined,
     private readonly crypto: PureJSCrypto,
   ) {
-    this.streamingHash = blake3.create({});
+    this.streamingHash = crypto.createStreamingHash();
   }
 
   clone(): SessionLogImpl {
@@ -271,7 +279,7 @@ export class PureJSSessionLog implements SessionLogImpl {
 
       if (!this.crypto.verify(newSignature, newHashEncoded, this.signerID)) {
         // Rebuild the streaming hash to the original state
-        this.streamingHash = blake3.create({});
+        this.streamingHash = this.crypto.createStreamingHash();
         for (const tx of this.transactions) {
           this.streamingHash.update(textEncoder.encode(tx));
         }

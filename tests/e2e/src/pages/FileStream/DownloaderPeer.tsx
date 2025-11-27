@@ -3,12 +3,12 @@ import { useAccount, useCoState } from "jazz-tools/react";
 import { useEffect, useState } from "react";
 import { UploadedFile } from "./schema";
 export function DownloaderPeer(props: { testCoMapId: string }) {
-  const account = useAccount();
+  const me = useAccount();
   const testCoMap = useCoState(UploadedFile, props.testCoMapId, {});
   const [synced, setSynced] = useState(false);
 
   useEffect(() => {
-    if (!account.me) {
+    if (!me.$isLoaded) {
       return;
     }
 
@@ -17,7 +17,7 @@ export function DownloaderPeer(props: { testCoMapId: string }) {
         loadAs: me,
       });
 
-      if (!uploadedFile) {
+      if (!uploadedFile.$isLoaded) {
         throw new Error("Uploaded file not found");
       }
 
@@ -34,7 +34,7 @@ export function DownloaderPeer(props: { testCoMapId: string }) {
       uploadedFile.$jazz.set("syncCompleted", true);
     }
 
-    run(account.me, props.testCoMapId);
+    run(me, props.testCoMapId);
   }, []);
 
   return (
@@ -43,12 +43,13 @@ export function DownloaderPeer(props: { testCoMapId: string }) {
       <div>Fetching: {props.testCoMapId}</div>
       <div>Synced: {String(synced)}</div>
       <div data-testid="result">
-        Covalue:{" "}
-        {Boolean(testCoMap?.$jazz.id) ? "Downloaded" : "Not Downloaded"}
+        Covalue: {testCoMap.$isLoaded ? "Downloaded" : "Not Downloaded"}
       </div>
       <div data-testid="result">
         File:{" "}
-        {Boolean(testCoMap?.syncCompleted) ? "Downloaded" : "Not Downloaded"}
+        {testCoMap.$isLoaded && testCoMap.syncCompleted
+          ? "Downloaded"
+          : "Not Downloaded"}
       </div>
     </>
   );

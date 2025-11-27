@@ -1,4 +1,4 @@
-import { ImageDefinition } from "jazz-tools";
+import { CoValueLoadingState, ImageDefinition } from "jazz-tools";
 import {
   type JSX,
   forwardRef,
@@ -87,7 +87,15 @@ export const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
   { imageId, width, height, ...props },
   ref,
 ) {
-  const image = useCoState(ImageDefinition, imageId);
+  const image = useCoState(ImageDefinition, imageId, {
+    select: (image) => {
+      if (image.$isLoaded) {
+        return image;
+      } else if (image.$jazz.loadingState === CoValueLoadingState.LOADING) {
+        return undefined;
+      } else return null;
+    },
+  });
   const lastBestImage = useRef<[string, string] | null>(null);
 
   /**

@@ -15,4 +15,11 @@ export interface CoreCoValueSchema {
    * Used for discriminating between different CoValue schemas.
    */
   builtin: string;
+
+  resolveQuery: CoreResolveQuery;
 }
+
+/**
+ * Simplified type for {@link ResolveQuery}, used to avoid circularity issues.
+ */
+export type CoreResolveQuery = boolean | Record<string, any>;

@@ -2,7 +2,7 @@ export const metadata = {
   description: "Use Jazz server-side through Server Workers which act like Jazz accounts."
 };
 
-import { Alert, CodeGroup } from "@/components/forMdx";
+import { Alert, CodeGroup, FileName } from "@/components/forMdx";
 
 # Running Jazz on the server
 
@@ -47,28 +47,7 @@ You can use `startWorker` to run a Server Worker. Similarly to setting up a clie
 The migration defined in the `AccountSchema` will be executed every time the worker starts, the same way as it would be for a client-side Jazz context.
 
 <CodeGroup>
-```ts twoslash
-import { co } from "jazz-tools";
-const MyWorkerAccount = co.account();
-type MyWorkerAccount = co.loaded<typeof MyWorkerAccount>;
-
-/**
- * Use your email as a temporary key, or get a free
- * API Key at dashboard.jazz.tools for higher limits.
- * 
- * @link https://dashboard.jazz.tools
-*/
-const apiKey = "you@example.com";
-
-// ---cut---
-import { startWorker } from 'jazz-tools/worker';
-
-const { worker } = await startWorker({
-  AccountSchema: MyWorkerAccount,
-  syncServer: `wss://cloud.jazz.tools/?key=${apiKey}`,
-  accountID: process.env.JAZZ_WORKER_ACCOUNT,
-  accountSecret: process.env.JAZZ_WORKER_SECRET,
-});
+```ts index.ts#Basic
 ```
 </CodeGroup>
 
@@ -95,21 +74,12 @@ On some edge platforms, such as Cloudflare Workers or Vercel Edge Functions, env
 You can ensure that Jazz uses the faster WASM implementation by importing the WASM loader before using Jazz. For example:
 
 <CodeGroup>
-```ts
-import "jazz-tools/load-edge-wasm"
-// Other Jazz Imports
-
-export default {
-  async fetch(request, env, ctx) {
-    // Jazz application logic
-    return new Response("Hello from Jazz on Cloudflare!");
-  },
-};
+```ts loadJazz.ts
 ```
 </CodeGroup>
 
 Currently, the Jazz Loader is tested on the following edge environments:
-- Cloudflare Workers 
+- Cloudflare Workers
 - Vercel Functions
 
 ### Requirements
@@ -121,23 +91,13 @@ Currently, the Jazz Loader is tested on the following edge environments:
 ## Node-API
 Jazz uses a WASM-based crypto implementation that provides near-native performance while ensuring full compatibility across a wide variety of environments.
 
-For even higher performance on Node.js or Deno, you can enable the native crypto (Node-API) implementation. Node-API is Node.js's native API for building modules in Native Code (Rust/C++) 
+For even higher performance on Node.js or Deno, you can enable the native crypto (Node-API) implementation. Node-API is Node.js's native API for building modules in Native Code (Rust/C++)
 that interact directly with the underlying system, allowing for true native execution speed.
 
 You can use it as follows:
 
 <CodeGroup>
-```ts
-import { startWorker } from "jazz-tools/worker";
-import { NapiCrypto } from "jazz-tools/napi";
-
-const { worker } = await startWorker({
-  syncServer: `wss://cloud.jazz.tools/?key=${apiKey}`,
-  accountID: process.env.JAZZ_WORKER_ACCOUNT,
-  accountSecret: process.env.JAZZ_WORKER_SECRET,
-  crypto: await NapiCrypto.create(),
-});
-
+```ts index.ts#NapiCrypto
 ```
 </CodeGroup>
 
@@ -154,24 +114,12 @@ const { worker } = await startWorker({
 
 In order to use Node-API with Next.js, you need to tell Next.js to bundle the native modules in your build.
 
-You can do this by adding the required packages to the [`serverExternalPackages`](https://nextjs.org/docs/app/api-reference/config/next-config-js/serverExternalPackages) array in your `next.config.js`. 
+You can do this by adding the required packages to the [`serverExternalPackages`](https://nextjs.org/docs/app/api-reference/config/next-config-js/serverExternalPackages) array in your `next.config.js`.
 
 **Note**: if you're deploying to Vercel, be sure to use the `nodejs` runtime!
 
+<FileName>next.config.js</FileName>
 <CodeGroup>
-```ts
-// next.config.js
-module.exports = {
-    serverExternalPackages: [
-        "cojson-core-napi",
-        "cojson-core-napi-linux-x64-gnu",
-        "cojson-core-napi-linux-x64-musl",
-        "cojson-core-napi-linux-arm64-gnu",
-        "cojson-core-napi-linux-arm64-musl",
-        "cojson-core-napi-darwin-x64",
-        "cojson-core-napi-darwin-arm64"
-        "cojson-core-napi-linux-arm-gnueabihf",
-    ],
-};
+```ts next.config.js
 ```
 </CodeGroup>

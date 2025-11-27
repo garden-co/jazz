@@ -405,6 +405,10 @@ export class CoValueCore {
   missingDependencies = new Set<RawCoID>();
 
   isCircularDependency(dependency: CoValueCore) {
+    if (dependency.id === this.id) {
+      return true;
+    }
+
     const visited = new Set<RawCoID>();
     const stack = [dependency];
 
@@ -659,15 +663,7 @@ export class CoValueCore {
 
   private processNewTransactions() {
     if (this._cachedContent) {
-      // Does the cached content support incremental processing?
-      if (
-        "processNewTransactions" in this._cachedContent &&
-        typeof this._cachedContent.processNewTransactions === "function"
-      ) {
-        this._cachedContent.processNewTransactions();
-      } else {
-        this._cachedContent = undefined;
-      }
+      this._cachedContent.processNewTransactions();
     }
   }
 
@@ -857,8 +853,6 @@ export class CoValueCore {
 
   // Reset the parsed transactions and branches, to validate them again from scratch when the group is updated
   resetParsedTransactions() {
-    this._cachedContent = undefined;
-
     this.branchStart = undefined;
     this.mergeCommits = [];
 
@@ -870,6 +864,8 @@ export class CoValueCore {
     this.toProcessTransactions = [];
     this.toDecryptTransactions = [];
     this.toParseMetaTransactions = [];
+
+    this._cachedContent?.rebuildFromCore();
   }
 
   verifiedTransactions: VerifiedTransaction[] = [];

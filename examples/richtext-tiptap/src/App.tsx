@@ -5,7 +5,7 @@ import { Logo } from "./Logo.tsx";
 import { JazzAccount } from "./schema.ts";
 
 function App() {
-  const { me } = useAccount(JazzAccount, {
+  const me = useAccount(JazzAccount, {
     resolve: { profile: { bio: true }, root: true },
   });
 
@@ -28,12 +28,12 @@ function App() {
 
         <div className="text-center">
           <h1>
-            Welcome{me?.profile.firstName ? <>, {me?.profile.firstName}</> : ""}
-            !
+            Welcome
+            {me.$isLoaded ? <>, {me.profile.firstName}</> : ""}!
           </h1>
         </div>
 
-        {me ? <Editor value={me.profile.bio} /> : null}
+        {me.$isLoaded ? <Editor value={me.profile.bio} /> : null}
       </main>
     </>
   );

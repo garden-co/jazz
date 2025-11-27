@@ -3,6 +3,7 @@ import { CoList } from "./coList.js";
 import { CoMap, CoMapInit } from "./coMap.js";
 import { CoPlainText } from "./coPlainText.js";
 import { CoRichText } from "./coRichText.js";
+import { CoVector } from "./coVector.js";
 
 /**
  * Returns the type of values that can be used to initialize a field of the provided type.
@@ -15,6 +16,8 @@ export type CoFieldInit<V> = V extends CoMap
   ? V | CoMapInit<V>
   : V extends CoList<infer T> | CoFeed<infer T>
     ? V | ReadonlyArray<CoFieldInit<T>>
-    : V extends CoPlainText | CoRichText
-      ? V | string
-      : V;
+    : V extends CoVector | Readonly<CoVector>
+      ? V | ReadonlyArray<number> | Float32Array
+      : V extends CoPlainText | CoRichText
+        ? V | string
+        : V;

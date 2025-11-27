@@ -1,3 +1,4 @@
+import { assert } from "vitest";
 import { AccountClass, isControlledAccount } from "../coValues/account";
 
 import { CoID, LocalNode, RawCoValue } from "cojson";
@@ -8,7 +9,14 @@ import {
   createJazzContextFromExistingCredentials,
   randomSessionProvider,
 } from "../index";
-import { CoValueFromRaw } from "../internal";
+import {
+  CoValue,
+  CoValueFromRaw,
+  CoValueLoadingState,
+  MaybeLoaded,
+  LoadedAndRequired,
+  AccountSchema,
+} from "../internal";
 
 const Crypto = await WasmCrypto.create();
 
@@ -133,8 +141,40 @@ export async function loadCoValueOrFail<V extends RawCoValue>(
   id: CoID<V>,
 ): Promise<V> {
   const value = await node.load(id);
-  if (value === "unavailable") {
+  if (value === CoValueLoadingState.UNAVAILABLE) {
     throw new Error("CoValue not found");
   }
   return value;
+}
+
+export function assertLoaded<T extends MaybeLoaded<CoValue>>(
+  coValue: T,
+): asserts coValue is LoadedAndRequired<T> {
+  assert(coValue.$isLoaded, "CoValue is not loaded");
+}
+
+export async function createAccountAs<S extends AccountSchema<any, any>>(
+  schema: S,
+  as: Account,
+  options: {
+    creationProps: { name: string };
+  },
+) {
+  const connectedPeers = cojsonInternals.connectedPeers(
+    "creatingAccount",
+    "createdAccount",
+    { peer1role: "server", peer2role: "client" },
+  );
+
+  as.$jazz.localNode.syncManager.addPeer(connectedPeers[1]);
+
+  const account = await schema.create({
+    creationProps: options.creationProps,
+    crypto: as.$jazz.localNode.crypto,
+    peers: [connectedPeers[0]],
+  });
+
+  await account.$jazz.waitForAllCoValuesSync();
+
+  return account;
 }

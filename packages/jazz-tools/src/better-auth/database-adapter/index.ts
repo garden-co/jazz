@@ -80,7 +80,7 @@ export const JazzBetterAuthDatabaseAdapter = (
 
       let worker: Account | undefined = undefined;
 
-      async function getWorker() {
+      async function getWorker(): Promise<Account> {
         if (worker) {
           return worker;
         }
@@ -96,7 +96,7 @@ export const JazzBetterAuthDatabaseAdapter = (
 
         worker = result.worker;
 
-        return worker;
+        return result.worker;
       }
 
       async function initRepository(

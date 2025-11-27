@@ -50,33 +50,14 @@ export class LocalTransactionsSyncQueue {
     coValue: VerifiedState,
     knownStateBefore: CoValueKnownState,
   ) {
-    const content = coValue.newContentSince(knownStateBefore, {
-      skipExpectContentUntil: true, // we need to calculate the streaming header considering the current batch
-    });
+    const content = coValue.newContentSince(knownStateBefore);
 
     if (!content) {
       return;
     }
 
-    let firstChunk = this.firstChunks.get(coValue.id);
-
     for (const piece of content) {
       this.batch.push(piece);
-
-      // Check if the local content updates are in streaming, if so we need to add the info to the first chunk
-      if (firstChunk) {
-        if (!firstChunk.expectContentUntil) {
-          firstChunk.expectContentUntil =
-            knownStateFromContent(firstChunk).sessions;
-        }
-        combineKnownStateSessions(
-          firstChunk.expectContentUntil,
-          knownStateFromContent(piece).sessions,
-        );
-      } else {
-        firstChunk = piece;
-        this.firstChunks.set(coValue.id, firstChunk);
-      }
     }
   }
 

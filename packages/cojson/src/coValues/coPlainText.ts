@@ -55,8 +55,8 @@ export class RawCoPlainText<
     PlaintextIdxMapping
   >;
 
-  constructor(core: AvailableCoValueCore) {
-    super(core);
+  constructor(core: AvailableCoValueCore, atTimeFilter?: number) {
+    super(core, atTimeFilter);
     this._cachedMapping = new WeakMap();
   }
 
@@ -95,6 +95,10 @@ export class RawCoPlainText<
     return this.entries()
       .map((entry) => entry.value)
       .join("");
+  }
+
+  atTime(time: number): this {
+    return new RawCoPlainText(this.core, time) as this;
   }
 
   /**

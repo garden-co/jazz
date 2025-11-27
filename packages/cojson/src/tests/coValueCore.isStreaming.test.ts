@@ -114,58 +114,64 @@ describe("isStreaming", () => {
     expect(mapInNewSession.core.isStreaming()).toBe(false);
   });
 
-  test("streaming a large value between two clients should be streaming until all chunks are sent", async () => {
-    const client = setupTestNode();
-    client.connectToSyncServer({
-      ourName: "initialClient",
-    });
-    const streamingClient = client.spawnNewSession();
-    streamingClient.connectToSyncServer({
-      ourName: "streamingClient",
-    });
+  // TODO: We can't handle client-to-client streaming until we
+  // handle the streaming state reset on disconnection
+  // Otherwise the other client might wait for a content that will never be sent
+  test.fails(
+    "streaming a large value between two clients should be streaming until all chunks are sent",
+    async () => {
+      const client = setupTestNode();
+      client.connectToSyncServer({
+        ourName: "initialClient",
+      });
+      const streamingClient = client.spawnNewSession();
+      streamingClient.connectToSyncServer({
+        ourName: "streamingClient",
+      });
 
-    const group = client.node.createGroup();
+      const group = client.node.createGroup();
 
-    await group.core.waitForSync();
-    client.disconnect();
+      await group.core.waitForSync();
+      client.disconnect();
 
-    const map = fillCoMapWithLargeData(group.createMap());
+      const map = fillCoMapWithLargeData(group.createMap());
 
-    const loadingClient = client.spawnNewSession();
-    loadingClient.connectToSyncServer({
-      ourName: "loadingClient",
-    });
+      const loadingClient = client.spawnNewSession();
+      loadingClient.connectToSyncServer({
+        ourName: "loadingClient",
+      });
 
-    await loadCoValueOrFail(loadingClient.node, group.id);
+      await loadCoValueOrFail(loadingClient.node, group.id);
 
-    const content = map.core.verified.newContentSince(undefined);
-    assert(content);
-    const lastChunk = content.pop();
-    assert(lastChunk);
+      const content = map.core.verified.newContentSince(undefined);
+      assert(content);
+      const lastChunk = content.pop();
+      assert(lastChunk);
 
-    for (const chunk of content) {
-      streamingClient.node.syncManager.handleNewContent(chunk, "import");
-    }
+      for (const chunk of content) {
+        streamingClient.node.syncManager.handleNewContent(chunk, "import");
+      }
 
-    await streamingClient.node.syncManager.waitForAllCoValuesSync();
+      await streamingClient.node.syncManager.waitForAllCoValuesSync();
 
-    const mapInLoadingClient = await loadCoValueOrFail(
-      loadingClient.node,
-      map.id,
-    );
-
-    expect(mapInLoadingClient.core.isStreaming()).toBe(true);
-
-    streamingClient.node.syncManager.handleNewContent(lastChunk, "import");
-
-    await waitFor(() => {
-      expect(mapInLoadingClient.core.knownState()).toEqual(
-        map.core.knownState(),
+      const mapInLoadingClient = await loadCoValueOrFail(
+        loadingClient.node,
+        map.id,
       );
-    });
 
-    expect(mapInLoadingClient.core.isStreaming()).toBe(false);
-  });
+      expect(mapInLoadingClient.core.isStreaming()).toBe(true);
+
+      streamingClient.node.syncManager.handleNewContent(lastChunk, "import");
+
+      await waitFor(() => {
+        expect(mapInLoadingClient.core.knownState()).toEqual(
+          map.core.knownState(),
+        );
+      });
+
+      expect(mapInLoadingClient.core.isStreaming()).toBe(false);
+    },
+  );
 
   test("should be false when getting streaming content that is already in the known state", async () => {
     const client = setupTestNode({
@@ -196,6 +202,37 @@ describe("isStreaming", () => {
     const mapInNewSession = await loadCoValueOrFail(newSession.node, map.id);
 
     expect(mapInNewSession.core.isStreaming()).toBe(false);
+  });
+
+  test("streaming state from clients should be ignored", async () => {
+    const client = setupTestNode();
+
+    const group = client.node.createGroup();
+
+    await group.core.waitForSync();
+
+    const map = fillCoMapWithLargeData(group.createMap());
+
+    await map.core.waitForSync();
+    const newSession = client.spawnNewSession();
+    newSession.connectToSyncServer({
+      ourName: "streamingClient",
+    });
+
+    const content = map.core.verified.newContentSince(undefined);
+    assert(content);
+    const lastChunk = content.pop();
+    assert(lastChunk);
+
+    for (const chunk of content) {
+      newSession.node.syncManager.handleNewContent(chunk, "import");
+    }
+
+    const mapOnServer = jazzCloud.node.getCoValue(map.id);
+    expect(mapOnServer.isStreaming()).toBe(false);
+    expect(mapOnServer.knownState()).toEqual(
+      mapOnServer.knownStateWithStreaming(),
+    );
   });
 
   test("should be false when getting streaming content that's not really streaming", async () => {

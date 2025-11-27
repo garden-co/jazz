@@ -32,10 +32,21 @@ export const Task = co
     }
   });
 
+export const TaskWithText = Task.resolved({
+  text: true,
+});
+export type TaskWithText = co.loaded<typeof TaskWithText>;
+
 /** Our top level object: a project with a title, referencing a list of tasks */
 export const TodoProject = co.map({
   title: z.string(),
   tasks: co.list(Task),
+});
+
+export const TodoProjectWithTasks = TodoProject.resolved({
+  tasks: {
+    $each: TaskWithText.resolveQuery,
+  },
 });
 
 /** The account root is an app-specific per-user private `CoMap`
@@ -59,5 +70,9 @@ export const TodoAccount = co
       });
     }
   });
+
+export const TodoAccountWithProjects = TodoAccount.resolved({
+  root: { projects: { $each: { $onError: "catch" } } },
+});
 
 /** Walkthrough: Continue with ./2_main.tsx */

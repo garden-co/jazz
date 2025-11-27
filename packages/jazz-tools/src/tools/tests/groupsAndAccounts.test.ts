@@ -1,9 +1,22 @@
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { assert, beforeEach, describe, expect, test } from "vitest";
 import { CoMap, Group, z } from "../exports.js";
-import { Account, Loaded, Ref, co } from "../internal.js";
+import {
+  Account,
+  Loaded,
+  MaybeLoaded,
+  Ref,
+  co,
+  CoValueLoadingState,
+} from "../internal.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
-import { loadCoValueOrFail, setupTwoNodes, waitFor } from "./utils.js";
+import {
+  assertLoaded,
+  createAccountAs,
+  loadCoValueOrFail,
+  setupTwoNodes,
+  waitFor,
+} from "./utils.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -31,9 +44,9 @@ describe("Custom accounts and groups", async () => {
       .withMigration((account, creationProps?: { name: string }) => {
         // making sure that the inferred type of account.root & account.profile considers the root/profile not being loaded
         type R = typeof account.root;
-        const _r: R = {} as Loaded<typeof Root> | null;
+        const _r: R = {} as MaybeLoaded<Loaded<typeof Root>>;
         type P = typeof account.profile;
-        const _p: P = {} as Loaded<typeof CustomProfile> | null;
+        const _p: P = {} as MaybeLoaded<Loaded<typeof CustomProfile>>;
         if (creationProps) {
           const profileGroup = Group.create({ owner: account });
           profileGroup.addMember("everyone", "reader");
@@ -65,8 +78,10 @@ describe("Custom accounts and groups", async () => {
     const meAsMember = group.members.find(
       (member) => member.id === me.$jazz.id,
     );
-    assert(meAsMember?.account);
-    expect((meAsMember?.account).profile?.name).toBe("Hermes Puggington");
+    const memberAccount = meAsMember?.account;
+    assert(memberAccount);
+    assertLoaded(memberAccount.profile);
+    expect(memberAccount.profile.name).toBe("Hermes Puggington");
   });
 });
 
@@ -86,7 +101,7 @@ describe("Group inheritance", () => {
 
     group.addMember(parentGroup);
 
-    const reader = await co.account().createAs(me, {
+    const reader = await createAccountAs(co.account(), me, {
       creationProps: { name: "Reader" },
     });
 
@@ -97,7 +112,8 @@ describe("Group inheritance", () => {
     const mapAsReader = await TestMap.load(mapInChild.$jazz.id, {
       loadAs: reader,
     });
-    expect(mapAsReader?.title).toBe("In Child");
+    assertLoaded(mapAsReader);
+    expect(mapAsReader.title).toBe("In Child");
 
     await parentGroup.removeMember(reader);
 
@@ -107,7 +123,9 @@ describe("Group inheritance", () => {
       const mapAsReaderAfterUpdate = await TestMap.load(mapInChild.$jazz.id, {
         loadAs: reader,
       });
-      expect(mapAsReaderAfterUpdate).toBe(null);
+      expect(mapAsReaderAfterUpdate.$jazz.loadingState).toBe(
+        CoValueLoadingState.UNAUTHORIZED,
+      );
     });
   });
 
@@ -124,7 +142,7 @@ describe("Group inheritance", () => {
     group.addMember(parentGroup);
     parentGroup.addMember(grandParentGroup);
 
-    const reader = await co.account().createAs(me, {
+    const reader = await createAccountAs(co.account(), me, {
       creationProps: { name: "Reader" },
     });
 
@@ -138,7 +156,8 @@ describe("Group inheritance", () => {
     const mapAsReader = await TestMap.load(mapInGrandChild.$jazz.id, {
       loadAs: reader,
     });
-    expect(mapAsReader?.title).toBe("In Grand Child");
+    assertLoaded(mapAsReader);
+    expect(mapAsReader.title).toBe("In Grand Child");
 
     await grandParentGroup.removeMember(reader);
 
@@ -152,7 +171,9 @@ describe("Group inheritance", () => {
         loadAs: reader,
       },
     );
-    expect(mapAsReaderAfterUpdate).toBe(null);
+    expect(mapAsReaderAfterUpdate.$jazz.loadingState).toBe(
+      CoValueLoadingState.UNAUTHORIZED,
+    );
   });
 
   test("Group.getParentGroups should return the parent groups", async () => {
@@ -196,7 +217,7 @@ describe("Group inheritance", () => {
 
     const loadedGroup = await serverNode.load(group.$jazz.raw.id);
 
-    expect(loadedGroup).not.toBe("unavailable");
+    expect(loadedGroup).not.toBe(CoValueLoadingState.UNAVAILABLE);
   });
 
   test("everyone is valid only for reader, writer and writeOnly roles", () => {
@@ -275,8 +296,8 @@ describe("Group inheritance", () => {
     const loadedAlice = await Account.load(alice.$jazz.id);
     const loadedBob = await Account.load(bob.$jazz.id);
 
-    assert(loadedBob);
-    assert(loadedAlice);
+    assertLoaded(loadedBob);
+    assertLoaded(loadedAlice);
 
     const parentGroup = Group.create();
     // `parentGroup` has `alice` as a writer
@@ -331,14 +352,15 @@ describe("Group inheritance", () => {
       const task = board.columns[0]![0]!;
 
       const boardAsWriter = await Board.load(board.$jazz.id, { loadAs: me });
-      expect(boardAsWriter?.title).toEqual("My board");
+      assertLoaded(boardAsWriter);
+      expect(boardAsWriter.title).toEqual("My board");
       const taskAsWriter = await Task.load(task.$jazz.id, { loadAs: me });
-      expect(taskAsWriter?.toString()).toEqual("Task 1.1");
+      expect(taskAsWriter.toString()).toEqual("Task 1.1");
     });
 
     test("nested CoValues inherit permissions from the referencing CoValue", async () => {
       const me = co.account().getMe();
-      const reader = await co.account().createAs(me, {
+      const reader = await createAccountAs(co.account(), me, {
         creationProps: { name: "Reader" },
       });
 
@@ -351,7 +373,9 @@ describe("Group inheritance", () => {
       const boardAsReader = await Board.load(board.$jazz.id, {
         loadAs: reader,
       });
-      expect(boardAsReader).toBeNull();
+      expect(boardAsReader.$jazz.loadingState).toBe(
+        CoValueLoadingState.UNAUTHORIZED,
+      );
     });
   });
 });
@@ -481,16 +505,16 @@ describe("Account permissions", () => {
     const group = Group.create({ owner: admin });
     const testObject = CoMap.create({}, { owner: group });
 
-    const manager = await co.account().createAs(admin, {
+    const manager = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Manager" },
     });
-    const writer = await co.account().createAs(admin, {
+    const writer = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Writer" },
     });
-    const reader = await co.account().createAs(admin, {
+    const reader = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Reader" },
     });
-    const writeOnly = await co.account().createAs(admin, {
+    const writeOnly = await createAccountAs(co.account(), admin, {
       creationProps: { name: "WriteOnly" },
     });
 
@@ -518,16 +542,16 @@ describe("Account permissions", () => {
     const group = Group.create({ owner: admin });
     const testObject = CoMap.create({}, { owner: group });
 
-    const manager = await co.account().createAs(admin, {
+    const manager = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Manager" },
     });
-    const writer = await co.account().createAs(admin, {
+    const writer = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Writer" },
     });
-    const reader = await co.account().createAs(admin, {
+    const reader = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Reader" },
     });
-    const writeOnly = await co.account().createAs(admin, {
+    const writeOnly = await createAccountAs(co.account(), admin, {
       creationProps: { name: "WriteOnly" },
     });
 
@@ -555,17 +579,17 @@ describe("Account permissions", () => {
     const group = Group.create({ owner: admin });
     const testObject = CoMap.create({}, { owner: group });
 
-    const manager = await co.account().createAs(admin, {
+    const manager = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Admin" },
     });
 
-    const writer = await co.account().createAs(admin, {
+    const writer = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Writer" },
     });
-    const reader = await co.account().createAs(admin, {
+    const reader = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Reader" },
     });
-    const writeOnly = await co.account().createAs(admin, {
+    const writeOnly = await createAccountAs(co.account(), admin, {
       creationProps: { name: "WriteOnly" },
     });
 
@@ -593,17 +617,17 @@ describe("Account permissions", () => {
     const group = Group.create({ owner: admin });
     const testObject = CoMap.create({}, { owner: group });
 
-    const manager = await co.account().createAs(admin, {
+    const manager = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Admin" },
     });
 
-    const writer = await co.account().createAs(admin, {
+    const writer = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Writer" },
     });
-    const reader = await co.account().createAs(admin, {
+    const reader = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Reader" },
     });
-    const writeOnly = await co.account().createAs(admin, {
+    const writeOnly = await createAccountAs(co.account(), admin, {
       creationProps: { name: "WriteOnly" },
     });
 
@@ -630,7 +654,7 @@ describe("Account permissions", () => {
     const group = Group.create({ owner: admin });
     const testObject = CoMap.create({}, { owner: group });
 
-    const nonMember = await co.account().createAs(admin, {
+    const nonMember = await createAccountAs(co.account(), admin, {
       creationProps: { name: "NonMember" },
     });
 

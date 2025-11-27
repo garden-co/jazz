@@ -1,5 +1,12 @@
-import type { CoValue, CoValueClass, RefEncoded } from "../internal.js";
+import type {
+  CoValue,
+  CoValueClass,
+  MaybeLoaded,
+  RefEncoded,
+} from "../internal.js";
+import { createUnloadedCoValue } from "../internal.js";
 import { SubscriptionScope } from "./SubscriptionScope.js";
+import { CoValueLoadingState } from "./types.js";
 
 export function getSubscriptionScope<D extends CoValue>(value: D) {
   const subscriptionScope = value.$jazz._subscriptionScope;
@@ -54,13 +61,22 @@ export function accessChildByKey<D extends CoValue>(
     );
   }
 
+  // TODO: this doesn't check the subscription tree loading state
+  // so if one of the children is loading, it will return the loading state
+  // instead of the latest loaded state
   const value = subscriptionScope.childValues.get(childId);
 
-  if (value?.type === "loaded") {
+  if (value?.type === CoValueLoadingState.LOADED) {
     return value.value;
-  } else {
-    return null;
   }
+
+  const childNode = subscriptionScope.childNodes.get(childId);
+
+  if (!childNode) {
+    return createUnloadedCoValue(childId, CoValueLoadingState.UNAVAILABLE);
+  }
+
+  return childNode.getCurrentValue();
 }
 
 /**
@@ -72,9 +88,9 @@ export function accessChildByKey<D extends CoValue>(
  * Used for refs that never change (e.g. CoFeed entries, CoMap edits)
  */
 export function accessChildById<D extends CoValue>(
-  parent: D,
+  parent: CoValue,
   childId: string,
-  schema: RefEncoded<CoValue>,
+  schema: RefEncoded<D>,
 ) {
   const subscriptionScope = getSubscriptionScope(parent);
 
@@ -82,9 +98,16 @@ export function accessChildById<D extends CoValue>(
 
   const value = subscriptionScope.childValues.get(childId);
 
-  if (value?.type === "loaded") {
+  // TODO: this doesn't check the subscription tree loading state
+  if (value?.type === CoValueLoadingState.LOADED) {
     return value.value;
-  } else {
-    return null;
   }
+
+  const childNode = subscriptionScope.childNodes.get(childId);
+
+  if (!childNode) {
+    return createUnloadedCoValue<D>(childId, CoValueLoadingState.UNAVAILABLE);
+  }
+
+  return childNode.getCurrentValue() as MaybeLoaded<D>;
 }

@@ -152,8 +152,8 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
-        "edge-france -> storage | CONTENT Group header: true new: After: 0 New: 3 expectContentUntil: header/5",
-        "edge-france -> core | CONTENT Group header: true new: After: 0 New: 3 expectContentUntil: header/5",
+        "edge-france -> storage | CONTENT Group header: true new: After: 0 New: 3",
+        "edge-france -> core | CONTENT Group header: true new: After: 0 New: 3",
         "edge-france -> storage | CONTENT ParentGroup header: true new: After: 0 New: 5",
         "edge-france -> core | CONTENT ParentGroup header: true new: After: 0 New: 5",
         "edge-france -> storage | CONTENT Group header: false new: After: 3 New: 2",

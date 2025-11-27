@@ -11,7 +11,7 @@ export const load: PageServerLoad = async ({ params }) => {
 
   return {
     profile: {
-      name: profile?.name || 'No name'
-    }
-  }
+      name: profile.$isLoaded ? profile.name : "No name",
+    },
+  };
 }

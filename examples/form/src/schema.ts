@@ -18,19 +18,27 @@ export const BubbleTeaBaseTeaTypes = [
 export const ListOfBubbleTeaAddOns = co.list(z.literal(BubbleTeaAddOnTypes));
 export type ListOfBubbleTeaAddOns = co.loaded<typeof ListOfBubbleTeaAddOns>;
 
-export const BubbleTeaOrder = co.map({
-  baseTea: z.literal([...BubbleTeaBaseTeaTypes]),
-  addOns: ListOfBubbleTeaAddOns,
-  deliveryDate: z.date(),
-  withMilk: z.boolean(),
-  instructions: co.plainText(),
-});
+export const BubbleTeaOrder = co
+  .map({
+    baseTea: z.literal([...BubbleTeaBaseTeaTypes]),
+    addOns: ListOfBubbleTeaAddOns,
+    deliveryDate: z.date(),
+    withMilk: z.boolean(),
+    instructions: co.plainText(),
+  })
+  .resolved({
+    addOns: true,
+    instructions: true,
+  });
 export type BubbleTeaOrder = co.loaded<typeof BubbleTeaOrder>;
 
 export const PartialBubbleTeaOrder = BubbleTeaOrder.partial({
   baseTea: true,
   deliveryDate: true,
   withMilk: true,
+}).resolved({
+  addOns: true,
+  instructions: true,
 });
 export type PartialBubbleTeaOrder = co.loaded<typeof PartialBubbleTeaOrder>;
 
@@ -66,3 +74,11 @@ export const JazzAccount = co
       });
     }
   });
+
+export const AccountWithOrders = JazzAccount.resolved({
+  root: {
+    orders: {
+      $each: BubbleTeaOrder.resolveQuery,
+    },
+  },
+});

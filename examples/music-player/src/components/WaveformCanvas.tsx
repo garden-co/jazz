@@ -9,13 +9,12 @@ import {
   usePlayerCurrentTime,
 } from "@/lib/audio/usePlayerCurrentTime";
 import { cn } from "@/lib/utils";
-import { Loaded } from "jazz-tools";
 import type React from "react";
 
 import { useEffect, useRef } from "react";
 
 type Props = {
-  track: Loaded<typeof MusicTrack>;
+  track: MusicTrack;
   height?: number;
   barColor?: string;
   progressColor?: string;

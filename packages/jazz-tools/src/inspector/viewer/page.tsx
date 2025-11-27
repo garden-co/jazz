@@ -2,6 +2,8 @@ import {
   CoID,
   LocalNode,
   RawCoList,
+  RawCoMap,
+  RawCoPlainText,
   RawCoStream,
   RawCoValue,
   RawGroup,
@@ -23,6 +25,7 @@ import { TypeIcon } from "./type-icon.js";
 import { PageInfo } from "./types.js";
 import { resolveCoValue, useResolvedCoValue } from "./use-resolve-covalue.js";
 import { HistoryView } from "./history-view.js";
+import { CoMapView } from "./co-map-view.js";
 
 interface PageContainerProps extends React.HTMLAttributes<HTMLDivElement> {
   isTopLevel?: boolean;
@@ -140,7 +143,13 @@ function View(
   }
 
   if (type === "coplaintext") {
-    return <CoPlainTextView data={snapshot} />;
+    return (
+      <CoPlainTextView
+        data={snapshot}
+        coValue={value as RawCoPlainText}
+        node={node}
+      />
+    );
   }
 
   if (type === "colist") {
@@ -163,6 +172,17 @@ function View(
 
   if (extendedType === "record") {
     return <TableView data={snapshot} node={node} onNavigate={onNavigate} />;
+  }
+
+  if (type === "comap") {
+    return (
+      <CoMapView
+        coValue={value as RawCoMap}
+        data={snapshot}
+        node={node}
+        onNavigate={onNavigate}
+      />
+    );
   }
 
   return <GridView data={snapshot} onNavigate={onNavigate} node={node} />;

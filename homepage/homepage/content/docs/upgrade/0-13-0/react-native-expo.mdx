@@ -34,7 +34,7 @@ npm install jazz-expo jazz-react-native-media-images
 Update your imports to use the new `jazz-expo` package.
 
 <CodeGroup>
-```tsx twoslash
+```tsx
 // @noErrors: 2300 2307
 // Before
 import { JazzProvider, useAccount, useCoState } from "jazz-react-native"; // [!code --]
@@ -49,7 +49,7 @@ import { JazzProvider, useAccount, useCoState } from "jazz-expo"; // [!code ++]
 Update your type declarations to use the new `jazz-expo` package.
 
 <CodeGroup>
-```tsx twoslash
+```tsx
 // @noErrors: 2664 2304
 // Before
 declare module "jazz-react-native" { // [!code --:5]
@@ -74,7 +74,7 @@ Clerk authentication has been moved inside the `jazz-expo` package. This is a br
 If you're using Clerk auth in your Expo application, you'll need to:
 
 <CodeGroup>
-```tsx twoslash
+```tsx
 // @noErrors: 2300 2307
 // Before
 import { JazzProviderWithClerk } from "jazz-react-native-clerk"; // [!code --]
@@ -97,7 +97,7 @@ These are now the default storage adapters in the `JazzProvider` for Expo applic
 ## Example Provider Setup
 
 <CodeGroup>
-```tsx twoslash
+```tsx
 // @noErrors: 2300 2307 2686 2664 2435 1005
 import { JazzProvider } from "jazz-react-native"; // [!code --]
 import { JazzProvider } from "jazz-expo"; // [!code ++]

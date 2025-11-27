@@ -62,25 +62,26 @@ export default function RouteComponent() {
   const location = useWindowLocation();
   const joinLocation = location + "?join=true";
 
-  const isJoining = !waitingRoom
+  const isJoining = !waitingRoom.$isLoaded
     ? searchParams.get("join") === "true"
     : Account.getMe().$jazz.id !== waitingRoom.creator.$jazz.id;
 
   useEffect(() => {
-    if (!waitingRoom) {
+    if (!waitingRoom.$isLoaded) {
       return;
     }
 
     askToJoinGame(waitingRoom);
-  }, [waitingRoom?.$jazz.id]);
+  }, [waitingRoom.$jazz.id, waitingRoom.$isLoaded]);
 
+  const gameId = waitingRoom.$isLoaded ? waitingRoom.game?.$jazz.id : undefined;
   useEffect(() => {
-    if (!waitingRoom?.game?.$jazz.id) {
+    if (!gameId) {
       return;
     }
 
-    router.push(`/game/${waitingRoom.game.$jazz.id}`);
-  }, [waitingRoom?.game?.$jazz.id]);
+    router.push(`/game/${gameId}`);
+  }, [gameId]);
 
   const onCopyClick = () => {
     navigator.clipboard.writeText(joinLocation);

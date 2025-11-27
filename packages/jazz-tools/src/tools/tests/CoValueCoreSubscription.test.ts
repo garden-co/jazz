@@ -1,5 +1,11 @@
 import { assert, beforeEach, describe, expect, test, vi } from "vitest";
-import { Group, co, exportCoValue, z } from "../exports.js";
+import {
+  CoValueLoadingState,
+  Group,
+  co,
+  exportCoValue,
+  z,
+} from "../exports.js";
 import { CoValueCoreSubscription } from "../subscribe/CoValueCoreSubscription.js";
 import {
   createJazzTestAccount,
@@ -462,7 +468,7 @@ describe("CoValueCoreSubscription", async () => {
       await waitFor(() => expect(listener).toHaveBeenCalled());
 
       // Should report unavailable when loading fails
-      expect(lastResult).toBe("unavailable");
+      expect(lastResult).toBe(CoValueLoadingState.UNAVAILABLE);
 
       subscription.unsubscribe();
     });
@@ -493,7 +499,7 @@ describe("CoValueCoreSubscription", async () => {
       await waitFor(() => expect(listener).toHaveBeenCalled());
 
       // Should report unavailable when loading fails
-      expect(lastResult).toBe("unavailable");
+      expect(lastResult).toBe(CoValueLoadingState.UNAVAILABLE);
 
       subscription.unsubscribe();
     });
@@ -542,7 +548,7 @@ describe("CoValueCoreSubscription", async () => {
       await waitFor(() => expect(listener).toHaveBeenCalled());
 
       // Should report unavailable when loading fails
-      expect(lastResult).toBe("unavailable");
+      expect(lastResult).toBe(CoValueLoadingState.UNAVAILABLE);
 
       subscription.unsubscribe();
     });

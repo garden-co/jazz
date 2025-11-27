@@ -26,41 +26,7 @@ To avoid this, create and reuse groups manually when their permissions stay the 
 **Note**: Implicit CoValue creation extends groups automatically. Be careful about how you create nested CoValues if you are likely to build long dependency chains.
 
 <CodeGroup>
-```ts
-const SubSubItem = co.map({
-  name: z.string()
-});
-const SubItem = co.map({
-  subSubItem: SubSubItem
-});
-const Item = co.map({
-  subItem: SubItem
-});
-
-// Implicit CoValue creation
-// Results in Group extension for subItem and subSubItem's owners.
-const item = Item.create({
-  subItem: {
-    subSubItem: {
-      name: "Example"
-    }
-  }
-});
-
-// Explicit CoValue creation
-// Does not result in Group extension.
-const fasterItem = Item.create({
-  subItem: SubItem.create({
-    subSubItem: SubSubItem.create({
-      name: "Example"
-    })
-  })
-})
-
-// Alternative
-const subSubItem = SubSubItem.create({ name: "Example"});
-const subItem = SubItem.create({ subSubItem: subSubItem });
-const fasterItem = Item.create({ subItem: subItem });
+```ts index.ts#ImplicitVsExplicit
 ```
 </CodeGroup>
 
@@ -86,49 +52,6 @@ Examples:
  - data which is rarely changed after it is created
 
 <CodeGroup>
-```ts
-const Sprite = co.map({
-  position: z.object({ x: z.number(), y: z.number() }),
-});
-
-const Location = co.map({
-  position: z.tuple([z.number(), z.number()]),
-});
-
-const mySprite = Sprite.create({ position: { x: 10, y: 10 }});
-mySprite.$jazz.set("position", { x: 20, y: 20 });
-// You cannot update 'x' and 'y' independently, only replace the whole object
-
-const myLocation = Location.create({ position: [26.052, -80.209] });
-myLocation.$jazz.set("position", [-33.868, -63.987])
-// Note: you cannot replace a single array element, only replace the whole tuple
-```
-</CodeGroup>
-
-
-## Batch Operations
-If you expect to be performing the same operation multiple times in a row, check to see if you can batch the operations. This is particularly true for list insertions, where the list is re-evaluated during each `push`.
-
-<CodeGroup>
-```ts
-let batch = []; // [!code ++]
-
-for (let i = 1; i <= 25000; i++) {
-  // [!code --:2]
-  const item = Item.create({ name: `Item ${i}` });
-  myItems.$jazz.push(item);
-
-  // [!code ++:5]
-  batch.push(Item.create({ name: `Item ${i}` }));
-  if (batch.length === 1000) {
-    myItems.$jazz.push(...batch);
-    batch = [];
-  }
-}
-
-// [!code ++:3]
-if (batch.length) {
-  myItems.$jazz.push(...batch);
-}
+```ts index.ts#ZObjectsZTuples
 ```
 </CodeGroup>

@@ -9,6 +9,7 @@ import {
 } from "vitest";
 import { Account, Group, cojsonInternals, z } from "../index.js";
 import {
+  CoValueLoadingState,
   Loaded,
   co,
   coValueClassFromCoValueClassOrSchema,
@@ -19,7 +20,7 @@ import {
   getPeerConnectedToTestSyncServer,
   setupJazzTestSync,
 } from "../testing.js";
-import { setupAccount, waitFor } from "./utils.js";
+import { assertLoaded, setupAccount, waitFor } from "./utils.js";
 import { getSubscriptionScope } from "../subscribe/index.js";
 
 cojsonInternals.setCoValueLoadingRetryDelay(300);
@@ -85,9 +86,10 @@ describe("subscribeToCoValue", () => {
       expect(updateFn).toHaveBeenCalled();
     });
 
-    expect(result).not.toBeNull();
     expect(result?.$jazz.id).toBe(chatRoom.$jazz.id);
-    expect(result?.messages).toEqual(null);
+    expect(result?.messages.$jazz.loadingState).toEqual(
+      CoValueLoadingState.LOADING,
+    );
     expect(result?.name).toBe("General");
 
     updateFn.mockClear();
@@ -906,8 +908,8 @@ describe("subscribeToCoValue", () => {
 
     spy.mockClear();
 
-    assert(personOnWriter1);
-    assert(personOnWriter2);
+    assertLoaded(personOnWriter1);
+    assertLoaded(personOnWriter2);
     personOnWriter1.$jazz.set("name", "writer1");
     personOnWriter2.$jazz.set("name", "writer2");
 
@@ -992,7 +994,7 @@ describe("subscribeToCoValue", () => {
     });
 
     assert(result);
-    expect(result[0]).toBe(null);
+    expect(result[0]?.$jazz.loadingState).toBe(CoValueLoadingState.LOADING);
 
     updateFn.mockClear();
 
@@ -1072,30 +1074,40 @@ describe("subscribeToCoValue", () => {
     onTestFinished(unsubscribe);
 
     await waitFor(() => {
-      expect(result?.[0]?.name).toBe("Guido");
-      expect(result?.[0]?.dog?.name).toBe("Giggino");
+      assert(result?.[0]);
+      expect(result[0].name).toBe("Guido");
+      assertLoaded(result[0].dog);
+      expect(result[0].dog.name).toBe("Giggino");
     });
 
     await waitFor(() => {
-      expect(result?.[1]?.name).toBe("John");
-      expect(result?.[1]?.dog?.name).toBe("Rex");
+      assert(result?.[1]);
+      expect(result[1].name).toBe("John");
+      assertLoaded(result[1].dog);
+      expect(result[1].dog.name).toBe("Rex");
     });
 
     await waitFor(() => {
-      expect(result?.[2]?.name).toBe("Jane");
-      expect(result?.[2]?.dog?.name).toBe("Bella");
+      assert(result?.[2]);
+      expect(result[2].name).toBe("Jane");
+      assertLoaded(result[2].dog);
+      expect(result[2].dog.name).toBe("Bella");
     });
 
     list[0]!.$jazz.set("dog", Dog.create({ name: "Ninja" }));
 
     await waitFor(() => {
-      expect(result?.[0]?.dog).toBe(null);
+      expect(result?.[0]?.dog.$jazz.loadingState).toBe(
+        CoValueLoadingState.UNAUTHORIZED,
+      );
     });
 
     list[1]!.$jazz.set("dog", Dog.create({ name: "Pinkie" }, everyone));
 
     await waitFor(() => {
-      expect(result?.[1]?.dog?.name).toBe("Pinkie");
+      assert(result?.[1]);
+      assertLoaded(result[1].dog);
+      expect(result[1].dog.name).toBe("Pinkie");
     });
 
     expect(onUnavailable).not.toHaveBeenCalled();
@@ -1168,18 +1180,24 @@ describe("subscribeToCoValue", () => {
     onTestFinished(unsubscribe);
 
     await waitFor(() => {
-      expect(result?.[0]?.name).toBe("Guido");
-      expect(result?.[0]?.dog?.name).toBe("Giggino");
+      assert(result?.[0]);
+      expect(result[0].name).toBe("Guido");
+      assertLoaded(result[0].dog);
+      expect(result[0].dog.name).toBe("Giggino");
     });
 
     await waitFor(() => {
-      expect(result?.[1]?.name).toBe("John");
-      expect(result?.[1]?.dog?.name).toBe("Rex");
+      assert(result?.[1]);
+      expect(result[1].name).toBe("John");
+      assertLoaded(result[1].dog);
+      expect(result[1].dog.name).toBe("Rex");
     });
 
     await waitFor(() => {
-      expect(result?.[2]?.name).toBe("Jane");
-      expect(result?.[2]?.dog?.name).toBe("Bella");
+      assert(result?.[2]);
+      expect(result[2].name).toBe("Jane");
+      assertLoaded(result[2].dog);
+      expect(result[2].dog.name).toBe("Bella");
     });
 
     expect(onUnavailable).not.toHaveBeenCalled();
@@ -1278,6 +1296,75 @@ describe("subscribeToCoValue", () => {
     expect(result.data.length).toBe(chunks + 1);
     expect(result.data[chunks]).toBe("new entry");
   });
+
+  it.fails(
+    "should return the latest loaded state when a deeply loaded child becomes not accessible",
+    async () => {
+      const Dog = co.map({
+        name: z.string(),
+      });
+
+      const Person = co.map({
+        name: z.string(),
+        dog: Dog,
+      });
+
+      const reader = await createJazzTestAccount({
+        isCurrentActiveAccount: true,
+      });
+
+      const creator = await createJazzTestAccount({
+        isCurrentActiveAccount: true,
+      });
+
+      const dogGroup = Group.create(creator);
+      dogGroup.addMember(reader, "reader");
+
+      const everyone = Group.create(creator);
+      everyone.addMember("everyone", "reader");
+
+      const dog = Dog.create({ name: "Giggino" }, dogGroup);
+      const person = Person.create({ name: "Guido", dog }, everyone);
+
+      let result = null as Loaded<typeof Person, { dog: true }> | null;
+
+      const updateFn = vi.fn().mockImplementation((value) => {
+        result = value;
+      });
+
+      const unsubscribe = subscribeToCoValue(
+        coValueClassFromCoValueClassOrSchema(Person),
+        person.$jazz.id,
+        {
+          loadAs: reader,
+          resolve: {
+            dog: true,
+          },
+        },
+        updateFn,
+      );
+
+      onTestFinished(unsubscribe);
+
+      await waitFor(() => {
+        assert(result);
+        expect(result.name).toBe("Guido");
+        assertLoaded(result.dog);
+        expect(result.dog.name).toBe("Giggino");
+      });
+
+      // Make the dog not accessible by removing the reader from the dog's group
+      dogGroup.removeMember(reader);
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      assert(result);
+
+      // The parent & child loading state should be in sync, but because the child loading state
+      // is mutable it becomes not loaded while the parent is still loaded
+      expect(result.$isLoaded).toBe(result.dog.$isLoaded);
+    },
+  );
 });
 
 describe("getSubscriptionScope", () => {
@@ -1312,7 +1399,7 @@ describe("getSubscriptionScope", () => {
   describe("when the coValue already has a subscription scope", () => {
     it("returns that subscription scope", async () => {
       const loadedPerson = await Person.load(person.$jazz.id);
-      assert(loadedPerson);
+      assertLoaded(loadedPerson);
       const subscriptionScope = loadedPerson.$jazz._subscriptionScope;
       expect(subscriptionScope).toBeDefined();
       expect(getSubscriptionScope(loadedPerson)).toBe(subscriptionScope);

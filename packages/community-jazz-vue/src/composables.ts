@@ -12,26 +12,29 @@ import {
   JazzContextManager,
   type JazzContextType,
   type Loaded,
-  type RefsToResolve,
-  ResolveQuery,
+  type MaybeLoaded,
+  CoValueLoadingState,
+  type ResolveQuery,
   ResolveQueryStrict,
   coValueClassFromCoValueClassOrSchema,
   subscribeToCoValue,
+  createUnloadedCoValue,
 } from "jazz-tools";
 import { consumeInviteLinkFromWindowLocation } from "jazz-tools/browser";
 import {
   type ComputedRef,
+  type MaybeRefOrGetter,
   type Ref,
   type ShallowRef,
   computed,
   inject,
   markRaw,
-  nextTick,
   onMounted,
   onUnmounted,
   ref,
   shallowRef,
   toRaw,
+  toValue,
   watch,
 } from "vue";
 
@@ -96,27 +99,16 @@ export function useAccount<
   options?: {
     resolve?: ResolveQueryStrict<A, R>;
   },
-): {
-  me: ComputedRef<Loaded<A, R> | undefined | null>;
-  agent: AnonymousJazzAgent | Loaded<A, true>;
-  logOut: () => void;
-} {
+): ComputedRef<MaybeLoaded<Loaded<A, R>>> {
   const context = useJazzContext();
-  const contextManager = useJazzContextManager<InstanceOfSchema<A>>();
 
   if (!context.value) {
     throw new Error("useAccount must be used within a JazzProvider");
   }
 
-  const agent = getCurrentAccountFromContextManager(contextManager.value);
-
-  // Handle guest mode - return null for me and the guest agent
+  // Handle guest mode - return null for the account data
   if (!("me" in context.value)) {
-    return {
-      me: computed(() => null) as any,
-      agent: agent,
-      logOut: context.value.logOut,
-    };
+    return computed(() => null) as any;
   }
 
   const contextMe = context.value.me as InstanceOfSchema<A>;
@@ -127,27 +119,51 @@ export function useAccount<
     options as any,
   );
 
-  return {
-    me: computed(() => {
-      const value =
-        options?.resolve === undefined ? me.value || contextMe : me.value;
-      return value ? markRaw(value) : value;
-    }) as any,
-    agent: agent,
-    logOut: context.value.logOut,
-  };
+  return computed(() => {
+    const value =
+      options?.resolve === undefined ? me.value || contextMe : me.value;
+    return value ? markRaw(value) : value;
+  }) as any;
+}
+
+/**
+ * Returns a function for logging out the current account.
+ */
+export function useLogOut(): () => void {
+  const context = useJazzContext();
+  if (!context.value) {
+    throw new Error("useLogOut must be used within a JazzProvider");
+  }
+  return context.value.logOut;
+}
+
+/**
+ * Hook for accessing the current agent. An agent can either be:
+ * - an Authenticated Account, if the user is logged in
+ * - an Anonymous Account, if the user didn't log in
+ * - or an anonymous agent, if in guest mode
+ *
+ * The agent can be used as the `loadAs` parameter for load and subscribe methods.
+ */
+export function useAgent<
+  A extends AccountClass<Account> | AnyAccountSchema = typeof Account,
+>(): AnonymousJazzAgent | Loaded<A, true> {
+  const contextManager = useJazzContextManager<InstanceOfSchema<A>>();
+  const agent = getCurrentAccountFromContextManager(contextManager.value);
+  return agent as AnonymousJazzAgent | Loaded<A, true>;
 }
 
 export function useCoState<
   S extends CoValueClassOrSchema,
-  const R extends RefsToResolve<S> = true,
+  const R extends ResolveQuery<S> = true,
 >(
   Schema: S,
-  id: string | undefined,
+  id: MaybeRefOrGetter<string | undefined>,
   options?: { resolve?: ResolveQueryStrict<S, R> },
-): Ref<Loaded<S, R> | undefined | null> {
-  const state: ShallowRef<Loaded<S, R> | undefined | null> =
-    shallowRef(undefined);
+): Ref<MaybeLoaded<Loaded<S, R>>> {
+  const state: ShallowRef<MaybeLoaded<Loaded<S, R>>> = shallowRef(
+    createUnloadedCoValue(toValue(id) ?? "", CoValueLoadingState.LOADING),
+  );
   const context = useJazzContext();
 
   if (!context.value) {
@@ -156,8 +172,15 @@ export function useCoState<
 
   let unsubscribe: (() => void) | undefined;
 
+  const updateState = (value: MaybeLoaded<Loaded<S, R>>) => {
+    if (shouldSkipUpdate(value, state.value)) return;
+    // Use markRaw to prevent Vue from making Jazz objects reactive
+    // but still allow property access and mutations
+    state.value = markRaw(value);
+  };
+
   watch(
-    [() => id, context],
+    [() => toValue(id), context],
     ([currentId, currentContext]) => {
       if (unsubscribe) {
         unsubscribe();
@@ -165,14 +188,21 @@ export function useCoState<
       }
 
       if (!currentId || !currentContext) {
-        state.value = undefined;
+        updateState(
+          createUnloadedCoValue(
+            currentId ?? "",
+            CoValueLoadingState.UNAVAILABLE,
+          ),
+        );
         return;
       }
 
       const loadAsAgent =
         "me" in currentContext ? currentContext.me : currentContext.guest;
       if (!loadAsAgent) {
-        state.value = undefined;
+        updateState(
+          createUnloadedCoValue(currentId, CoValueLoadingState.UNAVAILABLE),
+        );
         return;
       }
 
@@ -185,23 +215,23 @@ export function useCoState<
           {
             resolve: options?.resolve as any,
             loadAs: safeLoadAsAgent,
-            onUnavailable: () => {
-              state.value = null;
+            onUnavailable: (value) => {
+              updateState(value);
             },
-            onUnauthorized: () => {
-              state.value = null;
+            onUnauthorized: (value) => {
+              updateState(value);
             },
             syncResolution: true,
           },
           (value: any) => {
-            // Use markRaw to prevent Vue from making Jazz objects reactive
-            // but still allow property access and mutations
-            state.value = value ? markRaw(value) : value;
+            updateState(value);
           },
         );
       } catch (error) {
         console.error("Error in useCoState subscription:", error);
-        state.value = null;
+        updateState(
+          createUnloadedCoValue(currentId, CoValueLoadingState.UNAVAILABLE),
+        );
       }
     },
     { immediate: true },
@@ -274,7 +304,7 @@ export function useAcceptInvite<S extends CoValueClassOrSchema>({
 export function experimental_useInboxSender<
   I extends CoValue,
   O extends CoValue | undefined,
->(inboxOwnerID: string | undefined) {
+>(inboxOwnerID: MaybeRefOrGetter<string | undefined>) {
   const context = useJazzContext();
 
   if (!context.value) {
@@ -293,17 +323,21 @@ export function experimental_useInboxSender<
   const inboxRef = ref<Promise<InboxSender<I, O>> | undefined>(undefined);
 
   const sendMessage = async (message: I) => {
-    if (!inboxOwnerID) throw new Error("Inbox owner ID is required");
+    const resolvedInboxOwnerID = toValue(inboxOwnerID);
+    if (!resolvedInboxOwnerID) throw new Error("Inbox owner ID is required");
 
     if (!inboxRef.value) {
-      const inbox = InboxSender.load<I, O>(inboxOwnerID, toRaw(me.value));
+      const inbox = InboxSender.load<I, O>(
+        resolvedInboxOwnerID,
+        toRaw(me.value),
+      );
       inboxRef.value = inbox;
     }
 
     let inbox = await inboxRef.value;
 
-    if (inbox.owner.id !== inboxOwnerID) {
-      const req = InboxSender.load<I, O>(inboxOwnerID, toRaw(me.value));
+    if (inbox.owner.id !== resolvedInboxOwnerID) {
+      const req = InboxSender.load<I, O>(resolvedInboxOwnerID, toRaw(me.value));
       inboxRef.value = req;
       inbox = await req;
     }
@@ -312,7 +346,7 @@ export function experimental_useInboxSender<
   };
 
   watch(
-    () => inboxOwnerID,
+    () => toValue(inboxOwnerID),
     () => {
       inboxRef.value = undefined;
     },
@@ -325,3 +359,17 @@ export function experimental_useInboxSender<
 // It has been merged into useAccount which now handles both authenticated and guest scenarios.
 // This change maintains 1:1 API compatibility with the React Jazz library.
 // If you were using useAccountOrGuest, please migrate to useAccount.
+
+function shouldSkipUpdate(
+  newValue: MaybeLoaded<CoValue>,
+  previousValue: MaybeLoaded<CoValue>,
+) {
+  if (previousValue === newValue) return true;
+  // Avoid re-renders if the value is not loaded and didn't change
+  return (
+    previousValue.$jazz.id === newValue.$jazz.id &&
+    !previousValue.$isLoaded &&
+    !newValue.$isLoaded &&
+    previousValue.$jazz.loadingState === newValue.$jazz.loadingState
+  );
+}

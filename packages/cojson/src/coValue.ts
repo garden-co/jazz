@@ -34,13 +34,24 @@ export interface RawCoValue {
    * Used internally by `useTelepathicData()` for reactive updates on changes to a `CoValue`. */
   subscribe(listener: (coValue: this) => void): () => void;
 
+  /** The number of valid transactions that have been processed for this CoValue View */
   totalValidTransactions: number;
+  /**
+   * The version of this CoValue View, incremented when the content of the CoValue is rebuilt
+   *
+   * This is used to detect changes to the CoValue View coming from permission changes.
+   */
+  version: number;
+
+  processNewTransactions(): void;
+  rebuildFromCore(): void;
 }
 
 export class RawUnknownCoValue implements RawCoValue {
   id: CoID<this>;
   core: AvailableCoValueCore;
   totalValidTransactions = 0;
+  version = 0;
 
   constructor(core: AvailableCoValueCore) {
     this.id = core.id as CoID<this>;
@@ -73,6 +84,9 @@ export class RawUnknownCoValue implements RawCoValue {
       listener(core.getCurrentContent() as this);
     });
   }
+
+  processNewTransactions(): void {}
+  rebuildFromCore(): void {}
 }
 
 export type AnyRawCoValue =

@@ -484,6 +484,15 @@ export class SyncManager {
           ? "import"
           : peer?.role;
 
+    // TODO: We can't handle client-to-client streaming until we
+    // handle the streaming state reset on disconnection
+    if (peer?.role === "client" && msg.expectContentUntil) {
+      msg = {
+        ...msg,
+        expectContentUntil: undefined,
+      };
+    }
+
     coValue.addDependenciesFromContentMessage(msg);
 
     // If some of the dependencies are missing, we wait for them to be available

@@ -1,4 +1,4 @@
-export const metadata = { 
+export const metadata = {
   description: "Passkey authentication is fully local-first and the most secure of the auth methods that Jazz provides because keys are managed by the device/operating system itself."
 };
 
@@ -26,67 +26,11 @@ Using passkeys in Jazz is as easy as this:
 
 <TabbedCodeGroup default="react" savedPreferenceKey="framework" id="use-passkey-auth">
 <TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
-```tsx twoslash
-import * as React from "react";
-import { useState } from "react";
-import { usePasskeyAuth } from "jazz-tools/react";
-type AuthModalProps = {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-}
-// ---cut---
-export function AuthModal({ open, onOpenChange }: AuthModalProps) {
-  const [username, setUsername] = useState("");
-
-  const auth = usePasskeyAuth({ // Must be inside the JazzProvider!
-    appName: "My super-cool web app",
-  });
-
-  if (auth.state === "signedIn") { // You can also use `useIsAuthenticated()`
-    return <div>You are already signed in</div>;
-  }
-
-  const handleSignUp = async () => {
-    await auth.signUp(username);
-    onOpenChange(false);
-  };
-
-  const handleLogIn = async () => {
-    await auth.logIn();
-    onOpenChange(false);
-  };
-
-  return (
-    <div>
-      <button onClick={handleLogIn}>Log in</button>
-      <input type="text" value={username} onChange={(e) => setUsername(e.target.value)} />
-      <button onClick={handleSignUp}>Sign up</button>
-    </div>
-  );
-}
+```tsx AuthModal.tsx#Basic
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
-```svelte
-<script lang="ts">
-  import { usePasskeyAuth } from 'jazz-tools/svelte';
-  const auth = usePasskeyAuth({ appName: 'My super-cool web app' });
-  let username = $state('');
-
-  async function handleSignUp(e: Event) {
-    await auth.current.signUp(username);
-  }
-
-  asyn function handleLogIn(e: Event) {
-    await auth.current.logIn();
-  }
-</script>
-
-<div>
-  <button onclick={handleLogIn}>Log in</button>
-  <input type="text" bind:value={username} />
-  <button onclick={handleSignUp}>Sign up</button>
-</div>
+```svelte AuthModal.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>

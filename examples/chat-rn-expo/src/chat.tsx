@@ -1,6 +1,6 @@
 import * as Clipboard from "expo-clipboard";
-import { Account, Group } from "jazz-tools";
-import { useState } from "react";
+import { Account, getLoadedOrUndefined, Group } from "jazz-tools";
+import { useEffect, useRef, useState } from "react";
 import React, {
   Button,
   FlatList,
@@ -12,17 +12,57 @@ import React, {
   View,
   Alert,
   StyleSheet,
+  Animated,
+  Easing,
 } from "react-native";
 
-import { useAccount, useCoState } from "jazz-tools/expo";
+import { useAccount, useCoState, useLogOut, Image } from "jazz-tools/expo";
 import { Chat, Message } from "./schema";
+import { createImage } from "jazz-tools/media";
+import { launchImageLibrary } from "react-native-image-picker";
 
 export default function ChatScreen() {
-  const { me, logOut } = useAccount(Account, { resolve: { profile: true } });
+  const me = useAccount(Account, { resolve: { profile: true } });
+  const logOut = useLogOut();
   const [chatId, setChatId] = useState<string>();
   const [chatIdInput, setChatIdInput] = useState<string>();
-  const loadedChat = useCoState(Chat, chatId, { resolve: { $each: true } });
+  const loadedChat = useCoState(Chat, chatId, {
+    resolve: { $each: { text: true } },
+  });
   const [message, setMessage] = useState("");
+  const [imageUploading, setImageUploading] = useState(false);
+  const spinAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    let loop: Animated.CompositeAnimation | null = null;
+
+    if (imageUploading) {
+      const flip = Animated.sequence([
+        Animated.timing(spinAnim, {
+          toValue: 1,
+          duration: 400, // quick flip
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.delay(700), // pause before next flip
+      ]);
+
+      loop = Animated.loop(flip);
+      loop.start();
+    } else {
+      spinAnim.stopAnimation();
+      spinAnim.setValue(0);
+    }
+
+    return () => {
+      loop?.stop();
+    };
+  }, [imageUploading]);
+
+  const spin = spinAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ["0deg", "180deg"],
+  });
 
   function handleLogOut() {
     setChatId(undefined);
@@ -49,7 +89,7 @@ export default function ChatScreen() {
   };
 
   const sendMessage = () => {
-    if (!loadedChat) return;
+    if (!loadedChat.$isLoaded) return;
     if (message.trim()) {
       loadedChat.$jazz.push(
         Message.create({ text: message }, { owner: loadedChat?.$jazz.owner }),
@@ -58,8 +98,49 @@ export default function ChatScreen() {
     }
   };
 
+  const sendPhoto = async () => {
+    setImageUploading(true);
+    try {
+      if (!loadedChat.$isLoaded || !me.$isLoaded)
+        throw new Error("Chat or user not loaded");
+
+      const result = await launchImageLibrary({
+        mediaType: "photo",
+        quality: 0.8,
+      });
+
+      if (!result.didCancel && result.assets?.[0].uri) {
+        const image = await createImage(result.assets[0].uri, {
+          owner: loadedChat.$jazz.owner,
+          placeholder: "blur",
+          maxSize: 1024,
+        });
+
+        const thisMessage = Message.create(
+          {
+            text: message ? message.trim() : "",
+            image,
+          },
+          loadedChat.$jazz.owner,
+        );
+
+        loadedChat.$jazz.push(thisMessage);
+
+        setMessage("");
+      }
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setImageUploading(false);
+    }
+  };
+
   const renderMessageItem = ({ item }: { item: Message }) => {
     const isMe = item.$jazz.getEdits()?.text?.by?.isMe;
+    const lastEdit = item.$jazz.getEdits()?.text;
+    const lastEditor = lastEdit?.by?.profile;
+    const lastEditorName = getLoadedOrUndefined(lastEditor)?.name;
+
     return (
       <View
         style={[
@@ -74,23 +155,23 @@ export default function ChatScreen() {
               { textAlign: isMe ? "right" : "left" },
             ]}
           >
-            {item?.$jazz.getEdits()?.text?.by?.profile?.name}
+            {lastEditorName}
           </Text>
         ) : null}
         <View style={styles.messageContent}>
-          <Text style={styles.messageText}>{item.text}</Text>
+          {item.image && (
+            <Image
+              imageId={item.image?.$jazz.id}
+              width={200}
+              height="original"
+            />
+          )}
+          <Text style={styles.messageText}>{item.text.toString()}</Text>
           <Text style={[styles.messageTime, { marginTop: !isMe ? 8 : 4 }]}>
-            {item?.$jazz
-              .getEdits()
-              ?.text?.madeAt?.getHours()
-              .toString()
-              .padStart(2, "0")}
-            :
-            {item?.$jazz
-              .getEdits()
-              ?.text?.madeAt?.getMinutes()
-              .toString()
-              .padStart(2, "0")}
+            {new Date(item.$jazz.createdAt).toLocaleTimeString("en-US", {
+              hour: "2-digit",
+              minute: "2-digit",
+            })}
           </Text>
         </View>
       </View>
@@ -99,14 +180,14 @@ export default function ChatScreen() {
 
   return (
     <View style={styles.container}>
-      {!loadedChat ? (
+      {!loadedChat.$isLoaded ? (
         <View style={styles.welcomeContainer}>
           <Text style={styles.usernameTitle}>Username</Text>
           <TextInput
             style={styles.usernameInput}
-            value={me?.profile.name ?? ""}
+            value={getLoadedOrUndefined(me)?.profile?.name ?? ""}
             onChangeText={(value) => {
-              if (me?.profile) {
+              if (me.$isLoaded) {
                 me.profile.$jazz.set("name", value);
               }
             }}
@@ -182,13 +263,28 @@ export default function ChatScreen() {
             <SafeAreaView style={styles.inputRow}>
               <TextInput
                 style={styles.messageInput}
-                value={message}
-                onChangeText={setMessage}
-                placeholder="Type a message..."
+                value={imageUploading ? "Uploading..." : message}
+                onChangeText={imageUploading ? undefined : (v) => setMessage(v)}
+                placeholder={
+                  imageUploading ? "Uploading..." : "Type a message..."
+                }
                 textAlignVertical="center"
-                onSubmitEditing={sendMessage}
+                onSubmitEditing={imageUploading ? undefined : sendMessage}
                 testID="message-input"
               />
+              <TouchableOpacity
+                onPress={imageUploading ? undefined : sendPhoto}
+                style={styles.sendButton}
+                testID="send-photo-button"
+              >
+                {imageUploading ? (
+                  <Animated.Text style={{ transform: [{ rotate: spin }] }}>
+                    ⌛
+                  </Animated.Text>
+                ) : (
+                  <Text>📸</Text>
+                )}
+              </TouchableOpacity>
               <TouchableOpacity
                 onPress={sendMessage}
                 style={styles.sendButton}
@@ -290,7 +386,7 @@ const styles = StyleSheet.create({
     color: "#6b7280",
   },
   messageContent: {
-    flexDirection: "row",
+    flexDirection: "column",
     alignItems: "flex-end",
     justifyContent: "space-between",
   },

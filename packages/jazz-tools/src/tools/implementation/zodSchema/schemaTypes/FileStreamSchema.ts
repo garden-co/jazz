@@ -3,6 +3,7 @@ import {
   AnonymousJazzAgent,
   FileStream,
   Group,
+  MaybeLoaded,
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
 } from "../../../internal.js";
@@ -17,12 +18,14 @@ export function createCoreFileStreamSchema(): CoreFileStreamSchema {
   return {
     collaborative: true as const,
     builtin: "FileStream" as const,
+    resolveQuery: true as const,
   };
 }
 
 export class FileStreamSchema implements CoreFileStreamSchema {
   readonly collaborative = true as const;
   readonly builtin = "FileStream" as const;
+  readonly resolveQuery = true as const;
 
   constructor(private coValueClass: typeof FileStream) {}
 
@@ -79,7 +82,7 @@ export class FileStreamSchema implements CoreFileStreamSchema {
   load(
     id: string,
     options?: { loadAs?: Account | AnonymousJazzAgent },
-  ): Promise<FileStream | null> {
+  ): Promise<MaybeLoaded<FileStream>> {
     return this.coValueClass.load(id, options);
   }
 

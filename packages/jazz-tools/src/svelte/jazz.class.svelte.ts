@@ -3,24 +3,33 @@ import type {
   AccountClass,
   AnyAccountSchema,
   BranchDefinition,
+  CoValue,
   CoValueClassOrSchema,
   CoValueFromRaw,
+  SchemaResolveQuery,
   InstanceOfSchema,
   Loaded,
+  MaybeLoaded,
+  NotLoaded,
   ResolveQuery,
   ResolveQueryStrict,
 } from "jazz-tools";
 import {
   coValueClassFromCoValueClassOrSchema,
   subscribeToCoValue,
+  CoValueLoadingState,
+  getUnloadedCoValueWithoutId,
 } from "jazz-tools";
 import { untrack } from "svelte";
 import { createSubscriber } from "svelte/reactivity";
 import { useIsAuthenticated } from "./auth/useIsAuthenticated.svelte.js";
 import { getJazzContext } from "./jazz.svelte";
 
-type CoStateOptions<V extends CoValueClassOrSchema, R extends ResolveQuery<V>> = { 
-  resolve?: ResolveQueryStrict<V, R>,
+type CoStateOptions<
+  V extends CoValueClassOrSchema,
+  R extends ResolveQuery<V>,
+> = {
+  resolve?: ResolveQueryStrict<V, R>;
   /**
    * Create or load a branch for isolated editing.
    *
@@ -35,17 +44,20 @@ type CoStateOptions<V extends CoValueClassOrSchema, R extends ResolveQuery<V>> =
    *   the branch. If not provided, the branch is owned by the current user.
    *
    * For more info see the [branching](https://jazz.tools/docs/svelte/using-covalues/version-control) documentation.
-  */
-  unstable_branch?: BranchDefinition
+   */
+  unstable_branch?: BranchDefinition;
 };
 
 type CoStateId = string | undefined | null;
 
 export class CoState<
   V extends CoValueClassOrSchema,
-  R extends ResolveQuery<V> = true,
+  // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+  R extends ResolveQuery<V> = SchemaResolveQuery<V>,
 > {
-  #value: Loaded<V, R> | undefined | null = undefined;
+  #value: MaybeLoaded<Loaded<V, R>> = getUnloadedCoValueWithoutId(
+    CoValueLoadingState.LOADING,
+  );
   #ctx = getJazzContext<InstanceOfSchema<AccountClass<Account>>>();
   #id: CoStateId;
   #subscribe: () => void;
@@ -58,7 +70,9 @@ export class CoState<
     options?: CoStateOptions<V, R> | (() => CoStateOptions<V, R>),
   ) {
     this.#id = $derived.by(typeof id === "function" ? id : () => id);
-    this.#options = $derived.by(typeof options === "function" ? options : () => options);
+    this.#options = $derived.by(
+      typeof options === "function" ? options : () => options,
+    );
 
     this.#subscribe = createSubscriber((update) => {
       this.#update = update;
@@ -70,23 +84,26 @@ export class CoState<
       const options = this.#options;
 
       return untrack(() => {
-        if (!ctx || !id) {
-          return this.update(undefined);
+        if (!id) {
+          return this.update(
+            getUnloadedCoValueWithoutId(CoValueLoadingState.UNAVAILABLE),
+          );
         }
         const agent = "me" in ctx ? ctx.me : ctx.guest;
+        const resolve = getResolveQuery(Schema, options?.resolve);
 
         const unsubscribe = subscribeToCoValue(
           coValueClassFromCoValueClassOrSchema(Schema),
           id,
           {
             // @ts-expect-error The resolve query type isn't compatible with the coValueClassFromCoValueClassOrSchema conversion
-            resolve: options?.resolve,
+            resolve,
             loadAs: agent,
-            onUnavailable: () => {
-              this.update(null);
+            onUnavailable: (value) => {
+              this.update(value);
             },
-            onUnauthorized: () => {
-              this.update(null);
+            onUnauthorized: (value) => {
+              this.update(value);
             },
             syncResolution: true,
             unstable_branch: options?.unstable_branch,
@@ -103,8 +120,10 @@ export class CoState<
     });
   }
 
-  update(value: Loaded<V, R> | undefined | null) {
-    if (this.#value === value) return;
+  update(value: MaybeLoaded<Loaded<V, R>>) {
+    if (shouldSkipUpdate(value, this.#value)) {
+      return;
+    }
     this.#value = value;
     this.#update();
   }
@@ -117,18 +136,26 @@ export class CoState<
 
 export class AccountCoState<
   A extends
-  | (AccountClass<Account> & CoValueFromRaw<Account>)
-  | AnyAccountSchema,
-  R extends ResolveQuery<A> = true,
+    | (AccountClass<Account> & CoValueFromRaw<Account>)
+    | AnyAccountSchema,
+  // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+  R extends ResolveQuery<A> = SchemaResolveQuery<A>,
 > {
-  #value: Loaded<A, R> | undefined | null = undefined;
-  #ctx = getJazzContext<InstanceOfSchema<A>>();
+  #value: MaybeLoaded<Loaded<A, R>> = getUnloadedCoValueWithoutId(
+    CoValueLoadingState.LOADING,
+  );
+  #ctx = getJazzContext<InstanceOfSchema<AccountClass<Account>>>();
   #subscribe: () => void;
   #options: CoStateOptions<A, R> | undefined;
-  #update = () => { };
+  #update = () => {};
 
-  constructor(Schema: A, options?: CoStateOptions<A, R> | (() => CoStateOptions<A, R>)) {
-    this.#options = $derived.by(typeof options === "function" ? options : () => options);
+  constructor(
+    Schema: A,
+    options?: CoStateOptions<A, R> | (() => CoStateOptions<A, R>),
+  ) {
+    this.#options = $derived.by(
+      typeof options === "function" ? options : () => options,
+    );
 
     this.#subscribe = createSubscriber((update) => {
       this.#update = update;
@@ -139,24 +166,26 @@ export class AccountCoState<
       const options = this.#options;
 
       return untrack(() => {
-        if (!ctx || !("me" in ctx)) {
-          return this.update(undefined);
+        if (!("me" in ctx)) {
+          return this.update(
+            getUnloadedCoValueWithoutId(CoValueLoadingState.UNAVAILABLE),
+          );
         }
 
         const me = ctx.me;
+        const resolve = getResolveQuery(Schema, options?.resolve);
 
         const unsubscribe = subscribeToCoValue(
           coValueClassFromCoValueClassOrSchema(Schema),
           me.$jazz.id,
           {
-            // @ts-expect-error The resolve query type isn't compatible with the coValueClassFromCoValueClassOrSchema conversion
-            resolve: options?.resolve,
+            resolve,
             loadAs: me,
-            onUnavailable: () => {
-              this.update(null);
+            onUnavailable: (value) => {
+              this.update(value);
             },
-            onUnauthorized: () => {
-              this.update(null);
+            onUnauthorized: (value) => {
+              this.update(value);
             },
             syncResolution: true,
             unstable_branch: options?.unstable_branch,
@@ -173,8 +202,8 @@ export class AccountCoState<
     });
   }
 
-  update(value: Loaded<A, R> | undefined | null) {
-    if (this.#value === value) return;
+  update(value: MaybeLoaded<Loaded<A, R>>) {
+    if (shouldSkipUpdate(value, this.#value)) return;
     this.#value = value;
     this.#update();
   }
@@ -204,6 +233,20 @@ export class AccountCoState<
   get isAuthenticated() {
     return this.#isAuthenticated.current;
   }
+}
+
+function shouldSkipUpdate(
+  newValue: MaybeLoaded<CoValue>,
+  previousValue: MaybeLoaded<CoValue>,
+) {
+  if (previousValue === newValue) return true;
+  // Avoid re-renders if the value is not loaded and didn't change
+  return (
+    previousValue.$jazz.id === newValue.$jazz.id &&
+    !previousValue.$isLoaded &&
+    !newValue.$isLoaded &&
+    previousValue.$jazz.loadingState === newValue.$jazz.loadingState
+  );
 }
 
 /**
@@ -248,4 +291,19 @@ export class SyncConnectionStatus {
     this.#subscribe();
     return this.#ctx.current?.connected() ?? false;
   }
+}
+
+function getResolveQuery(
+  Schema: CoValueClassOrSchema,
+  // We don't need type validation here, since this is an internal API
+  resolveQuery?: ResolveQuery<any>,
+): ResolveQuery<any> {
+  if (resolveQuery) {
+    return resolveQuery;
+  }
+  // Check the schema is a CoValue schema (and not a CoValue class)
+  if ("resolveQuery" in Schema) {
+    return Schema.resolveQuery;
+  }
+  return true;
 }

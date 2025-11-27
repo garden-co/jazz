@@ -481,10 +481,7 @@ describe("loading coValues from server", () => {
     map.set("fromServer", "updated", "trusting");
 
     await waitFor(() => {
-      const coValue = expectMap(
-        client.node.expectCoValueLoaded(map.id).getCurrentContent(),
-      );
-      expect(coValue.get("fromServer")).toEqual("updated");
+      expect(map.get("fromServer")).toEqual("updated");
     });
 
     expect(
@@ -1257,10 +1254,7 @@ describe("loading coValues from server", () => {
 
     // Wait for the update to arrive on the initial client
     await waitFor(() => {
-      const mapOnClient = expectMap(
-        client.node.getCoValue(map.core.id).getCurrentContent(),
-      );
-      expect(mapOnClient.get("newAccountClient")).toBe(true);
+      expect(map.get("newAccountClient")).toBe(true);
     });
 
     // The edge server should wait for the new Account to be available before sending the Map update
@@ -1318,8 +1312,8 @@ describe("loading coValues from server", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
-        "client -> server | CONTENT Group header: true new: After: 0 New: 3 expectContentUntil: header/5",
-        "client -> server | CONTENT ParentGroup header: true new: After: 0 New: 5 expectContentUntil: header/7",
+        "client -> server | CONTENT Group header: true new: After: 0 New: 3",
+        "client -> server | CONTENT ParentGroup header: true new: After: 0 New: 5",
         "client -> server | CONTENT Group header: false new: After: 3 New: 2",
         "client -> server | CONTENT ParentGroup header: false new: After: 5 New: 2",
         "client -> server | CONTENT Map header: true new: After: 0 New: 1",

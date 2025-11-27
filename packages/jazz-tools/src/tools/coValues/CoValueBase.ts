@@ -3,11 +3,14 @@ import {
   AnonymousJazzAgent,
   CoValue,
   CoValueClass,
-  ID,
+  CoValueLoadingState,
+  ExportedCoValue,
   RegisteredSchemas,
   type SubscriptionScope,
   coValueClassFromCoValueClassOrSchema,
   coValuesCache,
+  exportCoValueFromSubscription,
+  getSubscriptionScope,
   inspect,
   unstable_mergeBranch,
 } from "../internal.js";
@@ -18,6 +21,13 @@ export abstract class CoValueBase implements CoValue {
   declare [TypeSym]: string;
 
   declare abstract $jazz: CoValueJazzApi<this>;
+  declare $isLoaded: true;
+
+  constructor() {
+    Object.defineProperties(this, {
+      $isLoaded: { value: true, enumerable: false },
+    });
+  }
 
   /** @category Internals */
   static fromRaw<V extends CoValue>(this: CoValueClass<V>, raw: RawCoValue): V {
@@ -58,6 +68,10 @@ export abstract class CoValueJazzApi<V extends CoValue> {
     }
 
     return this.raw.id;
+  }
+
+  get loadingState(): typeof CoValueLoadingState.LOADED {
+    return CoValueLoadingState.LOADED;
   }
 
   abstract get raw(): RawCoValue;
@@ -143,5 +157,13 @@ export abstract class CoValueJazzApi<V extends CoValue> {
     }
 
     unstable_mergeBranch(subscriptionScope);
+  }
+
+  export(): ExportedCoValue<V> {
+    const subscriptionScope = getSubscriptionScope(this.coValue);
+
+    return exportCoValueFromSubscription(
+      subscriptionScope as SubscriptionScope<CoValue>,
+    );
   }
 }

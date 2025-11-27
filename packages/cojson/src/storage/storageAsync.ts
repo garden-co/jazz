@@ -25,6 +25,7 @@ import {
 import type {
   CorrectionCallback,
   DBClientInterfaceAsync,
+  DBTransactionInterfaceAsync,
   SignatureAfterRow,
   StoredCoValueRow,
   StoredSessionRow,
@@ -280,8 +281,8 @@ export class StorageApiAsync implements StorageAPI {
     let invalidAssumptions = false;
 
     for (const sessionID of Object.keys(msg.new) as SessionID[]) {
-      await this.dbClient.transaction(async () => {
-        const sessionRow = await this.dbClient.getSingleCoValueSession(
+      await this.dbClient.transaction(async (tx) => {
+        const sessionRow = await tx.getSingleCoValueSession(
           storedCoValueRowID,
           sessionID,
         );
@@ -301,6 +302,7 @@ export class StorageApiAsync implements StorageAPI {
           invalidAssumptions = true;
         } else {
           const newLastIdx = await this.putNewTxs(
+            tx,
             msg,
             sessionID,
             sessionRow,
@@ -321,6 +323,7 @@ export class StorageApiAsync implements StorageAPI {
   }
 
   private async putNewTxs(
+    tx: DBTransactionInterfaceAsync,
     msg: NewContentMessage,
     sessionID: SessionID,
     sessionRow: StoredSessionRow | undefined,
@@ -363,13 +366,13 @@ export class StorageApiAsync implements StorageAPI {
       bytesSinceLastSignature,
     };
 
-    const sessionRowID: number = await this.dbClient.addSessionUpdate({
+    const sessionRowID: number = await tx.addSessionUpdate({
       sessionUpdate,
       sessionRow,
     });
 
     if (shouldWriteSignature) {
-      await this.dbClient.addSignatureAfter({
+      await tx.addSignatureAfter({
         sessionRowID,
         idx: newLastIdx - 1,
         signature: msg.new[sessionID].lastSignature,
@@ -378,7 +381,7 @@ export class StorageApiAsync implements StorageAPI {
 
     await Promise.all(
       actuallyNewTransactions.map((newTransaction, i) =>
-        this.dbClient.addTransaction(sessionRowID, nextIdx + i, newTransaction),
+        tx.addTransaction(sessionRowID, nextIdx + i, newTransaction),
       ),
     );
 

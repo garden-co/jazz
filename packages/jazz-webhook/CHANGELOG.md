@@ -1,5 +1,111 @@
 # jazz-webhook
 
+## 0.19.6
+
+### Patch Changes
+
+- Updated dependencies [23782f0]
+- Updated dependencies [56d74e4]
+- Updated dependencies [bc9120b]
+  - jazz-tools@0.19.6
+  - cojson@0.19.6
+  - cojson-storage-sqlite@0.19.6
+  - cojson-transport-ws@0.19.6
+
+## 0.19.5
+
+### Patch Changes
+
+- Updated dependencies [343c2e4]
+  - cojson@0.19.5
+  - cojson-storage-sqlite@0.19.5
+  - cojson-transport-ws@0.19.5
+  - jazz-tools@0.19.5
+
+## 0.19.4
+
+### Patch Changes
+
+- Updated dependencies [78dfffd]
+- Updated dependencies [de2f8b5]
+- Updated dependencies [763977a]
+- Updated dependencies [e02e14c]
+- Updated dependencies [3aaba61]
+  - jazz-tools@0.19.4
+  - cojson@0.19.4
+  - cojson-storage-sqlite@0.19.4
+  - cojson-transport-ws@0.19.4
+
+## 0.19.3
+
+### Patch Changes
+
+- Updated dependencies [cddbfdb]
+- Updated dependencies [114e4ce]
+  - jazz-tools@0.19.3
+  - cojson@0.19.3
+  - cojson-storage-sqlite@0.19.3
+  - cojson-transport-ws@0.19.3
+
+## 0.19.2
+
+### Patch Changes
+
+- Updated dependencies [ef24afb]
+- Updated dependencies [7e76313]
+- Updated dependencies [5f2b34b]
+  - jazz-tools@0.19.2
+  - cojson@0.19.2
+  - cojson-storage-sqlite@0.19.2
+  - cojson-transport-ws@0.19.2
+
+## 0.19.1
+
+### Patch Changes
+
+- Updated dependencies [f444bd9]
+- Updated dependencies [afd2ded]
+  - jazz-tools@0.19.1
+  - cojson@0.19.1
+  - cojson-storage-sqlite@0.19.1
+  - cojson-transport-ws@0.19.1
+
+## 0.19.0
+
+### Minor Changes
+
+- 26386d9: Add explicit CoValue loading states:
+  - Add `$isLoaded` field to discriminate between loaded and unloaded CoValues
+  - Add `$jazz.loadingState` field to provide additional info about the loading state
+  - All methods and functions that load CoValues now return a `MaybeLoaded<CoValue>` instead of `CoValue | null | undefined`
+  - Rename `$onError: null` to `$onError: "catch"`
+  - Split the `useAccount` hook into three separate hooks:
+    - `useAccount`: now only returns an Account CoValue
+    - `useLogOut`: returns a function for logging out of the current account
+    - `useAgent`: returns the current agent
+  - Add a `select` option (and an optional `equalityFn`) to `useAccount` and `useCoState`, and remove `useAccountWithSelector` and `useCoStateWithSelector`.
+  - Allow specifying resolve queries at the schema level. Those queries will be used when loading CoValues, if no other resolve query is provided.
+
+### Patch Changes
+
+- Updated dependencies [26386d9]
+  - jazz-tools@0.19.0
+  - cojson@0.19.0
+  - cojson-storage-sqlite@0.19.0
+  - cojson-transport-ws@0.19.0
+
+## 0.18.38
+
+### Patch Changes
+
+- Updated dependencies [349ca48]
+- Updated dependencies [68781a0]
+- Updated dependencies [349ca48]
+  - cojson@0.18.38
+  - jazz-tools@0.18.38
+  - cojson-storage-sqlite@0.18.38
+  - cojson-transport-ws@0.18.38
+
 ## 0.18.37
 
 ### Patch Changes

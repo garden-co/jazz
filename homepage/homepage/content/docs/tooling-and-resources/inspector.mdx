@@ -26,14 +26,7 @@ You can also embed the Inspector directly into your app, so you don't need to op
 
 <ContentByFramework framework="react">
 <CodeGroup>
-```tsx
-import { JazzInspector } from "jazz-tools/inspector";
-import { JazzReactProvider } from "jazz-tools/react"
-
-<JazzReactProvider>
- // [!code ++]
-  <JazzInspector />
-</JazzReactProvider>
+```tsx react-snippet.tsx#Install
 ```
 </CodeGroup>
 </ContentByFramework>
@@ -43,20 +36,14 @@ import { JazzReactProvider } from "jazz-tools/react"
 Install the custom element and render it.
 
 <CodeGroup>
-```ts
-import "jazz-tools/inspector/register-custom-element"
-
-document.body.appendChild(document.createElement("jazz-inspector"))
+```ts index.ts
 ```
 </CodeGroup>
 
 Or
 
 <CodeGroup>
-```tsx
-import "jazz-tools/inspector/register-custom-element"
-
-<jazz-inspector />
+```svelte svelte.svelte
 ```
 </CodeGroup>
 
@@ -81,8 +68,7 @@ You can also customize the button position with the following options:
 For example:
 
 <CodeGroup>
-```tsx
-<JazzInspector position="bottom left"/>
+```tsx react-snippet.tsx#Position
 ```
 </CodeGroup>
 

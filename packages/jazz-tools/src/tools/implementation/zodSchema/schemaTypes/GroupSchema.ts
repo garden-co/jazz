@@ -6,6 +6,7 @@ import {
 } from "../../../coValues/interfaces.js";
 import {
   Account,
+  MaybeLoaded,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
@@ -24,12 +25,14 @@ export function createCoreGroupSchema(): CoreGroupSchema {
   return {
     collaborative: true as const,
     builtin: "Group" as const,
+    resolveQuery: true as const,
   };
 }
 
 export class GroupSchema implements CoreGroupSchema {
   readonly collaborative = true as const;
   readonly builtin = "Group" as const;
+  readonly resolveQuery = true as const;
 
   getCoValueClass(): typeof Group {
     return Group;
@@ -49,7 +52,7 @@ export class GroupSchema implements CoreGroupSchema {
       loadAs?: Account;
       resolve?: RefsToResolveStrict<Group, R>;
     },
-  ): Promise<Group | null> {
+  ): Promise<MaybeLoaded<Group>> {
     return Group.load(id, options);
   }
   createInvite<G extends Group>(

@@ -25,6 +25,7 @@ import {
 import type {
   CorrectionCallback,
   DBClientInterfaceSync,
+  DBTransactionInterfaceSync,
   SignatureAfterRow,
   StoredCoValueRow,
   StoredSessionRow,
@@ -257,8 +258,8 @@ export class StorageApiSync implements StorageAPI {
     let invalidAssumptions = false;
 
     for (const sessionID of Object.keys(msg.new) as SessionID[]) {
-      this.dbClient.transaction(() => {
-        const sessionRow = this.dbClient.getSingleCoValueSession(
+      this.dbClient.transaction((tx) => {
+        const sessionRow = tx.getSingleCoValueSession(
           storedCoValueRowID,
           sessionID,
         );
@@ -275,6 +276,7 @@ export class StorageApiSync implements StorageAPI {
           invalidAssumptions = true;
         } else {
           const newLastIdx = this.putNewTxs(
+            tx,
             msg,
             sessionID,
             sessionRow,
@@ -295,6 +297,7 @@ export class StorageApiSync implements StorageAPI {
   }
 
   private putNewTxs(
+    tx: DBTransactionInterfaceSync,
     msg: NewContentMessage,
     sessionID: SessionID,
     sessionRow: StoredSessionRow | undefined,
@@ -338,13 +341,13 @@ export class StorageApiSync implements StorageAPI {
       bytesSinceLastSignature,
     };
 
-    const sessionRowID: number = this.dbClient.addSessionUpdate({
+    const sessionRowID: number = tx.addSessionUpdate({
       sessionUpdate,
       sessionRow,
     });
 
     if (shouldWriteSignature) {
-      this.dbClient.addSignatureAfter({
+      tx.addSignatureAfter({
         sessionRowID,
         idx: newLastIdx - 1,
         signature: msg.new[sessionID].lastSignature,
@@ -352,7 +355,7 @@ export class StorageApiSync implements StorageAPI {
     }
 
     actuallyNewTransactions.map((newTransaction, i) =>
-      this.dbClient.addTransaction(sessionRowID, nextIdx + i, newTransaction),
+      tx.addTransaction(sessionRowID, nextIdx + i, newTransaction),
     );
 
     return newLastIdx;

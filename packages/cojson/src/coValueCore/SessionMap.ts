@@ -40,8 +40,8 @@ export class SessionMap {
   knownState: CoValueKnownState;
   knownStateWithStreaming: CoValueKnownState | undefined;
   // The immutable version of the known statuses, to get a different reference when the known state is updated
-  immutableKnownState: CoValueKnownState;
-  immutableKnownStateWithStreaming: CoValueKnownState | undefined;
+  private immutableKnownState: CoValueKnownState | undefined;
+  private immutableKnownStateWithStreaming: CoValueKnownState | undefined;
   streamingKnownState?: KnownStateSessions;
 
   constructor(
@@ -50,7 +50,6 @@ export class SessionMap {
     streamingKnownState?: KnownStateSessions,
   ) {
     this.knownState = { id: this.id, header: true, sessions: {} };
-    this.immutableKnownState = { id: this.id, header: true, sessions: {} };
     if (streamingKnownState) {
       this.streamingKnownState = { ...streamingKnownState };
       this.knownStateWithStreaming = {
@@ -58,9 +57,6 @@ export class SessionMap {
         header: true,
         sessions: { ...streamingKnownState },
       };
-      this.immutableKnownStateWithStreaming = cloneKnownState(
-        this.knownStateWithStreaming,
-      );
     }
   }
 
@@ -92,17 +88,31 @@ export class SessionMap {
       this.knownStateWithStreaming.sessions,
       actualStreamingKnownState,
     );
-
-    this.immutableKnownStateWithStreaming = cloneKnownState(
-      this.knownStateWithStreaming,
-    );
   }
 
-  updateImmutableKnownState() {
-    this.immutableKnownState = cloneKnownState(this.knownState);
-    this.immutableKnownStateWithStreaming = this.knownStateWithStreaming
-      ? cloneKnownState(this.knownStateWithStreaming)
-      : undefined;
+  invalidateKnownStateCache() {
+    this.immutableKnownState = undefined;
+    this.immutableKnownStateWithStreaming = undefined;
+  }
+
+  getImmutableKnownState(): CoValueKnownState {
+    if (!this.immutableKnownState) {
+      this.immutableKnownState = cloneKnownState(this.knownState);
+    }
+    return this.immutableKnownState;
+  }
+
+  getImmutableKnownStateWithStreaming(): CoValueKnownState {
+    if (!this.knownStateWithStreaming) {
+      return this.getImmutableKnownState();
+    }
+
+    if (!this.immutableKnownStateWithStreaming) {
+      this.immutableKnownStateWithStreaming = cloneKnownState(
+        this.knownStateWithStreaming,
+      );
+    }
+    return this.immutableKnownStateWithStreaming;
   }
 
   get(sessionID: SessionID): SessionLog | undefined {
@@ -256,7 +266,7 @@ export class SessionMap {
       );
     }
 
-    this.updateImmutableKnownState();
+    this.invalidateKnownStateCache();
   }
 
   decryptTransaction(

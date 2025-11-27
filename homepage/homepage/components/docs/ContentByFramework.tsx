@@ -21,7 +21,7 @@ export function ContentByFramework(props: {
   framework: string | string[];
   children: React.ReactNode;
 }) {
-  const framework = useFramework();
+  const { framework } = useFramework();
 
   if (framework == props.framework) {
     return props.children;

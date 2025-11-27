@@ -25,7 +25,7 @@ import {
   importContentPieces,
   loadCoValue,
 } from "../internal.js";
-import { isCoValueId } from "../lib/id.js";
+import { isCoValueId } from "../lib/utils.js";
 import { Account } from "./account.js";
 
 type MessageShape = Record<string, AnyZodOrCoValueSchema>;
@@ -289,7 +289,7 @@ async function handleMessagePayload({
     loadAs,
   });
 
-  if (!madeBy) {
+  if (!madeBy.$isLoaded) {
     throw new JazzRequestError("Creator account not found", 400);
   }
 
@@ -301,7 +301,7 @@ async function handleMessagePayload({
     loadAs,
   });
 
-  if (!value) {
+  if (!value.$isLoaded) {
     throw new JazzRequestError("Value not found", 400);
   }
 
@@ -375,9 +375,6 @@ export class HttpRoute<
     const as = options?.owner ?? Account.getMe();
 
     const target = await loadWorkerAccountOrGroup(this.workerId, as);
-    if (!target) {
-      throw new JazzRequestError("Worker account not found", 400);
-    }
 
     const response = await fetch(this.url, {
       method: "POST",
@@ -619,20 +616,29 @@ async function loadWorkerAccountOrGroup(id: string, loadAs: Account) {
   const coValue = await node.loadCoValueCore(id as `co_z${string}`);
 
   if (!coValue.isAvailable()) {
-    return null;
+    throw new JazzRequestError("Worker account not found", 400);
   }
 
   const content = coValue.getCurrentContent();
 
   if (content instanceof RawAccount) {
-    return Account.load(content.id, {
+    const account = await Account.load(content.id, {
       loadAs,
     });
+    if (!account.$isLoaded) {
+      throw new JazzRequestError("Worker account not found", 400);
+    }
+    return account;
   }
 
-  return Group.load(content.id, {
+  const group = await Group.load(content.id, {
     loadAs,
   });
+
+  if (!group.$isLoaded) {
+    throw new JazzRequestError("Worker group not found", 400);
+  }
+  return group;
 }
 
 function defaultGetToken(request: Request) {
@@ -782,7 +788,7 @@ export async function parseAuthToken(
 
   const account = await Account.load(id, { loadAs: options?.loadAs });
 
-  if (!account) {
+  if (!account.$isLoaded) {
     return {
       error: {
         message: "Failed to load account",

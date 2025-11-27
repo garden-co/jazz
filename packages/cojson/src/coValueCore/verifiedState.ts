@@ -160,9 +160,6 @@ export class VerifiedState {
 
   newContentSince(
     knownState: CoValueKnownState | undefined,
-    opts?: {
-      skipExpectContentUntil?: boolean;
-    },
   ): NewContentMessage[] | undefined {
     let currentPiece: NewContentMessage = createContentMessage(
       this.id,
@@ -290,18 +287,15 @@ export class VerifiedState {
     );
 
     if (piecesWithContent.length > 1 || this.isStreaming()) {
-      if (!opts?.skipExpectContentUntil) {
-        // Flag that more content is coming
-        if (knownState) {
-          firstPiece.expectContentUntil = getKnownStateToSend(
-            this.knownStateWithStreaming().sessions,
-            knownState.sessions,
-          );
-        } else {
-          firstPiece.expectContentUntil = {
-            ...this.knownStateWithStreaming().sessions,
-          };
-        }
+      if (knownState) {
+        firstPiece.expectContentUntil = getKnownStateToSend(
+          this.knownStateWithStreaming().sessions,
+          knownState.sessions,
+        );
+      } else {
+        firstPiece.expectContentUntil = {
+          ...this.knownStateWithStreaming().sessions,
+        };
       }
     }
 
@@ -321,14 +315,11 @@ export class VerifiedState {
   }
 
   immutableKnownState() {
-    return this.sessions.immutableKnownState;
+    return this.sessions.getImmutableKnownState();
   }
 
   immutableKnownStateWithStreaming() {
-    return (
-      this.sessions.immutableKnownStateWithStreaming ??
-      this.immutableKnownState()
-    );
+    return this.sessions.getImmutableKnownStateWithStreaming();
   }
 
   isStreaming(): boolean {

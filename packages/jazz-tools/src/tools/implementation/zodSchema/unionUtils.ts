@@ -7,6 +7,7 @@ import {
   DiscriminableCoValueSchemas,
   DiscriminableCoreCoValueSchema,
   SchemaUnionDiscriminator,
+  coField,
 } from "../../internal.js";
 import {
   hydrateCoreCoValueSchema,
@@ -59,13 +60,23 @@ export function schemaUnionDiscriminatorFor(
     const determineSchema: SchemaUnionDiscriminator<CoMap> = (
       discriminable,
     ) => {
+      // collect all keys of nested CoValues
+      const allNestedRefKeys = new Set<string>();
+      for (const option of availableOptions) {
+        const coMapShape = (option as CoreCoMapSchema).getDefinition().shape;
+        for (const [key, value] of Object.entries(coMapShape)) {
+          if (isAnyCoValueSchema(value)) {
+            allNestedRefKeys.add(key);
+          }
+        }
+      }
+
       for (const option of availableOptions) {
         let match = true;
+        const optionDef = (option as CoreCoMapSchema).getDefinition();
 
         for (const key of Object.keys(discriminatorMap)) {
-          const discriminatorDef = (option as CoreCoMapSchema).getDefinition()
-            .shape[key];
-
+          const discriminatorDef = optionDef.shape[key];
           const discriminatorValue = discriminable.get(key);
 
           if (discriminatorValue && typeof discriminatorValue === "object") {
@@ -95,7 +106,26 @@ export function schemaUnionDiscriminatorFor(
 
         if (match) {
           const coValueSchema = hydrateCoreCoValueSchema(option as any);
-          return coValueSchema.getCoValueClass() as typeof CoMap;
+          const coValueClass = coValueSchema.getCoValueClass() as typeof CoMap;
+
+          const dummyFieldNames = Array.from(allNestedRefKeys).filter(
+            (key) => !optionDef.shape[key],
+          );
+
+          if (dummyFieldNames.length === 0) {
+            return coValueClass;
+          }
+
+          // inject dummy fields
+          return class extends coValueClass {
+            constructor(...args: ConstructorParameters<typeof coValueClass>) {
+              super(...args);
+
+              for (const key of dummyFieldNames) {
+                (this as any)[key] = coField.null;
+              }
+            }
+          };
         }
       }
 

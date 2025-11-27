@@ -1,8 +1,8 @@
-export const metadata = { 
+export const metadata = {
   description: "Passphrase authentication lets users log into any device using a recovery phrase consisting of multiple words (similar to cryptocurrency wallets). "
 };
 
-import { CodeGroup, ContentByFramework } from "@/components/forMdx";
+import { CodeGroup, ContentByFramework, ExpoLogo, ReactLogo, SvelteLogo, RNLogo, TabbedCodeGroup, TabbedCodeGroupItem, VanillaLogo } from "@/components/forMdx";
 
 # Passphrase Authentication
 
@@ -26,150 +26,30 @@ You can use one of the ready-to-use wordlists from the [BIP39 repository](https:
 - **Offline capable**: No external dependencies
 
 ## Implementation
+You can implement passphrase authentication in your application quickly and easily:
 
-<ContentByFramework framework="react">
-<CodeGroup>
-```tsx twoslash
-// @filename: wordlist.ts
-export const wordlist = ["apple", "banana", "cherry", "date", "elderberry", "fig", "grape", "honeydew", "kiwi", "lemon", "mango", "orange", "pear", "quince", "raspberry", "strawberry", "tangerine", "uva", "watermelon", "xigua", "yuzu", "zucchini"];
-// @filename: AuthModal.tsx
-import * as React from "react";
-import { useState } from "react";
-import { usePassphraseAuth } from "jazz-tools/react";
-type AuthModalProps = {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-}
-// ---cut---
-import { wordlist } from "./wordlist"
-
-export function AuthModal({ open, onOpenChange }: AuthModalProps) {
-  const [loginPassphrase, setLoginPassphrase] = useState("");
-
-  const auth = usePassphraseAuth({ // Must be inside the JazzProvider!
-    wordlist: wordlist,
-  });
-
-  if (auth.state === "signedIn") { // You can also use `useIsAuthenticated()`
-    return <div>You are already signed in</div>;
-  }
-
-  const handleSignUp = async () => {
-    await auth.signUp();
-    onOpenChange(false);
-  };
-
-  const handleLogIn = async () => {
-    await auth.logIn(loginPassphrase);
-    onOpenChange(false);
-  };
-
-  return (
-    <div>
-      <label>
-        Your current passphrase
-        <textarea
-          readOnly
-          value={auth.passphrase}
-          rows={5}
-        />
-      </label>
-      <button onClick={handleSignUp}>I have stored my passphrase</button>
-      <label>
-        Log in with your passphrase
-        <textarea
-          value={loginPassphrase}
-          onChange={(e) => setLoginPassphrase(e.target.value)}
-          placeholder="Enter your passphrase"
-          rows={5}
-          required
-        />
-      </label>
-      <button onClick={handleLogIn}>Log in</button>
-    </div>
-  );
-}
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="use-passphrase">
+  <TabbedCodeGroupItem icon={<VanillaLogo />} label="Vanilla" value="vanilla" preferWrap>
+  ```ts AuthModal.ts#PassphraseAuth
+  ```
+  </TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
+```tsx AuthModal.tsx#Basic
 ```
-</CodeGroup>
-</ContentByFramework>
-
-<ContentByFramework framework={["react-native", "react-native-expo"]}>
-<CodeGroup>
-```tsx twoslash
-// @filename: wordlist.ts
-export const wordlist = ["apple", "banana", "cherry", "date", "elderberry", "fig", "grape", "honeydew", "kiwi", "lemon", "mango", "orange", "pear", "quince", "raspberry", "strawberry", "tangerine", "uva", "watermelon", "xigua", "yuzu", "zucchini"];
-// @filename: AuthModal.tsx
-import * as React from "react";
-import { View, TextInput, Button, Text } from 'react-native';
-import { useState } from "react";
-import { usePassphraseAuth } from "jazz-tools/react-native";
-
-type AuthModalProps = {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-}
-// ---cut---
-import { wordlist } from "./wordlist"
-
-export function AuthModal({ open, onOpenChange }: AuthModalProps) {
-  const [loginPassphrase, setLoginPassphrase] = useState("");
-
-  const auth = usePassphraseAuth({
-    wordlist: wordlist,
-  });
-
-  if (auth.state === "signedIn") {
-    return <Text>You are already signed in</Text>;
-  }
-
-  const handleSignUp = async () => {
-    await auth.signUp();
-    onOpenChange(false);
-  };
-
-  const handleLogIn = async () => {
-    await auth.logIn(loginPassphrase);
-    onOpenChange(false);
-  };
-
-  return (
-    <View>
-      <View>
-        <Text>Your current passphrase</Text>
-        <TextInput
-          editable={false}
-          value={auth.passphrase}
-          multiline
-          numberOfLines={5}
-        />
-      </View>
-
-      <Button
-        title="I have stored my passphrase"
-        onPress={handleSignUp}
-      />
-
-      <View>
-        <Text>Log in with your passphrase</Text>
-        <TextInput
-          value={loginPassphrase}
-          onChangeText={setLoginPassphrase}
-          placeholder="Enter your passphrase"
-          multiline
-          numberOfLines={5}
-        />
-      </View>
-
-      <Button
-        title="Log in"
-        onPress={handleLogIn}
-      />
-    </View>
-  );
-}
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```svelte AuthModal.svelte
 ```
-</CodeGroup>
-</ContentByFramework>
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<RNLogo />} label="React Native" value="react-native" preferWrap>
+```tsx AuthModalRN.tsx#Basic
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ExpoLogo />} label="Expo" value="react-native-expo" preferWrap>
+```tsx AuthModalRN.tsx#Basic
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
 
 ## Examples
 

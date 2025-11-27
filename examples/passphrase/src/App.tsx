@@ -1,7 +1,7 @@
-import { useAccount } from "jazz-tools/react";
+import { useLogOut } from "jazz-tools/react";
 
 function App() {
-  const { logOut } = useAccount();
+  const logOut = useLogOut();
 
   return (
     <main>

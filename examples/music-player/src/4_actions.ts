@@ -1,6 +1,11 @@
 import { getAudioFileData } from "@/lib/audio/getAudioFileData";
 import { Group } from "jazz-tools";
-import { MusicTrack, MusicaAccount, Playlist } from "./1_schema";
+import {
+  MusicTrack,
+  MusicaAccount,
+  Playlist,
+  PlaylistWithTracks,
+} from "./1_schema";
 
 /**
  * Walkthrough: Actions
@@ -84,9 +89,7 @@ export async function addTrackToPlaylist(
   track: MusicTrack,
 ) {
   const { tracks } = await playlist.$jazz.ensureLoaded({
-    resolve: {
-      tracks: { $each: true },
-    },
+    resolve: PlaylistWithTracks.resolveQuery,
   });
 
   const isPartOfThePlaylist = tracks.some((t) => t.$jazz.id === track.$jazz.id);
@@ -123,18 +126,18 @@ export async function removeTrackFromAllPlaylists(track: MusicTrack) {
       root: {
         playlists: {
           $each: {
-            $onError: null,
+            $onError: "catch",
           },
         },
-        rootPlaylist: true,
       },
     },
   });
 
   const playlists = root.playlists;
 
+  // @ts-expect-error - https://github.com/microsoft/TypeScript/issues/62621
   for (const playlist of playlists) {
-    if (!playlist) continue;
+    if (!playlist.$isLoaded) continue;
 
     removeTrackFromPlaylist(playlist, track);
   }
@@ -196,6 +199,7 @@ export async function onAnonymousAccountDiscarded(
     },
   });
 
+  // @ts-expect-error - https://github.com/microsoft/TypeScript/issues/62621
   for (const track of anonymousAccountRoot.rootPlaylist.tracks) {
     if (track.isExampleTrack) continue;
 

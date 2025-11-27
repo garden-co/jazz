@@ -1,6 +1,4 @@
-import { useCallback } from "react";
-
-import { Task, TodoProject } from "./1_schema";
+import { TaskWithText, TodoProjectWithTasks } from "./1_schema";
 
 import {
   Button,
@@ -15,7 +13,6 @@ import {
   TableRow,
 } from "./basicComponents";
 
-import { Loaded } from "jazz-tools";
 import { useCoState } from "jazz-tools/react";
 import { useParams } from "react-router";
 import uniqolor from "uniqolor";
@@ -37,45 +34,31 @@ export function ProjectTodoTable() {
   // content - whether we create edits locally, load persisted data, or receive
   // sync updates from other devices or participants!
   // It also recursively resolves and subsribes to all referenced CoValues.
-  const project = useCoState(TodoProject, projectId, {
-    resolve: {
-      tasks: {
-        $each: {
-          text: true,
-        },
-      },
-    },
-  });
+  const project = useCoState(TodoProjectWithTasks, projectId);
 
   // `createTask` is similar to `createProject` we saw earlier, creating a new CoMap
   // for a new task (in the same group as the project), and then
   // adding that as an item to the project's list of tasks.
-  const createTask = useCallback(
-    (text: string) => {
-      if (!project?.tasks || !text) return;
-      const task = Task.create(
-        {
-          done: false,
-          text,
-          version: 1,
-        },
-        project.$jazz.owner,
-      );
+  const createTask = (text: string) => {
+    if (!project.$isLoaded || !text) return;
+    const task = TaskWithText.create(
+      {
+        done: false,
+        text,
+        version: 1,
+      },
+      project.$jazz.owner,
+    );
 
-      // push will cause useCoState to rerender this component, both here and on other devices
-      project.tasks.$jazz.push(task);
-    },
-    [project?.tasks, project?.$jazz.owner],
-  );
+    // push will cause useCoState to rerender this component, both here and on other devices
+    project.tasks.$jazz.push(task);
+  };
 
-  const deleteTask = useCallback(
-    (taskId: string) => {
-      if (!project?.tasks) return;
-      // similarly, removing a task will update everyone that is subscribed to this project's tasks
-      project.tasks.$jazz.remove((t) => t?.$jazz.id === taskId);
-    },
-    [project?.tasks],
-  );
+  const deleteTask = (taskId: string) => {
+    if (!project.$isLoaded) return;
+    // similarly, removing a task will update everyone that is subscribed to this project's tasks
+    project.tasks.$jazz.remove((t) => t?.$jazz.id === taskId);
+  };
 
   return (
     <div className="max-w-full w-xl">
@@ -83,8 +66,8 @@ export function ProjectTodoTable() {
         <h1>
           {
             // This is how we can access properties from the project query,
-            // accounting for the fact that note everything might be loaded yet
-            project?.title ? (
+            // accounting for the fact that not everything might be loaded yet
+            project.$isLoaded ? (
               <>
                 {project.title}{" "}
                 <span className="text-sm">({project.$jazz.id})</span>
@@ -104,17 +87,19 @@ export function ProjectTodoTable() {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {project?.tasks.map(
-            (task) =>
-              task && (
+          {project.$isLoaded
+            ? project.tasks.map((task) => (
                 <TaskRow
                   key={task.$jazz.id}
                   task={task}
                   deleteTask={deleteTask}
                 />
-              ),
-          )}
-          <NewTaskInputRow createTask={createTask} disabled={!project} />
+              ))
+            : null}
+          <NewTaskInputRow
+            createTask={createTask}
+            disabled={!project.$isLoaded}
+          />
         </TableBody>
       </Table>
     </div>
@@ -125,48 +110,45 @@ export function TaskRow({
   task,
   deleteTask,
 }: {
-  task: Loaded<typeof Task> | undefined;
+  task: TaskWithText;
   deleteTask: (taskId: string) => void;
 }) {
+  // Here we see for the first time how we can access edit history
+  // for a CoValue, and use it to display who created the task.
+  const taskCreator = task.$jazz.getEdits().text?.by;
   return (
     <TableRow>
       <TableCell>
         <Checkbox
           className="mt-1"
-          checked={task?.done}
+          checked={task.done}
           onCheckedChange={(checked) => {
             // Tick or untick the task
             // Task is also immutable, but this will update all queries
             // that include this task as a reference
-            if (task) task.$jazz.set("done", !!checked);
+            task.$jazz.set("done", !!checked);
           }}
         />
       </TableCell>
       <TableCell>
         <div className="flex flex-row justify-between items-center gap-2">
-          {task?.text ? (
+          {task.text ? (
             <span className={task?.done ? "line-through" : ""}>
               {task.text}
             </span>
           ) : (
             <Skeleton className="mt-1 w-[200px] h-[1em] rounded-full" />
           )}
-          {
-            // Here we see for the first time how we can access edit history
-            // for a CoValue, and use it to display who created the task.
-            task?.$jazz.getEdits().text?.by?.profile?.name ? (
-              <span
-                className="rounded-full py-0.5 px-2 text-xs"
-                style={uniqueColoring(
-                  task.$jazz.getEdits().text?.by?.$jazz.id ?? "",
-                )}
-              >
-                {task.$jazz.getEdits().text?.by?.profile?.name}
-              </span>
-            ) : (
-              <Skeleton className="mt-1 w-[50px] h-[1em] rounded-full" />
-            )
-          }
+          {taskCreator?.profile.$isLoaded ? (
+            <span
+              className="rounded-full py-0.5 px-2 text-xs"
+              style={uniqueColoring(taskCreator.$jazz.id)}
+            >
+              {taskCreator.profile.name}
+            </span>
+          ) : (
+            <Skeleton className="mt-1 w-[50px] h-[1em] rounded-full" />
+          )}
         </div>
       </TableCell>
       <TableCell>

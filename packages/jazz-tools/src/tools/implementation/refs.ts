@@ -5,11 +5,13 @@ import {
   ID,
   RefEncoded,
   SubscriptionScope,
-} from "../internal.js";
-import {
+  LoadedAndRequired,
   accessChildById,
+  CoValueLoadingState,
   getSubscriptionScope,
   isRefEncoded,
+  createUnloadedCoValue,
+  MaybeLoaded,
 } from "../internal.js";
 
 export class Ref<out V extends CoValue> {
@@ -24,10 +26,10 @@ export class Ref<out V extends CoValue> {
     }
   }
 
-  async load(): Promise<V | null> {
+  async load(): Promise<MaybeLoaded<V>> {
     const subscriptionScope = getSubscriptionScope(this.parent);
 
-    let node: SubscriptionScope<CoValue> | undefined | null;
+    let node: SubscriptionScope<CoValue> | undefined;
 
     /**
      * If the parent subscription scope is closed, we can't use it
@@ -51,25 +53,21 @@ export class Ref<out V extends CoValue> {
     }
 
     if (!node) {
-      return null;
+      return createUnloadedCoValue(this.id, CoValueLoadingState.UNAVAILABLE);
     }
 
-    const value = node.value;
+    const value = node.getCurrentValue();
 
-    if (value?.type === "loaded") {
-      return value.value as V;
+    if (value.$isLoaded) {
+      return value as V;
     } else {
       return new Promise((resolve) => {
         const unsubscribe = node.subscribe((value) => {
-          if (value?.type === "loaded") {
+          const currentValue = node.getCurrentValue();
+
+          if (currentValue.$jazz.loadingState !== CoValueLoadingState.LOADING) {
             unsubscribe();
-            resolve(value.value as V);
-          } else if (value?.type === "unavailable") {
-            unsubscribe();
-            resolve(null);
-          } else if (value?.type === "unauthorized") {
-            unsubscribe();
-            resolve(null);
+            resolve(currentValue as V);
           }
 
           if (subscriptionScope.closed) {
@@ -80,7 +78,7 @@ export class Ref<out V extends CoValue> {
     }
   }
 
-  get value(): V | null | undefined {
+  get value(): MaybeLoaded<V> {
     return accessChildById(this.parent, this.id, this.schema);
   }
 }
@@ -144,6 +142,6 @@ export function makeRefs<Keys extends string | number>(
   });
 }
 
-export type RefIfCoValue<V> = NonNullable<V> extends CoValue
-  ? Ref<NonNullable<V>>
+export type RefIfCoValue<V> = LoadedAndRequired<V> extends CoValue
+  ? Ref<LoadedAndRequired<V>>
   : never;

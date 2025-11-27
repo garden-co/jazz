@@ -1,5 +1,79 @@
 # passkey-svelte
 
+## 0.0.173
+
+### Patch Changes
+
+- Updated dependencies [23782f0]
+- Updated dependencies [56d74e4]
+- Updated dependencies [bc9120b]
+  - jazz-tools@0.19.6
+
+## 0.0.172
+
+### Patch Changes
+
+- jazz-tools@0.19.5
+
+## 0.0.171
+
+### Patch Changes
+
+- Updated dependencies [78dfffd]
+- Updated dependencies [de2f8b5]
+- Updated dependencies [763977a]
+- Updated dependencies [e02e14c]
+- Updated dependencies [3aaba61]
+  - jazz-tools@0.19.4
+
+## 0.0.170
+
+### Patch Changes
+
+- Updated dependencies [cddbfdb]
+- Updated dependencies [114e4ce]
+  - jazz-tools@0.19.3
+
+## 0.0.169
+
+### Patch Changes
+
+- Updated dependencies [ef24afb]
+- Updated dependencies [5f2b34b]
+  - jazz-tools@0.19.2
+
+## 0.0.168
+
+### Patch Changes
+
+- Updated dependencies [f444bd9]
+  - jazz-tools@0.19.1
+
+## 0.0.167
+
+### Patch Changes
+
+- 26386d9: Add explicit CoValue loading states:
+  - Add `$isLoaded` field to discriminate between loaded and unloaded CoValues
+  - Add `$jazz.loadingState` field to provide additional info about the loading state
+  - All methods and functions that load CoValues now return a `MaybeLoaded<CoValue>` instead of `CoValue | null | undefined`
+  - Rename `$onError: null` to `$onError: "catch"`
+  - Split the `useAccount` hook into three separate hooks:
+    - `useAccount`: now only returns an Account CoValue
+    - `useLogOut`: returns a function for logging out of the current account
+    - `useAgent`: returns the current agent
+  - Add a `select` option (and an optional `equalityFn`) to `useAccount` and `useCoState`, and remove `useAccountWithSelector` and `useCoStateWithSelector`.
+  - Allow specifying resolve queries at the schema level. Those queries will be used when loading CoValues, if no other resolve query is provided.
+- Updated dependencies [26386d9]
+  - jazz-tools@0.19.0
+
+## 0.0.166
+
+### Patch Changes
+
+- Updated dependencies [349ca48]
+  - jazz-tools@0.18.38
+
 ## 0.0.165
 
 ### Patch Changes

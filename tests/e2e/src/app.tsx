@@ -6,7 +6,6 @@ import { ConcurrentChanges } from "./pages/ConcurrentChanges";
 import { FileStreamTest } from "./pages/FileStream";
 import { InboxPage } from "./pages/Inbox";
 import { ResumeSyncState } from "./pages/ResumeSyncState";
-import { RetryUnavailable } from "./pages/RetryUnavailable";
 import { Sharing } from "./pages/Sharing";
 import { TestInput } from "./pages/TestInput";
 import { WriteOnlyRole } from "./pages/WriteOnly";
@@ -22,9 +21,6 @@ function Index() {
       </li>
       <li>
         <Link to="/file-stream">File Stream</Link>
-      </li>
-      <li>
-        <Link to="/retry-unavailable">Retry Unavailable</Link>
       </li>
       <li>
         <Link to="/sharing">Sharing</Link>
@@ -50,10 +46,6 @@ const router = createBrowserRouter([
   {
     path: "/resume-sync",
     element: <ResumeSyncState />,
-  },
-  {
-    path: "/retry-unavailable",
-    element: <RetryUnavailable />,
   },
   {
     path: "/file-stream",
