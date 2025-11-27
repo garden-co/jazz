@@ -2,7 +2,7 @@ export const metadata = {
   description: "Get started building a simple server worker with Jazz in 10 minutes."
 };
 
-import { Alert, CodeGroup, ContentByFramework, FileName, ReactLogo, SvelteLogo, TabbedCodeGroup, TabbedCodeGroupItem, TextLink } from "@/components/forMdx";
+import { Alert, CodeGroup, ContentByFramework, FileName, ReactLogo, SvelteLogo, TabbedCodeGroup, TabbedCodeGroupItem, TextLink, VanillaLogo } from "@/components/forMdx";
 import GetAPIKey from "@/components/docs/snippets/GetAPIKey.mdx";
 import InstallJazz from "@/components/docs/snippets/InstallJazz.mdx";
 import RunDevServer from "@/components/docs/snippets/RunDevServer.mdx";
@@ -14,8 +14,26 @@ This quickstart guide will take you from an empty project to a server worker whi
 - You'll get the most out of this guide if you complete [the frontend quickstart guide](/docs/quickstart) first.
 - If you've already completed the frontend quickstart, you can skip straight to [extending your schema](#define-your-schema).
 
+## Create Your App
+<ContentByFramework framework="vanilla">
+   We'll be using a basic Vite + TypeScript template for simplicity, but you can use any framework you like.
+   <TabbedCodeGroup id="create-vanilla-app" default="pnpm" savedPreferenceKey="package-manager">
+  <TabbedCodeGroupItem label="npm">
+  ```sh
+  npm create vite@latest jazzfest -- --template vanilla-ts
+  cd jazzfest
+  ```
+  </TabbedCodeGroupItem>
+  <TabbedCodeGroupItem label="pnpm">
+  ```sh
+  pnpm create-next-app@latest --typescript jazzfest
+  cd jazzfest
+  ```
+  </TabbedCodeGroupItem>
+  </TabbedCodeGroup>
+</ContentByFramework>
+
 <ContentByFramework framework="react">
-  ## Create your Next.js App
   We'll be using Next.js for simplicity, but you can use any framework you like.
 
   You can accept the defaults for all the questions, or customise the project as you like.
@@ -23,13 +41,13 @@ This quickstart guide will take you from an empty project to a server worker whi
   <TabbedCodeGroup id="create-nextjs-app" default="pnpm" savedPreferenceKey="package-manager">
   <TabbedCodeGroupItem label="npm">
   ```sh
-  npx create-next-app@latest --typescript jazzfest
+  npm create-next-app@latest --typescript jazzfest
   cd jazzfest
   ```
   </TabbedCodeGroupItem>
   <TabbedCodeGroupItem label="pnpm">
   ```sh
-  pnpx create-next-app@latest --typescript jazzfest
+  pnpm create-next-app@latest --typescript jazzfest
   cd jazzfest
   ```
   </TabbedCodeGroupItem>
@@ -37,7 +55,6 @@ This quickstart guide will take you from an empty project to a server worker whi
 
 </ContentByFramework>
 <ContentByFramework framework="svelte">
-  ## Create your SvelteKit App
   We'll be using SvelteKit for simplicity, but you can use any framework you like.
 
   You can accept the defaults for all the questions, or customise the project as you like.
@@ -75,6 +92,9 @@ The `jazz-tools` package includes everything you're going to need to build your 
 ## Define your schema
 We're going to define a simple schema for our server worker. We'll use the `root` on the worker to store a list of bands. We're also going to add a migration to initialise the `root` if it doesn't exist.
 
+<ContentByFramework framework="vanilla" savedPreferenceKey="framework">
+<FileName>schema.ts</FileName>
+</ContentByFramework>
 <ContentByFramework framework="react" savedPreferenceKey="framework">
 <FileName>app/schema.ts</FileName>
 </ContentByFramework>
@@ -112,6 +132,14 @@ You can copy the output of this command and paste it directly into your `.env` f
 
 <FileName>.env</FileName>
 <TabbedCodeGroup id="worker-env-vars" default="react" savedPreferenceKey="framework">
+<TabbedCodeGroupItem label="Vanilla" icon={<VanillaLogo />} value="vanilla" preferWrap>
+```bash
+VITE_JAZZ_API_KEY=you@example.com # or your API key
+#[!code ++:2]
+JAZZ_WORKER_ACCOUNT=co_z...
+JAZZ_WORKER_SECRET=sealerSecret_z.../signerSecret_z...
+```
+</TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Next.js" icon={<ReactLogo />} value="react" preferWrap>
 ```bash
 NEXT_PUBLIC_JAZZ_API_KEY=you@example.com # or your API key
@@ -139,12 +167,19 @@ Next, we're going to set up an HTTP request schema to define our request and res
 
 We also need to tell Jazz which keys should be treated as loaded in the request and response using the `resolve` query.
 <ContentByFramework framework="react" savedPreferenceKey="framework">
+<FileName>announceBandSchema.ts</FileName>
+</ContentByFramework>
+<ContentByFramework framework="react" savedPreferenceKey="framework">
 <FileName>app/announceBandSchema.ts</FileName>
 </ContentByFramework>
 <ContentByFramework framework="svelte" savedPreferenceKey="framework">
 <FileName>src/lib/announceBandSchema.ts</FileName>
 </ContentByFramework>
 <TabbedCodeGroup id="request-schema" default="react" savedPreferenceKey="framework">
+<TabbedCodeGroupItem label="Vanilla" icon={<VanillaLogo />} value="vanilla" preferWrap>
+```ts announceBandSchemaVanilla.ts
+```
+</TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Next.js" icon={<ReactLogo />} value="react" preferWrap>
 ```ts announceBandSchema.ts
 ```
@@ -161,6 +196,7 @@ We're going to use the `startWorker` function to start our server worker, and re
 
 We'll also use a `resolve` query here to make sure that the `bandList` is loaded on the worker's root.
 
+<ContentByFramework framework="vanilla" savedPreferenceKey="framework"> <FileName>worker.ts</FileName> </ContentByFramework>
 <ContentByFramework framework="react" savedPreferenceKey="framework">
 <FileName>app/api/announce-band/route.ts</FileName>
 </ContentByFramework>
@@ -168,6 +204,10 @@ We'll also use a `resolve` query here to make sure that the `bandList` is loaded
 <FileName>src/routes/api/announce-band/+server.ts</FileName>
 </ContentByFramework>
 <TabbedCodeGroup id="worker-config" default="react" savedPreferenceKey="framework">
+<TabbedCodeGroupItem label="Vanilla" icon={<VanillaLogo />} value="vanilla" preferWrap>
+```ts vanilla.ts
+```
+</TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Next.js" icon={<ReactLogo />} value="react" preferWrap>
 ```ts route.ts
 ```
@@ -182,6 +222,10 @@ We'll also use a `resolve` query here to make sure that the `bandList` is loaded
 
 We can now start our development server to make sure everything is working.
 
+<ContentByFramework framework="vanilla">
+*You'll probably need to check your server's docs, otherwise the command below will start the Vite frontend dev server, not your backend HTTP server.*
+</ContentByFramework>
+
 <RunDevServer />
 
 <ContentByFramework framework="react">
@@ -192,6 +236,9 @@ If you open your browser, you should see the default SvelteKit welcome page.
 </ContentByFramework>
 
 ### Not working?
+<ContentByFramework framework="vanilla">
+- You should double check in your server's documentation how to launch the server.
+</ContentByFramework>
 <ContentByFramework framework="react">
 - Check you set up your `.env` file correctly with `NEXT_PUBLIC_` where necessary
 </ContentByFramework>
@@ -205,8 +252,16 @@ If you open your browser, you should see the default SvelteKit welcome page.
 ## Send requests to your server worker
 
 ### Creating a Jazz Client
+<ContentByFramework framework="vanilla">
+*If you already have a working context from the frontend quickstart, you can skip this step.*
+</ContentByFramework>
+<ContentByFramework framework={["react", "svelte"]}>
 *If you already have a working provider from the frontend quickstart, you can skip this step.*
+</ContentByFramework>
 
+<ContentByFramework framework="vanilla">
+We're going to initialise a context so we can use Jazz on our client.
+</ContentByFramework>
 <ContentByFramework framework="react">
 We're going to wrap our Next.js app in a `JazzReactProvider` so that we can use Jazz on our client.
 </ContentByFramework>
@@ -214,6 +269,9 @@ We're going to wrap our Next.js app in a `JazzReactProvider` so that we can use 
 We're going to wrap our SvelteKit app in a `JazzSvelteProvider` so that we can use Jazz on our client.
 </ContentByFramework>
 
+<ContentByFramework framework="vanilla">
+  <FileName>src/main.ts</FileName>
+</ContentByFramework>
 <ContentByFramework framework="react">
   <FileName>app/layout.tsx</FileName>
 </ContentByFramework>
@@ -222,6 +280,10 @@ We're going to wrap our SvelteKit app in a `JazzSvelteProvider` so that we can u
 </ContentByFramework>
 
 <TabbedCodeGroup id="add-provider" savedPreferenceKey="framework">
+<TabbedCodeGroupItem label="Vanilla" value="vanilla" icon={<VanillaLogo />} preferWrap>
+  ```tsx main.ts#Context
+  ```
+</TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Next.js" value="react" icon={<ReactLogo />} preferWrap>
   ```tsx layout.tsx
   ```
@@ -236,6 +298,9 @@ We're going to wrap our SvelteKit app in a `JazzSvelteProvider` so that we can u
 
 We're going to send a request to our server worker to announce a new band. Our worker will respond with a list of bands that we can display on our page.
 
+<ContentByFramework framework="vanilla">
+<FileName>src/main.ts</FileName>
+</ContentByFramework>
 <ContentByFramework framework="react">
 <FileName>app/page.tsx</FileName>
 </ContentByFramework>
@@ -244,6 +309,10 @@ We're going to send a request to our server worker to announce a new band. Our w
 </ContentByFramework>
 
 <TabbedCodeGroup id="page-component" default="react" savedPreferenceKey="framework">
+<TabbedCodeGroupItem label="Vanilla" value="vanilla" icon={<VanillaLogo />} preferWrap>
+  ```tsx main.ts#Page
+  ```
+</TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Next.js" value="react" icon={<ReactLogo />} preferWrap>
 ```tsx page.tsx
 ```
@@ -255,6 +324,14 @@ We're going to send a request to our server worker to announce a new band. Our w
 </TabbedCodeGroup>
 
 ## Try it out!
+
+<ContentByFramework framework="vanilla">
+If you followed the instructions above, your backend server is already running. You will also need to start the Vite development server for your frontend application.
+
+<RunDevServer />
+
+</ContentByFramework>
+
 Your browser should now be showing you a page with an input field and a button. If you enter a band name and click the button, your server worker will receive the request and add the band to the list.
 
 **Congratulations! 🎉** You've just built your first Jazz server worker!

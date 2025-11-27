@@ -99,7 +99,7 @@ const recentActivity = getRecentActivity(myProjects, hourAgo);
 //   by: Account,
 //   at: Date
 // }]
-// # endregion
+// #endregion
 
 // #region GetLastUpdated
 function getLastUpdated(task: Task) {
