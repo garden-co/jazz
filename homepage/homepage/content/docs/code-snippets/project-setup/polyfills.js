@@ -1,4 +1,3 @@
-import { polyfillGlobal } from 'react-native/Libraries/Utilities/PolyfillFunctions';
 import { ReadableStream } from "readable-stream"; // polyfill ReadableStream
 import "@azure/core-asynciterator-polyfill"; // polyfill Async Iterator
 import 'react-native-get-random-values'; // polyfill getRandomValues
@@ -24,6 +23,6 @@ if (!FastTextEncoder.prototype.encodeInto) {
 }
 
 // Install polyfills
-polyfillGlobal("TextEncoder", () => FastTextEncoder);
-polyfillGlobal("TextDecoder", () => FastTextEncoder);
-polyfillGlobal("ReadableStream", () => ReadableStream);
+globalThis.TextEncoder = FastTextEncoder;
+globalThis.TextDecoder = FastTextEncoder;
+globalThis.ReadableStream = ReadableStream;
