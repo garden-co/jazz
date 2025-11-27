@@ -672,13 +672,16 @@ export class SubscriptionScope<D extends CoValue> {
     }
 
     const id = entry.value as string | undefined;
+    // $onError should allow loading a CoList even if a CoList with non-optional elements somehow
+    // ends up containing undefined references
+    const skipInvalid = typeof depth === "object" && depth.$onError === "catch";
 
     if (id) {
       this.loadChildNode(id, depth, descriptor, key);
       this.validationErrors.delete(key);
 
       return id;
-    } else if (!descriptor.optional) {
+    } else if (!descriptor.optional && !skipInvalid) {
       this.validationErrors.set(
         key,
         new JazzError(undefined, CoValueLoadingState.UNAVAILABLE, [

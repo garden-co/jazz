@@ -483,7 +483,7 @@ describe("Deep loading with unauthorized account", async () => {
 
   group.addMember(alice, "reader");
 
-  test("unaccessible root", async () => {
+  test("inaccessible root", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const map = TestMap.create({ list: TestList.create([], group) }, onlyBob);
@@ -501,7 +501,7 @@ describe("Deep loading with unauthorized account", async () => {
     errorSpy.mockReset();
   });
 
-  test("unaccessible list", async () => {
+  test("inaccessible list", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const map = TestMap.create({ list: TestList.create([], onlyBob) }, group);
@@ -525,7 +525,7 @@ describe("Deep loading with unauthorized account", async () => {
     errorSpy.mockReset();
   });
 
-  test("unaccessible list element", async () => {
+  test("inaccessible list element", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const map = TestMap.create(
@@ -561,7 +561,7 @@ describe("Deep loading with unauthorized account", async () => {
     errorSpy.mockReset();
   });
 
-  test("unaccessible optional element", async () => {
+  test("inaccessible optional element", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const map = TestMap.create(
@@ -586,7 +586,7 @@ describe("Deep loading with unauthorized account", async () => {
     errorSpy.mockReset();
   });
 
-  test("unaccessible optional element via autoload", async () => {
+  test("inaccessible optional element via autoload", async () => {
     const map = TestMap.create(
       {
         list: TestList.create([], group),
@@ -613,7 +613,7 @@ describe("Deep loading with unauthorized account", async () => {
     expect(result?.$jazz.loadingState).toBe(CoValueLoadingState.UNAUTHORIZED);
   });
 
-  test("unaccessible stream", async () => {
+  test("inaccessible stream", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const map = TestMap.create(
       {
@@ -648,7 +648,7 @@ describe("Deep loading with unauthorized account", async () => {
     errorSpy.mockReset();
   });
 
-  test("unaccessible stream element", async () => {
+  test("inaccessible stream element", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const value = InnermostMap.create({ value: "hello" }, onlyBob);
@@ -714,7 +714,7 @@ describe("Deep loading with unauthorized account", async () => {
     expect(loadedMap?.$jazz.id).toBe(map.$jazz.id);
   });
 
-  test("unaccessible record element with $onError", async () => {
+  test("inaccessible record element with $onError", async () => {
     const Person = co.map({
       name: z.string(),
     });
@@ -743,7 +743,7 @@ describe("Deep loading with unauthorized account", async () => {
     expect(friendsOnAlice.alice.name).toBe("Alice");
   });
 
-  test("unaccessible nested record element with $onError", async () => {
+  test("inaccessible nested record element with $onError", async () => {
     const Person = co.map({
       name: z.string(),
     });
@@ -783,7 +783,7 @@ describe("Deep loading with unauthorized account", async () => {
     expect(user.friends.alice.name).toBe("Alice");
   });
 
-  test("unaccessible element down the chain with $onError on a record", async () => {
+  test("inaccessible element down the chain with $onError on a record", async () => {
     const Dog = co.map({
       name: z.string(),
     });
@@ -840,7 +840,7 @@ describe("Deep loading with unauthorized account", async () => {
     expect(user.friends.alice.dog.name).toBe("Giggino");
   });
 
-  test("unaccessible list element with $onError and $each with depth", async () => {
+  test("inaccessible list element with $onError and $each with depth", async () => {
     const Person = co.map({
       name: z.string(),
       get friends(): co.Optional<typeof Friends> {
@@ -894,7 +894,34 @@ describe("Deep loading with unauthorized account", async () => {
     expect(listOnAlice).toHaveLength(2);
   });
 
-  test("unaccessible record element with $onError", async () => {
+  test("$onError allows loading a CoList with undefined elements", async () => {
+    const Person = co.map({
+      name: z.string(),
+      get friends() {
+        return Friends;
+      },
+    });
+    const Friends = co.list(Person);
+
+    const person = Person.create(
+      {
+        name: "Jane",
+        // @ts-expect-error - force an undefined reference
+        friends: [undefined],
+      },
+      group,
+    );
+
+    const personOnAlice = await Person.load(person.$jazz.id, {
+      resolve: { friends: { $each: { $onError: "catch" } } },
+      loadAs: alice,
+    });
+
+    assertLoaded(personOnAlice);
+    expect(personOnAlice.friends[0]).toBeUndefined();
+  });
+
+  test("inaccessible record element with $onError", async () => {
     const Person = co.map({
       name: z.string(),
     });
@@ -923,7 +950,7 @@ describe("Deep loading with unauthorized account", async () => {
     expect(friendsOnAlice.alice.name).toBe("Alice");
   });
 
-  test("unaccessible ref catched with $onError", async () => {
+  test("inaccessible ref catched with $onError", async () => {
     const Dog = co.map({
       name: z.string(),
     });
