@@ -6,9 +6,13 @@ import FastTextEncoder from "react-native-fast-encoder"; // polyfill TextEncoder
 
 // Add encodeInto method which the fast encoder doesn't provide
 if (!FastTextEncoder.prototype.encodeInto) {
+  /**
+   * @param {string} source
+   * @param {Uint8Array} destination
+   */
   FastTextEncoder.prototype.encodeInto = function (
-    source: string,
-    destination: Uint8Array,
+    source,
+    destination,
   ) {
     const encoded = this.encode(source);
     const writeLength = Math.min(encoded.length, destination.length);
