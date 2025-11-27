@@ -14,7 +14,7 @@ import {
   CoValue,
   CoValueClass,
   ID,
-  MaybeLoaded,
+  Settled,
   RefEncoded,
   RefsToResolve,
   RefsToResolveStrict,
@@ -283,7 +283,7 @@ export class Group extends CoValueBase implements CoValue {
       resolve?: RefsToResolveStrict<G, R>;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<MaybeLoaded<Resolved<G, R>>> {
+  ): Promise<Settled<Resolved<G, R>>> {
     return loadCoValueWithoutMe(this, id, options);
   }
 

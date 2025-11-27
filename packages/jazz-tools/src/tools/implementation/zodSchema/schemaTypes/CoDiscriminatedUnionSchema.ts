@@ -5,7 +5,7 @@ import {
   BranchDefinition,
   InstanceOfSchema,
   InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded,
-  MaybeLoaded,
+  Settled,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
@@ -87,7 +87,7 @@ export class CoDiscriminatedUnionSchema<
       unstable_branch?: BranchDefinition;
     },
   ): Promise<
-    MaybeLoaded<
+    Settled<
       Resolved<
         CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion,
         R

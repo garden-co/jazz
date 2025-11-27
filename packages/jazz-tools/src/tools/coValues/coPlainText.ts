@@ -7,7 +7,7 @@ import {
   CoValueJazzApi,
   CoValueLoadingState,
   ID,
-  MaybeLoaded,
+  Settled,
   Resolved,
   SubscribeListenerOptions,
   SubscribeRestArgs,
@@ -164,7 +164,7 @@ export class CoPlainText extends String implements CoValue {
     this: CoValueClass<T>,
     id: ID<T>,
     options?: { loadAs?: Account | AnonymousJazzAgent },
-  ): Promise<MaybeLoaded<T>> {
+  ): Promise<Settled<T>> {
     return loadCoValueWithoutMe(this, id, options);
   }
 

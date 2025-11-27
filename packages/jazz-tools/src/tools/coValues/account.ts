@@ -28,6 +28,7 @@ import {
   ID,
   InstanceOrPrimitiveOfSchema,
   MaybeLoaded,
+  Settled,
   Profile,
   Ref,
   type RefEncoded,
@@ -131,9 +132,7 @@ export class Account extends CoValueBase implements CoValue {
     valueID: string,
     inviteSecret: InviteSecret,
     coValueClass?: S,
-  ): Promise<
-    MaybeLoaded<Resolved<InstanceOfSchemaCoValuesMaybeLoaded<S>, true>>
-  > {
+  ): Promise<Settled<Resolved<InstanceOfSchemaCoValuesMaybeLoaded<S>, true>>> {
     if (!this.$jazz.isLocalNodeOwner) {
       throw new Error("Only a controlled account can accept invites");
     }
@@ -356,7 +355,7 @@ export class Account extends CoValueBase implements CoValue {
       resolve?: RefsToResolveStrict<A, R>;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<MaybeLoaded<Resolved<A, R>>> {
+  ): Promise<Settled<Resolved<A, R>>> {
     return loadCoValueWithoutMe(this, id, options);
   }
 
