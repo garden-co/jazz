@@ -17,7 +17,7 @@ import {
   hydrateCoreCoValueSchema,
   isAnyCoValueSchema,
   unstable_mergeBranchWithResolve,
-  mergeCreateOptionsWithSchemaPermissions,
+  withSchemaPermissions,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { removeGetters, withSchemaResolveQuery } from "../../schemaUtils.js";
@@ -88,7 +88,7 @@ export class CoMapSchema<
       | Owner,
   ): CoMapInstanceShape<Shape, CatchAll> & CoMap;
   create(init: any, options?: any) {
-    const optionsWithPermissions = mergeCreateOptionsWithSchemaPermissions(
+    const optionsWithPermissions = withSchemaPermissions(
       options,
       this.permissions,
     );

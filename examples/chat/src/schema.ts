@@ -1,4 +1,4 @@
-import { co } from "jazz-tools";
+import { co, Group } from "jazz-tools";
 
 export const Message = co
   .map({
@@ -11,8 +11,6 @@ export const Message = co
 export type Message = co.loaded<typeof Message>;
 
 export const Chat = co.list(Message).withPermissions({
-  onCreate(newGroup) {
-    newGroup.makePublic("writer");
-  },
+  default: () => Group.create().makePublic("writer"),
 });
 export type Chat = co.loaded<typeof Chat>;

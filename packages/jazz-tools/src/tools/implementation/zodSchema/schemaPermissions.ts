@@ -1,15 +1,10 @@
 import { Account, Group, TypeSym, type GroupRole } from "../../internal.js";
 
 /**
- * Callback to configure a CoValue's group when using `.create()` without providing an explicit owner.
- */
-export type GroupConfigurationCallback = (newGroup: Group) => void;
-
-/**
  * Defines how a nested CoValue’s owner is obtained when creating CoValues from JSON.
  *
  * This configuration is not used when using an explicit .create() for nested CoValues.
- * In that case, {@link SchemaPermissions.onCreate} is used.
+ * In that case, {@link SchemaPermissions.default} is used.
  */
 export type OnInlineCreateOptions =
   /**
@@ -39,18 +34,30 @@ export type InlineGroupConfigurationCallback = (
   context: { containerOwner: Group },
 ) => void;
 
+export type OnCreateCallback = (newGroup: Group) => void;
+
+/**
+ * Internal callback type used by RefPermissions that includes init for discriminated union support.
+ * @internal
+ */
+export type RefOnCreateCallback = (newGroup: Group, init?: unknown) => void;
+
 /**
  * Permissions to be used when creating or composing CoValues
- * @param onCreate - allows configuring a CoValue’s group when using `.create()` without providing an explicit owner.
- * @param onInlineCreate - defines how a nested CoValue’s owner is obtained when creating CoValues from JSON.
- * @default { onInlineCreate: "extendsContainer" }
+ * @param default - default owner to be used when creating a CoValue without providing an explicit owner.
+ * @param onInlineCreate - defines how a nested CoValue's owner is obtained when creating CoValues from JSON.
+ * @param onCreate - callback that runs every time a CoValue is created. Can be used to configure the CoValue's owner.
+ * Runs both when creating CoValues with `.create()` and when creating CoValues from JSON.
+ * @default { default: () => Group.create(), onInlineCreate: "extendsContainer" }
  */
 export type SchemaPermissions = {
-  onCreate?: GroupConfigurationCallback;
+  default?: () => Group;
   onInlineCreate?: OnInlineCreateOptions;
+  onCreate?: OnCreateCallback;
 };
 
 export let DEFAULT_SCHEMA_PERMISSIONS: SchemaPermissions = {
+  default: () => Group.create(),
   onInlineCreate: "extendsContainer",
 };
 
@@ -59,7 +66,10 @@ export let DEFAULT_SCHEMA_PERMISSIONS: SchemaPermissions = {
  * Schemas created before calling this function will not be affected.
  */
 export function setDefaultSchemaPermissions(permissions: SchemaPermissions) {
-  DEFAULT_SCHEMA_PERMISSIONS = permissions;
+  DEFAULT_SCHEMA_PERMISSIONS = {
+    ...DEFAULT_SCHEMA_PERMISSIONS,
+    ...permissions,
+  };
 }
 
 /**
@@ -67,6 +77,7 @@ export function setDefaultSchemaPermissions(permissions: SchemaPermissions) {
  */
 export type RefPermissions = {
   newInlineOwnerStrategy: NewInlineOwnerStrategy;
+  onCreate?: RefOnCreateCallback;
 };
 
 /**
@@ -105,8 +116,12 @@ export function schemaToRefPermissions(
   const newInlineOwnerStrategy = parseOnInlineCreate(
     permissions.onInlineCreate,
   );
+  const onCreate: RefOnCreateCallback | undefined = permissions.onCreate
+    ? (newGroup, _init) => permissions.onCreate?.(newGroup)
+    : undefined;
   return {
     newInlineOwnerStrategy,
+    onCreate,
   };
 }
 
@@ -139,20 +154,25 @@ export function getDefaultRefPermissions(): RefPermissions {
   return schemaToRefPermissions(DEFAULT_SCHEMA_PERMISSIONS);
 }
 
-export function mergeCreateOptionsWithSchemaPermissions<
-  T extends { owner?: Account | Group },
->(
+export function withSchemaPermissions<T extends { owner?: Account | Group }>(
   options?: T | Account | Group,
   schemaPermissions?: SchemaPermissions,
-): T & { configureImplicitGroupOwner?: (newGroup: Group) => void } {
-  if (!options || TypeSym in options) {
-    return {
-      ...(options && TypeSym in options ? { owner: options } : {}),
-      configureImplicitGroupOwner: schemaPermissions?.onCreate,
-    } as T & { configureImplicitGroupOwner?: (newGroup: Group) => void };
+): T & { onCreate?: OnCreateCallback } {
+  const onCreate = schemaPermissions?.onCreate;
+  if (!options) {
+    const owner = schemaPermissions?.default?.() ?? Group.create();
+    return { owner, onCreate } as T & { onCreate?: OnCreateCallback };
   }
+  if (TypeSym in options) {
+    return { owner: options, onCreate } as T & {
+      onCreate?: OnCreateCallback;
+    };
+  }
+  const owner =
+    options.owner ?? schemaPermissions?.default?.() ?? Group.create();
   return {
     ...options,
-    configureImplicitGroupOwner: schemaPermissions?.onCreate,
-  };
+    owner,
+    onCreate,
+  } as T & { onCreate?: OnCreateCallback };
 }

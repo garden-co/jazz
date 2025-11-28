@@ -165,7 +165,6 @@ export class CoList<out Item = any>
     options?:
       | {
           owner: Account | Group;
-          configureImplicitGroupOwner?: (newGroup: Group) => void;
           unique?: CoValueUniqueness["uniqueness"];
         }
       | Account
@@ -919,11 +918,13 @@ function toRawItems<Item>(
       if (!refId) {
         const newOwnerStrategy =
           itemDescriptor.permissions?.newInlineOwnerStrategy;
+        const onCreate = itemDescriptor.permissions?.onCreate;
         const coValue = instantiateRefEncodedWithInit(
           itemDescriptor,
           value,
           owner,
           newOwnerStrategy,
+          onCreate,
         );
         refId = coValue.$jazz.id;
       }

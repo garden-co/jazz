@@ -110,13 +110,7 @@ export class CoVector
   static create<S extends CoVector>(
     this: CoValueClass<S> & typeof CoVector,
     vector: number[] | Float32Array,
-    options?:
-      | {
-          owner?: Account | Group;
-          configureImplicitGroupOwner?: (newGroup: Group) => void;
-        }
-      | Account
-      | Group,
+    options?: { owner?: Account | Group } | Account | Group,
   ) {
     const vectorAsFloat32Array =
       vector instanceof Float32Array ? vector : new Float32Array(vector);

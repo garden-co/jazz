@@ -9,6 +9,7 @@ import {
   type NewInlineOwnerStrategy,
   type CoreCoDiscriminatedUnionSchema,
   type DiscriminableCoValueSchemas,
+  type RefOnCreateCallback,
 } from "../../../internal.js";
 import { coField } from "../../schema.js";
 import { CoreCoValueSchema } from "../schemaTypes/CoValueSchema.js";
@@ -275,7 +276,7 @@ function discriminatedUnionFieldPermissions(
   const discriminatorKey = schema.getDefinition().discriminator;
   const allOptions = getFlattenedUnionOptions(schema);
 
-  const valueToStrategy = new Map<unknown, NewInlineOwnerStrategy>();
+  const valueToStrategy = new Map<unknown, RefPermissions>();
   for (const option of allOptions) {
     const optionPermissions = schemaFieldPermissions(option);
     const discriminatorValues = getDiscriminatorValuesForOption(
@@ -289,12 +290,12 @@ function discriminatedUnionFieldPermissions(
 
     for (const value of discriminatorValues) {
       if (!valueToStrategy.has(value)) {
-        valueToStrategy.set(value, optionPermissions.newInlineOwnerStrategy);
+        valueToStrategy.set(value, optionPermissions);
       }
     }
   }
 
-  const fallbackStrategy = getDefaultRefPermissions().newInlineOwnerStrategy;
+  const fallbackStrategy = getDefaultRefPermissions();
 
   const newInlineOwnerStrategy: NewInlineOwnerStrategy = (
     createNewGroup,
@@ -308,8 +309,23 @@ function discriminatedUnionFieldPermissions(
         : undefined;
 
     const effectiveStrategy = strategy ?? fallbackStrategy;
-    return effectiveStrategy(createNewGroup, containerOwner, init);
+    return effectiveStrategy.newInlineOwnerStrategy(
+      createNewGroup,
+      containerOwner,
+      init,
+    );
   };
 
-  return { newInlineOwnerStrategy };
+  const onCreate: RefOnCreateCallback = (newGroup, init) => {
+    const discriminantValue = resolveDiscriminantValue(init, discriminatorKey);
+    const strategy =
+      discriminantValue !== undefined
+        ? valueToStrategy.get(discriminantValue)
+        : undefined;
+
+    const effectiveStrategy = strategy ?? fallbackStrategy;
+    effectiveStrategy.onCreate?.(newGroup, init);
+  };
+
+  return { newInlineOwnerStrategy, onCreate };
 }

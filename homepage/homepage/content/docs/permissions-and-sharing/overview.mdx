@@ -176,24 +176,29 @@ You can define permissions at the schema level by using the `withPermissions` me
 ```
 </CodeGroup>
 
-`withPermissions` supports two options, that let you customize how permissions are applied when creating or composing CoValues.
+`withPermissions` supports several options that let you customize how permissions are applied when creating or composing CoValues.
 
-#### `onCreate`
+#### `default`
 
-`onCreate` receives a callback that allows configuring a CoValue’s group when using `.create()` without providing an explicit owner. 
+`default` defines a group to be used when calling `.create()` without an explicit owner. 
 
 #### `onInlineCreate`
 
 `onInlineCreate` defines how a nested CoValue’s owner is obtained when creating inline CoValues.
 
-This configuration **is not applied** when using an explicit `.create()` for nested CoValues. In that case, `onCreate` is used.
+This configuration **is not applied** when using `.create()` for nested CoValues. In that case, `default` is used.
 
 `onInlineCreate` supports the following options:
 - `"extendsContainer"` - create a new group that includes the container CoValue's owner as a member, effectively inheriting all permissions from the container. This is the default if no `onInlineCreate` option is provided.
 - `"sameAsContainer"` - reuse the same owner as the container CoValue
 - `"newGroup"` - create a new group for inline CoValues, with the active account as admin
 - `{ extendsContainer: "reader" }` - similar to `“extendsContainer”`, but allows overriding the role of the container’s owner in the new group
-- `groupConfigurationCallback` - create a new group and configure it as needed (similarly to `onCreate`)
+- `groupConfigurationCallback` - create a new group and configure it as needed
+
+#### `onCreate`
+
+`onCreate` is a callback that runs every time a CoValue is created. It can be used to configure the CoValue's owner.
+It runs both when creating CoValues with `.create()` and when creating inline CoValues.
 
 ### Configuring permissions globally
 
