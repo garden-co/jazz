@@ -784,7 +784,9 @@ describe("Schema.withPermissions()", () => {
 describe("setDefaultSchemaPermissions", () => {
   afterEach(() => {
     setDefaultSchemaPermissions({
+      default: () => Group.create(),
       onInlineCreate: "extendsContainer",
+      onCreate: undefined,
     });
   });
 
@@ -799,6 +801,29 @@ describe("setDefaultSchemaPermissions", () => {
 
     const map = TestMap.create({ name: "Hello" });
     expect(map.name.$jazz.owner.$jazz.id).toEqual(map.$jazz.owner.$jazz.id);
+  });
+
+  test("only overrides the provided options", async () => {
+    const anotherAccount = await createJazzTestAccount();
+    setDefaultSchemaPermissions({
+      onInlineCreate: "sameAsContainer",
+    });
+    setDefaultSchemaPermissions({
+      onCreate: (newGroup) => {
+        newGroup.addMember(anotherAccount, "reader");
+      },
+    });
+
+    const TestMap = co.map({
+      name: co.plainText(),
+    });
+    const map = TestMap.create({ name: "Hello" });
+    await map.$jazz.waitForSync();
+
+    const parentOwner = map.$jazz.owner;
+    const childOwner = map.name.$jazz.owner;
+    expect(parentOwner.$jazz.id).toEqual(childOwner.$jazz.id);
+    expect(childOwner.getRoleOf(anotherAccount.$jazz.id)).toEqual("reader");
   });
 
   test("does not modify permissions for existing schemas", () => {

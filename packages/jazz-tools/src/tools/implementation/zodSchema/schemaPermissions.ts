@@ -66,8 +66,10 @@ export let DEFAULT_SCHEMA_PERMISSIONS: SchemaPermissions = {
  * Schemas created before calling this function will not be affected.
  */
 export function setDefaultSchemaPermissions(permissions: SchemaPermissions) {
-  // TODO should this only update the provided options?
-  DEFAULT_SCHEMA_PERMISSIONS = permissions;
+  DEFAULT_SCHEMA_PERMISSIONS = {
+    ...DEFAULT_SCHEMA_PERMISSIONS,
+    ...permissions,
+  };
 }
 
 /**
