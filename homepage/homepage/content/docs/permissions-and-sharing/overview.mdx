@@ -176,7 +176,7 @@ You can define permissions at the schema level by using the `withPermissions` me
 ```
 </CodeGroup>
 
-`withPermissions` supports two options, that let you customize how permissions are applied when creating or composing CoValues.
+`withPermissions` supports several options that let you customize how permissions are applied when creating or composing CoValues.
 
 #### `default`
 
@@ -194,6 +194,11 @@ This configuration **is not applied** when using `.create()` for nested CoValues
 - `"newGroup"` - create a new group for inline CoValues, with the active account as admin
 - `{ extendsContainer: "reader" }` - similar to `“extendsContainer”`, but allows overriding the role of the container’s owner in the new group
 - `groupConfigurationCallback` - create a new group and configure it as needed
+
+#### `onCreate`
+
+`onCreate` is a callback that runs every time a CoValue is created. It can be used to configure the CoValue's owner.
+It runs both when creating CoValues with `.create()` and when creating inline CoValues.
 
 ### Configuring permissions globally
 
