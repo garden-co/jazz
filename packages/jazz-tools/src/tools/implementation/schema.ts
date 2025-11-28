@@ -11,7 +11,7 @@ import {
   ItemsSym,
   LoadedAndRequired,
   type NewInlineOwnerStrategy,
-  type OnCreateCallback,
+  type RefOnCreateCallback,
   type RefPermissions,
   SchemaInit,
   isCoValueClass,
@@ -177,7 +177,7 @@ export function instantiateRefEncodedWithInit<V extends CoValue>(
   init: any,
   containerOwner: Group,
   newOwnerStrategy: NewInlineOwnerStrategy = extendContainerOwner,
-  onCreate?: OnCreateCallback,
+  onCreate?: RefOnCreateCallback,
 ): V {
   if (!isCoValueClass<V>(schema.ref)) {
     throw Error(
@@ -185,7 +185,7 @@ export function instantiateRefEncodedWithInit<V extends CoValue>(
     );
   }
   const owner = newOwnerStrategy(() => Group.create(), containerOwner, init);
-  onCreate?.(owner);
+  onCreate?.(owner, init);
   // @ts-expect-error - create is a static method in all CoValue classes
   return schema.ref.create(init, owner);
 }

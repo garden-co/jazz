@@ -622,31 +622,6 @@ describe("Schema.withPermissions()", () => {
     });
   });
 
-  test("withPermissions() can be used with recursive schemas", () => {
-    const Person = co.map({
-      name: z.string(),
-      get friend(): co.List<typeof Person> {
-        return Friends;
-      },
-    });
-    const Friends = co.list(Person).withPermissions({
-      onInlineCreate: "sameAsContainer",
-    });
-    const person = Person.create({ name: "John", friend: [] });
-
-    expect(person.friend.$jazz.owner).toEqual(person.$jazz.owner);
-  });
-
-  test("withPermissions() does not override previous schema configuration", () => {
-    const TestMap = co.map({ name: co.plainText() }).resolved({ name: true });
-    const TestMapWithName = TestMap.withPermissions({
-      onInlineCreate: "extendsContainer",
-    });
-    expect(TestMapWithName.permissions).toEqual({
-      onInlineCreate: "extendsContainer",
-    });
-  });
-
   describe("onCreate", () => {
     test("is called when creating a CoValue with .create() without explicit owner", async () => {
       let onCreateGroup: Group | undefined;
@@ -725,6 +700,83 @@ describe("Schema.withPermissions()", () => {
       expect(map.name.$jazz.owner.getRoleOf(anotherAccount.$jazz.id)).toEqual(
         "reader",
       );
+    });
+
+    test("works when the field is optional", async () => {
+      let onCreateGroup: Group | undefined;
+      const TestMap = co.map({
+        name: co
+          .plainText()
+          .withPermissions({
+            onCreate(newGroup) {
+              onCreateGroup = newGroup;
+            },
+          })
+          .optional(),
+      });
+      const map = TestMap.create({ name: "Hello" });
+      expect(onCreateGroup?.$jazz.id).toEqual(map.name?.$jazz.owner.$jazz.id);
+    });
+
+    test("works when the field is a discriminated union", async () => {
+      let onCreateCalledOn = "";
+      const Dog = co
+        .map({
+          type: z.literal("dog"),
+          name: z.string(),
+        })
+        .withPermissions({
+          onCreate() {
+            onCreateCalledOn = "dog";
+          },
+        });
+      const Cat = co
+        .map({
+          type: z.literal("cat"),
+          name: z.string(),
+        })
+        .withPermissions({
+          onCreate() {
+            onCreateCalledOn = "cat";
+          },
+        });
+      const Pet = co.discriminatedUnion("type", [Dog, Cat]);
+      const Person = co.map({
+        pet: Pet,
+      });
+
+      const person = Person.create({
+        pet: { type: "dog", name: "Rex" },
+      });
+      expect(onCreateCalledOn).toEqual("dog");
+
+      person.$jazz.set("pet", { type: "cat", name: "Whiskers" });
+      expect(onCreateCalledOn).toEqual("cat");
+    });
+  });
+
+  test("withPermissions() can be used with recursive schemas", () => {
+    const Person = co.map({
+      name: z.string(),
+      get friend(): co.List<typeof Person> {
+        return Friends;
+      },
+    });
+    const Friends = co.list(Person).withPermissions({
+      onInlineCreate: "sameAsContainer",
+    });
+    const person = Person.create({ name: "John", friend: [] });
+
+    expect(person.friend.$jazz.owner).toEqual(person.$jazz.owner);
+  });
+
+  test("withPermissions() does not override previous schema configuration", () => {
+    const TestMap = co.map({ name: co.plainText() }).resolved({ name: true });
+    const TestMapWithName = TestMap.withPermissions({
+      onInlineCreate: "extendsContainer",
+    });
+    expect(TestMapWithName.permissions).toEqual({
+      onInlineCreate: "extendsContainer",
     });
   });
 });

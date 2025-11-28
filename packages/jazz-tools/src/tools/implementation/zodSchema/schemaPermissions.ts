@@ -37,6 +37,12 @@ export type InlineGroupConfigurationCallback = (
 export type OnCreateCallback = (newGroup: Group) => void;
 
 /**
+ * Internal callback type used by RefPermissions that includes init for discriminated union support.
+ * @internal
+ */
+export type RefOnCreateCallback = (newGroup: Group, init?: unknown) => void;
+
+/**
  * Permissions to be used when creating or composing CoValues
  * @param default - default owner to be used when creating a CoValue without providing an explicit owner.
  * @param onInlineCreate - defines how a nested CoValue's owner is obtained when creating CoValues from JSON.
@@ -69,7 +75,7 @@ export function setDefaultSchemaPermissions(permissions: SchemaPermissions) {
  */
 export type RefPermissions = {
   newInlineOwnerStrategy: NewInlineOwnerStrategy;
-  onCreate?: OnCreateCallback;
+  onCreate?: RefOnCreateCallback;
 };
 
 /**
@@ -108,9 +114,12 @@ export function schemaToRefPermissions(
   const newInlineOwnerStrategy = parseOnInlineCreate(
     permissions.onInlineCreate,
   );
+  const onCreate: RefOnCreateCallback | undefined = permissions.onCreate
+    ? (newGroup, _init) => permissions.onCreate?.(newGroup)
+    : undefined;
   return {
     newInlineOwnerStrategy,
-    onCreate: permissions.onCreate,
+    onCreate,
   };
 }
 
