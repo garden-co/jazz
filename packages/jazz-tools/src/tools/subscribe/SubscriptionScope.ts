@@ -91,7 +91,11 @@ export class SubscriptionScope<D extends CoValue> {
         // - Run the migration only once
         // - Skip all the updates until the migration is done
         // - Trigger handleUpdate only with the final value
-        if (!this.migrated && value !== CoValueLoadingState.UNAVAILABLE) {
+        if (
+          !this.migrated &&
+          value !== CoValueLoadingState.UNAVAILABLE &&
+          hasAccessToCoValue(value)
+        ) {
           if (this.migrating) {
             return;
           }
@@ -139,14 +143,7 @@ export class SubscriptionScope<D extends CoValue> {
       return;
     }
 
-    const ruleset = update.core.verified.header.ruleset;
-
-    // Groups and accounts are accessible by everyone, for the other coValues we use the role to check access
-    const hasAccess =
-      ruleset.type !== "ownedByGroup" ||
-      myRoleForRawValue(update) !== undefined;
-
-    if (!hasAccess) {
+    if (!hasAccessToCoValue(update)) {
       if (this.value.type !== CoValueLoadingState.UNAUTHORIZED) {
         this.updateValue(
           new JazzError(this.id, CoValueLoadingState.UNAUTHORIZED, [
@@ -758,4 +755,14 @@ export class SubscriptionScope<D extends CoValue> {
     this.subscribers.clear();
     this.childNodes.forEach((child) => child.destroy());
   }
+}
+
+function hasAccessToCoValue(rawCoValue: RawCoValue): boolean {
+  const ruleset = rawCoValue.core.verified.header.ruleset;
+
+  // Groups and accounts are accessible by everyone, for the other coValues we use the role to check access
+  return (
+    ruleset.type !== "ownedByGroup" ||
+    myRoleForRawValue(rawCoValue) !== undefined
+  );
 }
