@@ -12,7 +12,7 @@ import {
   SubscribeListenerOptions,
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
-  mergeCreateOptionsWithSchemaPermissions,
+  withDefaultOwner,
 } from "../../../internal.js";
 import { CoValueUniqueness } from "cojson";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
@@ -75,10 +75,7 @@ export class CoListSchema<
       | Account
       | Group,
   ): CoListInstance<T> {
-    const optionsWithPermissions = mergeCreateOptionsWithSchemaPermissions(
-      options,
-      this.permissions,
-    );
+    const optionsWithPermissions = withDefaultOwner(options, this.permissions);
     return this.coValueClass.create(
       items as any,
       optionsWithPermissions,

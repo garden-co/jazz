@@ -1,15 +1,10 @@
 import { Account, Group, TypeSym, type GroupRole } from "../../internal.js";
 
 /**
- * Callback to configure a CoValue's group when using `.create()` without providing an explicit owner.
- */
-export type GroupConfigurationCallback = (newGroup: Group) => void;
-
-/**
  * Defines how a nested CoValue’s owner is obtained when creating CoValues from JSON.
  *
  * This configuration is not used when using an explicit .create() for nested CoValues.
- * In that case, {@link SchemaPermissions.onCreate} is used.
+ * In that case, {@link SchemaPermissions.default} is used.
  */
 export type OnInlineCreateOptions =
   /**
@@ -41,16 +36,17 @@ export type InlineGroupConfigurationCallback = (
 
 /**
  * Permissions to be used when creating or composing CoValues
- * @param onCreate - allows configuring a CoValue’s group when using `.create()` without providing an explicit owner.
+ * @param default - default owner to be used when creating a CoValue without providing an explicit owner.
  * @param onInlineCreate - defines how a nested CoValue’s owner is obtained when creating CoValues from JSON.
- * @default { onInlineCreate: "extendsContainer" }
+ * @default { default: () => Group.create(), onInlineCreate: "extendsContainer" }
  */
 export type SchemaPermissions = {
-  onCreate?: GroupConfigurationCallback;
+  default?: () => Group;
   onInlineCreate?: OnInlineCreateOptions;
 };
 
 export let DEFAULT_SCHEMA_PERMISSIONS: SchemaPermissions = {
+  default: () => Group.create(),
   onInlineCreate: "extendsContainer",
 };
 
@@ -59,6 +55,7 @@ export let DEFAULT_SCHEMA_PERMISSIONS: SchemaPermissions = {
  * Schemas created before calling this function will not be affected.
  */
 export function setDefaultSchemaPermissions(permissions: SchemaPermissions) {
+  // TODO should this only update the provided options?
   DEFAULT_SCHEMA_PERMISSIONS = permissions;
 }
 
@@ -139,20 +136,18 @@ export function getDefaultRefPermissions(): RefPermissions {
   return schemaToRefPermissions(DEFAULT_SCHEMA_PERMISSIONS);
 }
 
-export function mergeCreateOptionsWithSchemaPermissions<
-  T extends { owner?: Account | Group },
->(
+export function withDefaultOwner<T extends { owner?: Account | Group }>(
   options?: T | Account | Group,
   schemaPermissions?: SchemaPermissions,
-): T & { configureImplicitGroupOwner?: (newGroup: Group) => void } {
-  if (!options || TypeSym in options) {
-    return {
-      ...(options && TypeSym in options ? { owner: options } : {}),
-      configureImplicitGroupOwner: schemaPermissions?.onCreate,
-    } as T & { configureImplicitGroupOwner?: (newGroup: Group) => void };
+): T {
+  if (!options) {
+    return { owner: schemaPermissions?.default?.() ?? Group.create() } as T;
+  }
+  if (TypeSym in options) {
+    return { owner: options } as T;
   }
   return {
     ...options,
-    configureImplicitGroupOwner: schemaPermissions?.onCreate,
+    owner: options.owner ?? schemaPermissions?.default?.() ?? Group.create(),
   };
 }

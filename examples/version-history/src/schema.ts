@@ -16,8 +16,6 @@ export const Issue = co
   })
   .resolved({ description: true })
   .withPermissions({
-    onCreate(newGroup) {
-      newGroup.addMember("everyone", "writer");
-    },
+    default: () => Group.create().addMember("everyone", "writer"),
   });
 export type Issue = co.loaded<typeof Issue>;

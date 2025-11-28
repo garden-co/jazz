@@ -165,7 +165,6 @@ export class CoList<out Item = any>
     options?:
       | {
           owner: Account | Group;
-          configureImplicitGroupOwner?: (newGroup: Group) => void;
           unique?: CoValueUniqueness["uniqueness"];
         }
       | Account

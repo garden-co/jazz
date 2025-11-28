@@ -7,7 +7,7 @@ import {
   MaybeLoaded,
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
-  mergeCreateOptionsWithSchemaPermissions,
+  withDefaultOwner,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
@@ -52,10 +52,7 @@ export class PlainTextSchema implements CorePlainTextSchema {
     text: string,
     options?: { owner: Account | Group } | Account | Group,
   ): CoPlainText {
-    const optionsWithPermissions = mergeCreateOptionsWithSchemaPermissions(
-      options,
-      this.permissions,
-    );
+    const optionsWithPermissions = withDefaultOwner(options, this.permissions);
     return this.coValueClass.create(text, optionsWithPermissions);
   }
 

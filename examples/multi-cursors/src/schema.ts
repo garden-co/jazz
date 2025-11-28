@@ -1,4 +1,4 @@
-import { co, z } from "jazz-tools";
+import { co, Group, z } from "jazz-tools";
 import { Camera, Cursor } from "./types";
 
 export const CursorFeed = co.feed(Cursor).withPermissions({
@@ -11,9 +11,7 @@ export const CursorProfile = co
   })
   .withPermissions({
     // The profile info is visible to everyone
-    onCreate(newGroup) {
-      newGroup.makePublic();
-    },
+    default: () => Group.create().makePublic(),
     onInlineCreate(newGroup) {
       newGroup.makePublic();
     },

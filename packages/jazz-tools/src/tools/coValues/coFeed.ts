@@ -218,13 +218,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   static create<S extends CoFeed>(
     this: CoValueClass<S>,
     init: S extends CoFeed<infer Item> ? Item[] : never,
-    options?:
-      | {
-          owner: Account | Group;
-          configureImplicitGroupOwner?: (newGroup: Group) => void;
-        }
-      | Account
-      | Group,
+    options?: { owner: Account | Group } | Account | Group,
   ) {
     const { owner } = parseCoValueCreateOptions(options);
     const raw = owner.$jazz.raw.createStream();
@@ -748,13 +742,7 @@ export class FileStream extends CoValueBase implements CoValue {
    */
   static create<S extends FileStream>(
     this: CoValueClass<S>,
-    options?:
-      | {
-          owner?: Account | Group;
-          configureImplicitGroupOwner?: (newGroup: Group) => void;
-        }
-      | Account
-      | Group,
+    options?: { owner?: Account | Group } | Account | Group,
   ) {
     const { owner } = parseCoValueCreateOptions(options);
     return new this({ owner });
@@ -884,7 +872,6 @@ export class FileStream extends CoValueBase implements CoValue {
     options?:
       | {
           owner?: Account | Group;
-          configureImplicitGroupOwner?: (newGroup: Group) => void;
           onProgress?: (progress: number) => void;
         }
       | Account
@@ -918,7 +905,6 @@ export class FileStream extends CoValueBase implements CoValue {
     options?:
       | {
           owner?: Account | Group;
-          configureImplicitGroupOwner?: (newGroup: Group) => void;
           onProgress?: (progress: number) => void;
         }
       | Account

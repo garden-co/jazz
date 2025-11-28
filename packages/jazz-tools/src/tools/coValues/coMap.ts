@@ -174,7 +174,6 @@ export class CoMap extends CoValueBase implements CoValue {
     options?:
       | {
           owner?: Account | Group;
-          configureImplicitGroupOwner?: (newGroup: Group) => void;
           unique?: CoValueUniqueness["uniqueness"];
         }
       | Account
@@ -248,7 +247,6 @@ export class CoMap extends CoValueBase implements CoValue {
     options?:
       | {
           owner?: Account | Group;
-          configureImplicitGroupOwner?: (newGroup: Group) => void;
           unique?: CoValueUniqueness["uniqueness"];
         }
       | Account

@@ -13,7 +13,7 @@ import {
   coOptionalDefiner,
   parseSubscribeRestArgs,
   unstable_mergeBranchWithResolve,
-  mergeCreateOptionsWithSchemaPermissions,
+  withDefaultOwner,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoFeedSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
@@ -66,10 +66,7 @@ export class CoFeedSchema<
     init: CoFeedSchemaInit<T>,
     options?: { owner: Account | Group } | Account | Group,
   ): CoFeedInstance<T> {
-    const optionsWithPermissions = mergeCreateOptionsWithSchemaPermissions(
-      options,
-      this.permissions,
-    );
+    const optionsWithPermissions = withDefaultOwner(options, this.permissions);
     return this.coValueClass.create(
       init as any,
       optionsWithPermissions,

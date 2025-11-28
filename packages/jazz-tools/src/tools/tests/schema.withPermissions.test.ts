@@ -93,13 +93,11 @@ describe("Schema.withPermissions()", () => {
     ).toThrow();
   });
 
-  describe("onCreate", () => {
-    describe("allows configuring a CoValue's group when using .create() without providing an explicit owner", () => {
+  describe("default", () => {
+    describe("defines a default owner to be used when no explicit owner is passed to .create()", () => {
       test("for CoMap", async () => {
         const TestMap = co.map({ name: co.plainText() }).withPermissions({
-          onCreate(newGroup) {
-            newGroup.makePublic();
-          },
+          default: () => Group.create().makePublic(),
         });
 
         const map = TestMap.create({ name: "Hi!" });
@@ -114,9 +112,7 @@ describe("Schema.withPermissions()", () => {
 
       test("for CoList", async () => {
         const TestList = co.list(z.string()).withPermissions({
-          onCreate(newGroup) {
-            newGroup.makePublic();
-          },
+          default: () => Group.create().makePublic(),
         });
 
         const list = TestList.create(["a", "b", "c"]);
@@ -130,9 +126,7 @@ describe("Schema.withPermissions()", () => {
 
       test("for CoFeed", async () => {
         const TestFeed = co.feed(z.string()).withPermissions({
-          onCreate(newGroup) {
-            newGroup.makePublic();
-          },
+          default: () => Group.create().makePublic(),
         });
 
         const feed = TestFeed.create(["a", "b", "c"]);
@@ -146,9 +140,7 @@ describe("Schema.withPermissions()", () => {
 
       test("for CoPlainText", async () => {
         const TestPlainText = co.plainText().withPermissions({
-          onCreate(newGroup) {
-            newGroup.makePublic();
-          },
+          default: () => Group.create().makePublic(),
         });
 
         const plainText = TestPlainText.create("Hello");
@@ -162,9 +154,7 @@ describe("Schema.withPermissions()", () => {
 
       test("for CoRichText", async () => {
         const TestRichText = co.richText().withPermissions({
-          onCreate(newGroup) {
-            newGroup.makePublic();
-          },
+          default: () => Group.create().makePublic(),
         });
 
         const richText = TestRichText.create("Hello");
@@ -179,9 +169,7 @@ describe("Schema.withPermissions()", () => {
       describe("for FileStream", async () => {
         test(".create()", async () => {
           const TestFileStream = co.fileStream().withPermissions({
-            onCreate(newGroup) {
-              newGroup.makePublic();
-            },
+            default: () => Group.create().makePublic(),
           });
 
           const fileStream = TestFileStream.create();
@@ -202,9 +190,7 @@ describe("Schema.withPermissions()", () => {
 
         test(".createFromBlob()", async () => {
           const TestFileStream = co.fileStream().withPermissions({
-            onCreate(newGroup) {
-              newGroup.makePublic();
-            },
+            default: () => Group.create().makePublic(),
           });
 
           const blob = new Blob(["test"], { type: "text/plain" });
@@ -225,9 +211,7 @@ describe("Schema.withPermissions()", () => {
 
         test(".createFromArrayBuffer()", async () => {
           const TestFileStream = co.fileStream().withPermissions({
-            onCreate(newGroup) {
-              newGroup.makePublic();
-            },
+            default: () => Group.create().makePublic(),
           });
 
           const arrayBuffer = new TextEncoder().encode("test").buffer;
@@ -254,9 +238,7 @@ describe("Schema.withPermissions()", () => {
 
       test("for CoVector", async () => {
         const TestVector = co.vector(1).withPermissions({
-          onCreate(newGroup) {
-            newGroup.makePublic();
-          },
+          default: () => Group.create().makePublic(),
         });
 
         const vector = TestVector.create([1]);
@@ -269,11 +251,9 @@ describe("Schema.withPermissions()", () => {
       });
     });
 
-    test("configuration callback is not run when providing an explicit owner", async () => {
+    test("the default owner is not used when providing an explicit owner", async () => {
       const TestMap = co.map({ name: co.plainText() }).withPermissions({
-        onCreate(newGroup) {
-          newGroup.makePublic();
-        },
+        default: () => Group.create().makePublic(),
       });
       const map = TestMap.create({ name: "Hi!" }, { owner: Group.create() });
 
