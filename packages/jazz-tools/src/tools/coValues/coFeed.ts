@@ -378,11 +378,13 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
       if (!refId) {
         const newOwnerStrategy =
           itemDescriptor.permissions?.newInlineOwnerStrategy;
+        const onCreate = itemDescriptor.permissions?.onCreate;
         const coValue = instantiateRefEncodedWithInit(
           itemDescriptor,
           item,
           this.owner,
           newOwnerStrategy,
+          onCreate,
         );
         refId = coValue.$jazz.id;
       }

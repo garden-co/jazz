@@ -646,6 +646,87 @@ describe("Schema.withPermissions()", () => {
       onInlineCreate: "extendsContainer",
     });
   });
+
+  describe("onCreate", () => {
+    test("is called when creating a CoValue with .create() without explicit owner", async () => {
+      let onCreateGroup: Group | undefined;
+
+      const TestMap = co.map({ name: co.plainText() }).withPermissions({
+        onCreate(newGroup) {
+          onCreateGroup = newGroup;
+          newGroup.addMember(anotherAccount, "writer");
+        },
+      });
+
+      const map = TestMap.create({ name: "Hello" });
+
+      expect(onCreateGroup).toBeDefined();
+      expect(onCreateGroup?.$jazz.id).toEqual(map.$jazz.owner.$jazz.id);
+      expect(map.$jazz.owner.getRoleOf(anotherAccount.$jazz.id)).toEqual(
+        "writer",
+      );
+    });
+
+    test("is called when creating a CoValue with .create() with explicit owner", async () => {
+      let onCreateCalled = false;
+
+      const TestMap = co.map({ name: co.plainText() }).withPermissions({
+        onCreate() {
+          onCreateCalled = true;
+        },
+      });
+
+      const explicitOwner = Group.create();
+      const map = TestMap.create({ name: "Hello" }, { owner: explicitOwner });
+
+      expect(onCreateCalled).toBe(true);
+      expect(map.$jazz.owner.$jazz.id).toEqual(explicitOwner.$jazz.id);
+    });
+
+    test("is called when creating a CoValue inline", async () => {
+      let onCreateGroup: Group | undefined;
+
+      const TestMap = co.map({
+        name: co.plainText().withPermissions({
+          onCreate(newGroup) {
+            onCreateGroup = newGroup;
+            newGroup.addMember(anotherAccount, "reader");
+          },
+        }),
+      });
+
+      const parentOwner = Group.create({ owner: me });
+      const map = TestMap.create({ name: "Hello" }, { owner: parentOwner });
+
+      expect(onCreateGroup).toBeDefined();
+      expect(onCreateGroup?.$jazz.id).toEqual(map.name.$jazz.owner.$jazz.id);
+      expect(map.name.$jazz.owner.getRoleOf(anotherAccount.$jazz.id)).toEqual(
+        "reader",
+      );
+    });
+
+    test("works with onInlineCreate", async () => {
+      let onCreateCalled = false;
+
+      const TestMap = co.map({
+        name: co.plainText().withPermissions({
+          onCreate(newGroup) {
+            onCreateCalled = true;
+            newGroup.addMember(anotherAccount, "reader");
+          },
+          onInlineCreate: "extendsContainer",
+        }),
+      });
+
+      const parentOwner = Group.create({ owner: me });
+      const map = TestMap.create({ name: "Hello" }, { owner: parentOwner });
+
+      expect(onCreateCalled).toBe(true);
+      expect(map.name.$jazz.owner.getRoleOf(anotherAccount.$jazz.id)).toEqual(
+        "reader",
+      );
+    });
+  });
 });
 
 describe("setDefaultSchemaPermissions", () => {

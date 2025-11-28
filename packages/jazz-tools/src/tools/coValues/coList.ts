@@ -918,11 +918,13 @@ function toRawItems<Item>(
       if (!refId) {
         const newOwnerStrategy =
           itemDescriptor.permissions?.newInlineOwnerStrategy;
+        const onCreate = itemDescriptor.permissions?.onCreate;
         const coValue = instantiateRefEncodedWithInit(
           itemDescriptor,
           value,
           owner,
           newOwnerStrategy,
+          onCreate,
         );
         refId = coValue.$jazz.id;
       }

@@ -6,7 +6,7 @@ import {
   MaybeLoaded,
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
-  withDefaultOwner,
+  withSchemaPermissions,
 } from "../../../internal.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreCoValueSchema } from "./CoValueSchema.js";
@@ -43,7 +43,10 @@ export class FileStreamSchema implements CoreFileStreamSchema {
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
   create(options?: { owner: Account | Group } | Account | Group): FileStream;
   create(options?: { owner: Account | Group } | Account | Group): FileStream {
-    const optionsWithPermissions = withDefaultOwner(options, this.permissions);
+    const optionsWithPermissions = withSchemaPermissions(
+      options,
+      this.permissions,
+    );
     return this.coValueClass.create(optionsWithPermissions);
   }
 
@@ -71,7 +74,10 @@ export class FileStreamSchema implements CoreFileStreamSchema {
       | Account
       | Group,
   ): Promise<FileStream> {
-    const optionsWithPermissions = withDefaultOwner(options, this.permissions);
+    const optionsWithPermissions = withSchemaPermissions(
+      options,
+      this.permissions,
+    );
     return this.coValueClass.createFromBlob(blob, optionsWithPermissions);
   }
 
@@ -87,7 +93,10 @@ export class FileStreamSchema implements CoreFileStreamSchema {
       | Account
       | Group,
   ) {
-    const optionsWithPermissions = withDefaultOwner(options, this.permissions);
+    const optionsWithPermissions = withSchemaPermissions(
+      options,
+      this.permissions,
+    );
     return this.coValueClass.createFromArrayBuffer(
       arrayBuffer,
       mimeType,

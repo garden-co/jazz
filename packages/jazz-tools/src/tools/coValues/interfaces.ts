@@ -14,6 +14,7 @@ import {
   Group,
   Loaded,
   MaybeLoaded,
+  OnCreateCallback,
   RefsToResolve,
   RefsToResolveStrict,
   RegisteredSchemas,
@@ -430,6 +431,7 @@ export function parseCoValueCreateOptions(
     | {
         owner?: Account | Group;
         unique?: CoValueUniqueness["uniqueness"];
+        onCreate?: OnCreateCallback;
       }
     | Account
     | Group
@@ -438,15 +440,22 @@ export function parseCoValueCreateOptions(
   owner: Group;
   uniqueness?: CoValueUniqueness;
 } {
+  const onCreate =
+    options && "onCreate" in options ? options.onCreate : undefined;
   const Group = RegisteredSchemas["Group"];
   if (!options) {
-    return { owner: Group.create(), uniqueness: undefined };
+    const owner = Group.create();
+    onCreate?.(owner);
+    return { owner, uniqueness: undefined };
   }
 
   if (TypeSym in options) {
     if (options[TypeSym] === "Account") {
-      return { owner: accountOrGroupToGroup(options), uniqueness: undefined };
+      const owner = accountOrGroupToGroup(options);
+      onCreate?.(owner);
+      return { owner, uniqueness: undefined };
     } else if (options[TypeSym] === "Group") {
+      onCreate?.(options);
       return { owner: options, uniqueness: undefined };
     }
   }
@@ -455,10 +464,14 @@ export function parseCoValueCreateOptions(
     ? { uniqueness: options.unique }
     : undefined;
 
+  const owner = options.owner
+    ? accountOrGroupToGroup(options.owner)
+    : Group.create();
+
+  onCreate?.(owner);
+
   const opts = {
-    owner: options.owner
-      ? accountOrGroupToGroup(options.owner)
-      : Group.create(),
+    owner,
     uniqueness,
   };
   return opts;

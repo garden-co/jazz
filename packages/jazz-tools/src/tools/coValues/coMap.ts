@@ -300,11 +300,13 @@ export class CoMap extends CoValueBase implements CoValue {
             if (!refId) {
               const newOwnerStrategy =
                 descriptor.permissions?.newInlineOwnerStrategy;
+              const onCreate = descriptor.permissions?.onCreate;
               const coValue = instantiateRefEncodedWithInit(
                 descriptor,
                 initValue,
                 owner,
                 newOwnerStrategy,
+                onCreate,
               );
               refId = coValue.$jazz.id;
             }
@@ -615,11 +617,13 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
         if (!refId) {
           const newOwnerStrategy =
             descriptor.permissions?.newInlineOwnerStrategy;
+          const onCreate = descriptor.permissions?.onCreate;
           const coValue = instantiateRefEncodedWithInit(
             descriptor,
             value,
             this.owner,
             newOwnerStrategy,
+            onCreate,
           );
           refId = coValue.$jazz.id;
         }
