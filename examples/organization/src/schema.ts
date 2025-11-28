@@ -53,10 +53,7 @@ export const JazzAccountRoot = co.map({
 export const JazzAccount = co
   .account({
     profile: co.profile().withPermissions({
-      default: (newGroup) => {
-        newGroup.addMember("everyone", "reader");
-      },
-      onInlineCreate: (newGroup) => {
+      onCreate: (newGroup) => {
         newGroup.addMember("everyone", "reader");
       },
     }),
