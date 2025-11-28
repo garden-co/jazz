@@ -26,7 +26,7 @@ This quickstart guide will take you from an empty project to a server worker whi
   </TabbedCodeGroupItem>
   <TabbedCodeGroupItem label="pnpm">
   ```sh
-  pnpm create-next-app@latest --typescript jazzfest
+  pnpm create vite@latest jazzfest -- --template vanilla-ts
   cd jazzfest
   ```
   </TabbedCodeGroupItem>
@@ -134,9 +134,10 @@ You can copy the output of this command and paste it directly into your `.env` f
 <TabbedCodeGroup id="worker-env-vars" default="react" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="Vanilla" icon={<VanillaLogo />} value="vanilla" preferWrap>
 ```bash
+# Note that you will likely need to set up your env vars so they are readable by both your front AND backend. Check your server's docs.
 VITE_JAZZ_API_KEY=you@example.com # or your API key
 #[!code ++:2]
-JAZZ_WORKER_ACCOUNT=co_z...
+VITE_JAZZ_WORKER_ACCOUNT=co_z...
 JAZZ_WORKER_SECRET=sealerSecret_z.../signerSecret_z...
 ```
 </TabbedCodeGroupItem>
@@ -166,7 +167,7 @@ JAZZ_WORKER_SECRET=sealerSecret_z.../signerSecret_z...
 Next, we're going to set up an HTTP request schema to define our request and response. Here, we tell Jazz that we will send a `Band` under the key `band` and expect a `bandList` in response, which is a list of `Band`s.
 
 We also need to tell Jazz which keys should be treated as loaded in the request and response using the `resolve` query.
-<ContentByFramework framework="react" savedPreferenceKey="framework">
+<ContentByFramework framework="vanilla" savedPreferenceKey="framework">
 <FileName>announceBandSchema.ts</FileName>
 </ContentByFramework>
 <ContentByFramework framework="react" savedPreferenceKey="framework">
