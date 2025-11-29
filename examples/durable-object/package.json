@@ -1,6 +1,6 @@
 {
   "name": "durable-object",
-  "version": "0.0.14",
+  "version": "0.0.15",
   "private": true,
   "scripts": {
     "deploy": "wrangler deploy",
