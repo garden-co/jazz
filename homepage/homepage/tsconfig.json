@@ -32,5 +32,5 @@
     "lib/docNavigationItems.js",
     "app/api/opengraph-image/route.ts"
   ],
-  "exclude": ["node_modules", "content/docs/code-snippets"]
+  "exclude": ["node_modules", "content/docs/code-snippets", "**/*test*/**"]
 }
