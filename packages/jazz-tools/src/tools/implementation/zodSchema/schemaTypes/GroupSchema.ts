@@ -6,7 +6,7 @@ import {
 } from "../../../coValues/interfaces.js";
 import {
   Account,
-  MaybeLoaded,
+  Settled,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
@@ -52,7 +52,7 @@ export class GroupSchema implements CoreGroupSchema {
       loadAs?: Account;
       resolve?: RefsToResolveStrict<Group, R>;
     },
-  ): Promise<MaybeLoaded<Group>> {
+  ): Promise<Settled<Group>> {
     return Group.load(id, options);
   }
   createInvite<G extends Group>(

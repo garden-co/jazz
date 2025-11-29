@@ -14,6 +14,7 @@ import {
   CoValueLoadingState,
   exportCoValue,
   importContentPieces,
+  Inaccessible,
 } from "../internal.js";
 import { createJazzTestAccount, linkAccounts } from "../testing.js";
 
@@ -663,7 +664,7 @@ describe("JazzRequestError handling", () => {
             createUnloadedCoValue(
               "some-covalue-id",
               CoValueLoadingState.UNAVAILABLE,
-            ),
+            ) as Inaccessible<Account>,
           );
 
           return userRequest.handle(request, worker, async () => {

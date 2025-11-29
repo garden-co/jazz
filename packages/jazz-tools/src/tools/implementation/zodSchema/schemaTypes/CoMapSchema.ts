@@ -6,7 +6,7 @@ import {
   DiscriminableCoValueSchemaDefinition,
   DiscriminableCoreCoValueSchema,
   Group,
-  MaybeLoaded,
+  Settled,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
@@ -97,7 +97,7 @@ export class CoMapSchema<
       unstable_branch?: BranchDefinition;
     },
   ): Promise<
-    MaybeLoaded<
+    Settled<
       Resolved<Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap, R>
     >
   > {
@@ -183,7 +183,7 @@ export class CoMapSchema<
       R
     >;
   }): Promise<
-    MaybeLoaded<
+    Settled<
       Resolved<Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap, R>
     >
   > {
@@ -210,7 +210,7 @@ export class CoMapSchema<
       loadAs?: Account | AnonymousJazzAgent;
     },
   ): Promise<
-    MaybeLoaded<
+    Settled<
       Resolved<Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap, R>
     >
   > {

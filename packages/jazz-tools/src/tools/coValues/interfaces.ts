@@ -13,7 +13,9 @@ import {
   NotLoadedCoValueState,
   type Group,
   Loaded,
+  Inaccessible,
   MaybeLoaded,
+  Settled,
   RefsToResolve,
   RefsToResolveStrict,
   RegisteredSchemas,
@@ -145,7 +147,7 @@ export function loadCoValueWithoutMe<
     skipRetry?: boolean;
     unstable_branch?: BranchDefinition;
   },
-): Promise<MaybeLoaded<Resolved<V, R>>> {
+): Promise<Settled<Resolved<V, R>>> {
   return loadCoValue(cls, id, {
     ...options,
     loadAs: options?.loadAs ?? activeAccountContext.get(),
@@ -165,7 +167,7 @@ export function loadCoValue<
     skipRetry?: boolean;
     unstable_branch?: BranchDefinition;
   },
-): Promise<MaybeLoaded<Resolved<V, R>>> {
+): Promise<Settled<Resolved<V, R>>> {
   return new Promise((resolve) => {
     subscribeToCoValue<V, R>(
       cls,
@@ -302,8 +304,8 @@ export function subscribeToCoValue<
   options: {
     resolve?: RefsToResolveStrict<V, R>;
     loadAs: Account | AnonymousJazzAgent;
-    onUnavailable?: (value: NotLoaded<V>) => void;
-    onUnauthorized?: (value: NotLoaded<V>) => void;
+    onUnavailable?: (value: Inaccessible<V>) => void;
+    onUnauthorized?: (value: Inaccessible<V>) => void;
     syncResolution?: boolean;
     skipRetry?: boolean;
     unstable_branch?: BranchDefinition;
@@ -342,7 +344,7 @@ export function subscribeToCoValue<
 
     switch (value.$jazz.loadingState) {
       case CoValueLoadingState.UNAVAILABLE:
-        options.onUnavailable?.(value);
+        options.onUnavailable?.(value as Inaccessible<V>);
 
         // Don't log unavailable errors when `loadUnique` or `upsertUnique` are used
         if (!options.skipRetry) {
@@ -350,7 +352,7 @@ export function subscribeToCoValue<
         }
         break;
       case CoValueLoadingState.UNAUTHORIZED:
-        options.onUnauthorized?.(value);
+        options.onUnauthorized?.(value as Inaccessible<V>);
         console.error(value.toString());
         break;
     }
@@ -546,7 +548,7 @@ export async function internalLoadUnique<
     owner: Account | Group;
     resolve?: RefsToResolveStrict<V, R>;
   },
-): Promise<MaybeLoaded<Resolved<V, R>>> {
+): Promise<Settled<Resolved<V, R>>> {
   const loadAs = options.owner.$jazz.loadedAs;
 
   const node =

@@ -14,11 +14,13 @@ import {
   CoList,
   Loaded,
   MaybeLoaded,
+  Settled,
   NotLoaded,
   co,
   randomSessionProvider,
   CoValueLoadingState,
   NotLoadedCoValueState,
+  CoValueErrorState,
 } from "../internal.js";
 import { createJazzTestAccount, linkAccounts } from "../testing.js";
 import { assertLoaded, waitFor } from "./utils.js";
@@ -345,7 +347,7 @@ test("Deep loading a record-like coMap", async () => {
     },
   });
   expectTypeOf(recordLoaded).branded.toEqualTypeOf<
-    MaybeLoaded<
+    Settled<
       Loaded<typeof RecordLike> & {
         readonly [key: string]: Loaded<typeof TestMap> & {
           readonly list: Loaded<typeof TestList> &
@@ -1229,7 +1231,7 @@ describe("$isLoaded", async () => {
 
   const map = TestMap.create({ list: [] }, { owner: me });
 
-  test("$isLoaded narrows MaybeLoaded to loaded CoValue", async () => {
+  test("$isLoaded narrows a maybe-loaded CoValue to a loaded CoValue", async () => {
     const maybeLoadedMap = await TestMap.load(map.$jazz.id, {
       loadAs: me,
     });
@@ -1244,19 +1246,18 @@ describe("$isLoaded", async () => {
     } else {
       expectTypeOf(
         maybeLoadedMap.$jazz.loadingState,
-      ).toEqualTypeOf<NotLoadedCoValueState>();
+      ).toEqualTypeOf<CoValueErrorState>();
     }
   });
 
-  test("$isLoaded narrows MaybeLoaded to not loaded CoValue", async () => {
+  test("$isLoaded narrows a maybe-loaded CoValue to a not loaded CoValue", async () => {
     const otherAccount = await Account.create({
       creationProps: { name: "Other Account" },
       crypto: Crypto,
     });
-    const unloadedMap: MaybeLoaded<Loaded<typeof TestMap>> = await TestMap.load(
-      map.$jazz.id,
-      { loadAs: otherAccount },
-    );
+    const unloadedMap = await TestMap.load(map.$jazz.id, {
+      loadAs: otherAccount,
+    });
 
     expect(unloadedMap.$isLoaded).toBe(false);
     if (!unloadedMap.$isLoaded) {

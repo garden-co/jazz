@@ -5,7 +5,7 @@ import {
   CoMapSchemaDefinition,
   coOptionalDefiner,
   Group,
-  MaybeLoaded,
+  Settled,
   RefsToResolveStrict,
   RefsToResolve,
   Resolved,
@@ -84,7 +84,7 @@ export class AccountSchema<
       loadAs?: Account | AnonymousJazzAgent;
       resolve?: RefsToResolveStrict<AccountSchema<Shape>, R>;
     },
-  ): Promise<MaybeLoaded<Loaded<AccountSchema<Shape>, R>>> {
+  ): Promise<Settled<Loaded<AccountSchema<Shape>, R>>> {
     // @ts-expect-error
     return this.coValueClass.load(
       id,

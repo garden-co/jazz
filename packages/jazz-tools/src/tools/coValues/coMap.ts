@@ -18,7 +18,7 @@ import {
   getCoValueOwner,
   Group,
   ID,
-  MaybeLoaded,
+  Settled,
   PartialOnUndefined,
   RefEncoded,
   RefIfCoValue,
@@ -377,7 +377,7 @@ export class CoMap extends CoValueBase implements CoValue {
       loadAs?: Account | AnonymousJazzAgent;
       skipRetry?: boolean;
     },
-  ): Promise<MaybeLoaded<Resolved<M, R>>> {
+  ): Promise<Settled<Resolved<M, R>>> {
     return loadCoValueWithoutMe(this, id, options);
   }
 
@@ -494,7 +494,7 @@ export class CoMap extends CoValueBase implements CoValue {
       owner: Account | Group;
       resolve?: RefsToResolveStrict<M, R>;
     },
-  ): Promise<MaybeLoaded<Resolved<M, R>>> {
+  ): Promise<Settled<Resolved<M, R>>> {
     const header = CoMap._getUniqueHeader(
       options.unique,
       options.owner.$jazz.id,
@@ -536,7 +536,7 @@ export class CoMap extends CoValueBase implements CoValue {
       resolve?: RefsToResolveStrict<M, R>;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<MaybeLoaded<Resolved<M, R>>> {
+  ): Promise<Settled<Resolved<M, R>>> {
     const header = CoMap._getUniqueHeader(unique, ownerID);
 
     const owner = await Group.load(ownerID, {

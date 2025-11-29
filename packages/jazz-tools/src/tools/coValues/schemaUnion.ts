@@ -10,7 +10,7 @@ import {
   CoValueJazzApi,
   Group,
   ID,
-  MaybeLoaded,
+  Settled,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
@@ -162,7 +162,7 @@ export abstract class SchemaUnion extends CoValueBase implements CoValue {
       loadAs?: Account | AnonymousJazzAgent;
       skipRetry?: boolean;
     },
-  ): Promise<MaybeLoaded<Resolved<M, R>>> {
+  ): Promise<Settled<Resolved<M, R>>> {
     return loadCoValueWithoutMe(this, id, options);
   }
 
