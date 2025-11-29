@@ -1,0 +1,14 @@
+```ts
+import { Chair } from "./chairSchema";
+
+const chair = await Chair.load(
+  "co_z8ZXz8GgbdHZ"
+);
+
+chair.$jazz.set("color", "amber");
+
+
+
+// some more time later
+chair.$jazz.set("color", "bleen");
+```

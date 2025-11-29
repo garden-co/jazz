@@ -1,0 +1,12 @@
+```ts
+import { Chair } from "./chairSchema";
+
+const chair = Chair.create({
+  color: "red",
+  height: 16,
+});
+
+console.log(chair.color, chair.$jazz.id);
+
+chair.$jazz.set("height", "17");
+```
