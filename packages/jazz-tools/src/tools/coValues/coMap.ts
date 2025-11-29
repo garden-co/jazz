@@ -174,6 +174,7 @@ export class CoMap extends CoValueBase implements CoValue {
     options?:
       | {
           owner?: Account | Group;
+          configureImplicitGroupOwner?: (newGroup: Group) => void;
           unique?: CoValueUniqueness["uniqueness"];
         }
       | Account
@@ -247,6 +248,7 @@ export class CoMap extends CoValueBase implements CoValue {
     options?:
       | {
           owner?: Account | Group;
+          configureImplicitGroupOwner?: (newGroup: Group) => void;
           unique?: CoValueUniqueness["uniqueness"];
         }
       | Account
@@ -298,10 +300,13 @@ export class CoMap extends CoValueBase implements CoValue {
           if (initValue != null) {
             let refId = (initValue as unknown as CoValue).$jazz?.id;
             if (!refId) {
+              const newOwnerStrategy =
+                descriptor.permissions?.newInlineOwnerStrategy;
               const coValue = instantiateRefEncodedWithInit(
                 descriptor,
                 initValue,
                 owner,
+                newOwnerStrategy,
               );
               refId = coValue.$jazz.id;
             }
@@ -610,10 +615,13 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
         this.raw.set(key, null);
       } else {
         if (!refId) {
+          const newOwnerStrategy =
+            descriptor.permissions?.newInlineOwnerStrategy;
           const coValue = instantiateRefEncodedWithInit(
             descriptor,
             value,
             this.owner,
+            newOwnerStrategy,
           );
           refId = coValue.$jazz.id;
         }

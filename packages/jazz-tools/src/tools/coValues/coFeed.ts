@@ -31,8 +31,6 @@ import {
   SubscribeRestArgs,
   TypeSym,
   BranchDefinition,
-} from "../internal.js";
-import {
   Account,
   CoValueBase,
   CoValueJazzApi,
@@ -220,7 +218,13 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   static create<S extends CoFeed>(
     this: CoValueClass<S>,
     init: S extends CoFeed<infer Item> ? Item[] : never,
-    options?: { owner: Account | Group } | Account | Group,
+    options?:
+      | {
+          owner: Account | Group;
+          configureImplicitGroupOwner?: (newGroup: Group) => void;
+        }
+      | Account
+      | Group,
   ) {
     const { owner } = parseCoValueCreateOptions(options);
     const raw = owner.$jazz.raw.createStream();
@@ -378,10 +382,13 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
     } else if (isRefEncoded(itemDescriptor)) {
       let refId = (item as unknown as CoValue).$jazz?.id;
       if (!refId) {
+        const newOwnerStrategy =
+          itemDescriptor.permissions?.newInlineOwnerStrategy;
         const coValue = instantiateRefEncodedWithInit(
           itemDescriptor,
           item,
           this.owner,
+          newOwnerStrategy,
         );
         refId = coValue.$jazz.id;
       }
@@ -719,6 +726,7 @@ export class FileStream extends CoValueBase implements CoValue {
    *
    * @param options - Configuration options for the new FileStream
    * @param options.owner - The Account or Group that will own this FileStream and control access rights
+   * @param schemaConfiguration - Internal schema configuration
    *
    * @example
    * ```typescript
@@ -740,9 +748,16 @@ export class FileStream extends CoValueBase implements CoValue {
    */
   static create<S extends FileStream>(
     this: CoValueClass<S>,
-    options?: { owner?: Account | Group } | Account | Group,
+    options?:
+      | {
+          owner?: Account | Group;
+          configureImplicitGroupOwner?: (newGroup: Group) => void;
+        }
+      | Account
+      | Group,
   ) {
-    return new this(parseCoValueCreateOptions(options));
+    const { owner } = parseCoValueCreateOptions(options);
+    return new this({ owner });
   }
 
   getMetadata(): BinaryStreamInfo | undefined {
@@ -869,6 +884,7 @@ export class FileStream extends CoValueBase implements CoValue {
     options?:
       | {
           owner?: Account | Group;
+          configureImplicitGroupOwner?: (newGroup: Group) => void;
           onProgress?: (progress: number) => void;
         }
       | Account
@@ -902,6 +918,7 @@ export class FileStream extends CoValueBase implements CoValue {
     options?:
       | {
           owner?: Account | Group;
+          configureImplicitGroupOwner?: (newGroup: Group) => void;
           onProgress?: (progress: number) => void;
         }
       | Account

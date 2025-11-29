@@ -11,7 +11,7 @@ import {
   CoValueClassOrSchema,
   CoValueLoadingState,
   NotLoadedCoValueState,
-  type Group,
+  Group,
   Loaded,
   MaybeLoaded,
   RefsToResolve,
@@ -428,6 +428,7 @@ export function parseCoValueCreateOptions(
   options:
     | {
         owner?: Account | Group;
+        configureImplicitGroupOwner?: (newGroup: Group) => void;
         unique?: CoValueUniqueness["uniqueness"];
       }
     | Account
@@ -437,10 +438,19 @@ export function parseCoValueCreateOptions(
   owner: Group;
   uniqueness?: CoValueUniqueness;
 } {
-  const Group = RegisteredSchemas["Group"];
+  const configureImplicitGroupOwner =
+    options && "configureImplicitGroupOwner" in options
+      ? options.configureImplicitGroupOwner
+      : undefined;
+  const createNewGroup = () => {
+    const newGroup = Group.create();
+    configureImplicitGroupOwner?.(newGroup);
+    return newGroup;
+  };
 
+  const Group = RegisteredSchemas["Group"];
   if (!options) {
-    return { owner: Group.create(), uniqueness: undefined };
+    return { owner: createNewGroup(), uniqueness: undefined };
   }
 
   if (TypeSym in options) {
@@ -458,7 +468,7 @@ export function parseCoValueCreateOptions(
   const opts = {
     owner: options.owner
       ? accountOrGroupToGroup(options.owner)
-      : Group.create(),
+      : createNewGroup(),
     uniqueness,
   };
   return opts;

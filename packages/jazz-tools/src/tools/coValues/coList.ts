@@ -26,8 +26,6 @@ import {
   getIdFromHeader,
   internalLoadUnique,
   CoValueLoadingState,
-} from "../internal.js";
-import {
   AnonymousJazzAgent,
   ItemsSym,
   Ref,
@@ -167,13 +165,14 @@ export class CoList<out Item = any>
     options?:
       | {
           owner: Account | Group;
+          configureImplicitGroupOwner?: (newGroup: Group) => void;
           unique?: CoValueUniqueness["uniqueness"];
         }
       | Account
       | Group,
   ) {
-    const { owner, uniqueness } = parseCoValueCreateOptions(options);
     const instance = new this();
+    const { owner, uniqueness } = parseCoValueCreateOptions(options);
 
     Object.defineProperties(instance, {
       $jazz: {
@@ -918,10 +917,13 @@ function toRawItems<Item>(
       }
       let refId = (value as unknown as CoValue).$jazz?.id;
       if (!refId) {
+        const newOwnerStrategy =
+          itemDescriptor.permissions?.newInlineOwnerStrategy;
         const coValue = instantiateRefEncodedWithInit(
           itemDescriptor,
           value,
           owner,
+          newOwnerStrategy,
         );
         refId = coValue.$jazz.id;
       }

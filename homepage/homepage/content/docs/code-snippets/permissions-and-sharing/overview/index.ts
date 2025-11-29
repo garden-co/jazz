@@ -74,3 +74,34 @@ if (alice.$isLoaded) {
   }
 }
 // #endregion
+
+// #region DefinePermissionsAtSchemaLevel
+const Dog = co.map({
+  name: z.string(),
+}).withPermissions({
+  onInlineCreate: "sameAsContainer",
+});
+const Person = co.map({
+  pet: Dog,
+}).withPermissions({
+  onCreate(newGroup) {
+    newGroup.makePublic();
+  }
+});
+
+// All Person CoValues will be public, and each Dog CoValue will share the same owner
+// as the Person that references it.
+const person = Person.create({
+  pet: {
+    name: "Rex",
+  },
+});
+// #endregion
+
+// #region SetDefaultSchemaPermissions
+import { setDefaultSchemaPermissions } from "jazz-tools";
+
+setDefaultSchemaPermissions({
+  onInlineCreate: "sameAsContainer",
+});
+// #endregion

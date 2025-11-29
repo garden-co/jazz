@@ -1,4 +1,3 @@
-import { Group } from "jazz-tools";
 import { useAccount, useCoState } from "jazz-tools/react";
 import { useState } from "react";
 import { useNavigate } from "react-router";
@@ -27,19 +26,11 @@ export function CreateOrganization() {
       return;
     }
 
-    const group = Group.create();
-
     me.root.organizations.$jazz.push(draft as Organization);
 
-    me.root.$jazz.set(
-      "draftOrganization",
-      DraftOrganization.create(
-        {
-          projects: [],
-        },
-        { owner: group },
-      ),
-    );
+    me.root.$jazz.set("draftOrganization", {
+      projects: [],
+    });
 
     navigate(`/organizations/${draft.$jazz.id}`);
   };
