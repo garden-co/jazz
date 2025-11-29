@@ -1,3 +1,5 @@
+import type { CoValue, CoValueClass } from "../../../coValues/interfaces.js";
+
 /**
  * "Core" CoValue schemas contain all data necessary to represent a CoValue schema.
  * Behavior is provided by CoValue schemas that extend "core" CoValue schema data structures.
@@ -17,6 +19,10 @@ export interface CoreCoValueSchema {
   builtin: string;
 
   resolveQuery: CoreResolveQuery;
+}
+
+export interface HydratedCoValueSchema extends CoreCoValueSchema {
+  getCoValueClass: () => CoValueClass<CoValue>;
 }
 
 /**
