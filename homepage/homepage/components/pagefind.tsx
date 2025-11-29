@@ -62,10 +62,10 @@ const processSubUrl = (url: string): { path: string; hash: string } => {
   return { path, hash };
 };
 
-const navigateToUrl = (url: string, close: () => void) => {
+const navigateToUrl = (url: string, close: (resultSelected: boolean) => void) => {
   if (!url) return;
   window.location.href = `${window.location.origin}${url}`;
-  close();
+  close(true);
 };
 
 const alternativeKeywordsByFramework: Partial<Record<Framework, string[]>> = {
@@ -174,8 +174,8 @@ export function PagefindSearch() {
   const { framework: currentFramework } = useFramework();
   const pathname = usePathname();
   const [success, setSuccess] = useState(false);
-  const close = () => {
-    if (!success) {
+  const close = (resultSelected: boolean = false) => {
+    if (!resultSelected && !success) {
       track("Docs search - no result", { query, source: pathname });
     }
     setSuccess(false);
@@ -273,13 +273,12 @@ export function PagefindSearch() {
                 const { path, hash } = processSubUrl(result.url);
                 url = `${path}${hash}`;
               }
-              setSuccess(true);
-              navigateToUrl(url, close);
               track("Docs search", {
                 query,
                 destination: url,
                 source: pathname,
               });
+              navigateToUrl(url, close);
             }
           }}
         >
