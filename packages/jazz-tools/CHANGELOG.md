@@ -1,5 +1,14 @@
 # jazz-tools
 
+## 0.19.7
+
+### Patch Changes
+
+- e113a79: Avoid migrating unauthorized CoValues
+  - cojson@0.19.7
+  - cojson-storage-indexeddb@0.19.7
+  - cojson-transport-ws@0.19.7
+
 ## 0.19.6
 
 ### Patch Changes

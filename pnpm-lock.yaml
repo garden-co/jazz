@@ -147,7 +147,7 @@ importers:
         version: link:../packages/cojson
       cojson-latest:
         specifier: npm:cojson@latest
-        version: cojson@0.19.5
+        version: cojson@0.19.6
       cronometro:
         specifier: ^5.3.0
         version: 5.3.0
@@ -156,7 +156,7 @@ importers:
         version: link:../packages/jazz-tools
       jazz-tools-latest:
         specifier: npm:jazz-tools@latest
-        version: jazz-tools@0.19.5(24043b7f0320f7f00ff0c02eeb858bba)
+        version: jazz-tools@0.19.6(24043b7f0320f7f00ff0c02eeb858bba)
       vitest:
         specifier: catalog:default
         version: 3.2.4(@types/debug@4.1.12)(@types/node@24.10.0)(@vitest/browser@3.2.4)(@vitest/ui@3.2.4)(happy-dom@20.0.7)(jiti@2.5.1)(jsdom@25.0.1)(lightningcss@1.30.2)(msw@2.10.4(@types/node@24.10.0)(typescript@5.9.2))(terser@5.44.1)(tsx@4.20.3)(yaml@2.8.1)
@@ -2317,22 +2317,22 @@ importers:
         specifier: ^0.25.5
         version: 0.25.8(effect@3.11.9)
       cojson:
-        specifier: workspace:0.19.6
+        specifier: workspace:0.19.7
         version: link:../cojson
       cojson-storage-sqlite:
-        specifier: workspace:0.19.6
+        specifier: workspace:0.19.7
         version: link:../cojson-storage-sqlite
       cojson-transport-ws:
-        specifier: workspace:0.19.6
+        specifier: workspace:0.19.7
         version: link:../cojson-transport-ws
       effect:
         specifier: ^3.6.5
         version: 3.11.9
       jazz-tools:
-        specifier: workspace:0.19.6
+        specifier: workspace:0.19.7
         version: link:../jazz-tools
       jazz-webhook:
-        specifier: workspace:0.19.6
+        specifier: workspace:0.19.7
         version: link:../jazz-webhook
       ws:
         specifier: ^8.14.2
@@ -10644,67 +10644,67 @@ packages:
   code-block-writer@13.0.3:
     resolution: {integrity: sha512-Oofo0pq3IKnsFtuHqSF7TqBfr71aeyZDVJ0HpmqB7FBM2qEigL0iPONSCZSO9pE9dZTAxANe5XHG9Uy0YMv8cg==}
 
-  cojson-core-napi-darwin-arm64@0.19.5:
-    resolution: {integrity: sha512-SRy+pepNhOHakAhPn2wthK6HnAH8FmYNLXmdMQsYgmieQzIFr2SIU2yelk4BoQb1++K+kl76jCkwv7kgE8XY2A==}
+  cojson-core-napi-darwin-arm64@0.19.6:
+    resolution: {integrity: sha512-nz4+P9MCUYP2Bm8uSxNUq1P9J5q93lAv1paQi/Tt2tPjBDXVEWIkj+1ja35X2pE7EKUUFKzv0Zugz6xkfkBNbA==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [arm64]
     os: [darwin]
 
-  cojson-core-napi-darwin-x64@0.19.5:
-    resolution: {integrity: sha512-aj8YGxsfQ0BPyeeScTvmqb83li/cL7IO1+4NrV6aXfZrhxfV84nMHPQ+Ngs/qtWanmP3Juk4ViPkAlFCDXk7WA==}
+  cojson-core-napi-darwin-x64@0.19.6:
+    resolution: {integrity: sha512-uweqkFLaOwwrpKqVaC2tlBSliTwc6poO0gDIYap/7GPdKbM9DghQnB178fbfGbCjwntBkjmKSo1Eer6/mfp5uw==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [x64]
     os: [darwin]
 
-  cojson-core-napi-linux-arm-gnueabihf@0.19.5:
-    resolution: {integrity: sha512-QW1AcZTEHogY1OooW7QpJpmm66Oj/AEg32S/Qlck68+tKC570buqHl0Snll5AUw9fwePrrCUFzcxJ7Evh0f1nA==}
+  cojson-core-napi-linux-arm-gnueabihf@0.19.6:
+    resolution: {integrity: sha512-HCRT7m5c6vfUERWsSvKrLeExYz5ju/RuACuyaCDB4QWT7IqKF4X5D+HNt137w5lqp1rCzY5TrbsrmlSoC22BDA==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [arm]
     os: [linux]
 
-  cojson-core-napi-linux-arm64-gnu@0.19.5:
-    resolution: {integrity: sha512-cY9CMykyT0ye4c2gYPUoDIg3js981LUeQv5eEAbBsCpMzOI8rjVotVm7kTYZJXNsNQTmrJQ6nkPfFi2fPnBCgA==}
+  cojson-core-napi-linux-arm64-gnu@0.19.6:
+    resolution: {integrity: sha512-b2jP71Fp2+iEgmIZXbEcOlU6Cx5D5Oat0nj5P2PtPr2MfWvLLNk8OTnPkp4ppI2wz3rFJwzfxhIrl9dEWPhlWw==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
-  cojson-core-napi-linux-arm64-musl@0.19.5:
-    resolution: {integrity: sha512-nPpGEvHFGrhCPRkMwppCZ9xMVmYe1I3G4Zf3ilE8obzCCX+ut5QyEYNItl9dQEfDYdgwYoM5POVpNheNLXcEIw==}
+  cojson-core-napi-linux-arm64-musl@0.19.6:
+    resolution: {integrity: sha512-noBqMO8i4C40oBXjKa5qWBOApylYPwEiXV+Qj52iUvFm8eWiKIjURCoPwDtC2APF/CNRIkCh3XAI+Fd/Iza4aw==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [arm64]
     os: [linux]
     libc: [musl]
 
-  cojson-core-napi-linux-x64-gnu@0.19.5:
-    resolution: {integrity: sha512-fz+AqGhhXb6dq/aUeuVXqYb4/TnPj4bR5q8MUjZvW2RtrWeOuHjeqxYhwe79vJIGdFchf3NeoGiSHzsTTiH+CQ==}
+  cojson-core-napi-linux-x64-gnu@0.19.6:
+    resolution: {integrity: sha512-lmlnfF3N86ShqJKAmeko7dFrv2xjM6a5xTnrBwiCyb0Fiu+QnBV+jr1paM+r9BQVFbwfeyRBy5zBco432WC3ug==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
 
-  cojson-core-napi-linux-x64-musl@0.19.5:
-    resolution: {integrity: sha512-U5pMEjtwAeSuMJ0DzRW0vzTuNcIPgsgelV5X3C4LfR8u/oLNye8+qSkwfuDqMCH31ejH2AYJsH/hRULTo7V5Cw==}
+  cojson-core-napi-linux-x64-musl@0.19.6:
+    resolution: {integrity: sha512-SZUcjwDQKj83iG3fJf+HCHgroOxDGws1yX4elxD4HM5RHIRNg/f6KuPAuVYX+/09hRuItfnC7FS72SFXbGpsXQ==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [x64]
     os: [linux]
     libc: [musl]
 
-  cojson-core-napi@0.19.5:
-    resolution: {integrity: sha512-QhYxpH2nrK7p663x3sgXjjy15XuNW3cimg8zMgIMRemLVWymI57k7rShPMNbYJZoo6d7J4aserK4SjZjdo2Ggg==}
+  cojson-core-napi@0.19.6:
+    resolution: {integrity: sha512-SJxdpowyTMd09su0GXCeMAkiGsOtILr4kcN/wBJV0tCqw+6xfVyGYWTC4o2n0sTFNoA+9L+xZO47i2MEhbi4Rw==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
 
-  cojson-core-wasm@0.19.5:
-    resolution: {integrity: sha512-5faOs9R5ENsta2LCAb0lbWq9vTkNNYEmT7XyAVvVTHdtv1kpUydSWMcBOKFzyKHBsN7w6PukxgiZNOYrI56G6A==}
+  cojson-core-wasm@0.19.6:
+    resolution: {integrity: sha512-eNH5zlsgUapSqPxlsF52TOdvLXrZipPxppwpg8ABYsjj0zBPBZRhNnsL5wXwRbDvjGuAdiVgO62rFBCM9aQSnA==}
 
-  cojson-storage-indexeddb@0.19.5:
-    resolution: {integrity: sha512-gJKpW1pTl2fED1DEEeRWRCpiAFsxm1f/MTqUR1wITt8Sl2bkAAWmODkJzBW3yjjNLH8H50YQaCHtI4lQ4AFddQ==}
+  cojson-storage-indexeddb@0.19.6:
+    resolution: {integrity: sha512-OEgeSpSniVGWDcv9EMLzU6t3KH+bIlTN87mUTAXBPUoaFZqThEgE82+wloQV5K65xi/w9Zauwm26ytn9w3CjDQ==}
 
-  cojson-transport-ws@0.19.5:
-    resolution: {integrity: sha512-E3uo7E3o0ByCrnVBqslEhMP01pyA/WBZjQHKa0tOnM6U7EPh3W2sVmQFwrhjaU2HtVk8jmkoX3HpVd/3B24wEA==}
+  cojson-transport-ws@0.19.6:
+    resolution: {integrity: sha512-K8MV325DwEuY3IKvTnmZX5T5wyImaxnpZH6ZRIxKc7BGDp1ixWPTBoPA6v45fIGUuHTH0pDtsSlWv2SQROb75w==}
 
-  cojson@0.19.5:
-    resolution: {integrity: sha512-Wn9wfMuJaeJ86yvg4fIxyRlOTIKQBXGNZ/676i+lPmH/HYFUXNWClTK9pDY+xUFg6CKFDtLoOk5lWlPFQcmcwg==}
+  cojson@0.19.6:
+    resolution: {integrity: sha512-gXxBAGCi8YwxbNiafivwa2vDJF4UFNttnWdj7OMa0BwDPnkS7TWhEkd14c3lQxYhg1JIpjiLXtCTJW9KUksO6Q==}
 
   collect-v8-coverage@1.0.3:
     resolution: {integrity: sha512-1L5aqIkwPfiodaMgQunkF1zRhNqifHBmtbbbxcr6yVxxBnliw4TDOW6NxpO8DJLgJ16OT+Y4ztZqP6p/FtXnAw==}
@@ -12887,8 +12887,8 @@ packages:
     engines: {node: '>=10'}
     hasBin: true
 
-  jazz-tools@0.19.5:
-    resolution: {integrity: sha512-rYyYX2xY0lcLW6XKKzw9beLk+UPzBzdHnsjf1YBWr6RegwjH9Uc11I1xReHYTqUYOc5wS8JSdQc/JfObG7wG+w==}
+  jazz-tools@0.19.6:
+    resolution: {integrity: sha512-RLMLE8pINwLrNC802AE7yvh/J5L9fO88EBaf02Toa9irvgJbn6KwSMMdDjdsnszPXsH11ImB2wPw4SGqCfEAig==}
     peerDependencies:
       '@bam.tech/react-native-image-resizer': '*'
       '@op-engineering/op-sqlite': '*'
@@ -12904,7 +12904,7 @@ packages:
       react-native-fast-encoder: ^0.2.0
       react-native-mmkv: ^3.3.0
       react-native-nitro-modules: ^0.26.4
-      react-native-quick-crypto: ^1.0.0-beta.18
+      react-native-quick-crypto: ^1.0.0-beta.21
       sharp: ^0.33.5
       svelte: ^5.0.0
     peerDependenciesMeta:
@@ -28576,57 +28576,57 @@ snapshots:
 
   code-block-writer@13.0.3: {}
 
-  cojson-core-napi-darwin-arm64@0.19.5:
+  cojson-core-napi-darwin-arm64@0.19.6:
     optional: true
 
-  cojson-core-napi-darwin-x64@0.19.5:
+  cojson-core-napi-darwin-x64@0.19.6:
     optional: true
 
-  cojson-core-napi-linux-arm-gnueabihf@0.19.5:
+  cojson-core-napi-linux-arm-gnueabihf@0.19.6:
     optional: true
 
-  cojson-core-napi-linux-arm64-gnu@0.19.5:
+  cojson-core-napi-linux-arm64-gnu@0.19.6:
     optional: true
 
-  cojson-core-napi-linux-arm64-musl@0.19.5:
+  cojson-core-napi-linux-arm64-musl@0.19.6:
     optional: true
 
-  cojson-core-napi-linux-x64-gnu@0.19.5:
+  cojson-core-napi-linux-x64-gnu@0.19.6:
     optional: true
 
-  cojson-core-napi-linux-x64-musl@0.19.5:
+  cojson-core-napi-linux-x64-musl@0.19.6:
     optional: true
 
-  cojson-core-napi@0.19.5:
+  cojson-core-napi@0.19.6:
     optionalDependencies:
-      cojson-core-napi-darwin-arm64: 0.19.5
-      cojson-core-napi-darwin-x64: 0.19.5
-      cojson-core-napi-linux-arm-gnueabihf: 0.19.5
-      cojson-core-napi-linux-arm64-gnu: 0.19.5
-      cojson-core-napi-linux-arm64-musl: 0.19.5
-      cojson-core-napi-linux-x64-gnu: 0.19.5
-      cojson-core-napi-linux-x64-musl: 0.19.5
+      cojson-core-napi-darwin-arm64: 0.19.6
+      cojson-core-napi-darwin-x64: 0.19.6
+      cojson-core-napi-linux-arm-gnueabihf: 0.19.6
+      cojson-core-napi-linux-arm64-gnu: 0.19.6
+      cojson-core-napi-linux-arm64-musl: 0.19.6
+      cojson-core-napi-linux-x64-gnu: 0.19.6
+      cojson-core-napi-linux-x64-musl: 0.19.6
 
-  cojson-core-wasm@0.19.5: {}
+  cojson-core-wasm@0.19.6: {}
 
-  cojson-storage-indexeddb@0.19.5:
+  cojson-storage-indexeddb@0.19.6:
     dependencies:
-      cojson: 0.19.5
+      cojson: 0.19.6
 
-  cojson-transport-ws@0.19.5:
+  cojson-transport-ws@0.19.6:
     dependencies:
       '@opentelemetry/api': 1.9.0
-      cojson: 0.19.5
+      cojson: 0.19.6
 
-  cojson@0.19.5:
+  cojson@0.19.6:
     dependencies:
       '@noble/ciphers': 1.3.0
       '@noble/curves': 1.9.1
       '@noble/hashes': 1.8.0
       '@opentelemetry/api': 1.9.0
       '@scure/base': 1.2.1
-      cojson-core-napi: 0.19.5
-      cojson-core-wasm: 0.19.5
+      cojson-core-napi: 0.19.6
+      cojson-core-wasm: 0.19.6
       unicode-segmenter: 0.12.0
 
   collect-v8-coverage@1.0.3:
@@ -31282,16 +31282,16 @@ snapshots:
       filelist: 1.0.4
       picocolors: 1.1.1
 
-  jazz-tools@0.19.5(24043b7f0320f7f00ff0c02eeb858bba):
+  jazz-tools@0.19.6(24043b7f0320f7f00ff0c02eeb858bba):
     dependencies:
       '@manuscripts/prosemirror-recreate-steps': 0.1.4
       '@scure/base': 1.2.1
       '@scure/bip39': 1.5.0
       '@tiptap/core': 2.12.0(@tiptap/pm@2.12.0)
       clsx: 2.1.1
-      cojson: 0.19.5
-      cojson-storage-indexeddb: 0.19.5
-      cojson-transport-ws: 0.19.5
+      cojson: 0.19.6
+      cojson-storage-indexeddb: 0.19.6
+      cojson-transport-ws: 0.19.6
       fast-myers-diff: 3.2.0
       goober: 2.1.18(csstype@3.1.3)
       prosemirror-example-setup: 1.2.3
