@@ -1,5 +1,5 @@
 import { registerRootComponent } from "expo";
-import "./polyfills";
+import "jazz-tools/expo/polyfills";
 import App from "./src/App";
 
 // registerRootComponent calls AppRegistry.registerComponent('main', () => App);

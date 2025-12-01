@@ -64,16 +64,7 @@ npx expo install --fix
 </CodeGroup>
 
 ### Add polyfills
-
-Create a file `polyfills.js` at the project root with the following content:
-
-<FileName>polyfills.js</FileName>
-<CodeGroup>
-```ts project-setup/polyfills.js
-```
-</CodeGroup>
-
-Import your polyfills in `_layout.tsx`:
+Jazz provides a quick way for you to install polyfills. Import them in your root `_layout.tsx` component:
 
 <FileName>app/_layout.tsx</FileName>
 <CodeGroup>
@@ -108,7 +99,7 @@ If you run into any issues that aren't covered in the Common Issues section, [dr
 
 ## Common Issues
 
-- **Metro bundler errors**: If you see errors about missing polyfills, ensure all polyfills are properly imported.
+- **Metro bundler errors**: If you see errors about missing polyfills, ensure you installed them all and are importing them correctly
 - **iOS build failures**: Make sure you've run `pod install` after adding the dependencies.
 - **Android build failures**: Ensure you've run `npx expo prebuild` to generate native code.
 - **Expo Go incompatibility**: Remember that Jazz requires a development build and won't work with Expo Go.

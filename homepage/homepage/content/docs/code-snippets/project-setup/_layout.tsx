@@ -1,5 +1,5 @@
 // [!code ++:1]
-import "../polyfills";
+import "jazz-tools/expo/polyfills";
 import {
   DarkTheme,
   DefaultTheme,

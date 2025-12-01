@@ -43,8 +43,16 @@ export default defineConfig([
       index: "src/expo/index.ts",
       testing: "src/expo/testing.ts",
       crypto: "src/expo/crypto.ts",
+      polyfills: "src/react-native-core/polyfills/index.js",
     },
     outDir: "dist/expo",
+    external: [
+      "jazz-tools",
+      "readable-stream",
+      "@azure/core-asynciterator-polyfill",
+      "react-native-get-random-values",
+      "react-native-fast-encoder",
+    ],
   },
   {
     ...cfg,
@@ -107,8 +115,16 @@ export default defineConfig([
       index: "src/react-native/index.ts",
       testing: "src/react-native/testing.ts",
       crypto: "src/react-native/crypto.ts",
+      polyfills: "src/react-native-core/polyfills/index.js",
     },
     outDir: "dist/react-native",
+    external: [
+      "jazz-tools",
+      "readable-stream",
+      "@azure/core-asynciterator-polyfill",
+      "react-native-get-random-values",
+      "react-native-fast-encoder",
+    ],
   },
   {
     ...cfg,

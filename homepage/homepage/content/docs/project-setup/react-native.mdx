@@ -51,24 +51,10 @@ npm install jazz-tools
 
 ### Add polyfills
 
-Create a file `polyfills.js` at the project root with the following content:
+Jazz provides a quick way for you to install polyfills. Import them in your root `index.js` file:
 
 <CodeGroup>
-```ts project-setup/polyfills.js
-```
-</CodeGroup>
-
-Update `index.js`:
-
-<CodeGroup>
-```ts
-import { AppRegistry } from 'react-native';
-import App from './App';
-import { name as appName } from './app.json';
-// [!code ++:1]
-import './polyfills';
-
-AppRegistry.registerComponent(appName, () => App);
+```ts project-setup/index.js
 ```
 </CodeGroup>
 
@@ -103,7 +89,7 @@ If you run into any issues that aren't covered in the Common Issues section, [dr
 
 ## Common Issues
 
-- **Metro bundler errors**: If you see errors about missing polyfills, ensure all polyfills are properly imported in your `polyfills.js` file.
+- **Metro bundler errors**: If you see errors about missing polyfills, ensure you installed them all and are importing them correctly
 - **iOS build failures**: Make sure you've run `pod install` after adding the dependencies.
 - **Android build failures**: Ensure your Android SDK and NDK versions are compatible with the native modules.
 
