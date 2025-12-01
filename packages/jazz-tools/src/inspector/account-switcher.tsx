@@ -125,13 +125,6 @@ export function AccountSwitcher({
     [createLocalNode, accounts, defaultSyncServer],
   );
 
-  const handleModalConfirm = async () => {
-    if (selectedAccountId) {
-      await setCurrentAccount(selectedAccountId);
-      setIsModalOpen(false);
-    }
-  };
-
   const handleModalCancel = () => {
     setSelectedAccountId(currentAccountId);
     setNewAccountId("");
@@ -278,17 +271,6 @@ export function AccountSwitcher({
                 ))
               )}
             </AccountSelectionFieldset>
-            {accounts.length > 0 && (
-              <ConfirmButtonContainer>
-                <Button
-                  variant="primary"
-                  onClick={handleModalConfirm}
-                  disabled={!selectedAccountId}
-                >
-                  Confirm
-                </Button>
-              </ConfirmButtonContainer>
-            )}
           </div>
 
           <ModalAddAccountForm onSubmit={handleAddAccountSubmit}>
