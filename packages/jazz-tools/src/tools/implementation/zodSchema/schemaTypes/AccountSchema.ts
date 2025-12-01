@@ -5,7 +5,7 @@ import {
   CoMapSchemaDefinition,
   coOptionalDefiner,
   Group,
-  MaybeLoaded,
+  Settled,
   RefsToResolveStrict,
   RefsToResolve,
   Resolved,
@@ -84,7 +84,7 @@ export class AccountSchema<
       loadAs?: Account | AnonymousJazzAgent;
       resolve?: RefsToResolveStrict<AccountSchema<Shape>, R>;
     },
-  ): Promise<MaybeLoaded<Loaded<AccountSchema<Shape>, R>>> {
+  ): Promise<Settled<Loaded<AccountSchema<Shape>, R>>> {
     // @ts-expect-error
     return this.coValueClass.load(
       id,
@@ -93,15 +93,20 @@ export class AccountSchema<
     );
   }
 
-  /** @internal */
+  // Create an account via worker, useful to generate controlled accounts from the server
   createAs(
-    as: Account,
+    worker: Account,
     options: {
       creationProps: { name: string };
+      onCreate?: (
+        account: AccountInstance<Shape>,
+        worker: Account,
+      ) => Promise<void>;
     },
-  ): Promise<AccountInstance<Shape>> {
+    // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+  ): Promise<Loaded<AccountSchema<Shape>, DefaultResolveQuery>> {
     // @ts-expect-error
-    return this.coValueClass.createAs(as, options);
+    return this.coValueClass.createAs(worker, options);
   }
 
   unstable_merge<

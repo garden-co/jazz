@@ -19,22 +19,7 @@ The following examples demonstrate a practical use of CoFeeds:
 CoFeeds are defined by specifying the type of items they'll contain, similar to how you define CoLists:
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-// ---cut---
-// Define a schema for feed items
-const Activity = co.map({
-  timestamp: z.date(),
-  action: z.literal(["watering", "planting", "harvesting", "maintenance"]),
-  notes: z.optional(z.string()),
-});
-export type Activity = co.loaded<typeof Activity>;
-
-// Define a feed of garden activities
-const ActivityFeed = co.feed(Activity);
-
-// Create a feed instance
-const activityFeed = ActivityFeed.create([]);
+```ts index.ts#Basic
 ```
 </CodeGroup>
 
@@ -43,25 +28,7 @@ const activityFeed = ActivityFeed.create([]);
 Like other CoValues, you can specify ownership when creating CoFeeds.
 
 <CodeGroup>
-```ts twoslash
-import { Group, co, z } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-const colleagueAccount = await createJazzTestAccount();
-
-const Activity = co.map({
-  timestamp: z.date(),
-  action: z.literal(["watering", "planting", "harvesting", "maintenance"]),
-  notes: z.optional(z.string()),
-});
-
-const ActivityFeed = co.feed(Activity);
-
-// ---cut---
-const teamGroup = Group.create();
-teamGroup.addMember(colleagueAccount, "writer");
-
-const teamFeed = ActivityFeed.create([], { owner: teamGroup });
+```ts index.ts#WithOwner
 ```
 </CodeGroup>
 
@@ -76,58 +43,14 @@ Since CoFeeds are made of entries from users over multiple sessions, you can acc
 To retrieve entries from a session:
 
 <CodeGroup>
-```ts twoslash
-import { co, z, SessionID } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-
-const Activity = co.map({
-  timestamp: z.date(),
-  action: z.literal(["watering", "planting", "harvesting", "maintenance"]),
-  notes: z.optional(z.string()),
-});
-
-const ActivityFeed = co.feed(Activity);
-const activityFeed = ActivityFeed.create([]);
-const sessionId = `${me.$jazz.id}_session_z1` as SessionID;
-
-// ---cut---
-// Get the feed for a specific session
-const sessionFeed = activityFeed.perSession[sessionId];
-
-// Latest entry from a session
-if (sessionFeed?.value.$isLoaded) {
-  console.log(sessionFeed.value.action); // "watering"
-}
+```ts index.ts#SessionFeed
 ```
 </CodeGroup>
 
 For convenience, you can also access the latest entry from the current session with `inCurrentSession`:
 
 <CodeGroup>
-```ts twoslash
-import { co, z, SessionID } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-
-const Activity = co.map({
-  timestamp: z.date(),
-  action: z.literal(["watering", "planting", "harvesting", "maintenance"]),
-  notes: z.optional(z.string()),
-});
-
-const ActivityFeed = co.feed(Activity);
-const activityFeed = ActivityFeed.create([]);
-const sessionId = `${me.$jazz.id}_session_z1` as SessionID;
-
-// ---cut---
-// Get the feed for the current session
-const currentSessionFeed = activityFeed.inCurrentSession;
-
-// Latest entry from the current session
-if (currentSessionFeed?.value.$isLoaded) {
-  console.log(currentSessionFeed.value.action); // "harvesting"
-}
+```ts index.ts#InCurrentSession
 ```
 </CodeGroup>
 
@@ -136,58 +59,14 @@ if (currentSessionFeed?.value.$isLoaded) {
 To retrieve entries from a specific account (with entries from all sessions combined) use `perAccount`:
 
 <CodeGroup>
-```ts twoslash
-import { co, z, SessionID } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-
-const Activity = co.map({
-  timestamp: z.date(),
-  action: z.literal(["watering", "planting", "harvesting", "maintenance"]),
-  notes: z.optional(z.string()),
-});
-
-const ActivityFeed = co.feed(Activity);
-const activityFeed = ActivityFeed.create([]);
-const accountId = me.$jazz.id;
-
-// ---cut---
-// Get the feed for a specific account
-const accountFeed = activityFeed.perAccount[accountId];
-
-// Latest entry from the account
-if (accountFeed?.value.$isLoaded) {
-  console.log(accountFeed.value.action); // "watering"
-}
+```ts index.ts#AccountFeed
 ```
 </CodeGroup>
 
 For convenience, you can also access the latest entry from the current account with `byMe`:
 
 <CodeGroup>
-```ts twoslash
-import { co, z, SessionID } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-
-const Activity = co.map({
-  timestamp: z.date(),
-  action: z.literal(["watering", "planting", "harvesting", "maintenance"]),
-  notes: z.optional(z.string()),
-});
-
-const ActivityFeed = co.feed(Activity);
-const activityFeed = ActivityFeed.create([]);
-const accountId = me.$jazz.id;
-
-// ---cut---
-// Get the feed for the current account
-const myLatestEntry = activityFeed.byMe;
-
-// Latest entry from the current account
-if (myLatestEntry?.value.$isLoaded) {
-  console.log(myLatestEntry.value.action); // "harvesting"
-}
+```ts index.ts#ByMe
 ```
 </CodeGroup>
 
@@ -198,40 +77,7 @@ if (myLatestEntry?.value.$isLoaded) {
 To retrieve all entries from a CoFeed:
 
 <CodeGroup>
-```ts twoslash
-import { co, z, SessionID } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-
-const Activity = co.map({
-  timestamp: z.date(),
-  action: z.literal(["watering", "planting", "harvesting", "maintenance"]),
-  notes: z.optional(z.string()),
-});
-
-const ActivityFeed = co.feed(Activity);
-const activityFeed = ActivityFeed.create([]);
-const accountId = me.$jazz.id;
-const sessionId = `${me.$jazz.id}_session_z1` as SessionID;
-
-// ---cut---
-// Get the feeds for a specific account and session
-const accountFeed = activityFeed.perAccount[accountId];
-const sessionFeed = activityFeed.perSession[sessionId];
-
-// Iterate over all entries from the account
-for (const entry of accountFeed.all) {
-  if (entry.value.$isLoaded) {
-    console.log(entry.value);
-  }
-}
-
-// Iterate over all entries from the session
-for (const entry of sessionFeed.all) {
-  if (entry.value.$isLoaded) {
-    console.log(entry.value);
-  }
-}
+```ts index.ts#AllEntries
 ```
 </CodeGroup>
 
@@ -240,34 +86,7 @@ for (const entry of sessionFeed.all) {
 To retrieve the latest entry from a CoFeed, ie. the last update:
 
 <CodeGroup>
-```ts twoslash
-import { co, z, SessionID } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-
-const Activity = co.map({
-  timestamp: z.date(),
-  action: z.literal(["watering", "planting", "harvesting", "maintenance"]),
-  notes: z.optional(z.string()),
-});
-
-const ActivityFeed = co.feed(Activity);
-const activityFeed = ActivityFeed.create([]);
-
-// ---cut---
-// Get the latest entry from the current account
-const latestEntry = activityFeed.byMe;
-
-if (latestEntry?.value.$isLoaded) {
-  console.log(`My last action was ${latestEntry.value.action}`);
-  // "My last action was harvesting"
-}
-
-// Get the latest entry from each account
-const latestEntriesByAccount = Object.values(activityFeed.perAccount).map(entry => ({
-  accountName: entry.by?.profile.$isLoaded ? entry.by.profile.name : "Unknown",
-  value: entry.value,
-}));
+```ts index.ts#GetLatest
 ```
 </CodeGroup>
 
@@ -278,27 +97,7 @@ CoFeeds are append-only; you can add new items, but not modify existing ones. Th
 ### Adding Items
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-
-const Activity = co.map({
-  timestamp: z.date(),
-  action: z.literal(["watering", "planting", "harvesting", "maintenance"]),
-  notes: z.optional(z.string()),
-});
-
-const ActivityFeed = co.feed(Activity);
-const activityFeed = ActivityFeed.create([]);
-
-// ---cut---
-// Log a new activity
-activityFeed.$jazz.push(Activity.create({
-  timestamp: new Date(),
-  action: "watering",
-  notes: "Extra water for new seedlings"
-}));
+```ts index.ts#PushToFeed
 ```
 </CodeGroup>
 
@@ -309,37 +108,7 @@ Each item is automatically associated with the current user's session. You don't
 Each entry is automatically added to the current session's feed. When a user has multiple open sessions (like both a mobile app and web browser), each session creates its own separate entries:
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-
-const Activity = co.map({
-  timestamp: z.date(),
-  action: z.literal(["watering", "planting", "harvesting", "maintenance"]),
-  notes: z.optional(z.string()),
-});
-
-const ActivityFeed = co.feed(Activity);
-const fromMobileFeed = ActivityFeed.create([]);
-const fromBrowserFeed = ActivityFeed.create([]);
-
-// ---cut---
-// On mobile device:
-fromMobileFeed.$jazz.push(Activity.create({
-  timestamp: new Date(),
-  action: "harvesting",
-  notes: "Vegetable patch"
-}));
-
-// On web browser (same user):
-fromBrowserFeed.$jazz.push(Activity.create({
-  timestamp: new Date(),
-  action: "planting",
-  notes: "Flower bed"
-}));
-
-// These are separate entries in the same feed, from the same account
+```ts index.ts#MultiFeed
 ```
 </CodeGroup>
 
@@ -352,26 +121,7 @@ CoFeeds support metadata, which is useful for tracking information about the fee
 The `by` property is the account that made the entry.
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-
-const Activity = co.map({
-  timestamp: z.date(),
-  action: z.literal(["watering", "planting", "harvesting", "maintenance"]),
-  notes: z.optional(z.string()),
-});
-
-const ActivityFeed = co.feed(Activity);
-const activityFeed = ActivityFeed.create([]);
-const accountId = me.$jazz.id;
-
-// ---cut---
-const accountFeed = activityFeed.perAccount[accountId];
-
-// Get the account that made the last entry
-console.log(accountFeed?.by);
+```ts index.ts#By
 ```
 </CodeGroup>
 
@@ -380,31 +130,7 @@ console.log(accountFeed?.by);
 The `madeAt` property is a timestamp of when the entry was added to the feed.
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-
-const Activity = co.map({
-  timestamp: z.date(),
-  action: z.literal(["watering", "planting", "harvesting", "maintenance"]),
-  notes: z.optional(z.string()),
-});
-
-const ActivityFeed = co.feed(Activity);
-const activityFeed = ActivityFeed.create([]);
-const accountId = me.$jazz.id;
-
-// ---cut---
-const accountFeed = activityFeed.perAccount[accountId];
-
-// Get the timestamp of the last update
-console.log(accountFeed?.madeAt);
-
-// Get the timestamp of each entry
-for (const entry of accountFeed.all) {
-  console.log(entry.madeAt);
-}
+```ts index.ts#MadeAt
 ```
 </CodeGroup>
 

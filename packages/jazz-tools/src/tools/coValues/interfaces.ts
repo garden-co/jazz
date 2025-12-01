@@ -13,7 +13,9 @@ import {
   NotLoadedCoValueState,
   type Group,
   Loaded,
+  Inaccessible,
   MaybeLoaded,
+  Settled,
   RefsToResolve,
   RefsToResolveStrict,
   RegisteredSchemas,
@@ -26,7 +28,6 @@ import {
   NotLoaded,
   activeAccountContext,
   coValueClassFromCoValueClassOrSchema,
-  getSubscriptionScope,
   inspect,
 } from "../internal.js";
 import type { BranchDefinition } from "../subscribe/types.js";
@@ -107,6 +108,23 @@ export function isCoValueClass<V extends CoValue>(
  */
 export type ID<T> = string;
 
+const unloadedCoValueStates = new Map<
+  NotLoadedCoValueState,
+  NotLoaded<CoValue>
+>();
+
+export function getUnloadedCoValueWithoutId<T extends CoValue>(
+  loadingState: NotLoadedCoValueState,
+): NotLoaded<T> {
+  const value = unloadedCoValueStates.get(loadingState);
+  if (value) {
+    return value;
+  }
+  const newValue = createUnloadedCoValue("", loadingState);
+  unloadedCoValueStates.set(loadingState, newValue);
+  return newValue;
+}
+
 export function createUnloadedCoValue<T extends CoValue>(
   id: ID<T>,
   loadingState: NotLoadedCoValueState,
@@ -119,7 +137,7 @@ export function createUnloadedCoValue<T extends CoValue>(
 
 export function loadCoValueWithoutMe<
   V extends CoValue,
-  const R extends RefsToResolve<V>,
+  const R extends RefsToResolve<V> = true,
 >(
   cls: CoValueClass<V>,
   id: ID<CoValue>,
@@ -129,7 +147,7 @@ export function loadCoValueWithoutMe<
     skipRetry?: boolean;
     unstable_branch?: BranchDefinition;
   },
-): Promise<MaybeLoaded<Resolved<V, R>>> {
+): Promise<Settled<Resolved<V, R>>> {
   return loadCoValue(cls, id, {
     ...options,
     loadAs: options?.loadAs ?? activeAccountContext.get(),
@@ -149,7 +167,7 @@ export function loadCoValue<
     skipRetry?: boolean;
     unstable_branch?: BranchDefinition;
   },
-): Promise<MaybeLoaded<Resolved<V, R>>> {
+): Promise<Settled<Resolved<V, R>>> {
   return new Promise((resolve) => {
     subscribeToCoValue<V, R>(
       cls,
@@ -159,12 +177,8 @@ export function loadCoValue<
         loadAs: options.loadAs,
         syncResolution: true,
         skipRetry: options.skipRetry,
-        onUnavailable: () => {
-          resolve(createUnloadedCoValue(id, CoValueLoadingState.UNAVAILABLE));
-        },
-        onUnauthorized: () => {
-          resolve(createUnloadedCoValue(id, CoValueLoadingState.UNAUTHORIZED));
-        },
+        onUnavailable: resolve,
+        onUnauthorized: resolve,
         unstable_branch: options.unstable_branch,
       },
       (value, unsubscribe) => {
@@ -215,8 +229,8 @@ export type SubscribeListenerOptions<
 > = {
   resolve?: RefsToResolveStrict<V, R>;
   loadAs?: Account | AnonymousJazzAgent;
-  onUnauthorized?: () => void;
-  onUnavailable?: () => void;
+  onUnauthorized?: (value: NotLoaded<V>) => void;
+  onUnavailable?: (value: NotLoaded<V>) => void;
   unstable_branch?: BranchDefinition;
 };
 
@@ -263,7 +277,7 @@ export function parseSubscribeRestArgs<
 
 export function subscribeToCoValueWithoutMe<
   V extends CoValue,
-  const R extends RefsToResolve<V>,
+  const R extends RefsToResolve<V> = true,
 >(
   cls: CoValueClass<V>,
   id: ID<CoValue>,
@@ -283,15 +297,15 @@ export function subscribeToCoValueWithoutMe<
 
 export function subscribeToCoValue<
   V extends CoValue,
-  const R extends RefsToResolve<V>,
+  const R extends RefsToResolve<V> = true,
 >(
   cls: CoValueClass<V>,
   id: ID<CoValue>,
   options: {
     resolve?: RefsToResolveStrict<V, R>;
     loadAs: Account | AnonymousJazzAgent;
-    onUnavailable?: () => void;
-    onUnauthorized?: () => void;
+    onUnavailable?: (value: Inaccessible<V>) => void;
+    onUnauthorized?: (value: Inaccessible<V>) => void;
     syncResolution?: boolean;
     skipRetry?: boolean;
     unstable_branch?: BranchDefinition;
@@ -318,35 +332,42 @@ export function subscribeToCoValue<
     options.unstable_branch,
   );
 
-  const handleUpdate = (value: SubscriptionValue<V, any>) => {
+  const handleUpdate = () => {
     if (unsubscribed) return;
 
-    if (value.type === CoValueLoadingState.UNAVAILABLE) {
-      options.onUnavailable?.();
+    const value = rootNode.getCurrentValue();
 
-      // Don't log unavailable errors when `loadUnique` or `upsertUnique` are used
-      if (!options.skipRetry) {
+    if (value.$isLoaded) {
+      listener(value as Resolved<V, R>, unsubscribe);
+      return;
+    }
+
+    switch (value.$jazz.loadingState) {
+      case CoValueLoadingState.UNAVAILABLE:
+        options.onUnavailable?.(value as Inaccessible<V>);
+
+        // Don't log unavailable errors when `loadUnique` or `upsertUnique` are used
+        if (!options.skipRetry) {
+          console.error(value.toString());
+        }
+        break;
+      case CoValueLoadingState.UNAUTHORIZED:
+        options.onUnauthorized?.(value as Inaccessible<V>);
         console.error(value.toString());
-      }
-    } else if (value.type === CoValueLoadingState.UNAUTHORIZED) {
-      options.onUnauthorized?.();
-
-      console.error(value.toString());
-    } else if (value.type === CoValueLoadingState.LOADED) {
-      listener(value.value as Resolved<V, R>, unsubscribe);
+        break;
     }
   };
 
   let shouldDefer = !options.syncResolution;
 
-  rootNode.setListener((value) => {
+  rootNode.setListener(() => {
     if (shouldDefer) {
       shouldDefer = false;
       Promise.resolve().then(() => {
-        handleUpdate(value);
+        handleUpdate();
       });
     } else {
-      handleUpdate(value);
+      handleUpdate();
     }
   });
 
@@ -366,8 +387,8 @@ export function subscribeToExistingCoValue<
   options:
     | {
         resolve?: RefsToResolveStrict<V, R>;
-        onUnavailable?: () => void;
-        onUnauthorized?: () => void;
+        onUnavailable?: (value: NotLoaded<V>) => void;
+        onUnauthorized?: (value: NotLoaded<V>) => void;
         unstable_branch?: BranchDefinition;
       }
     | undefined,
@@ -527,7 +548,7 @@ export async function internalLoadUnique<
     owner: Account | Group;
     resolve?: RefsToResolveStrict<V, R>;
   },
-): Promise<MaybeLoaded<Resolved<V, R>>> {
+): Promise<Settled<Resolved<V, R>>> {
   const loadAs = options.owner.$jazz.loadedAs;
 
   const node =
@@ -690,6 +711,31 @@ export async function exportCoValue<
   return contentPieces;
 }
 
+export function exportCoValueFromSubscription<V>(
+  subscription: SubscriptionScope<CoValue>,
+): ExportedCoValue<V> {
+  const valuesExported = new Set<string>();
+  const contentPieces: CojsonInternalTypes.NewContentMessage[] = [];
+
+  loadContentPiecesFromSubscription(
+    subscription,
+    valuesExported,
+    contentPieces,
+  );
+
+  return {
+    id: subscription.id as ExportedID<V>,
+    contentPieces,
+  };
+}
+
+export type ExportedID<V> = string & { _exportedID: V };
+
+export type ExportedCoValue<V> = {
+  id: ExportedID<V>; // This is used for branding the export type
+  contentPieces: CojsonInternalTypes.NewContentMessage[];
+};
+
 function loadContentPiecesFromSubscription(
   subscription: SubscriptionScope<any>,
   valuesExported: Set<string>,
@@ -703,7 +749,7 @@ function loadContentPiecesFromSubscription(
 
   const currentValue = subscription.getCurrentValue();
 
-  if (typeof currentValue !== "string") {
+  if (currentValue.$isLoaded) {
     const core = currentValue.$jazz.raw.core as AvailableCoValueCore;
     loadContentPiecesFromCoValue(core, valuesExported, contentPieces);
   }

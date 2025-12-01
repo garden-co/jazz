@@ -49,7 +49,7 @@ export default function DocsLayout({
     });
   }
 
-  const framework = useFramework();
+  const { framework } = useFramework();
 
   let pagefindProps: {
     [key: `data-pagefind-${string}`]: string | boolean | number;

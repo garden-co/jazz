@@ -6,9 +6,11 @@ import {
   type CoValue,
   type ID,
   MaybeLoaded,
+  NotLoaded,
   type RefEncoded,
   type RefsToResolve,
   TypeSym,
+  createUnloadedCoValue,
   instantiateRefEncodedFromRaw,
   isRefEncoded,
 } from "../internal.js";
@@ -89,7 +91,11 @@ export class SubscriptionScope<D extends CoValue> {
         // - Run the migration only once
         // - Skip all the updates until the migration is done
         // - Trigger handleUpdate only with the final value
-        if (!this.migrated && value !== CoValueLoadingState.UNAVAILABLE) {
+        if (
+          !this.migrated &&
+          value !== CoValueLoadingState.UNAVAILABLE &&
+          hasAccessToCoValue(value)
+        ) {
           if (this.migrating) {
             return;
           }
@@ -137,14 +143,7 @@ export class SubscriptionScope<D extends CoValue> {
       return;
     }
 
-    const ruleset = update.core.verified.header.ruleset;
-
-    // Groups and accounts are accessible by everyone, for the other coValues we use the role to check access
-    const hasAccess =
-      ruleset.type !== "ownedByGroup" ||
-      myRoleForRawValue(update) !== undefined;
-
-    if (!hasAccess) {
+    if (!hasAccessToCoValue(update)) {
       if (this.value.type !== CoValueLoadingState.UNAUTHORIZED) {
         this.updateValue(
           new JazzError(this.id, CoValueLoadingState.UNAUTHORIZED, [
@@ -173,10 +172,7 @@ export class SubscriptionScope<D extends CoValue> {
     } else {
       const hasChanged =
         update.totalValidTransactions !== this.totalValidTransactions ||
-        update.version !== this.version ||
-        // Checking the identity of the raw value makes us cover the cases where the group
-        // has been updated and the coValues that don't update the totalValidTransactions value (e.g. FileStream)
-        this.value.value.$jazz.raw !== update;
+        update.version !== this.version;
 
       if (this.loadChildren()) {
         this.updateValue(createCoValue(this.schema, update, this));
@@ -286,7 +282,35 @@ export class SubscriptionScope<D extends CoValue> {
     return this.pendingLoadedChildren.size === 0;
   }
 
-  getCurrentValue(): D | NotLoadedCoValueState {
+  unloadedValue: NotLoaded<D> | undefined;
+
+  private getUnloadedValue(reason: NotLoadedCoValueState): NotLoaded<D> {
+    if (this.unloadedValue?.$jazz.loadingState === reason) {
+      return this.unloadedValue;
+    }
+
+    const unloadedValue: NotLoaded<D> = createUnloadedCoValue(this.id, reason);
+
+    this.unloadedValue = unloadedValue;
+
+    return unloadedValue;
+  }
+
+  getCurrentValue(): MaybeLoaded<D> {
+    const rawValue = this.getCurrentRawValue();
+
+    if (
+      rawValue === CoValueLoadingState.UNAUTHORIZED ||
+      rawValue === CoValueLoadingState.UNAVAILABLE ||
+      rawValue === CoValueLoadingState.LOADING
+    ) {
+      return this.getUnloadedValue(rawValue);
+    }
+
+    return rawValue;
+  }
+
+  getCurrentRawValue(): D | NotLoadedCoValueState {
     if (
       this.value.type === CoValueLoadingState.UNAUTHORIZED ||
       this.value.type === CoValueLoadingState.UNAVAILABLE
@@ -409,7 +433,7 @@ export class SubscriptionScope<D extends CoValue> {
     this.subscription.pullValue();
 
     // Check if the value is now available
-    const value = this.getCurrentValue();
+    const value = this.getCurrentRawValue();
 
     // If the value is available, trigger the listener
     if (typeof value !== "string") {
@@ -593,21 +617,16 @@ export class SubscriptionScope<D extends CoValue> {
       return undefined;
     }
 
+    // Check if $onError: "catch" is specified for this key
+    const skipInvalid = typeof depth === "object" && depth.$onError === "catch";
+    if (skipInvalid) {
+      this.skipInvalidKeys.add(key);
+    }
+
     const id = map.$jazz.raw.get(key) as string | undefined;
     const descriptor = map.$jazz.getDescriptor(key);
 
     if (!descriptor) {
-      this.childErrors.set(
-        key,
-        new JazzError(undefined, CoValueLoadingState.UNAVAILABLE, [
-          {
-            code: "validationError",
-            message: `The ref ${key} requested on ${map.constructor.name} is not defined in the schema`,
-            params: {},
-            path: [key],
-          },
-        ]),
-      );
       return undefined;
     }
 
@@ -736,4 +755,14 @@ export class SubscriptionScope<D extends CoValue> {
     this.subscribers.clear();
     this.childNodes.forEach((child) => child.destroy());
   }
+}
+
+function hasAccessToCoValue(rawCoValue: RawCoValue): boolean {
+  const ruleset = rawCoValue.core.verified.header.ruleset;
+
+  // Groups and accounts are accessible by everyone, for the other coValues we use the role to check access
+  return (
+    ruleset.type !== "ownedByGroup" ||
+    myRoleForRawValue(rawCoValue) !== undefined
+  );
 }

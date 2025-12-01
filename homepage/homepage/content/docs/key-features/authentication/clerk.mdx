@@ -1,8 +1,8 @@
-export const metadata = { 
+export const metadata = {
   description: "Integrate Clerk with your Jazz app to authenticate users. This method combines Clerk's comprehensive authentication services with Jazz's local-first capabilities."
 };
 
-import { CodeGroup, ContentByFramework } from "@/components/forMdx";
+import { CodeGroup, ContentByFramework, FileName, ReactLogo, ExpoLogo, RNLogo, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
 
 # Clerk Authentication
 
@@ -30,183 +30,37 @@ This authentication method is not fully local-first, as login and signup need to
 
 <ContentByFramework framework="react">
 Use `<JazzReactProviderWithClerk />` to wrap your app:
-
-<CodeGroup>
-```tsx twoslash
-import * as React from "react";
-import { createRoot } from "react-dom/client";
-
-/**
- * Use your email as a temporary key, or get a free
- * API Key at dashboard.jazz.tools for higher limits.
- * 
- * @link https://dashboard.jazz.tools
-*/
-const apiKey = "you@example.com";
-
-const PUBLISHABLE_KEY = "fake_key";
-function App() {
-  return <div>Hello World</div>;
-}
-// ---cut---
-import { useClerk, ClerkProvider } from '@clerk/clerk-react';
-import { JazzReactProviderWithClerk } from "jazz-tools/react";
-
-function JazzProvider({ children }: { children: React.ReactNode }) {
-  const clerk = useClerk();
-
-  return (
-    <JazzReactProviderWithClerk
-      clerk={clerk}
-      sync={{
-        peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
-      }}
-    >
-      {children}
-    </JazzReactProviderWithClerk>
-  );
-}
-
-createRoot(document.getElementById("root")!).render(
-  <ClerkProvider publishableKey={PUBLISHABLE_KEY} afterSignOutUrl="/">
-    <JazzProvider>
-      <App />
-    </JazzProvider>
-  </ClerkProvider>
-);
-```
-</CodeGroup>
 </ContentByFramework>
 
 <ContentByFramework framework="react-native-expo">
 Use `<JazzExpoProviderWithClerk />` to wrap your app.
-
-<CodeGroup>
-```tsx twoslash
-import * as React from "react";
-
-/**
- * Use your email as a temporary key, or get a free
- * API Key at dashboard.jazz.tools for higher limits.
- * 
- * @link https://dashboard.jazz.tools
-*/
-const apiKey = "you@example.com";
-
-const tokenCache = {
-  getToken: async (key: string) => {
-    return null;
-  },
-  saveToken: async (key: string, token: string) => {},
-  clearToken: async (key: string) => {},
-};
-function MainScreen() {
-  return null;
-}
-// ---cut---
-import { useClerk, ClerkProvider, ClerkLoaded } from '@clerk/clerk-expo';
-import { resourceCache } from '@clerk/clerk-expo/resource-cache';
-import { JazzExpoProviderWithClerk } from "jazz-tools/expo";
-
-function JazzAndAuth({ children }: { children: React.ReactNode }) {
-  const clerk = useClerk();
-
-  return (
-    <JazzExpoProviderWithClerk
-      clerk={clerk}
-      sync={{
-        peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
-      }}
-    >
-      {children}
-    </JazzExpoProviderWithClerk>
-  );
-}
-
-export default function RootLayout() {
-  const publishableKey = process.env.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY;
-
-  if (!publishableKey) {
-    throw new Error(
-      "Missing Publishable Key. Please set EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY in your .env",
-    );
-  }
-
-  return (
-    <ClerkProvider
-      tokenCache={tokenCache}
-      publishableKey={publishableKey}
-      __experimental_resourceCache={resourceCache}
-    >
-      <ClerkLoaded>
-        <JazzAndAuth>
-          <MainScreen />
-        </JazzAndAuth>
-      </ClerkLoaded>
-    </ClerkProvider>
-  );
-}
-```
-</CodeGroup>
 </ContentByFramework>
 
-<ContentByFramework framework="react">
-<CodeGroup>
-```tsx twoslash
-import * as React from "react";
-// ---cut---
-import { SignInButton } from "@clerk/clerk-react";
-import { useIsAuthenticated, useLogOut } from "jazz-tools/react";
+<FileName>App.tsx</FileName>
 
-export function AuthButton() {
-  const logOut = useLogOut();
-
-  const isAuthenticated = useIsAuthenticated();
-
-  if (isAuthenticated) {
-    return <button onClick={() => logOut()}>Logout</button>;
-  }
-
-  return <SignInButton />;
-}
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="wrap-in-provider" className="mb-4">
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
+```tsx react-snippet.tsx#Basic
 ```
-</CodeGroup>
-</ContentByFramework>
-
-<ContentByFramework framework="react-native-expo">
-<CodeGroup>
-```tsx twoslash
-import * as React from "react";
-// ---cut---
-import { useSignIn } from "@clerk/clerk-expo";
-import { useIsAuthenticated, useLogOut } from "jazz-tools/expo";
-import { Button, Text } from 'react-native';
-
-export function AuthButton() {
-  const logOut = useLogOut();
-  const { signIn, setActive, isLoaded } = useSignIn();
-  const isAuthenticated = useIsAuthenticated();
-
-  if (isAuthenticated) {
-    return <Button title="Logout" onPress={() => logOut()} />;
-  }
-
-  const onSignInPress = async () => {
-    if (!isLoaded) return;
-    const signInAttempt = await signIn.create({
-      identifier: "you@example.com",
-      password: "password",
-    });
-    if (signInAttempt.status === "complete") {
-      await setActive({ session: signInAttempt.createdSessionId });
-    }
-  };
-
-  return <Button title="Sign In" onPress={onSignInPress} />;
-}
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ExpoLogo />} label="Expo" value="react-native-expo" preferWrap>
+```tsx expo.tsx#Basic
 ```
-</CodeGroup>
-</ContentByFramework>
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+<FileName>AuthButton.tsx</FileName>
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="wrap-in-provider" >
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
+```tsx react-snippet.tsx#AuthButton
+```
+
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ExpoLogo />} label="Expo" value="react-native-expo" preferWrap>
+```tsx expo.tsx#AuthButton
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
 
 ## Examples
 

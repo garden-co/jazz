@@ -23,20 +23,7 @@ The package `jazz-tools/better-auth/database-adapter` is a database adapter for 
 4. Setup the database adapter on Better Auth server instance.
 
   <CodeGroup>
-  ```typescript
-  import { betterAuth } from "better-auth";
-  import { JazzBetterAuthDatabaseAdapter } from "jazz-tools/better-auth/database-adapter";
-  const apiKey = process.env.JAZZ_API_KEY;
-
-  const auth = betterAuth({
-    database: JazzBetterAuthDatabaseAdapter({
-      syncServer: `wss://cloud.jazz.tools/?key=${apiKey}`,
-      accountID: "auth-worker-account-id",
-      accountSecret: "your-worker-account-secret",
-    }),
-
-    // other Better Auth settings
-  });
+  ```ts auth.ts
   ```
   </CodeGroup>
 
@@ -55,38 +42,7 @@ Internally it uses specialized repository for known models like `User`, `Session
 The easiest way to access the database is using the same Server Worker's credentials and access the table we're looking for.
 
 <CodeGroup>
-```typescript
-import { startWorker } from 'jazz-tools/worker';
-import { co, z } from 'jazz-tools';
-const apiKey = process.env.JAZZ_API_KEY;
-
-
-const worker1 = await startWorker({
-  syncServer: `wss://cloud.jazz.tools/?key=${apiKey}`,
-  accountID: process.env.WORKER_ACCOUNT_ID,
-  accountSecret: process.env.WORKER_ACCOUNT_SECRET,
-});
-
-const DatabaseRoot = co.map({
-  tables: co.map({
-    user: co.list(co.map({
-      name: z.string(),
-      email: z.string(),
-    }))
-  })
-});
-
-const db = await DatabaseRoot.loadUnique("better-auth-root", process.env.WORKER_ACCOUNT_ID, {
-  resolve: {
-    tables: {
-      user: {
-        $each: true,
-      }
-    }
-  }
-});
-
-console.log(db.tables.user);
+```ts index.ts
 ```
 </CodeGroup>
 
@@ -96,60 +52,7 @@ console.log(db.tables.user);
 If you need to change the worker, you can create a new one and add it to the master Group.
 
 <CodeGroup>
-```typescript
-import { Account } from 'jazz-tools';
-import { startWorker } from 'jazz-tools/worker';
-const apiKey = process.env.JAZZ_API_KEY;
-
-// Start the main worker and fetch database reference
-const { worker } = await startWorker({
-  syncServer: `wss://cloud.jazz.tools/?key=${apiKey}`,
-  accountID: process.env.WORKER_ACCOUNT_ID,
-  accountSecret: process.env.WORKER_ACCOUNT_SECRET,
-});
-
-const DatabaseRoot = co.map({
-  group: Group,
-  tables: co.map({}),
-});
-
-const db = await DatabaseRoot.loadUnique("better-auth-root", process.env.WORKER_ACCOUNT_ID, {
-  loadAs: worker,
-  resolve: {
-    group: true,
-    tables: true,
-  },
-});
-
-// Load the new worker account
-const newWorkerRef = await Account.load(process.env.NEW_WORKER_ACCOUNT_ID);
-
-// Add the new worker to the group as admin
-db.group.$jazz.addMember(newWorkerRef, "admin");
-
-await db.group.$jazz.waitForSync();
-
-// Now the new worker can access the tables
-const { worker: newWorker } = await startWorker({
-  syncServer: `wss://cloud.jazz.tools/?key=${apiKey}`,
-  accountID: process.env.NEW_WORKER_ACCOUNT_ID,
-  accountSecret: process.env.NEW_WORKER_ACCOUNT_SECRET,
-});
-
-// Create the database root on the new worker with the same group's and tables' references
-await DatabaseRoot.upsertUnique({
-  unique: "better-auth-root",
-  value: {
-    group: db.group,
-    tables: db.tables,
-  },
-  owner: newWorker,
-});
-
-// Now the new worker can be used for the Database Adapter.
-
-// Don't forget to remove the old worker from the group
-db.group.$jazz.removeMember(worker);
+```ts rotate-worker.ts
 ```
 </CodeGroup>
 

@@ -5,15 +5,15 @@ import { createElement, Children } from "react";
 
 export const TabbedCodeGroup = ({ children }) => {
   const currentFramework = CURRENT_FRAMEWORK;
-  
+
   if (!currentFramework) {
     // No framework set, render all tabs with labels
-    return createElement('div', null, children);
+    return createElement("div", null, children);
   }
 
   // Filter children to find matching framework tab
   const childArray = Children.toArray(children);
-  const matchingChild = childArray.find(child => {
+  const matchingChild = childArray.find((child) => {
     return child.props?.value === currentFramework;
   });
 
@@ -21,7 +21,7 @@ export const TabbedCodeGroup = ({ children }) => {
   const tabToRender = matchingChild || childArray[0];
   if (tabToRender) {
     // Just render the content directly, not the wrapper
-    return createElement('div', null, tabToRender.props.children);
+    return createElement("div", null, tabToRender.props.children);
   }
 
   return null;
@@ -29,12 +29,14 @@ export const TabbedCodeGroup = ({ children }) => {
 
 export const TabbedCodeGroupItem = ({ children, label, value }) => {
   const currentFramework = CURRENT_FRAMEWORK;
-  
+
   if (!currentFramework) {
     // No framework set, render with label
-    return createElement('div', null, 
-      createElement('h5', null, `${label}:`),
-      children
+    return createElement(
+      "div",
+      null,
+      createElement("h5", null, `${label}:`),
+      children,
     );
   }
 
@@ -48,13 +50,15 @@ export const TabbedCodeGroupItem = ({ children, label, value }) => {
 
 export const ContentByFramework = ({ children, framework }) => {
   const currentFramework = CURRENT_FRAMEWORK;
-  
+
   if (!currentFramework) {
     // No framework set, render with markers
-    return createElement('div', null, 
-      createElement('p', {}, `--- Section applies only to ${framework} ---`), 
-      children, 
-      createElement('p', null, `--- End of ${framework} specific section ---`)
+    return createElement(
+      "div",
+      null,
+      createElement("p", {}, `--- Section applies only to ${framework} ---`),
+      children,
+      createElement("p", null, `--- End of ${framework} specific section ---`),
     );
   }
 
@@ -72,25 +76,46 @@ export const ContentByFramework = ({ children, framework }) => {
 };
 
 export const CodeGroup = ({ children }) => {
-  return createElement('div', null, children);
+  return createElement("div", null, children);
 };
 
 export const FileName = ({ children }) => {
-  return createElement('div', null, createElement('strong', {}, 'File name: ', children));
+  return createElement(
+    "div",
+    null,
+    createElement("strong", {}, "File name: ", children),
+  );
 };
 
 export const Alert = ({ children, title, variant }) => {
-  return createElement('div', {},  createElement('strong', null, `${variant && variant[0].toUpperCase() + variant.slice(1) + ": "}${title || ''} `), children);
+  return createElement(
+    "div",
+    {},
+    createElement(
+      "strong",
+      null,
+      `${variant && variant[0].toUpperCase() + variant.slice(1) + ": "}${title || ""} `,
+    ),
+    children,
+  );
 };
 
 export const TextLink = ({ children, href }) => {
-  return createElement('a', { href }, children);
+  return createElement("a", { href }, children);
 };
 
 export const FileDownloadLink = ({ children, href }) => {
-  return createElement('a', { href, download: true }, children);
+  return createElement("a", { href, download: true }, children);
 };
 
 // Just don't render these at all
 const emptyElement = () => null;
-export { emptyElement as ReactLogo, emptyElement as SvelteLogo, emptyElement as JazzLogo, emptyElement as JazzIcon, emptyElement as VanillaLogo };
+export {
+  emptyElement as ReactLogo,
+  emptyElement as SvelteLogo,
+  emptyElement as JazzLogo,
+  emptyElement as JazzIcon,
+  emptyElement as ExpoLogo,
+  emptyElement as RNLogo,
+  emptyElement as VanillaLogo,
+};

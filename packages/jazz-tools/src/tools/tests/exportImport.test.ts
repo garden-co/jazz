@@ -5,6 +5,7 @@ import { Account, CoPlainText, Group, co, z } from "../exports.js";
 import {
   createJazzTestAccount,
   createJazzTestGuest,
+  disableJazzTestSync,
   setupJazzTestSync,
 } from "../testing.js";
 import { assertLoaded } from "./utils.js";
@@ -259,6 +260,83 @@ describe("exportCoValue", () => {
       (piece) => piece.id === address.city.$jazz.id,
     );
     expect(cityContent).toHaveLength(0);
+  });
+});
+
+describe("value.$jazz.export", () => {
+  test("exports a CoValue returned by create", async () => {
+    disableJazzTestSync();
+
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+    });
+
+    const group = Group.create();
+    group.addMember("everyone", "reader");
+
+    const person = Person.create({ name: "Jane", age: 28 }, group);
+
+    const exported = person.$jazz.export();
+
+    expect(exported.id).toBe(person.$jazz.id);
+
+    const bob = await createJazzTestAccount();
+    importContentPieces(exported.contentPieces, bob);
+
+    const loadedPerson = await Person.load(person.$jazz.id, { loadAs: bob });
+    assertLoaded(loadedPerson);
+
+    expect(loadedPerson.name).toBe("Jane");
+    expect(loadedPerson.age).toBe(28);
+  });
+
+  test("exports a nested CoValue loaded with load", async () => {
+    disableJazzTestSync();
+
+    const Address = co.map({
+      street: z.string(),
+      city: z.string(),
+    });
+
+    const Person = co.map({
+      name: z.string(),
+      address: Address,
+    });
+
+    const alice = await createJazzTestAccount();
+
+    const group = Group.create(alice);
+    group.addMember("everyone", "reader");
+
+    const address = Address.create(
+      { street: "123 Main St", city: "New York" },
+      group,
+    );
+    const person = Person.create({ name: "John", address }, group);
+
+    const loadedPerson = await Person.load(person.$jazz.id, {
+      resolve: { address: true },
+      loadAs: alice,
+    });
+
+    assertLoaded(loadedPerson);
+    assertLoaded(loadedPerson.address);
+
+    const exported = loadedPerson.$jazz.export();
+
+    const bob = await createJazzTestAccount();
+
+    importContentPieces(exported.contentPieces, bob);
+
+    const importedPerson = await Person.load(person.$jazz.id, {
+      resolve: { address: true },
+      loadAs: bob,
+    });
+
+    assertLoaded(importedPerson);
+    expect(importedPerson.address.street).toBe("123 Main St");
+    expect(importedPerson.address.city).toBe("New York");
   });
 });
 

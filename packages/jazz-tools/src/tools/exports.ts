@@ -40,6 +40,7 @@ export type {
   AccountClass,
   AccountCreationProps,
   BaseProfileShape,
+  ExportedCoValue,
 } from "./internal.js";
 
 export {
@@ -64,6 +65,7 @@ export {
   Ref,
   createUnloadedCoValue,
   unstable_loadUnique,
+  getUnloadedCoValueWithoutId,
 } from "./internal.js";
 
 export {

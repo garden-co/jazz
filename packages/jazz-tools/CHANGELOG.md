@@ -1,5 +1,83 @@
 # jazz-tools
 
+## 0.19.7
+
+### Patch Changes
+
+- e113a79: Avoid migrating unauthorized CoValues
+  - cojson@0.19.7
+  - cojson-storage-indexeddb@0.19.7
+  - cojson-transport-ws@0.19.7
+
+## 0.19.6
+
+### Patch Changes
+
+- 23782f0: Upgraded `react-native-quick-crypto` to version 1.0.0-beta.21 and switch to using the native blake3 in RNQuickCrypto
+
+  Breaking: any app that uses RNQuickCrypto will have to upgrade to `react-native-quick-crypto@1.0.0-beta.21`
+
+- 56d74e4: Make createAs a public API that can be used to create controlled accounts from workers
+- bc9120b: - Added value.$jazz.export() API and preloaded option in React hooks, to make it possible to pass raw covalue data from React server components to client components
+  - Prevent the inspector from rendering during SSR
+  - cojson@0.19.6
+  - cojson-storage-indexeddb@0.19.6
+  - cojson-transport-ws@0.19.6
+
+## 0.19.5
+
+### Patch Changes
+
+- Updated dependencies [343c2e4]
+  - cojson@0.19.5
+  - cojson-storage-indexeddb@0.19.5
+  - cojson-transport-ws@0.19.5
+
+## 0.19.4
+
+### Patch Changes
+
+- 78dfffd: Optimize CoValue creation by caching schema->coField transformations
+- de2f8b5: Ensured ensureLoaded properly handles $onError in resolve queries
+- 763977a: In the inspector, accounts are now identified by header's meta type
+- e02e14c: Improved readability for CoPlainText's history in inspector
+- 3aaba61: Inline edit for CoPlainTexts in inspector
+- Updated dependencies [8778937]
+  - cojson-storage-indexeddb@0.19.4
+  - cojson@0.19.4
+  - cojson-transport-ws@0.19.4
+
+## 0.19.3
+
+### Patch Changes
+
+- cddbfdb: Fix co.discriminatedUnion load for React Native
+- 114e4ce: Show invalid transaction in inspector even if they are not decryptable
+  - cojson@0.19.3
+  - cojson-storage-indexeddb@0.19.3
+  - cojson-transport-ws@0.19.3
+
+## 0.19.2
+
+### Patch Changes
+
+- ef24afb: Support creating CoVectors using plain `number[]` or `Float32Array` objects inside CoValue containers
+- 5f2b34b: Inline editing and snapshot restore for CoMaps in the inspector
+- Updated dependencies [7e76313]
+  - cojson@0.19.2
+  - cojson-storage-indexeddb@0.19.2
+  - cojson-transport-ws@0.19.2
+
+## 0.19.1
+
+### Patch Changes
+
+- f444bd9: Add `resolve` support for `co.discriminatedUnion`
+- Updated dependencies [afd2ded]
+  - cojson@0.19.1
+  - cojson-storage-indexeddb@0.19.1
+  - cojson-transport-ws@0.19.1
+
 ## 0.19.0
 
 ### Minor Changes

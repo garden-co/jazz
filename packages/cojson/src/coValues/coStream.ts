@@ -51,15 +51,20 @@ export class RawCoStreamView<
   id: CoID<this>;
   type = "costream" as const;
   core: AvailableCoValueCore;
+
+  /** The internal state of RawCoStream */
   items: {
     [key: SessionID]: CoStreamItem<Item>[];
   };
-  /** @internal */
   knownTransactions: Record<RawCoID, number>;
-  readonly _item!: Item;
-
   totalValidTransactions: number = 0;
   version: number = 0;
+
+  private resetInternalState() {
+    this.items = {};
+    this.knownTransactions = { [this.core.id]: 0 };
+    this.totalValidTransactions = 0;
+  }
 
   constructor(core: AvailableCoValueCore) {
     this.id = core.id as CoID<this>;
@@ -71,9 +76,8 @@ export class RawCoStreamView<
 
   rebuildFromCore() {
     this.version++;
-    this.items = {};
-    this.knownTransactions = { [this.core.id]: 0 };
-    this.totalValidTransactions = 0;
+
+    this.resetInternalState();
     this.processNewTransactions();
   }
 

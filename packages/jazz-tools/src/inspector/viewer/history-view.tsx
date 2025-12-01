@@ -1,29 +1,11 @@
-import {
-  AccountRole,
-  BinaryStreamStart,
-  CoID,
-  JsonValue,
-  LocalNode,
-  OpID,
-  RawCoValue,
-  Role,
-} from "cojson";
+import { CoID, JsonValue, LocalNode, OpID, RawCoValue } from "cojson";
 import { useMemo } from "react";
 import { styled } from "goober";
-import { isCoId } from "./types";
 import { AccountOrGroupText } from "./account-or-group-text";
 import { DataTable, ColumnDef } from "../ui/data-table";
-import { MapOpPayload } from "cojson/dist/coValues/coMap.js";
-import {
-  DeletionOpPayload,
-  InsertionOpPayload,
-} from "cojson/dist/coValues/coList.js";
-import {
-  BinaryStreamChunk,
-  BinaryStreamEnd,
-} from "cojson/dist/coValues/coStream.js";
-import { VerifiedTransaction } from "cojson/dist/coValueCore/coValueCore.js";
 import { Icon, Accordion } from "../ui";
+import * as TransactionChanges from "../utils/transactions-changes";
+import { getTransactionChanges } from "../utils/history";
 
 type HistoryEntry = {
   id: string;
@@ -126,28 +108,6 @@ export function HistoryView({
   );
 }
 
-function getTransactionChanges(
-  tx: VerifiedTransaction,
-  coValue: RawCoValue,
-): JsonValue[] {
-  if (tx.isValid === false && tx.tx.privacy === "private") {
-    const readKey = coValue.core.getReadKey(tx.tx.keyUsed);
-    if (!readKey) {
-      throw new Error("Read key not found");
-    }
-
-    return (
-      coValue.core.verified.decryptTransaction(
-        tx.txID.sessionID,
-        tx.txID.txIndex,
-        readKey,
-      ) ?? []
-    );
-  }
-
-  return tx.changes ?? (tx.tx as any).changes ?? [];
-}
-
 function getHistory(coValue: RawCoValue): HistoryEntry[] {
   return coValue.core.verifiedTransactions.flatMap((tx, index) => {
     const changes = getTransactionChanges(tx, coValue);
@@ -168,7 +128,7 @@ function mapTransactionToAction(
   coValue: RawCoValue,
 ): string {
   // Group changes
-  if (isUserPromotion(change)) {
+  if (TransactionChanges.isUserPromotion(change)) {
     if (change.value === "revoked") {
       return `${change.key} has been revoked`;
     }
@@ -176,28 +136,28 @@ function mapTransactionToAction(
     return `${change.key} has been promoted to ${change.value}`;
   }
 
-  if (isGroupExtension(change)) {
+  if (TransactionChanges.isGroupExtension(change)) {
     const child = change.key.slice(6);
     return `Group became a member of ${child}`;
   }
 
-  if (isGroupExtendRevocation(change)) {
+  if (TransactionChanges.isGroupExtendRevocation(change)) {
     const child = change.key.slice(6);
     return `Group's membership of ${child} has been revoked.`;
   }
 
-  if (isGroupPromotion(change)) {
+  if (TransactionChanges.isGroupPromotion(change)) {
     const parent = change.key.slice(7);
     return `Group ${parent} has been promoted to ${change.value}`;
   }
 
-  if (isKeyRevelation(change)) {
+  if (TransactionChanges.isKeyRevelation(change)) {
     const [key, target] = change.key.split("_for_");
     return `Key "${key}" has been revealed to "${target}"`;
   }
 
   // coList changes
-  if (isItemAppend(change)) {
+  if (TransactionChanges.isItemAppend(change)) {
     if (change.after === "start") {
       return `"${change.value}" has been appended`;
     }
@@ -211,7 +171,7 @@ function mapTransactionToAction(
     return `"${change.value}" has been inserted after "${(after as any).value}"`;
   }
 
-  if (isItemPrepend(change)) {
+  if (TransactionChanges.isItemPrepend(change)) {
     if (change.before === "end") {
       return `"${change.value}" has been prepended`;
     }
@@ -225,7 +185,7 @@ function mapTransactionToAction(
     return `"${change.value}" has been inserted before "${(before as any).value}"`;
   }
 
-  if (isItemDeletion(change)) {
+  if (TransactionChanges.isItemDeletion(change)) {
     const insertion = findListChange(change.insertion, coValue);
     if (insertion === undefined) {
       return `An undefined item has been deleted`;
@@ -235,25 +195,29 @@ function mapTransactionToAction(
   }
 
   // coStream changes
-  if (isStreamStart(change)) {
+  if (TransactionChanges.isStreamStart(change)) {
     return `Stream started with mime type "${change.mimeType}" and file name "${change.fileName}"`;
   }
 
-  if (isStreamChunk(change)) {
+  if (TransactionChanges.isStreamChunk(change)) {
     return `Stream chunk added`;
   }
 
-  if (isStreamEnd(change)) {
+  if (TransactionChanges.isStreamEnd(change)) {
     return `Stream ended`;
   }
 
   // coMap changes
-  if (isPropertySet(change)) {
+  if (TransactionChanges.isPropertySet(change)) {
     return `Property "${change.key}" has been set to ${JSON.stringify(change.value)}`;
   }
 
-  if (isPropertyDeletion(change)) {
+  if (TransactionChanges.isPropertyDeletion(change)) {
     return `Property "${change.key}" has been deleted`;
+  }
+
+  if ((change as any).op === "custom") {
+    return (change as any).action;
   }
 
   return "Unknown action: " + JSON.stringify(change);
@@ -267,90 +231,6 @@ const findListChange = (
     (tx) =>
       tx.txID.sessionID === opId.sessionID && tx.txID.txIndex === opId.txIndex,
   )?.changes?.[opId.changeIdx];
-};
-
-const isGroupExtension = (
-  change: any,
-): change is Extract<
-  MapOpPayload<`child_${string}`, "extend">,
-  { op: "set" }
-> => {
-  return change?.op === "set" && change?.value === "extend";
-};
-
-const isGroupExtendRevocation = (
-  change: any,
-): change is Extract<
-  MapOpPayload<`child_${string}`, "revoked">,
-  { op: "set" }
-> => {
-  return change?.op === "set" && change?.value === "revoked";
-};
-
-const isGroupPromotion = (
-  change: any,
-): change is Extract<
-  MapOpPayload<`parent_co_${string}`, AccountRole>,
-  { op: "set" }
-> => {
-  return change?.op === "set" && change?.key.startsWith("parent_co_");
-};
-
-const isUserPromotion = (
-  change: any,
-): change is Extract<MapOpPayload<CoID<RawCoValue>, Role>, { op: "set" }> => {
-  return (
-    change?.op === "set" && (isCoId(change?.key) || change?.key === "everyone")
-  );
-};
-
-const isKeyRevelation = (
-  change: any,
-): change is Extract<
-  MapOpPayload<`${string}_for_${string}`, string>,
-  { op: "set" }
-> => {
-  return change?.op === "set" && change?.key.includes("_for_");
-};
-
-const isPropertySet = (
-  change: any,
-): change is Extract<MapOpPayload<string, any>, { op: "set" }> => {
-  return change?.op === "set" && "key" in change && "value" in change;
-};
-const isPropertyDeletion = (
-  change: any,
-): change is Extract<MapOpPayload<string, any>, { op: "del" }> => {
-  return change?.op === "del" && "key" in change;
-};
-
-const isItemAppend = (
-  change: any,
-): change is Extract<InsertionOpPayload<any>, { op: "app" }> => {
-  return change?.op === "app" && "after" in change && "value" in change;
-};
-const isItemPrepend = (
-  change: any,
-): change is Extract<InsertionOpPayload<any>, { op: "pre" }> => {
-  return change?.op === "pre" && "before" in change && "value" in change;
-};
-
-const isItemDeletion = (
-  change: any,
-): change is Extract<DeletionOpPayload, { op: "del" }> => {
-  return change?.op === "del" && "insertion" in change;
-};
-
-const isStreamStart = (change: any): change is BinaryStreamStart => {
-  return change?.type === "start" && "mimeType" in change;
-};
-
-const isStreamChunk = (change: any): change is BinaryStreamChunk => {
-  return change?.type === "chunk" && "chunk" in change;
-};
-
-const isStreamEnd = (change: any): change is BinaryStreamEnd => {
-  return change?.type === "end";
 };
 
 const RedTooltip = styled("span")`

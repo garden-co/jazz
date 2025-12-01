@@ -1,46 +1,38 @@
 "use client";
 
-import { Account } from "jazz-tools";
+import { JazzAccount } from "@/schema";
 import { useAccount } from "jazz-tools/react";
-import Link from "next/link";
+import { TodoList } from "./TodoList";
+import { useState } from "react";
 
 export default function Home() {
-  const me = useAccount(Account, {
-    resolve: {
-      profile: true,
-    },
-  });
+  const me = useAccount(JazzAccount);
+  const [copied, setCopied] = useState(false);
+
+  if (!me.$isLoaded) {
+    return null;
+  }
+
+  const handleCopyUrl = async () => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const accountUrl = `${window.location.origin}/account/${me.$jazz.id}`;
+
+    await navigator.clipboard.writeText(accountUrl);
+    setCopied(true);
+  };
 
   return (
-    <div className="flex flex-col items-center justify-center h-screen gap-4">
-      <h1 className="text-2xl font-bold">SSR rendering example with Jazz</h1>
-      <div className="text-sm text-gray-500 w-1/2 text-center">
-        Data is still loaded only on the client, the components are rendered on
-        the server with all the CoValues as null
-      </div>
-      <label>
-        <div className="text-sm">
-          Your profile name{" "}
-          <span className="text-xs">(only loaded on the client)</span>
-        </div>
-        <input
-          className="border-2 border-gray-300 rounded-md p-2 w-full"
-          value={me.$isLoaded ? me.profile.name : ""}
-          onChange={(e) => {
-            if (!me.$isLoaded) {
-              return;
-            }
-
-            me.profile.$jazz.set("name", e.target.value);
-          }}
-        />
-      </label>
-      <Link
-        href={`/profile/${me.$isLoaded ? me.profile.$jazz.id : ""}`}
-        className="bg-blue-500 text-white px-4 py-2 rounded-md"
+    <div className="relative flex h-screen flex-col items-center justify-center gap-4">
+      <button
+        onClick={handleCopyUrl}
+        className="absolute right-4 top-4 rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-400 focus:ring-offset-2"
       >
-        Your profile name in a Server Component
-      </Link>
+        {copied ? "Copied!" : "Copy todo list URL"}
+      </button>
+      <TodoList id={me.$jazz.id} />
     </div>
   );
 }

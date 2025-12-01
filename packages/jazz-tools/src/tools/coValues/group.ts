@@ -14,7 +14,7 @@ import {
   CoValue,
   CoValueClass,
   ID,
-  MaybeLoaded,
+  Settled,
   RefEncoded,
   RefsToResolve,
   RefsToResolveStrict,
@@ -178,7 +178,11 @@ export class Group extends CoValueBase implements CoValue {
           ref,
           get account() {
             // Accounts values are non-nullable because are loaded as dependencies
-            return accessChildById(group, accountID, refEncodedAccountSchema);
+            return accessChildById(
+              group,
+              accountID,
+              refEncodedAccountSchema,
+            ) as Account;
           },
         });
       }
@@ -279,7 +283,7 @@ export class Group extends CoValueBase implements CoValue {
       resolve?: RefsToResolveStrict<G, R>;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<MaybeLoaded<Resolved<G, R>>> {
+  ): Promise<Settled<Resolved<G, R>>> {
     return loadCoValueWithoutMe(this, id, options);
   }
 
@@ -410,7 +414,7 @@ export function getCoValueOwner(coValue: CoValue): Group {
     ref: RegisteredSchemas["Group"],
     optional: false,
   });
-  if (!group) {
+  if (!group.$isLoaded) {
     throw new Error("CoValue has no owner");
   }
   return group;

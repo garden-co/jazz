@@ -13,7 +13,7 @@ This quickstart guide will take you from an empty project to a working app with 
 
 ## Create your App
 
-<ContentByFramework framework="react">  
+<ContentByFramework framework="react">
   We'll be using Next.js for this guide per the [React team's recommendation](https://react.dev/learn/creating-a-react-app), but Jazz works great with vanilla React and other full-stack frameworks too.
 
   You can accept the defaults for all the questions, or customise the project as you like.
@@ -67,7 +67,7 @@ The `jazz-tools` package includes everything you're going to need to build your 
 <GetAPIKey />
 
 ## Define your schema
-Jazz uses Zod for more simple data types (like strings, numbers, booleans), and its own schemas to create collaborative data structures known as CoValues.  CoValues are automatically persisted across your devices and the cloud and synced in real-time. Here we're defining a schema made up of both Zod types and CoValues. 
+Jazz uses Zod for more simple data types (like strings, numbers, booleans), and its own schemas to create collaborative data structures known as CoValues.  CoValues are automatically persisted across your devices and the cloud and synced in real-time. Here we're defining a schema made up of both Zod types and CoValues.
 
 Adding a `root` to the user's account gives us a container that can be used to keep a track of all the data a user might need to use the app. The migration runs when the user logs in, and ensures the account is properly set up before we try to use it.
 
@@ -79,31 +79,7 @@ Adding a `root` to the user's account gives us a container that can be used to k
 </ContentByFramework>
 
 <CodeGroup preferWrap>
-```ts
-import { co, z } from "jazz-tools";
-
-export const Band = co.map({
-  name: z.string(), // Zod primitive type
-});
-
-export const Festival = co.list(Band);
-
-export const JazzFestAccountRoot = co.map({
-  myFestival: Festival,
-});
-
-export const JazzFestAccount = co
-  .account({
-    root: JazzFestAccountRoot,
-    profile: co.profile(),
-  })
-  .withMigration((account) => {
-    if (!account.$jazz.has('root')) {
-      account.$jazz.set('root', {
-        myFestival: [],
-      });
-    }
-  });
+```ts quickstart/schema.ts
 ```
 </CodeGroup>
 
@@ -113,31 +89,11 @@ Wrap your app with a provider so components can use Jazz.
 <ContentByFramework framework="react">
   <FileName>app/components/JazzWrapper.tsx</FileName>
 <CodeGroup preferWrap>
-```tsx
-"use client"; // tells Next.js that this component can't be server-side rendered. If you're not using Next.js, you can remove it.
-import { JazzReactProvider } from "jazz-tools/react";
-import { JazzFestAccount } from "@/app/schema";
-
-const apiKey = process.env.NEXT_PUBLIC_JAZZ_API_KEY;
-
-export function JazzWrapper({ children }: { 
-  children: React.ReactNode 
-}) {
-  return (
-    <JazzReactProvider
-      sync={{ 
-        peer: `wss://cloud.jazz.tools/?key=${apiKey}` 
-      }}
-      AccountSchema={JazzFestAccount}
-    >
-      {children}
-    </JazzReactProvider>
-  );
-}
+```tsx quickstart/JazzWrapper.tsx
 ```
 </CodeGroup>
 </ContentByFramework>
-<ContentByFramework framework="react">  
+<ContentByFramework framework="react">
   <FileName>app/layout.tsx</FileName>
 </ContentByFramework>
 <ContentByFramework framework="svelte">
@@ -146,41 +102,11 @@ export function JazzWrapper({ children }: {
 
 <TabbedCodeGroup id="jazz-provider" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-  ```tsx
-  import { JazzWrapper } from "@/app/components/JazzWrapper";
-
-  export default function RootLayout({ 
-    children
-  }: { 
-    children: React.ReactNode 
-  }) {
-    return (
-      <html lang="en">
-        <body>
-          <JazzWrapper>
-            {children}
-          </JazzWrapper>
-        </body>
-      </html>
-    );
-  }
+  ```tsx quickstart/layout.tsx
   ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
-```svelte
-<script lang="ts">
-  import { JazzSvelteProvider } from "jazz-tools/svelte";
-  import { JazzFestAccount } from "$lib/schema";
-	import { PUBLIC_JAZZ_API_KEY } from "$env/static/public";
-
-  const apiKey = PUBLIC_JAZZ_API_KEY;
-  let { children } = $props();
-  const sync = { peer: `wss://cloud.jazz.tools/?key=${apiKey}` };
-</script>
-
-<JazzSvelteProvider {sync} AccountSchema={JazzFestAccount}>
-  {@render children?.()}
-</JazzSvelteProvider>
+```svelte quickstart/+layout.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
@@ -191,13 +117,13 @@ Moment of truth&hairsp;—&hairsp;time to start your app and see if it works.
 <RunDevServer />
 
 <ContentByFramework framework="react">
-If everything's going according to plan, you should see the default Next.js welcome page! 
+If everything's going according to plan, you should see the default Next.js welcome page!
 </ContentByFramework>
 <ContentByFramework framework="svelte">
 If everything's going according to plan, you should see the default SvelteKit welcome page!
 </ContentByFramework>
 
-### Not loading? 
+### Not loading?
 
 If you're not seeing the welcome page:
 
@@ -225,58 +151,11 @@ Let's create a simple form to add a new band to the festival. We'll use the `use
 <TabbedCodeGroup id="new-band-component" default="react" savedPreferenceKey="framework"
 >
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-```tsx
-"use client";
-import { useAccount } from "jazz-tools/react";
-import { JazzFestAccount } from "@/app/schema";
-import { useState } from "react";
-
-export function NewBand() {
-  const me = useAccount(JazzFestAccount, { resolve: { root: { myFestival: true } } });
-  const [name, setName] = useState("");
-
-  const handleSave = () => {
-    if (!me.$isLoaded) return;
-    me.root.myFestival.$jazz.push({ name });
-    setName("");
-  };
-
-  return (
-    <div>
-      <input
-        type="text"
-        value={name}
-        placeholder="Band name"
-        onChange={(e) => setName(e.target.value)}
-      />
-      <button type="button" onClick={handleSave}>Add</button>
-    </div>
-  );
-}
+```tsx quickstart/NewBand.tsx
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
-```svelte
-<script lang="ts">
-	import { AccountCoState } from "jazz-tools/svelte";
-	import { JazzFestAccount } from "$lib/schema";
-
-  const me = new AccountCoState(JazzFestAccount, { 
-    resolve: { root: { myFestival: true } } 
-  });
-  let name = $state("");
-
-  function handleSave() {
-    if (!me.current.$isLoaded) return;
-    me.current.root.myFestival.$jazz.push({ name });
-    name = "";
-  }
-</script>
-
-<div>
-  <input type="text" bind:value={name} placeholder="Band name" />
-  <button type="button" onclick={handleSave}>Add</button>
-</div>
+```svelte quickstart/NewBand.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
@@ -293,41 +172,11 @@ Now we've got a way to create data, so let's add a component to display it.
 
 <TabbedCodeGroup id="my-festival-component" default="react" savedPreferenceKey="framework">
 <TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
-```tsx
-"use client";
-import { useAccount } from "jazz-tools/react";
-import { JazzFestAccount } from "@/app/schema";
-
-export function Festival() {
-  const me = useAccount(JazzFestAccount, { 
-    resolve: { root: { myFestival: { $each: true } } } 
-  });
-  if (!me.$isLoaded) return null;
-  return (
-    <ul>
-      {me.root.myFestival.map((band) => <li key={band.$jazz.id}>{band.name}</li>)}
-    </ul>
-  );
-}
+```tsx quickstart/Festival.tsx
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
-```svelte
-<script lang="ts">
-  import { AccountCoState } from "jazz-tools/svelte";
-  import { JazzFestAccount } from "$lib/schema";
-  const me = new AccountCoState(JazzFestAccount, { 
-    resolve: { root: { myFestival: { $each: true } } } 
-  });
-</script>
-
-<ul>
-  {#if me.current.$isLoaded}
-    {#each me.current.root.myFestival as band}
-      <li>{band.name}</li>
-    {/each}
-  {/if}
-</ul>
+```svelte quickstart/Festival.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
@@ -344,33 +193,11 @@ You've built all your components, time to put them together.
 
 <TabbedCodeGroup id="home-page" default="react" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-```tsx
-import { Festival } from "@/app/components/Festival";
-import { NewBand } from "@/app/components/NewBand";
-
-export default function Home() {
-  return (
-    <main>
-      <h1>🎪 My Festival</h1>
-      <NewBand />
-      <Festival />
-    </main>
-  );
-}
+```tsx quickstart/page.tsx
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
-```svelte
-<script lang="ts">
-  import NewBand from "$lib/components/NewBand.svelte";
-  import Festival from "$lib/components/Festival.svelte";
-</script>
-
-<main>
-  <h1>🎪 My Festival</h1>
-  <NewBand />
-  <Festival />
-</main>
+```svelte quickstart/+page.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>

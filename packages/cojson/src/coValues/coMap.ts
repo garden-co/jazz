@@ -1,5 +1,8 @@
 import { CoID, RawCoValue } from "../coValue.js";
-import { AvailableCoValueCore } from "../coValueCore/coValueCore.js";
+import {
+  AvailableCoValueCore,
+  DecryptedTransaction,
+} from "../coValueCore/coValueCore.js";
 import { AgentID, RawCoID, TransactionID } from "../ids.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfromSessionID.js";
@@ -40,10 +43,6 @@ export class RawCoMap<
   type = "comap" as const;
   /** @category 6. Meta */
   core: AvailableCoValueCore;
-  /** @internal */
-  latest: {
-    [Key in keyof Shape & string]?: MapOp<Key, Shape[Key]>;
-  };
 
   /** @internal */
   get latestTxMadeAt(): number {
@@ -55,12 +54,25 @@ export class RawCoMap<
     return this.core.earliestTxMadeAt;
   }
 
-  /** @internal */
+  /** The internal state of the RawCoMap */
   ops: {
     [Key in keyof Shape & string]?: MapOp<Key, Shape[Key]>[];
-  };
-  /** @internal */
-  knownTransactions: Record<RawCoID, number>;
+  } = {};
+  latest: {
+    [Key in keyof Shape & string]?: MapOp<Key, Shape[Key]>;
+  } = {};
+  // We track the knownTransactions in multiple CoValues because branches
+  // need to retrieve the transactions from both the source and the branch
+  knownTransactions: Record<RawCoID, number> = {};
+  totalValidTransactions: number = 0;
+  version: number = 0;
+
+  protected resetInternalState() {
+    this.ops = {};
+    this.latest = {};
+    this.knownTransactions = { [this.core.id]: 0 };
+    this.totalValidTransactions = 0;
+  }
 
   /** @internal */
   ignorePrivateTransactions: boolean;
@@ -68,9 +80,6 @@ export class RawCoMap<
   atTimeFilter?: number = undefined;
   /** @category 6. Meta */
   readonly _shape!: Shape;
-
-  totalValidTransactions: number = 0;
-  version: number = 0;
 
   /** @internal */
   constructor(
@@ -84,12 +93,6 @@ export class RawCoMap<
 
     this.ignorePrivateTransactions =
       options?.ignorePrivateTransactions ?? false;
-    this.ops = {};
-    this.latest = {};
-
-    // We track the knownTransacions in multiple CoValues because branches
-    // need to retrieve the transactions from both the source and the branch
-    this.knownTransactions = { [core.id]: 0 };
 
     this.processNewTransactions();
   }
@@ -115,7 +118,8 @@ export class RawCoMap<
       NonNullable<(typeof ops)[keyof typeof ops]>
     >();
 
-    for (const { txID, changes, madeAt, tx } of newValidTransactions) {
+    for (const transaction of newValidTransactions) {
+      const { txID, changes, madeAt, tx } = transaction;
       for (let changeIdx = 0; changeIdx < changes.length; changeIdx++) {
         const change = changes[changeIdx] as MapOpPayload<
           keyof Shape & string,
@@ -139,6 +143,8 @@ export class RawCoMap<
           changedEntries.set(change.key, entries);
         }
       }
+
+      this.handleNewTransaction(transaction);
     }
 
     for (const entries of changedEntries.values()) {
@@ -150,6 +156,15 @@ export class RawCoMap<
     }
 
     this.totalValidTransactions += newValidTransactions.length;
+  }
+
+  handleNewTransaction(transaction: DecryptedTransaction) {}
+
+  rebuildFromCore() {
+    this.version += 1;
+
+    this.resetInternalState();
+    this.processNewTransactions();
   }
 
   isTimeTravelEntity() {
@@ -168,16 +183,12 @@ export class RawCoMap<
 
   /** @category 4. Time travel */
   atTime(time: number): this {
-    if (time >= this.latestTxMadeAt) {
-      return this;
-    } else {
-      const clone = Object.create(this) as RawCoMap<Shape, Meta>;
+    const clone = Object.create(this) as RawCoMap<Shape, Meta>;
 
-      clone.atTimeFilter = time;
-      clone.latest = {};
+    clone.atTimeFilter = time;
+    clone.latest = {};
 
-      return clone as this;
-    }
+    return clone as this;
   }
 
   /** @internal */
@@ -431,19 +442,6 @@ export class RawCoMap<
       ],
       privacy,
     );
-
-    this.processNewTransactions();
-  }
-
-  rebuildFromCore() {
-    this.version++;
-    this.ops = {};
-    this.latest = {};
-
-    // We track the knownTransacions in multiple CoValues because branches
-    // need to retrieve the transactions from both the source and the branch
-    this.knownTransactions = { [this.core.id]: 0 };
-    this.totalValidTransactions = 0;
 
     this.processNewTransactions();
   }

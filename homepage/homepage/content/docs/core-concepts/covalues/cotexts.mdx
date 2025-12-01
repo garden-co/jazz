@@ -16,18 +16,7 @@ Both types enable real-time collaborative editing of text content while maintain
 **Note:** If you're looking for a quick way to add rich text editing to your app, check out [our prosemirror plugin](#using-rich-text-with-prosemirror).
 
 <CodeGroup>
-```ts twoslash
-import { co } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-
-// ---cut---
-const note = co.plainText().create("Meeting notes", { owner: me });
-
-// Update the text
-note.$jazz.applyDiff("Meeting notes for Tuesday");
-
-console.log(note.toString());  // "Meeting notes for Tuesday"
+```ts index.ts#Basic
 ```
 </CodeGroup>
 
@@ -50,34 +39,14 @@ Both support real-time updates, but `co.plainText()` provides specialized tools 
 CoText values are typically used as fields in your schemas:
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-
-// ---cut---
-const Profile = co.profile({
-  name: z.string(),
-  bio: co.plainText(),         // Plain text field
-  description: co.richText(),  // Rich text with formatting
-});
+```ts index.ts#Comparison
 ```
 </CodeGroup>
 
 Create a CoText value with a simple string:
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-
-// ---cut---
-// Create plaintext with default ownership (current user)
-const note = co.plainText().create("Meeting notes", { owner: me });
-
-// Create rich text with HTML content
-const document = co.richText().create("<p>Project <strong>overview</strong></p>",
-  { owner: me }
-);
+```ts index.ts#StringInitial
 ```
 </CodeGroup>
 
@@ -86,18 +55,7 @@ const document = co.richText().create("<p>Project <strong>overview</strong></p>"
 Like other CoValues, you can specify ownership when creating CoTexts.
 
 <CodeGroup>
-```ts twoslash
-import { co, z, Group } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-const colleagueAccount = await createJazzTestAccount();
-
-// ---cut---
-// Create with shared ownership
-const teamGroup = Group.create();
-teamGroup.addMember(colleagueAccount, "writer");
-
-const teamNote = co.plainText().create("Team updates", { owner: teamGroup });
+```ts index.ts#Ownership
 ```
 </CodeGroup>
 
@@ -108,37 +66,14 @@ See [Groups as permission scopes](/docs/permissions-and-sharing/overview) for mo
 CoText values work similarly to JavaScript strings:
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-const note = co.plainText().create("Meeting notes", { owner: me });
-
-// ---cut---
-// Get the text content
-console.log(note.toString());  // "Meeting notes"
-console.log(`${note}`);    // "Meeting notes"
-
-// Check the text length
-console.log(note.length);      // 14
+```ts index.ts#Reading
 ```
 </CodeGroup>
 
 <ContentByFramework framework="react">
 When using CoTexts in JSX, you can read the text directly:
 <CodeGroup>
-```tsx twoslash
-import * as React from "react";
-import { co, z } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-const note = co.plainText().create("Meeting notes", { owner: me });
-
-// ---cut---
-<>
-  <p>{note.toString()}</p>
-  <p>{note}</p>
-</>
+```tsx react-snippet.tsx#JSX
 ```
 </CodeGroup>
 </ContentByFramework>
@@ -148,24 +83,7 @@ const note = co.plainText().create("Meeting notes", { owner: me });
 Insert and delete text with intuitive methods:
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-const note = co.plainText().create("Meeting notes", { owner: me });
-
-// ---cut---
-// Insert text at a specific position
-note.insertBefore(8, "weekly ");  // "Meeting weekly notes"
-
-// Insert after a position
-note.insertAfter(21, " for Monday");  // "Meeting weekly notes for Monday"
-
-// Delete a range of text
-note.deleteRange({ from: 8, to: 15 });  // "Meeting notes for Monday"
-
-// Apply a diff to update the entire text
-note.$jazz.applyDiff("Team meeting notes for Tuesday");
+```ts index.ts#Editing
 ```
 </CodeGroup>
 
@@ -174,22 +92,7 @@ note.$jazz.applyDiff("Team meeting notes for Tuesday");
 Use `applyDiff` to efficiently update text with minimal changes:
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-
-// ---cut---
-// Original text: "Team status update"
-const minutes = co.plainText().create("Team status update", { owner: me });
-
-// Replace the entire text with a new version
-minutes.$jazz.applyDiff("Weekly team status update for Project X");
-
-// Make partial changes
-let text = minutes.toString();
-text = text.replace("Weekly", "Monday");
-minutes.$jazz.applyDiff(text);  // Efficiently updates only what changed
+```ts index.ts#ApplyDiff
 ```
 </CodeGroup>
 
@@ -197,109 +100,22 @@ Perfect for handling user input in form controls:
 
 <ContentByFramework framework="react">
 <CodeGroup>
-```tsx twoslash
-import { co, z } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-import { useCoState } from "jazz-tools/react";
-import React, { useState } from "react";
-const me = await createJazzTestAccount();
-
-// ---cut---
-function TextEditor({ textId }: { textId: string }) {
-  const note = useCoState(co.plainText(), textId);
-
-  return (
-    note.$isLoaded && <textarea
-      value={note.toString()}
-      onChange={(e) => {
-        // Efficiently update only what the user changed
-        note.$jazz.applyDiff(e.target.value);
-      }}
-    />
-  );
-}
+```ts react-snippet.tsx#TextEditor
 ```
 </CodeGroup>
 </ContentByFramework>
 
 <ContentByFramework framework="vanilla">
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-
-// ---cut---
-const note = co.plainText().create("", { owner: me });
-
-// Create and set up the textarea
-const textarea = document.createElement('textarea');
-textarea.value = note.toString();
-
-// Add event listener for changes
-textarea.addEventListener('input', (e: Event) => {
-  const target = e.target as HTMLTextAreaElement;
-  // Efficiently update only what the user changed
-  note.$jazz.applyDiff(target.value);
-});
-
-// Add the textarea to the document
-document.body.appendChild(textarea);
-```
-</CodeGroup>
-</ContentByFramework>
-
-<ContentByFramework framework="vue">
-<CodeGroup>
-```vue twoslash
-<script setup lang="ts">
-import { ref, onMounted } from 'vue';
-import { co, z } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-
-const note = ref(null);
-const textContent = ref("");
-
-onMounted(async () => {
-  const me = await createJazzTestAccount();
-  note.value = co.plainText().create("", { owner: me });
-  textContent.value = note.value.toString();
-});
-
-function updateText(e) {
-  if (note.value) {
-    note.value.$jazz.applyDiff(e.target.value);
-    textContent.value = note.value.toString();
-  }
-}
-</script>
-
-<template>
-  <textarea
-    :value="textContent"
-    @input="updateText"
-  />
-</template>
+```ts vanilla.ts#PlainText
 ```
 </CodeGroup>
 </ContentByFramework>
 
 <ContentByFramework framework="svelte">
 <CodeGroup>
-```svelte twoslash
-<script lang="ts">
-import { co } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-
-const note = co.plainText().create("", { owner: me });
-</script>
-
-<textarea
-  value={note.toString()}
-  oninput={e => note.$jazz.applyDiff(e.target.value)}
-/>
-```
+  ```svelte svelte.svelte
+  ```
 </CodeGroup>
 </ContentByFramework>
 
@@ -336,69 +152,7 @@ We don't currently have a React Native Expo-specific example, but you need help 
 <ContentByFramework framework={["react", "react-native", "react-native-expo"]}>
 For use with React:
 <CodeGroup>
-```tsx twoslash
-const JazzProfile = co.profile({
-  bio: co.richText(),
-});
-
-const JazzAccount = co.account({
-  profile: JazzProfile,
-  root: co.map({})
-});
-
-import { useAccount, useCoState } from "jazz-tools/react";
-import { co, z } from "jazz-tools";
-import React, { useEffect, useRef } from "react";
-// ---cut---
-// RichTextEditor.tsx
-import { createJazzPlugin } from "jazz-tools/prosemirror";
-import { exampleSetup } from "prosemirror-example-setup";
-import { schema } from "prosemirror-schema-basic";
-import { EditorState } from "prosemirror-state";
-import { EditorView } from "prosemirror-view";
-
-function RichTextEditor() {
-  const me = useAccount(JazzAccount, { resolve: { profile: { bio: true} } });
-  const editorRef = useRef<HTMLDivElement>(null);
-  const viewRef = useRef<EditorView | null>(null);
-
-  const bio = me.$isLoaded ? me.profile.bio : undefined;
-  useEffect(() => {
-    if (!bio || !editorRef.current) return;
-
-    // Create the Jazz plugin for ProseMirror
-    // Providing a co.richText() instance to the plugin to automatically sync changes
-    const jazzPlugin = createJazzPlugin(bio); // [!code ++]
-
-    // Set up ProseMirror with the Jazz plugin
-    if (!viewRef.current) {
-      viewRef.current = new EditorView(editorRef.current, {
-        state: EditorState.create({
-          schema,
-          plugins: [
-            ...exampleSetup({ schema }),
-            jazzPlugin, // [!code ++]
-          ],
-        }),
-      });
-    }
-
-    return () => {
-      if (viewRef.current) {
-        viewRef.current.destroy();
-        viewRef.current = null;
-      }
-    };
-  }, [bio?.$jazz.id]);
-
-  if (!me.$isLoaded) return null;
-
-  return (
-    <div className="border rounded-sm">
-      <div ref={editorRef} className="p-2" />
-    </div>
-  );
-}
+```tsx react-snippet.tsx#RichTextEditor
 ```
 </CodeGroup>
 </ContentByFramework>
@@ -407,50 +161,10 @@ function RichTextEditor() {
 We don't currently have a Svelte-specific example, but you need help you can [request one](https://github.com/garden-co/jazz/issues/new), or ask on [Discord](https://discord.gg/utDMjHYg42).
 </ContentByFramework>
 
-<ContentByFramework framework="vue">
-We don't currently have a Vue-specific example, but you need help you can [request one](https://github.com/garden-co/jazz/issues/new), or ask on [Discord](https://discord.gg/utDMjHYg42).
-</ContentByFramework>
-
-<ContentByFramework framework={["vanilla", "svelte", "vue", "react-native", "react-native-expo"]}>
+<ContentByFramework framework={["vanilla", "svelte", "react-native", "react-native-expo"]}>
 For use without a framework:
 <CodeGroup>
-```js twoslash
-import { co, z } from "jazz-tools";
-import { createJazzPlugin } from "jazz-tools/prosemirror";
-import { exampleSetup } from "prosemirror-example-setup";
-import { schema } from "prosemirror-schema-basic";
-import { EditorState } from "prosemirror-state";
-import { EditorView } from "prosemirror-view";
-
-function setupRichTextEditor(coRichText, container) {
-  // Create the Jazz plugin for ProseMirror
-  // Providing a co.richText() instance to the plugin to automatically sync changes
-  const jazzPlugin = createJazzPlugin(coRichText); // [!code ++]
-
-  // Set up ProseMirror with Jazz plugin
-  const view = new EditorView(container, {
-    state: EditorState.create({
-      schema,
-      plugins: [
-        ...exampleSetup({ schema }),
-        jazzPlugin, // [!code ++]
-      ],
-    }),
-  });
-
-  // Return cleanup function
-  return () => {
-    view.destroy();
-  };
-}
-
-// Usage
-const document = co.richText().create("<p>Initial content</p>", { owner: me });
-const editorContainer = document.getElementById("editor");
-const cleanup = setupRichTextEditor(document, editorContainer);
-
-// Later when done with the editor
-cleanup();
+```ts vanilla.ts#RichText
 ```
 </CodeGroup>
 </ContentByFramework>

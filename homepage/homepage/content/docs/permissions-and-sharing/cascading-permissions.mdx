@@ -15,14 +15,7 @@ When a group is added as a member of another group, members of the added group w
 Here's how to add a group as a member of another group:
 
 <CodeGroup>
-```ts twoslash
-import { Group } from "jazz-tools";
-// ---cut---
-const playlistGroup = Group.create();
-const trackGroup = Group.create();
-
-// Tracks are now visible to the members of playlist
-trackGroup.addMember(playlistGroup);
+```ts index.ts#Basic
 ```
 </CodeGroup>
 
@@ -36,15 +29,7 @@ When you add groups as members:
 Adding a group as a member of another is not limited in depth:
 
 <CodeGroup>
-```ts twoslash
-import { Group } from "jazz-tools";
-// ---cut---
-const grandParentGroup = Group.create();
-const parentGroup = Group.create();
-const childGroup = Group.create();
-
-childGroup.addMember(parentGroup);
-parentGroup.addMember(grandParentGroup);
+```ts index.ts#Inheritance
 ```
 </CodeGroup>
 
@@ -56,37 +41,13 @@ Members of the grandparent group will get access to all descendant groups based 
 
 If the account is already a member of the container group, it will get the more permissive role:
 <CodeGroup>
-```ts twoslash
-import { Group } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const bob = await createJazzTestAccount();
-// ---cut---
-const addedGroup = Group.create();
-addedGroup.addMember(bob, "reader");
-
-const containingGroup = Group.create();
-addedGroup.addMember(bob, "writer");
-containingGroup.addMember(addedGroup);
-
-// Bob stays a writer because his role is higher
-// than the inherited reader role.
+```ts index.ts#RuleOfMostPermissive
 ```
 </CodeGroup>
 
 When adding a group to another group, only admin, writer and reader roles are inherited:
-<CodeGroup>
-```ts twoslash
-import { Group } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const bob = await createJazzTestAccount();
-// ---cut---
-const addedGroup = Group.create();
-addedGroup.addMember(bob, "writeOnly");
-
-const containingGroup = Group.create();
-containingGroup.addMember(addedGroup);
-
-// Bob does not become a member of the containing group
+<CodeGroup className="[&_span]:whitespace-normal">
+```ts index.ts#WriteOnlyOmitted
 ```
 </CodeGroup>
 
@@ -95,39 +56,13 @@ containingGroup.addMember(addedGroup);
 In some cases you might want to inherit all members from an added group but override their roles to the same specific role in the containing group. You can do so by passing an "override role" as a second argument to `addMember`:
 
 <CodeGroup>
-```ts twoslash
-import { Group } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const bob = await createJazzTestAccount();
-// ---cut---
-const organizationGroup = Group.create();
-organizationGroup.addMember(bob, "admin");
-
-const billingGroup = Group.create();
-
-// This way the members of the organization
-// can only read the billing data
-billingGroup.addMember(organizationGroup, "reader");
-```
+```ts index.ts#Overrides
 </CodeGroup>
 
 The "override role" works in both directions:
 
 <CodeGroup>
-```ts twoslash
-import { Group } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const alice = await createJazzTestAccount();
-const bob = await createJazzTestAccount();
-// ---cut---
-const addedGroup = Group.create();
-addedGroup.addMember(bob, "reader");
-addedGroup.addMember(alice, "admin");
-
-const containingGroup = Group.create();
-containingGroup.addMember(addedGroup, "writer");
-
-// Bob and Alice are now writers in the containing group
+```ts index.ts#OverrideContainers
 ```
 </CodeGroup>
 
@@ -136,18 +71,7 @@ containingGroup.addMember(addedGroup, "writer");
 When you remove a member from an added group, they automatically lose access to all containing groups. We handle key rotation automatically to ensure security.
 
 <CodeGroup>
-```ts twoslash
-import { Group } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const bob = await createJazzTestAccount();
-const addedGroup = Group.create();
-// ---cut---
-// Remove member from added group
-await addedGroup.removeMember(bob);
-
-// Bob loses access to both groups.
-// If Bob was also a member of the containing group,
-// he wouldn't have lost access.
+```ts index.ts#RemoveMembers
 ```
 </CodeGroup>
 
@@ -155,17 +79,8 @@ await addedGroup.removeMember(bob);
 
 You can remove a group from another group by using the `removeMember` method:
 
-<CodeGroup>
-```ts twoslash
-import { Group } from "jazz-tools";
-// ---cut---
-const addedGroup = Group.create();
-const containingGroup = Group.create();
-
-containingGroup.addMember(addedGroup);
-
-// Revoke the extension
-await containingGroup.removeMember(addedGroup);
+<CodeGroup className="[&_span]:whitespace-normal">
+```ts index.ts#RevokeExtension
 ```
 </CodeGroup>
 
@@ -173,15 +88,8 @@ await containingGroup.removeMember(addedGroup);
 
 You can get all of the groups added to a group by calling the `getParentGroups` method:
 
-<CodeGroup>
-```ts twoslash
-import { Group } from "jazz-tools";
-// ---cut---
-const containingGroup = Group.create();
-const addedGroup = Group.create();
-containingGroup.addMember(addedGroup);
-
-console.log(containingGroup.getParentGroups()); // [addedGroup]
+<CodeGroup className="[&_span]:whitespace-normal">
+```ts index.ts#GetParentGroups
 ```
 </CodeGroup>
 
@@ -191,92 +99,24 @@ When creating CoValues that contain other CoValues (or updating references to Co
 the necessary CoValues automatically but it will also manage their group ownership.
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-
-// ---cut---
-const Task = co.plainText();
-const Column = co.list(Task);
-const Board = co.map({
-  title: z.string(),
-  columns: co.list(Column),
-});
-
-const board = Board.create({
-  title: "My board",
-  columns: [
-    ["Task 1.1", "Task 1.2"],
-    ["Task 2.1", "Task 2.2"],
-  ],
-});
+```ts index.ts#ImplicitOwnership
 ```
 </CodeGroup>
 
 For each created column and task CoValue, Jazz also creates a new group as its owner and
-adds the referencing CoValue's owner as a member of that group. This means permissions for nested CoValues 
+adds the referencing CoValue's owner as a member of that group. This means permissions for nested CoValues
 are inherited from the CoValue that references them, but can also be modified independently for each CoValue
 if needed.
 
 <CodeGroup>
-```ts twoslash
-import { co, z, Group, Account } from "jazz-tools";
-
-const alice = {} as unknown as Account;
-const bob = {} as unknown as Account;
-const Task = co.plainText();
-const Column = co.list(Task);
-const Board = co.map({
-  title: z.string(),
-  columns: co.list(Column),
-});
-// ---cut---
-const writeAccess = Group.create();
-writeAccess.addMember(bob, "writer");
-
-// Give Bob write access to the board, columns and tasks
-const board = Board.create({
-  title: "My board",
-  columns: [
-    ["Task 1.1", "Task 1.2"],
-    ["Task 2.1", "Task 2.2"],
-  ],
-}, writeAccess);
-
-// Give Alice read access to one specific task
-const task = board.columns[0][0];
-const taskGroup = task.$jazz.owner;
-taskGroup.addMember(alice, "reader");
+```ts index.ts#ManageImplicitPermissions
 ```
 </CodeGroup>
 
 If you prefer to manage permissions differently, you can always create CoValues explicitly:
 
 <CodeGroup>
-```ts twoslash
-import { co, Group, z, Account } from "jazz-tools";
-
-const bob = {} as unknown as Account;
-const Task = co.plainText();
-const Column = co.list(Task);
-const Board = co.map({
-  title: z.string(),
-  columns: co.list(Column),
-});
-
-// ---cut---
-const writeAccess = Group.create();
-writeAccess.addMember(bob, "writer");
-const readAccess =  Group.create();
-readAccess.addMember(bob, "reader");
-
-// Give Bob read access to the board and write access to the columns and tasks
-const board = Board.create({
-  title: "My board",
-  columns: co.list(Column).create([
-    ["Task 1.1", "Task 1.2"],
-    ["Task 2.1", "Task 2.2"],
-  ], writeAccess),
-}, readAccess);
+```ts index.ts#ExplicitPermissions
 ```
 </CodeGroup>
 
@@ -285,28 +125,7 @@ const board = Board.create({
 Here's a practical example of using group inheritance for team permissions:
 
 <CodeGroup>
-```ts twoslash
-import { Group } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const CEO = await createJazzTestAccount();
-const teamLead = await createJazzTestAccount();
-const developer = await createJazzTestAccount();
-const client = await createJazzTestAccount();
-// ---cut---
-// Company-wide group
-const companyGroup = Group.create();
-companyGroup.addMember(CEO, "admin");
-
-// Team group with elevated permissions
-const teamGroup = Group.create();
-teamGroup.addMember(companyGroup); // Inherits company-wide access
-teamGroup.addMember(teamLead, "admin");
-teamGroup.addMember(developer, "writer");
-
-// Project group with specific permissions
-const projectGroup = Group.create();
-projectGroup.addMember(teamGroup); // Inherits team permissions
-projectGroup.addMember(client, "reader"); // Client can only read project items
+```ts index.ts#TeamHierarchy
 ```
 </CodeGroup>
 

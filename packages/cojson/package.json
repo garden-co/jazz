@@ -33,7 +33,7 @@
   },
   "type": "module",
   "license": "MIT",
-  "version": "0.19.0",
+  "version": "0.19.7",
   "devDependencies": {
     "@opentelemetry/sdk-metrics": "^2.0.0",
     "libsql": "^0.5.13",

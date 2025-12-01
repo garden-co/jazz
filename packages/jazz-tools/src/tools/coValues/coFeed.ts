@@ -20,6 +20,7 @@ import {
   Group,
   ID,
   MaybeLoaded,
+  Settled,
   LoadedAndRequired,
   unstable_mergeBranch,
   RefsToResolve,
@@ -297,7 +298,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
       resolve?: RefsToResolveStrict<F, R>;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<MaybeLoaded<Resolved<F, R>>> {
+  ): Promise<Settled<Resolved<F, R>>> {
     return loadCoValueWithoutMe(this, id, options ?? {});
   }
 
@@ -512,13 +513,16 @@ function entryFromRawEntry<Item>(
       }
     },
     get by() {
-      return (
-        accountID &&
-        accessChildById(accessFrom, accountID, {
-          ref: Account,
-          optional: false,
-        })
-      );
+      if (!accountID) return null;
+
+      const account = accessChildById(accessFrom, accountID, {
+        ref: Account,
+        optional: false,
+      }) as Account;
+
+      if (!account.$isLoaded) return null;
+
+      return account;
     },
     madeAt: rawEntry.at,
     tx: rawEntry.tx,
@@ -980,7 +984,7 @@ export class FileStream extends CoValueBase implements CoValue {
       loadAs?: Account | AnonymousJazzAgent;
       allowUnfinished?: boolean;
     },
-  ): Promise<MaybeLoaded<FileStream>> {
+  ): Promise<Settled<FileStream>> {
     const stream = await loadCoValueWithoutMe(this, id, options);
 
     /**

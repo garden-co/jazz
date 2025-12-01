@@ -11,7 +11,7 @@ import {
   SubscribeListenerOptions,
   SubscribeRestArgs,
   TypeSym,
-  MaybeLoaded,
+  Settled,
   Account,
   CoValueJazzApi,
   inspect,
@@ -232,7 +232,7 @@ export class CoVector
     options?: {
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<MaybeLoaded<C>> {
+  ): Promise<Settled<C>> {
     const coVector = await loadCoValueWithoutMe(this, id, options);
 
     /**

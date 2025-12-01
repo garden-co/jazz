@@ -42,7 +42,7 @@ If you intend to build for iOS, you can accept the invitation to install CocoaPo
 npm install @react-native-community/netinfo @bam.tech/react-native-image-resizer
 
 # React Native polyfills
-npm i -S @azure/core-asynciterator-polyfill react-native-url-polyfill readable-stream react-native-get-random-values @op-engineering/op-sqlite react-native-mmkv
+npm i -S @azure/core-asynciterator-polyfill react-native-url-polyfill readable-stream react-native-get-random-values @op-engineering/op-sqlite react-native-mmkv react-native-fast-encoder
 
 # Jazz dependencies
 npm i -S jazz-tools
@@ -60,7 +60,7 @@ npm i -S jazz-tools
 If you are not working within a monorepo, create a new file `metro.config.js` in the root of your project with the following content:
 
 <CodeGroup>
-```ts twoslash
+```ts
 // metro.config.js
 const { getDefaultConfig, mergeConfig } = require('@react-native/metro-config');
 
@@ -80,7 +80,7 @@ module.exports = mergeConfig(getDefaultConfig(__dirname), config);
 For monorepos, use the following `metro.config.js`:
 
 <CodeGroup>
-```ts twoslash
+```ts
 // metro.config.js
 const path = require("path");
 const { makeMetroConfig } = require("@rnx-kit/metro-config");
@@ -141,7 +141,7 @@ module.exports = makeMetroConfig({
 Create a file `polyfills.js` at the project root with the following content:
 
 <CodeGroup>
-```ts twoslash
+```ts
 // @noErrors: 7016
 // polyfills.js
 import { polyfillGlobal } from 'react-native/Libraries/Utilities/PolyfillFunctions';
@@ -151,15 +151,22 @@ polyfillGlobal("ReadableStream", () => ReadableStream); // polyfill ReadableStre
 import "@azure/core-asynciterator-polyfill"; // polyfill Async Iterator
 import "@bacons/text-decoder/install"; // polyfill Text Decoder
 import 'react-native-get-random-values'; // polyfill getRandomValues
+import TextEncoder from 'react-native-fast-encoder'
+
+// The 'react-native-fast-encoder' package does not automatically install the polyfill, so we need to do it manually
+const originalTextEncoder = new window.TextEncoder()
+window.TextEncoder = TextEncoder;
+window.TextDecoder = TextEncoder;
+TextEncoder.prototype.encodeInto = (source: string, destination: Uint8Array<ArrayBufferLike>) => {
+  return originalTextEncoder.encodeInto(source, destination)
+}
 ```
 </CodeGroup>
 
 Update `index.js`:
 
 <CodeGroup>
-```ts twoslash
-// @noErrors: 2307
-// index.js
+```ts
 import { AppRegistry } from 'react-native';
 import App from './App';
 import { name as appName } from './app.json';

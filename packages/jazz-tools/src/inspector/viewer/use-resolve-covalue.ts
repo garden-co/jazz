@@ -48,10 +48,6 @@ export type ResolvedAccount = {
   [key: string]: JSON;
 };
 
-export const isAccount = (coValue: JSONObject): coValue is ResolvedAccount => {
-  return isGroup(coValue) && "profile" in coValue;
-};
-
 export async function resolveCoValue(
   coValueId: CoID<RawCoValue>,
   node: LocalNode,
@@ -89,7 +85,7 @@ export async function resolveCoValue(
   if (type === "comap") {
     if (isBrowserImage(snapshot)) {
       extendedType = "image";
-    } else if (isAccount(snapshot)) {
+    } else if (value.headerMeta?.type === "account") {
       extendedType = "account";
     } else if (value.core.isGroup()) {
       extendedType = "group";
@@ -125,7 +121,7 @@ function subscribeToCoValue(
       if (type === "comap") {
         if (isBrowserImage(snapshot)) {
           extendedType = "image";
-        } else if (isAccount(snapshot)) {
+        } else if (value.headerMeta?.type === "account") {
           extendedType = "account";
         } else if (value.core.isGroup()) {
           extendedType = "group";
