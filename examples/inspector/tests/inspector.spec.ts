@@ -1,5 +1,4 @@
 import { expect, test } from "@playwright/test";
-import { FileStream, Group } from "jazz-tools";
 import { createFile, createOrganization } from "./lib/data";
 import {
   addAccount,
@@ -17,13 +16,16 @@ test("should add and delete account in dropdown", async ({ page }) => {
   await addAccount(page, accountID, accountSecret);
 
   await expect(page.getByText("Jazz CoValue Inspector")).toBeVisible();
-  await page
-    .getByLabel("Account to inspect")
-    .selectOption(`Inspector test account <${accountID}>`);
+
+  await expect(
+    page.getByRole("button", { name: `Inspector test account <${accountID}>` }),
+  ).toBeVisible();
 
   await page.getByRole("button", { name: "Remove account" }).click();
   await expect(page.getByText("Jazz CoValue Inspector")).not.toBeVisible();
-  await expect(page.getByText("Add an account to inspect")).toBeVisible();
+  await expect(
+    page.getByText("Select an account to connect to the inspector."),
+  ).toBeVisible();
   await expect(
     page.getByText(`Inspector test account <${accountID}>`),
   ).not.toBeVisible();

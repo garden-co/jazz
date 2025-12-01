@@ -47,6 +47,7 @@ export async function addAccount(
   accountSecret: string,
 ) {
   await page.goto("/");
+  await page.getByRole("button", { name: "Select account" }).click();
   await page.getByLabel("Account ID").fill(accountID);
   await page.getByLabel("Account secret").fill(accountSecret);
   await page.getByRole("button", { name: "Add account" }).click();
