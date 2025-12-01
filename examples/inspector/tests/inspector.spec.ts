@@ -33,7 +33,7 @@ test("should inspect account", async ({ page }) => {
   await addAccount(page, accountID, accountSecret);
   await page.getByRole("button", { name: "Inspect my account" }).click();
 
-  await expect(page.getByRole("heading", { name: accountID })).toBeVisible();
+  await expect(page.locator("article").getByText(accountID)).toBeVisible();
   await expect(page.getByText("👤 Account")).toBeVisible();
 
   await page.getByRole("button", { name: "profile {} CoMap name:" }).click();
@@ -48,9 +48,7 @@ test("should inspect CoValue", async ({ page }) => {
   await inspectCoValue(page, organization.$jazz.id);
 
   await expect(page.getByText(/Garden Computing/)).toHaveCount(3);
-  await expect(
-    page.getByRole("heading", { name: organization.$jazz.id }),
-  ).toBeVisible();
+  await expect(page.getByText(organization.$jazz.id)).toBeVisible();
   await expect(page.getByText("Role: admin")).toBeVisible();
 
   await page.getByRole("button", { name: /projects/ }).click();
@@ -197,6 +195,7 @@ test("should show Group members", async ({ page }) => {
   await expect(row2.getByRole("cell").nth(1)).toHaveText("admin");
 
   await page
+    .locator("article")
     .getByRole("button", {
       name: `Inspector test account <${account.$jazz.id}>`,
     })

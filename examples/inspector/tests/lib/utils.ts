@@ -53,7 +53,7 @@ export async function addAccount(
 }
 
 export async function inspectCoValue(page: Page, coValueId: string) {
-  await page.goto("/");
+  await page.getByRole("button", { name: "Home" }).click();
   await page.getByLabel("CoValue ID").fill(coValueId);
   await page.getByRole("button", { name: "Inspect CoValue" }).click();
 }

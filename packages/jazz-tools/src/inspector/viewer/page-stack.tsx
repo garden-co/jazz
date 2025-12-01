@@ -6,7 +6,7 @@ import { useRouter } from "../router/context.js";
 import { useNode } from "../contexts/node.js";
 import { HomePage } from "../pages/home.js";
 
-const PageStackContainer = styled("div")`
+const PageStackContainer = styled("article")`
   position: relative;
   padding: 0 0.75rem;
   overflow-y: auto;
