@@ -379,11 +379,6 @@ export class CoValueCore {
 
     this.counter.add(-1, { state: this.loadingState });
 
-    if (this.groupInvalidationSubscription) {
-      this.groupInvalidationSubscription();
-      this.groupInvalidationSubscription = undefined;
-    }
-
     this.node.internalDeleteCoValue(this.id);
 
     return true;
@@ -517,38 +512,6 @@ export class CoValueCore {
     this.scheduleNotifyUpdate();
   }
 
-  groupInvalidationSubscription?: () => void;
-
-  subscribeToGroupInvalidation() {
-    if (!this.verified) {
-      return;
-    }
-
-    if (this.groupInvalidationSubscription) {
-      return;
-    }
-
-    const header = this.verified.header;
-
-    if (header.ruleset.type == "ownedByGroup") {
-      const groupId = header.ruleset.group;
-      const entry = this.node.getCoValue(groupId);
-
-      if (entry.isAvailable()) {
-        this.groupInvalidationSubscription = entry.subscribe((_groupUpdate) => {
-          // When the group is updated, we need to reset the cached content because the transactions validity might have changed
-          this.resetParsedTransactions();
-          this.scheduleNotifyUpdate();
-        }, false);
-      } else {
-        logger.error("CoValueCore: Owner group not available", {
-          id: this.id,
-          groupId,
-        });
-      }
-    }
-  }
-
   contentInClonedNodeWithDifferentAccount(account: ControlledAccountOrAgent) {
     return this.node
       .loadCoValueAsDifferentAgent(this.id, account.agentSecret, account.id)
@@ -656,8 +619,31 @@ export class CoValueCore {
 
       this.processNewTransactions();
       this.scheduleNotifyUpdate();
+      this.invalidateDependants();
     } catch (e) {
       return { type: "InvalidSignature", id: this.id, error: e } as const;
+    }
+  }
+
+  notifyDependants() {
+    if (!this.isGroup()) {
+      return;
+    }
+
+    for (const dependency of this.dependant) {
+      this.node.getCoValue(dependency).scheduleNotifyUpdate();
+      this.node.getCoValue(dependency).notifyDependants();
+    }
+  }
+
+  invalidateDependants() {
+    if (!this.isGroup()) {
+      return;
+    }
+
+    for (const dependency of this.dependant) {
+      this.node.getCoValue(dependency).resetParsedTransactions();
+      this.node.getCoValue(dependency).invalidateDependants();
     }
   }
 
@@ -807,6 +793,19 @@ export class CoValueCore {
     this.notifyUpdate();
     this.node.syncManager.syncLocalTransaction(this.verified, knownStateBefore);
 
+    if (madeAt === undefined) {
+      // We don't revalidate the dependants transactions because we assume that transactions that you are
+      // creating "now" on groups don't affect the validity of transactions you already have in memory.
+      // For validity I mean:
+      // - ability to decrypt a transaction
+      // - that the account that made the transaction had enough rights to do so
+      this.notifyDependants();
+    } else {
+      // If the transaction is not made "now", we need to revalidate the dependants transactions
+      // because the new transaction might affect the validity of the dependants transactions
+      this.invalidateDependants();
+    }
+
     return true;
   }
 
@@ -833,8 +832,6 @@ export class CoValueCore {
 
     const newContent = coreToCoValue(this as AvailableCoValueCore, options);
 
-    this.subscribeToGroupInvalidation();
-
     if (!options?.ignorePrivateTransactions) {
       this._cachedContent = newContent;
     }
@@ -853,19 +850,41 @@ export class CoValueCore {
 
   // Reset the parsed transactions and branches, to validate them again from scratch when the group is updated
   resetParsedTransactions() {
+    const verifiedTransactions = this.verifiedTransactions;
+
+    if (verifiedTransactions.length === 0) {
+      return;
+    }
+
     this.branchStart = undefined;
     this.mergeCommits = [];
 
-    for (const transaction of this.verifiedTransactions) {
+    // Store the validity of the transactions before resetting the parsed transactions
+    const validityBeforeReset = new Array<boolean>(verifiedTransactions.length);
+    this.verifiedTransactions.forEach((transaction, index) => {
       transaction.isValidated = false;
-    }
+      validityBeforeReset[index] = transaction.isValidTransactionWithChanges();
+    });
 
-    this.toValidateTransactions = this.verifiedTransactions.slice();
+    this.toValidateTransactions = verifiedTransactions.slice();
     this.toProcessTransactions = [];
     this.toDecryptTransactions = [];
     this.toParseMetaTransactions = [];
 
-    this._cachedContent?.rebuildFromCore();
+    this.parseNewTransactions(false);
+
+    // Check if the validity of the transactions has changed after resetting the parsed transactions
+    // If it has, we need to rebuild the content to reflect the new validity
+    const sameAsBefore = validityBeforeReset.every(
+      (valid, index) =>
+        valid === verifiedTransactions[index]?.isValidTransactionWithChanges(),
+    );
+
+    if (!sameAsBefore) {
+      this._cachedContent?.rebuildFromCore();
+    }
+
+    this.scheduleNotifyUpdate();
   }
 
   verifiedTransactions: VerifiedTransaction[] = [];
