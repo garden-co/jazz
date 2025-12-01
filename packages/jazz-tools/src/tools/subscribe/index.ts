@@ -8,6 +8,9 @@ import { createUnloadedCoValue } from "../internal.js";
 import { SubscriptionScope } from "./SubscriptionScope.js";
 import { CoValueLoadingState } from "./types.js";
 
+export { jazzErrorReporter, captureStack, isDev } from "./errorReporting.js";
+export type { JazzErrorEvent } from "./errorReporting.js";
+
 export function getSubscriptionScope<D extends CoValue>(value: D) {
   const subscriptionScope = value.$jazz._subscriptionScope;
 

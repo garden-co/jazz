@@ -11,7 +11,13 @@ export {
 } from "jazz-tools/react-core";
 
 export { SQLiteDatabaseDriverAsync } from "cojson";
-export { parseInviteLink } from "jazz-tools";
+
+// Export error reporting directly from the source file to avoid circular dependency
+export {
+  jazzErrorReporter,
+  type JazzErrorEvent,
+} from "../tools/subscribe/errorReporting.js";
+
 export { createInviteLink, setupKvStore } from "./platform.js";
 export {
   ReactNativeContextManager,

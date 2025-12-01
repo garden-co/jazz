@@ -11,7 +11,12 @@ export class JazzError {
   ) {}
 
   toString() {
-    return this.issues
+    // Capture stack trace to help developers find where unavailable values are accessed
+    const accessStack = new Error().stack || "";
+    const stackLines = accessStack.split("\n").slice(2, 8); // Skip Error and toString lines
+
+    // Build the main error message with inline stack info so it shows even if truncated
+    let result = this.issues
       .map((issue) => {
         let message = `${issue.message}`;
 
@@ -23,9 +28,35 @@ export class JazzError {
           message += ` on path ${issue.path.join(".")}`;
         }
 
+        // Add the most relevant stack frame inline
+        const relevantFrame =
+          stackLines.find(
+            (line) =>
+              line.includes("/packages/app/") && !line.includes("node_modules"),
+          ) || stackLines[0];
+
+        if (relevantFrame) {
+          message += ` | Accessed at: ${relevantFrame.trim()}`;
+        }
+
         return message;
       })
       .join("\n");
+
+    // Add helpful diagnostic information
+    result += "\n\n🔍 JAZZ DIAGNOSTIC INFO:";
+    result += `\n  CoValue ID: ${this.id}`;
+    result += `\n  Error Type: ${this.type}`;
+    result += "\n  Access Stack:";
+    for (const line of stackLines) {
+      result += `\n    ${line.trim()}`;
+    }
+    result +=
+      '\n\n💡 TIP: Check if you\'re accessing a field without first calling $jazz.has("field")';
+    result +=
+      "\n      or ensure you're using the value returned from ensureLoaded()";
+
+    return result;
   }
 
   prependPath(item: string) {

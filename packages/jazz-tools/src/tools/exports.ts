@@ -137,3 +137,6 @@ export {
 } from "./coValues/request.js";
 
 export * from "./ssr/index.js";
+
+export { jazzErrorReporter } from "./subscribe/index.js";
+export type { JazzErrorEvent } from "./subscribe/index.js";

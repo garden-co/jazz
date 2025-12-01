@@ -8,6 +8,7 @@ import { AvailableCoValueCore } from "cojson/dist/coValueCore/coValueCore.js";
 import {
   Account,
   AnonymousJazzAgent,
+  captureStack,
   CoValueClassOrSchema,
   CoValueLoadingState,
   NotLoadedCoValueState,
@@ -147,12 +148,18 @@ export function loadCoValueWithoutMe<
     skipRetry?: boolean;
     unstable_branch?: BranchDefinition;
   },
+  callerStack?: string,
 ): Promise<Settled<Resolved<V, R>>> {
-  return loadCoValue(cls, id, {
-    ...options,
-    loadAs: options?.loadAs ?? activeAccountContext.get(),
-    unstable_branch: options?.unstable_branch,
-  });
+  return loadCoValue(
+    cls,
+    id,
+    {
+      ...options,
+      loadAs: options?.loadAs ?? activeAccountContext.get(),
+      unstable_branch: options?.unstable_branch,
+    },
+    callerStack,
+  );
 }
 
 export function loadCoValue<
@@ -167,6 +174,7 @@ export function loadCoValue<
     skipRetry?: boolean;
     unstable_branch?: BranchDefinition;
   },
+  callerStack?: string,
 ): Promise<Settled<Resolved<V, R>>> {
   return new Promise((resolve) => {
     subscribeToCoValue<V, R>(
@@ -180,6 +188,7 @@ export function loadCoValue<
         onUnavailable: resolve,
         onUnauthorized: resolve,
         unstable_branch: options.unstable_branch,
+        callerStack,
       },
       (value, unsubscribe) => {
         resolve(value);
@@ -309,9 +318,13 @@ export function subscribeToCoValue<
     syncResolution?: boolean;
     skipRetry?: boolean;
     unstable_branch?: BranchDefinition;
+    callerStack?: string;
   },
   listener: SubscribeListener<V, R>,
 ): () => void {
+  // Use provided callerStack if available, otherwise capture here
+  const callerStack = options.callerStack || captureStack();
+
   const loadAs = options.loadAs ?? activeAccountContext.get();
   const node = "node" in loadAs ? loadAs.node : loadAs.$jazz.localNode;
 
@@ -330,6 +343,7 @@ export function subscribeToCoValue<
     options.skipRetry,
     false,
     options.unstable_branch,
+    callerStack,
   );
 
   const handleUpdate = () => {
@@ -347,8 +361,12 @@ export function subscribeToCoValue<
         options.onUnavailable?.(value as Inaccessible<V>);
 
         // Don't log unavailable errors when `loadUnique` or `upsertUnique` are used
-        if (!options.skipRetry) {
+        if (!options.skipRetry && process.env.NODE_ENV === "development") {
+          const stack = new Error().stack;
+          console.error("\n🔴 JAZZ UNAVAILABLE ERROR 🔴");
           console.error(value.toString());
+          console.error("\n📍 ACCESS LOCATION:");
+          console.error(stack);
         }
         break;
       case CoValueLoadingState.UNAUTHORIZED:
@@ -515,6 +533,9 @@ export async function unstable_loadUnique<
     resolve?: ResolveQueryStrict<S, R>;
   },
 ): Promise<MaybeLoaded<Loaded<S, R>>> {
+  // Capture stack at entry point for debugging
+  const callerStack = new Error().stack || "";
+
   const cls = coValueClassFromCoValueClassOrSchema(schema);
 
   if (
@@ -526,14 +547,18 @@ export async function unstable_loadUnique<
 
   const header = cls._getUniqueHeader(options.unique, options.owner.$jazz.id);
 
-  // @ts-expect-error the CoValue class is too generic for TS to infer its instances are CoValues
-  return internalLoadUnique(cls, {
-    header,
-    onCreateWhenMissing: options.onCreateWhenMissing,
-    onUpdateWhenFound: options.onUpdateWhenFound,
-    owner: options.owner,
-    resolve: options.resolve,
-  }) as unknown as MaybeLoaded<Loaded<S, R>>;
+  return internalLoadUnique(
+    // @ts-expect-error the CoValue class is too generic for TS to infer its instances are CoValues
+    cls,
+    {
+      header,
+      onCreateWhenMissing: options.onCreateWhenMissing,
+      onUpdateWhenFound: options.onUpdateWhenFound,
+      owner: options.owner,
+      resolve: options.resolve,
+    },
+    callerStack,
+  ) as unknown as MaybeLoaded<Loaded<S, R>>;
 }
 
 export async function internalLoadUnique<
@@ -548,6 +573,7 @@ export async function internalLoadUnique<
     owner: Account | Group;
     resolve?: RefsToResolveStrict<V, R>;
   },
+  callerStack?: string,
 ): Promise<Settled<Resolved<V, R>>> {
   const loadAs = options.owner.$jazz.loadedAs;
 
@@ -560,10 +586,15 @@ export async function internalLoadUnique<
   // retrying failures
   // This way when we want to upsert we are sure that, if the load failed
   // it failed because the unique value was missing
-  const maybeLoadedCoValue = await loadCoValueWithoutMe(cls, id, {
-    skipRetry: true,
-    loadAs,
-  });
+  const maybeLoadedCoValue = await loadCoValueWithoutMe(
+    cls,
+    id,
+    {
+      skipRetry: true,
+      loadAs,
+    },
+    callerStack,
+  );
 
   const isAvailable = node.getCoValue(id).hasVerifiedContent();
 
@@ -573,10 +604,15 @@ export async function internalLoadUnique<
   if (options.onCreateWhenMissing && !isAvailable) {
     options.onCreateWhenMissing();
 
-    return loadCoValueWithoutMe(cls, id, {
-      loadAs,
-      resolve: options.resolve,
-    });
+    return loadCoValueWithoutMe(
+      cls,
+      id,
+      {
+        loadAs,
+        resolve: options.resolve,
+      },
+      callerStack,
+    );
   }
 
   if (!isAvailable) {
@@ -587,10 +623,15 @@ export async function internalLoadUnique<
 
   if (options.onUpdateWhenFound) {
     // we deeply load the value, retrying any failures
-    const loaded = await loadCoValueWithoutMe(cls, id, {
-      loadAs,
-      resolve: options.resolve,
-    });
+    const loaded = await loadCoValueWithoutMe(
+      cls,
+      id,
+      {
+        loadAs,
+        resolve: options.resolve,
+      },
+      callerStack,
+    );
 
     if (loaded.$isLoaded) {
       // we don't return the update result because
@@ -602,10 +643,15 @@ export async function internalLoadUnique<
     }
   }
 
-  return loadCoValueWithoutMe(cls, id, {
-    loadAs,
-    resolve: options.resolve,
-  });
+  return loadCoValueWithoutMe(
+    cls,
+    id,
+    {
+      loadAs,
+      resolve: options.resolve,
+    },
+    callerStack,
+  );
 }
 
 /**

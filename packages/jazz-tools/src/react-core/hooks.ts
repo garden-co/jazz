@@ -28,6 +28,7 @@ import {
   SubscriptionScope,
   coValueClassFromCoValueClassOrSchema,
   importContentPieces,
+  captureStack,
   getUnloadedCoValueWithoutId,
   type BranchDefinition,
 } from "jazz-tools";
@@ -104,6 +105,9 @@ export function useCoValueSubscription<
   const contextManager = useJazzContextManager();
   const agent = useAgent();
 
+  // Capture stack trace at hook call time - this shows which component called useCoState
+  const callerStackRef = React.useRef<string>(captureStack());
+
   const createSubscription = () => {
     if (!id) {
       return {
@@ -137,6 +141,7 @@ export function useCoValueSubscription<
       false,
       false,
       options?.unstable_branch,
+      callerStackRef.current,
     );
 
     return {
@@ -481,6 +486,9 @@ export function useAccountSubscription<
 ) {
   const contextManager = useJazzContextManager();
 
+  // Capture stack trace at hook call time
+  const callerStackRef = React.useRef<string>(captureStack());
+
   const createSubscription = () => {
     const agent = getCurrentAccountFromContextManager(contextManager);
 
@@ -506,6 +514,7 @@ export function useAccountSubscription<
       false,
       false,
       options?.unstable_branch,
+      callerStackRef.current,
     );
 
     return {

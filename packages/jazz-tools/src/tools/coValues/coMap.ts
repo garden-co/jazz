@@ -12,6 +12,7 @@ import {
   AnonymousJazzAgent,
   AsLoaded,
   LoadedAndRequired,
+  captureStack,
   CoFieldInit,
   CoValue,
   CoValueClass,
@@ -500,20 +501,27 @@ export class CoMap extends CoValueBase implements CoValue {
       options.owner.$jazz.id,
     );
 
-    return internalLoadUnique(this, {
-      header,
-      owner: options.owner,
-      resolve: options.resolve,
-      onCreateWhenMissing: () => {
-        (this as any).create(options.value, {
-          owner: options.owner,
-          unique: options.unique,
-        });
+    // Capture stack at entry point for debugging unavailable errors
+    const callerStack = captureStack();
+
+    return internalLoadUnique(
+      this,
+      {
+        header,
+        owner: options.owner,
+        resolve: options.resolve,
+        onCreateWhenMissing: () => {
+          (this as any).create(options.value, {
+            owner: options.owner,
+            unique: options.unique,
+          });
+        },
+        onUpdateWhenFound(value) {
+          value.$jazz.applyDiff(options.value);
+        },
       },
-      onUpdateWhenFound(value) {
-        value.$jazz.applyDiff(options.value);
-      },
-    });
+      callerStack,
+    );
   }
 
   /**
@@ -545,11 +553,18 @@ export class CoMap extends CoValueBase implements CoValue {
 
     if (!owner.$isLoaded) return owner;
 
-    return internalLoadUnique(this, {
-      header,
-      owner,
-      resolve: options?.resolve,
-    });
+    // Capture stack at entry point for debugging unavailable errors
+    const callerStack = captureStack();
+
+    return internalLoadUnique(
+      this,
+      {
+        header,
+        owner,
+        resolve: options?.resolve,
+      },
+      callerStack,
+    );
   }
 }
 

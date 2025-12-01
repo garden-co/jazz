@@ -24,6 +24,7 @@ import type {
 } from "./types.js";
 import { CoValueLoadingState, NotLoadedCoValueState } from "./types.js";
 import { createCoValue, myRoleForRawValue } from "./utils.js";
+import { reportJazzError, isDev } from "./errorReporting.js";
 
 export class SubscriptionScope<D extends CoValue> {
   childNodes = new Map<string, SubscriptionScope<CoValue>>();
@@ -58,6 +59,13 @@ export class SubscriptionScope<D extends CoValue> {
 
   silenceUpdates = false;
 
+  /**
+   * Stack trace captured at subscription creation time.
+   * This helps identify which component/hook created the subscription
+   * when debugging "value unavailable" errors.
+   */
+  creationStack: string;
+
   constructor(
     public node: LocalNode,
     resolve: RefsToResolve<D>,
@@ -66,7 +74,10 @@ export class SubscriptionScope<D extends CoValue> {
     public skipRetry = false,
     public bestEffortResolution = false,
     public unstable_branch?: BranchDefinition,
+    callerStack?: string,
   ) {
+    // Use caller stack if provided, otherwise capture here (less useful but better than nothing)
+    this.creationStack = callerStack || new Error().stack || "";
     this.resolve = resolve;
     this.value = { type: CoValueLoadingState.LOADING, id };
 
@@ -126,18 +137,58 @@ export class SubscriptionScope<D extends CoValue> {
   handleUpdate(update: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE) {
     if (update === CoValueLoadingState.UNAVAILABLE) {
       if (this.value.type === CoValueLoadingState.LOADING) {
-        this.updateValue(
-          new JazzError(this.id, CoValueLoadingState.UNAVAILABLE, [
-            {
-              code: CoValueLoadingState.UNAVAILABLE,
-              message: "The value is unavailable",
-              params: {
-                id: this.id,
-              },
-              path: [],
-            },
-          ]),
+        // Find the app frame from the subscription creation stack trace
+        const creationStackLines = this.creationStack.split("\n").slice(2, 15);
+        const creationAppFrame = creationStackLines.find(
+          (line) =>
+            (line.includes("/packages/app/") || line.includes("/src/")) &&
+            !line.includes("node_modules") &&
+            !line.includes("jazz-tools"),
         );
+
+        const message = `The value ${this.id} is unavailable`;
+
+        // Log with the CREATION stack trace - this shows where the subscription was set up
+        if (isDev()) {
+          console.warn("🔴 JAZZ: Value became UNAVAILABLE");
+          console.warn("  CoValue ID:", this.id);
+          console.warn("  Schema:", this.schema.ref?.name || "unknown");
+          if (creationAppFrame) {
+            console.warn(
+              "  📍 Subscription created at:",
+              creationAppFrame.trim(),
+            );
+          }
+          console.warn("  Full subscription creation stack:");
+          for (const line of creationStackLines.slice(0, 8)) {
+            console.warn("    ", line.trim());
+          }
+        }
+
+        const error = new JazzError(this.id, CoValueLoadingState.UNAVAILABLE, [
+          {
+            code: CoValueLoadingState.UNAVAILABLE,
+            message,
+            params: {
+              id: this.id,
+            },
+            path: [],
+          },
+        ]);
+
+        // Store creation stack trace for later access
+        (error as any).creationStack = this.creationStack;
+
+        // Report to global error system with creation stack
+        reportJazzError(
+          "unavailable",
+          this.id,
+          message,
+          this.creationStack,
+          error,
+        );
+
+        this.updateValue(error);
       }
       this.triggerUpdate();
       return;
@@ -145,18 +196,58 @@ export class SubscriptionScope<D extends CoValue> {
 
     if (!hasAccessToCoValue(update)) {
       if (this.value.type !== CoValueLoadingState.UNAUTHORIZED) {
-        this.updateValue(
-          new JazzError(this.id, CoValueLoadingState.UNAUTHORIZED, [
-            {
-              code: CoValueLoadingState.UNAUTHORIZED,
-              message: `The current user (${this.node.getCurrentAgent().id}) is not authorized to access this value`,
-              params: {
-                id: this.id,
-              },
-              path: [],
-            },
-          ]),
+        // Find the app frame from the subscription creation stack trace
+        const creationStackLines = this.creationStack.split("\n").slice(2, 15);
+        const creationAppFrame = creationStackLines.find(
+          (line) =>
+            (line.includes("/packages/app/") || line.includes("/src/")) &&
+            !line.includes("node_modules") &&
+            !line.includes("jazz-tools"),
         );
+
+        const message = `The current user (${this.node.getCurrentAgent().id}) is not authorized to access ${this.id}`;
+
+        // Log with the CREATION stack trace
+        if (isDev()) {
+          console.warn("🔴 JAZZ: Value is UNAUTHORIZED");
+          console.warn("  CoValue ID:", this.id);
+          console.warn("  Schema:", this.schema.ref?.name || "unknown");
+          if (creationAppFrame) {
+            console.warn(
+              "  📍 Subscription created at:",
+              creationAppFrame.trim(),
+            );
+          }
+          console.warn("  Full subscription creation stack:");
+          for (const line of creationStackLines.slice(0, 8)) {
+            console.warn("    ", line.trim());
+          }
+        }
+
+        const error = new JazzError(this.id, CoValueLoadingState.UNAUTHORIZED, [
+          {
+            code: CoValueLoadingState.UNAUTHORIZED,
+            message,
+            params: {
+              id: this.id,
+            },
+            path: [],
+          },
+        ]);
+
+        // Store creation stack trace for later access
+        (error as any).creationStack = this.creationStack;
+
+        // Report to global error system
+        reportJazzError(
+          "unauthorized",
+          this.id,
+          message,
+          this.creationStack,
+          error,
+        );
+
+        this.updateValue(error);
         this.triggerUpdate();
       }
       return;
@@ -315,7 +406,13 @@ export class SubscriptionScope<D extends CoValue> {
       this.value.type === CoValueLoadingState.UNAUTHORIZED ||
       this.value.type === CoValueLoadingState.UNAVAILABLE
     ) {
-      console.error(this.value.toString());
+      if (isDev()) {
+        console.log("🔴🔴🔴 JAZZ DEBUG - UNAVAILABLE VALUE ACCESSED 🔴🔴🔴");
+        console.error("[JAZZ DEBUG] Unavailable value accessed:");
+        console.error("  CoValue ID:", this.id);
+        console.error("  Schema:", this.schema);
+        console.error("  Stack trace:", new Error().stack);
+      }
       return this.value.type;
     }
 
@@ -324,7 +421,9 @@ export class SubscriptionScope<D extends CoValue> {
     }
 
     if (this.errorFromChildren) {
-      console.error(this.errorFromChildren.toString());
+      if (isDev()) {
+        console.error(this.errorFromChildren.toString());
+      }
       return this.errorFromChildren.type;
     }
 
