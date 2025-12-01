@@ -25,8 +25,6 @@ export function InMemoryRouterProvider({
     return defaultPath || [];
   });
 
-  console.log({ path });
-
   const updatePath = useCallback((newPath: PageInfo[]) => {
     setPath(newPath);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(newPath));
