@@ -52,15 +52,18 @@ function createToDoItem(todo: co.loaded<typeof ToDo>) {
 
 // #region CreateAddForm
 function createAddForm(list: co.loaded<typeof ToDoList>) {
-  const form = document.createElement('form');
+  const form = Object.assign(document.createElement('form'), {
+    onsubmit: (e: Event) => {
+      e.preventDefault();
+      list.$jazz.push({ title: input.value, completed: false });
+    }
+  });
   const input = Object.assign(document.createElement('input'), {
     placeholder: 'New task',
   });
   const btn = Object.assign(document.createElement('button'), {
     innerText: 'Add',
   });
-  form.onsubmit = () =>
-    list.$jazz.push({ title: input.value, completed: false });
   form.append(input, btn);
   return form;
 }
