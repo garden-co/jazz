@@ -294,6 +294,7 @@ export function subscribeToCoValue<
     },
     options.skipRetry,
     false,
+    id,
     options.unstable_branch,
   );
 
@@ -637,6 +638,7 @@ export async function exportCoValue<
     },
     options.skipRetry,
     options.bestEffortResolution,
+    id,
     options.unstable_branch,
   );
 
@@ -781,6 +783,7 @@ export async function unstable_mergeBranchWithResolve<
     },
     false,
     false,
+    id,
     options.branch,
   );
 

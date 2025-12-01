@@ -125,6 +125,7 @@ export function useCoValueSubscription<
       },
       false,
       false,
+      id,
       options?.unstable_branch,
     );
 
@@ -545,6 +546,7 @@ export function useAccountSubscription<
       },
       false,
       false,
+      agent.$jazz.id,
       options?.unstable_branch,
     );
 
@@ -584,11 +586,11 @@ export function useAccountSubscription<
 
 /**
  * React hook for accessing the current user's account and authentication state.
- * 
+ *
  * This hook provides access to the current user's account profile and root data,
  * along with authentication utilities. It automatically handles subscription to
  * the user's account data and provides a logout function.
- * 
+ *
  * @returns An object containing:
  * - `me`: The loaded account data, or `undefined` if loading, or `null` if not authenticated
  * - `agent`: The current agent (anonymous or authenticated user). Can be used as `loadAs` parameter for load and subscribe methods.
@@ -610,13 +612,13 @@ export function useAccountSubscription<
  *       },
  *     },
  *   });
- * 
+ *
  *   if (!me) {
  *     return me === null
  *       ? <div>Failed to load your projects</div>
  *       : <div>Loading...</div>;
  *   }
- * 
+ *
  *   return (
  *     <div>
  *       <h1>{me.profile.name}'s projects</h1>
@@ -631,7 +633,7 @@ export function useAccountSubscription<
  *   );
  * }
  * ```
- * 
+ *
  */
 export function useAccount<
   A extends AccountClass<Account> | AnyAccountSchema,

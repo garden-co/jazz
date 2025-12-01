@@ -46,6 +46,8 @@ export class SubscriptionScope<D extends CoValue> {
   migrated = false;
   migrating = false;
   closed = false;
+  constructionTime = performance.now();
+  startLoadingChildrenTime?: number;
 
   silenceUpdates = false;
 
@@ -56,12 +58,17 @@ export class SubscriptionScope<D extends CoValue> {
     public schema: RefEncoded<D>,
     public skipRetry = false,
     public bestEffortResolution = false,
+    public root: ID<D>,
     public unstable_branch?: BranchDefinition,
+    public parent?: ID<D>,
+    public parentKey?: string,
   ) {
     this.resolve = resolve;
     this.value = { type: "unloaded", id };
 
     let lastUpdate: RawCoValue | "unavailable" | undefined;
+    console.log("Construction time", this.constructionTime, this.id, resolve);
+
     this.subscription = new CoValueCoreSubscription(
       node,
       id,
@@ -311,6 +318,30 @@ export class SubscriptionScope<D extends CoValue> {
       this.subscribers.forEach((listener) => listener(value));
     }
 
+    const simplifiedResolve = Object.entries(this.resolve).map(
+      ([key, value]) => key,
+    );
+
+    performance.measure(
+      (this.parentKey ? this.parentKey + "-" : "") +
+        this.id +
+        "-" +
+        simplifiedResolve.join(","),
+      {
+        start: this.constructionTime,
+        detail: {
+          id: this.id,
+          resolve: this.resolve,
+          type: error ? "error" : "loaded",
+          devtools: {
+            track: this.root,
+            trackGroup: "SubscriptionScopes",
+            color: error ? "error" : "primary",
+          },
+        },
+      },
+    );
+
     this.dirty = false;
   }
 
@@ -442,7 +473,10 @@ export class SubscriptionScope<D extends CoValue> {
       descriptor,
       this.skipRetry,
       this.bestEffortResolution,
+      this.root,
       this.unstable_branch,
+      this.id,
+      "direct-by-id",
     );
     this.childNodes.set(id, child);
     child.setListener((value) => this.handleChildUpdate(id, value));
@@ -464,6 +498,22 @@ export class SubscriptionScope<D extends CoValue> {
     if (this.value.type !== "loaded") {
       return false;
     }
+
+    performance.measure(
+      (this.parentKey ? this.parentKey + "-" : "") + this.id + "-" + "self",
+      {
+        start: this.constructionTime,
+        detail: {
+          id: this.id,
+          resolve: this.resolve,
+          devtools: {
+            track: this.root,
+            trackGroup: "SubscriptionScopes",
+            color: "secondary",
+          },
+        },
+      },
+    );
 
     const value = this.value.value;
 
@@ -701,7 +751,10 @@ export class SubscriptionScope<D extends CoValue> {
       descriptor,
       this.skipRetry,
       this.bestEffortResolution,
+      this.root,
       this.unstable_branch,
+      this.id,
+      key,
     );
     this.childNodes.set(id, child);
     child.setListener((value) => this.handleChildUpdate(id, value, key));
