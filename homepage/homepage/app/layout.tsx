@@ -1,3 +1,4 @@
+import { AdventOfJazzBanner } from "@/components/AdventOfJazzBanner";
 import "./globals.css";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import { JazzFooter } from "@/components/footer";
@@ -48,7 +49,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className="h-full" suppressHydrationWarning>
-       <body
+      <body
         className={[
           ...fontClasses,
           "min-h-full flex flex-col items-center **:scroll-mt-20",
@@ -62,12 +63,14 @@ export default function RootLayout({
           defaultTheme="system"
           enableSystem
           disableTransitionOnChange
-        > 
+        >
           {children}
           <JazzFooter />
           <PagefindSearch />
+          {/* TO DO: This will save us from having to remove on Jan 01 @ 00:00, but once the time has passed, should still be properly removed */}
+          {new Date() < new Date("2026-01-01") && <AdventOfJazzBanner />}
         </ThemeProvider>
-      </body> 
+      </body>
     </html>
   );
 }
