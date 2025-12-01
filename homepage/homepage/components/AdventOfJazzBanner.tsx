@@ -33,7 +33,7 @@ export const AdventOfJazzBanner = () => {
   if (!shouldShow) return;
   return (
     <>
-      <div className="fixed bottom-0 p-2 w-full grid grid-cols-3 justify-center bg-black overflow-hidden snow gap-2 items-center"><div></div><div>🎄 ❄️ 🕯️ <a href="https://discord.gg/utDMjHYg42" className="text-white underline">Join the Advent of Jazz event on our Discord!</a> 🕯️ ❄️ 🎄</div><button className="ms-auto px-2 py-1 cursor-pointer border-2 border-white rounded-lg hover:bg-white hover:text-black text-white transition-colors self-end" onClick={handleDismiss}>No thanks</button>
+      <div className="fixed bottom-0 p-2 w-full grid grid-cols-3 justify-center bg-black overflow-hidden snow gap-2 items-center z-99"><div></div><div>🎄 ❄️ 🕯️ <a href="https://discord.gg/utDMjHYg42" className="text-white underline">Join the Advent of Jazz event on our Discord!</a> 🕯️ ❄️ 🎄</div><button className="ms-auto px-2 py-1 cursor-pointer border-2 border-white rounded-lg hover:bg-white hover:text-black text-white transition-colors self-end" onClick={handleDismiss}>No thanks</button>
       </div >
     </>
   )
