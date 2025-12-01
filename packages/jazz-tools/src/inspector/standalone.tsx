@@ -1,26 +1,16 @@
-import clsx from "clsx";
-import {
-  AgentSecret,
-  CoID,
-  LocalNode,
-  RawAccount,
-  RawAccountID,
-  RawCoValue,
-} from "cojson";
+import { AgentSecret, CoID, LocalNode, RawAccount, RawAccountID } from "cojson";
 import { createWebSocketPeer } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
-import {
-  Breadcrumbs,
-  Button,
-  GlobalStyles,
-  Icon,
-  Input,
-  PageStack,
-  Select,
-} from "jazz-tools/inspector";
-import { AccountOrGroupText } from "jazz-tools/inspector";
+
 import React, { useState, useEffect } from "react";
-import { usePagePath } from "./use-page-path";
+import { HashRouterProvider, useRouter } from "./router";
+import { setup, styled } from "goober";
+import { NodeProvider } from "./contexts/node";
+import { Header } from "./viewer/header";
+import { GlobalStyles } from "./ui/global-styles";
+import { PageStack } from "./viewer/page-stack";
+import { Button, Icon, Input, Select } from "./ui";
+import { AccountOrGroupText } from "./viewer/account-or-group-text";
 
 interface Account {
   id: CoID<RawAccount>;
@@ -34,7 +24,21 @@ interface JazzLoggedInSecret {
   provider?: string;
 }
 
-export default function CoJsonViewerApp() {
+type InspectorAppProps = {
+  defaultSyncServer?: string;
+};
+
+setup(React.createElement);
+
+export default function InspectorStandalone(props: InspectorAppProps) {
+  return (
+    <HashRouterProvider>
+      <CoJsonViewerApp {...props} />
+    </HashRouterProvider>
+  );
+}
+
+function CoJsonViewerApp(props: InspectorAppProps) {
   const [errors, setErrors] = useState<string | null>(null);
   const [accounts, setAccounts] = useState<Account[]>(() => {
     const storedAccounts = localStorage.getItem("inspectorAccounts");
@@ -51,8 +55,7 @@ export default function CoJsonViewerApp() {
     return null;
   });
   const [localNode, setLocalNode] = useState<LocalNode | null>(null);
-  const [coValueId, setCoValueId] = useState<CoID<RawCoValue> | "">("");
-  const { path, addPages, goToIndex, goBack, setPage } = usePagePath();
+  const { path, goToIndex } = useRouter();
 
   useEffect(() => {
     localStorage.setItem("inspectorAccounts", JSON.stringify(accounts));
@@ -78,7 +81,9 @@ export default function CoJsonViewerApp() {
     WasmCrypto.create().then(async (crypto) => {
       const wsPeer = createWebSocketPeer({
         id: "cloud",
-        websocket: new WebSocket("wss://cloud.jazz.tools"),
+        websocket: new WebSocket(
+          props.defaultSyncServer || "wss://cloud.jazz.tools/",
+        ),
         role: "server",
       });
       let node;
@@ -133,110 +138,39 @@ export default function CoJsonViewerApp() {
         (account) => account.id !== currentAccount.id,
       );
       setAccounts(updatedAccounts);
-      setCurrentAccount(updatedAccounts.length > 0 ? updatedAccounts[0] : null);
+      setCurrentAccount(
+        updatedAccounts.length > 0 ? updatedAccounts[0]! : null,
+      );
     }
   };
-
-  const handleCoValueIdSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (coValueId) {
-      setPage(coValueId);
-    }
-    setCoValueId("");
-  };
-
-  if (
-    path?.[0]?.coId.toString() === "import" &&
-    path?.[1]?.coId !== undefined &&
-    path?.[2]?.coId !== undefined
-  ) {
-    addAccount(
-      path?.[1]?.coId as RawAccountID,
-      atob(path?.[2]?.coId as string) as AgentSecret,
-    );
-    goToIndex(-1);
-  }
 
   return (
-    <GlobalStyles
-      className={clsx(
-        "h-screen overflow-hidden flex flex-col",
-        " text-stone-700 bg-white",
-        "dark:text-stone-300 dark:bg-stone-950",
-      )}
-    >
-      <header className="flex items-center gap-4 p-3">
-        <Breadcrumbs path={path} onBreadcrumbClick={goToIndex} />
-        <div className="flex-1">
-          <form onSubmit={handleCoValueIdSubmit}>
-            {path.length !== 0 && (
-              <Input
-                className="min-w-84 font-mono"
-                placeholder="co_z1234567890abcdef123456789"
-                label="CoValue ID"
-                hideLabel
-                value={coValueId}
-                onChange={(e) =>
-                  setCoValueId(e.target.value as CoID<RawCoValue>)
-                }
-              />
-            )}
-          </form>
-        </div>
-        <AccountSwitcher
-          accounts={accounts}
-          currentAccount={currentAccount}
-          setCurrentAccount={setCurrentAccount}
-          deleteCurrentAccount={deleteCurrentAccount}
-          localNode={localNode}
-        />
-      </header>
-
-      <PageStack
-        path={path}
-        node={localNode}
-        goBack={goBack}
-        addPages={addPages}
+    <HashRouterProvider>
+      <NodeProvider
+        localNode={localNode}
+        accountID={currentAccount?.id ?? null}
       >
-        {!currentAccount && (
-          <AddAccountForm addAccount={addAccount} errors={errors} />
-        )}
-
-        {currentAccount && path.length <= 0 && (
-          <form
-            onSubmit={handleCoValueIdSubmit}
-            aria-hidden={path.length !== 0}
-            className="flex flex-col relative -top-6 justify-center gap-2 h-full w-full max-w-sm mx-auto"
-          >
-            <h1 className="text-lg text-center font-medium mb-4 text-stone-900 dark:text-white">
-              Jazz CoValue Inspector
-            </h1>
-            <Input
-              label="CoValue ID"
-              className="font-mono"
-              hideLabel
-              placeholder="co_z1234567890abcdef123456789"
-              value={coValueId}
-              onChange={(e) => setCoValueId(e.target.value as CoID<RawCoValue>)}
+        <InspectorContainer as={GlobalStyles}>
+          <Header>
+            <AccountSwitcher
+              accounts={accounts}
+              currentAccount={currentAccount}
+              setCurrentAccount={setCurrentAccount}
+              deleteCurrentAccount={deleteCurrentAccount}
+              localNode={localNode}
             />
-            <Button type="submit" variant="primary">
-              Inspect CoValue
-            </Button>
+          </Header>
 
-            <p className="text-center">or</p>
-
-            <Button
-              variant="secondary"
-              onClick={() => {
-                setPage(currentAccount.id);
-              }}
-            >
-              Inspect my account
-            </Button>
-          </form>
-        )}
-      </PageStack>
-    </GlobalStyles>
+          <PageStack
+            homePage={
+              currentAccount ? null : (
+                <AddAccountForm addAccount={addAccount} errors={errors} />
+              )
+            }
+          />
+        </InspectorContainer>
+      </NodeProvider>
+    </HashRouterProvider>
   );
 }
 
@@ -254,7 +188,7 @@ function AccountSwitcher({
   localNode: LocalNode | null;
 }) {
   return (
-    <div className="relative flex items-stretch gap-1">
+    <AccountSwitcherContainer>
       <Select
         label="Account to inspect"
         hideLabel
@@ -290,7 +224,7 @@ function AccountSwitcher({
           <Icon name="delete" className="text-gray-500" />
         </Button>
       )}
-    </div>
+    </AccountSwitcherContainer>
   );
 }
 
@@ -331,31 +265,23 @@ function AddAccountForm({
   };
 
   return (
-    <form
+    <AddAccountFormContainer
       onSubmit={handleSubmit}
-      className={`flex flex-col max-w-120 mx-auto justify-center ${errors == null ? "h-full" : ""}`}
+      fullHeight={errors == null}
     >
       {errors != null && (
-        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mt-4 font-mono whitespace-pre-wrap break-words mb-8">
+        <ErrorContainer>
           <h3>Error</h3>
-          <pre className="whitespace-pre-wrap break-words overflow-hidden">
-            {errors}
-          </pre>
-        </div>
+          <ErrorPre>{errors}</ErrorPre>
+        </ErrorContainer>
       )}
 
-      <h2 className="text-2xl font-medium text-gray-900 dark:text-white">
-        Add an account to inspect
-      </h2>
-      <p className="leading-relaxed mb-5">
-        Use the{" "}
-        <code className="whitespace-nowrap text-stone-900 dark:text-white font-semibold">
-          jazz-logged-in-secret
-        </code>{" "}
-        local storage key from within your Jazz app for your account
-        credentials. You can paste the full JSON object or enter the ID and
-        secret separately.
-      </p>
+      <FormHeading>Add an account to inspect</FormHeading>
+      <FormDescription>
+        Use the <CodeInline>jazz-logged-in-secret</CodeInline> local storage key
+        from within your Jazz app for your account credentials. You can paste
+        the full JSON object or enter the ID and secret separately.
+      </FormDescription>
       <Input
         label="Account ID"
         value={id}
@@ -372,6 +298,81 @@ function AddAccountForm({
       <Button className="mt-3" type="submit">
         Add account
       </Button>
-    </form>
+    </AddAccountFormContainer>
   );
 }
+
+const InspectorContainer = styled("div")`
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  color: #44403c; /* text-stone-700 */
+  background-color: #fff; /* bg-white */
+
+  @media (prefers-color-scheme: dark) {
+    color: #d6d3d1; /* text-stone-300 */
+    background-color: #0c0a09; /* bg-stone-950 */
+  }
+`;
+
+const AccountSwitcherContainer = styled("div")`
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+`;
+
+const AddAccountFormContainer = styled("form")<{ fullHeight: boolean }>`
+  display: flex;
+  flex-direction: column;
+  max-width: 30rem;
+  margin-left: auto;
+  margin-right: auto;
+  justify-content: center;
+  ${(props) => (props.fullHeight ? "height: 100%;" : "")}
+`;
+
+const ErrorContainer = styled("div")`
+  background-color: #fee2e2;
+  border: 1px solid #f87171;
+  color: #b91c1c;
+  padding: 0.75rem 1rem;
+  border-radius: 0.25rem;
+  margin-top: 1rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-words;
+  margin-bottom: 2rem;
+`;
+
+const ErrorPre = styled("pre")`
+  white-space: pre-wrap;
+  word-break: break-words;
+  overflow: hidden;
+`;
+
+const FormHeading = styled("h2")`
+  font-size: 1.5rem;
+  font-weight: 500;
+  color: #111827;
+
+  @media (prefers-color-scheme: dark) {
+    color: #fff;
+  }
+`;
+
+const FormDescription = styled("p")`
+  line-height: 1.625;
+  margin-bottom: 1.25rem;
+`;
+
+const CodeInline = styled("code")`
+  white-space: nowrap;
+  color: #0c0a09;
+  font-weight: 600;
+
+  @media (prefers-color-scheme: dark) {
+    color: #fff;
+  }
+`;

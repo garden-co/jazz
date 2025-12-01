@@ -50,6 +50,7 @@ export default defineConfig([
     ...cfg,
     entry: {
       index: "src/inspector/index.tsx",
+      standalone: "src/inspector/standalone.tsx",
     },
     outDir: "dist/inspector",
     esbuildOptions: (options) => {

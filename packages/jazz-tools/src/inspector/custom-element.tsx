@@ -2,7 +2,7 @@ import React from "react";
 import { setup } from "goober";
 import { Account } from "jazz-tools";
 import { createRoot } from "react-dom/client";
-import { JazzInspectorInternal } from "./viewer/new-app.js";
+import { InspectorInApp } from "./in-app.js";
 
 setup(React.createElement);
 
@@ -56,7 +56,7 @@ export class JazzInspectorElement extends HTMLElement {
     }
 
     this.root?.render(
-      <JazzInspectorInternal
+      <InspectorInApp
         localNode={this.account.$jazz.localNode}
         accountId={this.account.$jazz.raw.id}
       />,
