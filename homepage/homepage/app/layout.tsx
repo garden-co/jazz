@@ -1,3 +1,4 @@
+import { AdventOfJazzBanner } from "@/components/AdventOfJazzBanner";
 import "./globals.css";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import { JazzFooter } from "@/components/footer";
@@ -48,7 +49,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className="h-full" suppressHydrationWarning>
-       <body
+      <body
         className={[
           ...fontClasses,
           "min-h-full flex flex-col items-center **:scroll-mt-20",
@@ -62,12 +63,13 @@ export default function RootLayout({
           defaultTheme="system"
           enableSystem
           disableTransitionOnChange
-        > 
+        >
           {children}
           <JazzFooter />
           <PagefindSearch />
+          <AdventOfJazzBanner />
         </ThemeProvider>
-      </body> 
+      </body>
     </html>
   );
 }
