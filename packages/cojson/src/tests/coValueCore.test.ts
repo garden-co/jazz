@@ -151,8 +151,6 @@ describe("transactions that exceed the byte size limit are rejected", () => {
 test("subscribe to a map emits an update when a new transaction is added", async () => {
   const client = await setupTestAccount();
 
-  const agent = client.node.getCurrentAgent();
-
   const group = client.node.createGroup();
 
   const map = group.createMap();
@@ -171,30 +169,38 @@ test("subscribe to a map emits an update when a new transaction is added", async
 });
 
 test("new transactions in a group correctly update owned values, including subscriptions", async () => {
-  const client = await setupTestAccount();
+  const alice = await setupTestAccount({
+    connected: true,
+  });
 
-  const agent = client.node.getCurrentAgent();
+  const bob = await setupTestAccount({
+    connected: true,
+  });
 
-  const group = client.node.createGroup();
+  const bobAccount = await loadCoValueOrFail(alice.node, bob.accountID);
+  const group = alice.node.createGroup();
+
+  group.addMember(bobAccount, "writer");
 
   const map = group.createMap();
 
   await new Promise((resolve) => setTimeout(resolve, 10));
 
-  map.set("hello", "world");
+  const mapOnBob = await loadCoValueOrFail(bob.node, map.id);
+  mapOnBob.set("hello", "world");
 
-  const transaction = map.core.getValidSortedTransactions().at(-1);
+  const transaction = mapOnBob.core.getValidSortedTransactions().at(-1);
 
   assert(transaction);
 
   expect(transaction.isValid).toBe(true);
-  expect(group.get(agent.id)).toBe("admin");
+  expect(group.roleOf(bobAccount.id)).toBe("writer");
 
   group.core.makeTransaction(
     [
       {
         op: "set",
-        key: agent.id,
+        key: bobAccount.id,
         value: "revoked",
       },
     ],
@@ -203,50 +209,49 @@ test("new transactions in a group correctly update owned values, including subsc
     transaction.madeAt - 1, // Make the revocation to be before the map update
   );
 
-  expect(group.get(agent.id)).toBe("revoked");
+  await group.core.waitForSync();
 
-  await waitFor(() => {
-    expect(map.core.getValidSortedTransactions().length).toBe(0);
-  });
+  expect(transaction.isValid).toBe(false);
+  expect(mapOnBob.core.getValidSortedTransactions().length).toBe(0);
+  expect(map.core.getValidSortedTransactions().length).toBe(0);
 });
 
 test("new transactions in a parent group correctly update owned values, including subscriptions", async () => {
-  const client = await setupTestAccount();
+  const alice = await setupTestAccount({
+    connected: true,
+  });
 
-  const agent = client.node.getCurrentAgent();
+  const bob = await setupTestAccount({
+    connected: true,
+  });
 
-  const group = client.node.createGroup();
-  const parentGroup = client.node.createGroup();
+  const bobAccount = await loadCoValueOrFail(alice.node, bob.accountID);
+  const parentGroup = alice.node.createGroup();
+
+  parentGroup.addMember(bobAccount, "writer");
+
+  const group = alice.node.createGroup();
   group.extend(parentGroup);
-  group.core.makeTransaction(
-    [
-      {
-        op: "set",
-        key: agent.id,
-        value: "revoked",
-      },
-    ],
-    "trusting",
-  );
 
   const map = group.createMap();
 
   await new Promise((resolve) => setTimeout(resolve, 10));
 
-  map.set("hello", "world");
+  const mapOnBob = await loadCoValueOrFail(bob.node, map.id);
+  mapOnBob.set("hello", "world");
 
-  const transaction = map.core.getValidSortedTransactions().at(-1);
+  const transaction = mapOnBob.core.getValidSortedTransactions().at(-1);
 
   assert(transaction);
 
   expect(transaction.isValid).toBe(true);
-  expect(group.roleOfInternal(agent.id)).toBe("admin");
+  expect(group.roleOf(bobAccount.id)).toBe("writer");
 
   parentGroup.core.makeTransaction(
     [
       {
         op: "set",
-        key: agent.id,
+        key: bobAccount.id,
         value: "revoked",
       },
     ],
@@ -255,11 +260,11 @@ test("new transactions in a parent group correctly update owned values, includin
     transaction.madeAt - 1, // Make the revocation to be before the map update
   );
 
-  expect(group.roleOfInternal(agent.id)).toBe(undefined);
+  await parentGroup.core.waitForSync();
 
-  await waitFor(() =>
-    expect(map.core.getValidSortedTransactions().length).toBe(0),
-  );
+  expect(transaction.isValid).toBe(false);
+  expect(mapOnBob.core.getValidSortedTransactions().length).toBe(0);
+  expect(map.core.getValidSortedTransactions().length).toBe(0);
 });
 
 test("resetParsedTransactions triggers rebuildFromCore only when the validation state changes", async () => {

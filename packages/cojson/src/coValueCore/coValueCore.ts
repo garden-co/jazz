@@ -625,36 +625,19 @@ export class CoValueCore {
     }
   }
 
-  private invalidateDependantsScheduled = false;
-  scheduleInvalidateDependants() {
-    if (
-      this.invalidateDependantsScheduled ||
-      !this.isGroup() ||
-      // To avoid scheduling an invalidation on unused or newly created groups
-      this.dependant.size === 0
-    ) {
+  notifyDependants() {
+    if (!this.isGroup()) {
       return;
     }
 
-    this.invalidateDependantsScheduled = true;
-
-    queueMicrotask(() => {
-      // Check if the invalidation has been cancelled/executed in the meantime
-      if (!this.invalidateDependantsScheduled) {
-        return;
-      }
-
-      this.invalidateDependants();
-    });
-  }
-
-  cancelInvalidationDependants() {
-    this.invalidateDependantsScheduled = false;
+    for (const dependency of this.dependant) {
+      this.node.getCoValue(dependency).scheduleNotifyUpdate();
+      this.node.getCoValue(dependency).notifyDependants();
+    }
   }
 
   invalidateDependants() {
-    this.invalidateDependantsScheduled = false;
-    if (this.verifiedTransactions.length === 0 || !this.isGroup()) {
+    if (!this.isGroup()) {
       return;
     }
 
@@ -810,8 +793,18 @@ export class CoValueCore {
     this.notifyUpdate();
     this.node.syncManager.syncLocalTransaction(this.verified, knownStateBefore);
 
-    // We debounce the dependants invalidation because to one action in the group usually triggers multiple transactions
-    this.scheduleInvalidateDependants();
+    if (madeAt === undefined) {
+      // We don't revalidate the dependants transactions because we assume that transactions that you are
+      // creating "now" on groups don't affect the validity of transactions you already have in memory.
+      // For validity I mean:
+      // - ability to decrypt a transaction
+      // - that the account that made the transaction had enough rights to do so
+      this.notifyDependants();
+    } else {
+      // If the transaction is not made "now", we need to revalidate the dependants transactions
+      // because the new transaction might affect the validity of the dependants transactions
+      this.invalidateDependants();
+    }
 
     return true;
   }
