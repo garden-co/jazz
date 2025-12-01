@@ -625,7 +625,35 @@ export class CoValueCore {
     }
   }
 
+  private invalidateDependantsScheduled = false;
+  scheduleInvalidateDependants() {
+    if (
+      this.invalidateDependantsScheduled ||
+      !this.isGroup() ||
+      // To avoid scheduling an invalidation on unused or newly created groups
+      this.dependant.size === 0
+    ) {
+      return;
+    }
+
+    this.invalidateDependantsScheduled = true;
+
+    queueMicrotask(() => {
+      // Check if the invalidation has been cancelled/executed in the meantime
+      if (!this.invalidateDependantsScheduled) {
+        return;
+      }
+
+      this.invalidateDependants();
+    });
+  }
+
+  cancelInvalidationDependants() {
+    this.invalidateDependantsScheduled = false;
+  }
+
   invalidateDependants() {
+    this.invalidateDependantsScheduled = false;
     if (this.verifiedTransactions.length === 0 || !this.isGroup()) {
       return;
     }
@@ -781,7 +809,9 @@ export class CoValueCore {
     // where we need synchronous updates
     this.notifyUpdate();
     this.node.syncManager.syncLocalTransaction(this.verified, knownStateBefore);
-    this.invalidateDependants();
+
+    // We debounce the dependants invalidation because to one action in the group usually triggers multiple transactions
+    this.scheduleInvalidateDependants();
 
     return true;
   }
@@ -827,23 +857,40 @@ export class CoValueCore {
 
   // Reset the parsed transactions and branches, to validate them again from scratch when the group is updated
   resetParsedTransactions() {
-    if (this.verifiedTransactions.length === 0) {
+    const verifiedTransactions = this.verifiedTransactions;
+
+    if (verifiedTransactions.length === 0) {
       return;
     }
 
     this.branchStart = undefined;
     this.mergeCommits = [];
 
-    for (const transaction of this.verifiedTransactions) {
+    // Store the validity of the transactions before resetting the parsed transactions
+    const validityBeforeReset = new Array<boolean>(verifiedTransactions.length);
+    this.verifiedTransactions.forEach((transaction, index) => {
       transaction.isValidated = false;
-    }
+      validityBeforeReset[index] = transaction.isValidTransactionWithChanges();
+    });
 
-    this.toValidateTransactions = this.verifiedTransactions.slice();
+    this.toValidateTransactions = verifiedTransactions.slice();
     this.toProcessTransactions = [];
     this.toDecryptTransactions = [];
     this.toParseMetaTransactions = [];
 
-    this._cachedContent?.rebuildFromCore();
+    this.parseNewTransactions(false);
+
+    // Check if the validity of the transactions has changed after resetting the parsed transactions
+    // If it has, we need to rebuild the content to reflect the new validity
+    const sameAsBefore = validityBeforeReset.every(
+      (valid, index) =>
+        valid === verifiedTransactions[index]?.isValidTransactionWithChanges(),
+    );
+
+    if (!sameAsBefore) {
+      this._cachedContent?.rebuildFromCore();
+    }
+
     this.scheduleNotifyUpdate();
   }
 

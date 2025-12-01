@@ -148,6 +148,28 @@ describe("transactions that exceed the byte size limit are rejected", () => {
   });
 });
 
+test("subscribe to a map emits an update when a new transaction is added", async () => {
+  const client = await setupTestAccount();
+
+  const agent = client.node.getCurrentAgent();
+
+  const group = client.node.createGroup();
+
+  const map = group.createMap();
+
+  const subscriptionSpy = vi.fn();
+  const unsubscribe = map.core.subscribe(subscriptionSpy, false);
+
+  map.set("hello", "world");
+
+  await waitFor(() => {
+    expect(subscriptionSpy).toHaveBeenCalled();
+  });
+
+  expect(subscriptionSpy).toHaveBeenCalledTimes(1);
+  unsubscribe();
+});
+
 test("new transactions in a group correctly update owned values, including subscriptions", async () => {
   const client = await setupTestAccount();
 
@@ -182,7 +204,10 @@ test("new transactions in a group correctly update owned values, including subsc
   );
 
   expect(group.get(agent.id)).toBe("revoked");
-  expect(map.core.getValidSortedTransactions().length).toBe(0);
+
+  await waitFor(() => {
+    expect(map.core.getValidSortedTransactions().length).toBe(0);
+  });
 });
 
 test("new transactions in a parent group correctly update owned values, including subscriptions", async () => {
@@ -235,6 +260,93 @@ test("new transactions in a parent group correctly update owned values, includin
   await waitFor(() =>
     expect(map.core.getValidSortedTransactions().length).toBe(0),
   );
+});
+
+test("resetParsedTransactions triggers rebuildFromCore only when the validation state changes", async () => {
+  const alice = await setupTestAccount({
+    connected: true,
+  });
+  const bob = await setupTestAccount({
+    connected: true,
+  });
+
+  const group = alice.node.createGroup();
+
+  const map = group.createMap();
+
+  map.set("hello", "world");
+
+  const rebuildOnAliceSpy = vi.spyOn(map, "rebuildFromCore");
+
+  const mapOnBob = await loadCoValueOrFail(bob.node, map.id);
+
+  const rebuildOnBobSpy = vi.spyOn(mapOnBob, "rebuildFromCore");
+
+  group.addMember("everyone", "reader");
+
+  await group.core.waitForSync();
+
+  expect(rebuildOnAliceSpy).toHaveBeenCalledTimes(0);
+  expect(rebuildOnBobSpy).toHaveBeenCalledTimes(1);
+});
+
+test("group change trigger a subscription emit, even if the content doesn't change", async () => {
+  const alice = await setupTestAccount({
+    connected: true,
+  });
+  const bob = await setupTestAccount({
+    connected: true,
+  });
+
+  const group = alice.node.createGroup();
+
+  const map = group.createMap();
+
+  map.set("hello", "world");
+
+  const mapOnBob = await loadCoValueOrFail(bob.node, map.id);
+
+  const aliceSubscriptionSpy = vi.fn();
+  const aliceUnsubscribe = map.subscribe(aliceSubscriptionSpy);
+  const bobSubscriptionSpy = vi.fn();
+  const bobUnsubscribe = mapOnBob.subscribe(bobSubscriptionSpy);
+  aliceSubscriptionSpy.mockClear();
+  bobSubscriptionSpy.mockClear();
+
+  group.addMember("everyone", "reader");
+
+  await waitFor(() => {
+    expect(aliceSubscriptionSpy).toHaveBeenCalledTimes(1);
+    expect(bobSubscriptionSpy).toHaveBeenCalledTimes(1);
+  });
+
+  aliceUnsubscribe();
+  bobUnsubscribe();
+});
+
+test("changing parent and child group trigger only one invalidation on the local map", async () => {
+  const alice = await setupTestAccount();
+
+  const parentGroup = alice.node.createGroup();
+  const group = alice.node.createGroup();
+  group.extend(parentGroup);
+
+  const map = group.createMap();
+
+  map.set("hello", "world");
+
+  const aliceSubscriptionSpy = vi.fn();
+  const aliceUnsubscribe = map.subscribe(aliceSubscriptionSpy);
+  aliceSubscriptionSpy.mockClear();
+
+  parentGroup.addMember("everyone", "reader");
+  group.addMember("everyone", "reader");
+
+  await waitFor(() => {
+    expect(aliceSubscriptionSpy).toHaveBeenCalledTimes(1);
+  });
+
+  aliceUnsubscribe();
 });
 
 test("correctly records transactions", async () => {
