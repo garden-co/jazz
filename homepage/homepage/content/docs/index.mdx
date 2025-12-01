@@ -100,16 +100,9 @@ Then, define what your data looks like using [Collaborative Values](/docs/core-c
 </CodeGroup>
 
 ### Context
-Next, [give your app some context](/docs/project-setup#give-your-app-context) and tell Jazz your sync strategy&hairsp;—&hairsp;use the Jazz Cloud to get started quickly.
+Next, [give your app some context](/docs/project-setup#give-your-app-context) and tell Jazz your sync strategy&hairsp;—&hairsp;use the Jazz Cloud to get started quickly. We'll also create our to do list and get its ID here to use later. 
 <CodeGroup>
-```ts index.ts#ContextManager
-```
-</CodeGroup>
-
-### Simple Routing
-Next, we'll add a tiny bit of routing logic to be able to share the list by URL: if there's an `id` search parameter, that'll be the list we'll subscribe to later. If we don't have an `id`, we'll [create a new ToDo list](/docs/core-concepts/covalues/colists#creating-colists).
-<CodeGroup>
-```ts index.ts#SimpleRouting
+```ts routing.ts#Context
 ```
 </CodeGroup>
 
@@ -138,6 +131,14 @@ Display your items and add logic to mark them as done...
 Now for the magic: listen to changes coming from [**anyone, anywhere**](/docs/permissions-and-sharing/overview), and update your UI in real time.
 <CodeGroup>
 ```ts index.ts#SubscribeToChanges
+```
+</CodeGroup>
+
+### Simple Routing
+Lastly, we'll add a tiny bit of routing logic to be able to share the list by URL: if there's an `id` search parameter, that'll be the list we'll subscribe to later. If we don't have an `id`, we'll [create a new ToDo list](/docs/core-concepts/covalues/colists#creating-colists). We'll replace the section where we created the `ToDoList` above.
+
+<CodeGroup>
+```ts routing.ts#SimpleRouting
 ```
 </CodeGroup>
 

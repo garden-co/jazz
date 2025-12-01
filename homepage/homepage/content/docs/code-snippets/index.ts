@@ -23,10 +23,6 @@ const listId = new URLSearchParams(window.location.search).get('id');
 if (!listId) {
   const newList = ToDoList.create([{ title: 'Learn Jazz', completed: false }]);
   await newList.$jazz.waitForSync();
-  window.parent.postMessage(
-    { type: 'id-generated', id: newList.$jazz.id },
-    '*'
-  );
   window.location.search = `?id=${newList.$jazz.id}`;
   throw new Error('Redirecting...');
 }
