@@ -143,6 +143,7 @@ export function useCoValueSubscription<
       resolve,
       false,
       false,
+      id,
       options?.unstable_branch,
     );
 
@@ -593,6 +594,7 @@ export function useAccountSubscription<
       resolve,
       false,
       false,
+      agent.$jazz.id,
       options?.unstable_branch,
     );
 
