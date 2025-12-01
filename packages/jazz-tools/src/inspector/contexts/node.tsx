@@ -103,6 +103,9 @@ export function NodeProvider(props: NodeProviderProps) {
   }
 
   function reset() {
+    if (localNode) {
+      localNode.gracefulShutdown();
+    }
     setLocalNode(null);
     setAccountID(null);
     setServer("wss://cloud.jazz.tools/");
