@@ -12911,7 +12911,6 @@ packages:
       react-native-mmkv: ^3.3.0
       react-native-nitro-modules: ^0.26.4
       react-native-quick-crypto: ^1.0.0-beta.21
-      react-native-quick-crypto: ^1.0.0-beta.21
       sharp: ^0.33.5
       svelte: ^5.0.0
     peerDependenciesMeta:
@@ -25245,9 +25244,7 @@ snapshots:
       metro-runtime: 0.83.2
     transitivePeerDependencies:
       - '@babel/core'
-      - bufferutil
       - supports-color
-      - utf-8-validate
 
   '@react-native/metro-config@0.81.0(@babel/core@7.28.5)':
     dependencies:
