@@ -11,7 +11,7 @@ import {
   Group,
   ID,
   AsLoaded,
-  MaybeLoaded,
+  Settled,
   unstable_mergeBranch,
   RefEncoded,
   RefsToResolve,
@@ -268,7 +268,7 @@ export class CoList<out Item = any>
       resolve?: RefsToResolveStrict<L, R>;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<MaybeLoaded<Resolved<L, R>>> {
+  ): Promise<Settled<Resolved<L, R>>> {
     return loadCoValueWithoutMe(this, id, options);
   }
 
@@ -380,7 +380,7 @@ export class CoList<out Item = any>
       owner: Account | Group;
       resolve?: RefsToResolveStrict<L, R>;
     },
-  ): Promise<MaybeLoaded<Resolved<L, R>>> {
+  ): Promise<Settled<Resolved<L, R>>> {
     const header = CoList._getUniqueHeader(
       options.unique,
       options.owner.$jazz.id,
@@ -420,7 +420,7 @@ export class CoList<out Item = any>
       resolve?: RefsToResolveStrict<L, R>;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<MaybeLoaded<Resolved<L, R>>> {
+  ): Promise<Settled<Resolved<L, R>>> {
     const header = CoList._getUniqueHeader(unique, ownerID);
 
     const owner = await Group.load(ownerID, {
