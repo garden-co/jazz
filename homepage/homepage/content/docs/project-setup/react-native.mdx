@@ -42,149 +42,19 @@ If you intend to build for iOS, you can accept the invitation to install CocoaPo
 npm install @react-native-community/netinfo @bam.tech/react-native-image-resizer
 
 # React Native polyfills
-npm i -S @azure/core-asynciterator-polyfill react-native-url-polyfill readable-stream react-native-get-random-values @op-engineering/op-sqlite react-native-mmkv react-native-fast-encoder
+npm install @azure/core-asynciterator-polyfill react-native-url-polyfill readable-stream react-native-get-random-values @op-engineering/op-sqlite react-native-mmkv react-native-fast-encoder
 
 # Jazz dependencies
-npm i -S jazz-tools
-```
-</CodeGroup>
-
-<Alert variant="info" className="mt-4" title="Note">
-  - Hermes has added support for `atob` and `btoa` in React Native 0.74. If you are using earlier versions, you may also need to polyfill `atob` and `btoa` in your `package.json`. Packages to try include `text-encoding` and `base-64`, and you can drop `@bacons/text-decoder`.
-</Alert>
-
-### Configure Metro
-
-#### Regular repositories
-
-If you are not working within a monorepo, create a new file `metro.config.js` in the root of your project with the following content:
-
-<CodeGroup>
-```ts
-// metro.config.js
-const { getDefaultConfig, mergeConfig } = require('@react-native/metro-config');
-
-const config = {
-  resolver: {
-    sourceExts: ["mjs", "js", "json", "ts", "tsx", "cjs"],
-    requireCycleIgnorePatterns: [/(^|\/|\\)node_modules($|\/|\\)/]
-  }
-};
-
-module.exports = mergeConfig(getDefaultConfig(__dirname), config);
-```
-</CodeGroup>
-
-#### Monorepos
-
-For monorepos, use the following `metro.config.js`:
-
-<CodeGroup>
-```ts
-// metro.config.js
-const path = require("path");
-const { makeMetroConfig } = require("@rnx-kit/metro-config");
-const MetroSymlinksResolver = require("@rnx-kit/metro-resolver-symlinks");
-
-// Define workspace root
-const projectRoot = __dirname;
-const workspaceRoot = path.resolve(projectRoot, "../..");
-
-// Add packages paths
-const extraNodeModules = {
-  modules: path.resolve(workspaceRoot, "node_modules"),
-};
-
-const watchFolders = [
-  path.resolve(workspaceRoot, "node_modules"),
-  path.resolve(workspaceRoot, "packages"),
-];
-
-const nodeModulesPaths = [
-  path.resolve(projectRoot, "node_modules"),
-  path.resolve(workspaceRoot, "node_modules"),
-];
-
-module.exports = makeMetroConfig({
-  resolver: {
-    resolveRequest: MetroSymlinksResolver(),
-    extraNodeModules,
-    nodeModulesPaths,
-    sourceExts: ["mjs", "js", "json", "ts", "tsx", "cjs"],
-  },
-  watchFolders,
-});
-```
-</CodeGroup>
-
-### Additional monorepo configuration (for pnpm)
-
-- Add `node-linker=hoisted` to the root `.npmrc` (create this file if it doesn't exist).
-- Add the following to the root `package.json`:
-
-<CodeGroup>
-```json
-// package.json
-"pnpm": {
-  "peerDependencyRules": {
-    "ignoreMissing": [
-      "@babel/*",
-      "typescript"
-    ]
-  }
-}
+npm install jazz-tools
 ```
 </CodeGroup>
 
 ### Add polyfills
 
-Create a file `polyfills.js` at the project root with the following content:
+Jazz provides a quick way for you to install polyfills. Import them in your root `index.js` file:
 
 <CodeGroup>
-```ts
-// @noErrors: 7016
-// polyfills.js
-import { polyfillGlobal } from 'react-native/Libraries/Utilities/PolyfillFunctions';
-import { ReadableStream } from "readable-stream";
-polyfillGlobal("ReadableStream", () => ReadableStream); // polyfill ReadableStream
-
-import "@azure/core-asynciterator-polyfill"; // polyfill Async Iterator
-import "@bacons/text-decoder/install"; // polyfill Text Decoder
-import 'react-native-get-random-values'; // polyfill getRandomValues
-import TextEncoder from 'react-native-fast-encoder'
-
-// The 'react-native-fast-encoder' package does not automatically install the polyfill, so we need to do it manually
-const originalTextEncoder = new window.TextEncoder()
-window.TextEncoder = TextEncoder;
-window.TextDecoder = TextEncoder;
-TextEncoder.prototype.encodeInto = (source: string, destination: Uint8Array<ArrayBufferLike>) => {
-  return originalTextEncoder.encodeInto(source, destination)
-}
-```
-</CodeGroup>
-
-Update `index.js`:
-
-<CodeGroup>
-```ts
-import { AppRegistry } from 'react-native';
-import App from './App';
-import { name as appName } from './app.json';
-import './polyfills';
-
-AppRegistry.registerComponent(appName, () => App);
-```
-</CodeGroup>
-
-Lastly, ensure that the `"main"` field in your `package.json` points to `index.js`:
-
-<CodeGroup>
-```json
-// package.json
-{
-  "main": "index.js",
-  ...
-}
+```ts project-setup/index.js
 ```
 </CodeGroup>
 
@@ -203,20 +73,13 @@ Now that you've set up your React Native project for Jazz, you'll need to:
 
 <CodeGroup>
 ```sh
-npx react-native run-ios
-npx react-native run-android
-```
-</CodeGroup>
+# Start Metro
+npm run start
 
-## Verification
-
-Ready to see if everything's working? Let's fire up your app:
-
-<CodeGroup>
-```sh
-npx react-native run-ios
+# In a new terminal tab:
+npm run ios
 # or
-npx react-native run-android
+npm run android
 ```
 </CodeGroup>
 
@@ -226,7 +89,7 @@ If you run into any issues that aren't covered in the Common Issues section, [dr
 
 ## Common Issues
 
-- **Metro bundler errors**: If you see errors about missing polyfills, ensure all polyfills are properly imported in your `polyfills.js` file.
+- **Metro bundler errors**: If you see errors about missing polyfills, ensure you installed them all and are importing them correctly
 - **iOS build failures**: Make sure you've run `pod install` after adding the dependencies.
 - **Android build failures**: Ensure your Android SDK and NDK versions are compatible with the native modules.
 

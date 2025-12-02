@@ -46,6 +46,9 @@
       "@/app/components/*": [
         "./content/docs/code-snippets/permissions-and-sharing/quickstart/*",
         "./content/docs/code-snippets/quickstart/*"
+      ],
+      "@react-navigation/*": [
+        "./content/docs/code-snippets/project-setup/*"
       ]
     }
   },

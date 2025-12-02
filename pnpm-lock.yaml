@@ -147,7 +147,7 @@ importers:
         version: link:../packages/cojson
       cojson-latest:
         specifier: npm:cojson@latest
-        version: cojson@0.19.6
+        version: cojson@0.19.7
       cronometro:
         specifier: ^5.3.0
         version: 5.3.0
@@ -156,7 +156,7 @@ importers:
         version: link:../packages/jazz-tools
       jazz-tools-latest:
         specifier: npm:jazz-tools@latest
-        version: jazz-tools@0.19.6(24043b7f0320f7f00ff0c02eeb858bba)
+        version: jazz-tools@0.19.7(24043b7f0320f7f00ff0c02eeb858bba)
       vitest:
         specifier: catalog:default
         version: 3.2.4(@types/debug@4.1.12)(@types/node@24.10.0)(@vitest/browser@3.2.4)(@vitest/ui@3.2.4)(happy-dom@20.0.7)(jiti@2.5.1)(jsdom@25.0.1)(lightningcss@1.30.2)(msw@2.10.4(@types/node@24.10.0)(typescript@5.9.2))(terser@5.44.1)(tsx@4.20.3)(yaml@2.8.1)
@@ -397,9 +397,6 @@ importers:
       '@azure/core-asynciterator-polyfill':
         specifier: ^1.0.2
         version: 1.0.2
-      '@bacons/text-decoder':
-        specifier: 0.0.0
-        version: 0.0.0(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0))
       '@bam.tech/react-native-image-resizer':
         specifier: ^3.0.11
         version: 3.0.11(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
@@ -430,6 +427,9 @@ importers:
       react-native:
         specifier: catalog:rn
         version: 0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0)
+      react-native-fast-encoder:
+        specifier: ^0.3.1
+        version: 0.3.1(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
       react-native-get-random-values:
         specifier: ^1.11.0
         version: 1.11.0(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0))
@@ -445,6 +445,9 @@ importers:
       react-native-screens:
         specifier: 4.18.0
         version: 4.18.0(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+      react-native-url-polyfill:
+        specifier: ^3.0.0
+        version: 3.0.0(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0))
       readable-stream:
         specifier: 4.7.0
         version: 4.7.0
@@ -509,9 +512,6 @@ importers:
       '@azure/core-asynciterator-polyfill':
         specifier: ^1.0.2
         version: 1.0.2
-      '@bacons/text-decoder':
-        specifier: ^0.0.0
-        version: 0.0.0(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0))
       '@react-native-community/netinfo':
         specifier: 11.4.1
         version: 11.4.1(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0))
@@ -542,6 +542,9 @@ importers:
       react-native:
         specifier: 0.81.0
         version: 0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0)
+      react-native-fast-encoder:
+        specifier: ^0.3.1
+        version: 0.3.1(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
       react-native-get-random-values:
         specifier: ^1.11.0
         version: 1.11.0(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0))
@@ -554,6 +557,9 @@ importers:
       react-native-quick-crypto:
         specifier: ^1.0.0-beta.21
         version: 1.0.0-beta.21(expo@54.0.0-preview.4(@babel/core@7.27.1)(graphql@16.11.0)(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0))(react-native-nitro-modules@0.26.4(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0))(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+      react-native-url-polyfill:
+        specifier: ^3.0.0
+        version: 3.0.0(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0))
       readable-stream:
         specifier: ^4.7.0
         version: 4.7.0
@@ -2429,8 +2435,8 @@ importers:
         specifier: '*'
         version: 0.80.0(@babel/core@7.28.5)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0)
       react-native-fast-encoder:
-        specifier: ^0.2.0
-        version: 0.2.0(react-native@0.80.0(@babel/core@7.28.5)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+        specifier: ^0.3.1
+        version: 0.3.1(react-native@0.80.0(@babel/core@7.28.5)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
       react-native-mmkv:
         specifier: ^3.3.0
         version: 3.3.0(react-native@0.80.0(@babel/core@7.28.5)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
@@ -10644,67 +10650,67 @@ packages:
   code-block-writer@13.0.3:
     resolution: {integrity: sha512-Oofo0pq3IKnsFtuHqSF7TqBfr71aeyZDVJ0HpmqB7FBM2qEigL0iPONSCZSO9pE9dZTAxANe5XHG9Uy0YMv8cg==}
 
-  cojson-core-napi-darwin-arm64@0.19.6:
-    resolution: {integrity: sha512-nz4+P9MCUYP2Bm8uSxNUq1P9J5q93lAv1paQi/Tt2tPjBDXVEWIkj+1ja35X2pE7EKUUFKzv0Zugz6xkfkBNbA==}
+  cojson-core-napi-darwin-arm64@0.19.7:
+    resolution: {integrity: sha512-4OYYwKksaxNktqHjSJqatWla8cS5WqWOrwxr3+pGKFF2b3aNsdMh+OcJdymUG9gYiVY+zZYUYEuiA7w6hl/CVQ==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [arm64]
     os: [darwin]
 
-  cojson-core-napi-darwin-x64@0.19.6:
-    resolution: {integrity: sha512-uweqkFLaOwwrpKqVaC2tlBSliTwc6poO0gDIYap/7GPdKbM9DghQnB178fbfGbCjwntBkjmKSo1Eer6/mfp5uw==}
+  cojson-core-napi-darwin-x64@0.19.7:
+    resolution: {integrity: sha512-gzJf9yQh6htbVS6HXh0jjRHcQuDLr9VRORv2qbompCeezIRC2EwmEN/75L9m6PJQyJHU9eBvxWiOZIENyQRpcA==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [x64]
     os: [darwin]
 
-  cojson-core-napi-linux-arm-gnueabihf@0.19.6:
-    resolution: {integrity: sha512-HCRT7m5c6vfUERWsSvKrLeExYz5ju/RuACuyaCDB4QWT7IqKF4X5D+HNt137w5lqp1rCzY5TrbsrmlSoC22BDA==}
+  cojson-core-napi-linux-arm-gnueabihf@0.19.7:
+    resolution: {integrity: sha512-u0LGOXSlGl6guuJok/x7qM4P6B0sZfBziroxI8YzXVZ65oqY8oEzrBgSsOAkLtXpgAPAZY60AAIRzw/B6bLx1Q==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [arm]
     os: [linux]
 
-  cojson-core-napi-linux-arm64-gnu@0.19.6:
-    resolution: {integrity: sha512-b2jP71Fp2+iEgmIZXbEcOlU6Cx5D5Oat0nj5P2PtPr2MfWvLLNk8OTnPkp4ppI2wz3rFJwzfxhIrl9dEWPhlWw==}
+  cojson-core-napi-linux-arm64-gnu@0.19.7:
+    resolution: {integrity: sha512-t03VSh9RpL9/8id/wUDTyiqhZAu/V3WZJkfujyil1x8xU3o2fERrlA3WVb3ngi/uVbhDGAGiEcIQmmHmv2v8cQ==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
-  cojson-core-napi-linux-arm64-musl@0.19.6:
-    resolution: {integrity: sha512-noBqMO8i4C40oBXjKa5qWBOApylYPwEiXV+Qj52iUvFm8eWiKIjURCoPwDtC2APF/CNRIkCh3XAI+Fd/Iza4aw==}
+  cojson-core-napi-linux-arm64-musl@0.19.7:
+    resolution: {integrity: sha512-qKDU1fY/JYmAB5jse4wDGGoKQJp6cxnYZvIrHaZ7XCngrwOLiU+/f0lbdDu10KgiH4T5aaKBGOUsu3ChYGW46Q==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [arm64]
     os: [linux]
     libc: [musl]
 
-  cojson-core-napi-linux-x64-gnu@0.19.6:
-    resolution: {integrity: sha512-lmlnfF3N86ShqJKAmeko7dFrv2xjM6a5xTnrBwiCyb0Fiu+QnBV+jr1paM+r9BQVFbwfeyRBy5zBco432WC3ug==}
+  cojson-core-napi-linux-x64-gnu@0.19.7:
+    resolution: {integrity: sha512-9Ql5tT6HlsnEXaqiZYhFua3dxMETrakM7xlIU1fMOAG9KlqcPwE2F2DOXsC2A4fYzGgJrPAWy2DvBJh4U/C0aw==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
 
-  cojson-core-napi-linux-x64-musl@0.19.6:
-    resolution: {integrity: sha512-SZUcjwDQKj83iG3fJf+HCHgroOxDGws1yX4elxD4HM5RHIRNg/f6KuPAuVYX+/09hRuItfnC7FS72SFXbGpsXQ==}
+  cojson-core-napi-linux-x64-musl@0.19.7:
+    resolution: {integrity: sha512-A0pROF9wYhzePcXubxnJVxSkZO+/keO2KIaWTfDYQrhm6BCiLVdsqeU6SjCsuySYTMFoUEx92o4tv+mQtaGJhw==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [x64]
     os: [linux]
     libc: [musl]
 
-  cojson-core-napi@0.19.6:
-    resolution: {integrity: sha512-SJxdpowyTMd09su0GXCeMAkiGsOtILr4kcN/wBJV0tCqw+6xfVyGYWTC4o2n0sTFNoA+9L+xZO47i2MEhbi4Rw==}
+  cojson-core-napi@0.19.7:
+    resolution: {integrity: sha512-P70EfkIHmBoHwUagk8xzdxzgXy3EUPgfVzrXOuw1FPhwo2aNsNLmQNO/CjJ4RLp4SBZ7+bAA5bzJegETDlda8A==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
 
-  cojson-core-wasm@0.19.6:
-    resolution: {integrity: sha512-eNH5zlsgUapSqPxlsF52TOdvLXrZipPxppwpg8ABYsjj0zBPBZRhNnsL5wXwRbDvjGuAdiVgO62rFBCM9aQSnA==}
+  cojson-core-wasm@0.19.7:
+    resolution: {integrity: sha512-vUHr4ZmQ2ByVQ42KTHsguzCQSrI5Sk6mmTfGXlfUS9/AqIbIxEd4uIm8o8qLiPVaU5bUAMUF11zsrRnuOL51fA==}
 
-  cojson-storage-indexeddb@0.19.6:
-    resolution: {integrity: sha512-OEgeSpSniVGWDcv9EMLzU6t3KH+bIlTN87mUTAXBPUoaFZqThEgE82+wloQV5K65xi/w9Zauwm26ytn9w3CjDQ==}
+  cojson-storage-indexeddb@0.19.7:
+    resolution: {integrity: sha512-OzQikADE7xVunqcSDeU1gKH/cUiLmBbzzKqP9KfNRG56XEek860xGB3C1U/gjS/9h7IrMgZpZZxoOB//qh8mXQ==}
 
-  cojson-transport-ws@0.19.6:
-    resolution: {integrity: sha512-K8MV325DwEuY3IKvTnmZX5T5wyImaxnpZH6ZRIxKc7BGDp1ixWPTBoPA6v45fIGUuHTH0pDtsSlWv2SQROb75w==}
+  cojson-transport-ws@0.19.7:
+    resolution: {integrity: sha512-y0hWtdSmbIFaqxrkoVCc/jvKJwwzCoTgzO4bywnL2++dwrPsWOUNuYbLi+VqlHARd3fFi+CG5kYkqRpyIRmBOw==}
 
-  cojson@0.19.6:
-    resolution: {integrity: sha512-gXxBAGCi8YwxbNiafivwa2vDJF4UFNttnWdj7OMa0BwDPnkS7TWhEkd14c3lQxYhg1JIpjiLXtCTJW9KUksO6Q==}
+  cojson@0.19.7:
+    resolution: {integrity: sha512-2Kn/n6ChBtmOf/Nj6dBm6+Zw1STRrNRM/PofiImAwVwZcsRDoSw6v5nEXLXmU5iRG6pKyNGYJRpQE2axoqtVgg==}
 
   collect-v8-coverage@1.0.3:
     resolution: {integrity: sha512-1L5aqIkwPfiodaMgQunkF1zRhNqifHBmtbbbxcr6yVxxBnliw4TDOW6NxpO8DJLgJ16OT+Y4ztZqP6p/FtXnAw==}
@@ -12887,8 +12893,8 @@ packages:
     engines: {node: '>=10'}
     hasBin: true
 
-  jazz-tools@0.19.6:
-    resolution: {integrity: sha512-RLMLE8pINwLrNC802AE7yvh/J5L9fO88EBaf02Toa9irvgJbn6KwSMMdDjdsnszPXsH11ImB2wPw4SGqCfEAig==}
+  jazz-tools@0.19.7:
+    resolution: {integrity: sha512-YrzG9G9s4DeYnziwhp9ZdU/GI2FK5h2DKe7S3Ve6DsYxMlKm1yjUPS7jCPspG8RlQIQSVH8ngmmCZ40oGeMkWA==}
     peerDependencies:
       '@bam.tech/react-native-image-resizer': '*'
       '@op-engineering/op-sqlite': '*'
@@ -15420,6 +15426,13 @@ packages:
       react: 19.1.0
       react-native: '*'
 
+  react-native-fast-encoder@0.3.1:
+    resolution: {integrity: sha512-D5ZEbffxayZImtUUErbNod+7IvJITkxTCPZAQTFg6lrSjl/443Mk5CvT9nKpJC1w4cg2llWk6QP8nczij5ClcQ==}
+    engines: {node: '>= 18.0.0'}
+    peerDependencies:
+      react: 19.1.0
+      react-native: '*'
+
   react-native-get-random-values@1.11.0:
     resolution: {integrity: sha512-4BTbDbRmS7iPdhYLRcz3PGFIpFJBwNZg9g42iwa2P6FOv9vZj/xJc678RZXnLNZzd0qd7Q3CCF6Yd+CU2eoXKQ==}
     peerDependencies:
@@ -15480,6 +15493,11 @@ packages:
 
   react-native-url-polyfill@2.0.0:
     resolution: {integrity: sha512-My330Do7/DvKnEvwQc0WdcBnFPploYKp9CYlefDXzIdEaA+PAhDYllkvGeEroEzvc4Kzzj2O4yVdz8v6fjRvhA==}
+    peerDependencies:
+      react-native: '*'
+
+  react-native-url-polyfill@3.0.0:
+    resolution: {integrity: sha512-aA5CiuUCUb/lbrliVCJ6lZ17/RpNJzvTO/C7gC/YmDQhTUoRD5q5HlJfwLWcxz4VgAhHwXKzhxH+wUN24tAdqg==}
     peerDependencies:
       react-native: '*'
 
@@ -20320,10 +20338,6 @@ snapshots:
     dependencies:
       '@babel/helper-string-parser': 7.27.1
       '@babel/helper-validator-identifier': 7.28.5
-
-  '@bacons/text-decoder@0.0.0(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0))':
-    dependencies:
-      react-native: 0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0)
 
   '@bacons/text-decoder@0.0.0(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0))':
     dependencies:
@@ -25230,9 +25244,7 @@ snapshots:
       metro-runtime: 0.83.2
     transitivePeerDependencies:
       - '@babel/core'
-      - bufferutil
       - supports-color
-      - utf-8-validate
 
   '@react-native/metro-config@0.81.0(@babel/core@7.28.5)':
     dependencies:
@@ -28576,57 +28588,57 @@ snapshots:
 
   code-block-writer@13.0.3: {}
 
-  cojson-core-napi-darwin-arm64@0.19.6:
+  cojson-core-napi-darwin-arm64@0.19.7:
     optional: true
 
-  cojson-core-napi-darwin-x64@0.19.6:
+  cojson-core-napi-darwin-x64@0.19.7:
     optional: true
 
-  cojson-core-napi-linux-arm-gnueabihf@0.19.6:
+  cojson-core-napi-linux-arm-gnueabihf@0.19.7:
     optional: true
 
-  cojson-core-napi-linux-arm64-gnu@0.19.6:
+  cojson-core-napi-linux-arm64-gnu@0.19.7:
     optional: true
 
-  cojson-core-napi-linux-arm64-musl@0.19.6:
+  cojson-core-napi-linux-arm64-musl@0.19.7:
     optional: true
 
-  cojson-core-napi-linux-x64-gnu@0.19.6:
+  cojson-core-napi-linux-x64-gnu@0.19.7:
     optional: true
 
-  cojson-core-napi-linux-x64-musl@0.19.6:
+  cojson-core-napi-linux-x64-musl@0.19.7:
     optional: true
 
-  cojson-core-napi@0.19.6:
+  cojson-core-napi@0.19.7:
     optionalDependencies:
-      cojson-core-napi-darwin-arm64: 0.19.6
-      cojson-core-napi-darwin-x64: 0.19.6
-      cojson-core-napi-linux-arm-gnueabihf: 0.19.6
-      cojson-core-napi-linux-arm64-gnu: 0.19.6
-      cojson-core-napi-linux-arm64-musl: 0.19.6
-      cojson-core-napi-linux-x64-gnu: 0.19.6
-      cojson-core-napi-linux-x64-musl: 0.19.6
+      cojson-core-napi-darwin-arm64: 0.19.7
+      cojson-core-napi-darwin-x64: 0.19.7
+      cojson-core-napi-linux-arm-gnueabihf: 0.19.7
+      cojson-core-napi-linux-arm64-gnu: 0.19.7
+      cojson-core-napi-linux-arm64-musl: 0.19.7
+      cojson-core-napi-linux-x64-gnu: 0.19.7
+      cojson-core-napi-linux-x64-musl: 0.19.7
 
-  cojson-core-wasm@0.19.6: {}
+  cojson-core-wasm@0.19.7: {}
 
-  cojson-storage-indexeddb@0.19.6:
+  cojson-storage-indexeddb@0.19.7:
     dependencies:
-      cojson: 0.19.6
+      cojson: 0.19.7
 
-  cojson-transport-ws@0.19.6:
+  cojson-transport-ws@0.19.7:
     dependencies:
       '@opentelemetry/api': 1.9.0
-      cojson: 0.19.6
+      cojson: 0.19.7
 
-  cojson@0.19.6:
+  cojson@0.19.7:
     dependencies:
       '@noble/ciphers': 1.3.0
       '@noble/curves': 1.9.1
       '@noble/hashes': 1.8.0
       '@opentelemetry/api': 1.9.0
       '@scure/base': 1.2.1
-      cojson-core-napi: 0.19.6
-      cojson-core-wasm: 0.19.6
+      cojson-core-napi: 0.19.7
+      cojson-core-wasm: 0.19.7
       unicode-segmenter: 0.12.0
 
   collect-v8-coverage@1.0.3:
@@ -31282,16 +31294,16 @@ snapshots:
       filelist: 1.0.4
       picocolors: 1.1.1
 
-  jazz-tools@0.19.6(24043b7f0320f7f00ff0c02eeb858bba):
+  jazz-tools@0.19.7(24043b7f0320f7f00ff0c02eeb858bba):
     dependencies:
       '@manuscripts/prosemirror-recreate-steps': 0.1.4
       '@scure/base': 1.2.1
       '@scure/bip39': 1.5.0
       '@tiptap/core': 2.12.0(@tiptap/pm@2.12.0)
       clsx: 2.1.1
-      cojson: 0.19.6
-      cojson-storage-indexeddb: 0.19.6
-      cojson-transport-ws: 0.19.6
+      cojson: 0.19.7
+      cojson-storage-indexeddb: 0.19.7
+      cojson-transport-ws: 0.19.7
       fast-myers-diff: 3.2.0
       goober: 2.1.18(csstype@3.1.3)
       prosemirror-example-setup: 1.2.3
@@ -34353,13 +34365,6 @@ snapshots:
       react: 19.1.0
       react-dom: 19.1.0(react@19.1.0)
 
-  react-native-fast-encoder@0.2.0(react-native@0.80.0(@babel/core@7.28.5)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
-    dependencies:
-      big-integer: 1.6.52
-      flatbuffers: 2.0.6
-      react: 19.1.0
-      react-native: 0.80.0(@babel/core@7.28.5)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0)
-
   react-native-fast-encoder@0.2.0(react-native@0.81.0(@babel/core@7.28.5)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.28.5))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
     dependencies:
       big-integer: 1.6.52
@@ -34367,6 +34372,27 @@ snapshots:
       react: 19.1.0
       react-native: 0.81.0(@babel/core@7.28.5)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.28.5))(@types/react@19.1.0)(react@19.1.0)
     optional: true
+
+  react-native-fast-encoder@0.3.1(react-native@0.80.0(@babel/core@7.28.5)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
+    dependencies:
+      big-integer: 1.6.52
+      flatbuffers: 2.0.6
+      react: 19.1.0
+      react-native: 0.80.0(@babel/core@7.28.5)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0)
+
+  react-native-fast-encoder@0.3.1(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
+    dependencies:
+      big-integer: 1.6.52
+      flatbuffers: 2.0.6
+      react: 19.1.0
+      react-native: 0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0)
+
+  react-native-fast-encoder@0.3.1(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
+    dependencies:
+      big-integer: 1.6.52
+      flatbuffers: 2.0.6
+      react: 19.1.0
+      react-native: 0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0)
 
   react-native-get-random-values@1.11.0(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0)):
     dependencies:
@@ -34495,6 +34521,16 @@ snapshots:
       warn-once: 0.1.1
 
   react-native-url-polyfill@2.0.0(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0)):
+    dependencies:
+      react-native: 0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0)
+      whatwg-url-without-unicode: 8.0.0-3
+
+  react-native-url-polyfill@3.0.0(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0)):
+    dependencies:
+      react-native: 0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0)
+      whatwg-url-without-unicode: 8.0.0-3
+
+  react-native-url-polyfill@3.0.0(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0)):
     dependencies:
       react-native: 0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0)
       whatwg-url-without-unicode: 8.0.0-3

@@ -62,6 +62,10 @@
       "types": "./dist/expo/testing.d.ts",
       "default": "./dist/expo/testing.js"
     },
+    "./expo/polyfills": {
+      "@jazz-tools/source": "./src/react-native-core/polyfills/index.js",
+      "default": "./dist/expo/polyfills.js"
+    },
     "./inspector": {
       "@jazz-tools/source": "./src/inspector/index.ts",
       "types": "./dist/inspector/index.d.ts",
@@ -116,6 +120,10 @@
       "@jazz-tools/source": "./src/react-native/testing.tsx",
       "types": "./dist/react-native/testing.d.ts",
       "default": "./dist/react-native/testing.js"
+    },
+    "./react-native/polyfills": {
+      "@jazz-tools/source": "./src/react-native-core/polyfills/index.js",
+      "default": "./dist/react-native/polyfills.js"
     },
     "./react-native-core": {
       "@jazz-tools/source": "./src/react-native-core/index.ts",
@@ -253,7 +261,7 @@
     "react": "*",
     "react-dom": "*",
     "react-native": "*",
-    "react-native-fast-encoder": "^0.2.0",
+    "react-native-fast-encoder": "^0.3.1",
     "react-native-mmkv": "^3.3.0",
     "react-native-nitro-modules": "^0.26.4",
     "react-native-quick-crypto": "^1.0.0-beta.21",
