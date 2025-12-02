@@ -130,6 +130,34 @@ If everything's going according to plan, your app will load with the home page. 
 
 <StuckCTA />
 
+<ContentByFramework framework="react">
+## Bonus: making the server-rendered page dynamic
+
+Just like client-side pages, Jazz can update server-rendered pages in real-time.
+
+For that we can use `export` to serialize values from Jazz and pass them to a client component:
+
+<FileName>app/festival/[festivalId]/page.tsx</FileName>
+<CodeGroup>
+```tsx dynamicPage.tsx
+```
+</CodeGroup>
+
+Then we can pass the exported value to the preloaded option of the `useCoState` hook.
+
+This way Jazz can synchronously hydrate the CoValue data directly from the component props, avoiding the need to load the data:
+
+<FileName>app/festival/[festivalId]/FestivalComponent.tsx</FileName>
+<CodeGroup>
+```tsx FestivalComponent.tsx
+```
+</CodeGroup>
+
+Now your festival page will update in real-time, without needing to reload the page.
+
+</ContentByFramework>
+
+
 ## Next steps
 - Learn more about how to [manage complex permissions](/docs/permissions-and-sharing/overview) using groups and roles
 - Dive deeper into the collaborative data structures we call [CoValues](/docs/core-concepts/covalues/overview)
