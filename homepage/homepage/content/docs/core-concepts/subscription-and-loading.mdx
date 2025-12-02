@@ -290,6 +290,21 @@ You can also use `useAccount` in the same way, to subscribe to only the changes 
 </CodeGroup>
 </ContentByFramework>
 
+### Avoiding Expensive Selectors
+
+Selector functions optimise re-renders by only updating React state if the underlying CoValue has changed in a way that you care about. 
+  
+However, the selector function itself still runs on every CoValue update, even if your `equalityFn` returns `true` and your component does not re-render. Because of this, you should **avoid doing expensive computation inside a selector**.
+
+For expensive operations, use a lightweight selector which only tracks the minimum necessary to identify when the dependencies change, and run the expensive operations separately, wrapped in a `useMemo` hook. 
+
+This way, React can [batch state updates efficiently](https://react.dev/learn/queueing-a-series-of-state-updates) and only recompute the expensive memoised operation if the dependencies have changed.
+
+<CodeGroup>
+```tsx ProjectView.tsx#ExpensiveSelector
+```
+</CodeGroup>
+
 ## Ensuring data is loaded
 
 In most cases, you'll have specified the depth of data you need in a `resolve` query when you first load or subscribe to a CoValue. However, sometimes you might have a CoValue instance which is not loaded deeply enough, or you're not sure how deeply loaded it is. In this case, you need to make sure data is loaded before proceeding with an operation. The `$jazz.ensureLoaded` method lets you guarantee that a CoValue and its referenced data are loaded to a specific depth (i.e. with nested references resolved):
