@@ -90,7 +90,7 @@ const someExpensiveReduceFunction = () => ({});
 const GroupedTaskDisplay = ({ tasks }: { tasks: any }) => { tasks; return null };
 
 // #region ExpensiveSelector
-function ProjectViewWithExpensiveSelector({ projectId }: { projectId: string }) {
+function ProjectViewWithExpensiveOperations({ projectId }: { projectId: string }) {
   const project = useCoState(Project, projectId, {
     resolve: {
       tasks: {

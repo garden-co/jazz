@@ -294,9 +294,11 @@ You can also use `useAccount` in the same way, to subscribe to only the changes 
 
 Selector functions optimise re-renders by only updating React state if the underlying CoValue has changed in a way that you care about. 
   
-However, the selector function itself still runs every time your CoValue updates, even if your `equalityFn` returns `true` and it doesn't trigger a component re-render. Because of this, you should **avoid doing expensive computation during a selector function**.
+However, the selector function itself still runs on every CoValue update, even if your `equalityFn` returns `true` and your component does not re-render. Because of this, you should **avoid doing expensive computation inside a selector**.
 
-In case you need to run an expensive computation, use a lightweight selector which only tracks the minimum necessary to identify when the dependencies change. More expensive operations should run separately, wrapped in a `useMemo` hook. This way, React will only re-run the memoised expensive operation if the dependencies have changed.
+For expensive operations, use a lightweight selector which only tracks the minimum necessary to identify when the dependencies change, and run the expensive operations separately, wrapped in a `useMemo` hook. 
+
+This way, React can batch state updates efficiently and only recompute the expensive memoised operation if the dependencies have changed.
 
 <CodeGroup>
 ```tsx ProjectView.tsx#ExpensiveSelector
