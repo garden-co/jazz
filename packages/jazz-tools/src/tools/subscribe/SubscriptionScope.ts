@@ -24,6 +24,10 @@ import type {
 } from "./types.js";
 import { CoValueLoadingState, NotLoadedCoValueState } from "./types.js";
 import { createCoValue, myRoleForRawValue } from "./utils.js";
+import {
+  captureError,
+  isCustomErrorReportingEnabled,
+} from "./errorReporting.js";
 
 export class SubscriptionScope<D extends CoValue> {
   childNodes = new Map<string, SubscriptionScope<CoValue>>();
@@ -63,7 +67,7 @@ export class SubscriptionScope<D extends CoValue> {
    * This helps identify which component/hook created the subscription
    * when debugging "value unavailable" errors.
    */
-  creationStack: string;
+  callerStack: Error | undefined;
 
   constructor(
     public node: LocalNode,
@@ -73,10 +77,10 @@ export class SubscriptionScope<D extends CoValue> {
     public skipRetry = false,
     public bestEffortResolution = false,
     public unstable_branch?: BranchDefinition,
-    callerStack?: string,
+    callerStack?: Error | undefined,
   ) {
     // Use caller stack if provided, otherwise capture here (less useful but better than nothing)
-    this.creationStack = callerStack || "";
+    this.callerStack = callerStack;
     this.resolve = resolve;
     this.value = { type: CoValueLoadingState.LOADING, id };
 
@@ -139,7 +143,7 @@ export class SubscriptionScope<D extends CoValue> {
         const error = new JazzError(this.id, CoValueLoadingState.UNAVAILABLE, [
           {
             code: CoValueLoadingState.UNAVAILABLE,
-            message: `The value is unavailable`,
+            message: `Jazz Unavailable Error: unable to load ${this.id}`,
             params: {
               id: this.id,
             },
@@ -156,7 +160,7 @@ export class SubscriptionScope<D extends CoValue> {
 
     if (!hasAccessToCoValue(update)) {
       if (this.value.type !== CoValueLoadingState.UNAUTHORIZED) {
-        const message = `The current user (${this.node.getCurrentAgent().id}) is not authorized to access ${this.id}`;
+        const message = `Jazz Authorization Error: The current user (${this.node.getCurrentAgent().id}) is not authorized to access ${this.id}`;
 
         const error = new JazzError(this.id, CoValueLoadingState.UNAUTHORIZED, [
           {
@@ -350,7 +354,7 @@ export class SubscriptionScope<D extends CoValue> {
   }
 
   getCreationStackLines() {
-    const stack = this.creationStack;
+    const stack = this.callerStack?.stack;
 
     if (!stack) {
       return "";
@@ -366,14 +370,13 @@ export class SubscriptionScope<D extends CoValue> {
         !line.includes("jazz-tools"),
     );
 
-    let result = "";
+    let result = "\n\n";
 
     if (creationAppFrame) {
-      (result += "  📍 Subscription created "),
-        (result += creationAppFrame.trim());
+      (result += "Subscription created "), (result += creationAppFrame.trim());
     }
 
-    result += "\n  Full subscription creation stack:";
+    result += "\nFull subscription creation stack:";
     for (const line of creationStackLines.slice(0, 8)) {
       result += "\n    " + line.trim();
     }
@@ -404,7 +407,15 @@ export class SubscriptionScope<D extends CoValue> {
     }
 
     this.lastErrorLogged = error;
-    console.error(`${error.toString()}\n${this.getCreationStackLines()}`);
+
+    if (isCustomErrorReportingEnabled()) {
+      captureError(new Error(error.toString(), { cause: this.callerStack }), {
+        getPrettyStackTrace: () => this.getCreationStackLines(),
+        jazzError: error,
+      });
+    } else {
+      console.error(`${error.toString()}${this.getCreationStackLines()}`);
+    }
   }
 
   triggerUpdate() {
@@ -649,7 +660,7 @@ export class SubscriptionScope<D extends CoValue> {
                   new JazzError(undefined, CoValueLoadingState.UNAVAILABLE, [
                     {
                       code: "validationError",
-                      message: `The ref on position ${key} requested on ${stream.constructor.name} is missing`,
+                      message: `Jazz Validation Error: The ref on position ${key} is missing`,
                       params: {},
                       path: [key],
                     },
@@ -714,7 +725,7 @@ export class SubscriptionScope<D extends CoValue> {
           new JazzError(undefined, CoValueLoadingState.UNAVAILABLE, [
             {
               code: "validationError",
-              message: `The ref ${key} is required but missing`,
+              message: `Jazz Validation Error: The ref ${key} is required but missing`,
               params: {},
               path: [key],
             },
@@ -753,7 +764,7 @@ export class SubscriptionScope<D extends CoValue> {
         new JazzError(undefined, CoValueLoadingState.UNAVAILABLE, [
           {
             code: "validationError",
-            message: `The ref on position ${key} is required but missing`,
+            message: `Jazz Validation Error: The ref on position ${key} is required but missing`,
             params: {},
             path: [key],
           },

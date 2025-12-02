@@ -138,4 +138,8 @@ export {
 
 export * from "./ssr/index.js";
 
-export { captureStack } from "./subscribe/index.js";
+export {
+  captureStack,
+  isCustomErrorReportingEnabled,
+  setCustomErrorReporter,
+} from "./subscribe/errorReporting.js";

@@ -16,12 +16,12 @@ export class JazzError {
       .map((issue) => {
         let message = `${issue.message}`;
 
-        if (this.id) {
-          message += ` from ${this.id}`;
-        }
-
         if (issue.path.length > 0) {
-          message += ` on path ${issue.path.join(".")}`;
+          if (this.id) {
+            message += `. Subscription starts from ${this.id}`;
+          }
+
+          message += ` and the value is on path ${issue.path.join(".")}`;
         }
 
         return message;

@@ -106,7 +106,7 @@ export function useCoValueSubscription<
   const contextManager = useJazzContextManager();
   const agent = useAgent();
 
-  const callerStack = React.useRef<string | undefined>(undefined);
+  const callerStack = React.useRef<Error | undefined>(undefined);
 
   if (!callerStack.current) {
     callerStack.current = captureStack();
@@ -491,7 +491,7 @@ export function useAccountSubscription<
   const contextManager = useJazzContextManager();
 
   // Capture stack trace at hook call time
-  const callerStack = React.useRef<string | undefined>(undefined);
+  const callerStack = React.useRef<Error | undefined>(undefined);
   if (!callerStack.current) {
     callerStack.current = captureStack();
   }
