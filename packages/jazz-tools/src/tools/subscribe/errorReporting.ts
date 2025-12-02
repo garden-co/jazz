@@ -1,27 +1,5 @@
 import type { JazzError } from "./JazzError";
 
-type CustomErrorReporterProps = {
-  getPrettyStackTrace: () => string;
-  jazzError: JazzError;
-};
-
-type CustomErrorReporter = (
-  error: Error,
-  props: CustomErrorReporterProps,
-) => void;
-
-let customErrorReporter: CustomErrorReporter | undefined;
-let captureErrorCause: boolean = false;
-
-/**
- * Set whether to capture the source stack trace on errors.
- *
- * Useful for adding more context to errors in production.
- */
-export function enableCaptureErrorCause(capture: boolean) {
-  captureErrorCause = capture;
-}
-
 /**
  * A platform agnostic way to check if we're in development mode
  *
@@ -34,6 +12,28 @@ const isDev = (function () {
     return false;
   }
 })();
+
+type CustomErrorReporterProps = {
+  getPrettyStackTrace: () => string;
+  jazzError: JazzError;
+};
+
+type CustomErrorReporter = (
+  error: Error,
+  props: CustomErrorReporterProps,
+) => void;
+
+let customErrorReporter: CustomErrorReporter | undefined;
+let captureErrorCause: boolean = isDev;
+
+/**
+ * Turns on the additonal debug info coming from React hooks on the original subscription of the errors.
+ *
+ * Enabled by default in development mode.
+ */
+export function enableCaptureErrorCause(capture: boolean) {
+  captureErrorCause = capture;
+}
 
 /**
  * Set a custom error reporter to be used instead of the default console.error.
@@ -57,7 +57,7 @@ export function isCustomErrorReportingEnabled(): boolean {
  * Returns undefined in production to avoid overhead.
  */
 export function captureStack() {
-  return isDev || captureErrorCause ? new Error() : undefined;
+  return captureErrorCause ? new Error() : undefined;
 }
 
 export function captureError(error: Error, props: CustomErrorReporterProps) {
