@@ -2,7 +2,10 @@ import { createServer } from "node:http";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { LocalNode } from "cojson";
-import { getBetterSqliteStorage } from "cojson-storage-sqlite";
+import {
+  getBetterSqliteStorage,
+  getNodeSqliteStorage,
+} from "cojson-storage-sqlite";
 import { createWebSocketPeer } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { WebSocketServer } from "ws";
@@ -13,11 +16,13 @@ export const startSyncServer = async ({
   port,
   inMemory,
   db,
+  driver = "better-sqlite3",
 }: {
   host: string | undefined;
   port: string | undefined;
   inMemory: boolean;
   db: string;
+  driver?: "better-sqlite3" | "node:sqlite";
 }): Promise<SyncServer> => {
   const crypto = await WasmCrypto.create();
 
@@ -41,7 +46,10 @@ export const startSyncServer = async ({
   if (!inMemory) {
     await mkdir(dirname(db), { recursive: true });
 
-    const storage = getBetterSqliteStorage(db);
+    const storage =
+      driver === "better-sqlite3"
+        ? getBetterSqliteStorage(db)
+        : getNodeSqliteStorage(db);
 
     localNode.setStorage(storage);
   }
