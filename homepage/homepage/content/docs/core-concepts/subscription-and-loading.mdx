@@ -298,7 +298,7 @@ However, the selector function itself still runs on every CoValue update, even i
 
 For expensive operations, use a lightweight selector which only tracks the minimum necessary to identify when the dependencies change, and run the expensive operations separately, wrapped in a `useMemo` hook. 
 
-This way, React can batch state updates efficiently and only recompute the expensive memoised operation if the dependencies have changed.
+This way, React can [batch state updates efficiently](https://react.dev/learn/queueing-a-series-of-state-updates) and only recompute the expensive memoised operation if the dependencies have changed.
 
 <CodeGroup>
 ```tsx ProjectView.tsx#ExpensiveSelector
