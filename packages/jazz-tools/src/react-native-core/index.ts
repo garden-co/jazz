@@ -12,11 +12,7 @@ export {
 
 export { SQLiteDatabaseDriverAsync } from "cojson";
 
-// Export error reporting directly from the source file to avoid circular dependency
-export {
-  jazzErrorReporter,
-  type JazzErrorEvent,
-} from "../tools/subscribe/errorReporting.js";
+export { parseInviteLink } from "jazz-tools";
 
 export { createInviteLink, setupKvStore } from "./platform.js";
 export {

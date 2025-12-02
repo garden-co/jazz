@@ -34,7 +34,6 @@ import {
   SchemaInit,
   accessChildByKey,
   activeAccountContext,
-  captureStack,
   coField,
   ensureCoValueLoaded,
   inspect,
@@ -387,27 +386,20 @@ export class CoList<out Item = any>
       options.owner.$jazz.id,
     );
 
-    // Capture stack at entry point for debugging unavailable errors
-    const callerStack = captureStack();
-
-    return internalLoadUnique(
-      this,
-      {
-        header,
-        owner: options.owner,
-        resolve: options.resolve,
-        onCreateWhenMissing: () => {
-          (this as any).create(options.value, {
-            owner: options.owner,
-            unique: options.unique,
-          });
-        },
-        onUpdateWhenFound(value) {
-          (value as Resolved<L>).$jazz.applyDiff(options.value);
-        },
+    return internalLoadUnique(this, {
+      header,
+      owner: options.owner,
+      resolve: options.resolve,
+      onCreateWhenMissing: () => {
+        (this as any).create(options.value, {
+          owner: options.owner,
+          unique: options.unique,
+        });
       },
-      callerStack,
-    );
+      onUpdateWhenFound(value) {
+        (value as Resolved<L>).$jazz.applyDiff(options.value);
+      },
+    });
   }
 
   /**
@@ -436,18 +428,11 @@ export class CoList<out Item = any>
     });
     if (!owner.$isLoaded) return owner;
 
-    // Capture stack at entry point for debugging unavailable errors
-    const callerStack = captureStack();
-
-    return internalLoadUnique(
-      this,
-      {
-        header,
-        owner,
-        resolve: options?.resolve,
-      },
-      callerStack,
-    );
+    return internalLoadUnique(this, {
+      header,
+      owner,
+      resolve: options?.resolve,
+    });
   }
 
   // Override mutation methods defined on Array, as CoLists aren't meant to be mutated directly

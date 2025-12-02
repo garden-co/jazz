@@ -2,6 +2,7 @@ import { useSyncExternalStoreWithSelector } from "use-sync-external-store/shim/w
 import React, {
   useCallback,
   useContext,
+  useMemo,
   useRef,
   useSyncExternalStore,
 } from "react";
@@ -105,8 +106,11 @@ export function useCoValueSubscription<
   const contextManager = useJazzContextManager();
   const agent = useAgent();
 
-  // Capture stack trace at hook call time - this shows which component called useCoState
-  const callerStackRef = React.useRef<string>(captureStack());
+  const callerStack = React.useRef<string | undefined>(undefined);
+
+  if (!callerStack.current) {
+    callerStack.current = captureStack();
+  }
 
   const createSubscription = () => {
     if (!id) {
@@ -141,7 +145,7 @@ export function useCoValueSubscription<
       false,
       false,
       options?.unstable_branch,
-      callerStackRef.current,
+      callerStack.current,
     );
 
     return {
@@ -487,7 +491,10 @@ export function useAccountSubscription<
   const contextManager = useJazzContextManager();
 
   // Capture stack trace at hook call time
-  const callerStackRef = React.useRef<string>(captureStack());
+  const callerStack = React.useRef<string | undefined>(undefined);
+  if (!callerStack.current) {
+    callerStack.current = captureStack();
+  }
 
   const createSubscription = () => {
     const agent = getCurrentAccountFromContextManager(contextManager);
@@ -514,7 +521,7 @@ export function useAccountSubscription<
       false,
       false,
       options?.unstable_branch,
-      callerStackRef.current,
+      callerStack.current,
     );
 
     return {

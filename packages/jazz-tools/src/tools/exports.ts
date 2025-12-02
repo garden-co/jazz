@@ -138,5 +138,4 @@ export {
 
 export * from "./ssr/index.js";
 
-export { jazzErrorReporter } from "./subscribe/index.js";
-export type { JazzErrorEvent } from "./subscribe/index.js";
+export { captureStack } from "./subscribe/index.js";
