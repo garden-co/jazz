@@ -1,4 +1,4 @@
-import { CodeGroup } from '@/components/forMdx';
+import { CodeGroup, ContentByFramework } from '@/components/forMdx';
 
 export const metadata = {
   description: "Advanced performance tips for using Jazz."
@@ -55,3 +55,10 @@ Examples:
 ```ts index.ts#ZObjectsZTuples
 ```
 </CodeGroup>
+
+<ContentByFramework framework="react">
+### Avoid expensive selectors [!framework=react]
+Using selectors is a great way to avoid unnecessary re-renders in your app. However, an expensive selector will cause your app to run slowly as the selector will re-run every time the CoValue updates.
+
+In case you need to run expensive computations on your CoValues, [extract this into a separate `useMemo` call](/docs/react/core-concepts/subscription-and-loading#avoiding-expensive-selectors).
+</ContentByFramework>
