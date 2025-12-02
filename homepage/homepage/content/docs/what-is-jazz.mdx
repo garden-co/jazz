@@ -1,0 +1,123 @@
+# How Jazz Differs From Traditional Databases
+
+## The 'Old Way'
+The web industry has converged on a time-honoured way of building web apps:
+
+1. A traditional database serves as your application's persistent state (MySQL, PostgreSQL, MongoDB, etc.)
+2. A 'back-end' application runs on your server (either a virtual or real computer accessible over the internet) which communicates with the database.
+3. A 'front-end' application runs on your users' devices which communicates with the backend application.
+
+This has served the web well until now. Many of the applications you use on a day-to-day basis follow this paradigm.
+
+For some types of apps though, this approach is limiting:
+
+1. You need to be online for the app to work
+2. You need to build an authentication and authorisation system
+3. Slow network = slow app. Slow server = slow app. Slow database = slow app.
+4. It's harder to build real-time apps.
+
+## The Jazz Way
+We think that for many, maybe even most apps, there's a better model. We can let you work regardless of your network status, automatically build in authentication, and keep things real-time and super fast.
+
+With Jazz, what you might traditionally think of as your 'back-end' lives on all of your clients' devices. There are a few underpinning concepts that make this possible:
+
+### Your data is updated immediately
+In a traditional app, if you're offline, you can't persist data to the database. Even if you're online, you need to <span className="underline decoration-dotted" title="You can also assume that an operation has completed successfully when it's still in flight. This is known as 'optimistic UI', and it will work acceptably in some circumstances. The trade-off is that it breaks the user's expectation that what they see is the true state of their data.">wait for the server to confirm</span> your update has applied successfully.
+
+This adds at least a **full round-trip** from client -> server -> database -> server -> client which can be slow, especially with underpowered (or overwhelmed) servers or slow networks.
+
+With Jazz, whenever you create a piece of data (which we refer to as a **CoValue**, short for Collaborative Value), it's **immediately** persisted locally, and updates are sent to a sync server in the background if a network connection is available. If there's no network connection, the updates will be queued, and synced next time the client comes online.
+
+**Here's how a traditional app might look**. <br/> In particular, see how data has to flow all the way to the database and back, and there's a lot of cloud infrastructure.
+
+{/*
+---
+config:
+  theme: base
+  themeVariables:
+    primaryColor: white
+    primaryTextColor: '#151414'
+    primaryBorderColor: '#151414'
+    noteBkgColor: white
+    noteBorderColor: '#0088ff'
+    noteTextColor: '#151414'
+    fontFamily: 'Manrope'
+---
+sequenceDiagram
+    box Local Device
+    participant FE as Front-End (Client)
+    end
+
+    box Cloud
+    participant BE as Back-End (Server)
+    participant DB as Database
+    end
+
+
+    FE->>BE: Send request
+    Note over BE: Auth
+    Note over BE: Business logic
+    BE->>DB: Read or write data
+    DB-->>BE: Return result
+    Note over BE: Build response
+    BE-->>FE: Return response
+*/}
+<img src="/diagrams/traditional-app.png" alt="A diagram of a traditional app architecture" style={{ width: '100%', height: 'auto' }} />
+
+**Here's how a Jazz app looks**.<br/>
+Your updates are immediate and the sync happens in the background. You need almost no backend infrastructure (and in fact, if you use Jazz Cloud, we'll take care of everything for you).
+{/*---
+config:
+  theme: 'base'
+  themeVariables:
+    primaryColor: 'white'
+    primaryTextColor: '#151414'
+    primaryBorderColor: '#151414'
+    noteBkgColor: 'white'
+    noteBorderColor: '#0088ff'
+    noteTextColor: '#151414'
+---
+%% Brand: '0088ff', brand dark: '151414', brand muted: '6a6a69'
+sequenceDiagram
+
+box Local Device
+participant FE as Front-End (UI)
+participant IDB as IndexedDB (Local Store)
+end
+
+box Cloud
+participant SS as Sync Server
+end
+
+Note over FE,IDB: UI updates and persistence are immediate
+
+FE<<->>IDB: Read and write data
+
+Note over IDB,SS: Background sync
+
+IDB<<-->>SS: Sync data continuously
+*/}
+<img src="/diagrams/jazz-app.png" alt="A diagram of an app built with Jazz" style={{ width: '100%', height: 'auto' }} />
+
+**Jazz makes your app fast** because data can be read or updated anywhere in your app immediately&hairsp;—&hairsp;whether you're online or offline.
+
+### Your data is synchronised across clients
+While a traditional app 'syncs' data by updating the single source of truth (the database), Jazz syncs data by sending and receiving updates in real-time over a WebSocket connection. When the sync server receives a new update for a particular CoValue, it re-broadcasts the update to all clients that are interested in that CoValue.
+
+### Your data is "eventually consistent"
+When you build apps which work regardless of network connectivity, it is possible that users may have different versions of your app's data. This applies also in Jazz: users may see different representations of the same CoValue at the same time if they're not fully synced. However, all clients with the same sync state will see the same representation of the CoValue. This is known as "eventual consistency".
+
+### 'The Truth' is distributed and convergent
+When you read a CoValue in Jazz, you're seeing a representation of the sum of all of the changes that have been made to it according to the information you have so far.
+
+Every update or change made to a CoValue is added to the CoValue as an entry in an append-only log. As a result, there's no need for an 'authoritative state' or a 'single source of truth', because each copy of a CoValue is an authoritative representation of itself: every client which has the same set of logs will see the same representation of the CoValue.
+
+This means your UI is never stuck waiting for your server.
+
+### Conflicts are resolved automatically
+When two clients attempt to update the same CoValue simultaneously, Jazz uses a conflict resolution algorithm (making CoValues a type of CRDT) to determine how changes are merged. This ensures that the data remains consistent across all clients. Once both clients have received each other's updates, they will both see the same representation of the CoValue.
+
+### You manage access at the point of creation
+Jazz protects all CoValues by encrypting them. When you create a CoValue, you can specify immediately which users and groups should have access to the CoValue, and using public-key cryptography (baked in automatically to every Jazz account), only those users you specify will be able to read or write to the CoValue. You can update and manage access to CoValues at any time.
+
+Because this is built in to the core of Jazz, you don't need to have any separate logic to authenticate users or manage access to CoValues.
