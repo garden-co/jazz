@@ -133,9 +133,9 @@ If everything's going according to plan, your app will load with the home page. 
 <ContentByFramework framework="react">
 ## Bonus: making the server-rendered page dynamic
 
-We can leverage the properties of Jazz to make the server-rendered pages updated in real-time, like we do with the client-side pages.
+Just like client-side pages, Jazz can update server-rendered pages in real-time.
 
-For that we can use `export` to serialize the Jazz values and pass them to a client component:
+For that we can use `export` to serialize values from Jazz and pass them to a client component:
 
 <FileName>app/festival/[festivalId]/page.tsx</FileName>
 <CodeGroup>
@@ -145,7 +145,7 @@ For that we can use `export` to serialize the Jazz values and pass them to a cli
 
 Then we can pass the exported value to the preloaded option of the `useCoState` hook.
 
-This way Jazz can syncronously hydrate the CoValue data directly from the component props, avoiding the need to load the data:
+This way Jazz can synchronously hydrate the CoValue data directly from the component props, avoiding the need to load the data:
 
 <FileName>app/festival/[festivalId]/FestivalComponent.tsx</FileName>
 <CodeGroup>
@@ -153,7 +153,7 @@ This way Jazz can syncronously hydrate the CoValue data directly from the compon
 ```
 </CodeGroup>
 
-Now the updates on your festival page will be reflected in real-time, without the need to reload the page.
+Now your festival page will update in real-time, without needing to reload the page.
 
 </ContentByFramework>
 
