@@ -21,6 +21,7 @@ export const tech = {
 export const features = {
   fileUpload: "File upload",
   imageUpload: "Image upload",
+  vectorSearch: "Vector search",
   passkey: "Passkey auth",
   clerk: "Clerk auth",
   inviteLink: "Invite link",
@@ -28,5 +29,6 @@ export const features = {
   coRichText: "CoRichText",
   coPlainText: "CoPlainText",
   serverWorker: "Server worker",
+  nextjs: "Next.js",
   inbox: "Inbox",
 };
