@@ -11,9 +11,22 @@ type CustomErrorReporter = (
 ) => void;
 
 let customErrorReporter: CustomErrorReporter | undefined;
+let captureErrorCause: boolean = false;
 
-// A platform agnostic way to check if we're in development mode
-// works in Node.js and bundled code, falls back to false if process is not available
+/**
+ * Set whether to capture the source stack trace on errors.
+ *
+ * Useful for adding more context to errors in production.
+ */
+export function enableCaptureErrorCause(capture: boolean) {
+  captureErrorCause = capture;
+}
+
+/**
+ * A platform agnostic way to check if we're in development mode
+ *
+ * Works in Node.js and bundled code, falls back to false if process is not available
+ */
 const isDev = (function () {
   try {
     return process.env.NODE_ENV === "development";
@@ -44,7 +57,7 @@ export function isCustomErrorReportingEnabled(): boolean {
  * Returns undefined in production to avoid overhead.
  */
 export function captureStack() {
-  return isDev || isCustomErrorReportingEnabled() ? new Error() : undefined;
+  return isDev || captureErrorCause ? new Error() : undefined;
 }
 
 export function captureError(error: Error, props: CustomErrorReporterProps) {

@@ -142,4 +142,5 @@ export {
   captureStack,
   isCustomErrorReportingEnabled,
   setCustomErrorReporter,
+  enableCaptureErrorCause,
 } from "./subscribe/errorReporting.js";
