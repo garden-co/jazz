@@ -345,15 +345,9 @@ export function subscribeToCoValue<
     switch (value.$jazz.loadingState) {
       case CoValueLoadingState.UNAVAILABLE:
         options.onUnavailable?.(value as Inaccessible<V>);
-
-        // Don't log unavailable errors when `loadUnique` or `upsertUnique` are used
-        if (!options.skipRetry) {
-          console.error(value.toString());
-        }
         break;
       case CoValueLoadingState.UNAUTHORIZED:
         options.onUnauthorized?.(value as Inaccessible<V>);
-        console.error(value.toString());
         break;
     }
   };
@@ -684,18 +678,18 @@ export async function exportCoValue<
   );
 
   const value = await new Promise<Loaded<S, R> | null>((resolve) => {
-    rootNode.setListener((value) => {
-      if (value.type === CoValueLoadingState.UNAVAILABLE) {
-        resolve(null);
-        console.error(value.toString());
-      } else if (value.type === CoValueLoadingState.UNAUTHORIZED) {
-        resolve(null);
-        console.error(value.toString());
-      } else if (value.type === CoValueLoadingState.LOADED) {
-        resolve(value.value as Loaded<S, R>);
-      }
+    rootNode.setListener(() => {
+      const value = rootNode.getCurrentValue();
 
-      rootNode.destroy();
+      if (value.$isLoaded) {
+        resolve(value as Loaded<S, R>);
+      } else if (
+        value.$jazz.loadingState === CoValueLoadingState.UNAVAILABLE ||
+        value.$jazz.loadingState === CoValueLoadingState.UNAUTHORIZED
+      ) {
+        resolve(null);
+        rootNode.destroy();
+      }
     });
   });
 

@@ -1,6 +1,14 @@
 import { cojsonInternals } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
-import { assert, describe, expect, expectTypeOf, test, vi } from "vitest";
+import {
+  assert,
+  beforeEach,
+  describe,
+  expect,
+  expectTypeOf,
+  test,
+  vi,
+} from "vitest";
 import {
   Group,
   ID,
@@ -11,19 +19,17 @@ import {
 } from "../index.js";
 import {
   Account,
-  CoList,
   Loaded,
   MaybeLoaded,
   Settled,
-  NotLoaded,
   co,
   randomSessionProvider,
   CoValueLoadingState,
-  NotLoadedCoValueState,
   CoValueErrorState,
 } from "../internal.js";
 import { createJazzTestAccount, linkAccounts } from "../testing.js";
 import { assertLoaded, waitFor } from "./utils.js";
+import { setCustomErrorReporter } from "../config.js";
 
 const Crypto = await WasmCrypto.create();
 const { connectedPeers } = cojsonInternals;
@@ -43,6 +49,15 @@ const TestList = co.list(InnerMap);
 const TestMap = co.map({
   list: TestList,
   optionalRef: co.optional(InnermostMap),
+});
+
+let lastError: Error | undefined;
+
+beforeEach(() => {
+  lastError = undefined;
+  setCustomErrorReporter((error) => {
+    lastError = error;
+  });
 });
 
 describe("Deep loading with depth arg", async () => {
@@ -496,17 +511,14 @@ describe("Deep loading with unauthorized account", async () => {
       CoValueLoadingState.UNAUTHORIZED,
     );
 
-    expect(errorSpy).toHaveBeenCalledWith(
-      `The current user (${alice.$jazz.id}) is not authorized to access this value from ${map.$jazz.id}`,
+    expect(lastError?.message).toBe(
+      `Jazz Authorization Error: The current user (${alice.$jazz.id}) is not authorized to access ${map.$jazz.id}`,
     );
-
-    errorSpy.mockReset();
   });
 
   test("unaccessible list", async () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
-    const map = TestMap.create({ list: TestList.create([], onlyBob) }, group);
+    const innerList = TestList.create([], onlyBob);
+    const map = TestMap.create({ list: innerList }, group);
 
     const mapOnAlice = await TestMap.load(map.$jazz.id, { loadAs: alice });
     expect(mapOnAlice).toBeTruthy();
@@ -520,16 +532,12 @@ describe("Deep loading with unauthorized account", async () => {
       CoValueLoadingState.UNAUTHORIZED,
     );
 
-    expect(errorSpy).toHaveBeenCalledWith(
-      `The current user (${alice.$jazz.id}) is not authorized to access this value from ${map.$jazz.id} on path list`,
+    expect(lastError?.message).toBe(
+      `Jazz Authorization Error: The current user (${alice.$jazz.id}) is not authorized to access ${innerList.$jazz.id}. Subscription starts from ${map.$jazz.id} and the value is on path list`,
     );
-
-    errorSpy.mockReset();
   });
 
   test("unaccessible list element", async () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
     const map = TestMap.create(
       {
         list: TestList.create(
@@ -556,16 +564,12 @@ describe("Deep loading with unauthorized account", async () => {
       CoValueLoadingState.UNAUTHORIZED,
     );
 
-    expect(errorSpy).toHaveBeenCalledWith(
-      `The current user (${alice.$jazz.id}) is not authorized to access this value from ${map.$jazz.id} on path list.0`,
+    expect(lastError?.message).toBe(
+      `Jazz Authorization Error: The current user (${alice.$jazz.id}) is not authorized to access ${map.list[0]!.$jazz.id}. Subscription starts from ${map.$jazz.id} and the value is on path list.0`,
     );
-
-    errorSpy.mockReset();
   });
 
   test("unaccessible optional element", async () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
     const map = TestMap.create(
       {
         list: TestList.create([], group),
@@ -581,11 +585,9 @@ describe("Deep loading with unauthorized account", async () => {
     expect(mapOnAlice.$jazz.loadingState).toBe(
       CoValueLoadingState.UNAUTHORIZED,
     );
-    expect(errorSpy).toHaveBeenCalledWith(
-      `The current user (${alice.$jazz.id}) is not authorized to access this value from ${map.$jazz.id} on path optionalRef`,
+    expect(lastError?.message).toBe(
+      `Jazz Authorization Error: The current user (${alice.$jazz.id}) is not authorized to access ${map.optionalRef!.$jazz.id}. Subscription starts from ${map.$jazz.id} and the value is on path optionalRef`,
     );
-
-    errorSpy.mockReset();
   });
 
   test("unaccessible optional element via autoload", async () => {
@@ -613,17 +615,20 @@ describe("Deep loading with unauthorized account", async () => {
       });
 
     expect(result?.$jazz.loadingState).toBe(CoValueLoadingState.UNAUTHORIZED);
+    expect(lastError?.message).toBe(
+      `Jazz Authorization Error: The current user (${alice.$jazz.id}) is not authorized to access ${map.optionalRef!.$jazz.id}`,
+    );
   });
 
   test("unaccessible stream", async () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const stream = TestFeed.create([], onlyBob);
     const map = TestMap.create(
       {
         list: TestList.create(
           [
             InnerMap.create(
               {
-                stream: TestFeed.create([], onlyBob),
+                stream,
               },
               group,
             ),
@@ -643,16 +648,12 @@ describe("Deep loading with unauthorized account", async () => {
       CoValueLoadingState.UNAUTHORIZED,
     );
 
-    expect(errorSpy).toHaveBeenCalledWith(
-      `The current user (${alice.$jazz.id}) is not authorized to access this value from ${map.$jazz.id} on path list.0.stream`,
+    expect(lastError?.message).toBe(
+      `Jazz Authorization Error: The current user (${alice.$jazz.id}) is not authorized to access ${stream.$jazz.id}. Subscription starts from ${map.$jazz.id} and the value is on path list.0.stream`,
     );
-
-    errorSpy.mockReset();
   });
 
   test("unaccessible stream element", async () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
     const value = InnermostMap.create({ value: "hello" }, onlyBob);
 
     const map = TestMap.create(
@@ -681,11 +682,9 @@ describe("Deep loading with unauthorized account", async () => {
       CoValueLoadingState.UNAUTHORIZED,
     );
 
-    expect(errorSpy).toHaveBeenCalledWith(
-      `The current user (${alice.$jazz.id}) is not authorized to access this value from ${map.$jazz.id} on path list.0.stream.${value.$jazz.id}`,
+    expect(lastError?.message).toBe(
+      `Jazz Authorization Error: The current user (${alice.$jazz.id}) is not authorized to access ${value.$jazz.id}. Subscription starts from ${map.$jazz.id} and the value is on path list.0.stream.${value.$jazz.id}`,
     );
-
-    errorSpy.mockReset();
   });
 
   test("setting undefined via proxy", async () => {

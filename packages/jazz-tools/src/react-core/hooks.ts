@@ -2,6 +2,7 @@ import { useSyncExternalStoreWithSelector } from "use-sync-external-store/shim/w
 import React, {
   useCallback,
   useContext,
+  useMemo,
   useRef,
   useSyncExternalStore,
 } from "react";
@@ -28,6 +29,7 @@ import {
   SubscriptionScope,
   coValueClassFromCoValueClassOrSchema,
   importContentPieces,
+  captureStack,
   getUnloadedCoValueWithoutId,
   type BranchDefinition,
 } from "jazz-tools";
@@ -104,6 +106,12 @@ export function useCoValueSubscription<
   const contextManager = useJazzContextManager();
   const agent = useAgent();
 
+  const callerStack = React.useRef<Error | undefined>(undefined);
+
+  if (!callerStack.current) {
+    callerStack.current = captureStack();
+  }
+
   const createSubscription = () => {
     if (!id) {
       return {
@@ -137,6 +145,7 @@ export function useCoValueSubscription<
       false,
       false,
       options?.unstable_branch,
+      callerStack.current,
     );
 
     return {
@@ -481,6 +490,12 @@ export function useAccountSubscription<
 ) {
   const contextManager = useJazzContextManager();
 
+  // Capture stack trace at hook call time
+  const callerStack = React.useRef<Error | undefined>(undefined);
+  if (!callerStack.current) {
+    callerStack.current = captureStack();
+  }
+
   const createSubscription = () => {
     const agent = getCurrentAccountFromContextManager(contextManager);
 
@@ -506,6 +521,7 @@ export function useAccountSubscription<
       false,
       false,
       options?.unstable_branch,
+      callerStack.current,
     );
 
     return {
