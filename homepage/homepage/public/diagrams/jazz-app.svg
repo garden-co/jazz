@@ -1,0 +1,268 @@
+<svg id="graph-145" xmlns="http://www.w3.org/2000/svg" style="overflow: hidden; max-width: 100%; touch-action: none; user-select: none;" role="graphics-document document" aria-roledescription="sequence" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:ev="http://www.w3.org/2001/xml-events" viewBox="141.55 310.3 737.92 477.8"><defs><marker id="arrowhead" refX="7.9" refY="5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto-start-reverse"><path d="M -1 0 L 10 5 L 0 10 z"/></marker></defs><defs><marker id="crosshead" markerWidth="15" markerHeight="8" orient="auto" refX="4" refY="4.5"><path fill="none" stroke="#000000" style="stroke-dasharray: 0px, 0px;" stroke-width="1pt" d="M 1,2 L 6,7 M 6,2 L 1,7"/></marker></defs><defs><marker id="filled-head" refX="15.5" refY="7" markerWidth="20" markerHeight="28" orient="auto"><path d="M 18,7 L9,13 L14,7 L9,1 Z"/></marker></defs><defs><marker id="sequencenumber" refX="15" refY="15" markerWidth="60" markerHeight="40" orient="auto"><circle cx="15" cy="15" r="6"/></marker></defs><g id="viewport-20251203101323608" class="svg-pan-zoom_viewport" transform="matrix(1.0595178604125977,0,0,1.0595178604125977,163.7740020751953,316.6321105957031)" style="transform: matrix(1.05952, 0, 0, 1.05952, 163.774, 316.632);"><g><rect x="474.5" y="-5" fill="transparent" class="cloud-box rect" width="200" height="449"/><text x="574.5" y="16.5" style="text-anchor: middle; font-size: 16px; font-weight: 400; font-family: Manrope;" dominant-baseline="central" alignment-baseline="central" class="text"><tspan x="574.5" dy="0">Cloud</tspan></text></g><g><rect x="-20" y="-5" fill="transparent" class="local-box rect" width="453" height="449"/><text x="206.5" y="16.5" style="text-anchor: middle; font-size: 16px; font-weight: 400; font-family: Manrope;" dominant-baseline="central" alignment-baseline="central" class="text"><tspan x="206.5" dy="0">Local Device</tspan></text></g><g><rect x="499.5" y="359" fill="#eaeaea" stroke="#666" width="150" height="65" name="SS" rx="3" ry="3" class="actor actor-bottom"/><text x="574.5" y="391.5" style="text-anchor: middle; font-size: 16px; font-weight: 400; font-family: Manrope;" dominant-baseline="central" alignment-baseline="central" class="actor actor-box"><tspan x="574.5" dy="0">Sync Server</tspan></text></g><g><rect x="205" y="359" fill="#eaeaea" stroke="#666" width="203" height="65" name="IDB" rx="3" ry="3" class="actor actor-bottom"/><text x="306.5" y="391.5" style="text-anchor: middle; font-size: 16px; font-weight: 400; font-family: Manrope;" dominant-baseline="central" alignment-baseline="central" class="actor actor-box"><tspan x="306.5" dy="0">IndexedDB (Local Store)</tspan></text></g><g><rect x="5" y="359" fill="#eaeaea" stroke="#666" width="150" height="65" name="FE" rx="3" ry="3" class="actor actor-bottom"/><text x="80" y="391.5" style="text-anchor: middle; font-size: 16px; font-weight: 400; font-family: Manrope;" dominant-baseline="central" alignment-baseline="central" class="actor actor-box"><tspan x="80" dy="0">Front-End (UI)</tspan></text></g><g><line id="actor434" x1="574.5" y1="98" x2="574.5" y2="359" class="actor-line 200" stroke-width="0.5px" stroke="#999" name="SS"/><g id="root-434"><rect x="499.5" y="33" fill="#eaeaea" stroke="#666" width="150" height="65" name="SS" rx="3" ry="3" class="actor actor-top"/><text x="574.5" y="65.5" style="text-anchor: middle; font-size: 16px; font-weight: 400; font-family: Manrope;" dominant-baseline="central" alignment-baseline="central" class="actor actor-box"><tspan x="574.5" dy="0">Sync Server</tspan></text></g></g><g><line id="actor433" x1="306.5" y1="98" x2="306.5" y2="359" class="actor-line 200" stroke-width="0.5px" stroke="#999" name="IDB"/><g id="root-433"><rect x="205" y="33" fill="#eaeaea" stroke="#666" width="203" height="65" name="IDB" rx="3" ry="3" class="actor actor-top"/><text x="306.5" y="65.5" style="text-anchor: middle; font-size: 16px; font-weight: 400; font-family: Manrope;" dominant-baseline="central" alignment-baseline="central" class="actor actor-box"><tspan x="306.5" dy="0">IndexedDB (Local Store)</tspan></text></g></g><g><line id="actor432" x1="80" y1="98" x2="80" y2="359" class="actor-line 200" stroke-width="0.5px" stroke="#999" name="FE"/><g id="root-432"><rect x="5" y="33" fill="#eaeaea" stroke="#666" width="150" height="65" name="FE" rx="3" ry="3" class="actor actor-top"/><text x="80" y="65.5" style="text-anchor: middle; font-size: 16px; font-weight: 400; font-family: Manrope;" dominant-baseline="central" alignment-baseline="central" class="actor actor-box"><tspan x="80" dy="0">Front-End (UI)</tspan></text></g></g><style>
+/* Light mode (default) */
+#graph-145 {
+  font-family: Manrope;
+  font-size: 16px;
+  fill: #151414;
+  background-color: rgb(255, 255, 255);
+}
+
+#graph-145 .cloud-box,
+#graph-145 .local-box {
+  stroke: rgb(0, 0, 0, 0.5);
+}
+
+#graph-145 .actor {
+  stroke: #151414;
+  fill: white;
+}
+
+#graph-145 text.actor>tspan {
+  fill: #151414;
+  stroke: none;
+}
+
+#graph-145 .actor-line {
+  stroke: #151414;
+}
+
+#graph-145 .messageLine0 {
+  stroke-width: 1.5;
+  stroke-dasharray: none;
+  stroke: #151414;
+}
+
+#graph-145 .messageLine1 {
+  stroke-width: 1.5;
+  stroke-dasharray: 2, 2;
+  stroke: #151414;
+}
+
+#graph-145 #arrowhead path {
+  fill: #151414;
+  stroke: #151414;
+}
+
+#graph-145 .messageText {
+  fill: #151414;
+  stroke: none;
+}
+
+/* Dark mode */
+@media (prefers-color-scheme: dark) {
+  #graph-145 {
+    fill: white;
+    background-color: rgb(2, 8, 23);
+  }
+
+  #graph-145 .cloud-box,
+  #graph-145 .local-box {
+    stroke: #fff;
+  }
+
+  #graph-145 .actor {
+    stroke: white;
+    fill: transparent;
+  }
+
+  #graph-145 text.actor>tspan {
+    fill: white;
+    stroke: none;
+  }
+
+  #graph-145 .actor-line {
+    stroke: white;
+  }
+
+  #graph-145 .messageLine0 {
+    stroke: white;
+  }
+
+  #graph-145 .messageLine1 {
+    stroke: white;
+  }
+
+  #graph-145 #arrowhead path {
+    fill: white;
+    stroke: white;
+  }
+
+  #graph-145 .messageText {
+    fill: white;
+    stroke: none;
+  }
+}
+
+@keyframes edge-animation-frame {
+  from {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes dash {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+#graph-145 .edge-animation-slow {
+  stroke-dasharray: 9, 5 !important;
+  stroke-dashoffset: 900;
+  animation: dash 50s linear infinite;
+  stroke-linecap: round;
+}
+
+#graph-145 .edge-animation-fast {
+  stroke-dasharray: 9, 5 !important;
+  stroke-dashoffset: 900;
+  animation: dash 20s linear infinite;
+  stroke-linecap: round;
+}
+
+#graph-145 .error-icon {
+  fill: hsl(180, 0%, 100%);
+}
+
+#graph-145 .error-text {
+  fill: rgb(0, 0, 0);
+  stroke: rgb(0, 0, 0);
+}
+
+#graph-145 .edge-thickness-normal {
+  stroke-width: 1px;
+}
+
+#graph-145 .edge-thickness-thick {
+  stroke-width: 3.5px;
+}
+
+#graph-145 .edge-pattern-solid {
+  stroke-dasharray: 0;
+}
+
+#graph-145 .edge-thickness-invisible {
+  stroke-width: 0;
+  fill: none;
+}
+
+#graph-145 .edge-pattern-dashed {
+  stroke-dasharray: 3;
+}
+
+#graph-145 .edge-pattern-dotted {
+  stroke-dasharray: 2;
+}
+
+#graph-145 .marker {
+  fill: #0b0b0b;
+  stroke: #0b0b0b;
+}
+
+#graph-145 .marker.cross {
+  stroke: #0b0b0b;
+}
+
+#graph-145 svg {
+  font-family: Manrope;
+  font-size: 16px;
+}
+
+#graph-145 p {
+  margin: 0;
+}
+
+#graph-145 .innerArc {
+  stroke-width: 1.5;
+  stroke-dasharray: none;
+}
+
+#graph-145 .sequenceNumber {
+  fill: #f4f4f4;
+}
+
+#graph-145 #sequencenumber {
+  fill: #151414;
+}
+
+#graph-145 #crosshead path {
+  fill: #151414;
+  stroke: #151414;
+}
+
+#graph-145 .labelBox {
+  stroke: #151414;
+  fill: white;
+}
+
+#graph-145 .labelText,
+#graph-145 .labelText>tspan {
+  fill: #151414;
+  stroke: none;
+}
+
+#graph-145 .loopText,
+#graph-145 .loopText>tspan {
+  fill: #151414;
+  stroke: none;
+}
+
+#graph-145 .loopLine {
+  stroke-width: 2px;
+  stroke-dasharray: 2, 2;
+  stroke: #151414;
+  fill: #151414;
+}
+
+#graph-145 .note {
+  stroke: #0088ff;
+  fill: white;
+}
+
+#graph-145 .noteText,
+#graph-145 .noteText>tspan {
+  fill: #151414;
+  stroke: none;
+}
+
+#graph-145 .activation0 {
+  fill: hsl(-120, 0%, 100%);
+  stroke: hsl(-120, 0%, 90%);
+}
+
+#graph-145 .activation1 {
+  fill: hsl(-120, 0%, 100%);
+  stroke: hsl(-120, 0%, 90%);
+}
+
+#graph-145 .activation2 {
+  fill: hsl(-120, 0%, 100%);
+  stroke: hsl(-120, 0%, 90%);
+}
+
+#graph-145 .actorPopupMenu {
+  position: absolute;
+}
+
+#graph-145 .actorPopupMenuPanel {
+  position: absolute;
+  fill: white;
+  box-shadow: 0px 8px 16px 0px rgba(0, 0, 0, 0.2);
+  filter: drop-shadow(3px 5px 2px rgb(0 0 0 / 0.4));
+}
+
+#graph-145 .actor-man line {
+  stroke: #151414;
+  fill: white;
+}
+
+#graph-145 .actor-man circle,
+#graph-145 line {
+  stroke: #151414;
+  fill: white;
+  stroke-width: 2px;
+}
+
+#graph-145 :root {
+  --mermaid-font-family: Manrope;
+}
+</style><g/><g><rect x="55" y="108" fill="#EDF2AE" stroke="#666" width="276.5" height="66" class="note"/><text x="193" y="113" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" style="font-family: Manrope; font-size: 16px; font-weight: 400;" class="noteText" dy="1em"><tspan x="193">UI updates and</tspan></text><text x="193" y="136" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" style="font-family: Manrope; font-size: 16px; font-weight: 400;" class="noteText" dy="1em"><tspan x="193">persistence are immediate</tspan></text></g><g><rect x="281.5" y="240" fill="#EDF2AE" stroke="#666" width="318" height="43" class="note"/><text x="441" y="245" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" style="font-family: Manrope; font-size: 16px; font-weight: 400;" class="noteText" dy="1em"><tspan x="441">Background sync</tspan></text></g><text x="193" y="189" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" style="font-family: Manrope; font-size: 16px; font-weight: 400;" class="messageText" dy="1em">Read and write data</text><line x1="84" y1="230" x2="302.5" y2="230" class="messageLine0" stroke-width="2" stroke="none" style="fill: none;" marker-start="url(#arrowhead)" marker-end="url(#arrowhead)"/><text x="441" y="298" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" style="font-family: Manrope; font-size: 16px; font-weight: 400;" class="messageText" dy="1em">Sync data continuously</text><line x1="310.5" y1="339" x2="570.5" y2="339" style="stroke-dasharray: 3px, 3px; fill: none;" class="messageLine1" stroke-width="2" stroke="none" marker-start="url(#arrowhead)" marker-end="url(#arrowhead)"/></g></svg>
