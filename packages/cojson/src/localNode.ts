@@ -31,7 +31,7 @@ import {
 } from "./coValues/group.js";
 import { CO_VALUE_LOADING_CONFIG } from "./config.js";
 import { AgentSecret, CryptoProvider } from "./crypto/crypto.js";
-import { AgentID, RawCoID, SessionID, isAgentID, isRawCoID } from "./ids.js";
+import { AgentID, RawCoID, SessionID, isAgentID } from "./ids.js";
 import { logger } from "./logger.js";
 import { StorageAPI } from "./storage/index.js";
 import { Peer, PeerID, SyncManager } from "./sync.js";
@@ -387,17 +387,13 @@ export class LocalNode {
     return coValue;
   }
 
-  hasLoadingSources(id: RawCoID) {
-    return this.storage || this.syncManager.getServerPeers(id).length > 0;
-  }
-
   /** @internal */
   async loadCoValueCore(
     id: RawCoID,
     skipLoadingFromPeer?: PeerID,
     skipRetry?: boolean,
   ): Promise<CoValueCore> {
-    if (!isRawCoID(id)) {
+    if (typeof id !== "string" || !id.startsWith("co_z")) {
       throw new TypeError(
         `Trying to load CoValue with invalid id ${Array.isArray(id) ? JSON.stringify(id) : id}`,
       );

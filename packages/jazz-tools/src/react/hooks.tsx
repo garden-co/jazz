@@ -56,6 +56,4 @@ export {
   useCoValueSubscription,
   useAccountSubscription,
   useSubscriptionSelector,
-  useSuspenseAccount,
-  useSuspenseCoState,
 } from "jazz-tools/react-core";

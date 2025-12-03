@@ -23,17 +23,11 @@ import type {
   SubscriptionValueLoading,
 } from "./types.js";
 import { CoValueLoadingState, NotLoadedCoValueState } from "./types.js";
+import { createCoValue, myRoleForRawValue } from "./utils.js";
 import {
   captureError,
   isCustomErrorReportingEnabled,
 } from "./errorReporting.js";
-import {
-  createCoValue,
-  myRoleForRawValue,
-  PromiseWithStatus,
-  rejectedPromise,
-  resolvedPromise,
-} from "./utils.js";
 
 export class SubscriptionScope<D extends CoValue> {
   childNodes = new Map<string, SubscriptionScope<CoValue>>();
@@ -94,7 +88,6 @@ export class SubscriptionScope<D extends CoValue> {
       | RawCoValue
       | typeof CoValueLoadingState.UNAVAILABLE
       | undefined;
-
     this.subscription = new CoValueCoreSubscription(
       node,
       id,
@@ -308,62 +301,6 @@ export class SubscriptionScope<D extends CoValue> {
 
   unloadedValue: NotLoaded<D> | undefined;
 
-  lastPromise:
-    | {
-        value: MaybeLoaded<D>;
-        promise: PromiseWithStatus<MaybeLoaded<D>>;
-      }
-    | undefined;
-
-  cachePromise(value: MaybeLoaded<D>, callback: () => PromiseWithStatus<D>) {
-    if (this.lastPromise?.value === value) {
-      return this.lastPromise.promise;
-    }
-
-    const promise = callback();
-    this.lastPromise = { value, promise };
-    return promise;
-  }
-
-  getPromise() {
-    const currentValue = this.getCurrentValue();
-
-    return this.cachePromise(currentValue, () => {
-      if (currentValue.$isLoaded) {
-        return resolvedPromise(currentValue);
-      }
-
-      if (currentValue.$jazz.loadingState !== CoValueLoadingState.LOADING) {
-        const error = this.getError();
-        return rejectedPromise(
-          new Error(error?.toString() ?? "Unknown error", {
-            cause: this.callerStack,
-          }),
-        );
-      }
-
-      return new Promise<D>((resolve, reject) => {
-        const unsubscribe = this.subscribe(() => {
-          const currentValue = this.getCurrentValue();
-
-          if (currentValue.$isLoaded) {
-            unsubscribe();
-            resolve(currentValue);
-          } else if (
-            currentValue.$jazz.loadingState !== CoValueLoadingState.LOADING
-          ) {
-            unsubscribe();
-            reject(
-              new Error(this.getError()?.toString() ?? "Unknown error", {
-                cause: this.callerStack,
-              }),
-            );
-          }
-        });
-      });
-    });
-  }
-
   private getUnloadedValue(reason: NotLoadedCoValueState): NotLoaded<D> {
     if (this.unloadedValue?.$jazz.loadingState === reason) {
       return this.unloadedValue;
@@ -447,21 +384,19 @@ export class SubscriptionScope<D extends CoValue> {
     return result;
   }
 
-  getError() {
+  logError() {
+    let error: JazzError | undefined;
+
     if (
       this.value.type === CoValueLoadingState.UNAUTHORIZED ||
       this.value.type === CoValueLoadingState.UNAVAILABLE
     ) {
-      return this.value;
+      error = this.value;
     }
 
     if (this.errorFromChildren) {
-      return this.errorFromChildren;
+      error = this.errorFromChildren;
     }
-  }
-
-  logError() {
-    const error = this.getError();
 
     if (!error || this.lastErrorLogged === error) {
       return;
