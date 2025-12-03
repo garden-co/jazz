@@ -15,7 +15,6 @@ import {
   SessionID,
   createJazzContextFromExistingCredentials,
   isControlledAccount,
-  setCustomErrorReporter,
   z,
 } from "../index.js";
 import {
@@ -30,6 +29,7 @@ import {
 } from "../internal.js";
 import { createJazzTestAccount, linkAccounts } from "../testing.js";
 import { assertLoaded, waitFor } from "./utils.js";
+import { setCustomErrorReporter } from "../config.js";
 
 const Crypto = await WasmCrypto.create();
 const { connectedPeers } = cojsonInternals;

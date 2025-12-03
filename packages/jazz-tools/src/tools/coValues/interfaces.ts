@@ -678,16 +678,18 @@ export async function exportCoValue<
   );
 
   const value = await new Promise<Loaded<S, R> | null>((resolve) => {
-    rootNode.setListener((value) => {
-      if (value.type === CoValueLoadingState.UNAVAILABLE) {
-        resolve(null);
-      } else if (value.type === CoValueLoadingState.UNAUTHORIZED) {
-        resolve(null);
-      } else if (value.type === CoValueLoadingState.LOADED) {
-        resolve(value.value as Loaded<S, R>);
-      }
+    rootNode.setListener(() => {
+      const value = rootNode.getCurrentValue();
 
-      rootNode.destroy();
+      if (value.$isLoaded) {
+        resolve(value as Loaded<S, R>);
+      } else if (
+        value.$jazz.loadingState === CoValueLoadingState.UNAVAILABLE ||
+        value.$jazz.loadingState === CoValueLoadingState.UNAUTHORIZED
+      ) {
+        resolve(null);
+        rootNode.destroy();
+      }
     });
   });
 

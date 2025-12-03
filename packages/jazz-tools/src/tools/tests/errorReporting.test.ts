@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
-import { Group, setCustomErrorReporter, z } from "../index.js";
+import { Group, z } from "../index.js";
+import { setCustomErrorReporter } from "../config.js";
 import { CoValueLoadingState } from "../internal.js";
 import { createJazzTestAccount, linkAccounts } from "../testing.js";
 import { co } from "../exports.js";

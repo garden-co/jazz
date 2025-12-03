@@ -5,7 +5,7 @@ import {
   Group,
   co,
   exportCoValue,
-  setCustomErrorReporter,
+  jazzConfig,
   z,
 } from "../exports.js";
 import { CoValueLoadingState } from "../internal.js";
@@ -22,7 +22,7 @@ cojsonInternals.CO_VALUE_LOADING_CONFIG.RETRY_DELAY = 10;
 let lastError: Error | undefined;
 beforeEach(() => {
   lastError = undefined;
-  setCustomErrorReporter((error) => {
+  jazzConfig.setCustomErrorReporter((error) => {
     lastError = error;
   });
 });
