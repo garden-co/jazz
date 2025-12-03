@@ -407,7 +407,7 @@ const reactExamples: Example[] = [
     description: "An example on how to use Jazz with Next.js Server Components",
     tech: [tech.react],
     features: [features.nextjs],
-    demoUrl: "https://jazz-jazz-nextjs.vercel.app/",
+    demoUrl: "https://jazz-nextjs.vercel.app/",
     illustration: (
       <div className="h-full w-full bg-cover bg-[url('/ssr-todo.png')] bg-bottom-left"></div>
     ),
@@ -437,7 +437,7 @@ const reactExamples: Example[] = [
     name: "Server-side HTTP requests",
     slug: "server-worker-http",
     description:
-      "A game that shows how to manage state in a trusted environment through the experimental HTTP API.",
+      "A game that shows how to manage state in a trusted environment through the experimental JazzRPC API.",
     tech: [tech.react],
     features: [features.serverWorker, features.nextjs],
     illustration: <JazzPaperScissorsIllustration />,
