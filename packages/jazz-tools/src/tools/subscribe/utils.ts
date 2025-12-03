@@ -42,3 +42,23 @@ export function createCoValue<D extends CoValue>(
     id: subscriptionScope.id,
   };
 }
+
+export type PromiseWithStatus<T> = PromiseLike<T> & {
+  status?: "pending" | "fulfilled" | "rejected";
+  value?: T;
+  reason?: unknown;
+};
+
+export function resolvedPromise<T>(value: T): PromiseWithStatus<T> {
+  const promise = Promise.resolve(value) as PromiseWithStatus<T>;
+  promise.status = "fulfilled";
+  promise.value = value;
+  return promise;
+}
+
+export function rejectedPromise<T>(reason: unknown): PromiseWithStatus<T> {
+  const promise = Promise.reject(reason) as PromiseWithStatus<T>;
+  promise.status = "rejected";
+  promise.reason = reason;
+  return promise;
+}
