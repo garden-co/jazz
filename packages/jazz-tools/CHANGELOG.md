@@ -1,5 +1,20 @@
 # jazz-tools
 
+## 0.19.8
+
+### Patch Changes
+
+- 21f7d34: Improve error logging in subscriptions and add stacktraces on errors coming from React hooks.
+
+  Added jazzConfig.setCustomErrorReporter API to intercept subscription errors and send them to an error tracker.
+
+- b22ad89: Narrow down `.load` return type to not include `loading` CoValues
+- 28b23dd: Added polyfills helper to React Native and Expo exports
+- Updated dependencies [93e4a34]
+  - cojson@0.19.8
+  - cojson-storage-indexeddb@0.19.8
+  - cojson-transport-ws@0.19.8
+
 ## 0.19.7
 
 ### Patch Changes
