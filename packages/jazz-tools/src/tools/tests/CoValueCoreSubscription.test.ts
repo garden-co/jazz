@@ -444,7 +444,7 @@ describe("CoValueCoreSubscription", async () => {
   });
 
   describe("error handling scenarios", () => {
-    test("should handle return unavailable when the id is invalid", async () => {
+    test("should synchronously emit unavailable when an invalid id is provided", async () => {
       const bob = await createJazzTestAccount();
       const invalidId = "invalid-co-value-id";
 
@@ -461,13 +461,49 @@ describe("CoValueCoreSubscription", async () => {
         },
       );
 
-      // Should not call listener immediately since ID is invalid
-      expect(listener).not.toHaveBeenCalled();
+      // Should call listener synchronously since ID is invalid (doesn't start with "co_z")
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(lastResult).toBe(CoValueLoadingState.UNAVAILABLE);
 
-      // Wait for the error handling to complete
-      await waitFor(() => expect(listener).toHaveBeenCalled());
+      subscription.unsubscribe();
+    });
 
-      // Should report unavailable when loading fails
+    test("should synchronously emit unavailable when subscribing to a CoValue that has already been marked as unavailable", async () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number(),
+      });
+
+      // Create a person that bob can access
+      const person = Person.create(
+        { name: "John", age: 30 },
+        Group.create().makePublic("writer"),
+      );
+
+      // Create a new sync server, this way the CoValue is not available for new accounts
+      await setupJazzTestSync();
+      const bob = await createJazzTestAccount();
+
+      // Try to load it first, to mark the value as unavailable
+      await Person.load(person.$jazz.id, {
+        loadAs: bob,
+      });
+
+      let lastResult: any = null;
+      const listener = vi.fn();
+
+      // Subscribe to the unavailable CoValue
+      const subscription = new CoValueCoreSubscription(
+        bob.$jazz.localNode,
+        person.$jazz.id,
+        (result) => {
+          lastResult = result;
+          listener(result);
+        },
+      );
+
+      // Should call listener synchronously since CoValue is already marked as unavailable
+      expect(listener).toHaveBeenCalledTimes(1);
       expect(lastResult).toBe(CoValueLoadingState.UNAVAILABLE);
 
       subscription.unsubscribe();
@@ -492,13 +528,7 @@ describe("CoValueCoreSubscription", async () => {
         { name: "main", owner: bob },
       );
 
-      // Should not call listener immediately since ID is invalid
-      expect(listener).not.toHaveBeenCalled();
-
-      // Wait for the error handling to complete
-      await waitFor(() => expect(listener).toHaveBeenCalled());
-
-      // Should report unavailable when loading fails
+      expect(listener).toHaveBeenCalledTimes(1);
       expect(lastResult).toBe(CoValueLoadingState.UNAVAILABLE);
 
       subscription.unsubscribe();
@@ -831,6 +861,8 @@ describe("CoValueCoreSubscription", async () => {
         Group.create().makePublic("writer"),
       );
 
+      await person.$jazz.waitForSync();
+
       let lastResultSubscription1: any = null;
       let lastResultSubscription2: any = null;
       const listener = vi.fn();
@@ -876,6 +908,10 @@ describe("CoValueCoreSubscription", async () => {
         { name: "John", age: 30 },
         Group.create().makePublic("writer"),
       );
+
+      // TODO: added this because otherwise the second subscription would immediately emit unavailable
+      // We should consider a CoValue in the middle of a retry load as pending, not unavailable
+      await person.$jazz.waitForSync();
 
       let lastResultSubscription1: any = null;
       let lastResultSubscription2: any = null;

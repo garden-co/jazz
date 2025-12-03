@@ -1,6 +1,7 @@
 import {
   cojsonInternals,
   CoValueCore,
+  isRawCoID,
   LocalNode,
   RawCoID,
   RawCoValue,
@@ -73,6 +74,18 @@ export class CoValueCoreSubscription {
       return;
     }
 
+    if (!isRawCoID(source.id)) {
+      this.emit(CoValueLoadingState.UNAVAILABLE);
+      return;
+    }
+
+    if (
+      source.loadingState === "unavailable" ||
+      !this.localNode.hasLoadingSources(source.id)
+    ) {
+      this.emit(CoValueLoadingState.UNAVAILABLE);
+    }
+
     // If a specific branch is requested while the source is not available, attempt to checkout that branch
     if (this.branchName) {
       this.handleBranchCheckout();
@@ -105,6 +118,10 @@ export class CoValueCoreSubscription {
       this.source.createBranch(this.branchName, this.branchOwnerId);
       this.subscribe(branch.getCurrentContent());
     } else {
+      if (branch.loadingState === "unavailable") {
+        this.emit(CoValueLoadingState.UNAVAILABLE);
+      }
+
       // Branch not available, fall through to checkout logic
       this.handleBranchCheckout();
     }
@@ -223,12 +240,15 @@ export class CoValueCoreSubscription {
     });
   }
 
+  lastEmittedValue?: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE;
+
   emit(value: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE): void {
     if (this.unsubscribed) return;
-    if (!isReadyForEmit(value)) {
+    if (!isReadyForEmit(value, this.lastEmittedValue)) {
       return;
     }
 
+    this.lastEmittedValue = value;
     this.listener(value);
   }
 
@@ -246,9 +266,12 @@ export class CoValueCoreSubscription {
 /**
  * This is true if the value is unavailable, or if the value is a binary coValue or a completely downloaded coValue.
  */
-function isReadyForEmit(value: RawCoValue | "unavailable") {
+function isReadyForEmit(
+  value: RawCoValue | "unavailable",
+  lastEmittedValue?: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE,
+) {
   if (value === "unavailable") {
-    return true;
+    return lastEmittedValue !== CoValueLoadingState.UNAVAILABLE;
   }
 
   return (
