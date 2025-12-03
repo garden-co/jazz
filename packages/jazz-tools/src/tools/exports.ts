@@ -138,9 +138,6 @@ export {
 
 export * from "./ssr/index.js";
 
-export {
-  captureStack,
-  isCustomErrorReportingEnabled,
-  setCustomErrorReporter,
-  enableCaptureErrorCause,
-} from "./subscribe/errorReporting.js";
+export { captureStack } from "./subscribe/errorReporting.js";
+
+export * as jazzConfig from "./config.js";
