@@ -1,26 +1,24 @@
 ```tsx
-import { useCoState }
+import { useCo }
   from "jazz-tools/react";
 
-function MessageList({ id }) {
-  // Load & sync CoValues
+const MessageList = ({ id }) => {
+  // Load & sync CoValues w/ suspense
   // Rerenders on local & remote edits!
-  const chat = useCoState(Chat, id, {
+  const chat = useCo(Chat, id, {
     // Granular load of nested CoValues
     resolve: { $each: true }
   });
 
-  return chat.$isLoaded ? <div>
+  return <div>
     {chat.map(msg => (   // Looks like
       <p>{msg.text}</p>  // plain JSON
     ))}
     <TextInput onSubmit={(text) => {
       // Create and edit data anywhere!
       // Locally stored & synced
-      chat.$jazz.push(Message.create(
-        { text }, chat.$jazz.owner
-      ));
+      chat.$jazz.push({ text });
     }} />
-  </div> : <div>Loading...</div>;
+  </div>;
 }
 ```
