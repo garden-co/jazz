@@ -19,8 +19,11 @@ export function HeroSection() {
   return (
     <section className="container grid items-start gap-8 py-12 md:grid-cols-12 md:gap-0 md:py-20">
       <div className="md:col-span-4">
+        <Kicker className="mb-2">the database that syncs.</Kicker>
         <H1 className="text-3xl md:text-4xl lg:text-4xl">
           It's easy when data syncs anywhere, instantly.
+          {/* <JazzSyncs className="max-w-96 md:max-w-full" aria-hidden="true" /> */}
+          <span className="sr-only">{marketingCopy.headline}</span>
         </H1>
         <Prose
           size="lg"
