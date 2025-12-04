@@ -169,7 +169,7 @@ export function ChatDemoSection() {
   };
 
   return (
-    <div className="container grid items-start md:grid-cols-12">
+    <div className="container grid items-start md:grid-cols-12 pt-6">
       <div className="md:col-span-7">
         <div className="grid items-start gap-4 sm:grid-cols-2 sm:gap-0">
           <Iframe
