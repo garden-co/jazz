@@ -1,10 +1,10 @@
 // @vitest-environment happy-dom
 
 import { cojsonInternals } from "cojson";
-import { CoRichText, Group, Loaded, co, z } from "jazz-tools";
+import { Group, Loaded, co, z } from "jazz-tools";
 import { assertLoaded, disableJazzTestSync } from "jazz-tools/testing";
 import { beforeEach, describe, expect, expectTypeOf, it } from "vitest";
-import React, { Suspense, useRef, useState } from "react";
+import React, { Suspense, useRef } from "react";
 import { useSuspenseCoState } from "../hooks.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import {
@@ -31,6 +31,8 @@ const useRenderCount = <T,>(hook: () => T) => {
 process.on("unhandledRejection", () => {});
 
 beforeEach(async () => {
+  cojsonInternals.setCoValueLoadingRetryDelay(20);
+
   await setupJazzTestSync({
     asyncPeers: true,
   });
@@ -39,8 +41,6 @@ beforeEach(async () => {
     isCurrentActiveAccount: true,
   });
 });
-
-cojsonInternals.setCoValueLoadingRetryDelay(10);
 
 describe("useSuspenseCoState", () => {
   it("should return loaded value without suspending when data is available", async () => {
@@ -169,7 +169,7 @@ describe("useSuspenseCoState", () => {
     });
   });
 
-  it.skip("should throw error when CoValue is unavailable due to network disconnection", async () => {
+  it("should throw error when CoValue is unavailable", async () => {
     const TestMap = co.map({
       value: z.string(),
     });
@@ -206,12 +206,15 @@ describe("useSuspenseCoState", () => {
     });
 
     // Verify error is displayed in error boundary
-    await waitFor(() => {
-      expect(container.textContent).toContain("Error");
-    });
+    await waitFor(
+      () => {
+        expect(container.textContent).toContain("Error");
+      },
+      { timeout: 10_000 },
+    );
   });
 
-  it.skip("should throw error when CoValue is unavailable due disabled network", async () => {
+  it("should throw error when CoValue is unavailable due disabled network", async () => {
     disableJazzTestSync();
 
     const TestMap = co.map({
@@ -250,9 +253,12 @@ describe("useSuspenseCoState", () => {
     });
 
     // Verify error is displayed in error boundary
-    await waitFor(() => {
-      expect(container.textContent).toContain("Error!");
-    });
+    await waitFor(
+      () => {
+        expect(container.textContent).toContain("Error!");
+      },
+      { timeout: 10_000 },
+    );
   });
 
   it("should throw error when CoValue is unavailable due to missing loading sources", async () => {

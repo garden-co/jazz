@@ -36,11 +36,6 @@ import {
   resolvedPromise,
 } from "./utils.js";
 
-const promiseCache = new WeakMap<
-  LocalNode,
-  Map<string, [RefsToResolve<any>, PromiseWithStatus<any>][]>
->();
-
 export class SubscriptionScope<D extends CoValue> {
   childNodes = new Map<string, SubscriptionScope<CoValue>>();
   childValues: Map<string, SubscriptionValue<any, any>> = new Map<
@@ -314,40 +309,20 @@ export class SubscriptionScope<D extends CoValue> {
 
   unloadedValue: NotLoaded<D> | undefined;
 
-  cachePromise(callback: () => PromiseWithStatus<D>) {
-    let cache = promiseCache.get(this.node);
+  lastPromise:
+    | {
+        value: MaybeLoaded<D> | undefined;
+        promise: PromiseWithStatus<MaybeLoaded<D>>;
+      }
+    | undefined;
 
-    if (!cache) {
-      cache = new Map();
-      promiseCache.set(this.node, cache);
-    }
-
-    let entries = cache.get(this.id);
-
-    if (!entries) {
-      entries = [];
-      cache.set(this.id, entries);
-    }
-
-    const matchingEntry = entries.find(([resolve]) =>
-      isEqualRefsToResolve(resolve, this.resolve),
-    );
-
-    if (matchingEntry) {
-      return matchingEntry[1];
+  cachePromise(value: MaybeLoaded<D>, callback: () => PromiseWithStatus<D>) {
+    if (this.lastPromise?.value === value) {
+      return this.lastPromise.promise;
     }
 
     const promise = callback();
-    const entry: [RefsToResolve<any>, PromiseWithStatus<any>] = [
-      this.resolve,
-      promise,
-    ];
-    entries.push(entry);
-
-    // Clear the cache when the promise is resolved, to avoid memory leaks
-    promise.then(() => {
-      entries.splice(entries.indexOf(entry), 1);
-    });
+    this.lastPromise = { value, promise };
 
     return promise;
   }
@@ -369,24 +344,26 @@ export class SubscriptionScope<D extends CoValue> {
     }
 
     // We need to cache rejected promises to make React Suspense happy
-    return this.cachePromise(() => {
+    return this.cachePromise(currentValue, () => {
       return new Promise<D>((resolve, reject) => {
         const unsubscribe = this.subscribe(() => {
           const currentValue = this.getCurrentValue();
 
+          if (currentValue.$jazz.loadingState === CoValueLoadingState.LOADING) {
+            return;
+          }
+
           if (currentValue.$isLoaded) {
-            unsubscribe();
             resolve(currentValue);
-          } else if (
-            currentValue.$jazz.loadingState !== CoValueLoadingState.LOADING
-          ) {
-            unsubscribe();
+          } else {
             reject(
               new Error(this.getError()?.toString() ?? "Unknown error", {
                 cause: this.callerStack,
               }),
             );
           }
+
+          unsubscribe();
         });
       });
     });
@@ -530,16 +507,45 @@ export class SubscriptionScope<D extends CoValue> {
   }
 
   subscribers = new Set<(value: SubscriptionValue<D, any>) => void>();
+  subscriberChangeCallbacks = new Set<(count: number) => void>();
+
+  /**
+   * Subscribe to subscriber count changes
+   * Callback receives the total number of subscribers
+   * Returns an unsubscribe function
+   */
+  onSubscriberChange(callback: (count: number) => void): () => void {
+    this.subscriberChangeCallbacks.add(callback);
+
+    return () => {
+      this.subscriberChangeCallbacks.delete(callback);
+    };
+  }
+
+  private notifySubscriberChange() {
+    const count = this.subscribers.size;
+    this.subscriberChangeCallbacks.forEach((callback) => {
+      callback(count);
+    });
+  }
+
   subscribe(listener: (value: SubscriptionValue<D, any>) => void) {
     this.subscribers.add(listener);
+    this.notifySubscriberChange();
 
     return () => {
       this.subscribers.delete(listener);
+      this.notifySubscriberChange();
     };
   }
 
   setListener(listener: (value: SubscriptionValue<D, any>) => void) {
+    const hadListener = this.subscribers.has(listener);
     this.subscribers.add(listener);
+    // Only notify if this is a new listener (count actually changed)
+    if (!hadListener) {
+      this.notifySubscriberChange();
+    }
     this.triggerUpdate();
   }
 
@@ -928,7 +934,14 @@ export class SubscriptionScope<D extends CoValue> {
     this.closed = true;
 
     this.subscription.unsubscribe();
+    const hadSubscribers = this.subscribers.size > 0;
     this.subscribers.clear();
+    // Notify callbacks that subscriber count is now 0 if there were subscribers before
+    if (hadSubscribers) {
+      this.notifySubscriberChange();
+    }
+    // Clear subscriber change callbacks to prevent memory leaks
+    this.subscriberChangeCallbacks.clear();
     this.childNodes.forEach((child) => child.destroy());
   }
 }

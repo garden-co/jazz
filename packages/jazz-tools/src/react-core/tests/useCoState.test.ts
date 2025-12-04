@@ -64,13 +64,9 @@ describe("useCoState", () => {
       account,
     });
 
-    expect(result.current.$jazz.loadingState).toBe(CoValueLoadingState.LOADING);
-
-    await waitFor(() => {
-      expect(result.current.$jazz.loadingState).toBe(
-        CoValueLoadingState.UNAVAILABLE,
-      );
-    });
+    expect(result.current.$jazz.loadingState).toBe(
+      CoValueLoadingState.UNAVAILABLE,
+    );
   });
 
   it("should update the value when the coValue changes", async () => {

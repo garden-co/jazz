@@ -23,11 +23,11 @@ import {
   Loaded,
   MaybeLoaded,
   NotLoaded,
+  RefsToResolve,
   ResolveQuery,
   ResolveQueryStrict,
   SchemaResolveQuery,
   SubscriptionScope,
-  coValueClassFromCoValueClassOrSchema,
   importContentPieces,
   captureStack,
   getUnloadedCoValueWithoutId,
@@ -135,19 +135,21 @@ export function useCoValueSubscription<
     const resolve = getResolveQuery(Schema, options?.resolve);
 
     const node = contextManager.getCurrentValue()!.node;
-    const subscription = new SubscriptionScope<any>(
+    const cache = contextManager.getSubscriptionScopeCache();
+    const subscription = cache.getOrCreate(
       node,
-      resolve,
+      Schema,
       id,
-      {
-        ref: coValueClassFromCoValueClassOrSchema(Schema),
-        optional: true,
-      },
+      resolve,
       false,
       false,
       options?.unstable_branch,
-      callerStack.current,
     );
+
+    // Set callerStack on returned subscription after retrieval
+    if (callerStack.current) {
+      subscription.callerStack = callerStack.current;
+    }
 
     return {
       value: subscription,
@@ -183,7 +185,6 @@ export function useCoValueSubscription<
     subscription.branchOwnerId !== branchOwnerId ||
     subscription.agent !== agent
   ) {
-    subscription.value?.destroy();
     subscriptionRef.current = createSubscription();
     subscription = subscriptionRef.current;
   }
@@ -584,19 +585,21 @@ export function useAccountSubscription<
     const resolve = getResolveQuery(Schema, options?.resolve);
 
     const node = contextManager.getCurrentValue()!.node;
-    const subscription = new SubscriptionScope<any>(
+    const cache = contextManager.getSubscriptionScopeCache();
+    const subscription = cache.getOrCreate(
       node,
-      resolve,
+      Schema,
       agent.$jazz.id,
-      {
-        ref: coValueClassFromCoValueClassOrSchema(Schema),
-        optional: true,
-      },
+      resolve,
       false,
       false,
       options?.unstable_branch,
-      callerStack.current,
     );
+
+    // Set callerStack on returned subscription after retrieval
+    if (callerStack.current) {
+      subscription.callerStack = callerStack.current;
+    }
 
     return {
       subscription,
@@ -619,12 +622,12 @@ export function useAccountSubscription<
       subscription.branchName !== options?.unstable_branch?.name ||
       subscription.branchOwnerId !== options?.unstable_branch?.owner?.$jazz.id
     ) {
-      subscription.subscription?.destroy();
+      // No need to manually destroy - cache handles cleanup via SubscriptionScope lifecycle
       setSubscription(createSubscription());
     }
 
     return contextManager.subscribe(() => {
-      subscription.subscription?.destroy();
+      // No need to manually destroy - cache handles cleanup via SubscriptionScope lifecycle
       setSubscription(createSubscription());
     });
   }, [Schema, contextManager, branchName, branchOwnerId]);
@@ -816,7 +819,9 @@ export function useSuspenseAccount<
   const subscription = useAccountSubscription(AccountSchema, options);
 
   if (!subscription) {
-    throw new Error("Subscription not found");
+    throw new Error(
+      "Subscription not found, are you using useSuspenseAccount in guest mode?",
+    );
   }
 
   use(subscription.getPromise());

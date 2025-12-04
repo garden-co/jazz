@@ -4,7 +4,7 @@ import {
   type CojsonInternalTypes,
   type RawCoValue,
 } from "cojson";
-import { AvailableCoValueCore } from "cojson/dist/coValueCore/coValueCore.js";
+import { AvailableCoValueCore } from "cojson";
 import {
   Account,
   AnonymousJazzAgent,
@@ -23,7 +23,6 @@ import {
   ResolveQueryStrict,
   Resolved,
   SubscriptionScope,
-  type SubscriptionValue,
   TypeSym,
   NotLoaded,
   activeAccountContext,
@@ -31,7 +30,7 @@ import {
   inspect,
 } from "../internal.js";
 import type { BranchDefinition } from "../subscribe/types.js";
-import { CoValueHeader } from "cojson/dist/coValueCore/verifiedState.js";
+import { CoValueHeader } from "cojson";
 
 /** @category Abstract interfaces */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
