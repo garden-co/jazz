@@ -1,4 +1,4 @@
-import type { LocalNode, RawCoValue } from "cojson";
+import { LocalNode, RawCoValue } from "cojson";
 import {
   CoFeed,
   CoList,
@@ -29,11 +29,17 @@ import {
 } from "./errorReporting.js";
 import {
   createCoValue,
+  isEqualRefsToResolve,
   myRoleForRawValue,
   PromiseWithStatus,
   rejectedPromise,
   resolvedPromise,
 } from "./utils.js";
+
+const promiseCache = new WeakMap<
+  LocalNode,
+  Map<string, [RefsToResolve<any>, PromiseWithStatus<any>][]>
+>();
 
 export class SubscriptionScope<D extends CoValue> {
   childNodes = new Map<string, SubscriptionScope<CoValue>>();
@@ -308,40 +314,62 @@ export class SubscriptionScope<D extends CoValue> {
 
   unloadedValue: NotLoaded<D> | undefined;
 
-  lastPromise:
-    | {
-        value: MaybeLoaded<D>;
-        promise: PromiseWithStatus<MaybeLoaded<D>>;
-      }
-    | undefined;
+  cachePromise(callback: () => PromiseWithStatus<D>) {
+    let cache = promiseCache.get(this.node);
 
-  cachePromise(value: MaybeLoaded<D>, callback: () => PromiseWithStatus<D>) {
-    if (this.lastPromise?.value === value) {
-      return this.lastPromise.promise;
+    if (!cache) {
+      cache = new Map();
+      promiseCache.set(this.node, cache);
+    }
+
+    let entries = cache.get(this.id);
+
+    if (!entries) {
+      entries = [];
+      cache.set(this.id, entries);
+    }
+
+    const matchingEntry = entries.find(([resolve]) =>
+      isEqualRefsToResolve(resolve, this.resolve),
+    );
+
+    if (matchingEntry) {
+      return matchingEntry[1];
     }
 
     const promise = callback();
-    this.lastPromise = { value, promise };
+    const entry: [RefsToResolve<any>, PromiseWithStatus<any>] = [
+      this.resolve,
+      promise,
+    ];
+    entries.push(entry);
+
+    // Clear the cache when the promise is resolved, to avoid memory leaks
+    promise.then(() => {
+      entries.splice(entries.indexOf(entry), 1);
+    });
+
     return promise;
   }
 
   getPromise() {
     const currentValue = this.getCurrentValue();
 
-    return this.cachePromise(currentValue, () => {
-      if (currentValue.$isLoaded) {
-        return resolvedPromise(currentValue);
-      }
+    if (currentValue.$isLoaded) {
+      return resolvedPromise(currentValue);
+    }
 
-      if (currentValue.$jazz.loadingState !== CoValueLoadingState.LOADING) {
-        const error = this.getError();
-        return rejectedPromise(
-          new Error(error?.toString() ?? "Unknown error", {
-            cause: this.callerStack,
-          }),
-        );
-      }
+    if (currentValue.$jazz.loadingState !== CoValueLoadingState.LOADING) {
+      const error = this.getError();
+      return rejectedPromise(
+        new Error(error?.toString() ?? "Unknown error", {
+          cause: this.callerStack,
+        }),
+      );
+    }
 
+    // We need to cache rejected promises to make React Suspense happy
+    return this.cachePromise(() => {
       return new Promise<D>((resolve, reject) => {
         const unsubscribe = this.subscribe(() => {
           const currentValue = this.getCurrentValue();

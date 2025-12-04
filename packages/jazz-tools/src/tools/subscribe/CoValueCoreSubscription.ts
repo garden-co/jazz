@@ -68,137 +68,76 @@ export class CoValueCoreSubscription {
   private initializeSubscription(): void {
     const source = this.source;
 
-    // If the CoValue is already available, handle it immediately
-    if (source.isAvailable()) {
-      this.handleAvailableSource();
-      return;
-    }
-
+    // If the ID is not a valid raw CoID, we immediately emit an unavailable event
     if (!isRawCoID(source.id)) {
       this.emit(CoValueLoadingState.UNAVAILABLE);
       return;
     }
 
-    if (
-      source.loadingState === "unavailable" ||
-      !this.localNode.hasLoadingSources(source.id)
-    ) {
-      this.emit(CoValueLoadingState.UNAVAILABLE);
-    }
-
-    // If a specific branch is requested while the source is not available, attempt to checkout that branch
+    // If we have a branch name, we handle branching
     if (this.branchName) {
-      this.handleBranchCheckout();
+      this.handleBranching(this.branchName, this.branchOwnerId);
       return;
     }
 
-    // If we don't have a branch requested, load the CoValue
-    this.loadCoValue();
+    // If we don't have a branch name, we subscribe to the source directly
+    this.subscribe(this.source);
   }
 
-  /**
-   * Handles the case where the CoValue source is immediately available.
-   * Either subscribes directly or attempts to get the requested branch.
-   */
-  private handleAvailableSource(): void {
-    if (!this.branchName || !cojsonInternals.canBeBranched(this.source)) {
-      this.subscribe(this.source.getCurrentContent());
+  private handleBranching(branchName: string, branchOwnerId?: RawCoID) {
+    const source = this.source;
+
+    // If the source is not available, we wait for it to become available and then try to branch
+    if (!source.isAvailable()) {
+      this.waitForSourceToBecomeAvailable(branchName, branchOwnerId);
+      return;
+    }
+
+    // If the source is not branchable (e.g. it is a group), we subscribe to it directly
+    if (!cojsonInternals.canBeBranched(source)) {
+      this.subscribe(source);
       return;
     }
 
     // Try to get the specific branch from the available source
-    const branch = this.source.getBranch(this.branchName, this.branchOwnerId);
+    const branch = source.getBranch(branchName, branchOwnerId);
 
-    if (branch.isAvailable()) {
-      // Branch is available, subscribe to it
-      this.subscribe(branch.getCurrentContent());
-      return;
-      // If the branch hasn't been created, we create it directly so we can syncronously subscribe to it
-    } else if (!this.source.hasBranch(this.branchName, this.branchOwnerId)) {
-      this.source.createBranch(this.branchName, this.branchOwnerId);
-      this.subscribe(branch.getCurrentContent());
-    } else {
-      if (branch.loadingState === "unavailable") {
+    // If the branch hasn't been created, we create it directly so we can syncronously subscribe to it
+    if (!branch.isAvailable() && !source.hasBranch(branchName, branchOwnerId)) {
+      try {
+        source.createBranch(branchName, branchOwnerId);
+      } catch (error) {
+        // If the branch creation fails (provided group is not available), we emit an unavailable event
+        console.error("error creating branch", error);
         this.emit(CoValueLoadingState.UNAVAILABLE);
+        return;
       }
-
-      // Branch not available, fall through to checkout logic
-      this.handleBranchCheckout();
-    }
-  }
-
-  /**
-   * Attempts to checkout a specific branch of the CoValue.
-   * This is called when the source isn't available but a branch is requested.
-   */
-  private handleBranchCheckout(): void {
-    this.localNode
-      .checkoutBranch(this.source.id, this.branchName!, this.branchOwnerId)
-      .then((value) => {
-        if (this.unsubscribed) return;
-
-        if (value !== CoValueLoadingState.UNAVAILABLE) {
-          // Branch checkout successful, subscribe to it
-          this.subscribe(value);
-        } else {
-          // Branch checkout failed, handle the error
-          this.handleUnavailableBranch();
-        }
-      })
-      .catch((error) => {
-        // Handle unexpected errors during branch checkout
-        console.error(error);
-        this.emit(CoValueLoadingState.UNAVAILABLE);
-      });
-  }
-
-  /**
-   * Handles the case where a branch checkout fails.
-   * Determines whether to retry or report unavailability.
-   */
-  private handleUnavailableBranch(): void {
-    const source = this.source;
-    if (source.isAvailable()) {
-      // This should be impossible - if source is available we can create the branch and it should be available
-      throw new Error("Branch is unavailable");
     }
 
-    // Source isn't available either, subscribe to state changes and report unavailability
-    this.subscribeToUnavailableSource();
-    this.emit(CoValueLoadingState.UNAVAILABLE);
+    this.subscribe(branch);
   }
 
   /**
-   * Loads the CoValue core from the network/storage.
-   * This is the fallback strategy when immediate availability fails.
+   * Loads a CoValue core and emits an unavailable event if it is still unavailable after the retries.
    */
-  private loadCoValue(): void {
+  load(value: CoValueCore) {
     this.localNode
-      .loadCoValueCore(this.source.id, undefined, this.skipRetry)
-      .then((value) => {
-        if (this.unsubscribed) return;
-
-        if (value.isAvailable()) {
-          // Loading successful, subscribe to the loaded value
-          this.subscribe(value.getCurrentContent());
-        } else {
-          // Loading failed, subscribe to state changes and report unavailability
-          this.subscribeToUnavailableSource();
+      .loadCoValueCore(value.id, undefined, this.skipRetry)
+      .then(() => {
+        // If after the retries the value is still unavailable, we emit an unavailable event
+        if (!value.isAvailable()) {
           this.emit(CoValueLoadingState.UNAVAILABLE);
         }
-      })
-      .catch((error) => {
-        // Handle unexpected errors during loading
-        console.error(error);
-        this.emit(CoValueLoadingState.UNAVAILABLE);
       });
   }
 
   /**
-   * Subscribes to state changes of an unavailable CoValue source.
-   * This allows the subscription to become active when the source becomes available after a first loading attempt.
+   * Waits for the source to become available and then tries to branch.
    */
-  private subscribeToUnavailableSource(): void {
+  private waitForSourceToBecomeAvailable(
+    branchName: string,
+    branchOwnerId?: RawCoID,
+  ): void {
     const source = this.source;
 
     const handleStateChange = (
@@ -214,42 +153,58 @@ export class CoValueCoreSubscription {
 
       unsubFromStateChange();
 
-      if (this.branchName) {
-        // Branch was requested, attempt checkout again
-        this.handleBranchCheckout();
-      } else {
-        // No branch requested, subscribe directly and cleanup state subscription
-        this.subscribe(source.getCurrentContent());
-      }
+      this.handleBranching(branchName, branchOwnerId);
     };
 
     // Subscribe to state changes and store the unsubscribe function
     this._unsubscribe = source.subscribe(handleStateChange);
+
+    this.load(source);
   }
 
   /**
    * Subscribes to a specific CoValue and notifies the listener.
    * This is the final step where we actually start receiving updates.
    */
-  private subscribe(value: RawCoValue): void {
+  private subscribe(value: CoValueCore): void {
     if (this.unsubscribed) return;
 
     // Subscribe to the value and store the unsubscribe function
     this._unsubscribe = value.subscribe((value) => {
-      this.emit(value);
+      if (value.isAvailable()) {
+        this.emit(value.getCurrentContent());
+      }
     });
+
+    if (!value.isAvailable()) {
+      this.load(value);
+    }
   }
 
-  lastEmittedValue?: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE;
+  lastState: CoValueLoadingState | undefined;
 
   emit(value: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE): void {
     if (this.unsubscribed) return;
-    if (!isReadyForEmit(value, this.lastEmittedValue)) {
+    if (!this.isReadyForEmit(value)) {
       return;
     }
 
-    this.lastEmittedValue = value;
     this.listener(value);
+  }
+
+  isReadyForEmit(
+    value: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE,
+  ): boolean {
+    if (value === CoValueLoadingState.UNAVAILABLE) {
+      return true;
+    }
+
+    // If the value is not completely downloaded, we don't emit it to avoid providing partial data to the listener.
+    if (!isCompletelyDownloaded(value)) {
+      return false;
+    }
+
+    return true;
   }
 
   /**
@@ -266,14 +221,7 @@ export class CoValueCoreSubscription {
 /**
  * This is true if the value is unavailable, or if the value is a binary coValue or a completely downloaded coValue.
  */
-function isReadyForEmit(
-  value: RawCoValue | "unavailable",
-  lastEmittedValue?: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE,
-) {
-  if (value === "unavailable") {
-    return lastEmittedValue !== CoValueLoadingState.UNAVAILABLE;
-  }
-
+function isCompletelyDownloaded(value: RawCoValue) {
   return (
     value.core.verified?.header.meta?.type === "binary" ||
     value.core.isCompletelyDownloaded()

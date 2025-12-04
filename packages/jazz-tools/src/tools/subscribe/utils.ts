@@ -3,6 +3,7 @@ import { RegisteredSchemas } from "../coValues/registeredSchemas.js";
 import {
   CoValue,
   RefEncoded,
+  RefsToResolve,
   accountOrGroupToGroup,
   instantiateRefEncodedFromRaw,
 } from "../internal.js";
@@ -61,4 +62,60 @@ export function rejectedPromise<T>(reason: unknown): PromiseWithStatus<T> {
   promise.status = "rejected";
   promise.reason = reason;
   return promise;
+}
+
+export function isEqualRefsToResolve(
+  a: RefsToResolve<any>,
+  b: RefsToResolve<any>,
+) {
+  // Fast path: same reference
+  if (a === b) {
+    return true;
+  }
+
+  // Fast path: both are boolean
+  if (typeof a === "boolean" && typeof b === "boolean") {
+    return a === b;
+  }
+
+  // One is boolean, the other is not
+  if (typeof a === "boolean" || typeof b === "boolean") {
+    return false;
+  }
+
+  // Both must be objects at this point
+  if (
+    typeof a !== "object" ||
+    typeof b !== "object" ||
+    a === null ||
+    b === null
+  ) {
+    return false;
+  }
+
+  // Get all keys from both objects
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+
+  // Different number of keys means not equal
+  if (keysA.length !== keysB.length) {
+    return false;
+  }
+
+  // Check each key
+  for (const key of keysA) {
+    if (!(key in b)) {
+      return false;
+    }
+
+    const valueA = (a as any)[key];
+    const valueB = (b as any)[key];
+
+    // Recursively compare nested RefsToResolve values
+    if (!isEqualRefsToResolve(valueA, valueB)) {
+      return false;
+    }
+  }
+
+  return true;
 }

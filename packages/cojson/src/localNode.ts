@@ -425,6 +425,8 @@ export class LocalNode {
         const peers = this.syncManager.getServerPeers(id, skipLoadingFromPeer);
 
         if (!this.storage && peers.length === 0) {
+          // Flags the coValue as unavailable
+          coValue.markNotFoundInPeer("storage");
           return coValue;
         }
 

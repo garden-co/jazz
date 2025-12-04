@@ -14,6 +14,7 @@ import {
   setupJazzTestSync,
 } from "../testing.js";
 import { waitFor } from "../tests/utils.js";
+import { cojsonInternals } from "cojson";
 
 beforeEach(async () => {
   await setupJazzTestSync();
@@ -24,6 +25,8 @@ beforeEach(async () => {
     creationProps: { name: "Hermes Puggington" },
   });
 });
+
+cojsonInternals.setCoValueLoadingRetryDelay(10);
 
 describe("CoValueCoreSubscription", async () => {
   /**
@@ -468,7 +471,7 @@ describe("CoValueCoreSubscription", async () => {
       subscription.unsubscribe();
     });
 
-    test("should synchronously emit unavailable when subscribing to a CoValue that has already been marked as unavailable", async () => {
+    test("should emit unavailable when subscribing to a CoValue that has already been marked as unavailable", async () => {
       const Person = co.map({
         name: z.string(),
         age: z.number(),
@@ -502,7 +505,8 @@ describe("CoValueCoreSubscription", async () => {
         },
       );
 
-      // Should call listener synchronously since CoValue is already marked as unavailable
+      await waitFor(() => expect(listener).toHaveBeenCalled());
+
       expect(listener).toHaveBeenCalledTimes(1);
       expect(lastResult).toBe(CoValueLoadingState.UNAVAILABLE);
 
@@ -861,8 +865,6 @@ describe("CoValueCoreSubscription", async () => {
         Group.create().makePublic("writer"),
       );
 
-      await person.$jazz.waitForSync();
-
       let lastResultSubscription1: any = null;
       let lastResultSubscription2: any = null;
       const listener = vi.fn();
@@ -908,10 +910,6 @@ describe("CoValueCoreSubscription", async () => {
         { name: "John", age: 30 },
         Group.create().makePublic("writer"),
       );
-
-      // TODO: added this because otherwise the second subscription would immediately emit unavailable
-      // We should consider a CoValue in the middle of a retry load as pending, not unavailable
-      await person.$jazz.waitForSync();
 
       let lastResultSubscription1: any = null;
       let lastResultSubscription2: any = null;

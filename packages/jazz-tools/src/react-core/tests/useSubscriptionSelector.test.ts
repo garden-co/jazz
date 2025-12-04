@@ -89,13 +89,9 @@ describe("useSubscriptionSelector", () => {
       return useSubscriptionSelector(subscription);
     });
 
-    expect(result.current.$jazz.loadingState).toBe(CoValueLoadingState.LOADING);
-
-    await waitFor(() => {
-      expect(result.current.$jazz.loadingState).toBe(
-        CoValueLoadingState.UNAVAILABLE,
-      );
-    });
+    expect(result.current.$jazz.loadingState).toBe(
+      CoValueLoadingState.UNAVAILABLE,
+    );
   });
 
   it("should return coAccount", async () => {
