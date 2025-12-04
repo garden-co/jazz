@@ -20,8 +20,8 @@ export function HeroSection() {
     <section className="container grid items-start gap-8 py-12 md:grid-cols-12 md:gap-0 md:py-20">
       <div className="md:col-span-4">
         {/* <Kicker className="mb-6">Ship Better Apps, Faster.</Kicker> */}
-        <H1 className="text-4xl md:text-5xl lg:text-5xl">
-          All you need is sync.
+        <H1 className="text-3xl md:text-4xl lg:text-4xl">
+          It's easy when data syncs anywhere, instantly.
           {/* <JazzSyncs className="max-w-96 md:max-w-full" aria-hidden="true" /> */}
           <span className="sr-only">{marketingCopy.headline}</span>
         </H1>
@@ -31,11 +31,11 @@ export function HeroSection() {
         >
           <p>
             Jazz is a distributed database that runs across your frontend,
-            containers, serverless functions - and its own cloud.
+            containers, functions, and our global auto-scaling storage cloud.
           </p>
           <p>
-            It instantly syncs data, files and LLM streams. It feels like
-            reactive local JSON.
+            Efficiently sync data, files and LLM streams. Use them like reactive
+             local JSON state.
           </p>
         </Prose>
 

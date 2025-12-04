@@ -55,7 +55,7 @@ const environments = [
     icon: VercelLogo,
   },
   {
-    name: "Cloudflare Workers",
+    name: "CF DOs",
     icon: CloudflareWorkerLogo,
   },
 ];
