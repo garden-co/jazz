@@ -34,7 +34,7 @@ export function HeroSection() {
             containers, functions, and our global auto-scaling storage cloud.
           </p>
           <p>
-            It efficiently syncs subsets of data, files and LLM streams. It looks like
+            Efficiently sync data, files and LLM streams. Use them like reactive
              local JSON state.
           </p>
         </Prose>
