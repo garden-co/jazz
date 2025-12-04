@@ -62,7 +62,7 @@ const environments = [
 
 export function SupportedEnvironmentsSection() {
   return (
-    <div className="container flex flex-wrap gap-4 py-12 md:gap-6">
+    <div className="flex flex-wrap gap-4 py-12 md:gap-6">
       {environments.map(({ name, icon: Icon, href }) => {
         if (href) {
           return (
