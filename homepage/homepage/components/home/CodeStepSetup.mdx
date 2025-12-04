@@ -8,7 +8,7 @@ const Message = co.map({
   text: z.string(),
 }).withPermissions("sameAsContainer");
 
-const Chat = co.map(Message);
+const Chat = co.list(Message);
 
 // Use our global auto-scaling
 // Jazz Cloud or self-host
