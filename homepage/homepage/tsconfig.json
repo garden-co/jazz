@@ -31,7 +31,7 @@
     "mdx.d.ts",
     "lib/docNavigationItems.js",
     "app/api/opengraph-image/route.ts",
-    "next.config.mjs"
+    "next.config.ts"
   ],
   "exclude": ["node_modules", "content/docs/code-snippets"]
 }
