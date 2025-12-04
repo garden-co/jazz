@@ -21,7 +21,7 @@ export function HeroSection() {
       <div className="md:col-span-4">
         {/* <Kicker className="mb-6">Ship Better Apps, Faster.</Kicker> */}
         <H1 className="text-3xl md:text-4xl lg:text-4xl">
-          Things are easy when data syncs anywhere, instantly.
+          It's easy when data syncs anywhere, instantly.
           {/* <JazzSyncs className="max-w-96 md:max-w-full" aria-hidden="true" /> */}
           <span className="sr-only">{marketingCopy.headline}</span>
         </H1>
