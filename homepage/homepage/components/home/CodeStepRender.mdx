@@ -3,7 +3,7 @@ import { useCoState }
   from "jazz-tools/react";
 
 function MessageList({ id }) {
-  // Load & sync CoValues w/ suspense
+  // Load & sync CoValues
   // Rerenders on local & remote edits!
   const chat = useCoState(Chat, id, {
     // Granular load of nested CoValues
