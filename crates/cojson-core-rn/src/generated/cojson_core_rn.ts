@@ -172,10 +172,10 @@ export function decryptXsalsa20(
   );
 }
 /**
- * NAPI-exposed function to sign a message using Ed25519.
+ * uniffi-exposed function to sign a message using Ed25519.
  * - `signing_key`: 32 bytes of signing key material
  * - `message`: Raw bytes to sign
- * Returns 64 bytes of signature material or throws JsError if signing fails.
+ * Returns 64 bytes of signature material or throws CryptoErrorUniffi if signing fails.
  */
 export function ed25519Sign(
   signingKey: ArrayBuffer,
@@ -198,9 +198,9 @@ export function ed25519Sign(
   );
 }
 /**
- * NAPI-exposed function to validate and copy Ed25519 signature bytes.
+ * uniffi-exposed function to validate and copy Ed25519 signature bytes.
  * - `bytes`: 64 bytes of signature material to validate
- * Returns the same 64 bytes if valid or throws JsError if invalid.
+ * Returns the same 64 bytes if valid or throws CryptoErrorUniffi if invalid.
  */
 export function ed25519SignatureFromBytes(
   bytes: ArrayBuffer
@@ -221,9 +221,9 @@ export function ed25519SignatureFromBytes(
   );
 }
 /**
- * NAPI-exposed function to validate and copy Ed25519 signing key bytes.
+ * uniffi-exposed function to validate and copy Ed25519 signing key bytes.
  * - `bytes`: 32 bytes of signing key material to validate
- * Returns the same 32 bytes if valid or throws JsError if invalid.
+ * Returns the same 32 bytes if valid or throws CryptoErrorUniffi if invalid.
  */
 export function ed25519SigningKeyFromBytes(
   bytes: ArrayBuffer
@@ -244,10 +244,10 @@ export function ed25519SigningKeyFromBytes(
   );
 }
 /**
- * NAPI-exposed function to sign a message with an Ed25519 signing key.
+ * uniffi-exposed function to sign a message with an Ed25519 signing key.
  * - `signing_key`: 32 bytes of signing key material
  * - `message`: Raw bytes to sign
- * Returns 64 bytes of signature material or throws JsError if signing fails.
+ * Returns 64 bytes of signature material or throws CryptoErrorUniffi if signing fails.
  */
 export function ed25519SigningKeySign(
   signingKey: ArrayBuffer,
@@ -270,9 +270,9 @@ export function ed25519SigningKeySign(
   );
 }
 /**
- * NAPI-exposed function to derive the public key from an Ed25519 signing key.
+ * uniffi-exposed function to derive the public key from an Ed25519 signing key.
  * - `signing_key`: 32 bytes of signing key material
- * Returns 32 bytes of public key material or throws JsError if key is invalid.
+ * Returns 32 bytes of public key material or throws CryptoErrorUniffi if key is invalid.
  */
 export function ed25519SigningKeyToPublic(
   signingKey: ArrayBuffer
@@ -293,11 +293,11 @@ export function ed25519SigningKeyToPublic(
   );
 }
 /**
- * NAPI-exposed function to verify an Ed25519 signature.
+ * uniffi-exposed function to verify an Ed25519 signature.
  * - `verifying_key`: 32 bytes of verifying key material
  * - `message`: Raw bytes that were signed
  * - `signature`: 64 bytes of signature material
- * Returns true if signature is valid, false otherwise, or throws JsError if verification fails.
+ * Returns true if signature is valid, false otherwise, or throws CryptoErrorUniffi if verification fails.
  */
 export function ed25519Verify(
   verifyingKey: ArrayBuffer,
@@ -322,9 +322,9 @@ export function ed25519Verify(
   );
 }
 /**
- * NAPI-exposed function to derive an Ed25519 verifying key from a signing key.
+ * uniffi-exposed function to derive an Ed25519 verifying key from a signing key.
  * - `signing_key`: 32 bytes of signing key material
- * Returns 32 bytes of verifying key material or throws JsError if key is invalid.
+ * Returns 32 bytes of verifying key material or throws CryptoErrorUniffi if key is invalid.
  */
 export function ed25519VerifyingKey(
   signingKey: ArrayBuffer
@@ -345,9 +345,9 @@ export function ed25519VerifyingKey(
   );
 }
 /**
- * NAPI-exposed function to validate and copy Ed25519 verifying key bytes.
+ * uniffi-exposed function to validate and copy Ed25519 verifying key bytes.
  * - `bytes`: 32 bytes of verifying key material to validate
- * Returns the same 32 bytes if valid or throws JsError if invalid.
+ * Returns the same 32 bytes if valid or throws CryptoErrorUniffi if invalid.
  */
 export function ed25519VerifyingKeyFromBytes(
   bytes: ArrayBuffer
@@ -2079,7 +2079,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_func_ed25519_sign() !==
-    19190
+    5643
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_func_ed25519_sign'
@@ -2087,7 +2087,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_func_ed25519_signature_from_bytes() !==
-    42382
+    4624
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_func_ed25519_signature_from_bytes'
@@ -2095,7 +2095,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_func_ed25519_signing_key_from_bytes() !==
-    27746
+    37961
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_func_ed25519_signing_key_from_bytes'
@@ -2103,7 +2103,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_func_ed25519_signing_key_sign() !==
-    57484
+    50296
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_func_ed25519_signing_key_sign'
@@ -2111,7 +2111,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_func_ed25519_signing_key_to_public() !==
-    57910
+    17719
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_func_ed25519_signing_key_to_public'
@@ -2119,7 +2119,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_func_ed25519_verify() !==
-    48906
+    49484
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_func_ed25519_verify'
@@ -2127,7 +2127,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_func_ed25519_verifying_key() !==
-    34584
+    63215
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_func_ed25519_verifying_key'
@@ -2135,7 +2135,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_func_ed25519_verifying_key_from_bytes() !==
-    50513
+    42802
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_func_ed25519_verifying_key_from_bytes'
