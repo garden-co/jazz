@@ -82,7 +82,7 @@ sequenceDiagram
     Note over BE: Build response
     BE-->>FE: Return response
 */}
-<img src="/diagrams/traditional-app.svg" alt="A diagram of an app built with Jazz" className="w-full h-auto" />
+<img src="/diagrams/traditional-app.svg" alt="A diagram of an app built with the traditional model" className="w-full h-auto" />
 
 **Here's how a Jazz app looks**.<br/>
 Your updates are immediate and the sync happens in the background. You need almost no backend infrastructure (and in fact, if you use Jazz Cloud, we'll take care of everything for you).
@@ -112,7 +112,7 @@ sequenceDiagram
 
 box Local Device
 participant FE as Front-End (UI)
-participant IDB as IndexedDB (Local Store)
+participant IDB as Local Data Storage
 end
 
 box Cloud
@@ -132,19 +132,18 @@ IDB<<-->>SS: Sync data continuously
 **Jazz makes your app fast** because data can be read or updated anywhere in your app immediately&hairsp;—&hairsp;whether you're online or offline.
 
 ### Your data is synchronised across clients
+While a traditional app 'syncs' data by updating the single source of truth (the database), Jazz syncs data with a local store by sending and receiving updates in real-time over a WebSocket connection. When the sync server receives a new update for a particular CoValue, it stores it securely and re-broadcasts the update to all clients that are [subscribed to that CoValue](/docs/core-concepts/subscription-and-loading).
 
-While a traditional app 'syncs' data by updating the single source of truth (the database), Jazz syncs data by sending and receiving updates in real-time over a WebSocket connection. When the sync server receives a new update for a particular CoValue, it stores it securely and re-broadcasts the update to all clients that are [subscribed to that CoValue](/docs/core-concepts/subscription-and-loading).
+This means your UX is instant&hairsp;—&hairsp;CoValues your client has already seen load immediately from a fast local store (IndexedDB in the browser, or SQLite on servers/native platforms), and fresh data streams in from the server without ever blocking the UI.
 
 ### Your data is "eventually consistent"
 
 When you build apps which work regardless of network connectivity, it is possible that users may have different versions of your app's data. This applies also in Jazz: users may see different representations of the same CoValue at the same time if they're not fully synced. However, all clients with the same sync state will see the same representation of the CoValue. This is known as "eventual consistency". 
 
 ### 'The Truth' is distributed and convergent
-When you read a CoValue in Jazz, you're seeing a representation of the sum of all of the changes that have been made to it according to the information you have so far.
+When you read a CoValue in Jazz, you're seeing a representation of the sum of all of the changes that have been made to it.
 
 Every update or change made to a CoValue is added to the CoValue as an entry in an append-only log (a list of all the updates that have been made to the CoValue). As a result, there's no need for an 'authoritative state' or a 'single source of truth', because each copy of a CoValue is an authoritative representation of itself: every client which has the same set of logs will see the same representation of the CoValue.
-
-This means your UI is never stuck waiting for your server.
 
 For operations where you *do* need some kind of central authority (e.g. payments, audit logs, compliance, etc.), you can create lightweight server workers with admin access to a subset of your data to manage these requirements.
 
@@ -179,10 +178,10 @@ There are some scenarios where Jazz might not be a great fit for you. Here are t
 Jazz is part of a larger ecosystem of local-first and distributed databases.
 
 - [Automerge](https://automerge.org/): Local-first/offline capable sync engine with powerful CRDT support.
-- [ElectricSQL]: Sync read-only slices of your database to your clients.
+- [ElectricSQL](https://electric-sql.com/): Sync read-only slices of your database to your clients.
 - [InstantDB](https://www.instantdb.com/): Real-time multiplayer with offline mode.
-- [LiveStore]: Load an SQLite instance in your browser, and use git-like pull/push to sync with other clients
-- [PowerSync]: Sync engine that keeps a local SQLite database partially synced with a remote backend database.
+- [LiveStore](https://livestore.dev/): Load an SQLite instance in your browser, and use git-like pull/push to sync with other clients
+- [PowerSync](https://www.powersync.com/): Sync engine that keeps a local SQLite database partially synced with a remote backend database.
 - [Zero](https://zero.rocicorp.dev/): More traditional 'client-server' architecture with a twist: hybrid querying over a client-side cache *and* the full database. From the folks that build Replicache.
 
 You can find even more (including a useful comparison table) [here](https://www.localfirst.fm/landscape#3gADsGNvbHVtblZpc2liaWxpdHneAAKsR2VuZXJhbF9OYW1lwqxSQU5ET01fT1JERVLCrWNvbHVtbkZpbHRlcnOQp3NvcnRpbmeR3gAComlkrFJBTkRPTV9PUkRFUqRkZXNjwg==)
@@ -190,8 +189,8 @@ You can find even more (including a useful comparison table) [here](https://www.
 ## Key Technical Details
 
 For more technical information:
-- **[What are CoValues](/docs/react/core-concepts/covalues/overview)&hairsp;—&hairsp;read about what a CoValue is in more depth, and how you can use them in your app
-- **[Security & Encryption](/docs/reference/encryption)**&hairsp;—&hairsp;How Jazz's encryption works under the hood
-- **[Subscribing to data](/docs/core-concepts/subscription-and-loading)**&hairsp;—&hairsp;How subscriptions work in Jazz
-- **[Permissions](/docs/permissions-and-sharing/overview)**&hairsp;—&hairsp;Learn about how permissions work in practice with Jazz
-- **[Authoritative state with Server Workers](/docs/server-side/communicating-with-workers/overview)**&hairsp;—&hairsp;Learn about Server Workers, and how they can be used to enforce authoritative state
+- [What are CoValues](/docs/core-concepts/covalues/overview)&hairsp;—&hairsp;read about what a CoValue is in more depth, and how you can use them in your app
+- [Security & Encryption](/docs/reference/encryption)&hairsp;—&hairsp;How Jazz's encryption works under the hood
+- [Subscribing to data](/docs/core-concepts/subscription-and-loading)&hairsp;—&hairsp;How subscriptions work in Jazz
+- [Permissions](/docs/permissions-and-sharing/overview)&hairsp;—&hairsp;Learn about how permissions work in practice with Jazz
+- [Authoritative state with Server Workers](/docs/server-side/communicating-with-workers/overview)&hairsp;—&hairsp;Learn about Server Workers, and how they can be used to enforce authoritative state
