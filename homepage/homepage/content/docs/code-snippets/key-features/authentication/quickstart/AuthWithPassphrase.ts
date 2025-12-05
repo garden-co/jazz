@@ -10,12 +10,13 @@ import { JazzFestAccount } from "./schema";
 export const AuthComponent = (
   contextManager: JazzBrowserContextManager<typeof JazzFestAccount>
 ) => {
-  const crypto = contextManager.getCurrentValue()?.node.crypto;
-  const authenticate = contextManager.authenticate;
-  const register = contextManager.register;
+  const ctx = contextManager.getCurrentValue();
+  if (!ctx) throw new Error("Context is not available");
+  const crypto = ctx.node.crypto;
+  const authenticate = ctx.authenticate;
+  const register = ctx.register;
   const authSecretStorage = contextManager.getAuthSecretStorage();
   const appName = "JazzFest";
-  if (!crypto) throw new Error("Crypto is not available");
 
   const auth = new BrowserPasskeyAuth(crypto, authenticate, authSecretStorage, appName);
 
