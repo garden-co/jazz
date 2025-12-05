@@ -1,13 +1,26 @@
 ```tsx
-// Use CoValues like reactive local state. Get instant UI updates on every edit — across all devices and users. 🎉
+import { useCoState }
+  from "jazz-tools/react";
 
-import { useCoState } from "jazz-tools/react";
+function MessageList({ id }) {
+  // Load & sync CoValues
+  // Rerenders on local & remote edits!
+  const chat = useCoState(Chat, id, {
+    // Granular load of nested CoValues
+    resolve: { $each: true }
+  });
 
-const ChatScreen = ({ id }) => {
-  const chat = useCoState(Chat, id);
-
-  return chat.messages.map(msg => (
-    <p>{msg.text}</p>
-  ));
+  return chat.$isLoaded ? <div>
+    {chat.map(msg => (   // Looks like
+      <p>{msg.text}</p>  // plain JSON
+    ))}
+    <TextInput onSubmit={(text) => {
+      // Create and edit data anywhere!
+      // Locally stored & synced
+      chat.$jazz.push(Message.create(
+        { text }, chat.$jazz.owner
+      ));
+    }} />
+  </div> : <div>Loading...</div>;
 }
 ```
