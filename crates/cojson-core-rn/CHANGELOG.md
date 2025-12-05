@@ -1,5 +1,11 @@
 # cojson-core-rn
 
+## 0.19.10
+
+### Patch Changes
+
+- 4f5a5e7: Version bump to align the fixed version
+
 ## 0.1.1
 
 ### Patch Changes
