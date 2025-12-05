@@ -1,6 +1,6 @@
 {
   "name": "durable-object",
-  "version": "0.0.16",
+  "version": "0.0.17",
   "private": true,
   "packageManager": "pnpm@10.16.1",
   "scripts": {
