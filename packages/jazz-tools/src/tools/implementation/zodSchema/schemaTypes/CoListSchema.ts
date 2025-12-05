@@ -3,6 +3,7 @@ import {
   BranchDefinition,
   CoList,
   Group,
+  hydrateCoreCoValueSchema,
   ID,
   Settled,
   RefsToResolve,
@@ -11,6 +12,7 @@ import {
   SubscribeListenerOptions,
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
+  withSchemaPermissions,
 } from "../../../internal.js";
 import { CoValueUniqueness } from "cojson";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
@@ -21,6 +23,10 @@ import { AnyZodOrCoValueSchema } from "../zodSchema.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
 import { withSchemaResolveQuery } from "../../schemaUtils.js";
+import {
+  DEFAULT_SCHEMA_PERMISSIONS,
+  SchemaPermissions,
+} from "../schemaPermissions.js";
 
 export class CoListSchema<
   T extends AnyZodOrCoValueSchema,
@@ -36,6 +42,12 @@ export class CoListSchema<
    * @default true
    */
   resolveQuery: DefaultResolveQuery = true as DefaultResolveQuery;
+
+  /**
+   * Permissions to be used when creating or composing CoValues
+   * @internal
+   */
+  permissions: SchemaPermissions = DEFAULT_SCHEMA_PERMISSIONS;
 
   constructor(
     public element: T,
@@ -63,7 +75,14 @@ export class CoListSchema<
       | Account
       | Group,
   ): CoListInstance<T> {
-    return this.coValueClass.create(items as any, options) as CoListInstance<T>;
+    const optionsWithPermissions = withSchemaPermissions(
+      options,
+      this.permissions,
+    );
+    return this.coValueClass.create(
+      items as any,
+      optionsWithPermissions,
+    ) as CoListInstance<T>;
   }
 
   load<
@@ -189,8 +208,32 @@ export class CoListSchema<
   >(
     resolveQuery: RefsToResolveStrict<CoListInstanceCoValuesMaybeLoaded<T>, R>,
   ): CoListSchema<T, R> {
-    const copy = new CoListSchema<T, R>(this.element, this.coValueClass);
-    copy.resolveQuery = resolveQuery as R;
+    return this.copy({ resolveQuery: resolveQuery as R });
+  }
+
+  /**
+   * Configure permissions to be used when creating or composing CoValues
+   */
+  withPermissions(
+    permissions: SchemaPermissions,
+  ): CoListSchema<T, DefaultResolveQuery> {
+    return this.copy({ permissions });
+  }
+
+  private copy<ResolveQuery extends CoreResolveQuery = DefaultResolveQuery>({
+    permissions,
+    resolveQuery,
+  }: {
+    permissions?: SchemaPermissions;
+    resolveQuery?: ResolveQuery;
+  }): CoListSchema<T, ResolveQuery> {
+    const coreSchema = createCoreCoListSchema(this.element);
+    // @ts-expect-error
+    const copy: CoListSchema<T, ResolveQuery> =
+      hydrateCoreCoValueSchema(coreSchema);
+    // @ts-expect-error TS cannot infer that the resolveQuery type is valid
+    copy.resolveQuery = resolveQuery ?? this.resolveQuery;
+    copy.permissions = permissions ?? this.permissions;
     return copy;
   }
 }

@@ -1,12 +1,7 @@
 import { useState } from "react";
-import { Project } from "../schema.ts";
 import { useOrganizationSelector } from "./OrganizationProvider.ts";
 
 export function CreateProject() {
-  const organizationOwner = useOrganizationSelector({
-    select: (organization) => organization.$jazz.owner,
-  });
-
   const projects = useOrganizationSelector({
     select: (organization) => organization.projects,
   });
@@ -17,9 +12,7 @@ export function CreateProject() {
     e.preventDefault();
 
     if (name.length > 0) {
-      const project = Project.create({ name }, { owner: organizationOwner });
-
-      projects.$jazz.push(project);
+      projects.$jazz.push({ name });
       setName("");
     }
   };

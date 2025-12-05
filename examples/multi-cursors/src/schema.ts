@@ -1,11 +1,18 @@
-import { Group, co, z } from "jazz-tools";
+import { co, z } from "jazz-tools";
 import { Camera, Cursor } from "./types";
 
-export const CursorFeed = co.feed(Cursor);
-
-export const CursorProfile = co.profile({
-  name: z.string(),
+export const CursorFeed = co.feed(Cursor).withPermissions({
+  onInlineCreate: "sameAsContainer",
 });
+
+export const CursorProfile = co
+  .profile({
+    name: z.string(),
+  })
+  .withPermissions({
+    // The profile info is visible to everyone
+    onCreate: (newGroup) => newGroup.makePublic(),
+  });
 
 export const CursorRoot = co.map({
   camera: Camera,
@@ -35,17 +42,8 @@ export const CursorAccount = co
     }
 
     if (!account.$jazz.has("profile")) {
-      const group = Group.create();
-      group.makePublic(); // The profile info is visible to everyone
-
-      account.$jazz.set(
-        "profile",
-        CursorProfile.create(
-          {
-            name: "Anonymous user",
-          },
-          group,
-        ),
-      );
+      account.$jazz.set("profile", {
+        name: "Anonymous user",
+      });
     }
   });

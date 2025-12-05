@@ -5,9 +5,14 @@ import {
   type CoValue,
   type CoValueClass,
   CoValueFromRaw,
+  extendContainerOwner,
   Group,
+  type GroupRole,
   ItemsSym,
   LoadedAndRequired,
+  type NewInlineOwnerStrategy,
+  type RefOnCreateCallback,
+  type RefPermissions,
   SchemaInit,
   isCoValueClass,
 } from "../internal.js";
@@ -94,31 +99,33 @@ export const coField = {
 
 function optionalRef<C extends CoValueClass>(
   arg: C | ((raw: InstanceType<C>["$jazz"]["raw"]) => C),
+  options: { permissions: RefPermissions },
 ): InstanceType<C> | null | undefined {
-  return ref(arg, { optional: true });
+  return ref(arg, { optional: true, permissions: options.permissions });
 }
 
 function ref<C extends CoValueClass>(
   arg: C | ((raw: InstanceType<C>["$jazz"]["raw"]) => C),
-  options?: never,
+  options: { permissions?: RefPermissions },
 ): InstanceType<C> | null;
 function ref<C extends CoValueClass>(
   arg: C | ((raw: InstanceType<C>["$jazz"]["raw"]) => C),
-  options: { optional: true },
+  options: { optional: true; permissions?: RefPermissions },
 ): InstanceType<C> | null | undefined;
 function ref<
   C extends CoValueClass,
-  Options extends { optional?: boolean } | undefined,
+  Options extends { optional?: boolean; permissions?: RefPermissions },
 >(
   arg: C | ((raw: InstanceType<C>["$jazz"]["raw"]) => C),
-  options?: Options,
+  options: Options,
 ): Options extends { optional: true }
   ? InstanceType<C> | null | undefined
   : InstanceType<C> | null {
   return {
     [SchemaInit]: {
       ref: arg,
-      optional: options?.optional || false,
+      optional: options.optional || false,
+      permissions: options.permissions,
     } satisfies Schema,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any;
@@ -129,6 +136,7 @@ export type EncodedAs<V> = { encoded: Encoder<V> | OptionalEncoder<V> };
 export type RefEncoded<V extends CoValue> = {
   ref: CoValueClass<V> | ((raw: RawCoValue) => CoValueClass<V>);
   optional: boolean;
+  permissions?: RefPermissions;
 };
 
 export function isRefEncoded<V extends CoValue>(
@@ -158,24 +166,26 @@ export function instantiateRefEncodedFromRaw<V extends CoValue>(
  *
  * @param schema - The schema of the CoValue to create.
  * @param init - The init values to use to create the CoValue.
- * @param parentOwner - The owner of the referencing CoValue. Will be used
- * as the parent group of the created CoValue's group
+ * @param containerOwner - The owner of the referencing CoValue. Will be used
+ * to determine the owner of the new CoValue
+ * @param newOwnerStrategy - The strategy to use to determine the owner of the new CoValue
+ * @param onCreate - The callback to call when the new CoValue is created
  * @returns The created CoValue.
  */
 export function instantiateRefEncodedWithInit<V extends CoValue>(
   schema: RefEncoded<V>,
   init: any,
-  parentOwner: Group,
+  containerOwner: Group,
+  newOwnerStrategy: NewInlineOwnerStrategy = extendContainerOwner,
+  onCreate?: RefOnCreateCallback,
 ): V {
   if (!isCoValueClass<V>(schema.ref)) {
     throw Error(
       `Cannot automatically create CoValue from value: ${JSON.stringify(init)}. Use the CoValue schema's create() method instead.`,
     );
   }
-  const node = parentOwner.$jazz.localNode;
-  const rawGroup = node.createGroup();
-  const owner = new Group({ fromRaw: rawGroup });
-  owner.addMember(parentOwner);
+  const owner = newOwnerStrategy(() => Group.create(), containerOwner, init);
+  onCreate?.(owner, init);
   // @ts-expect-error - create is a static method in all CoValue classes
   return schema.ref.create(init, owner);
 }

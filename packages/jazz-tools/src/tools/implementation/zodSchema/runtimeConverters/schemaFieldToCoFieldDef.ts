@@ -1,8 +1,24 @@
 import type { JsonValue } from "cojson";
-import { CoValueClass, isCoValueClass } from "../../../internal.js";
+import {
+  CoValueClass,
+  isCoValueClass,
+  schemaToRefPermissions,
+  getDefaultRefPermissions,
+  SchemaPermissions,
+  RefPermissions,
+  type NewInlineOwnerStrategy,
+  type CoreCoDiscriminatedUnionSchema,
+  type DiscriminableCoValueSchemas,
+  type RefOnCreateCallback,
+} from "../../../internal.js";
 import { coField } from "../../schema.js";
 import { CoreCoValueSchema } from "../schemaTypes/CoValueSchema.js";
-import { isUnionOfPrimitivesDeeply } from "../unionUtils.js";
+import {
+  isUnionOfPrimitivesDeeply,
+  getFlattenedUnionOptions,
+  getDiscriminatorValuesForOption,
+  resolveDiscriminantValue,
+} from "../unionUtils.js";
 import {
   ZodCatch,
   ZodDefault,
@@ -76,17 +92,28 @@ export function schemaFieldToCoFieldDef(schema: SchemaField): CoFieldDef {
   }
 
   if (isCoValueClass(schema)) {
-    return cacheSchemaField(schema, coField.ref(schema));
+    return cacheSchemaField(
+      schema,
+      coField.ref(schema, {
+        permissions: getDefaultRefPermissions(),
+      }),
+    );
   } else if (isCoValueSchema(schema)) {
     if (schema.builtin === "CoOptional") {
       return cacheSchemaField(
         schema,
         coField.ref(schema.getCoValueClass(), {
           optional: true,
+          permissions: schemaFieldPermissions(schema),
         }),
       );
     }
-    return cacheSchemaField(schema, coField.ref(schema.getCoValueClass()));
+    return cacheSchemaField(
+      schema,
+      coField.ref(schema.getCoValueClass(), {
+        permissions: schemaFieldPermissions(schema),
+      }),
+    );
   } else {
     if ("_zod" in schema) {
       const zodSchemaDef = schema._zod.def;
@@ -227,4 +254,78 @@ export function schemaFieldToCoFieldDef(schema: SchemaField): CoFieldDef {
       throw new Error(`Unsupported zod type: ${schema}`);
     }
   }
+}
+
+function schemaFieldPermissions(schema: CoreCoValueSchema): RefPermissions {
+  if (schema.builtin === "CoOptional") {
+    return schemaFieldPermissions((schema as any).innerType);
+  }
+  if (schema.builtin === "CoDiscriminatedUnion") {
+    return discriminatedUnionFieldPermissions(
+      schema as CoreCoDiscriminatedUnionSchema<DiscriminableCoValueSchemas>,
+    );
+  }
+  return "permissions" in schema
+    ? schemaToRefPermissions(schema.permissions as SchemaPermissions)
+    : getDefaultRefPermissions();
+}
+
+function discriminatedUnionFieldPermissions(
+  schema: CoreCoDiscriminatedUnionSchema<DiscriminableCoValueSchemas>,
+): RefPermissions {
+  const discriminatorKey = schema.getDefinition().discriminator;
+  const allOptions = getFlattenedUnionOptions(schema);
+
+  const valueToStrategy = new Map<unknown, RefPermissions>();
+  for (const option of allOptions) {
+    const optionPermissions = schemaFieldPermissions(option);
+    const discriminatorValues = getDiscriminatorValuesForOption(
+      option,
+      discriminatorKey,
+    );
+
+    if (!discriminatorValues) {
+      continue;
+    }
+
+    for (const value of discriminatorValues) {
+      if (!valueToStrategy.has(value)) {
+        valueToStrategy.set(value, optionPermissions);
+      }
+    }
+  }
+
+  const fallbackStrategy = getDefaultRefPermissions();
+
+  const newInlineOwnerStrategy: NewInlineOwnerStrategy = (
+    createNewGroup,
+    containerOwner,
+    init,
+  ) => {
+    const discriminantValue = resolveDiscriminantValue(init, discriminatorKey);
+    const strategy =
+      discriminantValue !== undefined
+        ? valueToStrategy.get(discriminantValue)
+        : undefined;
+
+    const effectiveStrategy = strategy ?? fallbackStrategy;
+    return effectiveStrategy.newInlineOwnerStrategy(
+      createNewGroup,
+      containerOwner,
+      init,
+    );
+  };
+
+  const onCreate: RefOnCreateCallback = (newGroup, init) => {
+    const discriminantValue = resolveDiscriminantValue(init, discriminatorKey);
+    const strategy =
+      discriminantValue !== undefined
+        ? valueToStrategy.get(discriminantValue)
+        : undefined;
+
+    const effectiveStrategy = strategy ?? fallbackStrategy;
+    effectiveStrategy.onCreate?.(newGroup, init);
+  };
+
+  return { newInlineOwnerStrategy, onCreate };
 }

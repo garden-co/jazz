@@ -17,6 +17,7 @@ import {
   hydrateCoreCoValueSchema,
   isAnyCoValueSchema,
   unstable_mergeBranchWithResolve,
+  withSchemaPermissions,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { removeGetters, withSchemaResolveQuery } from "../../schemaUtils.js";
@@ -27,6 +28,10 @@ import { z } from "../zodReExport.js";
 import { AnyZodOrCoValueSchema, AnyZodSchema } from "../zodSchema.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
+import {
+  DEFAULT_SCHEMA_PERMISSIONS,
+  SchemaPermissions,
+} from "../schemaPermissions.js";
 
 export class CoMapSchema<
   Shape extends z.core.$ZodLooseShape,
@@ -47,6 +52,12 @@ export class CoMapSchema<
    * @default true
    */
   resolveQuery: DefaultResolveQuery = true as DefaultResolveQuery;
+
+  /**
+   * Permissions to be used when creating or composing CoValues
+   * @internal
+   */
+  permissions: SchemaPermissions = DEFAULT_SCHEMA_PERMISSIONS;
 
   constructor(
     coreSchema: CoreCoMapSchema<Shape, CatchAll>,
@@ -76,8 +87,12 @@ export class CoMapSchema<
         }
       | Owner,
   ): CoMapInstanceShape<Shape, CatchAll> & CoMap;
-  create(...args: [any, ...any[]]) {
-    return this.coValueClass.create(...args);
+  create(init: any, options?: any) {
+    const optionsWithPermissions = withSchemaPermissions(
+      options,
+      this.permissions,
+    );
+    return this.coValueClass.create(init, optionsWithPermissions);
   }
 
   load<
@@ -254,8 +269,8 @@ export class CoMapSchema<
         true
       >,
     ) => undefined,
-  ): CoMapSchema<Shape, CatchAll, Owner, DefaultResolveQuery> {
-    // @ts-expect-error
+  ): this {
+    // @ts-expect-error avoid exposing 'migrate' at the type level
     this.coValueClass.prototype.migrate = migration;
     return this;
   }
@@ -340,15 +355,37 @@ export class CoMapSchema<
       R
     >,
   ): CoMapSchema<Shape, CatchAll, Owner, R> {
-    const coreSchema: CoreCoMapSchema<Shape, CatchAll> = createCoreCoMapSchema(
-      this.shape,
-      this.catchAll,
-    );
-    const copy = new CoMapSchema<Shape, CatchAll, Owner, R>(
-      coreSchema,
-      this.coValueClass,
-    );
-    copy.resolveQuery = resolveQuery as R;
+    return this.copy({ resolveQuery: resolveQuery as R });
+  }
+
+  /**
+   * Configure permissions to be used when creating or composing CoValues
+   */
+  withPermissions(
+    permissions: SchemaPermissions,
+  ): CoMapSchema<Shape, CatchAll, Owner, DefaultResolveQuery> {
+    return this.copy({ permissions });
+  }
+
+  /**
+   * Creates a copy of this schema, preserving all previous configuration
+   */
+  private copy<ResolveQuery extends CoreResolveQuery = DefaultResolveQuery>({
+    permissions,
+    resolveQuery,
+  }: {
+    permissions?: SchemaPermissions;
+    resolveQuery?: ResolveQuery;
+  }): CoMapSchema<Shape, CatchAll, Owner, ResolveQuery> {
+    const coreSchema = createCoreCoMapSchema(this.shape, this.catchAll);
+    // @ts-expect-error
+    const copy: CoMapSchema<Shape, CatchAll, Owner, ResolveQuery> =
+      hydrateCoreCoValueSchema(coreSchema);
+    // @ts-expect-error avoid exposing 'migrate' at the type level
+    copy.coValueClass.prototype.migrate = this.coValueClass.prototype.migrate;
+    // @ts-expect-error TS cannot infer that the resolveQuery type is valid
+    copy.resolveQuery = resolveQuery ?? this.resolveQuery;
+    copy.permissions = permissions ?? this.permissions;
     return copy;
   }
 }
