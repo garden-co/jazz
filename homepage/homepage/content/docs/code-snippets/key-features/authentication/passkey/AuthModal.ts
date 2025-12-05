@@ -1,7 +1,4 @@
-// #region PassphraseAuth
-import { PassphraseAuth } from "jazz-tools";
-import { JazzBrowserContextManager } from 'jazz-tools/browser';
-import { wordlist } from "./wordlist";
+import { JazzBrowserContextManager, BrowserPasskeyAuth } from 'jazz-tools/browser';
 
 // @ts-expect-error Not a real Vite app
 const apiKey = import.meta.env.VITE_JAZZ_API_KEY;
@@ -15,17 +12,15 @@ const ctx = contextManager.getCurrentValue();
 if (!ctx) throw new Error("Context is not available");
 const crypto = ctx.node.crypto;
 const authenticate = ctx.authenticate;
-const register = ctx.register;
 const authSecretStorage = contextManager.getAuthSecretStorage();
+const appName = "My Jazz App"
 
-const auth = new PassphraseAuth(
+const auth = new BrowserPasskeyAuth(
   crypto,
   authenticate,
-  register,
   authSecretStorage,
-  wordlist,
+  appName,
 );
 
-// Use auth.getCurrentAccountPassphrase() to display the passphrase for the current account
-// Use auth.logIn(passphrase) to log in with an existing passphrase
-// #endregion
+// To register a new account, use auth.signUp(name: string)
+// To log in to an existing account with a passkey, use auth.signIn() 
