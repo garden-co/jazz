@@ -1098,6 +1098,7 @@ describe("CoMap resolution", async () => {
   });
 
   test("loading a remotely available map with skipRetry set to false", async () => {
+    disableJazzTestSync();
     // Make the retry delay extra long to avoid flakyness in the resolved checks
     cojsonInternals.CO_VALUE_LOADING_CONFIG.RETRY_DELAY = 100_000_000;
 
@@ -1114,13 +1115,6 @@ describe("CoMap resolution", async () => {
 
     const currentAccount = Account.getMe();
 
-    // Disconnect the current account
-    currentAccount.$jazz.localNode.syncManager
-      .getServerPeers(currentAccount.$jazz.raw.id)
-      .forEach((peer) => {
-        peer.gracefulShutdown();
-      });
-
     const group = Group.create();
     group.addMember("everyone", "writer");
 
@@ -1132,6 +1126,10 @@ describe("CoMap resolution", async () => {
       },
       group,
     );
+
+    await setupJazzTestSync({
+      asyncPeers: true,
+    });
 
     const userB = await createJazzTestAccount();
     let resolved = false;

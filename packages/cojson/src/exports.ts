@@ -6,7 +6,10 @@ import {
   enablePermissionErrors,
   type AvailableCoValueCore,
 } from "./coValueCore/coValueCore.js";
-import { CoValueUniqueness } from "./coValueCore/verifiedState.js";
+import {
+  CoValueHeader,
+  CoValueUniqueness,
+} from "./coValueCore/verifiedState.js";
 import {
   ControlledAccount,
   ControlledAgent,
@@ -78,7 +81,9 @@ import { getDependedOnCoValuesFromRawData } from "./coValueCore/utils.js";
 import {
   CO_VALUE_LOADING_CONFIG,
   TRANSACTION_CONFIG,
+  setCoValueLoadingMaxRetries,
   setCoValueLoadingRetryDelay,
+  setCoValueLoadingTimeout,
   setIncomingMessagesTimeBudget,
   setMaxRecommendedTxSize,
 } from "./config.js";
@@ -118,6 +123,8 @@ export const cojsonInternals = {
   CO_VALUE_PRIORITY,
   setIncomingMessagesTimeBudget,
   setCoValueLoadingRetryDelay,
+  setCoValueLoadingMaxRetries,
+  setCoValueLoadingTimeout,
   ConnectedPeerChannel,
   textEncoder,
   textDecoder,
@@ -186,6 +193,7 @@ export type {
   AccountRole,
   AvailableCoValueCore,
   PeerState,
+  CoValueHeader,
 };
 
 export * from "./storage/index.js";
