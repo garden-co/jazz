@@ -713,6 +713,92 @@ const stringConverter = {
 };
 const FfiConverterString = uniffiCreateFfiConverterString(stringConverter);
 
+// Error type: Blake3Error
+
+// Enum: Blake3Error
+export enum Blake3Error_Tags {
+  LockError = 'LockError',
+}
+export const Blake3Error = (() => {
+  type LockError__interface = {
+    tag: Blake3Error_Tags.LockError;
+  };
+
+  class LockError_ extends UniffiError implements LockError__interface {
+    /**
+     * @private
+     * This field is private and should not be used, use `tag` instead.
+     */
+    readonly [uniffiTypeNameSymbol] = 'Blake3Error';
+    readonly tag = Blake3Error_Tags.LockError;
+    constructor() {
+      super('Blake3Error', 'LockError');
+    }
+
+    static new(): LockError_ {
+      return new LockError_();
+    }
+
+    static instanceOf(obj: any): obj is LockError_ {
+      return obj.tag === Blake3Error_Tags.LockError;
+    }
+
+    static hasInner(obj: any): obj is LockError_ {
+      return false;
+    }
+  }
+
+  function instanceOf(obj: any): obj is Blake3Error {
+    return obj[uniffiTypeNameSymbol] === 'Blake3Error';
+  }
+
+  return Object.freeze({
+    instanceOf,
+    LockError: LockError_,
+  });
+})();
+
+export type Blake3Error = InstanceType<
+  (typeof Blake3Error)[keyof Omit<typeof Blake3Error, 'instanceOf'>]
+>;
+
+// FfiConverter for enum Blake3Error
+const FfiConverterTypeBlake3Error = (() => {
+  const ordinalConverter = FfiConverterInt32;
+  type TypeName = Blake3Error;
+  class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+    read(from: RustBuffer): TypeName {
+      switch (ordinalConverter.read(from)) {
+        case 1:
+          return new Blake3Error.LockError();
+        default:
+          throw new UniffiInternalError.UnexpectedEnumCase();
+      }
+    }
+    write(value: TypeName, into: RustBuffer): void {
+      switch (value.tag) {
+        case Blake3Error_Tags.LockError: {
+          ordinalConverter.write(1, into);
+          return;
+        }
+        default:
+          // Throwing from here means that Blake3Error_Tags hasn't matched an ordinal.
+          throw new UniffiInternalError.UnexpectedEnumCase();
+      }
+    }
+    allocationSize(value: TypeName): number {
+      switch (value.tag) {
+        case Blake3Error_Tags.LockError: {
+          return ordinalConverter.allocationSize(1);
+        }
+        default:
+          throw new UniffiInternalError.UnexpectedEnumCase();
+      }
+    }
+  }
+  return new FFIConverter();
+})();
+
 // Error type: CryptoErrorUniffi
 
 // Enum: CryptoErrorUniffi
@@ -1253,6 +1339,7 @@ export enum SessionLogError_Tags {
   CoJson = 'CoJson',
   Serde = 'Serde',
   Generic = 'Generic',
+  LockError = 'LockError',
 }
 export const SessionLogError = (() => {
   type CoJson__interface = {
@@ -1360,6 +1447,34 @@ export const SessionLogError = (() => {
     }
   }
 
+  type LockError__interface = {
+    tag: SessionLogError_Tags.LockError;
+  };
+
+  class LockError_ extends UniffiError implements LockError__interface {
+    /**
+     * @private
+     * This field is private and should not be used, use `tag` instead.
+     */
+    readonly [uniffiTypeNameSymbol] = 'SessionLogError';
+    readonly tag = SessionLogError_Tags.LockError;
+    constructor() {
+      super('SessionLogError', 'LockError');
+    }
+
+    static new(): LockError_ {
+      return new LockError_();
+    }
+
+    static instanceOf(obj: any): obj is LockError_ {
+      return obj.tag === SessionLogError_Tags.LockError;
+    }
+
+    static hasInner(obj: any): obj is LockError_ {
+      return false;
+    }
+  }
+
   function instanceOf(obj: any): obj is SessionLogError {
     return obj[uniffiTypeNameSymbol] === 'SessionLogError';
   }
@@ -1369,6 +1484,7 @@ export const SessionLogError = (() => {
     CoJson: CoJson_,
     Serde: Serde_,
     Generic: Generic_,
+    LockError: LockError_,
   });
 })();
 
@@ -1389,6 +1505,8 @@ const FfiConverterTypeSessionLogError = (() => {
           return new SessionLogError.Serde(FfiConverterString.read(from));
         case 3:
           return new SessionLogError.Generic(FfiConverterString.read(from));
+        case 4:
+          return new SessionLogError.LockError();
         default:
           throw new UniffiInternalError.UnexpectedEnumCase();
       }
@@ -1411,6 +1529,10 @@ const FfiConverterTypeSessionLogError = (() => {
           ordinalConverter.write(3, into);
           const inner = value.inner;
           FfiConverterString.write(inner[0], into);
+          return;
+        }
+        case SessionLogError_Tags.LockError: {
+          ordinalConverter.write(4, into);
           return;
         }
         default:
@@ -1438,6 +1560,9 @@ const FfiConverterTypeSessionLogError = (() => {
           size += FfiConverterString.allocationSize(inner[0]);
           return size;
         }
+        case SessionLogError_Tags.LockError: {
+          return ordinalConverter.allocationSize(4);
+        }
         default:
           throw new UniffiInternalError.UnexpectedEnumCase();
       }
@@ -1447,9 +1572,9 @@ const FfiConverterTypeSessionLogError = (() => {
 })();
 
 export interface Blake3HasherInterface {
-  cloneHasher(): Blake3HasherInterface;
-  finalize(): ArrayBuffer;
-  update(data: ArrayBuffer): void;
+  cloneHasher() /*throws*/ : Blake3HasherInterface;
+  finalize() /*throws*/ : ArrayBuffer;
+  update(data: ArrayBuffer) /*throws*/ : void;
 }
 
 export class Blake3Hasher
@@ -1474,9 +1599,12 @@ export class Blake3Hasher
       uniffiTypeBlake3HasherObjectFactory.bless(pointer);
   }
 
-  public cloneHasher(): Blake3HasherInterface {
+  public cloneHasher(): Blake3HasherInterface /*throws*/ {
     return FfiConverterTypeBlake3Hasher.lift(
-      uniffiCaller.rustCall(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeBlake3Error.lift.bind(
+          FfiConverterTypeBlake3Error
+        ),
         /*caller:*/ (callStatus) => {
           return nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_blake3hasher_clone_hasher(
             uniffiTypeBlake3HasherObjectFactory.clonePointer(this),
@@ -1488,9 +1616,12 @@ export class Blake3Hasher
     );
   }
 
-  public finalize(): ArrayBuffer {
+  public finalize(): ArrayBuffer /*throws*/ {
     return FfiConverterArrayBuffer.lift(
-      uniffiCaller.rustCall(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeBlake3Error.lift.bind(
+          FfiConverterTypeBlake3Error
+        ),
         /*caller:*/ (callStatus) => {
           return nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_blake3hasher_finalize(
             uniffiTypeBlake3HasherObjectFactory.clonePointer(this),
@@ -1502,8 +1633,11 @@ export class Blake3Hasher
     );
   }
 
-  public update(data: ArrayBuffer): void {
-    uniffiCaller.rustCall(
+  public update(data: ArrayBuffer): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeBlake3Error.lift.bind(
+        FfiConverterTypeBlake3Error
+      ),
       /*caller:*/ (callStatus) => {
         nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_blake3hasher_update(
           uniffiTypeBlake3HasherObjectFactory.clonePointer(this),
@@ -1617,7 +1751,7 @@ export interface SessionLogInterface {
     madeAt: /*f64*/ number,
     meta: string | undefined
   ) /*throws*/ : string;
-  cloneSessionLog(): SessionLogInterface;
+  cloneSessionLog() /*throws*/ : SessionLogInterface;
   decryptNextTransactionChangesJson(
     txIndex: /*u32*/ number,
     encryptionKey: string
@@ -1714,9 +1848,12 @@ export class SessionLog
     );
   }
 
-  public cloneSessionLog(): SessionLogInterface {
+  public cloneSessionLog(): SessionLogInterface /*throws*/ {
     return FfiConverterTypeSessionLog.lift(
-      uniffiCaller.rustCall(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeSessionLogError.lift.bind(
+          FfiConverterTypeSessionLogError
+        ),
         /*caller:*/ (callStatus) => {
           return nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionlog_clone_session_log(
             uniffiTypeSessionLogObjectFactory.clonePointer(this),
@@ -2105,7 +2242,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_blake3hasher_clone_hasher() !==
-    28277
+    23778
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_method_blake3hasher_clone_hasher'
@@ -2113,7 +2250,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_blake3hasher_finalize() !==
-    64794
+    64111
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_method_blake3hasher_finalize'
@@ -2121,7 +2258,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_blake3hasher_update() !==
-    49302
+    27902
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_method_blake3hasher_update'
@@ -2145,7 +2282,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionlog_clone_session_log() !==
-    27413
+    8261
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_method_sessionlog_clone_session_log'
@@ -2196,6 +2333,7 @@ function uniffiEnsureInitialized() {
 export default Object.freeze({
   initialize: uniffiEnsureInitialized,
   converters: {
+    FfiConverterTypeBlake3Error,
     FfiConverterTypeBlake3Hasher,
     FfiConverterTypeCryptoErrorUniffi,
     FfiConverterTypeSessionLog,

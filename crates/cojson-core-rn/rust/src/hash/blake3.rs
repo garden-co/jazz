@@ -1,5 +1,12 @@
 use cojson_core::hash;
 
+
+#[derive(thiserror::Error, Debug, uniffi::Error)]
+pub enum Blake3Error {
+    #[error("Failed to acquire lock")]
+    LockError,
+}
+
 /// Generate a 24-byte nonce from input material using BLAKE3.
 /// - `nonce_material`: Raw bytes to derive the nonce from
 /// Returns 24 bytes suitable for use as a nonce in cryptographic operations.
@@ -42,27 +49,30 @@ impl Blake3Hasher {
         }
     }
 
-    pub fn update(&self, data: &[u8]) {
+    pub fn finalize(&self) -> Result<Vec<u8>, Blake3Error> {
+        if let Ok(h) = self.hasher.lock() {
+            Ok(h.finalize().as_bytes().to_vec())
+        } else {
+            Err(Blake3Error::LockError)
+        }
+    }
+
+    pub fn update(&self, data: &[u8]) -> Result<(), Blake3Error> {
         if let Ok(mut h) = self.hasher.lock() {
             h.update(data);
-        }
-    }
-
-    pub fn finalize(&self) -> Vec<u8> {
-        if let Ok(h) = self.hasher.lock() {
-            h.finalize().as_bytes().to_vec()
+            Ok(())
         } else {
-            vec![]
+            Err(Blake3Error::LockError)
         }
     }
 
-    pub fn clone_hasher(&self) -> Self {
+    pub fn clone_hasher(&self) -> Result<Self, Blake3Error> {
         if let Ok(h) = self.hasher.lock() {
-            Blake3Hasher {
+            Ok(Blake3Hasher {
                 hasher: std::sync::Mutex::new(h.clone()),
-            }
+            })
         } else {
-            Blake3Hasher::new()
+            Err(Blake3Error::LockError)
         }
     }
 }
@@ -142,7 +152,7 @@ mod tests {
 
         // Check that this matches a direct hash
         let direct_hash = blake3_hash_once(data1);
-        let state_hash = state.finalize();
+        let state_hash = state.finalize().unwrap();
         assert_eq!(
             state_hash,
             direct_hash,
@@ -159,7 +169,7 @@ mod tests {
             25, 250, 160, 186, 218, 33, 73, 29, 136, 201, 112, 87,
         ];
         assert_eq!(
-            state.finalize(),
+            state.finalize().unwrap(),
             expected_first_hash,
             "First update should match expected hash"
         );
@@ -178,7 +188,7 @@ mod tests {
 
         let direct_hash_all = blake3_hash_once(all_data.as_slice());
         assert_eq!(
-            state.finalize(),
+            state.finalize().unwrap(),
             direct_hash_all,
             "Final state should match direct hash of all data"
         );
@@ -193,7 +203,7 @@ mod tests {
             176, 242, 97, 200, 101, 204, 79, 21, 233, 56, 51, 1, 199,
         ];
         assert_eq!(
-            state.finalize(),
+            state.finalize().unwrap(),
             expected_final_hash,
             "Final state should match expected hash"
         );

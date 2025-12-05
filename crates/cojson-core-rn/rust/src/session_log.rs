@@ -14,6 +14,8 @@ pub enum SessionLogError {
     Serde(String),
     #[error("Error: {0}")]
     Generic(String),
+    #[error("Failed to acquire lock")]
+    LockError,
 }
 
 impl From<CoJsonCoreError> for SessionLogError {
@@ -56,19 +58,13 @@ impl SessionLog {
         }
     }
 
-    pub fn clone_session_log(&self) -> Self {
+    pub fn clone_session_log(&self) -> Result<Self, SessionLogError> {
         if let Ok(internal) = self.internal.lock() {
-            SessionLog {
+            Ok(SessionLog {
                 internal: std::sync::Mutex::new(internal.clone()),
-            }
+            })
         } else {
-            // Fallback: create a new empty session log
-            // This shouldn't happen in normal operation
-            SessionLog::new(
-                String::new(),
-                String::new(),
-                None,
-            )
+            Err(SessionLogError::LockError)
         }
     }
 
@@ -94,9 +90,7 @@ impl SessionLog {
                 .try_add(transactions, &new_signature, skip_verify)
                 .map_err(Into::into)
         } else {
-            Err(SessionLogError::Generic(
-                "Failed to acquire lock".to_string(),
-            ))
+            Err(SessionLogError::LockError)
         }
     }
 
@@ -137,9 +131,7 @@ impl SessionLog {
 
             Ok(serde_json::to_string(&result)?)
         } else {
-            Err(SessionLogError::Generic(
-                "Failed to acquire lock".to_string(),
-            ))
+            Err(SessionLogError::LockError)
         }
     }
 
@@ -177,9 +169,7 @@ impl SessionLog {
                 .decrypt_next_transaction_changes_json(tx_index, KeySecret(encryption_key))
                 .map_err(Into::into)
         } else {
-            Err(SessionLogError::Generic(
-                "Failed to acquire lock".to_string(),
-            ))
+            Err(SessionLogError::LockError)
         }
     }
 
@@ -193,9 +183,7 @@ impl SessionLog {
                 .decrypt_next_transaction_meta_json(tx_index, KeySecret(encryption_key))
                 .map_err(Into::into)
         } else {
-            Err(SessionLogError::Generic(
-                "Failed to acquire lock".to_string(),
-            ))
+            Err(SessionLogError::LockError)
         }
     }
 }
