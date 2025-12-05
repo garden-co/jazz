@@ -205,6 +205,27 @@ Local persistence is enabled by default with no additional configuration require
 
 For accelerated crypto operations, you can use the `RNCrypto` crypto provider. It is the most performant crypto provider available for React Native and Expo.
 
+To use it, install the following Packages:
+
+<CodeGroup>
+```bash
+pnpm add cojson-core-rn
+```
+</CodeGroup>
+
+**Pay Attention:** The version of `cojson-core-rn` must be the same as the version of `jazz-tools`.
+
+<CodeGroup>
+```json
+"dependencies": {
+  "cojson-core-rn": "x.x.x", # same version as jazz-tools
+  "jazz-tools": "x.x.x" # same version as cojson-core-rn
+}
+```
+</CodeGroup>
+
+Then add the following to your provider:
+
 <TabbedCodeGroup id="rncrypto" savedPreferenceKey="framework">
   <TabbedCodeGroupItem label="React Native" value="react-native" icon={<RNLogo />} preferWrap>
 ```tsx rn-crypto-rn.tsx#RNC

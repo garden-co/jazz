@@ -22,13 +22,13 @@
     "jazz-tools": "workspace:*",
     "react": "catalog:expo",
     "react-native-fast-encoder": "^0.3.1",
-    "react-native-quick-crypto": "^1.0.0-beta.21",
     "react-native-url-polyfill": "^3.0.0",
     "react-native": "0.81.5",
     "react-native-get-random-values": "^1.11.0",
     "react-native-image-picker": "^8.2.1",
     "react-native-nitro-modules": "0.26.4",
-    "readable-stream": "^4.7.0"
+    "readable-stream": "^4.7.0",
+    "cojson-core-rn": "workspace:*"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
