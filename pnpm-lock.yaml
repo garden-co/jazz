@@ -152,7 +152,7 @@ importers:
         version: link:../packages/cojson
       cojson-latest:
         specifier: npm:cojson@latest
-        version: cojson@0.19.7
+        version: cojson@0.19.8
       cronometro:
         specifier: ^5.3.0
         version: 5.3.0
@@ -161,7 +161,7 @@ importers:
         version: link:../packages/jazz-tools
       jazz-tools-latest:
         specifier: npm:jazz-tools@latest
-        version: jazz-tools@0.19.7(570dc9a665518ed53dfeaf1590fde807)
+        version: jazz-tools@0.19.8(5c3467ae035b7f2fdb1b653ef5c92ee9)
       vitest:
         specifier: catalog:default
         version: 3.2.4(@types/debug@4.1.12)(@types/node@24.3.0)(@vitest/browser@3.2.4)(@vitest/ui@3.2.4)(happy-dom@20.0.7)(jiti@2.6.1)(jsdom@25.0.1)(lightningcss@1.30.2)(msw@2.10.4(@types/node@24.3.0)(typescript@5.9.2))(terser@5.44.1)(tsx@4.20.3)(yaml@2.8.1)
@@ -256,9 +256,6 @@ importers:
 
   crates/cojson-core-rn:
     dependencies:
-      add:
-        specifier: ^2.0.6
-        version: 2.0.6
       uniffi-bindgen-react-native:
         specifier: 0.29.3-1
         version: 0.29.3-1(patch_hash=651a1477b2643feac62679f63fd8996d65d416d6b2f5ee7f84fea45a8561bacb)
@@ -10278,9 +10275,6 @@ packages:
   add-stream@1.0.0:
     resolution: {integrity: sha512-qQLMr+8o0WC4FZGQTcJiKBVC59JylcPSrTtk6usvmIDFUOCKegapy1VHQwRbFMOFyb/inzUVqHs+eMYKDM1YeQ==}
 
-  add@2.0.6:
-    resolution: {integrity: sha512-j5QzrmsokwWWp6kUcJQySpbG+xfOBqqKnup3OIk1pz+kB/80SLorZ9V8zHFLO92Lcd+hbvq8bT+zOGoPkmBV0Q==}
-
   agent-base@7.1.3:
     resolution: {integrity: sha512-jRR5wdylq8CkOe6hei19GGZnxM6rBGwFl3Bg0YItGDimvjGtAvdZk4Pu6Cl4u4Igsws4a1fd1Vq3ezrhn4KmFw==}
     engines: {node: '>= 14'}
@@ -11088,67 +11082,67 @@ packages:
   code-block-writer@13.0.3:
     resolution: {integrity: sha512-Oofo0pq3IKnsFtuHqSF7TqBfr71aeyZDVJ0HpmqB7FBM2qEigL0iPONSCZSO9pE9dZTAxANe5XHG9Uy0YMv8cg==}
 
-  cojson-core-napi-darwin-arm64@0.19.7:
-    resolution: {integrity: sha512-4OYYwKksaxNktqHjSJqatWla8cS5WqWOrwxr3+pGKFF2b3aNsdMh+OcJdymUG9gYiVY+zZYUYEuiA7w6hl/CVQ==}
+  cojson-core-napi-darwin-arm64@0.19.8:
+    resolution: {integrity: sha512-DNBg1ofOUF1lGgNamR0BZ+ANzACgOM+o4F8DzX2Gt/e4zn5YkjULDu+IHaoThHOPX6AjaQJk9vcDSwuD7OfEhw==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [arm64]
     os: [darwin]
 
-  cojson-core-napi-darwin-x64@0.19.7:
-    resolution: {integrity: sha512-gzJf9yQh6htbVS6HXh0jjRHcQuDLr9VRORv2qbompCeezIRC2EwmEN/75L9m6PJQyJHU9eBvxWiOZIENyQRpcA==}
+  cojson-core-napi-darwin-x64@0.19.8:
+    resolution: {integrity: sha512-pXl+NO51i5yAnd6JELVRGIyx4s7B6Ivar4qAxm8L2YhcQvfGZ3tHNu/IZw/3X0oyr4RcS80jbjCIUv+wKpm5pA==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [x64]
     os: [darwin]
 
-  cojson-core-napi-linux-arm-gnueabihf@0.19.7:
-    resolution: {integrity: sha512-u0LGOXSlGl6guuJok/x7qM4P6B0sZfBziroxI8YzXVZ65oqY8oEzrBgSsOAkLtXpgAPAZY60AAIRzw/B6bLx1Q==}
+  cojson-core-napi-linux-arm-gnueabihf@0.19.8:
+    resolution: {integrity: sha512-DW6MC8rukgDwF2JcQoXAmodk3ddrVa48qQbvqMbXyxwpVXM0BE+9FO1AW18fbRdZ7Mpl7bQnvhzcEjo7B07msw==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [arm]
     os: [linux]
 
-  cojson-core-napi-linux-arm64-gnu@0.19.7:
-    resolution: {integrity: sha512-t03VSh9RpL9/8id/wUDTyiqhZAu/V3WZJkfujyil1x8xU3o2fERrlA3WVb3ngi/uVbhDGAGiEcIQmmHmv2v8cQ==}
+  cojson-core-napi-linux-arm64-gnu@0.19.8:
+    resolution: {integrity: sha512-+B+jIK9wOv/IoNozTHTlIvpQeUfQxxtnqoS0yy3j0qnUIBcrkm7hPJcoUoQDx6ICL6/cNmwyryjcEP0+F8vEvw==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
-  cojson-core-napi-linux-arm64-musl@0.19.7:
-    resolution: {integrity: sha512-qKDU1fY/JYmAB5jse4wDGGoKQJp6cxnYZvIrHaZ7XCngrwOLiU+/f0lbdDu10KgiH4T5aaKBGOUsu3ChYGW46Q==}
+  cojson-core-napi-linux-arm64-musl@0.19.8:
+    resolution: {integrity: sha512-Su/KZIKS8D9iIDLuEKrEWbchvENUoPdC1TDb1khzePeWUoJh6uMNIfby6KtaCKbBoghXyI80ucPm/6TfUN/4PQ==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [arm64]
     os: [linux]
     libc: [musl]
 
-  cojson-core-napi-linux-x64-gnu@0.19.7:
-    resolution: {integrity: sha512-9Ql5tT6HlsnEXaqiZYhFua3dxMETrakM7xlIU1fMOAG9KlqcPwE2F2DOXsC2A4fYzGgJrPAWy2DvBJh4U/C0aw==}
+  cojson-core-napi-linux-x64-gnu@0.19.8:
+    resolution: {integrity: sha512-KB0mJtTNrKEcK5ibYLLkiH4WgO6VsSQYm+zyUF5ae3ObPi7D+EIHibxkvx7qeFYaEvN+1865LXYJFXOlEzaR2g==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
 
-  cojson-core-napi-linux-x64-musl@0.19.7:
-    resolution: {integrity: sha512-A0pROF9wYhzePcXubxnJVxSkZO+/keO2KIaWTfDYQrhm6BCiLVdsqeU6SjCsuySYTMFoUEx92o4tv+mQtaGJhw==}
+  cojson-core-napi-linux-x64-musl@0.19.8:
+    resolution: {integrity: sha512-eUW9UKMWE7WImOGe8E8FTtSZ7qP2/YffwfTEQ5NFVhIM69zWCAPuZF72/QZ/sbnD3ya8Yst9VL5rylx5Yw6eeQ==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
     cpu: [x64]
     os: [linux]
     libc: [musl]
 
-  cojson-core-napi@0.19.7:
-    resolution: {integrity: sha512-P70EfkIHmBoHwUagk8xzdxzgXy3EUPgfVzrXOuw1FPhwo2aNsNLmQNO/CjJ4RLp4SBZ7+bAA5bzJegETDlda8A==}
+  cojson-core-napi@0.19.8:
+    resolution: {integrity: sha512-NSwAW7hIAGotIHjmj7jKcznTOWJDFnybdjrSUBGWmtbXNx3abYKYdYaFrBaCZlf9zE6BgUVpwmH5/raGgsT5bw==}
     engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
 
-  cojson-core-wasm@0.19.7:
-    resolution: {integrity: sha512-vUHr4ZmQ2ByVQ42KTHsguzCQSrI5Sk6mmTfGXlfUS9/AqIbIxEd4uIm8o8qLiPVaU5bUAMUF11zsrRnuOL51fA==}
+  cojson-core-wasm@0.19.8:
+    resolution: {integrity: sha512-SvtbaLaGYX3/At4o2B3RZCKCb71RisSq0vdm6WKIngNh0iES2MUChIjKk08KlGJJVnVWF50b8JZoM8Uj9C+Eww==}
 
-  cojson-storage-indexeddb@0.19.7:
-    resolution: {integrity: sha512-OzQikADE7xVunqcSDeU1gKH/cUiLmBbzzKqP9KfNRG56XEek860xGB3C1U/gjS/9h7IrMgZpZZxoOB//qh8mXQ==}
+  cojson-storage-indexeddb@0.19.8:
+    resolution: {integrity: sha512-YwAmM0IjCGXiBZoJGxeABXBnfbQ8Y7+voSZg0U19MD8+wwEpVhBmo9cziBw344MNE6rnrrh7ZbhmPEA1P8kXsg==}
 
-  cojson-transport-ws@0.19.7:
-    resolution: {integrity: sha512-y0hWtdSmbIFaqxrkoVCc/jvKJwwzCoTgzO4bywnL2++dwrPsWOUNuYbLi+VqlHARd3fFi+CG5kYkqRpyIRmBOw==}
+  cojson-transport-ws@0.19.8:
+    resolution: {integrity: sha512-cl11H1Y8eiLp5ph5TXcE+3vv86yApT9yNDd3BSSpytG6duEirxAsdJ9AmDg3SQ18fvPG/zSf9bsHMFnEvAc5Ug==}
 
-  cojson@0.19.7:
-    resolution: {integrity: sha512-2Kn/n6ChBtmOf/Nj6dBm6+Zw1STRrNRM/PofiImAwVwZcsRDoSw6v5nEXLXmU5iRG6pKyNGYJRpQE2axoqtVgg==}
+  cojson@0.19.8:
+    resolution: {integrity: sha512-kieGlXSFywqRY5F6cR9ztDjy6NVYOtyt9U6a/x3AI33pbVyOdUOluHL+WHE9fF/1JjpLj0ifgPgi7JaMP4QrJQ==}
 
   collect-v8-coverage@1.0.2:
     resolution: {integrity: sha512-lHl4d5/ONEbLlJvaJNtsF/Lz+WvB07u2ycqTYbdrq7UypDXailES4valYb2eWiJFxZlVmpGekfqoxQhzyFdT4Q==}
@@ -13616,8 +13610,8 @@ packages:
     engines: {node: '>=10'}
     hasBin: true
 
-  jazz-tools@0.19.7:
-    resolution: {integrity: sha512-YrzG9G9s4DeYnziwhp9ZdU/GI2FK5h2DKe7S3Ve6DsYxMlKm1yjUPS7jCPspG8RlQIQSVH8ngmmCZ40oGeMkWA==}
+  jazz-tools@0.19.8:
+    resolution: {integrity: sha512-8bFl4ewS+lGDhArK3C/vMDeEKBO3kky1HuDS3mdcIAoaWkivduzD+LFASjpFI126yVyNp7ZIZKHAXcmy4mxTGQ==}
     peerDependencies:
       '@bam.tech/react-native-image-resizer': '*'
       '@op-engineering/op-sqlite': '*'
@@ -13630,7 +13624,7 @@ packages:
       react: 19.1.0
       react-dom: 19.1.0
       react-native: '*'
-      react-native-fast-encoder: ^0.2.0
+      react-native-fast-encoder: ^0.3.1
       react-native-mmkv: ^3.3.0
       react-native-nitro-modules: ^0.26.4
       react-native-quick-crypto: ^1.0.0-beta.21
@@ -16242,13 +16236,6 @@ packages:
     resolution: {integrity: sha512-NvFFehDDVT1FqZHDDriX3mm4aQVSLXz2uuLPKD2g7OIwxGvWw1BJ7vRElS03/fnpOHAY6y7vF0JEjrytEF1BRQ==}
     engines: {node: ^20.19.0 || ^22.12.0 || >= 23.4.0}
     hasBin: true
-
-  react-native-fast-encoder@0.2.0:
-    resolution: {integrity: sha512-E4mx81fRMVs0qq8is3cZTrbuEJdsDo8Nfe7qTxKZwsCianpYpA2QfyH6cEYumSOEht6l+KeRJ4RqcyfxMDyesg==}
-    engines: {node: '>= 18.0.0'}
-    peerDependencies:
-      react: 19.1.0
-      react-native: '*'
 
   react-native-fast-encoder@0.3.1:
     resolution: {integrity: sha512-D5ZEbffxayZImtUUErbNod+7IvJITkxTCPZAQTFg6lrSjl/443Mk5CvT9nKpJC1w4cg2llWk6QP8nczij5ClcQ==}
@@ -27207,9 +27194,7 @@ snapshots:
       metro-runtime: 0.83.2
     transitivePeerDependencies:
       - '@babel/core'
-      - bufferutil
       - supports-color
-      - utf-8-validate
 
   '@react-native/metro-config@0.81.5(@babel/core@7.28.5)':
     dependencies:
@@ -27219,9 +27204,7 @@ snapshots:
       metro-runtime: 0.83.2
     transitivePeerDependencies:
       - '@babel/core'
-      - bufferutil
       - supports-color
-      - utf-8-validate
     optional: true
 
   '@react-native/normalize-colors@0.80.0': {}
@@ -29604,8 +29587,6 @@ snapshots:
 
   add-stream@1.0.0: {}
 
-  add@2.0.6: {}
-
   agent-base@7.1.3: {}
 
   aggregate-error@3.1.0:
@@ -30788,57 +30769,57 @@ snapshots:
 
   code-block-writer@13.0.3: {}
 
-  cojson-core-napi-darwin-arm64@0.19.7:
+  cojson-core-napi-darwin-arm64@0.19.8:
     optional: true
 
-  cojson-core-napi-darwin-x64@0.19.7:
+  cojson-core-napi-darwin-x64@0.19.8:
     optional: true
 
-  cojson-core-napi-linux-arm-gnueabihf@0.19.7:
+  cojson-core-napi-linux-arm-gnueabihf@0.19.8:
     optional: true
 
-  cojson-core-napi-linux-arm64-gnu@0.19.7:
+  cojson-core-napi-linux-arm64-gnu@0.19.8:
     optional: true
 
-  cojson-core-napi-linux-arm64-musl@0.19.7:
+  cojson-core-napi-linux-arm64-musl@0.19.8:
     optional: true
 
-  cojson-core-napi-linux-x64-gnu@0.19.7:
+  cojson-core-napi-linux-x64-gnu@0.19.8:
     optional: true
 
-  cojson-core-napi-linux-x64-musl@0.19.7:
+  cojson-core-napi-linux-x64-musl@0.19.8:
     optional: true
 
-  cojson-core-napi@0.19.7:
+  cojson-core-napi@0.19.8:
     optionalDependencies:
-      cojson-core-napi-darwin-arm64: 0.19.7
-      cojson-core-napi-darwin-x64: 0.19.7
-      cojson-core-napi-linux-arm-gnueabihf: 0.19.7
-      cojson-core-napi-linux-arm64-gnu: 0.19.7
-      cojson-core-napi-linux-arm64-musl: 0.19.7
-      cojson-core-napi-linux-x64-gnu: 0.19.7
-      cojson-core-napi-linux-x64-musl: 0.19.7
+      cojson-core-napi-darwin-arm64: 0.19.8
+      cojson-core-napi-darwin-x64: 0.19.8
+      cojson-core-napi-linux-arm-gnueabihf: 0.19.8
+      cojson-core-napi-linux-arm64-gnu: 0.19.8
+      cojson-core-napi-linux-arm64-musl: 0.19.8
+      cojson-core-napi-linux-x64-gnu: 0.19.8
+      cojson-core-napi-linux-x64-musl: 0.19.8
 
-  cojson-core-wasm@0.19.7: {}
+  cojson-core-wasm@0.19.8: {}
 
-  cojson-storage-indexeddb@0.19.7:
+  cojson-storage-indexeddb@0.19.8:
     dependencies:
-      cojson: 0.19.7
+      cojson: 0.19.8
 
-  cojson-transport-ws@0.19.7:
+  cojson-transport-ws@0.19.8:
     dependencies:
       '@opentelemetry/api': 1.9.0
-      cojson: 0.19.7
+      cojson: 0.19.8
 
-  cojson@0.19.7:
+  cojson@0.19.8:
     dependencies:
       '@noble/ciphers': 1.3.0
       '@noble/curves': 1.9.1
       '@noble/hashes': 1.8.0
       '@opentelemetry/api': 1.9.0
       '@scure/base': 1.2.1
-      cojson-core-napi: 0.19.7
-      cojson-core-wasm: 0.19.7
+      cojson-core-napi: 0.19.8
+      cojson-core-wasm: 0.19.8
       unicode-segmenter: 0.12.0
 
   collect-v8-coverage@1.0.2: {}
@@ -34039,16 +34020,16 @@ snapshots:
       filelist: 1.0.4
       picocolors: 1.1.1
 
-  jazz-tools@0.19.7(570dc9a665518ed53dfeaf1590fde807):
+  jazz-tools@0.19.8(5c3467ae035b7f2fdb1b653ef5c92ee9):
     dependencies:
       '@manuscripts/prosemirror-recreate-steps': 0.1.4
       '@scure/base': 1.2.1
       '@scure/bip39': 1.5.0
       '@tiptap/core': 2.12.0(@tiptap/pm@2.12.0)
       clsx: 2.1.1
-      cojson: 0.19.7
-      cojson-storage-indexeddb: 0.19.7
-      cojson-transport-ws: 0.19.7
+      cojson: 0.19.8
+      cojson-storage-indexeddb: 0.19.8
+      cojson-transport-ws: 0.19.8
       fast-myers-diff: 3.2.0
       goober: 2.1.18(csstype@3.1.3)
       prosemirror-example-setup: 1.2.3
@@ -34071,7 +34052,7 @@ snapshots:
       react: 19.1.0
       react-dom: 19.1.0(react@19.1.0)
       react-native: 0.81.5(@babel/core@7.28.5)(@react-native-community/cli@20.0.1(typescript@5.9.2))(@react-native/metro-config@0.81.5(@babel/core@7.28.5))(@types/react@19.1.10)(react@19.1.0)
-      react-native-fast-encoder: 0.2.0(react-native@0.81.5(@babel/core@7.28.5)(@react-native-community/cli@20.0.1(typescript@5.9.2))(@react-native/metro-config@0.81.5(@babel/core@7.28.5))(@types/react@19.1.10)(react@19.1.0))(react@19.1.0)
+      react-native-fast-encoder: 0.3.1(react-native@0.81.5(@babel/core@7.28.5)(@react-native-community/cli@20.0.1(typescript@5.9.2))(@react-native/metro-config@0.81.5(@babel/core@7.28.5))(@types/react@19.1.10)(react@19.1.0))(react@19.1.0)
       react-native-mmkv: 3.3.1(react-native@0.81.5(@babel/core@7.28.5)(@react-native-community/cli@20.0.1(typescript@5.9.2))(@react-native/metro-config@0.81.5(@babel/core@7.28.5))(@types/react@19.1.10)(react@19.1.0))(react@19.1.0)
       react-native-nitro-modules: 0.26.4(react-native@0.81.5(@babel/core@7.28.5)(@react-native-community/cli@20.0.1(typescript@5.9.2))(@react-native/metro-config@0.81.5(@babel/core@7.28.5))(@types/react@19.1.10)(react@19.1.0))(react@19.1.0)
       react-native-quick-crypto: 1.0.0-beta.23(expo@54.0.23(@babel/core@7.28.5)(graphql@16.12.0)(react-native@0.81.5(@babel/core@7.28.5)(@react-native-community/cli@20.0.1(typescript@5.9.2))(@react-native/metro-config@0.81.5(@babel/core@7.28.5))(@types/react@19.1.10)(react@19.1.0))(react@19.1.0))(react-native-nitro-modules@0.26.4(react-native@0.81.5(@babel/core@7.28.5)(@react-native-community/cli@20.0.1(typescript@5.9.2))(@react-native/metro-config@0.81.5(@babel/core@7.28.5))(@types/react@19.1.10)(react@19.1.0))(react@19.1.0))(react-native@0.81.5(@babel/core@7.28.5)(@react-native-community/cli@20.0.1(typescript@5.9.2))(@react-native/metro-config@0.81.5(@babel/core@7.28.5))(@types/react@19.1.10)(react@19.1.0))(react@19.1.0)
@@ -37360,14 +37341,6 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  react-native-fast-encoder@0.2.0(react-native@0.81.5(@babel/core@7.28.5)(@react-native-community/cli@20.0.1(typescript@5.9.2))(@react-native/metro-config@0.81.5(@babel/core@7.28.5))(@types/react@19.1.10)(react@19.1.0))(react@19.1.0):
-    dependencies:
-      big-integer: 1.6.52
-      flatbuffers: 2.0.6
-      react: 19.1.0
-      react-native: 0.81.5(@babel/core@7.28.5)(@react-native-community/cli@20.0.1(typescript@5.9.2))(@react-native/metro-config@0.81.5(@babel/core@7.28.5))(@types/react@19.1.10)(react@19.1.0)
-    optional: true
-
   react-native-fast-encoder@0.3.1(react-native@0.80.0(@babel/core@7.28.5)(@react-native-community/cli@20.0.1(typescript@5.6.2))(@types/react@19.1.10)(react@19.1.0))(react@19.1.0):
     dependencies:
       big-integer: 1.6.52
@@ -37388,6 +37361,14 @@ snapshots:
       flatbuffers: 2.0.6
       react: 19.1.0
       react-native: 0.81.5(@babel/core@7.27.1)(@react-native-community/cli@20.0.1(typescript@5.9.2))(@react-native/metro-config@0.81.5(@babel/core@7.27.1))(@types/react@19.1.10)(react@19.1.0)
+
+  react-native-fast-encoder@0.3.1(react-native@0.81.5(@babel/core@7.28.5)(@react-native-community/cli@20.0.1(typescript@5.9.2))(@react-native/metro-config@0.81.5(@babel/core@7.28.5))(@types/react@19.1.10)(react@19.1.0))(react@19.1.0):
+    dependencies:
+      big-integer: 1.6.52
+      flatbuffers: 2.0.6
+      react: 19.1.0
+      react-native: 0.81.5(@babel/core@7.28.5)(@react-native-community/cli@20.0.1(typescript@5.9.2))(@react-native/metro-config@0.81.5(@babel/core@7.28.5))(@types/react@19.1.10)(react@19.1.0)
+    optional: true
 
   react-native-get-random-values@1.11.0(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@20.0.1(typescript@5.9.2))(@react-native/metro-config@0.81.5(@babel/core@7.27.1))(@types/react@19.1.10)(react@19.1.0)):
     dependencies:
