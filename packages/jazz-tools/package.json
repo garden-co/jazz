@@ -191,6 +191,11 @@
       "@jazz-tools/source": "./src/worker/napi-crypto.ts",
       "types": "./dist/worker/napi-crypto.d.ts",
       "default": "./dist/worker/napi-crypto.js"
+    },
+    "./react-native-core/crypto/RNCrypto": {
+      "@jazz-tools/source": "./src/react-native-core/crypto/RNCrypto.ts",
+      "types": "./dist/react-native-core/crypto/RNCrypto.d.ts",
+      "default": "./dist/react-native-core/crypto/RNCrypto.js"
     }
   },
   "type": "module",

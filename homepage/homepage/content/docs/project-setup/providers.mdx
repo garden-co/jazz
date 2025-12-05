@@ -121,6 +121,7 @@ The provider accepts these additional options:
 - `CryptoProvider`
   - `PureJSCrypto` (default) - Pure JavaScript crypto provider
   - `RNQuickCrypto` - C++ accelerated crypto provider
+  - `RNCrypto` - Native crypto provider  
 </ContentByFramework>
 
 <ContentByFramework framework="react-native-expo">
@@ -131,6 +132,7 @@ The provider accepts these additional options:
   - `CryptoProvider`
     - `PureJSCrypto` (default) - Pure JavaScript crypto provider
     - `RNQuickCrypto` - C++ accelerated crypto provider
+    - `RNCrypto` - Native crypto provider  
 </ContentByFramework>
 
 <ContentByFramework framework={['react', 'svelte']}>
@@ -196,8 +198,49 @@ Jazz for Expo includes built-in local persistence using SQLite. Following Expo's
 
 <ContentByFramework framework={['react-native', 'react-native-expo']}>
 Local persistence is enabled by default with no additional configuration required. Your data will automatically persist across app restarts.
+</ContentByFramework>
 
-## Quick Crypto [!framework=react-native,react-native-expo]
+<ContentByFramework framework={['react-native', 'react-native-expo']}>
+## RNCrypto
+
+For accelerated crypto operations, you can use the `RNCrypto` crypto provider. It is the most performant crypto provider available for React Native and Expo.
+
+To use it, install the following package:
+
+<CodeGroup>
+```bash
+pnpm add cojson-core-rn
+```
+</CodeGroup>
+
+**Pay Attention:** The version of `cojson-core-rn` must be the same as the version of `jazz-tools`.
+
+<CodeGroup>
+```json
+"dependencies": {
+  "cojson-core-rn": "x.x.x", # same version as jazz-tools
+  "jazz-tools": "x.x.x" # same version as cojson-core-rn
+}
+```
+</CodeGroup>
+
+Then add the following to your provider:
+
+<TabbedCodeGroup id="rncrypto" savedPreferenceKey="framework">
+  <TabbedCodeGroupItem label="React Native" value="react-native" icon={<RNLogo />} preferWrap>
+```tsx rn-crypto-rn.tsx#RNC
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Expo" value="react-native-expo" icon={<ExpoLogo />} preferWrap>
+```tsx rn-crypto-expo.tsx#RNC
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+</ContentByFramework>
+
+<ContentByFramework framework={['react-native', 'react-native-expo']}>
+## Quick Crypto
 
 For accelerated crypto operations, you can use the `RNQuickCrypto` crypto provider.
 

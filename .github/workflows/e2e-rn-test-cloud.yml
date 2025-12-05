@@ -1,0 +1,116 @@
+name: End-to-End Tests for React Native
+
+concurrency:
+  # For pushes, this lets concurrent runs happen, so each push gets a result.
+  # But for other events (e.g. PRs), we can cancel the previous runs.
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - ".github/actions/source-code/**"
+      - ".github/workflows/e2e-rn-test-cloud.yml"
+      - "examples/chat-rn-expo/**"
+      - "crates/cojson-core-rn/**"
+      - "packages/**"
+
+jobs:
+  build-rn:
+    name: Build cojson-core-rn (Android and iOS) artifacts
+    uses: ./.github/workflows/rn-build-reusable.yml
+    with:
+      concurrency: e2e-rn-test-rn
+      disableAndroid: false
+      disableIOS: true
+
+  ## TODO: fix IOS Build 
+  # e2e-tests-ios:
+  #   runs-on: macos-latest
+  #   needs: [build-rn]
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v4
+
+  #     - name: Setup Source Code
+  #       uses: ./.github/actions/source-code/
+      
+  #     - name: Download React Native iOS artifact
+  #       uses: actions/download-artifact@v5
+  #       with:
+  #         name: cojson-core-rn-ios
+  #         path: crates/cojson-core-rn
+      
+  #     - name: List React Native iOS artifacts
+  #       run: |
+  #         ls -R crates/cojson-core-rn/ios
+  #       shell: bash
+      
+  #     - name: Pnpm Build
+  #       run: pnpm turbo build --filter="./packages/*"
+
+  #     - name: chat-rn-expo App Pre Build
+  #       working-directory: ./examples/chat-rn-expo
+  #       run: |
+  #         pnpm expo prebuild --clean
+
+  #     - name: Build iOS App
+  #       working-directory: ./examples/chat-rn-expo/ios
+  #       run: xcodebuild build -workspace ./chatrnexpo.xcworkspace -scheme chatrnexpo -configuration Release -destination 'generic/platform=iOS Simulator' CONFIGURATION_BUILD_DIR=$PWD/build
+      
+  #     - uses: mobile-dev-inc/action-maestro-cloud@v1
+  #       with:
+  #         api-key: ${{ secrets.MAESTRO_KEY }}
+  #         # note that you can supply the project id any way you like, it is not secret
+  #         project-id: ${{ secrets.MAESTRO_PROJECT_ID }}
+  #         app-file: ./examples/chat-rn-expo/ios/build/chatrnexpo.app
+
+  e2e-tests-android:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [build-rn]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Source Code
+        uses: ./.github/actions/source-code/
+      
+      - name: Download React Native Android artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: cojson-core-rn-android
+          path: crates/cojson-core-rn
+      
+      - name: List React Native Android artifacts
+        run: |
+          ls -R crates/cojson-core-rn/android/src/main/jniLibs
+        shell: bash
+
+      - name: Create Output Directory
+        run: |
+          mkdir -p ~/output
+
+      - name: Pnpm Build
+        run: pnpm turbo build --filter="./packages/*"
+
+      - name: chat-rn-expo App Pre Build
+        working-directory: ./examples/chat-rn-expo
+        run: |
+          pnpm expo prebuild --clean
+      
+      - uses: actions/setup-java@v3
+        with:
+          java-version: 17
+          distribution: 'temurin'
+
+      - name: Build Android App
+        working-directory: ./examples/chat-rn-expo/android
+        run: ./gradlew assembleRelease
+
+      - uses: mobile-dev-inc/action-maestro-cloud@v1
+        with:
+          api-key: ${{ secrets.MAESTRO_KEY }}
+          # note that you can supply the project id any way you like, it is not secret
+          project-id: ${{ secrets.MAESTRO_PROJECT_ID }}
+          app-file: ./examples/chat-rn-expo/android/app/build/outputs/apk/release/app-release.apk

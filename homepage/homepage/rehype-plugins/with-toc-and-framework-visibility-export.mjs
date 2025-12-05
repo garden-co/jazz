@@ -1,4 +1,3 @@
-// @ts-check
 
 import { valueToEstree } from "estree-util-value-to-estree";
 

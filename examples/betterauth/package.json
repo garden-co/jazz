@@ -13,6 +13,7 @@
     "test:e2e:ui": "playwright test --ui",
     "email": "email dev --dir src/components/emails"
   },
+  "packageManager": "pnpm@10.16.1",
   "dependencies": {
     "@icons-pack/react-simple-icons": "^12.8.0",
     "@radix-ui/react-label": "^2.1.6",

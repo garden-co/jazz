@@ -28,6 +28,10 @@
       "types": "./dist/crypto/WasmCryptoEdge.d.ts",
       "default": "./dist/crypto/WasmCryptoEdge.js"
     },
+    "./crypto/RNCrypto": {
+      "types": "./dist/crypto/RNCrypto.d.ts",
+      "default": "./dist/crypto/RNCrypto.js"
+    },
     "./dist/*": "./dist/*",
     "./src/*": "./src/*"
   },
@@ -48,6 +52,9 @@
     "cojson-core-wasm": "workspace:*",
     "cojson-core-napi": "workspace:*",
     "unicode-segmenter": "^0.12.0"
+  },
+  "peerDependencies": {
+    "cojson-core-rn": "workspace:*"
   },
   "scripts": {
     "dev": "tsc --watch --sourceMap --outDir dist",

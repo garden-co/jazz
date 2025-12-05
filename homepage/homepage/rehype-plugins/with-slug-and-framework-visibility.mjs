@@ -1,4 +1,3 @@
-// @ts-check
 
 import { visit } from "unist-util-visit";
 import { processHeadingNode } from "./utils/processing-heading-node.mjs";
