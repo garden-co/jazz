@@ -51,8 +51,18 @@ export type RefOnCreateCallback = (newGroup: Group, init?: unknown) => void;
  * @default { default: () => Group.create(), onInlineCreate: "extendsContainer" }
  */
 export type SchemaPermissions = {
+  /**
+   * default owner to be used when creating a CoValue without providing an explicit owner.
+   */
   default?: () => Group;
+  /**
+   * Defines how a nested CoValue's owner is obtained when creating CoValues from JSON.
+   */
   onInlineCreate?: OnInlineCreateOptions;
+  /**
+   * callback that runs every time a CoValue is created. Can be used to configure the CoValue's owner.
+   * Runs both when creating CoValues with `.create()` and when creating CoValues from JSON.
+   */
   onCreate?: OnCreateCallback;
 };
 

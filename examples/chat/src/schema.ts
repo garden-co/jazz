@@ -11,6 +11,6 @@ export const Message = co
 export type Message = co.loaded<typeof Message>;
 
 export const Chat = co.list(Message).withPermissions({
-  default: () => Group.create().makePublic("writer"),
+  onCreate: (owner) => owner.addMember("everyone", "writer"),
 });
 export type Chat = co.loaded<typeof Chat>;
