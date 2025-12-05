@@ -1,4 +1,12 @@
-import { afterEach, assert, beforeAll, describe, expect, test } from "vitest";
+import {
+  afterEach,
+  assert,
+  beforeAll,
+  describe,
+  expect,
+  test,
+  vi,
+} from "vitest";
 import {
   Account,
   co,
@@ -27,8 +35,11 @@ describe("Schema.withPermissions()", () => {
 
   beforeAll(async () => {
     me = Account.getMe();
-    anotherAccount = await Account.createAs(Account.getMe(), {
-      creationProps: { name: "Another Account" },
+    anotherAccount = await createJazzTestAccount();
+
+    // Load anotherAccount to make `addMember` work without needing manual loading
+    await Account.load(anotherAccount.$jazz.id, {
+      loadAs: me,
     });
   });
 
@@ -252,8 +263,12 @@ describe("Schema.withPermissions()", () => {
     });
 
     test("the default owner is not used when providing an explicit owner", async () => {
+      let spy = vi.fn();
       const TestMap = co.map({ name: co.plainText() }).withPermissions({
-        default: () => Group.create().makePublic(),
+        default: () => {
+          spy();
+          return Group.create().makePublic();
+        },
       });
       const map = TestMap.create({ name: "Hi!" }, { owner: Group.create() });
 
@@ -261,6 +276,7 @@ describe("Schema.withPermissions()", () => {
         resolve: { name: true },
         loadAs: anotherAccount,
       });
+      expect(spy).not.toHaveBeenCalled();
       expect(loadedMap.$isLoaded).toBe(false);
       expect(loadedMap.$jazz.loadingState).toBe(
         CoValueLoadingState.UNAUTHORIZED,
@@ -283,6 +299,7 @@ describe("Schema.withPermissions()", () => {
           const map = TestMap.create({ name: "Hello" }, { owner: parentOwner });
 
           const childOwner = map.name.$jazz.owner;
+
           expect(
             childOwner.getParentGroups().map((group) => group.$jazz.id),
           ).toContain(parentOwner.$jazz.id);
