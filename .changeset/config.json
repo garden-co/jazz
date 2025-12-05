@@ -7,6 +7,7 @@
     [
       "cojson",
       "cojson-core-wasm",
+      "cojson-core-rn",
       "cojson-storage-indexeddb",
       "cojson-storage-sqlite",
       "cojson-storage-do-sqlite",
