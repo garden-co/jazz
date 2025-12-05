@@ -573,11 +573,11 @@ importers:
         specifier: catalog:rn
         version: 0.81.5
       '@rnx-kit/metro-config':
-        specifier: ^2.0.1
-        version: 2.0.1(@react-native/metro-config@0.81.5(@babel/core@7.27.1))(react-native@0.81.5(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@react-native/metro-config@0.81.5(@babel/core@7.27.1))(@types/react@19.1.10)(react@19.1.0))(react@19.1.0)
+        specifier: ^2.2.1
+        version: 2.2.1(@react-native/metro-config@0.81.5(@babel/core@7.27.1))(react-native@0.81.5(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@react-native/metro-config@0.81.5(@babel/core@7.27.1))(@types/react@19.1.10)(react@19.1.0))(react@19.1.0)
       '@rnx-kit/metro-resolver-symlinks':
-        specifier: ^0.2.5
-        version: 0.2.5
+        specifier: ^0.2.6
+        version: 0.2.7
       '@types/react':
         specifier: 19.1.10
         version: 19.1.10
@@ -8530,8 +8530,8 @@ packages:
     resolution: {integrity: sha512-8kyM0TUWpawWlaypHKWLgJjPoF5HcsjIxx9LSnYM8VgwBW1gOl2cCDhPYaeS8IG9m0fi4rMtQD8OJqmwpJ2jEg==}
     engines: {node: '>=16.17'}
 
-  '@rnx-kit/metro-config@2.0.1':
-    resolution: {integrity: sha512-BkhniefN5U5lQtlwu97rz+32reUyBCC22zBrCazV/3BvfOZ3b94z2oljUPtYIosoVKm4o6e2bGNlNklG1GWNbQ==}
+  '@rnx-kit/metro-config@2.2.1':
+    resolution: {integrity: sha512-N3SuB1hXLlS6uhzrQ8Tqg6704soLvkx0SRWLxobDf9+lChskI4W14tjvA4gvATZgQcDEBrTwjKLEEWN/8dy7EA==}
     engines: {node: '>=16.17'}
     peerDependencies:
       '@react-native/metro-config': '*'
@@ -8541,11 +8541,11 @@ packages:
       '@react-native/metro-config':
         optional: true
 
-  '@rnx-kit/metro-resolver-symlinks@0.2.5':
-    resolution: {integrity: sha512-PKeLjuH94OajuN1Ktz1xeFQ4Y6gQBiqBcO+YjBuCMGt8859qp+nHFCUcuMFiEDZgwZRLRo8dgjtpqVqUPyJCcg==}
+  '@rnx-kit/metro-resolver-symlinks@0.2.7':
+    resolution: {integrity: sha512-/iqAquNhPdw06mXDGCVfFaJklOrQcaXtKxh/nP8bWvjF4eJo2AJdPuLzoE9zZA+F43pBSo7KgwUG90bzGC8geQ==}
     engines: {node: '>=16.17'}
     peerDependencies:
-      oxc-resolver: ^9.0.0
+      oxc-resolver: ^11.0.0
     peerDependenciesMeta:
       oxc-resolver:
         optional: true
@@ -8554,12 +8554,12 @@ packages:
     resolution: {integrity: sha512-nz0kq7FxJ89Vh5NLHZjmexl3sdGeoPaPZMSWQhW6g9JzryGVdU+CyLQtQbajtwaDMQB2qH/IqpmOzAxNFr5pgg==}
     engines: {node: '>=16.17'}
 
-  '@rnx-kit/tools-react-native@2.1.0':
-    resolution: {integrity: sha512-F18Pn28Ligw3RyNKzXtSRZudWQ5R3JFywyWwqcUY+UFmjBjhekdIceHM/SXNZOJgkj21RRgXaIJy1gpaJtT0Jw==}
-    engines: {node: '>=16.17'}
-
   '@rnx-kit/tools-react-native@2.2.0':
     resolution: {integrity: sha512-VTOtlHibOVvC9sulDTy+59vuIl3O8ssiC9f1k+TLZc5+AmFcLehg8Zs4MP09sQd6ngjeboRDrAf5LUpFZ3g/cQ==}
+    engines: {node: '>=16.17'}
+
+  '@rnx-kit/tools-react-native@2.3.1':
+    resolution: {integrity: sha512-6XVhP6W0C9xyjDeyhMC0/bmlgk8rAfrFGEafupn36q1dOzhcN3uXVQaLVFhYW6dF29NafakKg9gzfUeRTOz7bg==}
     engines: {node: '>=16.17'}
 
   '@rnx-kit/tools-workspaces@0.2.2':
@@ -27194,7 +27194,9 @@ snapshots:
       metro-runtime: 0.83.2
     transitivePeerDependencies:
       - '@babel/core'
+      - bufferutil
       - supports-color
+      - utf-8-validate
 
   '@react-native/metro-config@0.81.5(@babel/core@7.28.5)':
     dependencies:
@@ -27204,7 +27206,9 @@ snapshots:
       metro-runtime: 0.83.2
     transitivePeerDependencies:
       - '@babel/core'
+      - bufferutil
       - supports-color
+      - utf-8-validate
     optional: true
 
   '@react-native/normalize-colors@0.80.0': {}
@@ -27369,17 +27373,17 @@ snapshots:
 
   '@rnx-kit/console@2.0.0': {}
 
-  '@rnx-kit/metro-config@2.0.1(@react-native/metro-config@0.81.5(@babel/core@7.27.1))(react-native@0.81.5(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@react-native/metro-config@0.81.5(@babel/core@7.27.1))(@types/react@19.1.10)(react@19.1.0))(react@19.1.0)':
+  '@rnx-kit/metro-config@2.2.1(@react-native/metro-config@0.81.5(@babel/core@7.27.1))(react-native@0.81.5(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@react-native/metro-config@0.81.5(@babel/core@7.27.1))(@types/react@19.1.10)(react@19.1.0))(react@19.1.0)':
     dependencies:
       '@rnx-kit/tools-node': 3.0.2
-      '@rnx-kit/tools-react-native': 2.1.0
+      '@rnx-kit/tools-react-native': 2.3.1
       '@rnx-kit/tools-workspaces': 0.2.2
       react: 19.1.0
       react-native: 0.81.5(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@react-native/metro-config@0.81.5(@babel/core@7.27.1))(@types/react@19.1.10)(react@19.1.0)
     optionalDependencies:
       '@react-native/metro-config': 0.81.5(@babel/core@7.27.1)
 
-  '@rnx-kit/metro-resolver-symlinks@0.2.5':
+  '@rnx-kit/metro-resolver-symlinks@0.2.7':
     dependencies:
       '@rnx-kit/console': 2.0.0
       '@rnx-kit/tools-node': 3.0.2
@@ -27388,11 +27392,11 @@ snapshots:
 
   '@rnx-kit/tools-node@3.0.2': {}
 
-  '@rnx-kit/tools-react-native@2.1.0':
+  '@rnx-kit/tools-react-native@2.2.0':
     dependencies:
       '@rnx-kit/tools-node': 3.0.2
 
-  '@rnx-kit/tools-react-native@2.2.0':
+  '@rnx-kit/tools-react-native@2.3.1':
     dependencies:
       '@rnx-kit/tools-node': 3.0.2
 
