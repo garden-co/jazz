@@ -12,7 +12,7 @@ import { SidePanel } from "./components/SidePanel";
 import { Button } from "./components/ui/button";
 import { SidebarInset, SidebarTrigger } from "./components/ui/sidebar";
 import { usePlayState } from "./lib/audio/usePlayState";
-import { Suspense, useState } from "react";
+import { useState } from "react";
 import { useAccountSelector } from "@/components/AccountProvider.tsx";
 import { useSuspenseCoState } from "jazz-tools/react-core";
 
