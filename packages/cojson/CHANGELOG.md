@@ -1,5 +1,14 @@
 # cojson
 
+## 0.19.10
+
+### Patch Changes
+
+- Updated dependencies [4f5a5e7]
+  - cojson-core-rn@0.19.10
+  - cojson-core-wasm@0.19.10
+  - cojson-core-napi@0.19.10
+
 ## 0.19.9
 
 ### Patch Changes

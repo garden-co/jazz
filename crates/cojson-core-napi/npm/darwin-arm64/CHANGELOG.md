@@ -1,5 +1,7 @@
 # cojson-core-napi-darwin-arm64
 
+## 0.19.10
+
 ## 0.19.9
 
 ## 0.19.8
