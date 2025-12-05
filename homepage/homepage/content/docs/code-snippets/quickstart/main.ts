@@ -4,7 +4,7 @@ import { JazzFestAccount } from './schema';
 
 // @ts-expect-error Not a real Vite app
 const apiKey = import.meta.env.VITE_JAZZ_API_KEY;
-const contextManager = new JazzBrowserContextManager();
+const contextManager = new JazzBrowserContextManager<typeof JazzFestAccount>();
 await contextManager.createContext({
   sync: {
     peer: `wss://cloud.jazz.tools?key=${apiKey}`

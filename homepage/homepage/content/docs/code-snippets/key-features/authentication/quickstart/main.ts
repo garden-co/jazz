@@ -39,7 +39,8 @@ const input = Object.assign(document.createElement('input'), {
 const button = Object.assign(document.createElement('button'), {
   name: 'band',
   innerText: 'Add',
-  onclick: async () => {
+  onclick: async (e: Event) => {
+    e.preventDefault(); // Prevent navigation
     if (!myAccount.$isLoaded) return;
     myAccount.root.myFestival.$jazz.push({ name: input.value });
     input.value = '';
@@ -67,41 +68,62 @@ const unsubscribe = myAccount.root.myFestival.$jazz.subscribe((festival) => {
 });
 // #endregion
 
-// #region CreateInvite
-import { createInviteLink } from "jazz-tools";
-
-const inputLink = document.createElement('output')
-const createLinkButton = Object.assign(document.createElement('button'), {
-  innerText: 'Create Invite Link',
-  onclick: () => {
-    const inviteLink = createInviteLink(
-      myAccount.root.myFestival,
-      "writer",
-      window.location.host
-    );
-    inputLink.value = inviteLink;
-  }
-});
-
+// #region Page
 const app = document.querySelector<HTMLDivElement>('#app')!;
-app.append(form, inputLink, createLinkButton, bandList);
+app.append(form, bandList);
 // #endregion
 
+// #region AuthInstance
+import { BrowserPasskeyAuth } from 'jazz-tools/browser';
+const ctx = contextManager.getCurrentValue();
+if (!ctx) throw new Error("Context is not available");
+const crypto = ctx.node.crypto;
+const authenticate = contextManager.authenticate;
+const authSecretStorage = contextManager.getAuthSecretStorage();
+const appName = "JazzFest";
 
-// #region AcceptInvite
-import { consumeInviteLink } from "jazz-tools";
-import { Festival } from "./schema";
+const auth = new BrowserPasskeyAuth(
+  crypto,
+  authenticate,
+  authSecretStorage,
+  appName,
+);
+// #endregion
 
-const invite = window.location.hash;
+// #region SignUpForm
+const signUpForm = document.createElement("form");
+const nameInput = Object.assign(document.createElement("input"), {
+  placeholder: "Name",
+  required: true,
+});
+const signInButton = Object.assign(document.createElement("button"), {
+  type: "button",
+  innerText: "Sign In",
+  onclick: async (evt: MouseEvent) => {
+    evt.preventDefault();
+    await auth.logIn();
+    window.location.href = "/";
+  },
+});
+const signUpButton = Object.assign(document.createElement("button"), {
+  type: "submit",
+  innerText: "Sign Up",
+  onclick: async (evt: MouseEvent) => {
+    evt.preventDefault();
+    await auth.signUp(nameInput.value);
+    window.location.href = "/";
+  },
+});
+// #endregion
 
-if (invite) {
-  consumeInviteLink({
-    inviteURL: invite,
-    invitedObjectSchema: Festival, // Pass the schema for the invited object
-  }).then(async (invitedObject) => {
-    if (!invitedObject) throw new Error("Failed to consume invite link");
-    // Display the festival
-    window.location.href = `/festival/${invitedObject?.valueID}`;
-  });
+// #region AuthComponent
+import { AuthComponent } from './AuthComponent';
+
+// Your existing main.ts
+
+const authComponent = AuthComponent(contextManager);
+
+if (authComponent) {
+  app.insertBefore(authComponent, app.firstChild);
 }
 // #endregion
