@@ -2,6 +2,7 @@
   "name": "durable-object",
   "version": "0.0.16",
   "private": true,
+  "packageManager": "pnpm@10.16.1",
   "scripts": {
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",

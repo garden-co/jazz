@@ -2,6 +2,7 @@
   "name": "server-worker-http",
   "type": "module",
   "private": true,
+  "packageManager": "pnpm@10.16.1",
   "scripts": {
     "dev": "next dev --turbopack",
     "generate-env": "tsx generate-env.ts",

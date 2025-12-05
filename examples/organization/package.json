@@ -2,6 +2,7 @@
   "name": "organization",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@10.16.1",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",

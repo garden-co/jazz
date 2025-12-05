@@ -19,9 +19,16 @@ jobs:
       concurrency: pre-release-napi
       disableTest: true
 
+  build_rn:
+    name: Build React Native
+    uses: ./.github/workflows/rn-build-reusable.yml
+    if: contains(github.event.pull_request.labels.*.name, 'pre-release')
+    with:
+      concurrency: pre-release-rn
+
   pre-release:
     if: contains(github.event.pull_request.labels.*.name, 'pre-release')
-    needs: [build_napi]
+    needs: [build_napi, build_rn]
     runs-on: ubuntu-latest
 
     steps:
@@ -51,8 +58,27 @@ jobs:
         shell: bash
         working-directory: crates/cojson-core-napi
 
+      - name: Download React Native Android artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: cojson-core-rn-android
+          path: crates/cojson-core-rn
+
+      - name: Download React Native iOS artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: cojson-core-rn-ios
+          path: crates/cojson-core-rn
+
+      - name: List React Native artifacts
+        run: |
+          ls -R crates/cojson-core-rn/CojsonCoreRnFramework.xcframework
+          ls -R crates/cojson-core-rn/android/src/main/jniLibs
+          ls -R crates/cojson-core-rn/ios
+        shell: bash
+
       - name: Pre publish
-        run: pnpm exec pkg-pr-new publish --json output.json --comment=off "./crates/cojson-core-napi/npm/*" "./crates/cojson-core-napi" "./crates/cojson-core-wasm" "./packages/*" 
+        run: pnpm exec pkg-pr-new publish --json output.json --comment=off "./crates/cojson-core-napi/npm/*" "./crates/cojson-core-napi" "./crates/cojson-core-wasm" "./crates/cojson-core-rn" "./packages/*" 
 
       - name: Post or update comment
         uses: actions/github-script@v6

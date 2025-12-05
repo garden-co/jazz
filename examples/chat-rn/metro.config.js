@@ -40,6 +40,7 @@ module.exports = makeMetroConfig({
   watchFolders: [
     path.resolve(workspaceRoot, "node_modules"),
     path.resolve(workspaceRoot, "packages"),
+    path.resolve(workspaceRoot, "crates"),
   ],
   resolver: {
     resolveRequest: customResolver,

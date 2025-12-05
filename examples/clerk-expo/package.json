@@ -1,6 +1,7 @@
 {
   "name": "clerk-expo",
   "main": "index.ts",
+  "packageManager": "pnpm@10.16.1",
   "scripts": {
     "build": "expo prebuild",
     "start": "expo start",
