@@ -1,6 +1,13 @@
 import { cojsonInternals, emptyKnownState } from "cojson";
 import { assert, beforeEach, expect, test } from "vitest";
-import { Account, Group, co, exportCoValue, z } from "../exports.js";
+import {
+  Account,
+  Group,
+  co,
+  exportCoValue,
+  jazzConfig,
+  z,
+} from "../exports.js";
 import { CoValueLoadingState } from "../internal.js";
 import {
   createJazzTestAccount,
@@ -12,6 +19,13 @@ import { assertLoaded, waitFor } from "./utils.js";
 
 cojsonInternals.CO_VALUE_LOADING_CONFIG.RETRY_DELAY = 10;
 
+let lastError: Error | undefined;
+beforeEach(() => {
+  lastError = undefined;
+  jazzConfig.setCustomErrorReporter((error) => {
+    lastError = error;
+  });
+});
 beforeEach(async () => {
   await setupJazzTestSync();
   await createJazzTestAccount({
@@ -42,6 +56,9 @@ test("return 'unavailable' if id is invalid", async () => {
 
   const john = await Person.load("test");
   expect(john.$jazz.loadingState).toBe(CoValueLoadingState.UNAVAILABLE);
+  expect(lastError?.message).toBe(
+    "Jazz Unavailable Error: unable to load test",
+  );
 });
 
 test("load a missing optional value (co.optional)", async () => {
@@ -185,6 +202,9 @@ test("returns 'unavailable' if the value is unavailable after retries", async ()
   const john = await Person.load(map.$jazz.id, { loadAs: alice });
 
   expect(john.$jazz.loadingState).toBe(CoValueLoadingState.UNAVAILABLE);
+  expect(lastError?.message).toBe(
+    "Jazz Unavailable Error: unable to load " + map.$jazz.id,
+  );
 });
 
 test("load works even when the coValue access is granted after the creation", async () => {

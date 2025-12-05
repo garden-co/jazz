@@ -5,7 +5,7 @@ import {
   Group,
   hydrateCoreCoValueSchema,
   ID,
-  MaybeLoaded,
+  Settled,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
@@ -96,7 +96,7 @@ export class CoListSchema<
       loadAs?: Account | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
     },
-  ): Promise<MaybeLoaded<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>> {
+  ): Promise<Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>> {
     // @ts-expect-error
     return this.coValueClass.load(
       id,
@@ -166,7 +166,7 @@ export class CoListSchema<
     unique: CoValueUniqueness["uniqueness"];
     owner: Account | Group;
     resolve?: RefsToResolveStrict<CoListInstanceCoValuesMaybeLoaded<T>, R>;
-  }): Promise<MaybeLoaded<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>> {
+  }): Promise<Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>> {
     // @ts-expect-error
     return this.coValueClass.upsertUnique(
       // @ts-expect-error
@@ -185,7 +185,7 @@ export class CoListSchema<
       resolve?: RefsToResolveStrict<CoListInstanceCoValuesMaybeLoaded<T>, R>;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<MaybeLoaded<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>> {
+  ): Promise<Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>> {
     // @ts-expect-error
     return this.coValueClass.loadUnique(
       unique,

@@ -435,3 +435,68 @@ describe("accepting invites", () => {
     expect(group.getRoleOf(newAccount.$jazz.id)).toBe("reader");
   });
 });
+
+describe("createAs", () => {
+  test("migration is executed before onCreate and onCreate can set root from worker", async () => {
+    const executionOrder: string[] = [];
+
+    const CustomRoot = co.map({
+      value: z.string(),
+    });
+
+    const CustomAccount = co
+      .account({
+        profile: co.profile({
+          name: z.string(),
+        }),
+        root: CustomRoot,
+      })
+      .withMigration((me) => {
+        executionOrder.push("migration");
+        if (me.root === undefined) {
+          me.$jazz.set("root", { value: "migration-set" });
+        }
+      });
+
+    const worker = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const workerRoot = CustomRoot.create(
+      { value: "worker-root" },
+      { owner: worker },
+    );
+
+    const createdAccount = await CustomAccount.createAs(worker, {
+      creationProps: { name: "Test Account" },
+      onCreate: async (account, loadedWorker) => {
+        executionOrder.push("onCreate");
+
+        // Verify migration ran before onCreate
+        expect(executionOrder).toEqual(["migration", "onCreate"]);
+
+        // Verify migration set the root
+        assertLoaded(account.root);
+        expect(account.root.value).toBe("migration-set");
+
+        // It should be possible to add the worker as a member of the root
+        account.root.$jazz.owner.addMember(loadedWorker, "writer");
+        expect(account.root.$jazz.owner.getRoleOf(loadedWorker.$jazz.id)).toBe(
+          "writer",
+        );
+
+        // Set root from worker in onCreate
+        account.$jazz.set("root", workerRoot);
+      },
+    });
+
+    assertLoaded(createdAccount);
+    assertLoaded(createdAccount.root);
+
+    // Verify onCreate was called and root was set from worker
+    expect(createdAccount.root.value).toBe("worker-root");
+
+    // Verify execution order
+    expect(executionOrder).toEqual(["migration", "onCreate"]);
+  });
+});

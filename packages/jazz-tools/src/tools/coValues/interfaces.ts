@@ -13,8 +13,10 @@ import {
   NotLoadedCoValueState,
   Group,
   Loaded,
+  Inaccessible,
   MaybeLoaded,
   OnCreateCallback,
+  Settled,
   RefsToResolve,
   RefsToResolveStrict,
   RegisteredSchemas,
@@ -27,7 +29,6 @@ import {
   NotLoaded,
   activeAccountContext,
   coValueClassFromCoValueClassOrSchema,
-  getSubscriptionScope,
   inspect,
 } from "../internal.js";
 import type { BranchDefinition } from "../subscribe/types.js";
@@ -147,7 +148,7 @@ export function loadCoValueWithoutMe<
     skipRetry?: boolean;
     unstable_branch?: BranchDefinition;
   },
-): Promise<MaybeLoaded<Resolved<V, R>>> {
+): Promise<Settled<Resolved<V, R>>> {
   return loadCoValue(cls, id, {
     ...options,
     loadAs: options?.loadAs ?? activeAccountContext.get(),
@@ -167,7 +168,7 @@ export function loadCoValue<
     skipRetry?: boolean;
     unstable_branch?: BranchDefinition;
   },
-): Promise<MaybeLoaded<Resolved<V, R>>> {
+): Promise<Settled<Resolved<V, R>>> {
   return new Promise((resolve) => {
     subscribeToCoValue<V, R>(
       cls,
@@ -304,8 +305,8 @@ export function subscribeToCoValue<
   options: {
     resolve?: RefsToResolveStrict<V, R>;
     loadAs: Account | AnonymousJazzAgent;
-    onUnavailable?: (value: NotLoaded<V>) => void;
-    onUnauthorized?: (value: NotLoaded<V>) => void;
+    onUnavailable?: (value: Inaccessible<V>) => void;
+    onUnauthorized?: (value: Inaccessible<V>) => void;
     syncResolution?: boolean;
     skipRetry?: boolean;
     unstable_branch?: BranchDefinition;
@@ -344,16 +345,10 @@ export function subscribeToCoValue<
 
     switch (value.$jazz.loadingState) {
       case CoValueLoadingState.UNAVAILABLE:
-        options.onUnavailable?.(value);
-
-        // Don't log unavailable errors when `loadUnique` or `upsertUnique` are used
-        if (!options.skipRetry) {
-          console.error(value.toString());
-        }
+        options.onUnavailable?.(value as Inaccessible<V>);
         break;
       case CoValueLoadingState.UNAUTHORIZED:
-        options.onUnauthorized?.(value);
-        console.error(value.toString());
+        options.onUnauthorized?.(value as Inaccessible<V>);
         break;
     }
   };
@@ -559,7 +554,7 @@ export async function internalLoadUnique<
     owner: Account | Group;
     resolve?: RefsToResolveStrict<V, R>;
   },
-): Promise<MaybeLoaded<Resolved<V, R>>> {
+): Promise<Settled<Resolved<V, R>>> {
   const loadAs = options.owner.$jazz.loadedAs;
 
   const node =
@@ -695,18 +690,18 @@ export async function exportCoValue<
   );
 
   const value = await new Promise<Loaded<S, R> | null>((resolve) => {
-    rootNode.setListener((value) => {
-      if (value.type === CoValueLoadingState.UNAVAILABLE) {
-        resolve(null);
-        console.error(value.toString());
-      } else if (value.type === CoValueLoadingState.UNAUTHORIZED) {
-        resolve(null);
-        console.error(value.toString());
-      } else if (value.type === CoValueLoadingState.LOADED) {
-        resolve(value.value as Loaded<S, R>);
-      }
+    rootNode.setListener(() => {
+      const value = rootNode.getCurrentValue();
 
-      rootNode.destroy();
+      if (value.$isLoaded) {
+        resolve(value as Loaded<S, R>);
+      } else if (
+        value.$jazz.loadingState === CoValueLoadingState.UNAVAILABLE ||
+        value.$jazz.loadingState === CoValueLoadingState.UNAUTHORIZED
+      ) {
+        resolve(null);
+        rootNode.destroy();
+      }
     });
   });
 
@@ -721,6 +716,31 @@ export async function exportCoValue<
 
   return contentPieces;
 }
+
+export function exportCoValueFromSubscription<V>(
+  subscription: SubscriptionScope<CoValue>,
+): ExportedCoValue<V> {
+  const valuesExported = new Set<string>();
+  const contentPieces: CojsonInternalTypes.NewContentMessage[] = [];
+
+  loadContentPiecesFromSubscription(
+    subscription,
+    valuesExported,
+    contentPieces,
+  );
+
+  return {
+    id: subscription.id as ExportedID<V>,
+    contentPieces,
+  };
+}
+
+export type ExportedID<V> = string & { _exportedID: V };
+
+export type ExportedCoValue<V> = {
+  id: ExportedID<V>; // This is used for branding the export type
+  contentPieces: CojsonInternalTypes.NewContentMessage[];
+};
 
 function loadContentPiecesFromSubscription(
   subscription: SubscriptionScope<any>,

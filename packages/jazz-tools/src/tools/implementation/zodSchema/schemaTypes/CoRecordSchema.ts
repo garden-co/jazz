@@ -6,7 +6,7 @@ import {
   CoMapSchemaDefinition,
   Group,
   ID,
-  MaybeLoaded,
+  Settled,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
@@ -65,9 +65,7 @@ export interface CoRecordSchema<
       loadAs?: Account | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
     },
-  ): Promise<
-    MaybeLoaded<Resolved<CoRecordInstanceCoValuesMaybeLoaded<K, V>, R>>
-  >;
+  ): Promise<Settled<Resolved<CoRecordInstanceCoValuesMaybeLoaded<K, V>, R>>>;
 
   unstable_merge<
     const R extends RefsToResolve<
@@ -120,9 +118,7 @@ export interface CoRecordSchema<
     unique: CoValueUniqueness["uniqueness"];
     owner: Account | Group;
     resolve?: RefsToResolveStrict<CoRecordInstanceCoValuesMaybeLoaded<K, V>, R>;
-  }): Promise<
-    MaybeLoaded<Resolved<CoRecordInstanceCoValuesMaybeLoaded<K, V>, R>>
-  >;
+  }): Promise<Settled<Resolved<CoRecordInstanceCoValuesMaybeLoaded<K, V>, R>>>;
 
   loadUnique<
     const R extends RefsToResolve<
@@ -139,9 +135,7 @@ export interface CoRecordSchema<
       >;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<
-    MaybeLoaded<Resolved<CoRecordInstanceCoValuesMaybeLoaded<K, V>, R>>
-  >;
+  ): Promise<Settled<Resolved<CoRecordInstanceCoValuesMaybeLoaded<K, V>, R>>>;
 
   getCoValueClass: () => typeof CoMap;
 

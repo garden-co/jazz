@@ -32,13 +32,44 @@ type IsUnion<T, U = T> = (
 export type MaybeLoaded<T> = T | NotLoaded<T>;
 
 /**
+ * A CoValue that is either successfully loaded or that could not be loaded.
+ */
+export type Settled<T> = T | Inaccessible<T>;
+
+/**
  * A CoValue that is not loaded.
  */
+// Manually inlining the type to reduce type-checking complexity
+// type NotLoaded<T> = Loading<T> | Inaccessible<T>;
 export type NotLoaded<T> = {
   $jazz: {
     id: ID<T>;
     loadingState:
       | typeof CoValueLoadingState.LOADING
+      | typeof CoValueLoadingState.UNAVAILABLE
+      | typeof CoValueLoadingState.UNAUTHORIZED;
+  };
+  $isLoaded: false;
+};
+
+/**
+ * A CoValue that is being loaded
+ */
+export type Loading<T> = {
+  $jazz: {
+    id: ID<T>;
+    loadingState: typeof CoValueLoadingState.LOADING;
+  };
+  $isLoaded: false;
+};
+
+/**
+ * A CoValue that could not be loaded
+ */
+export type Inaccessible<T> = {
+  $jazz: {
+    id: ID<T>;
+    loadingState:
       | typeof CoValueLoadingState.UNAVAILABLE
       | typeof CoValueLoadingState.UNAUTHORIZED;
   };

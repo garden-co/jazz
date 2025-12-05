@@ -5,7 +5,7 @@ import {
   CoFeed,
   Group,
   hydrateCoreCoValueSchema,
-  MaybeLoaded,
+  Settled,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
@@ -88,7 +88,7 @@ export class CoFeedSchema<
       loadAs?: Account | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
     },
-  ): Promise<MaybeLoaded<Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>>> {
+  ): Promise<Settled<Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>>> {
     // @ts-expect-error
     return this.coValueClass.load(
       id,

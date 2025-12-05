@@ -10,6 +10,7 @@ import {
   type RefEncoded,
   type RefsToResolve,
   TypeSym,
+  createUnloadedCoValue,
   instantiateRefEncodedFromRaw,
   isRefEncoded,
 } from "../internal.js";
@@ -23,6 +24,10 @@ import type {
 } from "./types.js";
 import { CoValueLoadingState, NotLoadedCoValueState } from "./types.js";
 import { createCoValue, myRoleForRawValue } from "./utils.js";
+import {
+  captureError,
+  isCustomErrorReportingEnabled,
+} from "./errorReporting.js";
 
 export class SubscriptionScope<D extends CoValue> {
   childNodes = new Map<string, SubscriptionScope<CoValue>>();
@@ -57,6 +62,13 @@ export class SubscriptionScope<D extends CoValue> {
 
   silenceUpdates = false;
 
+  /**
+   * Stack trace captured at subscription creation time.
+   * This helps identify which component/hook created the subscription
+   * when debugging "value unavailable" errors.
+   */
+  callerStack: Error | undefined;
+
   constructor(
     public node: LocalNode,
     resolve: RefsToResolve<D>,
@@ -65,7 +77,10 @@ export class SubscriptionScope<D extends CoValue> {
     public skipRetry = false,
     public bestEffortResolution = false,
     public unstable_branch?: BranchDefinition,
+    callerStack?: Error | undefined,
   ) {
+    // Use caller stack if provided, otherwise capture here (less useful but better than nothing)
+    this.callerStack = callerStack;
     this.resolve = resolve;
     this.value = { type: CoValueLoadingState.LOADING, id };
 
@@ -90,7 +105,11 @@ export class SubscriptionScope<D extends CoValue> {
         // - Run the migration only once
         // - Skip all the updates until the migration is done
         // - Trigger handleUpdate only with the final value
-        if (!this.migrated && value !== CoValueLoadingState.UNAVAILABLE) {
+        if (
+          !this.migrated &&
+          value !== CoValueLoadingState.UNAVAILABLE &&
+          hasAccessToCoValue(value)
+        ) {
           if (this.migrating) {
             return;
           }
@@ -121,44 +140,40 @@ export class SubscriptionScope<D extends CoValue> {
   handleUpdate(update: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE) {
     if (update === CoValueLoadingState.UNAVAILABLE) {
       if (this.value.type === CoValueLoadingState.LOADING) {
-        this.updateValue(
-          new JazzError(this.id, CoValueLoadingState.UNAVAILABLE, [
-            {
-              code: CoValueLoadingState.UNAVAILABLE,
-              message: "The value is unavailable",
-              params: {
-                id: this.id,
-              },
-              path: [],
+        const error = new JazzError(this.id, CoValueLoadingState.UNAVAILABLE, [
+          {
+            code: CoValueLoadingState.UNAVAILABLE,
+            message: `Jazz Unavailable Error: unable to load ${this.id}`,
+            params: {
+              id: this.id,
             },
-          ]),
-        );
+            path: [],
+          },
+        ]);
+
+        this.updateValue(error);
       }
+
       this.triggerUpdate();
       return;
     }
 
-    const ruleset = update.core.verified.header.ruleset;
-
-    // Groups and accounts are accessible by everyone, for the other coValues we use the role to check access
-    const hasAccess =
-      ruleset.type !== "ownedByGroup" ||
-      myRoleForRawValue(update) !== undefined;
-
-    if (!hasAccess) {
+    if (!hasAccessToCoValue(update)) {
       if (this.value.type !== CoValueLoadingState.UNAUTHORIZED) {
-        this.updateValue(
-          new JazzError(this.id, CoValueLoadingState.UNAUTHORIZED, [
-            {
-              code: CoValueLoadingState.UNAUTHORIZED,
-              message: `The current user (${this.node.getCurrentAgent().id}) is not authorized to access this value`,
-              params: {
-                id: this.id,
-              },
-              path: [],
+        const message = `Jazz Authorization Error: The current user (${this.node.getCurrentAgent().id}) is not authorized to access ${this.id}`;
+
+        const error = new JazzError(this.id, CoValueLoadingState.UNAUTHORIZED, [
+          {
+            code: CoValueLoadingState.UNAUTHORIZED,
+            message,
+            params: {
+              id: this.id,
             },
-          ]),
-        );
+            path: [],
+          },
+        ]);
+
+        this.updateValue(error);
         this.triggerUpdate();
       }
       return;
@@ -291,20 +306,14 @@ export class SubscriptionScope<D extends CoValue> {
       return this.unloadedValue;
     }
 
-    const unloadedValue: NotLoaded<D> = {
-      $jazz: {
-        id: this.id,
-        loadingState: reason,
-        // @ts-expect-error - This is a private property
-        _subscriptionScope: this,
-      },
-      $isLoaded: false,
-    };
+    const unloadedValue: NotLoaded<D> = createUnloadedCoValue(this.id, reason);
 
     this.unloadedValue = unloadedValue;
 
     return unloadedValue;
   }
+
+  lastErrorLogged: JazzError | undefined;
 
   getCurrentValue(): MaybeLoaded<D> {
     const rawValue = this.getCurrentRawValue();
@@ -314,6 +323,7 @@ export class SubscriptionScope<D extends CoValue> {
       rawValue === CoValueLoadingState.UNAVAILABLE ||
       rawValue === CoValueLoadingState.LOADING
     ) {
+      this.logError();
       return this.getUnloadedValue(rawValue);
     }
 
@@ -325,7 +335,6 @@ export class SubscriptionScope<D extends CoValue> {
       this.value.type === CoValueLoadingState.UNAUTHORIZED ||
       this.value.type === CoValueLoadingState.UNAVAILABLE
     ) {
-      console.error(this.value.toString());
       return this.value.type;
     }
 
@@ -334,7 +343,6 @@ export class SubscriptionScope<D extends CoValue> {
     }
 
     if (this.errorFromChildren) {
-      console.error(this.errorFromChildren.toString());
       return this.errorFromChildren.type;
     }
 
@@ -343,6 +351,71 @@ export class SubscriptionScope<D extends CoValue> {
     }
 
     return CoValueLoadingState.LOADING;
+  }
+
+  getCreationStackLines() {
+    const stack = this.callerStack?.stack;
+
+    if (!stack) {
+      return "";
+    }
+
+    const creationStackLines = stack.split("\n").slice(2, 15);
+    const creationAppFrame = creationStackLines.find(
+      (line) =>
+        !line.includes("node_modules") &&
+        !line.includes("useCoValueSubscription") &&
+        !line.includes("useCoState") &&
+        !line.includes("useAccount") &&
+        !line.includes("jazz-tools"),
+    );
+
+    let result = "\n\n";
+
+    if (creationAppFrame) {
+      (result += "Subscription created "), (result += creationAppFrame.trim());
+    }
+
+    result += "\nFull subscription creation stack:";
+    for (const line of creationStackLines.slice(0, 8)) {
+      result += "\n    " + line.trim();
+    }
+
+    return result;
+  }
+
+  logError() {
+    let error: JazzError | undefined;
+
+    if (
+      this.value.type === CoValueLoadingState.UNAUTHORIZED ||
+      this.value.type === CoValueLoadingState.UNAVAILABLE
+    ) {
+      error = this.value;
+    }
+
+    if (this.errorFromChildren) {
+      error = this.errorFromChildren;
+    }
+
+    if (!error || this.lastErrorLogged === error) {
+      return;
+    }
+
+    if (error.type === CoValueLoadingState.UNAVAILABLE && this.skipRetry) {
+      return;
+    }
+
+    this.lastErrorLogged = error;
+
+    if (isCustomErrorReportingEnabled()) {
+      captureError(new Error(error.toString(), { cause: this.callerStack }), {
+        getPrettyStackTrace: () => this.getCreationStackLines(),
+        jazzError: error,
+      });
+    } else {
+      console.error(`${error.toString()}${this.getCreationStackLines()}`);
+    }
   }
 
   triggerUpdate() {
@@ -587,7 +660,7 @@ export class SubscriptionScope<D extends CoValue> {
                   new JazzError(undefined, CoValueLoadingState.UNAVAILABLE, [
                     {
                       code: "validationError",
-                      message: `The ref on position ${key} requested on ${stream.constructor.name} is missing`,
+                      message: `Jazz Validation Error: The ref on position ${key} is missing`,
                       params: {},
                       path: [key],
                     },
@@ -652,7 +725,7 @@ export class SubscriptionScope<D extends CoValue> {
           new JazzError(undefined, CoValueLoadingState.UNAVAILABLE, [
             {
               code: "validationError",
-              message: `The ref ${key} requested on ${map.constructor.name} is missing`,
+              message: `Jazz Validation Error: The ref ${key} is required but missing`,
               params: {},
               path: [key],
             },
@@ -691,7 +764,7 @@ export class SubscriptionScope<D extends CoValue> {
         new JazzError(undefined, CoValueLoadingState.UNAVAILABLE, [
           {
             code: "validationError",
-            message: `The ref on position ${key} requested on ${list.constructor.name} is missing`,
+            message: `Jazz Validation Error: The ref on position ${key} is required but missing`,
             params: {},
             path: [key],
           },
@@ -765,4 +838,14 @@ export class SubscriptionScope<D extends CoValue> {
     this.subscribers.clear();
     this.childNodes.forEach((child) => child.destroy());
   }
+}
+
+function hasAccessToCoValue(rawCoValue: RawCoValue): boolean {
+  const ruleset = rawCoValue.core.verified.header.ruleset;
+
+  // Groups and accounts are accessible by everyone, for the other coValues we use the role to check access
+  return (
+    ruleset.type !== "ownedByGroup" ||
+    myRoleForRawValue(rawCoValue) !== undefined
+  );
 }

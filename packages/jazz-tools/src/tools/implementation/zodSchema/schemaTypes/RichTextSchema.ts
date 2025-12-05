@@ -3,7 +3,7 @@ import {
   BranchDefinition,
   CoRichText,
   Group,
-  MaybeLoaded,
+  Settled,
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
@@ -60,7 +60,7 @@ export class RichTextSchema implements CoreRichTextSchema {
       loadAs: Account | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
     },
-  ): Promise<MaybeLoaded<CoRichText>> {
+  ): Promise<Settled<CoRichText>> {
     return this.coValueClass.load(id, options);
   }
 

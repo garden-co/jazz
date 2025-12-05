@@ -223,7 +223,7 @@ export function Pricing() {
             <ListItem icon={LucideCloudDownload}>Custom egress/mo</ListItem>
             <li aria-hidden="true" className="my-2 list-none border-t-2" />
             <ListItem icon={LucideHandshake}>
-              Rapid integration &amp premium onboarding
+              Rapid integration & premium onboarding
             </ListItem>
             <ListItem icon={LucideBuilding2}>
               SLAs, certifications, dedicated support

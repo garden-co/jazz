@@ -1,11 +1,16 @@
-import { expect, test } from "vitest";
+import { beforeEach, expect, test } from "vitest";
 import { expectAccount } from "../coValues/account.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import { LocalNode } from "../localNode.js";
 import { connectedPeers } from "../streamUtils.js";
 import { createAsyncStorage } from "./testStorage.js";
+import { setupTestAccount, setupTestNode } from "./testUtils.js";
 
 const Crypto = await WasmCrypto.create();
+
+beforeEach(async () => {
+  await setupTestNode({ isSyncServer: true });
+});
 
 test("Can create a node while creating a new account with profile", async () => {
   const { node, accountID, accountSecret, sessionID } =
@@ -75,66 +80,42 @@ test("Can create account with one node, and then load it on another", async () =
 });
 
 test("Should migrate the root from private to trusting", async () => {
-  const { node, accountID, accountSecret } =
-    await LocalNode.withNewlyCreatedAccount({
-      creationProps: { name: "Hermes Puggington" },
-      crypto: Crypto,
-    });
+  const session1 = await setupTestAccount({ connected: true });
 
-  const group = await node.createGroup();
+  const group = session1.node.createGroup();
   expect(group).not.toBeNull();
 
   const map = group.createMap();
   map.set("foo", "bar", "private");
   expect(map.get("foo")).toEqual("bar");
 
-  const peers1 = connectedPeers("node1", "node2", {
-    peer1role: "server",
-    peer2role: "client",
-  });
-
-  const account = await node.load(accountID);
+  const account = await session1.node.load(session1.accountID);
   if (account === "unavailable") throw new Error("Account unavailable");
 
   account.set("root", map.id, "private");
 
-  node.syncManager.addPeer(peers1[1]);
+  // Waiting to ensure that the migration is always applied on a different timestamp
+  // to make the test more stable
+  await new Promise((resolve) => setTimeout(resolve, 4));
 
-  const node2 = await LocalNode.withLoadedAccount({
-    accountID,
-    accountSecret,
-    sessionID: Crypto.newRandomSessionID(accountID),
-    peers: [peers1[0]],
-    crypto: Crypto,
-  });
+  const session2 = await session1.spawnNewSession();
 
-  const account2 = await node2.load(accountID);
-  if (account2 === "unavailable") throw new Error("Account unavailable");
+  const accountInNewSession = await session2.node.load(session1.accountID);
+  if (accountInNewSession === "unavailable")
+    throw new Error("Account unavailable");
 
-  expect(account2.getRaw("root")?.trusting).toEqual(true);
+  expect(accountInNewSession.getRaw("root")?.trusting).toEqual(true);
 
-  node2.gracefulShutdown(); // Stop getting updates from node1
+  await accountInNewSession.core.waitForSync();
 
-  const peers2 = connectedPeers("node2", "node3", {
-    peer1role: "server",
-    peer2role: "client",
-  });
+  const session3 = await session2.spawnNewSession();
 
-  node.syncManager.addPeer(peers2[1]);
+  const accountInNewSession2 = await session3.node.load(session1.accountID);
+  if (accountInNewSession2 === "unavailable")
+    throw new Error("Account unavailable");
 
-  const node3 = await LocalNode.withLoadedAccount({
-    accountID,
-    accountSecret,
-    sessionID: Crypto.newRandomSessionID(accountID),
-    peers: [peers2[0]],
-    crypto: Crypto,
-  });
-
-  const account3 = await node3.load(accountID);
-  if (account3 === "unavailable") throw new Error("Account unavailable");
-
-  expect(account3.getRaw("root")?.trusting).toEqual(true);
-  expect(account3.ops).toEqual(account2.ops); // No new transactions were made
+  expect(accountInNewSession2.getRaw("root")?.trusting).toEqual(true);
+  expect(accountInNewSession2.ops).toEqual(accountInNewSession.ops); // No new transactions were made
 });
 
 test("myRole returns 'admin' for the current account", async () => {

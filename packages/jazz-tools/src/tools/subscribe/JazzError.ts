@@ -11,21 +11,24 @@ export class JazzError {
   ) {}
 
   toString() {
-    return this.issues
+    // Build the main error message with inline stack info so it shows even if truncated
+    let result = this.issues
       .map((issue) => {
         let message = `${issue.message}`;
 
-        if (this.id) {
-          message += ` from ${this.id}`;
-        }
-
         if (issue.path.length > 0) {
-          message += ` on path ${issue.path.join(".")}`;
+          if (this.id) {
+            message += `. Subscription starts from ${this.id}`;
+          }
+
+          message += ` and the value is on path ${issue.path.join(".")}`;
         }
 
         return message;
       })
       .join("\n");
+
+    return result;
   }
 
   prependPath(item: string) {

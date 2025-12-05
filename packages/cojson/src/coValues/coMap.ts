@@ -1,5 +1,8 @@
 import { CoID, RawCoValue } from "../coValue.js";
-import { AvailableCoValueCore } from "../coValueCore/coValueCore.js";
+import {
+  AvailableCoValueCore,
+  DecryptedTransaction,
+} from "../coValueCore/coValueCore.js";
 import { AgentID, RawCoID, TransactionID } from "../ids.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfromSessionID.js";
@@ -64,7 +67,7 @@ export class RawCoMap<
   totalValidTransactions: number = 0;
   version: number = 0;
 
-  private resetInternalState() {
+  protected resetInternalState() {
     this.ops = {};
     this.latest = {};
     this.knownTransactions = { [this.core.id]: 0 };
@@ -115,7 +118,8 @@ export class RawCoMap<
       NonNullable<(typeof ops)[keyof typeof ops]>
     >();
 
-    for (const { txID, changes, madeAt, tx } of newValidTransactions) {
+    for (const transaction of newValidTransactions) {
+      const { txID, changes, madeAt, tx } = transaction;
       for (let changeIdx = 0; changeIdx < changes.length; changeIdx++) {
         const change = changes[changeIdx] as MapOpPayload<
           keyof Shape & string,
@@ -139,6 +143,8 @@ export class RawCoMap<
           changedEntries.set(change.key, entries);
         }
       }
+
+      this.handleNewTransaction(transaction);
     }
 
     for (const entries of changedEntries.values()) {
@@ -151,6 +157,8 @@ export class RawCoMap<
 
     this.totalValidTransactions += newValidTransactions.length;
   }
+
+  handleNewTransaction(transaction: DecryptedTransaction) {}
 
   rebuildFromCore() {
     this.version += 1;
@@ -175,16 +183,12 @@ export class RawCoMap<
 
   /** @category 4. Time travel */
   atTime(time: number): this {
-    if (time >= this.latestTxMadeAt) {
-      return this;
-    } else {
-      const clone = Object.create(this) as RawCoMap<Shape, Meta>;
+    const clone = Object.create(this) as RawCoMap<Shape, Meta>;
 
-      clone.atTimeFilter = time;
-      clone.latest = {};
+    clone.atTimeFilter = time;
+    clone.latest = {};
 
-      return clone as this;
-    }
+    return clone as this;
   }
 
   /** @internal */

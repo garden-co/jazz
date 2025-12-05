@@ -2,7 +2,7 @@ export const metadata = {
   description: "Learn how to set up Jazz in your React Native Expo application."
 };
 
-import { Alert, CodeGroup } from "@/components/forMdx";
+import { Alert, CodeGroup, FileName } from "@/components/forMdx";
 
 # React Native (Expo) Installation and Setup
 
@@ -28,7 +28,7 @@ Tested with:
 
 <CodeGroup>
 ```bash
-npx create-expo-app -e with-tailwindcss my-jazz-app
+npx create-expo-app my-jazz-app
 cd my-jazz-app
 npx expo prebuild
 ```
@@ -42,17 +42,15 @@ npx expo prebuild
 npx expo install expo-linking expo-secure-store expo-sqlite expo-file-system @react-native-community/netinfo expo-image-manipulator
 
 # React Native polyfills
-npm i -S @azure/core-asynciterator-polyfill react-native-url-polyfill readable-stream react-native-get-random-values @bacons/text-decoder react-native-fast-encoder
+npm install @azure/core-asynciterator-polyfill react-native-url-polyfill readable-stream react-native-get-random-values react-native-fast-encoder
 
 # Jazz dependencies
-npm i -S jazz-tools
+npm install jazz-tools
 ```
 </CodeGroup>
 
-<Alert variant="info" className="mt-4" title="Note">
-  - Requires at least Node.js v20. 
-  - Hermes has added support for `atob` and `btoa` in React Native 0.74. If you are using earlier versions, you may also need to polyfill `atob` and `btoa` in your `package.json`.
-   See our [Troubleshooting Guide](/docs/troubleshooting) for quick fixes.
+<Alert variant="info" className="mt-4" title="Note"> 
+Requires at least Node.js v20. See our [Troubleshooting Guide](/docs/troubleshooting) for quick fixes.
 </Alert>
 
 #### Fix incompatible dependencies
@@ -65,134 +63,12 @@ npx expo install --fix
 ```
 </CodeGroup>
 
-### Configure Metro
-
-#### Regular repositories
-
-If you are not working within a monorepo, create a new file `metro.config.js` in the root of your project with the following content:
-
-<CodeGroup>
-```ts
-// @noErrors: 2304
-// metro.config.js
-const { getDefaultConfig } = require("expo/metro-config");
-const { withNativeWind } = require("nativewind/metro");
-
-const config = getDefaultConfig(__dirname);
-
-config.resolver.sourceExts = ["mjs", "js", "json", "ts", "tsx", "cjs"];
-config.resolver.requireCycleIgnorePatterns = [/(^|\/|\\)node_modules($|\/|\\)/];
-
-module.exports = withNativeWind(config, { input: "./src/global.css" });
-
-```
-</CodeGroup>
-
-#### Monorepos
-
-For monorepos, use the following `metro.config.js`:
-
-<CodeGroup>
-```ts
-// @noErrors: 2304
-// metro.config.js
-const { getDefaultConfig } = require("expo/metro-config");
-const { FileStore } = require("metro-cache");
-const { withNativeWind } = require("nativewind/metro");
-
-const path = require("path");
-
-// eslint-disable-next-line no-undef
-const projectRoot = __dirname;
-const workspaceRoot = path.resolve(projectRoot, "../..");
-
-const config = getDefaultConfig(projectRoot);
-
-config.watchFolders = [workspaceRoot];
-config.resolver.nodeModulesPaths = [
-  path.resolve(projectRoot, "node_modules"),
-  path.resolve(workspaceRoot, "node_modules"),
-];
-config.resolver.sourceExts = ["mjs", "js", "json", "ts", "tsx", "cjs"];
-config.resolver.requireCycleIgnorePatterns = [/(^|\/|\\)node_modules($|\/|\\)/];
-config.cacheStores = [
-  new FileStore({
-    root: path.join(projectRoot, "node_modules", ".cache", "metro"),
-  }),
-];
-
-module.exports = withNativeWind(config, { input: "./src/global.css" });
-```
-</CodeGroup>
-
-### Additional monorepo configuration (for pnpm)
-
-If you're using `pnpm`, you'll need to make sure that your expo app's `package.json` has this:
-
-<CodeGroup>
-```json
-// package.json
-{
-  "main": "index.js",
-  ...
-}
-```
-</CodeGroup>
-
-For more information, refer to [this Expo monorepo example](https://github.com/byCedric/expo-monorepo-example#pnpm-workarounds).
-
 ### Add polyfills
+Jazz provides a quick way for you to apply the polyfills in your project. Import them in your root `_layout.tsx` component:
 
-Create a file `polyfills.js` at the project root with the following content:
-
+<FileName>app/_layout.tsx</FileName>
 <CodeGroup>
-```ts
-// @noErrors: 7016
-// polyfills.js
-import { polyfillGlobal } from 'react-native/Libraries/Utilities/PolyfillFunctions';
-
-import { ReadableStream } from "readable-stream";
-polyfillGlobal("ReadableStream", () => ReadableStream); // polyfill ReadableStream
-import TextEncoder from 'react-native-fast-encoder'
-import "@azure/core-asynciterator-polyfill"; // polyfill Async Iterator
-import "@bacons/text-decoder/install"; // polyfill Text Decoder
-import 'react-native-get-random-values'; // polyfill getRandomValues
-
-// The 'react-native-fast-encoder' package does not automatically install the polyfill, so we need to do it manually
-const originalTextEncoder = new window.TextEncoder()
-window.TextEncoder = TextEncoder;
-window.TextDecoder = TextEncoder;
-TextEncoder.prototype.encodeInto = (source: string, destination: Uint8Array<ArrayBufferLike>) => {
-  return originalTextEncoder.encodeInto(source, destination)
-}
-```
-</CodeGroup>
-
-Update `_layout.tsx`:
-
-<CodeGroup>
-```ts
-// _layout.tsx
-import "../global.css";
-// [!code ++:1]
-import "../../polyfills";
-import { Slot } from "expo-router";
-
-export default function Layout() {
-	return <Slot />;
-}
-```
-</CodeGroup>
-
-Lastly, ensure that the `"main"` field in your `package.json` points to `index.js`:
-
-<CodeGroup>
-```json
-// package.json
-{
-  "main": "index.js",
-  ...
-}
+```tsx project-setup/_layout.tsx
 ```
 </CodeGroup>
 
@@ -217,25 +93,13 @@ npx expo run:android
 ```
 </CodeGroup>
 
-## Verification
-
-Ready to see if everything's working? Let's fire up your app:
-
-<CodeGroup>
-```sh
-npx expo run:ios
-# or
-npx expo run:android
-```
-</CodeGroup>
-
 If all goes well, your app should start up without any angry red error screens. Take a quick look at the Metro console too - no Jazz-related errors there means you're all set! If you see your app's UI come up smoothly, you've nailed the installation.
 
 If you run into any issues that aren't covered in the Common Issues section, [drop by our Discord for help](https://discord.gg/utDMjHYg42).
 
 ## Common Issues
 
-- **Metro bundler errors**: If you see errors about missing polyfills, ensure all polyfills are properly imported.
+- **Metro bundler errors**: If you see errors about missing polyfills, ensure you installed them all and are importing them correctly
 - **iOS build failures**: Make sure you've run `pod install` after adding the dependencies.
 - **Android build failures**: Ensure you've run `npx expo prebuild` to generate native code.
 - **Expo Go incompatibility**: Remember that Jazz requires a development build and won't work with Expo Go.

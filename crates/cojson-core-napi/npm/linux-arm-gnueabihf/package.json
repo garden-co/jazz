@@ -1,6 +1,6 @@
 {
   "name": "cojson-core-napi-linux-arm-gnueabihf",
-  "version": "0.19.4",
+  "version": "0.19.8",
   "cpu": [
     "arm"
   ],

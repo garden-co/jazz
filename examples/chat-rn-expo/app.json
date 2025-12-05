@@ -27,6 +27,15 @@
     "web": {
       "favicon": "./assets/favicon.png"
     },
-    "plugins": ["expo-secure-store", "expo-sqlite"]
+    "plugins": [
+      "expo-secure-store",
+      "expo-sqlite",
+      [
+        "react-native-quick-crypto",
+        {
+          "sodiumEnabled": true
+        }
+      ]
+    ]
   }
 }

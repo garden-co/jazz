@@ -40,6 +40,7 @@ export type {
   AccountClass,
   AccountCreationProps,
   BaseProfileShape,
+  ExportedCoValue,
 } from "./internal.js";
 
 export {
@@ -137,3 +138,7 @@ export {
 } from "./coValues/request.js";
 
 export * from "./ssr/index.js";
+
+export { captureStack } from "./subscribe/errorReporting.js";
+
+export * as jazzConfig from "./config.js";

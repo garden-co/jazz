@@ -1297,6 +1297,50 @@ describe("subscribeToCoValue", () => {
     expect(result.data[chunks]).toBe("new entry");
   });
 
+  it("should emit not emit when the content doesn't bring real changes", async () => {
+    const alice = await createJazzTestAccount();
+
+    const Person = co.map({
+      name: z.string(),
+    });
+    const PersonList = co.list(Person);
+
+    const group = Group.create(alice);
+
+    const person1 = Person.create({ name: "John" }, group);
+    const person2 = Person.create({ name: "Jane" }, group);
+
+    const personList = PersonList.create([person1, person2], group);
+
+    const spy = vi.fn();
+    // Test subscribing to the large coValue
+    const unsubscribe = subscribeToCoValue(
+      coValueClassFromCoValueClassOrSchema(PersonList),
+      personList.$jazz.id,
+      {
+        loadAs: alice,
+        resolve: {
+          $each: true,
+        },
+        syncResolution: true,
+      },
+      spy,
+    );
+
+    onTestFinished(unsubscribe);
+
+    expect(spy).toHaveBeenCalledTimes(1);
+
+    // Test that updates to the large coValue are properly subscribed
+    spy.mockClear();
+
+    group.addMember("everyone", "reader");
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    expect(spy).not.toHaveBeenCalled();
+  });
+
   it.fails(
     "should return the latest loaded state when a deeply loaded child becomes not accessible",
     async () => {

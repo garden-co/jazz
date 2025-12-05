@@ -1,5 +1,13 @@
-import { beforeEach, describe, expect, test, vi } from "vitest";
-import { CoPlainText, Group, Loaded, co, loadCoValue, z } from "../exports.js";
+import { assert, beforeEach, describe, expect, test, vi } from "vitest";
+import {
+  CoPlainText,
+  CoValueLoadingState,
+  Group,
+  Loaded,
+  co,
+  loadCoValue,
+  z,
+} from "../exports.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { assertLoaded, waitFor } from "./utils.js";
 import type { Account } from "jazz-tools";
@@ -712,5 +720,64 @@ describe("co.discriminatedUnion", () => {
         }
       }
     });
+  });
+
+  test("cannot create a co.discriminatedUnion member if it has no matching discriminator value", async () => {
+    const Dog = co.map({
+      type: z.literal("dog"),
+      name: z.string(),
+    });
+    const Cat = co.map({
+      type: z.literal("cat"),
+      name: z.string(),
+    });
+    const Parrot = co.map({
+      type2: z.literal("parrot"),
+      name: z.string(),
+    });
+    const Pet = co.discriminatedUnion("type", [Dog, Cat, Parrot]);
+    const Pets = co.list(Pet);
+
+    expect(() => Pets.create([{ type2: "parrot", name: "Polly" }])).toThrow(
+      "co.discriminatedUnion() of collaborative types with no matching discriminator value found",
+    );
+  });
+
+  test("can load a discriminated union CoList even if some elements are not accessible", async () => {
+    const Dog = co.map({
+      type: z.literal("dog"),
+      name: z.string(),
+    });
+    const Cat = co.map({
+      type: z.literal("cat"),
+      name: z.string(),
+    });
+    const Pet = co.discriminatedUnion("type", [Dog, Cat]);
+    const Pets = co.list(Pet);
+
+    const publicGroup = Group.create().makePublic();
+    const privateGroup = Group.create();
+    const pets = Pets.create(
+      [
+        Dog.create({ type: "dog", name: "Rex" }, publicGroup),
+        Cat.create({ type: "cat", name: "Whiskers" }, privateGroup),
+      ],
+      { owner: publicGroup },
+    );
+
+    const anotherAccount = await createJazzTestAccount();
+    const loadedPets = await Pets.load(pets.$jazz.id, {
+      resolve: { $each: { $onError: "catch" } },
+      loadAs: anotherAccount,
+    });
+
+    assertLoaded(loadedPets);
+    expect(loadedPets.length).toEqual(2);
+    assert(loadedPets[0]);
+    assertLoaded(loadedPets[0]);
+    expect(loadedPets[0].type).toEqual("dog");
+    expect(loadedPets[1]?.$jazz.loadingState).toEqual(
+      CoValueLoadingState.UNAUTHORIZED,
+    );
   });
 });

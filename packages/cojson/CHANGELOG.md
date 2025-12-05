@@ -1,5 +1,35 @@
 # cojson
 
+## 0.19.8
+
+### Patch Changes
+
+- 93e4a34: Improved the transaction revalidation system to consider parent groups and rebuild only when the validity of the transactions changes
+  - cojson-core-wasm@0.19.8
+  - cojson-core-napi@0.19.8
+
+## 0.19.7
+
+### Patch Changes
+
+- cojson-core-wasm@0.19.7
+- cojson-core-napi@0.19.7
+
+## 0.19.6
+
+### Patch Changes
+
+- cojson-core-wasm@0.19.6
+- cojson-core-napi@0.19.6
+
+## 0.19.5
+
+### Patch Changes
+
+- 343c2e4: Improve the permission checks performance by optimizing the parent groups retrival
+  - cojson-core-wasm@0.19.5
+  - cojson-core-napi@0.19.5
+
 ## 0.19.4
 
 ### Patch Changes

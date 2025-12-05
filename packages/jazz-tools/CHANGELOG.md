@@ -1,5 +1,53 @@
 # jazz-tools
 
+## 0.19.8
+
+### Patch Changes
+
+- 21f7d34: Improve error logging in subscriptions and add stacktraces on errors coming from React hooks.
+
+  Added jazzConfig.setCustomErrorReporter API to intercept subscription errors and send them to an error tracker.
+
+- b22ad89: Narrow down `.load` return type to not include `loading` CoValues
+- 28b23dd: Added polyfills helper to React Native and Expo exports
+- Updated dependencies [93e4a34]
+  - cojson@0.19.8
+  - cojson-storage-indexeddb@0.19.8
+  - cojson-transport-ws@0.19.8
+
+## 0.19.7
+
+### Patch Changes
+
+- e113a79: Avoid migrating unauthorized CoValues
+  - cojson@0.19.7
+  - cojson-storage-indexeddb@0.19.7
+  - cojson-transport-ws@0.19.7
+
+## 0.19.6
+
+### Patch Changes
+
+- 23782f0: Upgraded `react-native-quick-crypto` to version 1.0.0-beta.21 and switch to using the native blake3 in RNQuickCrypto
+
+  Breaking: any app that uses RNQuickCrypto will have to upgrade to `react-native-quick-crypto@1.0.0-beta.21`
+
+- 56d74e4: Make createAs a public API that can be used to create controlled accounts from workers
+- bc9120b: - Added value.$jazz.export() API and preloaded option in React hooks, to make it possible to pass raw covalue data from React server components to client components
+  - Prevent the inspector from rendering during SSR
+  - cojson@0.19.6
+  - cojson-storage-indexeddb@0.19.6
+  - cojson-transport-ws@0.19.6
+
+## 0.19.5
+
+### Patch Changes
+
+- Updated dependencies [343c2e4]
+  - cojson@0.19.5
+  - cojson-storage-indexeddb@0.19.5
+  - cojson-transport-ws@0.19.5
+
 ## 0.19.4
 
 ### Patch Changes

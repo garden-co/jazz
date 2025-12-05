@@ -20,6 +20,7 @@ import {
   Group,
   ID,
   MaybeLoaded,
+  Settled,
   LoadedAndRequired,
   unstable_mergeBranch,
   RefsToResolve,
@@ -295,7 +296,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
       resolve?: RefsToResolveStrict<F, R>;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<MaybeLoaded<Resolved<F, R>>> {
+  ): Promise<Settled<Resolved<F, R>>> {
     return loadCoValueWithoutMe(this, id, options ?? {});
   }
 
@@ -988,7 +989,7 @@ export class FileStream extends CoValueBase implements CoValue {
       loadAs?: Account | AnonymousJazzAgent;
       allowUnfinished?: boolean;
     },
-  ): Promise<MaybeLoaded<FileStream>> {
+  ): Promise<Settled<FileStream>> {
     const stream = await loadCoValueWithoutMe(this, id, options);
 
     /**

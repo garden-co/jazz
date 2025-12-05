@@ -1,5 +1,54 @@
 # jazz-run
 
+## 0.19.8
+
+### Patch Changes
+
+- Updated dependencies [21f7d34]
+- Updated dependencies [b22ad89]
+- Updated dependencies [93e4a34]
+- Updated dependencies [28b23dd]
+  - jazz-tools@0.19.8
+  - cojson@0.19.8
+  - jazz-webhook@0.19.8
+  - cojson-storage-sqlite@0.19.8
+  - cojson-transport-ws@0.19.8
+
+## 0.19.7
+
+### Patch Changes
+
+- Updated dependencies [e113a79]
+  - jazz-tools@0.19.7
+  - jazz-webhook@0.19.7
+  - cojson@0.19.7
+  - cojson-storage-sqlite@0.19.7
+  - cojson-transport-ws@0.19.7
+
+## 0.19.6
+
+### Patch Changes
+
+- Updated dependencies [23782f0]
+- Updated dependencies [56d74e4]
+- Updated dependencies [bc9120b]
+  - jazz-tools@0.19.6
+  - jazz-webhook@0.19.6
+  - cojson@0.19.6
+  - cojson-storage-sqlite@0.19.6
+  - cojson-transport-ws@0.19.6
+
+## 0.19.5
+
+### Patch Changes
+
+- Updated dependencies [343c2e4]
+  - cojson@0.19.5
+  - cojson-storage-sqlite@0.19.5
+  - cojson-transport-ws@0.19.5
+  - jazz-tools@0.19.5
+  - jazz-webhook@0.19.5
+
 ## 0.19.4
 
 ### Patch Changes

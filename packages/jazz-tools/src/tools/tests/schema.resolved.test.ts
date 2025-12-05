@@ -248,11 +248,13 @@ describe("Schema.resolved()", () => {
 
         const account = await AccountWithProfile.createAs(serverAccount, {
           creationProps: { name: "Hermes Puggington" },
+          onCreate: async (account) => {
+            account.$jazz.set(
+              "profile",
+              co.profile().create({ name: "Hermes Puggington" }, publicGroup),
+            );
+          },
         });
-        account.$jazz.set(
-          "profile",
-          co.profile().create({ name: "Hermes Puggington" }, publicGroup),
-        );
 
         const loadedAccount = await AccountWithProfile.load(account.$jazz.id, {
           loadAs: clientAccount,
@@ -405,11 +407,13 @@ describe("Schema.resolved()", () => {
 
         const account = await AccountWithProfile.createAs(serverAccount, {
           creationProps: { name: "Hermes Puggington" },
+          onCreate: async (account) => {
+            account.$jazz.set(
+              "profile",
+              co.profile().create({ name: "Hermes Puggington" }, publicGroup),
+            );
+          },
         });
-        account.$jazz.set(
-          "profile",
-          co.profile().create({ name: "Hermes Puggington" }, publicGroup),
-        );
 
         const updates: co.loaded<typeof AccountWithProfile>[] = [];
         AccountWithProfile.subscribe(
@@ -559,18 +563,21 @@ describe("Schema.resolved()", () => {
 
         const account = await TestAccount.createAs(serverAccount, {
           creationProps: { name: "Hermes Puggington" },
+          onCreate: async (account) => {
+            account.$jazz.set(
+              "profile",
+              TestAccount.shape.profile.create(
+                { name: "Hermes Puggington" },
+                publicGroup,
+              ),
+            );
+            account.$jazz.set(
+              "root",
+              TestAccount.shape.root.create({ text: "Test" }, publicGroup),
+            );
+          },
         });
-        account.$jazz.set(
-          "profile",
-          TestAccount.shape.profile.create(
-            { name: "Hermes Puggington" },
-            publicGroup,
-          ),
-        );
-        account.$jazz.set(
-          "root",
-          TestAccount.shape.root.create({ text: "Test" }, publicGroup),
-        );
+
         const accountList = AccountList.create([account], publicGroup);
 
         const branchAccountList = await AccountList.load(accountList.$jazz.id, {
