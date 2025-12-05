@@ -56,9 +56,6 @@ export const JazzAccount = co
       onCreate: (newGroup) => {
         newGroup.addMember("everyone", "reader");
       },
-      onInlineCreate: (newGroup) => {
-        newGroup.addMember("everyone", "reader");
-      },
     }),
     root: JazzAccountRoot,
   })

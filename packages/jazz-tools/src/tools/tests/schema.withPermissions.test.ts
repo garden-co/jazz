@@ -93,13 +93,11 @@ describe("Schema.withPermissions()", () => {
     ).toThrow();
   });
 
-  describe("onCreate", () => {
-    describe("allows configuring a CoValue's group when using .create() without providing an explicit owner", () => {
+  describe("default", () => {
+    describe("defines a default owner to be used when no explicit owner is passed to .create()", () => {
       test("for CoMap", async () => {
         const TestMap = co.map({ name: co.plainText() }).withPermissions({
-          onCreate(newGroup) {
-            newGroup.makePublic();
-          },
+          default: () => Group.create().makePublic(),
         });
 
         const map = TestMap.create({ name: "Hi!" });
@@ -114,9 +112,7 @@ describe("Schema.withPermissions()", () => {
 
       test("for CoList", async () => {
         const TestList = co.list(z.string()).withPermissions({
-          onCreate(newGroup) {
-            newGroup.makePublic();
-          },
+          default: () => Group.create().makePublic(),
         });
 
         const list = TestList.create(["a", "b", "c"]);
@@ -130,9 +126,7 @@ describe("Schema.withPermissions()", () => {
 
       test("for CoFeed", async () => {
         const TestFeed = co.feed(z.string()).withPermissions({
-          onCreate(newGroup) {
-            newGroup.makePublic();
-          },
+          default: () => Group.create().makePublic(),
         });
 
         const feed = TestFeed.create(["a", "b", "c"]);
@@ -146,9 +140,7 @@ describe("Schema.withPermissions()", () => {
 
       test("for CoPlainText", async () => {
         const TestPlainText = co.plainText().withPermissions({
-          onCreate(newGroup) {
-            newGroup.makePublic();
-          },
+          default: () => Group.create().makePublic(),
         });
 
         const plainText = TestPlainText.create("Hello");
@@ -162,9 +154,7 @@ describe("Schema.withPermissions()", () => {
 
       test("for CoRichText", async () => {
         const TestRichText = co.richText().withPermissions({
-          onCreate(newGroup) {
-            newGroup.makePublic();
-          },
+          default: () => Group.create().makePublic(),
         });
 
         const richText = TestRichText.create("Hello");
@@ -179,9 +169,7 @@ describe("Schema.withPermissions()", () => {
       describe("for FileStream", async () => {
         test(".create()", async () => {
           const TestFileStream = co.fileStream().withPermissions({
-            onCreate(newGroup) {
-              newGroup.makePublic();
-            },
+            default: () => Group.create().makePublic(),
           });
 
           const fileStream = TestFileStream.create();
@@ -202,9 +190,7 @@ describe("Schema.withPermissions()", () => {
 
         test(".createFromBlob()", async () => {
           const TestFileStream = co.fileStream().withPermissions({
-            onCreate(newGroup) {
-              newGroup.makePublic();
-            },
+            default: () => Group.create().makePublic(),
           });
 
           const blob = new Blob(["test"], { type: "text/plain" });
@@ -225,9 +211,7 @@ describe("Schema.withPermissions()", () => {
 
         test(".createFromArrayBuffer()", async () => {
           const TestFileStream = co.fileStream().withPermissions({
-            onCreate(newGroup) {
-              newGroup.makePublic();
-            },
+            default: () => Group.create().makePublic(),
           });
 
           const arrayBuffer = new TextEncoder().encode("test").buffer;
@@ -254,9 +238,7 @@ describe("Schema.withPermissions()", () => {
 
       test("for CoVector", async () => {
         const TestVector = co.vector(1).withPermissions({
-          onCreate(newGroup) {
-            newGroup.makePublic();
-          },
+          default: () => Group.create().makePublic(),
         });
 
         const vector = TestVector.create([1]);
@@ -269,11 +251,9 @@ describe("Schema.withPermissions()", () => {
       });
     });
 
-    test("configuration callback is not run when providing an explicit owner", async () => {
+    test("the default owner is not used when providing an explicit owner", async () => {
       const TestMap = co.map({ name: co.plainText() }).withPermissions({
-        onCreate(newGroup) {
-          newGroup.makePublic();
-        },
+        default: () => Group.create().makePublic(),
       });
       const map = TestMap.create({ name: "Hi!" }, { owner: Group.create() });
 
@@ -642,6 +622,139 @@ describe("Schema.withPermissions()", () => {
     });
   });
 
+  describe("onCreate", () => {
+    test("is called when creating a CoValue with .create() without explicit owner", async () => {
+      let onCreateGroup: Group | undefined;
+
+      const TestMap = co.map({ name: co.plainText() }).withPermissions({
+        onCreate(newGroup) {
+          onCreateGroup = newGroup;
+          newGroup.addMember(anotherAccount, "writer");
+        },
+      });
+
+      const map = TestMap.create({ name: "Hello" });
+
+      expect(onCreateGroup).toBeDefined();
+      expect(onCreateGroup?.$jazz.id).toEqual(map.$jazz.owner.$jazz.id);
+      expect(map.$jazz.owner.getRoleOf(anotherAccount.$jazz.id)).toEqual(
+        "writer",
+      );
+    });
+
+    test("is called when creating a CoValue with .create() with explicit owner", async () => {
+      let onCreateCalled = false;
+
+      const TestMap = co.map({ name: co.plainText() }).withPermissions({
+        onCreate() {
+          onCreateCalled = true;
+        },
+      });
+
+      const explicitOwner = Group.create();
+      const map = TestMap.create({ name: "Hello" }, { owner: explicitOwner });
+
+      expect(onCreateCalled).toBe(true);
+      expect(map.$jazz.owner.$jazz.id).toEqual(explicitOwner.$jazz.id);
+    });
+
+    test("is called when creating a CoValue inline", async () => {
+      let onCreateGroup: Group | undefined;
+
+      const TestMap = co.map({
+        name: co.plainText().withPermissions({
+          onCreate(newGroup) {
+            onCreateGroup = newGroup;
+            newGroup.addMember(anotherAccount, "reader");
+          },
+        }),
+      });
+
+      const parentOwner = Group.create({ owner: me });
+      const map = TestMap.create({ name: "Hello" }, { owner: parentOwner });
+
+      expect(onCreateGroup).toBeDefined();
+      expect(onCreateGroup?.$jazz.id).toEqual(map.name.$jazz.owner.$jazz.id);
+      expect(map.name.$jazz.owner.getRoleOf(anotherAccount.$jazz.id)).toEqual(
+        "reader",
+      );
+    });
+
+    test("works with onInlineCreate", async () => {
+      let onCreateCalled = false;
+
+      const TestMap = co.map({
+        name: co.plainText().withPermissions({
+          onCreate(newGroup) {
+            onCreateCalled = true;
+            newGroup.addMember(anotherAccount, "reader");
+          },
+          onInlineCreate: "extendsContainer",
+        }),
+      });
+
+      const parentOwner = Group.create({ owner: me });
+      const map = TestMap.create({ name: "Hello" }, { owner: parentOwner });
+
+      expect(onCreateCalled).toBe(true);
+      expect(map.name.$jazz.owner.getRoleOf(anotherAccount.$jazz.id)).toEqual(
+        "reader",
+      );
+    });
+
+    test("works when the field is optional", async () => {
+      let onCreateGroup: Group | undefined;
+      const TestMap = co.map({
+        name: co
+          .plainText()
+          .withPermissions({
+            onCreate(newGroup) {
+              onCreateGroup = newGroup;
+            },
+          })
+          .optional(),
+      });
+      const map = TestMap.create({ name: "Hello" });
+      expect(onCreateGroup?.$jazz.id).toEqual(map.name?.$jazz.owner.$jazz.id);
+    });
+
+    test("works when the field is a discriminated union", async () => {
+      let onCreateCalledOn = "";
+      const Dog = co
+        .map({
+          type: z.literal("dog"),
+          name: z.string(),
+        })
+        .withPermissions({
+          onCreate() {
+            onCreateCalledOn = "dog";
+          },
+        });
+      const Cat = co
+        .map({
+          type: z.literal("cat"),
+          name: z.string(),
+        })
+        .withPermissions({
+          onCreate() {
+            onCreateCalledOn = "cat";
+          },
+        });
+      const Pet = co.discriminatedUnion("type", [Dog, Cat]);
+      const Person = co.map({
+        pet: Pet,
+      });
+
+      const person = Person.create({
+        pet: { type: "dog", name: "Rex" },
+      });
+      expect(onCreateCalledOn).toEqual("dog");
+
+      person.$jazz.set("pet", { type: "cat", name: "Whiskers" });
+      expect(onCreateCalledOn).toEqual("cat");
+    });
+  });
+
   test("withPermissions() can be used with recursive schemas", () => {
     const Person = co.map({
       name: z.string(),
@@ -671,7 +784,9 @@ describe("Schema.withPermissions()", () => {
 describe("setDefaultSchemaPermissions", () => {
   afterEach(() => {
     setDefaultSchemaPermissions({
+      default: () => Group.create(),
       onInlineCreate: "extendsContainer",
+      onCreate: undefined,
     });
   });
 
@@ -686,6 +801,29 @@ describe("setDefaultSchemaPermissions", () => {
 
     const map = TestMap.create({ name: "Hello" });
     expect(map.name.$jazz.owner.$jazz.id).toEqual(map.$jazz.owner.$jazz.id);
+  });
+
+  test("only overrides the provided options", async () => {
+    const anotherAccount = await createJazzTestAccount();
+    setDefaultSchemaPermissions({
+      onInlineCreate: "sameAsContainer",
+    });
+    setDefaultSchemaPermissions({
+      onCreate: (newGroup) => {
+        newGroup.addMember(anotherAccount, "reader");
+      },
+    });
+
+    const TestMap = co.map({
+      name: co.plainText(),
+    });
+    const map = TestMap.create({ name: "Hello" });
+    await map.$jazz.waitForSync();
+
+    const parentOwner = map.$jazz.owner;
+    const childOwner = map.name.$jazz.owner;
+    expect(parentOwner.$jazz.id).toEqual(childOwner.$jazz.id);
+    expect(childOwner.getRoleOf(anotherAccount.$jazz.id)).toEqual("reader");
   });
 
   test("does not modify permissions for existing schemas", () => {

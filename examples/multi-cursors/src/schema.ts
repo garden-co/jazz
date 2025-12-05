@@ -11,12 +11,7 @@ export const CursorProfile = co
   })
   .withPermissions({
     // The profile info is visible to everyone
-    onCreate(newGroup) {
-      newGroup.makePublic();
-    },
-    onInlineCreate(newGroup) {
-      newGroup.makePublic();
-    },
+    onCreate: (newGroup) => newGroup.makePublic(),
   });
 
 export const CursorRoot = co.map({
