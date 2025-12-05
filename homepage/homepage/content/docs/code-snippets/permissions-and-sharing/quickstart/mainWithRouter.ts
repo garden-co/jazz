@@ -6,7 +6,7 @@ import { assertLoaded } from "jazz-tools";
 
 // @ts-expect-error Not a real vite app
 const apiKey = import.meta.env.VITE_JAZZ_API_KEY;
-const contextManager = new JazzBrowserContextManager();
+const contextManager = new JazzBrowserContextManager<typeof JazzFestAccount>();
 await contextManager.createContext({
   sync: {
     peer: `wss://cloud.jazz.tools?key=${apiKey}`,
