@@ -1,10 +1,17 @@
-import { CoID, RawCoValue } from "cojson";
-import { useCallback, useEffect, useState } from "react";
-import { PageInfo } from "./types.js";
+import { ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import type { CoID, RawCoValue } from "cojson";
+import { Router, RouterContext } from "./context.js";
+import { PageInfo } from "../viewer/types.js";
 
 const STORAGE_KEY = "jazz-inspector-paths";
 
-export function usePagePath(defaultPath?: PageInfo[]) {
+export function InMemoryRouterProvider({
+  children,
+  defaultPath,
+}: {
+  children: ReactNode;
+  defaultPath?: PageInfo[];
+}) {
   const [path, setPath] = useState<PageInfo[]>(() => {
     if (typeof window === "undefined") return [];
     const stored = localStorage.getItem(STORAGE_KEY);
@@ -29,38 +36,33 @@ export function usePagePath(defaultPath?: PageInfo[]) {
     }
   }, [defaultPath, path, updatePath]);
 
-  const addPages = useCallback(
-    (newPages: PageInfo[]) => {
+  const router: Router = useMemo(() => {
+    const addPages = (newPages: PageInfo[]) => {
       updatePath([...path, ...newPages]);
-    },
-    [path, updatePath],
-  );
+    };
 
-  const goToIndex = useCallback(
-    (index: number) => {
+    const goToIndex = (index: number) => {
       updatePath(path.slice(0, index + 1));
-    },
-    [path, updatePath],
-  );
+    };
 
-  const setPage = useCallback(
-    (coId: CoID<RawCoValue>) => {
+    const setPage = (coId: CoID<RawCoValue>) => {
       updatePath([{ coId, name: "Root" }]);
-    },
-    [updatePath],
-  );
+    };
 
-  const goBack = useCallback(() => {
-    if (path.length > 1) {
+    const goBack = () => {
       updatePath(path.slice(0, path.length - 1));
-    }
+    };
+
+    return {
+      path,
+      addPages,
+      goToIndex,
+      setPage,
+      goBack,
+    };
   }, [path, updatePath]);
 
-  return {
-    path,
-    setPage,
-    addPages,
-    goToIndex,
-    goBack,
-  };
+  return (
+    <RouterContext.Provider value={router}>{children}</RouterContext.Provider>
+  );
 }

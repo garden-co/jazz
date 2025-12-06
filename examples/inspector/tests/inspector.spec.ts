@@ -1,5 +1,4 @@
 import { expect, test } from "@playwright/test";
-import { FileStream, Group } from "jazz-tools";
 import { createFile, createOrganization } from "./lib/data";
 import {
   addAccount,
@@ -17,13 +16,16 @@ test("should add and delete account in dropdown", async ({ page }) => {
   await addAccount(page, accountID, accountSecret);
 
   await expect(page.getByText("Jazz CoValue Inspector")).toBeVisible();
-  await page
-    .getByLabel("Account to inspect")
-    .selectOption(`Inspector test account <${accountID}>`);
+
+  await expect(
+    page.getByRole("button", { name: `Inspector test account <${accountID}>` }),
+  ).toBeVisible();
 
   await page.getByRole("button", { name: "Remove account" }).click();
   await expect(page.getByText("Jazz CoValue Inspector")).not.toBeVisible();
-  await expect(page.getByText("Add an account to inspect")).toBeVisible();
+  await expect(
+    page.getByText("Select an account to connect to the inspector."),
+  ).toBeVisible();
   await expect(
     page.getByText(`Inspector test account <${accountID}>`),
   ).not.toBeVisible();
@@ -33,7 +35,7 @@ test("should inspect account", async ({ page }) => {
   await addAccount(page, accountID, accountSecret);
   await page.getByRole("button", { name: "Inspect my account" }).click();
 
-  await expect(page.getByRole("heading", { name: accountID })).toBeVisible();
+  await expect(page.locator("article").getByText(accountID)).toBeVisible();
   await expect(page.getByText("👤 Account")).toBeVisible();
 
   await page.getByRole("button", { name: "profile {} CoMap name:" }).click();
@@ -48,9 +50,7 @@ test("should inspect CoValue", async ({ page }) => {
   await inspectCoValue(page, organization.$jazz.id);
 
   await expect(page.getByText(/Garden Computing/)).toHaveCount(3);
-  await expect(
-    page.getByRole("heading", { name: organization.$jazz.id }),
-  ).toBeVisible();
+  await expect(page.getByText(organization.$jazz.id)).toBeVisible();
   await expect(page.getByText("Role: admin")).toBeVisible();
 
   await page.getByRole("button", { name: /projects/ }).click();
@@ -197,6 +197,7 @@ test("should show Group members", async ({ page }) => {
   await expect(row2.getByRole("cell").nth(1)).toHaveText("admin");
 
   await page
+    .locator("article")
     .getByRole("button", {
       name: `Inspector test account <${account.$jazz.id}>`,
     })
