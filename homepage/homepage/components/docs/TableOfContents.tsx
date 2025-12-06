@@ -4,6 +4,7 @@ import type { Toc, TocEntry } from "@stefanprobst/rehype-extract-toc";
 import { clsx } from "clsx";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { CopyAsMarkdownButton } from "./CopyAsMarkdownButton";
 
 const TocList = ({
   items,
@@ -116,6 +117,7 @@ export function TableOfContents({
 
   return (
     <div className={className}>
+      <CopyAsMarkdownButton />
       <p className="font-medium text-highlight mb-3">On this page</p>
       <TocList items={itemsUnderH1} level={0} currentId={currentId} />
     </div>
