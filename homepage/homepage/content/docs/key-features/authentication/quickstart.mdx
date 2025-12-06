@@ -1,4 +1,4 @@
-import { Alert, CodeGroup, ContentByFramework, FileName, ReactLogo, SvelteLogo, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
+import { Alert, CodeGroup, ContentByFramework, FileName, ReactLogo, SvelteLogo, VanillaLogo, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
 import RunDevServer from "@/components/docs/snippets/RunDevServer.mdx";
 import StuckCTA from "@/components/docs/snippets/StuckCTA.mdx";
 
@@ -11,11 +11,30 @@ export const metadata = {
 This guide will show you how you can access your data on multiple devices by signing in to your app.
 
 <Alert variant="info" className="mt-4 flex gap-2 items-center">
-  If you haven't gone through the [front-end Quickstart](/docs/quickstart), you might find this guide a bit confusing. If you're looking for a quick reference, you might find [this page](/docs/key-features/authentication/overview) or our [Passkey Auth example app](https://github.com/gardencmp/jazz/tree/main/starters/react-passkey-auth) more helpful!
+  If you haven't gone through the [front-end Quickstart](/docs/quickstart), you might find this guide a bit confusing, as it continues from there. If you're looking for a quick reference, you might find [this page](/docs/key-features/authentication/overview) or our [Passkey Auth example app](https://github.com/gardencmp/jazz/tree/main/starters/react-passkey-auth) more helpful!
 </Alert>
 
 ## Add passkey authentication
+<ContentByFramework framework="vanilla">
+Jazz ships with everything you need to get started with authenticating users using passkeys. We'll add a simple sign-up form at the top of our app, allowing users to register a new passkey or log in with an existing one.
+</ContentByFramework>
+
+<ContentByFramework framework={["react", "svelte"]}>
 Jazz has a built-in passkey authentication component that you can use to add authentication to your app. This is the easiest way to get started with securely authenticating users into your application. By adding this component, when users access your app, they'll be greeted with an input where they can enter their name, and create a passkey.
+</ContentByFramework>
+
+<ContentByFramework framework="vanilla">
+First, we need to setup an auth instance, and provide it with some details from our current context, as well as a name for our app.
+
+<FileName>src/main.ts</FileName>
+
+<CodeGroup>
+```ts main.ts#AuthInstance
+```
+</CodeGroup>
+
+Then, we'll create the sign-up form itself:
+</ContentByFramework>
 
 <ContentByFramework framework="react">
   <FileName>app/components/JazzWrapper.tsx</FileName>
@@ -23,8 +42,11 @@ Jazz has a built-in passkey authentication component that you can use to add aut
 <ContentByFramework framework="svelte">
   <FileName>src/routes/+layout.svelte</FileName>
 </ContentByFramework>
-
 <TabbedCodeGroup savedPreferenceKey="framework" id="add-passkey-auth">
+<TabbedCodeGroupItem label="Vanilla" value="vanilla" icon={<VanillaLogo />} preferWrap>
+```ts main.ts#SignUpForm
+```
+</TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
   ```tsx JazzWrapper.tsx
   ```
@@ -56,8 +78,14 @@ You'll also need to be aware that the server agent can only render public CoValu
 <RunDevServer />
 
 ### Not working?
+<ContentByFramework framework="vanilla">
+- Did you get everything you need from the current context and pass it to the auth instance?
+- Did you make sure your context is properly set up?
+</ContentByFramework>
+<ContentByFramework framework={['react', 'svelte']}>
 - Did you add `<PasskeyAuthBasicUI>` *inside* your provider?
 - Does it wrap all the children?
+</ContentByFramework>
 - Are you running your app in a <a href="https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts" target="_blank" rel="noopener noreferrer">secure context</a> (either HTTPS or localhost)?
 
 <StuckCTA />
@@ -72,8 +100,17 @@ So, let's add a secondary login method using a passphrase. You can integrate [as
 
 ### Create an `Auth` component
 
+<ContentByFramework framework={["react", "svelte"]}>
 The `PasskeyAuthBasicUI` component is not customisable, so we'll implement our own Auth component so that we can extend it.
+</ContentByFramework>
 
+<ContentByFramework framework="vanilla">
+First, we'll extract our auth out into a separate component to make it easier to reason about.
+</ContentByFramework>
+
+<ContentByFramework framework="vanilla">
+  <FileName>src/AuthComponent.ts</FileName>
+</ContentByFramework>
 <ContentByFramework framework="react">
   <FileName>app/components/Auth.tsx</FileName>
 </ContentByFramework>
@@ -82,6 +119,10 @@ The `PasskeyAuthBasicUI` component is not customisable, so we'll implement our o
 </ContentByFramework>
 
 <TabbedCodeGroup default="react" savedPreferenceKey="framework" id="custom-auth">
+<TabbedCodeGroupItem label="Vanilla" value="vanilla" icon={<VanillaLogo />} preferWrap>
+```ts AuthComponent.ts
+```
+</TabbedCodeGroupItem>
 <TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
 ```tsx Auth.tsx
 ```
@@ -93,6 +134,9 @@ The `PasskeyAuthBasicUI` component is not customisable, so we'll implement our o
 </TabbedCodeGroup>
 
 ### Use your new component
+<ContentByFramework framework="vanilla">
+  <FileName>src/main.ts</FileName>
+</ContentByFramework>
 <ContentByFramework framework="react">
   <FileName>app/components/JazzWrapper.tsx</FileName>
 </ContentByFramework>
@@ -101,6 +145,10 @@ The `PasskeyAuthBasicUI` component is not customisable, so we'll implement our o
 </ContentByFramework>
 
 <TabbedCodeGroup savedPreferenceKey="framework" id="add-passkey-auth">
+<TabbedCodeGroupItem label="Vanilla" value="vanilla" icon={<VanillaLogo />} preferWrap>
+```ts main.ts#AuthComponent
+```
+</TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
   ```tsx JazzWrapperWithAuth.tsx
   ```
@@ -131,6 +179,10 @@ export const wordlist = [
 We'll import this, and add a textarea into our auth component which will show the recovery key for the current user's account.
 
 <TabbedCodeGroup default="react" savedPreferenceKey="framework" id="recovery-key">
+<TabbedCodeGroupItem label="Vanilla" value="vanilla" icon={<VanillaLogo />} preferWrap>
+```ts AuthWithPassphrase.ts
+```
+</TabbedCodeGroupItem>
 <TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
 ```tsx AuthWithPassphrase.tsx
 ```
@@ -151,6 +203,10 @@ This 'recovery key' is a method of authenticating into an account, and if compro
 Now you're displaying a recovery key to users, so we'll allow users to login using a saved recovery key by extending the Auth component a little further.
 
 <TabbedCodeGroup default="react" savedPreferenceKey="framework" id="log-in-with-recovery-key">
+<TabbedCodeGroupItem label="Vanilla" value="vanilla" icon={<VanillaLogo />} preferWrap>
+```ts AuthWithPassphraseLogin.ts
+```
+</TabbedCodeGroupItem>
 <TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
 ```tsx AuthWithPassphraseLogin.tsx
 ```
