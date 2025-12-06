@@ -8,7 +8,7 @@
     "build:generate-docs": "pnpm run generate:llm-docs",
     "build": "pnpm check && next build",
     "start": "next start",
-    "check": "pnpm generate:snippet-paths && concurrently --kill-others-on-fail 'tsc --noEmit -p tsconfig.snippets.json' 'svelte-check --tsconfig tsconfig.snippets.json'",
+    "check": "pnpm generate:snippet-paths && concurrently --kill-others-on-fail 'tsc --noEmit -p tsconfig.snippets.json' 'svelte-check --tsconfig tsconfig.snippets.json' && pnpm run generate:llm-docs",
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
     "generate:llm-docs": "node generate-docs/llms-full.mjs",
