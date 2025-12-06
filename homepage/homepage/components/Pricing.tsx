@@ -89,7 +89,7 @@ export function Pricing() {
         </div>
       </div>
 
-      <div className="mb-10 grid gap-4 md:grid-cols-3">
+      <div className="mb-10 grid gap-4 md:grid-cols-4">
         <div className="shadow-xs flex flex-col items-start gap-3 rounded-xl border bg-stone-100 p-6 shadow-gray-900/5 dark:bg-stone-925">
           <h3 className="flex w-full items-center justify-between text-xl font-semibold text-stone-900 dark:text-white">
             <span className="flex items-center gap-1.5">
@@ -204,6 +204,51 @@ export function Pricing() {
               <span className="text-sm font-normal text-stone-600 dark:text-stone-500">
                 /mo
               </span>
+            </span>
+          </h3>
+
+          <p className="text-sm">
+            Get our best infra and move quickly with our help.
+          </p>
+
+          <ul className="my-4 flex w-full flex-col text-sm lg:text-base">
+            <ListItem icon={LucideCloud}>Optimal cloud routing</ListItem>
+            <ListItem icon={LucideDatabaseZap}>Smart caching</ListItem>
+            <ListItem icon={LucideImagePlay}>
+              Blob storage & media streaming
+            </ListItem>
+            <li aria-hidden="true" className="my-2 list-none border-t-2" />
+            <ListItem icon={LucideUsers}>Custom monthly active users</ListItem>
+            <ListItem icon={LucideDatabase}>Custom storage</ListItem>
+            <ListItem icon={LucideCloudDownload}>Custom egress/mo</ListItem>
+            <li aria-hidden="true" className="my-2 list-none border-t-2" />
+            <ListItem icon={LucideHandshake}>
+              Rapid integration & premium onboarding
+            </ListItem>
+            <ListItem icon={LucideBuilding2}>
+              SLAs, certifications, dedicated support
+            </ListItem>
+            <ListItem icon={LucideServer}>
+              Dedicated / on-prem infrastructure
+            </ListItem>
+          </ul>
+
+          <Button
+            href="https://cal.com/anselm-io/cloud-pro-intro"
+            intent="primary"
+          >
+            Schedule intro call
+          </Button>
+
+          <p className="text-sm">
+            Our engineering team will get you going for free.
+          </p>
+        </div>
+        <div className="shadow-xs flex flex-col items-start gap-3 rounded-xl border bg-stone-100 p-6 shadow-gray-900/5 dark:bg-stone-925">
+          <h3 className="flex w-full items-center justify-between text-xl font-semibold text-stone-900 dark:text-white">
+            <span className="flex items-center gap-1.5">
+              <ProTierLogo />
+              Enterprise
             </span>
           </h3>
 
