@@ -45,6 +45,3 @@ The package includes pre-built native binaries for:
 
 Before building `cojson-core-rn`, ensure you followed this [guide](https://jhugman.github.io/uniffi-bindgen-react-native/guides/rn/pre-installation.html).
 
-
-4. **TypeScript Compilation**: The generated TypeScript bindings are compiled to JavaScript
-
