@@ -1,7 +1,7 @@
 "use client";
 
+import { Button } from "@garden-co/design-system/src/components/atoms/Button";
 import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
-import { clsx } from "clsx";
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 
@@ -42,29 +42,19 @@ export function CopyAsMarkdownButton() {
   };
 
   return (
-    <button
-      type="button"
+    <Button
       onClick={handleCopy}
       disabled={isLoading}
-      className={clsx(
-        "flex items-center gap-1.5 text-xs text-stone-600 dark:text-stone-400",
-        "hover:text-highlight transition-colors",
-        "mb-3 px-2 py-1.5 rounded-md",
-        "hover:bg-stone-100 dark:hover:bg-stone-900",
-        "disabled:opacity-50 disabled:cursor-not-allowed",
-        copied && "text-primary"
-      )}
+      intent="strong"
+      variant="ghost"
       aria-label="Copy page as Markdown"
     >
       <Icon
         name={copied ? "copySuccess" : "copy"}
         size="xs"
-        className={clsx(
-          "size-3.5 transition-colors",
-          copied ? "stroke-primary" : "stroke-current"
-        )}
+        className="size-4"
       />
-      <span>{copied ? "Copied!" : "Copy as Markdown"}</span>
-    </button>
+      {copied ? "Copied!" : "Copy as Markdown"}
+    </Button>
   );
 }

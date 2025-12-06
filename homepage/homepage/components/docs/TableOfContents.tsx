@@ -1,6 +1,7 @@
 "use client";
 
 import type { Toc, TocEntry } from "@stefanprobst/rehype-extract-toc";
+import { Separator } from "@garden-co/design-system/src/components/atoms/Separator";
 import { clsx } from "clsx";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -118,6 +119,7 @@ export function TableOfContents({
   return (
     <div className={className}>
       <CopyAsMarkdownButton />
+      <Separator className="my-5" />
       <p className="font-medium text-highlight mb-3">On this page</p>
       <TocList items={itemsUnderH1} level={0} currentId={currentId} />
     </div>
