@@ -16,6 +16,9 @@ export async function GET() {
   });
 
   posts.forEach((post) => {
+    const coverImageSrc = typeof post.meta.coverImage === 'string' 
+      ? post.meta.coverImage 
+      : post.meta.coverImage.src;
     feed.addItem({
       title: post.meta.title,
       description: post.meta.subtitle,
@@ -24,7 +27,9 @@ export async function GET() {
       date: new Date(post.meta.date),
       author: [{ name: post.meta.author.name }],
       guid: post.meta.slug,
-      image: `${metaTags.url}${post.meta.coverImage}`,
+      image: typeof coverImageSrc === 'string' && coverImageSrc.startsWith('/')
+        ? `${metaTags.url}${coverImageSrc}`
+        : coverImageSrc,
     });
   });
 

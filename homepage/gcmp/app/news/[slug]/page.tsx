@@ -24,15 +24,16 @@ export default async function Post({ params }: Params) {
     return notFound();
   }
 
-  const { title, subtitle, coverImage, date, author } = post.meta;
+  const { title, subtitle, coverImage, coverImagePng, date, author } = post.meta;
   const content = post.default({});
+  const ogImage = coverImagePng || coverImage;
 
   return (
     <>
       <PostJsonLd
         title={title}
         subtitle={subtitle}
-        image={coverImage.replace(".svg", ".png")}
+        image={typeof ogImage === 'string' ? ogImage : ogImage.src}
         author={author.name}
         datePublished={date}
       />
@@ -80,18 +81,20 @@ export async function generateMetadata({ params }: Params): Promise<Metadata> {
     return notFound();
   }
 
-  const { title, subtitle, coverImage } = post.meta;
+  const { title, subtitle, coverImage, coverImagePng } = post.meta;
+  const ogImage = coverImagePng || coverImage;
+  const ogImageSrc = typeof ogImage === 'string' ? ogImage : ogImage.src;
 
   return {
     title: title,
     description: subtitle,
     openGraph: {
       title: title,
-      images: [coverImage.replace(".svg", ".png")],
+      images: [ogImageSrc],
     },
     twitter: {
       title: title + " " + subtitle,
-      images: [coverImage.replace(".svg", ".png")],
+      images: [ogImageSrc],
     },
   };
 }
