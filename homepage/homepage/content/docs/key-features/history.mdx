@@ -72,6 +72,15 @@ To show created date and last updated date, use the `$jazz.createdAt` and `$jazz
 ```
 </CodeGroup>
 
+### Created By
+
+To show who created the value, use the `$jazz.createdBy` getter. This will return the ID of the user who created the value as a string.
+
+<CodeGroup>
+```tsx index.ts#CreatedBy
+```
+</CodeGroup>
+
 ## Requirements
 
 - CoValues must be loaded to access history (see [Subscription & Loading](/docs/core-concepts/subscription-and-loading))
