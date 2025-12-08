@@ -5,7 +5,7 @@ export const socialsHeader = {
 
 export const socials = {
   ...socialsHeader,
-  bluesky: "https://bsky.app/profile/jazz.tools",
   x: "https://x.com/jazz_tools",
+  bluesky: "https://bsky.app/profile/jazz.tools",
 };
 

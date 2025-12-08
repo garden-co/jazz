@@ -80,7 +80,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
     };
 
     const classNames = clsx(
-      "inline-flex items-center justify-center gap-2 rounded-lg text-center transition-colors w-fit text-nowrap",
+      "inline-flex items-center justify-center gap-2 rounded-lg text-center w-fit text-nowrap",
       getClasses({ variant }),
       "disabled:pointer-events-none disabled:opacity-70",
       disabled && "opacity-50 cursor-not-allowed pointer-events-none",
@@ -145,7 +145,10 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
   },
 );
 
-const iconVariant = (intent: Style, variant: Variant | undefined) => {
+const iconVariant = (
+  intent: Style | undefined,
+  variant: Variant | undefined,
+) => {
   return variant ? intent : intent === "default" ? "default" : "white";
 };
 const textColorVariant = (style: Style) => {
