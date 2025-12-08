@@ -41,8 +41,12 @@ export function JazzFooter() {
               label: "Examples",
             },
             {
+              href: "/pricing",
+              label: "Pricing",
+            },
+            {
               href: "/showcase",
-              label: "Built with Jazz",
+              label: "Showcase",
             },
           ],
         },

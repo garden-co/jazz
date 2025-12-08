@@ -7,7 +7,7 @@ import Link from "next/link";
 
 const metaTags = {
   title: "Built with Jazz",
-  description: "Great apps by smart people.",
+  description: "Successful adopters across diverse industries.",
   url:  "https://jazz.tools",
 }
 
@@ -32,7 +32,7 @@ export default function Page() {
     <div className="container flex flex-col gap-6 pb-10 lg:pb-20">
       <HeroHeader
         title="Built with Jazz"
-        slogan="Great apps by smart people."
+        slogan="Successful adopters across diverse industries."
       />
 
       <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-8">
