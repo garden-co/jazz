@@ -112,6 +112,18 @@ export abstract class CoValueJazzApi<V extends CoValue> {
     return this.raw.core.earliestTxMadeAt;
   }
 
+  get createdBy(): string | undefined {
+    const createdBy = this.raw.core.getValidSortedTransactions({
+      ignorePrivateTransactions: false,
+    })[0]?.author;
+
+    // Only return accounts, not sealer/signer strings
+    if (typeof createdBy === "string" && createdBy.startsWith("co_z"))
+      return createdBy;
+
+    return undefined;
+  }
+
   /**
    * The timestamp of the last updated time of the CoValue
    *
