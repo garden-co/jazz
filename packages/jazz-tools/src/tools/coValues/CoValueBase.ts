@@ -112,6 +112,18 @@ export abstract class CoValueJazzApi<V extends CoValue> {
     return this.raw.core.earliestTxMadeAt;
   }
 
+  /**
+   * Returns the account ID of the user who created this CoValue.
+   *
+   * Creation is determined by inspecting the earliest valid transaction,
+   * Note: Where the author is a sealer/signer identifiers (e.g. accounts)
+   * nothing is returned intentionally
+   *
+   * @returns {string | undefined} The creating user's account ID, or
+   * `undefined` if no author can be determined
+   *
+   * @category Content
+   */
   get createdBy(): string | undefined {
     const createdBy = this.raw.core.getValidSortedTransactions({
       ignorePrivateTransactions: false,
