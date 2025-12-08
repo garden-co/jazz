@@ -1,29 +1,58 @@
+import React, {
+  ReactNode,
+  useState,
+  useCallback,
+  useEffect,
+  useMemo,
+} from "react";
+import { Router, RouterContext } from "./context.js";
+import { PageInfo } from "../viewer/types.js";
 import { CoID, RawCoValue } from "cojson";
-import { PageInfo } from "jazz-tools/inspector";
-import { useCallback, useEffect, useState } from "react";
 
-export function usePagePath(defaultPath?: PageInfo[]) {
+export function HashRouterProvider({
+  children,
+  defaultPath,
+}: {
+  children: ReactNode;
+  defaultPath?: PageInfo[];
+}) {
   const [path, setPath] = useState<PageInfo[]>(() => {
+    if (typeof window === "undefined") return defaultPath || [];
     const hash = window.location.hash.slice(2); // Remove '#/'
-    if (hash) {
-      try {
-        return decodePathFromHash(hash);
-      } catch (e) {
-        console.error("Failed to parse hash:", e);
-      }
+
+    const defaultEncoded = encodePathToHash(defaultPath || []);
+
+    if (defaultPath) {
+      window.history.pushState({}, "", `#/${defaultEncoded}`);
+      return defaultPath;
     }
-    return defaultPath || [];
+
+    if (hash) {
+      const path = decodePathFromHash(hash);
+      return path;
+    }
+
+    window.history.pushState({}, "", `#/${encodePathToHash([])}`);
+    return [];
   });
 
   const updatePath = useCallback((newPath: PageInfo[]) => {
     setPath(newPath);
-    const hash = encodePathToHash(newPath);
-    window.location.hash = `#/${hash}`;
+    if (typeof window !== "undefined") {
+      const hash = encodePathToHash(newPath);
+      window.history.pushState({}, "", `#/${hash}`);
+    }
   }, []);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+
     const handleHashChange = () => {
       const hash = window.location.hash.slice(2);
+      const currentPath = encodePathToHash(path);
+
+      if (hash === currentPath) return;
+
       if (hash) {
         try {
           const newPath = decodePathFromHash(hash);
@@ -38,48 +67,43 @@ export function usePagePath(defaultPath?: PageInfo[]) {
 
     window.addEventListener("hashchange", handleHashChange);
     return () => window.removeEventListener("hashchange", handleHashChange);
-  }, [defaultPath]);
+  }, [path, defaultPath]);
 
   useEffect(() => {
-    if (defaultPath && JSON.stringify(path) !== JSON.stringify(defaultPath)) {
+    if (defaultPath) {
       updatePath(defaultPath);
     }
-  }, [defaultPath, path, updatePath]);
+  }, [defaultPath]);
 
-  const addPages = useCallback(
-    (newPages: PageInfo[]) => {
+  const router: Router = useMemo(() => {
+    const addPages = (newPages: PageInfo[]) => {
       updatePath([...path, ...newPages]);
-    },
-    [path, updatePath],
-  );
+    };
 
-  const goToIndex = useCallback(
-    (index: number) => {
+    const goToIndex = (index: number) => {
       updatePath(path.slice(0, index + 1));
-    },
-    [path, updatePath],
-  );
+    };
 
-  const setPage = useCallback(
-    (coId: CoID<RawCoValue>) => {
+    const setPage = (coId: CoID<RawCoValue>) => {
       updatePath([{ coId, name: "Root" }]);
-    },
-    [updatePath],
-  );
+    };
 
-  const goBack = useCallback(() => {
-    if (path.length > 1) {
+    const goBack = () => {
       updatePath(path.slice(0, path.length - 1));
-    }
+    };
+
+    return {
+      path,
+      addPages,
+      goToIndex,
+      setPage,
+      goBack,
+    };
   }, [path, updatePath]);
 
-  return {
-    path,
-    setPage,
-    addPages,
-    goToIndex,
-    goBack,
-  };
+  return (
+    <RouterContext.Provider value={router}>{children}</RouterContext.Provider>
+  );
 }
 
 function encodePathToHash(path: PageInfo[]): string {

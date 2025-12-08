@@ -15,14 +15,15 @@ interface ModalProps {
   onCancel?: () => void;
   showButtons?: boolean;
   className?: string;
+  wide?: boolean;
 }
 
-const ModalContent = styled("dialog")`
+const ModalContent = styled("dialog")<{ wide?: boolean }>`
   background-color: var(--j-background);
   border-radius: var(--j-radius-lg);
   box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
   border: 1px solid var(--j-border-color);
-  max-width: 32rem;
+  ${(props) => (props.wide ? "max-width: 60vw;" : "max-width: 32rem;")}
   margin-block: auto;
   margin-inline: auto;
   &::backdrop {
@@ -90,6 +91,7 @@ export const Modal = forwardRef<HTMLDialogElement, ModalProps>(
       onCancel,
       showButtons = true,
       className,
+      wide = false,
     },
     ref,
   ) => {
@@ -123,6 +125,7 @@ export const Modal = forwardRef<HTMLDialogElement, ModalProps>(
         role="dialog"
         aria-labelledby="modal-heading"
         onClose={onClose}
+        wide={wide}
       >
         <ModalHeader>
           <Heading id="modal-heading">{heading}</Heading>

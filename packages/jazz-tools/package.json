@@ -71,6 +71,11 @@
       "types": "./dist/inspector/index.d.ts",
       "default": "./dist/inspector/index.js"
     },
+    "./inspector/standalone": {
+      "@jazz-tools/source": "./src/inspector/standalone.tsx",
+      "types": "./dist/inspector/standalone.d.ts",
+      "default": "./dist/inspector/standalone.js"
+    },
     "./inspector/register-custom-element": {
       "@jazz-tools/source": "./src/inspector/register-custom-element.ts",
       "types": "./dist/inspector/register-custom-element.d.ts",
