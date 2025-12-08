@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, renderHook, waitFor } from "@testing-library/react";
-import { type PropsWithChildren } from "react";
+import { act, renderHook, screen, waitFor } from "@testing-library/react";
+import React, { type PropsWithChildren } from "react";
 import { HashRouterProvider } from "../../router/hash-router.js";
 import { useRouter } from "../../router/context.js";
 import type { PageInfo } from "../../viewer/types.js";
@@ -23,17 +23,13 @@ function encodePathToHash(path: PageInfo[]): string {
 }
 
 async function setHash(path: PageInfo[]) {
-  window.location.assign(`#/${encodePathToHash(path)}`);
+  window.history.replaceState({}, "", `#/${encodePathToHash(path)}`);
 }
 
 describe("HashRouterProvider", () => {
-  beforeEach(async () => {
-    // Clear hash before each test
-    setHash([]);
-  });
-
   afterEach(async () => {
     setHash([]);
+    expect(window.location.hash).toBe("#/");
   });
 
   describe("initialization", () => {
@@ -42,10 +38,11 @@ describe("HashRouterProvider", () => {
 
       await waitFor(() => {
         expect(result.current.path).toEqual([]);
+        expect(window.location.hash).toBe("#/");
       });
     });
 
-    it("should initialize with defaultPath when provided", () => {
+    it("should initialize with defaultPath when provided", async () => {
       const defaultPath: PageInfo[] = [
         { coId: "co_test1" as CoID<RawCoValue>, name: "Test1" },
         { coId: "co_test2" as CoID<RawCoValue>, name: "Test2" },
@@ -63,6 +60,9 @@ describe("HashRouterProvider", () => {
         wrapper: WrapperWithDefaultPath,
       });
       expect(result.current.path).toEqual(defaultPath);
+      await waitFor(() => {
+        expect(window.location.hash).toBe(`#/${encodePathToHash(defaultPath)}`);
+      });
     });
 
     it("should initialize from hash when available", async () => {
@@ -75,6 +75,7 @@ describe("HashRouterProvider", () => {
 
       await waitFor(() => {
         expect(result.current.path).toEqual(storedPath);
+        expect(window.location.hash).toBe(`#/${encodePathToHash(storedPath)}`);
       });
     });
 
@@ -101,6 +102,7 @@ describe("HashRouterProvider", () => {
 
       await waitFor(() => {
         expect(result.current.path).toEqual(defaultPath);
+        expect(window.location.hash).toBe(`#/${encodePathToHash(defaultPath)}`);
       });
     });
 
@@ -136,8 +138,6 @@ describe("HashRouterProvider", () => {
       // We test this by ensuring the component works correctly without hash
       // Note: We can't actually set window to undefined in happy-dom environment
       // So we just verify it works when hash is empty
-      await setHash([]);
-
       const { result } = renderHook(() => useRouter(), { wrapper: Wrapper });
 
       // When no hash and no defaultPath, should initialize with empty array
@@ -165,11 +165,12 @@ describe("HashRouterProvider", () => {
         { coId: "co_test1" as CoID<RawCoValue> },
         { coId: "co_test2" as CoID<RawCoValue> },
       ];
-      await setHash(path);
+      setHash(path);
 
       const { result } = renderHook(() => useRouter(), { wrapper: Wrapper });
 
       await waitFor(() => {
+        expect(window.location.hash).toBe(`#/${encodePathToHash(path)}`);
         expect(result.current.path).toEqual(path);
       });
     });
@@ -186,6 +187,63 @@ describe("HashRouterProvider", () => {
       await waitFor(() => {
         expect(result.current.path[0]?.coId).toBe("co_test1");
         // Root name might be undefined or "Root" depending on implementation
+      });
+    });
+
+    it("should update path when defaultPath changes", async () => {
+      const initialDefaultPath: PageInfo[] = [
+        { coId: "co_initial" as CoID<RawCoValue>, name: "Initial" },
+      ];
+
+      const newPage: PageInfo = {
+        coId: "co_page1" as CoID<RawCoValue>,
+        name: "Page1",
+      };
+
+      const newDefaultPath: PageInfo[] = [
+        { coId: "co_new" as CoID<RawCoValue>, name: "New" },
+      ];
+
+      function WrapperWithInitialPath({ children }: PropsWithChildren) {
+        const [defaultPath, setDefaultPath] =
+          React.useState(initialDefaultPath);
+        return (
+          <HashRouterProvider defaultPath={defaultPath}>
+            {children}
+            <button onClick={() => setDefaultPath(newDefaultPath)}>
+              Set Default Path
+            </button>
+          </HashRouterProvider>
+        );
+      }
+
+      const { result } = renderHook(() => useRouter(), {
+        wrapper: WrapperWithInitialPath,
+      });
+
+      await waitFor(() => {
+        expect(result.current.path).toEqual(initialDefaultPath);
+      });
+
+      act(() => {
+        result.current.addPages([newPage]);
+      });
+
+      await waitFor(() => {
+        expect(result.current.path).toEqual(
+          initialDefaultPath.concat([newPage]),
+        );
+        expect(window.location.hash).toBe(
+          `#/${encodePathToHash(initialDefaultPath.concat([newPage]))}`,
+        );
+      });
+
+      act(() => {
+        screen.getByRole("button", { name: "Set Default Path" }).click();
+      });
+
+      await waitFor(() => {
+        expect(result.current.path).toEqual(newDefaultPath);
       });
     });
   });
@@ -269,7 +327,7 @@ describe("HashRouterProvider", () => {
     });
   });
 
-  describe.skip("hashchange event", () => {
+  describe("hashchange event", () => {
     it("should update path when hash changes", async () => {
       // Ensure hash is cleared before starting
       await setHash([]);
@@ -683,138 +741,6 @@ describe("HashRouterProvider", () => {
         expect(result.current.path).toHaveLength(1);
         expect(result.current.path[0]).toEqual(initialPath[0]);
       });
-    });
-  });
-
-  describe("defaultPath synchronization", () => {
-    it("should update path when defaultPath changes", async () => {
-      const initialDefaultPath: PageInfo[] = [
-        { coId: "co_initial" as CoID<RawCoValue>, name: "Initial" },
-      ];
-
-      function WrapperWithInitialPath({ children }: PropsWithChildren) {
-        return (
-          <HashRouterProvider defaultPath={initialDefaultPath}>
-            {children}
-          </HashRouterProvider>
-        );
-      }
-
-      const { result } = renderHook(() => useRouter(), {
-        wrapper: WrapperWithInitialPath,
-      });
-
-      await waitFor(() => {
-        expect(result.current.path).toEqual(initialDefaultPath);
-      });
-
-      const newDefaultPath: PageInfo[] = [
-        { coId: "co_new" as CoID<RawCoValue>, name: "New" },
-      ];
-
-      function WrapperWithNewPath({ children }: PropsWithChildren) {
-        return (
-          <HashRouterProvider defaultPath={newDefaultPath}>
-            {children}
-          </HashRouterProvider>
-        );
-      }
-
-      const { result: result2 } = renderHook(() => useRouter(), {
-        wrapper: WrapperWithNewPath,
-      });
-
-      await waitFor(() => {
-        expect(result2.current.path).toEqual(newDefaultPath);
-      });
-    });
-
-    it("should not update when defaultPath is the same", async () => {
-      const defaultPath: PageInfo[] = [
-        { coId: "co_test" as CoID<RawCoValue>, name: "Test" },
-      ];
-
-      function WrapperWithDefaultPath({ children }: PropsWithChildren) {
-        return (
-          <HashRouterProvider defaultPath={defaultPath}>
-            {children}
-          </HashRouterProvider>
-        );
-      }
-
-      const { result } = renderHook(() => useRouter(), {
-        wrapper: WrapperWithDefaultPath,
-      });
-
-      await waitFor(() => {
-        expect(result.current.path).toEqual(defaultPath);
-      });
-
-      const initialPath = result.current.path;
-
-      // Re-render with same wrapper - path should remain the same
-      const { result: result2 } = renderHook(() => useRouter(), {
-        wrapper: WrapperWithDefaultPath,
-      });
-
-      await waitFor(() => {
-        expect(result2.current.path).toEqual(initialPath);
-      });
-    });
-
-    it("should override manual changes when defaultPath changes", async () => {
-      const defaultPath: PageInfo[] = [
-        { coId: "co_default" as CoID<RawCoValue>, name: "Default" },
-      ];
-
-      function WrapperWithDefaultPath({ children }: PropsWithChildren) {
-        return (
-          <HashRouterProvider defaultPath={defaultPath}>
-            {children}
-          </HashRouterProvider>
-        );
-      }
-
-      const { result } = renderHook(() => useRouter(), {
-        wrapper: WrapperWithDefaultPath,
-      });
-
-      await waitFor(() => {
-        expect(result.current.path).toEqual(defaultPath);
-      });
-
-      const newDefaultPath: PageInfo[] = [
-        { coId: "co_newdefault" as CoID<RawCoValue>, name: "NewDefault" },
-      ];
-
-      function WrapperWithNewDefaultPath({ children }: PropsWithChildren) {
-        return (
-          <HashRouterProvider defaultPath={newDefaultPath}>
-            {children}
-          </HashRouterProvider>
-        );
-      }
-
-      const { result: result2 } = renderHook(() => useRouter(), {
-        wrapper: WrapperWithNewDefaultPath,
-      });
-
-      await waitFor(() => {
-        expect(result2.current.path).toEqual(newDefaultPath);
-      });
-    });
-  });
-
-  describe("router object stability", () => {
-    it("should provide stable router object reference", () => {
-      const { result } = renderHook(() => useRouter(), { wrapper: Wrapper });
-
-      expect(result.current).toBeTruthy();
-      expect(result.current.path).toBeDefined();
-      expect(result.current.addPages).toBeDefined();
-      expect(result.current.goToIndex).toBeDefined();
-      expect(result.current.setPage).toBeDefined();
-      expect(result.current.goBack).toBeDefined();
     });
   });
 

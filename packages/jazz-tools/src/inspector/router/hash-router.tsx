@@ -19,57 +19,61 @@ export function HashRouterProvider({
   const [path, setPath] = useState<PageInfo[]>(() => {
     if (typeof window === "undefined") return defaultPath || [];
     const hash = window.location.hash.slice(2); // Remove '#/'
-    if (hash) {
-      try {
-        return decodePathFromHash(hash);
-      } catch (e) {
-        console.error("Failed to parse hash:", e);
-      }
+
+    const defaultEncoded = encodePathToHash(defaultPath || []);
+
+    if (defaultPath) {
+      window.history.pushState({}, "", `#/${defaultEncoded}`);
+      return defaultPath;
     }
-    return defaultPath || [];
+
+    if (hash) {
+      const path = decodePathFromHash(hash);
+      return path;
+    }
+
+    window.history.pushState({}, "", `#/${encodePathToHash([])}`);
+    return [];
   });
 
   const updatePath = useCallback((newPath: PageInfo[]) => {
     setPath(newPath);
     if (typeof window !== "undefined") {
       const hash = encodePathToHash(newPath);
-      window.location.assign(`#/${hash}`);
+      window.history.pushState({}, "", `#/${hash}`);
     }
   }, []);
 
-  // useEffect(() => {
-  //   if (typeof window === "undefined") return;
+  useEffect(() => {
+    if (typeof window === "undefined") return;
 
-  //   const handleHashChange = () => {
-  //     const hash = window.location.hash.slice(2);
-  //     const currentPath = encodePathToHash(path);
+    const handleHashChange = () => {
+      const hash = window.location.hash.slice(2);
+      const currentPath = encodePathToHash(path);
 
-  //     if(hash === currentPath) return;
+      if (hash === currentPath) return;
 
-  //     if (hash) {
-  //       try {
-  //         const newPath = decodePathFromHash(hash);
-  //         setPath(newPath);
-  //       } catch (e) {
-  //         console.error("Failed to parse hash:", e);
-  //       }
-  //     } else if (defaultPath) {
-  //       setPath(defaultPath);
-  //     }
-  //   };
+      if (hash) {
+        try {
+          const newPath = decodePathFromHash(hash);
+          setPath(newPath);
+        } catch (e) {
+          console.error("Failed to parse hash:", e);
+        }
+      } else if (defaultPath) {
+        setPath(defaultPath);
+      }
+    };
 
-  //   window.addEventListener("hashchange", handleHashChange);
-  //   return () => window.removeEventListener("hashchange", handleHashChange);
-  // }, [path, defaultPath]);
+    window.addEventListener("hashchange", handleHashChange);
+    return () => window.removeEventListener("hashchange", handleHashChange);
+  }, [path, defaultPath]);
 
   useEffect(() => {
-    if (
-      defaultPath &&
-      encodePathToHash(path) !== encodePathToHash(defaultPath)
-    ) {
+    if (defaultPath) {
       updatePath(defaultPath);
     }
-  }, [defaultPath, path, updatePath]);
+  }, [defaultPath]);
 
   const router: Router = useMemo(() => {
     const addPages = (newPages: PageInfo[]) => {
