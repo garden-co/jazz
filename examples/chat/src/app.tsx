@@ -1,14 +1,10 @@
 import { apiKey } from "@/apiKey.ts";
 import { getRandomUsername, inIframe, onChatLoad } from "@/util.ts";
 import { useIframeHashRouter } from "hash-slash";
-import { co, Group } from "jazz-tools";
+import { co, getLoadedOrUndefined, Group } from "jazz-tools";
 import { JazzInspector } from "jazz-tools/inspector";
-import {
-  JazzReactProvider,
-  useLogOut,
-  useSuspenseAccount,
-} from "jazz-tools/react";
-import { StrictMode, useId, useMemo } from "react";
+import { JazzReactProvider, useAccount, useLogOut } from "jazz-tools/react";
+import { StrictMode, useId, useMemo, useState, useEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import Jazzicon from "react-jazzicon";
 import { ChatScreen } from "./chatScreen.tsx";
@@ -31,17 +27,34 @@ const AccountWithProfile = co.account().resolved({
 });
 
 export function App() {
-  const me = useSuspenseAccount(AccountWithProfile);
+  const me = useAccount(AccountWithProfile);
   const logOut = useLogOut();
   const router = useIframeHashRouter();
-
   const inputId = useId();
+  const [localValue, setLocalValue] = useState("");
+  const [inputWidth, setInputWidth] = useState(120);
+  const spanRef = useRef<HTMLSpanElement>(null);
+
+  const profile = getLoadedOrUndefined(me)?.profile;
 
   const avatarSeed = useMemo(() => {
+    if (!me?.$jazz?.id) return 0;
     return stringToSeed(me.$jazz.id);
-  }, [me.$jazz.id]);
+  }, [me?.$jazz?.id]);
+
+  useEffect(() => {
+    setLocalValue(profile?.name ?? "");
+  }, [profile?.name]);
+
+  useEffect(() => {
+    if (spanRef.current) {
+      const width = spanRef.current.offsetWidth;
+      setInputWidth(Math.max(width + 4, 20));
+    }
+  }, [localValue]);
 
   const createChat = () => {
+    if (!me) return;
     const group = Group.create();
     group.makePublic("writer");
     const chat = Chat.create([], group);
@@ -65,19 +78,22 @@ export function App() {
         </label>
         <div className="relative">
           <span
+            ref={spanRef}
             className="absolute invisible whitespace-pre text-lg"
             aria-hidden="true"
           >
-            {usernamePlaceholder}
+            {localValue || usernamePlaceholder}
           </span>
           <input
             type="text"
             id={inputId}
-            value={me.profile.name}
-            style={{ width: `${me.profile.name.length}ch` }}
+            value={localValue}
+            style={{ width: `${inputWidth}px` }}
             className="bg-transparent text-lg outline-none min-w-0 max-w-full"
             onChange={(e) => {
-              me.profile.$jazz.set("name", e.target.value);
+              setLocalValue(e.target.value);
+              if (!profile) return;
+              profile.$jazz.set("name", e.target.value);
             }}
             placeholder={usernamePlaceholder}
           />

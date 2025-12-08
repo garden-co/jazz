@@ -1,6 +1,6 @@
 import { Account, getLoadedOrUndefined } from "jazz-tools";
 import { createImage } from "jazz-tools/media";
-import { useSuspenseAccount, useSuspenseCoState } from "jazz-tools/react";
+import { useAccount, useCoState } from "jazz-tools/react";
 import { useEffect, useState } from "react";
 import { Chat, Message } from "./schema.ts";
 import {
@@ -23,14 +23,14 @@ const ChatWithMessages = Chat.resolved({
 });
 
 export function ChatScreen(props: { chatID: string }) {
-  const chat = useSuspenseCoState(ChatWithMessages, props.chatID);
-  const me = useSuspenseAccount();
+  const chat = useCoState(ChatWithMessages, props.chatID);
+  const me = useAccount();
   const [showNLastMessages, setShowNLastMessages] = useState(
     INITIAL_MESSAGES_TO_SHOW,
   );
   const isLoading = useMessagesPreload(props.chatID);
 
-  if (isLoading)
+  if (!me.$isLoaded || !chat.$isLoaded || isLoading)
     return (
       <div className="flex-1 flex justify-center items-center">Loading...</div>
     );
@@ -61,6 +61,10 @@ export function ChatScreen(props: { chatID: string }) {
       );
     });
   };
+
+  if (!me) {
+    return <div>Loading...</div>;
+  }
 
   return (
     <>
