@@ -1,0 +1,295 @@
+export const metadata = {
+  description: "API reference for the `co.profile` module.",
+};
+
+# Profile
+
+`co.profile` provides core functionalities for creating and managing user profiles in Jazz applications. Profiles are specialized [`CoMap`](/docs/api-reference/co/map)s that represent public user information.
+
+## `Profile` Class
+
+```typescript
+class Profile extends CoMap
+```
+
+Extends [`CoMap`](/docs/api-reference/co/map). Represents a user profile with public information.
+
+Profiles are associated with [`Account`](/docs/api-reference/co/account)s and typically contain publicly visible user information like name, avatar, and other metadata.
+
+### Declaration
+
+Profiles are created using `co.profile()`:
+
+```typescript
+import { co, z } from "jazz-tools";
+
+// Default profile (name only)
+const BasicProfile = co.profile();
+
+// Custom profile with additional fields
+const UserProfile = co.profile({
+  name: z.string(),
+  avatar: co.optional(co.image()),
+  bio: z.optional(z.string()),
+  website: z.optional(z.string()),
+});
+```
+
+### Default Fields
+
+All profiles include these default fields:
+
+#### `name`
+
+```typescript
+readonly name: string
+```
+
+The user's display name. Required field.
+
+#### `inbox`
+
+```typescript
+readonly inbox?: string
+```
+
+Optional inbox identifier for receiving messages or notifications.
+
+#### `inboxInvite`
+
+```typescript
+readonly inboxInvite?: string
+```
+
+Optional invite code for accessing the inbox.
+
+### Static Methods
+
+#### `create`
+
+```typescript
+static override create<M extends CoMap>(
+  this: CoValueClass<M>,
+  init: CoMapInit<M>,
+  options?: { owner: Group } | Group,
+): M
+```
+
+**Deprecated:** Use `co.profile(...).create` instead.
+
+Creates a new profile with the given initial values and owner.
+
+**Important:** Profiles must be owned by a [`Group`](/docs/api-reference/co/group), not an [`Account`](/docs/api-reference/co/account). This is because profiles are typically public or shared, and groups provide the appropriate permission model.
+
+- `init`: Initial values for the profile fields.
+- `options`: The owner group. Can be an object with `owner` property, or a `Group` directly.
+
+**Returns:** A newly created `Profile` instance.
+
+**Example:**
+```typescript
+// Create a group for the profile
+const profileGroup = Group.create(me);
+profileGroup.makePublic("reader"); // Make profile readable by everyone
+
+// Create the profile
+const profile = UserProfile.create({
+  name: "Alice Johnson",
+  bio: "Software developer and open source enthusiast",
+  website: "https://alice.example.com",
+}, { owner: profileGroup });
+```
+
+**Error Handling:**
+```typescript
+// ❌ This will throw an error
+const profile = UserProfile.create(
+  { name: "Alice" },
+  { owner: me } // Accounts cannot own profiles
+);
+
+// ✅ This is correct
+const profileGroup = Group.create(me);
+const profile = UserProfile.create(
+  { name: "Alice" },
+  { owner: profileGroup }
+);
+```
+
+### Inherited from CoMap
+
+Profile inherits all properties and methods from [`CoMap`](/docs/api-reference/co/map), including:
+
+#### Static Methods
+- [`load()`](/docs/api-reference/co/map#load) - Load a profile by ID
+- [`subscribe()`](/docs/api-reference/co/map#subscribe) - Subscribe to profile changes
+- [`upsertUnique()`](/docs/api-reference/co/map#upsertunique) - Update or create unique profile
+- [`loadUnique()`](/docs/api-reference/co/map#loadunique) - Load unique profile
+
+#### Instance Methods
+- [`toJSON()`](/docs/api-reference/co/map#tojson) - Convert to JSON
+
+#### Jazz API (`$jazz` property)
+- [`owner`](/docs/api-reference/co/map#owner) - Get the owner group
+- [`has()`](/docs/api-reference/co/map#has) - Check if field exists
+- [`set()`](/docs/api-reference/co/map#set) - Set field value
+- [`delete()`](/docs/api-reference/co/map#delete) - Delete optional field
+- [`applyDiff()`](/docs/api-reference/co/map#applydiff) - Apply changes
+- [`ensureLoaded()`](/docs/api-reference/co/map#ensureloaded) - Ensure fields loaded
+- [`subscribe()`](/docs/api-reference/co/map#subscribe-1) - Subscribe to changes
+- [`waitForSync()`](/docs/api-reference/co/map#waitforsync) - Wait for sync
+- [`refs`](/docs/api-reference/co/map#refs) - Access field references
+
+## Usage with Accounts
+
+Profiles are typically associated with accounts:
+
+```typescript
+import { co, z } from "jazz-tools";
+
+// Define account with custom profile
+const AppAccount = co.account({
+  profile: co.profile({
+    name: z.string(),
+    avatar: co.optional(co.image()),
+    bio: z.optional(z.string()),
+  }),
+  root: co.map({
+    // ... your app data
+  }),
+});
+
+// Access profile from account
+const myProfile = me.profile;
+console.log(myProfile.name);
+
+// Update profile
+myProfile.$jazz.set("bio", "Updated bio");
+```
+
+## Permission Patterns
+
+### Public Profile Pattern
+
+Most apps want profiles to be publicly readable:
+
+```typescript
+// During account creation/migration
+const profileGroup = Group.create(me);
+profileGroup.makePublic("reader"); // Anyone can read
+
+const profile = UserProfile.create({
+  name: "Alice",
+  // ...
+}, { owner: profileGroup });
+```
+
+### Private Profile Pattern
+
+For apps where profiles should only be visible to specific users:
+
+```typescript
+const profileGroup = Group.create(me);
+// Don't make public
+// Add specific users as needed
+profileGroup.addMember(friend, "reader");
+
+const profile = UserProfile.create({
+  name: "Alice",
+  // ...
+}, { owner: profileGroup });
+```
+
+### Semi-Public Profile Pattern
+
+Profile readable by authenticated users only:
+
+```typescript
+const profileGroup = Group.create(me);
+const appUsersGroup = /* get your app's users group */;
+profileGroup.addMember(appUsersGroup, "reader");
+
+const profile = UserProfile.create({
+  name: "Alice",
+  // ...
+}, { owner: profileGroup });
+```
+
+## Use Cases
+
+Profiles are ideal for:
+- User display names and avatars
+- Public user information
+- User bios and descriptions
+- Social profiles
+- Contact information
+- Any user-specific metadata that should be separate from the account
+
+## Best Practices
+
+1. **Always use a Group as owner**: Profiles must be owned by groups, not accounts.
+
+2. **Make profiles public when appropriate**: Most apps benefit from publicly readable profiles.
+
+3. **Keep sensitive data in account root**: Store private user data in the account's root, not the profile.
+
+4. **Use optional fields**: Make most profile fields optional to allow gradual completion.
+
+5. **Consider profile updates**: Profiles can be updated over time as users add more information.
+
+## Example: Complete Profile Setup
+
+```typescript
+import { co, z } from "jazz-tools";
+
+// Define profile schema
+const UserProfile = co.profile({
+  name: z.string(),
+  avatar: co.optional(co.image()),
+  bio: z.optional(z.string()),
+  location: z.optional(z.string()),
+  website: z.optional(z.string()),
+  joined: z.date(),
+});
+
+// Define account with profile
+const AppAccount = co.account({
+  profile: UserProfile,
+  root: co.map({
+    // private user data
+    settings: co.map({ /* ... */ }),
+  }),
+}).withMigration(async (account, creationProps) => {
+  // Migration logic for account setup
+  if (!account.$jazz.has("profile")) {
+    const profileGroup = Group.create(account);
+    profileGroup.makePublic("reader");
+    
+    const profile = UserProfile.create({
+      name: creationProps?.name || "Anonymous",
+      joined: new Date(),
+    }, { owner: profileGroup });
+    
+    account.$jazz.set("profile", profile);
+  }
+});
+
+// Use the profile
+function displayProfile(profile: UserProfile) {
+  return (
+    <div>
+      <h2>{profile.name}</h2>
+      {profile.bio && <p>{profile.bio}</p>}
+      {profile.website && <a href={profile.website}>Website</a>}
+      <p>Joined: {profile.joined.toLocaleDateString()}</p>
+    </div>
+  );
+}
+```
+
+## See Also
+
+- [`co.account`](/docs/api-reference/co/account) - For managing user accounts
+- [`co.map`](/docs/api-reference/co/map) - Profile extends CoMap
+- [`co.group`](/docs/api-reference/co/group) - For profile ownership and permissions
+- [`co.image`](/docs/api-reference/co/image) - For profile avatars

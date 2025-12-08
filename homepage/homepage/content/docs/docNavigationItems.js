@@ -463,6 +463,82 @@ export const docNavigationItems = [
           },
         ],
       },
+      {
+        name: "API Reference",
+        prefix: "/docs/api-reference",
+        items: [
+          {
+            name: "Account",
+            href: "/docs/api-reference/co/account",
+            done: 100,
+          },
+          {
+            name: "Discriminated Union",
+            href: "/docs/api-reference/co/discriminatedUnion",
+            done: 100,
+          },
+          {
+            name: "Feed",
+            href: "/docs/api-reference/co/feed",
+            done: 100,
+          },
+          {
+            name: "FileStream",
+            href: "/docs/api-reference/co/fileStream",
+            done: 100,
+          },
+          {
+            name: "Group",
+            href: "/docs/api-reference/co/group",
+            done: 100,
+          },
+          {
+            name: "Image",
+            href: "/docs/api-reference/co/image",
+            done: 100,
+          },
+          {
+            name: "List",
+            href: "/docs/api-reference/co/list",
+            done: 100,
+          },
+          {
+            name: "Map",
+            href: "/docs/api-reference/co/map",
+            done: 100,
+          },
+          {
+            name: "Optional",
+            href: "/docs/api-reference/co/optional",
+            done: 100,
+          },
+          {
+            name: "PlainText",
+            href: "/docs/api-reference/co/plainText",
+            done: 100,
+          },
+          {
+            name: "Profile",
+            href: "/docs/api-reference/co/profile",
+            done: 100,
+          },
+          {
+            name: "Record",
+            href: "/docs/api-reference/co/record",
+            done: 100,
+          },
+          {
+            name: "RichText",
+            href: "/docs/api-reference/co/richText",
+            done: 100,
+          },
+          {
+            name: "Vector",
+            href: "/docs/api-reference/co/vector",
+            done: 100,
+          },
+        ],
+      },
     ],
   },
 ];

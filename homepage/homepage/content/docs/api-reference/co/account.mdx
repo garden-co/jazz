@@ -1,0 +1,508 @@
+import LoadStatic from './snippets/LoadStatic.mdx'
+import SubscribeStatic from './snippets/SubscribeStatic.mdx'
+import { CodeGroup } from '@/components/forMdx';
+export const metadata = {
+  description: "API reference for the `co.account` module.",
+};
+
+
+# Account
+
+`co.account` provides core functionalities for managing user accounts in Jazz applications. It allows for account creation, loading, subscription, and interaction with various account-related features.
+
+See the [detailed guide](/docs/core-concepts/schemas/accounts-and-migrations)
+
+## `Account` Class
+
+<CodeGroup preferWrap>
+```ts
+class Account extends CoValueBase implements CoValue
+```
+</CodeGroup>
+Extends `CoValueBase` and implements `CoValue`. Represents a user account.
+
+### Declaration
+
+Declare a custom `Account` using `co.account()`:
+
+
+<CodeGroup preferWrap>
+```ts
+import { co, z } from "jazz-tools";
+
+const MyAppAccount = co.account({
+  profile: co.profile(),
+  root: co.map({})
+});
+```
+</CodeGroup>
+
+### Properties
+
+#### `profile`
+
+<CodeGroup preferWrap>
+```ts
+readonly profile: MaybeLoaded<Profile>
+```
+</CodeGroup>
+The user's profile associated with this account. In case no profile schema is provided, it defaults to [`co.profile()`](/docs/api-reference/co/profile).
+
+#### `root`
+
+<CodeGroup preferWrap>
+```ts
+readonly root: MaybeLoaded<CoMap>
+```
+</CodeGroup>
+The root `CoMap` associated with this account. Defining a root is mandatory.
+
+#### `isMe`
+
+<CodeGroup preferWrap>
+```ts
+get isMe(): boolean
+```
+</CodeGroup>
+Returns `true` if this account is the currently active account, `false` otherwise.
+
+### Static Methods
+
+Calling static methods against the `Account` class directly is deprecated. Prefer using `co.account()`.
+
+#### `getMe`
+
+<CodeGroup preferWrap>
+```ts
+static getMe<A extends Account>(this: CoValueClass<A> & typeof Account): A
+```
+</CodeGroup>
+Retrieves the currently active `Account`.
+
+**Returns:** The active `Account` instance.
+
+#### `createAs`
+<CodeGroup preferWrap>
+```ts
+static async createAs<A extends Account>(
+  this: CoValueClass<A> & typeof Account,
+  worker: Account,
+  options: {
+    creationProps: { name: string };
+    onCreate?: (account: A, worker: Account) => Promise<void>;
+  },
+): Promise<A>
+```
+</CodeGroup>
+**Deprecated:** Use `co.account(...).createAs` instead.
+
+Creates a new `Account` as a worker account.
+
+- `worker`: The worker `Account` instance.
+- `options`: An object containing:
+  - `creationProps`: An object with `name: string` for the new account.
+  - `onCreate`: (Optional) A callback function executed after the account is created.
+
+**Returns:** A promise that resolves to the newly created `Account` instance.
+
+#### `load`
+
+<CodeGroup preferWrap>
+```ts
+static load<A extends Account, const R extends RefsToResolve<A> = true>(
+  this: CoValueClass<A>,
+  id: ID<A>,
+  options?: {
+    resolve?: RefsToResolveStrict<A, R>;
+    loadAs?: Account | AnonymousJazzAgent;
+  },
+): Promise<Settled<Resolved<A, R>>>
+```
+</CodeGroup>
+**Deprecated:** Use `co.account(...).load` instead.
+
+<LoadStatic item="Account" />
+
+#### `subscribe`
+
+<CodeGroup preferWrap>
+```ts
+static subscribe<A extends Account, const R extends RefsToResolve<A> = true>(
+  this: CoValueClass<A>,
+  id: ID<A>,
+  listener: (value: Resolved<A, R>, unsubscribe: () => void) => void,
+): () => void;
+static subscribe<A extends Account, const R extends RefsToResolve<A> = true>(
+  this: CoValueClass<A>,
+  id: ID<A>,
+  options: SubscribeListenerOptions<A, R>,
+  listener: (value: Resolved<A, R>, unsubscribe: () => void) => void,
+): () => void;
+```
+</CodeGroup>
+**Deprecated:** Use `co.account(...).subscribe` instead.
+
+Subscribes to changes in an `Account` when you have an ID but not an instance.
+
+- `id`: The `ID` of the `Account` to subscribe to.
+- `listener`: A callback function that receives the resolved `Account` and an `unsubscribe` function.
+- `options`: (Optional) An object containing subscription options.
+
+**Returns:** An unsubscribe function.
+
+#### Advanced/Internal
+
+##### `create`
+This is normally handled by the JazzContextManager. In case you want to create accounts programmatically, see [co.account().createAs()](#createAs).
+<CodeGroup preferWrap>
+```ts
+static async create<A extends Account>(
+  this: CoValueClass<A> & typeof Account,
+  options: {
+    creationProps: { name: string };
+    initialAgentSecret?: AgentSecret;
+    peers?: Peer[];
+    crypto: CryptoProvider;
+  },
+): Promise<A>
+```
+</CodeGroup>
+Creates a new `Account`.
+
+- `options`: An object containing:
+  - `creationProps`: An object with `name: string` for the new account.
+  - `initialAgentSecret`: (Optional) The initial agent secret.
+  - `peers`: (Optional) An array of peers to connect to.
+  - `crypto`: The crypto provider to use.
+
+**Returns:** A promise that resolves to the newly created `Account` instance.
+
+##### `fromNode`
+
+<CodeGroup preferWrap>
+```ts
+static fromNode<A extends Account>(this: CoValueClass<A>, node: LocalNode): A
+```
+</CodeGroup>
+Creates an `Account` instance from a `LocalNode`.
+
+- `node`: The `LocalNode` to create the account from.
+
+**Returns:** An `Account` instance.
+
+### Instance Methods
+
+#### `acceptInvite`
+
+<CodeGroup preferWrap>
+```ts
+async acceptInvite<S extends CoValueClassOrSchema>(
+  valueID: string,
+  inviteSecret: InviteSecret,
+  coValueClass?: S,
+): Promise<Settled<Resolved<InstanceOfSchemaCoValuesMaybeLoaded<S>, true>>>
+```
+</CodeGroup>
+Accepts an invite to a `CoValue` or a `Group`.
+
+- `valueID`: The ID of the `CoValue` or `Group` to accept the invite to.
+- `inviteSecret`: The secret of the invite.
+- `coValueClass`: (Optional) The class of the `CoValue` or `Group` to accept the invite to. Defaults to `Group`.
+
+**Returns:** A promise that resolves to the loaded `CoValue` or `Group`.
+
+#### `getRoleOf`
+
+<CodeGroup preferWrap>
+```ts
+getRoleOf(member: Everyone | ID<Account> | "me"): "admin" | undefined
+```
+</CodeGroup>
+Retrieves the role of a member within this account context. For an `Account`, currently only "admin" is returned if the member is the account itself or "me".
+
+- `member`: The `ID` of the account, `"me"` for the current account, or `Everyone`.
+
+**Returns:** `"admin"` if the member is the account itself, `undefined` otherwise.
+
+#### `canRead`
+
+<CodeGroup preferWrap>
+```ts
+canRead(value: CoValue): boolean
+```
+</CodeGroup>
+Checks if this account has read permissions for a given `CoValue`.
+
+- `value`: The `CoValue` to check permissions for.
+
+**Returns:** `true` if the account can read the `CoValue`, `false` otherwise.
+
+#### `canWrite`
+
+<CodeGroup preferWrap>
+```ts
+canWrite(value: CoValue): boolean
+```
+</CodeGroup>
+Checks if this account has write permissions for a given `CoValue`.
+
+- `value`: The `CoValue` to check permissions for.
+
+**Returns:** `true` if the account can write to the `CoValue`, `false` otherwise.
+
+#### `canManage`
+
+<CodeGroup preferWrap>
+```ts
+canManage(value: CoValue): boolean
+```
+</CodeGroup>
+Checks if this account has manage permissions for a given `CoValue`.
+
+- `value`: The `CoValue` to check permissions for.
+
+**Returns:** `true` if the account can manage the `CoValue`, `false` otherwise.
+
+#### `canAdmin`
+
+<CodeGroup preferWrap>
+```ts
+canAdmin(value: CoValue): boolean
+```
+</CodeGroup>
+Checks if this account has admin permissions for a given `CoValue`.
+
+- `value`: The `CoValue` to check permissions for.
+
+**Returns:** `true` if the account can administrate the `CoValue`, `false` otherwise.
+
+#### `applyMigration`
+
+<CodeGroup preferWrap>
+```ts
+async applyMigration(creationProps?: AccountCreationProps)
+```
+</CodeGroup>
+Applies migration logic to the account. This method is called internally during account creation or migration processes.
+
+- `creationProps`: (Optional) Properties used during account creation.
+
+#### Advanced/Internal
+
+##### `constructor`
+  
+  <CodeGroup preferWrap>
+```ts
+  constructor(options: { fromRaw: RawAccount })
+  ```
+</CodeGroup>  
+  Constructs a new `Account` instance. Intended for internal use; accounts are typically created via `co.account.create()`.
+  
+##### `migrate`
+
+<CodeGroup preferWrap>
+```ts
+migrate(creationProps?: AccountCreationProps)
+```
+</CodeGroup>
+Placeholder method for subclasses to override with custom migration logic.
+
+- `creationProps`: (Optional) Properties used during account creation.
+
+
+## `$jazz`
+
+<CodeGroup preferWrap>
+```ts
+class AccountJazzApi<A extends Account> extends CoValueJazzApi<A>
+```
+</CodeGroup>
+Provides Jazz-specific methods and properties for an `Account` instance, accessed via the `$jazz` property on an `Account`.
+
+### Properties
+
+#### `id`
+<CodeGroup preferWrap>
+```ts
+get id(): string
+```
+</CodeGroup>
+
+Returns the account ID.
+
+#### `owner`
+
+<CodeGroup preferWrap>
+```ts
+get owner(): undefined
+```
+</CodeGroup>
+Accounts have no owner, so this always returns `undefined`.
+
+#### Advanced/Internal
+
+##### `isLocalNodeOwner`
+
+<CodeGroup preferWrap>
+```ts
+isLocalNodeOwner: boolean
+```
+</CodeGroup>
+Indicates whether this account is the owner of the local node. Internal property.
+
+##### `sessionID`
+
+<CodeGroup preferWrap>
+```ts
+sessionID: SessionID | undefined
+```
+</CodeGroup>
+The session ID if this account is the local node owner. Internal property.
+
+##### `refs`
+
+<CodeGroup preferWrap>
+```ts
+get refs(): {
+  profile: RefIfCoValue<Profile> | undefined;
+  root: RefIfCoValue<CoMap> | undefined;
+}
+```
+</CodeGroup>
+Provides access to `Ref` objects for `profile` and `root`, allowing you to get their IDs or load them manually.
+
+### Methods
+
+#### `set`
+
+<CodeGroup preferWrap>
+```ts
+set<K extends "root" | "profile">(
+  key: K,
+  value: CoFieldInit<LoadedAndRequired<A[K]>>,
+)
+```
+</CodeGroup>
+Sets the value of a key in the account. Currently supports "root" and "profile".
+
+- `key`: The key to set (`"root"` or `"profile"`).
+- `value`: The `CoFieldInit` value to set.
+
+#### `has`
+
+<CodeGroup preferWrap>
+```ts
+has(key: "root" | "profile"): boolean
+```
+</CodeGroup>
+Checks if the account has a value for the given key.
+
+- `key`: The key to check (`"root"` or `"profile"`).
+
+**Returns:** `true` if the key exists and is not deleted, `false` otherwise.
+
+#### `ensureLoaded`
+
+<CodeGroup preferWrap>
+```ts
+ensureLoaded<A extends Account, const R extends RefsToResolve<A>>(
+  this: AccountJazzApi<A>,
+  options: {
+    resolve: RefsToResolveStrict<A, R>;
+    unstable_branch?: BranchDefinition;
+  },
+): Promise<Resolved<A, R>>
+```
+</CodeGroup>
+Ensures that the account and its specified references are loaded.
+
+- `options`: An object containing:
+  - `resolve`: Specifies which [references to resolve](/docs/core-concepts/subscription-and-loading).
+  - `unstable_branch`: (Optional) An unstable branch definition.
+
+**Returns:** A promise that resolves to the resolved `Account`.
+
+#### `subscribe`
+
+<CodeGroup preferWrap>
+```ts
+subscribe<A extends Account, const R extends RefsToResolve<A>>(
+  this: AccountJazzApi<A>,
+  listener: (value: Resolved<A, R>, unsubscribe: () => void) => void,
+): () => void;
+subscribe<A extends Account, const R extends RefsToResolve<A>>(
+  this: AccountJazzApi<A>,
+  options: {
+    resolve?: RefsToResolveStrict<A, R>;
+    unstable_branch?: BranchDefinition;
+  },
+  listener: (value: Resolved<A, R>, unsubscribe: () => void) => void,
+): () => void;
+```
+</CodeGroup>
+Subscribes to changes in the existing `Account` instance.
+
+- `listener`: A callback function that receives the resolved `Account` and an `unsubscribe` function.
+- `options`: An object containing:
+  - `resolve`: Specifies which [references to resolve](/docs/core-concepts/subscription-and-loading).
+  - `unstable_branch`: (Optional) An [unstable branch definition](/docs/key-features/version-control).
+
+**Returns:** An unsubscribe function.
+
+#### `waitForSync`
+
+<CodeGroup preferWrap>
+```ts
+waitForSync(options?: { timeout?: number }): Promise<void>
+```
+</CodeGroup>
+Waits for the `Account` to be uploaded to other peers.
+
+- `options`: (Optional) An object containing:
+  - `timeout`: (Optional) A timeout in milliseconds.
+
+**Returns:** A promise that resolves when the account is synced.
+
+#### `waitForAllCoValuesSync`
+
+<CodeGroup preferWrap>
+```ts
+waitForAllCoValuesSync(options?: { timeout?: number }): Promise<void>
+```
+</CodeGroup>
+Waits for all available `CoValues` associated with this account to be uploaded to other peers.
+
+- `options`: (Optional) An object containing:
+  - `timeout`: (Optional) A timeout in milliseconds.
+
+**Returns:** A promise that resolves when all `CoValues` are synced.
+
+#### Advanced/Internal
+
+##### `constructor`
+
+<CodeGroup preferWrap>
+```ts
+constructor(
+  private account: A,
+  public raw: RawAccount,
+)
+```
+</CodeGroup>
+Constructs an `AccountJazzApi` instance. Internal use only.
+
+- `account`: The `Account` instance this API is for.
+- `raw`: The raw `RawAccount` data.
+
+##### `getDescriptor`
+
+<CodeGroup preferWrap>
+```ts
+getDescriptor(key: string): RefEncoded<Profile> | RefEncoded<CoMap> | undefined
+```
+</CodeGroup>
+Retrieves the descriptor for a given key. Internal method.
+
+- `key`: The key to get the descriptor for.
+
+**Returns:** The `RefEncoded` descriptor or `undefined`.

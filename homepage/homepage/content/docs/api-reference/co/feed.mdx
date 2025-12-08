@@ -1,0 +1,320 @@
+import JazzDefaultProperties from './snippets/JazzDefaultProperties.mdx';
+import LoadStatic from './snippets/LoadStatic.mdx';
+import SubscribeStatic from './snippets/SubscribeStatic.mdx';
+import WaitForSync from './snippets/WaitForSync.mdx';
+import { CodeGroup } from '@/components/forMdx';
+export const metadata = {
+  description: "API reference for the `co.feed` module.",
+};
+
+# Feed
+
+A `co.feed` is a minimal abstraction over the internal workings of Jazz, and exposes the underlying per-session append-only logs as the feed itself.
+
+## `CoFeed` Class
+
+<CodeGroup preferWrap>
+```typescript
+class CoFeed<Item> extends CoValueBase implements CoValue
+```
+</CodeGroup>
+Extends `CoValueBase` and implements `CoValue`. Represents an append-only collaborative feed.
+
+CoFeeds are collaborative logs of data. They are similar to [`CoList`](/docs/api-reference/co/list)s, but with a few key differences:
+- They are append-only (no removal or editing of items)
+- They consist of append-only logs, one per account session (tab, device, app instance, etc.)
+- They expose those as a per-account aggregated view (default) or a precise per-session view
+
+### Declaration
+
+Declare a `CoFeed` using `co.feed()`:
+
+<CodeGroup preferWrap>
+```typescript
+import { co, z } from "jazz-tools";
+
+const ActivityFeed = co.feed(z.string());
+```
+</CodeGroup>
+### Static Methods
+
+Calling static methods against the `CoFeed` class directly is deprecated. Prefer using `co.feed()`.
+
+#### `create`
+
+<CodeGroup preferWrap>
+```typescript
+static create<F extends CoFeed>(
+  this: CoValueClass<F>,
+  init: Item[],
+  options?: { owner: Account | Group } | Account | Group,
+): F
+```
+</CodeGroup>
+
+Creates a new `CoFeed` with optional initial items.
+
+- `init`: Array of initial items for the feed.
+- `options`: The owner of the CoFeed. Can be an object with `owner` property, or an `Account` or `Group` directly.
+
+**Returns:** A newly created `CoFeed` instance.
+
+**Example:**
+<CodeGroup preferWrap>
+```typescript
+const activityFeed = ActivityFeed.create([], { owner: me });
+activityFeed.$jazz.push("User logged in");
+```
+</CodeGroup>
+
+#### `load`
+
+<CodeGroup preferWrap>
+```typescript
+static load<F extends CoFeed, const R extends RefsToResolve<F> = true>(
+  this: CoValueClass<F>,
+  id: ID<F>,
+  options?: {
+    resolve?: RefsToResolveStrict<F, R>;
+    loadAs?: Account | AnonymousJazzAgent;
+  },
+): Promise<Settled<Resolved<F, R>>>
+```
+</CodeGroup>
+
+<LoadStatic item="Feed" />
+
+#### `subscribe`
+
+<CodeGroup preferWrap>
+```typescript
+static subscribe<F extends CoFeed, const R extends RefsToResolve<F> = true>(
+  this: CoValueClass<F>,
+  id: ID<F>,
+  listener: (value: Resolved<F, R>, unsubscribe: () => void) => void,
+): () => void;
+static subscribe<F extends CoFeed, const R extends RefsToResolve<F> = true>(
+  this: CoValueClass<F>,
+  id: ID<F>,
+  options: SubscribeListenerOptions<F, R>,
+  listener: (value: Resolved<F, R>, unsubscribe: () => void) => void,
+): () => void;
+```
+</CodeGroup>
+
+<SubscribeStatic item="Feed" />
+
+### Properties
+
+#### `byMe`
+
+<CodeGroup preferWrap>
+```typescript
+get byMe(): CoFeedEntry<Item> | undefined
+```
+</CodeGroup>
+
+The current account's view of this `CoFeed`. Returns the latest entry from the current account across all their sessions.
+
+**Returns:** The latest entry made by the current account, or `undefined` if not available.
+
+#### `perAccount`
+
+<CodeGroup preferWrap>
+```typescript
+get perAccount(): {
+  [key: ID<Account>]: CoFeedEntry<Item>;
+}
+```
+</CodeGroup>
+
+The per-account view of this `CoFeed`. Access entries by account ID to get the latest entry from that account.
+
+**Example:**
+<CodeGroup preferWrap>
+```typescript
+// Access entries directly by account ID
+const aliceEntries = feed.perAccount[aliceAccount.id];
+console.log(aliceEntries.value); // Latest value from Alice
+
+// Iterate through all accounts' entries
+for (const [accountId, entries] of Object.entries(feed.perAccount)) {
+  console.log(`Latest entry from ${accountId}:`, entries.value);
+
+  // Access all entries from this account
+  for (const entry of entries.all) {
+    console.log(`Entry made at ${entry.madeAt}:`, entry.value);
+  }
+}
+```
+</CodeGroup>
+
+#### `perSession`
+
+<CodeGroup preferWrap>
+```typescript
+get perSession(): {
+  [key: SessionID]: CoFeedEntry<Item>;
+}
+```
+</CodeGroup>
+The per-session view of this `CoFeed`. Access entries by session ID to get the latest entry from that specific session.
+
+**Returns:** An object mapping session IDs to their latest entries.
+
+#### `inCurrentSession`
+
+<CodeGroup preferWrap>
+```typescript
+get inCurrentSession(): CoFeedEntry<Item> | undefined
+```
+</CodeGroup>
+The current session's view of this `CoFeed`. This is a shortcut for accessing `this.perSession[currentSessionID]`.
+
+**Returns:** The latest entry made in the current session, or `undefined` if not available.
+
+### Instance Methods
+
+#### `toJSON`
+
+<CodeGroup preferWrap>
+```typescript
+toJSON(): {
+  $jazz: { id: string };
+  [key: string]: unknown;
+  in: { [key: string]: unknown };
+}
+```
+</CodeGroup>
+Gets a JSON representation of the `CoFeed`.
+
+**Returns:** An object with:
+- `$jazz.id`: The feed's ID
+- Per-account entries
+- `in`: Per-session entries
+
+## `$jazz`
+
+<CodeGroup preferWrap>
+```typescript
+class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F>
+```
+</CodeGroup>
+Provides Jazz-specific methods and properties for a `CoFeed` instance, accessed via the `$jazz` property on a `CoFeed`.
+
+### Properties
+
+<JazzDefaultProperties item="Feed" level={4}  />
+
+### Methods
+
+#### `$jazz.push`
+
+<CodeGroup preferWrap>
+```typescript
+push(...items: CoFieldInit<Item>[]): void
+```
+</CodeGroup>
+Pushes items to this `CoFeed`.
+
+Items are appended to the current session's log. Each session (tab, device, app instance) maintains its own append-only log, which is then aggregated into the per-account view.
+
+- `items`: Items to append to the feed.
+
+**Example:**
+<CodeGroup preferWrap>
+```typescript
+// Adds items to current session's log
+feed.$jazz.push("item1", "item2");
+
+// View items from current session
+console.log(feed.inCurrentSession);
+
+// View aggregated items from all sessions for current account
+console.log(feed.byMe);
+```
+</CodeGroup>
+#### `$jazz.ensureLoaded`
+
+<CodeGroup preferWrap>
+```typescript
+ensureLoaded<F extends CoFeed, const R extends RefsToResolve<F>>(
+  this: CoFeedJazzApi<F>,
+  options?: {
+    resolve?: RefsToResolveStrict<F, R>;
+    unstable_branch?: BranchDefinition;
+  },
+): Promise<Resolved<F, R>>
+```
+</CodeGroup>
+Ensures a `CoFeed` is loaded to the specified depth.
+
+- `options`: (Optional) An object containing:
+  - `resolve`: Specifies which item references to resolve.
+  - `unstable_branch`: (Optional) An unstable branch definition.
+
+**Returns:** A promise that resolves to the resolved `CoFeed`.
+
+#### `$jazz.subscribe`
+
+<CodeGroup preferWrap>
+```typescript
+subscribe<F extends CoFeed, const R extends RefsToResolve<F>>(
+  this: CoFeedJazzApi<F>,
+  listener: (value: Resolved<F, R>, unsubscribe: () => void) => void,
+): () => void;
+subscribe<F extends CoFeed, const R extends RefsToResolve<F>>(
+  this: CoFeedJazzApi<F>,
+  options: {
+    resolve?: RefsToResolveStrict<F, R>;
+    unstable_branch?: BranchDefinition;
+  },
+  listener: (value: Resolved<F, R>, unsubscribe: () => void) => void,
+): () => void;
+```
+</CodeGroup>
+An instance method to subscribe to an existing `CoFeed`.
+
+- `listener`: A callback function that receives the resolved `CoFeed` and an `unsubscribe` function.
+- `options`: (Optional) An object containing subscription options.
+
+**Returns:** An unsubscribe function.
+
+**Example:**
+<CodeGroup preferWrap>
+```typescript
+// Subscribe to the feed
+const unsubscribe = feed.$jazz.subscribe(() => {
+  console.log('Update')
+}, {
+  resolve: {
+    item: true
+  }
+});
+```
+</CodeGroup>
+
+<WaitForSync item="Feed" />
+
+## `CoFeedEntry` Type
+
+<CodeGroup preferWrap>
+```typescript
+type CoFeedEntry<Item> = {
+  value: Item;
+  ref: Ref<Item>; // Only for CoValue items
+  by: Account | null;
+  madeAt: Date;
+  tx: TransactionID;
+  all: IterableIterator<SingleCoFeedEntry<Item>>;
+}
+```
+</CodeGroup>
+Represents an entry or entries in a CoFeed.
+
+- `value`: The item value
+- `ref`: Reference to the item (only for CoValue items)
+- `by`: The account that created this entry
+- `madeAt`: When the entry was created
+- `tx`: The transaction ID
+- `all`: Iterator over all entries (for accessing full history)

@@ -1,0 +1,455 @@
+export const metadata = {
+  description: "API reference for the `co.list` module.",
+};
+
+# List
+
+`co.list` provides core functionalities for creating and managing collaborative lists (array-like data structures) in Jazz applications. CoLists are the collaborative equivalent of plain JavaScript arrays.
+
+## `CoList` Class
+
+```typescript
+class CoList<Item> extends Array<Item> implements ReadonlyArray<Item>, CoValue
+```
+
+Extends `Array` and implements `CoValue`. Represents a collaborative list with items of a specific type.
+
+CoLists are collaborative versions of plain arrays. You can access items on a `CoList` as if they were normal items on a plain array, using `[]` notation. All readonly array methods are available on `CoList`.
+
+### Declaration
+
+Declare a `CoList` using `co.list()`:
+
+```typescript
+import { co, z } from "jazz-tools";
+
+const ColorList = co.list(z.string());
+const AnimalList = co.list(Animal); // references to CoValues
+```
+
+### Static Methods
+
+#### `create`
+
+```typescript
+static create<L extends CoList>(
+  this: CoValueClass<L>,
+  items: L[number][],
+  options?: { owner: Account | Group } | Account | Group,
+): L
+```
+
+**Deprecated:** Use `co.list(...).create` instead.
+
+Creates a new CoList with the given initial values and owner.
+
+The owner (a Group or Account) determines access rights to the CoList.
+
+The CoList will immediately be persisted and synced to connected peers.
+
+- `items`: Array of initial items for the list.
+- `options`: The owner of the CoList. Can be an object with `owner` property, or an `Account` or `Group` directly.
+
+**Returns:** A newly created `CoList` instance.
+
+**Example:**
+```typescript
+const colours = ColorList.create(
+  ["red", "green", "blue"],
+  { owner: me }
+);
+
+const animals = AnimalList.create(
+  [cat, dog, fish],
+  { owner: me }
+);
+```
+
+#### `load`
+
+```typescript
+static load<L extends CoList, const R extends RefsToResolve<L> = true>(
+  this: CoValueClass<L>,
+  id: ID<L>,
+  options?: {
+    resolve?: RefsToResolveStrict<L, R>;
+    loadAs?: Account | AnonymousJazzAgent;
+  },
+): Promise<Settled<Resolved<L, R>>>
+```
+
+**Deprecated:** Use `co.list(...).load` instead.
+
+Loads a `CoList` with a given ID.
+
+`resolve` specifies if item CoValue references should be loaded as well before resolving. You can pass `[]` for shallowly loading only this CoList, or `[{ nested: {} }]` for recursively loading referenced CoValues.
+
+- `id`: The `ID` of the `CoList` to load.
+- `options`: (Optional) An object containing:
+  - `resolve`: Specifies which item references to resolve.
+  - `loadAs`: The `Account` or `AnonymousJazzAgent` to load the CoList as.
+
+**Returns:** A promise that resolves to the loaded `CoList`.
+
+**Example:**
+```typescript
+const animalsWithVets = await ListOfAnimals.load(
+  "co_zdsMhHtfG6VNKt7RqPUPvUtN2Ax",
+  { resolve: [{ vet: {} }] }
+);
+```
+
+#### `subscribe`
+
+```typescript
+static subscribe<L extends CoList, const R extends RefsToResolve<L> = true>(
+  this: CoValueClass<L>,
+  id: ID<L>,
+  listener: (value: Resolved<L, R>, unsubscribe: () => void) => void,
+): () => void;
+static subscribe<L extends CoList, const R extends RefsToResolve<L> = true>(
+  this: CoValueClass<L>,
+  id: ID<L>,
+  options: SubscribeListenerOptions<L, R>,
+  listener: (value: Resolved<L, R>, unsubscribe: () => void) => void,
+): () => void;
+```
+
+**Deprecated:** Use `co.list(...).subscribe` instead.
+
+Loads and subscribes to a `CoList` with a given ID.
+
+Automatically also subscribes to updates to all referenced/nested CoValues as soon as they are accessed in the listener.
+
+Returns an unsubscribe function that you should call when you no longer need updates.
+
+- `id`: The `ID` of the `CoList` to subscribe to.
+- `listener`: A callback function that receives the resolved `CoList` and an `unsubscribe` function.
+- `options`: (Optional) An object containing subscription options.
+
+**Returns:** An unsubscribe function.
+
+**Example:**
+```typescript
+const unsub = ListOfAnimals.subscribe(
+  "co_zdsMhHtfG6VNKt7RqPUPvUtN2Ax",
+  { resolve: [{ vet: {} }] },
+  (animalsWithVets) => console.log(animalsWithVets)
+);
+```
+
+#### `upsertUnique`
+
+```typescript
+static async upsertUnique<L extends CoList, const R extends RefsToResolve<L> = true>(
+  this: CoValueClass<L>,
+  options: {
+    value: L[number][];
+    unique: CoValueUniqueness["uniqueness"];
+    owner: Account | Group;
+    resolve?: RefsToResolveStrict<L, R>;
+  },
+): Promise<Settled<Resolved<L, R>>>
+```
+
+Given some data, updates an existing CoList or initializes a new one if none exists.
+
+- `options`: An object containing:
+  - `value`: The intended items in the CoList.
+  - `unique`: The unique identifier for this CoList.
+  - `owner`: The owner (Account or Group) of the CoList.
+  - `resolve`: (Optional) Specifies which references to resolve.
+
+**Returns:** A promise that resolves to either an existing & modified CoList, or a new initialized CoList if none exists.
+
+**Example:**
+```typescript
+const activeItems = await ItemList.upsertUnique({
+  value: [item1, item2, item3],
+  unique: sourceData.identifier,
+  owner: workspace,
+});
+```
+
+#### `loadUnique`
+
+```typescript
+static async loadUnique<L extends CoList, const R extends RefsToResolve<L> = true>(
+  this: CoValueClass<L>,
+  unique: CoValueUniqueness["uniqueness"],
+  ownerID: ID<Account> | ID<Group>,
+  options?: {
+    resolve?: RefsToResolveStrict<L, R>;
+    loadAs?: Account | AnonymousJazzAgent;
+  },
+): Promise<Settled<Resolved<L, R>>>
+```
+
+Loads a CoList by its unique identifier and owner's ID.
+
+- `unique`: The unique identifier of the CoList to load.
+- `ownerID`: The ID of the owner of the CoList.
+- `options`: (Optional) Additional options for loading the CoList.
+
+**Returns:** The loaded CoList, or a not-loaded value if unavailable.
+
+### Instance Methods
+
+#### `toJSON`
+
+```typescript
+toJSON(_key?: string, seenAbove?: ID<CoValue>[]): any[]
+```
+
+Returns a JSON representation of the `CoList`.
+
+**Returns:** An array with all the CoList's items serialized to JSON.
+
+## `CoListJazzApi`
+
+```typescript
+class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L>
+```
+
+Provides Jazz-specific methods and properties for a `CoList` instance, accessed via the `$jazz` property on a `CoList`.
+
+### Properties
+
+#### `owner`
+
+```typescript
+get owner(): Group
+```
+
+The owner group of this CoList.
+
+**Returns:** The `Group` that owns this CoList.
+
+#### `refs`
+
+```typescript
+get refs(): {
+  [idx: number]: Ref<Item>;
+  length: number;
+}
+```
+
+If a `CoList`'s items are CoValue references, you can use `coList.$jazz.refs[i]` to access the `Ref` instead of the potentially loaded/null value.
+
+This allows you to always get the ID or load the value manually.
+
+**Example:**
+```typescript
+animals.$jazz.refs[0].id; // => ID<Animal>
+animals.$jazz.refs[0].value; // => Animal | null
+const animal = await animals.$jazz.refs[0].load();
+```
+
+### Methods
+
+#### `set`
+
+```typescript
+set(index: number, value: CoFieldInit<Item>): void
+```
+
+Sets the value at a specific index in the CoList.
+
+- `index`: The index to set.
+- `value`: The value to set.
+
+**Example:**
+```typescript
+colorList.$jazz.set(0, "purple");
+```
+
+#### `push`
+
+```typescript
+push(...items: CoFieldInit<Item>[]): number
+```
+
+Appends new elements to the end of the list, and returns the new length of the list.
+
+- `items`: New elements to add to the list.
+
+**Returns:** The new length of the list.
+
+**Example:**
+```typescript
+colorList.$jazz.push("yellow", "orange");
+```
+
+#### `unshift`
+
+```typescript
+unshift(...items: CoFieldInit<Item>[]): number
+```
+
+Inserts new elements at the start of the list, and returns the new length of the list.
+
+- `items`: Elements to insert at the start of the list.
+
+**Returns:** The new length of the list.
+
+**Example:**
+```typescript
+colorList.$jazz.unshift("purple");
+```
+
+#### `pop`
+
+```typescript
+pop(): Item | undefined
+```
+
+Removes the last element from the list and returns it. If the list is empty, undefined is returned and the list is not modified.
+
+**Returns:** The removed element, or `undefined` if the list was empty.
+
+#### `shift`
+
+```typescript
+shift(): Item | undefined
+```
+
+Removes the first element from the list and returns it. If the list is empty, undefined is returned and the list is not modified.
+
+**Returns:** The removed element, or `undefined` if the list was empty.
+
+#### `splice`
+
+```typescript
+splice(start: number, deleteCount: number, ...items: CoFieldInit<Item>[]): Item[]
+```
+
+Removes elements from the list and, if necessary, inserts new elements in their place, returning the deleted elements.
+
+- `start`: The zero-based location in the list from which to start removing elements.
+- `deleteCount`: The number of elements to remove.
+- `items`: Elements to insert into the list in place of the deleted elements.
+
+**Returns:** An array containing the elements that were deleted.
+
+**Example:**
+```typescript
+colorList.$jazz.splice(1, 1, "cyan");
+```
+
+#### `remove`
+
+```typescript
+remove(...indices: number[]): Item[];
+remove(predicate: (item: Item, index: number, coList: L) => boolean): Item[];
+```
+
+Removes elements at the specified indices or matching a predicate from the list.
+
+- `indices`: The indices of the elements to remove.
+- `predicate`: A function to test each element. Elements that match will be removed.
+
+**Returns:** The removed elements.
+
+**Example:**
+```typescript
+// Remove by indices
+colorList.$jazz.remove(0, 2);
+
+// Remove by predicate
+colorList.$jazz.remove((color) => color.startsWith("b"));
+```
+
+#### `retain`
+
+```typescript
+retain(predicate: (item: Item, index: number, coList: L) => boolean): Item[]
+```
+
+Retains only the elements matching the predicate, removing all others.
+
+- `predicate`: A function to test each element. Elements that don't match will be removed.
+
+**Returns:** The removed elements.
+
+#### `applyDiff`
+
+```typescript
+applyDiff(result: CoFieldInit<Item>[]): L
+```
+
+Modifies the `CoList` to match another list.
+
+Changes are detected using `Object.is` for non-collaborative values and `$jazz.id` for collaborative values.
+
+- `result`: The resolved list of items. For collaborative values, both CoValues and JSON values are supported.
+
+**Returns:** The modified CoList.
+
+#### `ensureLoaded`
+
+```typescript
+ensureLoaded<L extends CoList, const R extends RefsToResolve<L>>(
+  this: CoListJazzApi<L>,
+  options: {
+    resolve: RefsToResolveStrict<L, R>;
+    unstable_branch?: BranchDefinition;
+  },
+): Promise<Resolved<L, R>>
+```
+
+Given an already loaded `CoList`, ensures that items are loaded to the specified depth.
+
+Works like `CoList.load()`, but you don't need to pass the ID or the account to load as again.
+
+- `options`: An object containing:
+  - `resolve`: Specifies which item references to resolve.
+  - `unstable_branch`: (Optional) An unstable branch definition.
+
+**Returns:** A promise that resolves to the resolved `CoList`.
+
+#### `subscribe`
+
+```typescript
+subscribe<L extends CoList, const R extends RefsToResolve<L> = true>(
+  this: CoListJazzApi<L>,
+  listener: (value: Resolved<L, R>, unsubscribe: () => void) => void,
+): () => void;
+subscribe<L extends CoList, const R extends RefsToResolve<L> = true>(
+  this: CoListJazzApi<L>,
+  options: {
+    resolve?: RefsToResolveStrict<L, R>;
+    unstable_branch?: BranchDefinition;
+  },
+  listener: (value: Resolved<L, R>, unsubscribe: () => void) => void,
+): () => void;
+```
+
+Given an already loaded `CoList`, subscribes to updates to the `CoList` and ensures that items are loaded to the specified depth.
+
+Works like `CoList.subscribe()`, but you don't need to pass the ID or the account to load as again.
+
+Returns an unsubscribe function that you should call when you no longer need updates.
+
+- `listener`: A callback function that receives the resolved `CoList` and an `unsubscribe` function.
+- `options`: (Optional) An object containing subscription options.
+
+**Returns:** An unsubscribe function.
+
+#### `waitForSync`
+
+```typescript
+async waitForSync(options?: { timeout?: number }): Promise<void>
+```
+
+Waits for the `CoList` to be uploaded to other peers.
+
+- `options`: (Optional) An object containing:
+  - `timeout`: (Optional) A timeout in milliseconds.
+
+**Returns:** A promise that resolves when the CoList is synced.
+
+## See Also
+
+- [`co.map`](/docs/api-reference/co/map) - For creating collaborative maps/objects
+- [`co.feed`](/docs/api-reference/co/feed) - For creating append-only collaborative logs
+- [`co.group`](/docs/api-reference/co/group) - For managing ownership and permissions

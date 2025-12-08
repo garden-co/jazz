@@ -1,0 +1,353 @@
+export const metadata = {
+  description: "API reference for the `co.vector` module.",
+};
+
+# Vector
+
+`co.vector` provides core functionalities for creating and managing collaborative vectors (floating-point arrays) in Jazz applications. CoVectors are immutable collaborative storage for embedding vectors, commonly used in AI/ML applications.
+
+## `CoVector` Class
+
+```typescript
+class CoVector extends Float32Array implements Readonly<Float32Array>, CoValue
+```
+
+Extends `Float32Array` and implements `CoValue`. Represents an immutable collaborative vector with a fixed number of dimensions.
+
+CoVectors are designed for storing and sharing embedding vectors (e.g., from OpenAI, Cohere, or other AI models) in a collaborative environment. Once created, they are immutable.
+
+### Declaration
+
+CoVectors are created using `co.vector()` with a specified dimension count:
+
+```typescript
+import { co } from "jazz-tools";
+
+// OpenAI text-embedding-3-small has 1536 dimensions
+const Embedding = co.map({
+  text: z.string(),
+  vector: co.vector(1536),
+});
+```
+
+### Static Methods
+
+#### `create`
+
+```typescript
+static create<S extends CoVector>(
+  this: CoValueClass<S> & typeof CoVector,
+  vector: number[] | Float32Array,
+  options?: { owner?: Account | Group } | Account | Group,
+): S
+```
+
+**Deprecated:** Use `co.vector(...).create` instead.
+
+Creates a new `CoVector` instance with the given vector data.
+
+The vector dimensions must match the schema's dimension count.
+
+- `vector`: The vector data as an array of numbers or Float32Array.
+- `options`: (Optional) The owner of the CoVector. Can be an object with `owner` property, or an `Account` or `Group` directly.
+
+**Returns:** A newly created `CoVector` instance.
+
+**Example:**
+```typescript
+import { co } from "jazz-tools";
+
+const EmbeddingVector = co.vector(1536);
+
+// From array of numbers
+const embedding = EmbeddingVector.create(
+  [0.123, -0.456, 0.789, /* ...1533 more values */],
+  { owner: me }
+);
+
+// From Float32Array
+const float32Array = new Float32Array([/* ... */]);
+const embedding2 = EmbeddingVector.create(float32Array, { owner: me });
+```
+
+#### `load`
+
+```typescript
+static async load<C extends CoVector>(
+  this: CoValueClass<C>,
+  id: ID<C>,
+  options?: {
+    loadAs?: Account | AnonymousJazzAgent;
+  },
+): Promise<Settled<C>>
+```
+
+**Deprecated:** Use `co.vector(...).load` instead.
+
+Loads a `CoVector` by its ID. Waits for the entire vector to be downloaded before resolving.
+
+- `id`: The `ID` of the `CoVector` to load.
+- `options`: (Optional) An object containing:
+  - `loadAs`: The `Account` or `AnonymousJazzAgent` to load as.
+
+**Returns:** A promise that resolves to the loaded `CoVector`.
+
+#### `subscribe`
+
+```typescript
+static subscribe<V extends CoVector>(
+  this: CoValueClass<V>,
+  id: ID<V>,
+  listener: (value: Resolved<V, true>, unsubscribe: () => void) => void,
+): () => void;
+static subscribe<V extends CoVector>(
+  this: CoValueClass<V>,
+  id: ID<V>,
+  options: SubscribeListenerOptions<V, true>,
+  listener: (value: Resolved<V, true>, unsubscribe: () => void) => void,
+): () => void;
+```
+
+**Deprecated:** Use `co.vector(...).subscribe` instead.
+
+Subscribes to a `CoVector` when you have an ID but don't have a `CoVector` instance yet.
+
+- `id`: The `ID` of the `CoVector` to subscribe to.
+- `listener`: A callback function that receives the resolved `CoVector` and an `unsubscribe` function.
+- `options`: (Optional) An object containing subscription options.
+
+**Returns:** An unsubscribe function.
+
+### Instance Methods
+
+CoVector supports all readonly Float32Array methods like `map()`, `filter()`, `reduce()`, etc., but prevents mutation:
+
+#### Readonly Array Methods
+
+All standard Float32Array readonly methods are available:
+- `forEach()`, `map()`, `filter()`, `reduce()`, `find()`, `some()`, `every()`
+- `slice()`, `indexOf()`, `includes()`, `entries()`, `keys()`, `values()`
+- And more...
+
+#### `toJSON`
+
+```typescript
+toJSON(): Array<number>
+```
+
+Gets a JSON representation of the `CoVector`.
+
+**Returns:** An array of numbers.
+
+### Immutability
+
+CoVectors are immutable. The following mutation methods will throw errors:
+
+- `copyWithin()` ❌
+- `fill()` ❌
+- `reverse()` ❌
+- `set()` ❌
+- `sort()` ❌
+
+If you need to modify a vector, create a new one:
+
+```typescript
+// ❌ This will throw an error
+embedding.set([1, 2, 3]);
+
+// ✅ Create a new vector instead
+const modified = new Float32Array(embedding);
+modified[0] = 1.5;
+const newEmbedding = EmbeddingVector.create(modified, { owner: me });
+```
+
+## `CoVectorJazzApi`
+
+```typescript
+class CoVectorJazzApi<V extends CoVector> extends CoValueJazzApi<V>
+```
+
+Provides Jazz-specific methods and properties for a `CoVector` instance, accessed via the `$jazz` property on a `CoVector`.
+
+### Properties
+
+#### `owner`
+
+```typescript
+get owner(): Group
+```
+
+The owner group of this CoVector.
+
+**Returns:** The `Group` that owns this CoVector.
+
+### Methods
+
+#### `subscribe`
+
+```typescript
+subscribe<B extends CoVector>(
+  this: CoVectorJazzApi<B>,
+  listener: (value: Resolved<B, true>) => void,
+): () => void
+```
+
+An instance method to subscribe to an existing `CoVector`.
+
+- `listener`: A callback function that receives the resolved `CoVector`.
+
+**Returns:** An unsubscribe function.
+
+#### `waitForSync`
+
+```typescript
+waitForSync(options?: { timeout?: number }): Promise<void>
+```
+
+Waits for the `CoVector` to be uploaded to other peers.
+
+- `options`: (Optional) An object containing:
+  - `timeout`: (Optional) A timeout in milliseconds.
+
+**Returns:** A promise that resolves when the CoVector is synced.
+
+#### `magnitude`
+
+```typescript
+magnitude(): number
+```
+
+Calculates the magnitude (length) of this vector.
+
+**Returns:** The magnitude as a number.
+
+**Example:**
+```typescript
+const mag = embedding.$jazz.magnitude();
+console.log(`Vector magnitude: ${mag}`);
+```
+
+#### `normalize`
+
+```typescript
+normalize(): Float32Array
+```
+
+Normalizes this vector (scales to unit length).
+
+**Returns:** A new Float32Array with the normalized vector.
+
+**Example:**
+```typescript
+const normalized = embedding.$jazz.normalize();
+const normalizedEmbedding = EmbeddingVector.create(normalized, { owner: me });
+```
+
+#### `dotProduct`
+
+```typescript
+dotProduct(otherVector: CoVector | Float32Array | number[]): number
+```
+
+Calculates the dot product of this vector and another vector.
+
+- `otherVector`: The other vector to compute the dot product with.
+
+**Returns:** The dot product as a number.
+
+**Example:**
+```typescript
+const similarity = embedding1.$jazz.dotProduct(embedding2);
+```
+
+#### `cosineSimilarity`
+
+```typescript
+cosineSimilarity(otherVector: CoVector | Float32Array | number[]): number
+```
+
+Calculates the cosine similarity between this vector and another vector.
+
+- `otherVector`: The other vector to compare with.
+
+**Returns:** A value between `-1` and `1`:
+- `1` means the vectors are identical
+- `0` means the vectors are orthogonal (no similarity)
+- `-1` means the vectors are opposite direction (perfectly dissimilar)
+
+**Example:**
+```typescript
+const similarity = embedding1.$jazz.cosineSimilarity(embedding2);
+
+if (similarity > 0.9) {
+  console.log("Very similar!");
+} else if (similarity > 0.7) {
+  console.log("Somewhat similar");
+} else {
+  console.log("Not very similar");
+}
+```
+
+## Use Cases
+
+CoVectors are ideal for:
+- Storing AI/ML embedding vectors from models like OpenAI, Cohere, etc.
+- Semantic search and similarity matching
+- Building recommendation systems
+- Vector databases for RAG (Retrieval Augmented Generation) applications
+- Any fixed-dimension numerical vector data
+
+## Example: Semantic Search
+
+```typescript
+import { co, z } from "jazz-tools";
+
+// Define schema
+const Document = co.map({
+  title: z.string(),
+  content: z.string(),
+  embedding: co.vector(1536), // OpenAI embedding dimensions
+});
+
+// Create document with embedding
+async function createDocument(title: string, content: string) {
+  // Get embedding from OpenAI
+  const embeddingResponse = await openai.embeddings.create({
+    model: "text-embedding-3-small",
+    input: content,
+  });
+  
+  const embedding = embeddingResponse.data[0].embedding;
+  
+  // Create document
+  return Document.create({
+    title,
+    content,
+    embedding: co.vector(1536).create(embedding, { owner: group }),
+  }, { owner: group });
+}
+
+// Search similar documents
+function findSimilar(queryEmbedding: CoVector, documents: Document[]) {
+  return documents
+    .map(doc => ({
+      doc,
+      similarity: queryEmbedding.$jazz.cosineSimilarity(doc.embedding),
+    }))
+    .sort((a, b) => b.similarity - a.similarity)
+    .slice(0, 5); // Top 5 results
+}
+```
+
+## Performance Notes
+
+- Most embedding vectors are small (1536-3072 dimensions = 6-12 KB)
+- Vectors are automatically chunked during upload to respect transaction size limits
+- Loading waits for the complete vector before resolving
+- Vectors are immutable for performance and consistency
+
+## See Also
+
+- [`co.group`](/docs/api-reference/co/group) - For managing ownership and permissions
+- [`co.map`](/docs/api-reference/co/map) - For including vectors in collaborative maps
+- [`co.fileStream`](/docs/api-reference/co/fileStream) - Built on similar binary streaming technology

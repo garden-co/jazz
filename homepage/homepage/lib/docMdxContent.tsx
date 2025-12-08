@@ -56,7 +56,7 @@ export async function getMdxWithToc(framework: string, slug?: string[]) {
 
   const Content = mdxModule.default;
   const tableOfContents = mdxModule.tableOfContents ?? [];
-  const headingsFrameworkVisibility = mdxModule.headingsFrameworkVisibility ?? {};
+  const headingsFrameworkVisibility = mdxModule.headingsFrameworkVisibility ?? Object.create(null);
   const ex = mdxModule.metadata ?? {};
 
   const tocItems = filterTocItemsForFramework(tableOfContents, framework, headingsFrameworkVisibility);

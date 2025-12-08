@@ -1,0 +1,284 @@
+export const metadata = {
+  description: "API reference for the `co.record` module.",
+};
+
+# Record
+
+`co.record` provides core functionalities for creating record-like collaborative maps in Jazz applications. Records are [`CoMap`](/docs/api-reference/co/map)s with arbitrary string keys and a fixed value type, similar to TypeScript's `Record<string, T>`.
+
+## Overview
+
+Records are a specialized form of [`CoMap`](/docs/api-reference/co/map) where:
+- Keys can be any string (not predetermined at schema definition time)
+- All values must be of the same type
+- Keys can be added and removed dynamically
+
+This is in contrast to regular [`co.map()`](/docs/api-reference/co/map) which has fixed, known keys defined in the schema.
+
+## Declaration
+
+Records are created using `co.record()`:
+
+```typescript
+import { co, z } from "jazz-tools";
+
+// Record with primitive values
+const ColorMap = co.record(z.string(), z.string());
+// Record<string, string>
+
+// Record with CoValue references
+const UserSettings = co.record(z.string(), Setting);
+// Record<string, Setting>
+
+// Record with numbers
+const Scores = co.record(z.string(), z.number());
+// Record<string, number>
+```
+
+## Usage
+
+### Creating Records
+
+```typescript
+import { co, z } from "jazz-tools";
+
+const ColorToHex = co.record(z.string(), z.string());
+
+// Create a record
+const colors = ColorToHex.create({
+  red: "#FF0000",
+  green: "#00FF00",
+  blue: "#0000FF",
+}, { owner: group });
+```
+
+### Adding Entries
+
+```typescript
+// Add new entries dynamically
+colors.$jazz.set("yellow", "#FFFF00");
+colors.$jazz.set("purple", "#800080");
+
+// Access like a regular object
+console.log(colors["red"]); // "#FF0000"
+console.log(colors["yellow"]); // "#FFFF00"
+```
+
+### Removing Entries
+
+```typescript
+// Remove entries
+colors.$jazz.delete("yellow");
+```
+
+### Iterating Over Entries
+
+```typescript
+// Iterate over all entries
+for (const [color, hex] of Object.entries(colors)) {
+  console.log(`${color}: ${hex}`);
+}
+
+// Get all keys
+const colorNames = Object.keys(colors);
+
+// Get all values
+const hexValues = Object.values(colors);
+```
+
+## CoMap Integration
+
+Records inherit all capabilities from [`CoMap`](/docs/api-reference/co/map):
+
+### Static Methods
+- [`create()`](/docs/api-reference/co/map#create) - Create a new record
+- [`load()`](/docs/api-reference/co/map#load) - Load a record by ID
+- [`subscribe()`](/docs/api-reference/co/map#subscribe) - Subscribe to record changes
+- [`upsertUnique()`](/docs/api-reference/co/map#upsertunique) - Update or create unique record
+- [`loadUnique()`](/docs/api-reference/co/map#loadunique) - Load unique record
+
+### Jazz API (`$jazz` property)
+- [`owner`](/docs/api-reference/co/map#owner) - Get the owner group
+- [`has()`](/docs/api-reference/co/map#has) - Check if key exists
+- [`set()`](/docs/api-reference/co/map#set) - Set key value
+- [`delete()`](/docs/api-reference/co/map#delete) - Delete key
+- [`applyDiff()`](/docs/api-reference/co/map#applydiff) - Apply changes
+- [`ensureLoaded()`](/docs/api-reference/co/map#ensureloaded) - Ensure values loaded
+- [`subscribe()`](/docs/api-reference/co/map#subscribe-1) - Subscribe to changes
+- [`waitForSync()`](/docs/api-reference/co/map#waitforsync) - Wait for sync
+- [`refs`](/docs/api-reference/co/map#refs) - Access value references
+
+## Examples
+
+### Dictionary/Translation Map
+
+```typescript
+import { co, z } from "jazz-tools";
+
+const Translation = co.record(z.string(), z.string());
+
+const enToEs = Translation.create({
+  hello: "hola",
+  goodbye: "adiós",
+  thanks: "gracias",
+}, { owner: translationGroup });
+
+// Add more translations
+enToEs.$jazz.set("welcome", "bienvenido");
+
+// Use it
+function translate(word: string): string {
+  return enToEs[word] || word;
+}
+```
+
+### User Preferences
+
+```typescript
+import { co, z } from "jazz-tools";
+
+const Preferences = co.record(z.string(), z.any());
+
+const userPrefs = Preferences.create({
+  theme: "dark",
+  fontSize: 14,
+  notifications: true,
+}, { owner: me });
+
+// Update preference
+userPrefs.$jazz.set("theme", "light");
+
+// Check preference
+if (userPrefs.notifications) {
+  showNotification("Welcome!");
+}
+```
+
+### Metadata/Tags
+
+```typescript
+import { co, z } from "jazz-tools";
+
+const Document = co.map({
+  title: z.string(),
+  content: z.string(),
+  metadata: co.record(z.string(), z.string()),
+});
+
+const doc = Document.create({
+  title: "My Document",
+  content: "Document content...",
+  metadata: co.record(z.string(), z.string()).create({
+    author: "Alice",
+    category: "technical",
+    status: "draft",
+  }, { owner: group }),
+}, { owner: group });
+
+// Add metadata
+doc.metadata.$jazz.set("lastModified", new Date().toISOString());
+doc.metadata.$jazz.set("version", "1.0");
+
+// Query metadata
+if (doc.metadata.status === "draft") {
+  console.log("This document is still a draft");
+}
+```
+
+### Collaborative Scoreboard
+
+```typescript
+import { co, z } from "jazz-tools";
+
+const Scoreboard = co.record(z.string(), z.number());
+
+const scores = Scoreboard.create({
+  Alice: 100,
+  Bob: 85,
+  Charlie: 92,
+}, { owner: gameGroup });
+
+// Update score
+function updateScore(player: string, points: number) {
+  const currentScore = scores[player] || 0;
+  scores.$jazz.set(player, currentScore + points);
+}
+
+// Get leaderboard
+function getLeaderboard() {
+  return Object.entries(scores)
+    .sort(([, a], [, b]) => b - a)
+    .map(([name, score]) => ({ name, score }));
+}
+```
+
+### Feature Flags
+
+```typescript
+import { co, z } from "jazz-tools";
+
+const FeatureFlags = co.record(z.string(), z.boolean());
+
+const appFeatures = FeatureFlags.create({
+  darkMode: true,
+  betaFeatures: false,
+  analytics: true,
+}, { owner: configGroup });
+
+// Check feature
+function isFeatureEnabled(feature: string): boolean {
+  return appFeatures[feature] ?? false;
+}
+
+// Toggle feature
+function toggleFeature(feature: string) {
+  appFeatures.$jazz.set(feature, !appFeatures[feature]);
+}
+```
+
+## Type Safety
+
+Records provide type safety for values while allowing flexible keys:
+
+```typescript
+import { co, z } from "jazz-tools";
+
+const StringRecord = co.record(z.string(), z.string());
+
+const record = StringRecord.create({}, { owner: group });
+
+// ✅ Type-safe value assignment
+record.$jazz.set("key", "value");
+
+// ❌ TypeScript error: Type 'number' is not assignable to type 'string'
+// record.$jazz.set("key", 123);
+
+// ✅ Type-safe value access
+const value: string = record["key"];
+```
+
+## Differences from co.map()
+
+| Feature | `co.map()` | `co.record()` |
+|---------|-----------|---------------|
+| Keys | Fixed at schema definition | Dynamic, any string |
+| Types | Each key can have different type | All values same type |
+| Type checking | Strong typing for each field | Type-safe values, flexible keys |
+| Use case | Structured data with known fields | Dictionary/map-like data |
+
+## Use Cases
+
+Records are ideal for:
+- Dictionary-like data structures
+- Translation maps and localization
+- User preferences and settings
+- Metadata and tags
+- Scoreboards and rankings
+- Feature flags and configuration
+- Any key-value store where keys aren't known at compile time
+
+## See Also
+
+- [`co.map`](/docs/api-reference/co/map) - For structured maps with fixed keys
+- [`co.list`](/docs/api-reference/co/list) - For ordered collections
+- [`co.group`](/docs/api-reference/co/group) - For managing ownership and permissions

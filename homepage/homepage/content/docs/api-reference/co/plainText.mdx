@@ -1,0 +1,349 @@
+export const metadata = {
+  description: "API reference for the `co.plainText` module.",
+};
+
+# PlainText
+
+`co.plainText` provides core functionalities for creating and managing collaborative plain text in Jazz applications. CoPlainText is the collaborative equivalent of a plain string, with fine-grained operational transformation for concurrent editing.
+
+## `CoPlainText` Class
+
+```typescript
+class CoPlainText extends String implements CoValue
+```
+
+Extends `String` and implements `CoValue`. Represents collaborative plain text with character-level editing support.
+
+CoPlainText allows multiple users to edit the same text simultaneously with automatic conflict resolution. It's ideal for text editors, comments, descriptions, and any other plain text content.
+
+### Declaration
+
+`CoPlainText` can be created using `co.plainText()`:
+
+```typescript
+import { co } from "jazz-tools";
+
+const Document = co.map({
+  title: z.string(),
+  content: co.plainText(),
+});
+```
+
+### Static Methods
+
+#### `create`
+
+```typescript
+static create<T extends CoPlainText>(
+  this: CoValueClass<T>,
+  text: string,
+  options?: { owner: Account | Group } | Account | Group,
+): T
+```
+
+**Deprecated:** Use `co.plainText().create` instead.
+
+Creates a new `CoPlainText` with the given text and owner.
+
+The owner (a Group or Account) determines access rights to the CoPlainText.
+
+The CoPlainText will immediately be persisted and synced to connected peers.
+
+- `text`: The initial text content.
+- `options`: (Optional) The owner of the CoPlainText. Can be an object with `owner` property, or an `Account` or `Group` directly.
+
+**Returns:** A newly created `CoPlainText` instance.
+
+**Example:**
+```typescript
+const text = CoPlainText.create("Hello, world!", { owner: me });
+```
+
+#### `load`
+
+```typescript
+static load<T extends CoPlainText>(
+  this: CoValueClass<T>,
+  id: ID<T>,
+  options?: { loadAs?: Account | AnonymousJazzAgent },
+): Promise<Settled<T>>
+```
+
+**Deprecated:** Use `co.plainText().load` instead.
+
+Loads a `CoPlainText` with a given ID.
+
+- `id`: The `ID` of the `CoPlainText` to load.
+- `options`: (Optional) An object containing:
+  - `loadAs`: The `Account` or `AnonymousJazzAgent` to load as.
+
+**Returns:** A promise that resolves to the loaded `CoPlainText`.
+
+#### `subscribe`
+
+```typescript
+static subscribe<T extends CoPlainText>(
+  this: CoValueClass<T>,
+  id: ID<T>,
+  listener: (value: Resolved<T, true>, unsubscribe: () => void) => void,
+): () => void;
+static subscribe<T extends CoPlainText>(
+  this: CoValueClass<T>,
+  id: ID<T>,
+  options: Omit<SubscribeListenerOptions<T, true>, "resolve">,
+  listener: (value: Resolved<T, true>, unsubscribe: () => void) => void,
+): () => void;
+```
+
+**Deprecated:** Use `co.plainText().subscribe` instead.
+
+Loads and subscribes to a `CoPlainText` with a given ID.
+
+Automatically subscribes to updates from all collaborators.
+
+Returns an unsubscribe function that you should call when you no longer need updates.
+
+- `id`: The `ID` of the `CoPlainText` to subscribe to.
+- `listener`: A callback function that receives the resolved `CoPlainText` and an `unsubscribe` function.
+- `options`: (Optional) An object containing subscription options.
+
+**Returns:** An unsubscribe function.
+
+### Properties
+
+#### `length`
+
+```typescript
+get length(): number
+```
+
+The length of the text in characters.
+
+**Returns:** The number of characters in the text.
+
+### Instance Methods
+
+#### `toString`
+
+```typescript
+toString(): string
+```
+
+Converts the CoPlainText to a regular string.
+
+**Returns:** The text as a string.
+
+#### `valueOf`
+
+```typescript
+valueOf(): string
+```
+
+Returns the primitive value of the CoPlainText.
+
+**Returns:** The text as a string.
+
+#### `toJSON`
+
+```typescript
+toJSON(): string
+```
+
+Returns a JSON representation of the CoPlainText.
+
+**Returns:** The text as a string.
+
+#### `insertBefore`
+
+```typescript
+insertBefore(idx: number, text: string): void
+```
+
+Inserts text before the character at the given index.
+
+- `idx`: The character index before which to insert.
+- `text`: The text to insert.
+
+**Example:**
+```typescript
+const text = CoPlainText.create("Hello world", { owner: me });
+text.insertBefore(6, "beautiful "); // "Hello beautiful world"
+```
+
+#### `insertAfter`
+
+```typescript
+insertAfter(idx: number, text: string): void
+```
+
+Inserts text after the character at the given index.
+
+- `idx`: The character index after which to insert.
+- `text`: The text to insert.
+
+**Example:**
+```typescript
+const text = CoPlainText.create("Hello world", { owner: me });
+text.insertAfter(4, ","); // "Hello, world"
+```
+
+#### `deleteRange`
+
+```typescript
+deleteRange(range: { from: number; to: number }): void
+```
+
+Deletes a range of text.
+
+- `range`: An object with:
+  - `from`: The starting index (inclusive).
+  - `to`: The ending index (exclusive).
+
+**Example:**
+```typescript
+const text = CoPlainText.create("Hello world", { owner: me });
+text.deleteRange({ from: 5, to: 11 }); // "Hello"
+```
+
+#### `posBefore`
+
+```typescript
+posBefore(idx: number): TextPos | undefined
+```
+
+Gets the position identifier before a character index. Used for stable cursor positioning.
+
+- `idx`: The character index.
+
+**Returns:** A `TextPos` identifier, or `undefined` if not available.
+
+#### `posAfter`
+
+```typescript
+posAfter(idx: number): TextPos | undefined
+```
+
+Gets the position identifier after a character index. Used for stable cursor positioning.
+
+- `idx`: The character index.
+
+**Returns:** A `TextPos` identifier, or `undefined` if not available.
+
+#### `idxBefore`
+
+```typescript
+idxBefore(pos: TextPos): number | undefined
+```
+
+Gets the character index before a position identifier.
+
+- `pos`: The position identifier.
+
+**Returns:** The character index, or `undefined` if not available.
+
+#### `idxAfter`
+
+```typescript
+idxAfter(pos: TextPos): number | undefined
+```
+
+Gets the character index after a position identifier.
+
+- `pos`: The position identifier.
+
+**Returns:** The character index, or `undefined` if not available.
+
+### String-like Behavior
+
+CoPlainText implements `Symbol.toPrimitive`, which allows it to behave like a primitive string in most contexts:
+
+```typescript
+const text = CoPlainText.create("Hello", { owner: me });
+
+// String concatenation
+const greeting = text + " world"; // "Hello world"
+
+// Template literals
+console.log(`Message: ${text}`); // "Message: Hello"
+
+// React rendering (automatically converts to string)
+return <div>{text}</div>;
+
+// Comparisons
+if (text === "Hello") { /* ... */ }
+```
+
+## `CoTextJazzApi`
+
+```typescript
+class CoTextJazzApi<T extends CoPlainText> extends CoValueJazzApi<T>
+```
+
+Provides Jazz-specific methods and properties for a `CoPlainText` instance, accessed via the `$jazz` property on a `CoPlainText`.
+
+### Properties
+
+#### `owner`
+
+```typescript
+get owner(): Group
+```
+
+The owner group of this CoPlainText.
+
+**Returns:** The `Group` that owns this CoPlainText.
+
+### Methods
+
+#### `applyDiff`
+
+```typescript
+applyDiff(other: string): void
+```
+
+Applies text changes by calculating and applying the diff between the current text and the new text.
+
+This is useful for integrating with text editors or applying changes from external sources.
+
+- `other`: The new text to apply.
+
+**Example:**
+```typescript
+const text = CoPlainText.create("Hello world", { owner: me });
+text.$jazz.applyDiff("Hello beautiful world");
+// Automatically calculates and applies the minimal diff
+```
+
+#### `subscribe`
+
+```typescript
+subscribe<T extends CoPlainText>(
+  this: CoTextJazzApi<T>,
+  listener: (value: Resolved<T, true>, unsubscribe: () => void) => void,
+): () => void
+```
+
+Given an already loaded `CoPlainText`, subscribes to updates to the text.
+
+Works like `CoPlainText.subscribe()`, but you don't need to pass the ID or the account to load as again.
+
+Returns an unsubscribe function that you should call when you no longer need updates.
+
+- `listener`: A callback function that receives the resolved `CoPlainText` and an `unsubscribe` function.
+
+**Returns:** An unsubscribe function.
+
+## Use Cases
+
+CoPlainText is ideal for:
+- Collaborative text editors
+- Comments and discussions
+- Form fields with real-time collaboration
+- Shared notes and descriptions
+- Any plain text content that multiple users can edit
+
+## See Also
+
+- [`co.richText`](/docs/api-reference/co/richText) - For rich text with formatting
+- [`co.group`](/docs/api-reference/co/group) - For managing ownership and permissions
+- [`co.map`](/docs/api-reference/co/map) - For including text fields in collaborative maps

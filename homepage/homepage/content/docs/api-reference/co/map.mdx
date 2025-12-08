@@ -1,0 +1,423 @@
+export const metadata = {
+  description: "API reference for the `co.map` module.",
+};
+
+# Map
+
+`co.map` provides core functionalities for creating and managing collaborative maps (object-like data structures) in Jazz applications. CoMaps are the collaborative equivalent of plain JavaScript objects.
+
+## `CoMap` Class
+
+```typescript
+class CoMap extends CoValueBase implements CoValue
+```
+
+Extends `CoValueBase` and implements `CoValue`. Represents a collaborative map with string keys and various value types.
+
+CoMaps are collaborative versions of plain objects, mapping string-like keys to values. You can access properties on a `CoMap` as if they were normal properties on a plain object, using dot notation, `Object.keys()`, etc.
+
+### Declaration
+
+Declare your own CoMap schemas using `co.map()`:
+
+```typescript
+import { co, z } from "jazz-tools";
+
+const Person = co.map({
+  name: z.string(),
+  age: z.number(),
+  pet: Animal,  // reference to another CoValue
+});
+```
+
+### Static Methods
+
+#### `create`
+
+```typescript
+static create<M extends CoMap>(
+  this: CoValueClass<M>,
+  init: CoMapInit<M>,
+  options?: { owner?: Account | Group } | Account | Group,
+): M
+```
+
+**Deprecated:** Use `co.map(...).create` instead.
+
+Creates a new CoMap with the given initial values and owner.
+
+The owner (a Group or Account) determines access rights to the CoMap.
+
+The CoMap will immediately be persisted and synced to connected peers.
+
+- `init`: Initial values for the CoMap fields.
+- `options`: The owner of the CoMap. Can be an object with `owner` property, or an `Account` or `Group` directly.
+
+**Returns:** A newly created `CoMap` instance.
+
+**Example:**
+```typescript
+const person = Person.create({
+  name: "Alice",
+  age: 42,
+  pet: cat,
+}, { owner: friendGroup });
+```
+
+#### `load`
+
+```typescript
+static load<M extends CoMap, const R extends RefsToResolve<M> = true>(
+  this: CoValueClass<M>,
+  id: ID<M>,
+  options?: {
+    resolve?: RefsToResolveStrict<M, R>;
+    loadAs?: Account | AnonymousJazzAgent;
+    skipRetry?: boolean;
+  },
+): Promise<Settled<Resolved<M, R>>>
+```
+
+**Deprecated:** Use `co.map(...).load` instead.
+
+Loads a `CoMap` with a given ID.
+
+`resolve` specifies which (if any) fields that reference other CoValues to load as well before resolving. You can pass `{}` for shallowly loading only this CoMap, or `{ fieldA: {}, fieldB: {} }` for recursively loading referenced CoValues.
+
+- `id`: The `ID` of the `CoMap` to load.
+- `options`: (Optional) An object containing:
+  - `resolve`: Specifies which references to resolve.
+  - `loadAs`: The `Account` or `AnonymousJazzAgent` to load the CoMap as.
+  - `skipRetry`: Whether to skip retrying on failure.
+
+**Returns:** A promise that resolves to the loaded `CoMap`.
+
+**Example:**
+```typescript
+const person = await Person.load(
+  "co_zdsMhHtfG6VNKt7RqPUPvUtN2Ax",
+  { resolve: { pet: {} } }
+);
+```
+
+#### `subscribe`
+
+```typescript
+static subscribe<M extends CoMap, const R extends RefsToResolve<M> = true>(
+  this: CoValueClass<M>,
+  id: ID<M>,
+  listener: (value: Resolved<M, R>, unsubscribe: () => void) => void,
+): () => void;
+static subscribe<M extends CoMap, const R extends RefsToResolve<M> = true>(
+  this: CoValueClass<M>,
+  id: ID<M>,
+  options: SubscribeListenerOptions<M, R>,
+  listener: (value: Resolved<M, R>, unsubscribe: () => void) => void,
+): () => void;
+```
+
+**Deprecated:** Use `co.map(...).subscribe` instead.
+
+Loads and subscribes to a `CoMap` with a given ID.
+
+Automatically also subscribes to updates to all referenced/nested CoValues as soon as they are accessed in the listener.
+
+Returns an unsubscribe function that you should call when you no longer need updates.
+
+- `id`: The `ID` of the `CoMap` to subscribe to.
+- `listener`: A callback function that receives the resolved `CoMap` and an `unsubscribe` function.
+- `options`: (Optional) An object containing subscription options.
+
+**Returns:** An unsubscribe function.
+
+**Example:**
+```typescript
+const unsub = Person.subscribe(
+  "co_zdsMhHtfG6VNKt7RqPUPvUtN2Ax",
+  { resolve: { pet: {} } },
+  (person) => console.log(person)
+);
+```
+
+#### `upsertUnique`
+
+```typescript
+static async upsertUnique<M extends CoMap, const R extends RefsToResolve<M> = true>(
+  this: CoValueClass<M>,
+  options: {
+    value: CoMapInit<M>;
+    unique: CoValueUniqueness["uniqueness"];
+    owner: Account | Group;
+    resolve?: RefsToResolveStrict<M, R>;
+  },
+): Promise<Settled<Resolved<M, R>>>
+```
+
+**Deprecated:** Use `co.map(...).upsertUnique` instead.
+
+Given some data, updates an existing CoMap or initializes a new one if none exists.
+
+- `options`: An object containing:
+  - `value`: The intended state of the CoMap.
+  - `unique`: The unique identifier for this CoMap.
+  - `owner`: The owner (Account or Group) of the CoMap.
+  - `resolve`: (Optional) Specifies which references to resolve.
+
+**Returns:** A promise that resolves to either an existing & modified CoMap, or a new initialized CoMap if none exists.
+
+**Example:**
+```typescript
+const activeEvent = await Event.upsertUnique({
+  value: {
+    title: sourceData.title,
+    identifier: sourceData.identifier,
+    external_id: sourceData._id,
+  },
+  unique: sourceData.identifier,
+  owner: workspace,
+});
+```
+
+#### `loadUnique`
+
+```typescript
+static async loadUnique<M extends CoMap, const R extends RefsToResolve<M> = true>(
+  this: CoValueClass<M>,
+  unique: CoValueUniqueness["uniqueness"],
+  ownerID: ID<Account> | ID<Group>,
+  options?: {
+    resolve?: RefsToResolveStrict<M, R>;
+    loadAs?: Account | AnonymousJazzAgent;
+  },
+): Promise<Settled<Resolved<M, R>>>
+```
+
+**Deprecated:** Use `co.map(...).loadUnique` instead.
+
+Loads a CoMap by its unique identifier and owner's ID.
+
+- `unique`: The unique identifier of the CoMap to load.
+- `ownerID`: The ID of the owner of the CoMap.
+- `options`: (Optional) Additional options for loading the CoMap.
+
+**Returns:** The loaded CoMap, or a not-loaded value if unavailable.
+
+### Instance Methods
+
+#### `toJSON`
+
+```typescript
+toJSON(_key?: string, processedValues?: ID<CoValue>[]): any
+```
+
+Returns a JSON representation of the `CoMap`.
+
+**Returns:** An object with all the CoMap's fields serialized to JSON.
+
+### Static Helpers
+
+#### `Record`
+
+```typescript
+static Record<Value>(value: Value)
+```
+
+Declares a Record-like CoMap schema with arbitrary string keys and a fixed value type. Keys are always `string`.
+
+**Example:**
+```typescript
+import { co } from "jazz-tools";
+
+const ColorToFruitMap = co.map({}).catchall(Fruit);
+
+// Usage
+map["red"] = strawberry;
+```
+
+## `CoMapJazzApi`
+
+```typescript
+class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M>
+```
+
+Provides Jazz-specific methods and properties for a `CoMap` instance, accessed via the `$jazz` property on a `CoMap`.
+
+### Properties
+
+#### `owner`
+
+```typescript
+get owner(): Group
+```
+
+The owner group of this CoMap.
+
+**Returns:** The `Group` that owns this CoMap.
+
+#### `refs`
+
+```typescript
+get refs(): {
+  [Key in CoKeys<M>]?: RefIfCoValue<M[Key]>;
+}
+```
+
+If property `prop` is a CoValue reference, you can use `coMap.$jazz.refs.prop` to access the `Ref` instead of the potentially loaded/null value.
+
+This allows you to always get the ID or load the value manually.
+
+**Example:**
+```typescript
+person.$jazz.refs.pet.id; // => ID<Animal>
+person.$jazz.refs.pet.value; // => Animal | null
+const pet = await person.$jazz.refs.pet.load();
+```
+
+### Methods
+
+#### `has`
+
+```typescript
+has(key: CoKeys<M>): boolean
+```
+
+Checks if a key is defined in the CoMap.
+
+This check does not load the referenced value or validate permissions.
+
+- `key`: The key to check.
+
+**Returns:** `true` if the key is defined, `false` otherwise.
+
+#### `set`
+
+```typescript
+set<K extends CoKeys<M>>(key: K, value: CoFieldInit<M[K]>): void
+```
+
+Sets a value on the CoMap.
+
+- `key`: The key to set.
+- `value`: The value to set.
+
+**Example:**
+```typescript
+person.$jazz.set("age", 43);
+person.$jazz.set("pet", newPet);
+```
+
+#### `delete`
+
+```typescript
+delete(key: OptionalCoKeys<M> | (string extends keyof M ? string : never)): void
+```
+
+Deletes a value from a CoMap.
+
+For record-like CoMaps (created with `co.record`), any string key can be deleted. For struct-like CoMaps (created with `co.map`), only optional properties can be deleted.
+
+- `key`: The key to delete.
+
+#### `applyDiff`
+
+```typescript
+applyDiff(newValues: Partial<CoMapInit<M>>): M
+```
+
+Modifies the `CoMap` to match another map.
+
+The new values are assigned to the CoMap, overwriting existing values when the property already exists.
+
+- `newValues`: The new values to apply to the CoMap. For collaborative values, both CoValues and JSON values are supported.
+
+**Returns:** The modified CoMap.
+
+#### `ensureLoaded`
+
+```typescript
+ensureLoaded<Map extends CoMap, const R extends RefsToResolve<Map>>(
+  this: CoMapJazzApi<Map>,
+  options: {
+    resolve: RefsToResolveStrict<Map, R>;
+    unstable_branch?: BranchDefinition;
+  },
+): Promise<Resolved<Map, R>>
+```
+
+Given an already loaded `CoMap`, ensures that the specified fields are loaded to the specified depth.
+
+Works like `CoMap.load()`, but you don't need to pass the ID or the account to load as again.
+
+- `options`: An object containing:
+  - `resolve`: Specifies which references to resolve.
+  - `unstable_branch`: (Optional) An unstable branch definition.
+
+**Returns:** A promise that resolves to the resolved `CoMap`.
+
+#### `subscribe`
+
+```typescript
+subscribe<Map extends CoMap, const R extends RefsToResolve<Map> = true>(
+  this: CoMapJazzApi<Map>,
+  listener: (value: Resolved<Map, R>, unsubscribe: () => void) => void,
+): () => void;
+subscribe<Map extends CoMap, const R extends RefsToResolve<Map> = true>(
+  this: CoMapJazzApi<Map>,
+  options: {
+    resolve?: RefsToResolveStrict<Map, R>;
+    unstable_branch?: BranchDefinition;
+  },
+  listener: (value: Resolved<Map, R>, unsubscribe: () => void) => void,
+): () => void;
+```
+
+Given an already loaded `CoMap`, subscribes to updates to the `CoMap` and ensures that the specified fields are loaded to the specified depth.
+
+Works like `CoMap.subscribe()`, but you don't need to pass the ID or the account to load as again.
+
+Returns an unsubscribe function that you should call when you no longer need updates.
+
+- `listener`: A callback function that receives the resolved `CoMap` and an `unsubscribe` function.
+- `options`: (Optional) An object containing subscription options.
+
+**Returns:** An unsubscribe function.
+
+#### `waitForSync`
+
+```typescript
+async waitForSync(options?: { timeout?: number }): Promise<void>
+```
+
+Waits for the `CoMap` to be uploaded to other peers.
+
+- `options`: (Optional) An object containing:
+  - `timeout`: (Optional) A timeout in milliseconds.
+
+**Returns:** A promise that resolves when the CoMap is synced.
+
+#### `getEdits`
+
+```typescript
+getEdits(): CoMapEdits<M>
+```
+
+Gets the edit history for the CoMap fields.
+
+**Returns:** An object with edit information for each field, including:
+- `value`: The field value
+- `by`: The account that made the edit
+- `madeAt`: When the edit was made
+- `all`: An array of all edits for this field
+
+**Example:**
+```typescript
+const edits = person.$jazz.getEdits();
+console.log(edits.name?.by); // Account that last edited name
+console.log(edits.name?.madeAt); // When name was last edited
+```
+
+## See Also
+
+- [`co.list`](/docs/api-reference/co/list) - For creating collaborative lists
+- [`co.record`](/docs/api-reference/co/record) - For creating record-like maps with arbitrary keys
+- [`co.group`](/docs/api-reference/co/group) - For managing ownership and permissions

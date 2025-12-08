@@ -1,0 +1,374 @@
+export const metadata = {
+  description: "API reference for the `co.image` module.",
+};
+
+# Image
+
+`co.image` provides core functionalities for creating and managing collaborative images with responsive variants in Jazz applications. ImageDefinition is a specialized [`CoMap`](/docs/api-reference/co/map) that manages multiple versions of an image for responsive display.
+
+## `ImageDefinition` Type
+
+```typescript
+type ImageDefinition = {
+  original: FileStream;
+  originalSize: [number, number];
+  placeholderDataURL?: string;
+  progressive: boolean;
+  [key: string]: FileStream; // Additional responsive variants
+}
+```
+
+ImageDefinition is a [`CoMap`](/docs/api-reference/co/map) that stores an image with its original version and optional responsive variants.
+
+## Declaration
+
+Images are created using `co.image()`:
+
+```typescript
+import { co, z } from "jazz-tools";
+
+const Article = co.map({
+  title: z.string(),
+  coverImage: co.image(),
+  thumbnail: co.optional(co.image()),
+});
+```
+
+## Properties
+
+### `original`
+
+```typescript
+original: FileStream
+```
+
+The original, full-resolution [`FileStream`](/docs/api-reference/co/fileStream) of the image.
+
+### `originalSize`
+
+```typescript
+originalSize: [number, number]
+```
+
+The dimensions of the original image as `[width, height]` in pixels.
+
+### `placeholderDataURL`
+
+```typescript
+placeholderDataURL?: string
+```
+
+Optional base64-encoded data URL of a low-resolution placeholder image. Useful for progressive image loading.
+
+### `progressive`
+
+```typescript
+progressive: boolean
+```
+
+Indicates whether the image supports progressive loading with variants.
+
+### Responsive Variants
+
+Additional string keys map to [`FileStream`](/docs/api-reference/co/fileStream) instances representing responsive image variants:
+
+```typescript
+imageDefinition["640w"] // FileStream for 640px width variant
+imageDefinition["1024w"] // FileStream for 1024px width variant
+imageDefinition["1920w"] // FileStream for 1920px width variant
+```
+
+## Usage
+
+### Creating an Image
+
+```typescript
+import { co, FileStream } from "jazz-tools";
+
+// Upload an image file
+const file = /* File from input */;
+const originalStream = await FileStream.createFromBlob(file, {
+  owner: group,
+});
+
+// Get image dimensions (you'd need to read this from the file)
+const img = new Image();
+img.src = URL.createObjectURL(file);
+await img.decode();
+const width = img.naturalWidth;
+const height = img.naturalHeight;
+
+// Create image definition
+const ImageDef = co.image();
+const imageDefinition = ImageDef.create({
+  original: originalStream,
+  originalSize: [width, height],
+  progressive: false,
+}, { owner: group });
+```
+
+### Creating with Progressive Loading
+
+```typescript
+import { co, FileStream } from "jazz-tools";
+
+async function createProgressiveImage(
+  file: File,
+  owner: Group,
+) {
+  // Create original
+  const original = await FileStream.createFromBlob(file, { owner });
+  
+  // Create placeholder (tiny, blurred version)
+  const placeholder = await createThumbnail(file, 20, 20);
+  const canvas = document.createElement('canvas');
+  // ... render placeholder to canvas with blur
+  const placeholderDataURL = canvas.toDataURL('image/jpeg', 0.5);
+  
+  // Create responsive variants
+  const variant640 = await createResized(file, 640, owner);
+  const variant1024 = await createResized(file, 1024, owner);
+  const variant1920 = await createResized(file, 1920, owner);
+  
+  // Get dimensions
+  const img = new Image();
+  img.src = URL.createObjectURL(file);
+  await img.decode();
+  
+  const ImageDef = co.image();
+  return ImageDef.create({
+    original,
+    originalSize: [img.naturalWidth, img.naturalHeight],
+    placeholderDataURL,
+    progressive: true,
+    "640w": variant640,
+    "1024w": variant1024,
+    "1920w": variant1920,
+  }, { owner });
+}
+```
+
+### Accessing Image Data
+
+```typescript
+// Get original image
+const originalBlob = image.original.toBlob();
+const originalUrl = URL.createObjectURL(originalBlob);
+
+// Get dimensions
+const [width, height] = image.originalSize;
+console.log(`Image size: ${width}x${height}`);
+
+// Get placeholder
+if (image.placeholderDataURL) {
+  imgElement.src = image.placeholderDataURL; // Show immediately
+}
+
+// Get responsive variant
+const variant = image["1024w"];
+if (variant) {
+  const blob = variant.toBlob();
+  const url = URL.createObjectURL(blob);
+  imgElement.src = url;
+}
+```
+
+## Progressive Image Loading Pattern
+
+```typescript
+import { co } from "jazz-tools";
+
+function ProgressiveImage({ 
+  image 
+}: { 
+  image: ReturnType<typeof co.image>["_type"] 
+}) {
+  const [currentSrc, setCurrentSrc] = useState(
+    image.placeholderDataURL || ""
+  );
+  
+  useEffect(() => {
+    // Show placeholder immediately
+    if (image.placeholderDataURL) {
+      setCurrentSrc(image.placeholderDataURL);
+    }
+    
+    // Load appropriate variant based on screen size
+    const loadVariant = async () => {
+      const width = window.innerWidth;
+      let variant: FileStream | undefined;
+      
+      if (width <= 640) {
+        variant = image["640w"];
+      } else if (width <= 1024) {
+        variant = image["1024w"];
+      } else if (width <= 1920) {
+        variant = image["1920w"];
+      }
+      
+      // Fall back to original if no variant
+      const stream = variant || image.original;
+      const blob = stream.toBlob();
+      
+      if (blob) {
+        const url = URL.createObjectURL(blob);
+        setCurrentSrc(url);
+      }
+    };
+    
+    loadVariant();
+  }, [image]);
+  
+  return (
+    <img
+      src={currentSrc}
+      width={image.originalSize[0]}
+      height={image.originalSize[1]}
+      style={{ 
+        transition: "filter 0.3s",
+        filter: currentSrc === image.placeholderDataURL 
+          ? "blur(10px)" 
+          : "none" 
+      }}
+    />
+  );
+}
+```
+
+## Responsive Image with srcset
+
+```typescript
+function ResponsiveImage({ 
+  image 
+}: { 
+  image: ReturnType<typeof co.image>["_type"] 
+}) {
+  const variants = [
+    { key: "640w", width: 640 },
+    { key: "1024w", width: 1024 },
+    { key: "1920w", width: 1920 },
+  ];
+  
+  // Generate srcset
+  const srcset = variants
+    .map(({ key, width }) => {
+      const variant = image[key];
+      if (variant) {
+        const blob = variant.toBlob();
+        if (blob) {
+          const url = URL.createObjectURL(blob);
+          return `${url} ${width}w`;
+        }
+      }
+      return null;
+    })
+    .filter(Boolean)
+    .join(", ");
+  
+  // Fallback to original
+  const originalBlob = image.original.toBlob();
+  const src = originalBlob 
+    ? URL.createObjectURL(originalBlob) 
+    : image.placeholderDataURL || "";
+  
+  return (
+    <img
+      src={src}
+      srcSet={srcset}
+      sizes="(max-width: 640px) 640px, (max-width: 1024px) 1024px, 1920px"
+      width={image.originalSize[0]}
+      height={image.originalSize[1]}
+      loading="lazy"
+    />
+  );
+}
+```
+
+## Helper Functions
+
+### Creating Resized Variants
+
+```typescript
+async function createResized(
+  file: File,
+  targetWidth: number,
+  owner: Group,
+): Promise<FileStream> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = async () => {
+      // Calculate dimensions maintaining aspect ratio
+      const aspectRatio = img.height / img.width;
+      const width = Math.min(targetWidth, img.width);
+      const height = Math.round(width * aspectRatio);
+      
+      // Create canvas and resize
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(img, 0, 0, width, height);
+      
+      // Convert to blob
+      canvas.toBlob(async (blob) => {
+        if (blob) {
+          const stream = await FileStream.createFromBlob(blob, { owner });
+          resolve(stream);
+        }
+      }, 'image/jpeg', 0.85);
+    };
+    img.src = URL.createObjectURL(file);
+  });
+}
+```
+
+## CoMap Integration
+
+ImageDefinition inherits all capabilities from [`CoMap`](/docs/api-reference/co/map):
+
+### Static Methods
+- [`create()`](/docs/api-reference/co/map#create) - Create a new image definition
+- [`load()`](/docs/api-reference/co/map#load) - Load an image by ID
+- [`subscribe()`](/docs/api-reference/co/map#subscribe) - Subscribe to image changes
+
+### Jazz API (`$jazz` property)
+- [`owner`](/docs/api-reference/co/map#owner) - Get the owner group
+- [`set()`](/docs/api-reference/co/map#set) - Add responsive variants
+- [`ensureLoaded()`](/docs/api-reference/co/map#ensureloaded) - Ensure variants loaded
+- [`subscribe()`](/docs/api-reference/co/map#subscribe-1) - Subscribe to changes
+- [`waitForSync()`](/docs/api-reference/co/map#waitforsync) - Wait for sync
+
+## Use Cases
+
+ImageDefinition is ideal for:
+- User avatars with responsive variants
+- Article cover images
+- Product photos with multiple sizes
+- Photo galleries
+- Any image that needs responsive display
+- Progressive image loading for better UX
+
+## Best Practices
+
+1. **Always provide originalSize**: This allows proper aspect ratio calculation and prevents layout shifts.
+
+2. **Use placeholderDataURL for better UX**: A tiny blurred placeholder improves perceived performance.
+
+3. **Create appropriate variants**: Common breakpoints are 640px, 1024px, and 1920px.
+
+4. **Optimize file sizes**: Use appropriate compression for each variant.
+
+5. **Clean up blob URLs**: Remember to revoke blob URLs when components unmount:
+   ```typescript
+   useEffect(() => {
+     const url = URL.createObjectURL(blob);
+     return () => URL.revokeObjectURL(url);
+   }, [blob]);
+   ```
+
+## See Also
+
+- [`co.fileStream`](/docs/api-reference/co/fileStream) - For storing image files
+- [`co.map`](/docs/api-reference/co/map) - ImageDefinition extends CoMap
+- [`co.optional`](/docs/api-reference/co/optional) - For optional image fields
+- [`co.group`](/docs/api-reference/co/group) - For managing ownership and permissions

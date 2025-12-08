@@ -1,0 +1,340 @@
+export const metadata = {
+  description: "API reference for the `co.optional` module.",
+};
+
+# Optional
+
+`co.optional` provides core functionalities for creating optional CoValue fields in Jazz applications. It allows CoValue references to be optional (nullable) in schemas.
+
+## Overview
+
+By default, CoValue references in schemas are required. `co.optional()` wraps a CoValue schema to make it optional, allowing the field to be `undefined` or `null`.
+
+## Declaration
+
+Optional fields are created by wrapping a CoValue schema with `co.optional()`:
+
+```typescript
+import { co, z } from "jazz-tools";
+
+const Person = co.map({
+  name: z.string(),
+  age: z.number(),
+  // Required CoValue reference
+  address: Address,
+  // Optional CoValue reference
+  secondaryAddress: co.optional(Address),
+  // Optional image
+  avatar: co.optional(co.image()),
+});
+```
+
+## Usage
+
+### Creating with Optional Fields
+
+```typescript
+import { co, z } from "jazz-tools";
+
+const BlogPost = co.map({
+  title: z.string(),
+  content: z.string(),
+  coverImage: co.optional(co.image()),
+  author: Person,
+});
+
+// Create without optional field
+const post1 = BlogPost.create({
+  title: "My First Post",
+  content: "Hello world!",
+  author: alice,
+  // coverImage is omitted - this is fine
+}, { owner: group });
+
+// Create with optional field
+const post2 = BlogPost.create({
+  title: "My Second Post",
+  content: "With an image!",
+  coverImage: myImage,
+  author: alice,
+}, { owner: group });
+```
+
+### Accessing Optional Fields
+
+```typescript
+// Type-safe access with optional chaining
+const coverImage = post.coverImage;
+// Type: ImageDefinition | undefined
+
+// Check if field exists
+if (post.coverImage) {
+  // coverImage is defined here
+  console.log(post.coverImage.originalSize);
+}
+
+// Use optional chaining
+const width = post.coverImage?.originalSize[0];
+```
+
+### Setting Optional Fields
+
+```typescript
+// Set optional field
+post.$jazz.set("coverImage", myImage);
+
+// Set to undefined (remove)
+post.$jazz.set("coverImage", undefined);
+
+// Or use delete
+post.$jazz.delete("coverImage");
+```
+
+### TypeScript Types
+
+```typescript
+import { co } from "jazz-tools";
+
+const User = co.map({
+  name: z.string(),
+  avatar: co.optional(co.image()),
+  bio: co.optional(co.plainText()),
+});
+
+type UserType = ReturnType<typeof User.create>;
+
+// avatar has type: ImageDefinition | undefined
+// bio has type: CoPlainText | undefined
+```
+
+## Comparison: Optional vs Required
+
+### Required Field
+
+```typescript
+const Document = co.map({
+  // Required - must be provided at creation
+  owner: Person,
+});
+
+// ✅ Valid
+const doc1 = Document.create({
+  owner: alice,
+}, { owner: group });
+
+// ❌ TypeScript error: Property 'owner' is missing
+const doc2 = Document.create({}, { owner: group });
+
+// ❌ Runtime error: Cannot set required reference to undefined
+doc1.$jazz.set("owner", undefined);
+```
+
+### Optional Field
+
+```typescript
+const Document = co.map({
+  // Optional - can be omitted
+  reviewer: co.optional(Person),
+});
+
+// ✅ Valid - omit optional field
+const doc1 = Document.create({}, { owner: group });
+
+// ✅ Valid - provide optional field
+const doc2 = Document.create({
+  reviewer: bob,
+}, { owner: group });
+
+// ✅ Valid - set to undefined
+doc1.$jazz.set("reviewer", undefined);
+
+// ✅ Valid - delete
+doc1.$jazz.delete("reviewer");
+```
+
+## Patterns
+
+### Progressive Data Filling
+
+Optional fields are useful for data that's filled in over time:
+
+```typescript
+const UserProfile = co.map({
+  name: z.string(),
+  email: z.string(),
+  // Optional fields that can be added later
+  phone: co.optional(z.string()),
+  avatar: co.optional(co.image()),
+  bio: co.optional(co.plainText()),
+  website: co.optional(z.string()),
+});
+
+// Create with minimal info
+const profile = UserProfile.create({
+  name: "Alice",
+  email: "alice@example.com",
+}, { owner: profileGroup });
+
+// Add optional fields later
+profile.$jazz.set("bio", co.plainText().create("Developer", { owner: profileGroup }));
+profile.$jazz.set("avatar", userAvatar);
+```
+
+### Nullable Relationships
+
+Optional fields work well for relationships that may not always exist:
+
+```typescript
+const Task = co.map({
+  title: z.string(),
+  description: z.string(),
+  assignee: co.optional(Person),
+  parentTask: co.optional(Task),
+});
+
+// Task without assignee
+const unassignedTask = Task.create({
+  title: "Do something",
+  description: "Details...",
+}, { owner: group });
+
+// Assign later
+unassignedTask.$jazz.set("assignee", alice);
+
+// Check before accessing
+if (task.assignee) {
+  console.log(`Assigned to: ${task.assignee.name}`);
+} else {
+  console.log("Unassigned");
+}
+```
+
+### Feature Flags
+
+Optional fields can represent features that may or may not be enabled:
+
+```typescript
+const Project = co.map({
+  name: z.string(),
+  description: z.string(),
+  // Optional premium features
+  analytics: co.optional(AnalyticsDashboard),
+  aiAssistant: co.optional(AIAssistant),
+});
+
+// Free tier project
+const freeProject = Project.create({
+  name: "My Project",
+  description: "A basic project",
+}, { owner: group });
+
+// Premium tier project
+const premiumProject = Project.create({
+  name: "Premium Project",
+  description: "With all features",
+  analytics: analyticsInstance,
+  aiAssistant: aiInstance,
+}, { owner: group });
+
+// Check feature availability
+function hasAnalytics(project: Project): boolean {
+  return project.analytics !== undefined;
+}
+```
+
+## Integration with Other Types
+
+### Optional in Lists
+
+```typescript
+const Team = co.map({
+  name: z.string(),
+  // List of optional references
+  members: co.list(co.optional(Person)),
+});
+
+// Some members might not be loaded yet
+const team = Team.create({
+  name: "Engineering",
+  members: co.list(co.optional(Person)).create(
+    [alice, undefined, bob], // undefined for not-yet-loaded
+    { owner: group }
+  ),
+}, { owner: group });
+```
+
+### Optional in Records
+
+```typescript
+const TeamRoles = co.map({
+  name: z.string(),
+  roles: co.record(z.string(), co.optional(Person)),
+});
+
+const team = TeamRoles.create({
+  name: "Project X",
+  roles: co.record(z.string(), co.optional(Person)).create({
+    lead: alice,
+    backend: bob,
+    frontend: undefined, // Position not filled
+  }, { owner: group }),
+}, { owner: group });
+
+// Check if position is filled
+if (team.roles.frontend) {
+  console.log(`Frontend: ${team.roles.frontend.name}`);
+} else {
+  console.log("Frontend position open");
+}
+```
+
+## Best Practices
+
+1. **Use optional for truly optional data**: Don't make everything optional; use it for data that may legitimately be absent.
+
+2. **Always check before accessing**: Use optional chaining or explicit checks when accessing optional fields.
+
+3. **Provide good defaults in UI**: Handle the `undefined` case gracefully in your interface.
+
+4. **Document optionality**: Make it clear in your application which fields are optional and why.
+
+5. **Consider migration**: When adding optional fields to existing schemas, they'll be `undefined` for existing instances.
+
+## Common Mistakes
+
+### Forgetting to Check
+
+```typescript
+// ❌ May throw if avatar is undefined
+const width = post.coverImage.originalSize[0];
+
+// ✅ Safe access
+const width = post.coverImage?.originalSize[0];
+
+// ✅ With fallback
+const width = post.coverImage?.originalSize[0] ?? 300;
+```
+
+### Setting Required Fields to Undefined
+
+```typescript
+const Doc = co.map({
+  requiredField: SomeCoValue,
+  optionalField: co.optional(SomeCoValue),
+});
+
+const doc = Doc.create({ requiredField: value }, { owner: group });
+
+// ❌ Runtime error
+doc.$jazz.set("requiredField", undefined);
+
+// ✅ OK
+doc.$jazz.set("optionalField", undefined);
+```
+
+## See Also
+
+- [`co.map`](/docs/api-reference/co/map) - For creating maps with optional fields
+- [`co.list`](/docs/api-reference/co/list) - For creating lists with optional items
+- [`co.record`](/docs/api-reference/co/record) - For records with optional values
+- All CoValue types can be wrapped with `co.optional()`

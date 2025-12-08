@@ -1,0 +1,15 @@
+import { CodeGroup } from '@/components/forMdx';
+
+#### `waitForSync`
+
+<CodeGroup preferWrap>
+```typescript
+waitForSync(options?: { timeout?: number }): Promise<void>
+```
+</CodeGroup>
+Waits for the <code>{props.item ?? 'CoValue'}</code> to be uploaded to other peers.
+
+- `options`: (Optional) An object containing:
+  - `timeout`: (Optional) A timeout in milliseconds.
+
+**Returns:** A promise that resolves when the <code>{props.item ?? 'CoValue'}</code> is synced.

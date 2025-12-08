@@ -1,0 +1,68 @@
+export const metadata = {
+  description: "API reference for the `co.discriminatedUnion` module.",
+};
+
+# Discriminated Union
+
+`co.discriminatedUnion` creates a schema for a field that can hold one of several different CoValue types, with a discriminator field to identify which type it currently holds.
+
+## Function
+
+```typescript
+co.discriminatedUnion<D extends string, S extends Record<string, CoValueClass>>(
+  discriminator: D,
+  schemas: S
+): DiscriminatedUnionSchema<D, S>
+```
+
+Creates a discriminated union schema from multiple CoValue schemas.
+
+**Parameters:**
+- `discriminator`: The name of the field used to discriminate between variants (e.g., `"type"`, `"kind"`).
+- `schemas`: An object mapping discriminator values to their corresponding CoValue schemas.
+
+**Returns:** A schema that can be one of the specified types, distinguished by the discriminator field.
+
+## Usage
+
+```typescript
+import { co, z } from "jazz-tools";
+
+const TextContent = co.map({
+  type: z.literal("text"),
+  content: z.string(),
+});
+
+const ImageContent = co.map({
+  type: z.literal("image"),
+  image: co.image(),
+  caption: z.string(),
+});
+
+const MediaContent = co.discriminatedUnion("type", {
+  text: TextContent,
+  image: ImageContent,
+});
+
+// Use in a schema
+const Post = co.map({
+  title: z.string(),
+  content: MediaContent,
+});
+```
+
+## Type Safety
+
+TypeScript automatically narrows the union type based on the discriminator field:
+
+```typescript
+function processContent(content: MediaContent) {
+  if (content.type === "text") {
+    // TypeScript knows content is TextContent
+    console.log(content.content);
+  } else if (content.type === "image") {
+    // TypeScript knows content is ImageContent
+    console.log(content.caption);
+  }
+}
+```

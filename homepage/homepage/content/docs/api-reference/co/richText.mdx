@@ -1,0 +1,117 @@
+export const metadata = {
+  description: "API reference for the `co.richText` module.",
+};
+
+# RichText
+
+`co.richText` provides core functionalities for creating and managing collaborative rich text in Jazz applications. CoRichText extends [`CoPlainText`](/docs/api-reference/co/plainText) to support formatted text with styles, links, and other rich content.
+
+## `CoRichText` Class
+
+```typescript
+class CoRichText extends CoPlainText
+```
+
+Extends [`CoPlainText`](/docs/api-reference/co/plainText). Represents collaborative rich text with formatting support.
+
+CoRichText inherits all the collaborative editing capabilities of CoPlainText while adding support for text formatting, making it ideal for rich text editors, formatted comments, and styled content.
+
+### Declaration
+
+`CoRichText` can be created using `co.richText()`:
+
+```typescript
+import { co } from "jazz-tools";
+
+const Article = co.map({
+  title: z.string(),
+  content: co.richText(),
+});
+```
+
+### Inherited from CoPlainText
+
+CoRichText inherits all properties and methods from [`CoPlainText`](/docs/api-reference/co/plainText), including:
+
+#### Static Methods
+- [`create()`](/docs/api-reference/co/plainText#create) - Create a new CoRichText
+- [`load()`](/docs/api-reference/co/plainText#load) - Load by ID
+- [`subscribe()`](/docs/api-reference/co/plainText#subscribe) - Subscribe to changes
+
+#### Properties
+- [`length`](/docs/api-reference/co/plainText#length) - Text length
+
+#### Instance Methods
+- [`toString()`](/docs/api-reference/co/plainText#tostring) - Convert to string
+- [`valueOf()`](/docs/api-reference/co/plainText#valueof) - Get primitive value
+- [`toJSON()`](/docs/api-reference/co/plainText#tojson) - Convert to JSON
+- [`insertBefore()`](/docs/api-reference/co/plainText#insertbefore) - Insert text before index
+- [`insertAfter()`](/docs/api-reference/co/plainText#insertafter) - Insert text after index
+- [`deleteRange()`](/docs/api-reference/co/plainText#deleterange) - Delete text range
+- [`posBefore()`](/docs/api-reference/co/plainText#posbefore) - Get position before index
+- [`posAfter()`](/docs/api-reference/co/plainText#posafter) - Get position after index
+- [`idxBefore()`](/docs/api-reference/co/plainText#idxbefore) - Get index before position
+- [`idxAfter()`](/docs/api-reference/co/plainText#idxafter) - Get index after position
+
+### Usage
+
+CoRichText can be used with rich text editor libraries that support plain text with external formatting metadata, or with editors that can work with the underlying plain text representation.
+
+**Example:**
+```typescript
+import { co } from "jazz-tools";
+
+// Create rich text
+const article = Article.create({
+  title: "My Article",
+  content: co.richText().create(
+    "This is bold and this is italic text.",
+    { owner: me }
+  ),
+}, { owner: me });
+
+// Access the text
+console.log(article.content.toString());
+// "This is bold and this is italic text."
+
+// Edit the text
+article.content.insertAfter(
+  article.content.length,
+  "\n\nNew paragraph added."
+);
+
+// Use with diff-based updates
+article.content.$jazz.applyDiff(newFormattedText);
+```
+
+## Integration with Rich Text Editors
+
+CoRichText works with rich text editors that support collaborative editing. The plain text content can be edited collaboratively while formatting metadata is stored separately or managed by the editor.
+
+Popular editor integrations:
+- **Lexical** - React-based rich text editor framework
+- **ProseMirror** - Toolkit for building rich text editors
+- **Slate** - Customizable framework for building rich text editors
+- **Tiptap** - Headless rich text editor built on ProseMirror
+
+## Use Cases
+
+CoRichText is ideal for:
+- Collaborative rich text editors and document editors
+- Formatted comments and discussions with styling
+- Article and blog post content
+- Email composers with formatting
+- Any rich text content that multiple users can edit
+
+## Differences from CoPlainText
+
+While CoRichText extends CoPlainText and currently shares its implementation, it is semantically intended for rich text use cases where formatting is important. Using separate types helps:
+- Express intent in your schema
+- Allow for future enhancements specific to rich text
+- Integrate with rich text editor libraries that distinguish between plain and rich text
+
+## See Also
+
+- [`co.plainText`](/docs/api-reference/co/plainText) - For plain text without formatting
+- [`co.group`](/docs/api-reference/co/group) - For managing ownership and permissions
+- [`co.map`](/docs/api-reference/co/map) - For including rich text fields in collaborative maps

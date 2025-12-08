@@ -1,0 +1,431 @@
+export const metadata = {
+  description: "API reference for the `co.fileStream` module.",
+};
+
+# FileStream
+
+`co.fileStream` provides core functionalities for creating and managing collaborative file streams (binary data storage) in Jazz applications. FileStreams are the collaborative equivalent of `Blob`s or `File`s.
+
+## `FileStream` Class
+
+```typescript
+class FileStream extends CoValueBase implements CoValue
+```
+
+Extends `CoValueBase` and implements `CoValue`. Represents a collaborative binary file stream.
+
+FileStreams are `CoFeed`-based structures that contain binary data, allowing you to store and sync files like images, videos, PDFs, or any other binary content in your Jazz application.
+
+### Declaration
+
+`FileStream` can be referenced in schemas:
+
+```typescript
+import { co, FileStream } from "jazz-tools";
+
+const Document = co.map({
+  title: z.string(),
+  file: FileStream,
+});
+```
+
+### Static Methods
+
+#### `create`
+
+```typescript
+static create<S extends FileStream>(
+  this: CoValueClass<S>,
+  options?: { owner?: Account | Group } | Account | Group,
+): S
+```
+
+**Deprecated:** Use `co.fileStream().create` instead.
+
+Creates a new empty `FileStream` instance.
+
+- `options`: (Optional) Configuration options for the new FileStream.
+  - `owner`: The Account or Group that will own this FileStream and control access rights.
+
+**Returns:** A newly created `FileStream` instance.
+
+**Example:**
+```typescript
+// Create owned by an account
+const stream = FileStream.create({ owner: myAccount });
+
+// Create owned by a group
+const stream = FileStream.create({ owner: teamGroup });
+
+// Create with implicit owner
+const stream = FileStream.create(myAccount);
+```
+
+**Remarks:** For uploading an existing file or blob, use [`FileStream.createFromBlob()`](#createfromblob) instead.
+
+#### `createFromBlob`
+
+```typescript
+static async createFromBlob(
+  blob: Blob | File,
+  options?: {
+    owner?: Account | Group;
+    onProgress?: (progress: number) => void;
+  } | Account | Group,
+): Promise<FileStream>
+```
+
+**Deprecated:** Use `co.fileStream().createFromBlob` instead.
+
+Creates a `FileStream` from a `Blob` or `File`.
+
+- `blob`: The `Blob` or `File` to upload.
+- `options`: (Optional) Configuration options.
+  - `owner`: The Account or Group that will own this FileStream.
+  - `onProgress`: A callback function that receives progress updates (0 to 1).
+
+**Returns:** A promise that resolves to the newly created `FileStream`.
+
+**Example:**
+```typescript
+import { FileStream } from "jazz-tools";
+
+// From a file input
+const fileInput = document.querySelector('input[type="file"]');
+const file = fileInput.files[0];
+const fileStream = await FileStream.createFromBlob(file, {
+  owner: group,
+  onProgress: (progress) => {
+    console.log(`Upload progress: ${Math.round(progress * 100)}%`);
+  }
+});
+```
+
+#### `createFromArrayBuffer`
+
+```typescript
+static async createFromArrayBuffer(
+  arrayBuffer: ArrayBuffer,
+  mimeType: string,
+  fileName: string | undefined,
+  options?: {
+    owner?: Account | Group;
+    onProgress?: (progress: number) => void;
+  } | Account | Group,
+): Promise<FileStream>
+```
+
+**Deprecated:** Use `co.fileStream().createFromArrayBuffer` instead.
+
+Creates a `FileStream` from an `ArrayBuffer`.
+
+- `arrayBuffer`: The binary data as an `ArrayBuffer`.
+- `mimeType`: The MIME type of the file (e.g., `"image/png"`).
+- `fileName`: (Optional) The name of the file.
+- `options`: (Optional) Configuration options.
+  - `owner`: The Account or Group that will own this FileStream.
+  - `onProgress`: A callback function that receives progress updates (0 to 1).
+
+**Returns:** A promise that resolves to the newly created `FileStream`.
+
+#### `load`
+
+```typescript
+static async load<C extends FileStream>(
+  this: CoValueClass<C>,
+  id: ID<C>,
+  options?: {
+    loadAs?: Account | AnonymousJazzAgent;
+    allowUnfinished?: boolean;
+  },
+): Promise<Settled<FileStream>>
+```
+
+**Deprecated:** Use `co.fileStream().load` instead.
+
+Loads a `FileStream` by its ID.
+
+By default, waits for the stream to be complete before resolving. Use `allowUnfinished: true` to load incomplete streams.
+
+- `id`: The `ID` of the `FileStream` to load.
+- `options`: (Optional) An object containing:
+  - `loadAs`: The `Account` or `AnonymousJazzAgent` to load as.
+  - `allowUnfinished`: Whether to return incomplete streams.
+
+**Returns:** A promise that resolves to the loaded `FileStream`.
+
+#### `subscribe`
+
+```typescript
+static subscribe<F extends FileStream, const R extends RefsToResolve<F>>(
+  this: CoValueClass<F>,
+  id: ID<F>,
+  listener: (value: Resolved<F, R>, unsubscribe: () => void) => void,
+): () => void;
+static subscribe<F extends FileStream, const R extends RefsToResolve<F>>(
+  this: CoValueClass<F>,
+  id: ID<F>,
+  options: SubscribeListenerOptions<F, R>,
+  listener: (value: Resolved<F, R>, unsubscribe: () => void) => void,
+): () => void;
+```
+
+**Deprecated:** Use `co.fileStream().subscribe` instead.
+
+Subscribes to a `FileStream` when you have an ID but don't have a `FileStream` instance yet.
+
+- `id`: The `ID` of the `FileStream` to subscribe to.
+- `listener`: A callback function that receives the resolved `FileStream` and an `unsubscribe` function.
+- `options`: (Optional) An object containing subscription options.
+
+**Returns:** An unsubscribe function.
+
+#### `loadAsBlob`
+
+```typescript
+static async loadAsBlob(
+  id: ID<FileStream>,
+  options?: {
+    allowUnfinished?: boolean;
+    loadAs?: Account | AnonymousJazzAgent;
+  },
+): Promise<Blob | undefined>
+```
+
+**Deprecated:** Use `co.fileStream().loadAsBlob` instead.
+
+Loads a `FileStream` as a `Blob`.
+
+- `id`: The `ID` of the `FileStream` to load.
+- `options`: (Optional) An object containing:
+  - `allowUnfinished`: Whether to return incomplete blobs.
+  - `loadAs`: The `Account` or `AnonymousJazzAgent` to load as.
+
+**Returns:** A promise that resolves to a `Blob`, or `undefined` if not available.
+
+#### `loadAsBase64`
+
+```typescript
+static async loadAsBase64(
+  id: ID<FileStream>,
+  options?: {
+    allowUnfinished?: boolean;
+    loadAs?: Account | AnonymousJazzAgent;
+    dataURL?: boolean;
+  },
+): Promise<string | undefined>
+```
+
+Loads a `FileStream` as a base64-encoded string.
+
+- `id`: The `ID` of the `FileStream` to load.
+- `options`: (Optional) An object containing:
+  - `allowUnfinished`: Whether to return incomplete data.
+  - `loadAs`: The `Account` or `AnonymousJazzAgent` to load as.
+  - `dataURL`: Whether to return as a data URL (with MIME type prefix).
+
+**Returns:** A promise that resolves to a base64 string, or `undefined` if not available.
+
+### Instance Methods
+
+#### `getMetadata`
+
+```typescript
+getMetadata(): BinaryStreamInfo | undefined
+```
+
+Gets the metadata of this FileStream.
+
+**Returns:** An object containing:
+- `mimeType`: The MIME type of the file
+- `totalSizeBytes`: The total size in bytes
+- `fileName`: (Optional) The file name
+
+Or `undefined` if metadata is not available.
+
+#### `getChunks`
+
+```typescript
+getChunks(options?: {
+  allowUnfinished?: boolean;
+}): (BinaryStreamInfo & { chunks: Uint8Array[]; finished: boolean }) | undefined
+```
+
+Gets the binary chunks of this FileStream.
+
+- `options`: (Optional) An object containing:
+  - `allowUnfinished`: Whether to return incomplete chunks.
+
+**Returns:** An object containing metadata, chunks array, and finished status, or `undefined` if not available.
+
+#### `isBinaryStreamEnded`
+
+```typescript
+isBinaryStreamEnded(): boolean
+```
+
+Checks if the binary stream has been completely uploaded.
+
+**Returns:** `true` if the stream is complete, `false` otherwise.
+
+#### `toBlob`
+
+```typescript
+toBlob(options?: { allowUnfinished?: boolean }): Blob | undefined
+```
+
+Converts this FileStream to a `Blob`.
+
+- `options`: (Optional) An object containing:
+  - `allowUnfinished`: Whether to return incomplete blobs.
+
+**Returns:** A `Blob`, or `undefined` if not available.
+
+**Example:**
+```typescript
+const blob = fileStream.toBlob();
+if (blob) {
+  const url = URL.createObjectURL(blob);
+  // Use url for downloading, displaying, etc.
+}
+```
+
+#### `asBase64`
+
+```typescript
+asBase64(options?: {
+  allowUnfinished?: boolean;
+  dataURL?: boolean;
+}): string | undefined
+```
+
+Converts this FileStream to a base64-encoded string.
+
+- `options`: (Optional) An object containing:
+  - `allowUnfinished`: Whether to return incomplete data.
+  - `dataURL`: Whether to return as a data URL (with MIME type prefix).
+
+**Returns:** A base64 string, or `undefined` if not available.
+
+**Example:**
+```typescript
+// Get base64 string
+const base64 = fileStream.asBase64();
+
+// Get data URL for images
+const dataUrl = fileStream.asBase64({ dataURL: true });
+imageElement.src = dataUrl;
+```
+
+#### `start`
+
+```typescript
+start(options: BinaryStreamInfo): void
+```
+
+Starts a binary stream with metadata. Use this for manual streaming.
+
+- `options`: Metadata for the stream:
+  - `mimeType`: The MIME type
+  - `totalSizeBytes`: The total size in bytes
+  - `fileName`: (Optional) The file name
+
+#### `push`
+
+```typescript
+push(data: Uint8Array): void
+```
+
+Pushes a chunk of binary data to the stream.
+
+- `data`: The binary data chunk.
+
+#### `end`
+
+```typescript
+end(): void
+```
+
+Ends the binary stream, marking it as complete.
+
+#### `toJSON`
+
+```typescript
+toJSON(): {
+  $jazz: { id: string };
+  mimeType?: string;
+  totalSizeBytes?: number;
+  fileName?: string;
+  chunks?: Uint8Array[];
+  finished?: boolean;
+}
+```
+
+Gets a JSON representation of the `FileStream`.
+
+**Returns:** An object with metadata and chunk information.
+
+## `FileStreamJazzApi`
+
+```typescript
+class FileStreamJazzApi<F extends FileStream> extends CoValueJazzApi<F>
+```
+
+Provides Jazz-specific methods and properties for a `FileStream` instance, accessed via the `$jazz` property on a `FileStream`.
+
+### Properties
+
+#### `owner`
+
+```typescript
+get owner(): Group
+```
+
+The owner group of this FileStream.
+
+**Returns:** The `Group` that owns this FileStream.
+
+### Methods
+
+#### `subscribe`
+
+```typescript
+subscribe<B extends FileStream>(
+  this: FileStreamJazzApi<B>,
+  listener: (value: Resolved<B, true>) => void,
+): () => void
+```
+
+An instance method to subscribe to an existing `FileStream`.
+
+- `listener`: A callback function that receives the resolved `FileStream`.
+
+**Returns:** An unsubscribe function.
+
+#### `waitForSync`
+
+```typescript
+waitForSync(options?: { timeout?: number }): Promise<void>
+```
+
+Waits for the `FileStream` to be uploaded to other peers.
+
+- `options`: (Optional) An object containing:
+  - `timeout`: (Optional) A timeout in milliseconds.
+
+**Returns:** A promise that resolves when the FileStream is synced.
+
+## Use Cases
+
+FileStreams are ideal for:
+- Uploading and storing images, videos, and documents
+- Sharing files between users
+- Storing user avatars and profile pictures
+- Handling PDF documents and attachments
+- Any binary data that needs to be synchronized
+
+## See Also
+
+- [`co.image`](/docs/api-reference/co/image) - For working with images and responsive image sets
+- [`co.feed`](/docs/api-reference/co/feed) - FileStream is built on top of CoFeed
+- [`co.group`](/docs/api-reference/co/group) - For managing ownership and permissions

@@ -11,7 +11,7 @@ import { processHeadingNode } from "./utils/processing-heading-node.mjs";
  */
 export function withSlugAndHeadingsFrameworkVisibility() {
   return function (tree, vfile) {
-    vfile.data.headingsFrameworkVisibility = vfile.data.headingsFrameworkVisibility || {};
+    vfile.data.headingsFrameworkVisibility = vfile.data.headingsFrameworkVisibility || Object.create(null);
 
     visit(tree, "element", function (node) {
       const id = processHeadingNode(node, vfile.data.headingsFrameworkVisibility);

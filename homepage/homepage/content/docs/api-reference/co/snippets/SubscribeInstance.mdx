@@ -1,0 +1,7 @@
+An instance method to subscribe to an existing <code>{props.item ?? 'CoValue'}</code>
+- `listener`: A callback function that receives the resolved <code>{props.item ?? 'CoValue'}</code> and an `unsubscribe` function.
+- `options`: (Optional) An object containing:
+  - `resolve`: Specifies which [references to resolve](/docs/core-concepts/subscription-and-loading).
+  - `loadAs`: The [`Account`](/docs/api-reference/co/account) or `AnonymousJazzAgent` to load the <code>{props.item ?? 'CoValue'}</code> as.
+
+**Returns:** An unsubscribe function.

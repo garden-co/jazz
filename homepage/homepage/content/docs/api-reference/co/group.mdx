@@ -1,0 +1,345 @@
+export const metadata = {
+  description: "API reference for the `co.group` module.",
+};
+
+# Group
+
+`co.group` provides core functionalities for managing permission groups in Jazz applications. Groups control access rights to CoValues and can have members with different roles (admin, writer, reader).
+
+## `Group` Class
+
+```typescript
+class Group extends CoValueBase implements CoValue
+```
+
+Extends `CoValueBase` and implements `CoValue`. Represents a permission group.
+
+### Static Methods
+
+#### `create`
+
+```typescript
+static create<G extends Group>(
+  this: CoValueClass<G>,
+  options?: { owner: Account } | Account,
+): G
+```
+
+Creates a new `Group`.
+
+- `options`: (Optional) The account that will create this group. Can be an object with `owner` property or an `Account` directly.
+
+**Returns:** A newly created `Group` instance.
+
+**Example:**
+```typescript
+const teamGroup = Group.create({ owner: me });
+// or
+const teamGroup = Group.create(me);
+```
+
+#### `createInvite`
+
+```typescript
+static async createInvite<G extends Group>(
+  this: CoValueClass<G>,
+  id: ID<G>,
+  options?: { role?: AccountRole; loadAs?: Account },
+): Promise<InviteSecret>
+```
+
+Creates a group invite.
+
+- `id`: The ID of the group to create an invite for.
+- `options`: (Optional) Configuration options.
+  - `role`: The role to grant to the accepter of the invite. Defaults to `'reader'`.
+  - `loadAs`: The account to use when loading the group. Defaults to the current account.
+
+**Returns:** An invite secret (a string starting with `"inviteSecret_"`). Can be accepted using [`Account.acceptInvite()`](/docs/api-reference/co/account#acceptinvite).
+
+#### `load`
+
+```typescript
+static load<G extends Group, const R extends RefsToResolve<G>>(
+  this: CoValueClass<G>,
+  id: ID<G>,
+  options?: {
+    resolve?: RefsToResolveStrict<G, R>;
+    loadAs?: Account | AnonymousJazzAgent;
+  },
+): Promise<Settled<Resolved<G, R>>>
+```
+
+**Deprecated:** Use `co.group().load` instead.
+
+Loads a `Group` by its ID.
+
+- `id`: The `ID` of the `Group` to load.
+- `options`: (Optional) An object containing:
+  - `resolve`: Specifies which references to resolve.
+  - `loadAs`: The `Account` or `AnonymousJazzAgent` to load the group as.
+
+**Returns:** A promise that resolves to the loaded `Group`.
+
+#### `subscribe`
+
+```typescript
+static subscribe<G extends Group, const R extends RefsToResolve<G>>(
+  this: CoValueClass<G>,
+  id: ID<G>,
+  listener: (value: Resolved<G, R>, unsubscribe: () => void) => void,
+): () => void;
+static subscribe<G extends Group, const R extends RefsToResolve<G>>(
+  this: CoValueClass<G>,
+  id: ID<G>,
+  options: SubscribeListenerOptions<G, R>,
+  listener: (value: Resolved<G, R>, unsubscribe: () => void) => void,
+): () => void;
+```
+
+**Deprecated:** Use `co.group().subscribe` instead.
+
+Subscribes to changes in a `Group` when you have an ID but not an instance.
+
+- `id`: The `ID` of the `Group` to subscribe to.
+- `listener`: A callback function that receives the resolved `Group` and an `unsubscribe` function.
+- `options`: (Optional) An object containing subscription options.
+
+**Returns:** An unsubscribe function.
+
+### Instance Methods
+
+#### `myRole`
+
+```typescript
+myRole(): Role | undefined
+```
+
+Gets the current account's role in this group.
+
+**Returns:** The role of the current account, or `undefined` if not a member.
+
+#### `addMember`
+
+```typescript
+addMember(member: Everyone, role: "writer" | "reader" | "writeOnly"): void;
+addMember(member: Account, role: AccountRole): void;
+addMember(member: Group, role?: "reader" | "writer" | "admin" | "manager" | "inherit"): void;
+```
+
+Adds a member to the group.
+
+- `member`: The member to add. Can be `"everyone"`, an `Account`, or another `Group`.
+- `role`: The role to assign to the member. Options include:
+  - `"admin"`: Full control including managing members
+  - `"writer"`: Can read and write
+  - `"reader"`: Can only read
+  - `"writeOnly"`: Can only write (not read)
+  - `"manager"`: Can manage without reading/writing
+  - `"inherit"`: (For group members only) Inherit parent group roles
+
+**Example:**
+```typescript
+group.addMember(alice, "admin");
+group.addMember("everyone", "reader");
+group.addMember(parentGroup, "inherit");
+```
+
+#### `removeMember`
+
+```typescript
+removeMember(member: Everyone | Account): void;
+removeMember(member: Group): void;
+```
+
+Removes a member from the group.
+
+- `member`: The member to remove. Can be `"everyone"`, an `Account`, or another `Group`.
+
+#### `getRoleOf`
+
+```typescript
+getRoleOf(member: Everyone | ID<Account> | "me"): Role | undefined
+```
+
+Retrieves the role of a member within this group.
+
+- `member`: The `ID` of the account, `"me"` for the current account, or `"everyone"`.
+
+**Returns:** The role of the member, or `undefined` if not a member.
+
+#### `makePublic`
+
+```typescript
+makePublic(role: "reader" | "writer" = "reader"): this
+```
+
+Makes the group public so that everyone can access it. This is an alias for `addMember("everyone", role)`.
+
+- `role`: (Optional) The role to grant to everyone. Defaults to `"reader"`.
+
+**Returns:** The group itself for chaining.
+
+**Example:**
+```typescript
+const publicGroup = Group.create(me).makePublic();
+```
+
+#### `getParentGroups`
+
+```typescript
+getParentGroups(): Array<Group>
+```
+
+Gets all parent groups of this group.
+
+**Returns:** An array of parent `Group` instances.
+
+### Properties
+
+#### `members`
+
+```typescript
+get members(): GroupMember[]
+```
+
+Returns all members of the group, including inherited members from parent groups.
+
+For only direct members, use [`getDirectMembers()`](#getdirectmembers) instead.
+
+**Returns:** An array of `GroupMember` objects with properties:
+- `id`: Member account ID
+- `role`: Member's role in the group
+- `ref`: Reference to the member's account
+- `account`: Loaded account instance
+
+#### Advanced/Deprecated
+
+##### `extend`
+
+```typescript
+extend(
+  parent: Group,
+  roleMapping?: "reader" | "writer" | "admin" | "manager" | "inherit",
+): this
+```
+
+**Deprecated:** Use `addMember` instead.
+
+Gives members of a parent group membership in this group.
+
+##### `revokeExtend`
+
+```typescript
+async revokeExtend(parent: Group): Promise<this>
+```
+
+**Deprecated:** Use `removeMember` instead.
+
+Revokes membership from members of a parent group.
+
+##### `getDirectMembers`
+
+```typescript
+getDirectMembers(): GroupMember[]
+```
+
+Returns only the direct members of the group (excluding inherited members from parent groups).
+
+**Returns:** An array of `GroupMember` objects.
+
+## `GroupJazzApi`
+
+```typescript
+class GroupJazzApi<G extends Group> extends CoValueJazzApi<G>
+```
+
+Provides Jazz-specific methods and properties for a `Group` instance, accessed via the `$jazz` property on a `Group`.
+
+### Properties
+
+#### `id`
+
+```typescript
+get id(): ID<G>
+```
+
+The ID of this `Group`.
+
+#### `owner`
+
+```typescript
+get owner(): undefined
+```
+
+Groups have no owner. They can be accessed by everyone. Always returns `undefined`.
+
+### Methods
+
+#### `createInvite`
+
+```typescript
+createInvite(role: AccountRole = "reader"): InviteSecret
+```
+
+Creates an invite to this group.
+
+- `role`: (Optional) The role to assign to the invite accepter. Defaults to `"reader"`.
+
+**Returns:** An invite secret string.
+
+#### `ensureLoaded`
+
+```typescript
+ensureLoaded<G extends Group, const R extends RefsToResolve<G>>(
+  this: GroupJazzApi<G>,
+  options?: { resolve?: RefsToResolveStrict<G, R> },
+): Promise<Resolved<G, R>>
+```
+
+Ensures that the group and its specified references are loaded.
+
+- `options`: (Optional) An object containing:
+  - `resolve`: Specifies which references to resolve.
+
+**Returns:** A promise that resolves to the resolved `Group`.
+
+#### `subscribe`
+
+```typescript
+subscribe<G extends Group, const R extends RefsToResolve<G>>(
+  this: GroupJazzApi<G>,
+  listener: (value: Resolved<G, R>, unsubscribe: () => void) => void,
+): () => void;
+subscribe<G extends Group, const R extends RefsToResolve<G>>(
+  this: GroupJazzApi<G>,
+  options: { resolve?: RefsToResolveStrict<G, R> },
+  listener: (value: Resolved<G, R>, unsubscribe: () => void) => void,
+): () => void;
+```
+
+Subscribes to changes in the existing `Group` instance.
+
+- `listener`: A callback function that receives the resolved `Group` and an `unsubscribe` function.
+- `options`: (Optional) An object containing subscription options.
+
+**Returns:** An unsubscribe function.
+
+#### `waitForSync`
+
+```typescript
+waitForSync(options?: { timeout?: number }): Promise<void>
+```
+
+Waits for the `Group` to be uploaded to other peers.
+
+- `options`: (Optional) An object containing:
+  - `timeout`: (Optional) A timeout in milliseconds.
+
+**Returns:** A promise that resolves when the group is synced.
+
+## See Also
+
+- [`co.account`](/docs/api-reference/co/account) - For managing user accounts
+- [`co.map`](/docs/api-reference/co/map) - For creating collaborative maps owned by groups
+- [`co.list`](/docs/api-reference/co/list) - For creating collaborative lists owned by groups
