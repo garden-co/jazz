@@ -205,7 +205,7 @@ class SessionLogAdapter {
     skipVerify: boolean,
   ): void {
     this.sessionLog.tryAdd(
-      transactions.map((tx) => stableStringify(tx)),
+      transactions.map((tx) => JSON.stringify(tx)),
       newSignature,
       skipVerify,
     );
@@ -220,12 +220,12 @@ class SessionLogAdapter {
     meta: JsonObject | undefined,
   ): { signature: Signature; transaction: PrivateTransaction } {
     const output = this.sessionLog.addNewPrivateTransaction(
-      stableStringify(changes),
+      JSON.stringify(changes),
       signerAgent.currentSignerSecret(),
       keySecret,
       keyID,
       madeAt,
-      meta ? stableStringify(meta) : undefined,
+      meta ? JSON.stringify(meta) : undefined,
     );
     const parsedOutput = JSON.parse(output);
     const transaction: PrivateTransaction = {
@@ -247,10 +247,10 @@ class SessionLogAdapter {
     const stringifiedChanges = stableStringify(changes);
     const stringifiedMeta = meta ? stableStringify(meta) : undefined;
     const output = this.sessionLog.addNewTrustingTransaction(
-      stringifiedChanges,
+      JSON.stringify(changes),
       signerAgent.currentSignerSecret(),
       madeAt,
-      stringifiedMeta,
+      meta ? JSON.stringify(meta) : undefined,
     );
     const transaction: TrustingTransaction = {
       privacy: "trusting",

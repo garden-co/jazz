@@ -13,6 +13,8 @@ pub mod core {
     pub use cache::*;
     pub mod error;
     pub use error::*;
+    pub mod utils;
+    pub use utils::*;
 }
 
 pub mod hash {
