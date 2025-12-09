@@ -1,4 +1,5 @@
 import opacityImage from "./showcase/images/opacity.png";
+import suhylImage from "./showcase/images/suhyl.png";
 import invoiceRadarImage from "./showcase/images/invoice-radar.png";
 import reconfiguredImage from "./showcase/images/reconfigured.png";
 import wagesoImage from "./showcase/images/wageso.png";
@@ -16,6 +17,12 @@ export const products = [
     imageUrl: opacityImage.src,
     url: "https://opacity.com",
     description: "A product designer's best friend.",
+  },
+  {
+    name: "Suhyl",
+    imageUrl: suhylImage.src,
+    url: "https://suhyl.com",
+    description: "A platform for restaurants and foodservice venues with intelligent ordering systems, secure payment processing, and a comprehensive management solution.",
   },
   {
     name: "Invoice Radar",
