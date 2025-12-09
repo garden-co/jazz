@@ -1,5 +1,16 @@
 # jazz-tools
 
+## 0.19.11
+
+### Patch Changes
+
+- 68acca4: Sync Server is now configurable in inspector.jazz.tools
+- c00a454: Resolve footgun in Account.createAs() that made it easy to save the wrong credentials.
+- Updated dependencies [c00a454]
+  - cojson@0.19.11
+  - cojson-storage-indexeddb@0.19.11
+  - cojson-transport-ws@0.19.11
+
 ## 0.19.10
 
 ### Patch Changes
