@@ -26,54 +26,12 @@ export function FrameworkSelect({
   const onSelectRef = useRef(onSelect);
 
   useEffect(() => {
-    pathRef.current = path;
-  }, [path]);
+    onSelectRef.current = onSelect;
+  }, [onSelect]);
 
-  useEffect(() => {
-    if (!initialized) {
-      setSelectedFramework(defaultFramework);
-      setInitialized(true);
-    }
-  }, [defaultFramework, initialized]);
-
-
-  useEffect(() => {
-    window.addEventListener(
-      TAB_CHANGE_EVENT,
-      handleTabChange,
-    );
-    return () => {
-      window.removeEventListener(TAB_CHANGE_EVENT, handleTabChange);
-    };
-  }, []);
-
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      window.dispatchEvent(
-        new CustomEvent(TAB_CHANGE_EVENT, {
-          detail: {
-            key: 'framework',
-            value: defaultFramework,
-          },
-        }),
-      );
-    }, 0);
-    return () => clearTimeout(timer);
-  }, [defaultFramework]);
-
-  const selectFramework = (newFramework: Framework, shouldNavigate = true) => {
-    setSelectedFramework(newFramework);
-    onSelect && onSelect(newFramework);
-    localStorage.setItem("_tcgpref_framework", newFramework);
-    if (!shouldNavigate) return;
-    const newPath = path.split("/").toSpliced(2, 1, newFramework).join("/") + window.location.hash;
-    routerPush && router.replace(newPath, { scroll: false });
-  };
-
-  const handleTabChange = (event: CustomEvent<TabChangeEventDetail>) => {
-    if (isFrameworkChange(event.detail)) {
-      selectFramework(event.detail.value as Framework, false);
-    }
+  const handleSelect = (newFramework: Framework) => {
+    setFramework(newFramework);
+    onSelectRef.current?.(newFramework);
   };
 
   return (
