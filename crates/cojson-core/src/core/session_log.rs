@@ -1,5 +1,5 @@
 use crate::core::keys::{decode_z, CoID, KeyID, KeySecret, Signature, SignerID, SignerSecret};
-use crate::core::stable_stringify;
+use crate::stable_stringify;
 use crate::core::{CoJsonCoreError, CryptoCache, NonceGenerator};
 use base64::{engine::general_purpose::URL_SAFE, Engine as _};
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};

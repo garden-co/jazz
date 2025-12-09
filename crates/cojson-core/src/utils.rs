@@ -1,8 +1,6 @@
 // Adapted from fast-json-stable-stringify (https://github.com/epoberezkin/fast-json-stable-stringify)
-
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
-use crate::core::CoJsonCoreError;
 
 /// Stable stringify a JSON value with sorted object keys.
 /// This ensures deterministic serialization by sorting object keys alphabetically.
@@ -15,14 +13,14 @@ use crate::core::CoJsonCoreError;
 ///
 /// # Example
 /// ```
-/// use cojson_core::core::stable_stringify;
+/// use cojson_core::stable_stringify;
 /// use serde_json::json;
 ///
 /// let value = json!({"b": 2, "a": 1});
 /// let result = stable_stringify(&value).unwrap();
 /// assert_eq!(result, r#"{"a":1,"b":2}"#);
 /// ```
-pub fn stable_stringify(value: &JsonValue) -> Result<String, CoJsonCoreError> {
+pub fn stable_stringify(value: &JsonValue) -> Result<String, serde_json::Error> {
     match value {
         JsonValue::Null => Ok("null".to_string()),
     
@@ -81,7 +79,7 @@ pub fn stable_stringify(value: &JsonValue) -> Result<String, CoJsonCoreError> {
                             out.push(',');
                         }
                         // Properly escape the key
-                        let key_str = serde_json::to_string(key).unwrap();
+                        let key_str = serde_json::to_string(key)?;
                         out.push_str(&format!("{}:{}", key_str, s));
                         first = false;
                     }
@@ -105,16 +103,16 @@ pub fn stable_stringify(value: &JsonValue) -> Result<String, CoJsonCoreError> {
 ///
 /// # Returns
 /// * `Ok(T)` - The deserialized value
-/// * `Err(CoJsonCoreError::Json)` - If JSON parsing fails
+/// * `Err(JsonUtilsError::JsonParse)` - If JSON parsing fails
 ///
 /// # Example
 /// ```
-/// use cojson_core::core::parse_json;
+/// use cojson_core::parse_json;
 ///
 /// let json = r#"{"name": "test", "value": 42}"#;
 /// let result: serde_json::Value = parse_json(json).unwrap();
 /// ```
-pub fn parse_json<T: DeserializeOwned>(json: &str) -> Result<T, CoJsonCoreError> {
+pub fn parse_json<T: DeserializeOwned>(json: &str) -> Result<T, serde_json::Error> {
     serde_json::from_str(json).map_err(Into::into)
 }
 
@@ -129,7 +127,7 @@ pub fn parse_json<T: DeserializeOwned>(json: &str) -> Result<T, CoJsonCoreError>
 ///
 /// # Example
 /// ```
-/// use cojson_core::core::safe_parse_json;
+/// use cojson_core::safe_parse_json;
 ///
 /// let json = r#"{"name": "test"}"#;
 /// let result: Option<serde_json::Value> = safe_parse_json(json);

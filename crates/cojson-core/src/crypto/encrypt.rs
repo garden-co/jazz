@@ -1,5 +1,6 @@
 use crate::crypto::error::CryptoError;
 use crate::hash::blake3::generate_nonce;
+use crate::stable_stringify;
 use bs58;
 
 /// Internal function to encrypt bytes with a key secret and nonce material.
@@ -10,6 +11,8 @@ pub fn encrypt(
   key_secret: &str,
   nonce_material: &[u8],
 ) -> Result<Box<[u8]>, CryptoError> {
+  let plaintext = stable_stringify(&serde_json::from_slice(plaintext)?)?;
+  let nonce_material = stable_stringify(&serde_json::from_slice(nonce_material)?)?;
   // Decode the base58 key secret (removing the "keySecret_z" prefix)
   let key_secret = key_secret
     .strip_prefix("keySecret_z")
@@ -19,10 +22,10 @@ pub fn encrypt(
     .map_err(|e| CryptoError::Base58Error(e.to_string()))?;
 
   // Generate nonce from nonce material
-  let nonce = generate_nonce(nonce_material);
+  let nonce = generate_nonce(nonce_material.as_bytes());
 
   // Encrypt using XSalsa20
-  super::xsalsa20::encrypt_xsalsa20_raw(&key, &nonce, plaintext)
+  super::xsalsa20::encrypt_xsalsa20_raw(&key, &nonce, plaintext.as_bytes())
 }
 
 /// Internal function to decrypt bytes with a key secret and nonce material.
@@ -33,6 +36,7 @@ pub fn decrypt(
   key_secret: &str,
   nonce_material: &[u8],
 ) -> Result<Box<[u8]>, CryptoError> {
+  let nonce_material = stable_stringify(&serde_json::from_slice(nonce_material)?)?;
   // Decode the base58 key secret (removing the "keySecret_z" prefix)
   let key_secret = key_secret
     .strip_prefix("keySecret_z")
@@ -42,7 +46,7 @@ pub fn decrypt(
     .map_err(|e| CryptoError::Base58Error(e.to_string()))?;
 
   // Generate nonce from nonce material
-  let nonce = generate_nonce(nonce_material);
+  let nonce = generate_nonce(nonce_material.as_bytes());
 
   // Decrypt using XSalsa20
   super::xsalsa20::decrypt_xsalsa20_raw(&key, &nonce, ciphertext)
@@ -55,9 +59,9 @@ mod tests {
   #[test]
   fn test_encrypt_decrypt() {
     // Test data
-    let plaintext = b"Hello, World!";
+    let plaintext = b"{\"a\":1,\"b\":2}";
     let key_secret = "keySecret_z11111111111111111111111111111111"; // Example base58 encoded key
-    let nonce_material = b"test_nonce_material";
+    let nonce_material = b"{\"nonce\": \"test_nonce_material\"}";
 
     // Test encryption
     let ciphertext = encrypt(plaintext, key_secret, nonce_material).unwrap();
@@ -70,8 +74,8 @@ mod tests {
 
   #[test]
   fn test_invalid_key_secret() {
-    let plaintext = b"test";
-    let nonce_material = b"nonce";
+    let plaintext = b"{\"a\":1,\"b\":2}";
+    let nonce_material = b"{\"nonce\": \"test_nonce_material\"}";
 
     // Test with invalid key secret format
     let result = encrypt(plaintext, "invalid_key", nonce_material);

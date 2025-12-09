@@ -2,6 +2,7 @@ use crate::crypto::x25519::x25519_diffie_hellman;
 use crate::crypto::xsalsa20::{decrypt_xsalsa20_poly1305, encrypt_xsalsa20_poly1305};
 use crate::crypto::error::CryptoError;
 use crate::hash::blake3::generate_nonce;
+use crate::stable_stringify;
 use bs58;
 
 /// Internal function to seal a message using X25519 + XSalsa20-Poly1305.
@@ -22,6 +23,8 @@ pub fn seal(
   recipient_id: &str,
   nonce_material: &[u8],
 ) -> Result<Box<[u8]>, CryptoError> {
+  let message = stable_stringify(&serde_json::from_slice(message)?)?;
+  let nonce_material = stable_stringify(&serde_json::from_slice(nonce_material)?)?;
   // Decode the base58 sender secret (removing the "sealerSecret_z" prefix)
   let sender_secret =
     sender_secret
@@ -42,13 +45,13 @@ pub fn seal(
     .into_vec()
     .map_err(|e| CryptoError::Base58Error(e.to_string()))?;
 
-  let nonce = generate_nonce(nonce_material);
+  let nonce = generate_nonce(nonce_material.as_bytes());
 
   // Generate shared secret using X25519
   let shared_secret = x25519_diffie_hellman(&sender_private_key, &recipient_public_key)?;
 
   // Encrypt message using XSalsa20-Poly1305
-  encrypt_xsalsa20_poly1305(&shared_secret, &nonce, message)
+  encrypt_xsalsa20_poly1305(&shared_secret, &nonce, message.as_bytes())
 }
 
 /// Internal function to unseal a message using X25519 + XSalsa20-Poly1305.
@@ -69,6 +72,7 @@ pub fn unseal(
   sender_id: &str,
   nonce_material: &[u8],
 ) -> Result<Box<[u8]>, CryptoError> {
+  let nonce_material = stable_stringify(&serde_json::from_slice(nonce_material)?)?;
   // Decode the base58 recipient secret (removing the "sealerSecret_z" prefix)
   let recipient_secret =
     recipient_secret
@@ -89,7 +93,7 @@ pub fn unseal(
     .into_vec()
     .map_err(|e| CryptoError::Base58Error(e.to_string()))?;
 
-  let nonce = generate_nonce(nonce_material);
+  let nonce = generate_nonce(nonce_material.as_bytes());
 
   // Generate shared secret using X25519
   let shared_secret = x25519_diffie_hellman(&recipient_private_key, &sender_public_key)?;
@@ -117,8 +121,8 @@ mod tests {
     let recipient_id = format!("sealer_z{}", bs58::encode(&sender_public).into_string());
 
     // Test data
-    let message = b"Secret message";
-    let nonce_material = b"test_nonce_material";
+    let message = b"{\"a\": 1, \"b\": 2}";
+    let nonce_material = b"{\"nonce\": \"test_nonce_material\"}";
 
     // Test sealing
     let sealed = seal(message, &sender_secret, &recipient_id, nonce_material).unwrap();
@@ -126,13 +130,13 @@ mod tests {
 
     // Test unsealing (using same keys since it's a test)
     let unsealed = unseal(&sealed, &sender_secret, &recipient_id, nonce_material).unwrap();
-    assert_eq!(&*unsealed, message);
+    assert_eq!(&*unsealed, b"{\"a\":1,\"b\":2}");
   }
 
   #[test]
   fn test_invalid_keys() {
-    let message = b"test";
-    let nonce_material = b"nonce";
+    let message = b"{\"a\": 1, \"b\": 2}";
+    let nonce_material = b"{\"nonce\": \"test_nonce_material\"}";
 
     // Test with invalid sender secret format
     let result = seal(

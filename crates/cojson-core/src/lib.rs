@@ -2,6 +2,9 @@
 #[cfg(feature = "lzy")]
 pub use lzy;
 
+pub mod utils;
+pub use utils::*;
+
 pub mod core {
     pub mod nonce;
     pub mod session_log;
@@ -13,8 +16,6 @@ pub mod core {
     pub use cache::*;
     pub mod error;
     pub use error::*;
-    pub mod utils;
-    pub use utils::*;
 }
 
 pub mod hash {

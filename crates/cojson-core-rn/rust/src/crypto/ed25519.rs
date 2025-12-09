@@ -23,11 +23,14 @@ pub enum CryptoErrorUniffi {
     InvalidPrefix(String, String),
     #[error("Invalid base58: {0}")]
     Base58Error(String),
+    #[error("JSON parsing failed: {0}")]
+    JsonParse(String),
 }
 
 impl From<CryptoError> for CryptoErrorUniffi {
     fn from(error: CryptoError) -> Self {
         match error {
+            CryptoError::JsonParse(error) => CryptoErrorUniffi::JsonParse(error.to_string()),
             CryptoError::InvalidKeyLength(expected, actual) => {
                 CryptoErrorUniffi::InvalidKeyLength(expected as u64, actual as u64).into()
             }
