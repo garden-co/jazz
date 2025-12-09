@@ -312,6 +312,8 @@ export class LocalNode {
     storage?: StorageAPI;
   }): Promise<LocalNode> {
     try {
+      const expectedAgentID = crypto.getAgentID(accountSecret);
+
       const node = new LocalNode(
         accountSecret,
         sessionID || crypto.newRandomSessionID(accountID),
@@ -330,6 +332,12 @@ export class LocalNode {
 
       if (account === "unavailable") {
         throw new Error("Account unavailable from all peers");
+      }
+
+      if (account.currentAgentID() !== expectedAgentID) {
+        throw new Error(
+          "Account secret does not match expected agent ID in account",
+        );
       }
 
       const profileID = account.get("profile");
