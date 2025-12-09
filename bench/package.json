@@ -4,10 +4,8 @@
   "type": "module",
   "dependencies": {
     "cojson": "workspace:*",
-    "cojson-latest": "npm:cojson@latest",
     "cronometro": "^5.3.0",
     "jazz-tools": "workspace:*",
-    "jazz-tools-latest": "npm:jazz-tools@latest",
     "vitest": "catalog:default"
   },
   "scripts": {
