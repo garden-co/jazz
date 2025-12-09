@@ -9,8 +9,8 @@ import { H2 } from "@garden-co/design-system/src/components/atoms/Headings";
 const metaTags = {
   title: "Built with Jazz",
   description: "Successful adopters across diverse industries.",
-  url:  "https://jazz.tools",
-}
+  url: "https://jazz.tools",
+};
 
 export const metadata: Metadata = {
   title: metaTags.title,
@@ -38,25 +38,29 @@ export default function Page() {
 
       <div className="flex flex-col gap-8">
         {products.map((product) => (
-          <div key={product.url} className="group pb-8 border-b flex md:flex-row flex-col gap-3 rounded-lg md:gap-4 dark:bg-stone-950">
-          <Link
-            href={product.url}
-            className=""
+          <div
+            key={product.url}
+            className="group flex flex-col gap-3 rounded-lg border-b pb-8 dark:bg-stone-950 md:flex-row md:gap-4"
           >
-            <Image
-              className="rounded-md border dark:border-0 flex-1 max-w-lg"
-              src={product.imageUrl}
-              width="900"
-              height="675"
-              alt=""
-            />
-
-          </Link>
-          <div className="flex flex-col gap-2 flex-2 min-w-lg">
-              <H2 className="font-medium text-highlight leading-none">
+            <Link href={product.url} className="">
+              <Image
+                className="max-w-[calc(min(100%,32rem))] flex-1 rounded-md border dark:border-0"
+                src={product.imageUrl}
+                width="900"
+                height="675"
+                alt=""
+              />
+            </Link>
+            <div className="flex-2 min-w-lg flex flex-col gap-2">
+              <H2 className="font-medium leading-none text-highlight">
                 {product.name}
               </H2>
-              <Link href={product.url} className="text-lg text-stone-500 underline dark:text-stone-400">{product.url.replace("https://", "")}</Link>
+              <Link
+                href={product.url}
+                className="text-lg text-stone-500 underline dark:text-stone-400"
+              >
+                {product.url.replace("https://", "")}
+              </Link>
               <p className="text-sm">{product.description}</p>
             </div>
           </div>
