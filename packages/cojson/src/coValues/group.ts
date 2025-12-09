@@ -620,19 +620,31 @@ export class RawGroup<
     keyID: KeyID,
     secret: KeySecret,
   ) {
-    this.set(
-      `${keyID}_for_${memberKey}`,
-      this.crypto.seal({
-        message: secret,
-        from: this.core.node.getCurrentAgent().currentSealerSecret(),
-        to: this.crypto.getAgentSealerID(agent),
-        nOnceMaterial: {
-          in: this.id,
-          tx: this.core.nextTransactionID(),
-        },
-      }),
-      "trusting",
-    );
+    const sealed = this.crypto.seal({
+      message: secret,
+      from: this.core.node.getCurrentAgent().currentSealerSecret(),
+      to: this.crypto.getAgentSealerID(agent),
+      nOnceMaterial: {
+        in: this.id,
+        tx: this.core.nextTransactionID(),
+      },
+    });
+
+    console.log("SEALING", {
+      memberKey,
+      agent,
+      keyID,
+      secret,
+      message: secret,
+      from: this.core.node.getCurrentAgent().currentSealerSecret(),
+      to: this.crypto.getAgentSealerID(agent),
+      nOnceMaterial: {
+        in: this.id,
+        tx: this.core.nextTransactionID(),
+      },
+    });
+
+    this.set(`${keyID}_for_${memberKey}`, sealed, "trusting");
   }
 
   private storeKeyRevelationForParentGroup(
@@ -775,18 +787,48 @@ export class RawGroup<
         throw new Error("Expected to know revealer");
       }
 
-      const secret = this.crypto.unseal(
-        lastReadyKeyEdit.value,
-        this.crypto.getAgentSealerSecret(core.node.agentSecret), // being careful here to avoid recursion
-        this.crypto.getAgentSealerID(revealerAgent),
-        {
+      console.log("UNSEALING", {
+        localAgentID: core.node.getCurrentAgent().currentAgentID(),
+        localAgentSecret: core.node.agentSecret,
+        keyID,
+        lastReadyKeyEdit: lastReadyKeyEdit.value,
+        sealer: this.crypto.getAgentSealerSecret(core.node.agentSecret),
+        revealer: this.crypto.getAgentSealerID(revealerAgent),
+        nOnceMaterial: {
           in: this.id,
           tx: lastReadyKeyEdit.tx,
         },
-      );
+      });
 
-      if (secret) {
-        return secret as KeySecret;
+      try {
+        const secret = this.crypto.unseal(
+          lastReadyKeyEdit.value,
+          this.crypto.getAgentSealerSecret(core.node.agentSecret), // being careful here to avoid recursion
+          this.crypto.getAgentSealerID(revealerAgent),
+          {
+            in: this.id,
+            tx: lastReadyKeyEdit.tx,
+          },
+        );
+
+        if (secret) {
+          return secret as KeySecret;
+        }
+      } catch (error) {
+        console.error("UNSEALING ERROR", {
+          error,
+          localAgentID: core.node.getCurrentAgent().currentAgentID(),
+          localAgentSecret: core.node.agentSecret,
+          keyID,
+          lastReadyKeyEdit: lastReadyKeyEdit.value,
+          sealer: this.crypto.getAgentSealerSecret(core.node.agentSecret),
+          revealer: this.crypto.getAgentSealerID(revealerAgent),
+          nOnceMaterial: {
+            in: this.id,
+            tx: lastReadyKeyEdit.tx,
+          },
+        });
+        throw error;
       }
     }
 
