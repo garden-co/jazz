@@ -36,11 +36,11 @@ export default function Page() {
         slogan="Successful apps and systems across diverse industries."
       />
 
-      <div className="flex flex-col gap-8">
+      <div className="flex flex-col gap-8 divide-y">
         {products.map((product) => (
           <div
             key={product.url}
-            className="group flex flex-col gap-3 rounded-lg border-b pb-8 dark:bg-stone-950 md:flex-row md:gap-4"
+            className="group flex flex-col gap-3 rounded-lg rounded-b-none pb-8 dark:bg-stone-950 md:flex-row md:gap-4"
           >
             <Link href={product.url} className="">
               <Image
@@ -51,7 +51,8 @@ export default function Page() {
                 alt=""
               />
             </Link>
-            <div className="flex-2 min-w-lg flex flex-col gap-2">
+
+            <div className="flex-2 flex min-w-[calc(min(100%,32rem))] flex-col gap-2">
               <H2 className="font-medium leading-none text-highlight">
                 {product.name}
               </H2>
