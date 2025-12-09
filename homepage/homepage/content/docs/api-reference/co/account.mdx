@@ -10,7 +10,7 @@ export const metadata = {
 
 `co.account` provides core functionalities for managing user accounts in Jazz applications. It allows for account creation, loading, subscription, and interaction with various account-related features.
 
-See the [detailed guide](/docs/core-concepts/schemas/accounts-and-migrations)
+See the [detailed guide](/docs/core-concepts/schemas/accounts-and-migrations).
 
 ## `Account` Class
 
@@ -24,7 +24,6 @@ Extends `CoValueBase` and implements `CoValue`. Represents a user account.
 ### Declaration
 
 Declare a custom `Account` using `co.account()`:
-
 
 <CodeGroup preferWrap>
 ```ts
@@ -91,10 +90,16 @@ static async createAs<A extends Account>(
     creationProps: { name: string };
     onCreate?: (account: A, worker: Account) => Promise<void>;
   },
-): Promise<A>
+): Promise<{
+  credentials: {
+    accountID: string;
+    accountSecret: AgentSecret;
+  };
+  account: A;
+}>
 ```
 </CodeGroup>
-**Deprecated:** Use `co.account(...).createAs` instead.
+**Usage:** Use `co.account(...).createAs`.
 
 Creates a new `Account` as a worker account.
 
@@ -119,7 +124,7 @@ static load<A extends Account, const R extends RefsToResolve<A> = true>(
 ): Promise<Settled<Resolved<A, R>>>
 ```
 </CodeGroup>
-**Deprecated:** Use `co.account(...).load` instead.
+**Usage:** Use `co.account(...).load`.
 
 <LoadStatic item="Account" />
 
@@ -140,7 +145,7 @@ static subscribe<A extends Account, const R extends RefsToResolve<A> = true>(
 ): () => void;
 ```
 </CodeGroup>
-**Deprecated:** Use `co.account(...).subscribe` instead.
+**Usage:** Use `co.account(...).subscribe`.
 
 Subscribes to changes in an `Account` when you have an ID but not an instance.
 

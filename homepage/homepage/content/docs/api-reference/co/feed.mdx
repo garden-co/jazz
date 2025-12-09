@@ -1,6 +1,8 @@
 import JazzDefaultProperties from './snippets/JazzDefaultProperties.mdx';
+import EnsureLoaded from './snippets/EnsureLoaded.mdx';
 import LoadStatic from './snippets/LoadStatic.mdx';
 import SubscribeStatic from './snippets/SubscribeStatic.mdx';
+import SubscribeInstance from './snippets/SubscribeInstance.mdx';
 import WaitForSync from './snippets/WaitForSync.mdx';
 import { CodeGroup } from '@/components/forMdx';
 export const metadata = {
@@ -10,6 +12,8 @@ export const metadata = {
 # Feed
 
 A `co.feed` is a minimal abstraction over the internal workings of Jazz, and exposes the underlying per-session append-only logs as the feed itself.
+
+See the [detailed guide](/docs/core-concepts/covalues/cofeeds).
 
 ## `CoFeed` Class
 
@@ -29,6 +33,7 @@ CoFeeds are collaborative logs of data. They are similar to [`CoList`](/docs/api
 
 Declare a `CoFeed` using `co.feed()`:
 
+{/* TODO: Extract snippet */}
 <CodeGroup preferWrap>
 ```typescript
 import { co, z } from "jazz-tools";
@@ -59,6 +64,7 @@ Creates a new `CoFeed` with optional initial items.
 
 **Returns:** A newly created `CoFeed` instance.
 
+{/* TODO: Extract snippet */}
 **Example:**
 <CodeGroup preferWrap>
 ```typescript
@@ -130,6 +136,7 @@ get perAccount(): {
 
 The per-account view of this `CoFeed`. Access entries by account ID to get the latest entry from that account.
 
+{/* TODO: Extract snippet */}
 **Example:**
 <CodeGroup preferWrap>
 ```typescript
@@ -204,7 +211,7 @@ Provides Jazz-specific methods and properties for a `CoFeed` instance, accessed 
 
 ### Properties
 
-<JazzDefaultProperties item="Feed" level={4}  />
+<JazzDefaultProperties item="Feed"  />
 
 ### Methods
 
@@ -221,6 +228,7 @@ Items are appended to the current session's log. Each session (tab, device, app 
 
 - `items`: Items to append to the feed.
 
+{/* TODO: Extract snippet */}
 **Example:**
 <CodeGroup preferWrap>
 ```typescript
@@ -234,6 +242,7 @@ console.log(feed.inCurrentSession);
 console.log(feed.byMe);
 ```
 </CodeGroup>
+
 #### `$jazz.ensureLoaded`
 
 <CodeGroup preferWrap>
@@ -247,13 +256,8 @@ ensureLoaded<F extends CoFeed, const R extends RefsToResolve<F>>(
 ): Promise<Resolved<F, R>>
 ```
 </CodeGroup>
-Ensures a `CoFeed` is loaded to the specified depth.
 
-- `options`: (Optional) An object containing:
-  - `resolve`: Specifies which item references to resolve.
-  - `unstable_branch`: (Optional) An unstable branch definition.
-
-**Returns:** A promise that resolves to the resolved `CoFeed`.
+<EnsureLoaded item="CoFeed" />
 
 #### `$jazz.subscribe`
 
@@ -273,13 +277,10 @@ subscribe<F extends CoFeed, const R extends RefsToResolve<F>>(
 ): () => void;
 ```
 </CodeGroup>
-An instance method to subscribe to an existing `CoFeed`.
 
-- `listener`: A callback function that receives the resolved `CoFeed` and an `unsubscribe` function.
-- `options`: (Optional) An object containing subscription options.
+<SubscribeInstance item="CoFeed" />
 
-**Returns:** An unsubscribe function.
-
+{/* TODO: Extract snippet */}
 **Example:**
 <CodeGroup preferWrap>
 ```typescript
@@ -294,6 +295,7 @@ const unsubscribe = feed.$jazz.subscribe(() => {
 ```
 </CodeGroup>
 
+#### `$jazz.waitForSync`
 <WaitForSync item="Feed" />
 
 ## `CoFeedEntry` Type

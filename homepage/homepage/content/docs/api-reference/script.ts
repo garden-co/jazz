@@ -1,4 +1,4 @@
-import { co } from "jazz-tools";
+import { co, z } from "jazz-tools";
 //Object.keys(co).map((v) => console.log(v));
 
 function getAllKeys(obj: any) {
@@ -57,3 +57,7 @@ record
 richText
 vector
  */
+
+const myCoFeed = co.feed(z.string()).create(["hi"]);
+
+myCoFeed.$jazz.ensureLoaded({});

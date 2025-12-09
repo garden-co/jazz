@@ -1,3 +1,4 @@
+import { CodeGroup } from '@/components/forMdx';
 export const metadata = {
   description: "API reference for the `co.discriminatedUnion` module.",
 };
@@ -6,14 +7,18 @@ export const metadata = {
 
 `co.discriminatedUnion` creates a schema for a field that can hold one of several different CoValue types, with a discriminator field to identify which type it currently holds.
 
+See the [detailed guide](/docs/core-concepts/schemas/schemaunions). A discriminated union inherits the API of its member types. For a detailed API reference, see the appropriate reference page for each of the member types, and use type narrowing to access the specific properties of each variant.
+
 ## Function
 
+<CodeGroup preferWrap>
 ```typescript
 co.discriminatedUnion<D extends string, S extends Record<string, CoValueClass>>(
   discriminator: D,
   schemas: S
 ): DiscriminatedUnionSchema<D, S>
 ```
+</CodeGroup>
 
 Creates a discriminated union schema from multiple CoValue schemas.
 
@@ -25,44 +30,26 @@ Creates a discriminated union schema from multiple CoValue schemas.
 
 ## Usage
 
-```typescript
-import { co, z } from "jazz-tools";
-
-const TextContent = co.map({
-  type: z.literal("text"),
-  content: z.string(),
-});
-
-const ImageContent = co.map({
-  type: z.literal("image"),
-  image: co.image(),
-  caption: z.string(),
-});
-
-const MediaContent = co.discriminatedUnion("type", {
-  text: TextContent,
-  image: ImageContent,
-});
-
-// Use in a schema
-const Post = co.map({
-  title: z.string(),
-  content: MediaContent,
-});
+<CodeGroup preferWrap>
+```ts core-concepts/schemas/schemaunions/schema.ts#SchemaUnion
 ```
+</CodeGroup>
 
 ## Type Safety
 
 TypeScript automatically narrows the union type based on the discriminator field:
 
+{/* TODO: Extract snippet */}
+<CodeGroup preferWrap>
 ```typescript
-function processContent(content: MediaContent) {
-  if (content.type === "text") {
-    // TypeScript knows content is TextContent
-    console.log(content.content);
-  } else if (content.type === "image") {
-    // TypeScript knows content is ImageContent
-    console.log(content.caption);
+function processContent(widget: WidgetUnion) {
+  if (widget.type === "button") {
+    // TypeScript knows label comes from ButtonWidget
+    console.log(content.label);
+  } else if (widget.type === "slider") {
+    // TypeScript knows max comes from SliderWidget
+    console.log(widget.max);
   }
 }
 ```
+</CodeGroup>

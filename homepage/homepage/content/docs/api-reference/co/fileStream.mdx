@@ -1,3 +1,9 @@
+import { CodeGroup } from '@/components/forMdx';
+import EnsureLoaded from './snippets/EnsureLoaded.mdx';
+import JazzDefaultProperties from './snippets/JazzDefaultProperties.mdx';
+import SubscribeInstance from './snippets/SubscribeInstance.mdx';
+import SubscribeStatic from './snippets/SubscribeStatic.mdx';
+import WaitForSync from './snippets/WaitForSync.mdx';
 export const metadata = {
   description: "API reference for the `co.fileStream` module.",
 };
@@ -6,11 +12,15 @@ export const metadata = {
 
 `co.fileStream` provides core functionalities for creating and managing collaborative file streams (binary data storage) in Jazz applications. FileStreams are the collaborative equivalent of `Blob`s or `File`s.
 
+See the [detailed guide](/docs/core-concepts/covalues/filestreams).
+
 ## `FileStream` Class
 
-```typescript
+<CodeGroup preferWrap>
+```ts
 class FileStream extends CoValueBase implements CoValue
 ```
+</CodeGroup>
 
 Extends `CoValueBase` and implements `CoValue`. Represents a collaborative binary file stream.
 
@@ -20,7 +30,9 @@ FileStreams are `CoFeed`-based structures that contain binary data, allowing you
 
 `FileStream` can be referenced in schemas:
 
-```typescript
+{/* TODO: Extract snippet */}
+<CodeGroup preferWrap>
+```ts
 import { co, FileStream } from "jazz-tools";
 
 const Document = co.map({
@@ -28,19 +40,22 @@ const Document = co.map({
   file: FileStream,
 });
 ```
+</CodeGroup>
 
 ### Static Methods
 
 #### `create`
 
-```typescript
+<CodeGroup preferWrap>
+```ts
 static create<S extends FileStream>(
   this: CoValueClass<S>,
   options?: { owner?: Account | Group } | Account | Group,
 ): S
 ```
+</CodeGroup>
 
-**Deprecated:** Use `co.fileStream().create` instead.
+**Usage:** Use `co.fileStream().create`.
 
 Creates a new empty `FileStream` instance.
 
@@ -49,8 +64,10 @@ Creates a new empty `FileStream` instance.
 
 **Returns:** A newly created `FileStream` instance.
 
+{/* TODO: Extract snippet */}
 **Example:**
-```typescript
+<CodeGroup preferWrap>
+```ts
 // Create owned by an account
 const stream = FileStream.create({ owner: myAccount });
 
@@ -60,12 +77,13 @@ const stream = FileStream.create({ owner: teamGroup });
 // Create with implicit owner
 const stream = FileStream.create(myAccount);
 ```
+</CodeGroup>
 
 **Remarks:** For uploading an existing file or blob, use [`FileStream.createFromBlob()`](#createfromblob) instead.
 
 #### `createFromBlob`
-
-```typescript
+<CodeGroup preferWrap>
+```ts
 static async createFromBlob(
   blob: Blob | File,
   options?: {
@@ -74,8 +92,9 @@ static async createFromBlob(
   } | Account | Group,
 ): Promise<FileStream>
 ```
+</CodeGroup>
 
-**Deprecated:** Use `co.fileStream().createFromBlob` instead.
+**Usage:** Use `co.fileStream().createFromBlob`.
 
 Creates a `FileStream` from a `Blob` or `File`.
 
@@ -87,7 +106,9 @@ Creates a `FileStream` from a `Blob` or `File`.
 **Returns:** A promise that resolves to the newly created `FileStream`.
 
 **Example:**
-```typescript
+{/* TODO: Extract snippet */}
+<CodeGroup preferWrap>
+```ts
 import { FileStream } from "jazz-tools";
 
 // From a file input
@@ -100,10 +121,12 @@ const fileStream = await FileStream.createFromBlob(file, {
   }
 });
 ```
+</CodeGroup>
 
 #### `createFromArrayBuffer`
 
-```typescript
+<CodeGroup preferWrap>
+```ts
 static async createFromArrayBuffer(
   arrayBuffer: ArrayBuffer,
   mimeType: string,
@@ -114,8 +137,9 @@ static async createFromArrayBuffer(
   } | Account | Group,
 ): Promise<FileStream>
 ```
+</CodeGroup>
 
-**Deprecated:** Use `co.fileStream().createFromArrayBuffer` instead.
+**Usage:** Use `co.fileStream().createFromArrayBuffer`.
 
 Creates a `FileStream` from an `ArrayBuffer`.
 
@@ -130,7 +154,8 @@ Creates a `FileStream` from an `ArrayBuffer`.
 
 #### `load`
 
-```typescript
+<CodeGroup preferWrap>
+```ts
 static async load<C extends FileStream>(
   this: CoValueClass<C>,
   id: ID<C>,
@@ -140,8 +165,9 @@ static async load<C extends FileStream>(
   },
 ): Promise<Settled<FileStream>>
 ```
+</CodeGroup>
 
-**Deprecated:** Use `co.fileStream().load` instead.
+**Usage:** Use `co.fileStream().load`.
 
 Loads a `FileStream` by its ID.
 
@@ -156,6 +182,7 @@ By default, waits for the stream to be complete before resolving. Use `allowUnfi
 
 #### `subscribe`
 
+<CodeGroup preferWrap>
 ```typescript
 static subscribe<F extends FileStream, const R extends RefsToResolve<F>>(
   this: CoValueClass<F>,
@@ -169,20 +196,16 @@ static subscribe<F extends FileStream, const R extends RefsToResolve<F>>(
   listener: (value: Resolved<F, R>, unsubscribe: () => void) => void,
 ): () => void;
 ```
+</CodeGroup>
 
-**Deprecated:** Use `co.fileStream().subscribe` instead.
+**Usage:** Use `co.fileStream().subscribe`.
 
-Subscribes to a `FileStream` when you have an ID but don't have a `FileStream` instance yet.
-
-- `id`: The `ID` of the `FileStream` to subscribe to.
-- `listener`: A callback function that receives the resolved `FileStream` and an `unsubscribe` function.
-- `options`: (Optional) An object containing subscription options.
-
-**Returns:** An unsubscribe function.
+<SubscribeStatic item="FileStream" />
 
 #### `loadAsBlob`
 
-```typescript
+<CodeGroup preferWrap>
+```ts
 static async loadAsBlob(
   id: ID<FileStream>,
   options?: {
@@ -191,8 +214,9 @@ static async loadAsBlob(
   },
 ): Promise<Blob | undefined>
 ```
+</CodeGroup>
 
-**Deprecated:** Use `co.fileStream().loadAsBlob` instead.
+**Usage:** Use `co.fileStream().loadAsBlob`.
 
 Loads a `FileStream` as a `Blob`.
 
@@ -205,7 +229,8 @@ Loads a `FileStream` as a `Blob`.
 
 #### `loadAsBase64`
 
-```typescript
+<CodeGroup preferWrap>
+```ts
 static async loadAsBase64(
   id: ID<FileStream>,
   options?: {
@@ -215,6 +240,7 @@ static async loadAsBase64(
   },
 ): Promise<string | undefined>
 ```
+</CodeGroup>
 
 Loads a `FileStream` as a base64-encoded string.
 
@@ -230,9 +256,11 @@ Loads a `FileStream` as a base64-encoded string.
 
 #### `getMetadata`
 
-```typescript
+<CodeGroup preferWrap>
+```ts
 getMetadata(): BinaryStreamInfo | undefined
 ```
+</CodeGroup>
 
 Gets the metadata of this FileStream.
 
@@ -245,11 +273,13 @@ Or `undefined` if metadata is not available.
 
 #### `getChunks`
 
-```typescript
+<CodeGroup preferWrap>
+```ts
 getChunks(options?: {
   allowUnfinished?: boolean;
 }): (BinaryStreamInfo & { chunks: Uint8Array[]; finished: boolean }) | undefined
 ```
+</CodeGroup>
 
 Gets the binary chunks of this FileStream.
 
@@ -260,9 +290,11 @@ Gets the binary chunks of this FileStream.
 
 #### `isBinaryStreamEnded`
 
-```typescript
+<CodeGroup preferWrap>
+```ts
 isBinaryStreamEnded(): boolean
 ```
+</CodeGroup>
 
 Checks if the binary stream has been completely uploaded.
 
@@ -270,9 +302,11 @@ Checks if the binary stream has been completely uploaded.
 
 #### `toBlob`
 
-```typescript
+<CodeGroup preferWrap>
+```ts
 toBlob(options?: { allowUnfinished?: boolean }): Blob | undefined
 ```
+</CodeGroup>
 
 Converts this FileStream to a `Blob`.
 
@@ -282,22 +316,27 @@ Converts this FileStream to a `Blob`.
 **Returns:** A `Blob`, or `undefined` if not available.
 
 **Example:**
-```typescript
+
+<CodeGroup preferWrap>
+```ts
 const blob = fileStream.toBlob();
 if (blob) {
   const url = URL.createObjectURL(blob);
   // Use url for downloading, displaying, etc.
 }
 ```
+</CodeGroup>
 
 #### `asBase64`
 
-```typescript
+<CodeGroup preferWrap>
+```ts
 asBase64(options?: {
   allowUnfinished?: boolean;
   dataURL?: boolean;
 }): string | undefined
 ```
+</CodeGroup>
 
 Converts this FileStream to a base64-encoded string.
 
@@ -308,7 +347,8 @@ Converts this FileStream to a base64-encoded string.
 **Returns:** A base64 string, or `undefined` if not available.
 
 **Example:**
-```typescript
+<CodeGroup preferWrap>
+```ts
 // Get base64 string
 const base64 = fileStream.asBase64();
 
@@ -316,12 +356,15 @@ const base64 = fileStream.asBase64();
 const dataUrl = fileStream.asBase64({ dataURL: true });
 imageElement.src = dataUrl;
 ```
+</CodeGroup>
 
 #### `start`
 
-```typescript
+<CodeGroup preferWrap>
+```ts
 start(options: BinaryStreamInfo): void
 ```
+</CodeGroup>
 
 Starts a binary stream with metadata. Use this for manual streaming.
 
@@ -332,9 +375,11 @@ Starts a binary stream with metadata. Use this for manual streaming.
 
 #### `push`
 
-```typescript
+<CodeGroup preferWrap>
+```ts
 push(data: Uint8Array): void
 ```
+</CodeGroup>
 
 Pushes a chunk of binary data to the stream.
 
@@ -342,15 +387,17 @@ Pushes a chunk of binary data to the stream.
 
 #### `end`
 
-```typescript
+<CodeGroup preferWrap>
+  ```ts
 end(): void
 ```
+</CodeGroup>
 
 Ends the binary stream, marking it as complete.
 
 #### `toJSON`
-
-```typescript
+<CodeGroup preferWrap>
+```ts
 toJSON(): {
   $jazz: { id: string };
   mimeType?: string;
@@ -360,12 +407,13 @@ toJSON(): {
   finished?: boolean;
 }
 ```
+</CodeGroup>
 
 Gets a JSON representation of the `FileStream`.
 
 **Returns:** An object with metadata and chunk information.
 
-## `FileStreamJazzApi`
+## $jazz
 
 ```typescript
 class FileStreamJazzApi<F extends FileStream> extends CoValueJazzApi<F>
@@ -375,57 +423,15 @@ Provides Jazz-specific methods and properties for a `FileStream` instance, acces
 
 ### Properties
 
-#### `owner`
-
-```typescript
-get owner(): Group
-```
-
-The owner group of this FileStream.
-
-**Returns:** The `Group` that owns this FileStream.
+<JazzDefaultProperties />
 
 ### Methods
 
-#### `subscribe`
+#### `$jazz.ensureLoaded`
+<EnsureLoaded />
 
-```typescript
-subscribe<B extends FileStream>(
-  this: FileStreamJazzApi<B>,
-  listener: (value: Resolved<B, true>) => void,
-): () => void
-```
+#### `$jazz.subscribe`
+<SubscribeInstance item='FileStream' />
 
-An instance method to subscribe to an existing `FileStream`.
-
-- `listener`: A callback function that receives the resolved `FileStream`.
-
-**Returns:** An unsubscribe function.
-
-#### `waitForSync`
-
-```typescript
-waitForSync(options?: { timeout?: number }): Promise<void>
-```
-
-Waits for the `FileStream` to be uploaded to other peers.
-
-- `options`: (Optional) An object containing:
-  - `timeout`: (Optional) A timeout in milliseconds.
-
-**Returns:** A promise that resolves when the FileStream is synced.
-
-## Use Cases
-
-FileStreams are ideal for:
-- Uploading and storing images, videos, and documents
-- Sharing files between users
-- Storing user avatars and profile pictures
-- Handling PDF documents and attachments
-- Any binary data that needs to be synchronized
-
-## See Also
-
-- [`co.image`](/docs/api-reference/co/image) - For working with images and responsive image sets
-- [`co.feed`](/docs/api-reference/co/feed) - FileStream is built on top of CoFeed
-- [`co.group`](/docs/api-reference/co/group) - For managing ownership and permissions
+#### `$jazz.waitForSync`
+<WaitForSync />
