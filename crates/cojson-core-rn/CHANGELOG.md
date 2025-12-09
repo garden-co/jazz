@@ -1,5 +1,7 @@
 # cojson-core-rn
 
+## 0.19.11
+
 ## 0.19.10
 
 ### Patch Changes

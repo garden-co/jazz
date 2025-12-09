@@ -1,5 +1,14 @@
 # cojson
 
+## 0.19.11
+
+### Patch Changes
+
+- c00a454: Resolve footgun in Account.createAs() that made it easy to save the wrong credentials.
+  - cojson-core-wasm@0.19.11
+  - cojson-core-rn@0.19.11
+  - cojson-core-napi@0.19.11
+
 ## 0.19.10
 
 ### Patch Changes
