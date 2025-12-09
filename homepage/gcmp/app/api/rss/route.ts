@@ -2,6 +2,7 @@ import { metaTags } from "@/app/layout";
 import { posts } from "@/lib/posts";
 import { Feed } from "feed";
 import { NextResponse } from "next/server";
+import type { StaticImageData } from "next/image";
 
 export async function GET() {
   const feed = new Feed({
@@ -16,9 +17,10 @@ export async function GET() {
   });
 
   posts.forEach((post) => {
-    const coverImageSrc = typeof post.meta.coverImage === 'string' 
-      ? post.meta.coverImage 
-      : post.meta.coverImage.src;
+    const coverImage = post.meta.coverImage;
+    const coverImageSrc = typeof coverImage === 'string' 
+      ? coverImage 
+      : (coverImage as StaticImageData).src;
     feed.addItem({
       title: post.meta.title,
       description: post.meta.subtitle,
@@ -27,7 +29,7 @@ export async function GET() {
       date: new Date(post.meta.date),
       author: [{ name: post.meta.author.name }],
       guid: post.meta.slug,
-      image: typeof coverImageSrc === 'string' && coverImageSrc.startsWith('/')
+      image: coverImageSrc.startsWith('/')
         ? `${metaTags.url}${coverImageSrc}`
         : coverImageSrc,
     });
