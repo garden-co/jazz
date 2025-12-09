@@ -26,6 +26,7 @@ import {
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreResolveQuery } from "./CoValueSchema.js";
 import { withSchemaResolveQuery } from "../../schemaUtils.js";
+import { AgentSecret } from "cojson";
 
 export type BaseProfileShape = {
   name: z.core.$ZodString<string>;
@@ -103,8 +104,14 @@ export class AccountSchema<
         worker: Account,
       ) => Promise<void>;
     },
+  ): Promise<{
+    credentials: {
+      accountID: string;
+      accountSecret: AgentSecret;
+    };
     // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
-  ): Promise<Loaded<AccountSchema<Shape>, DefaultResolveQuery>> {
+    account: Loaded<AccountSchema<Shape>, DefaultResolveQuery>;
+  }> {
     // @ts-expect-error
     return this.coValueClass.createAs(worker, options);
   }
