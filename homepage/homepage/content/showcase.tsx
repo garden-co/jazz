@@ -1,4 +1,5 @@
 import opacityImage from "./showcase/images/opacity.png";
+import suhylImage from "./showcase/images/suhyl.png";
 import invoiceRadarImage from "./showcase/images/invoice-radar.png";
 import reconfiguredImage from "./showcase/images/reconfigured.png";
 import wagesoImage from "./showcase/images/wageso.png";
@@ -10,31 +11,67 @@ import hendImage from "./showcase/images/hend.png";
 import motleyImage from "./showcase/images/motley.png";
 import spicyGolfImage from "./showcase/images/spicy-golf.png";
 import { testimonials } from "./testimonials";
+import { StaticImageData } from "next/image";
+import { OpacityLogo } from "./showcase/images/OpacityLogo";
+import { SuhylLogo } from "./showcase/images/SuhylLogo";
+import { InvoiceRaderLogo } from "./showcase/images/InvoiceRaderLogo";
+import { ReconfiguredLogo } from "./showcase/images/ReconfiguredLogo";
+import { WagesoLogo } from "./showcase/images/WagesoLogo";
+import { TillyLogo } from "./showcase/images/TillyLogo";
+import { CupplLogo } from "./showcase/images/CupplLogo";
+import { HendLogo } from "./showcase/images/HendLogo";
 
-export const products = [
+type Product = {
+  name: string;
+  image: StaticImageData;
+  logo?: React.FunctionComponent<{ height?: number }>;
+  featured?: boolean;
+  url: string;
+  description: string;
+  jazzUse: string;
+  testimonials: (typeof testimonials)[keyof typeof testimonials][];
+  slogan: string;
+};
+
+export const products: Product[] = [
   {
     name: "Opacity",
-    imageUrl: opacityImage.src,
+    image: opacityImage,
+    logo: OpacityLogo,
+    featured: true,
     url: "https://opacity.com",
     description: "",
     jazzUse: "",
     testimonials: [],
-    slogan: "A product designer's best friend.",
+    slogan: "A design tool as the source of truth for components.",
+  },
+  {
+    name: "Suhyl",
+    image: suhylImage,
+    logo: SuhylLogo,
+    featured: true,
+    url: "https://suhyl.com",
+    description: "",
+    jazzUse: "",
+    testimonials: [],
+    slogan: "A point-of-service system for restaurants and venues.",
   },
   {
     name: "Invoice Radar",
-    imageUrl: invoiceRadarImage.src,
+    image: invoiceRadarImage,
+    logo: InvoiceRaderLogo,
     url: "https://invoiceradar.com",
+    featured: true,
     description: "",
     jazzUse: "",
-    testimonials: [
-      testimonials.invoiceRadar,
-    ],
+    testimonials: [testimonials.invoiceRadar],
     slogan: "Automatically gather invoices.",
   },
   {
     name: "Reconfigured",
-    imageUrl: reconfiguredImage.src,
+    image: reconfiguredImage,
+    logo: ReconfiguredLogo,
+    featured: true,
     url: "https://reconfigured.io",
     description: "",
     jazzUse: "",
@@ -43,7 +80,9 @@ export const products = [
   },
   {
     name: "Wageso",
-    imageUrl: wagesoImage.src,
+    image: wagesoImage,
+    logo: WagesoLogo,
+    featured: true,
     url: "https://wageso.com",
     description: "",
     jazzUse: "",
@@ -52,27 +91,29 @@ export const products = [
   },
   {
     name: "Tilly",
+    image: tillyScreenImage,
+    logo: TillyLogo,
+    featured: true,
     description: "",
     jazzUse: "",
     testimonials: [],
-    slogan:
-      "Be the friend who remembers.",
+    slogan: "Be the friend who remembers.",
     url: "https://tilly.social",
-    imageUrl: tillyScreenImage.src,
   },
   {
     name: "Learn Anything",
-    imageUrl: learnAnythingImage.src,
+    image: learnAnythingImage,
     url: "https://learn-anything.xyz",
     description: "",
     jazzUse: "",
     testimonials: [],
-    slogan:
-      "A community-driven learning platform.",
+    slogan: "A community-driven learning platform.",
   },
   {
     name: "Cuppl",
-    imageUrl: cupplImage.src,
+    image: cupplImage,
+    logo: CupplLogo,
+    featured: true,
     url: "https://www.getcuppl.com",
     description: "",
     jazzUse: "",
@@ -81,7 +122,7 @@ export const products = [
   },
   {
     name: "MTOR",
-    imageUrl: mtorImage.src,
+    image: mtorImage,
     url: "https://mtor.club",
     description: "",
     jazzUse: "",
@@ -90,17 +131,18 @@ export const products = [
   },
   {
     name: "Hend",
+    logo: HendLogo,
+    featured: true,
     description: "",
     jazzUse: "",
     testimonials: [],
-    slogan:
-      "Natural language acquisition, dialed to your level.",
+    slogan: "Natural language acquisition, dialed to your level.",
     url: "https://hendapp.com",
-    imageUrl: hendImage.src,
+    image: hendImage,
   },
   {
     name: "Motley",
-    imageUrl: motleyImage.src,
+    image: motleyImage,
     url: "https://trymotley.com",
     description: "",
     jazzUse: "",
@@ -109,11 +151,11 @@ export const products = [
   },
   {
     name: "Spicy Golf",
-    imageUrl: spicyGolfImage.src,
+    image: spicyGolfImage,
     url: "https://spicy.golf",
     description: "",
     jazzUse: "",
     testimonials: [],
     slogan: "Golf Games Kicked up a Notch.",
-  }
+  },
 ];

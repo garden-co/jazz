@@ -17,7 +17,7 @@ import { SupportedEnvironmentsSection } from "./SupportedEnvironmentsSection";
 
 export function HeroSection() {
   return (
-    <section className="container grid items-start gap-8 py-12 md:grid-cols-12 md:gap-0 md:py-20">
+    <section className="container grid items-start gap-8 pt-12 md:grid-cols-12 md:gap-0 md:pt-20">
       <div className="md:col-span-4">
         <Kicker className="mb-2">The database that syncs.</Kicker>
         <H1 className="text-3xl md:text-4xl lg:text-4xl">
