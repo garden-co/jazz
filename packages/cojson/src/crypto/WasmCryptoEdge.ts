@@ -1,4 +1,4 @@
-import { initialize } from "cojson-core-wasm/edge-lite";
+import { initialize, initializeSync } from "cojson-core-wasm/edge-lite";
 import { WasmCrypto } from "./WasmCrypto.js";
 
 /**
@@ -11,4 +11,8 @@ import { WasmCrypto } from "./WasmCrypto.js";
  */
 export const init = async () => {
   return initialize();
+};
+
+export const initSync = () => {
+  return initializeSync();
 };
