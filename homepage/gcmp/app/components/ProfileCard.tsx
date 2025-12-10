@@ -30,7 +30,13 @@ export function ProfileCard({ person }: { person: TeamMember }) {
   const imageClassName = "size-24 shadow rounded-md bg-stone-100 sm:size-28 ";
   return (
     <div className="flex items-center gap-6">
-      <Image src={person.image} alt={person.name} width={112} height={112} className={imageClassName} />
+      <Image
+        src={person.image}
+        alt={person.name}
+        width={112}
+        height={112}
+        className={imageClassName}
+      />
 
       <div className="flex flex-col gap-3">
         <h3 className="text-lg leading-none font-semibold tracking-tight text-highlight">
