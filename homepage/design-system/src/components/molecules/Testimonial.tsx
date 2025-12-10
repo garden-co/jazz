@@ -1,41 +1,44 @@
 import clsx from "clsx";
+import { StaticImageData } from "next/image";
 import Link from "next/link";
 
 export function Testimonial({
   children,
+  content,
   name,
   role,
   className,
   size = "md",
-  imageUrl,
-  darkImageUrl,
+  image,
+  darkImage,
   url,
 }: {
-  children: React.ReactNode;
+  children?: React.ReactNode;
+  content?: React.ReactNode;
   name: string;
   role: string;
   className?: string;
   size?: "sm" | "md";
-  imageUrl?: string;
-  darkImageUrl?: string;
+  image?: StaticImageData;
+  darkImage?: StaticImageData;
   url?: string;
 }) {
-  const content = (
+  const attribution = (
     <>
-      {imageUrl && (
+      {image && (
         <img
-          src={imageUrl}
+          src={image.src}
           alt=""
           className={clsx(
             "rounded-full size-10 sm:size-12",
-            darkImageUrl && "dark:hidden",
+            darkImage && "dark:hidden",
           )}
         />
       )}
 
-      {darkImageUrl && (
+      {darkImage && (
         <img
-          src={darkImageUrl}
+          src={darkImage.src}
           alt=""
           className={clsx("rounded-full size-10 sm:size-12 hidden dark:inline")}
         />
@@ -71,16 +74,16 @@ export function Testimonial({
           "mt-4 leading-relaxed gap-3": size === "sm",
         })}
       >
-        {children}
+        {content || children}
       </blockquote>
       {url ? (
         <figcaption>
           <Link href={url} target="_blank" className={authorClassName}>
-            {content}
+            {attribution}
           </Link>
         </figcaption>
       ) : (
-        <figcaption className={authorClassName}>{content}</figcaption>
+        <figcaption className={authorClassName}>{attribution}</figcaption>
       )}
     </figure>
   );

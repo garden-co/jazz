@@ -9,36 +9,54 @@ import mtorImage from "./showcase/images/mtor.png";
 import hendImage from "./showcase/images/hend.png";
 import motleyImage from "./showcase/images/motley.png";
 import spicyGolfImage from "./showcase/images/spicy-golf.png";
+import { testimonials } from "./testimonials";
 
 export const products = [
   {
     name: "Opacity",
     imageUrl: opacityImage.src,
     url: "https://opacity.com",
-    description: "A product designer's best friend.",
+    description: "",
+    jazzUse: "",
+    testimonials: [],
+    slogan: "A product designer's best friend.",
   },
   {
     name: "Invoice Radar",
     imageUrl: invoiceRadarImage.src,
     url: "https://invoiceradar.com",
-    description: "Automatically gather invoices from mail and cloud providers.",
+    description: "",
+    jazzUse: "",
+    testimonials: [
+      testimonials.invoiceRadar,
+    ],
+    slogan: "Automatically gather invoices.",
   },
   {
     name: "Reconfigured",
     imageUrl: reconfiguredImage.src,
     url: "https://reconfigured.io",
-    description: "The AI notepad for people who think for work.",
+    description: "",
+    jazzUse: "",
+    testimonials: [],
+    slogan: "The AI notepad for people who think for work.",
   },
   {
     name: "Wageso",
     imageUrl: wagesoImage.src,
     url: "https://wageso.com",
-    description: "A a privacy-first financial tracking app.",
+    description: "",
+    jazzUse: "",
+    testimonials: [],
+    slogan: "A a privacy-first financial tracking app.",
   },
   {
     name: "Tilly",
-    description:
-      "A relationship journal so simple that you actually use it.",
+    description: "",
+    jazzUse: "",
+    testimonials: [],
+    slogan:
+      "Be the friend who remembers.",
     url: "https://tilly.social",
     imageUrl: tillyScreenImage.src,
   },
@@ -46,25 +64,37 @@ export const products = [
     name: "Learn Anything",
     imageUrl: learnAnythingImage.src,
     url: "https://learn-anything.xyz",
-    description:
-      "A free, comprehensive learning platform where people collect the best resources for every subject.",
+    description: "",
+    jazzUse: "",
+    testimonials: [],
+    slogan:
+      "A community-driven learning platform.",
   },
   {
     name: "Cuppl",
     imageUrl: cupplImage.src,
     url: "https://www.getcuppl.com",
-    description: "An all-in-one app for couples to manage tasks, schedules, and shopping lists.",
+    description: "",
+    jazzUse: "",
+    testimonials: [],
+    slogan: "An all-in-one app for couples.",
   },
   {
     name: "MTOR",
     imageUrl: mtorImage.src,
     url: "https://mtor.club",
-    description: "A collaborative, real-time workout planner and tracker.",
+    description: "",
+    jazzUse: "",
+    testimonials: [],
+    slogan: "A collaborative, real-time workout planner and tracker.",
   },
   {
     name: "Hend",
-    description:
-      "Natural language acquisition, powered by content that meets your level, and raises it.",
+    description: "",
+    jazzUse: "",
+    testimonials: [],
+    slogan:
+      "Natural language acquisition, dialed to your level.",
     url: "https://hendapp.com",
     imageUrl: hendImage.src,
   },
@@ -72,12 +102,18 @@ export const products = [
     name: "Motley",
     imageUrl: motleyImage.src,
     url: "https://trymotley.com",
-    description: "Collect and connect anything - a mix between Are.na, mymind, and a regular read-later app.",
+    description: "",
+    jazzUse: "",
+    testimonials: [],
+    slogan: "Collect and connect anything.",
   },
   {
     name: "Spicy Golf",
     imageUrl: spicyGolfImage.src,
     url: "https://spicy.golf",
-    description: "Golf Games Kicked up a Notch.",
+    description: "",
+    jazzUse: "",
+    testimonials: [],
+    slogan: "Golf Games Kicked up a Notch.",
   }
 ];
