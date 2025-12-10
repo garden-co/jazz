@@ -24,7 +24,8 @@ export default async function Post({ params }: Params) {
     return notFound();
   }
 
-  const { title, subtitle, coverImage, coverImagePng, date, author } = post.meta;
+  const { title, subtitle, coverImage, coverImagePng, date, author } =
+    post.meta;
   const content = post.default({});
   const ogImage = coverImagePng || coverImage;
 
@@ -33,7 +34,7 @@ export default async function Post({ params }: Params) {
       <PostJsonLd
         title={title}
         subtitle={subtitle}
-        image={typeof ogImage === 'string' ? ogImage : ogImage.src}
+        image={typeof ogImage === "string" ? ogImage : ogImage.src}
         author={author.name}
         datePublished={date}
       />
@@ -83,7 +84,7 @@ export async function generateMetadata({ params }: Params): Promise<Metadata> {
 
   const { title, subtitle, coverImage, coverImagePng } = post.meta;
   const ogImage = coverImagePng || coverImage;
-  const ogImageSrc = typeof ogImage === 'string' ? ogImage : ogImage.src;
+  const ogImageSrc = typeof ogImage === "string" ? ogImage : ogImage.src;
 
   return {
     title: title,
