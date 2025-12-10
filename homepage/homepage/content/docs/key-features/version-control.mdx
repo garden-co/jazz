@@ -68,18 +68,28 @@ In order to access branched nested CoValues, you should access them in the same 
 Once you have a branch, you can make changes just as you would with the original CoValue:
 
 {/* TODO: this is not suitable for vanilla */}
-<ContentByFramework framework={["react", "react-native", "expo", "vanilla"]}>
-<CodeGroup>
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="edit-on-branch">
+<TabbedCodeGroupItem icon={<VanillaLogo />} label="Vanilla" value="vanilla" preferWrap>
+```ts index.ts#EditOnBranch
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
 ```tsx react-snippet.tsx#EditOnBranch
 ```
-</CodeGroup>
-</ContentByFramework>
-<ContentByFramework framework={["svelte"]}>
-<CodeGroup>
-```svelte EditOnBranch.svelte
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```ts EditOnBranch.svelte
 ```
-</CodeGroup>
-</ContentByFramework>
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<RNLogo />} label="React Native" value="react-native" preferWrap>
+```tsx react-snippet.tsx#EditOnBranchRN
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ExpoLogo />} label="React Native (Expo)" value="react-native-expo" preferWrap>
+```tsx react-snippet.tsx#EditOnBranchRN
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
 
 ### Account & Group
 
@@ -95,10 +105,28 @@ This means that, adding a member on a branched Group will also add the member to
 If you are modifying an account, be aware that replacing the root or profile  will also modify the main account (although updating the properties will happen on the branch).
 
 {/* TODO: Not framework friendly */}
-<CodeGroup>
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="edit-on-branch">
+<TabbedCodeGroupItem icon={<VanillaLogo />} label="Vanilla" value="vanilla" preferWrap>
+```ts index.ts#AccountModifications
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
 ```tsx react-snippet.tsx#AccountModifications
 ```
-</CodeGroup>
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```svelte AccountModifications.svelte
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<RNLogo />} label="React Native" value="react-native" preferWrap>
+```tsx react-snippet.tsx#AccountModifications
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ExpoLogo />} label="React Native (Expo)" value="react-native-expo" preferWrap>
+```tsx react-snippet.tsx#AccountModifications
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
 
 ### Merging Branches
 
