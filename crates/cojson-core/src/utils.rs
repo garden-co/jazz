@@ -2,6 +2,30 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 
+/// Formats a number string to ensure the exponent always has a sign.
+/// If the number is in scientific notation and the exponent doesn't have a sign,
+/// a '+' is inserted before the exponent.
+///
+/// # Arguments
+/// * `number_str` - The number string to format (e.g., "1.5e308")
+///
+/// # Returns
+/// * `String` - The formatted number string with explicit exponent sign (e.g., "1.5e+308")
+fn format_number_with_exponent_sign(number_str: &str) -> String {
+    // Ensure exponent always has a sign, as in "e+308"
+    if let Some(e_idx) = number_str.find('e') {
+        let (mantissa, exponent) = number_str.split_at(e_idx + 1); // after the "e"
+        if exponent.starts_with('-') || exponent.starts_with('+') {
+            number_str.to_string()
+        } else {
+            // Insert '+'
+            format!("{}+{}", mantissa, exponent)
+        }
+    } else {
+        number_str.to_string()
+    }
+}
+
 /// Stable stringify a JSON value with sorted object keys.
 /// This ensures deterministic serialization by sorting object keys alphabetically.
 ///
@@ -30,7 +54,8 @@ pub fn stable_stringify(value: &JsonValue) -> Result<String, serde_json::Error> 
             // Check if number is finite (similar to isFinite in JavaScript)
             if let Some(f) = n.as_f64() {
                 if f.is_finite() {
-                    Ok(n.to_string())
+                    let s = n.to_string();
+                    Ok(format_number_with_exponent_sign(&s))
                 } else {
                     // Infinity or NaN -> "null"
                     Ok("null".to_string())

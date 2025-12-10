@@ -44,6 +44,12 @@ describe("stableStringify comparison", () => {
     { name: "Infinity", value: Infinity },
     { name: "-Infinity", value: -Infinity },
     { name: "NaN", value: NaN },
+    { name: "Very large number", value: 1.7976931348623157e308 },
+    { name: "Very small number", value: 5e-324 },
+    {
+      name: "Very large number with exponent sign",
+      value: 1.7976931348623157e308,
+    },
 
     // Arrays
     { name: "empty array", value: [] },
