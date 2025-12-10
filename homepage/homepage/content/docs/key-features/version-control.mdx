@@ -1,4 +1,4 @@
-import { Alert, CodeGroup, ContentByFramework } from "@/components/forMdx";
+import { Alert, CodeGroup, ContentByFramework, TabbedCodeGroup, TabbedCodeGroupItem, VanillaLogo, ReactLogo, RNLogo, SvelteLogo, ExpoLogo } from "@/components/forMdx";
 
 export const metadata = {
   description: "Learn how to use branching and merging in Jazz"
@@ -8,39 +8,50 @@ export const metadata = {
 
 Jazz provides built-in version control through branching and merging, allowing multiple users to work on the same resource in isolation and merge their changes when they are ready.
 
-This enables the design of new editing workflows where users (or agents!) can create branches, make changes, and merge them back to the main version.
+You can use this to design new editing workflows where users (or agents!) can create branches, make changes, and merge them back to the main version.
 
-<Alert variant="info" className="mt-4 flex gap-2 items-center">
-  <strong>Important:</strong> Version control is currently unstable and we may ship breaking changes in patch releases.
+<Alert variant="info" className="mt-4 flex gap-2 items-center" title="Important">
+  Version control is currently unstable and we may ship breaking changes in patch releases.
 </Alert>
 
 ## Working with branches
 
 ### Creating Branches
 
+<ContentByFramework framework={["vanilla"]}>
 To create a branch, use the `unstable_branch` option when loading a CoValue:
+</ContentByFramework>
 
-<CodeGroup>
-```ts index.ts#Branch
-```
-</CodeGroup>
+<ContentByFramework framework={["svelte"]}>
+You can also create a branch via `CoState`:
+</ContentByFramework>
 
 <ContentByFramework framework={["react", "react-native", "expo"]}>
 You can also create a branch via the `useCoState` hook:
-
-<CodeGroup>
-```ts react-snippet.tsx#UseCoState
-```
-</CodeGroup>
 </ContentByFramework>
-<ContentByFramework framework={["svelte"]}>
-You can also create a branch via `CoState`:
 
-<CodeGroup>
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="load-a-branch">
+<TabbedCodeGroupItem icon={<VanillaLogo />} label="Vanilla" value="vanilla" preferWrap>
+```ts index.ts#Branch
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
+```tsx react-snippet.tsx#UseCoState
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
 ```ts svelte.svelte#CoState
 ```
-</CodeGroup>
-</ContentByFramework>
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<RNLogo />} label="React Native" value="react-native" preferWrap>
+```tsx react-snippet.tsx#UseCoState
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ExpoLogo />} label="React Native (Expo)" value="react-native-expo" preferWrap>
+```tsx react-snippet.tsx#UseCoState
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
 
 You can also include nested CoValues in your branch by using a [`resolve` query](/docs/core-concepts/subscription-and-loading#resolve-queries).
 
