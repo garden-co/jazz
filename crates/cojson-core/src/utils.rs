@@ -1,5 +1,5 @@
 // Adapted from fast-json-stable-stringify (https://github.com/epoberezkin/fast-json-stable-stringify)
-use serde::de::DeserializeOwned;
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value as JsonValue;
 
 /// Formats a number string to ensure the exponent always has a sign.
@@ -70,7 +70,7 @@ pub fn stable_stringify(value: &JsonValue) -> Result<String, serde_json::Error> 
             // Special handling for strings starting with "encrypted_U" or "binary_U"
             // TypeScript returns `"${node}"` which is a JSON string, so we use serde_json::to_string
             // which properly escapes and quotes the string
-            Ok(serde_json::to_string(s).unwrap())
+            Ok(serde_json::to_string(s)?)
         }
         
         JsonValue::Array(arr) => {

@@ -190,6 +190,138 @@ describe("stableStringify comparison", () => {
           "key.with.dots": "value",
         },
       },
+
+      // Unicode and multibyte characters
+      { name: "string with emoji", value: "hello 😀 world 🌍" },
+      { name: "string with accented characters", value: "café résumé naïve" },
+      { name: "string with surrogate pairs", value: "\uD83D\uDE00" },
+      { name: "string with non-BMP characters", value: "\u{1F600}" },
+      {
+        name: "object with unicode keys",
+        value: { café: 1, résumé: 2, 测试: 3 },
+      },
+
+      // Complex escape sequences
+      { name: "string with multiple backslashes", value: "path\\\\to\\\\file" },
+      { name: "string with nested escapes", value: '\\"quoted\\"' },
+      { name: "string with literal escape", value: "\\n" },
+      {
+        name: "string with all escape sequences",
+        value: '\\"\\/\\b\\f\\n\\r\\t',
+      },
+
+      // Control characters and non-printable
+      { name: "string with null byte", value: "\u0000" },
+      { name: "string with control characters", value: "\u0001\u0002\u0003" },
+      { name: "string with BOM", value: "\uFEFF" },
+      {
+        name: "object with control character keys",
+        value: { "\u0001": "value", "\u0002": "value2" },
+      },
+
+      // Number edge cases
+      { name: "negative zero", value: -0 },
+      { name: "number with many zeros", value: 0.0000000000000000000000001 },
+      {
+        name: "high precision decimal",
+        value: 3.141592653589793238462643383279,
+      },
+      { name: "scientific notation lowercase e", value: 1e-10 },
+      { name: "scientific notation uppercase E", value: 1e10 },
+      { name: "number beyond safe integer", value: 9007199254740992 },
+      { name: "number at safe integer limit", value: 9007199254740991 },
+
+      // Strings that look like JSON
+      { name: "string containing JSON object", value: '{"fake": "json"}' },
+      { name: "string with curly braces", value: "{key: value}" },
+      { name: "string containing JSON array", value: "[1, 2, 3]" },
+      {
+        name: "string with nested JSON-like structure",
+        value: '{"nested": {"deep": "value"}}',
+      },
+
+      // Keys with special characters
+      {
+        name: "object with unicode keys",
+        value: { 测试: 1, тест: 2, café: 3 },
+      },
+      {
+        name: "object with escaped keys",
+        value: { "key\nwith\nnewlines": "value" },
+      },
+      {
+        name: "object with empty key",
+        value: { "": "empty key", normal: "value" },
+      },
+      {
+        name: "object with long key",
+        value: Object.fromEntries([["a".repeat(100), "value"]]),
+      },
+      {
+        name: "object with special key characters",
+        value: {
+          "key with spaces": 1,
+          "key-with-dashes": 2,
+          "key.with.dots": 3,
+        },
+      },
+
+      // Long strings
+      { name: "very long string", value: "a".repeat(1000) },
+      {
+        name: "array with long strings",
+        value: ["a".repeat(500), "b".repeat(500)],
+      },
+      {
+        name: "object with many keys",
+        value: Object.fromEntries(
+          Array.from({ length: 100 }, (_, i) => [`key${i}`, i]),
+        ),
+      },
+
+      // Edge cases with special prefixes
+      { name: "encrypted_U with special chars", value: "encrypted_U\n123" },
+      { name: "binary_U with escape", value: "binary_U\\n123" },
+      {
+        name: "string containing encrypted_U prefix",
+        value: "prefix encrypted_U123",
+      },
+      { name: "encrypted_U with unicode", value: "encrypted_U😀123" },
+
+      // Special array cases
+      { name: "array with sparse elements", value: [1, , 3] },
+      { name: "array with undefined elements", value: [1, undefined, 3] },
+      {
+        name: "very deep nested array",
+        value: Array(20)
+          .fill(null)
+          .reduce((acc) => [acc], "deep"),
+      },
+
+      // Complex combinations
+      {
+        name: "object with unicode keys and escaped values",
+        value: { 测试: "value\nwith\tescapes", café: "path\\\\to\\\\file" },
+      },
+      {
+        name: "array with mixed unicode and escapes",
+        value: ["normal", "😀", "\\n", "\u0001", "encrypted_U123"],
+      },
+      {
+        name: "deep nested with unicode",
+        value: { level1: { 测试: { level3: { café: "deep value 😀" } } } },
+      },
+      {
+        name: "complex structure with all edge cases",
+        value: {
+          "unicode-key-测试": {
+            "escaped-value": "path\\\\file\nwith\ttabs",
+            numbers: [1e-10, -0, 9007199254740992],
+            encrypted_U: "encrypted_U123",
+            array: ["😀", "\u0001", "\\n"],
+          },
+        },
+      },
     ];
 
     edgeCases.forEach(({ name, value }) => {
