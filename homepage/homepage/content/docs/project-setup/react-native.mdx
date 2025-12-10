@@ -45,7 +45,20 @@ npm install @react-native-community/netinfo @bam.tech/react-native-image-resizer
 npm install @azure/core-asynciterator-polyfill react-native-url-polyfill readable-stream react-native-get-random-values @op-engineering/op-sqlite react-native-mmkv react-native-fast-encoder
 
 # Jazz dependencies
-npm install jazz-tools
+npm install jazz-tools cojson-core-rn
+```
+</CodeGroup>
+
+`cojson-core-rn` is our high-performance crypto provider for React Native. And it is **required** for React Native applications.
+
+**Pay Attention:** The version of `cojson-core-rn` must be the same as the version of `jazz-tools`.
+
+<CodeGroup>
+```json
+"dependencies": {
+  "cojson-core-rn": "x.x.x", # same version as jazz-tools
+  "jazz-tools": "x.x.x" # same version as cojson-core-rn
+}
 ```
 </CodeGroup>
 

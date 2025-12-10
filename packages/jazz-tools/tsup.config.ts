@@ -42,7 +42,6 @@ export default defineConfig([
     entry: {
       index: "src/expo/index.ts",
       testing: "src/expo/testing.ts",
-      crypto: "src/expo/crypto.ts",
       polyfills: "src/react-native-core/polyfills/index.js",
     },
     outDir: "dist/expo",
@@ -115,7 +114,6 @@ export default defineConfig([
     entry: {
       index: "src/react-native/index.ts",
       testing: "src/react-native/testing.ts",
-      crypto: "src/react-native/crypto.ts",
       polyfills: "src/react-native-core/polyfills/index.js",
     },
     outDir: "dist/react-native",
@@ -132,8 +130,6 @@ export default defineConfig([
     entry: {
       index: "src/react-native-core/index.ts",
       testing: "src/react-native-core/testing.tsx",
-      crypto: "src/react-native-core/crypto/index.ts",
-      "crypto/RNCrypto": "src/react-native-core/crypto/RNCrypto.ts",
     },
     outDir: "dist/react-native-core",
   },

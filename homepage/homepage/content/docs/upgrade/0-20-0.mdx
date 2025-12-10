@@ -1,0 +1,293 @@
+import { Alert, CodeGroup } from '@/components/forMdx'
+
+# Jazz 0.20.0 - Full native crypto
+
+With this release, we complete our migration to a pure **native** Rust toolchain.
+We have removed the JavaScript compatibility layer, meaning our native Rust core now runs everywhere: React Native, Edge runtimes, all server-side environments, and the web.
+
+## Motivation
+
+Before 0.20.0, Jazz relied on a JavaScript crypto implementation to work around compatibility issues in some runtimes-most notably React Native.
+As a result, our native Rust core wasn’t running in React Native and, on some Edge runtimes, 
+only worked when WASM was explicitly initialized (see [WASM on Edge runtimes](/docs/react/server-side/setup#wasm-on-edge-runtimes)).
+
+The JavaScript crypto implementation is much slower than native Rust crypto. Although workarounds like RNQuickCrypto for React Native improved performance, they still only wrapped certain native libraries, rather than running Jazz's full Rust crypto.
+
+With native Rust crypto now running everywhere, Jazz crypto is faster and more reliable. 
+This also helps us speed up the migration of Jazz Core to Rust which will improve the Jazz overall performance.
+
+## What changed
+
+- We dropped support for `PureJSCrypto`. Jazz crypto now runs natively in each environment.
+- We dropped support for `RNQuickCrypto`. RNCrypto is now the default crypto provider on React Native.
+- There is no more fallback to Javascript crypto. If the crypto fails to initialize, it will throw an error. 
+NB: if you use WASM crypto on Edge runtimes, you need to ensure that WASM is available and initialized. See more details at [WASM on Edge runtimes](/docs/react/server-side/setup#wasm-on-edge-runtimes).
+
+## Breaking changes
+
+### Edge runtimes
+
+If you use WASM crypto on Edge runtimes, you need to ensure that WASM is available and initialized, there is no more fallback to Javascript crypto. 
+See more details at [WASM on Edge runtimes](/docs/react/server-side/setup#wasm-on-edge-runtimes).
+
+<CodeGroup>
+```ts
+import "jazz-tools/load-edge-wasm";
+// Other Jazz Imports
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    // Jazz application logic
+    return new Response("Hello from Jazz on Cloudflare!");
+  },
+};
+```
+</CodeGroup>
+
+if you don't do this, you will get an error like this:
+
+<CodeGroup>
+```
+Error: Failed to initialize WasmCrypto. WebAssembly is required for crypto operations on web platforms.
+```
+</CodeGroup>
+
+Before 0.20.0, you would get a warning like this:
+<CodeGroup>
+```
+Warning: WASM crypto is not available. Falling back to JavaScript crypto.
+```
+</CodeGroup>
+
+### React Native (non-Expo)
+
+If you use React Native, you need to install `cojson-core-rn` and make sure the version matches `jazz-tools`. `cojson-core-rn` is our new high-performance crypto provider for React Native. 
+If you use React Native, you need to install `cojson-core-rn` and make sure the version matches `jazz-tools`. `cojson-core-rn` is our new high-performance crypto provider for React Native, and it is **required** for React Native applications.
+
+1) **Install `cojson-core-rn` (required)** and make sure the version matches `jazz-tools`:
+
+<CodeGroup>
+```bash
+npm install cojson-core-rn
+```
+</CodeGroup>
+
+<CodeGroup>
+```json
+"dependencies": {
+  "cojson-core-rn": "x.x.x", # same version as jazz-tools
+  "jazz-tools": "x.x.x" # same version as cojson-core-rn
+}
+```
+</CodeGroup>
+
+See also: [React Native setup](/docs/react-native/project-setup).
+
+2) **Remove QuickCrypto dependencies/config** (only if you previously added them for `RNQuickCrypto`):
+
+- Remove `react-native-quick-crypto` (and any associated config you added for it).
+- Remove any `SODIUM_ENABLED` / `sodiumEnabled` settings you added specifically for QuickCrypto.
+
+3) **Remove `CryptoProvider` entirely** (RNCrypto is now the default)
+
+After installing `cojson-core-rn`, you can remove the `CryptoProvider` option:
+
+<CodeGroup>
+```tsx
+import { JazzReactNativeProvider } from "jazz-tools/react-native";
+import { MyAppAccount } from "./schema";
+
+const apiKey = "you@example.com";
+
+export function MyJazzProvider({ children }: { children: React.ReactNode }) {
+  return (
+    <JazzReactNativeProvider
+      sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
+      AccountSchema={MyAppAccount}
+    >
+      {children}
+    </JazzReactNativeProvider>
+  );
+}
+```
+</CodeGroup>
+
+If you previously had `CryptoProvider={...}` and/or `import { RNCrypto } ...`, you can remove both:
+
+<CodeGroup>
+```tsx
+// BEFORE
+import { JazzReactNativeProvider } from "jazz-tools/react-native";
+import { RNCrypto } from "jazz-tools/react-native-core/crypto";
+
+export function MyJazzProvider({ children }: { children: React.ReactNode }) {
+  return (
+    <JazzReactNativeProvider
+      sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
+      CryptoProvider={RNCrypto}
+    >
+      {children}
+    </JazzReactNativeProvider>
+  );
+}
+
+// AFTER
+import { JazzReactNativeProvider } from "jazz-tools/react-native";
+
+export function MyJazzProvider({ children }: { children: React.ReactNode }) {
+  return (
+    <JazzReactNativeProvider sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}>
+      {children}
+    </JazzReactNativeProvider>
+  );
+}
+```
+</CodeGroup>
+
+4) **If you explicitly used `RNQuickCrypto`, you must remove it**
+
+<CodeGroup>
+```tsx
+// BEFORE
+import { JazzReactNativeProvider } from "jazz-tools/react-native";
+import { RNQuickCrypto } from "jazz-tools/react-native-core/crypto";
+
+export function MyJazzProvider({ children }: { children: React.ReactNode }) {
+  return (
+    <JazzReactNativeProvider
+      sync={{ peer: "wss://cloud.jazz.tools/?key=your-api-key" }}
+      CryptoProvider={RNQuickCrypto}
+    >
+      {children}
+    </JazzReactNativeProvider>
+  );
+}
+
+// AFTER
+import { JazzReactNativeProvider } from "jazz-tools/react-native";
+
+export function MyJazzProvider({ children }: { children: React.ReactNode }) {
+  return (
+    <JazzReactNativeProvider sync={{ peer: "wss://cloud.jazz.tools/?key=your-api-key" }}>
+      {children}
+    </JazzReactNativeProvider>
+  );
+}
+```
+</CodeGroup>
+
+### Expo
+
+1) If you use Expo, you need to install `cojson-core-rn` and make sure the version matches `jazz-tools`. `cojson-core-rn` is our new high-performance crypto provider for Expo, and it is **required** for Expo applications.
+
+<CodeGroup>
+```bash
+npm install cojson-core-rn
+```
+</CodeGroup>
+
+<CodeGroup>
+```json
+"dependencies": {
+  "cojson-core-rn": "x.x.x", # same version as jazz-tools
+  "jazz-tools": "x.x.x" # same version as cojson-core-rn
+}
+```
+</CodeGroup>
+
+See also: [Expo setup](/docs/react-native-expo/project-setup).
+
+2) **Remove QuickCrypto dependencies/config** (only if you previously added them for `RNQuickCrypto`):
+
+- Remove `react-native-quick-crypto` (and any associated config you added for it).
+- Remove any `SODIUM_ENABLED` / `sodiumEnabled` settings you added specifically for QuickCrypto.
+
+3) **Remove `CryptoProvider` entirely** (RNCrypto is now the default)
+
+After installing `cojson-core-rn`, you can remove the `CryptoProvider` option:
+
+<CodeGroup>
+```tsx
+import { JazzExpoProvider } from "jazz-tools/expo";
+import { MyAppAccount } from "./schema";
+
+const apiKey = "you@example.com";
+
+export function MyJazzProvider({ children }: { children: React.ReactNode }) {
+  return (
+    <JazzExpoProvider
+      sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
+      AccountSchema={MyAppAccount}
+    >
+      {children}
+    </JazzExpoProvider>
+  );
+}
+```
+</CodeGroup>
+
+If you previously had `CryptoProvider={...}` and/or `import { RNCrypto } ...`, you can remove both:
+
+<CodeGroup>
+```tsx
+// BEFORE
+import { JazzExpoProvider } from "jazz-tools/expo";
+import { RNCrypto } from "jazz-tools/expo/crypto";
+
+export function MyJazzProvider({ children }: { children: React.ReactNode }) {
+  return (
+    <JazzExpoProvider
+      sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
+      CryptoProvider={RNCrypto}
+    >
+      {children}
+    </JazzExpoProvider>
+  );
+}
+
+// AFTER
+import { JazzExpoProvider } from "jazz-tools/expo";
+
+export function MyJazzProvider({ children }: { children: React.ReactNode }) {
+  return (
+    <JazzExpoProvider sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}>
+      {children}
+    </JazzExpoProvider>
+  );
+}
+```
+</CodeGroup>
+
+4) **If you explicitly used `RNQuickCrypto`, you can remove it**
+
+If you were using `RNQuickCrypto`:
+
+<CodeGroup>
+```tsx
+// BEFORE
+import { JazzExpoProvider } from "jazz-tools/expo";
+import { RNQuickCrypto } from "jazz-tools/expo/crypto";
+
+export function MyJazzProvider({ children }: { children: React.ReactNode }) {
+  return (
+    <JazzExpoProvider
+      sync={{ peer: "wss://cloud.jazz.tools/?key=your-api-key" }}
+      CryptoProvider={RNQuickCrypto}
+    >
+      {children}
+    </JazzExpoProvider>
+  );
+}
+
+// AFTER
+import { JazzExpoProvider } from "jazz-tools/expo";
+
+export function MyJazzProvider({ children }: { children: React.ReactNode }) {
+  return (
+    <JazzExpoProvider sync={{ peer: "wss://cloud.jazz.tools/?key=your-api-key" }}>
+      {children}
+    </JazzExpoProvider>
+  );
+}
+```
+</CodeGroup>

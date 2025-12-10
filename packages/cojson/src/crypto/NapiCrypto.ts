@@ -19,7 +19,6 @@ import { RawCoID, SessionID, TransactionID } from "../ids.js";
 import { Stringified, stableStringify } from "../jsonStringify.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { logger } from "../logger.js";
-import { PureJSCrypto } from "./PureJSCrypto.js";
 import {
   CryptoProvider,
   Encrypted,
@@ -58,7 +57,7 @@ export class NapiCrypto extends CryptoProvider<Blake3State> {
     super();
   }
 
-  static async create(): Promise<NapiCrypto | PureJSCrypto | WasmCrypto> {
+  static async create(): Promise<NapiCrypto | WasmCrypto> {
     return new NapiCrypto();
   }
 
