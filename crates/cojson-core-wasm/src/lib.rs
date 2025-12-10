@@ -177,3 +177,10 @@ impl SessionLog {
             .decrypt_next_transaction_meta_json(tx_index, KeySecret(encryption_key))?)
     }
 }
+
+#[wasm_bindgen(js_name = stableStringify)]
+pub fn stable_stringify(value: String) -> Result<String, CojsonCoreWasmError> {
+    let value = serde_json::from_str(&value)?;
+    let result = cojson_core::stable_stringify(&value)?;
+    Ok(result)
+}

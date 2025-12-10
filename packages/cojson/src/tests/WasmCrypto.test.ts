@@ -109,7 +109,7 @@ describe("WasmCrypto", () => {
       [
         {
           privacy: "trusting",
-          changes: stableStringify([{ op: "set", key: "count", value: 1 }]),
+          changes: JSON.stringify([{ op: "set", key: "count", value: 1 }]),
           madeAt: Date.now(),
         },
       ],

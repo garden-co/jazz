@@ -180,3 +180,10 @@ impl SessionLog {
       .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
   }
 }
+
+#[napi]
+pub fn stable_stringify(value: String) -> napi::Result<String> {
+  let value = serde_json::from_str(&value)?;
+  let result = cojson_core::stable_stringify(&value)?;
+  Ok(result)
+}

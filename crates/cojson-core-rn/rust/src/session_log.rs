@@ -178,3 +178,9 @@ impl SessionLog {
     }
 }
 
+#[uniffi::export]
+pub fn stable_stringify(value: String) -> Result<String, SessionLogError> {
+  let value = serde_json::from_str(&value)?;
+  let result = cojson_core::stable_stringify(&value)?;
+  Ok(result)
+}

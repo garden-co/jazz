@@ -192,6 +192,9 @@ impl SessionLogInternal {
         meta: Option<String>,
     ) -> Result<(Signature, Transaction), CoJsonCoreError> {
         let changes = stable_stringify(&serde_json::from_str(changes_json)?)?;
+
+        let meta = meta.map_or(Ok(None), |meta| stable_stringify(&serde_json::from_str(&meta)?).map(Some))?;
+
         // Build the transaction object depending on the mode.
         let new_tx = match mode {
             TransactionMode::Private { key_id, key_secret } => {

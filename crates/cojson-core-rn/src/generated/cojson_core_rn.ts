@@ -576,6 +576,22 @@ export function sign(message: ArrayBuffer, secret: string): string /*throws*/ {
     )
   );
 }
+export function stableStringify(value: string): string /*throws*/ {
+  return FfiConverterString.lift(
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeSessionLogError.lift.bind(
+        FfiConverterTypeSessionLogError
+      ),
+      /*caller:*/ (callStatus) => {
+        return nativeModule().ubrn_uniffi_cojson_core_rn_fn_func_stable_stringify(
+          FfiConverterString.lower(value),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    )
+  );
+}
 /**
  * Uniffi-exposed function for unsealing a message using X25519 + XSalsa20-Poly1305.
  * Provides authenticated decryption with perfect forward secrecy.
@@ -2259,6 +2275,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_func_sign'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_func_stable_stringify() !==
+    34312
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_func_stable_stringify'
     );
   }
   if (

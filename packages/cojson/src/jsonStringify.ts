@@ -1,6 +1,6 @@
 // adapted from fast-json-stable-stringify (https://github.com/epoberezkin/fast-json-stable-stringify)
 
-export type Stringified<T> = string & { __type: T };
+export type Stringified<T> = (string & { __type: T }) | string;
 
 export function stableStringify<T>(data: T): Stringified<T>;
 export function stableStringify(data: undefined): undefined;
