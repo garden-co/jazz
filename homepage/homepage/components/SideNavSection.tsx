@@ -8,7 +8,9 @@ import {
 import { useFramework } from "@/lib/use-framework";
 import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
 import { usePathname } from "next/navigation";
-import React, { useMemo } from "react";
+import React, { useEffect, useMemo, useRef } from "react";
+
+const openedSections = new Set<string>();
 
 // Helper function to recursively check if any item in the tree matches the current path
 function hasMatchingPath(
@@ -53,8 +55,11 @@ export function SideNavSection({
   const path = usePathname();
   const { framework } = useFramework();
 
-  const isOpen = useMemo(() => {
-    // Check if current path matches this section's href, and open if so
+  const sectionId = useMemo(() => {
+    return `${name}-${prefix || href || ''}`;
+  }, [name, prefix, href]);
+
+  const pathMatches = useMemo(() => {
     // Note: hrefs are already framework-adjusted by DocsNav.tsx
     if (href) {
       if (path === href) return true;
@@ -77,11 +82,47 @@ export function SideNavSection({
       }
     }
 
+    return false;
+  }, [path, framework, prefix, href, items]);
+
+  // Determine if section should be open: path matches OR section was previously opened
+  const isOpen = useMemo(() => {
+    if (pathMatches) return true;
+
+    // If section was previously opened (by user or path match), keep it open
+    if (openedSections.has(sectionId)) return true;
+
     // If explicitly set to start closed and no path matches, don't open
     if (startClosed) return false;
 
+    // Default: open (for sections that don't have startClosed)
     return true;
-  }, [path, framework, startClosed, prefix, href, items]);
+  }, [pathMatches, sectionId, startClosed]);
+
+  // Track when section is opened by path match
+  useEffect(() => {
+    if (pathMatches) {
+      openedSections.add(sectionId);
+    }
+  }, [pathMatches, sectionId]);
+
+  // Track manual toggles to update opened sections set
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+
+  const handleToggle = (e: React.SyntheticEvent<HTMLDetailsElement>) => {
+    const details = e.currentTarget;
+
+    if (details.open) {
+      // Section was opened - add to opened set
+      openedSections.add(sectionId);
+    } else {
+      // Section was closed - only remove from set if path doesn't match
+      // (if path matches, we want it to reopen automatically)
+      if (!pathMatches) {
+        openedSections.delete(sectionId);
+      }
+    }
+  };
   if (!items || items.length === 0) {
     return <SideNavHeader href={href}>{name}</SideNavHeader>;
   }
@@ -100,8 +141,10 @@ export function SideNavSection({
   return (
     <>
       <details
+        ref={detailsRef}
         className="group not-first:mt-4"
         open={isOpen}
+        onToggle={handleToggle}
       >
         <summary className="list-none">
           <div className="flex items-center gap-2 justify-between font-medium text-stone-900 py-1 dark:text-white mb-1 not-first:mt-4">
