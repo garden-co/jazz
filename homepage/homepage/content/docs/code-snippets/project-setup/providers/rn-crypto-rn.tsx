@@ -5,7 +5,7 @@ function SignInScreen({ auth }: { auth: any }) {
 const apiKey = "you@example.com";
 // #region RNC
 import { JazzReactNativeProvider } from "jazz-tools/react-native";
-import { RNCrypto } from "jazz-tools/react-native-core/crypto/RNCrypto";
+import { RNCrypto } from "jazz-tools/react-native-core/crypto";
 
 function MyJazzProvider({ children }: { children: ReactNode }) {
   return (

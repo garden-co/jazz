@@ -2,7 +2,7 @@ import { JazzExpoProvider } from "jazz-tools/expo";
 import React, { StrictMode } from "react";
 import { apiKey } from "./apiKey";
 import ChatScreen from "./chat";
-import { RNCrypto } from "jazz-tools/react-native-core/crypto";
+import { RNCrypto } from "jazz-tools/expo/crypto";
 
 export default function App() {
   return (

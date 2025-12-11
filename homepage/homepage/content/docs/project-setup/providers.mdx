@@ -120,7 +120,6 @@ The provider accepts these additional options:
   - `Account` (default)
 - `CryptoProvider`
   - `PureJSCrypto` (default) - Pure JavaScript crypto provider
-  - `RNQuickCrypto` - C++ accelerated crypto provider
   - `RNCrypto` - Native crypto provider  
 </ContentByFramework>
 
@@ -131,7 +130,6 @@ The provider accepts these additional options:
     - `Account` (default)
   - `CryptoProvider`
     - `PureJSCrypto` (default) - Pure JavaScript crypto provider
-    - `RNQuickCrypto` - C++ accelerated crypto provider
     - `RNCrypto` - Native crypto provider  
 </ContentByFramework>
 
@@ -237,71 +235,6 @@ Then add the following to your provider:
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
 
-</ContentByFramework>
-
-<ContentByFramework framework={['react-native', 'react-native-expo']}>
-## Quick Crypto
-
-For accelerated crypto operations, you can use the `RNQuickCrypto` crypto provider.
-
-To use it, install the following Packages:
-
-<CodeGroup>
-```bash
-pnpm add react-native-quick-crypto@1.0.0-beta.18 react-native-nitro-modules react-native-fast-encoder
-```
-</CodeGroup>
-
-Then add the following to your provider:
-
-<TabbedCodeGroup id="quick-crypto" savedPreferenceKey="framework">
-  <TabbedCodeGroupItem label="React Native" value="react-native" icon={<RNLogo />} preferWrap>
-```tsx quickcrypto-rn.tsx#QC
-```
-</TabbedCodeGroupItem>
-<TabbedCodeGroupItem label="Expo" value="react-native-expo" icon={<ExpoLogo />} preferWrap>
-```tsx quickcrypto-expo.tsx#QC
-```
-</TabbedCodeGroupItem>
-</TabbedCodeGroup>
-</ContentByFramework>
-<ContentByFramework framework="react-native">
-For configuration, add the following settings:
-
-<CodeGroup>
-```ruby
-# ios/Podfile
-ENV['SODIUM_ENABLED'] = '1'
-```
-</CodeGroup>
-and
-<CodeGroup>
-```groovy
-// android/gradle.properties
-sodiumEnabled=true
-```
-</CodeGroup>
-</ContentByFramework>
-
-<ContentByFramework framework="react-native-expo">
-  For configuration, use the RNQC Expo config plugin:
-
-  <CodeGroup>
-  ```json
-  {
-    "expo": {
-      "plugins": [
-        [
-          "react-native-quick-crypto",
-          {
-            "sodiumEnabled": true
-          }
-        ]
-      ]
-    }
-  }
-  ```
-  </CodeGroup>
 </ContentByFramework>
 
 ## Need Help?
