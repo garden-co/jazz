@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{value::RawValue, Number, Value as JsonValue};
 use crate::core::{CryptoCache, NonceGenerator, CoJsonCoreError};
 use crate::core::keys::{SignerID, SignerSecret, Signature, KeyID, KeySecret, CoID, decode_z};
+use crate::core::config::MAX_TX_SIZE_BYTES;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionID(pub String);
@@ -66,8 +67,6 @@ pub enum TransactionMode {
     Trusting,
 }
 
-
-
 #[derive(Clone)]
 pub struct SessionLogInternal {
     public_key: Option<VerifyingKey>,
@@ -76,6 +75,13 @@ pub struct SessionLogInternal {
     last_signature: Option<Signature>,
     nonce_generator: NonceGenerator,
     crypto_cache: CryptoCache,
+}
+
+fn validate_tx_size_limit_in_bytes(changes_len: &str) -> Result<(), CoJsonCoreError> {
+    if changes_len.len() > MAX_TX_SIZE_BYTES {
+        return Err(CoJsonCoreError::TransactionTooLarge(changes_len.len(), MAX_TX_SIZE_BYTES));
+    }
+    Ok(())
 }
 
 
@@ -189,6 +195,7 @@ impl SessionLogInternal {
         made_at: u64,
         meta: Option<String>,
     ) -> Result<(Signature, Transaction), CoJsonCoreError> {
+        validate_tx_size_limit_in_bytes(changes_json)?;
         // Build the transaction object depending on the mode.
         let new_tx = match mode {
             TransactionMode::Private { key_id, key_secret } => {
