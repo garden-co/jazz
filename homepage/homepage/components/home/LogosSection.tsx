@@ -1,7 +1,7 @@
 import { products } from "@/content/showcase";
 import Link from "next/link";
 
-export function FeaturedShowcaseSection() {
+export function LogosSection() {
   return (
     <section>
       <div className="container mb-20 flex flex-col gap-6 py-10 text-black dark:text-white">
@@ -18,6 +18,7 @@ export function FeaturedShowcaseSection() {
                   key={product.url}
                   href={"/showcase#" + product.name}
                   target="_blank"
+                  className="hover:opacity-70"
                 >
                   <div title={product.slogan}>
                     {<product.logo height={25} />}

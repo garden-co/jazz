@@ -14,7 +14,7 @@ import { testimonials } from "./testimonials";
 import { StaticImageData } from "next/image";
 import { OpacityLogo } from "./showcase/images/OpacityLogo";
 import { SuhylLogo } from "./showcase/images/SuhylLogo";
-import { InvoiceRaderLogo } from "./showcase/images/InvoiceRaderLogo";
+import { InvoiceRaderLogo } from "./showcase/images/InvoiceRadarLogo";
 import { ReconfiguredLogo } from "./showcase/images/ReconfiguredLogo";
 import { WagesoLogo } from "./showcase/images/WagesoLogo";
 import { TillyLogo } from "./showcase/images/TillyLogo";

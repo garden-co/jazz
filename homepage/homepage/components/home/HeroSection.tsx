@@ -25,7 +25,7 @@ export function HeroSection() {
         </H1>
         <Prose
           size="lg"
-          className="mt-6 prose-p:leading-normal dark:text-white"
+          className="mt-6 prose-p:leading-snug dark:text-white"
         >
           <p>
             Jazz is a distributed database that runs across your frontend,
@@ -37,7 +37,13 @@ export function HeroSection() {
           </p>
         </Prose>
 
-        <div className="mb-2 mt-8 grid gap-4">
+
+
+        {/* <p className=  */}
+
+        <SupportedEnvironmentsSection className="mt-10" />
+
+        <div className="mb-2 mt-4 grid gap-4">
           <div className="relative col-span-2 w-full flex-1 overflow-hidden rounded-lg border-2 text-sm md:text-base lg:col-span-3">
             <NpxCreateJazzApp />
 
@@ -51,12 +57,6 @@ export function HeroSection() {
             />
           </div>
         </div>
-
-        <p className="text-base text-stone-600 dark:text-stone-400">
-          Open source (MIT) and self-hostable.
-        </p>
-
-        <SupportedEnvironmentsSection />
       </div>
       <div className="md:col-span-7 md:col-start-6">
         <CodeTabs />
