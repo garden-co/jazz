@@ -9,12 +9,14 @@ import ProblemStatementSection from "@/components/home/ProblemStatementSection";
 import { SupportedEnvironmentsSection } from "@/components/home/SupportedEnvironmentsSection";
 import { LatencyMap } from "@/components/cloud/latencyMap";
 import { Pricing } from "@/components/Pricing";
+import { LogosSection } from "@/components/home/LogosSection";
 
 export default function Home() {
   return (
     <>
       <HeroSection />
 
+      <LogosSection />
 
       <ChatDemoSection />
 

@@ -4,85 +4,7 @@ import { Button } from "@garden-co/design-system/src/components/atoms/Button";
 import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
 import { SectionHeader } from "@garden-co/design-system/src/components/molecules/SectionHeader";
 import { Testimonial } from "@garden-co/design-system/src/components/molecules/Testimonial";
-import useEmblaCarousel from "embla-carousel-react";
-import Autoplay from "embla-carousel-autoplay";
-import clsx from "clsx";
-import theoImage from "./images/theo.jpg";
-import theoDarkImage from "./images/theo-dark.jpg";
-
-const testimonials = [
-  {
-    name: "Theo",
-    role: "@theo",
-    imageUrl: theoImage.src,
-    darkImageUrl: theoDarkImage.src,
-    url: "https://x.com/theo",
-    content: (
-      <>
-        <p>
-          I talked with the team. They work really hard. The Jazz team clearly
-          cares, almost maybe too much, about making Jazz a great solution.
-        </p>
-        <p>
-          One of the best experiences I've had working with open source devs on
-          a short notice.
-        </p>
-      </>
-    ),
-  },
-  {
-    name: "Spreadsheet app (stealth)",
-    role: "CTO",
-    content: (
-      <p>
-        You don&apos;t have to think about deploying a database, SQL schemas,
-        relations, and writing queries… Basically, if you know TypeScript, you
-        know Jazz , and you can ship an app. It&apos;s just so nice!
-      </p>
-    ),
-  },
-  {
-    name: "Invoice Radar",
-    role: "Technical Founder",
-    content: (
-      <>
-        We just wanted to build a single-player experience first, planning to
-        add team and org features much later. But because of Jazz, we had that
-        from day one. All we needed to add was an invite button.
-      </>
-    ),
-  },
-];
-
-function TestimonialSlider({ className }: { className?: string }) {
-  const [emblaRef] = useEmblaCarousel(
-    {
-      loop: true,
-      align: "start",
-    },
-    [Autoplay({ delay: 5000, stopOnInteraction: false })],
-  );
-
-  return (
-    <div className={clsx("overflow-hidden", className)} ref={emblaRef}>
-      <div className="flex items-start">
-        {testimonials.map((testimonial, index) => (
-          <div key={index} className="min-w-0 flex-[0_0_100%]">
-            <Testimonial
-              name={testimonial.name}
-              role={testimonial.role}
-              imageUrl={testimonial.imageUrl}
-              darkImageUrl={testimonial.darkImageUrl}
-              url={testimonial.url}
-            >
-              {testimonial.content}
-            </Testimonial>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
+import { testimonials } from "@/content/testimonials";
 
 export function EarlyAdopterSection() {
   return (
@@ -121,7 +43,10 @@ export function EarlyAdopterSection() {
             </div>
           </div>
         </div>
-        <TestimonialSlider className="hidden overflow-hidden lg:block lg:border-l lg:py-8 lg:pl-8" />
+        <Testimonial
+          {...testimonials.theo}
+          className="lg:border-l p-8 lg:pr-0 max-w-full"
+        />
       </div>
     </section>
   );

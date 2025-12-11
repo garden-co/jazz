@@ -12,8 +12,8 @@ export function AddIcon(props: React.SVGProps<SVGSVGElement>) {
     >
       <path
         d="M4 12H20M12 4V20"
-        stroke-width="2"
-        stroke-linecap="round"
+        strokeWidth="2"
+        strokeLinecap="round"
         stroke-linejoin="round"
       />
     </svg>
