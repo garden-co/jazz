@@ -28,6 +28,7 @@ import {
   textEncoder,
 } from "./crypto.js";
 import { ControlledAccountOrAgent } from "../coValues/account.js";
+import { validateTxSizeLimitInBytes } from "../coValueContentMessage.js";
 
 export type Blake3State = {
   update: (buf: Uint8Array) => Blake3State;
@@ -321,6 +322,7 @@ export class PureJSSessionLog implements SessionLogImpl {
     madeAt: number,
     meta: JsonObject | undefined,
   ): { signature: Signature; transaction: PrivateTransaction } {
+    validateTxSizeLimitInBytes(changes);
     const encryptedChanges = this.crypto.encrypt(changes, keySecret, {
       in: this.coID,
       tx: { sessionID: this.sessionID, txIndex: this.transactions.length },
@@ -356,6 +358,7 @@ export class PureJSSessionLog implements SessionLogImpl {
     madeAt: number,
     meta: JsonObject | undefined,
   ): { signature: Signature; transaction: TrustingTransaction } {
+    validateTxSizeLimitInBytes(changes);
     const tx = {
       changes: stableStringify(changes),
       madeAt: madeAt,
