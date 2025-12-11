@@ -62,7 +62,7 @@ function Iframe(
   return (
     <div
       className={clsx(
-        "relative w-full aspect-[3/5] overflow-hidden rounded-[28px] border-[6px] border-black shadow-[0px_0px_0px_3px_rgba(0,0,0,0.15)] dark:bg-black dark:shadow-[0px_0px_0px_3px_rgba(255,255,255,0.2)]",
+        "relative w-full aspect-3/5 flex flex-col overflow-hidden rounded-[28px] border-[6px] border-black shadow-[0px_0px_0px_3px_rgba(0,0,0,0.15)] dark:bg-black dark:shadow-[0px_0px_0px_3px_rgba(255,255,255,0.2)]",
         className,
       )}
     >
@@ -71,9 +71,7 @@ function Iframe(
         {...props}
         src={src}
         title="Jazz chat demo"
-        className="w-full"
-        width="200"
-        height="390"
+        className="w-full flex-1"
         allowFullScreen
       />
     </div>
