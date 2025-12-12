@@ -9,7 +9,7 @@ export function Jazz({ children }: { children: React.ReactNode }) {
   return (
     <JazzReactProvider
       AccountSchema={JazzAccount}
-      enableSSR
+      fallback={<div>Loading...</div>}
       sync={{
         peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
       }}

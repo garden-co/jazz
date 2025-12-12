@@ -3,9 +3,11 @@ import {
   AccountClass,
   AnyAccountSchema,
   CoValueFromRaw,
+  createAnonymousJazzContext,
   InMemoryKVStore,
   InstanceOfSchema,
   JazzContextManager,
+  JazzContextType,
   SyncConfig,
 } from "jazz-tools";
 import { JazzContextManagerAuthProps } from "jazz-tools";
@@ -15,6 +17,7 @@ import {
   createJazzBrowserContext,
   createJazzBrowserGuestContext,
 } from "./createBrowserContext.js";
+import { PureJSCrypto } from "cojson/dist/crypto/PureJSCrypto";
 
 export type JazzContextManagerProps<
   S extends
@@ -33,6 +36,31 @@ export type JazzContextManagerProps<
   defaultProfileName?: string;
 };
 
+function isSSR() {
+  return typeof window === "undefined";
+}
+
+function getAnonymousFallback() {
+  const context = createAnonymousJazzContext({
+    peers: [],
+    crypto: new PureJSCrypto(),
+  });
+
+  return {
+    guest: context.agent,
+    node: context.agent.node,
+    done: () => {},
+    logOut: async () => {},
+    isAuthenticated: false,
+    authenticate: async () => {},
+    addConnectionListener: () => () => {},
+    connected: () => false,
+    register: async () => {
+      throw new Error("Not implemented");
+    },
+  } satisfies JazzContextType<InstanceOfSchema<any>>;
+}
+
 export class JazzBrowserContextManager<
   S extends
     | (AccountClass<Account> & CoValueFromRaw<Account>)
@@ -40,7 +68,7 @@ export class JazzBrowserContextManager<
 > extends JazzContextManager<InstanceOfSchema<S>, JazzContextManagerProps<S>> {
   // TODO: When the storage changes, if the user is changed, update the context
   getKvStore() {
-    if (typeof window === "undefined") {
+    if (isSSR()) {
       // To handle running in SSR
       return new InMemoryKVStore();
     } else {
@@ -48,10 +76,32 @@ export class JazzBrowserContextManager<
     }
   }
 
-  async getNewContext(
+  async createContext(
     props: JazzContextManagerProps<S>,
     authProps?: JazzContextManagerAuthProps,
   ) {
+    if (isSSR()) {
+      this.updateContext(props, getAnonymousFallback(), authProps);
+
+      this.contextPromise = Promise.resolve(this.value);
+      this.contextPromise.status = "fulfilled";
+      this.contextPromise.value = this.value;
+
+      this.notify();
+      return;
+    }
+
+    return super.createContext(props, authProps);
+  }
+
+  getNewContext(
+    props: JazzContextManagerProps<S>,
+    authProps?: JazzContextManagerAuthProps,
+  ) {
+    if (isSSR()) {
+      return getAnonymousFallback();
+    }
+
     if (props.guestMode) {
       return createJazzBrowserGuestContext({
         sync: props.sync,

@@ -1,5 +1,4 @@
 import { AgentSecret, LocalNode, cojsonInternals } from "cojson";
-import { PureJSCrypto } from "cojson/dist/crypto/PureJSCrypto";
 import { AuthSecretStorage } from "../auth/AuthSecretStorage.js";
 import { InMemoryKVStore } from "../auth/InMemoryKVStore.js";
 import { KvStore, KvStoreContext } from "../auth/KvStoreContext.js";
@@ -7,9 +6,8 @@ import { Account } from "../coValues/account.js";
 import { AuthCredentials } from "../types.js";
 import { JazzContextType } from "../types.js";
 import { AnonymousJazzAgent } from "./anonymousJazzAgent.js";
-import { createAnonymousJazzContext } from "./createContext.js";
-import { InstanceOfSchema } from "./zodSchema/typeConverters/InstanceOfSchema.js";
 import { SubscriptionCache } from "../subscribe/SubscriptionCache.js";
+import { PromiseWithStatus } from "../subscribe/utils.js";
 
 export type JazzContextManagerAuthProps = {
   credentials?: AuthCredentials;
@@ -44,27 +42,6 @@ type PlatformSpecificContext<Acc extends Account> =
   | PlatformSpecificAuthContext<Acc>
   | PlatformSpecificGuestContext;
 
-function getAnonymousFallback() {
-  const context = createAnonymousJazzContext({
-    peers: [],
-    crypto: new PureJSCrypto(),
-  });
-
-  return {
-    guest: context.agent,
-    node: context.agent.node,
-    done: () => {},
-    logOut: async () => {},
-    isAuthenticated: false,
-    authenticate: async () => {},
-    addConnectionListener: () => () => {},
-    connected: () => false,
-    register: async () => {
-      throw new Error("Not implemented");
-    },
-  } satisfies JazzContextType<InstanceOfSchema<any>>;
-}
-
 export class JazzContextManager<
   Acc extends Account,
   P extends JazzContextManagerBaseProps<Acc>,
@@ -74,21 +51,16 @@ export class JazzContextManager<
   protected props: P | undefined;
   protected authSecretStorage;
   protected keepContextOpen = false;
-  contextPromise: Promise<void> | undefined;
+  contextPromise:
+    | PromiseWithStatus<JazzContextType<Acc> | undefined>
+    | undefined;
   protected authenticatingAccountID: string | null = null;
   private subscriptionCache: SubscriptionCache;
 
-  constructor(opts?: {
-    useAnonymousFallback?: boolean;
-    authSecretStorageKey?: string;
-  }) {
+  constructor(opts?: { authSecretStorageKey?: string }) {
     KvStoreContext.getInstance().initialize(this.getKvStore());
     this.authSecretStorage = new AuthSecretStorage(opts?.authSecretStorageKey);
     this.subscriptionCache = new SubscriptionCache();
-
-    if (opts?.useAnonymousFallback) {
-      this.value = getAnonymousFallback();
-    }
   }
 
   getKvStore(): KvStore {
@@ -101,7 +73,9 @@ export class JazzContextManager<
     this.props = props;
 
     // Avoid race condition between the previous context and the new one
-    const { promise, resolve } = createResolvablePromise<void>();
+    const { promise, resolve } = createResolvablePromise<
+      JazzContextType<Acc> | undefined
+    >();
 
     const prevPromise = this.contextPromise;
     this.contextPromise = promise;
@@ -112,19 +86,17 @@ export class JazzContextManager<
       const result = await this.getNewContext(props, authProps);
       await this.updateContext(props, result, authProps);
 
-      resolve();
+      resolve(this.value);
     } catch (error) {
-      resolve();
+      resolve(undefined);
       throw error;
     }
   }
 
-  async getNewContext(
-    props: P,
-    authProps?: JazzContextManagerAuthProps,
-  ): Promise<PlatformSpecificContext<Acc>> {
-    props;
-    authProps;
+  getNewContext(
+    _props: P,
+    _authProps?: JazzContextManagerAuthProps,
+  ): Promise<PlatformSpecificContext<Acc>> | PlatformSpecificContext<Acc> {
     throw new Error("Not implemented");
   }
 
@@ -385,11 +357,18 @@ export class JazzContextManager<
 }
 
 function createResolvablePromise<T>() {
-  let resolve!: (value: T) => void;
+  let _resolve!: (value: T) => void;
 
   const promise = new Promise<T>((res) => {
-    resolve = res;
-  });
+    _resolve = res;
+  }) as PromiseWithStatus<T>;
+  promise.status = "pending";
+
+  function resolve(value: T) {
+    _resolve(value);
+    promise.status = "fulfilled";
+    promise.value = value;
+  }
 
   return { promise, resolve };
 }

@@ -26,6 +26,10 @@ import { setupInspector } from "./utils/export-account-inspector.js";
 
 setupInspector();
 
+function isSSR() {
+  return typeof window === "undefined";
+}
+
 export type BaseBrowserContextOptions = {
   sync: SyncConfig;
   reconnectionTimeout?: number;
@@ -55,7 +59,8 @@ async function setupPeers(options: BaseBrowserContextOptions) {
 
   const peers: Peer[] = [];
 
-  const storage = useIndexedDB ? await getIndexedDBStorage() : undefined;
+  const storage =
+    useIndexedDB && !isSSR() ? await getIndexedDBStorage() : undefined;
 
   if (options.sync.when === "never") {
     return {
@@ -132,7 +137,7 @@ export async function createJazzBrowserGuestContext(
     connected,
   } = await setupPeers(options);
 
-  const context = await createAnonymousJazzContext({
+  const context = createAnonymousJazzContext({
     crypto,
     peers,
     storage,
