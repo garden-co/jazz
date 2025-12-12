@@ -11,39 +11,27 @@
     },
     unstable_branch: currentBranchName === 'main' ? undefined : { name: currentBranchName }
   }));
-
-  function handleTitleChange(e: Event) {
-    const target = e.target as HTMLInputElement;
-    // Won't be visible on main until merged
-    project.current.$isLoaded && project.current.$jazz.set("title", target.value);
-  }
-
-  function handleTaskTitleChange(index: number, e: Event) {
-    const target = e.target as HTMLInputElement;
-    const task = project.current.$isLoaded && project.current?.tasks[index];
-
-    // The task is also part of the branch because we used the `resolve` option
-    // with `tasks: { $each: true }`
-    // so the changes won't be visible on main until merged
-    task && task.$jazz.set("title", target.value);
-  }
 </script>
 
 <form>
-  <!-- Edit form fields -->
   {#if project.current.$isLoaded}
-  <input
-    type="text"
-    value={project.current.title || ''}
-    oninput={handleTitleChange}
-  />
-
-  {#each project.current.tasks as task, index}
     <input
       type="text"
-      value={task.title || ''}
-      oninput={(e) => handleTaskTitleChange(index, e)}
+      bind:value={
+        () => (project.current.$isLoaded && project.current.title) || "",
+        (v) =>
+          project.current.$isLoaded && project.current.$jazz.set("title", v)
+      }
     />
-  {/each}
+
+    {#each project.current.tasks as task (task.$jazz.id)}
+      <input
+        type="text"
+        bind:value={
+          () => task.title || "",
+          (v) => task.$isLoaded && task.$jazz.set("title", v)
+        }
+      />
+    {/each}
   {/if}
 </form>
