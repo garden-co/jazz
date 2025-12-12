@@ -1,4 +1,4 @@
-import { ReactNode, useEffect, useState } from "react";
+import { ReactNode, startTransition, useEffect, useState } from "react";
 
 export type Routes = {
   [Key: `/${string}`]: ReactNode | ((param: string) => ReactNode);
@@ -15,20 +15,22 @@ class NavigateEvent extends Event {
 export function useHashRouter(options?: { tellParentFrame?: boolean }) {
   const [hash, setHash] = useState(location.hash.slice(1));
 
-  useEffect(() => {
-    const onHashChange = () => {
+  const onHashChange = () => {
+    startTransition(() => {
       setHash(location.hash.slice(1));
-      options?.tellParentFrame &&
-        window.parent.postMessage(
-          {
-            type: NavigateEvent.type,
-            url: location.href,
-          },
-          "*",
-        );
-      console.log("Posting", location.href + "-navigate");
-    };
+    });
+    options?.tellParentFrame &&
+      window.parent.postMessage(
+        {
+          type: NavigateEvent.type,
+          url: location.href,
+        },
+        "*",
+      );
+    console.log("Posting", location.href + "-navigate");
+  };
 
+  useEffect(() => {
     window.addEventListener("hashchange", onHashChange);
     window.addEventListener(NavigateEvent.type, onHashChange);
 
@@ -41,7 +43,7 @@ export function useHashRouter(options?: { tellParentFrame?: boolean }) {
   return {
     navigate: (url: string) => {
       history.replaceState({}, "", url);
-      window.dispatchEvent(new NavigateEvent());
+      onHashChange();
     },
     route: function (routes: {
       [route: `${string}` | `/${string}/:${string}`]: (
