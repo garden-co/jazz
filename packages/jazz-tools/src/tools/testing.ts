@@ -18,6 +18,7 @@ import {
   createJazzContext,
   randomSessionProvider,
 } from "./internal.js";
+import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 
 export { assertLoaded } from "./lib/utils.js";
 
@@ -26,11 +27,11 @@ const syncServer: { current: LocalNode | null; asyncPeers: boolean } = {
   asyncPeers: false,
 };
 
-export class TestJSCrypto extends PureJSCrypto {
+export class TestJSCrypto extends WasmCrypto {
   static async create() {
     if ("navigator" in globalThis && navigator.userAgent?.includes("jsdom")) {
       // Mocking crypto seal & encrypt to make it work with JSDom. Getting "Error: Uint8Array expected" there
-      const crypto = new PureJSCrypto();
+      const crypto = await WasmCrypto.create();
 
       crypto.seal = (options) =>
         `sealed_U${cojsonInternals.stableStringify(options.message)}` as any;
@@ -45,7 +46,7 @@ export class TestJSCrypto extends PureJSCrypto {
     }
 
     // For non-jsdom environments, we use the real crypto
-    return new PureJSCrypto();
+    return await WasmCrypto.create();
   }
 }
 
