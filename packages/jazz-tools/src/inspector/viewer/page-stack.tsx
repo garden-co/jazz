@@ -2,23 +2,11 @@ import { CoID, LocalNode, RawCoValue } from "cojson";
 import { styled } from "goober";
 import { Page } from "./page.js";
 import { ErrorBoundary } from "../ui/error-boundary.js";
+import { useRouter } from "../router/context.js";
+import { useNode } from "../contexts/node.js";
+import { HomePage } from "../pages/home.js";
 
-// Define the structure of a page in the path
-interface PageInfo {
-  coId: CoID<RawCoValue>;
-  name?: string;
-}
-
-// Props for the PageStack component
-interface PageStackProps {
-  path: PageInfo[];
-  node?: LocalNode | null;
-  goBack: () => void;
-  addPages: (pages: PageInfo[]) => void;
-  children?: React.ReactNode;
-}
-
-const PageStackContainer = styled("div")`
+const PageStackContainer = styled("article")`
   position: relative;
   padding: 0 0.75rem;
   overflow-y: auto;
@@ -27,25 +15,29 @@ const PageStackContainer = styled("div")`
   font-size: 16px;
 `;
 
-export function PageStack({
-  path,
-  node,
-  goBack,
-  addPages,
-  children,
-}: PageStackProps) {
+type PageStackProps = {
+  homePage?: React.ReactNode;
+};
+
+export function PageStack({ homePage }: PageStackProps) {
+  const { path, addPages, goBack } = useRouter();
+  const { localNode } = useNode();
+
   const page = path[path.length - 1];
   const index = path.length - 1;
+
+  if (path.length <= 0) {
+    return <PageStackContainer>{homePage ?? <HomePage />}</PageStackContainer>;
+  }
 
   return (
     <>
       <PageStackContainer>
-        {children}
-        {node && page && (
+        {localNode && page && (
           <ErrorBoundary title="An error occurred while rendering this CoValue">
             <Page
               coId={page.coId}
-              node={node}
+              node={localNode}
               name={page.name || page.coId}
               onHeaderClick={goBack}
               onNavigate={addPages}

@@ -10,6 +10,43 @@ import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
 import { usePathname } from "next/navigation";
 import React, { useMemo } from "react";
 
+// Helper function to recursively check if any item in the tree matches the current path
+function hasMatchingPath(
+  item: SideNavItem,
+  currentPath: string,
+  framework: string,
+): boolean {
+  // Check if this item's href matches the current path
+  // Note: hrefs are already framework-adjusted by DocsNav.tsx, so compare directly
+  if (item.href) {
+    if (currentPath === item.href) {
+      return true;
+    }
+  }
+
+  // Check if current path starts with this item's prefix
+  // Prefixes may need framework adjustment if they start with /docs
+  if (item.prefix) {
+    let prefixToCheck = item.prefix;
+    // If prefix starts with /docs but doesn't already have a framework segment, add it
+    if (prefixToCheck.startsWith("/docs/") && !prefixToCheck.match(/^\/docs\/(react|svelte|vue|react-native|react-native-expo|vanilla)\//)) {
+      prefixToCheck = prefixToCheck.replace("/docs/", "/docs/" + framework + "/");
+    }
+    if (currentPath.startsWith(prefixToCheck)) {
+      return true;
+    }
+  }
+
+  // Recursively check child items
+  if (item.items && item.items.length > 0) {
+    return item.items.some((childItem) =>
+      hasMatchingPath(childItem, currentPath, framework),
+    );
+  }
+
+  return false;
+}
+
 export function SideNavSection({
   item: { name, href, collapse, items, prefix, startClosed },
 }: { item: SideNavItem }) {
@@ -18,14 +55,26 @@ export function SideNavSection({
 
   const isOpen = useMemo(() => {
     // Check if current path matches this section's href, and open if so
+    // Note: hrefs are already framework-adjusted by DocsNav.tsx
     if (href) {
       if (path === href) return true;
     }
 
     // If there's a prefix, check if current path starts with the framework-adjusted prefix
     if (prefix) {
-      const frameworkPrefix = prefix.replace("/docs/", "/docs/" + framework + "/");
-      return path.startsWith(frameworkPrefix);
+      let prefixToCheck = prefix;
+      // If prefix starts with /docs but doesn't already have a framework segment, add it
+      if (prefixToCheck.startsWith("/docs/") && !prefixToCheck.match(/^\/docs\/(react|svelte|vue|react-native|react-native-expo|vanilla)\//)) {
+        prefixToCheck = prefixToCheck.replace("/docs/", "/docs/" + framework + "/");
+      }
+      if (path.startsWith(prefixToCheck)) return true;
+    }
+
+    // Recursively check if any child item matches the current path
+    if (items && items.length > 0) {
+      if (items.some((childItem) => hasMatchingPath(childItem, path, framework))) {
+        return true;
+      }
     }
 
     // If explicitly set to start closed and no path matches, don't open

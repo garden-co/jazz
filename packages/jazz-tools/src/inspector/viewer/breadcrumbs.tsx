@@ -1,7 +1,7 @@
 import { styled } from "goober";
 import React from "react";
 import { Button } from "../ui/button.js";
-import { PageInfo } from "./types.js";
+import { useRouter } from "../router/context.js";
 
 const BreadcrumbsContainer = styled("div")`
   position: relative;
@@ -15,21 +15,15 @@ const Separator = styled("span")`
   padding: 0 0.125rem;
 `;
 
-interface BreadcrumbsProps {
-  path: PageInfo[];
-  onBreadcrumbClick: (index: number) => void;
-}
+export const Breadcrumbs: React.FC<{}> = () => {
+  const { path, goToIndex } = useRouter();
 
-export const Breadcrumbs: React.FC<BreadcrumbsProps> = ({
-  path,
-  onBreadcrumbClick,
-}) => {
   return (
     <BreadcrumbsContainer>
       <Button
         variant="link"
         style={{ padding: "0 0.25rem" }}
-        onClick={() => onBreadcrumbClick(-1)}
+        onClick={() => goToIndex(-1)}
       >
         Home
       </Button>
@@ -40,7 +34,7 @@ export const Breadcrumbs: React.FC<BreadcrumbsProps> = ({
             <Button
               variant="link"
               style={{ padding: "0 0.25rem" }}
-              onClick={() => onBreadcrumbClick(index)}
+              onClick={() => goToIndex(index)}
             >
               {index === 0 ? page.name || "Root" : page.name}
             </Button>

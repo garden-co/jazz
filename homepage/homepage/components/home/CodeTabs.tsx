@@ -1,26 +1,16 @@
 "use client";
 
 import { clsx } from "clsx";
-import CodeStepAction from "./CodeStepAction.mdx";
-import CodeStepCloud from "./CodeStepCloud.mdx";
 import CodeStepRender from "./CodeStepRender.mdx";
-import CodeStepSchema from "./CodeStepSchema.mdx";
+import CodeStepSetup from "./CodeStepSetup.mdx";
 
 const codeFiles = [
   {
-    fileName: "schema.ts",
-    component: CodeStepSchema,
+    fileName: "setup.tsx",
+    component: CodeStepSetup,
   },
   {
-    fileName: "main.tsx",
-    component: CodeStepCloud,
-  },
-  {
-    fileName: "sendMessage.ts",
-    component: CodeStepAction,
-  },
-  {
-    fileName: "ChatScreen.tsx",
+    fileName: "Components.tsx",
     component: CodeStepRender,
   },
 ];

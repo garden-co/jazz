@@ -231,29 +231,29 @@ export const colorToBgActiveMap25 = {
 const gradiantClassesBase = "bg-linear-to-t from-7% via-50% to-95%";
 
 export const styleToBgGradientColorMap = {
-  primary: `from-primary-dark via-primary to-primary-light ${gradiantClassesBase}`,
-  info: `from-info-dark via-info to-info-light ${gradiantClassesBase}`,
-  success: `from-success-dark via-success to-success-light ${gradiantClassesBase}`,
-  warning: `from-warning-dark via-warning to-warning-light ${gradiantClassesBase}`,
-  danger: `from-danger-dark via-danger to-danger-light ${gradiantClassesBase}`,
-  alert: `from-alert-dark via-alert to-alert-light ${gradiantClassesBase}`,
-  tip: `from-tip-dark via-tip to-tip-light ${gradiantClassesBase}`,
-  muted: `from-stone-200 via-stone-300 to-stone-400 ${gradiantClassesBase} dark:from-stone-900 dark:via-stone-900 dark:to-stone-800`,
-  strong: `from-stone-700 via-stone-800 to-stone-900 ${gradiantClassesBase} dark:from-stone-100 dark:via-stone-200 dark:to-stone-300`,
-  default: `from-stone-200/40 via-white to-stone-100 ${gradiantClassesBase} dark:from-stone-900 dark:via-black dark:to-stone-950`,
+  primary: `bg-primary`,
+  info: `bg-info`,
+  success: `bg-success`,
+  warning: `bg-warning`,
+  danger: `bg-danger`,
+  alert: `bg-alert`,
+  tip: `bg-tip`,
+  muted: `bg-stone-300 dark:bg-stone-900`,
+  strong: `bg-stone-800 dark:bg-stone-200`,
+  default: `bg-white dark:bg-black`,
 };
 
 export const styleToBgGradientHoverMap = {
-  primary: `hover:from-primary-bright-light hover:to-primary-light ${gradiantClassesBase}`,
-  info: `hover:from-info-bright-light hover:to-info-light ${gradiantClassesBase}`,
-  success: `hover:from-success-bright-light hover:to-success-light ${gradiantClassesBase}`,
-  warning: `hover:from-warning-bright-light hover:to-warning-light ${gradiantClassesBase}`,
-  danger: `hover:from-danger-bright-light hover:to-danger-light ${gradiantClassesBase}`,
-  alert: `hover:from-alert-bright-light hover:to-alert-light ${gradiantClassesBase}`,
-  tip: `hover:from-tip-bright-light hover:to-tip-light ${gradiantClassesBase}`,
-  muted: `hover:from-stone-200 hover:to-stone-300 ${gradiantClassesBase} dark:hover:from-stone-900 dark:hover:to-stone-700/70`,
-  strong: `hover:from-stone-700 hover:to-stone-800 ${gradiantClassesBase} dark:hover:from-stone-100 dark:hover:to-stone-200`,
-  default: `hover:from-stone-100/50 hover:to-stone-100/50 dark:hover:from-stone-950 dark:hover:to-stone-900 ${gradiantClassesBase} border border-stone-100 dark:border-stone-900`,
+  primary: `hover:bg-primary-light`,
+  info: `hover:bg-info-light`,
+  success: `hover:bg-success-light`,
+  warning: `hover:bg-warning-light`,
+  danger: `hover:bg-danger-light`,
+  alert: `hover:bg-alert-light`,
+  tip: `hover:bg-tip-light`,
+  muted: `hover:bg-stone-200 dark:hover:bg-stone-800`,
+  strong: `hover:bg-stone-700 dark:hover:bg-stone-100`,
+  default: `hover:bg-stone-100/50 dark:hover:bg-stone-950`,
 };
 
 export const styleToBgGradientActiveMap = {

@@ -58,7 +58,7 @@ export default function Products() {
             <div className="flex items-center justify-between gap-4">
               <GardenLogo className="h-11 w-auto" />
               <div>
-                <ComingSoon>Coming 2025</ComingSoon>
+                <ComingSoon>Future Project</ComingSoon>
               </div>
             </div>
             <p>

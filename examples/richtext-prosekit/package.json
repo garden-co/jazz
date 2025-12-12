@@ -2,6 +2,7 @@
   "name": "example-prosekit-jazz",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@10.16.1",
   "scripts": {
     "build": "tsc -b && vite build",
     "dev": "vite",
@@ -10,14 +11,14 @@
   "dependencies": {
     "jazz-tools": "workspace:*",
     "prosekit": "^0.13.3",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react": "^19.1.10",
+    "react-dom": "^19.1.10"
   },
   "devDependencies": {
     "@egoist/tailwindcss-icons": "^1.9.0",
     "@iconify-json/lucide": "^1.2.45",
-    "@types/react": "^19.1.6",
-    "@types/react-dom": "^19.1.5",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.10",
     "@vitejs/plugin-react": "^4.5.0",
     "postcss": "^8.5.4",
     "tailwindcss": "^3.4.17",

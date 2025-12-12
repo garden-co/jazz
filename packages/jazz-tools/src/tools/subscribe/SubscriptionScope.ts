@@ -1,4 +1,4 @@
-import type { LocalNode, RawCoValue } from "cojson";
+import { LocalNode, RawCoValue } from "cojson";
 import {
   CoFeed,
   CoList,
@@ -23,11 +23,18 @@ import type {
   SubscriptionValueLoading,
 } from "./types.js";
 import { CoValueLoadingState, NotLoadedCoValueState } from "./types.js";
-import { createCoValue, myRoleForRawValue } from "./utils.js";
 import {
   captureError,
   isCustomErrorReportingEnabled,
 } from "./errorReporting.js";
+import {
+  createCoValue,
+  isEqualRefsToResolve,
+  myRoleForRawValue,
+  PromiseWithStatus,
+  rejectedPromise,
+  resolvedPromise,
+} from "./utils.js";
 
 export class SubscriptionScope<D extends CoValue> {
   childNodes = new Map<string, SubscriptionScope<CoValue>>();
@@ -88,6 +95,7 @@ export class SubscriptionScope<D extends CoValue> {
       | RawCoValue
       | typeof CoValueLoadingState.UNAVAILABLE
       | undefined;
+
     this.subscription = new CoValueCoreSubscription(
       node,
       id,
@@ -301,6 +309,66 @@ export class SubscriptionScope<D extends CoValue> {
 
   unloadedValue: NotLoaded<D> | undefined;
 
+  lastPromise:
+    | {
+        value: MaybeLoaded<D> | undefined;
+        promise: PromiseWithStatus<MaybeLoaded<D>>;
+      }
+    | undefined;
+
+  cachePromise(value: MaybeLoaded<D>, callback: () => PromiseWithStatus<D>) {
+    if (this.lastPromise?.value === value) {
+      return this.lastPromise.promise;
+    }
+
+    const promise = callback();
+    this.lastPromise = { value, promise };
+
+    return promise;
+  }
+
+  getPromise() {
+    const currentValue = this.getCurrentValue();
+
+    if (currentValue.$isLoaded) {
+      return resolvedPromise(currentValue);
+    }
+
+    if (currentValue.$jazz.loadingState !== CoValueLoadingState.LOADING) {
+      const error = this.getError();
+      return rejectedPromise(
+        new Error(error?.toString() ?? "Unknown error", {
+          cause: this.callerStack,
+        }),
+      );
+    }
+
+    // We need to cache rejected promises to make React Suspense happy
+    return this.cachePromise(currentValue, () => {
+      return new Promise<D>((resolve, reject) => {
+        const unsubscribe = this.subscribe(() => {
+          const currentValue = this.getCurrentValue();
+
+          if (currentValue.$jazz.loadingState === CoValueLoadingState.LOADING) {
+            return;
+          }
+
+          if (currentValue.$isLoaded) {
+            resolve(currentValue);
+          } else {
+            reject(
+              new Error(this.getError()?.toString() ?? "Unknown error", {
+                cause: this.callerStack,
+              }),
+            );
+          }
+
+          unsubscribe();
+        });
+      });
+    });
+  }
+
   private getUnloadedValue(reason: NotLoadedCoValueState): NotLoaded<D> {
     if (this.unloadedValue?.$jazz.loadingState === reason) {
       return this.unloadedValue;
@@ -384,19 +452,21 @@ export class SubscriptionScope<D extends CoValue> {
     return result;
   }
 
-  logError() {
-    let error: JazzError | undefined;
-
+  getError() {
     if (
       this.value.type === CoValueLoadingState.UNAUTHORIZED ||
       this.value.type === CoValueLoadingState.UNAVAILABLE
     ) {
-      error = this.value;
+      return this.value;
     }
 
     if (this.errorFromChildren) {
-      error = this.errorFromChildren;
+      return this.errorFromChildren;
     }
+  }
+
+  logError() {
+    const error = this.getError();
 
     if (!error || this.lastErrorLogged === error) {
       return;
@@ -437,16 +507,45 @@ export class SubscriptionScope<D extends CoValue> {
   }
 
   subscribers = new Set<(value: SubscriptionValue<D, any>) => void>();
+  subscriberChangeCallbacks = new Set<(count: number) => void>();
+
+  /**
+   * Subscribe to subscriber count changes
+   * Callback receives the total number of subscribers
+   * Returns an unsubscribe function
+   */
+  onSubscriberChange(callback: (count: number) => void): () => void {
+    this.subscriberChangeCallbacks.add(callback);
+
+    return () => {
+      this.subscriberChangeCallbacks.delete(callback);
+    };
+  }
+
+  private notifySubscriberChange() {
+    const count = this.subscribers.size;
+    this.subscriberChangeCallbacks.forEach((callback) => {
+      callback(count);
+    });
+  }
+
   subscribe(listener: (value: SubscriptionValue<D, any>) => void) {
     this.subscribers.add(listener);
+    this.notifySubscriberChange();
 
     return () => {
       this.subscribers.delete(listener);
+      this.notifySubscriberChange();
     };
   }
 
   setListener(listener: (value: SubscriptionValue<D, any>) => void) {
+    const hadListener = this.subscribers.has(listener);
     this.subscribers.add(listener);
+    // Only notify if this is a new listener (count actually changed)
+    if (!hadListener) {
+      this.notifySubscriberChange();
+    }
     this.triggerUpdate();
   }
 
@@ -835,7 +934,14 @@ export class SubscriptionScope<D extends CoValue> {
     this.closed = true;
 
     this.subscription.unsubscribe();
+    const hadSubscribers = this.subscribers.size > 0;
     this.subscribers.clear();
+    // Notify callbacks that subscriber count is now 0 if there were subscribers before
+    if (hadSubscribers) {
+      this.notifySubscriberChange();
+    }
+    // Clear subscriber change callbacks to prevent memory leaks
+    this.subscriberChangeCallbacks.clear();
     this.childNodes.forEach((child) => child.destroy());
   }
 }

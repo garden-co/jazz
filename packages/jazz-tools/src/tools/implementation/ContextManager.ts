@@ -9,6 +9,7 @@ import { JazzContextType } from "../types.js";
 import { AnonymousJazzAgent } from "./anonymousJazzAgent.js";
 import { createAnonymousJazzContext } from "./createContext.js";
 import { InstanceOfSchema } from "./zodSchema/typeConverters/InstanceOfSchema.js";
+import { SubscriptionCache } from "../subscribe/SubscriptionCache.js";
 
 export type JazzContextManagerAuthProps = {
   credentials?: AuthCredentials;
@@ -75,6 +76,7 @@ export class JazzContextManager<
   protected keepContextOpen = false;
   contextPromise: Promise<void> | undefined;
   protected authenticatingAccountID: string | null = null;
+  private subscriptionCache: SubscriptionCache;
 
   constructor(opts?: {
     useAnonymousFallback?: boolean;
@@ -82,6 +84,7 @@ export class JazzContextManager<
   }) {
     KvStoreContext.getInstance().initialize(this.getKvStore());
     this.authSecretStorage = new AuthSecretStorage(opts?.authSecretStorageKey);
+    this.subscriptionCache = new SubscriptionCache();
 
     if (opts?.useAnonymousFallback) {
       this.value = getAnonymousFallback();
@@ -130,6 +133,9 @@ export class JazzContextManager<
     context: PlatformSpecificContext<Acc>,
     authProps?: JazzContextManagerAuthProps,
   ) {
+    // Clear cache before updating context to prevent subscription leaks across authentication boundaries
+    this.subscriptionCache.clear();
+
     // When keepContextOpen we don't want to close the previous context
     // because we might need to handle the onAnonymousAccountDiscarded callback
     if (!this.keepContextOpen) {
@@ -178,12 +184,19 @@ export class JazzContextManager<
     return this.authenticatingAccountID;
   }
 
+  getSubscriptionScopeCache(): SubscriptionCache {
+    return this.subscriptionCache;
+  }
+
   logOut = async () => {
     if (!this.context || !this.props) {
       return;
     }
 
     this.authenticatingAccountID = null;
+
+    // Clear cache on logout to prevent subscription leaks across authentication boundaries
+    this.subscriptionCache.clear();
 
     await this.props.onLogOut?.();
 

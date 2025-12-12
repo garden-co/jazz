@@ -1,0 +1,100 @@
+name: Build cojson-core-rn (React Native)
+
+'on':
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_call:
+    inputs:
+      concurrency:
+        type: string
+        default: rn
+        description: Concurrency group suffix for this workflow
+      disableAndroid:
+        type: boolean
+        default: false
+        description: Skip Android build job
+      disableIOS:
+        type: boolean
+        default: false
+        description: Skip iOS build job
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.concurrency }}
+  cancel-in-progress: true
+
+env:
+  PACKAGE_PATH: crates/cojson-core-rn
+  PACKAGE_NAME: cojson-core-rn
+
+jobs:
+  build-android:
+    name: Build Android artifacts
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: ${{ !inputs.disableAndroid }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup Source Code
+        uses: ./.github/actions/source-code/
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: |
+            aarch64-linux-android
+            armv7-linux-androideabi
+            i686-linux-android
+            x86_64-linux-android
+
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Install cargo-ndk
+        run: cargo binstall cargo-ndk
+
+      - name: Build Android artifacts
+        run: pnpm --filter ${{ env.PACKAGE_NAME }} run build:rn:android
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cojson-core-rn-android
+          if-no-files-found: error
+          path: |
+            ${{ env.PACKAGE_PATH }}/android/src/main/jniLibs
+            ${{ env.PACKAGE_PATH }}/android/src/main/java
+            ${{ env.PACKAGE_PATH }}/cpp/generated
+
+  build-ios:
+    name: Build iOS artifacts
+    runs-on: macos-latest
+    if: ${{ !inputs.disableIOS }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup Source Code
+        uses: ./.github/actions/source-code/
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: |
+            aarch64-apple-ios
+            aarch64-apple-ios-sim
+            x86_64-apple-ios
+
+      - name: Build iOS artifacts
+        run: pnpm --filter ${{ env.PACKAGE_NAME }} run build:rn:ios
+
+      - name: Upload iOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cojson-core-rn-ios
+          if-no-files-found: error
+          path: |
+            ${{ env.PACKAGE_PATH }}/CojsonCoreRnFramework.xcframework
+            ${{ env.PACKAGE_PATH }}/ios
+            ${{ env.PACKAGE_PATH }}/cpp/generated
+

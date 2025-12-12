@@ -1,4 +1,3 @@
-import { useCoState } from "jazz-tools/react";
 import { useParams } from "react-router";
 import { PlaylistWithTracks } from "./1_schema";
 import { uploadMusicTracks } from "./4_actions";
@@ -15,6 +14,7 @@ import { SidebarInset, SidebarTrigger } from "./components/ui/sidebar";
 import { usePlayState } from "./lib/audio/usePlayState";
 import { useState } from "react";
 import { useAccountSelector } from "@/components/AccountProvider.tsx";
+import { useSuspenseCoState } from "jazz-tools/react-core";
 
 export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
   const playState = usePlayState();
@@ -32,16 +32,12 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
 
   const params = useParams<{ playlistId: string }>();
   const playlistId = useAccountSelector({
-    select: (me) =>
-      params.playlistId ??
-      (me.$isLoaded ? me.root.$jazz.refs.rootPlaylist.id : undefined),
+    select: (me) => params.playlistId ?? me.root.$jazz.refs.rootPlaylist.id,
   });
 
-  const playlist = useCoState(PlaylistWithTracks, playlistId, {
-    select: (playlist) => (playlist.$isLoaded ? playlist : undefined),
-  });
+  const playlist = useSuspenseCoState(PlaylistWithTracks, playlistId);
 
-  const membersIds = playlist?.$jazz.owner.members.map((member) => member.id);
+  const membersIds = playlist.$jazz.owner.members.map((member) => member.id);
   const isRootPlaylist = !params.playlistId;
   const canEdit = useAccountSelector({
     select: (me) => Boolean(playlist && me.canWrite(playlist)),

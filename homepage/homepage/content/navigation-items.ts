@@ -11,7 +11,11 @@ export const navigationItems: NavItemProps[] = [
     href: "/examples",
   },
   {
-    title: "Built with Jazz",
+    title: "Pricing",
+    href: "/pricing",
+  },
+  {
+    title: "Showcase",
     href: "/showcase",
   },
   {

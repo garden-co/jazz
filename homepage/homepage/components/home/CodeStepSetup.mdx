@@ -1,0 +1,25 @@
+```tsx
+import { co, z } from "jazz-tools";
+import { JazzReactProvider }
+  from "jazz-tools/react";
+
+// Describe your app with cloud-synced CoValues ("collaborative values")
+const Message = co.map({
+  text: z.string(),
+});
+
+const Chat = co.list(Message);
+
+// Use our global auto-scaling
+// Jazz Cloud or self-host
+const peer =
+  "wss://cloud.jazz.tools/?key=...";
+
+function App() {
+  return (
+    <JazzReactProvider sync={{ peer }}>
+      ...
+    </JazzReactProvider>
+  );
+}
+```

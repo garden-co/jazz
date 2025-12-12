@@ -1,6 +1,6 @@
 {
   "name": "chat-svelte",
-  "version": "0.0.175",
+  "version": "0.0.178",
   "type": "module",
   "private": true,
   "scripts": {
@@ -16,6 +16,7 @@
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui"
   },
+  "packageManager": "pnpm@10.16.1",
   "devDependencies": {
     "@sveltejs/adapter-auto": "^3.3.1",
     "@sveltejs/kit": "catalog:svelte",
