@@ -32,9 +32,9 @@ beforeEach(async () => {
 describe("Simple CoList operations", async () => {
   const TestList = co.list(z.string());
 
-  const list = TestList.create(["bread", "butter", "onion"], { owner: me });
-
   test("Construction", () => {
+    const list = TestList.create(["bread", "butter", "onion"], { owner: me });
+
     expect(list[0]).toBe("bread");
     expect(list[1]).toBe("butter");
     expect(list[2]).toBe("onion");
