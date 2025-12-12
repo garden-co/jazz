@@ -1,4 +1,4 @@
-import { Alert, CodeGroup, ContentByFramework, FileName, ReactLogo, SvelteLogo, TabbedCodeGroup, TabbedCodeGroupItem, VanillaLogo } from "@/components/forMdx";
+import { Alert, CodeGroup, ContentByFramework, FileName, ReactLogo, SvelteLogo, VanillaLogo, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
 
 export const metadata = {
   description: "Learn how to subscribe to CoValues, specify loading depths, and handle loading states and inaccessible data."
@@ -16,52 +16,25 @@ You can load and subscribe to CoValues in one of two ways:
 - **deeply**&hairsp;—&hairsp;some or all of the referenced CoValues have been loaded
 
 <Alert variant="info" title="Tip">
-  Jazz automatically deduplicates loading. If you subscribe to the same CoValue multiple times in your app, Jazz will only fetch it once. That means you don’t need to deeply load a CoValue *just in case* a child component might need its data, and you don’t have to worry about tracking every possible field your app needs in a top-level query. Instead, pass the CoValue ID to the child component and subscribe there&hairsp;—&hairsp;Jazz will only load what that component actually needs.
+  Jazz automatically deduplicates loading. If you subscribe to the same CoValue multiple times in your app, Jazz will only fetch it once. That means you don't need to deeply load a CoValue *just in case* you might need the data somewhere else in your app, and you don't have to worry about tracking every possible field your app needs in a top-level query. Instead, pass the CoValue ID to the child component and subscribe there&hairsp;—&hairsp;Jazz will only load what that component actually needs.
 </Alert>
 
-## Subscription Hooks
+## Subscribing to changes
 
-On your front-end, using a subscription hook is the easiest way to manage your subscriptions. The subscription and related clean-up is handled automatically, and you can use your data like any other piece of state in your app.
+If you have a CoValue's ID, you can subscribe to it anywhere in your code using `CoValue.subscribe()`.
 
-### Subscribe to CoValues
-<ContentByFramework framework={["react", "react-native", "react-native-expo"]}>
-The `useCoState` hook allows you to reactively subscribe to CoValues in your React components. It will subscribe to updates when the component mounts and unsubscribe when it unmounts, ensuring your UI stays in sync and avoiding memory leaks.
-</ContentByFramework>
-<ContentByFramework framework="svelte">
-The `CoState` class allows you to reactively subscribe to CoValues in your Svelte components. It will subscribe to updates when the component mounts and unsubscribe when it unmounts, ensuring your UI stays in sync and avoiding memory leaks.
-</ContentByFramework>
 
-<TabbedCodeGroup id="usecostate" default="react" savedPreferenceKey="framework">
-<TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-```tsx ProjectView.tsx#Basic
+<CodeGroup preferWrap>
+```ts core-concepts/subscription-and-loading/index.ts#ManualSubscription
 ```
-</TabbedCodeGroupItem>
-<TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
-```svelte ProjectView.svelte
-```
-</TabbedCodeGroupItem>
-</TabbedCodeGroup>
-**Note:** If you don't need to load a CoValue's references, you can choose to load it *shallowly* by omitting the resolve query.
+</CodeGroup>
 
-### Subscribe to the current user's account
+You can also subscribe to an existing CoValue instance using the `$jazz.subscribe` method.
 
-<ContentByFramework framework="react">
-`useAccount` is similar to `useCoState`, but it returns the current user's account. You can use this at the top level of your app to subscribe to the current user's [account profile and root](/docs/core-concepts/schemas/accounts-and-migrations#covalues-as-a-graph-of-data-rooted-in-accounts).
-</ContentByFramework>
-<ContentByFramework framework="svelte">
-`AccountCoState` is similar to `CoState`, but it returns the current user's account. You can use this at the top level of your app to subscribe to the current user's [account profile and root](/docs/core-concepts/schemas/accounts-and-migrations#covalues-as-a-graph-of-data-rooted-in-accounts).
-</ContentByFramework>
-
-<TabbedCodeGroup id="useaccount" default="react" savedPreferenceKey="framework">
-<TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-```tsx ProjectList.tsx
+<CodeGroup preferWrap>
+```ts core-concepts/subscription-and-loading/index.ts#SubscriptionInstanceMethod
 ```
-</TabbedCodeGroupItem>
-<TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
-```svelte ProjectList.svelte
-```
-</TabbedCodeGroupItem>
-</TabbedCodeGroup>
+</CodeGroup>
 
 ### Loading States
 
@@ -89,20 +62,20 @@ This is particularly the case when working with [CoMaps](/docs/core-concepts/cov
 A `resolve` query tells Jazz how deeply to load data for your app to use. We can use `true` to tell Jazz to shallowly load the tasks list here. Note that this does *not* cause the tasks themselves to load, just the CoList that holds the tasks.
 
 <CodeGroup>
-```ts ResolveQueries.ts#Basic
+```ts core-concepts/subscription-and-loading/ResolveQueries.ts#Basic
 ```
 </CodeGroup>
 
 We can use an `$each` expression to tell Jazz to load the items in a list.
 
 <CodeGroup>
-```ts ResolveQueries.ts#Each
+```ts core-concepts/subscription-and-loading/ResolveQueries.ts#Each
 ```
 </CodeGroup>
 We can also build a query that *deeply resolves* to multiple levels:
 
 <CodeGroup>
-```ts ResolveQueries.ts#Deep
+```ts core-concepts/subscription-and-loading/ResolveQueries.ts#Deep
 ```
 </CodeGroup>
 
@@ -114,21 +87,7 @@ Expecting data to be there which is not explicitly included in your `resolve` qu
 
 ### Where To Use Resolve Queries
 
-The syntax for resolve queries is shared throughout Jazz. As well as using them in `load` and `subscribe` method calls, you can pass a resolve query to a front-end hook.
-
-<TabbedCodeGroup id="resolve" default="react" savedPreferenceKey="framework">
-<TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-```tsx ProjectView.tsx#ShallowLoad
-
-```
-</TabbedCodeGroupItem>
-<TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
-```svelte ShallowLoad.svelte
-```
-</TabbedCodeGroupItem>
-</TabbedCodeGroup>
-
-You can also specify resolve queries at the schema level, using the `.resolved()` method. These queries will be used when loading CoValues from that schema (if no resolve query is provided by the user) and in types defined with [co.loaded](/docs/core-concepts/subscription-and-loading#type-safety-with-coloaded).
+The syntax for resolve queries is shared throughout Jazz. As well as using them in `load` and `subscribe` method calls, you can also specify resolve queries at the schema level, using the `.resolved()` method. These queries will be used when loading CoValues from that schema (if no resolve query is provided by the user) and in types defined with [co.loaded](/docs/core-concepts/subscription-and-loading#type-safety-with-coloaded).
 <CodeGroup>
 ```ts
 const TaskWithDescription = Task.resolved({
@@ -154,21 +113,21 @@ project.tasks[0].description; // CoPlainText
 A load operation will be successful **only** if all references requested (both optional and required) could be successfully loaded. If any reference cannot be loaded, the entire load operation will return a not-loaded CoValue to avoid potential inconsistencies.
 
 <CodeGroup preferWrap>
-```ts ResolveQueries.ts#Unauthorized
+```ts core-concepts/subscription-and-loading/ResolveQueries.ts#Unauthorized
 ```
 </CodeGroup>
 
 This is also true if **any** element of a list is inaccessible, even if all the others can be loaded.
 
 <CodeGroup preferWrap>
-```ts ResolveQueries.ts#NoCatch
+```ts core-concepts/subscription-and-loading/ResolveQueries.ts#NoCatch
 ```
 </CodeGroup>
 
 Loading will be successful if all requested references are loaded. Non-requested references may or may not be available.
 
 <CodeGroup preferWrap>
-```ts ResolveQueries.ts#ShallowNoCatch
+```ts core-concepts/subscription-and-loading/ResolveQueries.ts#ShallowNoCatch
 ```
 </CodeGroup>
 
@@ -209,7 +168,7 @@ For example, in case of a `project` (which the user can access) with three `task
 
 If some of your list items may not be accessible, you can skip loading them by specifying `$onError: 'catch'`. Inaccessible items will be not-loaded CoValues, while accessible items load properly.
 <CodeGroup preferWrap>
-```ts ResolveQueries.ts#SkipInaccessible
+```ts core-concepts/subscription-and-loading/ResolveQueries.ts#SkipInaccessible
 ```
 </CodeGroup>
 #### Scenario 2: Handling Inaccessible Nested References
@@ -219,13 +178,13 @@ An `$onError` applies only in the block where it's defined. If you need to handl
 This load will fail, because the `$onError` is defined only for the `task.description`, not for failures in loading the `task` itself.
 
 <CodeGroup preferWrap>
-```ts ResolveQueries.ts#NestedInaccessible
+```ts core-concepts/subscription-and-loading/ResolveQueries.ts#NestedInaccessible
 ```
 </CodeGroup>
 We can fix this by adding handlers at both levels
 
 <CodeGroup preferWrap>
-```ts ResolveQueries.ts#MultipleCatch
+```ts core-concepts/subscription-and-loading/ResolveQueries.ts#MultipleCatch
 ```
 </CodeGroup>
 
@@ -234,87 +193,31 @@ We can fix this by adding handlers at both levels
 You can tell your application how deeply your data is loaded by using the `co.loaded` type.
 
 The `co.loaded` type is especially useful when passing data between components, because it allows TypeScript to check at compile time whether data your application depends is properly loaded. The second argument lets you pass a `resolve` query to specify how deeply your data is loaded.
-
+ 
 <TabbedCodeGroup id="coloaded" default="react" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="Vanilla" value="vanilla" icon={<VanillaLogo />} preferWrap>
 ```ts core-concepts/subscription-and-loading/vanilla.ts
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-```tsx TaskList.tsx
+```tsx core-concepts/subscription-and-loading/TaskList.tsx 
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
-```svelte TaskList.svelte
+```svelte core-concepts/subscription-and-loading/TaskList.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
 
 You can pass a `resolve` query of any complexity to `co.loaded`.
 
-## Manual subscriptions
-
-If you have a CoValue's ID, you can subscribe to it anywhere in your code using `CoValue.subscribe()`.
-
-**Note:** Manual subscriptions are best suited for vanilla JavaScript&hairsp;—&hairsp;for example in server-side code or tests. Inside front-end components, we recommend using a subscription hook.
-
-<CodeGroup preferWrap>
-```ts index.ts#ManualSubscription
-```
-</CodeGroup>
-
-You can also subscribe to an existing CoValue instance using the `$jazz.subscribe` method.
-
-<CodeGroup preferWrap>
-```ts index.ts#SubscriptionInstanceMethod
-```
-</CodeGroup>
-
-<ContentByFramework framework={["react", "react-native", "react-native-expo"]}>
-
-## Selectors [!framework=react,react-native,react-native-expo]
-Sometimes, you only need to react to changes in specific parts of a CoValue. In those cases, you can provide a `select` function to specify what data you are interested in,
-and an optional `equalityFn` option to control re-renders.
-
-- `select`: extract the fields you care about
-- `equalityFn`: (optional) control when data should be considered equal
-
-<CodeGroup>
-```tsx ProjectView.tsx#Selector
-```
-</CodeGroup>
-
-By default, the return values of the select function will be compared using `Object.is`, but you can use the `equalityFn` to add your own logic.
-
-You can also use `useAccount` in the same way, to subscribe to only the changes in a user's account you are interested in.
-
-<CodeGroup>
-```tsx ProjectView.tsx#UseAccountWithSelector
-```
-</CodeGroup>
-</ContentByFramework>
-
-### Avoiding Expensive Selectors
-
-Selector functions optimise re-renders by only updating React state if the underlying CoValue has changed in a way that you care about. 
-  
-However, the selector function itself still runs on every CoValue update, even if your `equalityFn` returns `true` and your component does not re-render. Because of this, you should **avoid doing expensive computation inside a selector**.
-
-For expensive operations, use a lightweight selector which only tracks the minimum necessary to identify when the dependencies change, and run the expensive operations separately, wrapped in a `useMemo` hook. 
-
-This way, React can [batch state updates efficiently](https://react.dev/learn/queueing-a-series-of-state-updates) and only recompute the expensive memoised operation if the dependencies have changed.
-
-<CodeGroup>
-```tsx ProjectView.tsx#ExpensiveSelector
-```
-</CodeGroup>
 
 ## Ensuring data is loaded
 
 In most cases, you'll have specified the depth of data you need in a `resolve` query when you first load or subscribe to a CoValue. However, sometimes you might have a CoValue instance which is not loaded deeply enough, or you're not sure how deeply loaded it is. In this case, you need to make sure data is loaded before proceeding with an operation. The `$jazz.ensureLoaded` method lets you guarantee that a CoValue and its referenced data are loaded to a specific depth (i.e. with nested references resolved):
 
 <CodeGroup preferWrap>
-```ts index.ts#EnsureLoaded
+```ts core-concepts/subscription-and-loading/index.ts#EnsureLoaded
 ```
 </CodeGroup>
 

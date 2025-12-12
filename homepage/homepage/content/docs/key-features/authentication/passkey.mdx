@@ -2,7 +2,7 @@ export const metadata = {
   description: "Passkey authentication is fully local-first and the most secure of the auth methods that Jazz provides because keys are managed by the device/operating system itself."
 };
 
-import { TabbedCodeGroup, TabbedCodeGroupItem, ContentByFramework, ReactLogo, SvelteLogo } from "@/components/forMdx";
+import { TabbedCodeGroup, TabbedCodeGroupItem, ContentByFramework, ReactLogo, SvelteLogo, VanillaLogo } from "@/components/forMdx";
 
 # Passkey Authentication
 
@@ -25,6 +25,10 @@ Passkey authentication is based on the [Web Authentication API](https://develope
 Using passkeys in Jazz is as easy as this:
 
 <TabbedCodeGroup default="react" savedPreferenceKey="framework" id="use-passkey-auth">
+  <TabbedCodeGroupItem icon={<VanillaLogo />} label="Vanilla" value="vanilla" preferWrap>
+  ```ts AuthModal.ts
+  ```
+  </TabbedCodeGroupItem>
 <TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
 ```tsx AuthModal.tsx#Basic
 ```

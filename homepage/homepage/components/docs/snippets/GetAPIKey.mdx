@@ -1,8 +1,11 @@
-import { ContentByFramework, FileName, ReactLogo, SvelteLogo, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
+import { ContentByFramework, FileName, ReactLogo, SvelteLogo, TabbedCodeGroup, TabbedCodeGroupItem, VanillaLogo } from "@/components/forMdx";
 
 Sign up for a free API key at [dashboard.jazz.tools](https://dashboard.jazz.tools) for higher limits or production use, or use your email address as a temporary key to get started quickly.
 
 <div style={{display: props.hideFileName ? 'none' : ''}}>
+<ContentByFramework framework="vanilla">
+    <FileName>.env</FileName>
+  </ContentByFramework>
   <ContentByFramework framework="react">
     <FileName>.env</FileName>
   </ContentByFramework>
@@ -12,6 +15,11 @@ Sign up for a free API key at [dashboard.jazz.tools](https://dashboard.jazz.tool
 </div>
 
 <TabbedCodeGroup default="react" savedPreferenceKey="framework" id="get-api-key" style={{display: props.hideCodeGroup ? 'none' : ''}}>
+<TabbedCodeGroupItem label="Vanilla" value="vanilla" icon={<VanillaLogo />} preferWrap>
+    ```bash
+    VITE_JAZZ_API_KEY="you@example.com" # or your API key
+    ```
+  </TabbedCodeGroupItem>
   <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
     ```bash
     NEXT_PUBLIC_JAZZ_API_KEY="you@example.com" # or your API key
