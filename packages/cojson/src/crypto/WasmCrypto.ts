@@ -1,6 +1,7 @@
 import {
   SessionLog,
   initialize,
+  initializeSync,
   Blake3Hasher,
   blake3HashOnce,
   blake3HashOnceWithContext,
@@ -44,6 +45,7 @@ import {
 type Blake3State = Blake3Hasher;
 
 let wasmInit = initialize;
+let wasmInitSync = initializeSync;
 /**
  * WebAssembly implementation of the CryptoProvider interface using cojson-core-wasm.
  * This provides the primary implementation using WebAssembly for optimal performance, offering:
@@ -59,6 +61,22 @@ export class WasmCrypto extends CryptoProvider<Blake3State> {
 
   static setInit(value: typeof initialize) {
     wasmInit = value;
+  }
+
+  static setInitSync(value: typeof initializeSync) {
+    wasmInitSync = value;
+  }
+
+  static createSync(): WasmCrypto {
+    try {
+      wasmInitSync();
+    } catch (e) {
+      throw new Error(
+        "Failed to initialize WasmCrypto. WebAssembly is required for crypto operations on web platforms.",
+        { cause: e },
+      );
+    }
+    return new WasmCrypto();
   }
 
   static async create(): Promise<WasmCrypto> {
