@@ -10,7 +10,7 @@
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write"
   },
-  "packageManager": "pnpm@9.1.4",
+  "packageManager": "pnpm@10.16.1",
   "dependencies": {
     "@icons-pack/react-simple-icons": "^9.1.0",
     "@mdx-js/loader": "^2.3.0",
@@ -26,7 +26,7 @@
     "mdast-util-from-markdown": "^2.0.0",
     "mdast-util-mdx": "^3.0.0",
     "micromark-extension-mdxjs": "^3.0.0",
-    "next": "15.2.1",
+    "next": "15.5.8",
     "next-themes": "^0.2.1",
     "react": "catalog:react",
     "react-dom": "catalog:react",

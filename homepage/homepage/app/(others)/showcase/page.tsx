@@ -4,12 +4,13 @@ import { ContactForm } from "@/components/ContactForm";
 import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";
+import { H2 } from "@garden-co/design-system/src/components/atoms/Headings";
 
 const metaTags = {
   title: "Built with Jazz",
-  description: "Great apps by smart people.",
-  url:  "https://jazz.tools",
-}
+  description: "Successful adopters across diverse industries.",
+  url: "https://jazz.tools",
+};
 
 export const metadata: Metadata = {
   title: metaTags.title,
@@ -32,30 +33,38 @@ export default function Page() {
     <div className="container flex flex-col gap-6 pb-10 lg:pb-20">
       <HeroHeader
         title="Built with Jazz"
-        slogan="Great apps by smart people."
+        slogan="Successful apps and systems across diverse industries."
       />
 
-      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-8">
+      <div className="flex flex-col gap-8 divide-y">
         {products.map((product) => (
-          <Link
-            href={product.url}
+          <div
             key={product.url}
-            className="group border bg-stone-50 shadow-xs p-3 flex flex-col gap-3 rounded-lg md:gap-4 dark:bg-stone-950"
+            className="group flex flex-col gap-3 rounded-lg rounded-b-none pb-8 dark:bg-stone-950 md:flex-row md:gap-4"
           >
-            <Image
-              className="rounded-md border dark:border-0"
-              src={product.imageUrl}
-              width="900"
-              height="675"
-              alt=""
-            />
-            <div className="flex flex-col gap-2">
-              <h2 className="font-medium text-highlight leading-none">
+            <Link href={product.url} className="">
+              <Image
+                className="max-w-[calc(min(100%,32rem))] flex-1 rounded-md border dark:border-0"
+                src={product.imageUrl}
+                width="900"
+                height="675"
+                alt=""
+              />
+            </Link>
+
+            <div className="flex-2 flex min-w-[calc(min(100%,32rem))] flex-col gap-2">
+              <H2 className="font-medium leading-none text-highlight">
                 {product.name}
-              </h2>
+              </H2>
+              <Link
+                href={product.url}
+                className="text-lg text-stone-500 underline dark:text-stone-400"
+              >
+                {product.url.replace("https://", "")}
+              </Link>
               <p className="text-sm">{product.description}</p>
             </div>
-          </Link>
+          </div>
         ))}
       </div>
 

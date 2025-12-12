@@ -78,6 +78,62 @@
         "!.turbo/**"
       ]
     },
+    "build:rn": {
+      "env": ["ANDROID_NDK_LATEST_HOME"],
+      "outputs": [
+        "index.js",
+        "CojsonCoreRnFramework.xcframework",
+        "android/src/main/jniLibs/**",
+        "ios/**",
+        "cpp/generated/**"
+      ],
+      "inputs": [
+        "src/**",
+        "rust/**",
+        "cpp/**",
+        "ios/**",
+        "android/**",
+        "package.json",
+        "ubrn.config.yaml",
+        "tsconfig*.json",
+        "*.config.*"
+      ]
+    },
+    "build:rn:android": {
+      "env": ["ANDROID_NDK_LATEST_HOME"],
+      "outputs": ["android/src/main/jniLibs/**"],
+      "inputs": [
+        "android/**",
+        "package.json",
+        "ubrn.config.yaml",
+        "tsconfig*.json",
+        "*.config.*",
+        "!node_modules/**",
+        "!*.node",
+        "!dist/**",
+        "!index.d.ts",
+        "!index.js",
+        "!npm/**/*.node",
+        "!.turbo/**"
+      ]
+    },
+    "build:rn:ios": {
+      "outputs": ["ios/**"],
+      "inputs": [
+        "ios/**",
+        "package.json",
+        "ubrn.config.yaml",
+        "tsconfig*.json",
+        "*.config.*",
+        "!node_modules/**",
+        "!*.node",
+        "!dist/**",
+        "!index.d.ts",
+        "!index.js",
+        "!npm/**/*.node",
+        "!.turbo/**"
+      ]
+    },
     "dev": {
       "cache": false,
       "persistent": true,

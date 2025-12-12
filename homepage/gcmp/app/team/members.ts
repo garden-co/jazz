@@ -43,14 +43,6 @@ export const team: Array<TeamMember> = [
     image: "gio.jpg",
   },
   {
-    name: "Meg Culotta",
-    slug: "meg",
-    titles: ["Technical Project Manager", "QA"],
-    location: "Minneapolis, US",
-    github: "mculotta120",
-    image: "meg.jpg",
-  },
-  {
     name: "Nikita Voloboev",
     slug: "nikita",
     location: "Barcelona, Spain",
@@ -59,18 +51,6 @@ export const team: Array<TeamMember> = [
     github: "nikitavoloboev",
     website: "https://nikiv.dev",
     image: "nikita.jpg",
-  },
-  {
-    name: "Divya S",
-    slug: "div",
-    location: "New York, US",
-    titles: ["Platform Engineer"],
-    x: "shortdiv",
-    github: "shortdiv",
-    website: "https://shortdiv.com",
-    bluesky: "shortdiv.bsky.social",
-    linkedin: "shortdiv",
-    image: "div.jpg",
   },
   {
     name: "Nico Rainhart",

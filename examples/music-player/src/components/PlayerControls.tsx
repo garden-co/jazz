@@ -15,7 +15,7 @@ export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
 
   const activePlaylistTitle = useAccountSelector({
     select: (me) =>
-      me.$isLoaded && me.root.activePlaylist?.$isLoaded
+      me.root.activePlaylist?.$isLoaded
         ? (me.root.activePlaylist.title ?? "All tracks")
         : "All tracks",
   });

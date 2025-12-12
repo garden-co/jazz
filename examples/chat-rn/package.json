@@ -2,6 +2,7 @@
   "name": "chat-rn",
   "private": true,
   "main": "index.js",
+  "packageManager": "pnpm@10.16.1",
   "scripts": {
     "android": "react-native run-android",
     "ios": "react-native run-ios",
@@ -28,7 +29,8 @@
     "react-native-safe-area-context": "5.5.0",
     "react-native-screens": "4.18.0",
     "react-native-url-polyfill": "^3.0.0",
-    "readable-stream": "4.7.0"
+    "readable-stream": "4.7.0",
+    "cojson-core-rn": "workspace:*"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
@@ -42,8 +44,8 @@
     "@react-native/eslint-config": "catalog:rn",
     "@react-native/metro-config": "catalog:rn",
     "@react-native/typescript-config": "catalog:rn",
-    "@rnx-kit/metro-config": "^2.0.1",
-    "@rnx-kit/metro-resolver-symlinks": "^0.2.5",
+    "@rnx-kit/metro-config": "^2.2.1",
+    "@rnx-kit/metro-resolver-symlinks": "^0.2.6",
     "@types/react": "catalog:rn",
     "eslint": "^8.19.0",
     "pod-install": "^0.3.5",

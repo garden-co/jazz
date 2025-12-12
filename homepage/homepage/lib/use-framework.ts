@@ -5,7 +5,7 @@ import {
   isValidFramework,
 } from "@/content/framework";
 import { useParams, usePathname, useRouter } from "next/navigation";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useLayoutEffect, useState, useCallback } from "react";
 import {
   TAB_CHANGE_EVENT,
   isFrameworkChange,
@@ -15,6 +15,9 @@ import {
 let isRedirecting = false;
 let userInitiatedChange = false;
 let lastRedirectedFramework: Framework | null = null;
+let lastWindowScrollY = 0;
+let shouldRestoreScroll = false;
+let resetScrollRestorationTimeout: ReturnType<typeof setTimeout> | null = null;
 
 /* 
  * This hook does the following:
@@ -57,6 +60,17 @@ export const useFramework = () => {
 
   const urlFramework = framework && isValidFramework(framework) ? framework : null;
 
+  // Restore window scroll position after framework change
+  useLayoutEffect(() => {
+    if (shouldRestoreScroll && typeof window !== "undefined" && lastWindowScrollY > 0) {
+      // Single, precise scroll restoration
+      const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+      const scrollY = Math.min(lastWindowScrollY, maxScroll);
+      window.scrollTo({ top: scrollY, behavior: 'instant' });
+      shouldRestoreScroll = false;
+    }
+  }, [pathname, urlFramework]);
+
   useEffect(() => {
     const handleTabChange = (event: CustomEvent) => {
       if (isFrameworkChange(event.detail)) {
@@ -74,7 +88,9 @@ export const useFramework = () => {
 
 
   useEffect(() => {
-    if (!pathname.startsWith("/docs") || isRedirecting) return;
+    if (!pathname.startsWith("/docs") || isRedirecting) {
+      return;
+    }
 
     // Trigger this block only once after the user changes framework to update
     // to match user's choice
@@ -89,13 +105,46 @@ export const useFramework = () => {
       const newPath = parts.join("/");
       lastRedirectedFramework = savedFramework;
 
+      // Capture scroll position before route change
+      if (typeof window !== "undefined") {
+        lastWindowScrollY = window.scrollY;
+        shouldRestoreScroll = true;
+        // Set scroll restoration to manual and debounce reset to auto
+        try {
+          if ('scrollRestoration' in window.history) {
+            // Clear any existing reset timeout
+            if (resetScrollRestorationTimeout) {
+              clearTimeout(resetScrollRestorationTimeout);
+              resetScrollRestorationTimeout = null;
+            }
+            // Set to manual (only if not already manual to avoid unnecessary API calls)
+            if (window.history.scrollRestoration !== 'manual') {
+              window.history.scrollRestoration = 'manual';
+            }
+            // Debounce reset to auto after 3 seconds of inactivity
+            resetScrollRestorationTimeout = setTimeout(() => {
+              try {
+                if ('scrollRestoration' in window.history) {
+                  window.history.scrollRestoration = 'auto';
+                }
+              } catch (e) {
+                // Ignore security errors
+              }
+              resetScrollRestorationTimeout = null;
+            }, 3000);
+          }
+        } catch (e) {
+          // Ignore security errors when setting scrollRestoration
+        }
+      }
+
       isRedirecting = true;
       router.replace(newPath, { scroll: false });
 
       const timeout = setTimeout(() => {
         isRedirecting = false;
         lastRedirectedFramework = null;
-      }, 200);
+      }, 500); // Increased timeout to prevent rapid successive calls
 
       return () => {
         clearTimeout(timeout);
@@ -126,6 +175,40 @@ export const useFramework = () => {
     parts[2] = savedFramework || DEFAULT_FRAMEWORK;
     const newPath = parts.join("/");
 
+    // Capture scroll position before route change (only if this is a framework change, not initial load)
+    // Only capture if we're already on a docs page (not initial load)
+    if (typeof window !== "undefined" && pathname.startsWith("/docs/") && window.scrollY > 0) {
+      lastWindowScrollY = window.scrollY;
+      shouldRestoreScroll = true;
+      // Set scroll restoration to manual and debounce reset to auto
+      try {
+        if ('scrollRestoration' in window.history) {
+          // Clear any existing reset timeout
+          if (resetScrollRestorationTimeout) {
+            clearTimeout(resetScrollRestorationTimeout);
+            resetScrollRestorationTimeout = null;
+          }
+          // Set to manual (only if not already manual to avoid unnecessary API calls)
+          if (window.history.scrollRestoration !== 'manual') {
+            window.history.scrollRestoration = 'manual';
+          }
+          // Debounce reset to auto after 3 seconds of inactivity
+          resetScrollRestorationTimeout = setTimeout(() => {
+            try {
+              if ('scrollRestoration' in window.history) {
+                window.history.scrollRestoration = 'auto';
+              }
+            } catch (e) {
+              // Ignore security errors
+            }
+            resetScrollRestorationTimeout = null;
+          }, 3000);
+        }
+      } catch (e) {
+        // Ignore security errors when setting scrollRestoration
+      }
+    }
+
     // Tell everyone not to trigger cascading updates
     isRedirecting = true;
     // and update the URL
@@ -135,7 +218,7 @@ export const useFramework = () => {
     // again
     const timeout = setTimeout(() => {
       isRedirecting = false;
-    }, 200);
+    }, 500); // Increased timeout to prevent rapid successive calls
 
     // Clean up
     return () => {

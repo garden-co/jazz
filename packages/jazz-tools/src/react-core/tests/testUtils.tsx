@@ -4,9 +4,12 @@ import {
   render,
   renderHook,
 } from "@testing-library/react";
-import { Account, AnonymousJazzAgent, AuthSecretStorage } from "jazz-tools";
+import { Account, AnonymousJazzAgent } from "jazz-tools";
 import React from "react";
 import { JazzTestProvider } from "../testing.js";
+import { getSqliteStorageAsync, SQLiteDatabaseDriverAsync } from "cojson";
+import Database, { type Database as DatabaseT } from "libsql";
+import { onTestFinished } from "vitest";
 
 type JazzExtendedOptions = {
   account?: Account | { guest: AnonymousJazzAgent };
@@ -23,12 +26,16 @@ const customRender = (
         account={options.account}
         isAuthenticated={options.isAuthenticated}
       >
-        {children}
+        {options.wrapper ? (
+          <options.wrapper>{children}</options.wrapper>
+        ) : (
+          children
+        )}
       </JazzTestProvider>
     );
   };
 
-  return render(ui, { wrapper: AllTheProviders, ...options });
+  return render(ui, { ...options, wrapper: AllTheProviders });
 };
 
 const customRenderHook = <TProps, TResult>(
@@ -41,12 +48,16 @@ const customRenderHook = <TProps, TResult>(
         account={options.account}
         isAuthenticated={options.isAuthenticated}
       >
-        {children}
+        {options.wrapper ? (
+          <options.wrapper>{children}</options.wrapper>
+        ) : (
+          children
+        )}
       </JazzTestProvider>
     );
   };
 
-  return renderHook(callback, { wrapper: AllTheProviders, ...options });
+  return renderHook(callback, { ...options, wrapper: AllTheProviders });
 };
 
 // re-export everything
@@ -55,3 +66,54 @@ export * from "@testing-library/react";
 // override render method
 export { customRender as render };
 export { customRenderHook as renderHook };
+
+class LibSQLSqliteAsyncDriver implements SQLiteDatabaseDriverAsync {
+  private readonly db: DatabaseT;
+
+  constructor(filename: string) {
+    this.db = new Database(filename, {});
+  }
+
+  async initialize() {
+    await this.db.pragma("journal_mode = WAL");
+  }
+
+  async run(sql: string, params: unknown[]) {
+    this.db.prepare(sql).run(params);
+  }
+
+  async query<T>(sql: string, params: unknown[]): Promise<T[]> {
+    return this.db.prepare(sql).all(params) as T[];
+  }
+
+  async get<T>(sql: string, params: unknown[]): Promise<T | undefined> {
+    return this.db.prepare(sql).get(params) as T | undefined;
+  }
+
+  async transaction(callback: () => unknown) {
+    await this.run("BEGIN TRANSACTION", []);
+
+    try {
+      await callback();
+      await this.run("COMMIT", []);
+    } catch (error) {
+      await this.run("ROLLBACK", []);
+    }
+  }
+
+  async closeDb() {
+    this.db.close();
+  }
+}
+
+export async function createAsyncStorage() {
+  const storage = await getSqliteStorageAsync(
+    new LibSQLSqliteAsyncDriver(":memory:"),
+  );
+
+  onTestFinished(() => {
+    storage.close();
+  });
+
+  return storage;
+}
