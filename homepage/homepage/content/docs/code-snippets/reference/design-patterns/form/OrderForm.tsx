@@ -1,22 +1,31 @@
-// #region OrderForm
 import { co } from "jazz-tools";
 import { BubbleTeaOrder, PartialBubbleTeaOrder } from "./schema";
+import {
+  Button,
+  TextInput,
+  View,
+  Text,
+  GestureResponderEvent,
+} from "react-native";
 
+// #region OrderForm
 export function OrderForm({
   order,
   onSave,
 }: {
-  order: BubbleTeaOrder | PartialBubbleTeaOrder;
-  onSave?: (e: React.FormEvent<HTMLFormElement>) => void;
+  order:
+    | co.loaded<typeof BubbleTeaOrder>
+    | co.loaded<typeof PartialBubbleTeaOrder>;
+  onSave?: (evt: React.FormEvent<HTMLFormElement>) => void;
 }) {
   return (
-    <form onSubmit={onSave || ((e) => e.preventDefault())}>
+    <form onSubmit={onSave || ((evt) => evt.preventDefault())}>
       <label>
         Name
         <input
           type="text"
           value={order.name}
-          onChange={(e) => order.$jazz.set("name", e.target.value)}
+          onChange={(evt) => order.$jazz.set("name", evt.target.value)}
           required
         />
       </label>
@@ -26,7 +35,32 @@ export function OrderForm({
   );
 }
 // #endregion
+
+// #region OrderFormRN
+export function OrderFormComponent({
+  order,
+  onSave,
+}: {
+  order:
+    | co.loaded<typeof BubbleTeaOrder>
+    | co.loaded<typeof PartialBubbleTeaOrder>;
+  onSave?: (evt: GestureResponderEvent) => void;
+}) {
+  return (
+    <View>
+      <Text>Name</Text>
+      <TextInput
+        value={order.name}
+        onChangeText={(v) => order.$jazz.set("name", v)}
+      />
+      {onSave && <Button onPress={onSave} title="Submit" />}
+    </View>
+  );
+}
+// #endregion
+
 import { useAccount, useCoState } from "jazz-tools/react";
+
 // #region EditForm
 export function EditOrder(props: { id: string }) {
   const order = useCoState(BubbleTeaOrder, props.id);
@@ -54,7 +88,7 @@ export function CreateOrder(props: { id: string }) {
     // Convert to real order and add to the list
     // Note: the name field is marked as required in the form, so we can assume that has been set in this case
     // In a more complex form, you would need to validate the partial value before storing it
-    orders.$jazz.push(newOrder as BubbleTeaOrder);
+    orders.$jazz.push(newOrder as co.loaded<typeof BubbleTeaOrder>);
   };
 
   return <OrderForm order={newOrder} onSave={handleSave} />;
@@ -66,8 +100,7 @@ import { Group } from "jazz-tools";
 import { useState, useMemo } from "react";
 
 export function EditOrderWithSave(props: { id: string }) {
-  // Create a new group for the branch, so that every time we open the edit page,
-  // we create a new private branch
+  // Make sure we always create a new branch—see note below
   const owner = useMemo(() => Group.create(), []);
 
   const order = useCoState(BubbleTeaOrder, props.id, {
