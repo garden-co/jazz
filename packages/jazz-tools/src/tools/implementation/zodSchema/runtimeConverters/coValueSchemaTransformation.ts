@@ -20,6 +20,7 @@ import {
   isCoValueClass,
   Group,
   CoVector,
+  SchemaInit,
 } from "../../../internal.js";
 import { coField } from "../../schema.js";
 
@@ -105,12 +106,9 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
   } else if (schema.builtin === "CoList") {
     const element = schema.element;
     const coValueClass = class ZCoList extends CoList {
-      constructor(options: { fromRaw: RawCoList } | undefined) {
-        super(options);
-        (this as any)[coField.items] = schemaFieldToCoFieldDef(
-          element as SchemaField,
-        );
-      }
+      static itemSchema = schemaFieldToCoFieldDef(element as SchemaField)[
+        SchemaInit
+      ];
     };
 
     const coValueSchema = new CoListSchema(element, coValueClass as any);
