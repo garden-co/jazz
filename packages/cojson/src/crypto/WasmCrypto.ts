@@ -53,7 +53,7 @@ let wasmInit = initialize;
  * - Hashing (BLAKE3)
  */
 export class WasmCrypto extends CryptoProvider<Blake3State> {
-  constructor() {
+  protected constructor() {
     super();
   }
 
