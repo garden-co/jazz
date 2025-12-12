@@ -1,5 +1,6 @@
 import { Group } from "../../../coValues/group.js";
 import {
+  CoValueClass,
   ID,
   SubscribeListenerOptions,
   SubscribeRestArgs,
@@ -11,6 +12,11 @@ import {
   RefsToResolveStrict,
   Resolved,
   ResolveQuery,
+  loadCoValueWithoutMe,
+  parseSubscribeRestArgs,
+  subscribeToCoValueWithoutMe,
+  AnonymousJazzAgent,
+  co,
 } from "../../../internal.js";
 import { CoreCoValueSchema } from "./CoValueSchema.js";
 import { coOptionalDefiner } from "../zodCo.js";
@@ -42,24 +48,30 @@ export class GroupSchema implements CoreGroupSchema {
     return coOptionalDefiner(this);
   }
 
-  create(options?: { owner: Account } | Account) {
+  create(options?: { owner: Account } | Account): Group {
     return Group.create(options);
   }
 
   load<G extends Group, R extends ResolveQuery<GroupSchema>>(
     id: ID<G>,
     options?: {
-      loadAs?: Account;
+      loadAs?: Account | AnonymousJazzAgent;
       resolve?: RefsToResolveStrict<Group, R>;
     },
   ): Promise<Settled<Group>> {
-    return Group.load(id, options);
+    return loadCoValueWithoutMe(Group, id, options) as Promise<Settled<Group>>;
   }
-  createInvite<G extends Group>(
+  async createInvite<G extends Group>(
     id: ID<G>,
     options?: { role?: AccountRole; loadAs?: Account },
   ): Promise<InviteSecret> {
-    return Group.createInvite(id, options);
+    const group = await loadCoValueWithoutMe(Group, id, {
+      loadAs: options?.loadAs,
+    });
+    if (!group.$isLoaded) {
+      throw new Error(`Group with id ${id} not found`);
+    }
+    return group.$jazz.createInvite(options?.role ?? "reader");
   }
   subscribe<G extends Group, const R extends RefsToResolve<G>>(
     id: ID<G>,
@@ -74,7 +86,12 @@ export class GroupSchema implements CoreGroupSchema {
     id: ID<G>,
     ...args: SubscribeRestArgs<G, R>
   ): () => void {
-    // @ts-expect-error
-    return Group.subscribe<G, R>(id, ...args);
+    const { options, listener } = parseSubscribeRestArgs(args);
+    return subscribeToCoValueWithoutMe(
+      Group as unknown as CoValueClass<G>,
+      id,
+      options,
+      listener as any,
+    );
   }
 }

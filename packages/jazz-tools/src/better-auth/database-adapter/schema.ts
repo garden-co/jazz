@@ -1,12 +1,12 @@
 import { BetterAuthDbSchema, FieldAttribute } from "better-auth/db";
-import { Group, co, z } from "jazz-tools";
+import { GroupSchema, co, z } from "jazz-tools";
 
 type TableRow = co.Map<any>;
 export type TableItem = co.loaded<TableRow>;
 
 type Table = co.List<TableRow>;
 export type Database = co.Map<{
-  group: typeof Group;
+  group: GroupSchema;
   tables: co.Map<{
     [key: string]: Table;
   }>;
@@ -33,7 +33,7 @@ export function createJazzSchema(schema: BetterAuthDbSchema): JazzSchema {
   const tablesSchema = generateSchemaFromBetterAuthSchema(schema);
 
   const DatabaseRoot: Database = co.map({
-    group: Group,
+    group: co.group(),
     tables: co.map(tablesSchema),
   });
 
@@ -58,7 +58,7 @@ export function createJazzSchema(schema: BetterAuthDbSchema): JazzSchema {
       if (!dbRoot.$isLoaded) {
         // Create a group for the first time
         // it will be the owner of the all tables and data
-        const adminGroup = Group.create({ owner: account });
+        const adminGroup = co.group().create({ owner: account });
         await DatabaseRoot.upsertUnique({
           value: {
             group: adminGroup,

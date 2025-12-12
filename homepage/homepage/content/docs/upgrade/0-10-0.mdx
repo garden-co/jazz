@@ -353,8 +353,8 @@ You can override the inherited role by passing a second argument to `extend`.
 This can be used to give users limited access to a child group:
 <CodeGroup>
 ```ts
-const organization = Group.create();
-const billing = Group.create();
+const organization = co.group().create();
+const billing = co.group().create();
 
 billing.extend(organization, "reader");
 ```

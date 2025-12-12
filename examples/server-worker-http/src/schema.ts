@@ -1,4 +1,4 @@
-import { Account, Group, co, z } from "jazz-tools";
+import { Account, co, z } from "jazz-tools";
 
 export const PlayerState = co.map({
   currentSelection: z.literal(["rock", "paper", "scissors"]).optional(),
@@ -9,7 +9,7 @@ export type PlayerState = co.loaded<typeof PlayerState>;
 
 export const PlaySelection = co.map({
   value: z.literal(["rock", "paper", "scissors"]),
-  group: Group,
+  group: co.group(),
 });
 export type PlaySelection = co.loaded<typeof PlaySelection>;
 
@@ -42,7 +42,7 @@ export function createGameState(params: {
   worker: Account;
 }) {
   const { account1, account2, worker } = params;
-  const gameGroup = Group.create({ owner: worker });
+  const gameGroup = co.group().create({ owner: worker });
   gameGroup.addMember(account1, "reader");
   gameGroup.addMember(account2, "reader");
 
@@ -60,7 +60,7 @@ export function createGameState(params: {
     gameGroup,
   );
 
-  const player1StateGroup = Group.create(worker);
+  const player1StateGroup = co.group().create(worker);
   player1StateGroup.addMember(account1, "writer");
 
   const player1State = PlayerState.create(
@@ -72,7 +72,7 @@ export function createGameState(params: {
     player1StateGroup,
   );
 
-  const player2StateGroup = Group.create(worker);
+  const player2StateGroup = co.group().create(worker);
   player2StateGroup.addMember(account2, "writer");
 
   const player2State = PlayerState.create(

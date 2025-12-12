@@ -1,6 +1,6 @@
 import React from "react";
 import { setup } from "goober";
-import { Account } from "jazz-tools";
+import { type Account, co } from "jazz-tools";
 import { createRoot } from "react-dom/client";
 import { InspectorInApp } from "./in-app.js";
 
@@ -15,7 +15,7 @@ export class JazzInspectorElement extends HTMLElement {
 
   loadAccount() {
     try {
-      const value = Account.getMe();
+      const value = co.account().getMe();
 
       if (value !== this.account) {
         this.account = value;

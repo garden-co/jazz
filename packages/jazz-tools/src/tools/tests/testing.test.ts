@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "vitest";
-import { Account, CoMap, Group, co, z } from "../exports";
+import { type Account, CoMap, type Group, co, z } from "../exports";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing";
 import { assertLoaded } from "./utils";
 
@@ -13,16 +13,17 @@ describe("Jazz Test Sync", () => {
     const account2 = await createJazzTestAccount();
 
     // Create a test group in account1
-    const group = Group.create(account1);
+    const group = co.group().create(account1);
     group.addMember("everyone", "reader");
 
-    const map = CoMap.create({}, group);
-    map.$jazz.raw.set("test", "value");
+    const TestMap = co.map({ test: z.string().optional() });
 
+    const map = TestMap.create({}, group);
+    map.$jazz.raw.set("test", "value");
     // Verify account2 can see the group
-    const loadedMap = await CoMap.load(map.$jazz.id, { loadAs: account2 });
+    const loadedMap = await TestMap.load(map.$jazz.id, { loadAs: account2 });
     assertLoaded(loadedMap);
-    expect(loadedMap.$jazz.raw.get("test")).toBe("value");
+    expect(loadedMap.test).toBe("value");
   });
 
   test("correctly set the globalMe before starting the migration", async () => {
@@ -78,7 +79,7 @@ describe("Jazz Test Sync", () => {
     expect(account1.root?.value).toBe("ok");
     expect(account2.root?.value).toBe("ok");
 
-    expect(Account.getMe()).toBe(account1);
+    expect(co.account().getMe()).toBe(account1);
   });
 
   test("throws when running multiple migrations in parallel", async () => {

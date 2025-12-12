@@ -9,9 +9,9 @@ import {
   test,
 } from "vitest";
 import {
-  Account,
-  FileStream,
-  Group,
+  type Account,
+  type FileStream,
+  type Group,
   co,
   isControlledAccount,
   z,
@@ -104,7 +104,7 @@ describe("Simple CoFeed operations", async () => {
   });
 
   test("Construction with a Group", () => {
-    const group = Group.create(me);
+    const group = co.group().create(me);
     const stream = TestStream.create(["milk"], group);
 
     expect(stream.perAccount[me.$jazz.id]?.value).toEqual("milk");
@@ -167,7 +167,7 @@ describe("CoFeed resolution", async () => {
       isCurrentActiveAccount: true,
     });
 
-    const group = Group.create(me);
+    const group = co.group().create(me);
     group.makePublic();
     const stream = TestStream.create(
       [
@@ -331,12 +331,12 @@ describe("CoFeed resolution", async () => {
 });
 
 describe("Simple FileStream operations", async () => {
-  const me = await Account.create({
+  const me = await co.account().create({
     creationProps: { name: "Hermes Puggington" },
     crypto: Crypto,
   });
 
-  const stream = FileStream.create({ owner: me });
+  const stream = co.fileStream().create({ owner: me });
 
   describe("FileStream", () => {
     test("Construction", () => {
@@ -407,9 +407,9 @@ describe("FileStream loading & Subscription", async () => {
       isCurrentActiveAccount: true,
     });
 
-    const group = Group.create(me);
+    const group = co.group().create(me);
     group.makePublic();
-    const stream = FileStream.create({ owner: group });
+    const stream = co.fileStream().create({ owner: group });
 
     stream.start({ mimeType: "text/plain" });
     stream.push(new Uint8Array([1, 2, 3]));
@@ -432,7 +432,7 @@ describe("FileStream loading & Subscription", async () => {
     const { stream } = await initNodeAndStream();
     const anotherAccount = await createJazzTestAccount();
 
-    const loadedStream = await FileStream.load(stream.$jazz.id, {
+    const loadedStream = await co.fileStream().load(stream.$jazz.id, {
       loadAs: anotherAccount,
     });
 
@@ -446,15 +446,15 @@ describe("FileStream loading & Subscription", async () => {
 
   test("Subscription", async () => {
     const { me } = await initNodeAndStream();
-    const group = Group.create(me);
+    const group = co.group().create(me);
     group.makePublic();
-    const stream = FileStream.create({ owner: group });
+    const stream = co.fileStream().create({ owner: group });
 
     const anotherAccount = await createJazzTestAccount();
 
     const queue = new Channel();
 
-    FileStream.subscribe(
+    co.fileStream().subscribe(
       stream.$jazz.id,
       { loadAs: anotherAccount },
       (subscribedStream) => {
@@ -512,13 +512,13 @@ describe("FileStream loading & Subscription", async () => {
 
   test("Subscription without options", async () => {
     const { me } = await initNodeAndStream();
-    const group = Group.create(me);
+    const group = co.group().create(me);
     group.makePublic();
-    const stream = FileStream.create({ owner: group });
+    const stream = co.fileStream().create({ owner: group });
 
     const queue = new Channel();
 
-    FileStream.subscribe(stream.$jazz.id, (subscribedStream) => {
+    co.fileStream().subscribe(stream.$jazz.id, (subscribedStream) => {
       void queue.push(subscribedStream);
     });
 
@@ -557,9 +557,9 @@ describe("FileStream.load", async () => {
       isCurrentActiveAccount: true,
     });
 
-    const group = Group.create(me);
+    const group = co.group().create(me);
     group.makePublic();
-    const stream = FileStream.create({ owner: group });
+    const stream = co.fileStream().create({ owner: group });
 
     stream.start({ mimeType: "text/plain" });
 
@@ -570,7 +570,7 @@ describe("FileStream.load", async () => {
     const { stream, me } = await setup();
     stream.push(new Uint8Array([1]));
 
-    const promise = FileStream.load(stream.$jazz.id, { loadAs: me });
+    const promise = co.fileStream().load(stream.$jazz.id, { loadAs: me });
 
     stream.push(new Uint8Array([2]));
     stream.end();
@@ -587,7 +587,7 @@ describe("FileStream.load", async () => {
     const { stream, me } = await setup();
     stream.push(new Uint8Array([1]));
 
-    const promise = FileStream.load(stream.$jazz.id, {
+    const promise = co.fileStream().load(stream.$jazz.id, {
       loadAs: me,
       allowUnfinished: true,
     });
@@ -605,12 +605,12 @@ describe("FileStream.load", async () => {
 
 describe("FileStream.loadAsBlob", async () => {
   async function setup() {
-    const me = await Account.create({
+    const me = await co.account().create({
       creationProps: { name: "Hermes Puggington" },
       crypto: Crypto,
     });
 
-    const stream = FileStream.create({ owner: me });
+    const stream = co.fileStream().create({ owner: me });
 
     stream.start({ mimeType: "text/plain" });
 
@@ -621,7 +621,7 @@ describe("FileStream.loadAsBlob", async () => {
     const { stream, me } = await setup();
     stream.push(new Uint8Array([1]));
 
-    const promise = FileStream.loadAsBlob(stream.$jazz.id, { loadAs: me });
+    const promise = co.fileStream().loadAsBlob(stream.$jazz.id, { loadAs: me });
 
     stream.push(new Uint8Array([2]));
     stream.end();
@@ -637,7 +637,7 @@ describe("FileStream.loadAsBlob", async () => {
     const { stream, me } = await setup();
     stream.push(new Uint8Array([1]));
 
-    const promise = FileStream.loadAsBlob(stream.$jazz.id, {
+    const promise = co.fileStream().loadAsBlob(stream.$jazz.id, {
       loadAs: me,
       allowUnfinished: true,
     });
@@ -655,12 +655,12 @@ describe("FileStream.loadAsBlob", async () => {
 
 describe("FileStream.loadAsBase64", async () => {
   async function setup() {
-    const me = await Account.create({
+    const me = await co.account().create({
       creationProps: { name: "Hermes Puggington" },
       crypto: Crypto,
     });
 
-    const stream = FileStream.create({ owner: me });
+    const stream = co.fileStream().create({ owner: me });
 
     stream.start({ mimeType: "text/plain" });
 
@@ -671,7 +671,9 @@ describe("FileStream.loadAsBase64", async () => {
     const { stream, me } = await setup();
     stream.push(new Uint8Array([1]));
 
-    const promise = FileStream.loadAsBase64(stream.$jazz.id, { loadAs: me });
+    const promise = co
+      .fileStream()
+      .loadAsBase64(stream.$jazz.id, { loadAs: me });
 
     stream.push(new Uint8Array([2]));
     stream.end();
@@ -687,7 +689,7 @@ describe("FileStream.loadAsBase64", async () => {
     const { stream, me } = await setup();
     stream.push(new Uint8Array([1]));
 
-    const promise = FileStream.loadAsBase64(stream.$jazz.id, {
+    const promise = co.fileStream().loadAsBase64(stream.$jazz.id, {
       loadAs: me,
       dataURL: true,
     });
@@ -706,7 +708,7 @@ describe("FileStream.loadAsBase64", async () => {
     const { stream, me } = await setup();
     stream.push(new Uint8Array([1]));
 
-    const promise = FileStream.loadAsBase64(stream.$jazz.id, {
+    const promise = co.fileStream().loadAsBase64(stream.$jazz.id, {
       loadAs: me,
       allowUnfinished: true,
     });
@@ -731,7 +733,7 @@ describe("FileStream progress tracking", async () => {
 
     // Collect progress updates
     const progressUpdates: number[] = [];
-    await FileStream.createFromBlob(testBlob, {
+    await co.fileStream().createFromBlob(testBlob, {
       onProgress: (progress) => progressUpdates.push(progress),
     });
 
@@ -758,8 +760,8 @@ describe("FileStream large file loading", async () => {
   test("load a large FileStream with allowUnfinished: true should return the loaded file before it's fully loaded", async () => {
     const syncServer = await setupJazzTestSync({ asyncPeers: true });
 
-    const group = Group.create(syncServer);
-    const largeStream = FileStream.create({ owner: group });
+    const group = co.group().create(syncServer);
+    const largeStream = co.fileStream().create({ owner: group });
     group.addMember("everyone", "reader");
 
     // Create a large file stream with multiple chunks
@@ -786,7 +788,7 @@ describe("FileStream large file loading", async () => {
     const alice = await createJazzTestAccount();
 
     // Test loading the large FileStream
-    const loadedStream = await FileStream.load(largeStream.$jazz.id, {
+    const loadedStream = await co.fileStream().load(largeStream.$jazz.id, {
       loadAs: alice,
       allowUnfinished: true,
     });
@@ -805,8 +807,8 @@ describe("FileStream large file loading", async () => {
   test("load a large FileStream with allowUnfinished: false should return the loaded file only when it's fully loaded", async () => {
     const syncServer = await setupJazzTestSync({ asyncPeers: true });
 
-    const group = Group.create(syncServer);
-    const largeStream = FileStream.create({ owner: group });
+    const group = co.group().create(syncServer);
+    const largeStream = co.fileStream().create({ owner: group });
     group.addMember("everyone", "reader");
 
     // Create a large file stream with multiple chunks
@@ -833,7 +835,7 @@ describe("FileStream large file loading", async () => {
     const alice = await createJazzTestAccount();
 
     // Test loading the large FileStream
-    const loadedStream = await FileStream.load(largeStream.$jazz.id, {
+    const loadedStream = await co.fileStream().load(largeStream.$jazz.id, {
       loadAs: alice,
       allowUnfinished: false,
     });
@@ -872,7 +874,7 @@ describe("waitForSync", async () => {
   test("FileStream: should resolve when the value is uploaded", async () => {
     const { clientNode, serverNode, clientAccount } = await setupTwoNodes();
 
-    const stream = FileStream.create({ owner: clientAccount });
+    const stream = co.fileStream().create({ owner: clientAccount });
 
     stream.start({ mimeType: "text/plain" });
     stream.push(new Uint8Array([2]));
@@ -893,7 +895,7 @@ describe("waitForSync", async () => {
       isCurrentActiveAccount: true,
     });
 
-    const stream = FileStream.create();
+    const stream = co.fileStream().create();
     expect(stream.$jazz.owner[TypeSym]).toEqual("Group");
     expect(stream.$jazz.owner.$jazz.raw.roleOf(account.$jazz.raw.id)).toEqual(
       "admin",

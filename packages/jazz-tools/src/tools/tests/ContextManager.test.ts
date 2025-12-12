@@ -2,10 +2,10 @@ import { StorageAPI } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { assert, beforeEach, describe, expect, test, vi } from "vitest";
 import {
-  Account,
+  type Account,
   AccountClass,
   AuthSecretStorage,
-  Group,
+  type Group,
   InMemoryKVStore,
   JazzAuthContext,
   KvStoreContext,
@@ -266,7 +266,7 @@ describe("ContextManager", () => {
             {
               value: "Hello",
             },
-            Group.create(this).makePublic(),
+            co.group().create(this).makePublic(),
           ),
         );
       });
@@ -676,7 +676,7 @@ describe("ContextManager", () => {
             "root",
             AccountRoot.create(
               { value: "Hello" },
-              Group.create(this).makePublic(),
+              co.group().create(this).makePublic(),
             ),
           );
         });

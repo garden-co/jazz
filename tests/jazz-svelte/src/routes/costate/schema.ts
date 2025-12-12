@@ -1,4 +1,4 @@
-import { co, Group, z } from "jazz-tools";
+import { co, type Group, z } from "jazz-tools";
 
 export const Dog = co.map({
   name: z.string(),
@@ -23,7 +23,7 @@ export const TestAccount = co
   })
   .withMigration((account) => {
     if (!account.$jazz.refs.root) {
-      const publicGroup = Group.create();
+      const publicGroup = co.group().create();
       publicGroup.makePublic("writer");
 
       account.$jazz.set(

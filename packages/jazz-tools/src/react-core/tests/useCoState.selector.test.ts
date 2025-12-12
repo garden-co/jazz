@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { cojsonInternals } from "cojson";
-import { Account, co, Loaded, z } from "jazz-tools";
+import { type Account, co, Loaded, z } from "jazz-tools";
 import { beforeEach, describe, expect, expectTypeOf, it } from "vitest";
 import { useCoState } from "../index.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
@@ -66,7 +66,7 @@ describe("useCoState", () => {
 
     for (let i = 0; i < 100; i++) {
       map.nested!.$jazz.set("value", `${i}`);
-      await Account.getMe().$jazz.waitForAllCoValuesSync();
+      await co.account().getMe().$jazz.waitForAllCoValuesSync();
     }
 
     expect(result.current.result).toEqual("1");
@@ -110,7 +110,7 @@ describe("useCoState", () => {
 
     for (let i = 1; i <= 100; i++) {
       map.nested!.$jazz.set("value", `${i}`);
-      await Account.getMe().$jazz.waitForAllCoValuesSync();
+      await co.account().getMe().$jazz.waitForAllCoValuesSync();
     }
 
     expect(result.current.result).toEqual("100");
@@ -155,7 +155,7 @@ describe("useCoState", () => {
 
     for (let i = 1; i <= 100; i++) {
       map.nested!.$jazz.set("value", `${i}`);
-      await Account.getMe().$jazz.waitForAllCoValuesSync();
+      await co.account().getMe().$jazz.waitForAllCoValuesSync();
     }
 
     expect(result.current.result).toEqual("1");

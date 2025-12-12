@@ -1,9 +1,9 @@
 import { SignInButton, SignOutButton } from "@clerk/clerk-react";
-import { Account } from "jazz-tools";
+import { co } from "jazz-tools";
 import { useAccount, useIsAuthenticated } from "jazz-tools/react";
 
 function App() {
-  const me = useAccount(Account, { resolve: { profile: true } });
+  const me = useAccount(co.account(), { resolve: { profile: true } });
 
   const isAuthenticated = useIsAuthenticated();
 

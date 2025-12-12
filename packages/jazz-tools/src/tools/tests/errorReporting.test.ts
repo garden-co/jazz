@@ -1,9 +1,8 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
-import { Group, z } from "../index.js";
+import { z } from "../index.js";
 import { setCustomErrorReporter } from "../config.js";
-import { CoValueLoadingState } from "../internal.js";
+import { CoValueLoadingState, co } from "../internal.js";
 import { createJazzTestAccount, linkAccounts } from "../testing.js";
-import { co } from "../exports.js";
 
 const TestMap = co.map({
   value: z.string(),
@@ -29,7 +28,7 @@ describe("Custom error reporter", () => {
     await alice.$jazz.waitForAllCoValuesSync();
 
     const onlyBob = bob;
-    const group = Group.create(bob);
+    const group = co.group().create(bob);
 
     group.addMember(alice, "reader");
 
@@ -76,7 +75,7 @@ describe("Custom error reporter", () => {
     await alice.$jazz.waitForAllCoValuesSync();
 
     const onlyBob = bob;
-    const group = Group.create(bob);
+    const group = co.group().create(bob);
 
     group.addMember(alice, "reader");
 

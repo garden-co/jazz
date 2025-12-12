@@ -178,7 +178,8 @@ export class CoVector
     return new Float32Array(u8.buffer, u8.byteOffset, total / 4);
   }
 
-  private loadVectorData(): void {
+  /** @internal */
+  loadVectorData(): void {
     if (this._isVectorLoaded === true) {
       return;
     }
@@ -219,70 +220,6 @@ export class CoVector
   /** @internal */
   [inspect]() {
     return this.toJSON();
-  }
-
-  /**
-   * Load a `CoVector`
-   *
-   * @category Subscription & Loading
-   * @deprecated Use `co.vector(...).load` instead.
-   */
-  static async load<C extends CoVector>(
-    this: CoValueClass<C>,
-    id: ID<C>,
-    options?: {
-      loadAs?: Account | AnonymousJazzAgent;
-    },
-  ): Promise<Settled<C>> {
-    const coVector = await loadCoValueWithoutMe(this, id, options);
-
-    /**
-     * We are only interested in the entire vector. Since most vectors are small (<15kB),
-     * we can wait for the stream to be complete before returning the vector
-     */
-    if (!coVector.$isLoaded || !coVector.$jazz.raw.isBinaryStreamEnded()) {
-      return new Promise((resolve) => {
-        subscribeToCoValueWithoutMe(
-          this,
-          id,
-          options || {},
-          (value, unsubscribe) => {
-            if (value.$jazz.raw.isBinaryStreamEnded()) {
-              unsubscribe();
-              resolve(value);
-            }
-          },
-        );
-      });
-    }
-
-    coVector.loadVectorData();
-    return coVector;
-  }
-
-  /**
-   * Subscribe to a `CoVector`, when you have an ID but don't have a `CoVector` instance yet
-   * @category Subscription & Loading
-   * @deprecated Use `co.vector(...).subscribe` instead.
-   */
-  static subscribe<V extends CoVector>(
-    this: CoValueClass<V>,
-    id: ID<V>,
-    listener: (value: Resolved<V, true>, unsubscribe: () => void) => void,
-  ): () => void;
-  static subscribe<V extends CoVector>(
-    this: CoValueClass<V>,
-    id: ID<V>,
-    options: SubscribeListenerOptions<V, true>,
-    listener: (value: Resolved<V, true>, unsubscribe: () => void) => void,
-  ): () => void;
-  static subscribe<V extends CoVector>(
-    this: CoValueClass<V>,
-    id: ID<V>,
-    ...args: SubscribeRestArgs<V, true>
-  ): () => void {
-    const { options, listener } = parseSubscribeRestArgs(args);
-    return subscribeToCoValueWithoutMe<V, true>(this, id, options, listener);
   }
 
   // CoVector mutation method overrides, as CoVectors aren't meant to be mutated

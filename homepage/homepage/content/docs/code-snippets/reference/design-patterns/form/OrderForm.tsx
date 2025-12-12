@@ -68,7 +68,7 @@ import { useState, useMemo } from "react";
 export function EditOrderWithSave(props: { id: string }) {
   // Create a new group for the branch, so that every time we open the edit page,
   // we create a new private branch
-  const owner = useMemo(() => Group.create(), []);
+  const owner = useMemo(() => co.group().create(), []);
 
   const order = useCoState(BubbleTeaOrder, props.id, {
     resolve: {

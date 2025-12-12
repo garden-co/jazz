@@ -28,7 +28,7 @@ beforeEach(async () => {
 
 describe("Creating and finding unique CoMaps", async () => {
   test("Creating and finding unique CoMaps", async () => {
-    const group = Group.create();
+    const group = co.group().create();
 
     const Person = co.map({
       name: z.string(),
@@ -55,7 +55,7 @@ describe("Creating and finding unique CoMaps", async () => {
   });
 
   test("should work with unstable_loadUnique", async () => {
-    const group = Group.create();
+    const group = co.group().create();
 
     const Person = co.map({
       name: z.string(),
@@ -82,7 +82,7 @@ describe("Creating and finding unique CoMaps", async () => {
   });
 
   test("should upsert with unstable_loadUnique", async () => {
-    const group = Group.create();
+    const group = co.group().create();
 
     const Person = co.map({
       name: z.string(),
@@ -124,7 +124,7 @@ describe("Creating and finding unique CoMaps", async () => {
       identifier: "test-event-identifier",
       _id: "test-event-external-id",
     };
-    const workspace = Group.create();
+    const workspace = co.group().create();
 
     // Pattern
     let activeEvent = await Event.loadUnique(
@@ -168,7 +168,7 @@ describe("Creating and finding unique CoMaps", async () => {
       identifier: "test-event-identifier",
       _id: "test-event-external-id",
     };
-    const workspace = Group.create();
+    const workspace = co.group().create();
 
     // Upserting
     const activeEvent = await Event.upsertUnique({
@@ -199,7 +199,7 @@ describe("Creating and finding unique CoMaps", async () => {
       identifier: "test-event-identifier",
       _id: "test-event-external-id",
     };
-    const workspace = Group.create();
+    const workspace = co.group().create();
 
     const initialEvent = await Event.upsertUnique({
       value: {
@@ -215,7 +215,7 @@ describe("Creating and finding unique CoMaps", async () => {
       isCurrentActiveAccount: true,
     });
 
-    const workspaceOnAlice = await Group.load(workspace.$jazz.id, {
+    const workspaceOnAlice = await co.group().load(workspace.$jazz.id, {
       loadAs: alice,
     });
     assertLoaded(workspaceOnAlice);
@@ -295,7 +295,7 @@ describe("Creating and finding unique CoMaps", async () => {
       _id: "test-event-external-id",
     };
     expect(oldSourceData.identifier).toEqual(newSourceData.identifier);
-    const workspace = Group.create();
+    const workspace = co.group().create();
     const oldActiveEvent = Event.create(
       {
         title: oldSourceData.title,
@@ -331,7 +331,7 @@ describe("Creating and finding unique CoMaps", async () => {
       name: z.string(),
       projects: co.list(Project),
     });
-    const workspace = Group.create();
+    const workspace = co.group().create();
 
     const myOrg = await Organisation.upsertUnique({
       value: {
@@ -372,7 +372,7 @@ describe("Creating and finding unique CoMaps", async () => {
       name: z.string(),
       projects: co.list(Project),
     });
-    const workspace = Group.create();
+    const workspace = co.group().create();
     const initialProject = await Project.upsertUnique({
       value: {
         name: "My project",
@@ -424,7 +424,7 @@ describe("Creating and finding unique CoMaps", async () => {
       name: z.string(),
       projects: co.list(Project),
     });
-    const publicAccess = Group.create();
+    const publicAccess = co.group().create();
     publicAccess.addMember("everyone", "writer");
 
     const initialProject = await Project.upsertUnique({
@@ -452,9 +452,11 @@ describe("Creating and finding unique CoMaps", async () => {
       });
     assertLoaded(shallowProjectList);
 
-    const publicAccessAsNewAccount = await Group.load(publicAccess.$jazz.id, {
-      loadAs: account,
-    });
+    const publicAccessAsNewAccount = await co
+      .group()
+      .load(publicAccess.$jazz.id, {
+        loadAs: account,
+      });
     assertLoaded(publicAccessAsNewAccount);
 
     const updatedOrg = await Organisation.upsertUnique({
@@ -486,7 +488,7 @@ describe("Creating and finding unique CoMaps", async () => {
       name: z.string(),
       projects: co.list(Project),
     });
-    const publicAccess = Group.create();
+    const publicAccess = co.group().create();
     publicAccess.addMember("everyone", "writer");
 
     const initialProject = await Project.upsertUnique({
@@ -528,9 +530,11 @@ describe("Creating and finding unique CoMaps", async () => {
       });
     assertLoaded(shallowProjectList);
 
-    const publicAccessAsNewAccount = await Group.load(publicAccess.$jazz.id, {
-      loadAs: account,
-    });
+    const publicAccessAsNewAccount = await co
+      .group()
+      .load(publicAccess.$jazz.id, {
+        loadAs: account,
+      });
     assertLoaded(publicAccessAsNewAccount);
 
     const updatedOrg = await Organisation.upsertUnique({
@@ -560,7 +564,7 @@ describe("Creating and finding unique CoMaps", async () => {
       name: z.string(),
     });
 
-    const owner = Group.create();
+    const owner = co.group().create();
 
     const promises = Array.from({ length: 3 }, (_, i) =>
       Project.upsertUnique({

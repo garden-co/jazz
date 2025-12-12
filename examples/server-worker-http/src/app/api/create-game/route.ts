@@ -1,7 +1,7 @@
 import { jazzServerAccount } from "@/jazzServerAccount";
 import { WaitingRoom } from "@/schema";
 import { serverApi } from "@/serverApi";
-import { Group } from "jazz-tools";
+import { co } from "jazz-tools";
 
 export async function POST(request: Request) {
   const response = await serverApi.createGame.handle(
@@ -10,7 +10,7 @@ export async function POST(request: Request) {
     async (_, madeBy) => {
       const waitingRoom = WaitingRoom.create(
         { creator: madeBy },
-        Group.create(jazzServerAccount.worker).makePublic(),
+        co.group().create(jazzServerAccount.worker).makePublic(),
       );
 
       return {

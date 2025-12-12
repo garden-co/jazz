@@ -1,4 +1,4 @@
-import { Account, Group, type ID } from "jazz-tools";
+import { type Account, type Group, type ID, co } from "jazz-tools";
 import { CursorContainer } from "../schema";
 
 /**
@@ -7,7 +7,7 @@ import { CursorContainer } from "../schema";
  * @returns The group.
  */
 function createGroup(me: Account) {
-  const group = Group.create({
+  const group = co.group().create({
     owner: me,
   });
   group.addMember("everyone", "writer");
@@ -21,7 +21,7 @@ async function loadGroup(me: Account, groupID: ID<Group>) {
     console.log("No group ID found in .env, creating group...");
     return createGroup(me);
   }
-  const group = await Group.load(groupID, {});
+  const group = await co.group().load(groupID, {});
   if (group === null || group === undefined) {
     console.log("Group not found, creating group...");
     return createGroup(me);

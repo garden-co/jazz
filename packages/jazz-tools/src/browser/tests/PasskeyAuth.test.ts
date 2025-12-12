@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { AgentSecret } from "cojson";
-import { Account, InMemoryKVStore, KvStoreContext } from "jazz-tools";
+import { type Account, InMemoryKVStore, KvStoreContext, co } from "jazz-tools";
 import { ID } from "jazz-tools";
 import { AuthSecretStorage } from "jazz-tools";
 import { createJazzTestAccount } from "jazz-tools/testing";
@@ -198,11 +198,14 @@ describe("BrowserPasskeyAuth", () => {
 
       await auth.signUp("");
 
-      const currentAccount = await Account.getMe().$jazz.ensureLoaded({
-        resolve: {
-          profile: true,
-        },
-      });
+      const currentAccount = await co
+        .account()
+        .getMe()
+        .$jazz.ensureLoaded({
+          resolve: {
+            profile: true,
+          },
+        });
 
       // 'Test Account' is the name provided during account creation (see: `jazz-tools/src/testing.ts`)
       expect(currentAccount.profile.name).toEqual("Test Account");
@@ -230,11 +233,14 @@ describe("BrowserPasskeyAuth", () => {
 
       await auth.signUp("testuser");
 
-      const currentAccount = await Account.getMe().$jazz.ensureLoaded({
-        resolve: {
-          profile: true,
-        },
-      });
+      const currentAccount = await co
+        .account()
+        .getMe()
+        .$jazz.ensureLoaded({
+          resolve: {
+            profile: true,
+          },
+        });
 
       expect(currentAccount.profile.name).toEqual("testuser");
     });

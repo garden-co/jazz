@@ -7,11 +7,11 @@ import {
   test,
 } from "vitest";
 import {
-  Account,
+  type Account,
   co,
-  CoPlainText,
+  type CoPlainText,
   CoValueLoadingState,
-  Group,
+  type Group,
   z,
 } from "../exports";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing";
@@ -141,7 +141,7 @@ describe("Schema.resolved()", () => {
 
     beforeAll(async () => {
       ({ clientAccount, serverAccount } = await setupTwoNodes());
-      publicGroup = Group.create(serverAccount).makePublic("writer");
+      publicGroup = co.group().create(serverAccount).makePublic("writer");
     });
 
     describe("on load()", () => {
@@ -658,7 +658,7 @@ describe("Schema.resolved()", () => {
     describe("on loadUnique()", () => {
       let group: Group;
       beforeAll(async () => {
-        group = Group.create();
+        group = co.group().create();
       });
 
       test("for CoMap", async () => {

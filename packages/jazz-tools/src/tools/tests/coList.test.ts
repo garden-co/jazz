@@ -1,12 +1,13 @@
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { assert, beforeEach, describe, expect, test, vi } from "vitest";
-import { Account, Group, subscribeToCoValue, z } from "../index.js";
+import { z } from "../exports.js";
 import {
   Loaded,
-  activeAccountContext,
+  subscribeToCoValue,
   co,
   coValueClassFromCoValueClassOrSchema,
   CoValueLoadingState,
+  Account,
 } from "../internal.js";
 import {
   createJazzTestAccount,
@@ -17,10 +18,7 @@ import { assertLoaded, setupTwoNodes, waitFor } from "./utils.js";
 
 const Crypto = await WasmCrypto.create();
 
-let me = await Account.create({
-  creationProps: { name: "Hermes Puggington" },
-  crypto: Crypto,
-});
+let me: Account;
 
 beforeEach(async () => {
   await setupJazzTestSync();
@@ -34,9 +32,9 @@ beforeEach(async () => {
 describe("Simple CoList operations", async () => {
   const TestList = co.list(z.string());
 
-  const list = TestList.create(["bread", "butter", "onion"], { owner: me });
-
   test("Construction", () => {
+    const list = TestList.create(["bread", "butter", "onion"], { owner: me });
+
     expect(list[0]).toBe("bread");
     expect(list[1]).toBe("butter");
     expect(list[2]).toBe("onion");
@@ -117,7 +115,7 @@ describe("Simple CoList operations", async () => {
   });
 
   test("Construction with a Group", () => {
-    const group = Group.create(me);
+    const group = co.group().create(me);
     const list = TestList.create(["milk"], group);
 
     expect(list[0]).toEqual("milk");
@@ -725,7 +723,7 @@ describe("CoList resolution", async () => {
   const TestList = co.list(NestedList);
 
   const initNodeAndList = async () => {
-    const me = await Account.create({
+    const me = await co.account().create({
       creationProps: { name: "Hermes Puggington" },
       crypto: Crypto,
     });
@@ -762,7 +760,7 @@ describe("CoList resolution", async () => {
 
     const Pets = co.list(Dog);
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "writer");
 
     const pets = Pets.create([{ name: "Rex", breed: "Labrador" }], group);
@@ -911,7 +909,7 @@ describe("CoList subscription", async () => {
       list.$jazz.id,
       {
         syncResolution: true,
-        loadAs: Account.getMe(),
+        loadAs: co.account().getMe(),
       },
       spy,
     );
@@ -949,7 +947,7 @@ describe("CoList subscription", async () => {
 
     const TestList = co.list(Item);
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "writer");
 
     const list = TestList.create(
@@ -1002,7 +1000,7 @@ describe("CoList subscription", async () => {
 
     const TestList = co.list(Item);
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "writer");
 
     const list = TestList.create(
@@ -1106,7 +1104,7 @@ describe("CoList subscription", async () => {
 
     const TestList = co.list(Item);
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "writer");
 
     const list = TestList.create(
@@ -1172,7 +1170,7 @@ describe("CoList subscription", async () => {
           { name: "Fido", breed: "Poodle" },
         ]),
       },
-      Group.create().makePublic(),
+      co.group().create().makePublic(),
     );
 
     const bob = await createJazzTestAccount();

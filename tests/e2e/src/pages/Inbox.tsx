@@ -1,4 +1,4 @@
-import { Account, Group, Inbox, co, z } from "jazz-tools";
+import { Inbox, co, z } from "jazz-tools";
 import {
   useAccount,
   experimental_useInboxSender as useInboxSender,
@@ -57,11 +57,11 @@ export function InboxPage() {
   useEffect(() => {
     async function load() {
       if (!id) return;
-      const account = await Account.load(id);
+      const account = await co.account().load(id);
 
       if (!account.$isLoaded) return;
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember(account, "writer");
       const pingPong = PingPong.create({ ping: Date.now() }, { owner: group });
 

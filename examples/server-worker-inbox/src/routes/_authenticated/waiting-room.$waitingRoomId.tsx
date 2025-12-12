@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { WORKER_ID } from "@/constants";
 import { JoinGameRequest, WaitingRoom } from "@/schema";
 import { createFileRoute, redirect } from "@tanstack/react-router";
-import { Group, InboxSender } from "jazz-tools";
+import { InboxSender, co } from "jazz-tools";
 import { ClipboardCopyIcon, Loader2Icon } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -38,7 +38,7 @@ export const Route = createFileRoute(
       sender.sendMessage(
         JoinGameRequest.create(
           { type: "joinGame", waitingRoom },
-          { owner: Group.create({ owner: me }) },
+          { owner: co.group().create({ owner: me }) },
         ),
       );
       // If the waiting room already has a game, redirect to the game

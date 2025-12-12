@@ -1,4 +1,4 @@
-import { Account, FileStream } from "jazz-tools";
+import { Account, co } from "jazz-tools";
 import { useAccount, useCoState } from "jazz-tools/react";
 import { useEffect, useState } from "react";
 import { UploadedFile } from "./schema";
@@ -27,7 +27,7 @@ export function DownloaderPeer(props: { testCoMapId: string }) {
 
       uploadedFile.$jazz.set("coMapDownloaded", true);
 
-      await FileStream.loadAsBlob(uploadedFile.$jazz.refs.file!.id, {
+      await co.fileStream().loadAsBlob(uploadedFile.$jazz.refs.file!.id, {
         loadAs: me,
       });
 

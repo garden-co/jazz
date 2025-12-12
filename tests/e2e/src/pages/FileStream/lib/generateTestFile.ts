@@ -1,11 +1,11 @@
-import { Account, Group, co } from "jazz-tools";
+import { type Account, co } from "jazz-tools";
 import { UploadedFile } from "../schema";
 
 export async function generateTestFile(
   me: Account | null | undefined,
   bytes: number,
 ) {
-  const group = Group.create(me ? { owner: me } : undefined);
+  const group = co.group().create(me ? { owner: me } : undefined);
   group.addMember("everyone", "writer");
 
   const ownership = { owner: group };

@@ -3,7 +3,7 @@
  * https://jazz.tools/docs/react/schemas/covalues
  */
 
-import { CoRichText, Group, co, z } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
 /** The account profile is an app-specific per-user public `CoMap`
  *  where you can store top-level objects for that user */
@@ -38,7 +38,7 @@ export const JazzAccount = co
     }
 
     if (!account.$jazz.has("profile")) {
-      const group = Group.create();
+      const group = co.group().create();
       group.makePublic(); // The profile info is visible to everyone
 
       account.$jazz.set(
@@ -47,12 +47,11 @@ export const JazzAccount = co
           {
             name: "Anonymous user",
             firstName: "",
-            bio: CoRichText.create(
-              "<p>A <strong>hu<em>man</strong></em>.</p>",
-              {
+            bio: co
+              .richText()
+              .create("<p>A <strong>hu<em>man</strong></em>.</p>", {
                 owner: group,
-              },
-            ),
+              }),
           },
           group,
         ),

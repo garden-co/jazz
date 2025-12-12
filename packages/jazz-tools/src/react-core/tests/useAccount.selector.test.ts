@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { Account, RefsToResolve, co, z, Group } from "jazz-tools";
+import { type Account, RefsToResolve, co, z, type Group } from "jazz-tools";
 import { assert, beforeEach, describe, expect, it } from "vitest";
 import { useAccount, useJazzContextManager } from "../hooks.js";
 import { useIsAuthenticated } from "../index.js";
@@ -376,7 +376,7 @@ describe("useAccount", () => {
 
     const { result } = renderHook(
       () =>
-        useAccount(Account, {
+        useAccount(co.account(), {
           select: (account) => {
             if (!account.$isLoaded) {
               return "No account";
@@ -474,7 +474,7 @@ describe("useAccount", () => {
       isCurrentActiveAccount: true,
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "writer");
     const { result } = renderHook(
       () => {

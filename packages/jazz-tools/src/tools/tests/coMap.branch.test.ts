@@ -1,7 +1,7 @@
 import { cojsonInternals } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { assert, beforeEach, describe, expect, test, vi } from "vitest";
-import { Group, co, subscribeToCoValue, z } from "../exports.js";
+import { type Group, co, subscribeToCoValue, z } from "../exports.js";
 
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { assertLoaded, waitFor } from "./utils.js";
@@ -27,7 +27,7 @@ describe("CoMap Branching", async () => {
       });
 
       // Create a group to own the CoMap
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       // Create the original CoMap
@@ -85,7 +85,7 @@ describe("CoMap Branching", async () => {
       });
 
       // Create a group to own the CoMap
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       // Create the original CoMap
@@ -144,7 +144,7 @@ describe("CoMap Branching", async () => {
         email: z.string(),
       });
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const originalPerson = Person.create(
@@ -184,7 +184,7 @@ describe("CoMap Branching", async () => {
         email: z.string(),
       });
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const originalPerson = Person.create(
@@ -246,7 +246,7 @@ describe("CoMap Branching", async () => {
         email: z.string(),
       });
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const originalPerson = Person.create(
@@ -321,7 +321,7 @@ describe("CoMap Branching", async () => {
         email: z.string(),
       });
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const originalPerson = Person.create(
@@ -371,7 +371,7 @@ describe("CoMap Branching", async () => {
         email: z.string(),
       });
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const originalPerson = Person.create(
@@ -447,7 +447,7 @@ describe("CoMap Branching", async () => {
         email: z.string(),
       });
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const originalPerson = Person.create(
@@ -475,7 +475,7 @@ describe("CoMap Branching", async () => {
         email: z.string(),
       });
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const originalPerson = Person.create(
@@ -526,7 +526,7 @@ describe("CoMap Branching", async () => {
         email: z.string(),
       });
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const originalPerson = Person.create(
@@ -580,7 +580,7 @@ describe("CoMap Branching", async () => {
         version: z.number(),
       });
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       // Create a large document with many properties
@@ -684,7 +684,7 @@ describe("CoMap Branching", async () => {
         }),
       });
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const originalPerson = Person.create(
@@ -755,7 +755,7 @@ describe("CoMap Branching", async () => {
         }),
       });
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const originalPerson = Person.create(
@@ -816,7 +816,7 @@ describe("CoMap Branching", async () => {
         email: z.string(),
       });
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const originalPerson = Person.create(

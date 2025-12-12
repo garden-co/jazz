@@ -1,12 +1,12 @@
 import { Account, Group, co } from "jazz-tools";
 // #region Basic
-const group = Group.create();
+const group = co.group().create();
 group.addMember("everyone", "writer");
 // #endregion
 
 {
   // #region MakePublic
-  const group = Group.create();
+  const group = co.group().create();
   group.addMember("everyone", "writer"); // [!code --]
   group.makePublic("writer"); // [!code ++]
   // group.makePublic(); // Defaults to "reader" access
@@ -20,13 +20,13 @@ const organization = Organization.create({
 });
 const organizationId = organization.$jazz.id;
 const inviteSecret = "inviteSecret_z";
-const account = Account.getMe();
+const account = co.account().getMe();
 // #region AcceptInviteProgrammatically
 await account.acceptInvite(organizationId, inviteSecret, Organization);
 // #endregion
 
 // #region InviteToGroup
-const groupToInviteTo = Group.create();
+const groupToInviteTo = co.group().create();
 const readerInvite = groupToInviteTo.$jazz.createInvite("reader");
 // `inviteSecret_`
 
@@ -36,7 +36,7 @@ await account.acceptInvite(group.$jazz.id, readerInvite);
 import { RequestsList, JoinRequest } from "./schema";
 // #region CreateRequestsToJoin
 function createRequestsToJoin() {
-  const requestsGroup = Group.create();
+  const requestsGroup = co.group().create();
   requestsGroup.addMember("everyone", "writeOnly");
 
   return RequestsList.create([], requestsGroup);

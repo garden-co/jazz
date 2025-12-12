@@ -1,11 +1,11 @@
 import { useIframeHashRouter } from "hash-slash";
-import { Account, Group } from "jazz-tools";
+import { co } from "jazz-tools";
 import { useAccount, useLogOut } from "jazz-tools/react";
 import { ReactionsScreen } from "./ReactionsScreen.tsx";
 import { Reactions } from "./schema.ts";
 
 function App() {
-  const me = useAccount(Account, {
+  const me = useAccount(co.account(), {
     resolve: {
       profile: true,
     },
@@ -14,7 +14,7 @@ function App() {
   const router = useIframeHashRouter();
 
   const createReactions = () => {
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "writer");
     const chat = Reactions.create([], { owner: group });
     router.navigate("/#/reactions/" + chat.$jazz.id);

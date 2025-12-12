@@ -3,7 +3,7 @@ import { createWebSocketPeer } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { Hono } from "hono";
 import { CoMap, coField } from "jazz-tools";
-import { Account, co, z } from "jazz-tools";
+import { type Account, co, z } from "jazz-tools";
 import { startWorker } from "jazz-tools/worker";
 
 const app = new Hono();
@@ -34,7 +34,7 @@ app.get("/", async (c) => {
     role: "server",
   });
 
-  const account = await Account.create({
+  const account = await co.account().create({
     creationProps: { name: "Cloudflare test account" },
     peers: [peer],
     crypto,

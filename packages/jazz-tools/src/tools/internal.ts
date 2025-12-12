@@ -46,6 +46,7 @@ export * from "./implementation/zodSchema/schemaTypes/AccountSchema.js";
 export * from "./implementation/zodSchema/schemaTypes/FileStreamSchema.js";
 export * from "./implementation/zodSchema/schemaTypes/CoVectorSchema.js";
 export * from "./implementation/zodSchema/schemaTypes/PlainTextSchema.js";
+export * from "./implementation/zodSchema/schemaTypes/GroupSchema.js";
 export * from "./implementation/zodSchema/typeConverters/InstanceOrPrimitiveOfSchema.js";
 export * from "./implementation/zodSchema/typeConverters/InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded.js";
 export * from "./implementation/zodSchema/typeConverters/InstanceOfSchema.js";

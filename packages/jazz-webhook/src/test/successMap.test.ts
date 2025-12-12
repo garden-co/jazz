@@ -4,15 +4,15 @@ import {
   isTxSuccessful,
   markSuccessful,
   SuccessMap,
-} from "../successMap";
+} from "../successMap.js";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createJazzTestAccount } from "jazz-tools/testing";
-import { Account } from "jazz-tools";
+import { co } from "jazz-tools";
 
 describe("successMap", () => {
   beforeEach(async () => {
     await createJazzTestAccount({
-      AccountSchema: Account,
+      AccountSchema: co.account(),
       isCurrentActiveAccount: true,
     });
   });

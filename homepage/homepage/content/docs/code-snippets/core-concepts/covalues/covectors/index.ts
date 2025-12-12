@@ -32,7 +32,7 @@ documents.$jazz.push(newDocument);
 
 // #region Ownership
 // Create with shared ownership
-const teamGroup = Group.create();
+const teamGroup = co.group().create();
 teamGroup.addMember(colleagueAccount, "writer");
 
 const teamList = co.vector(384).create(vector, { owner: teamGroup });

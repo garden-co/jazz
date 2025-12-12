@@ -3,6 +3,7 @@ import {
   BranchDefinition,
   CoList,
   Group,
+  co,
   hydrateCoreCoValueSchema,
   ID,
   Settled,
@@ -11,10 +12,15 @@ import {
   Resolved,
   SubscribeListenerOptions,
   coOptionalDefiner,
+  internalLoadUnique,
+  loadCoValueWithoutMe,
+  parseSubscribeRestArgs,
+  subscribeToCoValueWithoutMe,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
+  getIdFromHeader,
 } from "../../../internal.js";
-import { CoValueUniqueness } from "cojson";
+import { CoValueUniqueness, RawCoID } from "cojson";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoListSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
 import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
@@ -97,12 +103,11 @@ export class CoListSchema<
       unstable_branch?: BranchDefinition;
     },
   ): Promise<Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>> {
-    // @ts-expect-error
-    return this.coValueClass.load(
+    return loadCoValueWithoutMe(
+      this.coValueClass,
       id,
-      // @ts-expect-error
       withSchemaResolveQuery(options, this.resolveQuery),
-    );
+    ) as Promise<Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>>;
   }
 
   unstable_merge<
@@ -137,10 +142,11 @@ export class CoListSchema<
       unsubscribe: () => void,
     ) => void,
   ): () => void {
-    return this.coValueClass.subscribe(
+    return subscribeToCoValueWithoutMe(
+      this.coValueClass,
       id,
       withSchemaResolveQuery(options, this.resolveQuery),
-      listener,
+      listener as any,
     );
   }
 
@@ -154,7 +160,24 @@ export class CoListSchema<
     ownerID: ID<Account> | ID<Group>,
     as?: Account | Group | AnonymousJazzAgent,
   ): ID<CoListInstanceCoValuesMaybeLoaded<T>> {
-    return this.coValueClass.findUnique(unique, ownerID, as);
+    const header = this._getUniqueHeader(unique, ownerID);
+    return getIdFromHeader(header, as);
+  }
+
+  /** @internal */
+  private _getUniqueHeader(
+    unique: CoValueUniqueness["uniqueness"],
+    ownerID: ID<Account> | ID<Group>,
+  ) {
+    return {
+      type: "colist" as const,
+      ruleset: {
+        type: "ownedByGroup" as const,
+        group: ownerID as RawCoID,
+      },
+      meta: null,
+      uniqueness: unique,
+    };
   }
 
   upsertUnique<
@@ -167,14 +190,33 @@ export class CoListSchema<
     owner: Account | Group;
     resolve?: RefsToResolveStrict<CoListInstanceCoValuesMaybeLoaded<T>, R>;
   }): Promise<Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>> {
-    // @ts-expect-error
-    return this.coValueClass.upsertUnique(
-      // @ts-expect-error
-      withSchemaResolveQuery(options, this.resolveQuery),
+    const header = this._getUniqueHeader(
+      options.unique,
+      options.owner.$jazz.id,
     );
+
+    return internalLoadUnique(this.coValueClass, {
+      header,
+      owner: options.owner,
+      resolve: withSchemaResolveQuery(
+        options.resolve ? { resolve: options.resolve } : undefined,
+        this.resolveQuery,
+      )?.resolve as any,
+      onCreateWhenMissing: () => {
+        this.create(options.value, {
+          owner: options.owner,
+          unique: options.unique,
+        });
+      },
+      onUpdateWhenFound(value) {
+        (
+          value as Resolved<CoListInstanceCoValuesMaybeLoaded<T>>
+        ).$jazz.applyDiff(options.value as any);
+      },
+    }) as Promise<Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>>;
   }
 
-  loadUnique<
+  async loadUnique<
     const R extends RefsToResolve<
       CoListInstanceCoValuesMaybeLoaded<T>
     > = DefaultResolveQuery,
@@ -186,13 +228,21 @@ export class CoListSchema<
       loadAs?: Account | AnonymousJazzAgent;
     },
   ): Promise<Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>> {
-    // @ts-expect-error
-    return this.coValueClass.loadUnique(
-      unique,
-      ownerID,
-      // @ts-expect-error
-      withSchemaResolveQuery(options, this.resolveQuery),
-    );
+    const header = this._getUniqueHeader(unique, ownerID);
+
+    const owner = await co.group().load(ownerID, {
+      loadAs: options?.loadAs,
+    });
+    if (!owner.$isLoaded) return owner as any;
+
+    return internalLoadUnique(this.coValueClass, {
+      header,
+      owner,
+      resolve: withSchemaResolveQuery(
+        options?.resolve ? { resolve: options.resolve } : undefined,
+        this.resolveQuery,
+      )?.resolve as any,
+    }) as Promise<Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>>;
   }
 
   optional(): CoOptionalSchema<this> {

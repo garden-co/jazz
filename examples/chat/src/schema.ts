@@ -1,4 +1,4 @@
-import { co, Group } from "jazz-tools";
+import { co } from "jazz-tools";
 
 export const Message = co
   .map({

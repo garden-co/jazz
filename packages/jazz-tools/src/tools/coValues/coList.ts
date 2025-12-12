@@ -23,8 +23,6 @@ import {
   SubscribeRestArgs,
   TypeSym,
   BranchDefinition,
-  getIdFromHeader,
-  internalLoadUnique,
   CoValueLoadingState,
   AnonymousJazzAgent,
   ItemsSym,
@@ -37,7 +35,6 @@ import {
   inspect,
   instantiateRefEncodedWithInit,
   isRefEncoded,
-  loadCoValueWithoutMe,
   makeRefs,
   parseCoValueCreateOptions,
   parseSubscribeRestArgs,
@@ -259,179 +256,6 @@ export class CoList<out Item = any>
    * @category Subscription & Loading
    * @deprecated Use `co.list(...).load` instead.
    */
-  static load<L extends CoList, const R extends RefsToResolve<L> = true>(
-    this: CoValueClass<L>,
-    id: ID<L>,
-    options?: {
-      resolve?: RefsToResolveStrict<L, R>;
-      loadAs?: Account | AnonymousJazzAgent;
-    },
-  ): Promise<Settled<Resolved<L, R>>> {
-    return loadCoValueWithoutMe(this, id, options);
-  }
-
-  /**
-   * Load and subscribe to a `CoList` with a given ID, as a given account.
-   *
-   * Automatically also subscribes to updates to all referenced/nested CoValues as soon as they are accessed in the listener.
-   *
-   * `depth` specifies if item CoValue references should be loaded as well before calling `listener` for the first time.
-   * The `DeeplyLoaded` return type guarantees that corresponding referenced CoValues are loaded to the specified depth.
-   *
-   * You can pass `[]` or for shallowly loading only this CoList, or `[itemDepth]` for recursively loading referenced CoValues.
-   *
-   * Check out the `load` methods on `CoMap`/`CoList`/`CoFeed`/`Group`/`Account` to see which depth structures are valid to nest.
-   *
-   * Returns an unsubscribe function that you should call when you no longer need updates.
-   *
-   * Also see the `useCoState` hook to reactively subscribe to a CoValue in a React component.
-   *
-   * @example
-   * ```ts
-   * const unsub = ListOfAnimals.subscribe(
-   *   "co_zdsMhHtfG6VNKt7RqPUPvUtN2Ax",
-   *   me,
-   *   { vet: {} },
-   *   (animalsWithVets) => console.log(animalsWithVets)
-   * );
-   * ```
-   *
-   * @category Subscription & Loading
-   * @deprecated Use `co.list(...).subscribe` instead.
-   */
-  static subscribe<L extends CoList, const R extends RefsToResolve<L> = true>(
-    this: CoValueClass<L>,
-    id: ID<L>,
-    listener: (value: Resolved<L, R>, unsubscribe: () => void) => void,
-  ): () => void;
-  static subscribe<L extends CoList, const R extends RefsToResolve<L> = true>(
-    this: CoValueClass<L>,
-    id: ID<L>,
-    options: SubscribeListenerOptions<L, R>,
-    listener: (value: Resolved<L, R>, unsubscribe: () => void) => void,
-  ): () => void;
-  static subscribe<L extends CoList, const R extends RefsToResolve<L>>(
-    this: CoValueClass<L>,
-    id: ID<L>,
-    ...args: SubscribeRestArgs<L, R>
-  ): () => void {
-    const { options, listener } = parseSubscribeRestArgs(args);
-    return subscribeToCoValueWithoutMe<L, R>(this, id, options, listener);
-  }
-
-  /** @deprecated Use `CoList.upsertUnique` and `CoList.loadUnique` instead. */
-  static findUnique<L extends CoList>(
-    this: CoValueClass<L>,
-    unique: CoValueUniqueness["uniqueness"],
-    ownerID: ID<Account> | ID<Group>,
-    as?: Account | Group | AnonymousJazzAgent,
-  ) {
-    const header = CoList._getUniqueHeader(unique, ownerID);
-
-    return getIdFromHeader(header, as);
-  }
-
-  /** @internal */
-  static _getUniqueHeader(
-    unique: CoValueUniqueness["uniqueness"],
-    ownerID: ID<Account> | ID<Group>,
-  ) {
-    return {
-      type: "colist" as const,
-      ruleset: {
-        type: "ownedByGroup" as const,
-        group: ownerID as RawCoID,
-      },
-      meta: null,
-      uniqueness: unique,
-    };
-  }
-
-  /**
-   * Given some data, updates an existing CoList or initialises a new one if none exists.
-   *
-   * Note: This method respects resolve options, and thus can return a not-loaded value if the references cannot be resolved.
-   *
-   * @example
-   * ```ts
-   * const activeItems = await ItemList.upsertUnique(
-   *   {
-   *     value: [item1, item2, item3],
-   *     unique: sourceData.identifier,
-   *     owner: workspace,
-   *   }
-   * );
-   * ```
-   *
-   * @param options The options for creating or loading the CoList. This includes the intended state of the CoList, its unique identifier, its owner, and the references to resolve.
-   * @returns Either an existing & modified CoList, or a new initialised CoList if none exists.
-   * @category Subscription & Loading
-   */
-  static async upsertUnique<
-    L extends CoList,
-    const R extends RefsToResolve<L> = true,
-  >(
-    this: CoValueClass<L>,
-    options: {
-      value: L[number][];
-      unique: CoValueUniqueness["uniqueness"];
-      owner: Account | Group;
-      resolve?: RefsToResolveStrict<L, R>;
-    },
-  ): Promise<Settled<Resolved<L, R>>> {
-    const header = CoList._getUniqueHeader(
-      options.unique,
-      options.owner.$jazz.id,
-    );
-
-    return internalLoadUnique(this, {
-      header,
-      owner: options.owner,
-      resolve: options.resolve,
-      onCreateWhenMissing: () => {
-        (this as any).create(options.value, {
-          owner: options.owner,
-          unique: options.unique,
-        });
-      },
-      onUpdateWhenFound(value) {
-        (value as Resolved<L>).$jazz.applyDiff(options.value);
-      },
-    });
-  }
-
-  /**
-   * Loads a CoList by its unique identifier and owner's ID.
-   * @param unique The unique identifier of the CoList to load.
-   * @param ownerID The ID of the owner of the CoList.
-   * @param options Additional options for loading the CoList.
-   * @returns The loaded CoList, or an not-loaded value if unavailable.
-   */
-  static async loadUnique<
-    L extends CoList,
-    const R extends RefsToResolve<L> = true,
-  >(
-    this: CoValueClass<L>,
-    unique: CoValueUniqueness["uniqueness"],
-    ownerID: ID<Account> | ID<Group>,
-    options?: {
-      resolve?: RefsToResolveStrict<L, R>;
-      loadAs?: Account | AnonymousJazzAgent;
-    },
-  ): Promise<Settled<Resolved<L, R>>> {
-    const header = CoList._getUniqueHeader(unique, ownerID);
-
-    const owner = await Group.load(ownerID, {
-      loadAs: options?.loadAs,
-    });
-    if (!owner.$isLoaded) return owner;
-
-    return internalLoadUnique(this, {
-      header,
-      owner,
-      resolve: options?.resolve,
-    });
-  }
 
   // Override mutation methods defined on Array, as CoLists aren't meant to be mutated directly
   /**

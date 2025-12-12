@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "vitest";
-import { Account, Group } from "../exports";
+import { type Account, type Group, co } from "../exports";
 import {
   consumeInviteLink,
   createInviteLink,
@@ -17,7 +17,7 @@ describe("Invite Links", () => {
     account = await createJazzTestAccount({
       isCurrentActiveAccount: true,
     });
-    group = Group.create({ owner: account });
+    group = co.group().create({ owner: account });
   });
 
   test("createInviteLink generates correct format", () => {
@@ -63,7 +63,7 @@ describe("Invite Links", () => {
       inviteURL: inviteLink,
       as: newAccount,
       forValueHint: "myGroup",
-      invitedObjectSchema: Group,
+      invitedObjectSchema: co.group(),
     });
 
     expect(result).toBeDefined();
@@ -79,7 +79,7 @@ describe("Invite Links", () => {
       inviteURL: inviteLink,
       as: newAccount,
       forValueHint: "wrongHint",
-      invitedObjectSchema: Group,
+      invitedObjectSchema: co.group(),
     });
 
     expect(result).toBeUndefined();

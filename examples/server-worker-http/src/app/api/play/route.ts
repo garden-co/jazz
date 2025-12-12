@@ -1,7 +1,7 @@
 import { jazzServerAccount } from "@/jazzServerAccount";
 import { PlaySelection } from "@/schema";
 import { serverApi } from "@/serverApi";
-import { Group, JazzRequestError } from "jazz-tools";
+import { co, JazzRequestError } from "jazz-tools";
 
 export async function POST(request: Request) {
   const response = await serverApi.play.handle(
@@ -15,7 +15,7 @@ export async function POST(request: Request) {
         throw new JazzRequestError("You are not a player in this game", 400);
       }
 
-      const group = Group.create({ owner: jazzServerAccount.worker });
+      const group = co.group().create({ owner: jazzServerAccount.worker });
       group.addMember(madeBy, "reader");
 
       if (isPlayer1 && game.player1.playSelection) {

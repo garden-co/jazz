@@ -3,7 +3,7 @@ import { LocalNode } from "cojson";
 import { createWebSocketPeer } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { WebSocket, WebSocketServer } from "ws";
-import { Account, isControlledAccount } from "jazz-tools";
+import { type Account, isControlledAccount, co } from "jazz-tools";
 
 export const startSyncServer = async (port?: number) => {
   const crypto = await WasmCrypto.create();
@@ -108,7 +108,7 @@ export const createWorkerAccount = async ({
     role: "server",
   });
 
-  const account = await Account.create({
+  const account = await co.account().create({
     creationProps: { name },
     peers: [peer],
     crypto,

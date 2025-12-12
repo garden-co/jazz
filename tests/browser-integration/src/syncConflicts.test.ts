@@ -1,11 +1,13 @@
 import { commands } from "@vitest/browser/context";
-import { AuthSecretStorage, CoMap, coField } from "jazz-tools";
+import { AuthSecretStorage, CoMap, coField, co, z } from "jazz-tools";
 import { assert, afterAll, afterEach, describe, expect, test } from "vitest";
 import { createAccountContext, startSyncServer, waitFor } from "./testUtils";
 
 class Issue extends CoMap {
   estimate = coField.number;
 }
+
+const IssueSchema = co.map({ estimate: z.number() });
 
 afterAll(async () => {
   await commands.cleanup();
@@ -49,7 +51,7 @@ describe("Browser sync", () => {
       },
     );
 
-    const loadedIssue = await Issue.load(issue.$jazz.id, {
+    const loadedIssue = await IssueSchema.load(issue.$jazz.id, {
       loadAs: account2,
     });
 

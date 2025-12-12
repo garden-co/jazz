@@ -1,5 +1,5 @@
 import { co, FileStream, Group, ID } from "jazz-tools";
-const myGroup = Group.create();
+const myGroup = co.group().create();
 const progressBar: HTMLElement = document.querySelector(".progress-bar")!;
 import { createJazzTestAccount } from "jazz-tools/testing";
 const colleagueAccount = await createJazzTestAccount();
@@ -38,7 +38,7 @@ const fileStream = co.fileStream().create({ owner: myGroup });
 
 // #region Ownership
 // Create a team group
-const teamGroup = Group.create();
+const teamGroup = co.group().create();
 teamGroup.addMember(colleagueAccount, "writer");
 
 // Create a FileStream with shared ownership

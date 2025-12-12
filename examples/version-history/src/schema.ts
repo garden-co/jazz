@@ -3,7 +3,7 @@
  * https://jazz.tools/docs/react/schemas/covalues
  */
 
-import { co, Group, z } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
 export const Issue = co
   .map({
@@ -17,7 +17,7 @@ export const Issue = co
   .resolved({ description: true })
   .withPermissions({
     default: () => {
-      const owner = Group.create();
+      const owner = co.group().create();
       owner.addMember("everyone", "writer");
       return owner;
     },

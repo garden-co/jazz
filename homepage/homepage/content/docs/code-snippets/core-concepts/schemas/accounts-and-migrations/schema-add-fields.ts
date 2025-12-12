@@ -33,7 +33,7 @@ export const MyAppAccount = co
       // [!code ++:3]
       root.$jazz.set(
         "myBookmarks",
-        co.list(Bookmark).create([], Group.create()),
+        co.list(Bookmark).create([], co.group().create()),
       );
     }
   });

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createImage } from 'jazz-tools/media';
   import { AccountCoState, CoState } from 'jazz-tools/svelte';
-  import { Account, CoPlainText, getLoadedOrUndefined, type ID } from 'jazz-tools';
+  import { getLoadedOrUndefined, type ID, co } from 'jazz-tools';
 
   import { page } from '$app/state';
 
@@ -26,7 +26,7 @@
       }
     })
   );
-  const account = new AccountCoState(Account, {
+  const account = new AccountCoState(co.account(), {
     resolve: {
       profile: true
     }
@@ -48,7 +48,7 @@
       chat.current.$jazz.push(
         Message.create(
           {
-            text: CoPlainText.create(file.name, chat.current.$jazz.owner),
+            text: co.plainText().create(file.name, chat.current.$jazz.owner),
             image: image
           },
           chat.current.$jazz.owner
@@ -106,7 +106,7 @@
           if (!chat.current.$isLoaded) return;
           chat.current.$jazz.push(
             Message.create(
-              { text: CoPlainText.create(text, chat.current.$jazz.owner) },
+              { text: co.plainText().create(text, chat.current.$jazz.owner) },
               chat.current.$jazz.owner
             )
           );

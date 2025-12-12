@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { Group, Inbox, InboxSender, z } from "../exports";
+import { type Group, Inbox, InboxSender, z } from "../exports";
 import {
-  Account,
+  type Account,
   Loaded,
   co,
   coValueClassFromCoValueClassOrSchema,
+  Account as AccountClass,
 } from "../internal";
 import { setupTwoNodes, waitFor } from "./utils";
 import {
@@ -33,7 +34,7 @@ describe("Inbox", () => {
           "profile",
           co
             .profile()
-            .create({ name: "Worker" }, Group.create({ owner: account })),
+            .create({ name: "Worker" }, co.group().create({ owner: account })),
         );
       });
 
@@ -61,7 +62,7 @@ describe("Inbox", () => {
     const message = Message.create(
       { text: "Hello" },
       {
-        owner: Group.create({ owner: sender }),
+        owner: co.group().create({ owner: sender }),
       },
     );
 
@@ -104,7 +105,7 @@ describe("Inbox", () => {
     const message = EmptyMessage.create(
       {},
       {
-        owner: Group.create({ owner: sender }),
+        owner: co.group().create({ owner: sender }),
       },
     );
 
@@ -145,7 +146,7 @@ describe("Inbox", () => {
     const message = Message.create(
       { text: "Hello" },
       {
-        owner: Group.create({ owner: sender }),
+        owner: co.group().create({ owner: sender }),
       },
     );
 
@@ -180,7 +181,7 @@ describe("Inbox", () => {
     const message = Message.create(
       { text: "Hello" },
       {
-        owner: Group.create({ owner: sender }),
+        owner: co.group().create({ owner: sender }),
       },
     );
 
@@ -208,7 +209,7 @@ describe("Inbox", () => {
     const message = Message.create(
       { text: "Hello" },
       {
-        owner: Group.create({ owner: sender }),
+        owner: co.group().create({ owner: sender }),
       },
     );
 
@@ -245,7 +246,7 @@ describe("Inbox", () => {
     const message = Message.create(
       { text: "Hello" },
       {
-        owner: Group.create({ owner: sender }),
+        owner: co.group().create({ owner: sender }),
       },
     );
 
@@ -285,7 +286,7 @@ describe("Inbox", () => {
     const message = Message.create(
       { text: "Hello" },
       {
-        owner: Group.create({ owner: sender }),
+        owner: co.group().create({ owner: sender }),
       },
     );
 
@@ -324,7 +325,7 @@ describe("Inbox", () => {
     const message = Message.create(
       { text: "Hello" },
       {
-        owner: Group.create({ owner: sender }),
+        owner: co.group().create({ owner: sender }),
       },
     );
     const errorLogSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -397,7 +398,7 @@ describe("Inbox", () => {
     const receiverInbox = await Inbox.load(receiver);
     const inboxSender = await InboxSender.load(receiver.$jazz.id, sender);
 
-    const group = Group.create({ owner: receiver });
+    const group = co.group().create({ owner: receiver });
 
     // This generates 4 chunks on the processed stream
     for (let i = 0; i < 5; i++) {
@@ -431,7 +432,7 @@ describe("Inbox", () => {
       sessionID: sessionID,
     });
 
-    const reloadedInbox = await Inbox.load(Account.fromNode(node));
+    const reloadedInbox = await Inbox.load(AccountClass.fromNode(node));
 
     const subscribeEmitted = await new Promise((resolve) => {
       const unsubscribe = reloadedInbox.subscribe(Message, async (message) => {
@@ -458,7 +459,7 @@ describe("Inbox", () => {
     const receiverInbox = await Inbox.load(receiver);
     const inboxSender = await InboxSender.load(receiver.$jazz.id, sender);
 
-    const group = Group.create({ owner: receiver });
+    const group = co.group().create({ owner: receiver });
 
     // This generates 4 chunks on the processed stream
     for (let i = 0; i < 5; i++) {
@@ -502,7 +503,7 @@ describe("Inbox", () => {
       sessionID: sessionID,
     });
 
-    const reloadedInbox = await Inbox.load(Account.fromNode(node));
+    const reloadedInbox = await Inbox.load(AccountClass.fromNode(node));
 
     const subscribeEmitted = await new Promise((resolve) => {
       const unsubscribe = reloadedInbox.subscribe(Message, async (message) => {
@@ -526,7 +527,7 @@ describe("Inbox", () => {
       const receiverInbox = await Inbox.load(receiver);
       const inboxSender = await InboxSender.load(receiver.$jazz.id, sender);
 
-      const group = Group.create({ owner: sender });
+      const group = co.group().create({ owner: sender });
 
       const processingOrder: string[] = [];
 
@@ -589,7 +590,7 @@ describe("Inbox", () => {
       const receiverInbox = await Inbox.load(receiver);
       const inboxSender = await InboxSender.load(receiver.$jazz.id, sender);
 
-      const group = Group.create({ owner: sender });
+      const group = co.group().create({ owner: sender });
 
       // Track processing order and timing
       const processingOrder: string[] = [];

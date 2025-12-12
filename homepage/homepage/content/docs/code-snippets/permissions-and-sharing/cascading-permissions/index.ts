@@ -1,16 +1,16 @@
 import { co, Group, z } from "jazz-tools";
 // #region Basic
-const playlistGroup = Group.create();
-const trackGroup = Group.create();
+const playlistGroup = co.group().create();
+const trackGroup = co.group().create();
 
 // Tracks are now visible to the members of playlist
 trackGroup.addMember(playlistGroup);
 // #endregion
 
 // #region Inheritance
-const grandParentGroup = Group.create();
-const parentGroup = Group.create();
-const childGroup = Group.create();
+const grandParentGroup = co.group().create();
+const parentGroup = co.group().create();
+const childGroup = co.group().create();
 
 childGroup.addMember(parentGroup);
 parentGroup.addMember(grandParentGroup);
@@ -20,10 +20,10 @@ import { createJazzTestAccount } from "jazz-tools/testing";
 const bob = await createJazzTestAccount();
 
 // #region RuleOfMostPermissive
-const addedGroup = Group.create();
+const addedGroup = co.group().create();
 addedGroup.addMember(bob, "reader");
 
-const containingGroup = Group.create();
+const containingGroup = co.group().create();
 addedGroup.addMember(bob, "writer");
 containingGroup.addMember(addedGroup);
 
@@ -33,19 +33,19 @@ containingGroup.addMember(addedGroup);
 {
   // #region WriteOnlyOmitted
 
-  const addedGroup = Group.create();
+  const addedGroup = co.group().create();
   containingGroup.addMember(bob, "writeOnly");
 
-  const mainGroup = Group.create();
+  const mainGroup = co.group().create();
   mainGroup.addMember(containingGroup);
   // #endregion
 }
 
 // #region Overrides
-const organizationGroup = Group.create();
+const organizationGroup = co.group().create();
 organizationGroup.addMember(bob, "admin");
 
-const billingGroup = Group.create();
+const billingGroup = co.group().create();
 
 // This way the members of the organization
 // can only read the billing data
@@ -55,11 +55,11 @@ billingGroup.addMember(organizationGroup, "reader");
 const alice = await createJazzTestAccount();
 {
   // #region OverrideContainers
-  const addedGroup = Group.create();
+  const addedGroup = co.group().create();
   addedGroup.addMember(alice, "admin");
   addedGroup.addMember(bob, "reader");
 
-  const containingGroup = Group.create();
+  const containingGroup = co.group().create();
   containingGroup.addMember(addedGroup, "writer");
 }
 
@@ -76,8 +76,8 @@ addedGroup.removeMember(bob);
 
 {
   // #region RevokeExtension
-  const addedGroup = Group.create();
-  const containingGroup = Group.create();
+  const addedGroup = co.group().create();
+  const containingGroup = co.group().create();
 
   containingGroup.addMember(addedGroup);
 
@@ -87,8 +87,8 @@ addedGroup.removeMember(bob);
 }
 {
   // #region GetParentGroups
-  const containingGroup = Group.create();
-  const addedGroup = Group.create();
+  const containingGroup = co.group().create();
+  const addedGroup = co.group().create();
   containingGroup.addMember(addedGroup);
 
   console.log(containingGroup.getParentGroups()); // [addedGroup]
@@ -114,7 +114,7 @@ const board = Board.create({
 
 // #region ManageImplicitPermissions
 // @ts-expect-error Redeclaring
-const writeAccess = Group.create();
+const writeAccess = co.group().create();
 writeAccess.addMember(bob, "writer");
 
 // Give Bob write access to the board, columns and tasks
@@ -137,9 +137,9 @@ taskGroup.addMember(alice, "reader");
 
 // #region ExplicitPermissions
 // @ts-expect-error Redeclaring
-const writeAccess = Group.create();
+const writeAccess = co.group().create();
 writeAccess.addMember(bob, "writer");
-const readAccess = Group.create();
+const readAccess = co.group().create();
 readAccess.addMember(bob, "reader");
 
 // Give Bob read access to the board and write access to the columns and tasks
@@ -164,17 +164,17 @@ const developer = await createJazzTestAccount();
 const client = await createJazzTestAccount();
 // #region TeamHierarchy
 // Company-wide group
-const companyGroup = Group.create();
+const companyGroup = co.group().create();
 companyGroup.addMember(CEO, "admin");
 
 // Team group with elevated permissions
-const teamGroup = Group.create();
+const teamGroup = co.group().create();
 teamGroup.addMember(companyGroup); // Inherits company-wide access
 teamGroup.addMember(teamLead, "admin");
 teamGroup.addMember(developer, "writer");
 
 // Project group with specific permissions
-const projectGroup = Group.create();
+const projectGroup = co.group().create();
 projectGroup.addMember(teamGroup); // Inherits team permissions
 projectGroup.addMember(client, "reader"); // Client can only read project items
 // #endregion

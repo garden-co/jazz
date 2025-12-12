@@ -1,4 +1,4 @@
-import { Group, ID, co, z } from "jazz-tools";
+import { type Group, ID, co, z } from "jazz-tools";
 import { createInviteLink } from "jazz-tools/react";
 import { useAcceptInvite, useAccount, useCoState } from "jazz-tools/react";
 import { useState } from "react";
@@ -22,7 +22,7 @@ export function Sharing() {
   const createCoMap = async () => {
     if (!me.$isLoaded || id) return;
 
-    const group = Group.create({ owner: me });
+    const group = co.group().create({ owner: me });
 
     const coMap = SharedCoMap.create(
       {
@@ -105,7 +105,7 @@ function SharedCoMapWithChildren(props: {
   const addChild = () => {
     if (!coMap.$isLoaded) return;
 
-    const group = Group.create();
+    const group = co.group().create();
 
     const child = SharedCoMap.create(
       { value: "CoValue child " + nextLevel },

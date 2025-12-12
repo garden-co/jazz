@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { CoRichText } from "jazz-tools";
+import { type CoRichText, co } from "jazz-tools";
 import { createJazzTestAccount, setupJazzTestSync } from "jazz-tools/testing";
 import { EditorState, TextSelection } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
@@ -24,7 +24,7 @@ const schema = new Schema({
 
 async function setupTest(initialContent = "<p>Hello</p>") {
   // Create a real CoRichText with the test account as owner
-  const coRichText = CoRichText.create(initialContent);
+  const coRichText = co.richText().create(initialContent);
 
   const plugin = createJazzPlugin(coRichText);
   const state = EditorState.create({
@@ -84,7 +84,7 @@ describe("createJazzPlugin", () => {
   });
 
   it("handles empty CoRichText initialization", async () => {
-    const emptyCoRichText = CoRichText.create("");
+    const emptyCoRichText = co.richText().create("");
     const emptyPlugin = createJazzPlugin(emptyCoRichText);
     const emptyState = EditorState.create({
       schema,

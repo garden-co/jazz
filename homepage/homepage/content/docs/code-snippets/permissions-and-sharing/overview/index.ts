@@ -1,7 +1,7 @@
 // #region Basic
 import { Group } from "jazz-tools";
 
-const group = Group.create();
+const group = co.group().create();
 // #endregion
 
 const bobsId = "";
@@ -84,7 +84,7 @@ const Dog = co.map({
 const Person = co.map({
   pet: Dog,
 }).withPermissions({
-  default: () => Group.create().makePublic(),
+  default: () => co.group().create().makePublic(),
 });
 
 // All Person CoValues will be public, and each Dog CoValue will share the same owner

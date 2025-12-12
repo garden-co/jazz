@@ -1,7 +1,6 @@
 import "jazz-tools/load-edge-wasm";
 import { createWebSocketPeer } from "cojson-transport-ws";
-import { CoMap, coField, co, z } from "jazz-tools";
-import { Account } from "jazz-tools";
+import { co, z } from "jazz-tools";
 import { startWorker } from "jazz-tools/worker";
 import { NextResponse } from "next/server";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
@@ -36,7 +35,7 @@ export async function GET(request: Request) {
     role: "server",
   });
 
-  const account = await Account.create({
+  const account = await co.account().create({
     creationProps: { name: "Cloudflare test account" },
     peers: [peer],
     crypto,

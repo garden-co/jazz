@@ -22,7 +22,7 @@ const activityFeed = ActivityFeed.create([]);
 // #endregion
 
 // #region WithOwner
-const teamGroup = Group.create();
+const teamGroup = co.group().create();
 teamGroup.addMember(colleagueAccount, "writer");
 const teamFeed = ActivityFeed.create([], { owner: teamGroup });
 // #endregion

@@ -1,4 +1,4 @@
-import { CoValueUniqueness } from "cojson";
+import { CoValueUniqueness, RawCoID } from "cojson";
 import {
   Account,
   BranchDefinition,
@@ -6,18 +6,26 @@ import {
   DiscriminableCoValueSchemaDefinition,
   DiscriminableCoreCoValueSchema,
   Group,
+  ID,
   Settled,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
   Simplify,
   SubscribeListenerOptions,
+  SubscribeRestArgs,
+  co,
   coMapDefiner,
   coOptionalDefiner,
   hydrateCoreCoValueSchema,
+  internalLoadUnique,
   isAnyCoValueSchema,
+  loadCoValueWithoutMe,
+  parseSubscribeRestArgs,
+  subscribeToCoValueWithoutMe,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
+  getIdFromHeader,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { removeGetters, withSchemaResolveQuery } from "../../schemaUtils.js";
@@ -116,12 +124,16 @@ export class CoMapSchema<
       Resolved<Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap, R>
     >
   > {
-    // @ts-expect-error
-    return this.coValueClass.load(
+    return loadCoValueWithoutMe(
+      this.coValueClass,
       id,
       // @ts-expect-error
       withSchemaResolveQuery(options, this.resolveQuery),
-    );
+    ) as Promise<
+      Settled<
+        Resolved<Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap, R>
+      >
+    >;
   }
 
   unstable_merge<
@@ -167,11 +179,12 @@ export class CoMapSchema<
       unsubscribe: () => void,
     ) => void,
   ): () => void {
-    // @ts-expect-error
-    return this.coValueClass.subscribe(
+    return subscribeToCoValueWithoutMe(
+      this.coValueClass,
       id,
+      // @ts-expect-error
       withSchemaResolveQuery(options, this.resolveQuery),
-      listener,
+      listener as any,
     );
   }
 
@@ -181,7 +194,24 @@ export class CoMapSchema<
     ownerID: string,
     as?: Account | Group | AnonymousJazzAgent,
   ): string {
-    return this.coValueClass.findUnique(unique, ownerID, as);
+    const header = this._getUniqueHeader(unique, ownerID);
+    return getIdFromHeader(header, as);
+  }
+
+  /** @internal */
+  private _getUniqueHeader(
+    unique: CoValueUniqueness["uniqueness"],
+    ownerID: ID<Account> | ID<Group>,
+  ) {
+    return {
+      type: "comap" as const,
+      ruleset: {
+        type: "ownedByGroup" as const,
+        group: ownerID as RawCoID,
+      },
+      meta: null,
+      uniqueness: unique,
+    };
   }
 
   upsertUnique<
@@ -202,14 +232,35 @@ export class CoMapSchema<
       Resolved<Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap, R>
     >
   > {
-    // @ts-expect-error
-    return this.coValueClass.upsertUnique(
-      // @ts-expect-error
-      withSchemaResolveQuery(options, this.resolveQuery),
+    const header = this._getUniqueHeader(
+      options.unique,
+      options.owner.$jazz.id,
     );
+
+    return internalLoadUnique(this.coValueClass, {
+      header,
+      owner: options.owner,
+      resolve: withSchemaResolveQuery(
+        options.resolve ? { resolve: options.resolve } : undefined,
+        this.resolveQuery,
+      )?.resolve as any,
+      onCreateWhenMissing: () => {
+        this.create(options.value, {
+          owner: options.owner,
+          unique: options.unique,
+        });
+      },
+      onUpdateWhenFound(value) {
+        value.$jazz.applyDiff(options.value);
+      },
+    }) as Promise<
+      Settled<
+        Resolved<Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap, R>
+      >
+    >;
   }
 
-  loadUnique<
+  async loadUnique<
     const R extends RefsToResolve<
       Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
       // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
@@ -229,13 +280,26 @@ export class CoMapSchema<
       Resolved<Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap, R>
     >
   > {
-    // @ts-expect-error
-    return this.coValueClass.loadUnique(
-      unique,
-      ownerID,
-      // @ts-expect-error
-      withSchemaResolveQuery(options, this.resolveQuery),
-    );
+    const header = this._getUniqueHeader(unique, ownerID);
+
+    const owner = await co.group().load(ownerID, {
+      loadAs: options?.loadAs,
+    });
+
+    if (!owner.$isLoaded) return owner as any;
+
+    return internalLoadUnique(this.coValueClass, {
+      header,
+      owner,
+      resolve: withSchemaResolveQuery(
+        options?.resolve ? { resolve: options.resolve } : undefined,
+        this.resolveQuery,
+      )?.resolve as any,
+    }) as Promise<
+      Settled<
+        Resolved<Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap, R>
+      >
+    >;
   }
 
   /**

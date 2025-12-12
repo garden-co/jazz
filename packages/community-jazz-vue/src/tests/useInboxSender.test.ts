@@ -35,7 +35,7 @@ describe("useInboxSender", () => {
     const promise = sendMessage(
       TestMap.create(
         { value: "hello" },
-        { owner: Group.create({ owner: account }) },
+        { owner: co.group().create({ owner: account }) },
       ),
     );
 
@@ -91,7 +91,7 @@ describe("useInboxSender", () => {
     sendMessage(
       TestMap.create(
         { value: "hello" },
-        { owner: Group.create({ owner: account }) },
+        { owner: co.group().create({ owner: account }) },
       ),
     );
 
@@ -109,7 +109,7 @@ describe("useInboxSender", () => {
     sendMessage(
       TestMap.create(
         { value: "hello to you too" },
-        { owner: Group.create({ owner: account }) },
+        { owner: co.group().create({ owner: account }) },
       ),
     );
     const inbox2 = await Inbox.load(inboxReceiver2);

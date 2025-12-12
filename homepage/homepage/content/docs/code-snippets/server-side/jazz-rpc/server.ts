@@ -2,7 +2,7 @@
 import { jazzServer } from "@/jazzServer";
 import { Ticket } from "@/lib/schema";
 import { bookEventTicket } from "@/bookEventTicket";
-import { Group, JazzRequestError } from "jazz-tools";
+import { co, JazzRequestError } from "jazz-tools";
 
 // @ts-expect-error
 export async function POST(request: Request) {
@@ -10,7 +10,7 @@ export async function POST(request: Request) {
     request,
     jazzServer.worker,
     async ({ event }, madeBy) => {
-      const ticketGroup = Group.create(jazzServer.worker);
+      const ticketGroup = co.group().create(jazzServer.worker);
       const ticket = Ticket.create({
         account: madeBy,
         event,
@@ -42,7 +42,7 @@ export async function POST(request: Request) {
         throw new JazzRequestError("Event is full", 400);
       }
 
-      const ticketGroup = Group.create(jazzServer.worker);
+      const ticketGroup = co.group().create(jazzServer.worker);
       const ticket = Ticket.create({
         account: madeBy,
         event,

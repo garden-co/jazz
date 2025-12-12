@@ -39,7 +39,7 @@ const handleSubmit = () => {
   // To create a new todo project, we first create a `Group`,
   // which is a scope for defining access rights (reader/writer/admin)
   // of its members, which will apply to all CoValues owned by that group.
-  const projectGroup = Group.create({ owner: me.value });
+  const projectGroup = co.group().create({ owner: me.value });
 
   // Then we create an empty todo project within that group
   const project = TodoProject.create(

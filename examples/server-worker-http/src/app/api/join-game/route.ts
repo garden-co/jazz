@@ -1,7 +1,7 @@
 import { jazzServerAccount } from "@/jazzServerAccount";
 import { Game, createGameState } from "@/schema";
 import { serverApi } from "@/serverApi";
-import { Account, Group, JazzRequestError } from "jazz-tools";
+import { Account, co, JazzRequestError } from "jazz-tools";
 
 export async function POST(request: Request) {
   return serverApi.joinGame.handle(
@@ -35,7 +35,7 @@ interface CreateGameParams {
 }
 
 function createGame({ account1, account2, worker }: CreateGameParams) {
-  const gameGroup = Group.create({ owner: worker });
+  const gameGroup = co.group().create({ owner: worker });
   gameGroup.addMember(account1, "reader");
   gameGroup.addMember(account2, "reader");
 

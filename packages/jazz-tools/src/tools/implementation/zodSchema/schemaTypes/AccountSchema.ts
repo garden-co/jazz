@@ -11,6 +11,10 @@ import {
   Resolved,
   Simplify,
   SubscribeListenerOptions,
+  SubscribeRestArgs,
+  loadCoValueWithoutMe,
+  parseSubscribeRestArgs,
+  subscribeToCoValueWithoutMe,
   unstable_mergeBranchWithResolve,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
@@ -86,12 +90,12 @@ export class AccountSchema<
       resolve?: RefsToResolveStrict<AccountSchema<Shape>, R>;
     },
   ): Promise<Settled<Loaded<AccountSchema<Shape>, R>>> {
-    // @ts-expect-error
-    return this.coValueClass.load(
+    return loadCoValueWithoutMe(
+      this.coValueClass,
       id,
       // @ts-expect-error
       withSchemaResolveQuery(options, this.resolveQuery),
-    );
+    ) as Promise<Settled<Loaded<AccountSchema<Shape>, R>>>;
   }
 
   // Create an account via worker, useful to generate controlled accounts from the server
@@ -148,11 +152,12 @@ export class AccountSchema<
       unsubscribe: () => void,
     ) => void,
   ): () => void {
-    return this.coValueClass.subscribe(
+    return subscribeToCoValueWithoutMe(
+      this.coValueClass,
       id,
       // @ts-expect-error
       withSchemaResolveQuery(options, this.resolveQuery),
-      listener,
+      listener as any,
     );
   }
 

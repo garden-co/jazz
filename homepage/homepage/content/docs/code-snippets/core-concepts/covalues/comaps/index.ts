@@ -44,7 +44,7 @@ const privateProject = Project.create({
 });
 
 // Create with shared ownership
-const gardenGroup = Group.create();
+const gardenGroup = co.group().create();
 gardenGroup.addMember(memberAccount, "writer");
 
 const communityProject = Project.create(

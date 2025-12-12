@@ -1,5 +1,5 @@
 import { describe, expectTypeOf, it } from "vitest";
-import { CoMap, coField } from "../index.js";
+import { CoMap, coField } from "../internal.js";
 
 describe("coField.json TypeScript validation", () => {
   it("should accept serializable types", async () => {

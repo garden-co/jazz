@@ -1,6 +1,6 @@
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { assert, beforeEach, describe, expect, test, vi } from "vitest";
-import { Account, Group, subscribeToCoValue, z } from "../index.js";
+import { type Account, type Group, subscribeToCoValue, z } from "../index.js";
 import {
   CoValueLoadingState,
   Loaded,
@@ -18,10 +18,7 @@ import { setupTwoNodes, waitFor } from "./utils.js";
 
 const Crypto = await WasmCrypto.create();
 
-let me = await Account.create({
-  creationProps: { name: "Hermes Puggington" },
-  crypto: Crypto,
-});
+let me: Account;
 
 beforeEach(async () => {
   await setupJazzTestSync();
@@ -35,7 +32,7 @@ beforeEach(async () => {
 describe("CoList unique methods", () => {
   test("loadUnique returns existing list", async () => {
     const ItemList = co.list(z.string());
-    const group = Group.create();
+    const group = co.group().create();
 
     const originalList = ItemList.create(["item1", "item2", "item3"], {
       owner: group,
@@ -51,7 +48,7 @@ describe("CoList unique methods", () => {
 
   test("loadUnique returns 'unavailable' for non-existent list", async () => {
     const ItemList = co.list(z.string());
-    const group = Group.create();
+    const group = co.group().create();
 
     const foundList = await ItemList.loadUnique("non-existent", group.$jazz.id);
     expect(foundList.$jazz.loadingState).toBe(CoValueLoadingState.UNAVAILABLE);
@@ -59,7 +56,7 @@ describe("CoList unique methods", () => {
 
   test("upsertUnique creates new list when none exists", async () => {
     const ItemList = co.list(z.string());
-    const group = Group.create();
+    const group = co.group().create();
 
     const sourceData = ["item1", "item2", "item3"];
 
@@ -101,7 +98,7 @@ describe("CoList unique methods", () => {
 
   test("upsertUnique updates existing list", async () => {
     const ItemList = co.list(z.string());
-    const group = Group.create();
+    const group = co.group().create();
 
     // Create initial list
     const originalList = ItemList.create(["original1", "original2"], {
@@ -130,7 +127,7 @@ describe("CoList unique methods", () => {
       value: z.number(),
     });
     const ItemList = co.list(Item);
-    const group = Group.create();
+    const group = co.group().create();
 
     const items = [
       Item.create({ name: "First", value: 1 }, group),
@@ -156,7 +153,7 @@ describe("CoList unique methods", () => {
       value: z.number(),
     });
     const ItemList = co.list(Item);
-    const group = Group.create();
+    const group = co.group().create();
 
     // Create initial list
     const initialItems = [Item.create({ name: "Initial", value: 0 }, group)];
@@ -187,7 +184,7 @@ describe("CoList unique methods", () => {
 
   test("findUnique returns correct ID", async () => {
     const ItemList = co.list(z.string());
-    const group = Group.create();
+    const group = co.group().create();
 
     const originalList = ItemList.create(["test"], {
       owner: group,
@@ -205,7 +202,7 @@ describe("CoList unique methods", () => {
       category: Category,
     });
     const ItemList = co.list(Item);
-    const group = Group.create();
+    const group = co.group().create();
 
     const category = Category.create({ title: "Category 1" }, group);
 
@@ -227,7 +224,7 @@ describe("CoList unique methods", () => {
   test("concurrently upserting the same value", async () => {
     const ItemList = co.list(z.string());
 
-    const owner = Group.create();
+    const owner = co.group().create();
 
     const promises = Array.from({ length: 3 }, (_, i) =>
       ItemList.upsertUnique({

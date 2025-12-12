@@ -19,7 +19,7 @@ watch(
   ([currentMe, authenticated]) => {
     if (currentMe && authenticated) {
       try {
-        const group = Group.create({ owner: currentMe });
+        const group = co.group().create({ owner: currentMe });
         group.addMember("everyone", "writer");
         const chat = Chat.create([], { owner: group });
         router.push(`/chat/${chat.$jazz.id}`);

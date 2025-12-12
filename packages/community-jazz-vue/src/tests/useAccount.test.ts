@@ -25,7 +25,7 @@ const AccountSchema = co
     }
     if (!account.profile) {
       // Profile must be owned by a Group, not the account itself
-      const group = Group.create();
+      const group = co.group().create();
       account.$jazz.set("profile", { name: "Test User" });
     }
   });

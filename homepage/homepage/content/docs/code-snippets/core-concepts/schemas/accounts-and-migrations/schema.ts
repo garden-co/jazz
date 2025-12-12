@@ -48,7 +48,7 @@ export const MyAppAccountWithMigration = co
     }
 
     if (!account.$jazz.has("profile")) {
-      const profileGroup = Group.create();
+      const profileGroup = co.group().create();
       // Unlike the root, we want the profile to be publicly readable.
       profileGroup.makePublic();
 

@@ -8,9 +8,9 @@ import {
   test,
   vi,
 } from "vitest";
-import { FileStream, Group, co, z } from "../exports.js";
+import { type FileStream, type Group, co, z } from "../exports.js";
 import { Loaded } from "../implementation/zodSchema/zodSchema.js";
-import { Account } from "../index.js";
+import { type Account, co as coFromIndex } from "../index.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { assertLoaded, waitFor } from "./utils.js";
 import { CoValueLoadingState, TypeSym } from "../internal.js";
@@ -73,7 +73,10 @@ describe("CoMap.Record", async () => {
     test("create a Record with an account as owner", () => {
       const Person = co.record(z.string(), z.string());
 
-      const person = Person.create({ name: "John" }, Account.getMe());
+      const person = Person.create(
+        { name: "John" },
+        coFromIndex.account().getMe(),
+      );
 
       expect(person.name).toEqual("John");
       expect(person.$jazz.raw.get("name")).toEqual("John");
@@ -82,7 +85,7 @@ describe("CoMap.Record", async () => {
     test("create a Record with a group as owner", () => {
       const Person = co.record(z.string(), z.string());
 
-      const person = Person.create({ name: "John" }, Group.create());
+      const person = Person.create({ name: "John" }, co.group().create());
 
       expect(person.name).toEqual("John");
       expect(person.$jazz.raw.get("name")).toEqual("John");
@@ -166,7 +169,7 @@ describe("CoMap.Record", async () => {
 
       const person = Person.create({ name: "John" });
 
-      const me = Account.getMe();
+      const me = coFromIndex.account().getMe();
 
       person.$jazz.set("name", "Jane");
 
@@ -336,7 +339,7 @@ describe("CoMap.Record", async () => {
   });
 
   describe("Record Typescript validation", async () => {
-    const me = await Account.create({
+    const me = await coFromIndex.account().create({
       creationProps: { name: "Hermes Puggington" },
       crypto: Crypto,
     });
@@ -387,7 +390,7 @@ describe("CoMap.Record", async () => {
       type: "repro",
       name: "John",
       image: co.image().create({
-        original: FileStream.create(),
+        original: co.fileStream().create(),
         progressive: false,
         originalSize: [1920, 1080],
       }),
@@ -479,7 +482,7 @@ describe("CoMap.Record", async () => {
 describe("CoRecord unique methods", () => {
   test("loadUnique returns existing record", async () => {
     const ItemRecord = co.record(z.string(), z.number());
-    const group = Group.create();
+    const group = co.group().create();
 
     const originalRecord = ItemRecord.create(
       { item1: 1, item2: 2, item3: 3 },
@@ -498,7 +501,7 @@ describe("CoRecord unique methods", () => {
 
   test("loadUnique returns 'unavailable' for non-existent record", async () => {
     const ItemRecord = co.record(z.string(), z.number());
-    const group = Group.create();
+    const group = co.group().create();
 
     const foundRecord = await ItemRecord.loadUnique(
       "non-existent",
@@ -511,7 +514,7 @@ describe("CoRecord unique methods", () => {
 
   test("upsertUnique creates new record when none exists", async () => {
     const ItemRecord = co.record(z.string(), z.number());
-    const group = Group.create();
+    const group = co.group().create();
 
     const sourceData = { item1: 1, item2: 2, item3: 3 };
 
@@ -529,7 +532,7 @@ describe("CoRecord unique methods", () => {
 
   test("upsertUnique updates existing record", async () => {
     const ItemRecord = co.record(z.string(), z.number());
-    const group = Group.create();
+    const group = co.group().create();
 
     // Create initial record
     const originalRecord = ItemRecord.create(
@@ -557,7 +560,7 @@ describe("CoRecord unique methods", () => {
       value: z.number(),
     });
     const ItemRecord = co.record(z.string(), Item);
-    const group = Group.create();
+    const group = co.group().create();
 
     const items = {
       first: Item.create({ name: "First", value: 1 }, group),
@@ -578,7 +581,7 @@ describe("CoRecord unique methods", () => {
 
   test("findUnique returns correct ID", async () => {
     const ItemRecord = co.record(z.string(), z.string());
-    const group = Group.create();
+    const group = co.group().create();
 
     const originalRecord = ItemRecord.create(
       { test: "value" },

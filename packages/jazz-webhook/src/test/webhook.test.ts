@@ -26,7 +26,7 @@ const TestAccount = co
     profile: co.profile(),
   })
   .withMigration((account, creationProps) => {
-    const group = Group.create({ owner: account });
+    const group = co.group().create({ owner: account });
     group.addMember("everyone", "reader");
 
     if (!account.$jazz.has("profile")) {

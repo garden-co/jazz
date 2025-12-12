@@ -7,7 +7,13 @@ import {
   onTestFinished,
   vi,
 } from "vitest";
-import { Account, Group, cojsonInternals, z } from "../index.js";
+import {
+  type Account,
+  type Group,
+  cojsonInternals,
+  z,
+  co as coFromIndex,
+} from "../index.js";
 import {
   CoValueLoadingState,
   Loaded,
@@ -435,10 +441,10 @@ describe("subscribeToCoValue", () => {
       isCurrentActiveAccount: true,
     });
 
-    const everyone = Group.create(creator);
+    const everyone = co.group().create(creator);
     everyone.addMember("everyone", "reader");
 
-    const group = Group.create(creator);
+    const group = co.group().create(creator);
 
     const list = TestList.create(
       [
@@ -512,7 +518,7 @@ describe("subscribeToCoValue", () => {
         peer.gracefulShutdown();
       });
 
-    const everyone = Group.create(creator);
+    const everyone = co.group().create(creator);
     everyone.addMember("everyone", "reader");
 
     const list = TestList.create(
@@ -580,7 +586,7 @@ describe("subscribeToCoValue", () => {
       isCurrentActiveAccount: true,
     });
 
-    const everyone = Group.create(creator);
+    const everyone = co.group().create(creator);
     everyone.addMember("everyone", "reader");
 
     const list = TestList.create(
@@ -651,7 +657,7 @@ describe("subscribeToCoValue", () => {
       isCurrentActiveAccount: true,
     });
 
-    const everyone = Group.create(creator);
+    const everyone = co.group().create(creator);
     everyone.addMember("everyone", "reader");
 
     const list = TestList.create(
@@ -859,7 +865,7 @@ describe("subscribeToCoValue", () => {
       reader.$jazz.waitForAllCoValuesSync(),
     ]);
 
-    const group = Group.create(creator);
+    const group = co.group().create(creator);
     group.addMember(writer1, "writer");
     group.addMember(writer2, "reader");
     group.addMember(reader, "reader");
@@ -946,10 +952,10 @@ describe("subscribeToCoValue", () => {
       isCurrentActiveAccount: true,
     });
 
-    const everyone = Group.create(creator);
+    const everyone = co.group().create(creator);
     everyone.addMember("everyone", "reader");
 
-    const group = Group.create(creator);
+    const group = co.group().create(creator);
 
     const list = TestList.create(
       [
@@ -1028,7 +1034,7 @@ describe("subscribeToCoValue", () => {
       isCurrentActiveAccount: true,
     });
 
-    const everyone = Group.create(creator);
+    const everyone = co.group().create(creator);
     everyone.addMember("everyone", "reader");
 
     const list = PersonList.create(
@@ -1134,7 +1140,7 @@ describe("subscribeToCoValue", () => {
       isCurrentActiveAccount: true,
     });
 
-    const everyone = Group.create(creator);
+    const everyone = co.group().create(creator);
     everyone.addMember("everyone", "reader");
 
     const list = PersonList.create(
@@ -1217,7 +1223,7 @@ describe("subscribeToCoValue", () => {
       data: Data,
     });
 
-    const group = Group.create(syncServer);
+    const group = co.group().create(syncServer);
     const largeMap = LargeDataset.create(
       {
         metadata: {
@@ -1305,7 +1311,7 @@ describe("subscribeToCoValue", () => {
     });
     const PersonList = co.list(Person);
 
-    const group = Group.create(alice);
+    const group = co.group().create(alice);
 
     const person1 = Person.create({ name: "John" }, group);
     const person2 = Person.create({ name: "Jane" }, group);
@@ -1361,10 +1367,10 @@ describe("subscribeToCoValue", () => {
         isCurrentActiveAccount: true,
       });
 
-      const dogGroup = Group.create(creator);
+      const dogGroup = co.group().create(creator);
       dogGroup.addMember(reader, "reader");
 
-      const everyone = Group.create(creator);
+      const everyone = co.group().create(creator);
       everyone.addMember("everyone", "reader");
 
       const dog = Dog.create({ name: "Giggino" }, dogGroup);

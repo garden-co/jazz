@@ -1,5 +1,5 @@
 import * as Clipboard from "expo-clipboard";
-import { Account, getLoadedOrUndefined, Group } from "jazz-tools";
+import { getLoadedOrUndefined, co } from "jazz-tools";
 import { useEffect, useRef, useState } from "react";
 import React, {
   Button,
@@ -22,7 +22,7 @@ import { createImage } from "jazz-tools/media";
 import { launchImageLibrary } from "react-native-image-picker";
 
 export default function ChatScreen() {
-  const me = useAccount(Account, { resolve: { profile: true } });
+  const me = useAccount(co.account(), { resolve: { profile: true } });
   const logOut = useLogOut();
   const [chatId, setChatId] = useState<string>();
   const [chatIdInput, setChatIdInput] = useState<string>();
@@ -70,7 +70,7 @@ export default function ChatScreen() {
   }
 
   const createChat = () => {
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "writer");
     const chat = Chat.create([], group);
     setChatId(chat.$jazz.id);

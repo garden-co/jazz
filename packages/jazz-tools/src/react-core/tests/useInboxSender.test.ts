@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { CoMap, Group, Inbox, Loaded, co, z } from "jazz-tools";
+import { CoMap, type Group, Inbox, Loaded, co, z } from "jazz-tools";
 import { assertLoaded } from "jazz-tools/testing";
 import { describe, expect, it } from "vitest";
 import {
@@ -41,7 +41,7 @@ describe("useInboxSender", () => {
     const promise = sendMessage(
       TestMap.create(
         { value: "hello" },
-        { owner: Group.create({ owner: account }) },
+        { owner: co.group().create({ owner: account }) },
       ),
     );
 

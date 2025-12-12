@@ -6,7 +6,7 @@ import {
   Player,
   WaitingRoom,
 } from "@/schema";
-import { Account, Group, co } from "jazz-tools";
+import { type Account, co } from "jazz-tools";
 import { startWorker } from "jazz-tools/worker";
 import { determineWinner } from "./lib/utils";
 
@@ -38,7 +38,7 @@ inbox.subscribe(InboxMessage, async (message, senderID) => {
       break;
 
     case "createGame":
-      const waitingRoomGroup = Group.create({ owner: worker });
+      const waitingRoomGroup = co.group().create({ owner: worker });
       waitingRoomGroup.addMember("everyone", "reader");
       const waitingRoom = WaitingRoom.create(
         { account1: playerAccount },
@@ -80,7 +80,7 @@ interface CreateGameParams {
 }
 
 async function createGame({ account1, account2 }: CreateGameParams) {
-  const publicReadOnly = Group.create({ owner: worker });
+  const publicReadOnly = co.group().create({ owner: worker });
   publicReadOnly.addMember(account1, "reader");
   publicReadOnly.addMember(account2, "reader");
 
@@ -107,7 +107,7 @@ interface CreatePlayerParams {
 }
 
 function createPlayer({ account }: CreatePlayerParams) {
-  const publicRead = Group.create({ owner: worker });
+  const publicRead = co.group().create({ owner: worker });
   publicRead.addMember("everyone", "reader");
 
   const player = Player.create(

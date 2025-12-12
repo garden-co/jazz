@@ -10,15 +10,16 @@ import {
   vi,
 } from "vitest";
 import {
-  Group,
+  type Group,
   ID,
   SessionID,
   createJazzContextFromExistingCredentials,
   isControlledAccount,
   z,
+  co as coFromIndex,
 } from "../index.js";
 import {
-  Account,
+  type Account,
   Loaded,
   MaybeLoaded,
   Settled,
@@ -61,7 +62,7 @@ beforeEach(() => {
 });
 
 describe("Deep loading with depth arg", async () => {
-  const me = await Account.create({
+  const me = await coFromIndex.account().create({
     creationProps: { name: "Hermes Puggington" },
     crypto: Crypto,
   });
@@ -314,7 +315,7 @@ test("Deep loading within account", async () => {
 const RecordLike = co.record(z.string(), TestMap);
 
 test("Deep loading a record-like coMap", async () => {
-  const me = await Account.create({
+  const me = await coFromIndex.account().create({
     creationProps: { name: "Hermes Puggington" },
     crypto: Crypto,
   });
@@ -496,7 +497,7 @@ describe("Deep loading with unauthorized account", async () => {
   await alice.$jazz.waitForAllCoValuesSync();
 
   const onlyBob = bob;
-  const group = Group.create(bob);
+  const group = co.group().create(bob);
 
   group.addMember(alice, "reader");
 
@@ -1088,7 +1089,7 @@ test("throw when calling ensureLoaded on a ref that's required but missing", asy
     profile: JazzProfile,
   });
 
-  const me = await Account.create({
+  const me = await coFromIndex.account().create({
     creationProps: { name: "Tester McTesterson" },
     crypto: Crypto,
   });
@@ -1109,7 +1110,7 @@ test("throw when calling ensureLoaded on a ref that's required but missing", asy
 test("returns the value when calling ensureLoaded on a ref that is not defined in the schema", async () => {
   const JazzRoot = co.map({});
 
-  const me = await Account.create({
+  const me = await coFromIndex.account().create({
     creationProps: { name: "Tester McTesterson" },
     crypto: Crypto,
   });
@@ -1133,7 +1134,7 @@ test("should not throw when calling ensureLoaded a record with a deleted ref", a
 
   const JazzySnapStore = co.record(z.string(), JazzProfile);
 
-  const me = await Account.create({
+  const me = await coFromIndex.account().create({
     creationProps: { name: "Tester McTesterson" },
     crypto: Crypto,
   });
@@ -1220,7 +1221,7 @@ test("should load a record with a non-existent key if there's a catch block", as
 test("deep loaded CoList nested inside another CoValue can be iterated over", async () => {
   const TestMap = co.map({ list: co.list(z.number()) });
 
-  const me = await Account.create({
+  const me = await coFromIndex.account().create({
     creationProps: { name: "Hermes Puggington" },
     crypto: Crypto,
   });
@@ -1246,7 +1247,7 @@ test("deep loaded CoList nested inside another CoValue can be iterated over", as
 });
 
 describe("$isLoaded", async () => {
-  const me = await Account.create({
+  const me = await coFromIndex.account().create({
     creationProps: { name: "Hermes Puggington" },
     crypto: Crypto,
   });
@@ -1273,7 +1274,7 @@ describe("$isLoaded", async () => {
   });
 
   test("$isLoaded narrows a maybe-loaded CoValue to a not loaded CoValue", async () => {
-    const otherAccount = await Account.create({
+    const otherAccount = await coFromIndex.account().create({
       creationProps: { name: "Other Account" },
       crypto: Crypto,
     });

@@ -11,7 +11,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { WaitingRoom } from "@/schema";
 import { serverApi } from "@/serverApi";
-import { Account, JazzRequestError, co } from "jazz-tools";
+import { JazzRequestError, co } from "jazz-tools";
 import { useCoState } from "jazz-tools/react-core";
 import { ClipboardCopyIcon, Loader2Icon } from "lucide-react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
@@ -64,7 +64,7 @@ export default function RouteComponent() {
 
   const isJoining = !waitingRoom.$isLoaded
     ? searchParams.get("join") === "true"
-    : Account.getMe().$jazz.id !== waitingRoom.creator.$jazz.id;
+    : co.account().getMe().$jazz.id !== waitingRoom.creator.$jazz.id;
 
   useEffect(() => {
     if (!waitingRoom.$isLoaded) {

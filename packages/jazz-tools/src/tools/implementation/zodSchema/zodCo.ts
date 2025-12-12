@@ -23,6 +23,7 @@ import {
   hydrateCoreCoValueSchema,
   isAnyCoValueSchema,
   isCoValueClass,
+  Account,
 } from "../../internal.js";
 import { removeGetters } from "../schemaUtils.js";
 import {
@@ -41,6 +42,19 @@ import {
   createCoreGroupSchema,
   GroupSchema,
 } from "./schemaTypes/GroupSchema.js";
+
+// This cache is used to avoid creating the same schema multiple times.
+// Meant only for Account, Group and maybe CoList.
+// For CoMap and other schemas, we need to at least namespace the key by the schema type.
+const schemaCache = new WeakMap<WeakKey, unknown>();
+
+function getCachedSchema<T>(key: WeakKey, create: () => T): T {
+  const cached = schemaCache.get(key) as T | undefined;
+  if (cached) return cached;
+  const newSchema = create();
+  schemaCache.set(key, newSchema);
+  return newSchema;
+}
 
 /**
  * Checking for the presence of the `_zod` property is the recommended way
@@ -108,7 +122,7 @@ export const coMapDefiner = <Shape extends z.core.$ZodLooseShape>(
  * }).withMigration(async (account) => {
  *   // Migration logic for existing accounts
  *   if (!account.$jazz.has("profile")) {
- *     const group = Group.create();
+ *     const group = co.group().create();
  *     account.$jazz.set("profile", co.profile().create(
  *       { name: getRandomUsername() },
  *       group
@@ -119,22 +133,30 @@ export const coMapDefiner = <Shape extends z.core.$ZodLooseShape>(
  * ```
  */
 export const coAccountDefiner = <Shape extends BaseAccountShape>(
-  shape: Shape = {
-    profile: coMapDefiner({
-      name: z.string(),
-      inbox: z.optional(z.string()),
-      inboxInvite: z.optional(z.string()),
-    }),
-    root: coMapDefiner({}),
-  } as unknown as Shape,
+  shape?: Shape,
 ): AccountSchema<Shape> => {
-  const coreSchema = createCoreAccountSchema(shape);
-  return hydrateCoreCoValueSchema(coreSchema);
+  const key = shape || Account;
+  return getCachedSchema(key, () => {
+    const defaultShape = {
+      profile: coMapDefiner({
+        name: z.string(),
+        inbox: z.optional(z.string()),
+        inboxInvite: z.optional(z.string()),
+      }),
+      root: coMapDefiner({}),
+    } as unknown as Shape;
+    const coreSchema = createCoreAccountSchema(shape || defaultShape);
+    return hydrateCoreCoValueSchema(coreSchema);
+  });
 };
 
+const defaultGroupKey = Symbol("defaultGroupKey");
+
 export const coGroupDefiner = (): GroupSchema => {
-  const coreSchema = createCoreGroupSchema();
-  return hydrateCoreCoValueSchema(coreSchema);
+  return getCachedSchema(defaultGroupKey, () => {
+    const coreSchema = createCoreGroupSchema();
+    return hydrateCoreCoValueSchema(coreSchema);
+  });
 };
 
 export const coRecordDefiner = <

@@ -1,4 +1,4 @@
-import { Account, Group, TypeSym, type GroupRole } from "../../internal.js";
+import { Account, co, Group, TypeSym, type GroupRole } from "../../internal.js";
 
 /**
  * Defines how a nested CoValue’s owner is obtained when creating CoValues from JSON.
@@ -48,7 +48,7 @@ export type RefOnCreateCallback = (newGroup: Group, init?: unknown) => void;
  * @param onInlineCreate - defines how a nested CoValue's owner is obtained when creating CoValues from JSON.
  * @param onCreate - callback that runs every time a CoValue is created. Can be used to configure the CoValue's owner.
  * Runs both when creating CoValues with `.create()` and when creating CoValues from JSON.
- * @default { default: () => Group.create(), onInlineCreate: "extendsContainer" }
+ * @default { default: () => co.group().create(), onInlineCreate: "extendsContainer" }
  */
 export type SchemaPermissions = {
   /**
@@ -67,7 +67,7 @@ export type SchemaPermissions = {
 };
 
 export let DEFAULT_SCHEMA_PERMISSIONS: SchemaPermissions = {
-  default: () => Group.create(),
+  default: () => co.group().create(),
   onInlineCreate: "extendsContainer",
 };
 
@@ -170,7 +170,7 @@ export function withSchemaPermissions<T extends { owner?: Account | Group }>(
 ): T & { onCreate?: OnCreateCallback } {
   const onCreate = schemaPermissions?.onCreate;
   if (!options) {
-    const owner = schemaPermissions?.default?.() ?? Group.create();
+    const owner = schemaPermissions?.default?.() ?? co.group().create();
     return { owner, onCreate } as T & { onCreate?: OnCreateCallback };
   }
   if (TypeSym in options) {
@@ -179,7 +179,7 @@ export function withSchemaPermissions<T extends { owner?: Account | Group }>(
     };
   }
   const owner =
-    options.owner ?? schemaPermissions?.default?.() ?? Group.create();
+    options.owner ?? schemaPermissions?.default?.() ?? co.group().create();
   return {
     ...options,
     owner,

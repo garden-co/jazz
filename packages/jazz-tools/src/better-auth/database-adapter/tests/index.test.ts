@@ -11,7 +11,7 @@ import {
   beforeEach,
   vi,
 } from "vitest";
-import { Account, co, Group } from "jazz-tools";
+import { type Account, co, type Group } from "jazz-tools";
 import { startWorker } from "jazz-tools/worker";
 import { createWorkerAccount, startSyncServer } from "./sync-utils.js";
 import { JazzBetterAuthDatabaseAdapter } from "../index.js";
@@ -186,7 +186,7 @@ describe("JazzBetterAuthDatabaseAdapter tests", async () => {
       });
 
       const DatabaseRoot = co.map({
-        group: Group,
+        group: co.group(),
         tables: co.map({}),
       });
 
@@ -206,7 +206,7 @@ describe("JazzBetterAuthDatabaseAdapter tests", async () => {
         peer: `ws://localhost:${syncServer.port}`,
       });
 
-      const newWorkerRef = await Account.load(newWorkerAccount.accountID);
+      const newWorkerRef = await co.account().load(newWorkerAccount.accountID);
       assertLoaded(newWorkerRef);
 
       // Add the new worker to the group

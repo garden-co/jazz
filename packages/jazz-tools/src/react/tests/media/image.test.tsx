@@ -1,6 +1,11 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi } from "vitest";
-import { Account, FileStream, ImageDefinition } from "../../../";
+import type { Account } from "../../../";
+import {
+  Account as AccountClass,
+  ImageDefinition,
+  co,
+} from "../../../tools/internal.js";
 import { Image } from "../../media/image";
 import { createJazzTestAccount } from "../../testing";
 import { render, screen, waitFor } from "../testUtils";
@@ -10,7 +15,7 @@ describe("Image", async () => {
     isCurrentActiveAccount: true,
   });
 
-  vi.spyOn(Account, "getMe").mockReturnValue(account);
+  vi.spyOn(AccountClass, "getMe").mockReturnValue(account);
 
   describe("initial rendering", () => {
     it("should render a blank placeholder while waiting for the coValue to load", async () => {
@@ -45,7 +50,7 @@ describe("Image", async () => {
     });
 
     it("should render an empty image if the image is not loaded yet", async () => {
-      const original = FileStream.create({ owner: account });
+      const original = co.fileStream().create({ owner: account });
       original.start({ mimeType: "image/jpeg" });
       // Don't end original, so it has no chunks
 
@@ -76,7 +81,7 @@ describe("Image", async () => {
       const placeholderDataUrl =
         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
-      const original = FileStream.create({ owner: account });
+      const original = co.fileStream().create({ owner: account });
       original.start({ mimeType: "image/jpeg" });
       // Don't end original, so it has no chunks
 
@@ -107,7 +112,7 @@ describe("Image", async () => {
       const customPlaceholder =
         "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiIGNsYXNzPSJsdWNpZGUgbHVjaWRlLXVzZXItaWNvbiBsdWNpZGUtdXNlciI+PHBhdGggZD0iTTE5IDIxdi0yYTQgNCAwIDAgMC00LTRIOWE0IDQgMCAwIDAtNCA0djIiLz48Y2lyY2xlIGN4PSIxMiIgY3k9IjciIHI9IjQiLz48L3N2Zz4=";
 
-      const original = FileStream.create({ owner: account });
+      const original = co.fileStream().create({ owner: account });
       original.start({ mimeType: "image/jpeg" });
       // Don't end original, so it has no chunks
 
@@ -153,7 +158,7 @@ describe("Image", async () => {
         "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSIyIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiIGNsYXNzPSJsdWNpZGUgbHVjaWRlLXVzZXItaWNvbiBsdWNpZGUtdXNlciI+PHBhdGggZD0iTTE5IDIxdi0yYTQgNCAwIDAgMC00LTRIOWE0IDQgMCAwIDAtNCA0djIiLz48Y2lyY2xlIGN4PSIxMiIgY3k9IjciIHI9IjQiLz48L3N2Zz4=";
 
       // Create an image with no chunks initially (loading state)
-      const original = FileStream.create({ owner: account });
+      const original = co.fileStream().create({ owner: account });
       original.start({ mimeType: "image/jpeg" });
       // Don't end original, so it has no chunks
 
@@ -482,9 +487,11 @@ describe("Image", async () => {
           return `blob:test-${blob.size}`;
         });
 
-      const original = await FileStream.createFromBlob(createDummyBlob(1), {
-        owner: account,
-      });
+      const original = await co
+        .fileStream()
+        .createFromBlob(createDummyBlob(1), {
+          owner: account,
+        });
 
       const im = ImageDefinition.create(
         {
@@ -714,7 +721,7 @@ function createDummyFileStream(
   size: number,
   account: Awaited<ReturnType<typeof createJazzTestAccount>>,
 ) {
-  return FileStream.createFromBlob(createDummyBlob(size), {
+  return co.fileStream().createFromBlob(createDummyBlob(size), {
     owner: account,
   });
 }

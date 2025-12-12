@@ -382,6 +382,6 @@ export const registerWebhook = async (options: {
 
   registry.$jazz.set(registration.$jazz.id, registration);
 
-  await Account.getMe().$jazz.waitForAllCoValuesSync();
+  await co.account().getMe().$jazz.waitForAllCoValuesSync();
   return registration.$jazz.id;
 };

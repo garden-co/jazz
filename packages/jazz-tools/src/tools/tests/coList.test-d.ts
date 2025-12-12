@@ -1,6 +1,6 @@
 import { assert, describe, expectTypeOf, test } from "vitest";
-import { Group, co, z } from "../exports.js";
-import { Account } from "../index.js";
+import { type Group, co, z } from "../exports.js";
+import { type Account, co as coFromIndex } from "../index.js";
 import { CoList, CoMap, Loaded, MaybeLoaded } from "../internal.js";
 import { assertLoaded } from "./utils.js";
 
@@ -40,7 +40,10 @@ describe("CoList", () => {
     test("has the owner property", () => {
       const StringList = co.list(z.string());
 
-      const list = StringList.create(["a", "b", "c"], Account.getMe());
+      const list = StringList.create(
+        ["a", "b", "c"],
+        coFromIndex.account().getMe(),
+      );
 
       expectTypeOf(list.$jazz.owner).toEqualTypeOf<Group>();
     });
