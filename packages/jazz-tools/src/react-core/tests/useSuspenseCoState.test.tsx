@@ -370,7 +370,7 @@ describe("useSuspenseCoState", () => {
     });
   });
 
-  it.only("should throw error when CoValue becomes unauthorized", async () => {
+  it("should throw error when CoValue becomes unauthorized", async () => {
     const TestMap = co.map({
       value: z.string(),
     });
