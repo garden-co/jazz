@@ -10,6 +10,9 @@ import { GappedGrid } from "@garden-co/design-system/src/components/molecules/Ga
 import { HeroHeader } from "@garden-co/design-system/src/components/molecules/HeroHeader";
 import { clsx } from "clsx";
 import type { Metadata } from "next";
+import journalImage from "@/components/examples/images/journal.png";
+import ssrTodoImage from "@/components/examples/images/ssr-todo.png";
+import todoImage from "@/components/examples/images/todo.jpg";
 
 const metaTags = {
   title: "Examples",
@@ -388,7 +391,7 @@ const reactExamples: Example[] = [
     features: [features.vectorSearch],
     demoUrl: "https://vector-search.demo.jazz.tools/",
     illustration: (
-      <div className="h-full w-full bg-cover bg-[url('/journal.png')] bg-bottom-left"></div>
+      <div className="h-full w-full bg-cover bg-bottom-left" style={{ backgroundImage: `url(${journalImage.src})` }}></div>
     ),
   },
   {
@@ -409,7 +412,7 @@ const reactExamples: Example[] = [
     features: [features.nextjs],
     demoUrl: "https://jazz-nextjs.vercel.app/",
     illustration: (
-      <div className="h-full w-full bg-cover bg-[url('/ssr-todo.png')] bg-bottom-left"></div>
+      <div className="h-full w-full bg-cover bg-bottom-left" style={{ backgroundImage: `url(${ssrTodoImage.src})` }}></div>
     ),
   },
   {
@@ -420,7 +423,7 @@ const reactExamples: Example[] = [
     features: [features.inviteLink],
     demoUrl: "https://todo.demo.jazz.tools",
     illustration: (
-      <div className="h-full w-full bg-cover bg-[url('/todo.jpg')] bg-bottom-left"></div>
+      <div className="h-full w-full bg-cover bg-bottom-left" style={{ backgroundImage: `url(${todoImage.src})` }}></div>
     ),
   },
   {
