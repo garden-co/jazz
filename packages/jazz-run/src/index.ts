@@ -18,6 +18,15 @@ const peerOption = Options.text("peer")
   .pipe(Options.withAlias("p"))
   .pipe(Options.withDefault("wss://cloud.jazz.tools"));
 
+const driverOption = Options.choice("driver", ["better-sqlite3", "node:sqlite"])
+  .pipe(Options.withAlias("d"))
+  .pipe(
+    Options.withDescription(
+      "The database driver to use. Defaults to 'better-sqlite3' if not specified.",
+    ),
+  )
+  .pipe(Options.withDefault("better-sqlite3"));
+
 const createAccountCommand = Command.make(
   "create",
   { name: nameOption, peer: peerOption, json: jsonOption },
@@ -81,11 +90,12 @@ const startSyncServerCommand = Command.make(
     port: portOption,
     inMemory: inMemoryOption,
     db: dbOption,
+    driver: driverOption,
   },
-  ({ host, port, inMemory, db }) => {
+  ({ host, port, inMemory, db, driver }) => {
     return Effect.gen(function* () {
       const server = yield* Effect.promise(() =>
-        startSyncServer({ host, port, inMemory, db }),
+        startSyncServer({ host, port, inMemory, db, driver }),
       );
 
       const serverAddress = server.address();

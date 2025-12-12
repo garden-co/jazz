@@ -5,6 +5,7 @@ import { Task, TodoProject } from "./1_schema";
 export function generateRandomProject(numTasks: number) {
   // Create a list of tasks
   const tasks = TodoProject.shape.tasks.create([]);
+  const start = performance.now();
 
   // Generate random tasks
   function populateTasks() {
@@ -29,7 +30,12 @@ export function generateRandomProject(numTasks: number) {
     done: new Promise((resolve) => {
       setTimeout(() => {
         populateTasks();
-        resolve(true);
+        tasks.$jazz.localNode.syncManager.waitForAllCoValuesSync().then(() => {
+          console.log(
+            `Generated and synced ${numTasks} tasks in ${performance.now() - start}ms`,
+          );
+          resolve(true);
+        });
       }, 10);
     }),
   };
