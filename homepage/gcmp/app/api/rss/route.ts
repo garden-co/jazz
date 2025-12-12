@@ -2,6 +2,7 @@ import { metaTags } from "@/app/layout";
 import { posts } from "@/lib/posts";
 import { Feed } from "feed";
 import { NextResponse } from "next/server";
+import type { StaticImageData } from "next/image";
 
 export async function GET() {
   const feed = new Feed({

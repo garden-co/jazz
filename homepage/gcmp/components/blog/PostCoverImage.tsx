@@ -1,6 +1,7 @@
 import { clsx } from "clsx";
 import Image from "next/image";
 import Link from "next/link";
+import type { StaticImageData } from "next/image";
 
 const PostCoverImage = ({
   src,
@@ -9,7 +10,7 @@ const PostCoverImage = ({
   alt = "",
   className,
 }: {
-  src: string;
+  src: string | StaticImageData;
   title: string;
   slug?: string;
   alt?: string;
