@@ -12,6 +12,11 @@ export const docNavigationItems = [
         done: 100,
       },
       {
+        name: "What Is Jazz?",
+        href: "/docs/what-is-jazz",
+        done: 100,
+      },
+      {
         name: "Quickstart",
         href: "/docs/quickstart",
         done: {
