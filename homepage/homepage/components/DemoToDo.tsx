@@ -1,8 +1,8 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 
 export const DemoToDo = () => {
-  const [online, setOnline] = useState(true);
+  const HEIGHT = 350;
   let frameA = useRef<HTMLIFrameElement>(null);
   let frameB = useRef<HTMLIFrameElement>(null);
   useEffect(() => {
@@ -27,7 +27,7 @@ export const DemoToDo = () => {
           id="childA"
           src="/simplest-jazz-todo.html"
           style={{ overflowY: "auto" }}
-          height={350}
+          height={HEIGHT}
           width="100%"
           title="Jazz Todo List Demo Instance A"
         ></iframe>
@@ -38,7 +38,7 @@ export const DemoToDo = () => {
           id="childB"
           src="/simplest-jazz-todo.html"
           style={{ overflowY: "auto" }}
-          height={320}
+          height={HEIGHT}
           width="100%"
           title="Jazz Todo List Demo Instance B"
         ></iframe>
