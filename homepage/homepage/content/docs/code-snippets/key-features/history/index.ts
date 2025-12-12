@@ -56,3 +56,7 @@ console.log(`Started as: ${initialValue}`);
 console.log(new Date(task.$jazz.createdAt));
 console.log(new Date(task.$jazz.lastUpdatedAt));
 // #endregion
+
+// #region CreatedBy
+console.log(task.$jazz.createdBy);
+// #endregion
