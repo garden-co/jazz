@@ -10,7 +10,7 @@ import { apiKey } from "./apiKey";
 import { ChatScreen } from "./chat";
 import { HandleInviteScreen } from "./invite";
 import { theme } from "./theme";
-import { RNCrypto } from "jazz-tools/react-native-core/crypto/RNCrypto";
+import { RNCrypto } from "jazz-tools/react-native-core/crypto";
 
 type RootStackParamList = {
   ChatScreen: undefined;

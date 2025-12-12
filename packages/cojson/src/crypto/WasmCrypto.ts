@@ -1,6 +1,7 @@
 import {
   SessionLog,
   initialize,
+  initializeSync,
   Blake3Hasher,
   blake3HashOnce,
   blake3HashOnceWithContext,
@@ -20,7 +21,6 @@ import { RawCoID, SessionID, TransactionID } from "../ids.js";
 import { Stringified, stableStringify } from "../jsonStringify.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { logger } from "../logger.js";
-import { PureJSCrypto } from "./PureJSCrypto.js";
 import {
   CryptoProvider,
   Encrypted,
@@ -45,6 +45,7 @@ import {
 type Blake3State = Blake3Hasher;
 
 let wasmInit = initialize;
+let wasmInitSync = initializeSync;
 /**
  * WebAssembly implementation of the CryptoProvider interface using cojson-core-wasm.
  * This provides the primary implementation using WebAssembly for optimal performance, offering:
@@ -54,7 +55,7 @@ let wasmInit = initialize;
  * - Hashing (BLAKE3)
  */
 export class WasmCrypto extends CryptoProvider<Blake3State> {
-  private constructor() {
+  protected constructor() {
     super();
   }
 
@@ -62,15 +63,32 @@ export class WasmCrypto extends CryptoProvider<Blake3State> {
     wasmInit = value;
   }
 
-  static async create(): Promise<WasmCrypto | PureJSCrypto> {
+  static setInitSync(value: typeof initializeSync) {
+    wasmInitSync = value;
+  }
+
+  static createSync(): WasmCrypto {
+    try {
+      wasmInitSync();
+    } catch (e) {
+      throw new Error(
+        "Failed to initialize WasmCrypto. WebAssembly is required for crypto operations on web platforms.",
+        { cause: e },
+      );
+    }
+    return new WasmCrypto();
+  }
+
+  // TODO: Remove this method and use createSync instead, this is not necessary since we can use createSync in the browser and in the worker.
+  // @deprecated
+  static async create(): Promise<WasmCrypto> {
     try {
       await wasmInit();
     } catch (e) {
-      logger.warn(
-        "Failed to initialize WasmCrypto, falling back to PureJSCrypto",
-        { err: e },
+      throw new Error(
+        "Failed to initialize WasmCrypto. WebAssembly is required for crypto operations on web platforms.",
+        { cause: e },
       );
-      return new PureJSCrypto();
     }
 
     return new WasmCrypto();

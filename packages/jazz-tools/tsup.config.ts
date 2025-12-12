@@ -133,7 +133,6 @@ export default defineConfig([
       index: "src/react-native-core/index.ts",
       testing: "src/react-native-core/testing.tsx",
       crypto: "src/react-native-core/crypto/index.ts",
-      "crypto/RNCrypto": "src/react-native-core/crypto/RNCrypto.ts",
     },
     outDir: "dist/react-native-core",
   },

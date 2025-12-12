@@ -4,7 +4,7 @@ function SignInScreen({ auth }: { auth: any }) {
 }
 // #region RNC
 import { JazzExpoProvider } from "jazz-tools/expo";
-import { RNCrypto } from "jazz-tools/react-native-core/crypto/RNCrypto";
+import { RNCrypto } from "jazz-tools/expo/crypto";
 
 function MyJazzProvider({ children }: { children: ReactNode }) {
   return (
