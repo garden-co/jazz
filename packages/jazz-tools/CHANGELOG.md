@@ -1,5 +1,17 @@
 # jazz-tools
 
+## 0.19.12
+
+### Patch Changes
+
+- 9ca9e72: Fix the inspector to guess correctly Group's transactions
+- 5b0bb7d: Bugfix: ensure that the promises used for Suspense is always cached
+- fa0759b: Bugfix: close the server peers before calling the onAnonymousAccountDiscarded hook, to ensure that there won't be conflicting issues with the new context sync
+- a2372db: Bugfix: ensure onAnonymousAccountDiscarded hook is conditionally applied in React providers
+  - cojson@0.19.12
+  - cojson-storage-indexeddb@0.19.12
+  - cojson-transport-ws@0.19.12
+
 ## 0.19.11
 
 ### Patch Changes
