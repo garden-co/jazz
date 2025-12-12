@@ -105,10 +105,10 @@ export class RNCrypto extends CryptoProvider<Blake3State> {
     nOnceMaterial: { in: RawCoID; tx: TransactionID };
   }): Sealed<T> {
     const messageBuffer = toArrayBuffer(
-      textEncoder.encode(stableStringify(message)),
+      textEncoder.encode(JSON.stringify(message)),
     );
     const nOnceBuffer = toArrayBuffer(
-      textEncoder.encode(stableStringify(nOnceMaterial)),
+      textEncoder.encode(JSON.stringify(nOnceMaterial)),
     );
 
     return `sealed_U${bytesToBase64url(
@@ -123,7 +123,7 @@ export class RNCrypto extends CryptoProvider<Blake3State> {
   ): T | undefined {
     const sealedBytes = base64URLtoBytes(sealed.substring("sealed_U".length));
     const nonceBuffer = toArrayBuffer(
-      textEncoder.encode(stableStringify(nOnceMaterial)),
+      textEncoder.encode(JSON.stringify(nOnceMaterial)),
     );
 
     const plaintext = textDecoder.decode(
@@ -157,7 +157,7 @@ export class RNCrypto extends CryptoProvider<Blake3State> {
     message: JsonValue,
   ): CojsonInternalTypes.Signature {
     return sign(
-      toArrayBuffer(textEncoder.encode(stableStringify(message))),
+      toArrayBuffer(textEncoder.encode(JSON.stringify(message))),
       secret,
     ) as CojsonInternalTypes.Signature;
   }
@@ -169,7 +169,7 @@ export class RNCrypto extends CryptoProvider<Blake3State> {
   ): boolean {
     const result = verify(
       signature,
-      toArrayBuffer(textEncoder.encode(stableStringify(message))),
+      toArrayBuffer(textEncoder.encode(JSON.stringify(message))),
       id,
     );
 
@@ -181,11 +181,9 @@ export class RNCrypto extends CryptoProvider<Blake3State> {
     keySecret: CojsonInternalTypes.KeySecret,
     nOnceMaterial: N,
   ): CojsonInternalTypes.Encrypted<T, N> {
-    const valueBytes = toArrayBuffer(
-      textEncoder.encode(stableStringify(value)),
-    );
+    const valueBytes = toArrayBuffer(textEncoder.encode(JSON.stringify(value)));
     const nOnceBytes = toArrayBuffer(
-      textEncoder.encode(stableStringify(nOnceMaterial)),
+      textEncoder.encode(JSON.stringify(nOnceMaterial)),
     );
 
     const encrypted = `encrypted_U${bytesToBase64url(
@@ -205,7 +203,7 @@ export class RNCrypto extends CryptoProvider<Blake3State> {
       decrypt(
         toArrayBuffer(buffer),
         keySecret,
-        toArrayBuffer(textEncoder.encode(stableStringify(nOnceMaterial))),
+        toArrayBuffer(textEncoder.encode(JSON.stringify(nOnceMaterial))),
       ),
     ) as Stringified<T>;
 
@@ -222,7 +220,7 @@ class SessionLogAdapter implements SessionLogImpl {
     skipVerify: boolean,
   ): void {
     this.sessionLog.tryAdd(
-      transactions.map((tx) => stableStringify(tx)),
+      transactions.map((tx) => JSON.stringify(tx)),
       newSignature,
       skipVerify,
     );
@@ -237,12 +235,12 @@ class SessionLogAdapter implements SessionLogImpl {
     meta: JsonObject | undefined,
   ) {
     const output = this.sessionLog.addNewPrivateTransaction(
-      stableStringify(changes),
+      JSON.stringify(changes),
       signerAgent.currentSignerSecret(),
       keySecret,
       keyID,
       madeAt,
-      meta ? stableStringify(meta) : undefined,
+      meta ? JSON.stringify(meta) : undefined,
     );
     const parsedOutput = JSON.parse(output);
     const transaction: PrivateTransaction = {
@@ -264,10 +262,10 @@ class SessionLogAdapter implements SessionLogImpl {
     const stringifiedChanges = stableStringify(changes);
     const stringifiedMeta = meta ? stableStringify(meta) : undefined;
     const output = this.sessionLog.addNewTrustingTransaction(
-      stringifiedChanges,
+      JSON.stringify(changes),
       signerAgent.currentSignerSecret(),
       madeAt,
-      stringifiedMeta,
+      meta ? JSON.stringify(meta) : undefined,
     );
     const transaction: TrustingTransaction = {
       privacy: "trusting",

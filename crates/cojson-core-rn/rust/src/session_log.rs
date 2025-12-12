@@ -3,7 +3,6 @@ use cojson_core::core::{
     SignerSecret, Transaction, TransactionMode,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
 use thiserror::Error;
 
 #[derive(Error, Debug, uniffi::Error)]
@@ -74,20 +73,11 @@ impl SessionLog {
         new_signature_str: String,
         skip_verify: bool,
     ) -> Result<(), SessionLogError> {
-        let transactions: Vec<Box<RawValue>> = transactions_json
-            .into_iter()
-            .map(|s| {
-                serde_json::from_str(&s).map_err(|e| {
-                    SessionLogError::Generic(format!("Failed to parse transaction string: {}", e))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
         let new_signature = Signature(new_signature_str);
 
         if let Ok(mut internal) = self.internal.lock() {
             internal
-                .try_add(transactions, &new_signature, skip_verify)
+                .try_add(transactions_json, &new_signature, skip_verify)
                 .map_err(Into::into)
         } else {
             Err(SessionLogError::LockError)
@@ -188,3 +178,9 @@ impl SessionLog {
     }
 }
 
+#[uniffi::export]
+pub fn stable_stringify(value: String) -> Result<String, SessionLogError> {
+  let value = serde_json::from_str(&value)?;
+  let result = cojson_core::stable_stringify(&value)?;
+  Ok(result)
+}

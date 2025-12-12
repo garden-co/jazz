@@ -4,7 +4,6 @@ use cojson_core::core::{
 };
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
 use thiserror::Error;
 
 pub mod hash {
@@ -83,20 +82,11 @@ impl SessionLog {
     new_signature_str: String,
     skip_verify: bool,
   ) -> napi::Result<()> {
-    let transactions: Vec<Box<RawValue>> = transactions_json
-      .into_iter()
-      .map(|s| {
-        serde_json::from_str(&s)
-          .map_err(|e| CojsonCoreError::Js(format!("Failed to parse transaction string: {}", e)))
-      })
-      .collect::<Result<Vec<_>, _>>()
-      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
-
     let new_signature = Signature(new_signature_str);
 
     self
       .internal
-      .try_add(transactions, &new_signature, skip_verify)
+      .try_add(transactions_json, &new_signature, skip_verify)
       .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
 
     Ok(())
@@ -189,4 +179,11 @@ impl SessionLog {
       .decrypt_next_transaction_meta_json(tx_index, KeySecret(encryption_key))
       .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
   }
+}
+
+#[napi]
+pub fn stable_stringify(value: String) -> napi::Result<String> {
+  let value = serde_json::from_str(&value)?;
+  let result = cojson_core::stable_stringify(&value)?;
+  Ok(result)
 }

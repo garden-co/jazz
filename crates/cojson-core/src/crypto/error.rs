@@ -1,18 +1,29 @@
-use std::fmt;
+use thiserror::Error;
 
-
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CryptoError {
+  #[error("Invalid key length (expected {0}, got {1})")]
   InvalidKeyLength(usize, usize),
+  #[error("Invalid nonce length")]
   InvalidNonceLength,
+  #[error("Invalid sealer secret format: must start with 'sealerSecret_z'")]
   InvalidSealerSecretFormat,
+  #[error("Invalid signature length")]
   InvalidSignatureLength,
+  #[error("Invalid verifying key: {0}")]
   InvalidVerifyingKey(String),
+  #[error("Invalid public key: {0}")]
   InvalidPublicKey(String),
+  #[error("Wrong tag")]
   WrongTag,
+  #[error("Failed to create cipher")]
   CipherError,
+  #[error("Invalid prefix: {0} must start with '{1}'")]
   InvalidPrefix(&'static str, &'static str),
+  #[error("Invalid base58: {0}")]
   Base58Error(String),
+  #[error("JSON parsing failed: {0}")]
+  JsonParse(#[from] serde_json::Error),
 }
 
 impl From<CryptoError> for String {
@@ -20,33 +31,3 @@ impl From<CryptoError> for String {
       err.to_string()
     }
 }
-
-impl fmt::Display for CryptoError {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match self {
-      CryptoError::InvalidKeyLength(expected, actual) => {
-        write!(f, "Invalid key length (expected {expected}, got {actual})")
-      }
-      CryptoError::InvalidNonceLength => write!(f, "Invalid nonce length"),
-      CryptoError::InvalidSealerSecretFormat => {
-        write!(
-          f,
-          "Invalid sealer secret format: must start with 'sealerSecret_z'"
-        )
-      }
-      CryptoError::InvalidSignatureLength => write!(f, "Invalid signature length"),
-      CryptoError::InvalidVerifyingKey(e) => write!(f, "Invalid verifying key: {}", e),
-      CryptoError::InvalidPublicKey(e) => write!(f, "Invalid public key: {}", e),
-      CryptoError::WrongTag => write!(f, "Wrong tag"),
-      CryptoError::CipherError => write!(f, "Failed to create cipher"),
-      CryptoError::InvalidPrefix(prefix, field) => {
-        write!(f, "Invalid {} format: must start with '{}'", field, prefix)
-      }
-      CryptoError::Base58Error(e) => write!(f, "Invalid base58: {}", e),
-    }
-  }
-}
-
-impl std::error::Error for CryptoError {}
-
-
