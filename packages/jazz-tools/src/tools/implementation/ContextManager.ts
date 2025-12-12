@@ -351,6 +351,16 @@ export class JazzContextManager<
       // The storage is reachable through currentContext using the connectedPeers
       prevContext.node.removeStorage();
 
+      // Ensure that the new context is the only peer connected to the previous context
+      // This way all the changes made in the previous context are synced only to the new context
+      for (const peer of Object.values(prevContext.node.syncManager.peers)) {
+        if (!peer.closed) {
+          peer.gracefulShutdown();
+        }
+      }
+
+      prevContext.node.syncManager.peers = {};
+
       currentContext.node.syncManager.addPeer(prevAccountAsPeer);
       prevContext.node.syncManager.addPeer(currentAccountAsPeer);
 
