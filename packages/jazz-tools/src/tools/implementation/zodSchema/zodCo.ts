@@ -23,6 +23,7 @@ import {
   hydrateCoreCoValueSchema,
   isAnyCoValueSchema,
   isCoValueClass,
+  Account,
 } from "../../internal.js";
 import { removeGetters } from "../schemaUtils.js";
 import {
@@ -94,15 +95,6 @@ export const coMapDefiner = <Shape extends z.core.$ZodLooseShape>(
   return hydrateCoreCoValueSchema(coreSchema);
 };
 
-const defaultAccountShape: BaseAccountShape = {
-  profile: coMapDefiner({
-    name: z.string(),
-    inbox: z.optional(z.string()),
-    inboxInvite: z.optional(z.string()),
-  }),
-  root: coMapDefiner({}),
-};
-
 /**
  * Defines a collaborative account schema for Jazz applications.
  *
@@ -141,10 +133,19 @@ const defaultAccountShape: BaseAccountShape = {
  * ```
  */
 export const coAccountDefiner = <Shape extends BaseAccountShape>(
-  shape: Shape = defaultAccountShape as unknown as Shape,
+  shape?: Shape,
 ): AccountSchema<Shape> => {
-  return getCachedSchema(shape, () => {
-    const coreSchema = createCoreAccountSchema(shape);
+  const key = shape || Account;
+  return getCachedSchema(key, () => {
+    const defaultShape = {
+      profile: coMapDefiner({
+        name: z.string(),
+        inbox: z.optional(z.string()),
+        inboxInvite: z.optional(z.string()),
+      }),
+      root: coMapDefiner({}),
+    } as unknown as Shape;
+    const coreSchema = createCoreAccountSchema(shape || defaultShape);
     return hydrateCoreCoValueSchema(coreSchema);
   });
 };
