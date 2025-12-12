@@ -42,6 +42,19 @@ import {
   GroupSchema,
 } from "./schemaTypes/GroupSchema.js";
 
+// This cache is used to avoid creating the same schema multiple times.
+// Meant only for Account, Group and maybe CoList.
+// For CoMap and other schemas, we need to at least namespace the key by the schema type.
+const schemaCache = new WeakMap<WeakKey, unknown>();
+
+function getCachedSchema<T>(key: WeakKey, create: () => T): T {
+  const cached = schemaCache.get(key) as T | undefined;
+  if (cached) return cached;
+  const newSchema = create();
+  schemaCache.set(key, newSchema);
+  return newSchema;
+}
+
 /**
  * Checking for the presence of the `_zod` property is the recommended way
  * to determine if a schema is a Zod v4 schema.
@@ -79,6 +92,15 @@ export const coMapDefiner = <Shape extends z.core.$ZodLooseShape>(
   validateCoMapShape(shape);
   const coreSchema = createCoreCoMapSchema(shape);
   return hydrateCoreCoValueSchema(coreSchema);
+};
+
+const defaultAccountShape: BaseAccountShape = {
+  profile: coMapDefiner({
+    name: z.string(),
+    inbox: z.optional(z.string()),
+    inboxInvite: z.optional(z.string()),
+  }),
+  root: coMapDefiner({}),
 };
 
 /**
@@ -119,22 +141,21 @@ export const coMapDefiner = <Shape extends z.core.$ZodLooseShape>(
  * ```
  */
 export const coAccountDefiner = <Shape extends BaseAccountShape>(
-  shape: Shape = {
-    profile: coMapDefiner({
-      name: z.string(),
-      inbox: z.optional(z.string()),
-      inboxInvite: z.optional(z.string()),
-    }),
-    root: coMapDefiner({}),
-  } as unknown as Shape,
+  shape: Shape = defaultAccountShape as unknown as Shape,
 ): AccountSchema<Shape> => {
-  const coreSchema = createCoreAccountSchema(shape);
-  return hydrateCoreCoValueSchema(coreSchema);
+  return getCachedSchema(shape, () => {
+    const coreSchema = createCoreAccountSchema(shape);
+    return hydrateCoreCoValueSchema(coreSchema);
+  });
 };
 
+const defaultGroupKey = Symbol("defaultGroupKey");
+
 export const coGroupDefiner = (): GroupSchema => {
-  const coreSchema = createCoreGroupSchema();
-  return hydrateCoreCoValueSchema(coreSchema);
+  return getCachedSchema(defaultGroupKey, () => {
+    const coreSchema = createCoreGroupSchema();
+    return hydrateCoreCoValueSchema(coreSchema);
+  });
 };
 
 export const coRecordDefiner = <
