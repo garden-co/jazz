@@ -37,8 +37,8 @@ const listContainer = document.createElement('div');
 app.append(listContainer, id);
 // #endregion
 
-// #region CreateToDoItem
-function createToDoItem(todo: co.loaded<typeof ToDo>) {
+// #region toDoItemElement
+function toDoItemElement(todo: co.loaded<typeof ToDo>) {
   const label = document.createElement('label');
   const checkbox = Object.assign(document.createElement('input'), {
     type: 'checkbox',
@@ -50,8 +50,8 @@ function createToDoItem(todo: co.loaded<typeof ToDo>) {
 }
 // #endregion
 
-// #region CreateAddForm
-function createAddForm(list: co.loaded<typeof ToDoList>) {
+// #region newToDoFormElement
+function newToDoFormElement(list: co.loaded<typeof ToDoList>) {
   const form = Object.assign(document.createElement('form'), {
     onsubmit: (e: Event) => {
       e.preventDefault();
@@ -74,10 +74,10 @@ const unsubscribe = ToDoList.subscribe(
   listId,
   { resolve: { $each: true } },
   (toDoList) => {
-    const addForm = createAddForm(toDoList);
+    const addForm = newToDoFormElement(toDoList);
     listContainer.replaceChildren(
       ...toDoList.map((todo) => {
-        return createToDoItem(todo);
+        return toDoItemElement(todo);
       }),
       addForm
     );
