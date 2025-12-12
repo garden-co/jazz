@@ -8,14 +8,6 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
-    "./dist/crypto/PureJSCrypto": {
-      "types": "./dist/crypto/PureJSCrypto.d.ts",
-      "default": "./dist/crypto/PureJSCrypto.js"
-    },
-    "./crypto/PureJSCrypto": {
-      "types": "./dist/crypto/PureJSCrypto.d.ts",
-      "default": "./dist/crypto/PureJSCrypto.js"
-    },
     "./crypto/NapiCrypto": {
       "types": "./dist/crypto/NapiCrypto.d.ts",
       "default": "./dist/crypto/NapiCrypto.js"

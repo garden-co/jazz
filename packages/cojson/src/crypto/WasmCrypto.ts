@@ -79,6 +79,8 @@ export class WasmCrypto extends CryptoProvider<Blake3State> {
     return new WasmCrypto();
   }
 
+  // TODO: Remove this method and use createSync instead, this is not necessary since we can use createSync in the browser and in the worker.
+  // @deprecated
   static async create(): Promise<WasmCrypto> {
     try {
       await wasmInit();
