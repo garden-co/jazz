@@ -15,7 +15,7 @@ import {
   useState,
 } from "react";
 
-function StatusBar() {
+export function StatusBar() {
   const currentTime = new Date().toLocaleTimeString("en-US", {
     hour: "2-digit",
     minute: "2-digit",
@@ -126,11 +126,11 @@ export function ChatDemoSection() {
 
     setServer1(
       (isLocal ? "http://localhost:5173" : "https://jazz-chat-1.vercel.app") +
-        `?user=${user1}`,
+      `?user=${user1}`,
     );
     setServer2(
       (isLocal ? "http://localhost:5174" : "https://jazz-chat-2.vercel.app") +
-        `?user=${user2}`,
+      `?user=${user2}`,
     );
 
     if (!server1 || !server2) return;
@@ -203,57 +203,57 @@ export function ChatDemoSection() {
         </Prose>
       </div>
 
-        <div className="mt-6 flex flex-col justify-between gap-6 text-center md:col-span-4 md:col-start-9 md:mt-0">
-          <div>
-            <h2 className="mb-2 hidden font-display text-xl font-semibold tracking-tight text-stone-950 dark:text-white md:block md:text-2xl">
-              Scan the QR code
-            </h2>
-            <p className="text-balance">
-              Add your device to the live demo. Messages update everywhere
-              instantly.
-            </p>
-          </div>
-
-            <img
-              src={qrCode}
-              className="mx-auto hidden size-48 rounded-lg border md:block bg-white"
-              alt="Scan this QR code to join the chat"
-            />
-
-          <div className="hidden items-center gap-2 md:flex">
-            <div className="h-px w-full border-t" />
-            <p className="whitespace-nowrap">or copy the URL</p>
-            <div className="h-px w-full border-t" />
-          </div>
-          <div className="relative w-full sm:mx-auto sm:max-w-xl">
-            <Label
-              label="To join the chat, copy the URL"
-              htmlFor="shareUrl"
-              className="sr-only"
-            />
-            <input
-              id="shareUrl"
-              className="h-10 w-full rounded-md border bg-transparent pl-3 pr-10"
-              type="text"
-              value={shareUrl}
-              onClick={(e) => e.currentTarget.select()}
-              onBlur={(e) => e.currentTarget.setSelectionRange(0, 0)}
-              readOnly
-            />
-            <button
-              type="button"
-              className="absolute right-0 top-0 p-3 text-primary dark:text-blue-400"
-              onClick={copyUrl}
-            >
-              {copied ? (
-                <Icon name="check" size="xs" />
-              ) : (
-                <Icon name="copy" size="xs" />
-              )}
-              <span className="sr-only">Copy URL</span>
-            </button>
-          </div>
+      <div className="mt-6 flex flex-col justify-between gap-6 text-center md:col-span-4 md:col-start-9 md:mt-0">
+        <div>
+          <h2 className="mb-2 hidden font-display text-xl font-semibold tracking-tight text-stone-950 dark:text-white md:block md:text-2xl">
+            Scan the QR code
+          </h2>
+          <p className="text-balance">
+            Add your device to the live demo. Messages update everywhere
+            instantly.
+          </p>
         </div>
+
+        <img
+          src={qrCode}
+          className="mx-auto hidden size-48 rounded-lg border md:block bg-white"
+          alt="Scan this QR code to join the chat"
+        />
+
+        <div className="hidden items-center gap-2 md:flex">
+          <div className="h-px w-full border-t" />
+          <p className="whitespace-nowrap">or copy the URL</p>
+          <div className="h-px w-full border-t" />
+        </div>
+        <div className="relative w-full sm:mx-auto sm:max-w-xl">
+          <Label
+            label="To join the chat, copy the URL"
+            htmlFor="shareUrl"
+            className="sr-only"
+          />
+          <input
+            id="shareUrl"
+            className="h-10 w-full rounded-md border bg-transparent pl-3 pr-10"
+            type="text"
+            value={shareUrl}
+            onClick={(e) => e.currentTarget.select()}
+            onBlur={(e) => e.currentTarget.setSelectionRange(0, 0)}
+            readOnly
+          />
+          <button
+            type="button"
+            className="absolute right-0 top-0 p-3 text-primary dark:text-blue-400"
+            onClick={copyUrl}
+          >
+            {copied ? (
+              <Icon name="check" size="xs" />
+            ) : (
+              <Icon name="copy" size="xs" />
+            )}
+            <span className="sr-only">Copy URL</span>
+          </button>
+        </div>
+      </div>
 
     </div>
   );
