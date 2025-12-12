@@ -7,13 +7,15 @@ import { Testimonial } from "@garden-co/design-system/src/components/molecules/T
 import useEmblaCarousel from "embla-carousel-react";
 import Autoplay from "embla-carousel-autoplay";
 import clsx from "clsx";
+import theoImage from "./images/theo.jpg";
+import theoDarkImage from "./images/theo-dark.jpg";
 
 const testimonials = [
   {
     name: "Theo",
     role: "@theo",
-    imageUrl: "/theo.jpg",
-    darkImageUrl: "/theo-dark.jpg",
+    imageUrl: theoImage.src,
+    darkImageUrl: theoDarkImage.src,
     url: "https://x.com/theo",
     content: (
       <>

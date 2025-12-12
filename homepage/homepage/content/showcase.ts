@@ -1,25 +1,37 @@
+import opacityImage from "./showcase/images/opacity.png";
+import invoiceRadarImage from "./showcase/images/invoice-radar.png";
+import reconfiguredImage from "./showcase/images/reconfigured.png";
+import wagesoImage from "./showcase/images/wageso.png";
+import tillyScreenImage from "./showcase/images/tilly-screen.png";
+import learnAnythingImage from "./showcase/images/learn-anything.png";
+import cupplImage from "./showcase/images/cuppl.png";
+import mtorImage from "./showcase/images/mtor.png";
+import hendImage from "./showcase/images/hend.png";
+import motleyImage from "./showcase/images/motley.png";
+import spicyGolfImage from "./showcase/images/spicy-golf.png";
+
 export const products = [
   {
     name: "Opacity",
-    imageUrl: "/opacity.png",
+    imageUrl: opacityImage.src,
     url: "https://opacity.com",
     description: "A product designer's best friend.",
   },
   {
     name: "Invoice Radar",
-    imageUrl: "/invoice-radar.png",
+    imageUrl: invoiceRadarImage.src,
     url: "https://invoiceradar.com",
     description: "Automatically gather invoices from mail and cloud providers.",
   },
   {
     name: "Reconfigured",
-    imageUrl: "/reconfigured.png",
+    imageUrl: reconfiguredImage.src,
     url: "https://reconfigured.io",
     description: "The AI notepad for people who think for work.",
   },
   {
     name: "Wageso",
-    imageUrl: "/wageso.png",
+    imageUrl: wagesoImage.src,
     url: "https://wageso.com",
     description: "A a privacy-first financial tracking app.",
   },
@@ -28,24 +40,24 @@ export const products = [
     description:
       "A relationship journal so simple that you actually use it.",
     url: "https://tilly.social",
-    imageUrl: "/tilly-screen.png",
+    imageUrl: tillyScreenImage.src,
   },
   {
     name: "Learn Anything",
-    imageUrl: "/learn-anything.png",
+    imageUrl: learnAnythingImage.src,
     url: "https://learn-anything.xyz",
     description:
       "A free, comprehensive learning platform where people collect the best resources for every subject.",
   },
   {
     name: "Cuppl",
-    imageUrl: "/cuppl.png",
+    imageUrl: cupplImage.src,
     url: "https://www.getcuppl.com",
     description: "An all-in-one app for couples to manage tasks, schedules, and shopping lists.",
   },
   {
     name: "MTOR",
-    imageUrl: "/mtor.png",
+    imageUrl: mtorImage.src,
     url: "https://mtor.club",
     description: "A collaborative, real-time workout planner and tracker.",
   },
@@ -54,17 +66,17 @@ export const products = [
     description:
       "Natural language acquisition, powered by content that meets your level, and raises it.",
     url: "https://hendapp.com",
-    imageUrl: "/hend.png",
+    imageUrl: hendImage.src,
   },
   {
     name: "Motley",
-    imageUrl: "/motley.png",
+    imageUrl: motleyImage.src,
     url: "https://trymotley.com",
     description: "Collect and connect anything - a mix between Are.na, mymind, and a regular read-later app.",
   },
   {
     name: "Spicy Golf",
-    imageUrl: "/spicy-golf.png",
+    imageUrl: spicyGolfImage.src,
     url: "https://spicy.golf",
     description: "Golf Games Kicked up a Notch.",
   }
