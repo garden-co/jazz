@@ -1,6 +1,5 @@
 import NetInfo from "@react-native-community/netinfo";
 import { LocalNode, Peer, RawAccountID, getSqliteStorageAsync } from "cojson";
-import { PureJSCrypto } from "cojson/dist/crypto/PureJSCrypto"; // Importing from dist to not rely on the exports field
 import {
   Account,
   AccountClass,
@@ -23,13 +22,14 @@ import { KvStore, KvStoreContext } from "./storage/kv-store-context.js";
 
 import { SQLiteDatabaseDriverAsync } from "cojson";
 import { WebSocketPeerWithReconnection } from "cojson-transport-ws";
-import type { RNCrypto } from "jazz-tools/react-native-core/crypto";
+import { RNCrypto } from "jazz-tools/react-native-core/crypto";
+import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 
 export type BaseReactNativeContextOptions = {
   sync: SyncConfig;
   reconnectionTimeout?: number;
   storage?: SQLiteDatabaseDriverAsync | "disabled";
-  CryptoProvider?: typeof PureJSCrypto | typeof RNCrypto;
+  CryptoProvider?: typeof RNCrypto | typeof WasmCrypto;
   authSecretStorage: AuthSecretStorage;
 };
 
@@ -42,7 +42,7 @@ class ReactNativeWebSocketPeerWithReconnection extends WebSocketPeerWithReconnec
 }
 
 async function setupPeers(options: BaseReactNativeContextOptions) {
-  const CryptoProvider = options.CryptoProvider || PureJSCrypto;
+  const CryptoProvider = options.CryptoProvider || RNCrypto;
   const crypto = await CryptoProvider.create();
   let node: LocalNode | undefined = undefined;
 

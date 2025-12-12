@@ -26,15 +26,12 @@ import type { Peer, SyncMessage } from "../sync.js";
 import { expectGroup } from "../typeUtils/expectGroup.js";
 import { toSimplifiedMessages } from "./messagesTestUtils.js";
 import { createAsyncStorage, createSyncStorage } from "./testStorage.js";
-import { PureJSCrypto } from "../crypto/PureJSCrypto.js";
 import { CoValueHeader } from "../coValueCore/verifiedState.js";
 import { idforHeader } from "../coValueCore/coValueCore.js";
 
 let Crypto = await WasmCrypto.create();
 
-export function setCurrentTestCryptoProvider(
-  crypto: WasmCrypto | PureJSCrypto,
-) {
+export function setCurrentTestCryptoProvider(crypto: WasmCrypto) {
   Crypto = crypto;
 }
 

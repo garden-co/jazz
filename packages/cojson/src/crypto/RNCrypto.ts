@@ -47,6 +47,7 @@ import {
   Blake3Hasher,
   SessionLog,
 } from "cojson-core-rn";
+import { WasmCrypto } from "./WasmCrypto.js";
 
 type Blake3State = Blake3Hasher;
 
@@ -145,7 +146,18 @@ export class RNCrypto extends CryptoProvider<Blake3State> {
   }
 
   static async create(): Promise<RNCrypto> {
-    return new RNCrypto();
+    // Check if we are running in a browser environment
+    if (
+      // @ts-ignore
+      typeof window !== "undefined" &&
+      // @ts-ignore
+      typeof window.document !== "undefined"
+    ) {
+      console.log("WASM CRYPTO");
+      return WasmCrypto.create();
+    } else {
+      return new RNCrypto();
+    }
   }
 
   newEd25519SigningKey(): Uint8Array {
