@@ -16,18 +16,7 @@ export function useHashRouter(options?: { tellParentFrame?: boolean }) {
   const [hash, setHash] = useState(location.hash.slice(1));
 
   const onHashChange = () => {
-    startTransition(() => {
-      setHash(location.hash.slice(1));
-    });
-    options?.tellParentFrame &&
-      window.parent.postMessage(
-        {
-          type: NavigateEvent.type,
-          url: location.href,
-        },
-        "*",
-      );
-    console.log("Posting", location.href + "-navigate");
+    setHash(location.hash.slice(1));
   };
 
   useEffect(() => {
@@ -43,7 +32,20 @@ export function useHashRouter(options?: { tellParentFrame?: boolean }) {
   return {
     navigate: (url: string) => {
       history.replaceState({}, "", url);
-      onHashChange();
+      startTransition(() => {
+        window.dispatchEvent(new NavigateEvent());
+        onHashChange();
+      });
+
+      if (options?.tellParentFrame) {
+        window.parent.postMessage(
+          {
+            type: NavigateEvent.type,
+            url: url,
+          },
+          "*",
+        );
+      }
     },
     route: function (routes: {
       [route: `${string}` | `/${string}/:${string}`]: (
