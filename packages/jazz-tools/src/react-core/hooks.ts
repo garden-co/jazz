@@ -489,7 +489,7 @@ export function useSuspenseCoState<
     throw new Error("Subscription not found");
   }
 
-  use(subscription.getPromise());
+  use(subscription.getCachedPromise());
 
   const getCurrentValue = () => {
     const value = subscription.getCurrentValue();
@@ -824,7 +824,7 @@ export function useSuspenseAccount<
     );
   }
 
-  use(subscription.getPromise());
+  use(subscription.getCachedPromise());
 
   const getCurrentValue = () => {
     const value = subscription.getCurrentValue();

@@ -95,7 +95,7 @@ export function BubbleImage(props: { image: ImageDefinition }) {
   return (
     <Image
       imageId={props.image.$jazz.id}
-      className="h-auto max-h-80 max-w-full rounded-t-xl mb-1"
+      className="h-auto max-h-80 max-w-full rounded-t-xl mb-1 object-contain"
       height="original"
       width="original"
     />
