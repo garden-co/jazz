@@ -309,64 +309,77 @@ export class SubscriptionScope<D extends CoValue> {
 
   unloadedValue: NotLoaded<D> | undefined;
 
-  lastPromise:
-    | {
-        value: MaybeLoaded<D> | undefined;
-        promise: PromiseWithStatus<MaybeLoaded<D>>;
-      }
-    | undefined;
-
-  cachePromise(value: MaybeLoaded<D>, callback: () => PromiseWithStatus<D>) {
-    if (this.lastPromise?.value === value) {
-      return this.lastPromise.promise;
-    }
-
-    const promise = callback();
-    this.lastPromise = { value, promise };
-
-    return promise;
-  }
+  lastPromise: PromiseWithStatus<D> | undefined;
 
   getPromise() {
     const currentValue = this.getCurrentValue();
 
     if (currentValue.$isLoaded) {
-      return resolvedPromise(currentValue);
+      return resolvedPromise<D>(currentValue);
     }
 
     if (currentValue.$jazz.loadingState !== CoValueLoadingState.LOADING) {
       const error = this.getError();
-      return rejectedPromise(
+      return rejectedPromise<D>(
         new Error(error?.toString() ?? "Unknown error", {
           cause: this.callerStack,
         }),
       );
     }
 
-    // We need to cache rejected promises to make React Suspense happy
-    return this.cachePromise(currentValue, () => {
-      return new Promise<D>((resolve, reject) => {
-        const unsubscribe = this.subscribe(() => {
-          const currentValue = this.getCurrentValue();
+    const promise = new Promise<D>((resolve, reject) => {
+      const unsubscribe = this.subscribe(() => {
+        const currentValue = this.getCurrentValue();
 
-          if (currentValue.$jazz.loadingState === CoValueLoadingState.LOADING) {
-            return;
-          }
+        if (currentValue.$jazz.loadingState === CoValueLoadingState.LOADING) {
+          return;
+        }
 
-          if (currentValue.$isLoaded) {
-            resolve(currentValue);
-          } else {
-            reject(
-              new Error(this.getError()?.toString() ?? "Unknown error", {
-                cause: this.callerStack,
-              }),
-            );
-          }
+        if (currentValue.$isLoaded) {
+          promise.status = "fulfilled";
+          promise.value = currentValue;
+          resolve(currentValue);
+        } else {
+          promise.status = "rejected";
+          promise.reason = new Error(
+            this.getError()?.toString() ?? "Unknown error",
+            {
+              cause: this.callerStack,
+            },
+          );
+          reject(
+            new Error(this.getError()?.toString() ?? "Unknown error", {
+              cause: this.callerStack,
+            }),
+          );
+        }
 
-          unsubscribe();
-        });
+        unsubscribe();
       });
-    });
+    }) as PromiseWithStatus<D>;
+
+    promise.status = "pending";
+
+    return promise;
+  }
+
+  getCachedPromise() {
+    if (this.lastPromise) {
+      const value = this.getCurrentValue();
+
+      // if the value is loaded, we update the promise state
+      // to ensure that the value provided is always up to date
+      if (value.$isLoaded) {
+        this.lastPromise.status = "fulfilled";
+        this.lastPromise.value = value;
+      }
+
+      return this.lastPromise;
+    }
+
+    const promise = this.getPromise();
+    this.lastPromise = promise;
+    return promise;
   }
 
   private getUnloadedValue(reason: NotLoadedCoValueState): NotLoaded<D> {
