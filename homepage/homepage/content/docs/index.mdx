@@ -1,5 +1,5 @@
 import { Alert, CodeGroup, ContentByFramework, JazzLogo } from "@/components/forMdx";
-import { IFrameSyncer } from '@/components/IFrameSyncer.tsx'
+import { DemoToDo } from '@/components/DemoToDo.tsx'
 
 export const metadata = {
   title: "Documentation",
@@ -75,14 +75,10 @@ This is the end result: we're showing it here running in two iframes, updating i
 
 Try adding items on the left and watch them appear instantly on the right!
 
-<div className="grid grid-cols-1 md:grid-cols-2 w-full my-4 gap-6 p-1">
-<div className="outline-4 rounded-2xl">
-<iframe id="childA" src="/simplest-jazz-todo.html" style={{ overflowY: 'auto' }}  height={320} width="100%" title="Jazz Todo List Demo Instance A"></iframe>
-</div>
-<div className="outline-4 rounded-2xl">
-<iframe id="childB" src="/simplest-jazz-todo.html" style={{ overflowY: 'auto' }}  height={320} width="100%" title="Jazz Todo List Demo Instance B"></iframe>
-</div>
-</div>
+<DemoToDo />
+<Alert variant="info" title="Using Jazz Cloud">
+  These two iframes are syncing through the Jazz Cloud. You can use the toggle in the top right hand side to enable or disable sync, and see how you can continue working even without network connectivity.
+</Alert>
 
 ### Imports
 Start by importing Jazz into your app.
@@ -154,6 +150,3 @@ Put it all together for a simple Jazz app in less than 100 lines of code.
 Have a look at our [example apps](/examples) for inspiration and to see what's possible with Jazz. From real-time chat and collaborative editors to file sharing and social features&hairsp;—&hairsp;these are just the beginning of what you can build.
 
 If you have any questions or need assistance, please don't hesitate to reach out to us on [Discord](https://discord.gg/utDMjHYg42). We'd love to help you get started.
-
-
-<IFrameSyncer />
