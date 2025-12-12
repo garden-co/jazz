@@ -1,7 +1,7 @@
 import { assert, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   CoValueLoadingState,
-  Group,
+  type Group,
   co,
   exportCoValue,
   z,
@@ -146,7 +146,7 @@ describe("CoValueCoreSubscription", async () => {
       // Create a person that's immediately available
       const person = Person.create(
         { name: "John", age: 30 },
-        Group.create().makePublic("writer"),
+        co.group().create().makePublic("writer"),
       );
 
       person.$jazz.raw.core.createBranch("main");
@@ -197,7 +197,7 @@ describe("CoValueCoreSubscription", async () => {
       // Create a person that's immediately available
       const person = Person.create(
         { name: "John", age: 30 },
-        Group.create().makePublic("writer"),
+        co.group().create().makePublic("writer"),
       );
 
       const branch = person.$jazz.raw.core.createBranch("main");
@@ -258,7 +258,7 @@ describe("CoValueCoreSubscription", async () => {
       // The sync is delayed by a queueMicrotask, making the load async
       const person = Person.create(
         { name: "John", age: 30 },
-        Group.create().makePublic("writer"),
+        co.group().create().makePublic("writer"),
       );
 
       let lastResult: any = null;
@@ -297,7 +297,7 @@ describe("CoValueCoreSubscription", async () => {
       // Create a person on a different account that bob doesn't have access to yet
       const person = Person.create(
         { name: "John", age: 30 },
-        Group.create().makePublic("writer"),
+        co.group().create().makePublic("writer"),
       );
 
       let lastResult: any = null;
@@ -344,7 +344,7 @@ describe("CoValueCoreSubscription", async () => {
       // Create a person on a different account that bob doesn't have access to yet
       const person = Person.create(
         { name: "John", age: 30 },
-        Group.create().makePublic("writer"),
+        co.group().create().makePublic("writer"),
       );
 
       // Create a branch on the person with modified data
@@ -394,7 +394,10 @@ describe("CoValueCoreSubscription", async () => {
       // Create a person on a different account that bob doesn't have access to yet
       const person = Person.create(
         { name: "John", age: 30 },
-        Group.create().makePublic(), // Only read access
+        co
+          .group()
+          .create()
+          .makePublic(), // Only read access
       );
 
       // Create a branch on the person using the current owner id
@@ -480,7 +483,7 @@ describe("CoValueCoreSubscription", async () => {
       // Create a person that bob can access
       const person = Person.create(
         { name: "John", age: 30 },
-        Group.create().makePublic("writer"),
+        co.group().create().makePublic("writer"),
       );
 
       // Create a new sync server, this way the CoValue is not available for new accounts
@@ -551,14 +554,14 @@ describe("CoValueCoreSubscription", async () => {
         .getServerPeers(alice.$jazz.raw.id)
         .forEach((peer) => peer.gracefulShutdown());
 
-      const unavailableGroup = Group.create(alice).makePublic("writer");
+      const unavailableGroup = co.group().create(alice).makePublic("writer");
 
       const bob = await createJazzTestAccount();
 
       // Create a person that bob can access
       const person = Person.create(
         { name: "John", age: 30 },
-        Group.create().makePublic("writer"),
+        co.group().create().makePublic("writer"),
       );
       let lastResult: any = null;
       const listener = vi.fn();
@@ -602,7 +605,7 @@ describe("CoValueCoreSubscription", async () => {
       // Create a person that bob can access
       const person = Person.create(
         { name: "John", age: 30 },
-        Group.create().makePublic("writer"),
+        co.group().create().makePublic("writer"),
       );
 
       // Disconnect all peers to make the CoValue unavailable
@@ -656,7 +659,7 @@ describe("CoValueCoreSubscription", async () => {
       // Create a person that bob can access
       const person = Person.create(
         { name: "John", age: 30 },
-        Group.create().makePublic("writer"),
+        co.group().create().makePublic("writer"),
       );
 
       // Disconnect all peers to make the CoValue unavailable
@@ -782,7 +785,7 @@ describe("CoValueCoreSubscription", async () => {
       // Create a person on a different account that bob doesn't have access to yet
       const person = Person.create(
         { name: "John", age: 30 },
-        Group.create().makePublic("writer"),
+        co.group().create().makePublic("writer"),
       );
 
       let lastResult: any = null;
@@ -818,7 +821,7 @@ describe("CoValueCoreSubscription", async () => {
       // Create a person on a different account that bob doesn't have access to yet
       const person = Person.create(
         { name: "John", age: 30 },
-        Group.create().makePublic("writer"),
+        co.group().create().makePublic("writer"),
       );
 
       let lastResult: any = null;
@@ -862,7 +865,7 @@ describe("CoValueCoreSubscription", async () => {
       // Create a person on a different account that bob doesn't have access to yet
       const person = Person.create(
         { name: "John", age: 30 },
-        Group.create().makePublic("writer"),
+        co.group().create().makePublic("writer"),
       );
 
       let lastResultSubscription1: any = null;
@@ -908,7 +911,7 @@ describe("CoValueCoreSubscription", async () => {
       // Create a person on a different account that bob doesn't have access to yet
       const person = Person.create(
         { name: "John", age: 30 },
-        Group.create().makePublic("writer"),
+        co.group().create().makePublic("writer"),
       );
 
       let lastResultSubscription1: any = null;
@@ -1155,7 +1158,7 @@ describe("CoValueCoreSubscription", async () => {
       update: z.number(),
     });
 
-    const group = Group.create();
+    const group = co.group().create();
 
     const person = Person.create(
       {
@@ -1226,7 +1229,7 @@ describe("CoValueCoreSubscription", async () => {
       update: z.number(),
     });
 
-    const group = Group.create();
+    const group = co.group().create();
 
     const person = Person.create(
       {
@@ -1304,8 +1307,8 @@ describe("CoValueCoreSubscription", async () => {
       update: z.number(),
     });
 
-    const group = Group.create();
-    const parentGroup = Group.create();
+    const group = co.group().create();
+    const parentGroup = co.group().create();
 
     const person = Person.create(
       {

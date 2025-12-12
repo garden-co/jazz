@@ -19,6 +19,7 @@ import {
   coValueClassFromCoValueClassOrSchema,
   subscribeToCoValue,
   createUnloadedCoValue,
+  co,
 } from "jazz-tools";
 import { consumeInviteLinkFromWindowLocation } from "jazz-tools/browser";
 import {
@@ -95,7 +96,7 @@ export function useAccount<
   A extends AccountClass<Account> | AnyAccountSchema = typeof Account,
   R extends ResolveQuery<A> = true,
 >(
-  AccountSchema: A = Account as unknown as A,
+  AccountSchema: A = co.account() as unknown as A,
   options?: {
     resolve?: ResolveQueryStrict<A, R>;
   },

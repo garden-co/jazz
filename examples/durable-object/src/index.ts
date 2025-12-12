@@ -34,7 +34,7 @@ export class KVStore extends DurableObject {
         }
         return kvMap;
       }
-      const group = Group.create({ owner: jazzConn.worker });
+      const group = co.group().create({ owner: jazzConn.worker });
       group.addMember(jazzConn.worker, "admin");
       const kvMap = KvMap.create({}, { owner: group });
       await this.ctx.storage.put("kvMapId", kvMap.$jazz.id);

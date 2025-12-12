@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { cojsonInternals } from "cojson";
-import { Account, Group, Loaded, co, z } from "jazz-tools";
+import { type Account, type Group, Loaded, co, z } from "jazz-tools";
 import { assertLoaded } from "jazz-tools/testing";
 import { beforeEach, describe, expect, expectTypeOf, it } from "vitest";
 import React, { Suspense } from "react";
@@ -176,7 +176,7 @@ describe("useSuspenseAccount", () => {
           },
         ],
       },
-      Group.create().makePublic(),
+      co.group().create().makePublic(),
     );
 
     const MyAppAccount = co.account({

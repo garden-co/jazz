@@ -1,4 +1,4 @@
-import { Account, FileStream, Group } from "jazz-tools";
+import { type Account, type FileStream, type Group, co } from "jazz-tools";
 import { createImageFactory } from "../create-image-factory";
 
 /**
@@ -51,7 +51,7 @@ async function createFileStreamFromSource(
   imageBlobOrFile: Blob | File,
   owner?: Account | Group,
 ): Promise<FileStream> {
-  return FileStream.createFromBlob(imageBlobOrFile, owner);
+  return co.fileStream().createFromBlob(imageBlobOrFile, owner);
 }
 
 // using createImageBitmap is ~10x slower than Image object

@@ -11,7 +11,7 @@ import {
 } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import {
-  Account,
+  type Account,
   AccountClass,
   AnyAccountSchema,
   CoValueFromRaw,
@@ -20,6 +20,7 @@ import {
   Loaded,
   createJazzContextFromExistingCredentials,
   randomSessionProvider,
+  co,
 } from "jazz-tools";
 
 type WorkerOptions<
@@ -54,7 +55,7 @@ export async function startWorker<
     accountID = process.env.JAZZ_WORKER_ACCOUNT,
     accountSecret = process.env.JAZZ_WORKER_SECRET,
     syncServer = "wss://cloud.jazz.tools",
-    AccountSchema = Account as unknown as S,
+    AccountSchema = co.account() as unknown as S,
     skipInboxLoad = false,
     asActiveAccount = true,
   } = options;

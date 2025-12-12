@@ -1,4 +1,4 @@
-import { Account, FileStream, Group } from "jazz-tools";
+import { type Account, type FileStream, type Group, co } from "jazz-tools";
 import type sharp from "sharp";
 import { createImageFactory } from "../create-image-factory";
 
@@ -95,7 +95,7 @@ async function createFileStreamFromSource(
 ): Promise<FileStream> {
   // `File` is also an instance of `Blob`
   if (imageBlobOrBuffer instanceof Blob) {
-    return FileStream.createFromBlob(imageBlobOrBuffer, { owner });
+    return co.fileStream().createFromBlob(imageBlobOrBuffer, { owner });
   }
 
   const sharp = await getSharp();
@@ -105,12 +105,9 @@ async function createFileStreamFromSource(
   const format = metadata.format;
   const mimeType = formatToMimeType(format);
 
-  return FileStream.createFromArrayBuffer(
-    imageBlobOrBuffer,
-    mimeType,
-    undefined,
-    { owner },
-  );
+  return co
+    .fileStream()
+    .createFromArrayBuffer(imageBlobOrBuffer, mimeType, undefined, { owner });
 }
 
 async function getImageSize(

@@ -23,7 +23,7 @@ describe("useAcceptInvite", () => {
     const invitelink = createInviteLink(
       TestMap.create(
         { value: "hello" },
-        { owner: Group.create({ owner: inviteSender }) },
+        { owner: co.group().create({ owner: inviteSender }) },
       ),
       "reader",
     );

@@ -2,13 +2,13 @@
   import { goto } from '$app/navigation';
   import { Chat } from '$lib/schema';
   import { AccountCoState } from 'jazz-tools/svelte';
-  import { Account, Group } from 'jazz-tools';
+  import { co } from 'jazz-tools';
 
-  const account = new AccountCoState(Account);
+  const account = new AccountCoState(co.account());
   const me = $derived(account.current);
   $effect(() => {
     if (!me.$isLoaded) return;
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember('everyone', 'writer');
     const chat = Chat.create([], group);
     goto(`/chat/${chat.$jazz.id}`);

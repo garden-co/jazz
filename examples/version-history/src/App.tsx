@@ -1,4 +1,4 @@
-import { Account } from "jazz-tools";
+import { co } from "jazz-tools";
 import { useAccount, useCoState, useLogOut } from "jazz-tools/react";
 import { useState } from "react";
 import { IssueComponent } from "./Issue.tsx";
@@ -6,7 +6,7 @@ import { IssueVersionHistory } from "./IssueVersionHistory.tsx";
 import { Issue } from "./schema";
 
 function App() {
-  const me = useAccount(Account, {
+  const me = useAccount(co.account(), {
     resolve: {
       profile: true,
     },

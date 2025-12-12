@@ -46,7 +46,7 @@ The `getRoleOf` method has been added to query the role of specific entities:
 
 <CodeGroup>
 ```typescript
-const group = Group.create();
+const group = co.group().create();
 group.getRoleOf(me); // admin
 group.getRoleOf(Eve); // undefined
 
@@ -85,8 +85,8 @@ The `getParentGroups` method has been added to `Group` to get all the parent gro
 
 <CodeGroup>
 ```ts
-const childGroup = Group.create();
-const parentGroup = Group.create();
+const childGroup = co.group().create();
+const parentGroup = co.group().create();
 childGroup.extend(parentGroup);
 
 console.log(childGroup.getParentGroups()); // [parentGroup]
@@ -128,7 +128,7 @@ export class MyAppAccount extends Account {
 
   async migrate(this: MyAppAccount, creationProps?: { name: string }) {
     if (this.profile === undefined) {
-      const profileGroup = Group.create();
+      const profileGroup = co.group().create();
       profileGroup.addMember("everyone", "reader");
 
       this.profile = MyAppProfile.create({
@@ -166,10 +166,10 @@ This might affect your application if you were relying on only direct members be
  *  the actual implementation is different.
 */
 
-const parentGroup = Group.create();
+const parentGroup = co.group().create();
 parentGroup.addMember(John, "admin");
 
-const childGroup = Group.create();
+const childGroup = co.group().create();
 childGroup.addMember(Eve, "admin");
 
 childGroup.extend(parentGroup);
@@ -227,7 +227,7 @@ export class MyAppAccount extends Account {
     });
 
     if ((me.profile._owner as Group | Account)._type === "Account") {
-      const profileGroup = Group.create();
+      const profileGroup = co.group().create();
       profileGroup.addMember("everyone", "reader");
 
       // recreate your profile here...

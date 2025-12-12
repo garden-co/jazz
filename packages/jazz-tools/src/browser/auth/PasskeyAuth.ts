@@ -1,9 +1,10 @@
 import { CryptoProvider, RawAccountID, cojsonInternals } from "cojson";
 import {
-  Account,
+  type Account,
   AuthSecretStorage,
   AuthenticateAccountFunction,
   ID,
+  co,
 } from "jazz-tools";
 
 /**
@@ -82,11 +83,14 @@ export class BrowserPasskeyAuth {
       username,
     });
 
-    const currentAccount = await Account.getMe().$jazz.ensureLoaded({
-      resolve: {
-        profile: true,
-      },
-    });
+    const currentAccount = await co
+      .account()
+      .getMe()
+      .$jazz.ensureLoaded({
+        resolve: {
+          profile: true,
+        },
+      });
 
     if (username.trim().length !== 0) {
       currentAccount.profile.$jazz.set("name", username);

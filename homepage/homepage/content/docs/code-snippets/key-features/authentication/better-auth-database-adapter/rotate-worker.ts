@@ -1,4 +1,4 @@
-import { Account, Group, co } from "jazz-tools";
+import { co } from "jazz-tools";
 import { startWorker } from "jazz-tools/worker";
 const apiKey = process.env.JAZZ_API_KEY;
 
@@ -10,7 +10,7 @@ const { worker } = await startWorker({
 });
 
 const DatabaseRoot = co.map({
-  group: Group,
+  group: co.group(),
   tables: co.map({}),
 });
 

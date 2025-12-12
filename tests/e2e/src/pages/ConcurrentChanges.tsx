@@ -1,4 +1,4 @@
-import { Group, co, z } from "jazz-tools";
+import { co, z } from "jazz-tools";
 import { useAccount, useCoState } from "jazz-tools/react";
 import { useEffect, useState } from "react";
 
@@ -33,7 +33,7 @@ export function ConcurrentChanges() {
   const createCounter = () => {
     if (!me.$isLoaded) return;
 
-    const group = Group.create();
+    const group = co.group().create();
 
     group.addMember("everyone", "writer");
 

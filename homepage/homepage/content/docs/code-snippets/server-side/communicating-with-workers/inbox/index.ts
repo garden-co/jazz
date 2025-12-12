@@ -23,7 +23,7 @@ inbox.subscribe(BookTicketMessage, async (message, senderID) => {
     },
   });
 
-  const ticketGroup = Group.create(worker);
+  const ticketGroup = co.group().create(worker);
   const ticket = Ticket.create({
     account: madeBy,
     event,

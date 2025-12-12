@@ -1,5 +1,5 @@
 import { useCoState } from "jazz-tools/react";
-import { Group } from "jazz-tools";
+import { co } from "jazz-tools";
 import { LinkToHome } from "./LinkToHome.tsx";
 import { OrderForm } from "./OrderForm.tsx";
 import { OrderThumbnail } from "./OrderThumbnail.tsx";
@@ -11,7 +11,7 @@ export function EditOrder(props: { id: string }) {
   const router = useIframeHashRouter();
 
   // Create a new group for the branch, so that every time we open the edit order page, we create a new private branch
-  const owner = useMemo(() => Group.create(), []);
+  const owner = useMemo(() => co.group().create(), []);
 
   const order = useCoState(BubbleTeaOrder, props.id, {
     unstable_branch: {

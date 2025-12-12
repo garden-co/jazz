@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, expectTypeOf, it } from "vitest";
-import { Account, co, Group, Loaded, Ref } from "../internal";
+import { co } from "../internal";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing";
 
 beforeEach(async () => {
@@ -40,12 +40,12 @@ describe("Group", () => {
     it("should create invitations as an static method", async () => {
       const group = co.group().create();
       const groupId = group.$jazz.id;
-      const invite = await Group.createInvite(groupId);
+      const invite = await co.group().createInvite(groupId);
       expect(invite.startsWith("inviteSecret_")).toBeTruthy();
     });
 
     it("should correctly create invitations for users of different roles", async () => {
-      const currentUser = Account.getMe();
+      const currentUser = co.account().getMe();
       const group = co.group().create();
       const invites = {
         reader: group.$jazz.createInvite("reader"),
@@ -73,7 +73,7 @@ describe("Group", () => {
       const otherAccount = await createJazzTestAccount();
       group.addMember(otherAccount, "admin");
 
-      const invite = await Group.createInvite(groupId, {
+      const invite = await co.group().createInvite(groupId, {
         role: "writer",
         loadAs: otherAccount,
       });
@@ -114,8 +114,8 @@ describe("Group", () => {
     it("should correctly type the create function", () => {
       const g = co.group();
 
-      expectTypeOf(g.create).toBeCallableWith({ owner: Account.getMe() });
-      expectTypeOf(g.create).toBeCallableWith(Account.getMe());
+      expectTypeOf(g.create).toBeCallableWith({ owner: co.account().getMe() });
+      expectTypeOf(g.create).toBeCallableWith(co.account().getMe());
       expectTypeOf(g.create).toBeCallableWith(undefined);
     });
 

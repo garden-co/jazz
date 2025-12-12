@@ -2,15 +2,15 @@
 
 import { cojsonInternals } from "cojson";
 import {
-  Account,
-  CoRichText,
+  type Account,
+  type CoRichText,
   CoValue,
   CoValueLoadingState,
-  Group,
+  type Group,
   ID,
+  co,
   Loaded,
   MaybeLoaded,
-  co,
   z,
 } from "jazz-tools";
 import { assertLoaded, disableJazzTestSync } from "jazz-tools/testing";
@@ -233,7 +233,7 @@ describe("useCoState", () => {
       isCurrentActiveAccount: true,
     });
 
-    const group = Group.create(someoneElse);
+    const group = co.group().create(someoneElse);
     group.addMember("everyone", "reader");
 
     const map = TestMap.create(
@@ -266,7 +266,7 @@ describe("useCoState", () => {
       isCurrentActiveAccount: true,
     });
 
-    const group = Group.create(someoneElse);
+    const group = co.group().create(someoneElse);
 
     const map = TestMap.create(
       {
@@ -310,7 +310,7 @@ describe("useCoState", () => {
       isCurrentActiveAccount: true,
     });
 
-    const group = Group.create(someoneElse);
+    const group = co.group().create(someoneElse);
 
     const map = TestMap.create(
       {
@@ -368,9 +368,9 @@ describe("useCoState", () => {
       isCurrentActiveAccount: true,
     });
 
-    const everyone = Group.create(someoneElse);
+    const everyone = co.group().create(someoneElse);
     everyone.addMember("everyone", "reader");
-    const group = Group.create(someoneElse);
+    const group = co.group().create(someoneElse);
 
     const map = TestMap.create(
       {
@@ -513,13 +513,13 @@ describe("useCoState", () => {
       },
     });
 
-    const janeOnJohn = await Account.load(jane.$jazz.id, {
+    const janeOnJohn = await co.account().load(jane.$jazz.id, {
       loadAs: john,
     });
 
     assertLoaded(janeOnJohn);
 
-    const group = Group.create(john);
+    const group = co.group().create(john);
     group.addMember(janeOnJohn, "reader");
 
     const dog = Dog.create(
@@ -556,7 +556,7 @@ describe("useCoState", () => {
 
   it("should immediately load deeploaded data when available locally", async () => {
     const Message = co.map({
-      content: CoRichText,
+      content: co.richText(),
     });
     const Messages = co.list(Message);
     const Thread = co.map({
@@ -566,13 +566,13 @@ describe("useCoState", () => {
     const thread = Thread.create({
       messages: Messages.create([
         Message.create({
-          content: CoRichText.create("Hello man!"),
+          content: co.richText().create("Hello man!"),
         }),
         Message.create({
-          content: CoRichText.create("The temperature is high today"),
+          content: co.richText().create("The temperature is high today"),
         }),
         Message.create({
-          content: CoRichText.create("Shall we go to the beach?"),
+          content: co.richText().create("Shall we go to the beach?"),
         }),
       ]),
     });
@@ -604,7 +604,7 @@ describe("useCoState", () => {
     });
     const PersonWithName = Person.resolved({ name: true });
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "writer");
 
     const person = Person.create(
@@ -639,7 +639,7 @@ describe("useCoState", () => {
     const Person = co.map({
       name: co.plainText(),
     });
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "writer");
 
     const person = Person.create(
@@ -678,7 +678,7 @@ describe("useCoState", () => {
       email: z.string(),
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "writer");
 
     const originalPerson = Person.create(
@@ -763,7 +763,7 @@ describe("useCoState", () => {
       email: z.string(),
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "writer");
 
     const originalPerson = Person.create(
@@ -811,7 +811,7 @@ describe("useCoState", () => {
       email: z.string(),
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "writer");
 
     const originalPerson = Person.create(

@@ -11,7 +11,7 @@ This example demonstrates how to use the **Jazz HTTP API** with **Next.js** to i
 ## 🚀 Getting Started
 
 ### Prerequisites
-- Node.js 20+ 
+- Node.js 20+
 - pnpm (recommended) or npm
 
 ### Installation
@@ -73,7 +73,7 @@ const playRequest = experimental_defineRequest({
 ### Secure Move Handling
 ```typescript
 // Create restricted group for the move
-const group = Group.create({ owner: jazzServerAccount.worker });
+const group = co.group().create({ owner: jazzServerAccount.worker });
 group.addMember(madeBy, "reader");
 
 // Store move with restricted access

@@ -1,5 +1,5 @@
 import { getAudioFileData } from "@/lib/audio/getAudioFileData";
-import { Group } from "jazz-tools";
+import { co } from "jazz-tools";
 import {
   MusicTrack,
   MusicaAccount,
@@ -38,7 +38,7 @@ export async function uploadMusicTracks(
   for (const file of files) {
     // The ownership object defines the user that owns the created coValues
     // We are creating a group for each CoValue in order to be able to share them via Playlist
-    const group = Group.create();
+    const group = co.group().create();
 
     const data = await getAudioFileData(file);
 

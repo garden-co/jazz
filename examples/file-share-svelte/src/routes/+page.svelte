@@ -1,7 +1,7 @@
 <script lang="ts">
   import { AccountCoState } from 'jazz-tools/svelte';
   import { SharedFile, FileShareAccount } from '$lib/schema';
-  import { FileStream, type Loaded } from 'jazz-tools';
+  import { type Loaded, co } from 'jazz-tools';
   import FileItem from '$lib/components/FileItem.svelte';
   import { CloudUpload } from 'lucide-svelte';
 
@@ -34,7 +34,7 @@
 
     try {
       // Create a FileStream from the uploaded file
-      const fileStream = await FileStream.createFromBlob(file, sharedFiles.$jazz.owner);
+      const fileStream = await co.fileStream().createFromBlob(file, sharedFiles.$jazz.owner);
 
       // Create the shared file entry
       const sharedFile = SharedFile.create(

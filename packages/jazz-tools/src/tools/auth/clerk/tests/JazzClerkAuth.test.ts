@@ -2,7 +2,13 @@
 
 import { AgentSecret } from "cojson";
 import { AuthSecretStorage } from "jazz-tools";
-import { Account, ID, InMemoryKVStore, KvStoreContext } from "jazz-tools";
+import {
+  type Account,
+  ID,
+  InMemoryKVStore,
+  KvStoreContext,
+  co,
+} from "jazz-tools";
 import { createJazzTestAccount } from "jazz-tools/testing";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { JazzClerkAuth } from "../index";
@@ -81,11 +87,14 @@ describe("JazzClerkAuth", () => {
         provider: "clerk",
       });
 
-      const me = await Account.getMe().$jazz.ensureLoaded({
-        resolve: {
-          profile: true,
-        },
-      });
+      const me = await co
+        .account()
+        .getMe()
+        .$jazz.ensureLoaded({
+          resolve: {
+            profile: true,
+          },
+        });
       expect(me.profile.name).toBe("Guido");
     });
 

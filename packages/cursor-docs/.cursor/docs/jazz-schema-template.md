@@ -65,9 +65,9 @@ export const AppAccount = co
 
     // Initialize profile if it doesn't exist
     if (!account.$jazz.has("profile")) {
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "reader"); // Profile visible to everyone
-      
+
       account.profile = UserProfile.create(
         {
           name: "Anonymous User",
@@ -102,11 +102,11 @@ export const AppAccount = co
       // Initialize with sensible defaults
     });
   }
-  
+
   if (!account.$jazz.has("profile")) {
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "reader");
-    
+
     account.profile = UserProfile.create({
       // Default profile data
     }, group);
@@ -117,14 +117,14 @@ export const AppAccount = co
 ### 4. Permission Patterns
 ```typescript
 // Public data (readable by everyone)
-const group = Group.create();
+const group = co.group().create();
 group.addMember("everyone", "reader");
 
 // Private data (only owner can access)
 // Don't add any members to the group
 
 // Collaborative data (specific users can edit)
-const group = Group.create();
+const group = co.group().create();
 group.addMember("user123", "writer");
 group.addMember("user456", "reader");
 ```
@@ -196,4 +196,4 @@ export const DocumentRoot = co.map({
 2. **Don't** forget migration logic - it's essential for schema evolution
 3. **Don't** mix different data types in the same feed
 4. **Don't** create circular references between schemas
-5. **Don't** forget to set appropriate permissions for sensitive data 
+5. **Don't** forget to set appropriate permissions for sensitive data

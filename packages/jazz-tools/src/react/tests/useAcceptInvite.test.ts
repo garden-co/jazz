@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { CoMap, Group, ID, co, coField, z } from "jazz-tools";
+import { CoMap, type Group, ID, co, coField, z } from "jazz-tools";
 import { assertLoaded } from "jazz-tools/testing";
 import { describe, expect, it } from "vitest";
 import { createInviteLink, useAcceptInvite } from "../index.js";
@@ -23,7 +23,7 @@ describe("useAcceptInvite", () => {
     const invitelink = createInviteLink(
       TestMap.create(
         { value: "hello" },
-        { owner: Group.create({ owner: inviteSender }) },
+        { owner: co.group().create({ owner: inviteSender }) },
       ),
       "reader",
     );

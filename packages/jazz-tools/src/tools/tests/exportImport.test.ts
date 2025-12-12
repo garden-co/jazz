@@ -1,7 +1,13 @@
 import { cojsonInternals } from "cojson";
 import { assert, beforeEach, describe, expect, test } from "vitest";
 import { exportCoValue, importContentPieces } from "../coValues/interfaces.js";
-import { Account, CoPlainText, Group, co, z } from "../exports.js";
+import {
+  type Account,
+  type CoPlainText,
+  type Group,
+  co,
+  z,
+} from "../exports.js";
 import {
   createJazzTestAccount,
   createJazzTestGuest,
@@ -26,7 +32,7 @@ describe("exportCoValue", () => {
       age: z.number(),
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     const person = Person.create({ name: "John", age: 30 }, group);
     group.addMember("everyone", "reader");
 
@@ -58,7 +64,7 @@ describe("exportCoValue", () => {
       address: Address,
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     const address = Address.create(
       { street: "123 Main St", city: "New York" },
       group,
@@ -92,7 +98,7 @@ describe("exportCoValue", () => {
   test("exports a CoList", async () => {
     const TodoList = co.list(z.string());
 
-    const group = Group.create();
+    const group = co.group().create();
     const todos = TodoList.create([], group);
     todos.$jazz.push("Buy groceries");
     todos.$jazz.push("Walk the dog");
@@ -117,7 +123,7 @@ describe("exportCoValue", () => {
   test("exports a CoStream", async () => {
     const ChatStream = co.feed(z.string());
 
-    const group = Group.create();
+    const group = co.group().create();
     const chat = ChatStream.create([], group);
     chat.$jazz.push("Hello");
     chat.$jazz.push("World");
@@ -144,7 +150,7 @@ describe("exportCoValue", () => {
       name: z.string(),
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     const person = Person.create({ name: "John" }, group);
     // Don't add any members, so it's private
 
@@ -168,7 +174,7 @@ describe("exportCoValue", () => {
       address: Address,
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     const address = Address.create(
       { street: "123 Main St", city: "New York" },
       group,
@@ -214,11 +220,11 @@ describe("exportCoValue", () => {
       address: Address,
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     const address = Address.create(
       {
-        street: CoPlainText.create("123 Main St"),
-        city: CoPlainText.create("New York"),
+        street: co.plainText().create("123 Main St"),
+        city: co.plainText().create("New York"),
       },
       group,
     );
@@ -272,7 +278,7 @@ describe("value.$jazz.export", () => {
       age: z.number(),
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "reader");
 
     const person = Person.create({ name: "Jane", age: 28 }, group);
@@ -306,7 +312,7 @@ describe("value.$jazz.export", () => {
 
     const alice = await createJazzTestAccount();
 
-    const group = Group.create(alice);
+    const group = co.group().create(alice);
     group.addMember("everyone", "reader");
 
     const address = Address.create(
@@ -347,7 +353,7 @@ describe("importContentPieces", () => {
       age: z.number(),
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     const person = Person.create({ name: "John", age: 30 }, group);
     group.addMember("everyone", "reader");
 
@@ -386,7 +392,7 @@ describe("importContentPieces", () => {
       address: Address,
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     const address = Address.create(
       { street: "123 Main St", city: "New York" },
       group,
@@ -430,7 +436,7 @@ describe("importContentPieces", () => {
       name: z.string(),
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     const person = Person.create({ name: "John" }, group);
     group.addMember("everyone", "reader");
 
@@ -464,7 +470,7 @@ describe("importContentPieces", () => {
       name: z.string(),
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     const person = Person.create({ name: "John" }, group);
     group.addMember("everyone", "reader");
 
@@ -507,7 +513,7 @@ describe("importContentPieces", () => {
       name: z.string(),
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     const person = Person.create({ name: "John" }, group);
     group.addMember("everyone", "reader");
 
@@ -552,7 +558,7 @@ describe("importContentPieces", () => {
       posts: co.list(Post),
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     const comment1 = Comment.create(
       { text: "Great post!", author: "Alice" },
       group,

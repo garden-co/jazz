@@ -1,7 +1,7 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
-import { Account } from "jazz-tools";
+import { co } from "jazz-tools";
 import { useAccount } from "jazz-tools/react";
 import {
   AppWindowMacIcon,
@@ -12,7 +12,7 @@ import {
 import Image from "next/image";
 
 export default function Home() {
-  const me = useAccount(Account, { resolve: { profile: {} } });
+  const me = useAccount(co.account(), { resolve: { profile: {} } });
 
   if (!me.$isLoaded) {
     return null;

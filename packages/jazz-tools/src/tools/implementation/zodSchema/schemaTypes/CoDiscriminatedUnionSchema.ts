@@ -12,7 +12,11 @@ import {
   SchemaUnion,
   SchemaUnionConcreteSubclass,
   SubscribeListenerOptions,
+  SubscribeRestArgs,
   coOptionalDefiner,
+  loadCoValueWithoutMe,
+  parseSubscribeRestArgs,
+  subscribeToCoValueWithoutMe,
 } from "../../../internal.js";
 import { z } from "../zodReExport.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
@@ -94,11 +98,20 @@ export class CoDiscriminatedUnionSchema<
       >
     >
   > {
-    return this.coValueClass.load(
+    return loadCoValueWithoutMe(
+      this.coValueClass,
       id,
       // @ts-expect-error
       withSchemaResolveQuery(options, this.resolveQuery),
-    ) as any;
+    ) as Promise<
+      Settled<
+        Resolved<
+          CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> &
+            SchemaUnion,
+          R
+        >
+      >
+    >;
   }
 
   subscribe<
@@ -120,11 +133,12 @@ export class CoDiscriminatedUnionSchema<
       unsubscribe: () => void,
     ) => void,
   ): () => void {
-    // @ts-expect-error
-    return this.coValueClass.subscribe(
+    return subscribeToCoValueWithoutMe(
+      this.coValueClass,
       id,
+      // @ts-expect-error
       withSchemaResolveQuery(options, this.resolveQuery),
-      listener,
+      listener as any,
     );
   }
 

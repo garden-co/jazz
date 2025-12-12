@@ -1,4 +1,4 @@
-import { FileStream } from "jazz-tools";
+import { type FileStream, co } from "jazz-tools";
 import { createJazzTestAccount } from "jazz-tools/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createImageFactory } from "./create-image-factory";
@@ -10,7 +10,7 @@ describe("createImage", async () => {
   const getPlaceholderBase64 = vi.fn();
   const createFileStreamFromSource = vi
     .fn()
-    .mockResolvedValue(FileStream.create({ owner: account }));
+    .mockResolvedValue(co.fileStream().create({ owner: account }));
   const resize = vi.fn();
 
   const createImage = createImageFactory({

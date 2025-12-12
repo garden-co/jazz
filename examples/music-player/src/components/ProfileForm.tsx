@@ -5,7 +5,7 @@ import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Separator } from "./ui/separator";
-import { Group } from "jazz-tools";
+import { co } from "jazz-tools";
 import { useAccountSelector } from "@/components/AccountProvider.tsx";
 
 interface ProfileFormProps {
@@ -55,7 +55,7 @@ export function ProfileForm({
     try {
       // Create image using the Image API from jazz-tools/media
       const image = await createImage(file, {
-        owner: Group.create().makePublic(),
+        owner: co.group().create().makePublic(),
         maxSize: 256, // Good size for avatars
         placeholder: "blur",
         progressive: true,

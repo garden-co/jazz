@@ -1,5 +1,5 @@
 // @ts-expect-error duplicate import
-import { Account, co, Group, ImageDefinition, Loaded, z } from "jazz-tools";
+import { co, ImageDefinition, Loaded, z } from "jazz-tools";
 
 const JazzAccount = co.account({
   profile: co.profile({

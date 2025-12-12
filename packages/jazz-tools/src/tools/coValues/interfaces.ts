@@ -29,6 +29,7 @@ import {
   activeAccountContext,
   coValueClassFromCoValueClassOrSchema,
   inspect,
+  co,
 } from "../internal.js";
 import type { BranchDefinition } from "../subscribe/types.js";
 import { CoValueHeader } from "cojson";
@@ -438,7 +439,7 @@ export function parseCoValueCreateOptions(
     options && "onCreate" in options ? options.onCreate : undefined;
   const Group = RegisteredSchemas["Group"];
   if (!options) {
-    const owner = Group.create();
+    const owner = co.group().create();
     onCreate?.(owner);
     return { owner, uniqueness: undefined };
   }
@@ -460,7 +461,7 @@ export function parseCoValueCreateOptions(
 
   const owner = options.owner
     ? accountOrGroupToGroup(options.owner)
-    : Group.create();
+    : co.group().create();
 
   onCreate?.(owner);
 
@@ -522,14 +523,20 @@ export async function unstable_loadUnique<
 ): Promise<MaybeLoaded<Loaded<S, R>>> {
   const cls = coValueClassFromCoValueClassOrSchema(schema);
 
-  if (
-    !("_getUniqueHeader" in cls) ||
-    typeof cls._getUniqueHeader !== "function"
-  ) {
+  // Check if schema has _getUniqueHeader (for schemas) or class has it (for classes)
+  const getUniqueHeaderFn =
+    ("_getUniqueHeader" in schema &&
+      typeof (schema as any)._getUniqueHeader === "function" &&
+      (schema as any)._getUniqueHeader) ||
+    ("_getUniqueHeader" in cls &&
+      typeof cls._getUniqueHeader === "function" &&
+      cls._getUniqueHeader);
+
+  if (!getUniqueHeaderFn) {
     throw new Error("CoValue class does not support unique headers");
   }
 
-  const header = cls._getUniqueHeader(options.unique, options.owner.$jazz.id);
+  const header = getUniqueHeaderFn(options.unique, options.owner.$jazz.id);
 
   // @ts-expect-error the CoValue class is too generic for TS to infer its instances are CoValues
   return internalLoadUnique(cls, {
@@ -633,7 +640,7 @@ export async function internalLoadUnique<
  *   address: Address,
  * });
  *
- * const group = Group.create();
+ * const group = co.group().create();
  * const address = Address.create(
  *   { street: "123 Main St", city: "New York" },
  *   group,

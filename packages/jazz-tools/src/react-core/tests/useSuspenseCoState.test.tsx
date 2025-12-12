@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { cojsonInternals } from "cojson";
-import { Group, Loaded, co, z } from "jazz-tools";
+import { type Group, Loaded, co, z } from "jazz-tools";
 import { assertLoaded, disableJazzTestSync } from "jazz-tools/testing";
 import { beforeEach, describe, expect, expectTypeOf, it } from "vitest";
 import React, { Suspense, useRef } from "react";
@@ -130,7 +130,7 @@ describe("useSuspenseCoState", () => {
       {
         value: "123",
       },
-      Group.create().makePublic("reader"),
+      co.group().create().makePublic("reader"),
     );
 
     const viewerAccount = await createJazzTestAccount({
@@ -178,7 +178,7 @@ describe("useSuspenseCoState", () => {
       {
         value: "123",
       },
-      Group.create().makePublic("reader"),
+      co.group().create().makePublic("reader"),
     );
 
     await setupJazzTestSync();
@@ -225,7 +225,7 @@ describe("useSuspenseCoState", () => {
       {
         value: "123",
       },
-      Group.create().makePublic("reader"),
+      co.group().create().makePublic("reader"),
     );
 
     const viewerAccount = await createJazzTestAccount({
@@ -272,7 +272,7 @@ describe("useSuspenseCoState", () => {
       {
         value: "123",
       },
-      Group.create().makePublic("reader"),
+      co.group().create().makePublic("reader"),
     );
 
     const viewerAccount = await createJazzTestAccount({
@@ -342,7 +342,7 @@ describe("useSuspenseCoState", () => {
       {
         value: "123",
       },
-      Group.create(),
+      co.group().create(),
     );
 
     await createJazzTestAccount({
@@ -537,7 +537,7 @@ describe("useSuspenseCoState", () => {
           value: "456",
         },
       },
-      Group.create().makePublic("reader"),
+      co.group().create().makePublic("reader"),
     );
 
     const account = await createJazzTestAccount({
@@ -1008,7 +1008,7 @@ describe("useSuspenseCoState", () => {
       email: z.string(),
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "writer");
 
     const originalPerson = Person.create(
@@ -1115,7 +1115,7 @@ describe("useSuspenseCoState", () => {
       email: z.string(),
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "writer");
 
     const originalPerson = Person.create(

@@ -11,7 +11,9 @@ import {
   Resolved,
   SubscribeListenerOptions,
   coOptionalDefiner,
+  loadCoValueWithoutMe,
   parseSubscribeRestArgs,
+  subscribeToCoValueWithoutMe,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
 } from "../../../internal.js";
@@ -89,12 +91,11 @@ export class CoFeedSchema<
       unstable_branch?: BranchDefinition;
     },
   ): Promise<Settled<Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>>> {
-    // @ts-expect-error
-    return this.coValueClass.load(
+    return loadCoValueWithoutMe(
+      this.coValueClass,
       id,
-      // @ts-expect-error
-      withSchemaResolveQuery(options, this.resolveQuery),
-    );
+      withSchemaResolveQuery(options, this.resolveQuery) ?? {},
+    ) as Promise<Settled<Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>>>;
   }
 
   unstable_merge<
@@ -140,11 +141,11 @@ export class CoFeedSchema<
   ): () => void;
   subscribe(id: string, ...args: any) {
     const { options, listener } = parseSubscribeRestArgs(args);
-    return this.coValueClass.subscribe(
+    return subscribeToCoValueWithoutMe(
+      this.coValueClass,
       id,
-      // @ts-expect-error
       withSchemaResolveQuery(options, this.resolveQuery),
-      listener,
+      listener as any,
     );
   }
 

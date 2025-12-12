@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { co, Account, CoValueLoadingState, Group } from "jazz-tools";
+import { co, type Account, CoValueLoadingState, type Group } from "jazz-tools";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing";
 import { render, screen, waitFor } from "./testUtils";
@@ -18,11 +18,11 @@ describe("CoState", () => {
       isCurrentActiveAccount: true,
     });
 
-    serverAccount = Account.getMe();
+    serverAccount = co.account().getMe();
     clientAccount = await createJazzTestAccount({
       creationProps: { name: "Client" },
     });
-    publicGroup = Group.create(serverAccount).makePublic("reader");
+    publicGroup = co.group().create(serverAccount).makePublic("reader");
   });
 
   it("should use the schema's resolve query if no resolve query is provided", async () => {

@@ -5,7 +5,11 @@ import {
   CoPlainText,
   Group,
   Settled,
+  SubscribeRestArgs,
   coOptionalDefiner,
+  loadCoValueWithoutMe,
+  parseSubscribeRestArgs,
+  subscribeToCoValueWithoutMe,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
 } from "../../../internal.js";
@@ -66,7 +70,9 @@ export class PlainTextSchema implements CorePlainTextSchema {
       unstable_branch?: BranchDefinition;
     },
   ): Promise<Settled<CoPlainText>> {
-    return this.coValueClass.load(id, options);
+    return loadCoValueWithoutMe(this.coValueClass, id, options) as Promise<
+      Settled<CoPlainText>
+    >;
   }
 
   subscribe(
@@ -81,9 +87,15 @@ export class PlainTextSchema implements CorePlainTextSchema {
     id: string,
     listener: (value: CoPlainText, unsubscribe: () => void) => void,
   ): () => void;
-  subscribe(...args: [any, ...any[]]) {
-    // @ts-expect-error
-    return this.coValueClass.subscribe(...args);
+  subscribe(...args: [any, ...[any]]) {
+    const [id, ...restArgs] = args;
+    const { options, listener } = parseSubscribeRestArgs(restArgs);
+    return subscribeToCoValueWithoutMe(
+      this.coValueClass,
+      id,
+      options,
+      listener as any,
+    );
   }
 
   unstable_merge(

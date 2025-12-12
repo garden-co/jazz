@@ -1,5 +1,5 @@
 import { commands } from "@vitest/browser/context";
-import { AuthSecretStorage, Group, co, z } from "jazz-tools";
+import { AuthSecretStorage, type Group, co, z } from "jazz-tools";
 import {
   assert,
   afterAll,
@@ -44,7 +44,7 @@ describe("Browser sync", () => {
       AccountSchema: CustomAccount,
     });
 
-    const group = Group.create(account1);
+    const group = co.group().create(account1);
     const map = TestMap.create({ value: "test data" }, group);
     group.addMember("everyone", "reader");
 
@@ -81,7 +81,7 @@ describe("Browser sync", () => {
       AccountSchema: CustomAccount,
     });
 
-    const group = Group.create(account1);
+    const group = co.group().create(account1);
     const map = TestMap.create({ value: "test data" }, group);
     group.addMember("everyone", "reader");
 
@@ -111,7 +111,7 @@ describe("Browser sync", () => {
       AccountSchema: CustomAccount,
     });
 
-    const group = Group.create(context.me);
+    const group = co.group().create(context.me);
     const map = TestMap.create({ value: "test data" }, group);
     group.addMember("everyone", "reader");
 
@@ -149,7 +149,7 @@ describe("Browser sync", () => {
       AccountSchema: CustomAccount,
     });
 
-    const group = Group.create(context.me);
+    const group = co.group().create(context.me);
     const map = TestMap.create({ value: "test data" }, group);
     group.addMember("everyone", "reader");
 
@@ -189,7 +189,7 @@ describe("Browser sync", () => {
       AccountSchema: CustomAccount,
     });
 
-    const group = Group.create(context.me);
+    const group = co.group().create(context.me);
     const map = TestMap.create({ value: "test data" }, group);
     group.addMember("everyone", "reader");
 
@@ -259,7 +259,7 @@ describe("Browser sync", () => {
         storage: "indexedDB",
       });
 
-    const group = Group.create(account1);
+    const group = co.group().create(account1);
     await group.$jazz.waitForSync();
     contextManager1.getAuthSecretStorage().clear();
     contextManager1.done();
@@ -273,8 +273,8 @@ describe("Browser sync", () => {
         storage: "indexedDB",
       });
 
-      const childGroup = Group.create(account);
-      const groupToExtend = await Group.load(group.$jazz.id, {
+      const childGroup = co.group().create(account);
+      const groupToExtend = await co.group().load(group.$jazz.id, {
         loadAs: account,
       });
 
@@ -299,7 +299,7 @@ describe("Browser sync", () => {
       databaseName: "jazz-storage",
     });
 
-    await Group.load(group.$jazz.id, { loadAs: loadingAccount });
+    await co.group().load(group.$jazz.id, { loadAs: loadingAccount });
 
     const { account: loadingRetryAccount } = await createAccountContext({
       sync: {
@@ -310,7 +310,7 @@ describe("Browser sync", () => {
       databaseName: "jazz-storage",
     });
 
-    const loadedGroup = await Group.load(group.$jazz.id, {
+    const loadedGroup = await co.group().load(group.$jazz.id, {
       loadAs: loadingRetryAccount,
     });
 

@@ -16,10 +16,10 @@ export { Encoders, coField } from "./internal.js";
 
 export { Inbox, InboxSender } from "./internal.js";
 
-export { Group } from "./internal.js";
+export type { Group } from "./internal.js";
 export { CoValueBase } from "./internal.js";
-export { Profile } from "./internal.js";
-export { SchemaUnion } from "./internal.js";
+export type { Profile } from "./internal.js";
+export type { SchemaUnion } from "./internal.js";
 
 export { co } from "./internal.js";
 
@@ -43,7 +43,7 @@ export type {
   ExportedCoValue,
 } from "./internal.js";
 
-export {
+export type {
   CoMap,
   CoList,
   BinaryCoStream,
@@ -53,6 +53,8 @@ export {
   CoPlainText,
   CoRichText,
   Account,
+} from "./internal.js";
+export {
   assertLoaded,
   getLoadedOrUndefined,
   isControlledAccount,
@@ -125,6 +127,7 @@ export {
   type CoreAccountSchema as AnyAccountSchema,
   type ResolveQuery,
   type ResolveQueryStrict,
+  GroupSchema,
 } from "./internal.js";
 
 export {

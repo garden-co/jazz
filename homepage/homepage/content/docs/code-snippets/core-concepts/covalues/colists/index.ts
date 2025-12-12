@@ -30,7 +30,7 @@ const tasks = co.list(Task).create([
 
 // #region WithOwner
 // Create with shared ownership
-const teamGroup = Group.create();
+const teamGroup = co.group().create();
 teamGroup.addMember(colleagueAccount, "writer");
 
 const teamList = co.list(Task).create([], { owner: teamGroup });

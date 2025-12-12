@@ -1,4 +1,4 @@
-import { co, Group, Loaded, z } from "jazz-tools";
+import { co, type Group, Loaded, z } from "jazz-tools";
 
 export const TodoProfile = co
   .profile({
@@ -23,7 +23,7 @@ export const JazzAccount = co
             name: "Anonymous",
             todos: [],
           },
-          Group.create().makePublic(),
+          co.group().create().makePublic(),
         ),
       );
     }

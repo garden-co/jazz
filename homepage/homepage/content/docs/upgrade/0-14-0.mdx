@@ -171,7 +171,7 @@ const Person = co.map({
   pets: co.list(Pet),
 });
 type Person = co.loaded<typeof Person>;
-``` 
+```
 ```svelte
 // @filename: app.svelte
 <script lang="ts">
@@ -199,7 +199,7 @@ const person = new CoState(Person, id);
 
 <script lang="ts">
   import { Person } from './schema';
-  
+
   let props: Props = $props();
 </script>
 
@@ -291,7 +291,7 @@ function MyComponent() {
 </script>
 
 <JazzProvider
-  sync={{ 
+  sync={{
     peer: "wss://cloud.jazz.tools/?key=your-api-key",
     when: "always" // When to sync: "always", "never", or "signedUp"
   }}
@@ -357,7 +357,7 @@ export const MyAppAccount = co.account({
   }
 
   if (account.profile === undefined) {
-    const profileGroup = Group.create();
+    const profileGroup = co.group().create();
     profileGroup.addMember("everyone", "reader");
 
     account.profile = MyAppProfile.create({
@@ -380,7 +380,7 @@ You can no longer define helper methods directly within your schema, create stan
 The type of `_refs` and `_edits` is now nullable.
 
 <CodeGroup>
-```ts 
+```ts
 const Person = co.map({
   name: z.string(),
   age: z.number(),
@@ -390,7 +390,7 @@ const person = Person.create({ name: "John", age: 30 });
 
 person._refs; // now nullable
 person._edits; // now nullable
-``` 
+```
 </CodeGroup>
 
 ### `members` and `by` now return basic `Account`

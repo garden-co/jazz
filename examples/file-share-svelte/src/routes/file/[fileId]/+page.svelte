@@ -3,7 +3,7 @@
   import { CoState } from 'jazz-tools/svelte';
   import { SharedFile } from '$lib/schema';
   import { File, FileDown, Link2 } from 'lucide-svelte';
-  import { FileStream } from 'jazz-tools';
+  import { co } from 'jazz-tools';
   import { toast } from 'svelte-sonner';
   import { downloadFileBlob } from '$lib/utils';
 
@@ -21,7 +21,7 @@
     }
 
     try {
-      const blob = await FileStream.loadAsBlob(fileStreamId);
+      const blob = await co.fileStream().loadAsBlob(fileStreamId);
       if (!blob) {
         toast.error('Failed to download file');
         return;

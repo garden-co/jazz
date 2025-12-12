@@ -4,7 +4,11 @@ import {
   FileStream,
   Group,
   Settled,
+  SubscribeRestArgs,
   coOptionalDefiner,
+  loadCoValueWithoutMe,
+  parseSubscribeRestArgs,
+  subscribeToCoValueWithoutMe,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
 } from "../../../internal.js";
@@ -105,21 +109,75 @@ export class FileStreamSchema implements CoreFileStreamSchema {
     );
   }
 
-  loadAsBlob(
+  async loadAsBlob(
     id: string,
     options?: {
       allowUnfinished?: boolean;
       loadAs?: Account | AnonymousJazzAgent;
     },
   ): Promise<Blob | undefined> {
-    return this.coValueClass.loadAsBlob(id, options);
+    const stream = await this.load(id, options);
+
+    if (!stream.$isLoaded) {
+      return undefined;
+    }
+
+    return stream.toBlob({
+      allowUnfinished: options?.allowUnfinished,
+    });
   }
 
-  load(
+  async loadAsBase64(
     id: string,
-    options?: { loadAs?: Account | AnonymousJazzAgent },
+    options?: {
+      allowUnfinished?: boolean;
+      loadAs?: Account | AnonymousJazzAgent;
+      dataURL?: boolean;
+    },
+  ): Promise<string | undefined> {
+    const stream = await this.load(id, options);
+
+    if (!stream.$isLoaded) {
+      return undefined;
+    }
+
+    return stream.asBase64(options);
+  }
+
+  async load(
+    id: string,
+    options?: {
+      loadAs?: Account | AnonymousJazzAgent;
+      allowUnfinished?: boolean;
+    },
   ): Promise<Settled<FileStream>> {
-    return this.coValueClass.load(id, options);
+    const stream = await loadCoValueWithoutMe(this.coValueClass, id, options);
+
+    /**
+     * If the user hasn't requested an incomplete blob and the
+     * stream isn't complete wait for the stream download before progressing
+     */
+    if (
+      !options?.allowUnfinished &&
+      stream.$isLoaded &&
+      !stream.isBinaryStreamEnded()
+    ) {
+      return new Promise<FileStream>((resolve) => {
+        subscribeToCoValueWithoutMe(
+          this.coValueClass,
+          id,
+          options || {},
+          (value, unsubscribe) => {
+            if (value.isBinaryStreamEnded()) {
+              unsubscribe();
+              resolve(value);
+            }
+          },
+        );
+      }) as Promise<Settled<FileStream>>;
+    }
+
+    return stream as Settled<FileStream>;
   }
 
   unstable_merge(
@@ -139,9 +197,15 @@ export class FileStreamSchema implements CoreFileStreamSchema {
     id: string,
     listener: (value: FileStream, unsubscribe: () => void) => void,
   ): () => void;
-  subscribe(...args: [any, ...any[]]) {
-    // @ts-expect-error
-    return this.coValueClass.subscribe(...args);
+  subscribe(...args: [any, ...[any]]) {
+    const [id, ...restArgs] = args;
+    const { options, listener } = parseSubscribeRestArgs(restArgs);
+    return subscribeToCoValueWithoutMe(
+      this.coValueClass,
+      id,
+      options,
+      listener as any,
+    );
   }
 
   getCoValueClass(): typeof FileStream {

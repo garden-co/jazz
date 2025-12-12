@@ -1,5 +1,11 @@
 import type { CoID } from "cojson";
-import { Account, FileStream, ImageDefinition, MaybeLoaded } from "jazz-tools";
+import {
+  type Account,
+  type FileStream,
+  ImageDefinition,
+  MaybeLoaded,
+  co,
+} from "jazz-tools";
 
 export function highestResAvailable(
   image: ImageDefinition,
@@ -113,7 +119,7 @@ function isLoaded(id: CoID<any> | null | undefined): boolean {
     return false;
   }
 
-  return !!Account.getMe().$jazz.localNode.getLoaded(id);
+  return !!co.account().getMe().$jazz.localNode.getLoaded(id);
 }
 
 export async function loadImage(
@@ -142,7 +148,9 @@ export async function loadImage(
     return null;
   }
 
-  const loadedOriginal = await FileStream.load(imageOrId.original.$jazz.id);
+  const loadedOriginal = await co
+    .fileStream()
+    .load(imageOrId.original.$jazz.id);
 
   if (!loadedOriginal.$isLoaded) {
     console.warn("Unable to find the original image");
@@ -207,7 +215,7 @@ export async function loadImageBySize(
     return null;
   }
 
-  const loadedFile = await FileStream.load(file.id);
+  const loadedFile = await co.fileStream().load(file.id);
 
   if (!loadedFile.$isLoaded) {
     return null;

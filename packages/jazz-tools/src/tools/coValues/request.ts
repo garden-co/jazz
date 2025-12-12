@@ -19,6 +19,7 @@ import {
   ResolveQuery,
   ResolveQueryStrict,
   Simplify,
+  co,
   coMapDefiner,
   coValueClassFromCoValueClassOrSchema,
   exportCoValue,
@@ -103,7 +104,7 @@ function createMessageEnvelope<S extends MessageShape>(
   sharedWith: Account | Group,
   type: "request" | "response",
 ): Loaded<CoMapSchema<S>> {
-  const group = Group.create({ owner });
+  const group = co.group().create({ owner });
 
   if (type === "request") {
     group.addMember(sharedWith, "writer");
@@ -285,7 +286,7 @@ async function handleMessagePayload({
   const coValue = await node.loadCoValueCore(requestData.id);
   const accountId = getCoValueCreatorAccountId(coValue);
 
-  const madeBy = await Account.load(accountId, {
+  const madeBy = await co.account().load(accountId, {
     loadAs,
   });
 
@@ -622,7 +623,7 @@ async function loadWorkerAccountOrGroup(id: string, loadAs: Account) {
   const content = coValue.getCurrentContent();
 
   if (content instanceof RawAccount) {
-    const account = await Account.load(content.id, {
+    const account = await co.account().load(content.id, {
       loadAs,
     });
     if (!account.$isLoaded) {
@@ -631,7 +632,7 @@ async function loadWorkerAccountOrGroup(id: string, loadAs: Account) {
     return account;
   }
 
-  const group = await Group.load(content.id, {
+  const group = await co.group().load(content.id, {
     loadAs,
   });
 
@@ -786,7 +787,7 @@ export async function parseAuthToken(
     };
   }
 
-  const account = await Account.load(id, { loadAs: options?.loadAs });
+  const account = await co.account().load(id, { loadAs: options?.loadAs });
 
   if (!account.$isLoaded) {
     return {

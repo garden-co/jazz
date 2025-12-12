@@ -273,68 +273,6 @@ export class Group extends CoValueBase implements CoValue {
     await this.$jazz.raw.revokeExtend(parent.$jazz.raw);
     return this;
   }
-
-  /** @category Subscription & Loading
-   *
-   * @deprecated Use `co.group(...).load` instead.
-   */
-  static load<G extends Group, const R extends RefsToResolve<G>>(
-    this: CoValueClass<G>,
-    id: ID<G>,
-    options?: {
-      resolve?: RefsToResolveStrict<G, R>;
-      loadAs?: Account | AnonymousJazzAgent;
-    },
-  ): Promise<Settled<Resolved<G, R>>> {
-    return loadCoValueWithoutMe(this, id, options);
-  }
-
-  /** @category Subscription & Loading
-   *
-   * @deprecated Use `co.group(...).subscribe` instead.
-   */
-  static subscribe<G extends Group, const R extends RefsToResolve<G>>(
-    this: CoValueClass<G>,
-    id: ID<G>,
-    listener: (value: Resolved<G, R>, unsubscribe: () => void) => void,
-  ): () => void;
-  static subscribe<G extends Group, const R extends RefsToResolve<G>>(
-    this: CoValueClass<G>,
-    id: ID<G>,
-    options: SubscribeListenerOptions<G, R>,
-    listener: (value: Resolved<G, R>, unsubscribe: () => void) => void,
-  ): () => void;
-  static subscribe<G extends Group, const R extends RefsToResolve<G>>(
-    this: CoValueClass<G>,
-    id: ID<G>,
-    ...args: SubscribeRestArgs<G, R>
-  ): () => void {
-    const { options, listener } = parseSubscribeRestArgs(args);
-    return subscribeToCoValueWithoutMe<G, R>(this, id, options, listener);
-  }
-
-  /** @category Invites
-   * Creates a group invite
-   * @param id The ID of the group to create an invite for
-   * @param options Optional configuration
-   * @param options.role The role to grant to the accepter of the invite. Defaults to 'reader'
-   * @param options.loadAs The account to use when loading the group. Defaults to the current account
-   * @returns An invite secret, (a string starting with "inviteSecret_"). Can be
-   * accepted using `Account.acceptInvite()`
-   */
-  static async createInvite<G extends Group>(
-    this: CoValueClass<G>,
-    id: ID<G>,
-    options?: { role?: AccountRole; loadAs?: Account },
-  ): Promise<InviteSecret> {
-    const group = await loadCoValueWithoutMe(this, id, {
-      loadAs: options?.loadAs,
-    });
-    if (!group.$isLoaded) {
-      throw new Error(`Group with id ${id} not found`);
-    }
-    return group.$jazz.createInvite(options?.role ?? "reader");
-  }
 }
 
 export class GroupJazzApi<G extends Group> extends CoValueJazzApi<G> {

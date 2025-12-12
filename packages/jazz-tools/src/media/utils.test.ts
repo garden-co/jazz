@@ -1,4 +1,10 @@
-import { Account, FileStream, Group, ImageDefinition } from "jazz-tools";
+import {
+  type Account,
+  type FileStream,
+  type Group,
+  ImageDefinition,
+  co,
+} from "jazz-tools";
 import {
   createJazzTestAccount,
   setActiveAccount,
@@ -8,12 +14,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { highestResAvailable, loadImageBySize } from "./utils.js";
 
 const createFileStream = (account: any, blobSize?: number) => {
-  return FileStream.createFromBlob(
-    new Blob([new Uint8Array(blobSize || 1)], { type: "image/png" }),
-    {
-      owner: account,
-    },
-  );
+  return co
+    .fileStream()
+    .createFromBlob(
+      new Blob([new Uint8Array(blobSize || 1)], { type: "image/png" }),
+      {
+        owner: account,
+      },
+    );
 };
 
 describe("highestResAvailable", async () => {
@@ -23,7 +31,7 @@ describe("highestResAvailable", async () => {
     account = await createJazzTestAccount({
       isCurrentActiveAccount: true,
     });
-    vi.spyOn(Account, "getMe").mockReturnValue(account);
+    vi.spyOn(co.account(), "getMe").mockReturnValue(account);
     await setupJazzTestSync();
   });
 
@@ -125,7 +133,7 @@ describe("highestResAvailable", async () => {
     const resize256 = await createFileStream(account.$jazz.owner, 1);
     const resize2048 = await createFileStream(account.$jazz.owner, 1);
     // 1024 is not loaded yet
-    const resize1024 = FileStream.create({ owner: account.$jazz.owner });
+    const resize1024 = co.fileStream().create({ owner: account });
     resize1024.start({ mimeType: "image/jpeg" });
     // Don't end resize1024, so it has no chunks
 
@@ -159,7 +167,7 @@ describe("highestResAvailable", async () => {
 
     imageDef.$jazz.set("256x256", original);
     // 1024 is not loaded yet
-    const resize1024 = FileStream.create({ owner: account.$jazz.owner });
+    const resize1024 = co.fileStream().create({ owner: account });
     resize1024.start({ mimeType: "image/jpeg" });
     // Don't end resize1024, so it has no chunks
     imageDef.$jazz.set("1024x1024", resize1024);
@@ -170,7 +178,7 @@ describe("highestResAvailable", async () => {
   });
 
   it("returns the first loaded resize if original is not loaded yet(missing chunks)", async () => {
-    const original = FileStream.create({ owner: account.$jazz.owner });
+    const original = co.fileStream().create({ owner: account });
     original.start({ mimeType: "image/jpeg" });
     // Don't call .end(), so it has no chunks
 
@@ -270,7 +278,7 @@ describe("loadImageBySize", async () => {
 
     setActiveAccount(account);
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "reader");
 
     const imageDef = await createImageDef([[1920, 1080]], false, group);
@@ -361,7 +369,7 @@ describe("loadImageBySize", async () => {
 
     setActiveAccount(account);
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "reader");
 
     const imageDef = await createImageDef(

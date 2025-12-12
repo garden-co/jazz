@@ -45,12 +45,12 @@ This also applies to the load API:
   ```
 </CodeGroup>
 
-And `Group.create`:
+And `co.group().create`:
 
 <CodeGroup>
     {/* prettier-ignore */}
     ```tsx
-    const group = Group.create()
+    const group = co.group().create()
     const sharedIssue = Issue.create(payload, group)
     group.addMember('everyone', 'reader')
     ```

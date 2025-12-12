@@ -1,5 +1,11 @@
 import { commands } from "@vitest/browser/context";
-import { AuthSecretStorage, FileStream, Group, co, z } from "jazz-tools";
+import {
+  AuthSecretStorage,
+  type FileStream,
+  type Group,
+  co,
+  z,
+} from "jazz-tools";
 import { assert, afterAll, afterEach, describe, expect, test } from "vitest";
 import { createAccountContext, startSyncServer } from "./testUtils";
 
@@ -39,13 +45,15 @@ describe("Browser sync on unstable connection", () => {
 
     const bytes1MB = 1e6;
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "reader");
 
-    const promise = FileStream.createFromBlob(
-      new Blob(["1".repeat(bytes1MB)], { type: "image/png" }),
-      group,
-    );
+    const promise = co
+      .fileStream()
+      .createFromBlob(
+        new Blob(["1".repeat(bytes1MB)], { type: "image/png" }),
+        group,
+      );
 
     await syncServer.disconnectAllClients();
 
@@ -66,7 +74,7 @@ describe("Browser sync on unstable connection", () => {
       AccountSchema: CustomAccount,
     });
 
-    const promise2 = FileStream.loadAsBlob(file.$jazz.id);
+    const promise2 = co.fileStream().loadAsBlob(file.$jazz.id);
 
     await syncServer.disconnectAllClients();
 
@@ -85,7 +93,7 @@ describe("Browser sync on unstable connection", () => {
       AccountSchema: CustomAccount,
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "reader");
 
     await syncServer.setOnline(false);
@@ -144,13 +152,15 @@ describe("Browser sync on unstable connection", () => {
 
     const bytes10MB = 1e7;
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "reader");
 
-    const file = await FileStream.createFromBlob(
-      new Blob(["1".repeat(bytes10MB)], { type: "image/png" }),
-      group,
-    );
+    const file = await co
+      .fileStream()
+      .createFromBlob(
+        new Blob(["1".repeat(bytes10MB)], { type: "image/png" }),
+        group,
+      );
 
     const fileStream = await file.$jazz.waitForSync();
 
@@ -169,7 +179,7 @@ describe("Browser sync on unstable connection", () => {
       AccountSchema: CustomAccount,
     });
 
-    const fileOnSecondAccount = await FileStream.loadAsBlob(file.$jazz.id);
+    const fileOnSecondAccount = await co.fileStream().loadAsBlob(file.$jazz.id);
 
     expect(fileOnSecondAccount?.size).toBe(bytes10MB);
   });

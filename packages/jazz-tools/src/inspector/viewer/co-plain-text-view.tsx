@@ -1,7 +1,7 @@
 import { JsonObject, LocalNode, RawCoPlainText } from "cojson";
 import { useState } from "react";
 import { styled } from "goober";
-import { CoPlainText } from "jazz-tools";
+import { type CoPlainText, co } from "jazz-tools";
 import { isWriter } from "../utils/permissions.js";
 import { Button } from "../ui/button.js";
 import { RawDataCard } from "./raw-data-card.js";
@@ -34,7 +34,7 @@ export function CoPlainTextView({
     e.preventDefault();
     e.stopPropagation();
 
-    const coPlainText = CoPlainText.fromRaw(coValue);
+    const coPlainText = co.plainText().fromRaw(coValue);
     coPlainText.$jazz.applyDiff(editValue);
 
     setIsEditing(false);

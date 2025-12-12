@@ -1,18 +1,18 @@
 // #region Basic
-import { Group } from "jazz-tools";
+import { co } from "jazz-tools";
 import { TodoProject, ListOfTasks } from "./schema";
 
 const project = TodoProject.create(
   {
     title: "New Project",
-    tasks: ListOfTasks.create([], Group.create()),
+    tasks: ListOfTasks.create([], co.group().create()),
   },
-  Group.create(),
+  co.group().create(),
 );
 // #endregion
 
 // #region ImplicitPublic
-const group = Group.create().makePublic();
+const group = co.group().create().makePublic();
 const publicProject = TodoProject.create(
   {
     title: "New Project",

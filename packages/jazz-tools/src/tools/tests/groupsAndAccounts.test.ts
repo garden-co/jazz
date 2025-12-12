@@ -1,13 +1,14 @@
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { assert, beforeEach, describe, expect, test } from "vitest";
-import { CoMap, Group, z } from "../exports.js";
+import { type Group, z } from "../exports.js";
 import {
-  Account,
+  type Account,
   Loaded,
   MaybeLoaded,
   Ref,
   co,
   CoValueLoadingState,
+  CoMap,
 } from "../internal.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import {
@@ -48,7 +49,7 @@ describe("Custom accounts and groups", async () => {
         type P = typeof account.profile;
         const _p: P = {} as MaybeLoaded<Loaded<typeof CustomProfile>>;
         if (creationProps) {
-          const profileGroup = Group.create({ owner: account });
+          const profileGroup = co.group().create({ owner: account });
           profileGroup.addMember("everyone", "reader");
           account.$jazz.set(
             "profile",
@@ -70,7 +71,7 @@ describe("Custom accounts and groups", async () => {
     expect(me.profile?.name).toBe("Hermes Puggington");
     expect(me.profile?.color).toBe("blue");
 
-    const group = Group.create({ owner: me });
+    const group = co.group().create({ owner: me });
     group.addMember("everyone", "reader");
 
     expect(group.members).toMatchObject([{ id: me.$jazz.id, role: "admin" }]);
@@ -96,8 +97,8 @@ describe("Group inheritance", () => {
       crypto: Crypto,
     });
 
-    const parentGroup = Group.create({ owner: me });
-    const group = Group.create({ owner: me });
+    const parentGroup = co.group().create({ owner: me });
+    const group = co.group().create({ owner: me });
 
     group.addMember(parentGroup);
 
@@ -135,9 +136,9 @@ describe("Group inheritance", () => {
       crypto: Crypto,
     });
 
-    const grandParentGroup = Group.create({ owner: me });
-    const parentGroup = Group.create({ owner: me });
-    const group = Group.create({ owner: me });
+    const grandParentGroup = co.group().create({ owner: me });
+    const parentGroup = co.group().create({ owner: me });
+    const group = co.group().create({ owner: me });
 
     group.addMember(parentGroup);
     parentGroup.addMember(grandParentGroup);
@@ -182,9 +183,9 @@ describe("Group inheritance", () => {
       crypto: Crypto,
     });
 
-    const grandParentGroup = Group.create({ owner: me });
-    const parentGroup = Group.create({ owner: me });
-    const childGroup = Group.create({ owner: me });
+    const grandParentGroup = co.group().create({ owner: me });
+    const parentGroup = co.group().create({ owner: me });
+    const childGroup = co.group().create({ owner: me });
 
     childGroup.addMember(parentGroup);
     parentGroup.addMember(grandParentGroup);
@@ -208,7 +209,7 @@ describe("Group inheritance", () => {
   test("waitForSync should resolve when the value is uploaded", async () => {
     const { clientNode, serverNode, clientAccount } = await setupTwoNodes();
 
-    const group = Group.create({ owner: clientAccount });
+    const group = co.group().create({ owner: clientAccount });
 
     await group.$jazz.waitForSync({ timeout: 1000 });
 
@@ -221,7 +222,7 @@ describe("Group inheritance", () => {
   });
 
   test("everyone is valid only for reader, writer and writeOnly roles", () => {
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "reader");
 
     expect(group.getRoleOf("everyone")).toBe("reader");
@@ -241,13 +242,13 @@ describe("Group inheritance", () => {
   });
 
   test("makePublic should add everyone as a reader", () => {
-    const group = Group.create();
+    const group = co.group().create();
     group.makePublic();
     expect(group.getRoleOf("everyone")).toBe("reader");
   });
 
   test("makePublic should add everyone as a writer", () => {
-    const group = Group.create();
+    const group = co.group().create();
     group.makePublic("writer");
     expect(group.getRoleOf("everyone")).toBe("writer");
   });
@@ -256,7 +257,7 @@ describe("Group inheritance", () => {
     const account = await createJazzTestAccount({});
     await account.$jazz.waitForAllCoValuesSync();
 
-    const group = Group.create();
+    const group = co.group().create();
 
     // @ts-expect-error - Even though readerInvite is a valid role for an account, we don't allow it to not create confusion when using the intellisense
     group.addMember(account, "readerInvite");
@@ -279,8 +280,8 @@ describe("Group inheritance", () => {
     const account = await createJazzTestAccount({});
     await account.$jazz.waitForAllCoValuesSync();
 
-    const parentGroup = Group.create();
-    const group = Group.create();
+    const parentGroup = co.group().create();
+    const group = co.group().create();
     expect(() => {
       // @ts-expect-error
       group.addMember(parentGroup, "writeOnly");
@@ -293,18 +294,18 @@ describe("Group inheritance", () => {
     const bob = await createJazzTestAccount({});
     await bob.$jazz.waitForAllCoValuesSync();
 
-    const loadedAlice = await Account.load(alice.$jazz.id);
-    const loadedBob = await Account.load(bob.$jazz.id);
+    const loadedAlice = await co.account().load(alice.$jazz.id);
+    const loadedBob = await co.account().load(bob.$jazz.id);
 
     assertLoaded(loadedBob);
     assertLoaded(loadedAlice);
 
-    const parentGroup = Group.create();
+    const parentGroup = co.group().create();
     // `parentGroup` has `alice` as a writer
     parentGroup.addMember(loadedAlice, "writer");
     expect(parentGroup.getRoleOf(alice.$jazz.id)).toBe("writer");
 
-    const group = Group.create();
+    const group = co.group().create();
     // `group` has `bob` as a reader
     group.addMember(loadedBob, "reader");
     expect(group.getRoleOf(bob.$jazz.id)).toBe("reader");
@@ -332,7 +333,7 @@ describe("Group inheritance", () => {
 
     beforeEach(async () => {
       const me = co.account().getMe();
-      const writeAccess = Group.create();
+      const writeAccess = co.group().create();
       writeAccess.addMember(me, "writer");
 
       board = Board.create(
@@ -386,7 +387,7 @@ describe("Group.getRoleOf", () => {
   });
 
   test("returns correct role for admin", async () => {
-    const group = Group.create();
+    const group = co.group().create();
     const admin = await createJazzTestAccount({});
     await admin.$jazz.waitForAllCoValuesSync();
     group.addMember(admin, "admin");
@@ -395,7 +396,7 @@ describe("Group.getRoleOf", () => {
   });
 
   test("returns correct role for writer", async () => {
-    const group = Group.create();
+    const group = co.group().create();
     const writer = await createJazzTestAccount({});
     await writer.$jazz.waitForAllCoValuesSync();
     group.addMember(writer, "writer");
@@ -403,7 +404,7 @@ describe("Group.getRoleOf", () => {
   });
 
   test("returns correct role for reader", async () => {
-    const group = Group.create();
+    const group = co.group().create();
     const reader = await createJazzTestAccount({});
     await reader.$jazz.waitForAllCoValuesSync();
     group.addMember(reader, "reader");
@@ -411,7 +412,7 @@ describe("Group.getRoleOf", () => {
   });
 
   test("returns correct role for writeOnly", async () => {
-    const group = Group.create();
+    const group = co.group().create();
     const writeOnly = await createJazzTestAccount({});
     await writeOnly.$jazz.waitForAllCoValuesSync();
     group.addMember(writeOnly, "writeOnly");
@@ -419,7 +420,7 @@ describe("Group.getRoleOf", () => {
   });
 
   test("returns correct role for everyone", () => {
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "reader");
     expect(group.getRoleOf("everyone")).toBe("reader");
   });
@@ -431,14 +432,14 @@ describe("Group.getRoleOf with 'me' parameter", () => {
   });
 
   test("returns correct role for 'me' when current account is admin", () => {
-    const group = Group.create();
+    const group = co.group().create();
     expect(group.getRoleOf("me")).toBe("admin");
   });
 
   test("returns correct role for 'me' when current account is writer", async () => {
     const account = await createJazzTestAccount();
     await account.$jazz.waitForAllCoValuesSync();
-    const group = Group.create({ owner: account });
+    const group = co.group().create({ owner: account });
 
     group.addMember(co.account().getMe(), "writer");
 
@@ -448,7 +449,7 @@ describe("Group.getRoleOf with 'me' parameter", () => {
   test("returns correct role for 'me' when current account is reader", async () => {
     const account = await createJazzTestAccount();
     await account.$jazz.waitForAllCoValuesSync();
-    const group = Group.create({ owner: account });
+    const group = co.group().create({ owner: account });
 
     group.addMember(co.account().getMe(), "reader");
 
@@ -458,7 +459,7 @@ describe("Group.getRoleOf with 'me' parameter", () => {
   test("returns undefined for 'me' when current account has no role", async () => {
     const account = await createJazzTestAccount();
     await account.$jazz.waitForAllCoValuesSync();
-    const group = Group.create({ owner: account });
+    const group = co.group().create({ owner: account });
 
     expect(group.getRoleOf("me")).toBeUndefined();
   });
@@ -502,8 +503,8 @@ describe("Account permissions", () => {
       crypto: Crypto,
     });
 
-    const group = Group.create({ owner: admin });
-    const testObject = CoMap.create({}, { owner: group });
+    const group = co.group().create({ owner: admin });
+    const testObject = co.map({}).create({}, { owner: group });
 
     const manager = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Manager" },
@@ -539,8 +540,8 @@ describe("Account permissions", () => {
       crypto: Crypto,
     });
 
-    const group = Group.create({ owner: admin });
-    const testObject = CoMap.create({}, { owner: group });
+    const group = co.group().create({ owner: admin });
+    const testObject = co.map({}).create({}, { owner: group });
 
     const manager = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Manager" },
@@ -576,8 +577,8 @@ describe("Account permissions", () => {
       crypto: Crypto,
     });
 
-    const group = Group.create({ owner: admin });
-    const testObject = CoMap.create({}, { owner: group });
+    const group = co.group().create({ owner: admin });
+    const testObject = co.map({}).create({}, { owner: group });
 
     const manager = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Admin" },
@@ -614,8 +615,8 @@ describe("Account permissions", () => {
       crypto: Crypto,
     });
 
-    const group = Group.create({ owner: admin });
-    const testObject = CoMap.create({}, { owner: group });
+    const group = co.group().create({ owner: admin });
+    const testObject = co.map({}).create({}, { owner: group });
 
     const manager = await createAccountAs(co.account(), admin, {
       creationProps: { name: "Admin" },
@@ -651,8 +652,8 @@ describe("Account permissions", () => {
       crypto: Crypto,
     });
 
-    const group = Group.create({ owner: admin });
-    const testObject = CoMap.create({}, { owner: group });
+    const group = co.group().create({ owner: admin });
+    const testObject = co.map({}).create({}, { owner: group });
 
     const nonMember = await createAccountAs(co.account(), admin, {
       creationProps: { name: "NonMember" },
@@ -684,7 +685,7 @@ describe("Account permissions", () => {
           creationProps: { name: "Test Account" },
           crypto: Crypto,
         });
-        const group = Group.create();
+        const group = co.group().create();
 
         expect(account.canRead(group)).toBe(true);
       });
@@ -720,7 +721,7 @@ describe("Account permissions", () => {
           creationProps: { name: "Other Account" },
           crypto: Crypto,
         });
-        const group = Group.create({ owner: otherAccount });
+        const group = co.group().create({ owner: otherAccount });
 
         group.addMember(account, "writer");
 
@@ -736,7 +737,7 @@ describe("Account permissions", () => {
           creationProps: { name: "Other Account" },
           crypto: Crypto,
         });
-        const group = Group.create({ owner: otherAccount });
+        const group = co.group().create({ owner: otherAccount });
 
         group.addMember(account, "admin");
 
@@ -752,7 +753,7 @@ describe("Account permissions", () => {
           creationProps: { name: "Other Account" },
           crypto: Crypto,
         });
-        const group = Group.create({ owner: otherAccount });
+        const group = co.group().create({ owner: otherAccount });
 
         group.addMember(account, "writeOnly");
 
@@ -768,7 +769,7 @@ describe("Account permissions", () => {
           creationProps: { name: "Other Account" },
           crypto: Crypto,
         });
-        const group = Group.create({ owner: otherAccount });
+        const group = co.group().create({ owner: otherAccount });
 
         group.addMember(account, "reader");
 
@@ -784,7 +785,7 @@ describe("Account permissions", () => {
           creationProps: { name: "Other Account" },
           crypto: Crypto,
         });
-        const group = Group.create({ owner: otherAccount });
+        const group = co.group().create({ owner: otherAccount });
 
         expect(account.canWrite(group)).toBe(false);
       });
@@ -820,7 +821,7 @@ describe("Account permissions", () => {
           creationProps: { name: "Other Account" },
           crypto: Crypto,
         });
-        const group = Group.create({ owner: otherAccount });
+        const group = co.group().create({ owner: otherAccount });
 
         group.addMember(account, "admin");
 
@@ -836,7 +837,7 @@ describe("Account permissions", () => {
           creationProps: { name: "Other Account" },
           crypto: Crypto,
         });
-        const group = Group.create({ owner: otherAccount });
+        const group = co.group().create({ owner: otherAccount });
 
         group.addMember(account, "writer");
 
@@ -852,7 +853,7 @@ describe("Account permissions", () => {
           creationProps: { name: "Other Account" },
           crypto: Crypto,
         });
-        const group = Group.create({ owner: otherAccount });
+        const group = co.group().create({ owner: otherAccount });
 
         group.addMember(account, "writeOnly");
 
@@ -868,7 +869,7 @@ describe("Account permissions", () => {
           creationProps: { name: "Other Account" },
           crypto: Crypto,
         });
-        const group = Group.create({ owner: otherAccount });
+        const group = co.group().create({ owner: otherAccount });
 
         group.addMember(account, "reader");
 
@@ -884,7 +885,7 @@ describe("Account permissions", () => {
           creationProps: { name: "Other Account" },
           crypto: Crypto,
         });
-        const group = Group.create({ owner: otherAccount });
+        const group = co.group().create({ owner: otherAccount });
 
         expect(account.canAdmin(group)).toBe(false);
       });
@@ -920,7 +921,7 @@ describe("Account permissions", () => {
           creationProps: { name: "Other Account" },
           crypto: Crypto,
         });
-        const group = Group.create({ owner: otherAccount });
+        const group = co.group().create({ owner: otherAccount });
 
         group.addMember(account, "manager");
 
@@ -936,7 +937,7 @@ describe("Account permissions", () => {
           creationProps: { name: "Other Account" },
           crypto: Crypto,
         });
-        const group = Group.create({ owner: otherAccount });
+        const group = co.group().create({ owner: otherAccount });
 
         group.addMember(account, "writer");
 
@@ -952,7 +953,7 @@ describe("Account permissions", () => {
           creationProps: { name: "Other Account" },
           crypto: Crypto,
         });
-        const group = Group.create({ owner: otherAccount });
+        const group = co.group().create({ owner: otherAccount });
 
         group.addMember(account, "writeOnly");
 
@@ -968,7 +969,7 @@ describe("Account permissions", () => {
           creationProps: { name: "Other Account" },
           crypto: Crypto,
         });
-        const group = Group.create({ owner: otherAccount });
+        const group = co.group().create({ owner: otherAccount });
 
         group.addMember(account, "reader");
 
@@ -984,7 +985,7 @@ describe("Account permissions", () => {
           creationProps: { name: "Other Account" },
           crypto: Crypto,
         });
-        const group = Group.create({ owner: otherAccount });
+        const group = co.group().create({ owner: otherAccount });
 
         expect(account.canManage(group)).toBe(false);
       });
@@ -994,7 +995,7 @@ describe("Account permissions", () => {
 
 describe("Group.members", () => {
   test("should return the members of the group", async () => {
-    const childGroup = Group.create();
+    const childGroup = co.group().create();
 
     const bob = await createJazzTestAccount({});
     await bob.$jazz.waitForAllCoValuesSync();
@@ -1025,8 +1026,8 @@ describe("Group.members", () => {
   });
 
   test("should return the members of the parent group", async () => {
-    const childGroup = Group.create();
-    const parentGroup = Group.create();
+    const childGroup = co.group().create();
+    const parentGroup = co.group().create();
 
     const bob = await createJazzTestAccount({});
     await bob.$jazz.waitForAllCoValuesSync();
@@ -1059,7 +1060,7 @@ describe("Group.members", () => {
   });
 
   test("should not return everyone", async () => {
-    const childGroup = Group.create();
+    const childGroup = co.group().create();
 
     childGroup.addMember("everyone", "reader");
     expect(childGroup.getRoleOf("everyone")).toBe("reader");
@@ -1077,7 +1078,7 @@ describe("Group.members", () => {
   });
 
   test("should not return revoked members", async () => {
-    const childGroup = Group.create();
+    const childGroup = co.group().create();
 
     const bob = await createJazzTestAccount({});
     await bob.$jazz.waitForAllCoValuesSync();
@@ -1102,8 +1103,8 @@ describe("Group.members", () => {
 
 describe("Group.getDirectMembers", () => {
   test("should return only the direct members of the group", async () => {
-    const parentGroup = Group.create();
-    const childGroup = Group.create();
+    const parentGroup = co.group().create();
+    const childGroup = co.group().create();
 
     const bob = await createJazzTestAccount({});
     await bob.$jazz.waitForAllCoValuesSync();

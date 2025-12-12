@@ -1,5 +1,5 @@
 import { assert, beforeEach, describe, expect, test } from "vitest";
-import { Account, Group, co, z } from "../exports.js";
+import { type Account, type Group, co, z } from "../exports.js";
 import {
   createJazzTestAccount,
   linkAccounts,
@@ -97,7 +97,7 @@ test("accounts should sync correctly", async () => {
 
   await linkAccounts(account, otherAccount);
 
-  const group = Group.create({ owner: account });
+  const group = co.group().create({ owner: account });
 
   group.addMember(otherAccount, "writer");
 
@@ -120,7 +120,7 @@ test("loading accounts should work", async () => {
 
   const otherAccount = await createJazzTestAccount();
 
-  const loadedAccount = await Account.load(account.$jazz.id, {
+  const loadedAccount = await co.account().load(account.$jazz.id, {
     loadAs: otherAccount,
     resolve: {
       profile: true,
@@ -138,7 +138,7 @@ test("loading raw accounts should work", async () => {
     },
   });
 
-  const loadedAccount = await Account.load(account.$jazz.id, {
+  const loadedAccount = await co.account().load(account.$jazz.id, {
     loadAs: account,
   });
 
@@ -188,7 +188,7 @@ test("should support recursive props on co.profile", async () => {
     })
     .withMigration((me) => {
       if (me.profile === undefined) {
-        const group = Group.create({ owner: me });
+        const group = co.group().create({ owner: me });
         group.addMember("everyone", "reader");
         me.$jazz.set(
           "profile",
@@ -251,7 +251,7 @@ describe("root and profile", () => {
         }),
       })
       .withMigration((me, creationProps) => {
-        const group = Group.create({ owner: me }).makePublic();
+        const group = co.group().create({ owner: me }).makePublic();
 
         if (me.profile === undefined) {
           me.$jazz.set(

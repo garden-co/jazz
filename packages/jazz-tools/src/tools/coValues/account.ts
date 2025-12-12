@@ -51,12 +51,12 @@ import {
   inspect,
   instantiateRefEncodedWithInit,
   loadCoValue,
-  loadCoValueWithoutMe,
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
   InstanceOfSchemaCoValuesMaybeLoaded,
   LoadedAndRequired,
+  co,
 } from "../internal.js";
 
 export type AccountCreationProps = {
@@ -302,7 +302,7 @@ export class Account extends CoValueBase implements CoValue {
     };
 
     // Load the worker inside the account node
-    const loadedWorker = await Account.load(worker.$jazz.id, {
+    const loadedWorker = await co.account().load(worker.$jazz.id, {
       loadAs: account,
     });
 
@@ -315,7 +315,7 @@ export class Account extends CoValueBase implements CoValue {
 
     await account.$jazz.waitForAllCoValuesSync();
 
-    const createdAccount = await this.load(account.$jazz.id, {
+    const createdAccount = await co.account().load(account.$jazz.id, {
       loadAs: worker,
     });
 
@@ -325,7 +325,7 @@ export class Account extends CoValueBase implements CoValue {
     // Close the account node, to avoid leaking memory
     account.$jazz.localNode.gracefulShutdown();
 
-    return { credentials, account: createdAccount };
+    return { credentials, account: createdAccount as A };
   }
 
   static fromNode<A extends Account>(
@@ -376,47 +376,6 @@ export class Account extends CoValueBase implements CoValue {
   // Placeholder method for subclasses to override
   migrate(creationProps?: AccountCreationProps) {
     creationProps; // To avoid unused parameter warning
-  }
-
-  /**
-   * Load an `Account`
-   * @category Subscription & Loading
-   * @deprecated Use `co.account(...).load` instead.
-   */
-  static load<A extends Account, const R extends RefsToResolve<A> = true>(
-    this: CoValueClass<A>,
-    id: ID<A>,
-    options?: {
-      resolve?: RefsToResolveStrict<A, R>;
-      loadAs?: Account | AnonymousJazzAgent;
-    },
-  ): Promise<Settled<Resolved<A, R>>> {
-    return loadCoValueWithoutMe(this, id, options);
-  }
-
-  /**
-   * Subscribe to an `Account`, when you have an ID but don't have an `Account` instance yet
-   * @category Subscription & Loading
-   * @deprecated Use `co.account(...).subscribe` instead.
-   */
-  static subscribe<A extends Account, const R extends RefsToResolve<A> = true>(
-    this: CoValueClass<A>,
-    id: ID<A>,
-    listener: (value: Resolved<A, R>, unsubscribe: () => void) => void,
-  ): () => void;
-  static subscribe<A extends Account, const R extends RefsToResolve<A> = true>(
-    this: CoValueClass<A>,
-    id: ID<A>,
-    options: SubscribeListenerOptions<A, R>,
-    listener: (value: Resolved<A, R>, unsubscribe: () => void) => void,
-  ): () => void;
-  static subscribe<A extends Account, const R extends RefsToResolve<A>>(
-    this: CoValueClass<A>,
-    id: ID<A>,
-    ...args: SubscribeRestArgs<A, R>
-  ): () => void {
-    const { options, listener } = parseSubscribeRestArgs(args);
-    return subscribeToCoValueWithoutMe<A, R>(this, id, options, listener);
   }
 }
 

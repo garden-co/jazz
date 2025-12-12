@@ -1,5 +1,10 @@
 import { assert, beforeEach, describe, expect, test, vi } from "vitest";
-import { cojsonInternals, Group, isControlledAccount, z } from "../index.js";
+import {
+  cojsonInternals,
+  type Group,
+  isControlledAccount,
+  z,
+} from "../index.js";
 import {
   CoVector,
   CoVectorSchema,
@@ -32,7 +37,7 @@ const initNodeAndVector = async (
     isCurrentActiveAccount: true,
   });
 
-  const group = Group.create(me);
+  const group = co.group().create(me);
   group.addMember("everyone", "reader");
 
   const coVector = coVectorSchema.create(vectorInput, {
@@ -107,7 +112,7 @@ describe("Creating a CoVector", async () => {
   });
 
   test("given Group as owner • creates a CoVector", () => {
-    const group = Group.create(me);
+    const group = co.group().create(me);
     const embedding = EmbeddingSchema.create([1, 2, 3], group);
 
     expect(embedding.$jazz.owner).toEqual(group);
@@ -634,7 +639,7 @@ describe("CoVector in subscription", async () => {
     });
 
     test("subscribing to remotely available CoVector • sends update holding the CoVector", async () => {
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const embedding = EmbeddingSchema.create(
@@ -771,7 +776,7 @@ describe("CoVector in subscription", async () => {
 
     describe("remotely available list", async () => {
       test("subscribing with deep resolve • sends update holding the CoVectors", async () => {
-        const group = Group.create({ owner: me });
+        const group = co.group().create({ owner: me });
         group.addMember("everyone", "writer");
 
         const docs = Docs.create(
@@ -840,7 +845,7 @@ describe("CoVector in subscription", async () => {
       });
 
       test("subscribing with autoload • sends update holding the CoVectors", async () => {
-        const group = Group.create({ owner: me });
+        const group = co.group().create({ owner: me });
         group.addMember("everyone", "writer");
 
         const docs = Docs.create(

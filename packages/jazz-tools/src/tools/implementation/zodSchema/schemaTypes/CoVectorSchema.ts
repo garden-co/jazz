@@ -5,7 +5,13 @@ import {
   Group,
   InstanceOrPrimitiveOfSchema,
   InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded,
+  Settled,
+  SubscribeListenerOptions,
+  SubscribeRestArgs,
   coOptionalDefiner,
+  loadCoValueWithoutMe,
+  parseSubscribeRestArgs,
+  subscribeToCoValueWithoutMe,
   withSchemaPermissions,
 } from "../../../internal.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
@@ -76,11 +82,34 @@ export class CoVectorSchema implements CoreCoVectorSchema {
   /**
    * Load a `CoVector` with a given ID.
    */
-  load(
+  async load(
     id: string,
     options?: { loadAs: Account | AnonymousJazzAgent },
   ): Promise<MaybeLoadedCoVectorInstance> {
-    return this.coValueClass.load(id, options);
+    const coVector = await loadCoValueWithoutMe(this.coValueClass, id, options);
+
+    /**
+     * We are only interested in the entire vector. Since most vectors are small (<15kB),
+     * we can wait for the stream to be complete before returning the vector
+     */
+    if (!coVector.$isLoaded || !coVector.$jazz.raw.isBinaryStreamEnded()) {
+      return new Promise((resolve) => {
+        subscribeToCoValueWithoutMe(
+          this.coValueClass,
+          id,
+          options || {},
+          (value, unsubscribe) => {
+            if (value.$jazz.raw.isBinaryStreamEnded()) {
+              unsubscribe();
+              resolve(value);
+            }
+          },
+        );
+      }) as Promise<MaybeLoadedCoVectorInstance>;
+    }
+
+    coVector.loadVectorData();
+    return coVector as MaybeLoadedCoVectorInstance;
   }
 
   /**
@@ -101,9 +130,15 @@ export class CoVectorSchema implements CoreCoVectorSchema {
       unsubscribe: () => void,
     ) => void,
   ): () => void;
-  subscribe(...args: [any, ...any[]]) {
-    // @ts-expect-error
-    return this.coValueClass.subscribe(...args);
+  subscribe(...args: [any, ...[any]]) {
+    const [id, ...restArgs] = args;
+    const { options, listener } = parseSubscribeRestArgs(restArgs);
+    return subscribeToCoValueWithoutMe(
+      this.coValueClass,
+      id,
+      options,
+      listener as any,
+    );
   }
 
   getCoValueClass(): typeof CoVector {

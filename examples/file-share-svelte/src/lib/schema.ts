@@ -1,4 +1,4 @@
-import { Group, co, z } from 'jazz-tools';
+import { co, z } from 'jazz-tools';
 
 export const SharedFile = co.map({
   name: z.string(),
@@ -20,7 +20,7 @@ export const FileShareAccount = co.account({
   root: FileShareAccountRoot,
 }).withMigration((account) => {
   if (!account.$jazz.has("root")) {
-    const publicGroup = Group.create({ owner: account });
+    const publicGroup = co.group().create({ owner: account });
     publicGroup.addMember('everyone', 'reader');
 
     account.$jazz.set(

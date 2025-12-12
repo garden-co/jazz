@@ -15,7 +15,6 @@ import {
   unstable_mergeBranch,
   parseCoValueCreateOptions,
   inspect,
-  loadCoValueWithoutMe,
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
@@ -160,47 +159,6 @@ export class CoPlainText extends String implements CoValue {
    * @category Subscription & Loading
    * @deprecated Use `co.plainText(...).load` instead.
    */
-  static load<T extends CoPlainText>(
-    this: CoValueClass<T>,
-    id: ID<T>,
-    options?: { loadAs?: Account | AnonymousJazzAgent },
-  ): Promise<Settled<T>> {
-    return loadCoValueWithoutMe(this, id, options);
-  }
-
-  /**
-   * Load and subscribe to a `CoPlainText` with a given ID, as a given account.
-   *
-   * Automatically also subscribes to updates to all referenced/nested CoValues as soon as they are accessed in the listener.
-   *
-   * Check out the `load` methods on `CoMap`/`CoList`/`CoStream`/`Group`/`Account` to see which depth structures are valid to nest.
-   *
-   * Returns an unsubscribe function that you should call when you no longer need updates.
-   *
-   * Also see the `useCoState` hook to reactively subscribe to a CoValue in a React component.
-   *
-   * @category Subscription & Loading
-   * @deprecated Use `co.plainText(...).subscribe` instead.
-   */
-  static subscribe<T extends CoPlainText>(
-    this: CoValueClass<T>,
-    id: ID<T>,
-    listener: (value: Resolved<T, true>, unsubscribe: () => void) => void,
-  ): () => void;
-  static subscribe<T extends CoPlainText>(
-    this: CoValueClass<T>,
-    id: ID<T>,
-    options: Omit<SubscribeListenerOptions<T, true>, "resolve">,
-    listener: (value: Resolved<T, true>, unsubscribe: () => void) => void,
-  ): () => void;
-  static subscribe<T extends CoPlainText>(
-    this: CoValueClass<T>,
-    id: ID<T>,
-    ...args: SubscribeRestArgs<T, true>
-  ): () => void {
-    const { options, listener } = parseSubscribeRestArgs(args);
-    return subscribeToCoValueWithoutMe<T, true>(this, id, options, listener);
-  }
 
   /**
    * Allow CoPlainText to behave like a primitive string in most contexts (e.g.,

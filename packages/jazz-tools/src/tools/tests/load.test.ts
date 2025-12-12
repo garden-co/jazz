@@ -1,8 +1,8 @@
 import { cojsonInternals, emptyKnownState } from "cojson";
 import { assert, beforeEach, expect, test } from "vitest";
 import {
-  Account,
-  Group,
+  type Account,
+  type Group,
   co,
   exportCoValue,
   jazzConfig,
@@ -38,7 +38,7 @@ test("load a value", async () => {
     name: z.string(),
   });
 
-  const group = Group.create();
+  const group = co.group().create();
   const map = Person.create({ name: "John" }, group);
   group.addMember("everyone", "reader");
 
@@ -71,7 +71,7 @@ test("load a missing optional value (co.optional)", async () => {
     dog: co.optional(Dog),
   });
 
-  const group = Group.create();
+  const group = co.group().create();
   const map = Person.create({ name: "John" }, group);
   group.addMember("everyone", "reader");
 
@@ -97,7 +97,7 @@ test("load a missing optional value (Schema.optional)", async () => {
     dog: Dog.optional(),
   });
 
-  const group = Group.create();
+  const group = co.group().create();
   const map = Person.create({ name: "John" }, group);
   group.addMember("everyone", "reader");
 
@@ -129,7 +129,7 @@ test("load a missing optional value (optional discrminatedUnion)", async () => {
     pet: co.discriminatedUnion("type", [Dog, Cat]).optional(),
   });
 
-  const group = Group.create();
+  const group = co.group().create();
   const map = Person.create({ name: "John" }, group);
   group.addMember("everyone", "reader");
 
@@ -150,7 +150,7 @@ test("retry an unavailable value", async () => {
     name: z.string(),
   });
 
-  const currentAccount = Account.getMe();
+  const currentAccount = co.account().getMe();
 
   // Disconnect the current account
   currentAccount.$jazz.localNode.syncManager
@@ -159,7 +159,7 @@ test("retry an unavailable value", async () => {
       peer.gracefulShutdown();
     });
 
-  const group = Group.create();
+  const group = co.group().create();
   const map = Person.create({ name: "John" }, group);
   group.addMember("everyone", "reader");
 
@@ -184,7 +184,7 @@ test("returns 'unavailable' if the value is unavailable after retries", async ()
     name: z.string(),
   });
 
-  const currentAccount = Account.getMe();
+  const currentAccount = co.account().getMe();
 
   // Disconnect the current account
   currentAccount.$jazz.localNode.syncManager
@@ -193,7 +193,7 @@ test("returns 'unavailable' if the value is unavailable after retries", async ()
       peer.gracefulShutdown();
     });
 
-  const group = Group.create();
+  const group = co.group().create();
   const map = Person.create({ name: "John" }, group);
   group.addMember("everyone", "reader");
 
@@ -215,7 +215,7 @@ test("load works even when the coValue access is granted after the creation", as
     name: z.string(),
   });
 
-  const group = Group.create(alice);
+  const group = co.group().create(alice);
   const map = Person.create({ name: "John" }, group);
 
   group.addMember("everyone", "reader");
@@ -239,7 +239,7 @@ test("load a large coValue", async () => {
     data: Data,
   });
 
-  const group = Group.create(syncServer);
+  const group = co.group().create(syncServer);
   const largeMap = LargeDataset.create(
     {
       metadata: {
@@ -302,7 +302,7 @@ test("should wait for the full streaming of the group", async () => {
     update: z.number(),
   });
 
-  const group = Group.create();
+  const group = co.group().create();
 
   const person = Person.create(
     {
@@ -366,8 +366,8 @@ test("should wait for the full streaming of the parent groups", async () => {
     update: z.number(),
   });
 
-  const parentGroup = Group.create();
-  const group = Group.create();
+  const parentGroup = co.group().create();
+  const group = co.group().create();
 
   const person = Person.create(
     {
@@ -435,7 +435,7 @@ test("should correctly reject the load if after the group streaming the account 
     update: z.number(),
   });
 
-  const group = Group.create();
+  const group = co.group().create();
 
   const person = Person.create(
     {

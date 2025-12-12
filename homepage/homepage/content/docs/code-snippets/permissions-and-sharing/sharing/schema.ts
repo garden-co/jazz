@@ -39,7 +39,7 @@ export const JazzAccount = co
   .withMigration((account) => {
     if (!account.$jazz.has("root")) {
       // Using a Group as an owner allows you to give access to other users
-      const organizationGroup = Group.create();
+      const organizationGroup = co.group().create();
 
       const organizations = co.list(Organization).create([
         // Create the first Organization so users can start right away

@@ -24,7 +24,7 @@ type Union = co.loaded<typeof Union>;
 
 // Example 1: Property access patterns
 function examplePropertyAccess() {
-  const chat = Chat.create([], Group.create());
+  const chat = Chat.create([], co.group().create());
   const chatId = chat.id; // Will become: chat.$jazz.id
   const owner = chat._owner.castAs(Group); // Will become: chat.$jazz.owner
   const raw = chat._raw; // Will become: chat.$jazz.raw
@@ -82,7 +82,7 @@ function examplePropertyAssignments(union: Union) {
     me.profile.avatar = undefined; // Will become: me.profile.$jazz.delete("avatar")
   }
 
-  const chat = Message.create({ text: "Hello" }, Group.create());
+  const chat = Message.create({ text: "Hello" }, co.group().create());
   chat.text = "My Chat";
 
   union.name = "John"; // Will become: union.$jazz.applyDiff({"name": "John"}) because unions do not support set
@@ -90,7 +90,7 @@ function examplePropertyAssignments(union: Union) {
 
 // Example 3: Array operations
 function exampleArrayOperations() {
-  const chat = Chat.create([], Group.create());
+  const chat = Chat.create([], co.group().create());
   const message = Message.create({ text: "Hello" }, chat._owner);
 
   chat.push(message); // Will become: chat.messages.$jazz.push(message)
@@ -102,7 +102,7 @@ function exampleArrayOperations() {
 
 // Example 4: Method calls
 async function exampleMethodCalls() {
-  const chat = Chat.create([], Group.create());
+  const chat = Chat.create([], co.group().create());
 
   await chat.waitForSync(); // Will become: await chat.$jazz.waitForSync()
   await chat.waitForAllCoValuesSync(); // Will become: await chat.$jazz.waitForAllCoValuesSync()
@@ -118,14 +118,14 @@ async function exampleMethodCalls() {
 
 // Example 5: Rich text operations
 function exampleRichTextOperations() {
-  const richText = co.richText().create("Initial text", Group.create());
+  const richText = co.richText().create("Initial text", co.group().create());
 
   richText.applyDiff("Updated text"); // Will become: richText.$jazz.applyDiff("Updated text")
 }
 
 // Example 6: Complex property chains
 function exampleComplexChains() {
-  const chat = Chat.create([], Group.create());
+  const chat = Chat.create([], co.group().create());
   const message = chat[0];
 
   if (message && message._edits?.text?.by?.profile?.name) {
@@ -139,7 +139,7 @@ function exampleComplexChains() {
 
 // Example 7: Conditional expressions
 function exampleConditionals() {
-  const chat = Chat.create([], Group.create());
+  const chat = Chat.create([], co.group().create());
 
   if (chat._edits?.title) {
     // Will become: chat.$jazz.getEdits()?.title
@@ -159,7 +159,7 @@ function exampleDeleteOperations() {
 
 // Example 9: Type checking
 function exampleTypeChecking() {
-  const obj = Chat.create([], Group.create());
+  const obj = Chat.create([], co.group().create());
 
   if (obj._type === "Group") {
     // Will become: obj.$type$ === 'Group'
@@ -174,7 +174,7 @@ function exampleTypeChecking() {
 
 // Example 10: Timestamp access
 function exampleTimestamps() {
-  const message = Message.create({ text: "Hello" }, Group.create());
+  const message = Message.create({ text: "Hello" }, co.group().create());
 
   const created = message._createdAt; // Will become: message.$jazz.createdAt
   const lastEdit = message._edits?.text?.madeAt; // Will become: message.$jazz.getEdits()?.text?.madeAt
@@ -182,8 +182,8 @@ function exampleTimestamps() {
 
 // Example 11: Destructuring assignments
 function exampleDestructuring() {
-  const chat = Chat.create([], Group.create());
-  const message = Message.create({ text: "Hello" }, Group.create());
+  const chat = Chat.create([], co.group().create());
+  const message = Message.create({ text: "Hello" }, co.group().create());
 
   // Simple id destructuring
   const { id } = chat; // Will become: const { id } = chat.$jazz

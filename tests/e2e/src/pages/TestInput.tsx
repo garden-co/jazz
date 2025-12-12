@@ -1,4 +1,4 @@
-import { Group, co, z } from "jazz-tools";
+import { co, z } from "jazz-tools";
 import { useCoState, usePassphraseAuth } from "jazz-tools/react";
 import { useEffect, useState } from "react";
 import { wordlist } from "../wordlist";
@@ -20,7 +20,7 @@ export function TestInput() {
   useEffect(() => {
     if (id) return;
 
-    const group = Group.create();
+    const group = co.group().create();
 
     group.addMember("everyone", "writer");
     const map = InputTestCoMap.create({ title: "" }, { owner: group });

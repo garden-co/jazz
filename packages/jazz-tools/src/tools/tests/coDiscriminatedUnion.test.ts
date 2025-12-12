@@ -1,13 +1,13 @@
 import { assert, beforeEach, describe, expect, test, vi } from "vitest";
+import { z } from "../exports.js";
 import {
-  CoPlainText,
+  CoPlainText as CoPlainTextClass,
   CoValueLoadingState,
-  Group,
+  Group as GroupClass,
   Loaded,
   co,
   loadCoValue,
-  z,
-} from "../exports.js";
+} from "../internal.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { assertLoaded, waitFor } from "./utils.js";
 import type { Account } from "jazz-tools";
@@ -219,7 +219,7 @@ describe("co.discriminatedUnion", () => {
       child: NoteItem.create({
         type: "note",
         internal: false,
-        content: CoPlainText.create("Hello"),
+        content: CoPlainTextClass.create("Hello"),
       }),
     });
 
@@ -269,7 +269,7 @@ describe("co.discriminatedUnion", () => {
         NoteItem.create({
           type: "note",
           internal: false,
-          content: CoPlainText.create("Hello"),
+          content: CoPlainTextClass.create("Hello"),
         }),
       ]),
     });
@@ -636,7 +636,7 @@ describe("co.discriminatedUnion", () => {
     let species: Loaded<typeof Species>;
 
     beforeEach(async () => {
-      const group = Group.create();
+      const group = GroupClass.create();
       group.makePublic();
 
       species = Species.create(
@@ -755,8 +755,8 @@ describe("co.discriminatedUnion", () => {
     const Pet = co.discriminatedUnion("type", [Dog, Cat]);
     const Pets = co.list(Pet);
 
-    const publicGroup = Group.create().makePublic();
-    const privateGroup = Group.create();
+    const publicGroup = GroupClass.create().makePublic();
+    const privateGroup = GroupClass.create();
     const pets = Pets.create(
       [
         Dog.create({ type: "dog", name: "Rex" }, publicGroup),

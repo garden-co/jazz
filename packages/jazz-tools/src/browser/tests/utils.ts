@@ -1,6 +1,7 @@
 import { CoID, LocalNode, RawCoValue } from "cojson";
 import { cojsonInternals } from "cojson";
-import { Account } from "jazz-tools";
+import { type Account, co } from "jazz-tools";
+import { Account as AccountClass } from "../../tools/internal";
 import { TestJSCrypto } from "jazz-tools/testing";
 
 const crypto = await TestJSCrypto.create();
@@ -20,7 +21,7 @@ export async function setupTwoNodes() {
     crypto,
     creationProps: { name: "Client" },
     migration: async (rawAccount, _node, creationProps) => {
-      const account = new Account({
+      const account = new AccountClass({
         fromRaw: rawAccount,
       });
 
@@ -33,7 +34,7 @@ export async function setupTwoNodes() {
     crypto,
     creationProps: { name: "Server" },
     migration: async (rawAccount, _node, creationProps) => {
-      const account = new Account({
+      const account = new AccountClass({
         fromRaw: rawAccount,
       });
 
@@ -44,10 +45,10 @@ export async function setupTwoNodes() {
   return {
     clientNode: client.node,
     serverNode: server.node,
-    clientAccount: Account.fromRaw(
+    clientAccount: AccountClass.fromRaw(
       await loadCoValueOrFail(client.node, client.accountID),
     ),
-    serverAccount: Account.fromRaw(
+    serverAccount: AccountClass.fromRaw(
       await loadCoValueOrFail(server.node, server.accountID),
     ),
   };

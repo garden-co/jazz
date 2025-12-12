@@ -1,7 +1,7 @@
 import { assert, describe, expectTypeOf, test } from "vitest";
 import { ZodNumber, ZodOptional, ZodString } from "zod/v4";
-import { Group, co, z } from "../exports.js";
-import { Account } from "../index.js";
+import { type Group, co, z } from "../exports.js";
+import { type Account, co as coFromIndex } from "../index.js";
 import { CoMap, Loaded, MaybeLoaded } from "../internal.js";
 import { assertLoaded } from "./utils.js";
 
@@ -66,7 +66,10 @@ describe("CoMap", async () => {
         name: z.string(),
       });
 
-      const john = Person.create({ name: "John" }, Account.getMe());
+      const john = Person.create(
+        { name: "John" },
+        coFromIndex.account().getMe(),
+      );
 
       expectTypeOf(john.$jazz.owner).toEqualTypeOf<Group>();
     });

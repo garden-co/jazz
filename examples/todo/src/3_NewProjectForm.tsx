@@ -4,7 +4,7 @@ import { TodoAccountWithProjects, TodoProject } from "./1_schema";
 
 import { SubmittableInput } from "./basicComponents";
 
-import { Group } from "jazz-tools";
+import { co } from "jazz-tools";
 import { useAccount } from "jazz-tools/react";
 import { useNavigate } from "react-router";
 
@@ -23,7 +23,7 @@ export function NewProjectForm() {
       // To create a new todo project, we first create a `Group`,
       // which is a scope for defining access rights (reader/writer/admin)
       // of its members, which will apply to all CoValues owned by that group.
-      const projectGroup = Group.create();
+      const projectGroup = co.group().create();
 
       // Then we create an empty todo project within that group
       const project = TodoProject.create(

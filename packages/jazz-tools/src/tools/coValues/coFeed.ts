@@ -44,7 +44,6 @@ import {
   inspect,
   instantiateRefEncodedWithInit,
   isRefEncoded,
-  loadCoValueWithoutMe,
   parseCoValueCreateOptions,
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
@@ -289,41 +288,6 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
    * @category Subscription & Loading
    * @deprecated Use `co.feed(...).load` instead.
    */
-  static load<F extends CoFeed, const R extends RefsToResolve<F> = true>(
-    this: CoValueClass<F>,
-    id: ID<F>,
-    options?: {
-      resolve?: RefsToResolveStrict<F, R>;
-      loadAs?: Account | AnonymousJazzAgent;
-    },
-  ): Promise<Settled<Resolved<F, R>>> {
-    return loadCoValueWithoutMe(this, id, options ?? {});
-  }
-
-  /**
-   * Subscribe to a `CoFeed`, when you have an ID but don't have a `CoFeed` instance yet
-   * @category Subscription & Loading
-   * @deprecated Use `co.feed(...).subscribe` instead.
-   */
-  static subscribe<F extends CoFeed, const R extends RefsToResolve<F> = true>(
-    this: CoValueClass<F>,
-    id: ID<F>,
-    listener: (value: Resolved<F, R>, unsubscribe: () => void) => void,
-  ): () => void;
-  static subscribe<F extends CoFeed, const R extends RefsToResolve<F> = true>(
-    this: CoValueClass<F>,
-    id: ID<F>,
-    options: SubscribeListenerOptions<F, R>,
-    listener: (value: Resolved<F, R>, unsubscribe: () => void) => void,
-  ): () => void;
-  static subscribe<F extends CoFeed, const R extends RefsToResolve<F>>(
-    this: CoValueClass<F>,
-    id: ID<F>,
-    ...args: SubscribeRestArgs<F, R>
-  ): () => void {
-    const { options, listener } = parseSubscribeRestArgs(args);
-    return subscribeToCoValueWithoutMe<F, R>(this, id, options, listener);
-  }
 }
 
 /** @internal */
@@ -792,47 +756,6 @@ export class FileStream extends CoValueBase implements CoValue {
     return new Blob(chunks.chunks, { type: chunks.mimeType });
   }
 
-  /**
-   * Load a `FileStream` as a `Blob`
-   *
-   * @category Content
-   * @deprecated Use `co.fileStream(...).loadAsBlob` instead.
-   */
-  static async loadAsBlob(
-    id: ID<FileStream>,
-    options?: {
-      allowUnfinished?: boolean;
-      loadAs?: Account | AnonymousJazzAgent;
-    },
-  ): Promise<Blob | undefined> {
-    let stream = await this.load(id, options);
-
-    if (!stream.$isLoaded) {
-      return undefined;
-    }
-
-    return stream.toBlob({
-      allowUnfinished: options?.allowUnfinished,
-    });
-  }
-
-  static async loadAsBase64(
-    id: ID<FileStream>,
-    options?: {
-      allowUnfinished?: boolean;
-      loadAs?: Account | AnonymousJazzAgent;
-      dataURL?: boolean;
-    },
-  ): Promise<string | undefined> {
-    const stream = await this.load(id, options);
-
-    if (!stream.$isLoaded) {
-      return undefined;
-    }
-
-    return stream.asBase64(options);
-  }
-
   asBase64(options?: {
     allowUnfinished?: boolean;
     dataURL?: boolean;
@@ -975,73 +898,6 @@ export class FileStream extends CoValueBase implements CoValue {
   /** @internal */
   [inspect]() {
     return this.toJSON();
-  }
-
-  /**
-   * Load a `FileStream`
-   * @category Subscription & Loading
-   * @deprecated Use `co.fileStream(...).load` instead.
-   */
-  static async load<C extends FileStream>(
-    this: CoValueClass<C>,
-    id: ID<C>,
-    options?: {
-      loadAs?: Account | AnonymousJazzAgent;
-      allowUnfinished?: boolean;
-    },
-  ): Promise<Settled<FileStream>> {
-    const stream = await loadCoValueWithoutMe(this, id, options);
-
-    /**
-     * If the user hasn't requested an incomplete blob and the
-     * stream isn't complete wait for the stream download before progressing
-     */
-    if (
-      !options?.allowUnfinished &&
-      stream.$isLoaded &&
-      !stream.isBinaryStreamEnded()
-    ) {
-      return new Promise<FileStream>((resolve) => {
-        subscribeToCoValueWithoutMe(
-          this,
-          id,
-          options || {},
-          (value, unsubscribe) => {
-            if (value.isBinaryStreamEnded()) {
-              unsubscribe();
-              resolve(value);
-            }
-          },
-        );
-      });
-    }
-
-    return stream;
-  }
-
-  /**
-   * Subscribe to a `FileStream`, when you have an ID but don't have a `FileStream` instance yet
-   * @category Subscription & Loading
-   * @deprecated Use `co.fileStream(...).subscribe` instead.
-   */
-  static subscribe<F extends FileStream, const R extends RefsToResolve<F>>(
-    this: CoValueClass<F>,
-    id: ID<F>,
-    listener: (value: Resolved<F, R>, unsubscribe: () => void) => void,
-  ): () => void;
-  static subscribe<F extends FileStream, const R extends RefsToResolve<F>>(
-    this: CoValueClass<F>,
-    id: ID<F>,
-    options: SubscribeListenerOptions<F, R>,
-    listener: (value: Resolved<F, R>, unsubscribe: () => void) => void,
-  ): () => void;
-  static subscribe<F extends FileStream, const R extends RefsToResolve<F>>(
-    this: CoValueClass<F>,
-    id: ID<F>,
-    ...args: SubscribeRestArgs<F, R>
-  ): () => void {
-    const { options, listener } = parseSubscribeRestArgs(args);
-    return subscribeToCoValueWithoutMe<F, R>(this, id, options, listener);
   }
 }
 

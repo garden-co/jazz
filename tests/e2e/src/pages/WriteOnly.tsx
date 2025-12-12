@@ -1,4 +1,4 @@
-import { Account, Group, ID, co, z } from "jazz-tools";
+import { ID, co, z } from "jazz-tools";
 import { createInviteLink } from "jazz-tools/react";
 import { useAcceptInvite, useCoState } from "jazz-tools/react";
 import { useState } from "react";
@@ -17,7 +17,7 @@ export function WriteOnlyRole() {
   const createCoList = async () => {
     if (id) return;
 
-    const group = Group.create();
+    const group = co.group().create();
 
     const coList = SharedCoList.create([], { owner: group });
 
@@ -51,7 +51,7 @@ export function WriteOnlyRole() {
       if (
         member.account &&
         member.role !== "admin" &&
-        member.account.$jazz.id !== Account.getMe().$jazz.id
+        member.account.$jazz.id !== co.account().getMe().$jazz.id
       ) {
         coListGroup.removeMember(member.account);
       }

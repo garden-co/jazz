@@ -1,7 +1,7 @@
 <script lang="ts">
   import { slide } from 'svelte/transition';
   import { type SharedFile } from '$lib/schema';
-  import { FileStream, type Loaded } from 'jazz-tools';
+  import { co, type Loaded } from 'jazz-tools';
   import { File, FileDown, Trash2, Link2 } from 'lucide-svelte';
   import { toast } from 'svelte-sonner';
   import { downloadFileBlob, formatFileSize } from '$lib/utils';
@@ -26,7 +26,7 @@
     }
 
     try {
-      const blob = await FileStream.loadAsBlob(fileStreamId);
+      const blob = await co.fileStream().loadAsBlob(fileStreamId);
       if (!blob) {
         toast.error('Failed to download file');
         return;

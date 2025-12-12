@@ -1,6 +1,6 @@
 import { cojsonInternals } from "cojson";
 import { assert, beforeEach, describe, expect, test, vi } from "vitest";
-import { Group, co, z } from "../exports.js";
+import { type Group, co, z } from "../exports.js";
 
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { assertLoaded, waitFor } from "./utils.js";
@@ -22,7 +22,7 @@ describe("CoList Branching", async () => {
       const TodoList = co.list(z.string());
 
       // Create a group to own the CoList
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       // Create the original CoList
@@ -69,7 +69,7 @@ describe("CoList Branching", async () => {
       const TodoList = co.list(z.string());
 
       // Create a group to own the CoList
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       // Create the original CoList
@@ -117,7 +117,7 @@ describe("CoList Branching", async () => {
     test("create branch and merge without doing any changes", async () => {
       const TodoList = co.list(z.string());
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const originalList = TodoList.create(
@@ -151,7 +151,7 @@ describe("CoList Branching", async () => {
     test("the same user creates the same branch with different starting points", async () => {
       const TodoList = co.list(z.string());
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const originalList = TodoList.create(
@@ -202,7 +202,7 @@ describe("CoList Branching", async () => {
     test("two users create the same branch with different starting points", async () => {
       const TodoList = co.list(z.string());
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const originalList = TodoList.create(
@@ -268,7 +268,7 @@ describe("CoList Branching", async () => {
     test("a branch is merged twice by the same user", async () => {
       const TodoList = co.list(z.string());
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const originalList = TodoList.create(
@@ -307,7 +307,7 @@ describe("CoList Branching", async () => {
     test("two users merge different branches with different edits", async () => {
       const TodoList = co.list(z.string());
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const originalList = TodoList.create(
@@ -372,7 +372,7 @@ describe("CoList Branching", async () => {
     test("the id of a branch is the source id", async () => {
       const TodoList = co.list(z.string());
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const originalList = TodoList.create(
@@ -393,7 +393,7 @@ describe("CoList Branching", async () => {
     test("merge with conflicts resolution", async () => {
       const TodoList = co.list(z.string());
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const originalList = TodoList.create(
@@ -432,7 +432,7 @@ describe("CoList Branching", async () => {
     test("the branch always starts from the same point", async () => {
       const TodoList = co.list(z.string());
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const originalList = TodoList.create(
@@ -480,7 +480,7 @@ describe("CoList Branching", async () => {
 
       const TaskList = co.list(Task);
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       // Create a task list with many tasks
@@ -572,7 +572,7 @@ describe("CoList Branching", async () => {
 
       const TaskList = co.list(Task);
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const originalTaskList = TaskList.create(
@@ -646,7 +646,7 @@ describe("CoList Branching", async () => {
 
       const TaskList = co.list(Task);
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const originalTaskList = TaskList.create(
@@ -717,7 +717,7 @@ describe("CoList Branching", async () => {
 
       const TaskList = co.list(Task);
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const originalTaskList = TaskList.create(

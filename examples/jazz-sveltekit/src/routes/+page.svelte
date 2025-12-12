@@ -1,9 +1,9 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
-  import { Account } from "jazz-tools";
+  import { co } from "jazz-tools";
   import { AccountCoState } from "jazz-tools/svelte";
 
-  const account = new AccountCoState(Account, {
+  const account = new AccountCoState(co.account(), {
     resolve: {
       profile: true,
     },

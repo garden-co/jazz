@@ -10,8 +10,8 @@ import {
   test,
   vi,
 } from "vitest";
-import { Group, co, subscribeToCoValue, z } from "../exports.js";
-import { Account } from "../index.js";
+import { type Group, co, subscribeToCoValue, z } from "../exports.js";
+import { type Account, co as coFromIndex } from "../index.js";
 import {
   Loaded,
   TypeSym,
@@ -114,7 +114,10 @@ describe("CoMap", async () => {
         name: z.string(),
       });
 
-      const john = Person.create({ name: "John" }, Account.getMe());
+      const john = Person.create(
+        { name: "John" },
+        coFromIndex.account().getMe(),
+      );
 
       expect(john.name).toEqual("John");
       expect(john.$jazz.raw.get("name")).toEqual("John");
@@ -125,7 +128,7 @@ describe("CoMap", async () => {
         name: z.string(),
       });
 
-      const john = Person.create({ name: "John" }, Group.create());
+      const john = Person.create({ name: "John" }, co.group().create());
 
       expect(john.name).toEqual("John");
       expect(john.$jazz.raw.get("name")).toEqual("John");
@@ -276,7 +279,7 @@ describe("CoMap", async () => {
       it("creates a group for the new CoValue when there is no active account", () => {
         const Schema = co.map({ text: co.plainText() });
 
-        const parentGroup = Group.create();
+        const parentGroup = co.group().create();
         runWithoutActiveAccount(() => {
           const map = Schema.create({ text: "Hello" }, parentGroup);
 
@@ -483,7 +486,7 @@ describe("CoMap", async () => {
         },
       });
 
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "writer");
 
       const pet = Dog.create({ name: "Rex", breed: "Labrador" }, group);
@@ -748,7 +751,7 @@ describe("CoMap", async () => {
 
       const john = Person.create({ name: "John", age: 20 });
 
-      const me = Account.getMe();
+      const me = coFromIndex.account().getMe();
 
       john.$jazz.set("age", 21);
 
@@ -842,7 +845,7 @@ describe("CoMap", async () => {
         {
           name: "John",
         },
-        { owner: Group.create(serverAccount).makePublic() },
+        { owner: co.group().create(serverAccount).makePublic() },
       );
 
       const loadedPerson = await Person.load(person.$jazz.id, {
@@ -864,9 +867,9 @@ describe("CoMap", async () => {
 
       const person = Person.create(
         // UserB has no access to name
-        { name: co.plainText().create("John", Group.create()) },
+        { name: co.plainText().create("John", co.group().create()) },
         // UserB has access to person
-        { owner: Group.create().makePublic() },
+        { owner: co.group().create().makePublic() },
       );
 
       const userB = await createJazzTestAccount();
@@ -986,7 +989,7 @@ describe("CoMap resolution", async () => {
       dog: Dog,
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "writer");
 
     const person = Person.create(
@@ -1023,7 +1026,7 @@ describe("CoMap resolution", async () => {
       dog: Dog,
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "writer");
 
     const person = Person.create(
@@ -1063,7 +1066,7 @@ describe("CoMap resolution", async () => {
       dog: Dog,
     });
 
-    const currentAccount = Account.getMe();
+    const currentAccount = coFromIndex.account().getMe();
 
     // Disconnect the current account
     currentAccount.$jazz.localNode.syncManager
@@ -1072,7 +1075,7 @@ describe("CoMap resolution", async () => {
         peer.gracefulShutdown();
       });
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "writer");
 
     const person = Person.create(
@@ -1113,9 +1116,9 @@ describe("CoMap resolution", async () => {
       dog: Dog,
     });
 
-    const currentAccount = Account.getMe();
+    const currentAccount = coFromIndex.account().getMe();
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "writer");
 
     const person = Person.create(
@@ -1197,7 +1200,7 @@ describe("CoMap resolution", async () => {
       dog: Dog,
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "writer");
 
     const person = Person.create(
@@ -1343,7 +1346,7 @@ describe("CoMap resolution", async () => {
       person.$jazz.id,
       {
         syncResolution: true,
-        loadAs: Account.getMe(),
+        loadAs: coFromIndex.account().getMe(),
       },
       spy,
     );
@@ -1380,7 +1383,7 @@ describe("CoMap resolution", async () => {
       dog: Dog,
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "writer");
 
     const person = Person.create(
@@ -1437,7 +1440,7 @@ describe("CoMap resolution", async () => {
       dog: Dog,
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "writer");
 
     const person = Person.create(
@@ -1535,7 +1538,7 @@ describe("CoMap resolution", async () => {
 });
 
 describe("CoMap applyDiff", async () => {
-  const me = await Account.create({
+  const me = await coFromIndex.account().create({
     creationProps: { name: "Tester McTesterson" },
     crypto: Crypto,
   });
@@ -1765,7 +1768,7 @@ describe("CoMap applyDiff", async () => {
 });
 
 describe("CoMap Typescript validation", async () => {
-  const me = await Account.create({
+  const me = await coFromIndex.account().create({
     creationProps: { name: "Hermes Puggington" },
     crypto: Crypto,
   });
@@ -2261,7 +2264,7 @@ describe("CoMap migration", () => {
         });
       });
 
-    const group = Group.create();
+    const group = co.group().create();
 
     const person = Person.create(
       {
@@ -2498,7 +2501,7 @@ describe("Updating a nested reference", () => {
     // Define the schema similar to the server-worker-http example
     const PlaySelection = co.map({
       value: z.literal(["rock", "paper", "scissors"]),
-      group: Group,
+      group: co.group(),
     });
 
     const Player = co.map({
@@ -2535,7 +2538,7 @@ describe("Updating a nested reference", () => {
     });
 
     // Create a group for the play selection (similar to the route logic)
-    const group = Group.create({ owner: Account.getMe() });
+    const group = co.group().create({ owner: coFromIndex.account().getMe() });
     group.addMember(player1Account, "reader");
 
     // Load the game to verify the assignment worked

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Group } from "../coValues/group";
-import { Account } from "../exports";
+import { type Account, co } from "../exports";
 import {
   parseCoValueCreateOptions,
   parseGroupCreateOptions,
@@ -18,9 +18,9 @@ describe("parseCoValueCreateOptions", () => {
   it("should create a new group when no options provided", () => {
     const result = parseCoValueCreateOptions(undefined);
     expect(result.owner[TypeSym]).toBe("Group");
-    expect(result.owner.$jazz.raw.roleOf(Account.getMe().$jazz.raw.id)).toBe(
-      "admin",
-    );
+    expect(
+      result.owner.$jazz.raw.roleOf(co.account().getMe().$jazz.raw.id),
+    ).toBe("admin");
     expect(result.uniqueness).toBeUndefined();
   });
 
@@ -32,17 +32,17 @@ describe("parseCoValueCreateOptions", () => {
   });
 
   it("should use existing group when passing a Group", () => {
-    const group = Group.create();
+    const group = co.group().create();
     const result = parseCoValueCreateOptions(group);
     expect(result.owner).toBe(group);
-    expect(result.owner.$jazz.raw.roleOf(Account.getMe().$jazz.raw.id)).toBe(
-      "admin",
-    );
+    expect(
+      result.owner.$jazz.raw.roleOf(co.account().getMe().$jazz.raw.id),
+    ).toBe("admin");
     expect(result.uniqueness).toBeUndefined();
   });
 
   it("should handle options with uniqueness", () => {
-    const group = Group.create();
+    const group = co.group().create();
     const result = parseCoValueCreateOptions({
       unique: "per-group",
       owner: group,
@@ -69,7 +69,7 @@ describe("parseGroupCreateOptions", () => {
 
   it("should use active account when no options provided", () => {
     const result = parseGroupCreateOptions(undefined);
-    expect(result.owner).toBe(Account.getMe());
+    expect(result.owner).toBe(co.account().getMe());
   });
 
   it("should use provided account when passing an Account", async () => {
@@ -80,7 +80,7 @@ describe("parseGroupCreateOptions", () => {
 
   it("should use active account when passing empty options", () => {
     const result = parseGroupCreateOptions({});
-    expect(result.owner).toBe(Account.getMe());
+    expect(result.owner).toBe(co.account().getMe());
   });
 
   it("should use provided account in options.owner", async () => {

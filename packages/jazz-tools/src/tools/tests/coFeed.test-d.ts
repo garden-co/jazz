@@ -1,6 +1,6 @@
 import { assert, describe, expectTypeOf, test } from "vitest";
-import { Group, co, z } from "../exports.js";
-import { Account } from "../index.js";
+import { type Group, co, z } from "../exports.js";
+import { type Account, co as coFromIndex } from "../index.js";
 import { CoFeed, FileStream, Loaded, MaybeLoaded } from "../internal.js";
 import { assertLoaded } from "./utils.js";
 
@@ -17,13 +17,13 @@ describe("CoFeed", () => {
         return value;
       }
 
-      matches(feed.perAccount[Account.getMe().$jazz.id]!.value);
+      matches(feed.perAccount[coFromIndex.account().getMe().$jazz.id]!.value);
     });
 
     test("has the owner property", () => {
       const StringFeed = co.feed(z.string());
 
-      const feed = StringFeed.create(["milk"], Account.getMe());
+      const feed = StringFeed.create(["milk"], coFromIndex.account().getMe());
 
       expectTypeOf(feed.$jazz.owner).toEqualTypeOf<Group>();
     });
@@ -46,7 +46,7 @@ describe("CoFeed", () => {
         return value;
       }
 
-      matches(feed.perAccount[Account.getMe().$jazz.id]!.value);
+      matches(feed.perAccount[coFromIndex.account().getMe().$jazz.id]!.value);
     });
 
     test("CoFeed with optional reference", () => {
@@ -67,7 +67,7 @@ describe("CoFeed", () => {
         return value;
       }
 
-      matches(feed.perAccount[Account.getMe().$jazz.id]?.value);
+      matches(feed.perAccount[coFromIndex.account().getMe().$jazz.id]?.value);
     });
 
     test("CoFeed create with partially loaded, reference and optional", () => {
@@ -96,7 +96,7 @@ describe("CoFeed", () => {
         return value;
       }
 
-      matches(feed.perAccount[Account.getMe().$jazz.id]!.value);
+      matches(feed.perAccount[coFromIndex.account().getMe().$jazz.id]!.value);
     });
 
     test("CoFeed with nested feeds", () => {
@@ -110,7 +110,7 @@ describe("CoFeed", () => {
         return value;
       }
 
-      matches(feed.perAccount[Account.getMe().$jazz.id]?.value);
+      matches(feed.perAccount[coFromIndex.account().getMe().$jazz.id]?.value);
     });
 
     test("CoFeed with enum type", () => {
@@ -124,7 +124,7 @@ describe("CoFeed", () => {
         return value;
       }
 
-      matches(feed.perAccount[Account.getMe().$jazz.id]?.value);
+      matches(feed.perAccount[coFromIndex.account().getMe().$jazz.id]?.value);
     });
   });
 
@@ -152,10 +152,13 @@ describe("CoFeed", () => {
       }
 
       assertLoaded(loadedFeed);
-      matches(loadedFeed?.perAccount[Account.getMe().$jazz.id]?.value);
+      matches(
+        loadedFeed?.perAccount[coFromIndex.account().getMe().$jazz.id]?.value,
+      );
 
       assert(loadedFeed);
-      const dog = loadedFeed.perAccount[Account.getMe().$jazz.id]?.value;
+      const dog =
+        loadedFeed.perAccount[coFromIndex.account().getMe().$jazz.id]?.value;
       assert(dog);
       assertLoaded(dog);
       expectTypeOf(dog.name).toEqualTypeOf<string>();
@@ -184,7 +187,9 @@ describe("CoFeed", () => {
       }
 
       assertLoaded(loadedFeed);
-      matches(loadedFeed.perAccount[Account.getMe().$jazz.id]?.value);
+      matches(
+        loadedFeed.perAccount[coFromIndex.account().getMe().$jazz.id]?.value,
+      );
     });
 
     test("loading a nested feed with deep resolve", async () => {
@@ -214,13 +219,16 @@ describe("CoFeed", () => {
 
       assertLoaded(loadedFeed);
       const nestedFeed =
-        loadedFeed?.perAccount[Account.getMe().$jazz.id]?.value;
+        loadedFeed?.perAccount[coFromIndex.account().getMe().$jazz.id]?.value;
       assert(nestedFeed);
       assertLoaded(nestedFeed);
-      matches(nestedFeed.perAccount[Account.getMe().$jazz.id]?.value);
+      matches(
+        nestedFeed.perAccount[coFromIndex.account().getMe().$jazz.id]?.value,
+      );
 
       assert(loadedFeed);
-      const dog = nestedFeed.perAccount[Account.getMe().$jazz.id]?.value;
+      const dog =
+        nestedFeed.perAccount[coFromIndex.account().getMe().$jazz.id]?.value;
       assert(dog);
       assertLoaded(dog);
       expectTypeOf(dog.name).toEqualTypeOf<string>();
@@ -232,7 +240,9 @@ describe("co.fileStream", () => {
   test("create function type", () => {
     const FileStreamFeed = co.fileStream();
 
-    const feed = FileStreamFeed.create({ owner: Account.getMe() });
+    const feed = FileStreamFeed.create({
+      owner: coFromIndex.account().getMe(),
+    });
 
     type ExpectedType = FileStream;
 
@@ -248,7 +258,7 @@ describe("co.fileStream", () => {
     const blob = new Blob(["test"], { type: "text/plain" });
 
     const feed = await FileStreamFeed.createFromBlob(blob, {
-      owner: Account.getMe(),
+      owner: coFromIndex.account().getMe(),
       onProgress: (progress: number) => {
         console.log(`Progress: ${progress}`);
       },

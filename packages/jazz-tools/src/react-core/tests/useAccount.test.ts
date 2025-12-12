@@ -1,6 +1,12 @@
 // @vitest-environment happy-dom
 
-import { CoValueLoadingState, Group, RefsToResolve, co, z } from "jazz-tools";
+import {
+  CoValueLoadingState,
+  type Group,
+  RefsToResolve,
+  co,
+  z,
+} from "jazz-tools";
 import { assertLoaded } from "jazz-tools/testing";
 import { assert, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -293,7 +299,7 @@ describe("useAccount", () => {
       isCurrentActiveAccount: true,
     });
 
-    const group = Group.create();
+    const group = co.group().create();
     group.addMember("everyone", "writer");
     // Use useAccount with the branch
     const { result } = renderHook(

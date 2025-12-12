@@ -2,10 +2,11 @@ import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { Channel } from "queueueue";
 import { describe, expect, test, vi } from "vitest";
 import {
-  Account,
+  type Account,
   cojsonInternals,
   createJazzContextFromExistingCredentials,
   isControlledAccount,
+  co as coFromIndex,
 } from "../index.js";
 import { co, randomSessionProvider } from "../internal.js";
 
@@ -15,7 +16,7 @@ const connectedPeers = cojsonInternals.connectedPeers;
 
 describe("CoPlainText", () => {
   const initNodeAndText = async () => {
-    const me = await Account.create({
+    const me = await coFromIndex.account().create({
       creationProps: { name: "Hermes Puggington" },
       crypto: Crypto,
     });
@@ -27,7 +28,7 @@ describe("CoPlainText", () => {
 
   describe("Creation", () => {
     test("should allow `create`", async () => {
-      const me = await Account.create({
+      const me = await coFromIndex.account().create({
         creationProps: { name: "Hermes Puggington" },
         crypto: Crypto,
       });
@@ -36,7 +37,7 @@ describe("CoPlainText", () => {
     });
 
     test("should allow `create` from raw", async () => {
-      const me = await Account.create({
+      const me = await coFromIndex.account().create({
         creationProps: { name: "Hermes Puggington" },
         crypto: Crypto,
       });
@@ -47,7 +48,7 @@ describe("CoPlainText", () => {
     });
 
     test("should allow owner shorthand", async () => {
-      const me = await Account.create({
+      const me = await coFromIndex.account().create({
         creationProps: { name: "Hermes Puggington" },
         crypto: Crypto,
       });

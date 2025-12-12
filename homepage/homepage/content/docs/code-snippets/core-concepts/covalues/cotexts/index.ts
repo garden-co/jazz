@@ -31,7 +31,7 @@ const document = co
 
 // #region Ownership
 // Create with shared ownership
-const teamGroup = Group.create();
+const teamGroup = co.group().create();
 teamGroup.addMember(colleagueAccount, "writer");
 
 const teamNote = co.plainText().create("Team updates", { owner: teamGroup });

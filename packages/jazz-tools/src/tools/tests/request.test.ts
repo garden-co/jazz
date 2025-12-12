@@ -8,7 +8,7 @@ import {
   experimental_defineRequest,
   isJazzRequestError,
 } from "../coValues/request.js";
-import { Account, CoPlainText, Group, co } from "../index.js";
+import { type Account, type CoPlainText, type Group, co } from "../index.js";
 import {
   createUnloadedCoValue,
   CoValueLoadingState,
@@ -29,7 +29,7 @@ async function setupAccounts() {
   const me = await createJazzTestAccount();
   const worker = await createJazzTestAccount();
 
-  const workerPieces = await exportCoValue(Account, worker.$jazz.id, {
+  const workerPieces = await exportCoValue(co.account(), worker.$jazz.id, {
     loadAs: worker,
   });
 
@@ -43,7 +43,7 @@ describe("experimental_defineRequest", () => {
     it("should accept the CoMap init as the request payload and as response callback return value", async () => {
       const { me, worker } = await setupAccounts();
 
-      const group = Group.create(me);
+      const group = co.group().create(me);
       group.addMember("everyone", "writer");
 
       const userRequest = experimental_defineRequest({
@@ -131,7 +131,7 @@ describe("experimental_defineRequest", () => {
     it("should push the response content directly to the client", async () => {
       const { me, worker } = await setupAccounts();
 
-      const group = Group.create(me);
+      const group = co.group().create(me);
       group.addMember("everyone", "writer");
 
       const Address = co.map({
@@ -174,7 +174,7 @@ describe("experimental_defineRequest", () => {
               request,
               worker,
               async (user, madeBy) => {
-                const group = Group.create(me);
+                const group = co.group().create(me);
                 group.addMember(madeBy, "writer");
 
                 const person = Person.create(
@@ -182,8 +182,8 @@ describe("experimental_defineRequest", () => {
                     name: user.name,
                     address: Address.create(
                       {
-                        street: CoPlainText.create("123 Main St", group),
-                        city: CoPlainText.create("New York", group),
+                        street: co.plainText().create("123 Main St", group),
+                        city: co.plainText().create("New York", group),
                       },
                       group,
                     ),
@@ -235,13 +235,13 @@ describe("experimental_defineRequest", () => {
       address: Address,
     });
 
-    const privateToWorker = Group.create(worker);
-    const privateToMe = Group.create(me);
-    const publicGroup = Group.create(me).makePublic();
+    const privateToWorker = co.group().create(worker);
+    const privateToMe = co.group().create(me);
+    const publicGroup = co.group().create(me).makePublic();
     const address = Address.create(
       {
-        street: CoPlainText.create("123 Main St", privateToWorker),
-        city: CoPlainText.create("New York", privateToMe),
+        street: co.plainText().create("123 Main St", privateToWorker),
+        city: co.plainText().create("New York", privateToMe),
       },
       publicGroup,
     );
@@ -299,7 +299,7 @@ describe("experimental_defineRequest", () => {
   it("should accept void responses", async () => {
     const { me, worker } = await setupAccounts();
 
-    const group = Group.create(me);
+    const group = co.group().create(me);
     group.addMember("everyone", "writer");
 
     const userRequest = experimental_defineRequest({
@@ -359,7 +359,7 @@ describe("experimental_defineRequest", () => {
     await linkAccounts(me, worker);
 
     // Create a group that will act as the worker
-    const workerGroup = Group.create(worker);
+    const workerGroup = co.group().create(worker);
 
     const userRequest = experimental_defineRequest({
       url: "https://api.example.com/api/user",
@@ -660,7 +660,7 @@ describe("JazzRequestError handling", () => {
 
       server.use(
         http.post("https://api.example.com/api/user", async ({ request }) => {
-          vi.spyOn(Account, "load").mockResolvedValue(
+          vi.spyOn(co.account(), "load").mockResolvedValue(
             createUnloadedCoValue(
               "some-covalue-id",
               CoValueLoadingState.UNAVAILABLE,
@@ -783,7 +783,7 @@ describe("JazzRequestError handling", () => {
         }),
       );
 
-      const group = Group.create(me);
+      const group = co.group().create(me);
       group.makePublic();
 
       const user = User.create(

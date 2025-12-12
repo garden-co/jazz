@@ -1,5 +1,5 @@
 import { assert, describe, expect, test } from "vitest";
-import { Account, Group, co, z } from "../../exports";
+import { type Account, type Group, co, z } from "../../exports";
 import { CoValueLoadingState } from "../../internal.js";
 import {
   createJazzTestAccount,
@@ -9,7 +9,7 @@ import {
 import { assertLoaded } from "../utils.js";
 
 const RequestToJoin = co.map({
-  account: Account,
+  account: co.account(),
   status: z.literal(["pending", "approved", "rejected"]),
 });
 
@@ -25,8 +25,8 @@ const Organization = co.map({
   requests: RequestsMap,
   statuses: RequestsStatus,
   projects: co.list(z.string()),
-  mainGroup: Group,
-  adminsGroup: Group,
+  mainGroup: co.group(),
+  adminsGroup: co.group(),
 });
 
 async function setup() {
@@ -46,19 +46,19 @@ async function setup() {
   // await linkAccounts(admin2, user2);
 
   // The organization info are public
-  const adminsGroup = Group.create(admin1);
+  const adminsGroup = co.group().create(admin1);
   adminsGroup.addMember(admin2, "admin");
 
-  const publicGroup = Group.create(admin1);
+  const publicGroup = co.group().create(admin1);
   publicGroup.addMember("everyone", "reader");
   publicGroup.addMember(adminsGroup);
 
   // Everyone can write to requests, but only admins can read
-  const requestsGroup = Group.create(admin1);
+  const requestsGroup = co.group().create(admin1);
   requestsGroup.addMember("everyone", "writeOnly");
   requestsGroup.addMember(adminsGroup);
 
-  const organizationGroup = Group.create(admin1);
+  const organizationGroup = co.group().create(admin1);
   organizationGroup.addMember(adminsGroup);
 
   const organization = Organization.create(
@@ -102,7 +102,7 @@ async function sendRequestToJoin(organizationId: string, account: Account) {
 
   assertLoaded(organization);
 
-  const group = Group.create(account);
+  const group = co.group().create(account);
   group.addMember(organization.adminsGroup);
 
   const request = RequestToJoin.create(

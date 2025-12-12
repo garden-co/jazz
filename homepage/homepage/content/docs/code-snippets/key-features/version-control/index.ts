@@ -1,4 +1,4 @@
-import { Group } from "jazz-tools";
+import { co } from "jazz-tools";
 import { Project } from "./schema";
 import { createJazzTestAccount } from "jazz-tools/testing";
 const projectId = "";
@@ -70,7 +70,7 @@ console.log(originalProject.priority); // "urgent"
 
 // #region PrivateBranches
 // Create a private group for the branch
-const privateGroup = Group.create();
+const privateGroup = co.group().create();
 
 const privateBranch = Project.load(projectId, {
   unstable_branch: {

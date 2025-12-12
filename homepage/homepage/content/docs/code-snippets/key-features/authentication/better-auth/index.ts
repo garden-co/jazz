@@ -1,4 +1,4 @@
-import { Account } from "jazz-tools";
+import { co } from "jazz-tools";
 
 // #region Basic
 import { betterAuthClient } from "./auth-client";
@@ -13,7 +13,7 @@ betterAuthClient.jazz.setAuthSecretStorage(authSecretStorage);
 // #endregion
 
 // #region SignUp
-const me = Account.getMe();
+const me = co.account().getMe();
 await betterAuthClient.signUp.email(
   {
     email: "email@example.com",

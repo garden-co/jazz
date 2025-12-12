@@ -90,7 +90,7 @@ let isMigrationActive = false;
 export async function createJazzTestAccount<
   S extends
     | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | CoreAccountSchema,
+    | CoreAccountSchema = CoreAccountSchema,
 >(options?: {
   isCurrentActiveAccount?: boolean;
   AccountSchema?: S;

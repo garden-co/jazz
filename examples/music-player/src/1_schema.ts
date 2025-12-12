@@ -1,4 +1,4 @@
-import { co, Group, z } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
 /** Walkthrough: Defining the data model with CoJSON
  *
@@ -117,7 +117,7 @@ export const MusicaAccount = co
           {
             name: "",
           },
-          Group.create().makePublic(),
+          co.group().create().makePublic(),
         ),
       );
     }

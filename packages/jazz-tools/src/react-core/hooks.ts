@@ -8,7 +8,7 @@ import React, {
 } from "react";
 
 import {
-  Account,
+  type Account,
   AccountClass,
   AnonymousJazzAgent,
   AnyAccountSchema,
@@ -32,6 +32,7 @@ import {
   captureStack,
   getUnloadedCoValueWithoutId,
   type BranchDefinition,
+  co,
 } from "jazz-tools";
 import { JazzContext, JazzContextManagerContext } from "./provider.js";
 import { getCurrentAccountFromContextManager } from "./utils.js";
@@ -731,7 +732,7 @@ export function useAccount<
   TSelectorReturn = MaybeLoaded<Loaded<A, R>>,
 >(
   /** The account schema to use. Defaults to the base Account schema */
-  AccountSchema: A = Account as unknown as A,
+  AccountSchema: A = co.account() as unknown as A,
   /** Optional configuration for the subscription */
   options?: {
     /** Resolve query to specify which nested CoValues to load from the account */
@@ -789,7 +790,7 @@ export function useSuspenseAccount<
   TSelectorReturn = Loaded<A, R>,
 >(
   /** The account schema to use. Defaults to the base Account schema */
-  AccountSchema: A = Account as unknown as A,
+  AccountSchema: A = co.account() as unknown as A,
   /** Optional configuration for the subscription */
   options?: {
     /** Resolve query to specify which nested CoValues to load from the account */
@@ -871,7 +872,9 @@ export function useLogOut(): () => void {
  * The agent can be used as the `loadAs` parameter for load and subscribe methods.
  */
 export function useAgent<
-  A extends AccountClass<Account> | AnyAccountSchema = typeof Account,
+  A extends AccountClass<Account> | AnyAccountSchema = ReturnType<
+    typeof co.account
+  >,
 >(): AnonymousJazzAgent | Loaded<A, true> {
   const contextManager = useJazzContextManager<InstanceOfSchema<A>>();
 

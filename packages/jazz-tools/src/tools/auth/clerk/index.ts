@@ -1,8 +1,9 @@
 import {
-  Account,
+  type Account,
   AuthCredentials,
   AuthSecretStorage,
   AuthenticateAccountFunction,
+  co,
 } from "jazz-tools";
 import { getClerkUsername } from "./getClerkUsername.js";
 import {
@@ -145,11 +146,14 @@ export class JazzClerkAuth {
       } satisfies ClerkCredentials,
     });
 
-    const currentAccount = await Account.getMe().$jazz.ensureLoaded({
-      resolve: {
-        profile: true,
-      },
-    });
+    const currentAccount = await co
+      .account()
+      .getMe()
+      .$jazz.ensureLoaded({
+        resolve: {
+          profile: true,
+        },
+      });
 
     const username = getClerkUsername(clerkClient);
 

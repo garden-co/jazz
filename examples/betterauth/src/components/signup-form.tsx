@@ -11,7 +11,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { SocialProviderList } from "better-auth/social-providers";
-import { Account } from "jazz-tools";
+import { co } from "jazz-tools";
 import { useAccount } from "jazz-tools/react-core";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -31,7 +31,7 @@ export function SignupForm({ providers }: Props) {
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
 
-  const me = useAccount(Account, { resolve: { profile: true } });
+  const me = useAccount(co.account(), { resolve: { profile: true } });
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();

@@ -7,7 +7,6 @@ import {
   AccountClass,
   AnyAccountSchema,
   CoValueFromRaw,
-  Group,
   InboxSender,
   Loaded,
   co,
@@ -99,7 +98,7 @@ describe("startWorker integration", () => {
     const worker1 = await setup();
     const worker2 = await setupWorker(worker1.syncServer);
 
-    const group = Group.create({ owner: worker1.worker });
+    const group = co.group().create({ owner: worker1.worker });
     group.addMember("everyone", "reader");
 
     const map = TestMap.create(
@@ -178,7 +177,7 @@ describe("startWorker integration", () => {
   test("waits for all coValues to sync before resolving done", async () => {
     const worker1 = await setup();
 
-    const group = Group.create({ owner: worker1.worker });
+    const group = co.group().create({ owner: worker1.worker });
     group.addMember("everyone", "reader");
 
     const map = TestMap.create(
@@ -206,7 +205,7 @@ describe("startWorker integration", () => {
     const worker1 = await setup();
     const worker2 = await setupWorker(worker1.syncServer);
 
-    const group = Group.create({ owner: worker1.worker });
+    const group = co.group().create({ owner: worker1.worker });
     const map = TestMap.create(
       {
         value: "Hello!",
@@ -243,7 +242,7 @@ describe("startWorker integration", () => {
     const worker1 = await setup();
     const worker2 = await setupWorker(worker1.syncServer);
 
-    const group = Group.create({ owner: worker1.worker });
+    const group = co.group().create({ owner: worker1.worker });
     group.addMember("everyone", "reader");
 
     const map = TestMap.create(
@@ -410,6 +409,6 @@ describe("startWorker integration", () => {
   test("startWorker should be able to not set the active account", async () => {
     const worker1 = await setup(undefined, false);
 
-    expect(Account.getMe().$jazz.id).not.toBe(worker1.worker.$jazz.id);
+    expect(co.account().getMe().$jazz.id).not.toBe(worker1.worker.$jazz.id);
   });
 });

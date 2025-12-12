@@ -3,7 +3,7 @@
  * https://jazz.tools/docs/svelte/schemas/covalues
  */
 
-import { Group, co, z } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
 /** The account profile is an app-specific per-user public `CoMap`
  *  where you can store top-level objects for that user */
@@ -59,7 +59,7 @@ export const JazzAccount = co
     }
 
     if (!account.$jazz.has("profile")) {
-      const group = Group.create();
+      const group = co.group().create();
       group.addMember("everyone", "reader"); // The profile info is visible to everyone
 
       account.$jazz.set(

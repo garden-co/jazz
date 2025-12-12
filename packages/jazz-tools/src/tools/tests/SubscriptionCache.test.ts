@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { Account, Group, co, z } from "../exports.js";
+import { type Account, type Group, co, z } from "../exports.js";
 import { SubscriptionCache } from "../subscribe/SubscriptionCache.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 
@@ -52,7 +52,7 @@ describe("SubscriptionCache", () => {
 
     it("creates different entries for different branch definitions", () => {
       const person = Person.create({ name: "John" });
-      const group = Group.create();
+      const group = co.group().create();
       const node = person.$jazz.raw.core.node;
       const id = person.$jazz.id;
       const cache = new SubscriptionCache();
@@ -72,8 +72,8 @@ describe("SubscriptionCache", () => {
 
     it("matches entries with same branch name but different owner references", () => {
       const person = Person.create({ name: "John" });
-      const group1 = Group.create();
-      const group2 = Group.create();
+      const group1 = co.group().create();
+      const group2 = co.group().create();
       const node = person.$jazz.raw.core.node;
       const id = person.$jazz.id;
       const cache = new SubscriptionCache();

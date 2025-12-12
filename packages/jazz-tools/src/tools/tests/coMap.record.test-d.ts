@@ -1,6 +1,6 @@
 import { describe, expectTypeOf, test } from "vitest";
-import { Group, co, z } from "../exports.js";
-import { Account } from "../index.js";
+import { type Group, co, z } from "../exports.js";
+import { type Account, co as coFromIndex } from "../index.js";
 import { Loaded, MaybeLoaded, LoadedAndRequired } from "../internal.js";
 import { assertLoaded } from "./utils.js";
 
@@ -46,7 +46,10 @@ describe("CoMap.Record", () => {
     test("has the owner property", () => {
       const Person = co.record(z.string(), z.string());
 
-      const person = Person.create({ name: "John" }, Account.getMe());
+      const person = Person.create(
+        { name: "John" },
+        coFromIndex.account().getMe(),
+      );
 
       expectTypeOf(person.$jazz.owner).toEqualTypeOf<Group>();
     });

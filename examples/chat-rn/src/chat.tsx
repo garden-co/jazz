@@ -105,7 +105,7 @@ export function ChatScreen({ navigation }: { navigation: any }) {
 
   const createChat = () => {
     if (!me.$isLoaded) return;
-    const group = Group.create({ owner: me });
+    const group = co.group().create({ owner: me });
     group.addMember("everyone", "writer");
     const chat = Chat.create([], { owner: group });
     setChatId(chat.$jazz.id);
