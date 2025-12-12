@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 
-export const IFrameSyncer = () => {
+export const DemoToDo = () => {
   const [online, setOnline] = useState(true);
   let frameA = useRef<HTMLIFrameElement>(null);
   let frameB = useRef<HTMLIFrameElement>(null);
