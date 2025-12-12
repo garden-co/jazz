@@ -1,6 +1,5 @@
 import { LocalNode } from "cojson";
 import { cojsonInternals } from "cojson";
-import { PureJSCrypto } from "cojson/crypto/PureJSCrypto";
 import {
   Account,
   AccountClass,
@@ -187,7 +186,7 @@ export function runWithoutActiveAccount<Result>(
 
 export async function createJazzTestGuest() {
   const ctx = await createAnonymousJazzContext({
-    crypto: await PureJSCrypto.create(),
+    crypto: await WasmCrypto.create(),
     peers: [],
   });
 
