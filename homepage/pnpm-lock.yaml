@@ -58,11 +58,11 @@ importers:
         specifier: ^0.436.0
         version: 0.436.0(react@19.1.0)
       next:
-        specifier: 15.5.7
-        version: 15.5.7(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+        specifier: 15.5.8
+        version: 15.5.8(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
       next-themes:
         specifier: ^0.2.1
-        version: 0.2.1(next@15.5.7(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0))(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+        version: 0.2.1(next@15.5.8(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0))(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
       postcss:
         specifier: ^8
         version: 8.5.6
@@ -132,10 +132,10 @@ importers:
         version: 2.0.13
       '@vercel/analytics':
         specifier: ^1.3.1
-        version: 1.5.0(next@15.5.7(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0))(react@19.1.0)(svelte@5.41.1)
+        version: 1.5.0(next@15.5.8(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0))(react@19.1.0)(svelte@5.41.1)
       '@vercel/speed-insights':
         specifier: ^1.0.12
-        version: 1.2.0(next@15.5.7(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0))(react@19.1.0)(svelte@5.41.1)
+        version: 1.2.0(next@15.5.8(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0))(react@19.1.0)(svelte@5.41.1)
       clsx:
         specifier: ^2.1.1
         version: 2.1.1
@@ -155,11 +155,11 @@ importers:
         specifier: ^3.0.0
         version: 3.0.0
       next:
-        specifier: 15.5.7
-        version: 15.5.7(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+        specifier: 15.5.8
+        version: 15.5.8(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
       next-themes:
         specifier: ^0.2.1
-        version: 0.2.1(next@15.5.7(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0))(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+        version: 0.2.1(next@15.5.8(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0))(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
       react:
         specifier: catalog:react
         version: 19.1.0
@@ -256,10 +256,10 @@ importers:
         version: 3.1.5
       '@vercel/analytics':
         specifier: ^1.3.1
-        version: 1.5.0(next@15.5.7(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0))(react@19.1.0)(svelte@5.41.1)
+        version: 1.5.0(next@15.5.8(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0))(react@19.1.0)(svelte@5.41.1)
       '@vercel/speed-insights':
         specifier: ^1.0.12
-        version: 1.2.0(next@15.5.7(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0))(react@19.1.0)(svelte@5.41.1)
+        version: 1.2.0(next@15.5.8(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0))(react@19.1.0)(svelte@5.41.1)
       clsx:
         specifier: ^2.1.1
         version: 2.1.1
@@ -300,11 +300,11 @@ importers:
         specifier: ^3.0.0
         version: 3.0.0
       next:
-        specifier: 15.5.7
-        version: 15.5.7(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+        specifier: 15.5.8
+        version: 15.5.8(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
       next-themes:
         specifier: ^0.2.1
-        version: 0.2.1(next@15.5.7(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0))(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+        version: 0.2.1(next@15.5.8(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0))(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
       node-html-markdown:
         specifier: ^1.3.0
         version: 1.3.0
@@ -1108,8 +1108,8 @@ packages:
     peerDependencies:
       react: '>=16'
 
-  '@next/env@15.5.7':
-    resolution: {integrity: sha512-4h6Y2NyEkIEN7Z8YxkA27pq6zTkS09bUSYC0xjd0NpwFxjnIKeZEeH591o5WECSmjpUhLn3H2QLJcDye3Uzcvg==}
+  '@next/env@15.5.8':
+    resolution: {integrity: sha512-ejZHa3ogTxcy851dFoNtfB5B2h7AbSAtHbR5CymUlnz4yW1QjHNufVpvTu8PTnWBKFKjrd4k6Gbi2SsCiJKvxw==}
 
   '@next/mdx@13.5.11':
     resolution: {integrity: sha512-PB2dhmGGlOno0eKRM1WY33PSGlCpZN9MvH6MN7DlMilsB20f1nTYZJgJNSiOyxmrdbWYzN944Z0VgA8Lre1ZZw==}
@@ -4534,8 +4534,8 @@ packages:
       react: '*'
       react-dom: '*'
 
-  next@15.5.7:
-    resolution: {integrity: sha512-+t2/0jIJ48kUpGKkdlhgkv+zPTEOoXyr60qXe68eB/pl3CMJaLeIGjzp5D6Oqt25hCBiBTt8wEeeAzfJvUKnPQ==}
+  next@15.5.8:
+    resolution: {integrity: sha512-Tma2R50eiM7Fx6fbDeHiThq7sPgl06mBr76j6Ga0lMFGrmaLitFsy31kykgb8Z++DR2uIEKi2RZ0iyjIwFd15Q==}
     engines: {node: ^18.18.0 || ^19.8.0 || >= 20.0.0}
     hasBin: true
     peerDependencies:
@@ -5123,11 +5123,6 @@ packages:
 
   semver@6.3.1:
     resolution: {integrity: sha512-BR7VvDCVHO+q2xBEWskxS6DJE1qRnb7DxzUrogb71CWoSficBxYsiAGd+Kl0mmq/MprG9yArRkyrQxTO6XjMzA==}
-    hasBin: true
-
-  semver@7.7.2:
-    resolution: {integrity: sha512-RF0Fw+rO5AMf9MAyaRXI4AV0Ulj5lMHqVxxdSgiVbixSCXoEmmX/jk0CuJw4+3SqroYO9VoUh+HcuJivvtJemA==}
-    engines: {node: '>=10'}
     hasBin: true
 
   semver@7.7.3:
@@ -6535,7 +6530,7 @@ snapshots:
       '@types/react': 19.1.10
       react: 19.1.0
 
-  '@next/env@15.5.7': {}
+  '@next/env@15.5.8': {}
 
   '@next/mdx@13.5.11(@mdx-js/loader@2.3.0(webpack@5.101.3))(@mdx-js/react@2.3.0(react@19.1.0))':
     dependencies:
@@ -7459,7 +7454,7 @@ snapshots:
       metro: 0.83.1
       metro-config: 0.83.1
       metro-core: 0.83.1
-      semver: 7.7.2
+      semver: 7.7.3
     transitivePeerDependencies:
       - bufferutil
       - supports-color
@@ -9041,15 +9036,15 @@ snapshots:
 
   '@ungap/structured-clone@1.3.0': {}
 
-  '@vercel/analytics@1.5.0(next@15.5.7(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0))(react@19.1.0)(svelte@5.41.1)':
+  '@vercel/analytics@1.5.0(next@15.5.8(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0))(react@19.1.0)(svelte@5.41.1)':
     optionalDependencies:
-      next: 15.5.7(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      next: 15.5.8(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
       react: 19.1.0
       svelte: 5.41.1
 
-  '@vercel/speed-insights@1.2.0(next@15.5.7(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0))(react@19.1.0)(svelte@5.41.1)':
+  '@vercel/speed-insights@1.2.0(next@15.5.8(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0))(react@19.1.0)(svelte@5.41.1)':
     optionalDependencies:
-      next: 15.5.7(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      next: 15.5.8(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
       react: 19.1.0
       svelte: 5.41.1
 
@@ -11355,15 +11350,15 @@ snapshots:
 
   neo-async@2.6.2: {}
 
-  next-themes@0.2.1(next@15.5.7(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0))(react-dom@19.1.0(react@19.1.0))(react@19.1.0):
+  next-themes@0.2.1(next@15.5.8(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0))(react-dom@19.1.0(react@19.1.0))(react@19.1.0):
     dependencies:
-      next: 15.5.7(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      next: 15.5.8(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
       react: 19.1.0
       react-dom: 19.1.0(react@19.1.0)
 
-  next@15.5.7(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0):
+  next@15.5.8(@babel/core@7.28.4)(@playwright/test@1.55.0)(react-dom@19.1.0(react@19.1.0))(react@19.1.0):
     dependencies:
-      '@next/env': 15.5.7
+      '@next/env': 15.5.8
       '@swc/helpers': 0.5.15
       caniuse-lite: 1.0.30001741
       postcss: 8.4.31
@@ -11760,7 +11755,7 @@ snapshots:
       react-refresh: 0.14.2
       regenerator-runtime: 0.13.11
       scheduler: 0.26.0
-      semver: 7.7.2
+      semver: 7.7.3
       stacktrace-parser: 0.1.11
       whatwg-fetch: 3.6.20
       ws: 6.2.3
@@ -12038,10 +12033,7 @@ snapshots:
 
   semver@6.3.1: {}
 
-  semver@7.7.2: {}
-
-  semver@7.7.3:
-    optional: true
+  semver@7.7.3: {}
 
   send@0.19.0:
     dependencies:
