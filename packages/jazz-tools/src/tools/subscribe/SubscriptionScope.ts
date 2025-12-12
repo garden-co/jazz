@@ -372,14 +372,23 @@ export class SubscriptionScope<D extends CoValue> {
       if (value.$isLoaded) {
         this.lastPromise.status = "fulfilled";
         this.lastPromise.value = value;
+      } else if (value.$jazz.loadingState !== CoValueLoadingState.LOADING) {
+        this.lastPromise.status = "rejected";
+        this.lastPromise.reason = new Error(
+          this.getError()?.toString() ?? "Unknown error",
+          {
+            cause: this.callerStack,
+          },
+        );
+      } else if (this.lastPromise.status !== "pending") {
+        // Value got into loading state, we need to suspend again
+        this.lastPromise = this.getPromise();
       }
-
-      return this.lastPromise;
+    } else {
+      this.lastPromise = this.getPromise();
     }
 
-    const promise = this.getPromise();
-    this.lastPromise = promise;
-    return promise;
+    return this.lastPromise;
   }
 
   private getUnloadedValue(reason: NotLoadedCoValueState): NotLoaded<D> {
