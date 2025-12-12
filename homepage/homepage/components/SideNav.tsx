@@ -3,8 +3,15 @@ import { SideNavItem } from "@/components/SideNavItem";
 import { DoneStatus } from "@/content/docs/docNavigationItemsTypes";
 import { clsx } from "clsx";
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { usePathname } from "next/navigation";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { SideNavSection } from "./SideNavSection";
+import { normalizePath, SideNavContext } from "./SideNavContext";
+
+// Module-level variables to persist scroll state across re-renders
+let lastScrollTop = 0;
+let lastNormalizedPath: string | null = null;
+let lastRawPath: string | null = null;
 
 export interface SideNavItem {
   name: string;
@@ -76,6 +83,44 @@ export function SideNavSectionList({ items }: { items?: SideNavItem[] }) {
 export function SideNavBody({ children }: { children: React.ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
   const [extraPadding, setExtraPadding] = useState(false);
+  const pathname = usePathname();
+  const currentNormalizedPath = normalizePath(pathname);
+
+  // Determine if this is a framework change (same normalized path, different raw path)
+  const isFrameworkChange = lastNormalizedPath !== null &&
+    currentNormalizedPath === lastNormalizedPath &&
+    lastRawPath !== null &&
+    pathname !== lastRawPath; // Raw paths differ but normalized paths match
+
+  // Restore scroll position on framework change
+  useLayoutEffect(() => {
+    const div = ref.current;
+    if (!div) return;
+
+    if (isFrameworkChange && lastScrollTop > 0) {
+      // Restore scroll position instantly (no animation)
+      div.scrollTop = lastScrollTop;
+    }
+  }, [isFrameworkChange, pathname]);
+
+  // Track scroll position
+  useEffect(() => {
+    const div = ref.current;
+    if (!div) return;
+
+    const handleScroll = () => {
+      lastScrollTop = div.scrollTop;
+    };
+
+    div.addEventListener("scroll", handleScroll, { passive: true });
+    return () => div.removeEventListener("scroll", handleScroll);
+  }, []);
+
+  // Update tracking variables after determining framework change
+  useEffect(() => {
+    lastNormalizedPath = currentNormalizedPath;
+    lastRawPath = pathname;
+  }, [currentNormalizedPath, pathname]);
 
   useEffect(() => {
     const div = ref.current;
@@ -92,21 +137,25 @@ export function SideNavBody({ children }: { children: React.ReactNode }) {
     return () => window.removeEventListener("resize", updatePadding);
   }, []);
 
-  return (
+  // Determine if we should scroll to active item (true for navigation, false for framework change)
+  const shouldScrollToActive = !isFrameworkChange;
 
-    <div ref={ref}
-      className={clsx("flex-1 relative overflow-y-auto -mx-2", extraPadding ? 'px-2 pr-4' : 'px-2')}>
-      {children}
-      <div
-        aria-hidden
-        className={clsx(
-          "h-12 right-0 sticky bottom-0 left-0",
-          "bg-linear-to-t from-white  to-transparent",
-          "dark:from-stone-950",
-          "hidden md:block",
-        )}
-      />
-    </div>
+  return (
+    <SideNavContext.Provider value={{ shouldScrollToActive, scrollContainerRef: ref }}>
+      <div ref={ref}
+        className={clsx("flex-1 relative overflow-y-auto -mx-2", extraPadding ? 'px-2 pr-4' : 'px-2')}>
+        {children}
+        <div
+          aria-hidden
+          className={clsx(
+            "h-12 right-0 sticky bottom-0 left-0",
+            "bg-linear-to-t from-white  to-transparent",
+            "dark:from-stone-950",
+            "hidden md:block",
+          )}
+        />
+      </div>
+    </SideNavContext.Provider>
   );
 }
 

@@ -23,6 +23,7 @@
 	},
 	"dependencies": {
 		"jazz-sveltekit": "link:",
-		"jazz-tools": "workspace:*"
+		"jazz-tools": "workspace:*",
+		"zod": "^4.1.13"
 	}
 }
