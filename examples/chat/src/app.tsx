@@ -52,6 +52,8 @@ export function App() {
 
     // for https://jazz.tools marketing site demo only
     onChatLoad(chat);
+
+    return null;
   };
 
   const usernamePlaceholder = "Set username";
@@ -93,7 +95,7 @@ export function App() {
         )}
       </TopBar>
       {router.route({
-        "/": () => createChat() as never,
+        "/": () => createChat(),
         "/chat/:id": (id) => <ChatScreen chatID={id} />,
       })}
     </AppContainer>

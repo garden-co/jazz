@@ -23,17 +23,13 @@ const ChatWithMessages = Chat.resolved({
 });
 
 export function ChatScreen(props: { chatID: string }) {
+  useMessagesPreload(props.chatID);
+
   const chat = useSuspenseCoState(ChatWithMessages, props.chatID);
   const me = useSuspenseAccount();
   const [showNLastMessages, setShowNLastMessages] = useState(
     INITIAL_MESSAGES_TO_SHOW,
   );
-  const isLoading = useMessagesPreload(props.chatID);
-
-  if (isLoading)
-    return (
-      <div className="flex-1 flex justify-center items-center">Loading...</div>
-    );
 
   const sendImage = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.currentTarget.files?.[0];
