@@ -48,6 +48,11 @@ type GroupMember = {
   account: Account;
 };
 
+/**
+ * Roles that can be granted to a group member.
+ */
+export type GroupRole = "reader" | "writer" | "admin" | "manager";
+
 /** @category Identity & Permissions */
 export class Group extends CoValueBase implements CoValue {
   declare [TypeSym]: "Group";
@@ -107,10 +112,7 @@ export class Group extends CoValueBase implements CoValue {
    * @param member The group that will gain access to this group.
    * @param role The role all members of the parent group should have in this group.
    */
-  addMember(
-    member: Group,
-    role?: "reader" | "writer" | "admin" | "manager" | "inherit",
-  ): void;
+  addMember(member: Group, role?: GroupRole | "inherit"): void;
   addMember(
     member: Group | Account,
     role: "reader" | "writer" | "admin" | "manager",

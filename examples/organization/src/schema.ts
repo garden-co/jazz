@@ -1,20 +1,36 @@
-import { Group, co, z } from "jazz-tools";
+import { co, z } from "jazz-tools";
 import { getRandomUsername } from "./util";
 
-export const Project = co.map({
-  name: z.string(),
-});
+export const Project = co
+  .map({
+    name: z.string(),
+  })
+  .withPermissions({
+    onInlineCreate: "sameAsContainer",
+  });
 
-export const Organization = co.map({
-  name: z.string(),
-  projects: co.list(Project),
-});
+export const Organization = co
+  .map({
+    name: z.string(),
+    projects: co.list(Project).withPermissions({
+      onInlineCreate: "sameAsContainer",
+    }),
+  })
+  .withPermissions({
+    onInlineCreate: "newGroup",
+  });
 export type Organization = co.loaded<typeof Organization>;
 
-export const DraftOrganization = co.map({
-  name: z.optional(z.string()),
-  projects: co.list(Project),
-});
+export const DraftOrganization = co
+  .map({
+    name: z.optional(z.string()),
+    projects: co.list(Project).withPermissions({
+      onInlineCreate: "sameAsContainer",
+    }),
+  })
+  .withPermissions({
+    onInlineCreate: "newGroup",
+  });
 export type DraftOrganization = co.loaded<typeof DraftOrganization>;
 
 export function validateDraftOrganization(org: DraftOrganization) {
@@ -36,54 +52,33 @@ export const JazzAccountRoot = co.map({
 
 export const JazzAccount = co
   .account({
-    profile: co.profile(),
+    profile: co.profile().withPermissions({
+      onCreate: (newGroup) => newGroup.makePublic(),
+    }),
     root: JazzAccountRoot,
   })
   .withMigration(async (account) => {
     if (!account.$jazz.has("profile")) {
-      const group = Group.create();
-      account.$jazz.set(
-        "profile",
-        co.profile().create(
-          {
-            name: getRandomUsername(),
-          },
-          group,
-        ),
-      );
-      group.addMember("everyone", "reader");
+      account.$jazz.set("profile", {
+        name: getRandomUsername(),
+      });
     }
 
     if (!account.$jazz.has("root")) {
-      const draftOrgGroup = Group.create();
-      const draftOrganization = DraftOrganization.create(
-        {
-          projects: co.list(Project).create([], draftOrgGroup),
-        },
-        draftOrgGroup,
-      );
-
-      const defaultOrgGroup = Group.create();
-
       const { profile } = await account.$jazz.ensureLoaded({
         resolve: {
           profile: true,
         },
       });
 
-      const organizations = co.list(Organization).create([
-        Organization.create(
+      account.$jazz.set("root", {
+        draftOrganization: { projects: [] },
+        organizations: [
           {
             name: profile.name ? `${profile.name}'s projects` : "Your projects",
-            projects: co.list(Project).create([], defaultOrgGroup),
+            projects: [],
           },
-          defaultOrgGroup,
-        ),
-      ]);
-
-      account.$jazz.set("root", {
-        draftOrganization,
-        organizations,
+        ],
       });
     }
   });

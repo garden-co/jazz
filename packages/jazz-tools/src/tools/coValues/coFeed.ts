@@ -32,8 +32,6 @@ import {
   SubscribeRestArgs,
   TypeSym,
   BranchDefinition,
-} from "../internal.js";
-import {
   Account,
   CoValueBase,
   CoValueJazzApi,
@@ -379,10 +377,15 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
     } else if (isRefEncoded(itemDescriptor)) {
       let refId = (item as unknown as CoValue).$jazz?.id;
       if (!refId) {
+        const newOwnerStrategy =
+          itemDescriptor.permissions?.newInlineOwnerStrategy;
+        const onCreate = itemDescriptor.permissions?.onCreate;
         const coValue = instantiateRefEncodedWithInit(
           itemDescriptor,
           item,
           this.owner,
+          newOwnerStrategy,
+          onCreate,
         );
         refId = coValue.$jazz.id;
       }
@@ -720,6 +723,7 @@ export class FileStream extends CoValueBase implements CoValue {
    *
    * @param options - Configuration options for the new FileStream
    * @param options.owner - The Account or Group that will own this FileStream and control access rights
+   * @param schemaConfiguration - Internal schema configuration
    *
    * @example
    * ```typescript
@@ -743,7 +747,8 @@ export class FileStream extends CoValueBase implements CoValue {
     this: CoValueClass<S>,
     options?: { owner?: Account | Group } | Account | Group,
   ) {
-    return new this(parseCoValueCreateOptions(options));
+    const { owner } = parseCoValueCreateOptions(options);
+    return new this({ owner });
   }
 
   getMetadata(): BinaryStreamInfo | undefined {

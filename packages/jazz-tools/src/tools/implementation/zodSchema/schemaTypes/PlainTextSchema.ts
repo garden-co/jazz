@@ -7,10 +7,15 @@ import {
   Settled,
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
+  withSchemaPermissions,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreCoValueSchema } from "./CoValueSchema.js";
+import {
+  DEFAULT_SCHEMA_PERMISSIONS,
+  SchemaPermissions,
+} from "../schemaPermissions.js";
 
 export interface CorePlainTextSchema extends CoreCoValueSchema {
   builtin: "CoPlainText";
@@ -29,6 +34,12 @@ export class PlainTextSchema implements CorePlainTextSchema {
   readonly builtin = "CoPlainText" as const;
   readonly resolveQuery = true as const;
 
+  /**
+   * Permissions to be used when creating or composing CoValues
+   * @internal
+   */
+  permissions: SchemaPermissions = DEFAULT_SCHEMA_PERMISSIONS;
+
   constructor(private coValueClass: typeof CoPlainText) {}
 
   create(text: string, options?: { owner: Group } | Group): CoPlainText;
@@ -41,7 +52,11 @@ export class PlainTextSchema implements CorePlainTextSchema {
     text: string,
     options?: { owner: Account | Group } | Account | Group,
   ): CoPlainText {
-    return this.coValueClass.create(text, options);
+    const optionsWithPermissions = withSchemaPermissions(
+      options,
+      this.permissions,
+    );
+    return this.coValueClass.create(text, optionsWithPermissions);
   }
 
   load(
@@ -89,5 +104,14 @@ export class PlainTextSchema implements CorePlainTextSchema {
 
   optional(): CoOptionalSchema<this> {
     return coOptionalDefiner(this);
+  }
+
+  /**
+   * Configure permissions to be used when creating or composing CoValues
+   */
+  withPermissions(permissions: SchemaPermissions): PlainTextSchema {
+    const copy = new PlainTextSchema(this.coValueClass);
+    copy.permissions = permissions;
+    return copy;
   }
 }

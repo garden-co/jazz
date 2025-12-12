@@ -129,7 +129,8 @@ export class CoVector
       );
     }
 
-    const coVector = new this(parseCoValueCreateOptions(options));
+    const { owner } = parseCoValueCreateOptions(options);
+    const coVector = new this({ owner });
     coVector.setVectorData(vectorAsFloat32Array);
 
     const byteArray = CoVector.toByteArray(vectorAsFloat32Array);

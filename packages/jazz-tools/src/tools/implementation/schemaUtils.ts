@@ -1,4 +1,4 @@
-import { CoreResolveQuery } from "./zodSchema/schemaTypes/CoValueSchema";
+import { CoreResolveQuery } from "./zodSchema/schemaTypes/CoValueSchema.js";
 
 /**
  * Remove getters from an object
