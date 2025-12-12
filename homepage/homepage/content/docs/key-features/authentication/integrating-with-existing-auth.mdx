@@ -1,0 +1,69 @@
+import { Alert, CodeGroup, TabbedCodeGroup, ReactSnippet, SvelteSnippet, RNSnippet, ExpoSnippet, VanillaSnippet, TabbedCodeGroupItem, SvelteLogo, ReactLogo, RNLogo, ExpoLogo, FileName } from "@/components/forMdx";
+export const metadata = { title: "Integrating with Existing Auth Methods", description: "Learn how to integrate Jazz with existing authentication methods." };
+
+# Integrating with Existing Auth Methods
+
+You can integrate Jazz with an existing auth method by giving each of your users a Jazz account which is linked to their existing user identity.
+
+We will use a server worker to create Jazz accounts for your existing users, and persist the IDs and secrets for the Jazz users in your existing database.
+
+Once this is done, you can retrieve and decrypt Jazz credentials when a user logs in, and then authenticate the client using the Jazz account ID and secret from the database.
+
+## Creating Jazz Accounts
+
+You should [set up a server worker](/docs/server-side/setup#generating-credentials), which will be responsible for creating Jazz accounts for your existing users. This worker:
+
+1. Creates Jazz accounts
+2. Extracts the ID and secret for the Jazz user
+3. Encrypts the secret securely
+4. Stores the ID and encrypted secret in your existing database
+
+In production you should avoid creating accounts for users that already have them, and ensure that failures are handled gracefully.
+
+It's also worth noting that you should check that your account schema is set up properly first, in order to ensure that the accounts get created correctly with the profile and root. If you wish to have centralised admin access to the user's root, you should add your server worker as an admin during the migration.
+
+<FileName>schema.ts</FileName>
+<CodeGroup preferWrap>
+```ts schema.ts
+```
+</CodeGroup>
+
+
+<Alert variant="info" tip="Security Note" className="mt-4">
+  Account secrets and IDs are immutable, and are the only credentials needed to access a Jazz user's data. Don't store the secret in plaintext. If a Jazz secret is lost, the account cannot be recovered. You will need to issue a new Jazz account.
+</Alert>
+
+<FileName className="mt-4">index.ts</FileName>
+<CodeGroup preferWrap>
+```ts index.ts
+```
+</CodeGroup>
+
+## Using your existing authentication system
+
+Now that your users all have Jazz accounts, you can authenticate them using your original authentication system, and have them fetch their Jazz account ID and secret from your database.
+
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="auth-using-context">
+<VanillaSnippet preferWrap>
+```ts Auth.ts
+```
+</VanillaSnippet>
+<ReactSnippet preferWrap>
+```tsx Auth.tsx
+```
+</ReactSnippet>
+<SvelteSnippet preferWrap>
+```svelte
+```
+</SvelteSnippet>
+<RNSnippet preferWrap>
+```tsx AuthRN.tsx
+```
+</RNSnippet>
+<ExpoSnippet preferWrap>
+```tsx AuthExpo.tsx
+```
+</ExpoSnippet>
+</TabbedCodeGroup>
+
+Check the [accounts and migrations](/docs/core-concepts/schemas/accounts-and-migrations) documentation to learn more about how you can make sure that the Jazz accounts contain all the fields you need.
