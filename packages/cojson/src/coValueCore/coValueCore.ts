@@ -734,8 +734,6 @@ export class CoValueCore {
       );
     }
 
-    validateTxSizeLimitInBytes(changes);
-
     // This is an ugly hack to get a unique but stable session ID for editing the current account
     const sessionID =
       this.verified.header.meta?.type === "account"
