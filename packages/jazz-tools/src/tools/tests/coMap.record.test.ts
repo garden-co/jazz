@@ -9,7 +9,6 @@ import {
   vi,
 } from "vitest";
 import { type FileStream, type Group, co, z } from "../exports.js";
-import { Loaded } from "../implementation/zodSchema/zodSchema.js";
 import { type Account, co as coFromIndex } from "../index.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { assertLoaded, waitFor } from "./utils.js";
@@ -307,7 +306,7 @@ describe("CoMap.Record", async () => {
         pet1: Dog.create({ name: "Rex", breed: "Labrador" }),
       });
 
-      const updates: Loaded<typeof Person, { $each: true }>[] = [];
+      const updates: co.loaded<typeof Person, { $each: true }>[] = [];
       const spy = vi.fn((person) => updates.push(person));
 
       Person.subscribe(

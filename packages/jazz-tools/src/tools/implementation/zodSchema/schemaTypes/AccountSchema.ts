@@ -16,12 +16,14 @@ import {
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   unstable_mergeBranchWithResolve,
+  Loaded,
+  ResolveQuery,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
 import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded.js";
 import { z } from "../zodReExport.js";
-import { AnyZodOrCoValueSchema, Loaded, ResolveQuery } from "../zodSchema.js";
+import { AnyZodOrCoValueSchema } from "../zodSchema.js";
 import {
   CoMapSchema,
   CoreCoMapSchema,

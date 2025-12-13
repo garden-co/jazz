@@ -119,24 +119,3 @@ export type AnyCoreCoValueSchema =
 export type AnyZodSchema = z.core.$ZodType;
 
 export type AnyZodOrCoValueSchema = AnyZodSchema | CoreCoValueSchema;
-
-export type Loaded<
-  T extends CoValueClassOrSchema,
-  // @ts-expect-error
-  R extends ResolveQuery<T> = SchemaResolveQuery<T>,
-> = Resolved<LoadedAndRequired<InstanceOfSchemaCoValuesMaybeLoaded<T>>, R>;
-
-export type ResolveQuery<T extends CoValueClassOrSchema> = RefsToResolve<
-  LoadedAndRequired<InstanceOfSchemaCoValuesMaybeLoaded<T>>
->;
-
-export type ResolveQueryStrict<
-  T extends CoValueClassOrSchema,
-  R extends ResolveQuery<T>,
-> = RefsToResolveStrict<
-  LoadedAndRequired<InstanceOfSchemaCoValuesMaybeLoaded<T>>,
-  R
->;
-
-export type SchemaResolveQuery<T extends CoValueClassOrSchema> =
-  T extends CoreCoValueSchema ? T["resolveQuery"] : true;

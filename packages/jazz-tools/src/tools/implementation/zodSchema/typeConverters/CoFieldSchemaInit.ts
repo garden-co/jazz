@@ -7,13 +7,14 @@ import {
   CoreCoRecordSchema,
   CoreCoVectorSchema,
   CorePlainTextSchema,
+  Loaded,
   Simplify,
 } from "../../../internal.js";
 import { CoreCoOptionalSchema } from "../schemaTypes/CoOptionalSchema.js";
 import { CoreCoValueSchema } from "../schemaTypes/CoValueSchema.js";
 import { CoreRichTextSchema } from "../schemaTypes/RichTextSchema.js";
 import { z } from "../zodReExport.js";
-import { AnyZodOrCoValueSchema, Loaded } from "../zodSchema.js";
+import { AnyZodOrCoValueSchema } from "../zodSchema.js";
 import { TypeOfZodSchema } from "./TypeOfZodSchema.js";
 
 /**

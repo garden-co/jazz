@@ -1,9 +1,16 @@
 import { SessionID } from "cojson";
-import { CoValueLoadingState, ItemsMarker, TypeSym } from "../internal.js";
+import {
+  CoValueClassOrSchema,
+  CoValueLoadingState,
+  InstanceOfSchemaCoValuesMaybeLoaded,
+  ItemsMarker,
+  TypeSym,
+} from "../internal.js";
 import { type Account } from "./account.js";
 import { CoFeedEntry } from "./coFeed.js";
 import { type CoKeys } from "./coMap.js";
 import { type CoValue, type ID } from "./interfaces.js";
+import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoValueSchema.js";
 
 /**
  * Returns a boolean for whether the given type is a union.
@@ -96,6 +103,21 @@ export type AsLoaded<T> = Exclude<T, NotLoaded<T>>;
  */
 type OnError = { $onError?: "catch" };
 
+export type ResolveQuery<T extends CoValueClassOrSchema> = RefsToResolve<
+  LoadedAndRequired<InstanceOfSchemaCoValuesMaybeLoaded<T>>
+>;
+
+export type ResolveQueryStrict<
+  T extends CoValueClassOrSchema,
+  R extends ResolveQuery<T>,
+> = RefsToResolveStrict<
+  LoadedAndRequired<InstanceOfSchemaCoValuesMaybeLoaded<T>>,
+  R
+>;
+
+export type SchemaResolveQuery<T extends CoValueClassOrSchema> =
+  T extends CoreCoValueSchema ? T["resolveQuery"] : true;
+
 export type RefsToResolve<
   V,
   DepthLimit extends number = 10,
@@ -165,6 +187,12 @@ export type Resolved<
   T,
   R extends RefsToResolve<T> | undefined = true,
 > = DeeplyLoaded<T, R>;
+
+export type Loaded<
+  T extends CoValueClassOrSchema,
+  // @ts-expect-error
+  R extends ResolveQuery<T> = SchemaResolveQuery<T>,
+> = Resolved<LoadedAndRequired<InstanceOfSchemaCoValuesMaybeLoaded<T>>, R>;
 
 /**
  * If the resolve query contains `$onError: "catch"`, we return a not loaded value for this nested CoValue.
