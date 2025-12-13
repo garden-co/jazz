@@ -12,7 +12,7 @@ export * as z from "./implementation/zodSchema/zodReExport.js";
 
 export type { CoValue, ID } from "./internal.js";
 
-export { Encoders, coField } from "./internal.js";
+export { Encoders } from "./internal.js";
 
 export { Inbox, InboxSender } from "./internal.js";
 
@@ -30,7 +30,6 @@ export type {
   Resolved,
   RefsToResolve,
   RefsToResolveStrict,
-  CoMapInit_DEPRECATED as CoMapInit,
   CoMapEdit,
   CoMapEdits,
   LastAndAllCoMapEdits,

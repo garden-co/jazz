@@ -1,5 +1,5 @@
 import { SessionID } from "cojson";
-import { CoValueLoadingState, ItemsSym, TypeSym } from "../internal.js";
+import { CoValueLoadingState, ItemsMarker, TypeSym } from "../internal.js";
 import { type Account } from "./account.js";
 import { CoFeedEntry } from "./coFeed.js";
 import { type CoKeys } from "./coMap.js";
@@ -130,10 +130,10 @@ export type RefsToResolve<
                     [0, ...CurrentDepth]
                   >;
                 } & OnError)
-              | (ItemsSym extends keyof V
+              | (ItemsMarker extends keyof V
                   ? {
                       $each: RefsToResolve<
-                        LoadedAndRequired<V[ItemsSym]>,
+                        LoadedAndRequired<V[ItemsMarker]>,
                         DepthLimit,
                         [0, ...CurrentDepth]
                       >;
@@ -240,19 +240,19 @@ export type DeeplyLoaded<
           keyof Depth extends never
           ? V
           : // 1. Record-like CoMap
-            ItemsSym extends keyof V
+            ItemsMarker extends keyof V
             ? // 1.1. Deeply loaded Record-like CoMap with { $each: true | { $onError: 'catch' } }
               Depth extends { $each: infer ItemDepth }
               ? {
                   readonly [key: string]:
                     | DeeplyLoaded<
-                        LoadedAndRequired<V[ItemsSym]>,
+                        LoadedAndRequired<V[ItemsMarker]>,
                         ItemDepth,
                         DepthLimit,
                         [0, ...CurrentDepth]
                       >
                     | OnErrorResolvedValue<
-                        LoadedAndRequired<V[ItemsSym]>,
+                        LoadedAndRequired<V[ItemsMarker]>,
                         Depth["$each"]
                       >;
                 } & V // same reason as in CoList

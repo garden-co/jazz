@@ -3,12 +3,12 @@ import {
   AnyZodOrCoValueSchema,
   CoDiscriminatedUnionSchema,
   CoMap,
+  CoMapFieldSchema,
   CoreCoDiscriminatedUnionSchema,
   CoreCoMapSchema,
   DiscriminableCoValueSchemas,
   DiscriminableCoreCoValueSchema,
   SchemaUnionDiscriminator,
-  coField,
 } from "../../internal.js";
 import {
   hydrateCoreCoValueSchema,
@@ -102,14 +102,23 @@ export function schemaUnionDiscriminatorFor(
             return coValueClass;
           }
 
+          let cachedFields: CoMapFieldSchema;
+
           // inject dummy fields
           return class extends coValueClass {
-            constructor(...args: ConstructorParameters<typeof coValueClass>) {
-              super(...args);
-
-              for (const key of dummyFieldNames) {
-                (this as any)[key] = coField.null;
-              }
+            // lazy to allow for shape to have circular references
+            static get fields() {
+              if (cachedFields) return cachedFields;
+              cachedFields = {
+                ...coValueClass.fields,
+                ...Object.fromEntries(
+                  dummyFieldNames.map((key) => [
+                    key,
+                    { type: "json", field: z.null() },
+                  ]),
+                ),
+              };
+              return cachedFields;
             }
           };
         }

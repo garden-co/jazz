@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { Account, Group, co, z } from "../exports.js";
 import {
   CoValueLoadingState,
+  InstanceOfSchema,
+  RefEncoded,
   coValueClassFromCoValueClassOrSchema,
 } from "../internal.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
@@ -12,6 +14,13 @@ describe("SubscriptionScope", () => {
   const Person = co.map({
     name: z.string(),
   });
+
+  const personField = {
+    type: "ref",
+    ref: coValueClassFromCoValueClassOrSchema(Person),
+    optional: false,
+    field: Person,
+  } satisfies RefEncoded<InstanceOfSchema<typeof Person>>;
 
   beforeEach(async () => {
     await setupJazzTestSync();
@@ -27,12 +36,8 @@ describe("SubscriptionScope", () => {
       const person = Person.create({ name: "John" });
       const node = person.$jazz.raw.core.node;
       const id = person.$jazz.id;
-      const schema = {
-        ref: coValueClassFromCoValueClassOrSchema(Person),
-        optional: false,
-      };
 
-      const scope = new SubscriptionScope(node, true, id, schema);
+      const scope = new SubscriptionScope(node, true, id, personField);
 
       // Simulate LOADING state
       scope.value = { type: CoValueLoadingState.LOADING, id };
@@ -61,12 +66,8 @@ describe("SubscriptionScope", () => {
       const person = Person.create({ name: "John" });
       const node = person.$jazz.raw.core.node;
       const id = person.$jazz.id;
-      const schema = {
-        ref: coValueClassFromCoValueClassOrSchema(Person),
-        optional: false,
-      };
 
-      const scope = new SubscriptionScope(node, true, id, schema);
+      const scope = new SubscriptionScope(node, true, id, personField);
 
       // Start with LOADING state
       scope.value = { type: CoValueLoadingState.LOADING, id };
@@ -122,12 +123,8 @@ describe("SubscriptionScope", () => {
       const person = Person.create({ name: "John" });
       const node = person.$jazz.raw.core.node;
       const id = person.$jazz.id;
-      const schema = {
-        ref: coValueClassFromCoValueClassOrSchema(Person),
-        optional: false,
-      };
 
-      const scope = new SubscriptionScope(node, true, id, schema);
+      const scope = new SubscriptionScope(node, true, id, personField);
 
       // Get LOADING value multiple times
       scope.value = { type: CoValueLoadingState.LOADING, id };
@@ -197,12 +194,8 @@ describe("SubscriptionScope", () => {
       const person = Person.create({ name: "John" });
       const node = person.$jazz.raw.core.node;
       const id = person.$jazz.id;
-      const schema = {
-        ref: coValueClassFromCoValueClassOrSchema(Person),
-        optional: false,
-      };
 
-      const scope = new SubscriptionScope(node, true, id, schema);
+      const scope = new SubscriptionScope(node, true, id, personField);
 
       // First, get a LOADING value
       scope.value = { type: CoValueLoadingState.LOADING, id };
@@ -247,12 +240,8 @@ describe("SubscriptionScope", () => {
       const person = Person.create({ name: "John" });
       const node = person.$jazz.raw.core.node;
       const id = person.$jazz.id;
-      const schema = {
-        ref: coValueClassFromCoValueClassOrSchema(Person),
-        optional: false,
-      };
 
-      const scope = new SubscriptionScope(node, true, id, schema);
+      const scope = new SubscriptionScope(node, true, id, personField);
 
       // Test LOADING state
       scope.value = { type: CoValueLoadingState.LOADING, id };
@@ -304,12 +293,8 @@ describe("SubscriptionScope", () => {
       const person = Person.create({ name: "John" });
       const node = person.$jazz.raw.core.node;
       const id = person.$jazz.id;
-      const schema = {
-        ref: coValueClassFromCoValueClassOrSchema(Person),
-        optional: false,
-      };
 
-      const scope = new SubscriptionScope(node, true, id, schema);
+      const scope = new SubscriptionScope(node, true, id, personField);
 
       // Set up a loaded value with pending children
       const loadedPerson = Person.create({ name: "Jane" });
@@ -345,12 +330,8 @@ describe("SubscriptionScope", () => {
       const person = Person.create({ name: "John" });
       const node = person.$jazz.raw.core.node;
       const id = person.$jazz.id;
-      const schema = {
-        ref: coValueClassFromCoValueClassOrSchema(Person),
-        optional: false,
-      };
 
-      const scope = new SubscriptionScope(node, true, id, schema);
+      const scope = new SubscriptionScope(node, true, id, personField);
 
       // Set up a loaded value
       const loadedPerson = Person.create({ name: "Jane" });

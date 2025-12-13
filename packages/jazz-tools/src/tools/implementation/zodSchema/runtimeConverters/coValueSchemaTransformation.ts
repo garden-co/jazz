@@ -20,8 +20,9 @@ import {
   isCoValueClass,
   Group,
   CoVector,
+  CoMapFieldSchema,
+  ItemsMarker,
 } from "../../../internal.js";
-import { coField } from "../../schema.js";
 
 import { CoreCoValueSchema } from "../schemaTypes/CoValueSchema.js";
 import { RichTextSchema } from "../schemaTypes/RichTextSchema.js";
@@ -36,8 +37,8 @@ import {
 } from "../zodSchema.js";
 import {
   SchemaField,
-  schemaFieldToCoFieldDef,
-} from "./schemaFieldToCoFieldDef.js";
+  schemaFieldToFieldDescriptor,
+} from "./schemaFieldToFieldDescriptor.js";
 
 // Note: if you're editing this function, edit the `isAnyCoValueSchema`
 // function in `zodReExport.ts` as well
@@ -78,26 +79,46 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
     );
   } else if (schema.builtin === "CoMap" || schema.builtin === "Account") {
     const def = schema.getDefinition();
-    const ClassToExtend = schema.builtin === "Account" ? Account : CoMap;
 
-    const coValueClass = class ZCoMap extends ClassToExtend {
-      constructor(options: { fromRaw: RawCoMap } | undefined) {
-        super(options);
-        for (const [fieldName, fieldType] of Object.entries(def.shape)) {
-          (this as any)[fieldName] = schemaFieldToCoFieldDef(
-            fieldType as SchemaField,
-          );
-        }
-        if (def.catchall) {
-          (this as any)[coField.items] = schemaFieldToCoFieldDef(
-            def.catchall as SchemaField,
-          );
-        }
+    let coValueClass: typeof Account | typeof CoMap;
+
+    let cachedFields: CoMapFieldSchema;
+
+    const getFields = () => {
+      if (cachedFields) return cachedFields;
+      const fields = Object.fromEntries(
+        Object.entries(def.shape).map(([fieldName, fieldType]) => [
+          fieldName,
+          schemaFieldToFieldDescriptor(fieldType as SchemaField),
+        ]),
+      );
+      if (def.catchall) {
+        fields[ItemsMarker] = schemaFieldToFieldDescriptor(
+          def.catchall as SchemaField,
+        );
       }
+      cachedFields = fields;
+      return fields;
     };
 
+    if (schema.builtin === "Account") {
+      coValueClass = class ZAccount extends Account {
+        // lazy to allow for shape to have circular references
+        static get fields() {
+          return getFields() as any;
+        }
+      };
+    } else {
+      coValueClass = class ZCoMap extends CoMap {
+        // lazy to allow for shape to have circular references
+        static get fields() {
+          return getFields();
+        }
+      };
+    }
+
     const coValueSchema =
-      ClassToExtend === Account
+      schema.builtin === "Account"
         ? new AccountSchema(schema as any, coValueClass as any)
         : new CoMapSchema(schema as any, coValueClass as any);
 
@@ -105,21 +126,18 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
   } else if (schema.builtin === "CoList") {
     const element = schema.element;
     const coValueClass = class ZCoList extends CoList {
-      constructor(options: { fromRaw: RawCoList } | undefined) {
-        super(options);
-        (this as any)[coField.items] = schemaFieldToCoFieldDef(
-          element as SchemaField,
-        );
-      }
+      static itemSchema = schemaFieldToFieldDescriptor(element as SchemaField);
     };
 
     const coValueSchema = new CoListSchema(element, coValueClass as any);
 
     return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoFeed") {
-    const coValueClass = CoFeed.Of(
-      schemaFieldToCoFieldDef(schema.element as SchemaField),
-    );
+    const element = schema.element;
+    const coValueClass = class ZCoFeed extends CoFeed {
+      static itemSchema = schemaFieldToFieldDescriptor(element as SchemaField);
+    };
+
     const coValueSchema = new CoFeedSchema(schema.element, coValueClass);
     return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "FileStream") {

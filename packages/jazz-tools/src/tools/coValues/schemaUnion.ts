@@ -2,7 +2,6 @@ import { JsonValue, RawCoMap } from "cojson";
 import {
   Account,
   AnonymousJazzAgent,
-  CoMapInit_DEPRECATED,
   CoValue,
   CoValueBase,
   CoValueClass,
@@ -107,7 +106,7 @@ export abstract class SchemaUnion extends CoValueBase implements CoValue {
 
       static override create<V extends CoValue>(
         this: CoValueClass<V>,
-        init: Simplify<CoMapInit_DEPRECATED<V>>,
+        init: object,
         owner: Account | Group,
       ): V {
         const ResolvedClass = discriminator(new Map(Object.entries(init)));
@@ -129,7 +128,7 @@ export abstract class SchemaUnion extends CoValueBase implements CoValue {
 
   static create<V extends CoValue>(
     this: CoValueClass<V>,
-    init: Simplify<CoMapInit_DEPRECATED<V>>,
+    init: object,
     owner: Account | Group,
   ): V {
     throw new Error("Not implemented");

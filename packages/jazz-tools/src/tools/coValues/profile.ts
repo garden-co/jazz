@@ -1,19 +1,24 @@
+import { z } from "../implementation/zodSchema/zodReExport.js";
 import {
   Account,
   CoMap,
-  CoMapInit_DEPRECATED,
   CoValueClass,
   Group,
   Simplify,
   TypeSym,
-  coField,
 } from "../internal.js";
 
 /** @category Identity & Permissions */
 export class Profile extends CoMap {
-  readonly name = coField.string;
-  readonly inbox? = coField.optional.string;
-  readonly inboxInvite? = coField.optional.string;
+  static fields = {
+    name: { type: "json", field: z.string() } as const,
+    inbox: { type: "json", field: z.string().optional() } as const,
+    inboxInvite: { type: "json", field: z.string().optional() } as const,
+  };
+
+  declare readonly name: string;
+  declare readonly inbox: string | undefined;
+  declare readonly inboxInvite: string | undefined;
 
   /**
    * Creates a new profile with the given initial values and owner.
@@ -25,7 +30,7 @@ export class Profile extends CoMap {
    */
   static override create<M extends CoMap>(
     this: CoValueClass<M>,
-    init: Simplify<CoMapInit_DEPRECATED<M>>,
+    init: object,
     options?:
       | {
           owner: Group;
