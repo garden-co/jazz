@@ -3,6 +3,7 @@ import {
   AnyZodOrCoValueSchema,
   CoDiscriminatedUnionSchema,
   CoMap,
+  CoMapFieldSchema,
   CoreCoDiscriminatedUnionSchema,
   CoreCoMapSchema,
   DiscriminableCoValueSchemas,
@@ -102,14 +103,20 @@ export function schemaUnionDiscriminatorFor(
             return coValueClass;
           }
 
+          let cachedFields: CoMapFieldSchema;
+
           // inject dummy fields
           return class extends coValueClass {
-            constructor(...args: ConstructorParameters<typeof coValueClass>) {
-              super(...args);
-
-              for (const key of dummyFieldNames) {
-                (this as any)[key] = coField.null;
-              }
+            // lazy to allow for shape to have circular references
+            static get fields() {
+              if (cachedFields) return cachedFields;
+              cachedFields = {
+                ...coValueClass.fields,
+                ...Object.fromEntries(
+                  dummyFieldNames.map((key) => [key, "json" as const]),
+                ),
+              };
+              return cachedFields;
             }
           };
         }

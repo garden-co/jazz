@@ -21,6 +21,7 @@ import {
   Group,
   CoVector,
   SchemaInit,
+  CoMapFieldSchema,
 } from "../../../internal.js";
 import { coField } from "../../schema.js";
 
@@ -79,26 +80,46 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
     );
   } else if (schema.builtin === "CoMap" || schema.builtin === "Account") {
     const def = schema.getDefinition();
-    const ClassToExtend = schema.builtin === "Account" ? Account : CoMap;
 
-    const coValueClass = class ZCoMap extends ClassToExtend {
-      constructor(options: { fromRaw: RawCoMap } | undefined) {
-        super(options);
-        for (const [fieldName, fieldType] of Object.entries(def.shape)) {
-          (this as any)[fieldName] = schemaFieldToCoFieldDef(
-            fieldType as SchemaField,
-          );
-        }
-        if (def.catchall) {
-          (this as any)[coField.items] = schemaFieldToCoFieldDef(
-            def.catchall as SchemaField,
-          );
-        }
+    let coValueClass: typeof Account | typeof CoMap;
+
+    let cachedFields: CoMapFieldSchema;
+
+    const getFields = () => {
+      if (cachedFields) return cachedFields;
+      const fields = Object.fromEntries(
+        Object.entries(def.shape).map(([fieldName, fieldType]) => [
+          fieldName,
+          schemaFieldToCoFieldDef(fieldType as SchemaField)[SchemaInit],
+        ]),
+      );
+      if (def.catchall) {
+        fields[coField.items] = schemaFieldToCoFieldDef(
+          def.catchall as SchemaField,
+        )[SchemaInit];
       }
+      cachedFields = fields;
+      return fields;
     };
 
+    if (schema.builtin === "Account") {
+      coValueClass = class ZAccount extends Account {
+        // lazy to allow for shape to have circular references
+        static get fields() {
+          return getFields() as any;
+        }
+      };
+    } else {
+      coValueClass = class ZCoMap extends CoMap {
+        // lazy to allow for shape to have circular references
+        static get fields() {
+          return getFields();
+        }
+      };
+    }
+
     const coValueSchema =
-      ClassToExtend === Account
+      schema.builtin === "Account"
         ? new AccountSchema(schema as any, coValueClass as any)
         : new CoMapSchema(schema as any, coValueClass as any);
 

@@ -30,7 +30,6 @@ export type {
   Resolved,
   RefsToResolve,
   RefsToResolveStrict,
-  CoMapInit_DEPRECATED as CoMapInit,
   CoMapEdit,
   CoMapEdits,
   LastAndAllCoMapEdits,

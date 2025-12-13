@@ -57,6 +57,9 @@ import {
   InstanceOfSchemaCoValuesMaybeLoaded,
   LoadedAndRequired,
   co,
+  CoMapFieldSchema,
+  isRefEncoded,
+  InstanceOfSchema,
 } from "../internal.js";
 
 export type AccountCreationProps = {
@@ -77,7 +80,7 @@ export class Account extends CoValueBase implements CoValue {
   declare $jazz: AccountJazzApi<this>;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  static _schema: any = {
+  static fields: CoMapFieldSchema = {
     profile: {
       ref: () => Profile,
       optional: false,
@@ -91,10 +94,12 @@ export class Account extends CoValueBase implements CoValue {
   declare readonly profile: MaybeLoaded<Profile>;
   declare readonly root: MaybeLoaded<CoMap>;
 
-  constructor(options: { fromRaw: RawAccount }) {
+  constructor(fields: CoMapFieldSchema, raw: RawAccount) {
     super();
-    if (!("fromRaw" in options)) {
-      throw new Error("Can only construct account from raw or with .create()");
+
+    if (!raw) {
+      // TODO: delete
+      throw new Error("Raw account is required");
     }
 
     const proxy = new Proxy(
@@ -105,12 +110,19 @@ export class Account extends CoValueBase implements CoValue {
     Object.defineProperties(this, {
       [TypeSym]: { value: "Account", enumerable: false },
       $jazz: {
-        value: new AccountJazzApi(proxy, options.fromRaw),
+        value: new AccountJazzApi(proxy, raw, fields),
         enumerable: false,
       },
     });
 
     return proxy;
+  }
+
+  static fromRaw<A extends CoValue>(this: CoValueClass<A>, raw: RawAccount): A {
+    return new this(
+      (this as unknown as { fields: CoMapFieldSchema }).fields,
+      raw,
+    ) as A;
   }
 
   /**
@@ -143,7 +155,9 @@ export class Account extends CoValueBase implements CoValue {
     );
 
     return loadCoValue(
-      coValueClassFromCoValueClassOrSchema(coValueClass ?? Group),
+      coValueClassFromCoValueClassOrSchema(
+        coValueClass ?? (Group as unknown as S),
+      ),
       valueID,
       {
         loadAs: this,
@@ -248,9 +262,7 @@ export class Account extends CoValueBase implements CoValue {
     const { node } = await LocalNode.withNewlyCreatedAccount({
       ...options,
       migration: async (rawAccount, _node, creationProps) => {
-        const account = new this({
-          fromRaw: rawAccount,
-        }) as A;
+        const account = new this(this.fields, rawAccount) as A;
 
         await account.applyMigration?.(creationProps);
       },
@@ -328,13 +340,11 @@ export class Account extends CoValueBase implements CoValue {
     return { credentials, account: createdAccount as A };
   }
 
-  static fromNode<A extends Account>(
-    this: CoValueClass<A>,
-    node: LocalNode,
-  ): A {
-    return new this({
-      fromRaw: node.expectCurrentAccount("jazz-tools/Account.fromNode"),
-    }) as A;
+  static fromNode<A extends Account>(node: LocalNode): A {
+    return new this(
+      this.fields,
+      node.expectCurrentAccount("jazz-tools/Account.fromNode"),
+    ) as A;
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -392,6 +402,7 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
   constructor(
     private account: A,
     public raw: RawAccount,
+    private fields: CoMapFieldSchema,
   ) {
     super(account);
     this.isLocalNodeOwner = this.raw.id === this.localNode.getCurrentAgent().id;
@@ -424,7 +435,16 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
         | CoID<RawCoMap>
         | undefined;
       if (!refId) {
-        const descriptor = this.schema[key];
+        const descriptor = this.fields[key];
+
+        if (!descriptor) {
+          throw Error(`Cannot set unknown key ${key}`);
+        }
+
+        if (!isRefEncoded(descriptor)) {
+          throw Error(`Cannot set non-reference key ${key} on Account`);
+        }
+
         const newOwnerStrategy = descriptor.permissions?.newInlineOwnerStrategy;
         const onCreate = descriptor.permissions?.onCreate;
         const coValue = instantiateRefEncodedWithInit(
@@ -451,9 +471,9 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
    */
   getDescriptor(key: string) {
     if (key === "profile") {
-      return this.schema.profile;
+      return this.fields.profile;
     } else if (key === "root") {
-      return this.schema.root;
+      return this.fields.root;
     }
 
     return undefined;
@@ -483,7 +503,7 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
         ? (new Ref(
             profileID,
             this.loadedAs,
-            this.schema.profile as RefEncoded<
+            this.fields.profile as RefEncoded<
               LoadedAndRequired<(typeof this.account)["profile"]> & CoValue
             >,
             this.account,
@@ -493,7 +513,7 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
         ? (new Ref(
             rootID,
             this.loadedAs,
-            this.schema.root as RefEncoded<
+            this.fields.root as RefEncoded<
               LoadedAndRequired<(typeof this.account)["root"]> & CoValue
             >,
             this.account,
@@ -552,14 +572,6 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
     return this.localNode.syncManager.waitForAllCoValuesSync(options?.timeout);
   }
 
-  /** @internal */
-  get schema(): {
-    profile: RefEncoded<Profile>;
-    root: RefEncoded<CoMap>;
-  } {
-    return (this.account.constructor as typeof Account)._schema;
-  }
-
   get loadedAs(): Account | AnonymousJazzAgent {
     if (this.isLocalNodeOwner) return this.account;
 
@@ -587,43 +599,6 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
       }
     } else {
       return Reflect.get(target, key, receiver);
-    }
-  },
-  set(target, key, value, receiver) {
-    if (
-      target instanceof Account &&
-      (key === "profile" || key === "root") &&
-      typeof value === "object" &&
-      SchemaInit in value
-    ) {
-      (target.constructor as typeof Account)._schema ||= {};
-      (target.constructor as typeof Account)._schema[key] = value[SchemaInit];
-      return true;
-    } else if (
-      target instanceof Account &&
-      (key === "profile" || key === "root")
-    ) {
-      if (value) {
-        target.$jazz.set(key, value);
-      }
-
-      return true;
-    } else {
-      return Reflect.set(target, key, value, receiver);
-    }
-  },
-  defineProperty(target, key, descriptor) {
-    if (
-      (key === "profile" || key === "root") &&
-      typeof descriptor.value === "object" &&
-      SchemaInit in descriptor.value
-    ) {
-      (target.constructor as typeof Account)._schema ||= {};
-      (target.constructor as typeof Account)._schema[key] =
-        descriptor.value[SchemaInit];
-      return true;
-    } else {
-      return Reflect.defineProperty(target, key, descriptor);
     }
   },
 };

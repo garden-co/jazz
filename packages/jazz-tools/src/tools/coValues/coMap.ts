@@ -67,7 +67,7 @@ export type CoMapEdits<M extends CoMap> = {
   [Key in CoKeys<M>]?: LastAndAllCoMapEdits<M[Key]>;
 };
 
-type CoMapFieldSchema = {
+export type CoMapFieldSchema = {
   [key: string]: Schema;
 } & { [ItemsSym]?: Schema };
 
@@ -121,28 +121,29 @@ export class CoMap extends CoValueBase implements CoValue {
   declare $jazz: CoMapJazzApi<this>;
 
   /** @internal */
-  static _schema: CoMapFieldSchema;
+  static fields: CoMapFieldSchema;
 
   /** @internal */
-  constructor(options: { fromRaw: RawCoMap } | undefined) {
+  constructor(fields: CoMapFieldSchema, raw: RawCoMap) {
     super();
 
     const proxy = new Proxy(this, CoMapProxyHandler as ProxyHandler<this>);
 
-    if (options) {
-      if ("fromRaw" in options) {
-        Object.defineProperties(this, {
-          $jazz: {
-            value: new CoMapJazzApi(proxy, () => options.fromRaw),
-            enumerable: false,
-          },
-        });
-      } else {
-        throw new Error("Invalid CoMap constructor arguments");
-      }
-    }
+    Object.defineProperties(this, {
+      $jazz: {
+        value: new CoMapJazzApi(proxy, raw, fields),
+        enumerable: false,
+      },
+    });
 
     return proxy;
+  }
+
+  static fromRaw<M extends CoValue>(
+    this: CoValueClass<M> & { fields: CoMapFieldSchema },
+    raw: RawCoMap,
+  ): M {
+    return new this(this.fields, raw) as M;
   }
 
   /**
@@ -166,8 +167,8 @@ export class CoMap extends CoValueBase implements CoValue {
    * @deprecated Use `co.map(...).create`.
    **/
   static create<M extends CoMap>(
-    this: CoValueClass<M>,
-    init: Simplify<CoMapInit_DEPRECATED<M>>,
+    this: CoValueClass<M> & { fields: CoMapFieldSchema },
+    init: object,
     options?:
       | {
           owner?: Account | Group;
@@ -176,9 +177,10 @@ export class CoMap extends CoValueBase implements CoValue {
       | Account
       | Group,
   ) {
-    const instance = new this();
+    const { owner, uniqueness } = parseCoValueCreateOptions(options);
+    const raw = CoMap.rawFromInit(this.fields, init, owner, uniqueness);
 
-    return CoMap._createCoMap(instance, init, options);
+    return new this(this.fields, raw);
   }
 
   /**
@@ -236,54 +238,26 @@ export class CoMap extends CoValueBase implements CoValue {
   }
 
   /**
-   * @internal
-   */
-  static _createCoMap<M extends CoMap>(
-    instance: M,
-    init: Simplify<CoMapInit_DEPRECATED<M>>,
-    options?:
-      | {
-          owner?: Account | Group;
-          unique?: CoValueUniqueness["uniqueness"];
-        }
-      | Account
-      | Group,
-  ): M {
-    const { owner, uniqueness } = parseCoValueCreateOptions(options);
-
-    Object.defineProperties(instance, {
-      $jazz: {
-        value: new CoMapJazzApi(instance, () => raw),
-        enumerable: false,
-      },
-    });
-
-    const raw = CoMap.rawFromInit(instance, init, owner, uniqueness);
-
-    return instance;
-  }
-
-  /**
    * Create a new `RawCoMap` from an initialization object
    * @internal
    */
-  static rawFromInit<M extends CoMap, Fields extends object>(
-    instance: M,
-    init: Simplify<CoMapInit_DEPRECATED<Fields>> | undefined,
+  static rawFromInit(
+    fields: CoMapFieldSchema,
+    init: object | undefined,
     owner: Group,
     uniqueness?: CoValueUniqueness,
   ) {
     const rawOwner = owner.$jazz.raw;
 
     const rawInit = {} as {
-      [key in keyof Fields]: JsonValue | undefined;
+      [key: string]: JsonValue | undefined;
     };
 
     if (init)
-      for (const key of Object.keys(init) as (keyof Fields)[]) {
+      for (const key of Object.keys(init)) {
         const initValue = init[key as keyof typeof init];
 
-        const descriptor = instance.$jazz.getDescriptor(key as string);
+        const descriptor = fields?.[key] || fields?.[ItemsSym];
 
         if (!descriptor) {
           continue;
@@ -356,7 +330,8 @@ export class CoMap extends CoValueBase implements CoValue {
 class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
   constructor(
     private coMap: M,
-    private getRaw: () => RawCoMap,
+    public raw: RawCoMap,
+    private fields: CoMapFieldSchema,
   ) {
     super(coMap);
   }
@@ -539,7 +514,7 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
    * @internal
    */
   getDescriptor(key: string): Schema | undefined {
-    return this.schema?.[key] || this.schema?.[ItemsSym];
+    return this.fields?.[key] || this.fields?.[ItemsSym];
   }
 
   /**
@@ -630,16 +605,6 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
       },
     );
   }
-
-  /** @internal */
-  override get raw() {
-    return this.getRaw();
-  }
-
-  /** @internal */
-  get schema(): CoMapFieldSchema {
-    return (this.coMap.constructor as typeof CoMap)._schema;
-  }
 }
 
 export type CoKeys<Map extends object> = Exclude<
@@ -692,10 +657,6 @@ type ForceRequiredRef<V> = V extends InstanceType<CoValueClass> | null
     ? V | null
     : V;
 
-export type CoMapInit_DEPRECATED<Map extends object> = PartialOnUndefined<{
-  [Key in CoKeys<Map>]: ForceRequiredRef<Map[Key]>;
-}>;
-
 export type CoMapInit<Map extends object> = {
   [K in RequiredCoKeys<Map>]: CoFieldInit<Map[K]>;
 } & {
@@ -705,9 +666,7 @@ export type CoMapInit<Map extends object> = {
 // TODO: cache handlers per descriptor for performance?
 const CoMapProxyHandler: ProxyHandler<CoMap> = {
   get(target, key, receiver) {
-    if (key === "_schema") {
-      return Reflect.get(target, key);
-    } else if (key in target) {
+    if (key in target) {
       return Reflect.get(target, key, receiver);
     } else {
       if (typeof key !== "string") {
@@ -734,39 +693,10 @@ const CoMapProxyHandler: ProxyHandler<CoMap> = {
     }
   },
   set(target, key, value, receiver) {
-    if (
-      typeof key === "string" &&
-      typeof value === "object" &&
-      value !== null &&
-      SchemaInit in value
-    ) {
-      (target.constructor as typeof CoMap)._schema ||= {};
-      (target.constructor as typeof CoMap)._schema[key] = value[SchemaInit];
-      return true;
-    }
-
-    const descriptor = target.$jazz.getDescriptor(key as string);
-
-    if (!descriptor) return false;
-
     if (typeof key === "string") {
       throw Error("Cannot update a CoMap directly. Use `$jazz.set` instead.");
     } else {
       return Reflect.set(target, key, value, receiver);
-    }
-  },
-  defineProperty(target, key, attributes) {
-    if (
-      "value" in attributes &&
-      typeof attributes.value === "object" &&
-      SchemaInit in attributes.value
-    ) {
-      (target.constructor as typeof CoMap)._schema ||= {};
-      (target.constructor as typeof CoMap)._schema[key as string] =
-        attributes.value[SchemaInit];
-      return true;
-    } else {
-      return Reflect.defineProperty(target, key, attributes);
     }
   },
   ownKeys(target) {

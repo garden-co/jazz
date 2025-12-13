@@ -21,9 +21,7 @@ export async function setupTwoNodes() {
     crypto,
     creationProps: { name: "Client" },
     migration: async (rawAccount, _node, creationProps) => {
-      const account = new AccountClass({
-        fromRaw: rawAccount,
-      });
+      const account = AccountClass.fromRaw(rawAccount);
 
       await account.applyMigration(creationProps);
     },
@@ -34,10 +32,7 @@ export async function setupTwoNodes() {
     crypto,
     creationProps: { name: "Server" },
     migration: async (rawAccount, _node, creationProps) => {
-      const account = new AccountClass({
-        fromRaw: rawAccount,
-      });
-
+      const account = AccountClass.fromRaw(rawAccount);
       await account.applyMigration(creationProps);
     },
   });

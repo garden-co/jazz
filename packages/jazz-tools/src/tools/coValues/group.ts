@@ -22,6 +22,9 @@ import {
   SubscribeListenerOptions,
   SubscribeRestArgs,
   TypeSym,
+  CoMapFieldSchema,
+  Profile,
+  MaybeLoaded,
 } from "../internal.js";
 import {
   Account,
@@ -61,22 +64,21 @@ export class Group extends CoValueBase implements CoValue {
   }
   declare $jazz: GroupJazzApi<this>;
 
-  /** @deprecated Don't use constructor directly, use .create */
-  constructor(options: { fromRaw: RawGroup } | { owner: Account }) {
-    super();
-    let raw: RawGroup;
+  static fields = {
+    profile: {
+      ref: () => Profile,
+      optional: true,
+    } satisfies RefEncoded<Profile>,
+  };
 
-    if (options && "fromRaw" in options) {
-      raw = options.fromRaw;
-    } else {
-      const initOwner = options.owner;
-      if (!initOwner) throw new Error("No owner provided");
-      if (initOwner[TypeSym] === "Account" && isControlledAccount(initOwner)) {
-        const rawOwner = initOwner.$jazz.raw;
-        raw = rawOwner.core.node.createGroup();
-      } else {
-        throw new Error("Can only construct group as a controlled account");
-      }
+  declare readonly profile: MaybeLoaded<Profile> | undefined;
+
+  /** @deprecated Don't use constructor directly, use .create */
+  constructor(raw: RawGroup) {
+    super();
+
+    if (!raw) {
+      throw new Error("Raw group is required");
     }
 
     const proxy = new Proxy(
@@ -91,14 +93,26 @@ export class Group extends CoValueBase implements CoValue {
       },
     });
 
-    return proxy;
+    return proxy as this;
   }
 
-  static create<G extends Group>(
-    this: CoValueClass<G>,
-    options?: { owner: Account } | Account,
-  ) {
-    return new this(parseGroupCreateOptions(options));
+  static fromRaw<G extends CoValue>(
+    this: CoValueClass<G> & { fields: CoMapFieldSchema },
+    raw: RawGroup,
+  ): G {
+    return new this(raw) as G;
+  }
+
+  static create(options?: { owner: Account } | Account) {
+    const initOwner = parseGroupCreateOptions(options).owner;
+    if (!initOwner) throw new Error("No owner provided");
+    if (initOwner[TypeSym] === "Account" && isControlledAccount(initOwner)) {
+      const rawOwner = initOwner.$jazz.raw;
+      const raw = rawOwner.core.node.createGroup();
+      return new this(raw);
+    } else {
+      throw new Error("Can only construct group as a controlled account");
+    }
   }
 
   myRole(): Role | undefined {

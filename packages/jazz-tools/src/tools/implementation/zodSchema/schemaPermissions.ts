@@ -107,9 +107,10 @@ export type NewInlineOwnerStrategy = (
 export const extendContainerOwnerFactory =
   (roleOverride?: GroupRole): NewInlineOwnerStrategy =>
   (createNewGroup: () => Group, containerOwner: Group): Group => {
+    // TODO: why is this unused?
     const node = containerOwner.$jazz.localNode;
     const rawGroup = node.createGroup();
-    const owner = new Group({ fromRaw: rawGroup });
+    const owner = Group.fromRaw(rawGroup);
     owner.addMember(containerOwner, roleOverride);
     return owner;
   };
