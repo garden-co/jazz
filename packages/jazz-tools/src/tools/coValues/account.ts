@@ -37,7 +37,6 @@ import {
   RefsToResolveStrict,
   RegisteredSchemas,
   Resolved,
-  SchemaInit,
   SubscribeListenerOptions,
   SubscribeRestArgs,
   TypeSym,
@@ -82,12 +81,16 @@ export class Account extends CoValueBase implements CoValue {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   static fields: CoMapFieldSchema = {
     profile: {
+      type: "ref",
       ref: () => Profile,
       optional: false,
+      field: Profile,
     } satisfies RefEncoded<Profile>,
     root: {
+      type: "ref",
       ref: () => RegisteredSchemas["CoMap"],
       optional: true,
+      field: RegisteredSchemas["CoMap"],
     } satisfies RefEncoded<CoMap>,
   };
 

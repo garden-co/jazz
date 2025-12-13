@@ -9,7 +9,6 @@ import {
   DiscriminableCoValueSchemas,
   DiscriminableCoreCoValueSchema,
   SchemaUnionDiscriminator,
-  coField,
 } from "../../internal.js";
 import {
   hydrateCoreCoValueSchema,
@@ -113,7 +112,10 @@ export function schemaUnionDiscriminatorFor(
               cachedFields = {
                 ...coValueClass.fields,
                 ...Object.fromEntries(
-                  dummyFieldNames.map((key) => [key, "json" as const]),
+                  dummyFieldNames.map((key) => [
+                    key,
+                    { type: "json", field: z.null() },
+                  ]),
                 ),
               };
               return cachedFields;

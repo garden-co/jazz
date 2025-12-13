@@ -207,8 +207,10 @@ export class SubscriptionCache {
     // Create new SubscriptionScope
     // Transform schema to RefEncoded format
     const refEncoded: RefEncoded<CoValue> = {
+      type: "ref",
       ref: coValueClassFromCoValueClassOrSchema(schema) as any,
       optional: true,
+      field: schema,
     };
 
     // Create new SubscriptionScope with all required parameters

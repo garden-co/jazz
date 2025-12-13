@@ -1,3 +1,4 @@
+import { z } from "../implementation/zodSchema/zodReExport.js";
 import {
   Account,
   CoMap,
@@ -5,15 +6,14 @@ import {
   Group,
   Simplify,
   TypeSym,
-  coField,
 } from "../internal.js";
 
 /** @category Identity & Permissions */
 export class Profile extends CoMap {
   static fields = {
-    name: "json" as const,
-    inbox: "json" as const,
-    inboxInvite: "json" as const,
+    name: { type: "json", field: z.string() } as const,
+    inbox: { type: "json", field: z.string().optional() } as const,
+    inboxInvite: { type: "json", field: z.string().optional() } as const,
   };
 
   declare readonly name: string;

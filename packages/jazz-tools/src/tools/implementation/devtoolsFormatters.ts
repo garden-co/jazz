@@ -1,6 +1,6 @@
 /* istanbul ignore file -- @preserve */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { ItemsSym, TypeSym } from "./symbols.js";
+import { ItemsMarker, TypeSym } from "./symbols.js";
 
 (globalThis as any).devtoolsFormatters = [
   {
@@ -70,13 +70,13 @@ import { ItemsSym, TypeSym } from "./symbols.js";
             { style: "white-space: nowrap;" },
             ["span", { style: "font-weight: bold; opacity: 0.6" }, i, ": "],
             ["object", { object: v }],
-            ...(typeof object._schema[ItemsSym] === "function"
+            ...(typeof object._schema[ItemsMarker] === "function"
               ? v === null
                 ? [
                     [
                       "span",
                       { style: "opacity: 0.5" },
-                      ` (pending ${object._schema[ItemsSym].name} `,
+                      ` (pending ${object._schema[ItemsMarker].name} `,
                       ["object", { object: object.$jazz.refs[i] }],
                       ")",
                     ],

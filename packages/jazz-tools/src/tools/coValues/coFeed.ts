@@ -26,8 +26,8 @@ import {
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
-  Schema,
-  SchemaFor,
+  FieldDescriptor,
+  FieldDescriptorFor,
   SubscribeListenerOptions,
   SubscribeRestArgs,
   TypeSym,
@@ -35,11 +35,9 @@ import {
   Account,
   CoValueBase,
   CoValueJazzApi,
-  ItemsSym,
+  ItemsMarker,
   Ref,
-  SchemaInit,
   accessChildById,
-  coField,
   ensureCoValueLoaded,
   inspect,
   instantiateRefEncodedWithInit,
@@ -94,27 +92,8 @@ export { CoFeed as CoStream };
 export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   declare $jazz: CoFeedJazzApi<this>;
 
-  /**
-   * Declare a `CoFeed` by subclassing `CoFeed.Of(...)` and passing the item schema using a `co` primitive or a `coField.ref`.
-   *
-   * @example
-   * ```ts
-   * class ColorFeed extends CoFeed.Of(coField.string) {}
-   * class AnimalFeed extends CoFeed.Of(coField.ref(Animal)) {}
-   * ```
-   *
-   * @category Declaration
-   */
-  static Of<Item>(item: Item): typeof CoFeed<Item> {
-    const cls = class CoFeedOf extends CoFeed<Item> {
-      [coField.items] = item;
-    };
-
-    cls._schema ||= {};
-    cls._schema[ItemsSym] = (item as any)[SchemaInit];
-
-    return cls;
-  }
+  /** @internal */
+  static itemSchema: FieldDescriptor;
 
   /** @category Type Helpers */
   declare [TypeSym]: "CoStream";
@@ -123,7 +102,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   }
 
   /** @internal This is only a marker type and doesn't exist at runtime */
-  [ItemsSym]!: Item;
+  [ItemsMarker]!: Item;
   /** @internal */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   static _schema: any;
@@ -197,17 +176,27 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   }
 
   /** @internal */
-  constructor(options: { fromRaw: RawCoStream }) {
+  constructor(itemSchema: FieldDescriptor, raw: RawCoStream) {
     super();
 
     Object.defineProperties(this, {
       $jazz: {
-        value: new CoFeedJazzApi(this, options.fromRaw),
+        value: new CoFeedJazzApi(this, raw, itemSchema),
         enumerable: false,
       },
     });
 
     return this;
+  }
+
+  static fromRaw<S extends CoValue>(
+    this: CoValueClass<S>,
+    fromRaw: RawCoStream,
+  ) {
+    return new this(
+      (this as unknown as { itemSchema: FieldDescriptor }).itemSchema,
+      fromRaw,
+    );
   }
 
   /**
@@ -222,7 +211,10 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   ) {
     const { owner } = parseCoValueCreateOptions(options);
     const raw = owner.$jazz.raw.createStream();
-    const instance = new this({ fromRaw: raw });
+    const instance = new this(
+      (this as unknown as { itemSchema: FieldDescriptor }).itemSchema,
+      raw,
+    );
 
     if (init) {
       instance.$jazz.push(...init);
@@ -239,12 +231,12 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
     [key: string]: unknown;
     in: { [key: string]: unknown };
   } {
-    const itemDescriptor = this.$jazz.schema[ItemsSym] as Schema;
+    const itemDescriptor = this.$jazz.itemSchema;
     const mapper =
-      itemDescriptor === "json"
+      itemDescriptor.type === "json"
         ? (v: unknown) => v
-        : "encoded" in itemDescriptor
-          ? itemDescriptor.encoded.encode
+        : itemDescriptor.type === "encoded"
+          ? itemDescriptor.encode
           : (v: unknown) => v && (v as CoValue).$jazz.id;
 
     return {
@@ -272,22 +264,6 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   } {
     return this.toJSON();
   }
-
-  /** @internal */
-  static schema<V extends CoFeed>(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    this: { new (...args: any): V } & typeof CoFeed,
-    def: { [ItemsSym]: V["$jazz"]["schema"][ItemsSym] },
-  ) {
-    this._schema ||= {};
-    Object.assign(this._schema, def);
-  }
-
-  /**
-   * Load a `CoFeed`
-   * @category Subscription & Loading
-   * @deprecated Use `co.feed(...).load` instead.
-   */
 }
 
 /** @internal */
@@ -297,6 +273,7 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
   constructor(
     private coFeed: F,
     public raw: RawCoStream,
+    public itemSchema: FieldDescriptor,
   ) {
     super(coFeed);
   }
@@ -332,12 +309,12 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
   }
 
   private pushItem(item: CoFieldInit<CoFeedItem<F>>) {
-    const itemDescriptor = this.schema[ItemsSym] as Schema;
+    const itemDescriptor = this.itemSchema;
 
-    if (itemDescriptor === "json") {
+    if (itemDescriptor.type === "json") {
       this.raw.push(item as JsonValue);
-    } else if ("encoded" in itemDescriptor) {
-      this.raw.push(itemDescriptor.encoded.encode(item));
+    } else if (itemDescriptor.type === "encoded") {
+      this.raw.push(itemDescriptor.encode(item));
     } else if (isRefEncoded(itemDescriptor)) {
       let refId = (item as unknown as CoValue).$jazz?.id;
       if (!refId) {
@@ -412,15 +389,8 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
    * Get the descriptor for the items in the `CoFeed`
    * @internal
    */
-  getItemsDescriptor(): Schema | undefined {
-    return this.schema[ItemsSym];
-  }
-
-  /** @internal */
-  get schema(): {
-    [ItemsSym]: SchemaFor<CoFeedItem<F>> | any;
-  } {
-    return (this.coFeed.constructor as typeof CoFeed)._schema;
+  getItemsDescriptor(): FieldDescriptor | undefined {
+    return this.itemSchema;
   }
 }
 
@@ -438,18 +408,18 @@ function entryFromRawEntry<Item>(
   },
   loadedAs: Account | AnonymousJazzAgent,
   accountID: ID<Account> | undefined,
-  itemField: Schema,
+  itemField: FieldDescriptor,
 ): Omit<CoFeedEntry<Item>, "all"> {
   return {
     get value(): LoadedAndRequired<Item> extends CoValue
       ? MaybeLoaded<CoValue & Item>
       : Item {
-      if (itemField === "json") {
+      if (itemField.type === "json") {
         return rawEntry.value as LoadedAndRequired<Item> extends CoValue
           ? MaybeLoaded<CoValue & Item>
           : Item;
-      } else if ("encoded" in itemField) {
-        return itemField.encoded.decode(rawEntry.value);
+      } else if (itemField.type === "encoded") {
+        return itemField.decode(rawEntry.value);
       } else if (isRefEncoded(itemField)) {
         return accessChildById(
           accessFrom,
@@ -465,7 +435,7 @@ function entryFromRawEntry<Item>(
     get ref(): LoadedAndRequired<Item> extends CoValue
       ? Ref<LoadedAndRequired<Item>>
       : never {
-      if (itemField !== "json" && isRefEncoded(itemField)) {
+      if (itemField.type !== "json" && isRefEncoded(itemField)) {
         const rawId = rawEntry.value;
         return new Ref(
           rawId as unknown as ID<CoValue>,
@@ -483,8 +453,10 @@ function entryFromRawEntry<Item>(
       if (!accountID) return null;
 
       const account = accessChildById(accessFrom, accountID, {
+        type: "ref",
         ref: Account,
         optional: false,
+        field: Account,
       }) as Account;
 
       if (!account.$isLoaded) return null;
@@ -513,7 +485,7 @@ export const CoStreamPerAccountProxyHandler = (
         rawEntry,
         innerTarget.$jazz.loadedAs,
         key as unknown as ID<Account>,
-        innerTarget.$jazz.schema[ItemsSym],
+        innerTarget.$jazz.itemSchema,
       );
 
       Object.defineProperty(entry, "all", {
@@ -530,7 +502,7 @@ export const CoStreamPerAccountProxyHandler = (
                 rawEntry.value,
                 innerTarget.$jazz.loadedAs,
                 key as unknown as ID<Account>,
-                innerTarget.$jazz.schema[ItemsSym],
+                innerTarget.$jazz.itemSchema,
               );
             }
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -582,7 +554,7 @@ const CoStreamPerSessionProxyHandler = (
         cojsonInternals.isAccountID(by)
           ? (by as unknown as ID<Account>)
           : undefined,
-        innerTarget.$jazz.schema[ItemsSym],
+        innerTarget.$jazz.itemSchema,
       );
 
       Object.defineProperty(entry, "all", {
@@ -599,7 +571,7 @@ const CoStreamPerSessionProxyHandler = (
                 cojsonInternals.isAccountID(by)
                   ? (by as unknown as ID<Account>)
                   : undefined,
-                innerTarget.$jazz.schema[ItemsSym],
+                innerTarget.$jazz.itemSchema,
               );
             }
             // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -17,20 +17,18 @@ import {
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
-  Schema,
-  SchemaFor,
+  FieldDescriptor,
+  FieldDescriptorFor,
   SubscribeListenerOptions,
   SubscribeRestArgs,
   TypeSym,
   BranchDefinition,
   CoValueLoadingState,
   AnonymousJazzAgent,
-  ItemsSym,
+  ItemsMarker,
   Ref,
-  SchemaInit,
   accessChildByKey,
   activeAccountContext,
-  coField,
   ensureCoValueLoaded,
   inspect,
   instantiateRefEncodedWithInit,
@@ -85,16 +83,19 @@ export class CoList<out Item = any>
   }
 
   /** @internal This is only a marker type and doesn't exist at runtime */
-  [ItemsSym]!: Item; // TODO: get rid of this
+  [ItemsMarker]!: Item; // TODO: get rid of this
 
   /** @internal */
-  static itemSchema: SchemaFor<CoListItem<CoList>> | any;
+  static itemSchema: FieldDescriptorFor<CoListItem<CoList>> | any;
 
   static get [Symbol.species]() {
     return Array;
   }
 
-  constructor(itemSchema: SchemaFor<CoListItem<CoList>>, raw: RawCoList) {
+  constructor(
+    itemSchema: FieldDescriptorFor<CoListItem<CoList>>,
+    raw: RawCoList,
+  ) {
     super();
 
     const proxy = new Proxy(this, CoListProxyHandler as ProxyHandler<this>);
@@ -157,13 +158,11 @@ export class CoList<out Item = any>
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   toJSON(_key?: string, seenAbove?: ID<CoValue>[]): any[] {
-    const itemDescriptor = this.$jazz.itemSchema as Schema;
-    if (itemDescriptor === "json") {
+    const itemDescriptor = this.$jazz.itemSchema as FieldDescriptor;
+    if (itemDescriptor.type === "json") {
       return this.$jazz.raw.asArray();
-    } else if ("encoded" in itemDescriptor) {
-      return this.$jazz.raw
-        .asArray()
-        .map((e) => itemDescriptor.encoded.encode(e));
+    } else if (itemDescriptor.type === "encoded") {
+      return this.$jazz.raw.asArray().map((e) => itemDescriptor.encode(e));
     } else if (isRefEncoded(itemDescriptor)) {
       return this.map((item, idx) =>
         seenAbove?.includes((item as CoValue)?.$jazz.id)
@@ -300,7 +299,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     private coList: L,
     public raw: RawCoList,
     /** @internal */
-    public itemSchema: SchemaFor<CoListItem<L>> | any,
+    public itemSchema: FieldDescriptorFor<CoListItem<L>> | any,
   ) {
     super(coList);
   }
@@ -604,7 +603,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    * Get the descriptor for the items in the `CoList`
    * @internal
    */
-  getItemsDescriptor(): Schema | undefined {
+  getItemsDescriptor(): FieldDescriptor | undefined {
     return this.itemSchema;
   }
 
@@ -672,14 +671,14 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
  */
 function toRawItems<Item>(
   items: Item[],
-  itemDescriptor: Schema,
+  itemDescriptor: FieldDescriptor,
   owner: Group,
 ): JsonValue[] {
   let rawItems: JsonValue[] = [];
-  if (itemDescriptor === "json") {
+  if (itemDescriptor.type === "json") {
     rawItems = items as JsonValue[];
-  } else if ("encoded" in itemDescriptor) {
-    rawItems = items?.map((e) => itemDescriptor.encoded.encode(e));
+  } else if (itemDescriptor.type === "encoded") {
+    rawItems = items?.map((e) => itemDescriptor.encode(e));
   } else if (isRefEncoded(itemDescriptor)) {
     rawItems = items?.map((value) => {
       if (value == null) {
@@ -710,14 +709,14 @@ function toRawItems<Item>(
 const CoListProxyHandler: ProxyHandler<CoList> = {
   get(target, key, receiver) {
     if (typeof key === "string" && !isNaN(+key)) {
-      const itemDescriptor = target.$jazz.itemSchema as Schema;
+      const itemDescriptor = target.$jazz.itemSchema as FieldDescriptor;
       const rawValue = target.$jazz.raw.get(Number(key));
-      if (itemDescriptor === "json") {
+      if (itemDescriptor.type === "json") {
         return rawValue;
-      } else if ("encoded" in itemDescriptor) {
+      } else if (itemDescriptor.type === "encoded") {
         return rawValue === undefined
           ? undefined
-          : itemDescriptor.encoded.decode(rawValue);
+          : itemDescriptor.decode(rawValue);
       } else if (isRefEncoded(itemDescriptor)) {
         return rawValue === undefined || rawValue === null
           ? undefined

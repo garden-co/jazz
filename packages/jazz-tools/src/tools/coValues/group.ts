@@ -66,8 +66,10 @@ export class Group extends CoValueBase implements CoValue {
 
   static fields = {
     profile: {
+      type: "ref",
       ref: () => Profile,
       optional: true,
+      field: Profile,
     } satisfies RefEncoded<Profile>,
   };
 
@@ -169,8 +171,10 @@ export class Group extends CoValueBase implements CoValue {
     const members = [];
 
     const refEncodedAccountSchema = {
+      type: "ref",
       ref: () => Account,
       optional: false,
+      field: Account,
     } satisfies RefEncoded<Account>;
 
     for (const accountID of accountIDs) {
@@ -365,7 +369,9 @@ export function isAccountID(id: RawAccountID | AgentID): id is RawAccountID {
 
 export function getCoValueOwner(coValue: CoValue): Group {
   const group = accessChildById(coValue, coValue.$jazz.raw.group.id, {
-    ref: RegisteredSchemas["Group"],
+    type: "ref",
+    ref: () => Group,
+    field: Group,
     optional: false,
   });
   if (!group.$isLoaded) {

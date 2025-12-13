@@ -325,8 +325,10 @@ export function subscribeToCoValue<
     resolve,
     id as ID<V>,
     {
+      type: "ref",
       ref: cls,
       optional: false,
+      field: cls,
     },
     options.skipRetry,
     false,
@@ -687,8 +689,10 @@ export async function exportCoValue<
     resolve as any,
     id,
     {
+      type: "ref",
       ref: coValueClassFromCoValueClassOrSchema(cls),
       optional: false,
+      field: cls,
     },
     options.skipRetry,
     options.bestEffortResolution,
@@ -856,8 +860,10 @@ export async function unstable_mergeBranchWithResolve<
     resolve as any,
     id,
     {
+      type: "ref",
       ref: coValueClassFromCoValueClassOrSchema(cls),
       optional: false,
+      field: cls,
     },
     false,
     false,

@@ -20,10 +20,9 @@ import {
   isCoValueClass,
   Group,
   CoVector,
-  SchemaInit,
   CoMapFieldSchema,
+  ItemsMarker,
 } from "../../../internal.js";
-import { coField } from "../../schema.js";
 
 import { CoreCoValueSchema } from "../schemaTypes/CoValueSchema.js";
 import { RichTextSchema } from "../schemaTypes/RichTextSchema.js";
@@ -38,8 +37,8 @@ import {
 } from "../zodSchema.js";
 import {
   SchemaField,
-  schemaFieldToCoFieldDef,
-} from "./schemaFieldToCoFieldDef.js";
+  schemaFieldToFieldDescriptor,
+} from "./schemaFieldToFieldDescriptor.js";
 
 // Note: if you're editing this function, edit the `isAnyCoValueSchema`
 // function in `zodReExport.ts` as well
@@ -90,13 +89,13 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
       const fields = Object.fromEntries(
         Object.entries(def.shape).map(([fieldName, fieldType]) => [
           fieldName,
-          schemaFieldToCoFieldDef(fieldType as SchemaField)[SchemaInit],
+          schemaFieldToFieldDescriptor(fieldType as SchemaField),
         ]),
       );
       if (def.catchall) {
-        fields[coField.items] = schemaFieldToCoFieldDef(
+        fields[ItemsMarker] = schemaFieldToFieldDescriptor(
           def.catchall as SchemaField,
-        )[SchemaInit];
+        );
       }
       cachedFields = fields;
       return fields;
@@ -127,18 +126,18 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
   } else if (schema.builtin === "CoList") {
     const element = schema.element;
     const coValueClass = class ZCoList extends CoList {
-      static itemSchema = schemaFieldToCoFieldDef(element as SchemaField)[
-        SchemaInit
-      ];
+      static itemSchema = schemaFieldToFieldDescriptor(element as SchemaField);
     };
 
     const coValueSchema = new CoListSchema(element, coValueClass as any);
 
     return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoFeed") {
-    const coValueClass = CoFeed.Of(
-      schemaFieldToCoFieldDef(schema.element as SchemaField),
-    );
+    const element = schema.element;
+    const coValueClass = class ZCoFeed extends CoFeed {
+      static itemSchema = schemaFieldToFieldDescriptor(element as SchemaField);
+    };
+
     const coValueSchema = new CoFeedSchema(schema.element, coValueClass);
     return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "FileStream") {
