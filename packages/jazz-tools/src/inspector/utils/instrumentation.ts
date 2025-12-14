@@ -1,23 +1,7 @@
-import {
-  MeterProvider,
-  PeriodicExportingMetricReader,
-  ConsoleMetricExporter,
-  PushMetricExporter,
-  ResourceMetrics,
-  MetricReader,
-  InMemoryMetricExporter,
-  AggregationTemporality,
-} from "@opentelemetry/sdk-metrics";
-import {
-  defaultResource,
-  resourceFromAttributes,
-} from "@opentelemetry/resources";
-import { type ExportResult, ExportResultCode } from "@opentelemetry/core";
+import { MeterProvider } from "@opentelemetry/sdk-metrics";
+import { resourceFromAttributes } from "@opentelemetry/resources";
 import { metrics } from "@opentelemetry/api";
-import {
-  ATTR_SERVICE_NAME,
-  ATTR_SERVICE_VERSION,
-} from "@opentelemetry/semantic-conventions";
+import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
 import { jazzMetricReader } from "./otel";
 
 export function recordMetrics() {

@@ -73,7 +73,6 @@ export class SubscriptionScope<D extends CoValue> {
   migrating = false;
   closed = false;
   constructionTime = performance.now();
-  startLoadingChildrenTime?: number;
   firstLoadRecorded = false;
   sourceId: ID<D>;
 

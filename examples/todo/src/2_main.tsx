@@ -6,7 +6,7 @@ import {
 } from "react-router-dom";
 import "./index.css";
 
-import { JazzInspector } from "jazz-tools/inspector";
+import { JazzInspector, recordMetrics } from "jazz-tools/inspector";
 import {
   JazzReactProvider,
   PassphraseAuthBasicUI,
@@ -30,6 +30,7 @@ import {
 } from "./basicComponents/index.ts";
 import { wordlist } from "./wordlist.ts";
 
+recordMetrics();
 /**
  * Walkthrough: The top-level provider `<JazzReactProvider/>`
  *

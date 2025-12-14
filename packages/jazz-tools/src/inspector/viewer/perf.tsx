@@ -12,7 +12,6 @@ import { Accordion } from "../ui/accordion";
 import { DataTable, type ColumnDef } from "../ui/data-table";
 import { Heading } from "../ui/heading";
 import { Text } from "../ui/text";
-import { Badge } from "../ui/badge";
 import { useRouter } from "../router";
 
 function getSumOfCounterMetric(
