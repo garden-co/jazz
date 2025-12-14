@@ -94,9 +94,12 @@ export class SubscriptionScope<D extends CoValue> {
     // TODO: remove
     if (
       (this.schema.sourceSchema as any).name &&
-      (this.schema.sourceSchema as any).name.includes("CoList")
+      ((this.schema.sourceSchema as any).name.includes("CoList") ||
+        (this.schema.sourceSchema as any).name.includes("CoFeed"))
     ) {
-      throw new Error("use the CoListSchema instead of the CoList class");
+      throw new Error(
+        "use the CoListSchema or CoFeedSchema instead of the CoList or CoFeed class",
+      );
     }
 
     let lastUpdate:
@@ -891,7 +894,8 @@ export class SubscriptionScope<D extends CoValue> {
     // TODO: remove
     if (
       (descriptor.sourceSchema as any).name &&
-      (descriptor.sourceSchema as any).name.includes("CoList")
+      ((descriptor.sourceSchema as any).name.includes("CoList") ||
+        (descriptor.sourceSchema as any).name.includes("CoFeed"))
     ) {
       throw new Error("use the CoListSchema instead of the CoList class");
     }

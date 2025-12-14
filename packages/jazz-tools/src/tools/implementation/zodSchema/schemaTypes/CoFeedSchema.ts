@@ -16,6 +16,9 @@ import {
   subscribeToCoValueWithoutMe,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
+  parseCoValueCreateOptions,
+  SchemaField,
+  schemaFieldToFieldDescriptor,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoFeedSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
@@ -28,6 +31,7 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
+import { RawCoStream } from "cojson";
 
 export class CoFeedSchema<
   T extends AnyZodOrCoValueSchema,
@@ -72,10 +76,26 @@ export class CoFeedSchema<
       options,
       this.permissions,
     );
-    return this.coValueClass.create(
-      init as any,
-      optionsWithPermissions,
-    ) as CoFeedInstance<T>;
+    const { owner } = parseCoValueCreateOptions(options);
+
+    const itemFieldDescriptor = schemaFieldToFieldDescriptor(
+      this.element as SchemaField, // TODO we should enforce this at runtime
+    );
+
+    const raw = owner.$jazz.raw.createStream();
+    const instance = new this.coValueClass(itemFieldDescriptor, raw, this);
+
+    if (init) {
+      instance.$jazz.push(...init);
+    }
+    return instance;
+  }
+
+  fromRaw(raw: RawCoStream): CoFeedInstance<T> {
+    const itemFieldDescriptor = schemaFieldToFieldDescriptor(
+      this.element as SchemaField, // TODO we should enforce this at runtime
+    );
+    return new this.coValueClass(itemFieldDescriptor, raw, this);
   }
 
   load<
@@ -92,9 +112,8 @@ export class CoFeedSchema<
     },
   ): Promise<Settled<Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>>> {
     return loadCoValueWithoutMe(
-      this.coValueClass,
+      this,
       id,
-      // @ts-expect-error TODO: remove this
       withSchemaResolveQuery(options, this.resolveQuery),
     ) as Promise<Settled<Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>>>;
   }
@@ -113,7 +132,7 @@ export class CoFeedSchema<
     },
   ): Promise<void> {
     return unstable_mergeBranchWithResolve(
-      this.coValueClass,
+      this,
       id,
       // @ts-expect-error
       withSchemaResolveQuery(options, this.resolveQuery),
@@ -143,9 +162,8 @@ export class CoFeedSchema<
   subscribe(id: string, ...args: any) {
     const { options, listener } = parseSubscribeRestArgs(args);
     return subscribeToCoValueWithoutMe(
-      this.coValueClass,
+      this,
       id,
-      // @ts-expect-error TODO: remove this
       withSchemaResolveQuery(options, this.resolveQuery),
       listener as any,
     );

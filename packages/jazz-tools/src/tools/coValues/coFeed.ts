@@ -46,6 +46,7 @@ import {
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
+  CoreCoFeedSchema,
 } from "../internal.js";
 
 /** @deprecated Use CoFeedEntry instead */
@@ -92,9 +93,6 @@ export { CoFeed as CoStream };
 export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   declare $jazz: CoFeedJazzApi<this>;
 
-  /** @internal */
-  static itemSchema: FieldDescriptor;
-
   /** @category Type Helpers */
   declare [TypeSym]: "CoStream";
   static {
@@ -103,9 +101,6 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
 
   /** @internal This is only a marker type and doesn't exist at runtime */
   [ItemsMarker]!: Item;
-  /** @internal */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  static _schema: any;
 
   /**
    * The current account's view of this `CoFeed`
@@ -176,50 +171,21 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   }
 
   /** @internal */
-  constructor(itemSchema: FieldDescriptor, raw: RawCoStream) {
+  constructor(
+    itemSchema: FieldDescriptor,
+    raw: RawCoStream,
+    sourceSchema: CoreCoFeedSchema,
+  ) {
     super();
 
     Object.defineProperties(this, {
       $jazz: {
-        value: new CoFeedJazzApi(this, raw, itemSchema),
+        value: new CoFeedJazzApi(this, raw, itemSchema, sourceSchema),
         enumerable: false,
       },
     });
 
     return this;
-  }
-
-  static fromRaw<S extends CoValue>(
-    this: CoValueClass<S>,
-    fromRaw: RawCoStream,
-  ) {
-    return new this(
-      (this as unknown as { itemSchema: FieldDescriptor }).itemSchema,
-      fromRaw,
-    );
-  }
-
-  /**
-   * Create a new `CoFeed`
-   * @category Creation
-   * @deprecated Use `co.feed(...).create` instead.
-   */
-  static create<S extends CoFeed>(
-    this: CoValueClass<S>,
-    init: S extends CoFeed<infer Item> ? Item[] : never,
-    options?: { owner: Account | Group } | Account | Group,
-  ) {
-    const { owner } = parseCoValueCreateOptions(options);
-    const raw = owner.$jazz.raw.createStream();
-    const instance = new this(
-      (this as unknown as { itemSchema: FieldDescriptor }).itemSchema,
-      raw,
-    );
-
-    if (init) {
-      instance.$jazz.push(...init);
-    }
-    return instance;
   }
 
   /**
@@ -274,8 +240,13 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
     private coFeed: F,
     public raw: RawCoStream,
     public itemSchema: FieldDescriptor,
+    public sourceSchema: CoreCoFeedSchema,
   ) {
     super(coFeed);
+
+    if (!this.sourceSchema) {
+      throw new Error("sourceSchema is required");
+    }
   }
 
   get owner(): Group {

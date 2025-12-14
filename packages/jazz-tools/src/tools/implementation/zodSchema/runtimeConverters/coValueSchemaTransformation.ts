@@ -129,13 +129,10 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
       CoList,
     ) as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoFeed") {
-    const element = schema.element;
-    const coValueClass = class ZCoFeed extends CoFeed {
-      static itemSchema = schemaFieldToFieldDescriptor(element as SchemaField);
-    };
-
-    const coValueSchema = new CoFeedSchema(schema.element, coValueClass);
-    return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
+    return new CoFeedSchema(
+      schema.element,
+      CoFeed,
+    ) as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "FileStream") {
     const coValueClass = FileStream;
     return new FileStreamSchema(coValueClass) as CoValueSchemaFromCoreSchema<S>;
