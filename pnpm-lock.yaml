@@ -2410,22 +2410,22 @@ importers:
         specifier: ^0.25.5
         version: 0.25.8(effect@3.11.9)
       cojson:
-        specifier: workspace:0.19.11
+        specifier: workspace:0.19.12
         version: link:../cojson
       cojson-storage-sqlite:
-        specifier: workspace:0.19.11
+        specifier: workspace:0.19.12
         version: link:../cojson-storage-sqlite
       cojson-transport-ws:
-        specifier: workspace:0.19.11
+        specifier: workspace:0.19.12
         version: link:../cojson-transport-ws
       effect:
         specifier: ^3.6.5
         version: 3.11.9
       jazz-tools:
-        specifier: workspace:0.19.11
+        specifier: workspace:0.19.12
         version: link:../jazz-tools
       jazz-webhook:
-        specifier: workspace:0.19.11
+        specifier: workspace:0.19.12
         version: link:../jazz-webhook
       ws:
         specifier: ^8.14.2
@@ -4544,6 +4544,7 @@ packages:
   '@base-ui-components/react@1.0.0-beta.1':
     resolution: {integrity: sha512-7zmGiz4/+HKnv99lWftItoSMqnj2PdSvt2krh0/GP+Rj0xK0NMnFI/gIVvP7CB2G+k0JPUrRWXjXa3y08oiakg==}
     engines: {node: '>=14.0.0'}
+    deprecated: Package was renamed to @base-ui/react
     peerDependencies:
       '@types/react': 19.1.10
       react: 19.1.0
