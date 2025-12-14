@@ -7,6 +7,8 @@ import { GlobalStyles } from "./ui/global-styles";
 import { PageStack } from "./viewer/page-stack";
 import { AccountSwitcher } from "./account-switcher";
 
+export { recordMetrics } from "./utils/instrumentation";
+
 type InspectorAppProps = {
   defaultSyncServer?: string;
 };

@@ -10,15 +10,17 @@ import { useRouter } from "../router/context.js";
 export function Header({
   showDeleteLocalData = false,
   showClose = false,
+  showPerformance = false,
   onClose,
   children,
 }: PropsWithChildren<{
   showDeleteLocalData?: boolean;
   showClose?: boolean;
+  showPerformance?: boolean;
   onClose?: () => void;
 }>) {
   const [coValueId, setCoValueId] = useState<CoID<RawCoValue> | "">("");
-  const { path, setPage } = useRouter();
+  const { path, setPage, addPages } = useRouter();
 
   const handleCoValueIdSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -44,6 +46,16 @@ export function Header({
         </Form>
       )}
       {children}
+      {showPerformance && (
+        <Button
+          type="button"
+          onClick={() =>
+            addPages([{ coId: "performance" as any, name: "Performance" }])
+          }
+        >
+          Perf
+        </Button>
+      )}
       {showDeleteLocalData && <DeleteLocalData />}
       {showClose && (
         <Button variant="plain" type="button" onClick={onClose}>

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Account, Group, co, z } from "../exports.js";
 import {
   CoValueLoadingState,
@@ -7,6 +7,10 @@ import {
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { JazzError } from "../subscribe/JazzError.js";
 import { SubscriptionScope } from "../subscribe/SubscriptionScope.js";
+import {
+  createTestMetricReader,
+  tearDownTestMetricReader,
+} from "./testMetricUtils.js";
 
 describe("SubscriptionScope", () => {
   const Person = co.map({
@@ -390,6 +394,113 @@ describe("SubscriptionScope", () => {
       const loadedValue = scope.getCurrentValue();
       expect(loadedValue).toBe(loadedPerson);
       expect(loadedValue.$isLoaded).toBe(true);
+
+      scope.destroy();
+    });
+  });
+
+  describe("OTel metrics", () => {
+    let metricReader: ReturnType<typeof createTestMetricReader>;
+
+    beforeEach(() => {
+      metricReader = createTestMetricReader();
+    });
+
+    afterEach(() => {
+      tearDownTestMetricReader();
+    });
+
+    it("tracks the number of active subscriptions", async () => {
+      const schema = {
+        ref: coValueClassFromCoValueClassOrSchema(Person),
+        optional: false,
+      };
+
+      const person = Person.create({ name: "John" });
+      const scope = new SubscriptionScope(
+        person.$jazz.raw.core.node,
+        true,
+        person.$jazz.id,
+        schema,
+      );
+
+      const dp = await metricReader.getMetricDataPoints(
+        "jazz-tools",
+        "jazz.subscription.active",
+      );
+      expect(dp).toHaveLength(1);
+      expect(dp[0]).toMatchObject({
+        attributes: {
+          id: person.$jazz.id,
+        },
+        value: 1,
+      });
+
+      expect(
+        await metricReader.getSumOfCounterMetric(
+          "jazz-tools",
+          "jazz.subscription.active",
+        ),
+      ).toBe(1);
+
+      const person2 = Person.create({ name: "John" });
+      const scope2 = new SubscriptionScope(
+        person2.$jazz.raw.core.node,
+        true,
+        person2.$jazz.id,
+        schema,
+      );
+
+      expect(
+        await metricReader.getSumOfCounterMetric(
+          "jazz-tools",
+          "jazz.subscription.active",
+        ),
+      ).toBe(2);
+
+      scope.destroy();
+
+      expect(
+        await metricReader.getSumOfCounterMetric(
+          "jazz-tools",
+          "jazz.subscription.active",
+        ),
+      ).toBe(1);
+
+      scope2.destroy();
+
+      expect(
+        await metricReader.getSumOfCounterMetric(
+          "jazz-tools",
+          "jazz.subscription.active",
+        ),
+      ).toBe(0);
+    });
+
+    it("tracks the duration of the first load", async () => {
+      const schema = {
+        ref: coValueClassFromCoValueClassOrSchema(Person),
+        optional: false,
+      };
+
+      const person = Person.create({ name: "John" });
+      person.$jazz.owner.makePublic();
+
+      const account2 = await createJazzTestAccount();
+
+      const scope = new SubscriptionScope(
+        account2.$jazz.raw.core.node,
+        true,
+        person.$jazz.id,
+        schema,
+      );
+
+      expect(
+        await metricReader.getMetricValue(
+          "jazz-tools",
+          "jazz.subscription.first_load",
+        ),
+      ).toBeGreaterThan(0);
 
       scope.destroy();
     });

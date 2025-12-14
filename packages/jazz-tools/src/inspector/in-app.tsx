@@ -33,6 +33,7 @@ export function InspectorInApp({
             showDeleteLocalData={true}
             showClose={true}
             onClose={() => setOpen(false)}
+            showPerformance={true}
           />
 
           <PageStack />

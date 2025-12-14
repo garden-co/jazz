@@ -1,4 +1,10 @@
-import { LocalNode, RawCoValue } from "cojson";
+import {
+  type UpDownCounter,
+  ValueType,
+  metrics,
+  Histogram,
+} from "@opentelemetry/api";
+import type { LocalNode, RawCoValue } from "cojson";
 import {
   CoFeed,
   CoList,
@@ -68,6 +74,25 @@ export class SubscriptionScope<D extends CoValue> {
   closed = false;
   constructionTime = performance.now();
   startLoadingChildrenTime?: number;
+  firstLoadRecorded = false;
+  sourceId: ID<D>;
+
+  private activeSubCounter: UpDownCounter = metrics
+    .getMeter("jazz-tools")
+    .createUpDownCounter("jazz.subscription.active", {
+      description: "The number of active subscriptions",
+      unit: "covalue",
+      valueType: ValueType.INT,
+    });
+
+  private firstLoadMetric: Histogram = metrics
+    .getMeter("jazz-tools")
+    .createHistogram("jazz.subscription.first_load", {
+      description:
+        "Time elapsed between SubscriptionScope construction and first TriggerUpdate",
+      unit: "ms",
+      valueType: ValueType.DOUBLE,
+    });
 
   silenceUpdates = false;
 
@@ -85,9 +110,9 @@ export class SubscriptionScope<D extends CoValue> {
     public schema: RefEncoded<D>,
     public skipRetry = false,
     public bestEffortResolution = false,
-    public root: ID<D>,
     public unstable_branch?: BranchDefinition,
     callerStack?: Error | undefined,
+    sourceId?: ID<D>,
     public parent?: ID<D>,
     public parentKey?: string,
   ) {
@@ -95,14 +120,18 @@ export class SubscriptionScope<D extends CoValue> {
     this.callerStack = callerStack;
     this.resolve = resolve;
     this.value = { type: CoValueLoadingState.LOADING, id };
+    this.sourceId = sourceId ?? id;
 
     let lastUpdate:
       | RawCoValue
       | typeof CoValueLoadingState.UNAVAILABLE
       | undefined;
 
-    console.log("Construction time", this.constructionTime, this.id, resolve);
-
+    this.activeSubCounter.add(1, {
+      // It increments/decrements counters comparing the attributes
+      id: this.id,
+      source_id: this.sourceId,
+    });
     this.subscription = new CoValueCoreSubscription(
       node,
       id,
@@ -532,29 +561,44 @@ export class SubscriptionScope<D extends CoValue> {
       this.subscribers.forEach((listener) => listener(value));
     }
 
-    const simplifiedResolve = Object.entries(this.resolve).map(
-      ([key, value]) => key,
-    );
+    if (!this.firstLoadRecorded) {
+      const firstLoadTime = performance.now();
+      const duration = firstLoadTime - this.constructionTime;
+      this.firstLoadMetric.record(duration, {
+        id: this.id,
+        result: error ? "error" : "loaded",
+        parent_id: this.parent,
+        parent_key: this.parentKey,
+        source_id: this.sourceId,
+        resolve: JSON.stringify(this.resolve),
+      });
 
-    performance.measure(
-      (this.parentKey ? this.parentKey + "-" : "") +
-        this.id +
-        "-" +
-        simplifiedResolve.join(","),
-      {
-        start: this.constructionTime,
-        detail: {
-          id: this.id,
-          resolve: this.resolve,
-          type: error ? "error" : "loaded",
-          devtools: {
-            track: this.root,
-            trackGroup: "SubscriptionScopes",
-            color: error ? "error" : "primary",
+      performance.measure(
+        (this.parentKey ? this.parentKey + "-" : "") +
+          this.id +
+          "-" +
+          Object.keys(this.resolve).join(","),
+        {
+          start: this.constructionTime,
+          detail: {
+            id: this.id,
+            resolve: this.resolve,
+            type: error ? "error" : "loaded",
+            devtools: {
+              track: this.sourceId,
+              trackGroup: "SubscriptionScopes",
+              color: error ? "error" : "primary",
+              tooltipText: `Loaded from ${this.sourceId}`,
+              properties: {
+                resolve: this.resolve,
+              },
+            },
           },
         },
-      },
-    );
+      );
+
+      this.firstLoadRecorded = true;
+    }
 
     this.dirty = false;
   }
@@ -715,8 +759,9 @@ export class SubscriptionScope<D extends CoValue> {
       descriptor,
       this.skipRetry,
       this.bestEffortResolution,
-      this.root,
       this.unstable_branch,
+      undefined,
+      this.sourceId,
       this.id,
       "direct-by-id",
     );
@@ -749,7 +794,7 @@ export class SubscriptionScope<D extends CoValue> {
           id: this.id,
           resolve: this.resolve,
           devtools: {
-            track: this.root,
+            track: this.sourceId,
             trackGroup: "SubscriptionScopes",
             color: "secondary",
           },
@@ -988,8 +1033,9 @@ export class SubscriptionScope<D extends CoValue> {
       descriptor,
       this.skipRetry,
       this.bestEffortResolution,
-      this.root,
       this.unstable_branch,
+      undefined,
+      this.sourceId,
       this.id,
       key,
     );
@@ -1018,6 +1064,11 @@ export class SubscriptionScope<D extends CoValue> {
     // Clear subscriber change callbacks to prevent memory leaks
     this.subscriberChangeCallbacks.clear();
     this.childNodes.forEach((child) => child.destroy());
+
+    this.activeSubCounter.add(-1, {
+      id: this.id,
+      source_id: this.sourceId,
+    });
   }
 }
 

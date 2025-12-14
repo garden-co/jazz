@@ -44,7 +44,6 @@ export class Ref<out V extends CoValue> {
         this.schema,
         subscriptionScope.skipRetry,
         subscriptionScope.bestEffortResolution,
-        this.id,
         subscriptionScope.unstable_branch,
       );
     } else {
