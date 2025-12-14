@@ -1,5 +1,11 @@
 # hash-slash
 
+## 0.2.5
+
+### Patch Changes
+
+- d45f063: Fix issues with hashchange propagation when suspending the component
+
 ## 0.2.4
 
 ### Patch Changes
