@@ -19,8 +19,12 @@ import {
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
   getIdFromHeader,
+  parseCoValueCreateOptions,
+  toRawItems,
+  schemaFieldToFieldDescriptor,
+  SchemaField,
 } from "../../../internal.js";
-import { CoValueUniqueness, RawCoID } from "cojson";
+import { CoValueUniqueness, RawCoID, RawCoList } from "cojson";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoListSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
 import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
@@ -85,10 +89,31 @@ export class CoListSchema<
       options,
       this.permissions,
     );
-    return this.coValueClass.create(
-      items as any,
+
+    const { owner, uniqueness } = parseCoValueCreateOptions(
       optionsWithPermissions,
-    ) as CoListInstance<T>;
+    );
+
+    const itemFieldDescriptor = schemaFieldToFieldDescriptor(
+      this.element as SchemaField, // TODO we should enforce this at runtime
+    );
+
+    const raw = owner.$jazz.raw.createList(
+      toRawItems([...items], itemFieldDescriptor, owner),
+      null,
+      "private",
+      uniqueness,
+    );
+
+    return new this.coValueClass(itemFieldDescriptor, raw, this);
+  }
+
+  fromRaw(raw: RawCoList): CoListInstance<T> {
+    const itemFieldDescriptor = schemaFieldToFieldDescriptor(
+      this.element as SchemaField, // TODO we should enforce this at runtime
+    );
+
+    return new this.coValueClass(itemFieldDescriptor, raw, this);
   }
 
   load<
@@ -104,7 +129,7 @@ export class CoListSchema<
     },
   ): Promise<Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>> {
     return loadCoValueWithoutMe(
-      this.coValueClass,
+      this,
       id,
       withSchemaResolveQuery(options, this.resolveQuery),
     ) as Promise<Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>>;
@@ -123,7 +148,7 @@ export class CoListSchema<
     },
   ): Promise<void> {
     return unstable_mergeBranchWithResolve(
-      this.coValueClass,
+      this,
       id,
       // @ts-expect-error
       withSchemaResolveQuery(options, this.resolveQuery),
@@ -143,7 +168,7 @@ export class CoListSchema<
     ) => void,
   ): () => void {
     return subscribeToCoValueWithoutMe(
-      this.coValueClass,
+      this,
       id,
       withSchemaResolveQuery(options, this.resolveQuery),
       listener as any,
@@ -195,7 +220,7 @@ export class CoListSchema<
       options.owner.$jazz.id,
     );
 
-    return internalLoadUnique(this.coValueClass, {
+    return internalLoadUnique(this, {
       header,
       owner: options.owner,
       resolve: withSchemaResolveQuery(
@@ -235,7 +260,7 @@ export class CoListSchema<
     });
     if (!owner.$isLoaded) return owner as any;
 
-    return internalLoadUnique(this.coValueClass, {
+    return internalLoadUnique(this, {
       header,
       owner,
       resolve: withSchemaResolveQuery(

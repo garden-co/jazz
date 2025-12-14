@@ -456,7 +456,7 @@ function entryFromRawEntry<Item>(
         type: "ref",
         ref: Account,
         optional: false,
-        field: Account,
+        sourceSchema: Account,
       }) as Account;
 
       if (!account.$isLoaded) return null;

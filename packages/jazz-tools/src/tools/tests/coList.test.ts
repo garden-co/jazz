@@ -905,7 +905,7 @@ describe("CoList subscription", async () => {
     const spy = vi.fn((list) => updates.push(list));
 
     subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(TestList),
+      TestList,
       list.$jazz.id,
       {
         syncResolution: true,

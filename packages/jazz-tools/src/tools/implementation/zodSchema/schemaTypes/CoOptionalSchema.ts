@@ -1,5 +1,8 @@
+import { RawCoValue } from "cojson";
 import { CoValueSchemaFromCoreSchema } from "../zodSchema.js";
 import { CoreCoValueSchema } from "./CoValueSchema.js";
+import { InstanceOfSchema } from "../typeConverters/InstanceOfSchema.js";
+import { Group } from "../../../internal.js";
 
 type CoOptionalSchemaDefinition<
   Shape extends CoreCoValueSchema = CoreCoValueSchema,
@@ -32,5 +35,27 @@ export class CoOptionalSchema<
     CoValueSchemaFromCoreSchema<Shape>["getCoValueClass"]
   > {
     return (this.innerType as any).getCoValueClass();
+  }
+
+  fromRaw(raw: RawCoValue): InstanceOfSchema<Shape> {
+    if (
+      "fromRaw" in this.innerType &&
+      typeof this.innerType.fromRaw === "function"
+    ) {
+      return this.innerType.fromRaw(raw);
+    } else {
+      return (this.innerType as any).coValueClass.fromRaw(raw);
+    }
+  }
+
+  create(init: any, owner: Group): InstanceOfSchema<Shape> {
+    if (
+      "create" in this.innerType &&
+      typeof this.innerType.create === "function"
+    ) {
+      return this.innerType.create(init, owner);
+    } else {
+      return (this.innerType as any).coValueClass.create(init, owner);
+    }
   }
 }

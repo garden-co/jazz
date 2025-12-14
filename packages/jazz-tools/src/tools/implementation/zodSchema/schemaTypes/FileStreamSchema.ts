@@ -3,6 +3,7 @@ import {
   AnonymousJazzAgent,
   FileStream,
   Group,
+  RefsToResolve,
   Settled,
   SubscribeRestArgs,
   coOptionalDefiner,
@@ -199,7 +200,10 @@ export class FileStreamSchema implements CoreFileStreamSchema {
   ): () => void;
   subscribe(...args: [any, ...[any]]) {
     const [id, ...restArgs] = args;
-    const { options, listener } = parseSubscribeRestArgs(restArgs);
+    const { options, listener } = parseSubscribeRestArgs<
+      FileStream,
+      RefsToResolve<FileStream>
+    >(restArgs);
     return subscribeToCoValueWithoutMe(
       this.coValueClass,
       id,

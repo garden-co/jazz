@@ -91,6 +91,14 @@ export class SubscriptionScope<D extends CoValue> {
     this.resolve = resolve;
     this.value = { type: CoValueLoadingState.LOADING, id };
 
+    // TODO: remove
+    if (
+      (this.schema.sourceSchema as any).name &&
+      (this.schema.sourceSchema as any).name.includes("CoList")
+    ) {
+      throw new Error("use the CoListSchema instead of the CoList class");
+    }
+
     let lastUpdate:
       | RawCoValue
       | typeof CoValueLoadingState.UNAVAILABLE
@@ -880,6 +888,14 @@ export class SubscriptionScope<D extends CoValue> {
     descriptor: RefEncoded<any>,
     key?: string,
   ) {
+    // TODO: remove
+    if (
+      (descriptor.sourceSchema as any).name &&
+      (descriptor.sourceSchema as any).name.includes("CoList")
+    ) {
+      throw new Error("use the CoListSchema instead of the CoList class");
+    }
+
     if (this.isSubscribedToId(id)) {
       return;
     }

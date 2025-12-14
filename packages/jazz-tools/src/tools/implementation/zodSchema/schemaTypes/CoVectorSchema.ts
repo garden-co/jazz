@@ -5,6 +5,7 @@ import {
   Group,
   InstanceOrPrimitiveOfSchema,
   InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded,
+  RefsToResolve,
   Settled,
   SubscribeListenerOptions,
   SubscribeRestArgs,
@@ -132,7 +133,10 @@ export class CoVectorSchema implements CoreCoVectorSchema {
   ): () => void;
   subscribe(...args: [any, ...[any]]) {
     const [id, ...restArgs] = args;
-    const { options, listener } = parseSubscribeRestArgs(restArgs);
+    const { options, listener } = parseSubscribeRestArgs<
+      CoVector,
+      RefsToResolve<CoVector>
+    >(restArgs);
     return subscribeToCoValueWithoutMe(
       this.coValueClass,
       id,

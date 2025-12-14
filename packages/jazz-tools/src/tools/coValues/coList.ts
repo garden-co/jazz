@@ -38,6 +38,7 @@ import {
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
+  CoreCoListSchema,
 } from "../internal.js";
 
 /**
@@ -85,9 +86,6 @@ export class CoList<out Item = any>
   /** @internal This is only a marker type and doesn't exist at runtime */
   [ItemsMarker]!: Item; // TODO: get rid of this
 
-  /** @internal */
-  static itemSchema: FieldDescriptorFor<CoListItem<CoList>> | any;
-
   static get [Symbol.species]() {
     return Array;
   }
@@ -95,6 +93,7 @@ export class CoList<out Item = any>
   constructor(
     itemSchema: FieldDescriptorFor<CoListItem<CoList>>,
     raw: RawCoList,
+    sourceSchema: CoreCoListSchema,
   ) {
     super();
 
@@ -102,58 +101,13 @@ export class CoList<out Item = any>
 
     Object.defineProperties(this, {
       $jazz: {
-        value: new CoListJazzApi(proxy, raw, itemSchema),
+        value: new CoListJazzApi(proxy, raw, itemSchema, sourceSchema),
         enumerable: false,
       },
       $isLoaded: { value: true, enumerable: false },
     });
 
     return proxy;
-  }
-
-  /**
-   * Create a new CoList with the given initial values and owner.
-   *
-   * The owner (a Group or Account) determines access rights to the CoMap.
-   *
-   * The CoList will immediately be persisted and synced to connected peers.
-   *
-   * @example
-   * ```ts
-   * const colours = ColorList.create(
-   *   ["red", "green", "blue"],
-   *   { owner: me }
-   * );
-   * const animals = AnimalList.create(
-   *   [cat, dog, fish],
-   *   { owner: me }
-   * );
-   * ```
-   *
-   * @category Creation
-   * @deprecated Use `co.list(...).create` instead.
-   **/
-  static create<L extends CoList>(
-    // this: CoValueClass<L> & { itemSchema: SchemaFor<CoListItem<L>> | any },
-    items: L[number][],
-    options?:
-      | {
-          owner: Account | Group;
-          unique?: CoValueUniqueness["uniqueness"];
-        }
-      | Account
-      | Group,
-  ) {
-    const { owner, uniqueness } = parseCoValueCreateOptions(options);
-
-    const raw = owner.$jazz.raw.createList(
-      toRawItems(items, this.itemSchema, owner),
-      null,
-      "private",
-      uniqueness,
-    );
-
-    return new this(this.itemSchema, raw);
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -180,38 +134,6 @@ export class CoList<out Item = any>
   [inspect]() {
     return this.toJSON();
   }
-
-  /** @category Internals */
-  static fromRaw<V extends CoList>(
-    this: CoValueClass<V> & typeof CoList,
-    raw: RawCoList,
-  ) {
-    return new this(this.itemSchema, raw);
-  }
-
-  /**
-   * Load a `CoList` with a given ID, as a given account.
-   *
-   * `depth` specifies if item CoValue references should be loaded as well before resolving.
-   * The `DeeplyLoaded` return type guarantees that corresponding referenced CoValues are loaded to the specified depth.
-   *
-   * You can pass `[]` or for shallowly loading only this CoList, or `[itemDepth]` for recursively loading referenced CoValues.
-   *
-   * Check out the `load` methods on `CoMap`/`CoList`/`CoFeed`/`Group`/`Account` to see which depth structures are valid to nest.
-   *
-   * @example
-   * ```ts
-   * const animalsWithVets =
-   *   await ListOfAnimals.load(
-   *     "co_zdsMhHtfG6VNKt7RqPUPvUtN2Ax",
-   *     me,
-   *     [{ vet: {} }]
-   *   );
-   * ```
-   *
-   * @category Subscription & Loading
-   * @deprecated Use `co.list(...).load` instead.
-   */
 
   // Override mutation methods defined on Array, as CoLists aren't meant to be mutated directly
   /**
@@ -300,6 +222,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     public raw: RawCoList,
     /** @internal */
     public itemSchema: FieldDescriptorFor<CoListItem<L>> | any,
+    public sourceSchema: CoreCoListSchema,
   ) {
     super(coList);
   }
@@ -669,7 +592,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
  * @param owner - The owner of the CoList.
  * @returns The raw array of items.
  */
-function toRawItems<Item>(
+export function toRawItems<Item>(
   items: Item[],
   itemDescriptor: FieldDescriptor,
   owner: Group,

@@ -4,6 +4,7 @@ import {
   BranchDefinition,
   CoPlainText,
   Group,
+  RefsToResolve,
   Settled,
   SubscribeRestArgs,
   coOptionalDefiner,
@@ -89,7 +90,10 @@ export class PlainTextSchema implements CorePlainTextSchema {
   ): () => void;
   subscribe(...args: [any, ...[any]]) {
     const [id, ...restArgs] = args;
-    const { options, listener } = parseSubscribeRestArgs(restArgs);
+    const { options, listener } = parseSubscribeRestArgs<
+      CoPlainText,
+      RefsToResolve<CoPlainText>
+    >(restArgs);
     return subscribeToCoValueWithoutMe(
       this.coValueClass,
       id,

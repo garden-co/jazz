@@ -94,7 +94,8 @@ export class CoFeedSchema<
     return loadCoValueWithoutMe(
       this.coValueClass,
       id,
-      withSchemaResolveQuery(options, this.resolveQuery) ?? {},
+      // @ts-expect-error TODO: remove this
+      withSchemaResolveQuery(options, this.resolveQuery),
     ) as Promise<Settled<Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>>>;
   }
 
@@ -144,6 +145,7 @@ export class CoFeedSchema<
     return subscribeToCoValueWithoutMe(
       this.coValueClass,
       id,
+      // @ts-expect-error TODO: remove this
       withSchemaResolveQuery(options, this.resolveQuery),
       listener as any,
     );

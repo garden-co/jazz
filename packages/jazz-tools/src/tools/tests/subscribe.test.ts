@@ -404,7 +404,7 @@ describe("subscribeToCoValue", () => {
     const updateFn = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(TestList),
+      TestList,
       list.$jazz.id,
       {
         loadAs: account,
@@ -465,7 +465,7 @@ describe("subscribeToCoValue", () => {
     const onUnauthorized = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(TestList),
+      TestList,
       list.$jazz.id,
       {
         loadAs: reader,
@@ -538,7 +538,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(TestList),
+      TestList,
       list.$jazz.id,
       {
         loadAs: reader,
@@ -610,7 +610,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(TestList),
+      TestList,
       list.$jazz.id,
       {
         loadAs: reader,
@@ -680,7 +680,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(TestList),
+      TestList,
       list.$jazz.id,
       {
         loadAs: reader,
@@ -732,7 +732,7 @@ describe("subscribeToCoValue", () => {
     });
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(TestList),
+      TestList,
       list.$jazz.id,
       {
         loadAs: creator,
@@ -799,7 +799,7 @@ describe("subscribeToCoValue", () => {
     });
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(TestList),
+      TestList,
       list.$jazz.id,
       {
         loadAs: creator,
@@ -977,7 +977,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(TestList),
+      TestList,
       list.$jazz.id,
       {
         loadAs: reader,
@@ -1064,7 +1064,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(PersonList),
+      PersonList,
       list.$jazz.id,
       {
         loadAs: reader,
@@ -1170,7 +1170,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(PersonList),
+      PersonList,
       list.$jazz.id,
       {
         loadAs: reader,
@@ -1321,7 +1321,7 @@ describe("subscribeToCoValue", () => {
     const spy = vi.fn();
     // Test subscribing to the large coValue
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(PersonList),
+      PersonList,
       personList.$jazz.id,
       {
         loadAs: alice,

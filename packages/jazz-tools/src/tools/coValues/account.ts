@@ -78,19 +78,22 @@ export class Account extends CoValueBase implements CoValue {
    */
   declare $jazz: AccountJazzApi<this>;
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   static fields: CoMapFieldSchema = {
     profile: {
       type: "ref",
       ref: () => Profile,
       optional: false,
-      field: Profile,
+      get sourceSchema() {
+        return Profile;
+      },
     } satisfies RefEncoded<Profile>,
     root: {
       type: "ref",
       ref: () => RegisteredSchemas["CoMap"],
       optional: true,
-      field: RegisteredSchemas["CoMap"],
+      get sourceSchema() {
+        return RegisteredSchemas["CoMap"];
+      },
     } satisfies RefEncoded<CoMap>,
   };
 

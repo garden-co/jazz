@@ -210,7 +210,7 @@ export class SubscriptionCache {
       type: "ref",
       ref: coValueClassFromCoValueClassOrSchema(schema) as any,
       optional: true,
-      field: schema,
+      sourceSchema: schema,
     };
 
     // Create new SubscriptionScope with all required parameters

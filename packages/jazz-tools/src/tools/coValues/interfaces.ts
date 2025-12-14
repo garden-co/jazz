@@ -30,9 +30,11 @@ import {
   coValueClassFromCoValueClassOrSchema,
   inspect,
   co,
+  CoreCoListSchema,
 } from "../internal.js";
 import type { BranchDefinition } from "../subscribe/types.js";
 import { CoValueHeader } from "cojson";
+import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoValueSchema.js";
 
 /** @category Abstract interfaces */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -68,6 +70,7 @@ export interface CoValue {
     isBranched: boolean;
     branchName: string | undefined;
     unstable_merge: () => void;
+    sourceSchema?: CoreCoValueSchema;
   };
   /**
    * Whether the CoValue is loaded. Can be used to distinguish between loaded and {@link NotLoaded} CoValues.
@@ -140,7 +143,7 @@ export function loadCoValueWithoutMe<
   V extends CoValue,
   const R extends RefsToResolve<V> = true,
 >(
-  cls: CoValueClass<V>,
+  cls: CoValueClass<V> | CoreCoListSchema,
   id: ID<CoValue>,
   options?: {
     resolve?: RefsToResolveStrict<V, R>;
@@ -160,7 +163,7 @@ export function loadCoValue<
   V extends CoValue,
   const R extends RefsToResolve<V>,
 >(
-  cls: CoValueClass<V>,
+  cls: CoValueClass<V> | CoreCoListSchema,
   id: ID<CoValue>,
   options: {
     resolve?: RefsToResolveStrict<V, R>;
@@ -203,7 +206,8 @@ export async function ensureCoValueLoaded<
     | undefined,
 ): Promise<Resolved<V, R>> {
   const response = await loadCoValue(
-    existing.constructor as CoValueClass<V>,
+    (existing.$jazz.sourceSchema as CoreCoListSchema) ??
+      (existing.constructor as CoValueClass<V>),
     existing.$jazz.id,
     {
       loadAs: existing.$jazz.loadedAs,
@@ -280,7 +284,7 @@ export function subscribeToCoValueWithoutMe<
   V extends CoValue,
   const R extends RefsToResolve<V> = true,
 >(
-  cls: CoValueClass<V>,
+  cls: CoValueClass<V> | CoreCoListSchema,
   id: ID<CoValue>,
   options: SubscribeListenerOptions<V, R>,
   listener: SubscribeListener<V, R>,
@@ -300,7 +304,7 @@ export function subscribeToCoValue<
   V extends CoValue,
   const R extends RefsToResolve<V> = true,
 >(
-  cls: CoValueClass<V>,
+  cls: CoValueClass<V> | CoreCoListSchema,
   id: ID<CoValue>,
   options: {
     resolve?: RefsToResolveStrict<V, R>;
@@ -326,9 +330,15 @@ export function subscribeToCoValue<
     id as ID<V>,
     {
       type: "ref",
-      ref: cls,
+      ref: isCoValueClass<V>(cls)
+        ? cls
+        : () => {
+            throw new Error(
+              "should be using sourceSchema instead of expecting a class",
+            );
+          },
       optional: false,
-      field: cls,
+      sourceSchema: cls,
     },
     options.skipRetry,
     false,
@@ -392,7 +402,8 @@ export function subscribeToExistingCoValue<
   listener: SubscribeListener<V, R>,
 ): () => void {
   return subscribeToCoValue(
-    existing.constructor as CoValueClass<V>,
+    (existing.$jazz.sourceSchema as CoreCoListSchema) ??
+      (existing.constructor as CoValueClass<V>),
     existing.$jazz.id,
     {
       loadAs: existing.$jazz.loadedAs,
@@ -554,7 +565,7 @@ export async function internalLoadUnique<
   V extends CoValue,
   R extends RefsToResolve<V>,
 >(
-  cls: CoValueClass<V>,
+  cls: CoValueClass<V> | CoreCoListSchema,
   options: {
     header: CoValueHeader;
     onCreateWhenMissing?: () => void;
@@ -692,7 +703,7 @@ export async function exportCoValue<
       type: "ref",
       ref: coValueClassFromCoValueClassOrSchema(cls),
       optional: false,
-      field: cls,
+      sourceSchema: cls,
     },
     options.skipRetry,
     options.bestEffortResolution,
@@ -863,7 +874,7 @@ export async function unstable_mergeBranchWithResolve<
       type: "ref",
       ref: coValueClassFromCoValueClassOrSchema(cls),
       optional: false,
-      field: cls,
+      sourceSchema: cls,
     },
     false,
     false,

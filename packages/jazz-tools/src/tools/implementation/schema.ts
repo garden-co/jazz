@@ -43,7 +43,7 @@ export type RefEncoded<V extends CoValue> = {
   ref: CoValueClass<V> | ((raw: RawCoValue) => CoValueClass<V>);
   optional: boolean;
   permissions?: RefPermissions;
-  field: CoreCoValueSchema | CoValueClass;
+  sourceSchema: CoreCoValueSchema | CoValueClass;
 };
 
 export function isRefEncoded<V extends CoValue>(
@@ -63,6 +63,20 @@ export function instantiateRefEncodedFromRaw<V extends CoValue>(
   schema: RefEncoded<V>,
   raw: RawCoValue,
 ): V {
+  if (!schema.sourceSchema) {
+    throw new Error("sourceSchema is required");
+  }
+
+  if (
+    "fromRaw" in schema.sourceSchema &&
+    typeof schema.sourceSchema.fromRaw === "function"
+  ) {
+    // new path if CoValueSchema has a fromRaw method
+    return schema.sourceSchema.fromRaw(raw);
+  }
+  if ((schema.ref as any).name && (schema.ref as any).name.includes("CoList")) {
+    throw new Error("use the CoListSchema instead of the CoList class");
+  }
   return isCoValueClass<V>(schema.ref)
     ? schema.ref.fromRaw(raw)
     : (schema.ref as (raw: RawCoValue) => CoValueClass<V> & CoValueFromRaw<V>)(
@@ -88,7 +102,13 @@ export function instantiateRefEncodedWithInit<V extends CoValue>(
   newOwnerStrategy: NewInlineOwnerStrategy = extendContainerOwner,
   onCreate?: RefOnCreateCallback,
 ): V {
-  if (!isCoValueClass<V>(schema.ref)) {
+  if (
+    !isCoValueClass<V>(schema.ref) &&
+    !(
+      "create" in schema.sourceSchema &&
+      typeof schema.sourceSchema.create === "function"
+    )
+  ) {
     throw Error(
       `Cannot automatically create CoValue from value: ${JSON.stringify(init)}. Use the CoValue schema's create() method instead.`,
     );
@@ -99,6 +119,14 @@ export function instantiateRefEncodedWithInit<V extends CoValue>(
     init,
   );
   onCreate?.(owner, init);
+
+  if (
+    "create" in schema.sourceSchema &&
+    typeof schema.sourceSchema.create === "function"
+  ) {
+    // new path if CoValueSchema has a create method
+    return schema.sourceSchema.create(init, owner);
+  }
   // @ts-expect-error - create is a static method in all CoValue classes
   return schema.ref.create(init, owner);
 }

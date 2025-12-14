@@ -3,6 +3,7 @@ import {
   BranchDefinition,
   CoRichText,
   Group,
+  RefsToResolve,
   Settled,
   SubscribeRestArgs,
   coOptionalDefiner,
@@ -84,7 +85,10 @@ export class RichTextSchema implements CoreRichTextSchema {
   ): () => void;
   subscribe(...args: [any, ...[any]]) {
     const [id, ...restArgs] = args;
-    const { options, listener } = parseSubscribeRestArgs(restArgs);
+    const { options, listener } = parseSubscribeRestArgs<
+      CoRichText,
+      RefsToResolve<CoRichText>
+    >(restArgs);
     return subscribeToCoValueWithoutMe(
       this.coValueClass,
       id,

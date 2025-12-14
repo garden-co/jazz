@@ -19,7 +19,7 @@ describe("SubscriptionScope", () => {
     type: "ref",
     ref: coValueClassFromCoValueClassOrSchema(Person),
     optional: false,
-    field: Person,
+    sourceSchema: Person,
   } satisfies RefEncoded<InstanceOfSchema<typeof Person>>;
 
   beforeEach(async () => {

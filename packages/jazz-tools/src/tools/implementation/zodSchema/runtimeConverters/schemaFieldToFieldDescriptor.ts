@@ -107,7 +107,7 @@ export function schemaFieldToFieldDescriptor(
       ref: schema,
       permissions: getDefaultRefPermissions(),
       optional: false,
-      field: schema,
+      sourceSchema: schema,
     });
   } else if (isCoValueSchema(schema)) {
     return cacheSchemaField(schema, {
@@ -115,7 +115,7 @@ export function schemaFieldToFieldDescriptor(
       ref: schema.getCoValueClass(),
       permissions: schemaFieldPermissions(schema),
       optional: schema.builtin === "CoOptional",
-      field: schema,
+      sourceSchema: schema,
     });
   } else {
     if ("_zod" in schema) {
