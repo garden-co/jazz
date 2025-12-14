@@ -1,6 +1,8 @@
 import { TodoList } from "@/app/TodoList";
 import { jazzSSR } from "@/jazzSSR";
 import { JazzAccountWithTodos } from "@/schema";
+import { syncServerContent } from "./syncServer";
+import { clientContent } from "./client";
 
 export default async function ServerSidePage(props: {
   params: Promise<{ id: string }>;
@@ -9,6 +11,9 @@ export default async function ServerSidePage(props: {
   const account = await JazzAccountWithTodos.load(id, {
     loadAs: jazzSSR,
   });
+
+  jazzSSR.node.syncManager.handleNewContent(syncServerContent, "import");
+  jazzSSR.node.syncManager.handleNewContent(clientContent, "import"); // This triggers an InvalidSignature only when added on top of the syncServerContent
 
   if (!account.$isLoaded) {
     return <div>{account.$jazz.loadingState}</div>;
