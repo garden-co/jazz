@@ -1,0 +1,43 @@
+/* Blue color for light color scheme (Default) */
+/* Can be forced with data-theme="light" */
+[data-theme='light'],
+:root:not([data-theme='dark']),
+:host:not([data-theme='dark']) {
+  --pico-text-selection-color: rgba(20, 106, 255, 0.25);
+  --pico-primary: #146aff;
+  --pico-primary-background: #146aff;
+  --pico-primary-underline: rgba(20, 106, 255, 0.5);
+  --pico-primary-hover: #0e4acb;
+  --pico-primary-hover-background: #0e4acb;
+  --pico-primary-focus: rgba(20, 106, 255, 0.5);
+  --pico-primary-inverse: #fff;
+}
+
+/* Blue color for dark color scheme (Auto) */
+/* Automatically enabled if user has Dark mode enabled */
+@media only screen and (prefers-color-scheme: dark) {
+  :root:not([data-theme]),
+  :host:not([data-theme]) {
+    --pico-text-selection-color: rgba(92, 146, 255, 0.1875);
+    --pico-primary: #5c92ff;
+    --pico-primary-background: #146aff;
+    --pico-primary-underline: rgba(92, 146, 255, 0.5);
+    --pico-primary-hover: #85b0ff;
+    --pico-primary-hover-background: #2f74ff;
+    --pico-primary-focus: rgba(92, 146, 255, 0.375);
+    --pico-primary-inverse: #fff;
+  }
+}
+
+/* Blue color for dark color scheme (Forced) */
+/* Enabled if forced with data-theme="dark" */
+[data-theme='dark'] {
+  --pico-text-selection-color: rgba(92, 146, 255, 0.1875);
+  --pico-primary: #5c92ff;
+  --pico-primary-background: #146aff;
+  --pico-primary-underline: rgba(92, 146, 255, 0.5);
+  --pico-primary-hover: #85b0ff;
+  --pico-primary-hover-background: #2f74ff;
+  --pico-primary-focus: rgba(92, 146, 255, 0.375);
+  --pico-primary-inverse: #fff;
+}

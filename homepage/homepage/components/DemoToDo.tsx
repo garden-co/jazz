@@ -1,18 +1,19 @@
 "use client";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export const DemoToDo = () => {
   const HEIGHT = 350;
-  let frameA = useRef<HTMLIFrameElement>(null);
-  let frameB = useRef<HTMLIFrameElement>(null);
+  const frameA = useRef<HTMLIFrameElement>(null);
+  const frameB = useRef<HTMLIFrameElement>(null);
+
+  const [activeListId, setActiveListId] = useState<string | null>(null);
+
   useEffect(() => {
     const handler = (e: MessageEvent) => {
-      if (e.data?.type === "id-generated" && frameA.current && frameB.current) {
-        const id = e.data.id;
-        if (e.source === frameA.current.contentWindow) {
-          frameB.current.src = "/simplest-jazz-todo.html?id=" + id;
-        }
-      }
+      if (e.origin !== window.location.origin) return;
+      if (e.data?.type !== "id-generated") return;
+      setActiveListId(e.data.id);
+      return;
     };
 
     window.addEventListener("message", handler);
@@ -24,24 +25,28 @@ export const DemoToDo = () => {
       <div className="rounded-2xl outline-4">
         <iframe
           ref={frameA}
-          id="childA"
-          src="/simplest-jazz-todo.html"
-          style={{ overflowY: "auto" }}
+          src="/minimal-example/index.html"
           height={HEIGHT}
           width="100%"
           title="Jazz Todo List Demo Instance A"
-        ></iframe>
+        />
       </div>
+
       <div className="rounded-2xl outline-4">
-        <iframe
-          ref={frameB}
-          id="childB"
-          src="/simplest-jazz-todo.html"
-          style={{ overflowY: "auto" }}
-          height={HEIGHT}
-          width="100%"
-          title="Jazz Todo List Demo Instance B"
-        ></iframe>
+        {activeListId ? (
+          <iframe
+            ref={frameB}
+            src={`/minimal-example/index.html?id=${activeListId}`}
+            height={HEIGHT}
+            width="100%"
+            title="Jazz Todo List Demo Instance B"
+          />
+        ) : (
+          <div
+            style={{ height: HEIGHT }}
+            className="flex items-center justify-center bg-gray-50 text-gray-400"
+          ></div>
+        )}
       </div>
     </div>
   );
