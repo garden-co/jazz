@@ -10,7 +10,7 @@ export class BrowserSessionProvider implements SessionProvider {
     const { sessionPromise, resolveSession } = createSessionLockPromise();
 
     // Get the list of sessions for the account, to try to acquire an existing session
-    const sessionsList = await acquireSessionList(accountID);
+    const sessionsList = SessionIDStorage.getSessionsList(accountID);
 
     for (const [index, sessionID] of sessionsList.entries()) {
       const sessionAcquired = await tryToAcquireSession(
@@ -95,21 +95,6 @@ function tryToAcquireSession(
       },
     );
   });
-}
-
-function acquireSessionList(accountID: ID<Account> | AgentID) {
-  return navigator.locks.request(
-    `get_sessions_list_${accountID}`,
-    { mode: "shared" },
-    async (lock) => {
-      if (!lock) {
-        console.error("Couldn't get lock to get sessions list", accountID);
-        return [];
-      }
-
-      return SessionIDStorage.getSessionsList(accountID);
-    },
-  );
 }
 
 function storeSessionID(
