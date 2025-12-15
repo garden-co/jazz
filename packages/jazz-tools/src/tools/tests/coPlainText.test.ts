@@ -7,10 +7,10 @@ import {
   createJazzContextFromExistingCredentials,
   isControlledAccount,
 } from "../index.js";
-import { co, randomSessionProvider } from "../internal.js";
+import { co, MockSessionProvider } from "../internal.js";
 
 const Crypto = await WasmCrypto.create();
-
+const randomSessionProvider = new MockSessionProvider();
 const connectedPeers = cojsonInternals.connectedPeers;
 
 describe("CoPlainText", () => {

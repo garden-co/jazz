@@ -7,7 +7,7 @@ import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import {
   Account,
   createJazzContextFromExistingCredentials,
-  randomSessionProvider,
+  MockSessionProvider,
 } from "../index";
 import {
   CoValue,
@@ -45,7 +45,7 @@ export async function setupAccount() {
         accountID: me.$jazz.id,
         secret: me.$jazz.localNode.getCurrentAgent().agentSecret,
       },
-      sessionProvider: randomSessionProvider,
+      sessionProvider: new MockSessionProvider(),
       peers: [initialAsPeer],
       crypto: Crypto,
       asActiveAccount: true,

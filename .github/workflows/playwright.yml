@@ -30,7 +30,7 @@ jobs:
         uses: ./.github/actions/source-code/
 
       - name: Install Playwright Browsers
-        run: pnpm exec playwright install
+        run: pnpm exec playwright install --with-deps
 
       - name: Run Playwright tests for shard ${{ matrix.shard }}
         run: |

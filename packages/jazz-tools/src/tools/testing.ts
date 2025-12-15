@@ -16,8 +16,10 @@ import {
   coValueClassFromCoValueClassOrSchema,
   createAnonymousJazzContext,
   createJazzContext,
-  randomSessionProvider,
+  MockSessionProvider,
 } from "./internal.js";
+
+const randomSessionProvider = new MockSessionProvider();
 
 export { assertLoaded } from "./lib/utils.js";
 

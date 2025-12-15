@@ -6,7 +6,7 @@ import {
   InMemoryKVStore,
   KvStoreContext,
   createJazzContext,
-  randomSessionProvider,
+  MockSessionProvider,
 } from "jazz-tools";
 
 export const initializeKvStore = () => {
@@ -18,7 +18,7 @@ export async function createAccount() {
   const { account, authSecretStorage } = await createJazzContext({
     defaultProfileName: "Inspector test account",
     crypto: await WasmCrypto.create(),
-    sessionProvider: randomSessionProvider,
+    sessionProvider: new MockSessionProvider(),
     authSecretStorage: new AuthSecretStorage(),
     peers: [
       createWebSocketPeer({

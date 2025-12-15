@@ -23,7 +23,7 @@ import {
   MaybeLoaded,
   Settled,
   co,
-  randomSessionProvider,
+  MockSessionProvider,
   CoValueLoadingState,
   CoValueErrorState,
 } from "../internal.js";
@@ -33,7 +33,7 @@ import { setCustomErrorReporter } from "../config.js";
 
 const Crypto = await WasmCrypto.create();
 const { connectedPeers } = cojsonInternals;
-
+const randomSessionProvider = new MockSessionProvider();
 const InnermostMap = co.map({
   value: z.string(),
 });
