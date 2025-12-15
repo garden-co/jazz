@@ -15,7 +15,7 @@ import {
   createJazzContext,
   createJazzContextForNewAccount,
   createJazzContextFromExistingCredentials,
-  randomSessionProvider,
+  MockSessionProvider,
 } from "../exports";
 import { activeAccountContext } from "../implementation/activeAccountContext";
 import {
@@ -26,6 +26,7 @@ import {
 import { assertLoaded, loadCoValueOrFail } from "./utils";
 const Crypto = await WasmCrypto.create();
 
+let randomSessionProvider = new MockSessionProvider();
 KvStoreContext.getInstance().initialize(new InMemoryKVStore());
 
 describe("createContext methods", () => {
@@ -35,6 +36,9 @@ describe("createContext methods", () => {
     authSecretStorage = new AuthSecretStorage();
     authSecretStorage.clear();
     await setupJazzTestSync();
+    randomSessionProvider = new MockSessionProvider();
+    vi.spyOn(randomSessionProvider, "acquireSession");
+    vi.spyOn(randomSessionProvider, "persistSession");
   });
 
   describe("createJazzContextFromExistingCredentials", () => {
@@ -49,6 +53,13 @@ describe("createContext methods", () => {
         secret: account.$jazz.localNode.getCurrentAgent().agentSecret,
       };
 
+      const sessionID = Crypto.newRandomSessionID(account.$jazz.raw.id);
+
+      vi.spyOn(randomSessionProvider, "acquireSession").mockResolvedValue({
+        sessionID: sessionID,
+        sessionDone: () => {},
+      });
+
       const context = await createJazzContextFromExistingCredentials({
         credentials,
         peers: [getPeerConnectedToTestSyncServer()],
@@ -60,8 +71,45 @@ describe("createContext methods", () => {
       expect(context.node).toBeDefined();
       expect(context.account).toBeDefined();
       expect(context.account.$jazz.id).toBe(credentials.accountID);
+      expect(context.node.currentSessionID).toBe(sessionID);
       expect(typeof context.done).toBe("function");
       expect(typeof context.logOut).toBe("function");
+    });
+
+    test("releasese the session when the context is done", async () => {
+      const spy = vi.fn();
+
+      // Create an account first to get valid credentials
+      const account = await createJazzTestAccount({
+        isCurrentActiveAccount: true,
+      });
+
+      const credentials: Credentials = {
+        accountID: account.$jazz.id,
+        secret: account.$jazz.localNode.getCurrentAgent().agentSecret,
+      };
+
+      const sessionID = Crypto.newRandomSessionID(account.$jazz.raw.id);
+
+      vi.spyOn(randomSessionProvider, "acquireSession").mockResolvedValue({
+        sessionID: sessionID,
+        sessionDone: spy,
+      });
+
+      const context = await createJazzContextFromExistingCredentials({
+        credentials,
+        peers: [getPeerConnectedToTestSyncServer()],
+        crypto: Crypto,
+        sessionProvider: randomSessionProvider,
+        asActiveAccount: true,
+      });
+
+      expect(randomSessionProvider.acquireSession).toHaveBeenCalled();
+      expect(spy).not.toHaveBeenCalled();
+
+      context.done();
+
+      expect(spy).toHaveBeenCalled();
     });
 
     test("handles custom account schema", async () => {
@@ -187,6 +235,7 @@ describe("createContext methods", () => {
         creationProps: { name: "New User" },
         peers: [],
         crypto: Crypto,
+        sessionProvider: randomSessionProvider,
       });
 
       expect(context.account).toBeDefined();
@@ -202,9 +251,36 @@ describe("createContext methods", () => {
         initialAgentSecret: initialSecret,
         peers: [],
         crypto: Crypto,
+        sessionProvider: randomSessionProvider,
       });
 
+      expect(randomSessionProvider.persistSession).toHaveBeenCalledWith(
+        context.account.$jazz.id,
+        context.node.currentSessionID,
+      );
+      expect(randomSessionProvider.acquireSession).not.toHaveBeenCalled();
       expect(context.node.getCurrentAgent().agentSecret).toBe(initialSecret);
+    });
+
+    test("releasese the session when the context is done", async () => {
+      const spy = vi.fn();
+      vi.spyOn(randomSessionProvider, "persistSession").mockResolvedValue({
+        sessionDone: spy,
+      });
+
+      const context = await createJazzContextForNewAccount({
+        creationProps: { name: "New User" },
+        peers: [],
+        crypto: Crypto,
+        sessionProvider: randomSessionProvider,
+      });
+
+      expect(randomSessionProvider.persistSession).toHaveBeenCalled();
+      expect(spy).not.toHaveBeenCalled();
+
+      context.done();
+
+      expect(spy).toHaveBeenCalled();
     });
 
     test("handles custom account schema", async () => {
@@ -220,6 +296,7 @@ describe("createContext methods", () => {
         peers: [],
         crypto: Crypto,
         AccountSchema: CustomAccount,
+        sessionProvider: randomSessionProvider,
       });
 
       expect(context.account).toBeInstanceOf(
@@ -232,6 +309,7 @@ describe("createContext methods", () => {
         creationProps: { name: "New User" },
         peers: [],
         crypto: Crypto,
+        sessionProvider: randomSessionProvider,
       });
       expect(activeAccountContext.get()).toBe(context.account);
     });

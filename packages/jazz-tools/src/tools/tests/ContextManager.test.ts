@@ -19,7 +19,7 @@ import {
 } from "../implementation/ContextManager";
 import {
   createJazzContext,
-  randomSessionProvider,
+  MockSessionProvider,
 } from "../implementation/createContext";
 import {
   CoValueFromRaw,
@@ -37,6 +37,7 @@ import { SubscriptionCache } from "../subscribe/SubscriptionCache";
 import { createAsyncStorage, getDbPath } from "./testStorage";
 
 const Crypto = await WasmCrypto.create();
+const randomSessionProvider = new MockSessionProvider();
 
 class TestJazzContextManager<Acc extends Account> extends JazzContextManager<
   Acc,
