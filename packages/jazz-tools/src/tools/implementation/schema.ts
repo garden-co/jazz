@@ -83,6 +83,24 @@ export function instantiateRefEncodedFromRaw<V extends CoValue>(
   ) {
     throw new Error("use the CoVectorSchema instead of the CoVector class");
   }
+  if (
+    (schema.ref as any).name &&
+    (schema.ref as any).name.includes("CoPlainText")
+  ) {
+    throw new Error("use the PlainTextSchema instead of the CoPlainText class");
+  }
+  if (
+    (schema.ref as any).name &&
+    (schema.ref as any).name.includes("CoRichText")
+  ) {
+    throw new Error("use the RichTextSchema instead of the CoRichText class");
+  }
+  if (
+    (schema.ref as any).name &&
+    (schema.ref as any).name.includes("FileStream")
+  ) {
+    throw new Error("use the FileStreamSchema instead of the FileStream class");
+  }
   return isCoValueClass<V>(schema.ref)
     ? schema.ref.fromRaw(raw)
     : (schema.ref as (raw: RawCoValue) => CoValueClass<V> & CoValueFromRaw<V>)(

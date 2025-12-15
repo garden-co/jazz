@@ -9,6 +9,7 @@ import {
   SubscribeRestArgs,
   coOptionalDefiner,
   loadCoValueWithoutMe,
+  parseCoValueCreateOptions,
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   unstable_mergeBranchWithResolve,
@@ -61,7 +62,8 @@ export class PlainTextSchema implements CorePlainTextSchema {
       options,
       this.permissions,
     );
-    return this.coValueClass.create(text, optionsWithPermissions);
+    const { owner } = parseCoValueCreateOptions(optionsWithPermissions);
+    return new this.coValueClass({ text, owner }, this);
   }
 
   load(
@@ -71,7 +73,7 @@ export class PlainTextSchema implements CorePlainTextSchema {
       unstable_branch?: BranchDefinition;
     },
   ): Promise<Settled<CoPlainText>> {
-    return loadCoValueWithoutMe(this.coValueClass, id, options) as Promise<
+    return loadCoValueWithoutMe(this, id, options) as Promise<
       Settled<CoPlainText>
     >;
   }
@@ -94,24 +96,27 @@ export class PlainTextSchema implements CorePlainTextSchema {
       CoPlainText,
       RefsToResolve<CoPlainText>
     >(restArgs);
-    return subscribeToCoValueWithoutMe(
-      this.coValueClass,
-      id,
-      options,
-      listener as any,
-    );
+    return subscribeToCoValueWithoutMe(this, id, options, listener as any);
   }
 
   unstable_merge(
     id: string,
-    options: { loadAs: Account | AnonymousJazzAgent },
+    options: {
+      loadAs: Account | AnonymousJazzAgent;
+      unstable_branch?: BranchDefinition;
+    },
   ): Promise<void> {
-    // @ts-expect-error
-    return unstable_mergeBranchWithResolve(this.coValueClass, id, options);
+    if (!options.unstable_branch) {
+      throw new Error("unstable_branch is required for unstable_merge");
+    }
+    return unstable_mergeBranchWithResolve(this, id, {
+      ...options,
+      branch: options.unstable_branch,
+    });
   }
 
   fromRaw(raw: RawCoPlainText): CoPlainText {
-    return this.coValueClass.fromRaw(raw);
+    return new this.coValueClass({ fromRaw: raw }, this);
   }
 
   getCoValueClass(): typeof CoPlainText {

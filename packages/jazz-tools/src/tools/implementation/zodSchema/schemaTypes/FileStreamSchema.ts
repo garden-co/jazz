@@ -1,6 +1,7 @@
 import {
   Account,
   AnonymousJazzAgent,
+  BranchDefinition,
   FileStream,
   Group,
   RefsToResolve,
@@ -8,11 +9,14 @@ import {
   SubscribeRestArgs,
   coOptionalDefiner,
   loadCoValueWithoutMe,
+  parseCoValueCreateOptions,
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
 } from "../../../internal.js";
+import { RawBinaryCoStream } from "cojson";
+import { cojsonInternals } from "cojson";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreCoValueSchema } from "./CoValueSchema.js";
 import {
@@ -52,7 +56,12 @@ export class FileStreamSchema implements CoreFileStreamSchema {
       options,
       this.permissions,
     );
-    return this.coValueClass.create(optionsWithPermissions);
+    const { owner } = parseCoValueCreateOptions(optionsWithPermissions);
+    return new this.coValueClass({ owner }, this);
+  }
+
+  fromRaw(raw: RawBinaryCoStream): FileStream {
+    return new this.coValueClass({ fromRaw: raw }, this);
   }
 
   createFromBlob(
@@ -69,7 +78,7 @@ export class FileStreamSchema implements CoreFileStreamSchema {
       | Account
       | Group,
   ): Promise<FileStream>;
-  createFromBlob(
+  async createFromBlob(
     blob: Blob | File,
     options?:
       | {
@@ -83,10 +92,16 @@ export class FileStreamSchema implements CoreFileStreamSchema {
       options,
       this.permissions,
     );
-    return this.coValueClass.createFromBlob(blob, optionsWithPermissions);
+    const arrayBuffer = await blob.arrayBuffer();
+    return this.createFromArrayBuffer(
+      arrayBuffer,
+      blob.type,
+      blob instanceof File ? blob.name : undefined,
+      optionsWithPermissions,
+    );
   }
 
-  createFromArrayBuffer(
+  async createFromArrayBuffer(
     arrayBuffer: ArrayBuffer,
     mimeType: string,
     fileName: string | undefined,
@@ -97,17 +112,53 @@ export class FileStreamSchema implements CoreFileStreamSchema {
         }
       | Account
       | Group,
-  ) {
+  ): Promise<FileStream> {
     const optionsWithPermissions = withSchemaPermissions(
       options,
       this.permissions,
     );
-    return this.coValueClass.createFromArrayBuffer(
-      arrayBuffer,
+    const { owner } = parseCoValueCreateOptions(optionsWithPermissions);
+    const stream = this.create({ owner });
+    const onProgress =
+      optionsWithPermissions && "onProgress" in optionsWithPermissions
+        ? optionsWithPermissions.onProgress
+        : undefined;
+
+    const start = Date.now();
+
+    const data = new Uint8Array(arrayBuffer);
+    stream.start({
       mimeType,
+      totalSizeBytes: arrayBuffer.byteLength,
       fileName,
-      optionsWithPermissions,
+    });
+    const chunkSize =
+      cojsonInternals.TRANSACTION_CONFIG.MAX_RECOMMENDED_TX_SIZE;
+
+    let lastProgressUpdate = Date.now();
+
+    for (let idx = 0; idx < data.length; idx += chunkSize) {
+      stream.push(data.slice(idx, idx + chunkSize));
+
+      if (Date.now() - lastProgressUpdate > 100) {
+        onProgress?.(idx / data.length);
+        lastProgressUpdate = Date.now();
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    stream.end();
+    const end = Date.now();
+
+    console.debug(
+      "Finished creating binary stream in",
+      (end - start) / 1000,
+      "s - Throughput in MB/s",
+      (1000 * (arrayBuffer.byteLength / (end - start))) / (1024 * 1024),
     );
+    onProgress?.(1);
+
+    return stream;
   }
 
   async loadAsBlob(
@@ -152,7 +203,11 @@ export class FileStreamSchema implements CoreFileStreamSchema {
       allowUnfinished?: boolean;
     },
   ): Promise<Settled<FileStream>> {
-    const stream = await loadCoValueWithoutMe(this.coValueClass, id, options);
+    const stream = (await loadCoValueWithoutMe(
+      this,
+      id,
+      options,
+    )) as FileStream;
 
     /**
      * If the user hasn't requested an incomplete blob and the
@@ -165,13 +220,14 @@ export class FileStreamSchema implements CoreFileStreamSchema {
     ) {
       return new Promise<FileStream>((resolve) => {
         subscribeToCoValueWithoutMe(
-          this.coValueClass,
+          this,
           id,
           options || {},
           (value, unsubscribe) => {
-            if (value.isBinaryStreamEnded()) {
+            const streamValue = value as FileStream;
+            if (streamValue.isBinaryStreamEnded()) {
               unsubscribe();
-              resolve(value);
+              resolve(streamValue);
             }
           },
         );
@@ -183,10 +239,18 @@ export class FileStreamSchema implements CoreFileStreamSchema {
 
   unstable_merge(
     id: string,
-    options: { loadAs: Account | AnonymousJazzAgent },
+    options: {
+      loadAs: Account | AnonymousJazzAgent;
+      unstable_branch?: BranchDefinition;
+    },
   ): Promise<void> {
-    // @ts-expect-error
-    return unstable_mergeBranchWithResolve(this.coValueClass, id, options);
+    if (!options.unstable_branch) {
+      throw new Error("unstable_branch is required for unstable_merge");
+    }
+    return unstable_mergeBranchWithResolve(this, id, {
+      ...options,
+      branch: options.unstable_branch,
+    });
   }
 
   subscribe(
@@ -204,12 +268,7 @@ export class FileStreamSchema implements CoreFileStreamSchema {
       FileStream,
       RefsToResolve<FileStream>
     >(restArgs);
-    return subscribeToCoValueWithoutMe(
-      this.coValueClass,
-      id,
-      options,
-      listener as any,
-    );
+    return subscribeToCoValueWithoutMe(this, id, options, listener as any);
   }
 
   getCoValueClass(): typeof FileStream {

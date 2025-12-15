@@ -1,7 +1,6 @@
 import { assert, beforeEach, describe, expect, test, vi } from "vitest";
 import { z } from "../exports.js";
 import {
-  CoPlainText as CoPlainTextClass,
   CoValueLoadingState,
   Group as GroupClass,
   Loaded,
@@ -219,7 +218,7 @@ describe("co.discriminatedUnion", () => {
       child: NoteItem.create({
         type: "note",
         internal: false,
-        content: CoPlainTextClass.create("Hello"),
+        content: co.plainText().create("Hello"),
       }),
     });
 
@@ -269,7 +268,7 @@ describe("co.discriminatedUnion", () => {
         NoteItem.create({
           type: "note",
           internal: false,
-          content: CoPlainTextClass.create("Hello"),
+          content: co.plainText().create("Hello"),
         }),
       ]),
     });

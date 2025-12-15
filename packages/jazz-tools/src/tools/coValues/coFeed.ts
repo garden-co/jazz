@@ -47,6 +47,7 @@ import {
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
   CoreCoFeedSchema,
+  CoreFileStreamSchema,
 } from "../internal.js";
 
 /** @deprecated Use CoFeedEntry instead */
@@ -604,6 +605,7 @@ export class FileStream extends CoValueBase implements CoValue {
       | {
           fromRaw: RawBinaryCoStream;
         },
+    sourceSchema: CoreFileStreamSchema,
   ) {
     super();
 
@@ -619,43 +621,10 @@ export class FileStream extends CoValueBase implements CoValue {
     Object.defineProperties(this, {
       [TypeSym]: { value: "BinaryCoStream", enumerable: false },
       $jazz: {
-        value: new FileStreamJazzApi(this, raw),
+        value: new FileStreamJazzApi(this, raw, sourceSchema),
         enumerable: false,
       },
     });
-  }
-
-  /**
-   * Create a new empty `FileStream` instance.
-   *
-   * @param options - Configuration options for the new FileStream
-   * @param options.owner - The Account or Group that will own this FileStream and control access rights
-   * @param schemaConfiguration - Internal schema configuration
-   *
-   * @example
-   * ```typescript
-   * // Create owned by an account
-   * const stream = FileStream.create({ owner: myAccount });
-   *
-   * // Create owned by a group
-   * const stream = FileStream.create({ owner: teamGroup });
-   *
-   * // Create with implicit owner
-   * const stream = FileStream.create(myAccount);
-   * ```
-   *
-   * @remarks
-   * For uploading an existing file or blob, use {@link FileStream.createFromBlob} instead.
-   *
-   * @category Creation
-   * @deprecated Use `co.fileStream(...).create` instead.
-   */
-  static create<S extends FileStream>(
-    this: CoValueClass<S>,
-    options?: { owner?: Account | Group } | Account | Group,
-  ) {
-    const { owner } = parseCoValueCreateOptions(options);
-    return new this({ owner });
   }
 
   getMetadata(): BinaryStreamInfo | undefined {
@@ -725,102 +694,6 @@ export class FileStream extends CoValueBase implements CoValue {
   }
 
   /**
-   * Create a `FileStream` from a `Blob` or `File`
-   *
-   * @example
-   * ```ts
-   * import { coField, FileStream } from "jazz-tools";
-   *
-   * const fileStream = await FileStream.createFromBlob(file, {owner: group})
-   * ```
-   * @category Content
-   * @deprecated Use `co.fileStream(...).createFromBlob` instead.
-   */
-  static async createFromBlob(
-    blob: Blob | File,
-    options?:
-      | {
-          owner?: Account | Group;
-          onProgress?: (progress: number) => void;
-        }
-      | Account
-      | Group,
-  ): Promise<FileStream> {
-    const arrayBuffer = await blob.arrayBuffer();
-    return this.createFromArrayBuffer(
-      arrayBuffer,
-      blob.type,
-      blob instanceof File ? blob.name : undefined,
-      options,
-    );
-  }
-
-  /**
-   * Create a `FileStream` from a `Blob` or `File`
-   *
-   * @example
-   * ```ts
-   * import { coField, FileStream } from "jazz-tools";
-   *
-   * const fileStream = await FileStream.createFromBlob(file, {owner: group})
-   * ```
-   * @category Content
-   * @deprecated Use `co.fileStream(...).createFromArrayBuffer` instead.
-   */
-  static async createFromArrayBuffer(
-    arrayBuffer: ArrayBuffer,
-    mimeType: string,
-    fileName: string | undefined,
-    options?:
-      | {
-          owner?: Account | Group;
-          onProgress?: (progress: number) => void;
-        }
-      | Account
-      | Group,
-  ): Promise<FileStream> {
-    const stream = this.create(options);
-    const onProgress =
-      options && "onProgress" in options ? options.onProgress : undefined;
-
-    const start = Date.now();
-
-    const data = new Uint8Array(arrayBuffer);
-    stream.start({
-      mimeType,
-      totalSizeBytes: arrayBuffer.byteLength,
-      fileName,
-    });
-    const chunkSize =
-      cojsonInternals.TRANSACTION_CONFIG.MAX_RECOMMENDED_TX_SIZE;
-
-    let lastProgressUpdate = Date.now();
-
-    for (let idx = 0; idx < data.length; idx += chunkSize) {
-      stream.push(data.slice(idx, idx + chunkSize));
-
-      if (Date.now() - lastProgressUpdate > 100) {
-        onProgress?.(idx / data.length);
-        lastProgressUpdate = Date.now();
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-    stream.end();
-    const end = Date.now();
-
-    console.debug(
-      "Finished creating binary stream in",
-      (end - start) / 1000,
-      "s - Throughput in MB/s",
-      (1000 * (arrayBuffer.byteLength / (end - start))) / (1024 * 1024),
-    );
-    onProgress?.(1);
-
-    return stream;
-  }
-
-  /**
    * Get a JSON representation of the `FileStream`
    * @category Content
    */
@@ -848,8 +721,13 @@ export class FileStreamJazzApi<F extends FileStream> extends CoValueJazzApi<F> {
   constructor(
     private fileStream: F,
     public raw: RawBinaryCoStream,
+    public sourceSchema: CoreFileStreamSchema,
   ) {
     super(fileStream);
+
+    if (!this.sourceSchema) {
+      throw new Error("sourceSchema is required");
+    }
   }
 
   get owner(): Group {

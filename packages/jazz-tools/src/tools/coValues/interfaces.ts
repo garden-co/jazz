@@ -33,6 +33,9 @@ import {
   CoreCoListSchema,
   CoreCoFeedSchema,
   CoreCoVectorSchema,
+  CorePlainTextSchema,
+  CoreRichTextSchema,
+  CoreFileStreamSchema,
 } from "../internal.js";
 import type { BranchDefinition } from "../subscribe/types.js";
 import { CoValueHeader } from "cojson";
@@ -149,7 +152,10 @@ export function loadCoValueWithoutMe<
     | CoValueClass<V>
     | CoreCoListSchema
     | CoreCoFeedSchema
-    | CoreCoVectorSchema,
+    | CoreCoVectorSchema
+    | CorePlainTextSchema
+    | CoreRichTextSchema
+    | CoreFileStreamSchema,
   id: ID<CoValue>,
   options?: {
     resolve?: RefsToResolveStrict<V, R>;
@@ -173,7 +179,10 @@ export function loadCoValue<
     | CoValueClass<V>
     | CoreCoListSchema
     | CoreCoFeedSchema
-    | CoreCoVectorSchema,
+    | CoreCoVectorSchema
+    | CorePlainTextSchema
+    | CoreRichTextSchema
+    | CoreFileStreamSchema,
   id: ID<CoValue>,
   options: {
     resolve?: RefsToResolveStrict<V, R>;
@@ -298,7 +307,10 @@ export function subscribeToCoValueWithoutMe<
     | CoValueClass<V>
     | CoreCoListSchema
     | CoreCoFeedSchema
-    | CoreCoVectorSchema,
+    | CoreCoVectorSchema
+    | CorePlainTextSchema
+    | CoreRichTextSchema
+    | CoreFileStreamSchema,
   id: ID<CoValue>,
   options: SubscribeListenerOptions<V, R>,
   listener: SubscribeListener<V, R>,
@@ -322,7 +334,10 @@ export function subscribeToCoValue<
     | CoValueClass<V>
     | CoreCoListSchema
     | CoreCoFeedSchema
-    | CoreCoVectorSchema,
+    | CoreCoVectorSchema
+    | CorePlainTextSchema
+    | CoreRichTextSchema
+    | CoreFileStreamSchema,
   id: ID<CoValue>,
   options: {
     resolve?: RefsToResolveStrict<V, R>;

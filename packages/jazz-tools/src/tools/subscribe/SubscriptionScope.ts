@@ -96,10 +96,13 @@ export class SubscriptionScope<D extends CoValue> {
       (this.schema.sourceSchema as any).name &&
       ((this.schema.sourceSchema as any).name.includes("CoList") ||
         (this.schema.sourceSchema as any).name.includes("CoFeed") ||
-        (this.schema.sourceSchema as any).name.includes("CoVector"))
+        (this.schema.sourceSchema as any).name.includes("CoVector") ||
+        (this.schema.sourceSchema as any).name.includes("CoPlainText") ||
+        (this.schema.sourceSchema as any).name.includes("CoRichText") ||
+        (this.schema.sourceSchema as any).name.includes("FileStream"))
     ) {
       throw new Error(
-        "use the CoListSchema, CoFeedSchema, or CoVectorSchema instead of the CoList, CoFeed, or CoVector class",
+        "use the CoListSchema, CoFeedSchema, CoVectorSchema, PlainTextSchema, RichTextSchema, or FileStreamSchema instead of the CoList, CoFeed, CoVector, CoPlainText, CoRichText, or FileStream class",
       );
     }
 
@@ -897,10 +900,13 @@ export class SubscriptionScope<D extends CoValue> {
       (descriptor.sourceSchema as any).name &&
       ((descriptor.sourceSchema as any).name.includes("CoList") ||
         (descriptor.sourceSchema as any).name.includes("CoFeed") ||
-        (descriptor.sourceSchema as any).name.includes("CoVector"))
+        (descriptor.sourceSchema as any).name.includes("CoVector") ||
+        (descriptor.sourceSchema as any).name.includes("CoPlainText") ||
+        (descriptor.sourceSchema as any).name.includes("CoRichText") ||
+        (descriptor.sourceSchema as any).name.includes("FileStream"))
     ) {
       throw new Error(
-        "use the CoListSchema, CoFeedSchema, or CoVectorSchema instead of the CoList, CoFeed, or CoVector class",
+        "use the CoListSchema, CoFeedSchema, CoVectorSchema, PlainTextSchema, RichTextSchema, or FileStreamSchema instead of the CoList, CoFeed, CoVector, CoPlainText, CoRichText, or FileStream class",
       );
     }
 

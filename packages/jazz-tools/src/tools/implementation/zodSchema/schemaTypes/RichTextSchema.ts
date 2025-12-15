@@ -8,11 +8,13 @@ import {
   SubscribeRestArgs,
   coOptionalDefiner,
   loadCoValueWithoutMe,
+  parseCoValueCreateOptions,
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
 } from "../../../internal.js";
+import { RawCoPlainText } from "cojson";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreCoValueSchema } from "./CoValueSchema.js";
@@ -56,7 +58,12 @@ export class RichTextSchema implements CoreRichTextSchema {
       options,
       this.permissions,
     );
-    return this.coValueClass.create(text, optionsWithPermissions);
+    const { owner } = parseCoValueCreateOptions(optionsWithPermissions);
+    return new this.coValueClass({ text, owner }, this as any);
+  }
+
+  fromRaw(raw: RawCoPlainText): CoRichText {
+    return new this.coValueClass({ fromRaw: raw }, this as any);
   }
 
   load(
@@ -66,7 +73,7 @@ export class RichTextSchema implements CoreRichTextSchema {
       unstable_branch?: BranchDefinition;
     },
   ): Promise<Settled<CoRichText>> {
-    return loadCoValueWithoutMe(this.coValueClass, id, options) as Promise<
+    return loadCoValueWithoutMe(this, id, options) as Promise<
       Settled<CoRichText>
     >;
   }
@@ -89,20 +96,23 @@ export class RichTextSchema implements CoreRichTextSchema {
       CoRichText,
       RefsToResolve<CoRichText>
     >(restArgs);
-    return subscribeToCoValueWithoutMe(
-      this.coValueClass,
-      id,
-      options,
-      listener as any,
-    );
+    return subscribeToCoValueWithoutMe(this, id, options, listener as any);
   }
 
   unstable_merge(
     id: string,
-    options: { loadAs: Account | AnonymousJazzAgent },
+    options: {
+      loadAs: Account | AnonymousJazzAgent;
+      unstable_branch?: BranchDefinition;
+    },
   ): Promise<void> {
-    // @ts-expect-error
-    return unstable_mergeBranchWithResolve(this.coValueClass, id, options);
+    if (!options.unstable_branch) {
+      throw new Error("unstable_branch is required for unstable_merge");
+    }
+    return unstable_mergeBranchWithResolve(this, id, {
+      ...options,
+      branch: options.unstable_branch,
+    });
   }
 
   getCoValueClass(): typeof CoRichText {
