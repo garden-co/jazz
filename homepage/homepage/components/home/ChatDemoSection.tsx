@@ -114,7 +114,7 @@ export function ChatDemoSection() {
       const shareServer = isLocal
         ? "http://localhost:5173"
         : "https://chat.jazz.tools";
-      const url = `${shareServer}/${chatId}`;
+      const url = `${shareServer}/#${chatId}`;
       setShareUrl(url);
 
       QRCode.toDataURL(url, {
