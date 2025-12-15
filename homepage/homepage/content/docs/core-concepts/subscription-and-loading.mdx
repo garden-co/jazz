@@ -129,25 +129,28 @@ The syntax for resolve queries is shared throughout Jazz. As well as using them 
 </TabbedCodeGroup>
 
 You can also specify resolve queries at the schema level, using the `.resolved()` method. These queries will be used when loading CoValues from that schema (if no resolve query is provided by the user) and in types defined with [co.loaded](/docs/core-concepts/subscription-and-loading#type-safety-with-coloaded).
-<CodeGroup>
-```ts
-const TaskWithDescription = Task.resolved({
-  description: true,
-});
-const ProjectWithTasks = Project.resolved({
-  tasks: {
-    // Use `.resolveQuery` to get the resolve query from a schema and compose it in other queries
-    $each: TaskWithDescription.resolveQuery,
-  }
-});
 
-// .load() will use the resolve query from the schema
-const project = await ProjectWithTasks.load(projectId);
-if (!project.$isLoaded) throw new Error("Project not found or not accessible");
-// Both the tasks and the descriptions are loaded
-project.tasks[0].description; // CoPlainText
+<CodeGroup preferWrap>
+```ts index.ts#ResolvedHelper
 ```
 </CodeGroup>
+
+It is possible that in more complex cases, TypeScript cannot accurately infer types with circular references. For example, below, attempting to resolve `createdBy` on `Project` will in turn force `MyAppAccount` to resolve `projects`, which refers back to `Project`. This will result in an error.
+
+<CodeGroup preferWrap>
+```ts broken-schema.ts#BrokenSchema
+```
+</CodeGroup>
+
+In cases where you come across this, you can create a shallowly-loaded version of the schema which avoids loading the circular references.
+
+<CodeGroup preferWrap>
+```ts fixed-schema.ts#FixedSchema
+```
+</CodeGroup>
+
+
+
 
 ## Loading Errors
 
