@@ -1,12 +1,12 @@
 import type {
-  AccountClass,
+  AnyAccountSchema,
   AuthSecretStorage,
   CoValueClassOrSchema,
   ID,
   InstanceOfSchema,
   JazzContextType,
 } from "jazz-tools";
-import { Account } from "jazz-tools";
+import { Account, AccountSchema } from "jazz-tools";
 import { consumeInviteLinkFromWindowLocation } from "jazz-tools/browser";
 import { getContext, onDestroy, untrack } from "svelte";
 import Provider from "./Provider.svelte";
@@ -22,7 +22,7 @@ export const JAZZ_AUTH_CTX = {};
 /**
  * The Jazz context.
  */
-export type JazzContext<Acc extends Account> = {
+export type JazzContext<Acc extends AnyAccountSchema> = {
   current?: JazzContextType<Acc>;
 };
 
@@ -30,7 +30,7 @@ export type JazzContext<Acc extends Account> = {
  * Get the current Jazz context.
  * @returns The current Jazz context.
  */
-export function getJazzContext<Acc extends Account>() {
+export function getJazzContext<Acc extends AnyAccountSchema>() {
   const context = getContext<JazzContext<Acc>>(JAZZ_CTX);
 
   if (!context) {
@@ -77,7 +77,7 @@ export class InviteListener<V extends CoValueClassOrSchema> {
     forValueHint?: string;
   }) {
     const _onAccept = onAccept;
-    const ctx = getJazzContext<InstanceOfSchema<AccountClass<Account>>>();
+    const ctx = getJazzContext<AccountSchema>();
 
     const tryConsume = () => {
       if (!ctx.current || !("me" in ctx.current)) return;

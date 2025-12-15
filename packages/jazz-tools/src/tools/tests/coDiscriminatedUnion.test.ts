@@ -1,12 +1,6 @@
 import { assert, beforeEach, describe, expect, test, vi } from "vitest";
 import { z } from "../exports.js";
-import {
-  CoValueLoadingState,
-  Group as GroupClass,
-  Loaded,
-  co,
-  loadCoValue,
-} from "../internal.js";
+import { CoValueLoadingState, Loaded, co, loadCoValue } from "../internal.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { assertLoaded, waitFor } from "./utils.js";
 import type { Account } from "jazz-tools";
@@ -635,7 +629,7 @@ describe("co.discriminatedUnion", () => {
     let species: Loaded<typeof Species>;
 
     beforeEach(async () => {
-      const group = GroupClass.create();
+      const group = co.group().create();
       group.makePublic();
 
       species = Species.create(
@@ -754,8 +748,8 @@ describe("co.discriminatedUnion", () => {
     const Pet = co.discriminatedUnion("type", [Dog, Cat]);
     const Pets = co.list(Pet);
 
-    const publicGroup = GroupClass.create().makePublic();
-    const privateGroup = GroupClass.create();
+    const publicGroup = co.group().create().makePublic();
+    const privateGroup = co.group().create();
     const pets = Pets.create(
       [
         Dog.create({ type: "dog", name: "Rex" }, publicGroup),

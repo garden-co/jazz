@@ -1,5 +1,10 @@
 import { createAuthClient } from "better-auth/client";
-import type { Account, AuthSecretStorage } from "jazz-tools";
+import type {
+  Account,
+  AnyAccountSchema,
+  AuthSecretStorage,
+  Loaded,
+} from "jazz-tools";
 import {
   TestJazzContextManager,
   createJazzTestAccount,
@@ -11,8 +16,8 @@ import { jazzPluginClient } from "../client.js";
 import { emailOTPClient, genericOAuthClient } from "better-auth/client/plugins";
 
 describe("Better-Auth client plugin", () => {
-  let account: Account;
-  let jazzContextManager: TestJazzContextManager<Account>;
+  let account: Loaded<AnyAccountSchema>;
+  let jazzContextManager: TestJazzContextManager<AnyAccountSchema>;
   let authSecretStorage: AuthSecretStorage;
   let authClient: ReturnType<
     typeof createAuthClient<{

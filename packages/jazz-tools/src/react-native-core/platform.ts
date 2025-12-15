@@ -3,7 +3,6 @@ import { LocalNode, Peer, RawAccountID, getSqliteStorageAsync } from "cojson";
 import { PureJSCrypto } from "cojson/dist/crypto/PureJSCrypto"; // Importing from dist to not rely on the exports field
 import {
   Account,
-  AccountClass,
   AgentID,
   AnyAccountSchema,
   AuthCredentials,
@@ -24,6 +23,7 @@ import { KvStore, KvStoreContext } from "./storage/kv-store-context.js";
 import { SQLiteDatabaseDriverAsync } from "cojson";
 import { WebSocketPeerWithReconnection } from "cojson-transport-ws";
 import type { RNCrypto } from "jazz-tools/react-native-core/crypto";
+import { PlatformSpecificContext } from "../tools/implementation/ContextManager.js";
 
 export type BaseReactNativeContextOptions = {
   sync: SyncConfig;
@@ -152,22 +152,18 @@ export async function createJazzReactNativeGuestContext(
   };
 }
 
-export type ReactNativeContextOptions<
-  S extends
-    | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | AnyAccountSchema,
-> = {
+export type ReactNativeContextOptions<S extends AnyAccountSchema> = {
   credentials?: AuthCredentials;
   AccountSchema?: S;
   newAccountProps?: NewAccountProps;
   defaultProfileName?: string;
 } & BaseReactNativeContextOptions;
 
-export async function createJazzReactNativeContext<
-  S extends
-    | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | AnyAccountSchema,
->(options: ReactNativeContextOptions<S>) {
+export async function createJazzReactNativeContext<S extends AnyAccountSchema>(
+  options: ReactNativeContextOptions<S>,
+): Promise<
+  PlatformSpecificContext<S> & { authSecretStorage: AuthSecretStorage }
+> {
   const {
     toggleNetwork,
     peers,

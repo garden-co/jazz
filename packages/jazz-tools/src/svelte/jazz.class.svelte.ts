@@ -1,6 +1,5 @@
 import type {
   Account,
-  AccountClass,
   AnyAccountSchema,
   BranchDefinition,
   CoValue,
@@ -13,6 +12,7 @@ import type {
   NotLoaded,
   ResolveQuery,
   ResolveQueryStrict,
+  AccountSchema,
 } from "jazz-tools";
 import {
   coValueClassFromCoValueClassOrSchema,
@@ -58,7 +58,7 @@ export class CoState<
   #value: MaybeLoaded<Loaded<V, R>> = getUnloadedCoValueWithoutId(
     CoValueLoadingState.LOADING,
   );
-  #ctx = getJazzContext<InstanceOfSchema<AccountClass<Account>>>();
+  #ctx = getJazzContext<AnyAccountSchema>();
   #id: CoStateId;
   #subscribe: () => void;
   #update = () => {};
@@ -135,16 +135,14 @@ export class CoState<
 }
 
 export class AccountCoState<
-  A extends
-    | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | AnyAccountSchema,
+  A extends AnyAccountSchema,
   // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
   R extends ResolveQuery<A> = SchemaResolveQuery<A>,
 > {
   #value: MaybeLoaded<Loaded<A, R>> = getUnloadedCoValueWithoutId(
     CoValueLoadingState.LOADING,
   );
-  #ctx = getJazzContext<InstanceOfSchema<AccountClass<Account>>>();
+  #ctx = getJazzContext<AnyAccountSchema>();
   #subscribe: () => void;
   #options: CoStateOptions<A, R> | undefined;
   #update = () => {};
@@ -259,7 +257,7 @@ function shouldSkipUpdate(
  * after 5 seconds of not receiving a ping from the server.
  */
 export class SyncConnectionStatus {
-  #ctx = getJazzContext<InstanceOfSchema<AccountClass<Account>>>();
+  #ctx = getJazzContext<AnyAccountSchema>();
   #subscribe: () => void;
   #update = () => {};
 

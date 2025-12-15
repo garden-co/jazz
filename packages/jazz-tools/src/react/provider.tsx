@@ -1,6 +1,5 @@
 import {
   Account,
-  AccountClass,
   AnyAccountSchema,
   CoValueFromRaw,
   InstanceOfSchema,
@@ -13,11 +12,7 @@ import {
 import { JazzContext, JazzContextManagerContext } from "jazz-tools/react-core";
 import React, { useEffect, useRef } from "react";
 
-export type JazzProviderProps<
-  S extends
-    | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | AnyAccountSchema,
-> = {
+export type JazzProviderProps<S extends AnyAccountSchema> = {
   children: React.ReactNode;
   enableSSR?: boolean;
   fallback?: React.ReactNode | null;
@@ -25,11 +20,7 @@ export type JazzProviderProps<
 } & JazzContextManagerProps<S>;
 
 /** @category Context & Hooks */
-export function JazzReactProvider<
-  S extends
-    | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | AnyAccountSchema,
->({
+export function JazzReactProvider<S extends AnyAccountSchema>({
   children,
   guestMode,
   sync,
@@ -59,9 +50,7 @@ export function JazzReactProvider<
   const logoutReplacementActiveRef = useRef(false);
   logoutReplacementActiveRef.current = Boolean(logOutReplacement);
 
-  const value = React.useSyncExternalStore<
-    JazzContextType<InstanceOfSchema<S>> | undefined
-  >(
+  const value = React.useSyncExternalStore<JazzContextType<S> | undefined>(
     React.useCallback(
       (callback) => {
         const props = {

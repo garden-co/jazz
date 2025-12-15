@@ -10,13 +10,14 @@ import {
 import { coValuesCache } from "../lib/cache.js";
 import { SubscriptionScope } from "./SubscriptionScope.js";
 import { CoValueLoadingState } from "./types.js";
+import { asConstructable } from "../implementation/zodSchema/runtimeConverters/coValueSchemaTransformation.js";
 
 export function myRoleForRawValue(raw: RawCoValue): Role | undefined {
   const rawOwner = raw.group;
 
   const owner = coValuesCache.get(rawOwner, () =>
     rawOwner instanceof RawAccount
-      ? RegisteredSchemas["Account"].fromRaw(rawOwner)
+      ? asConstructable(RegisteredSchemas["Account"]).fromRaw(rawOwner)
       : RegisteredSchemas["Group"].fromRaw(rawOwner),
   );
 

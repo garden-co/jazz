@@ -36,6 +36,9 @@ import {
   CorePlainTextSchema,
   CoreRichTextSchema,
   CoreFileStreamSchema,
+  CoreCoMapSchema,
+  CoreGroupSchema,
+  CoreAccountSchema,
 } from "../internal.js";
 import type { BranchDefinition } from "../subscribe/types.js";
 import { CoValueHeader } from "cojson";
@@ -155,7 +158,10 @@ export function loadCoValueWithoutMe<
     | CoreCoVectorSchema
     | CorePlainTextSchema
     | CoreRichTextSchema
-    | CoreFileStreamSchema,
+    | CoreFileStreamSchema
+    | CoreCoMapSchema
+    | CoreGroupSchema
+    | CoreAccountSchema,
   id: ID<CoValue>,
   options?: {
     resolve?: RefsToResolveStrict<V, R>;
@@ -182,7 +188,10 @@ export function loadCoValue<
     | CoreCoVectorSchema
     | CorePlainTextSchema
     | CoreRichTextSchema
-    | CoreFileStreamSchema,
+    | CoreFileStreamSchema
+    | CoreCoMapSchema
+    | CoreGroupSchema
+    | CoreAccountSchema,
   id: ID<CoValue>,
   options: {
     resolve?: RefsToResolveStrict<V, R>;
@@ -310,7 +319,10 @@ export function subscribeToCoValueWithoutMe<
     | CoreCoVectorSchema
     | CorePlainTextSchema
     | CoreRichTextSchema
-    | CoreFileStreamSchema,
+    | CoreFileStreamSchema
+    | CoreCoMapSchema
+    | CoreGroupSchema
+    | CoreAccountSchema,
   id: ID<CoValue>,
   options: SubscribeListenerOptions<V, R>,
   listener: SubscribeListener<V, R>,
@@ -337,7 +349,10 @@ export function subscribeToCoValue<
     | CoreCoVectorSchema
     | CorePlainTextSchema
     | CoreRichTextSchema
-    | CoreFileStreamSchema,
+    | CoreFileStreamSchema
+    | CoreCoMapSchema
+    | CoreGroupSchema
+    | CoreAccountSchema,
   id: ID<CoValue>,
   options: {
     resolve?: RefsToResolveStrict<V, R>;
@@ -598,7 +613,17 @@ export async function internalLoadUnique<
   V extends CoValue,
   R extends RefsToResolve<V>,
 >(
-  cls: CoValueClass<V> | CoreCoListSchema,
+  cls:
+    | CoValueClass<V>
+    | CoreCoListSchema
+    | CoreCoFeedSchema
+    | CoreCoVectorSchema
+    | CorePlainTextSchema
+    | CoreRichTextSchema
+    | CoreFileStreamSchema
+    | CoreCoMapSchema
+    | CoreGroupSchema
+    | CoreAccountSchema,
   options: {
     header: CoValueHeader;
     onCreateWhenMissing?: () => void;
@@ -883,7 +908,7 @@ export function unstable_mergeBranch(
 }
 
 export async function unstable_mergeBranchWithResolve<
-  S extends CoValueClassOrSchema,
+  S extends CoreCoValueSchema,
   const R extends ResolveQuery<S>,
 >(
   cls: S,

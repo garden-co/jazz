@@ -50,6 +50,7 @@ import {
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
+  CoreCoMapSchema,
 } from "../internal.js";
 
 export type CoMapEdit<V> = {
@@ -123,63 +124,23 @@ export class CoMap extends CoValueBase implements CoValue {
   static fields: CoMapFieldSchema;
 
   /** @internal */
-  constructor(fields: CoMapFieldSchema, raw: RawCoMap) {
+  constructor(
+    fields: CoMapFieldSchema,
+    raw: RawCoMap,
+    sourceSchema: CoreCoMapSchema,
+  ) {
     super();
 
     const proxy = new Proxy(this, CoMapProxyHandler as ProxyHandler<this>);
 
     Object.defineProperties(this, {
       $jazz: {
-        value: new CoMapJazzApi(proxy, raw, fields),
+        value: new CoMapJazzApi(proxy, raw, fields, sourceSchema),
         enumerable: false,
       },
     });
 
     return proxy;
-  }
-
-  static fromRaw<M extends CoValue>(this: CoValueClass<M>, raw: RawCoMap): M {
-    return new this(
-      (this as unknown as { fields: CoMapFieldSchema }).fields,
-      raw,
-    ) as M;
-  }
-
-  /**
-   * Create a new CoMap with the given initial values and owner.
-   *
-   * The owner (a Group or Account) determines access rights to the CoMap.
-   *
-   * The CoMap will immediately be persisted and synced to connected peers.
-   *
-   * @example
-   * ```ts
-   * const person = Person.create({
-   *   name: "Alice",
-   *   age: 42,
-   *   pet: cat,
-   * }, { owner: friendGroup });
-   * ```
-   *
-   * @category Creation
-   *
-   * @deprecated Use `co.map(...).create`.
-   **/
-  static create<M extends CoMap>(
-    this: CoValueClass<M> & { fields: CoMapFieldSchema },
-    init: object,
-    options?:
-      | {
-          owner?: Account | Group;
-          unique?: CoValueUniqueness["uniqueness"];
-        }
-      | Account
-      | Group,
-  ) {
-    const { owner, uniqueness } = parseCoValueCreateOptions(options);
-    const raw = CoMap.rawFromInit(this.fields, init, owner, uniqueness);
-
-    return new this(this.fields, raw);
   }
 
   /**
@@ -331,8 +292,13 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
     private coMap: M,
     public raw: RawCoMap,
     private fields: CoMapFieldSchema,
+    public sourceSchema: CoreCoMapSchema,
   ) {
     super(coMap);
+
+    if (!this.sourceSchema) {
+      throw new Error("sourceSchema is required");
+    }
   }
 
   get owner(): Group {
@@ -748,8 +714,6 @@ const CoMapProxyHandler: ProxyHandler<CoMap> = {
     }
   },
 };
-
-RegisteredSchemas["CoMap"] = CoMap;
 
 /** @internal */
 function getEditFromRaw(

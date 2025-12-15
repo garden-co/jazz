@@ -31,9 +31,7 @@ export class CoOptionalSchema<
 
   constructor(public readonly innerType: Shape) {}
 
-  getCoValueClass(): ReturnType<
-    CoValueSchemaFromCoreSchema<Shape>["getCoValueClass"]
-  > {
+  getCoValueClass() {
     return (this.innerType as any).getCoValueClass();
   }
 

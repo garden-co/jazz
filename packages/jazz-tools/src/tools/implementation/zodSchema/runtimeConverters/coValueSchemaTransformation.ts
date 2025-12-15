@@ -65,7 +65,7 @@ export function isCoValueSchema(
  *
  * @returns The CoValue schema matching the provided CoreCoValueSchema
  */
-export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
+export function asConstructable<S extends AnyCoreCoValueSchema>(
   schema: S,
 ): CoValueSchemaFromCoreSchema<S> {
   if (isCoValueSchema(schema)) {

@@ -1,5 +1,12 @@
 import type { AgentSecret, LocalNode } from "cojson";
-import type { Account, AnonymousJazzAgent, ID } from "./internal.js";
+import type {
+  Account,
+  AccountSchema,
+  AnonymousJazzAgent,
+  CoreAccountSchema,
+  ID,
+  Loaded,
+} from "./internal.js";
 
 export type AuthCredentials = {
   accountID: ID<Account>;
@@ -18,8 +25,8 @@ export type RegisterAccountFunction = (
 ) => Promise<ID<Account>>;
 
 /** @category Context Creation */
-export type JazzAuthContext<Acc extends Account> = {
-  me: Acc;
+export type JazzAuthContext<Acc extends CoreAccountSchema> = {
+  me: Loaded<Acc>;
   node: LocalNode;
   authenticate: AuthenticateAccountFunction;
   register: RegisterAccountFunction;
@@ -42,7 +49,7 @@ export type JazzGuestContext = {
   connected: () => boolean;
 };
 
-export type JazzContextType<Acc extends Account> =
+export type JazzContextType<Acc extends CoreAccountSchema> =
   | JazzAuthContext<Acc>
   | JazzGuestContext;
 

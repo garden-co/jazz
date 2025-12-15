@@ -20,7 +20,7 @@ import {
   createCoreCoPlainTextSchema,
   createCoreFileStreamSchema,
   createCoreCoVectorSchema,
-  hydrateCoreCoValueSchema,
+  asConstructable,
   isAnyCoValueSchema,
   isCoValueClass,
   Account,
@@ -92,7 +92,7 @@ export const coMapDefiner = <Shape extends z.core.$ZodLooseShape>(
 ): CoMapSchema<Shape> => {
   validateCoMapShape(shape);
   const coreSchema = createCoreCoMapSchema(shape);
-  return hydrateCoreCoValueSchema(coreSchema);
+  return asConstructable(coreSchema);
 };
 
 /**
@@ -146,7 +146,7 @@ export const coAccountDefiner = <Shape extends BaseAccountShape>(
       root: coMapDefiner({}),
     } as unknown as Shape;
     const coreSchema = createCoreAccountSchema(shape || defaultShape);
-    return hydrateCoreCoValueSchema(coreSchema);
+    return asConstructable(coreSchema);
   });
 };
 
@@ -155,7 +155,7 @@ const defaultGroupKey = Symbol("defaultGroupKey");
 export const coGroupDefiner = (): GroupSchema => {
   return getCachedSchema(defaultGroupKey, () => {
     const coreSchema = createCoreGroupSchema();
-    return hydrateCoreCoValueSchema(coreSchema);
+    return asConstructable(coreSchema);
   });
 };
 
@@ -176,7 +176,7 @@ export const coListDefiner = <T extends AnyZodOrCoValueSchema>(
   element: T,
 ): CoListSchema<T> => {
   const coreSchema = createCoreCoListSchema(element);
-  return hydrateCoreCoValueSchema(coreSchema);
+  return asConstructable(coreSchema);
 };
 
 const validateProfileShape = (shape: z.core.$ZodLooseShape) => {
@@ -209,12 +209,12 @@ export const coFeedDefiner = <T extends AnyZodOrCoValueSchema>(
   element: T,
 ): CoFeedSchema<T> => {
   const coreSchema = createCoreCoFeedSchema(element);
-  return hydrateCoreCoValueSchema(coreSchema);
+  return asConstructable(coreSchema);
 };
 
 export const coFileStreamDefiner = (): FileStreamSchema => {
   const coreSchema = createCoreFileStreamSchema();
-  return hydrateCoreCoValueSchema(coreSchema);
+  return asConstructable(coreSchema);
 };
 
 export const coVectorDefiner = (dimensions: number): CoVectorSchema => {
@@ -227,17 +227,17 @@ export const coVectorDefiner = (dimensions: number): CoVectorSchema => {
   }
 
   const coreSchema = createCoreCoVectorSchema(dimensions);
-  return hydrateCoreCoValueSchema(coreSchema);
+  return asConstructable(coreSchema);
 };
 
 export const coPlainTextDefiner = (): PlainTextSchema => {
   const coreSchema = createCoreCoPlainTextSchema();
-  return hydrateCoreCoValueSchema(coreSchema);
+  return asConstructable(coreSchema);
 };
 
 export const coRichTextDefiner = (): RichTextSchema => {
   const coreSchema = createCoreCoRichTextSchema();
-  return hydrateCoreCoValueSchema(coreSchema);
+  return asConstructable(coreSchema);
 };
 
 export type ImageDefinitionSchema = typeof ImageDefinition;
@@ -261,5 +261,5 @@ export const coDiscriminatedUnionDefiner = <
     discriminator,
     schemas,
   );
-  return hydrateCoreCoValueSchema(coreSchema);
+  return asConstructable(coreSchema);
 };

@@ -36,7 +36,6 @@ export type {
   CoFeedEntry,
   SingleCoFeedEntry,
   TextPos,
-  AccountClass,
   AccountCreationProps,
   BaseProfileShape,
   ExportedCoValue,
@@ -126,6 +125,7 @@ export {
   type CoreAccountSchema as AnyAccountSchema,
   type ResolveQuery,
   type ResolveQueryStrict,
+  AccountSchema,
   GroupSchema,
 } from "./internal.js";
 

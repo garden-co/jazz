@@ -31,9 +31,7 @@ import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "./InstanceOrPrim
 /**
  * A loaded CoValue whose references may or may not be loaded.
  */
-export type InstanceOfSchemaCoValuesMaybeLoaded<
-  S extends CoValueClass | AnyZodOrCoValueSchema,
-> = S extends CoreCoValueSchema
+export type InstanceOfSchemaCoValuesMaybeLoaded<S> = S extends CoreCoValueSchema
   ? S extends CoreAccountSchema<infer Shape>
     ? MaybeLoaded<
         {

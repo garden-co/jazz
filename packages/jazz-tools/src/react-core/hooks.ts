@@ -9,7 +9,6 @@ import React, {
 
 import {
   type Account,
-  AccountClass,
   AnonymousJazzAgent,
   AnyAccountSchema,
   CoValue,
@@ -39,7 +38,7 @@ import { getCurrentAccountFromContextManager } from "./utils.js";
 import { CoValueSubscription } from "./types.js";
 import { use } from "./use.js";
 
-export function useJazzContext<Acc extends Account>() {
+export function useJazzContext<Acc extends AnyAccountSchema>() {
   const value = useContext(JazzContext) as JazzContextType<Acc>;
 
   if (!value) {
@@ -51,7 +50,7 @@ export function useJazzContext<Acc extends Account>() {
   return value;
 }
 
-export function useJazzContextManager<Acc extends Account>() {
+export function useJazzContextManager<Acc extends AnyAccountSchema>() {
   const value = useContext(JazzContextManagerContext) as JazzContextManager<
     Acc,
     {}
@@ -554,7 +553,7 @@ export function useSubscriptionSelector<
 }
 
 export function useAccountSubscription<
-  S extends AccountClass<Account> | AnyAccountSchema,
+  S extends AnyAccountSchema,
   // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
   const R extends ResolveQuery<S> = SchemaResolveQuery<S>,
 >(
@@ -726,7 +725,7 @@ export function useAccountSubscription<
  *
  */
 export function useAccount<
-  A extends AccountClass<Account> | AnyAccountSchema,
+  A extends AnyAccountSchema,
   // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
   const R extends ResolveQuery<A> = SchemaResolveQuery<A>,
   TSelectorReturn = MaybeLoaded<Loaded<A, R>>,
@@ -784,7 +783,7 @@ export function useAccount<
 }
 
 export function useSuspenseAccount<
-  A extends AccountClass<Account> | AnyAccountSchema,
+  A extends AnyAccountSchema,
   // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
   const R extends ResolveQuery<A> = SchemaResolveQuery<A>,
   TSelectorReturn = Loaded<A, R>,
@@ -872,11 +871,9 @@ export function useLogOut(): () => void {
  * The agent can be used as the `loadAs` parameter for load and subscribe methods.
  */
 export function useAgent<
-  A extends AccountClass<Account> | AnyAccountSchema = ReturnType<
-    typeof co.account
-  >,
+  A extends AnyAccountSchema = ReturnType<typeof co.account>,
 >(): AnonymousJazzAgent | Loaded<A, true> {
-  const contextManager = useJazzContextManager<InstanceOfSchema<A>>();
+  const contextManager = useJazzContextManager<A>();
 
   const getCurrentValue = () =>
     getCurrentAccountFromContextManager(contextManager) as

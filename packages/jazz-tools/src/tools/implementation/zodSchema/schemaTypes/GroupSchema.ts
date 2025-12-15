@@ -13,11 +13,16 @@ import {
   Resolved,
   ResolveQuery,
   loadCoValueWithoutMe,
+  parseGroupCreateOptions,
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   AnonymousJazzAgent,
   co,
+  isControlledAccount,
+  TypeSym,
+  RegisteredSchemas,
 } from "../../../internal.js";
+import { RawGroup } from "cojson";
 import { CoreCoValueSchema } from "./CoValueSchema.js";
 import { coOptionalDefiner } from "../zodCo.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
@@ -49,7 +54,19 @@ export class GroupSchema implements CoreGroupSchema {
   }
 
   create(options?: { owner: Account } | Account): Group {
-    return Group.create(options);
+    const initOwner = parseGroupCreateOptions(options).owner;
+    if (!initOwner) throw new Error("No owner provided");
+    if (initOwner[TypeSym] === "Account" && isControlledAccount(initOwner)) {
+      const rawOwner = initOwner.$jazz.raw;
+      const raw = rawOwner.core.node.createGroup();
+      return new Group(raw, this);
+    } else {
+      throw new Error("Can only construct group as a controlled account");
+    }
+  }
+
+  fromRaw(raw: RawGroup): Group {
+    return new Group(raw, this);
   }
 
   load<G extends Group, R extends ResolveQuery<GroupSchema>>(
@@ -59,7 +76,7 @@ export class GroupSchema implements CoreGroupSchema {
       resolve?: RefsToResolveStrict<Group, R>;
     },
   ): Promise<Settled<Group>> {
-    return loadCoValueWithoutMe(Group, id, options) as Promise<Settled<Group>>;
+    return loadCoValueWithoutMe(this, id, options) as Promise<Settled<Group>>;
   }
   async createInvite<G extends Group>(
     id: ID<G>,
@@ -87,11 +104,8 @@ export class GroupSchema implements CoreGroupSchema {
     ...args: SubscribeRestArgs<G, R>
   ): () => void {
     const { options, listener } = parseSubscribeRestArgs(args);
-    return subscribeToCoValueWithoutMe(
-      Group as unknown as CoValueClass<G>,
-      id,
-      options,
-      listener as any,
-    );
+    return subscribeToCoValueWithoutMe(this, id, options, listener as any);
   }
 }
+
+RegisteredSchemas["Group"] = new GroupSchema();

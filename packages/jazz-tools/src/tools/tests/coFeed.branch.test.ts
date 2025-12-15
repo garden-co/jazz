@@ -1,7 +1,7 @@
 import { cojsonInternals } from "cojson";
 import { assert, beforeEach, describe, expect, test, vi } from "vitest";
 import { z } from "../exports.js";
-import { Group as GroupClass, co } from "../internal.js";
+import { co } from "../internal.js";
 
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { assertLoaded, waitFor } from "./utils.js";
@@ -191,7 +191,7 @@ describe("CoFeed Branching", async () => {
 
       const originalFeed = TestStream.create(
         ["milk", "bread", "butter"],
-        GroupClass.create(me).makePublic("writer"),
+        co.group().create(me).makePublic("writer"),
       );
 
       const alice = await createJazzTestAccount();
@@ -245,7 +245,7 @@ describe("CoFeed Branching", async () => {
 
       const originalFeed = TestStream.create(
         ["milk", "bread", "butter"],
-        GroupClass.create(me).makePublic("writer"),
+        co.group().create(me).makePublic("writer"),
       );
 
       await new Promise((resolve) => setTimeout(resolve, 5));
@@ -288,7 +288,7 @@ describe("CoFeed Branching", async () => {
 
       const originalFeed = TestStream.create(
         ["milk", "bread", "butter"],
-        GroupClass.create(me).makePublic("writer"),
+        co.group().create(me).makePublic("writer"),
       );
 
       const alice = await createJazzTestAccount();
@@ -342,7 +342,7 @@ describe("CoFeed Branching", async () => {
 
       const originalFeed = TestStream.create(
         ["milk", "bread", "butter"],
-        GroupClass.create(me).makePublic("writer"),
+        co.group().create(me).makePublic("writer"),
       );
 
       // Create a branch
@@ -390,7 +390,7 @@ describe("CoFeed Branching", async () => {
 
       const originalFeed = TestStream.create(
         ["milk", "bread", "butter"],
-        GroupClass.create(me).makePublic("writer"),
+        co.group().create(me).makePublic("writer"),
       );
 
       // Create a branch
@@ -426,7 +426,7 @@ describe("CoFeed Branching", async () => {
       // Create a feed with text values
       const textFeed = TextFeed.create(
         ["milk", "bread", "butter"],
-        GroupClass.create(me).makePublic("writer"),
+        co.group().create(me).makePublic("writer"),
       );
 
       // Create a branch for editing

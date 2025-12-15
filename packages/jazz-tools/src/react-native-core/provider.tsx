@@ -1,6 +1,5 @@
 import {
   Account,
-  AccountClass,
   AnyAccountSchema,
   CoValueFromRaw,
   InstanceOfSchema,
@@ -13,22 +12,14 @@ import type { JazzContextManagerProps } from "./ReactNativeContextManager.js";
 import { ReactNativeContextManager } from "./ReactNativeContextManager.js";
 import { setupKvStore } from "./platform.js";
 
-export type JazzProviderProps<
-  S extends
-    | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | AnyAccountSchema,
-> = {
+export type JazzProviderProps<S extends AnyAccountSchema> = {
   children: React.ReactNode;
   kvStore?: KvStore;
   authSecretStorageKey?: string;
 } & JazzContextManagerProps<S>;
 
 /** @category Context & Hooks */
-export function JazzProviderCore<
-  S extends
-    | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | AnyAccountSchema,
->({
+export function JazzProviderCore<S extends AnyAccountSchema>({
   children,
   guestMode,
   sync,
@@ -56,9 +47,7 @@ export function JazzProviderCore<
   const logoutReplacementActiveRef = useRef(false);
   logoutReplacementActiveRef.current = Boolean(logOutReplacement);
 
-  const value = React.useSyncExternalStore<
-    JazzContextType<InstanceOfSchema<S>> | undefined
-  >(
+  const value = React.useSyncExternalStore<JazzContextType<S> | undefined>(
     React.useCallback(
       (callback) => {
         const props = {

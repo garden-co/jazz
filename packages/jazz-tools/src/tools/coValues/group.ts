@@ -42,6 +42,7 @@ import {
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
+  CoreGroupSchema,
 } from "../internal.js";
 
 type GroupMember = {
@@ -76,7 +77,7 @@ export class Group extends CoValueBase implements CoValue {
   declare readonly profile: MaybeLoaded<Profile> | undefined;
 
   /** @deprecated Don't use constructor directly, use .create */
-  constructor(raw: RawGroup) {
+  constructor(raw: RawGroup, sourceSchema: CoreGroupSchema) {
     super();
 
     if (!raw) {
@@ -90,31 +91,12 @@ export class Group extends CoValueBase implements CoValue {
 
     Object.defineProperties(this, {
       $jazz: {
-        value: new GroupJazzApi(proxy, raw),
+        value: new GroupJazzApi(proxy, raw, sourceSchema),
         enumerable: false,
       },
     });
 
     return proxy as this;
-  }
-
-  static fromRaw<G extends CoValue>(
-    this: CoValueClass<G> & { fields: CoMapFieldSchema },
-    raw: RawGroup,
-  ): G {
-    return new this(raw) as G;
-  }
-
-  static create(options?: { owner: Account } | Account) {
-    const initOwner = parseGroupCreateOptions(options).owner;
-    if (!initOwner) throw new Error("No owner provided");
-    if (initOwner[TypeSym] === "Account" && isControlledAccount(initOwner)) {
-      const rawOwner = initOwner.$jazz.raw;
-      const raw = rawOwner.core.node.createGroup();
-      return new this(raw);
-    } else {
-      throw new Error("Can only construct group as a controlled account");
-    }
   }
 
   myRole(): Role | undefined {
@@ -258,9 +240,15 @@ export class Group extends CoValueBase implements CoValue {
   }
 
   getParentGroups(): Array<Group> {
-    return this.$jazz.raw
-      .getParentGroups()
-      .map((group) => Group.fromRaw(group));
+    return this.$jazz.raw.getParentGroups().map((group) => {
+      // Use the schema's fromRaw method
+      const schema = this.$jazz.sourceSchema;
+      if (schema && "fromRaw" in schema) {
+        return (schema as any).fromRaw(group);
+      }
+      // Fallback for backward compatibility
+      return new Group(group, schema!);
+    });
   }
 
   /** @category Identity & Permissions
@@ -297,8 +285,13 @@ export class GroupJazzApi<G extends Group> extends CoValueJazzApi<G> {
   constructor(
     private group: G,
     public raw: RawGroup,
+    public sourceSchema: CoreGroupSchema,
   ) {
     super(group);
+
+    if (!this.sourceSchema) {
+      throw new Error("sourceSchema is required");
+    }
   }
 
   /**
@@ -360,8 +353,6 @@ export class GroupJazzApi<G extends Group> extends CoValueJazzApi<G> {
     return this.raw.core.waitForSync(options);
   }
 }
-
-RegisteredSchemas["Group"] = Group;
 
 export function isAccountID(id: RawAccountID | AgentID): id is RawAccountID {
   return id.startsWith("co_");

@@ -18,7 +18,21 @@ import {
   unstable_mergeBranchWithResolve,
   Loaded,
   ResolveQuery,
+  schemaFieldToFieldDescriptor,
+  SchemaField,
+  CoMapFieldSchema,
+  ItemsMarker,
+  RegisteredSchemas,
+  CoMap,
+  asConstructable,
 } from "../../../internal.js";
+import {
+  cojsonInternals,
+  CryptoProvider,
+  LocalNode,
+  Peer,
+  RawAccount,
+} from "cojson";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
 import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded.js";
@@ -52,7 +66,7 @@ export type DefaultAccountShape = {
 
 export class AccountSchema<
   Shape extends BaseAccountShape = DefaultAccountShape,
-  DefaultResolveQuery extends CoreResolveQuery = true,
+  DefaultResolveQuery extends ResolveQuery<AccountSchema<Shape>> = true,
 > implements CoreAccountSchema<Shape>
 {
   collaborative = true as const;
@@ -75,15 +89,31 @@ export class AccountSchema<
     this.getDefinition = coreSchema.getDefinition;
   }
 
-  create(
-    options: Simplify<Parameters<(typeof Account)["create"]>[0]>,
-  ): Promise<AccountInstance<Shape>> {
-    // @ts-expect-error
-    return this.coValueClass.create(options);
+  async create(options: {
+    creationProps: { name: string };
+    initialAgentSecret?: AgentSecret;
+    peers?: Peer[];
+    crypto: CryptoProvider;
+  }): Promise<Loaded<CoreAccountSchema<Shape>>> {
+    const def = this.getDefinition();
+    const fields: CoMapFieldSchema = {};
+    for (const [key, value] of Object.entries(def.shape)) {
+      fields[key] = schemaFieldToFieldDescriptor(value as SchemaField);
+    }
+
+    const { node } = await LocalNode.withNewlyCreatedAccount({
+      ...options,
+      migration: async (rawAccount, _node, creationProps) => {
+        const account = new this.coValueClass(fields, rawAccount, this);
+
+        await account.applyMigration?.(creationProps);
+      },
+    });
+
+    return this.fromNode(node);
   }
 
   load<
-    // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
     const R extends ResolveQuery<AccountSchema<Shape>> = DefaultResolveQuery,
   >(
     id: string,
@@ -93,21 +123,44 @@ export class AccountSchema<
     },
   ): Promise<Settled<Loaded<AccountSchema<Shape>, R>>> {
     return loadCoValueWithoutMe(
-      this.coValueClass,
+      this,
       id,
-      // @ts-expect-error
-      withSchemaResolveQuery(options, this.resolveQuery),
+      withSchemaResolveQuery(options, this.resolveQuery) as any, // TODO: fix cast
     ) as Promise<Settled<Loaded<AccountSchema<Shape>, R>>>;
   }
 
+  fromRaw(raw: RawAccount): Loaded<CoreAccountSchema<Shape>> {
+    const def = this.getDefinition();
+    const fields: CoMapFieldSchema = {};
+    for (const [key, value] of Object.entries(def.shape)) {
+      fields[key] = schemaFieldToFieldDescriptor(value as SchemaField);
+    }
+    return new this.coValueClass(fields, raw, this) as Loaded<
+      CoreAccountSchema<Shape>
+    >;
+  }
+
+  fromNode(node: LocalNode): Loaded<CoreAccountSchema<Shape>> {
+    const def = this.getDefinition();
+    const fields: CoMapFieldSchema = {};
+    for (const [key, value] of Object.entries(def.shape)) {
+      fields[key] = schemaFieldToFieldDescriptor(value as SchemaField);
+    }
+    return new this.coValueClass(
+      fields,
+      node.expectCurrentAccount("jazz-tools/Account.fromNode"),
+      this,
+    ) as Loaded<CoreAccountSchema<Shape>>;
+  }
+
   // Create an account via worker, useful to generate controlled accounts from the server
-  createAs(
-    worker: Account,
+  async createAs(
+    worker: Loaded<CoreAccountSchema>,
     options: {
       creationProps: { name: string };
       onCreate?: (
-        account: AccountInstance<Shape>,
-        worker: Account,
+        account: Loaded<CoreAccountSchema<Shape>>,
+        worker: Loaded<CoreAccountSchema>,
       ) => Promise<void>;
     },
   ): Promise<{
@@ -115,29 +168,85 @@ export class AccountSchema<
       accountID: string;
       accountSecret: AgentSecret;
     };
-    // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
-    account: Loaded<AccountSchema<Shape>, DefaultResolveQuery>;
+    account: Loaded<CoreAccountSchema<Shape>, DefaultResolveQuery>;
   }> {
-    // @ts-expect-error
-    return this.coValueClass.createAs(worker, options);
+    const crypto = worker.$jazz.localNode.crypto;
+
+    const connectedPeers = cojsonInternals.connectedPeers(
+      "creatingAccount",
+      crypto.uniquenessForHeader(), // Use a unique id for the client peer, so we don't have clashes in the worker node
+      { peer1role: "server", peer2role: "client" },
+    );
+
+    worker.$jazz.localNode.syncManager.addPeer(connectedPeers[1]);
+
+    const account = await (this as unknown as AccountSchema).create({
+      creationProps: options.creationProps,
+      crypto,
+      peers: [connectedPeers[0]],
+    });
+
+    const credentials = {
+      accountID: account.$jazz.id,
+      accountSecret: account.$jazz.localNode.getCurrentAgent().agentSecret,
+    };
+
+    // Load the worker inside the account node
+    const loadedWorker = await asConstructable(
+      RegisteredSchemas["Account"],
+    ).load(worker.$jazz.id, {
+      loadAs: account,
+    });
+
+    // This should never happen, because the two accounts are linked
+    if (!loadedWorker.$isLoaded)
+      throw new Error("Unable to load the worker account");
+
+    // The onCreate hook can be helpful to define inline logic, such as querying the DB
+    if (options.onCreate)
+      await options.onCreate(
+        account as Loaded<CoreAccountSchema<Shape>>,
+        loadedWorker as Loaded<CoreAccountSchema>,
+      );
+
+    await account.$jazz.waitForAllCoValuesSync();
+
+    const createdAccount = await (this as AccountSchema<Shape>).load(
+      account.$jazz.id,
+      {
+        loadAs: worker,
+      },
+    );
+
+    if (!createdAccount.$isLoaded)
+      throw new Error("Unable to load the created account");
+
+    // Close the account node, to avoid leaking memory
+    account.$jazz.localNode.gracefulShutdown();
+
+    return {
+      credentials,
+      account: createdAccount as Loaded<
+        CoreAccountSchema<Shape>,
+        DefaultResolveQuery
+      >,
+    };
   }
 
   unstable_merge<
-    // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
     R extends ResolveQuery<AccountSchema<Shape>> = DefaultResolveQuery,
   >(
     id: string,
     options: {
-      loadAs?: Account | AnonymousJazzAgent;
+      loadAs?: Loaded<CoreAccountSchema> | AnonymousJazzAgent;
       resolve?: RefsToResolveStrict<AccountSchema<Shape>, R>;
       branch: BranchDefinition;
     },
   ): Promise<void> {
     return unstable_mergeBranchWithResolve(
-      this.coValueClass,
+      this,
       id,
-      // @ts-expect-error
-      withSchemaResolveQuery(options, this.resolveQuery),
+      withSchemaResolveQuery(options, this.resolveQuery) as any, // TODO: fix cast
     );
   }
 
@@ -155,9 +264,8 @@ export class AccountSchema<
     ) => void,
   ): () => void {
     return subscribeToCoValueWithoutMe(
-      this.coValueClass,
+      this,
       id,
-      // @ts-expect-error
       withSchemaResolveQuery(options, this.resolveQuery),
       listener as any,
     );
@@ -170,7 +278,7 @@ export class AccountSchema<
 
   withMigration(
     migration: (
-      account: Loaded<AccountSchema<Shape>>,
+      account: Loaded<CoreAccountSchema<Shape>>,
       creationProps?: { name: string },
     ) => void,
   ): AccountSchema<Shape, DefaultResolveQuery> {
@@ -231,7 +339,7 @@ export type CoProfileSchema<
 
 // less precise version to avoid circularity issues and allow matching against
 export interface CoreAccountSchema<
-  Shape extends z.core.$ZodLooseShape = z.core.$ZodLooseShape,
+  Shape extends BaseAccountShape = BaseAccountShape,
 > extends Omit<CoreCoMapSchema<Shape>, "builtin"> {
   builtin: "Account";
 }
@@ -239,3 +347,18 @@ export interface CoreAccountSchema<
 export type AccountInstance<Shape extends z.core.$ZodLooseShape> = {
   readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchema<Shape[key]>;
 } & Account;
+
+RegisteredSchemas["Account"] = new AccountSchema(
+  createCoreAccountSchema({
+    profile: new CoMapSchema(
+      createCoreCoMapSchema({
+        name: z.string(),
+        inbox: z.optional(z.string()),
+        inboxInvite: z.optional(z.string()),
+      }),
+      CoMap,
+    ),
+    root: new CoMapSchema(createCoreCoMapSchema({}), CoMap),
+  }),
+  Account,
+);

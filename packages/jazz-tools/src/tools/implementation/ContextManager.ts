@@ -10,20 +10,27 @@ import { AnonymousJazzAgent } from "./anonymousJazzAgent.js";
 import { createAnonymousJazzContext } from "./createContext.js";
 import { InstanceOfSchema } from "./zodSchema/typeConverters/InstanceOfSchema.js";
 import { SubscriptionCache } from "../subscribe/SubscriptionCache.js";
+import {
+  AccountSchema,
+  CoreAccountSchema,
+} from "./zodSchema/schemaTypes/AccountSchema.js";
+import { Loaded } from "../internal.js";
 
 export type JazzContextManagerAuthProps = {
   credentials?: AuthCredentials;
   newAccountProps?: { secret: AgentSecret; creationProps: { name: string } };
 };
 
-export type JazzContextManagerBaseProps<Acc extends Account> = {
-  onAnonymousAccountDiscarded?: (anonymousAccount: Acc) => Promise<void>;
+export type JazzContextManagerBaseProps<Acc extends CoreAccountSchema> = {
+  onAnonymousAccountDiscarded?: (
+    anonymousAccount: Loaded<Acc>,
+  ) => Promise<void>;
   onLogOut?: () => void | Promise<unknown>;
   logOutReplacement?: () => void | Promise<unknown>;
 };
 
-type PlatformSpecificAuthContext<Acc extends Account> = {
-  me: Acc;
+type PlatformSpecificAuthContext<Acc extends CoreAccountSchema> = {
+  me: Loaded<Acc>;
   node: LocalNode;
   logOut: () => Promise<void>;
   done: () => void;
@@ -40,7 +47,7 @@ type PlatformSpecificGuestContext = {
   connected: () => boolean;
 };
 
-type PlatformSpecificContext<Acc extends Account> =
+export type PlatformSpecificContext<Acc extends CoreAccountSchema> =
   | PlatformSpecificAuthContext<Acc>
   | PlatformSpecificGuestContext;
 
@@ -66,7 +73,7 @@ function getAnonymousFallback() {
 }
 
 export class JazzContextManager<
-  Acc extends Account,
+  Acc extends CoreAccountSchema,
   P extends JazzContextManagerBaseProps<Acc>,
 > {
   protected value: JazzContextType<Acc> | undefined;

@@ -1,7 +1,6 @@
 import { LocalNode, RawAccount } from "cojson";
 import {
   Account,
-  AccountClass,
   LoadedAndRequired,
   CoRecordSchema,
   CoValueClass,
@@ -88,19 +87,13 @@ export type CoValueSchemaFromCoreSchema<S extends CoreCoValueSchema> =
                               infer Members
                             >
                           ? CoDiscriminatedUnionSchema<Members>
-                          : never;
+                          : `No Constructable for` & S;
 
 export type CoValueClassFromAnySchema<S extends CoValueClassOrSchema> =
   S extends CoValueClass<any>
     ? S
     : CoValueClass<LoadedAndRequired<InstanceOfSchema<S>>> &
-        CoValueFromRaw<LoadedAndRequired<InstanceOfSchema<S>>> &
-        (S extends CoreAccountSchema ? AccountClassEssentials : {});
-
-type AccountClassEssentials = {
-  fromRaw: <A extends Account>(this: AccountClass<A>, raw: RawAccount) => A;
-  fromNode: <A extends Account>(this: AccountClass<A>, node: LocalNode) => A;
-};
+        CoValueFromRaw<LoadedAndRequired<InstanceOfSchema<S>>>;
 
 export type AnyCoreCoValueSchema =
   | CoreCoMapSchema

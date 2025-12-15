@@ -101,6 +101,22 @@ export function instantiateRefEncodedFromRaw<V extends CoValue>(
   ) {
     throw new Error("use the FileStreamSchema instead of the FileStream class");
   }
+  if (
+    (schema.ref as any).name &&
+    (schema.ref as any).name.includes("CoMap") &&
+    !(schema.ref as any).name.includes("CoMapSchema")
+  ) {
+    throw new Error("use the CoMapSchema instead of the CoMap class");
+  }
+  if (
+    (schema.ref as any).name &&
+    (schema.ref as any).name.includes("Account")
+  ) {
+    throw new Error("use the AccountSchema instead of the Account class");
+  }
+  if ((schema.ref as any).name && (schema.ref as any).name.includes("Group")) {
+    throw new Error("use the GroupSchema instead of the Group class");
+  }
   return isCoValueClass<V>(schema.ref)
     ? schema.ref.fromRaw(raw)
     : (schema.ref as (raw: RawCoValue) => CoValueClass<V> & CoValueFromRaw<V>)(

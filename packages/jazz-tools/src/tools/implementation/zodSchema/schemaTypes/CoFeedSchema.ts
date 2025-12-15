@@ -4,7 +4,7 @@ import {
   BranchDefinition,
   CoFeed,
   Group,
-  hydrateCoreCoValueSchema,
+  asConstructable,
   Settled,
   RefsToResolve,
   RefsToResolveStrict,
@@ -207,8 +207,7 @@ export class CoFeedSchema<
   }): CoFeedSchema<T, ResolveQuery> {
     const coreSchema = createCoreCoFeedSchema(this.element);
     // @ts-expect-error
-    const copy: CoFeedSchema<T, ResolveQuery> =
-      hydrateCoreCoValueSchema(coreSchema);
+    const copy: CoFeedSchema<T, ResolveQuery> = asConstructable(coreSchema);
     // @ts-expect-error TS cannot infer that the resolveQuery type is valid
     copy.resolveQuery = resolveQuery ?? this.resolveQuery;
     copy.permissions = permissions ?? this.permissions;

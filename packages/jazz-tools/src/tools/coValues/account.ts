@@ -59,6 +59,12 @@ import {
   CoMapFieldSchema,
   isRefEncoded,
   InstanceOfSchema,
+  CoreAccountSchema,
+  AccountInstance,
+  DefaultAccountShape,
+  coProfileDefiner,
+  asConstructable,
+  Loaded,
 } from "../internal.js";
 
 export type AccountCreationProps = {
@@ -81,7 +87,9 @@ export class Account extends CoValueBase implements CoValue {
   static fields: CoMapFieldSchema = {
     profile: {
       type: "ref",
-      ref: () => Profile,
+      ref: () => {
+        throw new Error("Don't use ref for profile");
+      },
       optional: false,
       get sourceSchema() {
         return Profile;
@@ -89,7 +97,9 @@ export class Account extends CoValueBase implements CoValue {
     } satisfies RefEncoded<Profile>,
     root: {
       type: "ref",
-      ref: () => RegisteredSchemas["CoMap"],
+      ref: () => {
+        throw new Error("Don't use ref for root");
+      },
       optional: true,
       get sourceSchema() {
         return RegisteredSchemas["CoMap"];
@@ -100,7 +110,11 @@ export class Account extends CoValueBase implements CoValue {
   declare readonly profile: MaybeLoaded<Profile>;
   declare readonly root: MaybeLoaded<CoMap>;
 
-  constructor(fields: CoMapFieldSchema, raw: RawAccount) {
+  constructor(
+    fields: CoMapFieldSchema,
+    raw: RawAccount,
+    sourceSchema: CoreAccountSchema,
+  ) {
     super();
 
     if (!raw) {
@@ -116,19 +130,12 @@ export class Account extends CoValueBase implements CoValue {
     Object.defineProperties(this, {
       [TypeSym]: { value: "Account", enumerable: false },
       $jazz: {
-        value: new AccountJazzApi(proxy, raw, fields),
+        value: new AccountJazzApi(proxy, raw, fields, sourceSchema),
         enumerable: false,
       },
     });
 
     return proxy;
-  }
-
-  static fromRaw<A extends CoValue>(this: CoValueClass<A>, raw: RawAccount): A {
-    return new this(
-      (this as unknown as { fields: CoMapFieldSchema }).fields,
-      raw,
-    ) as A;
   }
 
   /**
@@ -255,102 +262,8 @@ export class Account extends CoValueBase implements CoValue {
     return valueOwner.getRoleOf(this.$jazz.id) === "admin";
   }
 
-  /** @private */
-  static async create<A extends Account>(
-    this: CoValueClass<A> & typeof Account,
-    options: {
-      creationProps: { name: string };
-      initialAgentSecret?: AgentSecret;
-      peers?: Peer[];
-      crypto: CryptoProvider;
-    },
-  ): Promise<A> {
-    const { node } = await LocalNode.withNewlyCreatedAccount({
-      ...options,
-      migration: async (rawAccount, _node, creationProps) => {
-        const account = new this(this.fields, rawAccount) as A;
-
-        await account.applyMigration?.(creationProps);
-      },
-    });
-
-    return this.fromNode(node) as A;
-  }
-
   static getMe<A extends Account>(this: CoValueClass<A> & typeof Account) {
     return activeAccountContext.get() as A;
-  }
-
-  /**
-   * @deprecated Use `co.account(...).createAs` instead.
-   */
-  static async createAs<A extends Account>(
-    this: CoValueClass<A> & typeof Account,
-    worker: Account,
-    options: {
-      creationProps: { name: string };
-      onCreate?: (account: A, worker: Account) => Promise<void>;
-    },
-  ): Promise<{
-    credentials: {
-      accountID: string;
-      accountSecret: AgentSecret;
-    };
-    account: A;
-  }> {
-    const crypto = worker.$jazz.localNode.crypto;
-
-    const connectedPeers = cojsonInternals.connectedPeers(
-      "creatingAccount",
-      crypto.uniquenessForHeader(), // Use a unique id for the client peer, so we don't have clashes in the worker node
-      { peer1role: "server", peer2role: "client" },
-    );
-
-    worker.$jazz.localNode.syncManager.addPeer(connectedPeers[1]);
-
-    const account = await this.create<A>({
-      creationProps: options.creationProps,
-      crypto,
-      peers: [connectedPeers[0]],
-    });
-
-    const credentials = {
-      accountID: account.$jazz.id,
-      accountSecret: account.$jazz.localNode.getCurrentAgent().agentSecret,
-    };
-
-    // Load the worker inside the account node
-    const loadedWorker = await co.account().load(worker.$jazz.id, {
-      loadAs: account,
-    });
-
-    // This should never happen, because the two accounts are linked
-    if (!loadedWorker.$isLoaded)
-      throw new Error("Unable to load the worker account");
-
-    // The onCreate hook can be helpful to define inline logic, such as querying the DB
-    if (options.onCreate) await options.onCreate(account, loadedWorker);
-
-    await account.$jazz.waitForAllCoValuesSync();
-
-    const createdAccount = await co.account().load(account.$jazz.id, {
-      loadAs: worker,
-    });
-
-    if (!createdAccount.$isLoaded)
-      throw new Error("Unable to load the created account");
-
-    // Close the account node, to avoid leaking memory
-    account.$jazz.localNode.gracefulShutdown();
-
-    return { credentials, account: createdAccount as A };
-  }
-
-  static fromNode<A extends Account>(node: LocalNode): A {
-    return new this(
-      this.fields,
-      node.expectCurrentAccount("jazz-tools/Account.fromNode"),
-    ) as A;
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -369,11 +282,16 @@ export class Account extends CoValueBase implements CoValue {
 
     // if the user has not defined a profile themselves, we create one
     if (this.profile === undefined && creationProps) {
-      const profileGroup = RegisteredSchemas["Group"].create({ owner: this });
+      const profileGroup = (RegisteredSchemas["Group"] as any).create({
+        owner: this,
+      });
 
       this.$jazz.set(
         "profile",
-        Profile.create({ name: creationProps.name }, profileGroup) as any,
+        coProfileDefiner().create(
+          { name: creationProps.name },
+          profileGroup,
+        ) as any,
       );
       profileGroup.addMember("everyone", "reader");
     }
@@ -409,11 +327,16 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
     private account: A,
     public raw: RawAccount,
     private fields: CoMapFieldSchema,
+    public sourceSchema: CoreAccountSchema,
   ) {
     super(account);
     this.isLocalNodeOwner = this.raw.id === this.localNode.getCurrentAgent().id;
     if (this.isLocalNodeOwner) {
       this.sessionID = this.localNode.currentSessionID;
+    }
+
+    if (!this.sourceSchema) {
+      throw new Error("sourceSchema is required");
     }
   }
 
@@ -578,14 +501,14 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
     return this.localNode.syncManager.waitForAllCoValuesSync(options?.timeout);
   }
 
-  get loadedAs(): Account | AnonymousJazzAgent {
-    if (this.isLocalNodeOwner) return this.account;
+  get loadedAs(): Loaded<CoreAccountSchema> | AnonymousJazzAgent {
+    if (this.isLocalNodeOwner) return this.account as Loaded<CoreAccountSchema>;
 
     const agent = this.localNode.getCurrentAgent();
 
     if (agent instanceof RawControlledAccount) {
       return coValuesCache.get(agent.account, () =>
-        Account.fromRaw(agent.account),
+        asConstructable(RegisteredSchemas["Account"]).fromRaw(agent.account),
       );
     }
 
@@ -623,9 +546,3 @@ export function isControlledAccount(
 ): account is ControlledAccount {
   return account.$jazz.isLocalNodeOwner;
 }
-
-export type AccountClass<Acc extends Account> = CoValueClass<Acc> & {
-  fromNode: (typeof Account)["fromNode"];
-};
-
-RegisteredSchemas["Account"] = Account;

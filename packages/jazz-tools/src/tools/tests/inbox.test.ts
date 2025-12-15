@@ -6,6 +6,7 @@ import {
   co,
   coValueClassFromCoValueClassOrSchema,
   Account as AccountClass,
+  RegisteredSchemas,
 } from "../internal";
 import { setupTwoNodes, waitFor } from "./utils";
 import {
@@ -40,8 +41,7 @@ describe("Inbox", () => {
 
       const { clientAccount: sender, serverAccount: receiver } =
         await setupTwoNodes({
-          ServerAccountSchema:
-            coValueClassFromCoValueClassOrSchema(WorkerAccount),
+          ServerAccountSchema: WorkerAccount,
         });
 
       await expect(() =>
@@ -432,7 +432,7 @@ describe("Inbox", () => {
       sessionID: sessionID,
     });
 
-    const reloadedInbox = await Inbox.load(AccountClass.fromNode(node));
+    const reloadedInbox = await Inbox.load(co.account().fromNode(node));
 
     const subscribeEmitted = await new Promise((resolve) => {
       const unsubscribe = reloadedInbox.subscribe(Message, async (message) => {
@@ -503,7 +503,7 @@ describe("Inbox", () => {
       sessionID: sessionID,
     });
 
-    const reloadedInbox = await Inbox.load(AccountClass.fromNode(node));
+    const reloadedInbox = await Inbox.load(co.account().fromNode(node));
 
     const subscribeEmitted = await new Promise((resolve) => {
       const unsubscribe = reloadedInbox.subscribe(Message, async (message) => {

@@ -7,6 +7,7 @@ import {
   ExportedCoValue,
   RegisteredSchemas,
   type SubscriptionScope,
+  asConstructable,
   coValueClassFromCoValueClassOrSchema,
   coValuesCache,
   exportCoValueFromSubscription,
@@ -88,9 +89,7 @@ export abstract class CoValueJazzApi<V extends CoValue> {
 
     if (agent instanceof ControlledAccount) {
       return coValuesCache.get(agent.account, () =>
-        coValueClassFromCoValueClassOrSchema(
-          RegisteredSchemas["Account"],
-        ).fromRaw(agent.account),
+        asConstructable(RegisteredSchemas["Account"]).fromRaw(agent.account),
       );
     }
 

@@ -11,7 +11,7 @@ import {
   SchemaUnionDiscriminator,
 } from "../../internal.js";
 import {
-  hydrateCoreCoValueSchema,
+  asConstructable,
   isAnyCoValueSchema,
 } from "./runtimeConverters/coValueSchemaTransformation.js";
 import { z } from "./zodReExport.js";
@@ -91,7 +91,7 @@ export function schemaUnionDiscriminatorFor(
         }
 
         if (match) {
-          const coValueSchema = hydrateCoreCoValueSchema(option as any);
+          const coValueSchema = asConstructable(option as any);
           const coValueClass = coValueSchema.getCoValueClass() as typeof CoMap;
 
           const dummyFieldNames = Array.from(allNestedRefKeys).filter(

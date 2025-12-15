@@ -1,10 +1,18 @@
-import type { Account, CoMap, Group } from "../internal.js";
+import type {
+  Account,
+  AccountSchema,
+  CoMap,
+  CoMapSchema,
+  CoreAccountSchema,
+  Group,
+  GroupSchema,
+} from "../internal.js";
 
 /**
  * Regisering schemas into this Record to avoid circular dependencies.
  */
 export const RegisteredSchemas = {} as {
-  Account: typeof Account;
-  Group: typeof Group;
-  CoMap: typeof CoMap;
+  Account: CoreAccountSchema;
+  Group: GroupSchema;
+  CoMap: CoMapSchema<{}>;
 };

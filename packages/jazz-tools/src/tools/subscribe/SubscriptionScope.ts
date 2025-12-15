@@ -99,10 +99,13 @@ export class SubscriptionScope<D extends CoValue> {
         (this.schema.sourceSchema as any).name.includes("CoVector") ||
         (this.schema.sourceSchema as any).name.includes("CoPlainText") ||
         (this.schema.sourceSchema as any).name.includes("CoRichText") ||
-        (this.schema.sourceSchema as any).name.includes("FileStream"))
+        (this.schema.sourceSchema as any).name.includes("FileStream") ||
+        (this.schema.sourceSchema as any).name.includes("CoMap") ||
+        (this.schema.sourceSchema as any).name.includes("Account") ||
+        (this.schema.sourceSchema as any).name.includes("Group"))
     ) {
       throw new Error(
-        "use the CoListSchema, CoFeedSchema, CoVectorSchema, PlainTextSchema, RichTextSchema, or FileStreamSchema instead of the CoList, CoFeed, CoVector, CoPlainText, CoRichText, or FileStream class",
+        "use the CoListSchema, CoFeedSchema, CoVectorSchema, PlainTextSchema, RichTextSchema, FileStreamSchema, CoMapSchema, AccountSchema, or GroupSchema instead of the CoList, CoFeed, CoVector, CoPlainText, CoRichText, FileStream, CoMap, Account, or Group class",
       );
     }
 
@@ -903,10 +906,13 @@ export class SubscriptionScope<D extends CoValue> {
         (descriptor.sourceSchema as any).name.includes("CoVector") ||
         (descriptor.sourceSchema as any).name.includes("CoPlainText") ||
         (descriptor.sourceSchema as any).name.includes("CoRichText") ||
-        (descriptor.sourceSchema as any).name.includes("FileStream"))
+        (descriptor.sourceSchema as any).name.includes("FileStream") ||
+        (descriptor.sourceSchema as any).name.includes("CoMap") ||
+        (descriptor.sourceSchema as any).name.includes("Account") ||
+        (descriptor.sourceSchema as any).name.includes("Group"))
     ) {
       throw new Error(
-        "use the CoListSchema, CoFeedSchema, CoVectorSchema, PlainTextSchema, RichTextSchema, or FileStreamSchema instead of the CoList, CoFeed, CoVector, CoPlainText, CoRichText, or FileStream class",
+        "use the CoListSchema, CoFeedSchema, CoVectorSchema, PlainTextSchema, RichTextSchema, FileStreamSchema, CoMapSchema, AccountSchema, or GroupSchema instead of the CoList, CoFeed, CoVector, CoPlainText, CoRichText, FileStream, CoMap, Account, or Group class",
       );
     }
 

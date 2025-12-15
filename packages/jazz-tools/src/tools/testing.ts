@@ -3,7 +3,7 @@ import { cojsonInternals } from "cojson";
 import { PureJSCrypto } from "cojson/dist/crypto/PureJSCrypto";
 import {
   Account,
-  AccountClass,
+  RegisteredSchemas,
   type AnonymousJazzAgent,
   AuthCredentials,
   CoValueFromRaw,
@@ -13,10 +13,14 @@ import {
   JazzContextManagerAuthProps,
   JazzContextManagerBaseProps,
   activeAccountContext,
+  co,
   coValueClassFromCoValueClassOrSchema,
   createAnonymousJazzContext,
   createJazzContext,
   randomSessionProvider,
+  Loaded,
+  PlatformSpecificContext,
+  asConstructable,
 } from "./internal.js";
 
 export { assertLoaded } from "./lib/utils.js";
@@ -88,9 +92,7 @@ const SecretSeedMap = new Map<string, Uint8Array>();
 let isMigrationActive = false;
 
 export async function createJazzTestAccount<
-  S extends
-    | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | CoreAccountSchema = CoreAccountSchema,
+  S extends CoreAccountSchema = CoreAccountSchema,
 >(options?: {
   isCurrentActiveAccount?: boolean;
   AccountSchema?: S;
@@ -124,8 +126,7 @@ export async function createJazzTestAccount<
 
       isMigrationActive = true;
 
-      // @ts-expect-error - AccountClass doesn't infer the fromRaw static method
-      const account = AccountClass.fromRaw(rawAccount) as InstanceOfSchema<S>;
+      const account = AccountClass.fromRaw(rawAccount);
 
       // We need to set the account as current because the migration
       // will probably rely on the global me
@@ -142,7 +143,7 @@ export async function createJazzTestAccount<
     },
   });
 
-  const account = AccountClass.fromNode(node);
+  const account = co.account().fromNode(node);
   SecretSeedMap.set(account.$jazz.id, secretSeed);
 
   if (options?.isCurrentActiveAccount) {
@@ -212,29 +213,35 @@ export class MockConnectionStatus {
   }
 }
 
-export type TestJazzContextManagerProps<Acc extends Account> =
+export type TestJazzContextManagerProps<Acc extends CoreAccountSchema> =
   JazzContextManagerBaseProps<Acc> & {
     defaultProfileName?: string;
-    AccountSchema?: AccountClass<Acc> & CoValueFromRaw<Acc>;
+    AccountSchema?: Acc;
     isAuthenticated?: boolean;
   };
 
 export class TestJazzContextManager<
-  Acc extends Account,
+  Acc extends CoreAccountSchema,
 > extends JazzContextManager<Acc, TestJazzContextManagerProps<Acc>> {
-  static fromAccountOrGuest<Acc extends Account>(
-    account?: Acc | { guest: AnonymousJazzAgent },
+  static fromAccountOrGuest<Acc extends CoreAccountSchema>(
+    account?: Loaded<Acc> | { guest: AnonymousJazzAgent },
     props?: TestJazzContextManagerProps<Acc>,
   ) {
     if (account && "guest" in account) {
-      return this.fromGuest<Acc>(account, props);
+      return this.fromGuest<Acc>(
+        account as { guest: AnonymousJazzAgent },
+        props,
+      );
     }
 
-    return this.fromAccount<Acc>(account ?? (Account.getMe() as Acc), props);
+    return this.fromAccount<Acc>(
+      account ?? (co.account().getMe() as Loaded<Acc>), // TODO: we can't really know the Account schema here?
+      props,
+    );
   }
 
-  static fromAccount<Acc extends Account>(
-    account: Acc,
+  static fromAccount<Acc extends CoreAccountSchema>(
+    account: Loaded<Acc>,
     props?: TestJazzContextManagerProps<Acc>,
   ) {
     const context = new TestJazzContextManager<Acc>();
@@ -254,8 +261,7 @@ export class TestJazzContextManager<
 
     context.updateContext(
       {
-        AccountSchema: account.constructor as AccountClass<Acc> &
-          CoValueFromRaw<Acc>,
+        AccountSchema: account.$jazz.sourceSchema as Acc,
         ...props,
       },
       {
@@ -281,7 +287,7 @@ export class TestJazzContextManager<
     return context;
   }
 
-  static fromGuest<Acc extends Account>(
+  static fromGuest<Acc extends CoreAccountSchema>(
     { guest }: { guest: AnonymousJazzAgent },
     props: TestJazzContextManagerProps<Acc> = {},
   ) {
@@ -309,7 +315,7 @@ export class TestJazzContextManager<
   async getNewContext(
     props: TestJazzContextManagerProps<Acc>,
     authProps?: JazzContextManagerAuthProps,
-  ) {
+  ): Promise<PlatformSpecificContext<Acc>> {
     if (!syncServer.current) {
       throw new Error(
         "You need to setup a test sync server with setupJazzTestSync to use the Auth functions",
@@ -375,7 +381,7 @@ export async function setupJazzTestSync({
     syncServer.current.gracefulShutdown();
   }
 
-  const account = await Account.create({
+  const account = await asConstructable(RegisteredSchemas["Account"]).create({
     creationProps: {
       name: "Test Account",
     },

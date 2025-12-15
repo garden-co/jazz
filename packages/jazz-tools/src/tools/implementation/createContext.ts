@@ -10,14 +10,17 @@ import {
   StorageAPI,
 } from "cojson";
 import { AuthSecretStorage } from "../auth/AuthSecretStorage.js";
-import { type Account, type AccountClass } from "../coValues/account.js";
+import { type Account } from "../coValues/account.js";
 import { RegisteredSchemas } from "../coValues/registeredSchemas.js";
 import {
+  AccountSchema,
   CoValueFromRaw,
   type CoreAccountSchema,
   type ID,
   type InstanceOfSchema,
   coValueClassFromCoValueClassOrSchema,
+  asConstructable,
+  Loaded,
 } from "../internal.js";
 import { AuthCredentials, NewAccountProps } from "../types.js";
 import { activeAccountContext } from "./activeAccountContext.js";
@@ -67,9 +70,9 @@ export async function randomSessionProvider(
   };
 }
 
-export type JazzContextWithAccount<Acc extends Account> = {
+export type JazzContextWithAccount<Acc extends CoreAccountSchema> = {
   node: LocalNode;
-  account: Acc;
+  account: Loaded<Acc>;
   done: () => void;
   logOut: () => Promise<void>;
 };
@@ -80,14 +83,12 @@ export type JazzContextWithAgent = {
   logOut: () => Promise<void>;
 };
 
-export type JazzContext<Acc extends Account> =
+export type JazzContext<Acc extends CoreAccountSchema> =
   | JazzContextWithAccount<Acc>
   | JazzContextWithAgent;
 
 export async function createJazzContextFromExistingCredentials<
-  S extends
-    | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | CoreAccountSchema,
+  S extends CoreAccountSchema,
 >({
   credentials,
   peers,
@@ -106,7 +107,7 @@ export async function createJazzContextFromExistingCredentials<
   onLogOut?: () => void;
   storage?: StorageAPI;
   asActiveAccount: boolean;
-}): Promise<JazzContextWithAccount<InstanceOfSchema<S>>> {
+}): Promise<JazzContextWithAccount<S>> {
   const { sessionID, sessionDone } = await sessionProvider(
     credentials.accountID,
     crypto,
@@ -114,9 +115,6 @@ export async function createJazzContextFromExistingCredentials<
 
   const CurrentAccountSchema =
     PropsAccountSchema ?? (RegisteredSchemas["Account"] as unknown as S);
-
-  const AccountClass =
-    coValueClassFromCoValueClassOrSchema(CurrentAccountSchema);
 
   const node = await LocalNode.withLoadedAccount({
     accountID: credentials.accountID as unknown as CoID<RawAccount>,
@@ -126,7 +124,9 @@ export async function createJazzContextFromExistingCredentials<
     crypto: crypto,
     storage,
     migration: async (rawAccount, _node, creationProps) => {
-      const account = AccountClass.fromRaw(rawAccount) as InstanceOfSchema<S>;
+      const account = asConstructable(CurrentAccountSchema).fromRaw(
+        rawAccount,
+      ) as InstanceOfSchema<S>;
       if (asActiveAccount) {
         activeAccountContext.set(account);
       }
@@ -135,14 +135,14 @@ export async function createJazzContextFromExistingCredentials<
     },
   });
 
-  const account = AccountClass.fromNode(node);
+  const account = asConstructable(CurrentAccountSchema).fromNode(node);
   if (asActiveAccount) {
     activeAccountContext.set(account);
   }
 
   return {
     node,
-    account: account as InstanceOfSchema<S>,
+    account: account as Loaded<S>,
     done: () => {
       node.gracefulShutdown();
       sessionDone();
@@ -156,9 +156,7 @@ export async function createJazzContextFromExistingCredentials<
 }
 
 export async function createJazzContextForNewAccount<
-  S extends
-    | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | CoreAccountSchema,
+  S extends CoreAccountSchema,
 >({
   creationProps,
   initialAgentSecret,
@@ -175,12 +173,9 @@ export async function createJazzContextForNewAccount<
   AccountSchema?: S;
   onLogOut?: () => Promise<void>;
   storage?: StorageAPI;
-}): Promise<JazzContextWithAccount<InstanceOfSchema<S>>> {
+}): Promise<JazzContextWithAccount<S>> {
   const CurrentAccountSchema =
     PropsAccountSchema ?? (RegisteredSchemas["Account"] as unknown as S);
-
-  const AccountClass =
-    coValueClassFromCoValueClassOrSchema(CurrentAccountSchema);
 
   const { node } = await LocalNode.withNewlyCreatedAccount({
     creationProps,
@@ -189,19 +184,21 @@ export async function createJazzContextForNewAccount<
     initialAgentSecret,
     storage,
     migration: async (rawAccount, _node, creationProps) => {
-      const account = AccountClass.fromRaw(rawAccount) as InstanceOfSchema<S>;
+      const account = asConstructable(CurrentAccountSchema).fromRaw(
+        rawAccount,
+      ) as InstanceOfSchema<S>;
       activeAccountContext.set(account);
 
       await account.applyMigration(creationProps);
     },
   });
 
-  const account = AccountClass.fromNode(node);
+  const account = asConstructable(CurrentAccountSchema).fromNode(node);
   activeAccountContext.set(account);
 
   return {
     node,
-    account: account as InstanceOfSchema<S>,
+    account: account as Loaded<S>,
     done: () => {
       node.gracefulShutdown();
     },
@@ -212,11 +209,7 @@ export async function createJazzContextForNewAccount<
   };
 }
 
-export async function createJazzContext<
-  S extends
-    | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | CoreAccountSchema,
->(options: {
+export async function createJazzContext<S extends CoreAccountSchema>(options: {
   credentials?: AuthCredentials;
   newAccountProps?: NewAccountProps;
   peers: Peer[];
@@ -226,10 +219,12 @@ export async function createJazzContext<
   sessionProvider: SessionProvider;
   authSecretStorage: AuthSecretStorage;
   storage?: StorageAPI;
-}) {
+}): Promise<
+  JazzContextWithAccount<S> & { authSecretStorage: AuthSecretStorage }
+> {
   const crypto = options.crypto;
 
-  let context: JazzContextWithAccount<InstanceOfSchema<S>>;
+  let context: JazzContextWithAccount<S>;
 
   const authSecretStorage = options.authSecretStorage;
 

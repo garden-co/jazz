@@ -4,7 +4,7 @@ import {
   CoList,
   Group,
   co,
-  hydrateCoreCoValueSchema,
+  asConstructable,
   ID,
   Settled,
   RefsToResolve,
@@ -304,8 +304,7 @@ export class CoListSchema<
   }): CoListSchema<T, ResolveQuery> {
     const coreSchema = createCoreCoListSchema(this.element);
     // @ts-expect-error
-    const copy: CoListSchema<T, ResolveQuery> =
-      hydrateCoreCoValueSchema(coreSchema);
+    const copy: CoListSchema<T, ResolveQuery> = asConstructable(coreSchema);
     // @ts-expect-error TS cannot infer that the resolveQuery type is valid
     copy.resolveQuery = resolveQuery ?? this.resolveQuery;
     copy.permissions = permissions ?? this.permissions;

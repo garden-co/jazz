@@ -12,7 +12,6 @@ import {
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import {
   type Account,
-  AccountClass,
   AnyAccountSchema,
   CoValueFromRaw,
   Inbox,
@@ -23,11 +22,7 @@ import {
   co,
 } from "jazz-tools";
 
-type WorkerOptions<
-  S extends
-    | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | AnyAccountSchema,
-> = {
+type WorkerOptions<S extends AnyAccountSchema> = {
   accountID?: string;
   accountSecret?: string;
   syncServer?: string;
@@ -46,11 +41,9 @@ type WorkerOptions<
 };
 
 /** @category Context Creation */
-export async function startWorker<
-  S extends
-    | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | AnyAccountSchema,
->(options: WorkerOptions<S>) {
+export async function startWorker<S extends AnyAccountSchema>(
+  options: WorkerOptions<S>,
+) {
   const {
     accountID = process.env.JAZZ_WORKER_ACCOUNT,
     accountSecret = process.env.JAZZ_WORKER_SECRET,
