@@ -77,6 +77,12 @@ export function instantiateRefEncodedFromRaw<V extends CoValue>(
   if ((schema.ref as any).name && (schema.ref as any).name.includes("CoList")) {
     throw new Error("use the CoListSchema instead of the CoList class");
   }
+  if (
+    (schema.ref as any).name &&
+    (schema.ref as any).name.includes("CoVector")
+  ) {
+    throw new Error("use the CoVectorSchema instead of the CoVector class");
+  }
   return isCoValueClass<V>(schema.ref)
     ? schema.ref.fromRaw(raw)
     : (schema.ref as (raw: RawCoValue) => CoValueClass<V> & CoValueFromRaw<V>)(

@@ -137,15 +137,9 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
     const coValueClass = FileStream;
     return new FileStreamSchema(coValueClass) as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoVector") {
-    const dimensions = schema.dimensions;
-
-    const coValueClass = class CoVectorWithDimensions extends CoVector {
-      protected static requiredDimensionsCount = dimensions;
-    };
-
     return new CoVectorSchema(
-      dimensions,
-      coValueClass,
+      schema.dimensions,
+      CoVector,
     ) as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoPlainText") {
     const coValueClass = CoPlainText;

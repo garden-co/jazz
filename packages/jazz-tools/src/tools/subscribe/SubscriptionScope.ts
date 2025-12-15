@@ -95,10 +95,11 @@ export class SubscriptionScope<D extends CoValue> {
     if (
       (this.schema.sourceSchema as any).name &&
       ((this.schema.sourceSchema as any).name.includes("CoList") ||
-        (this.schema.sourceSchema as any).name.includes("CoFeed"))
+        (this.schema.sourceSchema as any).name.includes("CoFeed") ||
+        (this.schema.sourceSchema as any).name.includes("CoVector"))
     ) {
       throw new Error(
-        "use the CoListSchema or CoFeedSchema instead of the CoList or CoFeed class",
+        "use the CoListSchema, CoFeedSchema, or CoVectorSchema instead of the CoList, CoFeed, or CoVector class",
       );
     }
 
@@ -895,9 +896,12 @@ export class SubscriptionScope<D extends CoValue> {
     if (
       (descriptor.sourceSchema as any).name &&
       ((descriptor.sourceSchema as any).name.includes("CoList") ||
-        (descriptor.sourceSchema as any).name.includes("CoFeed"))
+        (descriptor.sourceSchema as any).name.includes("CoFeed") ||
+        (descriptor.sourceSchema as any).name.includes("CoVector"))
     ) {
-      throw new Error("use the CoListSchema instead of the CoList class");
+      throw new Error(
+        "use the CoListSchema, CoFeedSchema, or CoVectorSchema instead of the CoList, CoFeed, or CoVector class",
+      );
     }
 
     if (this.isSubscribedToId(id)) {

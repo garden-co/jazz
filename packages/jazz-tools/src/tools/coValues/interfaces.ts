@@ -32,6 +32,7 @@ import {
   co,
   CoreCoListSchema,
   CoreCoFeedSchema,
+  CoreCoVectorSchema,
 } from "../internal.js";
 import type { BranchDefinition } from "../subscribe/types.js";
 import { CoValueHeader } from "cojson";
@@ -144,7 +145,11 @@ export function loadCoValueWithoutMe<
   V extends CoValue,
   const R extends RefsToResolve<V> = true,
 >(
-  cls: CoValueClass<V> | CoreCoListSchema | CoreCoFeedSchema,
+  cls:
+    | CoValueClass<V>
+    | CoreCoListSchema
+    | CoreCoFeedSchema
+    | CoreCoVectorSchema,
   id: ID<CoValue>,
   options?: {
     resolve?: RefsToResolveStrict<V, R>;
@@ -164,7 +169,11 @@ export function loadCoValue<
   V extends CoValue,
   const R extends RefsToResolve<V>,
 >(
-  cls: CoValueClass<V> | CoreCoListSchema | CoreCoFeedSchema,
+  cls:
+    | CoValueClass<V>
+    | CoreCoListSchema
+    | CoreCoFeedSchema
+    | CoreCoVectorSchema,
   id: ID<CoValue>,
   options: {
     resolve?: RefsToResolveStrict<V, R>;
@@ -285,7 +294,11 @@ export function subscribeToCoValueWithoutMe<
   V extends CoValue,
   const R extends RefsToResolve<V> = true,
 >(
-  cls: CoValueClass<V> | CoreCoListSchema | CoreCoFeedSchema,
+  cls:
+    | CoValueClass<V>
+    | CoreCoListSchema
+    | CoreCoFeedSchema
+    | CoreCoVectorSchema,
   id: ID<CoValue>,
   options: SubscribeListenerOptions<V, R>,
   listener: SubscribeListener<V, R>,
@@ -305,7 +318,11 @@ export function subscribeToCoValue<
   V extends CoValue,
   const R extends RefsToResolve<V> = true,
 >(
-  cls: CoValueClass<V> | CoreCoListSchema | CoreCoFeedSchema,
+  cls:
+    | CoValueClass<V>
+    | CoreCoListSchema
+    | CoreCoFeedSchema
+    | CoreCoVectorSchema,
   id: ID<CoValue>,
   options: {
     resolve?: RefsToResolveStrict<V, R>;

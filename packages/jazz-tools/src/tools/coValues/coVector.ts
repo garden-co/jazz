@@ -20,6 +20,7 @@ import {
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
+  CoreCoVectorSchema,
 } from "../internal.js";
 
 /**
@@ -53,9 +54,9 @@ export class CoVector
       | {
           fromRaw: RawBinaryCoStream;
         },
+    sourceSchema: CoreCoVectorSchema,
   ) {
-    const dimensionsCount = (new.target as typeof CoVector)
-      .requiredDimensionsCount;
+    const dimensionsCount = sourceSchema.dimensions;
 
     if (dimensionsCount === undefined) {
       throw new Error(
@@ -76,7 +77,7 @@ export class CoVector
     Object.defineProperties(this, {
       [TypeSym]: { value: "BinaryCoStream", enumerable: false },
       $jazz: {
-        value: new CoVectorJazzApi(this, raw),
+        value: new CoVectorJazzApi(this, raw, sourceSchema),
         enumerable: false,
       },
       $isLoaded: { value: true, enumerable: false },
@@ -93,70 +94,7 @@ export class CoVector
     }
   }
 
-  /** @category Internals */
-  static fromRaw<V extends CoVector>(
-    this: CoValueClass<V> & typeof CoVector,
-    raw: RawBinaryCoStream,
-  ) {
-    return new this({ fromRaw: raw });
-  }
-
-  /**
-   * Create a new `CoVector` instance with the given vector.
-   *
-   * @category Creation
-   * @deprecated Use `co.vector(...).create` instead.
-   */
-  static create<S extends CoVector>(
-    this: CoValueClass<S> & typeof CoVector,
-    vector: number[] | Float32Array,
-    options?: { owner?: Account | Group } | Account | Group,
-  ) {
-    const vectorAsFloat32Array =
-      vector instanceof Float32Array ? vector : new Float32Array(vector);
-
-    const givenVectorDimensions =
-      vectorAsFloat32Array.byteLength / vectorAsFloat32Array.BYTES_PER_ELEMENT;
-
-    if (
-      this.requiredDimensionsCount !== undefined &&
-      givenVectorDimensions !== this.requiredDimensionsCount
-    ) {
-      throw new Error(
-        `Vector dimension mismatch! Expected ${this.requiredDimensionsCount} dimensions, got ${
-          givenVectorDimensions
-        }`,
-      );
-    }
-
-    const { owner } = parseCoValueCreateOptions(options);
-    const coVector = new this({ owner });
-    coVector.setVectorData(vectorAsFloat32Array);
-
-    const byteArray = CoVector.toByteArray(vectorAsFloat32Array);
-
-    coVector.$jazz.raw.startBinaryStream({
-      mimeType: "application/vector+octet-stream",
-      totalSizeBytes: byteArray.byteLength,
-    });
-
-    const chunkSize =
-      cojsonInternals.TRANSACTION_CONFIG.MAX_RECOMMENDED_TX_SIZE;
-
-    // Although most embedding vectors are small
-    // (3072-dimensional vector is only 12,288 bytes),
-    // we should still chunk the data to avoid transaction size limits
-    for (let idx = 0; idx < byteArray.length; idx += chunkSize) {
-      coVector.$jazz.raw.pushBinaryStreamChunk(
-        byteArray.slice(idx, idx + chunkSize),
-      );
-    }
-    coVector.$jazz.raw.endBinaryStream();
-
-    return coVector;
-  }
-
-  private static toByteArray(vector: Float32Array): Uint8Array {
+  static toByteArray(vector: Float32Array): Uint8Array {
     // zero copy view of the vector bytes
     return new Uint8Array(vector.buffer, vector.byteOffset, vector.byteLength);
   }
@@ -204,7 +142,7 @@ export class CoVector
     return;
   }
 
-  private setVectorData(vector: Float32Array): void {
+  setVectorData(vector: Float32Array): void {
     super.set(vector, 0);
     this._isVectorLoaded = true;
   }
@@ -264,8 +202,13 @@ export class CoVectorJazzApi<V extends CoVector> extends CoValueJazzApi<V> {
   constructor(
     private coVector: V,
     public raw: RawBinaryCoStream,
+    public sourceSchema: CoreCoVectorSchema,
   ) {
     super(coVector);
+
+    if (!this.sourceSchema) {
+      throw new Error("sourceSchema is required");
+    }
   }
 
   get owner(): Group {
