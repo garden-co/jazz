@@ -1,10 +1,10 @@
-import { useIframeHashRouter } from "hash-slash";
+import { useHashRouter } from "hash-slash";
 import { CreateOrder } from "./CreateOrder.tsx";
 import { EditOrder } from "./EditOrder.tsx";
 import { Orders } from "./Orders.tsx";
 
 function App() {
-  const router = useIframeHashRouter();
+  const router = useHashRouter();
 
   return (
     <>

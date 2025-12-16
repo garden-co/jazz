@@ -55,6 +55,9 @@ export function JazzProviderCore<
   );
   const logoutReplacementActiveRef = useRef(false);
   logoutReplacementActiveRef.current = Boolean(logOutReplacement);
+  const onAnonymousAccountDiscardedEnabled = Boolean(
+    onAnonymousAccountDiscarded,
+  );
 
   const value = React.useSyncExternalStore<
     JazzContextType<InstanceOfSchema<S>> | undefined
@@ -71,7 +74,9 @@ export function JazzProviderCore<
           logOutReplacement: logoutReplacementActiveRef.current
             ? logOutReplacementRefCallback
             : undefined,
-          onAnonymousAccountDiscarded: onAnonymousAccountDiscardedRefCallback,
+          onAnonymousAccountDiscarded: onAnonymousAccountDiscardedEnabled
+            ? onAnonymousAccountDiscardedRefCallback
+            : undefined,
           CryptoProvider,
         } satisfies JazzContextManagerProps<S>;
 

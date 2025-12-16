@@ -164,7 +164,7 @@ export function Icon({
   name?: IconName;
   icon?: LucideIcon;
   size?: keyof typeof sizes;
-  intent?: Style | "white";
+  intent?: Style | "white" | "enterprise";
   hasBackground?: boolean;
   className?: string;
   hasHover?: boolean;

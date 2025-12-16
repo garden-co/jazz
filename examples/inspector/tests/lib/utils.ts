@@ -6,7 +6,7 @@ import {
   InMemoryKVStore,
   KvStoreContext,
   createJazzContext,
-  randomSessionProvider,
+  MockSessionProvider,
 } from "jazz-tools";
 
 export const initializeKvStore = () => {
@@ -18,7 +18,7 @@ export async function createAccount() {
   const { account, authSecretStorage } = await createJazzContext({
     defaultProfileName: "Inspector test account",
     crypto: await WasmCrypto.create(),
-    sessionProvider: randomSessionProvider,
+    sessionProvider: new MockSessionProvider(),
     authSecretStorage: new AuthSecretStorage(),
     peers: [
       createWebSocketPeer({
@@ -47,13 +47,14 @@ export async function addAccount(
   accountSecret: string,
 ) {
   await page.goto("/");
+  await page.getByRole("button", { name: "Select account" }).click();
   await page.getByLabel("Account ID").fill(accountID);
   await page.getByLabel("Account secret").fill(accountSecret);
   await page.getByRole("button", { name: "Add account" }).click();
 }
 
 export async function inspectCoValue(page: Page, coValueId: string) {
-  await page.goto("/");
+  await page.getByRole("button", { name: "Home" }).click();
   await page.getByLabel("CoValue ID").fill(coValueId);
   await page.getByRole("button", { name: "Inspect CoValue" }).click();
 }

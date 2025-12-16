@@ -1,5 +1,5 @@
-import { Group } from "jazz-tools";
-import { Project } from "./schema";
+import { co, Group } from "jazz-tools";
+import { MyAccount, Project } from "./schema";
 import { createJazzTestAccount } from "jazz-tools/testing";
 const projectId = "";
 const member = await createJazzTestAccount();
@@ -9,6 +9,13 @@ const branch = await Project.load(projectId, {
   unstable_branch: { name: "feature-branch" },
 });
 // #endregion
+
+// #region EditOnBranch
+const editBranch = await Project.load(projectId, {
+  unstable_branch: { name: "feature-branch" },
+});
+// #endregion
+
 
 // #region Permissions
 const featureBranch = await Project.load(projectId, {
@@ -91,4 +98,16 @@ const myBranch = await Project.load(projectId, {
 console.log(myBranch.$jazz.id); // Branch ID is the same as source
 console.log(myBranch.$isLoaded && myBranch.$jazz.branchName); // "feature-branch"
 console.log(myBranch.$isLoaded && myBranch.$jazz.isBranched); // true
+// #endregion
+
+
+// #region AccountModifications
+const myAcct = MyAccount.getMe();
+const me = await myAcct.$jazz.ensureLoaded({
+  resolve: { root: true },
+  unstable_branch: { name: "feature-branch" },
+});
+
+me.$isLoaded && me.$jazz.set("root", { value: "Feature Branch" }); // Will also modify the main account
+me.$isLoaded && me.root.$jazz.set("value", "Feature Branch"); // This only modifies the branch
 // #endregion

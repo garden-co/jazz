@@ -246,7 +246,7 @@ describe("Schema.resolved()", () => {
           profile: true,
         });
 
-        const account = await AccountWithProfile.createAs(serverAccount, {
+        const { account } = await AccountWithProfile.createAs(serverAccount, {
           creationProps: { name: "Hermes Puggington" },
           onCreate: async (account) => {
             account.$jazz.set(
@@ -405,7 +405,7 @@ describe("Schema.resolved()", () => {
       test("for Account", async () => {
         const AccountWithProfile = co.account().resolved({ profile: true });
 
-        const account = await AccountWithProfile.createAs(serverAccount, {
+        const { account } = await AccountWithProfile.createAs(serverAccount, {
           creationProps: { name: "Hermes Puggington" },
           onCreate: async (account) => {
             account.$jazz.set(
@@ -561,7 +561,7 @@ describe("Schema.resolved()", () => {
           .list(TestAccount)
           .resolved({ $each: TestAccount.resolveQuery });
 
-        const account = await TestAccount.createAs(serverAccount, {
+        const { account } = await TestAccount.createAs(serverAccount, {
           creationProps: { name: "Hermes Puggington" },
           onCreate: async (account) => {
             account.$jazz.set(

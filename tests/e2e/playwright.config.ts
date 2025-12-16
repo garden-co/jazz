@@ -31,14 +31,26 @@ export default defineConfig({
 
     /* Collect trace when retrying the failed test. See https://playwright.dev/docs/trace-viewer */
     trace: "on-first-retry",
-    permissions: ["clipboard-read", "clipboard-write"],
   },
 
   /* Configure projects for major browsers */
   projects: [
     {
       name: "chromium",
-      use: { ...devices["Desktop Chrome"] },
+      use: {
+        ...devices["Desktop Chrome"],
+        permissions: ["clipboard-read", "clipboard-write"],
+      },
+    },
+    {
+      name: "firefox",
+      testMatch: /.*\.cross-browser\.spec\.ts/,
+      use: { ...devices["Desktop Firefox"] },
+    },
+    {
+      name: "safari",
+      testMatch: /.*\.cross-browser\.spec\.ts/,
+      use: { ...devices["Desktop Safari"] },
     },
   ],
 

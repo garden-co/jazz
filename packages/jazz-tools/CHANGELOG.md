@@ -1,5 +1,47 @@
 # jazz-tools
 
+## 0.19.12
+
+### Patch Changes
+
+- 9ca9e72: Fix the inspector to guess correctly Group's transactions
+- 5b0bb7d: Bugfix: ensure that the promises used for Suspense is always cached
+- fa0759b: Bugfix: close the server peers before calling the onAnonymousAccountDiscarded hook, to ensure that there won't be conflicting issues with the new context sync
+- a2372db: Bugfix: ensure onAnonymousAccountDiscarded hook is conditionally applied in React providers
+  - cojson@0.19.12
+  - cojson-storage-indexeddb@0.19.12
+  - cojson-transport-ws@0.19.12
+
+## 0.19.11
+
+### Patch Changes
+
+- 68acca4: Sync Server is now configurable in inspector.jazz.tools
+- c00a454: Resolve footgun in Account.createAs() that made it easy to save the wrong credentials.
+- Updated dependencies [c00a454]
+  - cojson@0.19.11
+  - cojson-storage-indexeddb@0.19.11
+  - cojson-transport-ws@0.19.11
+
+## 0.19.10
+
+### Patch Changes
+
+- cojson@0.19.10
+- cojson-storage-indexeddb@0.19.10
+- cojson-transport-ws@0.19.10
+
+## 0.19.9
+
+### Patch Changes
+
+- d901caa: Added cojson-core-rn that improves ReactNative crypto performance
+- a2bb9f0: Added Suspense hooks for React and implemented subscription deduplication for React hooks
+- Updated dependencies [d901caa]
+  - cojson@0.19.9
+  - cojson-storage-indexeddb@0.19.9
+  - cojson-transport-ws@0.19.9
+
 ## 0.19.8
 
 ### Patch Changes
@@ -347,7 +389,6 @@
 ### Patch Changes
 
 - f2f478a: Add connection status API for React and Svelte
-
   - **React**: Added `useSyncConnectionStatus()` hook that returns the current connection status to the Jazz sync server
   - **Svelte**: Added `SyncConnectionStatus` class that provides reactive connection status monitoring
 
@@ -383,7 +424,6 @@
 ### Patch Changes
 
 - a584ab3: Add WasmCrypto support for Cloudflare Workers and edge runtimes by importing `jazz-tools/load-edge-wasm`.
-
   - Enable WasmCrypto functionality by initializing the WebAssembly environment with the import: `import "jazz-tools/load-edge-wasm"` in edge runtimes.
   - Guarantee compatibility across Cloudflare Workers and other edge runtime environments.
 
@@ -767,7 +807,6 @@
 - 3cd1586: Makes the key rotation not fail when child groups are unavailable or their readkey is not accessible.
 
   Also changes the Group.removeMember method to not return a Promise, because:
-
   - All the locally available child groups are rotated immediately
   - All the remote child groups are rotated in background, but since they are not locally available the user won't need the new key immediately
 

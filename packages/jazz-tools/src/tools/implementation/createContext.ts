@@ -28,10 +28,39 @@ export type Credentials = {
   secret: AgentSecret;
 };
 
-type SessionProvider = (
-  accountID: ID<Account>,
-  crypto: CryptoProvider,
-) => Promise<{ sessionID: SessionID; sessionDone: () => void }>;
+export interface SessionProvider {
+  acquireSession: (
+    accountID: ID<Account>,
+    crypto: CryptoProvider,
+  ) => Promise<{ sessionID: SessionID; sessionDone: () => void }>;
+  persistSession: (
+    accountID: ID<Account>,
+    sessionID: SessionID,
+  ) => Promise<{ sessionDone: () => void }>;
+}
+
+export class MockSessionProvider implements SessionProvider {
+  async acquireSession(
+    accountID: ID<Account>,
+    crypto: CryptoProvider,
+  ): Promise<{ sessionID: SessionID; sessionDone: () => void }> {
+    return {
+      sessionID: crypto.newRandomSessionID(
+        accountID as unknown as RawAccountID,
+      ),
+      sessionDone: () => {},
+    };
+  }
+
+  async persistSession(
+    _accountID: ID<Account>,
+    _sessionID: SessionID,
+  ): Promise<{ sessionDone: () => void }> {
+    return {
+      sessionDone: () => {},
+    };
+  }
+}
 
 export type AuthResult =
   | {
@@ -56,16 +85,6 @@ export type AuthResult =
       onError: (error: string | Error) => void;
       logOut: () => Promise<void>;
     };
-
-export async function randomSessionProvider(
-  accountID: ID<Account>,
-  crypto: CryptoProvider,
-) {
-  return {
-    sessionID: crypto.newRandomSessionID(accountID as unknown as RawAccountID),
-    sessionDone: () => {},
-  };
-}
 
 export type JazzContextWithAccount<Acc extends Account> = {
   node: LocalNode;
@@ -107,7 +126,7 @@ export async function createJazzContextFromExistingCredentials<
   storage?: StorageAPI;
   asActiveAccount: boolean;
 }): Promise<JazzContextWithAccount<InstanceOfSchema<S>>> {
-  const { sessionID, sessionDone } = await sessionProvider(
+  const { sessionID, sessionDone } = await sessionProvider.acquireSession(
     credentials.accountID,
     crypto,
   );
@@ -167,6 +186,7 @@ export async function createJazzContextForNewAccount<
   AccountSchema: PropsAccountSchema,
   onLogOut,
   storage,
+  sessionProvider,
 }: {
   creationProps: { name: string };
   initialAgentSecret?: AgentSecret;
@@ -175,6 +195,7 @@ export async function createJazzContextForNewAccount<
   AccountSchema?: S;
   onLogOut?: () => Promise<void>;
   storage?: StorageAPI;
+  sessionProvider: SessionProvider;
 }): Promise<JazzContextWithAccount<InstanceOfSchema<S>>> {
   const CurrentAccountSchema =
     PropsAccountSchema ?? (RegisteredSchemas["Account"] as unknown as S);
@@ -199,11 +220,17 @@ export async function createJazzContextForNewAccount<
   const account = AccountClass.fromNode(node);
   activeAccountContext.set(account);
 
+  const { sessionDone } = await sessionProvider.persistSession(
+    account.$jazz.id,
+    node.currentSessionID,
+  );
+
   return {
     node,
     account: account as InstanceOfSchema<S>,
     done: () => {
       node.gracefulShutdown();
+      sessionDone();
     },
     logOut: async () => {
       node.gracefulShutdown();
@@ -270,6 +297,7 @@ export async function createJazzContext<
       peers: options.peers,
       crypto,
       AccountSchema: options.AccountSchema,
+      sessionProvider: options.sessionProvider,
       onLogOut: async () => {
         await authSecretStorage.clearWithoutNotify();
       },

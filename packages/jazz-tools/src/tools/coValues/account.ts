@@ -273,7 +273,13 @@ export class Account extends CoValueBase implements CoValue {
       creationProps: { name: string };
       onCreate?: (account: A, worker: Account) => Promise<void>;
     },
-  ) {
+  ): Promise<{
+    credentials: {
+      accountID: string;
+      accountSecret: AgentSecret;
+    };
+    account: A;
+  }> {
     const crypto = worker.$jazz.localNode.crypto;
 
     const connectedPeers = cojsonInternals.connectedPeers(
@@ -289,6 +295,11 @@ export class Account extends CoValueBase implements CoValue {
       crypto,
       peers: [connectedPeers[0]],
     });
+
+    const credentials = {
+      accountID: account.$jazz.id,
+      accountSecret: account.$jazz.localNode.getCurrentAgent().agentSecret,
+    };
 
     // Load the worker inside the account node
     const loadedWorker = await Account.load(worker.$jazz.id, {
@@ -314,7 +325,7 @@ export class Account extends CoValueBase implements CoValue {
     // Close the account node, to avoid leaking memory
     account.$jazz.localNode.gracefulShutdown();
 
-    return createdAccount;
+    return { credentials, account: createdAccount };
   }
 
   static fromNode<A extends Account>(

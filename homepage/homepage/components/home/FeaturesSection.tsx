@@ -4,6 +4,8 @@ import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
 import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
 import { SectionHeader } from "@garden-co/design-system/src/components/molecules/SectionHeader";
 import { H3 } from "@garden-co/design-system/src/components/atoms/Headings";
+import Image from "next/image";
+import leavesImage from "./images/leaves.jpg";
 
 const features = [
   {
@@ -42,19 +44,23 @@ const features = [
     illustration: (
       <>
         <div className="relative -mr-4 -mt-10 overflow-hidden rounded-md">
-          <img
-            src="/leaves.jpg"
+          <Image
+            src={leavesImage}
             className="h-auto w-32 scale-125 opacity-90 blur-md"
             alt="Leaves image demonstrating progressive loading"
+            width={128}
+            height={96}
           />
           <p className="absolute left-0 top-0 z-10 flex h-full w-full items-center justify-center text-center text-sm text-stone-100">
             400x300
           </p>
         </div>
-        <img
-          src="/leaves.jpg"
+        <Image
+          src={leavesImage}
           className="z-20 -ml-4 mt-10 h-auto w-32 rounded-md shadow-xl"
           alt="Leaves image demonstrating progressive loading"
+          width={128}
+          height={96}
         />
       </>
     ),

@@ -1,4 +1,4 @@
-import { useIframeHashRouter } from "hash-slash";
+import { useHashRouter } from "hash-slash";
 import { useAccount, useCoState } from "jazz-tools/react";
 import { useState } from "react";
 import { Errors } from "./Errors.tsx";
@@ -21,7 +21,7 @@ export function CreateOrder(props: { id: string }) {
       return account.root.orders;
     },
   });
-  const router = useIframeHashRouter();
+  const router = useHashRouter();
   const [errors, setErrors] = useState<string[]>([]);
 
   const newOrder = useCoState(PartialBubbleTeaOrder, props.id);

@@ -467,7 +467,7 @@ describe("createAs", () => {
       { owner: worker },
     );
 
-    const createdAccount = await CustomAccount.createAs(worker, {
+    const created = await CustomAccount.createAs(worker, {
       creationProps: { name: "Test Account" },
       onCreate: async (account, loadedWorker) => {
         executionOrder.push("onCreate");
@@ -490,11 +490,18 @@ describe("createAs", () => {
       },
     });
 
-    assertLoaded(createdAccount);
-    assertLoaded(createdAccount.root);
+    assertLoaded(created.account);
+    assertLoaded(created.account.root);
+
+    expect(created.credentials.accountID).toBe(created.account.$jazz.id);
+    // ensure we get the created, not the creat*ing* account credentials
+    expect(created.credentials.accountID).not.toBe(worker.$jazz.id);
+    expect(created.credentials.accountSecret).not.toBe(
+      worker.$jazz.localNode.getCurrentAgent().agentSecret,
+    );
 
     // Verify onCreate was called and root was set from worker
-    expect(createdAccount.root.value).toBe("worker-root");
+    expect(created.account.root.value).toBe("worker-root");
 
     // Verify execution order
     expect(executionOrder).toEqual(["migration", "onCreate"]);

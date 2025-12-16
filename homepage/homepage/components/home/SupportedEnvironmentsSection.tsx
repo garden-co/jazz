@@ -7,6 +7,7 @@ import { NodejsLogo } from "@/components/icons/NodejsLogo";
 import { ReactLogo } from "@/components/icons/ReactLogo";
 import { ReactNativeLogo } from "@/components/icons/ReactNativeLogo";
 import { SvelteLogo } from "@/components/icons/SvelteLogo";
+import { TauriLogo } from "@/components/icons/TauriLogo";
 import Link from "next/link";
 import React from "react";
 
@@ -22,6 +23,11 @@ const environments = [
     href: "/docs/react",
   },
   {
+    name: "Svelte",
+    icon: SvelteLogo,
+    href: "/docs/svelte",
+  },
+  {
     name: "React Native",
     icon: ReactNativeLogo,
     href: "/docs/react-native",
@@ -32,9 +38,8 @@ const environments = [
     href: "/docs/react-native-expo",
   },
   {
-    name: "Svelte",
-    icon: SvelteLogo,
-    href: "/docs/svelte",
+    name: "Tauri",
+    icon: TauriLogo,
   },
   {
     name: "Node.js",
@@ -50,14 +55,14 @@ const environments = [
     icon: VercelLogo,
   },
   {
-    name: "CF Workers",
+    name: "CF DOs",
     icon: CloudflareWorkerLogo,
   },
 ];
 
 export function SupportedEnvironmentsSection() {
   return (
-    <div className="container flex flex-wrap justify-center gap-4 py-12 md:gap-6 lg:pt-24">
+    <div className="flex flex-wrap gap-4 py-12 md:gap-6">
       {environments.map(({ name, icon: Icon, href }) => {
         if (href) {
           return (

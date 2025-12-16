@@ -6,6 +6,7 @@ import {
 } from "@icons-pack/react-simple-icons";
 import { GlobeIcon, LucideIcon } from "lucide-react";
 import Link from "next/link";
+import Image from "next/image";
 import { TeamMember } from "../team/members";
 
 function SocialLink({
@@ -29,7 +30,13 @@ export function ProfileCard({ person }: { person: TeamMember }) {
   const imageClassName = "size-24 shadow rounded-md bg-stone-100 sm:size-28 ";
   return (
     <div className="flex items-center gap-6">
-      <img src={`/team/${person.image}`} className={imageClassName} />
+      <Image
+        src={person.image}
+        alt={person.name}
+        width={112}
+        height={112}
+        className={imageClassName}
+      />
 
       <div className="flex flex-col gap-3">
         <h3 className="text-lg leading-none font-semibold tracking-tight text-highlight">

@@ -164,15 +164,31 @@ describe("createCoValueSubscriptionContext", () => {
   });
 
   it("the provider shows a loading fallback when loading the coValue", async () => {
+    await setupJazzTestSync({
+      asyncPeers: true,
+    });
+
     const TestMap = co.map({
       value: z.string(),
+    });
+
+    const map = TestMap.create({
+      value: "123",
+    });
+
+    await createJazzTestAccount({
+      isCurrentActiveAccount: true,
     });
 
     const { Provider } = createCoValueSubscriptionContext(TestMap);
 
     const { container } = render(
       <JazzTestProvider>
-        <Provider id="co_test123" loadingFallback={<div>Loading...</div>}>
+        <Provider
+          id={map.$jazz.id}
+          loadingFallback={<div>Loading...</div>}
+          unavailableFallback={<div>Unavailable</div>}
+        >
           <div>Children should not render</div>
         </Provider>
       </JazzTestProvider>,
@@ -203,13 +219,7 @@ describe("createCoValueSubscriptionContext", () => {
       </JazzTestProvider>,
     );
 
-    // Initially shows loading fallback
-    expect(container.textContent).toContain("Loading...");
-
-    // Should show unavailable fallback after CoValue load timeout
-    await waitFor(() => {
-      expect(container.textContent).toContain("Unavailable");
-    });
+    expect(container.textContent).toContain("Unavailable");
 
     // Children should never be rendered
     expect(container.textContent).not.toContain("Children should not render");

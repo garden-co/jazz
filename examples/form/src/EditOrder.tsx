@@ -5,10 +5,10 @@ import { OrderForm } from "./OrderForm.tsx";
 import { OrderThumbnail } from "./OrderThumbnail.tsx";
 import { BubbleTeaOrder } from "./schema.ts";
 import { useMemo } from "react";
-import { useIframeHashRouter } from "hash-slash";
+import { useHashRouter } from "hash-slash";
 
 export function EditOrder(props: { id: string }) {
-  const router = useIframeHashRouter();
+  const router = useHashRouter();
 
   // Create a new group for the branch, so that every time we open the edit order page, we create a new private branch
   const owner = useMemo(() => Group.create(), []);

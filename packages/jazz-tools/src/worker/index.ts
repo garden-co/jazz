@@ -19,7 +19,7 @@ import {
   InstanceOfSchema,
   Loaded,
   createJazzContextFromExistingCredentials,
-  randomSessionProvider,
+  MockSessionProvider,
 } from "jazz-tools";
 
 type WorkerOptions<
@@ -98,7 +98,7 @@ export async function startWorker<
       secret: accountSecret as AgentSecret,
     },
     AccountSchema,
-    sessionProvider: randomSessionProvider,
+    sessionProvider: new MockSessionProvider(),
     peers,
     crypto: options.crypto ?? (await WasmCrypto.create()),
     asActiveAccount,

@@ -6,7 +6,6 @@ import {
   RawCoPlainText,
   RawCoStream,
   RawCoValue,
-  RawGroup,
 } from "cojson";
 import { styled } from "goober";
 import React from "react";

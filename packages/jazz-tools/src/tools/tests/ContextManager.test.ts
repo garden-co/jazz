@@ -19,7 +19,7 @@ import {
 } from "../implementation/ContextManager";
 import {
   createJazzContext,
-  randomSessionProvider,
+  MockSessionProvider,
 } from "../implementation/createContext";
 import {
   CoValueFromRaw,
@@ -33,9 +33,11 @@ import {
   getPeerConnectedToTestSyncServer,
   setupJazzTestSync,
 } from "../testing";
+import { SubscriptionCache } from "../subscribe/SubscriptionCache";
 import { createAsyncStorage, getDbPath } from "./testStorage";
 
 const Crypto = await WasmCrypto.create();
+const randomSessionProvider = new MockSessionProvider();
 
 class TestJazzContextManager<Acc extends Account> extends JazzContextManager<
   Acc,
@@ -807,6 +809,90 @@ describe("ContextManager", () => {
       expect([credentials1.accountID, credentials2.accountID]).toContain(
         currentAccount.$jazz.id,
       );
+    });
+  });
+
+  describe("SubscriptionCache integration", () => {
+    test("initializes cache on construction", () => {
+      const newManager = new TestJazzContextManager<Account>();
+      const cache = newManager.getSubscriptionScopeCache();
+
+      expect(cache).toBeDefined();
+      expect(cache).toBeInstanceOf(SubscriptionCache);
+    });
+
+    test("getSubscriptionScopeCache returns the cache instance", () => {
+      const cache1 = manager.getSubscriptionScopeCache();
+      const cache2 = manager.getSubscriptionScopeCache();
+
+      expect(cache1).toBe(cache2);
+      expect(cache1).toBeDefined();
+    });
+
+    test("updateContext clears the cache", async () => {
+      await manager.createContext({});
+
+      const cache = manager.getSubscriptionScopeCache();
+      const node = getCurrentValue().node;
+      const Person = co.map({ name: z.string() });
+      const person = Person.create({ name: "Test" });
+
+      // Create a subscription in the cache
+      const scope = cache.getOrCreate(
+        node,
+        Person,
+        person.$jazz.id,
+        true,
+        false,
+        false,
+      );
+
+      // Verify it's in the cache
+      const idSet = (cache as any).cache.get(person.$jazz.id);
+      expect(idSet).toBeDefined();
+      expect(idSet).toBeInstanceOf(Set);
+      expect(idSet.size).toBeGreaterThan(0);
+
+      // Update context - should clear cache
+      await manager.createContext({});
+
+      // Verify cache was cleared
+      const idSetAfter = (cache as any).cache.get(person.$jazz.id);
+      expect(idSetAfter).toBeUndefined();
+      expect(scope.closed).toBe(true);
+    });
+
+    test("logOut clears the cache", async () => {
+      await manager.createContext({});
+
+      const cache = manager.getSubscriptionScopeCache();
+      const node = getCurrentValue().node;
+      const Person = co.map({ name: z.string() });
+      const person = Person.create({ name: "Test" });
+
+      // Create a subscription in the cache
+      const scope = cache.getOrCreate(
+        node,
+        Person,
+        person.$jazz.id,
+        true,
+        false,
+        false,
+      );
+
+      // Verify it's in the cache
+      const scopeSet = (cache as any).cache.get(person.$jazz.id);
+      expect(scopeSet).toBeDefined();
+      expect(scopeSet).toBeInstanceOf(Set);
+      expect(scopeSet.size).toBeGreaterThan(0);
+
+      // Logout - should clear cache
+      await manager.logOut();
+
+      // Verify cache was cleared
+      const scopeSetAfter = (cache as any).cache.get(person.$jazz.id);
+      expect(scopeSetAfter).toBeUndefined();
+      expect(scope.closed).toBe(true);
     });
   });
 });
