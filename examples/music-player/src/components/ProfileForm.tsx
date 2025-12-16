@@ -1,12 +1,12 @@
 import React, { useState, useRef } from "react";
-import { Image } from "jazz-tools/react";
+import { Image, useSuspenseAccount } from "jazz-tools/react";
 import { createImage } from "jazz-tools/media";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Separator } from "./ui/separator";
 import { Group } from "jazz-tools";
-import { useAccountSelector } from "@/components/AccountProvider.tsx";
+import { MusicaAccount } from "@/1_schema";
 
 interface ProfileFormProps {
   onSubmit?: (data: { username: string; avatar?: any }) => void;
@@ -14,7 +14,6 @@ interface ProfileFormProps {
   showHeader?: boolean;
   headerTitle?: string;
   headerDescription?: string;
-  initialUsername?: string;
   onCancel?: () => void;
   showCancelButton?: boolean;
   cancelButtonText?: string;
@@ -27,19 +26,16 @@ export function ProfileForm({
   showHeader = false,
   headerTitle = "Profile Settings",
   headerDescription = "Update your profile information",
-  initialUsername = "",
   onCancel,
   showCancelButton = false,
   cancelButtonText = "Cancel",
   className = "",
 }: ProfileFormProps) {
-  const profile = useAccountSelector({
+  const profile = useSuspenseAccount(MusicaAccount, {
     select: (me) => me.profile,
   });
 
-  const [username, setUsername] = useState(
-    initialUsername || profile?.name || "",
-  );
+  const [username, setUsername] = useState(profile.name);
   const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 

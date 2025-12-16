@@ -1,5 +1,5 @@
 import { useParams } from "react-router";
-import { PlaylistWithTracks } from "./1_schema";
+import { MusicaAccount, PlaylistWithTracks } from "./1_schema";
 import { uploadMusicTracks } from "./4_actions";
 import { MediaPlayer } from "./5_useMediaPlayer";
 import { FileUploadButton } from "./components/FileUploadButton";
@@ -8,30 +8,32 @@ import { PlayerControls } from "./components/PlayerControls";
 import { EditPlaylistModal } from "./components/EditPlaylistModal";
 import { PlaylistMembers } from "./components/PlaylistMembers";
 import { MemberAccessModal } from "./components/MemberAccessModal";
+import { AddTracksDialog } from "./components/AddTracksDialog";
+import { PlaylistEmptyState } from "./components/PlaylistEmptyState";
 import { SidePanel } from "./components/SidePanel";
 import { Button } from "./components/ui/button";
 import { SidebarInset, SidebarTrigger } from "./components/ui/sidebar";
 import { usePlayState } from "./lib/audio/usePlayState";
 import { useState } from "react";
-import { useAccountSelector } from "@/components/AccountProvider.tsx";
-import { useSuspenseCoState } from "jazz-tools/react-core";
+import { useSuspenseAccount, useSuspenseCoState } from "jazz-tools/react-core";
 
 export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
   const playState = usePlayState();
   const isPlaying = playState.value === "play";
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isMembersModalOpen, setIsMembersModalOpen] = useState(false);
+  const [isAddTracksModalOpen, setIsAddTracksModalOpen] = useState(false);
 
   async function handleFileLoad(files: FileList) {
     /**
      * Follow this function definition to see how we update
      * values in Jazz and manage files!
      */
-    await uploadMusicTracks(files);
+    await uploadMusicTracks(playlist, files);
   }
 
   const params = useParams<{ playlistId: string }>();
-  const playlistId = useAccountSelector({
+  const playlistId = useSuspenseAccount(MusicaAccount, {
     select: (me) => params.playlistId ?? me.root.$jazz.refs.rootPlaylist.id,
   });
 
@@ -39,12 +41,16 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
 
   const membersIds = playlist.$jazz.owner.members.map((member) => member.id);
   const isRootPlaylist = !params.playlistId;
-  const canEdit = useAccountSelector({
-    select: (me) => Boolean(playlist && me.canWrite(playlist)),
+  const canEdit = useSuspenseAccount(MusicaAccount, {
+    select: (me) => me.canWrite(playlist),
   });
-  const isActivePlaylist = useAccountSelector({
-    select: (me) =>
-      me.$isLoaded && playlistId === me.root.activePlaylist?.$jazz.id,
+
+  const canManage = useSuspenseAccount(MusicaAccount, {
+    select: (me) => me.canManage(playlist),
+  });
+
+  const isActivePlaylist = useSuspenseAccount(MusicaAccount, {
+    select: (me) => playlistId === me.root.activePlaylist?.$jazz.id,
   });
 
   const handlePlaylistShareClick = () => {
@@ -68,54 +74,74 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
             ) : (
               <div className="flex items-center space-x-4">
                 <h1 className="text-2xl font-bold text-blue-800">
-                  {playlist?.title}
+                  {playlist.title}
                 </h1>
-                {membersIds && playlist && (
-                  <PlaylistMembers
-                    memberIds={membersIds}
-                    onClick={() => setIsMembersModalOpen(true)}
-                  />
-                )}
+                <PlaylistMembers
+                  memberIds={membersIds}
+                  onClick={() => setIsMembersModalOpen(true)}
+                />
               </div>
             )}
             <div className="flex items-center space-x-4">
-              {isRootPlaylist && (
+              {isRootPlaylist ? (
                 <>
                   <FileUploadButton onFileLoad={handleFileLoad}>
                     Add file
                   </FileUploadButton>
                 </>
-              )}
-              {!isRootPlaylist && canEdit && (
-                <>
-                  <Button onClick={handleEditClick} variant="outline">
-                    Edit
-                  </Button>
-                  <Button onClick={handlePlaylistShareClick}>Share</Button>
-                </>
+              ) : (
+                canEdit && (
+                  <>
+                    {canEdit && (
+                      <Button
+                        onClick={() => setIsAddTracksModalOpen(true)}
+                        variant="outline"
+                      >
+                        Add tracks from library
+                      </Button>
+                    )}
+                    {canEdit && (
+                      <Button onClick={handleEditClick} variant="outline">
+                        Edit
+                      </Button>
+                    )}
+                    {canManage && (
+                      <Button onClick={handlePlaylistShareClick}>Share</Button>
+                    )}
+                  </>
+                )
               )}
             </div>
           </div>
-          <ul className="flex flex-col max-w-full sm:gap-1">
-            {playlist?.tracks?.map(
-              (track, index) =>
-                track && (
-                  <MusicTrackRow
-                    trackId={track.$jazz.id}
-                    key={track.$jazz.id}
-                    index={index}
-                    isPlaying={
-                      mediaPlayer.activeTrackId === track.$jazz.id &&
-                      isActivePlaylist &&
-                      isPlaying
-                    }
-                    onClick={() => {
-                      mediaPlayer.setActiveTrack(track, playlist);
-                    }}
-                  />
-                ),
-            )}
-          </ul>
+          {playlist.tracks.length > 0 ? (
+            <ul className="flex flex-col max-w-full sm:gap-1">
+              {playlist.tracks.map(
+                (track, index) =>
+                  track && (
+                    <MusicTrackRow
+                      trackId={track.$jazz.id}
+                      key={track.$jazz.id}
+                      index={index}
+                      isPlaying={
+                        mediaPlayer.activeTrackId === track.$jazz.id &&
+                        isActivePlaylist &&
+                        isPlaying
+                      }
+                      onClick={() => {
+                        mediaPlayer.setActiveTrack(track, playlist);
+                      }}
+                    />
+                  ),
+              )}
+            </ul>
+          ) : (
+            !isRootPlaylist && (
+              <PlaylistEmptyState
+                canEdit={canEdit}
+                onAddTracks={() => setIsAddTracksModalOpen(true)}
+              />
+            )
+          )}
         </main>
         <PlayerControls mediaPlayer={mediaPlayer} />
       </div>
@@ -128,13 +154,18 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
       />
 
       {/* Members Management Modal */}
-      {playlist && (
-        <MemberAccessModal
-          isOpen={isMembersModalOpen}
-          onOpenChange={setIsMembersModalOpen}
-          playlist={playlist}
-        />
-      )}
+      <MemberAccessModal
+        isOpen={isMembersModalOpen}
+        onOpenChange={setIsMembersModalOpen}
+        playlist={playlist}
+      />
+
+      {/* Add Tracks from Root Modal */}
+      <AddTracksDialog
+        isOpen={isAddTracksModalOpen}
+        onOpenChange={setIsAddTracksModalOpen}
+        playlist={playlist}
+      />
     </SidebarInset>
   );
 }
