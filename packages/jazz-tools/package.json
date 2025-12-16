@@ -177,6 +177,12 @@
       "types": "./dist/better-auth/auth/react.d.ts",
       "default": "./dist/better-auth/auth/react.js"
     },
+    "./better-auth/auth/svelte": {
+      "svelte": "./dist/better-auth/auth/svelte.svelte",
+      "@jazz-tools/source": "./src/better-auth/auth/svelte.svelte",
+      "types": "./dist/better-auth/auth/svelte.d.ts",
+      "default": "./dist/better-auth/auth/svelte.svelte"
+    },
     "./better-auth/auth/server": {
       "@jazz-tools/source": "./src/better-auth/auth/server.ts",
       "types": "./dist/better-auth/auth/server.d.ts",
@@ -236,7 +242,8 @@
     "test:watch": "vitest --watch --root ../../ --project jazz-tools",
     "types": "tsc --outDir dist",
     "build:svelte": "rm -rf dist/svelte && svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json",
-    "build": "tsup && pnpm types && pnpm build:svelte"
+    "build:better-auth-svelte": "mkdir -p dist/better-auth/auth && cp src/better-auth/auth/svelte.svelte dist/better-auth/auth/svelte.svelte",
+    "build": "tsup && pnpm types && pnpm build:svelte && pnpm build:better-auth-svelte"
   },
   "devDependencies": {
     "@scure/bip39": "^1.3.0",
