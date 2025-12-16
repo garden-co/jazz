@@ -1,4 +1,5 @@
-import { co, Group, z } from "jazz-tools";
+import { co, z } from "jazz-tools";
+import { createMusicTrackFromFile } from "@/4_actions";
 
 /** Walkthrough: Defining the data model with CoJSON
  *
@@ -10,40 +11,53 @@ import { co, Group, z } from "jazz-tools";
  *  - other CoValues
  **/
 
-export const MusicTrackWaveform = co.map({
-  data: z.array(z.number()),
-});
+export const MusicTrackWaveform = co
+  .map({
+    data: z.array(z.number()),
+  })
+  .withPermissions({
+    onInlineCreate: "sameAsContainer",
+  });
 export type MusicTrackWaveform = co.loaded<typeof MusicTrackWaveform>;
 
-export const MusicTrack = co.map({
-  /**
-   *  Attributes are defined using zod schemas
-   */
-  title: z.string(),
-  duration: z.number(),
+export const MusicTrack = co
+  .map({
+    /**
+     *  Attributes are defined using zod schemas
+     */
+    title: z.string(),
+    duration: z.number(),
 
-  /**
-   * You can define relations between coValues using the other CoValue schema
-   * You can mark them optional using z.optional()
-   */
-  waveform: MusicTrackWaveform,
+    /**
+     * You can define relations between coValues using the other CoValue schema
+     * You can mark them optional using z.optional()
+     */
+    waveform: MusicTrackWaveform,
 
-  /**
-   * In Jazz you can upload files using FileStream.
-   *
-   * As for any other coValue the music files we put inside FileStream
-   * is available offline and end-to-end encrypted 😉
-   */
-  file: co.fileStream(),
+    /**
+     * In Jazz you can upload files using FileStream.
+     *
+     * As for any other coValue the music files we put inside FileStream
+     * is available offline and end-to-end encrypted 😉
+     */
+    file: co.fileStream(),
 
-  isExampleTrack: z.optional(z.boolean()),
-});
+    isExampleTrack: z.optional(z.boolean()),
+  })
+  .withPermissions({ onInlineCreate: "extendsContainer" });
 export type MusicTrack = co.loaded<typeof MusicTrack>;
 
-export const Playlist = co.map({
-  title: z.string(),
-  tracks: co.list(MusicTrack), // CoList is the collaborative version of Array
-});
+export const TracksList = co
+  .list(MusicTrack)
+  .withPermissions({ onInlineCreate: "sameAsContainer" });
+export type TracksList = co.loaded<typeof TracksList>;
+
+export const Playlist = co
+  .map({
+    title: z.string(),
+    tracks: TracksList, // CoList is the collaborative version of Array
+  })
+  .withPermissions({ onInlineCreate: "newGroup" });
 export type Playlist = co.loaded<typeof Playlist>;
 
 export const PlaylistWithTracks = Playlist.resolved({
@@ -51,36 +65,47 @@ export const PlaylistWithTracks = Playlist.resolved({
 });
 export type PlaylistWithTracks = co.loaded<typeof PlaylistWithTracks>;
 
+const PlaylistsList = co
+  .list(Playlist)
+  .withPermissions({ onInlineCreate: "sameAsContainer" });
+type PlaylistsList = co.loaded<typeof PlaylistsList>;
+
 /** The account root is an app-specific per-user private `CoMap`
  *  where you can store top-level objects for that user */
-export const MusicaAccountRoot = co.map({
-  // The root playlist works as container for the tracks that
-  // the user has uploaded
-  rootPlaylist: Playlist,
-  // Here we store the list of playlists that the user has created
-  // or that has been invited to
-  playlists: co.list(Playlist),
-  // We store the active track and playlist as coValue here
-  // so when the user reloads the page can see the last played
-  // track and playlist
-  // You can also add the position in time if you want make it possible
-  // to resume the song
-  activeTrack: co.optional(MusicTrack),
-  activePlaylist: Playlist,
+export const MusicaAccountRoot = co
+  .map({
+    // The root playlist works as container for the tracks that
+    // the user has uploaded
+    rootPlaylist: Playlist,
+    // Here we store the list of playlists that the user has created
+    // or that has been invited to
+    playlists: PlaylistsList,
+    // We store the active track and playlist as coValue here
+    // so when the user reloads the page can see the last played
+    // track and playlist
+    // You can also add the position in time if you want make it possible
+    // to resume the song
+    activeTrack: co.optional(MusicTrack),
+    activePlaylist: Playlist,
 
-  exampleDataLoaded: z.optional(z.boolean()),
-  accountSetupCompleted: z.optional(z.boolean()),
-});
+    exampleDataLoaded: z.optional(z.boolean()),
+    accountSetupCompleted: z.optional(z.boolean()),
+  })
+  .withPermissions({ onInlineCreate: "newGroup" })
+  .resolved({
+    activeTrack: { $onError: "catch" },
+    activePlaylist: { $onError: "catch" },
+  });
 export type MusicaAccountRoot = co.loaded<typeof MusicaAccountRoot>;
 
 export const MusicaAccountProfile = co
   .profile({
     avatar: co.optional(co.image()),
   })
-  .withMigration((profile) => {
-    if (profile.$jazz.owner.getRoleOf("everyone") !== "reader") {
-      profile.$jazz.owner.addMember("everyone", "reader");
-    }
+  .withPermissions({
+    onCreate(group) {
+      group.addMember("everyone", "reader");
+    },
   });
 export type MusicaAccountProfile = co.loaded<typeof MusicaAccountProfile>;
 
@@ -111,16 +136,14 @@ export const MusicaAccount = co
     }
 
     if (!account.$jazz.has("profile")) {
-      account.$jazz.set(
-        "profile",
-        MusicaAccountProfile.create(
-          {
-            name: "",
-          },
-          Group.create().makePublic(),
-        ),
-      );
+      account.$jazz.set("profile", {
+        name: "",
+      });
     }
+  })
+  .resolved({
+    profile: true,
+    root: MusicaAccountRoot.resolveQuery,
   });
 export type MusicaAccount = co.loaded<typeof MusicaAccount>;
 
@@ -131,5 +154,4 @@ export const MusicaAccountWithPlaylists = MusicaAccount.resolved({
     },
   },
 });
-
 /** Walkthrough: Continue with ./2_main.tsx */

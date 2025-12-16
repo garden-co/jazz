@@ -1,4 +1,5 @@
 import {
+  MusicaAccount,
   MusicTrack,
   Playlist,
   PlaylistWithTracks,
@@ -21,7 +22,6 @@ import { Fragment, Suspense, useCallback, useState } from "react";
 import { EditTrackDialog } from "./RenameTrackDialog";
 import { Waveform } from "./Waveform";
 import { Button } from "./ui/button";
-import { useAccountSelector } from "@/components/AccountProvider.tsx";
 import { useSuspenseCoState, useSuspenseAccount } from "jazz-tools/react";
 
 function isPartOfThePlaylist(trackId: string, playlist: PlaylistWithTracks) {
@@ -44,11 +44,11 @@ export function MusicTrackRow({
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
 
-  const isActiveTrack = useAccountSelector({
+  const isActiveTrack = useSuspenseAccount(MusicaAccount, {
     select: (me) => me.root.activeTrack?.$jazz.id === trackId,
   });
 
-  const canEditTrack = useAccountSelector({
+  const canEditTrack = useSuspenseAccount(MusicaAccount, {
     select: (me) => me.canWrite(track),
   });
 

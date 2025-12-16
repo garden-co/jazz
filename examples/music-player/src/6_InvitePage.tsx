@@ -1,12 +1,10 @@
-import { useAcceptInvite, useIsAuthenticated } from "jazz-tools/react";
+import { useAcceptInvite } from "jazz-tools/react";
 import { useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { MusicaAccount, Playlist } from "./1_schema";
 
 export function InvitePage() {
   const navigate = useNavigate();
-
-  const isAuthenticated = useIsAuthenticated();
 
   useAcceptInvite({
     invitedObjectSchema: Playlist,
@@ -41,9 +39,5 @@ export function InvitePage() {
     ),
   });
 
-  return isAuthenticated ? (
-    <p>Accepting invite....</p>
-  ) : (
-    <p>Please sign in to accept the invite.</p>
-  );
+  return <p>Accepting invite....</p>;
 }

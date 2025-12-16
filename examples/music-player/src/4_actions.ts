@@ -20,6 +20,34 @@ import {
  * Jazz is very unopinionated in this sense and you can adopt the
  * pattern that best fits your app.
  */
+export async function createMusicTrackFromFile(
+  file: File,
+  isExampleTrack: boolean = false,
+) {
+  // The ownership object defines the user that owns the created coValues
+  // We are creating a group for each CoValue in order to be able to share them via Playlist
+  const group = Group.create();
+
+  const data = await getAudioFileData(file);
+
+  // We transform the file blob into a FileStream
+  // making it a collaborative value that is encrypted, easy
+  // to share across devices and users and available offline!
+  const fileStream = await MusicTrack.shape.file.createFromBlob(file, group);
+
+  const track = MusicTrack.create(
+    {
+      file: fileStream,
+      duration: data.duration,
+      waveform: { data: data.waveform },
+      title: file.name,
+      isExampleTrack,
+    },
+    group,
+  );
+
+  return track;
+}
 
 export async function uploadMusicTracks(
   files: Iterable<File>,
@@ -36,27 +64,7 @@ export async function uploadMusicTracks(
   });
 
   for (const file of files) {
-    // The ownership object defines the user that owns the created coValues
-    // We are creating a group for each CoValue in order to be able to share them via Playlist
-    const group = Group.create();
-
-    const data = await getAudioFileData(file);
-
-    // We transform the file blob into a FileStream
-    // making it a collaborative value that is encrypted, easy
-    // to share across devices and users and available offline!
-    const fileStream = await MusicTrack.shape.file.createFromBlob(file, group);
-
-    const track = MusicTrack.create(
-      {
-        file: fileStream,
-        duration: data.duration,
-        waveform: { data: data.waveform },
-        title: file.name,
-        isExampleTrack,
-      },
-      group,
-    );
+    const track = await createMusicTrackFromFile(file, isExampleTrack);
 
     // We create a new music track and add it to the root playlist
     root.rootPlaylist.tracks.$jazz.push(track);
@@ -135,8 +143,7 @@ export async function removeTrackFromAllPlaylists(track: MusicTrack) {
 
   const playlists = root.playlists;
 
-  // @ts-expect-error - https://github.com/microsoft/TypeScript/issues/62621
-  for (const playlist of playlists) {
+  for (const playlist of playlists.values()) {
     if (!playlist.$isLoaded) continue;
 
     removeTrackFromPlaylist(playlist, track);
@@ -199,8 +206,7 @@ export async function onAnonymousAccountDiscarded(
     },
   });
 
-  // @ts-expect-error - https://github.com/microsoft/TypeScript/issues/62621
-  for (const track of anonymousAccountRoot.rootPlaylist.tracks) {
+  for (const track of anonymousAccountRoot.rootPlaylist.tracks.values()) {
     if (track.isExampleTrack) continue;
 
     const trackGroup = track.$jazz.owner;

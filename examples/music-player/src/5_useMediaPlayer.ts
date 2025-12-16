@@ -1,11 +1,11 @@
-import { MusicTrack, Playlist } from "@/1_schema";
+import { MusicaAccount, MusicTrack, Playlist } from "@/1_schema";
 import { usePlayMedia } from "@/lib/audio/usePlayMedia";
 import { usePlayState } from "@/lib/audio/usePlayState";
 import { useRef, useState } from "react";
 import { updateActivePlaylist, updateActiveTrack } from "./4_actions";
 import { useAudioManager } from "./lib/audio/AudioManager";
 import { getNextTrack, getPrevTrack } from "./lib/getters";
-import { useAccountSelector } from "@/components/AccountProvider.tsx";
+import { useSuspenseAccount } from "jazz-tools/react-core";
 
 export function useMediaPlayer() {
   const audioManager = useAudioManager();
@@ -14,8 +14,8 @@ export function useMediaPlayer() {
 
   const [loading, setLoading] = useState<string | null>(null);
 
-  const activeTrackId = useAccountSelector({
-    select: (me) => me.root.$jazz.refs.activeTrack?.id,
+  const activeTrackId = useSuspenseAccount(MusicaAccount, {
+    select: (me) => me.root.activeTrack?.$jazz.id,
   });
   // Reference used to avoid out-of-order track loads
   const lastLoadedTrackId = useRef<string | null>(null);
