@@ -48,7 +48,7 @@ if you don't do this, you will get an error like this:
 
 <CodeGroup>
 ```
-Error: Failed to initialize WasmCrypto. WebAssembly is required for crypto operations on web platforms.
+Error: Failed to initialize WasmCrypto. WebAssembly is required for crypto operations on web platforms. See https://jazz.tools/docs/react/server-side/setup#wasm-on-edge-runtimes for more details.
 ```
 </CodeGroup>
 
@@ -112,7 +112,7 @@ export function MyJazzProvider({ children }: { children: React.ReactNode }) {
 ```
 </CodeGroup>
 
-If you previously had `CryptoProvider={...}` and/or `import { RNCrypto } ...`, you can remove both:
+`CryptoProvider` is no longer supported. You can remove it completely:
 
 <CodeGroup>
 ```tsx
@@ -226,7 +226,7 @@ export function MyJazzProvider({ children }: { children: React.ReactNode }) {
 ```
 </CodeGroup>
 
-If you previously had `CryptoProvider={...}` and/or `import { RNCrypto } ...`, you can remove both:
+`CryptoProvider` is no longer supported. You can remove it completely:
 
 <CodeGroup>
 ```tsx
