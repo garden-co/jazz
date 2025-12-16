@@ -51,6 +51,11 @@ npm install jazz-tools cojson-core-rn
 
 `cojson-core-rn` is our high-performance crypto provider for React Native. And it is **required** for React Native applications.
 
+<Alert variant="info" className="mt-4" title="Note"> 
+In the React Native ecosystem, the Autolinking process (which links native code from libraries to your iOS and Android projects) 
+relies on scanning the dependencies listed in your application's root package.json. As a result, `cojson-core-rn` must be a direct dependency of the app, and not a dependency of a dependency.
+</Alert>
+
 **Pay Attention:** The version of `cojson-core-rn` must be the same as the version of `jazz-tools`.
 
 <CodeGroup>
