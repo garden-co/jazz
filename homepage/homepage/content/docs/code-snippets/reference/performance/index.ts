@@ -39,14 +39,6 @@ const subItem = SubItem.create({ subSubItem: subSubItem });
 const fasterItem = Item.create({ subItem: subItem });
 // #endregion
 
-// #region ReuseOwnerOnInlineCreation
-import { setDefaultSchemaPermissions } from "jazz-tools";
-
-setDefaultSchemaPermissions({
-  onInlineCreate: "sameAsContainer",
-});
-// #endregion
-
 // #region ZObjectsZTuples
 const Sprite = co.map({
   position: z.object({ x: z.number(), y: z.number() }),
