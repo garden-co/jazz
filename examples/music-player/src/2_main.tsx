@@ -8,6 +8,7 @@ import { HomePage } from "./3_HomePage";
 import { useMediaPlayer } from "./5_useMediaPlayer";
 import { InvitePage } from "./6_InvitePage";
 import { WelcomeScreen } from "./components/WelcomeScreen";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import "./index.css";
 
 import { MusicaAccount } from "@/1_schema";
@@ -47,11 +48,19 @@ function AppContent({
   const router = createHashRouter([
     {
       path: "/",
-      element: <HomePage mediaPlayer={mediaPlayer} />,
+      element: (
+        <ErrorBoundary>
+          <HomePage mediaPlayer={mediaPlayer} />
+        </ErrorBoundary>
+      ),
     },
     {
       path: "/playlist/:playlistId",
-      element: <HomePage mediaPlayer={mediaPlayer} />,
+      element: (
+        <ErrorBoundary>
+          <HomePage mediaPlayer={mediaPlayer} />
+        </ErrorBoundary>
+      ),
     },
     {
       path: "/invite/*",

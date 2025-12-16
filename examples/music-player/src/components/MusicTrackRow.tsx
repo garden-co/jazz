@@ -1,7 +1,6 @@
 import {
   MusicaAccount,
   MusicTrack,
-  Playlist,
   PlaylistWithTracks,
   MusicaAccountWithPlaylists,
 } from "@/1_schema";
@@ -56,11 +55,11 @@ export function MusicTrackRow({
     onClick(track);
   }
 
-  function handleAddToPlaylist(playlist: Playlist) {
+  function handleAddToPlaylist(playlist: PlaylistWithTracks) {
     addTrackToPlaylist(playlist, track);
   }
 
-  function handleRemoveFromPlaylist(playlist: Playlist) {
+  function handleRemoveFromPlaylist(playlist: PlaylistWithTracks) {
     removeTrackFromPlaylist(playlist, track);
   }
 

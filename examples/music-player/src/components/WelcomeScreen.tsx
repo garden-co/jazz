@@ -2,7 +2,6 @@ import { usePasskeyAuth, useSuspenseAccount } from "jazz-tools/react";
 import { ProfileForm } from "./ProfileForm";
 import { Button } from "./ui/button";
 import { MusicaAccount } from "@/1_schema";
-import { useEffect } from "react";
 
 export function WelcomeScreen() {
   const auth = usePasskeyAuth({

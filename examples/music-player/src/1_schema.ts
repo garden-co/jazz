@@ -1,5 +1,4 @@
 import { co, z } from "jazz-tools";
-import { createMusicTrackFromFile } from "@/4_actions";
 
 /** Walkthrough: Defining the data model with CoJSON
  *
@@ -154,4 +153,7 @@ export const MusicaAccountWithPlaylists = MusicaAccount.resolved({
     },
   },
 });
+export type MusicaAccountWithPlaylists = co.loaded<
+  typeof MusicaAccountWithPlaylists
+>;
 /** Walkthrough: Continue with ./2_main.tsx */
