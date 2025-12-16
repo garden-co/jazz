@@ -16,6 +16,14 @@ The fastest implementations are (in order):
 Check whether your environment supports Node-API.
 Some edge runtimes may not enable WASM by default.
 
+## Initialize WASM asynchronously
+If you want to initialize the WASM asynchronously (**Suggested**), you can use the `initWasm` function.
+Otherwise, the WASM will be initialized synchronously and will block the main thread (**Not Recommended**).
+<CodeGroup className="mt-4 [&_span]:[tab-size:2]" preferWrap>
+```ts index.ts#InitWasmAsync
+```
+</CodeGroup>
+
 ## Minimise group extensions
 
 Group extensions make it easy to cascade permissions and they’re fast enough for most cases.
