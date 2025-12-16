@@ -1,5 +1,15 @@
 # jazz-tools
 
+## 0.19.13
+
+### Patch Changes
+
+- bef1cc6: Bugfix: rewrittern the session provider to prevent race conditions and reuse also the new accounts sessions
+- b839147: Add schema-level permissions to centralize permission configuration
+  - cojson@0.19.13
+  - cojson-storage-indexeddb@0.19.13
+  - cojson-transport-ws@0.19.13
+
 ## 0.19.12
 
 ### Patch Changes
