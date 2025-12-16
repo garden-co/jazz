@@ -1,4 +1,8 @@
-import { co, z } from "jazz-tools";
+import { co, z, setDefaultSchemaPermissions } from "jazz-tools";
+
+setDefaultSchemaPermissions({
+  onInlineCreate: "sameAsContainer",
+});
 
 /** Walkthrough: Defining the data model with CoJSON
  *
@@ -10,64 +14,46 @@ import { co, z } from "jazz-tools";
  *  - other CoValues
  **/
 
-export const MusicTrackWaveform = co
-  .map({
-    data: z.array(z.number()),
-  })
-  .withPermissions({
-    onInlineCreate: "sameAsContainer",
-  });
+export const MusicTrackWaveform = co.map({
+  data: z.array(z.number()),
+});
 export type MusicTrackWaveform = co.loaded<typeof MusicTrackWaveform>;
 
-export const MusicTrack = co
-  .map({
-    /**
-     *  Attributes are defined using zod schemas
-     */
-    title: z.string(),
-    duration: z.number(),
+export const MusicTrack = co.map({
+  /**
+   *  Attributes are defined using zod schemas
+   */
+  title: z.string(),
+  duration: z.number(),
 
-    /**
-     * You can define relations between coValues using the other CoValue schema
-     * You can mark them optional using z.optional()
-     */
-    waveform: MusicTrackWaveform,
+  /**
+   * You can define relations between coValues using the other CoValue schema
+   * You can mark them optional using z.optional()
+   */
+  waveform: MusicTrackWaveform,
 
-    /**
-     * In Jazz you can upload files using FileStream.
-     *
-     * As for any other coValue the music files we put inside FileStream
-     * is available offline and end-to-end encrypted 😉
-     */
-    file: co.fileStream(),
+  /**
+   * In Jazz you can upload files using FileStream.
+   *
+   * As for any other coValue the music files we put inside FileStream
+   * is available offline and end-to-end encrypted 😉
+   */
+  file: co.fileStream(),
 
-    isExampleTrack: z.optional(z.boolean()),
-  })
-  .withPermissions({ onInlineCreate: "extendsContainer" });
+  isExampleTrack: z.optional(z.boolean()),
+});
 export type MusicTrack = co.loaded<typeof MusicTrack>;
 
-export const TracksList = co
-  .list(MusicTrack)
-  .withPermissions({ onInlineCreate: "sameAsContainer" });
-export type TracksList = co.loaded<typeof TracksList>;
-
-export const Playlist = co
-  .map({
-    title: z.string(),
-    tracks: TracksList, // CoList is the collaborative version of Array
-  })
-  .withPermissions({ onInlineCreate: "newGroup" });
+export const Playlist = co.map({
+  title: z.string(),
+  tracks: co.list(MusicTrack), // CoList is the collaborative version of Array
+});
 export type Playlist = co.loaded<typeof Playlist>;
 
 export const PlaylistWithTracks = Playlist.resolved({
   tracks: { $each: true },
 });
 export type PlaylistWithTracks = co.loaded<typeof PlaylistWithTracks>;
-
-const PlaylistsList = co
-  .list(Playlist)
-  .withPermissions({ onInlineCreate: "sameAsContainer" });
-type PlaylistsList = co.loaded<typeof PlaylistsList>;
 
 /** The account root is an app-specific per-user private `CoMap`
  *  where you can store top-level objects for that user */
@@ -78,7 +64,7 @@ export const MusicaAccountRoot = co
     rootPlaylist: Playlist,
     // Here we store the list of playlists that the user has created
     // or that has been invited to
-    playlists: PlaylistsList,
+    playlists: co.list(Playlist),
     // We store the active track and playlist as coValue here
     // so when the user reloads the page can see the last played
     // track and playlist
