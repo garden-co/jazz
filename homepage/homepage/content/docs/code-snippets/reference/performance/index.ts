@@ -56,3 +56,11 @@ const myLocation = Location.create({ position: [26.052, -80.209] });
 myLocation.$jazz.set("position", [-33.868, -63.987]);
 // Note: you cannot replace a single array element, only replace the whole tuple
 // #endregion
+
+// #region InitWasmAsync
+import { initWasm } from "jazz-tools/wasm";
+
+await initWasm();
+
+// Your code here...
+// #endregion
