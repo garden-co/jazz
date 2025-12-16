@@ -201,7 +201,10 @@ describe("jazz-webhook", () => {
       } = await setupTest();
 
       // Create a test CoMap
-      const testMap = TestCoMap.create({ value: "initial" }, account.root);
+      const testMap = TestCoMap.create(
+        { value: "initial" },
+        account.root.$jazz.owner,
+      );
       const coValueId = testMap.$jazz.id as `co_z${string}`;
 
       // Register webhook
@@ -227,7 +230,10 @@ describe("jazz-webhook", () => {
         webhookRegistry: webhookManager,
       } = await setupTest();
 
-      const testMap = TestCoMap.create({ value: "initial" }, account.root);
+      const testMap = TestCoMap.create(
+        { value: "initial" },
+        account.root.$jazz.owner,
+      );
       const coValueId = testMap.$jazz.id as `co_z${string}`;
 
       await webhookManager.register(webhookServer.getUrl(), coValueId);
@@ -252,7 +258,10 @@ describe("jazz-webhook", () => {
       const { account, webhookServer, registryState, webhookRegistry } =
         await setupTest();
 
-      const testMap = TestCoMap.create({ value: "initial" }, account.root);
+      const testMap = TestCoMap.create(
+        { value: "initial" },
+        account.root.$jazz.owner,
+      );
       const coValueId = testMap.$jazz.id as `co_z${string}`;
 
       const webhookId = await webhookRegistry.register(
@@ -284,7 +293,10 @@ describe("jazz-webhook", () => {
         webhookRegistry: webhookManager,
       } = await setupTest();
 
-      const testMap = TestCoMap.create({ value: "initial" }, account.root);
+      const testMap = TestCoMap.create(
+        { value: "initial" },
+        account.root.$jazz.owner,
+      );
       const coValueId = testMap.$jazz.id as `co_z${string}`;
 
       // Set up server to fail first 2 requests, then succeed
@@ -314,7 +326,10 @@ describe("jazz-webhook", () => {
         baseDelayMs: 100000, // Really long default delay, we expect this to be overridden by the Retry-After header
       });
 
-      const testMap = TestCoMap.create({ value: "initial" }, account.root);
+      const testMap = TestCoMap.create(
+        { value: "initial" },
+        account.root.$jazz.owner,
+      );
       const coValueId = testMap.$jazz.id as `co_z${string}`;
 
       // Set up server to fail with Retry-After header
@@ -346,7 +361,10 @@ describe("jazz-webhook", () => {
         webhookRegistry: webhookManager,
       } = await setupTest();
 
-      const testMap = TestCoMap.create({ value: "initial" }, account.root);
+      const testMap = TestCoMap.create(
+        { value: "initial" },
+        account.root.$jazz.owner,
+      );
       const coValueId = testMap.$jazz.id as `co_z${string}`;
 
       // Set up server to always fail
@@ -372,7 +390,10 @@ describe("jazz-webhook", () => {
         webhookRegistry: webhookManager,
       } = await setupTest();
 
-      const testMap = TestCoMap.create({ value: "initial" }, account.root);
+      const testMap = TestCoMap.create(
+        { value: "initial" },
+        account.root.$jazz.owner,
+      );
       const coValueId = testMap.$jazz.id as `co_z${string}`;
 
       // Set up server with slow response
@@ -392,7 +413,10 @@ describe("jazz-webhook", () => {
     test("should handle webhook unregistration cleanup", async () => {
       const { account, webhookServer, webhookRegistry } = await setupTest();
 
-      const testMap = TestCoMap.create({ value: "initial" }, account.root);
+      const testMap = TestCoMap.create(
+        { value: "initial" },
+        account.root.$jazz.owner,
+      );
       const coValueId = testMap.$jazz.id as `co_z${string}`;
 
       const webhookId = await webhookRegistry.register(
@@ -424,8 +448,14 @@ describe("jazz-webhook", () => {
     test("should start all active webhook subscriptions", async () => {
       const { account, webhookServer, webhookRegistry } = await setupTest();
 
-      const testMap1 = TestCoMap.create({ value: "initial1" }, account.root);
-      const testMap2 = TestCoMap.create({ value: "initial2" }, account.root);
+      const testMap1 = TestCoMap.create(
+        { value: "initial1" },
+        account.root.$jazz.owner,
+      );
+      const testMap2 = TestCoMap.create(
+        { value: "initial2" },
+        account.root.$jazz.owner,
+      );
       const coValueId1 = testMap1.$jazz.id as `co_z${string}`;
       const coValueId2 = testMap2.$jazz.id as `co_z${string}`;
 
@@ -472,9 +502,15 @@ describe("jazz-webhook", () => {
     test("should when restarting, only the changed covalues should trigger webhooks", async () => {
       const { account, webhookServer, webhookRegistry } = await setupTest();
 
-      const testMap1 = TestCoMap.create({ value: "initial1" }, account.root);
+      const testMap1 = TestCoMap.create(
+        { value: "initial1" },
+        account.root.$jazz.owner,
+      );
       const initialTxID1 = testMap1.$jazz.raw.lastEditAt("value")!.tx;
-      const testMap2 = TestCoMap.create({ value: "initial2" }, account.root);
+      const testMap2 = TestCoMap.create(
+        { value: "initial2" },
+        account.root.$jazz.owner,
+      );
       const initialTxID2 = testMap2.$jazz.raw.lastEditAt("value")!.tx;
       const coValueId1 = testMap1.$jazz.id as `co_z${string}`;
       const coValueId2 = testMap2.$jazz.id as `co_z${string}`;
@@ -511,7 +547,10 @@ describe("jazz-webhook", () => {
     test("should not start subscriptions for inactive webhooks", async () => {
       const { account, webhookServer, webhookRegistry } = await setupTest();
 
-      const testMap = TestCoMap.create({ value: "initial" }, account.root);
+      const testMap = TestCoMap.create(
+        { value: "initial" },
+        account.root.$jazz.owner,
+      );
       const coValueId = testMap.$jazz.id as `co_z${string}`;
 
       // Register webhook

@@ -298,10 +298,15 @@ export class CoMap extends CoValueBase implements CoValue {
           if (initValue != null) {
             let refId = (initValue as unknown as CoValue).$jazz?.id;
             if (!refId) {
+              const newOwnerStrategy =
+                descriptor.permissions?.newInlineOwnerStrategy;
+              const onCreate = descriptor.permissions?.onCreate;
               const coValue = instantiateRefEncodedWithInit(
                 descriptor,
                 initValue,
                 owner,
+                newOwnerStrategy,
+                onCreate,
               );
               refId = coValue.$jazz.id;
             }
@@ -610,10 +615,15 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
         this.raw.set(key, null);
       } else {
         if (!refId) {
+          const newOwnerStrategy =
+            descriptor.permissions?.newInlineOwnerStrategy;
+          const onCreate = descriptor.permissions?.onCreate;
           const coValue = instantiateRefEncodedWithInit(
             descriptor,
             value,
             this.owner,
+            newOwnerStrategy,
+            onCreate,
           );
           refId = coValue.$jazz.id;
         }

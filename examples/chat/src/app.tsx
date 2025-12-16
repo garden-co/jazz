@@ -1,7 +1,7 @@
 import { apiKey } from "@/apiKey.ts";
 import { getRandomUsername, inIframe, onChatLoad } from "@/util.ts";
 import { useIframeHashRouter } from "hash-slash";
-import { co, Group } from "jazz-tools";
+import { co } from "jazz-tools";
 import { JazzInspector } from "jazz-tools/inspector";
 import {
   JazzReactProvider,
@@ -12,7 +12,7 @@ import { StrictMode, useId, useMemo } from "react";
 import { createRoot } from "react-dom/client";
 import Jazzicon from "react-jazzicon";
 import { ChatScreen } from "./chatScreen.tsx";
-import { Chat, Message } from "./schema.ts";
+import { Chat } from "./schema.ts";
 import { ThemeProvider } from "./themeProvider.tsx";
 import { AppContainer, TopBar } from "./ui.tsx";
 
@@ -42,11 +42,9 @@ export function App() {
   }, [me.$jazz.id]);
 
   const createChat = () => {
-    const group = Group.create();
-    group.makePublic("writer");
-    const chat = Chat.create([], group);
+    const chat = Chat.create([]);
 
-    chat.$jazz.push(Message.create({ text: "Hello world" }, group));
+    chat.$jazz.push({ text: "Hello world" });
 
     router.navigate("/#/chat/" + chat.$jazz.id);
 

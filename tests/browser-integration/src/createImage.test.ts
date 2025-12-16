@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { createImage } from "jazz-tools/media";
-import { createJazzTestAccount } from "jazz-tools/testing";
+import { assertLoaded, createJazzTestAccount } from "jazz-tools/testing";
+import { co, z } from "jazz-tools";
 import { describe, expect, it } from "vitest";
 
 describe("createImage - Browser Edition", async () => {
@@ -24,7 +25,7 @@ describe("createImage - Browser Edition", async () => {
     expect(image["256x53"]).toBeDefined();
 
     const imgOriginal = document.createElement("img");
-    imgOriginal.src = URL.createObjectURL(image.original!.toBlob()!);
+    imgOriginal.src = URL.createObjectURL(image.original.toBlob()!);
 
     await new Promise((resolve) => (imgOriginal.onload = resolve));
 
@@ -34,7 +35,8 @@ describe("createImage - Browser Edition", async () => {
     URL.revokeObjectURL(imgOriginal.src);
 
     const imgResized = document.createElement("img");
-    imgResized.src = URL.createObjectURL(image["256x53"]!.toBlob()!);
+    assertLoaded(image["256x53"]);
+    imgResized.src = URL.createObjectURL(image["256x53"].toBlob()!);
 
     await new Promise((resolve) => (imgResized.onload = resolve));
 
@@ -57,8 +59,9 @@ describe("createImage - Browser Edition", async () => {
       owner: account,
     });
 
-    expect(pngImage.original!.toBlob()!.type).toBe("image/png");
-    expect(pngImage["256x53"]!.toBlob()!.type).toBe("image/png");
+    expect(pngImage.original.toBlob()!.type).toBe("image/png");
+    assertLoaded(pngImage["256x53"]);
+    expect(pngImage["256x53"].toBlob()!.type).toBe("image/png");
 
     const jpegBlob = new Blob(
       [Uint8Array.from(White1920, (c) => c.charCodeAt(0))],
@@ -72,8 +75,9 @@ describe("createImage - Browser Edition", async () => {
       owner: account,
     });
 
-    expect(jpegImage.original!.toBlob()!.type).toBe("image/jpeg");
-    expect(jpegImage["256x53"]!.toBlob()!.type).toBe("image/jpeg");
+    expect(jpegImage.original.toBlob()!.type).toBe("image/jpeg");
+    assertLoaded(jpegImage["256x53"]);
+    expect(jpegImage["256x53"].toBlob()!.type).toBe("image/jpeg");
   });
 });
 

@@ -2,14 +2,21 @@ import { co, z } from "jazz-tools";
 
 export const JazzProfile = co.profile();
 
-export const Embedding = co.vector(384); // <- 384-dim vector schema
-
-export const JournalEntry = co.map({
-  text: z.string(),
-  feelings: z.array(z.string()),
-  topics: z.array(z.string()),
-  embedding: Embedding,
+// 384-dim vector schema
+export const Embedding = co.vector(384).withPermissions({
+  onInlineCreate: "sameAsContainer",
 });
+
+export const JournalEntry = co
+  .map({
+    text: z.string(),
+    feelings: z.array(z.string()),
+    topics: z.array(z.string()),
+    embedding: Embedding,
+  })
+  .withPermissions({
+    onInlineCreate: "sameAsContainer",
+  });
 export type JournalEntry = co.loaded<typeof JournalEntry>;
 
 export const JournalEntryList = co.list(JournalEntry);

@@ -466,10 +466,14 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
         | undefined;
       if (!refId) {
         const descriptor = this.schema[key];
+        const newOwnerStrategy = descriptor.permissions?.newInlineOwnerStrategy;
+        const onCreate = descriptor.permissions?.onCreate;
         const coValue = instantiateRefEncodedWithInit(
           descriptor,
           value,
           accountOrGroupToGroup(this.account),
+          newOwnerStrategy,
+          onCreate,
         );
         refId = coValue.$jazz.id as CoID<RawCoMap>;
       }
