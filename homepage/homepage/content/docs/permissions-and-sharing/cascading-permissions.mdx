@@ -93,13 +93,13 @@ You can get all of the groups added to a group by calling the `getParentGroups` 
 ```
 </CodeGroup>
 
-## Ownership on implicit CoValue creation
+## Ownership on inline CoValue creation
 
 When creating CoValues that contain other CoValues (or updating references to CoValues) using plain JSON objects, Jazz not only creates
 the necessary CoValues automatically but it will also manage their group ownership.
 
 <CodeGroup>
-```ts index.ts#ImplicitOwnership
+```ts index.ts#InlineCoValueCreation
 ```
 </CodeGroup>
 
