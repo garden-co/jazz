@@ -47,6 +47,9 @@ type Blake3State = Blake3Hasher;
 let wasmInit = initialize;
 let wasmInitSync = initializeSync;
 
+const WASM_CRYPTO_ERROR_MESSAGE =
+  "Failed to initialize WasmCrypto. WebAssembly is required for crypto operations on web platforms. See https://jazz.tools/docs/react/server-side/setup#wasm-on-edge-runtimes for more details.";
+
 /**
  * Initializes the WasmCrypto module. This function can be used to initialize the WasmCrypto module in a worker or a browser.
  * if you are using SSR and you want to initialize WASM crypto asynchronously you can use this function.
@@ -56,10 +59,7 @@ export async function initWasmCrypto() {
   try {
     await wasmInit();
   } catch (e) {
-    throw new Error(
-      "Failed to initialize WasmCrypto. WebAssembly is required for crypto operations on web platforms.",
-      { cause: e },
-    );
+    throw new Error(WASM_CRYPTO_ERROR_MESSAGE, { cause: e });
   }
 }
 
@@ -88,10 +88,7 @@ export class WasmCrypto extends CryptoProvider<Blake3State> {
     try {
       wasmInitSync();
     } catch (e) {
-      throw new Error(
-        "Failed to initialize WasmCrypto. WebAssembly is required for crypto operations on web platforms.",
-        { cause: e },
-      );
+      throw new Error(WASM_CRYPTO_ERROR_MESSAGE, { cause: e });
     }
     return new WasmCrypto();
   }
@@ -102,10 +99,7 @@ export class WasmCrypto extends CryptoProvider<Blake3State> {
     try {
       await wasmInit();
     } catch (e) {
-      throw new Error(
-        "Failed to initialize WasmCrypto. WebAssembly is required for crypto operations on web platforms.",
-        { cause: e },
-      );
+      throw new Error(WASM_CRYPTO_ERROR_MESSAGE, { cause: e });
     }
 
     return new WasmCrypto();
