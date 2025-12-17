@@ -8,6 +8,18 @@ This design implements a secure, efficient data deletion flow for coValues that 
 
 The design leverages existing transaction validation mechanisms, adding delete-specific checks in `tryAddTransactions`, and implements sync restrictions to prevent deleted content from propagating while allowing delete operations to sync.
 
+## Backward compatibility (wire protocol + mixed-version peers)
+
+This design is intended to be rolled out without introducing new message types or changing the shape of existing sync messages (`load`, `known`, `content`, `done`). Instead, we change *semantics* for deleted coValues while remaining compatible with older peers.
+
+Key points:
+
+- **No protocol versioning required**: delete is represented as an ordinary unencrypted (`trusting`) transaction with meta `{ deleted: true }`, and a dedicated session ID pattern (`{accountId}_deleted_{uniqueId}`).
+- **Mixed-version safety**:
+  - New peers must **not accept** or **re-propagate** historical content for a deleted coValue (they only accept/sync the tombstone).
+  - Old peers may continue to send historical content. New peers handle this by **ignoring** non-delete sessions for deleted coValues (see “Sync message behavior” below). This avoids resurrection even when older peers don’t understand deletion.
+- **Sync quenching (“poisoned knownState”)**: when interacting with peers that *do* speak the existing protocol (including older peers), we can prevent them from continuously trying to send historical sessions by replying with the peer optimistic known state plus the deleted session. This makes the sender believe we already have everything and therefore stops further uploads.
+
 ## Architecture / Components
 
 ### 1. Delete API Method
@@ -127,7 +139,31 @@ tryAddTransactions(
   newSignature: Signature,
   skipVerify: boolean = false,
 ) {
-  // ... existing signature verification ...
+  let isDeleteOperation = false;
+  // Only check for delete transactions if sessionID contains '_deleted_'
+  if (sessionID.includes('_deleted_') && !this.isGroup() && !this.isAccount()) {
+    // Check for delete transactions after successful addition
+    for (const tx of newTransactions) {
+      if (tx.privacy !== "trusting" || !tx.meta) continue;
+      const txMeta = JSON.parse(tx.meta)
+      if (txMeta?.deleted === true) {
+        // Validate admin permissions for delete
+        if (!skipVerify) {
+          const deleteAuthor = accountOrAgentIDfromSessionID(sessionID);
+          const hasAdminPermission = this.validateDeletePermission(deleteAuthor);
+          
+          if (!hasAdminPermission) {
+            // Mark transaction as invalid
+            // This should be handled in determineValidTransactions
+            return { type: "NotEnoughPermissions", id: this.id, error: new Error("Not enough permissions to delete the CoValue, transaction rejected") };
+          }
+        }
+        
+        // Mark coValue as deleted
+        isDeleteOperation = true;
+      }
+    }
+  }
 
   try {
     this.verified.tryAddTransactions(
@@ -138,29 +174,7 @@ tryAddTransactions(
       skipVerify,
     );
 
-    // Only check for delete transactions if sessionID contains '_deleted_'
-    if (sessionID.includes('_deleted_') && !this.isGroup() && !this.isAccount()) {
-      // Check for delete transactions after successful addition
-      for (const tx of newTransactions) {
-        const txMeta = this.parseTransactionMeta(tx);
-        if (txMeta?.deleted === true) {
-          // Validate admin permissions for delete
-          if (!skipVerify) {
-            const deleteAuthor = accountOrAgentIDfromSessionID(sessionID);
-            const hasAdminPermission = this.validateDeletePermission(deleteAuthor);
-            
-            if (!hasAdminPermission) {
-              // Mark transaction as invalid
-              // This should be handled in determineValidTransactions
-              continue;
-            }
-          }
-          
-          // Mark coValue as deleted
-          this.markAsDeleted(sessionID, tx);
-        }
-      }
-    }
+    if (isDeleteOperation) this.markAsDeleted(sessionID, tx);
 
     this.processNewTransactions();
     this.scheduleNotifyUpdate();
@@ -173,32 +187,21 @@ tryAddTransactions(
 
 ### 4. Delete Permission Validation
 
-**Location**: `packages/cojson/src/permissions.ts` - `determineValidTransactions()`
+**Location**: `packages/cojson/src/coValueCore/coValueCore.ts` - `validateDeletePermission()`
 
 **Changes**:
-- Add validation for delete transactions in `determineValidTransactions()`
 - Check that transaction author has admin permissions when meta contains `{ deleted: true }`
 - Reject delete transactions from non-admin accounts
 
 **Key Logic**:
 ```typescript
-export function determineValidTransactions(coValue: CoValueCore): void {
-  // ... existing validation logic ...
+validateDeletePermission(sessionID: SessionID, tx: Transaction): void {
+  const deleteAuthor = accountOrAgentIDfromSessionID(sessionID);
+  const groupAtTime = this.safeGetGroup()?.atTime(tx.currentMadeAt);
 
-  for (const tx of coValue.toValidateTransactions) {
-    // Check for delete transactions
-    if (tx.meta?.deleted === true) {
-      // Only admins can delete
-      if (transactorRoleAtTxTime !== "admin") {
-        tx.markInvalid("Only admins can delete coValues", {
-          transactor: tx.author,
-          transactorRole: transactorRoleAtTxTime ?? "undefined",
-        });
-        continue;
-      }
-    }
-    // ... existing transaction validation ...
-  }
+  if (!groupAtTime) return false;
+
+  return groupAtTime.roleOf(deleteAuthor) === "admin"
 }
 ```
 
@@ -213,17 +216,12 @@ export function determineValidTransactions(coValue: CoValueCore): void {
 **Key Logic**:
 ```typescript
 // In CoValueCore
-private _isDeleted = false;
-private _deleteSessionID: SessionID | undefined;
+public isDeleted = false;
+public deleteSessionID: SessionID | undefined;
 
-get isDeleted(): boolean {
-  return this._isDeleted;
-}
-
-markAsDeleted(sessionID: SessionID, transaction: Transaction): void {
-  this._isDeleted = true;
-  this._deleteSessionID = sessionID;
-  this._deleteTransaction = transaction;
+markAsDeleted(sessionID: SessionID): void {
+  this.isDeleted = true;
+  this.deleteSessionID = sessionID;
 }
 ```
 
@@ -233,7 +231,7 @@ markAsDeleted(sessionID: SessionID, transaction: Transaction): void {
 
 **Changes**:
 - Before syncing content, check if coValue is deleted
-- If deleted, only allow syncing the delete session/transaction
+- If deleted, only allow syncing the delete session/transaction (tombstone)
 - Block all other content from syncing
 
 **Key Logic**:
@@ -244,29 +242,73 @@ handleNewContent(
   from: PeerState | "storage" | "import",
 ) {
   const coValue = this.node.getCoValue(msg.id);
-  
-  // Check if coValue is deleted
+
+  // If the coValue is deleted, only accept the delete session.
+  // Any other session content must be ignored to prevent resurrection.
   if (coValue.isDeleted && coValue.deleteSessionID) {
-    return;
+    // Keep only the delete session from msg.new (and optionally msg.header).
+    // Everything else is ignored.
   }
 
   // ... rest of handleNewContent ...
 }
-
-// In syncLocalTransaction
-syncLocalTransaction(
-  coValue: VerifiedState,
-  knownStateBefore: CoValueKnownState,
-) {
-  const core = this.node.getCoValueCore(coValue.id);
-  
-  if (core.isDeleted && core.deleteSessionID) {
-    return;
-  }
-
-  // ... normal sync logic ...
-}
 ```
+
+### 6.1 Sync message behavior for deleted CoValues (responses + quenching)
+
+This section defines exactly how existing sync message handlers behave once a coValue is marked as deleted (i.e. `isDeleted === true` and `deleteSessionID` is set).
+
+#### Terminology / constants
+
+- **Delete session**: `deleteSessionID` with pattern `{RawAccountID}_deleted_{string}`.
+- **Delete transaction count**: `deleteTxCount = knownState.sessions[deleteSessionID]` (typically `1`).
+- **Poison counter**: We reply with the peer optimistic known state plus the deleted session.
+
+#### `load` message
+
+Requirement: for a deleted coValue, the `load` response must:
+
+- report **`deleteSessionID`** with the amount of transactions in that session
+- include a **poisoned knownState** (very high counters) to prevent further syncs of historical sessions
+
+Behavior:
+
+- On receiving `LoadMessage` for `id` where the local coValue is deleted and available:
+  - Reply with a `KnownStateMessage`:
+    - `header: true` (tombstone header is available)
+    - `sessions`:
+      - `{ [deleteSessionID]: deleteTxCount }`
+      - For every session key present in the incoming `msg.sessions` **other than** `deleteSessionID`, send `{ [thatSessionID]: POISON_COUNTER }`
+  - Then, sync **only** the delete session content if the requester is behind (normal `content` flow, but limited to delete session).
+
+Rationale:
+
+- The explicit delete session counter allows a peer that is missing the tombstone to request/receive it.
+- The poisoned counters ensure a peer that still has historical sessions will not keep trying to upload them after deletion.
+
+#### `content` message
+
+- For deleted coValues, only `content.new[deleteSessionID]` is accepted/applied/stored.
+- Any other `content.new` session entries MUST be ignored (and must not be stored or forwarded).
+- If the incoming `content` contains `header`, it may be accepted if needed to complete the tombstone (header must remain available for verification).
+
+#### `known` message
+
+- For deleted coValues, known-state merging/tracking should be treated as **delete-session-only** for purposes of sync completion and progress tracking.
+- (Optional optimization) peers may continue to exchange full knownStates, but wait/sync checks must only consider the delete session once it exists.
+
+#### `done` message
+
+No special behavior required. It remains a transport-level signal.
+
+### 6.2 `waitForSync` semantics for deleted CoValues
+
+Once `deleteSessionID` exists for a coValue, `waitForSync()` must only wait for:
+
+- the tombstone/header (if applicable in the specific wait path), and
+- the **delete session counter** to be fully uploaded/stored
+
+It must **not** wait for historical sessions, because those are intentionally blocked from syncing after deletion (and may never be uploaded/stored on some peers).
 
 ### 7. DBClient Deleted CoValue Tracking
 
@@ -298,10 +340,78 @@ export interface DBClientInterfaceSync {
 }
 ```
 
-**Implementation Notes**:
-- When storing a delete transaction, call `markCoValueAsDeleted()` to update the database
-- This can be done by adding a `deleted: boolean` column to the `coValues` table or a separate `deletedCoValues` table
-- The tracking happens automatically when delete transactions are stored via normal storage flow
+**Implementation Notes (by adapter)**:
+
+The repository currently has three DBClient implementations:
+
+- SQLite (sync): `packages/cojson/src/storage/sqlite/client.ts` (`SQLiteClient`)
+- SQLite (async): `packages/cojson/src/storage/sqliteAsync/client.ts` (`SQLiteClientAsync`)
+- IndexedDB (async): `packages/cojson-storage-indexeddb/src/idbClient.ts` (`IDBClient`)
+
+Additionally, these packages provide **SQLite drivers** that reuse the same SQLite storage implementation and therefore inherit the SQLite behavior below:
+
+- `packages/cojson-storage-sqlite` (better-sqlite3 driver)
+- `packages/cojson-storage-do-sqlite` (Cloudflare Durable Object SQLite driver)
+
+#### 7.1 SQLite family (sync + async)
+
+**Schema**
+
+The SQLite schema is managed by `packages/cojson/src/storage/sqlite/sqliteMigrations.ts` (used by both `getSqliteStorage` and `getSqliteStorageAsync`).
+
+Add a migration that introduces a separate table for deleted coValues:
+
+```sql
+CREATE TABLE IF NOT EXISTS deletedCoValues (
+  coValueRowID INTEGER PRIMARY KEY
+  -- Optional (if foreign keys are enabled in the embedding runtime):
+  -- , FOREIGN KEY (coValueRowID) REFERENCES coValues(rowID) ON DELETE CASCADE
+);
+```
+
+**Implementation: `markCoValueAsDeleted(coValueRowID)`**
+
+SQLite implementation is an idempotent insert (works for both sync and async variants):
+
+```sql
+INSERT OR IGNORE INTO deletedCoValues (coValueRowID) VALUES (?);
+```
+
+Notes:
+- the storage write path already has both `msg.id` and `storedCoValueRowID`; passing `storedCoValueRowID` is sufficient.
+
+**Implementation: `getAllDeletedCoValueIDs()`**
+
+```sql
+SELECT c.id
+FROM deletedCoValues d
+JOIN coValues c ON c.rowID = d.coValueRowID;
+```
+
+#### 7.2 IndexedDB (cojson-storage-indexeddb)
+
+**Schema**
+
+The IndexedDB schema is defined in `packages/cojson-storage-indexeddb/src/idbNode.ts` (inside `onupgradeneeded`).
+
+Add a new database version (bump from `indexedDB.open(name, 4)` to the next version) and introduce a new store:
+
+- Create `deletedCoValues` store with `keyPath: "coValueRowID"` and values containing:
+  - `coValueRowID: number` (the `coValues.rowID`)
+  - `id: RawCoID` (duplicated for efficient reads)
+
+**Implementation: `markCoValueAsDeleted(coValueRowID)`**
+
+Because `IDBClient` uses a transactional wrapper (`CoJsonIDBTransaction`), implement `markCoValueAsDeleted` by:
+
+1. `get` the `coValues` record by primary key (`rowID`) to retrieve the `id`
+2. `put` `{ coValueRowID, id }` into the `deletedCoValues` store (idempotent via key)
+
+This should run inside the same write transaction that stores the delete transaction so the marker is not lost if the write rolls back.
+
+**Implementation: `getAllDeletedCoValueIDs()`**
+
+Read `getAll()` from the `deletedCoValues` store and return the `id` field from each row.
 
 ### 8. Storage API Batch Delete
 
@@ -359,9 +469,7 @@ export interface SQLiteDatabaseDriverAsync {
 }
 
 // Implementation example (SQL)
-// SELECT id FROM coValues WHERE deleted = true;
-// or
-// SELECT coValueID FROM deletedCoValues;
+// SELECT coValueRowID FROM deletedCoValues
 ```
 
 ### 10. Delete Tombstone
