@@ -32,7 +32,7 @@ Key points:
   - Checks that the current account has admin permissions on the coValue
   - Throws error if not admin
   - Creates delete transaction with meta `{ deleted: true }`
-  - Uses session naming pattern: `{accountId}_deleted_{uniqueId}`
+  - Uses session naming pattern: `{accountId}_session_z{uniqueId}_deleted`
 
 **Key Logic**:
 ```typescript
@@ -66,8 +66,7 @@ deleteCoValue(): void {
   }
 
   // Generate unique session ID for delete transaction
-  const uniqueId = this.crypto.newRandomSessionID(currentAccount.id).split('_session_z')[1];
-  const deleteSessionID = `${currentAccount.id}_deleted_${uniqueId}` as SessionID;
+  const deleteSessionID = this.crypto.newRandomSessionID(currentAccount.id) + `_deleted`;
 
   // Create unencrypted (trusting) transaction with delete meta
   // Pass deleteSessionID to makeTransaction to use the delete session
@@ -91,7 +90,7 @@ deleteCoValue(): void {
 - Ensure delete transactions are always unencrypted (trusting)
 
 **Rationale for Special Delete Session**:
-The special session naming pattern (`{accountId}_deleted_{uniqueId}`) is used to provide a simple way to sync the delete marker without carrying extra data. By using a dedicated session for delete transactions, the system can:
+The special session naming pattern (`{accountId}_session_z{uniqueId}_deleted`) is used to provide a simple way to sync the delete marker without carrying extra data. By using a dedicated session for delete transactions, the system can:
 - Easily identify delete operations by session ID pattern
 - Sync only the delete marker without carrying any history
 - Maintain a clean separation between regular transactions and delete operations
@@ -126,7 +125,7 @@ makeTransaction(
 
 **Changes**:
 - After signature verification succeeds, check for delete transactions
-- Only parse transaction meta if sessionID contains `_deleted_` (optimization)
+- Only parse transaction meta if sessionID ends with `_deleted` (optimization)
 - Validate that delete transaction author has admin permissions
 - Mark coValue as deleted if valid delete transaction found
 - Store delete state for sync blocking
@@ -140,8 +139,8 @@ tryAddTransactions(
   skipVerify: boolean = false,
 ) {
   let isDeleteOperation = false;
-  // Only check for delete transactions if sessionID contains '_deleted_'
-  if (sessionID.includes('_deleted_') && !this.isGroup() && !this.isAccount()) {
+  // Only check for delete transactions if sessionID contains '_deleted'
+  if (sessionID.endsWith('_deleted') && !this.isGroup() && !this.isAccount()) {
     // Check for delete transactions after successful addition
     for (const tx of newTransactions) {
       if (tx.privacy !== "trusting" || !tx.meta) continue;
@@ -260,7 +259,7 @@ This section defines exactly how existing sync message handlers behave once a co
 
 #### Terminology / constants
 
-- **Delete session**: `deleteSessionID` with pattern `{RawAccountID}_deleted_{string}`.
+- **Delete session**: `deleteSessionID` with pattern `{accountId}_session_z{uniqueId}_deleted`.
 - **Delete transaction count**: `deleteTxCount = knownState.sessions[deleteSessionID]` (typically `1`).
 - **Poison counter**: We reply with the peer optimistic known state plus the deleted session.
 
@@ -520,7 +519,7 @@ This section defines the **storage-level primitive** used by batch deletion (sec
 **Goal**: remove all persisted history for a deleted coValue while preserving:
 
 - the `coValues` row (header), and
-- all sessions matching the delete-session pattern (`*_deleted_*`) and their transactions/signatures.
+- all sessions matching the delete-session pattern (`*_deleted$`) and their transactions/signatures.
 
 Everything else for that coValue is physically deleted.
 
@@ -563,7 +562,7 @@ The SQLite storage schema is:
 SELECT rowID
 FROM sessions
 WHERE coValue = ?
-  AND sessionID NOT LIKE '%_deleted_%';
+  AND sessionID NOT LIKE '%_deleted';
 ```
 
 2. Delete all rows for those sessions:
@@ -573,19 +572,19 @@ DELETE FROM transactions
 WHERE ses IN (
   SELECT rowID FROM sessions
   WHERE coValue = ?
-    AND sessionID NOT LIKE '%_deleted_%'
+    AND sessionID NOT LIKE '%_deleted'
 );
 
 DELETE FROM signatureAfter
 WHERE ses IN (
   SELECT rowID FROM sessions
   WHERE coValue = ?
-    AND sessionID NOT LIKE '%_deleted_%'
+    AND sessionID NOT LIKE '%_deleted'
 );
 
 DELETE FROM sessions
 WHERE coValue = ?
-  AND sessionID NOT LIKE '%_deleted_%';
+  AND sessionID NOT LIKE '%_deleted';
 ```
 
 `deletedCoValues` is treated as a **work queue**, remove the row so the batch job won’t repeatedly re-process already-erased coValues:
@@ -612,7 +611,7 @@ The IndexedDB storage uses these stores:
 
 1. Load all sessions for the coValue via the `sessionsByCoValue` index.
 2. Partition them into:
-   - keep: `sessionID.includes("_deleted_")`
+   - keep: `sessionID.endsWith("_deleted")`
    - delete: everything else
 3. For each session in the delete set:
    - delete all `transactions` keys in range `IDBKeyRange.bound([ses, 0], [ses, +∞])` (cursor delete)
@@ -627,7 +626,7 @@ The IndexedDB storage uses these stores:
 ```typescript
 // Conceptual pseudocode inside one IDB transaction:
 const allSessions = await sessionsByCoValue.getAll(coValueRowID);
-const sessionsToDelete = allSessions.filter((s) => !s.sessionID.includes("_deleted_"));
+const sessionsToDelete = allSessions.filter((s) => !s.sessionID.endsWith("_deleted"));
 
 for (const s of sessionsToDelete) {
   // delete txs for ses = s.rowID
@@ -657,7 +656,7 @@ type DeleteTransactionMeta = {
   deleted: true;
 };
 
-type DeleteSessionID = `${RawAccountID}_deleted_${string}`;
+type DeleteSessionID = `${SessionID}_deleted`;
 ```
 
 ### CoValue Deleted State

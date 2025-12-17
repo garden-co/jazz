@@ -2,23 +2,23 @@
 
 Numbered checklist of **coding tasks** only. Each task references the relevant requirements in `requirements.md` (US-1…US-7).
 
-1. [ ] **Add admin-only delete API on CoValueCore** (Req: US-1)
+1. [x] **Add admin-only delete API on CoValueCore** (Req: US-1)
    - Implement `CoValueCore.deleteCoValue()` in `packages/cojson/src/coValueCore/coValueCore.ts`.
    - Hard-block deletion for **Account** and **Group** coValues (throw).
    - Enforce **admin-only** permissions (throw if not admin).
 
-2. [ ] **Create delete transaction with correct meta + session naming** (Req: US-2)
+2. [x] **Create delete transaction with correct meta + session naming** (Req: US-2)
    - Ensure delete creates an **unencrypted/trusting** transaction with `meta: { deleted: true }`.
-   - Generate a delete session ID with pattern `{accountId}_deleted_{uniqueId}` that is unique per delete.
+   - Generate a delete session ID with pattern `{accountId}_session_z{uniqueId}_deleted` (i.e. `_deleted` suffix) that is unique per delete.
    - Ensure the mechanism works across all coValue types.
 
-3. [ ] **Allow overriding session ID for transaction creation (delete sessions)** (Req: US-2)
+3. [x] **Allow overriding session ID for transaction creation (delete sessions)** (Req: US-2)
    - Update `makeTransaction(...)` in `packages/cojson/src/coValueCore/coValueCore.ts` to accept an optional `sessionID?: SessionID`.
    - Ensure delete uses the delete session ID and cannot accidentally fall back to the regular session.
 
 4. [ ] **Detect delete transactions and validate delete permissions during ingestion** (Req: US-3)
    - In `packages/cojson/src/coValueCore/coValueCore.ts` (`tryAddTransactions` and/or the validity pipeline), detect delete transactions via:
-     - session ID containing `_deleted_`, and
+     - session ID ending with `_deleted`, and
      - trusting tx with `meta.deleted === true`.
    - When not `skipVerify`, verify the delete author has **admin** permissions on the coValue.
    - Reject invalid delete transactions (non-admin) with an explicit error result.
@@ -66,11 +66,11 @@ Numbered checklist of **coding tasks** only. Each task references the relevant r
 
 11. [ ] **Implement physical deletion primitive: erase all content but keep tombstone** (Req: US-5, US-6)
    - Implement a per-coValue primitive (run inside a single storage transaction) that:
-     - deletes **all non-delete sessions** (`sessionID` not matching `*_deleted_*`) for the coValue
+     - deletes **all non-delete sessions** (`sessionID` not matching `*_deleted`) for the coValue
      - deletes their `transactions` and `signatureAfter` rows
      - preserves:
        - the `coValues` row (header)
-       - all delete-session(s) (`*_deleted_*`) and their transactions/signatures (tombstone)
+       - all delete-session(s) (`*_deleted`) and their transactions/signatures (tombstone)
    - After erasure, delete the queue entry:
      - SQLite: `DELETE FROM deletedCoValues WHERE coValueRowID = ?;`
      - IndexedDB: `deletedCoValues.delete(coValueRowID)`
@@ -101,7 +101,7 @@ Numbered checklist of **coding tasks** only. Each task references the relevant r
    - `deleteCoValue()`:
      - rejects Account/Group deletion
      - rejects non-admin
-     - produces trusting tx with `{ deleted: true }` in `{accountId}_deleted_{uniqueId}` session
+     - produces trusting tx with `{ deleted: true }` in `{accountId}_session_z{uniqueId}_deleted` session
    - Transaction ingestion:
      - accepts valid admin delete
      - rejects non-admin delete (when verifying)
