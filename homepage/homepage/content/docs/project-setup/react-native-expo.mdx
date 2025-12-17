@@ -45,25 +45,7 @@ npx expo install expo-linking expo-secure-store expo-sqlite expo-file-system @re
 npm install @azure/core-asynciterator-polyfill react-native-url-polyfill readable-stream react-native-get-random-values react-native-fast-encoder
 
 # Jazz dependencies
-npm install jazz-tools cojson-core-rn
-```
-</CodeGroup>
-
-`cojson-core-rn` is our high-performance crypto provider for React Native. And it is **required** for React Native Expo applications.
-
-<Alert variant="info" className="mt-4" title="Note"> 
-In the React Native ecosystem, the Autolinking process (which links native code from libraries to your iOS and Android projects) 
-relies on scanning the dependencies listed in your application's root package.json. As a result, `cojson-core-rn` must be a direct dependency of the app, and not a dependency of a dependency.
-</Alert>
-
-**Pay Attention:** The version of `cojson-core-rn` must be the same as the version of `jazz-tools`.
-
-<CodeGroup>
-```json
-"dependencies": {
-  "cojson-core-rn": "x.x.x", # same version as jazz-tools
-  "jazz-tools": "x.x.x" # same version as cojson-core-rn
-}
+npm install jazz-tools
 ```
 </CodeGroup>
 
