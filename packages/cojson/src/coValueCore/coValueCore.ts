@@ -43,7 +43,6 @@ import {
 import { type RawAccountID } from "../coValues/account.js";
 import { decryptTransactionChangesAndMeta } from "./decryptTransactionChangesAndMeta.js";
 import {
-  cloneKnownState,
   combineKnownStateSessions,
   CoValueKnownState,
   emptyKnownState,
@@ -197,6 +196,8 @@ export class CoValueCore {
   // context
   readonly node: LocalNode;
   private readonly crypto: CryptoProvider;
+  // Whether the coValue is deleted
+  public isDeleted: boolean = false;
 
   // state
   id: RawCoID;
@@ -722,11 +723,62 @@ export class CoValueCore {
     };
   }
 
+  /**
+   * Creates a delete marker transaction for this CoValue and sets the coValue as deleted
+   *
+   * Constraints:
+   * - Account and Group CoValues cannot be deleted.
+   * - Only admins can delete a coValue.
+   */
+  deleteCoValue() {
+    if (!this.verified) {
+      throw new Error("Cannot delete coValue without verified state");
+    }
+
+    if (this.isGroupOrAccount()) {
+      throw new Error("Cannot delete Group or Account coValues");
+    }
+
+    if (this.isDeleted) {
+      throw new Error("CoValue is already deleted");
+    }
+
+    // Enforce admin-only permissions for values owned by groups
+    const group = this.safeGetGroup();
+    if (group) {
+      const role = group.myRole();
+      if (role !== "admin") {
+        throw new Error("Only admins can delete coValues");
+      }
+    }
+
+    /**
+     * Use a dedicated delete session. It must remain compatible with the existing `SessionID` format
+     * (which is parsed via `_session`) while still carrying the `_deleted_` marker for future delete-aware logic.
+     */
+    const baseSessionID = this.crypto.newDeleteSessionID(
+      this.node.getCurrentAccountOrAgentID(),
+    );
+    const uniqueId = baseSessionID.split("_session_z")[1] ?? baseSessionID;
+    const deleteSessionID = `${baseSessionID}_deleted_${uniqueId}` as SessionID;
+
+    this.makeTransaction(
+      [], // Empty changes array
+      "trusting", // Unencrypted
+      { deleted: true }, // Delete metadata
+      Date.now(),
+      deleteSessionID,
+    );
+
+    this.isDeleted = true;
+  }
+
   makeTransaction(
     changes: JsonValue[],
     privacy: "private" | "trusting",
     meta?: JsonObject,
     madeAt?: number,
+    sessionIDOverride?: SessionID,
   ): boolean {
     if (!this.verified) {
       throw new Error(
@@ -738,12 +790,13 @@ export class CoValueCore {
 
     // This is an ugly hack to get a unique but stable session ID for editing the current account
     const sessionID =
-      this.verified.header.meta?.type === "account"
+      sessionIDOverride ??
+      (this.verified.header.meta?.type === "account"
         ? (this.node.currentSessionID.replace(
             this.node.getCurrentAgent().id,
             this.node.getCurrentAgent().currentAgentID(),
           ) as SessionID)
-        : this.node.currentSessionID;
+        : this.node.currentSessionID);
 
     const signerAgent = this.node.getCurrentAgent();
 
@@ -1227,6 +1280,14 @@ export class CoValueCore {
   dependant: Set<RawCoID> = new Set();
   private addDependant(dependant: RawCoID) {
     this.dependant.add(dependant);
+  }
+
+  isGroupOrAccount() {
+    if (!this.verified) {
+      return false;
+    }
+
+    return this.verified.header.ruleset.type === "group";
   }
 
   isGroup() {

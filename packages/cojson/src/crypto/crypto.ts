@@ -250,6 +250,10 @@ export abstract class CryptoProvider<Blake3State = any> {
     return `${accountID}_session_z${base58.encode(this.randomBytes(8))}`;
   }
 
+  newDeleteSessionID(accountID: RawAccountID | AgentID): SessionID {
+    return `${this.newRandomSessionID(accountID)}_deleted`;
+  }
+
   abstract createSessionLog(
     coID: RawCoID,
     sessionID: SessionID,
