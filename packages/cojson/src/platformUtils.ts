@@ -1,7 +1,8 @@
 export function isCloudflare() {
-  // @ts-ignore
   if (
+    // @ts-ignore
     typeof navigator !== "undefined" &&
+    // @ts-ignore
     navigator?.userAgent?.includes("Cloudflare")
   ) {
     return true;
