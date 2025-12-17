@@ -68,7 +68,28 @@ Warning: WASM crypto is not available. Falling back to JavaScript crypto.
 
 ### Expo
 
-1) If you use Expo, you need to upgrade to Expo SDK >= 54. And if you have installed `cojson-core-rn`, you need to remove it because it is no longer required.
+1) If you use Expo, you need to install `cojson-core-rn` and make sure the version matches `jazz-tools`. `cojson-core-rn` is our new high-performance crypto provider for Expo, and it is **required** for Expo applications.
+
+<CodeGroup>
+```bash
+npm install cojson-core-rn
+```
+</CodeGroup>
+
+<CodeGroup>
+```json
+"dependencies": {
+  "cojson-core-rn": "x.x.x", # same version as jazz-tools
+  "jazz-tools": "x.x.x" # same version as cojson-core-rn
+}
+```
+</CodeGroup>
+
+<Alert variant="warning" title="Versioning" className="mt-4">
+  While you can distribute your own JS code changes OTA, as the Jazz versions must be kept the same for both the JS and the native dependencies, if you updates your Jazz version, this *cannot* be distributed over the air, and requires a new store submission.
+</Alert>
+
+See also: [Expo setup](/docs/react-native-expo/project-setup).
 
 2) **Remove QuickCrypto dependencies/config** (only if you previously added them for `RNQuickCrypto`):
 
@@ -120,6 +141,10 @@ npm install cojson-core-rn
 }
 ```
 </CodeGroup>
+
+<Alert variant="warning" title="Versioning" className="mt-4">
+  While you can distribute your own JS code changes OTA, as the Jazz versions must be kept the same for both the JS and the native dependencies, if you updates your Jazz version, this *cannot* be distributed over the air, and requires a new store submission.
+</Alert>
 
 See also: [React Native setup](/docs/react-native/project-setup).
 
