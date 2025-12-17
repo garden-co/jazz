@@ -85,6 +85,10 @@ npm install cojson-core-rn
 ```
 </CodeGroup>
 
+<Alert variant="warning" title="Versioning" className="mt-4">
+  While you can distribute your own JS code changes OTA, as the Jazz versions must be kept the same for both the JS and the native dependencies, if you updates your Jazz version, this *cannot* be distributed over the air, and requires a new store submission.
+</Alert>
+
 See also: [Expo setup](/docs/react-native-expo/project-setup).
 
 2) **Remove QuickCrypto dependencies/config** (only if you previously added them for `RNQuickCrypto`):
@@ -137,6 +141,10 @@ npm install cojson-core-rn
 }
 ```
 </CodeGroup>
+
+<Alert variant="warning" title="Versioning" className="mt-4">
+  While you can distribute your own JS code changes OTA, as the Jazz versions must be kept the same for both the JS and the native dependencies, if you updates your Jazz version, this *cannot* be distributed over the air, and requires a new store submission.
+</Alert>
 
 See also: [React Native setup](/docs/react-native/project-setup).
 

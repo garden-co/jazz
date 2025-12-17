@@ -67,8 +67,8 @@ relies on scanning the dependencies listed in your application's root package.js
 ```
 </CodeGroup>
 
-<Alert variant="info" className="mt-4" title="Note"> 
-Requires at least Node.js v20. See our [Troubleshooting Guide](/docs/troubleshooting) for quick fixes.
+<Alert variant="warning" title="Versioning" className="mt-4">
+  While you can distribute your own JS code changes OTA, as the Jazz versions must be kept the same for both the JS and the native dependencies, if you updates your Jazz version, this *cannot* be distributed over the air, and requires a new store submission.
 </Alert>
 
 #### Fix incompatible dependencies
