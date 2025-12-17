@@ -68,24 +68,7 @@ Warning: WASM crypto is not available. Falling back to JavaScript crypto.
 
 ### Expo
 
-1) If you use Expo, you need to install `cojson-core-rn` and make sure the version matches `jazz-tools`. `cojson-core-rn` is our new high-performance crypto provider for Expo, and it is **required** for Expo applications.
-
-<CodeGroup>
-```bash
-npm install cojson-core-rn
-```
-</CodeGroup>
-
-<CodeGroup>
-```json
-"dependencies": {
-  "cojson-core-rn": "x.x.x", # same version as jazz-tools
-  "jazz-tools": "x.x.x" # same version as cojson-core-rn
-}
-```
-</CodeGroup>
-
-See also: [Expo setup](/docs/react-native-expo/project-setup).
+1) If you use Expo, you need to upgrade to Expo SDK >= 54. And if you have installed `cojson-core-rn`, you need to remove it because it is no longer required.
 
 2) **Remove QuickCrypto dependencies/config** (only if you previously added them for `RNQuickCrypto`):
 
@@ -94,7 +77,7 @@ See also: [Expo setup](/docs/react-native-expo/project-setup).
 
 3) **Remove `CryptoProvider` entirely** (RNCrypto is now the default)
 
-After installing `cojson-core-rn`, you have to remove the `CryptoProvider` option, it is no longer supported:
+You have to remove the `CryptoProvider` option, it is no longer supported:
 
 <CodeGroup>
 ```tsx
@@ -118,8 +101,8 @@ export function MyJazzProvider({ children }: { children: React.ReactNode }) {
 
 ### React Native (non-Expo)
 
-If you use React Native, you need to install `cojson-core-rn` and make sure the version matches `jazz-tools`. `cojson-core-rn` is our new high-performance crypto provider for React Native. 
-If you use React Native, you need to install `cojson-core-rn` and make sure the version matches `jazz-tools`. `cojson-core-rn` is our new high-performance crypto provider for React Native, and it is **required** for React Native applications.
+If you use React Native, you need to install `cojson-core-rn` and make sure the version matches `jazz-tools`. `cojson-core-rn` is our new high-performance crypto provider for React Native, 
+and it is **required** for React Native applications.
 
 1) **Install `cojson-core-rn` (required)** and make sure the version matches `jazz-tools`:
 
