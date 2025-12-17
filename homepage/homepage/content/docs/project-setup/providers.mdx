@@ -178,7 +178,7 @@ Implementing PassphraseAuth is straightforward:
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
 
-## Local Persistence [!framework=react-native,expo]
+## Local Persistence [!framework=react-native,react-native-expo]
 </ContentByFramework>
 
 <ContentByFramework framework="react-native">
@@ -201,7 +201,7 @@ Local persistence is enabled by default with no additional configuration require
 </ContentByFramework>
 
 <ContentByFramework framework={['react-native', 'react-native-expo']}>
-## RNCrypto
+## RNCrypto [!framework=react-native,react-native-expo]
 
 For accelerated crypto operations, you can use the `RNCrypto` crypto provider. It is the most performant crypto provider available for React Native and Expo.
 
@@ -213,7 +213,7 @@ pnpm add cojson-core-rn
 ```
 </CodeGroup>
 
-**Pay Attention:** The version of `cojson-core-rn` must be the same as the version of `jazz-tools`.
+You must keep the versions of `cojson-core-rn` and `jazz-tools` the same.
 
 <CodeGroup>
 ```json
@@ -223,6 +223,10 @@ pnpm add cojson-core-rn
 }
 ```
 </CodeGroup>
+
+<Alert variant="warning" title="Versioning" className="mt-4">
+  While you can distribute your own JS code changes OTA, as the Jazz versions must be kept the same for both the JS and the native dependencies, if you updates your Jazz version, this *cannot* be distributed over the air, and requires a new store submission.
+</Alert>
 
 Then add the following to your provider:
 
