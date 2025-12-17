@@ -422,6 +422,38 @@ Read `getAll()` from the `deletedCoValues` store and return the `id` field from 
 - This method uses the DBClient's `getAllDeletedCoValueIDs()` to get the list
 - For each deleted coValue, perform physical deletion while preserving tombstone
 
+#### 8.1 When to run `ereaseAllDeletedCoValues()`
+
+**Background**: delete transactions provide immediate sync blocking (privacy + safety). Physical deletion is purely a **space-reclamation** step and can run later, in the background.
+
+`deletedCoValues` is treated as a **work queue**: after a coValue is physically erased (tombstone preserved), the queue entry is removed so it is not re-processed.
+
+**Where it should run**
+
+- **Sync server / storage shard / backend storage process**: recommended default. These environments can run periodic background work reliably and are where large accounts need efficient cleanup.
+- **Local app storage (browser IndexedDB / local sqlite)**: optional. It’s safe to run, but should be strictly best-effort and low priority to avoid UI jank.
+
+**Default triggers**
+
+- **After a delete is stored**:
+  - schedule a near-future cleanup run (debounced), e.g. “run within the next minute”.
+  - rationale: keeps queues short without doing heavy work synchronously in the user’s delete flow.
+- **On startup / resume**:
+  - run once shortly after boot (or after the first successful open of the DB).
+  - rationale: drains any queued deletions from prior runs.
+
+**Throttling / batching**
+
+To prevent long pauses/locks:
+- process **at most** `maxCoValuesPerRun` (e.g. 50–500) per invocation.
+- optionally stop after a `maxDurationMs` budget (e.g. 100–300ms).
+- for each coValue, perform deletion in a **per-coValue transaction** (idempotent) so work can resume after interruptions.
+
+**Concurrency / locking**
+- The operation should be guarded so only one eraser runs per database at a time.
+  - sqlite: the DB is accessed only by a single process, use an in-memory “currently erasing” flag to avoid re-entrancy.
+  - IndexedDB: rely on the single `readwrite` transaction semantics; also use an in-memory “currently erasing” flag to avoid re-entrancy in the same tab.
+
 **Key Logic**:
 ```typescript
 // In StorageAPI interface
@@ -481,16 +513,132 @@ export interface SQLiteDatabaseDriverAsync {
 - Tombstone consists of: delete transaction + delete session + coValue header
 - Even after physical deletion, tombstone remains
 
-**Key Logic**:
-```typescript
-// When physical delete happens, preserve tombstone
-async performPhysicalDelete(coValueID: RawCoID) {
-  // Delete all sessions except delete session
-  // Delete all transactions except delete transaction
-  // Keep header and delete transaction (tombstone)
-  await this.dbClient.deleteCoValueContent(coValueID);
-}
+#### 10.1 Physical deletion primitive: erase all content but keep tombstone
+
+This section defines the **storage-level primitive** used by batch deletion (section 8) to reclaim space while keeping a cryptographic tombstone.
+
+**Goal**: remove all persisted history for a deleted coValue while preserving:
+
+- the `coValues` row (header), and
+- all sessions matching the delete-session pattern (`*_deleted_*`) and their transactions/signatures.
+
+Everything else for that coValue is physically deleted.
+
+**Important properties**
+
+- **Idempotent**: running it multiple times is safe.
+- **Crash-safe**: must run inside a single storage transaction so we never end up with “half deleted” state.
+- **Conservative on tombstone**: it keeps the full delete session(s). (Each delete session is expected to contain only the delete transaction, but storage doesn’t rely on that assumption.)
+
+**Preconditions**
+
+- The coValue is already marked deleted (has a valid delete transaction) and is present in the `deletedCoValues` marker structure (section 7).
+
+**Postconditions**
+
+- Non-delete sessions for that coValue are removed from:
+  - `sessions`
+  - `transactions`
+  - `signatureAfter`
+- Delete session(s) and the header remain, so the tombstone is still loadable/syncable.
+
+##### 10.1.1 SQLite family (sync + async)
+
+The SQLite storage schema is:
+
+- `coValues(rowID, id, header, ...)`
+- `sessions(rowID, coValue, sessionID, ...)`
+- `transactions(ses, idx, tx, ...)` where `ses` is `sessions.rowID`
+- `signatureAfter(ses, idx, signature, ...)` where `ses` is `sessions.rowID`
+
+**Primitive signature (conceptual)**
+
+- `eraseCoValueButKeepTombstone(coValueRowID: number): void | Promise<void>`
+
+**Algorithm (single SQL transaction)**
+
+1. Identify non-delete sessions:
+
+```sql
+SELECT rowID
+FROM sessions
+WHERE coValue = ?
+  AND sessionID NOT LIKE '%_deleted_%';
 ```
+
+2. Delete all rows for those sessions:
+
+```sql
+DELETE FROM transactions
+WHERE ses IN (
+  SELECT rowID FROM sessions
+  WHERE coValue = ?
+    AND sessionID NOT LIKE '%_deleted_%'
+);
+
+DELETE FROM signatureAfter
+WHERE ses IN (
+  SELECT rowID FROM sessions
+  WHERE coValue = ?
+    AND sessionID NOT LIKE '%_deleted_%'
+);
+
+DELETE FROM sessions
+WHERE coValue = ?
+  AND sessionID NOT LIKE '%_deleted_%';
+```
+
+`deletedCoValues` is treated as a **work queue**, remove the row so the batch job won’t repeatedly re-process already-erased coValues:
+
+```sql
+DELETE FROM deletedCoValues WHERE coValueRowID = ?;
+```
+
+##### 10.1.2 IndexedDB (cojson-storage-indexeddb)
+
+The IndexedDB storage uses these stores:
+
+- `coValues` (keyPath `rowID`) — keep
+- `sessions` (keyPath `rowID`, indexed by `sessionsByCoValue`) — delete non-delete sessions
+- `transactions` (keyPath `["ses","idx"]`) — delete for non-delete sessions
+- `signatureAfter` (keyPath `["ses","idx"]`) — delete for non-delete sessions
+- `deletedCoValues` (keyPath `coValueRowID`) — optional queue semantics (see below)
+
+**Primitive signature (conceptual)**
+
+- `eraseCoValueButKeepTombstone(coValueRowID: number): Promise<void>`
+
+**Algorithm (single IndexedDB readwrite transaction spanning all stores above)**
+
+1. Load all sessions for the coValue via the `sessionsByCoValue` index.
+2. Partition them into:
+   - keep: `sessionID.includes("_deleted_")`
+   - delete: everything else
+3. For each session in the delete set:
+   - delete all `transactions` keys in range `IDBKeyRange.bound([ses, 0], [ses, +∞])` (cursor delete)
+   - delete all `signatureAfter` keys in the same `ses` range (cursor delete)
+   - delete the `sessions` row by its `rowID`
+4. Optional queue semantics for `deletedCoValues`:
+   - if treated as a work queue, `deletedCoValues.delete(coValueRowID)`
+   - otherwise keep it.
+
+**Key Logic (pseudocode)**
+
+```typescript
+// Conceptual pseudocode inside one IDB transaction:
+const allSessions = await sessionsByCoValue.getAll(coValueRowID);
+const sessionsToDelete = allSessions.filter((s) => !s.sessionID.includes("_deleted_"));
+
+for (const s of sessionsToDelete) {
+  // delete txs for ses = s.rowID
+  await deleteAllByPrefix(transactionsStore, [s.rowID]); // cursor over IDBKeyRange.bound([ses, 0], [ses, INF])
+  await deleteAllByPrefix(signatureAfterStore, [s.rowID]);
+  await sessionsStore.delete(s.rowID);
+}
+
+// optional: deletedCoValuesStore.delete(coValueRowID)
+```
+
 
 ### 11. Storage Shard Handling (skipVerify: true)
 
