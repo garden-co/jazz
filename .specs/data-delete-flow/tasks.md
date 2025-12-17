@@ -16,14 +16,14 @@ Numbered checklist of **coding tasks** only. Each task references the relevant r
    - Update `makeTransaction(...)` in `packages/cojson/src/coValueCore/coValueCore.ts` to accept an optional `sessionID?: SessionID`.
    - Ensure delete uses the delete session ID and cannot accidentally fall back to the regular session.
 
-4. [ ] **Detect delete transactions and validate delete permissions during ingestion** (Req: US-3)
+4. [x] **Detect delete transactions and validate delete permissions during ingestion** (Req: US-3)
    - In `packages/cojson/src/coValueCore/coValueCore.ts` (`tryAddTransactions` and/or the validity pipeline), detect delete transactions via:
      - session ID ending with `_deleted`, and
      - trusting tx with `meta.deleted === true`.
    - When not `skipVerify`, verify the delete author has **admin** permissions on the coValue.
    - Reject invalid delete transactions (non-admin) with an explicit error result.
 
-5. [ ] **Track “deleted” state on CoValueCore and surface it for sync decisions** (Req: US-4, US-7)
+5. [x] **Track “deleted” state on CoValueCore and surface it for sync decisions** (Req: US-4, US-7)
    - Add and wire `isDeleted: boolean` and `deleteSessionID?: SessionID` on `CoValueCore` (and any necessary persistence/derivation via `verifiedState`).
    - Mark the coValue as deleted when a valid delete transaction is accepted.
 
