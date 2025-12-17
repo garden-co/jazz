@@ -41,14 +41,20 @@ import {
   Transaction,
   TrustingTransaction,
 } from "../coValueCore/verifiedState.js";
+import { isCloudflare, isEvalAllowed } from "../platformUtils.js";
 
 type Blake3State = Blake3Hasher;
 
 let wasmInit = initialize;
 let wasmInitSync = initializeSync;
 
-const WASM_CRYPTO_ERROR_MESSAGE =
-  "Failed to initialize WasmCrypto. WebAssembly is required for crypto operations on web platforms. See https://jazz.tools/docs/react/server-side/setup#wasm-on-edge-runtimes for more details.";
+const wasmCryptoErrorMessage = (
+  e: unknown,
+) => `Critical Error: Failed to load WASM module
+
+${!isEvalAllowed() ? `You need to add \`import "jazz-tools/load-edge-wasm";\` on top of your entry module to make Jazz work with ${isCloudflare() ? "Cloudflare workers" : "this runtime"}` : (e as Error).message}
+
+A native crypto module is required for Jazz to work. See https://jazz.tools/docs/react/reference/performance#use-the-best-crypto-implementation-for-your-platform for possible alternatives.`;
 
 /**
  * Initializes the WasmCrypto module. This function can be used to initialize the WasmCrypto module in a worker or a browser.
@@ -59,7 +65,7 @@ export async function initWasmCrypto() {
   try {
     await wasmInit();
   } catch (e) {
-    throw new Error(WASM_CRYPTO_ERROR_MESSAGE, { cause: e });
+    throw new Error(wasmCryptoErrorMessage(e), { cause: e });
   }
 }
 
@@ -88,7 +94,7 @@ export class WasmCrypto extends CryptoProvider<Blake3State> {
     try {
       wasmInitSync();
     } catch (e) {
-      throw new Error(WASM_CRYPTO_ERROR_MESSAGE, { cause: e });
+      throw new Error(wasmCryptoErrorMessage(e), { cause: e });
     }
     return new WasmCrypto();
   }
@@ -96,12 +102,7 @@ export class WasmCrypto extends CryptoProvider<Blake3State> {
   // TODO: Remove this method and use createSync instead, this is not necessary since we can use createSync in the browser and in the worker.
   // @deprecated
   static async create(): Promise<WasmCrypto> {
-    try {
-      await wasmInit();
-    } catch (e) {
-      throw new Error(WASM_CRYPTO_ERROR_MESSAGE, { cause: e });
-    }
-
+    await initWasmCrypto();
     return new WasmCrypto();
   }
 
