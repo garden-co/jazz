@@ -13,15 +13,17 @@ import {
   CoMapSchema,
   CoMapSchemaInit,
   CoValueClass,
+  CoreAccountSchema,
   CoreCoMapSchema,
+  CoreGroupSchema,
   Group,
   Loaded,
   ResolveQuery,
   ResolveQueryStrict,
   Simplify,
   co,
+  coAccountDefiner,
   coMapDefiner,
-  coValueClassFromCoValueClassOrSchema,
   exportCoValue,
   importContentPieces,
   loadCoValue,
@@ -100,8 +102,8 @@ type MessageValuePayload<T extends MessageShape> =
 function createMessageEnvelope<S extends MessageShape>(
   schema: CoreCoMapSchema,
   value: MessageValuePayload<S>,
-  owner: Account,
-  sharedWith: Account | Group,
+  owner: Loaded<CoreAccountSchema, true>,
+  sharedWith: Loaded<CoreAccountSchema, true> | Loaded<CoreGroupSchema, true>,
   type: "request" | "response",
 ): Loaded<CoMapSchema<S>> {
   const group = co.group().create({ owner });
@@ -133,10 +135,10 @@ async function serializeMessagePayload({
   schema: CoreCoMapSchema;
   resolve: any;
   value: any;
-  owner: Account;
-  target: Account | Group;
+  owner: Loaded<CoreAccountSchema, true>;
+  target: Loaded<CoreAccountSchema, true> | Loaded<CoreGroupSchema, true>;
 }) {
-  const me = owner ?? Account.getMe();
+  const me = owner ?? coAccountDefiner().getMe();
   const node = me.$jazz.localNode;
   const crypto = node.crypto;
 
@@ -205,7 +207,7 @@ async function handleMessagePayload({
   schema: CoreCoMapSchema;
   resolve: any;
   request: unknown;
-  loadAs: Account;
+  loadAs: Loaded<CoreAccountSchema, true>;
 }) {
   const node = loadAs.$jazz.localNode;
   const crypto = node.crypto;
@@ -294,13 +296,14 @@ async function handleMessagePayload({
     throw new JazzRequestError("Creator account not found", 400);
   }
 
-  const coSchema = coValueClassFromCoValueClassOrSchema(
+  const value = await loadCoValue<CoreCoMapSchema, true>(
     schema,
-  ) as CoValueClass<CoMap>;
-  const value = await loadCoValue<CoMap, true>(coSchema, requestData.id, {
-    resolve,
-    loadAs,
-  });
+    requestData.id,
+    {
+      resolve,
+      loadAs,
+    },
+  );
 
   if (!value.$isLoaded) {
     throw new JazzRequestError("Value not found", 400);
@@ -371,9 +374,9 @@ export class HttpRoute<
 
   async send(
     values: MessageValuePayload<RequestShape>,
-    options?: { owner?: Account },
+    options?: { owner?: Loaded<CoreAccountSchema, true> },
   ): Promise<Loaded<CoMapSchema<ResponseShape>, ResponseResolve>> {
-    const as = options?.owner ?? Account.getMe();
+    const as = options?.owner ?? coAccountDefiner().getMe();
 
     const target = await loadWorkerAccountOrGroup(this.workerId, as);
 
@@ -433,10 +436,10 @@ export class HttpRoute<
 
   handle = async (
     request: Request,
-    as: Account,
+    as: Loaded<CoreAccountSchema, true>,
     callback: (
       value: Loaded<CoMapSchema<RequestShape>, RequestResolve>,
-      madeBy: Account,
+      madeBy: Loaded<CoreAccountSchema, true>,
     ) =>
       | Promise<MessageValuePayload<ResponseShape>>
       | MessageValuePayload<ResponseShape>,
@@ -462,10 +465,10 @@ export class HttpRoute<
 
   executeHandleRequest = async (
     request: Request,
-    as: Account,
+    as: Loaded<CoreAccountSchema, true>,
     callback: (
       value: Loaded<CoMapSchema<RequestShape>, RequestResolve>,
-      madeBy: Account,
+      madeBy: Loaded<CoreAccountSchema, true>,
     ) =>
       | Promise<MessageValuePayload<ResponseShape>>
       | MessageValuePayload<ResponseShape>,
@@ -612,7 +615,10 @@ function safeVerifySignature(
   }
 }
 
-async function loadWorkerAccountOrGroup(id: string, loadAs: Account) {
+async function loadWorkerAccountOrGroup(
+  id: string,
+  loadAs: Loaded<CoreAccountSchema, true>,
+) {
   const node = loadAs.$jazz.localNode;
   const coValue = await node.loadCoValueCore(id as `co_z${string}`);
 
@@ -687,12 +693,12 @@ export async function authenticateRequest(
   request: Request,
   options?: {
     expiration?: number;
-    loadAs?: Account;
+    loadAs?: Loaded<CoreAccountSchema, true>;
     getToken?: (request: Request) => string | undefined | null;
   },
 ): Promise<
   | {
-      account?: Account;
+      account?: Loaded<CoreAccountSchema, true>;
       error?: never;
     }
   | {
@@ -735,8 +741,8 @@ export async function authenticateRequest(
  * ```
  */
 
-export function generateAuthToken(as?: Account) {
-  const account = as ?? Account.getMe();
+export function generateAuthToken(as?: Loaded<CoreAccountSchema, true>) {
+  const account = as ?? coAccountDefiner().getMe();
   const node = account.$jazz.localNode;
   const crypto = node.crypto;
 
@@ -757,9 +763,9 @@ export function generateAuthToken(as?: Account) {
 
 export async function parseAuthToken(
   authToken: string,
-  options?: { loadAs?: Account; expiration?: number },
+  options?: { loadAs?: Loaded<CoreAccountSchema, true>; expiration?: number },
 ): Promise<
-  | { account: Account; error?: never }
+  | { account: Loaded<CoreAccountSchema, true>; error?: never }
   | { account?: never; error: { message: string; details?: unknown } }
 > {
   const expiration = options?.expiration ?? 1_000 * 60; // 1 minute

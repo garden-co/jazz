@@ -1,4 +1,9 @@
-import type { CoValue, LoadedAndRequired, MaybeLoaded } from "../internal.js";
+import type {
+  CoreCoValueSchema,
+  CoValue,
+  LoadedAndRequired,
+  MaybeLoaded,
+} from "../internal.js";
 
 export function isCoValueId(id: unknown): id is `co_z${string}` {
   return typeof id === "string" && id.startsWith("co_z");
@@ -7,9 +12,10 @@ export function isCoValueId(id: unknown): id is `co_z${string}` {
 /**
  * Assert that a CoValue is loaded, otherwise throw an error
  */
-export function assertLoaded<T extends MaybeLoaded<CoValue>>(
-  coValue: T,
-): asserts coValue is LoadedAndRequired<T> {
+export function assertLoaded<
+  T extends MaybeLoaded<CoreCoValueSchema>,
+  S extends CoreCoValueSchema,
+>(coValue: T & MaybeLoaded<S>): asserts coValue is LoadedAndRequired<S, true> {
   if (!coValue.$isLoaded) {
     throw new Error("CoValue is not loaded");
   }
@@ -21,12 +27,13 @@ export function assertLoaded<T extends MaybeLoaded<CoValue>>(
  * Can be used to ease the transition between nullable loading states from Jazz 0.18
  * and explicit loading states from Jazz 0.19.
  */
-export function getLoadedOrUndefined<T extends MaybeLoaded<CoValue>>(
-  coValue: T | undefined | null,
-): LoadedAndRequired<T> | undefined {
+export function getLoadedOrUndefined<
+  T extends MaybeLoaded<CoreCoValueSchema>,
+  S extends CoreCoValueSchema,
+>(coValue: T | undefined | null): LoadedAndRequired<S, true> | undefined {
   if (!coValue?.$isLoaded) {
     return undefined;
   }
 
-  return coValue as LoadedAndRequired<T>;
+  return coValue as LoadedAndRequired<S, true>;
 }

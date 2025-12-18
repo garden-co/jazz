@@ -26,10 +26,7 @@ export { co } from "./internal.js";
 export type {
   CoValueClass,
   CoValueFromRaw,
-  DeeplyLoaded,
-  Resolved,
-  RefsToResolve,
-  RefsToResolveStrict,
+  LoadedWithResolveQuery as DeeplyLoaded,
   CoMapEdit,
   CoMapEdits,
   LastAndAllCoMapEdits,
@@ -111,11 +108,7 @@ export {
 export type * from "./types.js";
 
 export {
-  coValueClassFromCoValueClassOrSchema,
-  type InstanceOfSchema,
-  type InstanceOfSchemaCoValuesMaybeLoaded,
   type SchemaResolveQuery,
-  type CoValueClassOrSchema,
   CoValueLoadingState,
   type MaybeLoaded,
   type NotLoaded,

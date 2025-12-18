@@ -18,11 +18,17 @@
     "customConditions": ["@jazz-tools/source"]
   },
   "include": [
-    "src/**/*.ts",
-    "./src/**/*.js",
-    "./src/**/*.ts",
-    "./src/**/*.tsx",
-    "./src/**/*.svelte"
+    // "src/**/*.ts",
+    // "./src/**/*.js",
+    // "./src/**/*.ts",
+    // "./src/**/*.tsx",
+    // "./src/**/*.svelte"
+    "src/tools/**/*.ts",
+    "./src/tools/**/*.js",
+    "./src/tools/**/*.ts",
+    "./src/tools/**/*.tsx",
+    "./src/tools/**/*.svelte",
+    "!src/tools/**/*.test.ts"
   ],
   "exclude": ["./node_modules"]
 }

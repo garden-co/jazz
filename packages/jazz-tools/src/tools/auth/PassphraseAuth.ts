@@ -1,8 +1,8 @@
 import * as bip39 from "@scure/bip39";
 import { entropyToMnemonic } from "@scure/bip39";
 import { CryptoProvider, cojsonInternals } from "cojson";
-import type { ID } from "../internal.js";
-import { Account } from "../internal.js";
+import type { CoreAccountSchema, ID } from "../internal.js";
+import { Account, co } from "../internal.js";
 import type {
   AuthenticateAccountFunction,
   RegisterAccountFunction,
@@ -47,7 +47,7 @@ export class PassphraseAuth {
     const accountID = cojsonInternals.idforHeader(
       cojsonInternals.accountHeaderForInitialAgentSecret(accountSecret, crypto),
       crypto,
-    ) as ID<Account>;
+    ) as ID<CoreAccountSchema>;
 
     await authenticate({
       accountID,
@@ -82,11 +82,14 @@ export class PassphraseAuth {
     });
 
     if (name?.trim()) {
-      const currentAccount = await Account.getMe().$jazz.ensureLoaded({
-        resolve: {
-          profile: true,
-        },
-      });
+      const currentAccount = await co
+        .account()
+        .getMe()
+        .$jazz.ensureLoaded({
+          resolve: {
+            profile: true,
+          },
+        });
 
       currentAccount.profile.$jazz.set("name", name);
     }

@@ -6,10 +6,6 @@ import {
   CoValueClass,
   CoValueFromRaw,
   CoreCoRecordSchema,
-  InstanceOfSchema,
-  RefsToResolve,
-  RefsToResolveStrict,
-  Resolved,
   Simplify,
 } from "../../internal.js";
 import {
@@ -45,7 +41,6 @@ import {
   CoreRichTextSchema,
   RichTextSchema,
 } from "./schemaTypes/RichTextSchema.js";
-import { InstanceOfSchemaCoValuesMaybeLoaded } from "./typeConverters/InstanceOfSchemaCoValuesMaybeLoaded.js";
 import { z } from "./zodReExport.js";
 import { CoreGroupSchema } from "./schemaTypes/GroupSchema.js";
 import { GroupSchema } from "./schemaTypes/GroupSchema.js";
@@ -57,8 +52,6 @@ export type ZodPrimitiveSchema =
   | z.core.$ZodNull
   | z.core.$ZodDate
   | z.core.$ZodLiteral;
-
-export type CoValueClassOrSchema = CoValueClass | CoreCoValueSchema;
 
 export type CoValueSchemaFromCoreSchema<S extends CoreCoValueSchema> =
   S extends CoreAccountSchema<infer Shape extends BaseAccountShape>
@@ -88,12 +81,6 @@ export type CoValueSchemaFromCoreSchema<S extends CoreCoValueSchema> =
                             >
                           ? CoDiscriminatedUnionSchema<Members>
                           : `No Constructable for` & S;
-
-export type CoValueClassFromAnySchema<S extends CoValueClassOrSchema> =
-  S extends CoValueClass<any>
-    ? S
-    : CoValueClass<LoadedAndRequired<InstanceOfSchema<S>>> &
-        CoValueFromRaw<LoadedAndRequired<InstanceOfSchema<S>>>;
 
 export type AnyCoreCoValueSchema =
   | CoreCoMapSchema

@@ -1,13 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { type Group, Inbox, InboxSender, z } from "../exports";
-import {
-  type Account,
-  Loaded,
-  co,
-  coValueClassFromCoValueClassOrSchema,
-  Account as AccountClass,
-  RegisteredSchemas,
-} from "../internal";
+import { type Account, Loaded, co } from "../internal";
 import { setupTwoNodes, waitFor } from "./utils";
 import {
   createJazzTestAccount,

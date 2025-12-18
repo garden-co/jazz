@@ -1,6 +1,6 @@
 import { AgentSecret } from "cojson";
 import type { Account } from "../coValues/account.js";
-import type { ID } from "../internal.js";
+import type { CoreAccountSchema, ID } from "../internal.js";
 import { AuthCredentials } from "../types.js";
 import KvStoreContext from "./KvStoreContext.js";
 import { z } from "zod/v4";
@@ -8,7 +8,7 @@ import { z } from "zod/v4";
 const STORAGE_KEY = "jazz-logged-in-secret";
 
 export type AuthSetPayload = {
-  accountID: ID<Account>;
+  accountID: ID<CoreAccountSchema>;
   secretSeed?: Uint8Array;
   accountSecret: AgentSecret;
   provider:

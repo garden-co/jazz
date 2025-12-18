@@ -1,10 +1,10 @@
-import type { Account } from "../internal.js";
+import type { CoreAccountSchema, Loaded } from "../internal.js";
 
 class ActiveAccountContext {
-  private activeAccount: Account | null = null;
+  private activeAccount: Loaded<CoreAccountSchema, true> | null = null;
   private guestMode: boolean = false;
 
-  set(account: Account | null) {
+  set(account: Loaded<CoreAccountSchema, true> | null) {
     this.activeAccount = account;
     this.guestMode = false;
   }

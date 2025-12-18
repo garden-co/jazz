@@ -1,11 +1,11 @@
 import { AgentSecret } from "cojson";
-import { Account, ID } from "../internal.js";
+import { Account, co, CoreAccountSchema, ID } from "../internal.js";
 import { AuthenticateAccountFunction } from "../types.js";
 import { AuthSecretStorage } from "./AuthSecretStorage.js";
 import { KvStore, KvStoreContext } from "./KvStoreContext.js";
 
 type StorageData = {
-  accountID: ID<Account>;
+  accountID: ID<CoreAccountSchema>;
   accountSecret: AgentSecret;
   secretSeed?: number[];
 };
@@ -64,11 +64,14 @@ export class DemoAuth {
       throw new Error("No credentials found");
     }
 
-    const currentAccount = await Account.getMe().$jazz.ensureLoaded({
-      resolve: {
-        profile: true,
-      },
-    });
+    const currentAccount = await co
+      .account()
+      .getMe()
+      .$jazz.ensureLoaded({
+        resolve: {
+          profile: true,
+        },
+      });
 
     currentAccount.profile.$jazz.set("name", username);
 

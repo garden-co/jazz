@@ -17,8 +17,6 @@ import {
   CoValueFromRaw,
   type CoreAccountSchema,
   type ID,
-  type InstanceOfSchema,
-  coValueClassFromCoValueClassOrSchema,
   asConstructable,
   Loaded,
 } from "../internal.js";
@@ -27,12 +25,12 @@ import { activeAccountContext } from "./activeAccountContext.js";
 import { AnonymousJazzAgent } from "./anonymousJazzAgent.js";
 
 export type Credentials = {
-  accountID: ID<Account>;
+  accountID: ID<CoreAccountSchema>;
   secret: AgentSecret;
 };
 
 type SessionProvider = (
-  accountID: ID<Account>,
+  accountID: ID<CoreAccountSchema>,
   crypto: CryptoProvider,
 ) => Promise<{ sessionID: SessionID; sessionDone: () => void }>;
 
@@ -61,7 +59,7 @@ export type AuthResult =
     };
 
 export async function randomSessionProvider(
-  accountID: ID<Account>,
+  accountID: ID<CoreAccountSchema>,
   crypto: CryptoProvider,
 ) {
   return {
@@ -124,9 +122,7 @@ export async function createJazzContextFromExistingCredentials<
     crypto: crypto,
     storage,
     migration: async (rawAccount, _node, creationProps) => {
-      const account = asConstructable(CurrentAccountSchema).fromRaw(
-        rawAccount,
-      ) as InstanceOfSchema<S>;
+      const account = asConstructable(CurrentAccountSchema).fromRaw(rawAccount);
       if (asActiveAccount) {
         activeAccountContext.set(account);
       }
@@ -184,9 +180,7 @@ export async function createJazzContextForNewAccount<
     initialAgentSecret,
     storage,
     migration: async (rawAccount, _node, creationProps) => {
-      const account = asConstructable(CurrentAccountSchema).fromRaw(
-        rawAccount,
-      ) as InstanceOfSchema<S>;
+      const account = asConstructable(CurrentAccountSchema).fromRaw(rawAccount);
       activeAccountContext.set(account);
 
       await account.applyMigration(creationProps);

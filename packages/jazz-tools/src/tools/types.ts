@@ -9,7 +9,7 @@ import type {
 } from "./internal.js";
 
 export type AuthCredentials = {
-  accountID: ID<Account>;
+  accountID: ID<CoreAccountSchema>;
   secretSeed?: Uint8Array;
   accountSecret: AgentSecret;
   provider?: "anonymous" | "clerk" | "demo" | "passkey" | "passphrase" | string;
@@ -22,7 +22,7 @@ export type AuthenticateAccountFunction = (
 export type RegisterAccountFunction = (
   accountSecret: AgentSecret,
   creationProps: { name: string },
-) => Promise<ID<Account>>;
+) => Promise<ID<CoreAccountSchema>>;
 
 /** @category Context Creation */
 export type JazzAuthContext<Acc extends CoreAccountSchema> = {

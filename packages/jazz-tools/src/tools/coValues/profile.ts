@@ -2,6 +2,7 @@ import { z } from "../implementation/zodSchema/zodReExport.js";
 import {
   Account,
   CoMap,
+  CoProfileSchema,
   CoValueClass,
   Group,
   Simplify,
@@ -9,7 +10,7 @@ import {
 } from "../internal.js";
 
 /** @category Identity & Permissions */
-export class Profile extends CoMap {
+export class Profile extends CoMap<CoProfileSchema> {
   static fields = {
     name: { type: "json", field: z.string() } as const,
     inbox: { type: "json", field: z.string().optional() } as const,

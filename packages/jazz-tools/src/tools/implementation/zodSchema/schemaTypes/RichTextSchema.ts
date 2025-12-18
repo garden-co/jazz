@@ -3,9 +3,11 @@ import {
   BranchDefinition,
   CoRichText,
   Group,
-  RefsToResolve,
+  Loaded,
+  CoreAccountSchema,
+  ResolveQuery,
+  ResolveQueryStrict,
   Settled,
-  SubscribeRestArgs,
   coOptionalDefiner,
   loadCoValueWithoutMe,
   parseCoValueCreateOptions,
@@ -13,6 +15,7 @@ import {
   subscribeToCoValueWithoutMe,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
+  CoreGroupSchema,
 } from "../../../internal.js";
 import { RawCoPlainText } from "cojson";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
@@ -44,15 +47,27 @@ export class RichTextSchema implements CoreRichTextSchema {
 
   constructor(private coValueClass: typeof CoRichText) {}
 
-  create(text: string, options?: { owner: Group } | Group): CoRichText;
+  create(
+    text: string,
+    options?:
+      | { owner: Loaded<CoreAccountSchema, true> | Loaded<CoreGroupSchema> }
+      | Loaded<CoreAccountSchema, true>
+      | Loaded<CoreGroupSchema>,
+  ): CoRichText;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
   create(
     text: string,
-    options?: { owner: Account | Group } | Account | Group,
+    options?:
+      | { owner: Loaded<CoreAccountSchema, true> | Loaded<CoreGroupSchema> }
+      | Loaded<CoreAccountSchema, true>
+      | Loaded<CoreGroupSchema>,
   ): CoRichText;
   create(
     text: string,
-    options?: { owner: Account | Group } | Account | Group,
+    options?:
+      | { owner: Loaded<CoreAccountSchema, true> | Loaded<CoreGroupSchema> }
+      | Loaded<CoreAccountSchema, true>
+      | Loaded<CoreGroupSchema>,
   ): CoRichText {
     const optionsWithPermissions = withSchemaPermissions(
       options,
@@ -69,19 +84,19 @@ export class RichTextSchema implements CoreRichTextSchema {
   load(
     id: string,
     options: {
-      loadAs: Account | AnonymousJazzAgent;
+      loadAs: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
     },
-  ): Promise<Settled<CoRichText>> {
+  ): Promise<Settled<CoreRichTextSchema>> {
     return loadCoValueWithoutMe(this, id, options) as Promise<
-      Settled<CoRichText>
+      Settled<CoreRichTextSchema>
     >;
   }
 
   subscribe(
     id: string,
     options: {
-      loadAs: Account | AnonymousJazzAgent;
+      loadAs: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
     },
     listener: (value: CoRichText, unsubscribe: () => void) => void,
@@ -93,8 +108,8 @@ export class RichTextSchema implements CoreRichTextSchema {
   subscribe(...args: [any, ...[any]]) {
     const [id, ...restArgs] = args;
     const { options, listener } = parseSubscribeRestArgs<
-      CoRichText,
-      RefsToResolve<CoRichText>
+      CoreRichTextSchema,
+      ResolveQuery<CoreRichTextSchema>
     >(restArgs);
     return subscribeToCoValueWithoutMe(this, id, options, listener as any);
   }
@@ -102,7 +117,7 @@ export class RichTextSchema implements CoreRichTextSchema {
   unstable_merge(
     id: string,
     options: {
-      loadAs: Account | AnonymousJazzAgent;
+      loadAs: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
     },
   ): Promise<void> {
@@ -113,10 +128,6 @@ export class RichTextSchema implements CoreRichTextSchema {
       ...options,
       branch: options.unstable_branch,
     });
-  }
-
-  getCoValueClass(): typeof CoRichText {
-    return this.coValueClass;
   }
 
   optional(): CoOptionalSchema<this> {

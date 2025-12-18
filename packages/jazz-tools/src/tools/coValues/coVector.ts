@@ -7,7 +7,6 @@ import {
   getCoValueOwner,
   Group,
   ID,
-  Resolved,
   SubscribeListenerOptions,
   SubscribeRestArgs,
   TypeSym,
@@ -21,6 +20,9 @@ import {
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
   CoreCoVectorSchema,
+  Loaded,
+  CoreAccountSchema,
+  CoreGroupSchema,
 } from "../internal.js";
 
 /**
@@ -49,7 +51,9 @@ export class CoVector
   constructor(
     options:
       | {
-          owner: Account | Group;
+          owner:
+            | Loaded<CoreAccountSchema, true>
+            | Loaded<CoreGroupSchema, true>;
         }
       | {
           fromRaw: RawBinaryCoStream;
@@ -221,7 +225,7 @@ export class CoVectorJazzApi<V extends CoVector> extends CoValueJazzApi<V> {
    */
   subscribe<B extends CoVector>(
     this: CoVectorJazzApi<B>,
-    listener: (value: Resolved<B, true>) => void,
+    listener: (value: Loaded<CoreCoVectorSchema, true>) => void,
   ): () => void {
     return subscribeToExistingCoValue(this.coVector, {}, listener);
   }

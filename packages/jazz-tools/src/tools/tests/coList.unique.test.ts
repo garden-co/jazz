@@ -6,7 +6,6 @@ import {
   Loaded,
   activeAccountContext,
   co,
-  coValueClassFromCoValueClassOrSchema,
 } from "../internal.js";
 import {
   assertLoaded,

@@ -1,5 +1,5 @@
 import { AgentSecret } from "cojson";
-import { Account, ID } from "jazz-tools";
+import { AnyAccountSchema, ID } from "jazz-tools";
 
 export type MinimalClerkClient = {
   user:
@@ -26,7 +26,7 @@ export type MinimalClerkClient = {
 };
 
 export type ClerkCredentials = {
-  jazzAccountID: ID<Account>;
+  jazzAccountID: ID<AnyAccountSchema>;
   jazzAccountSecret: AgentSecret;
   jazzAccountSeed?: number[];
 };

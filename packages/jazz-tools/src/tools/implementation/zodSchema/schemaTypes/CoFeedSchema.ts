@@ -6,9 +6,6 @@ import {
   Group,
   asConstructable,
   Settled,
-  RefsToResolve,
-  RefsToResolveStrict,
-  Resolved,
   SubscribeListenerOptions,
   coOptionalDefiner,
   loadCoValueWithoutMe,
@@ -19,11 +16,13 @@ import {
   parseCoValueCreateOptions,
   SchemaField,
   schemaFieldToFieldDescriptor,
+  ResolveQuery,
+  ResolveQueryStrict,
+  Loaded,
+  CoreAccountSchema,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoFeedSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
-import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
-import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
 import { withSchemaResolveQuery } from "../../schemaUtils.js";
@@ -35,7 +34,7 @@ import { RawCoStream } from "cojson";
 
 export class CoFeedSchema<
   T extends AnyZodOrCoValueSchema,
-  DefaultResolveQuery extends CoreResolveQuery = true,
+  DefaultResolveQuery extends ResolveQuery<CoreCoFeedSchema<T>> = true,
 > implements CoreCoFeedSchema<T>
 {
   collaborative = true as const;
@@ -62,16 +61,22 @@ export class CoFeedSchema<
   create(
     init: CoFeedSchemaInit<T>,
     options?: { owner: Group } | Group,
-  ): CoFeedInstance<T>;
+  ): Loaded<CoreCoFeedSchema<T>>;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
   create(
     init: CoFeedSchemaInit<T>,
-    options?: { owner: Account | Group } | Account | Group,
-  ): CoFeedInstance<T>;
+    options?:
+      | { owner: Loaded<CoreAccountSchema, true> | Group }
+      | Loaded<CoreAccountSchema, true>
+      | Group,
+  ): Loaded<CoreCoFeedSchema<T>>;
   create(
     init: CoFeedSchemaInit<T>,
-    options?: { owner: Account | Group } | Account | Group,
-  ): CoFeedInstance<T> {
+    options?:
+      | { owner: Loaded<CoreAccountSchema, true> | Group }
+      | Loaded<CoreAccountSchema, true>
+      | Group,
+  ): Loaded<CoreCoFeedSchema<T>> {
     const optionsWithPermissions = withSchemaPermissions(
       options,
       this.permissions,
@@ -83,7 +88,11 @@ export class CoFeedSchema<
     );
 
     const raw = owner.$jazz.raw.createStream();
-    const instance = new this.coValueClass(itemFieldDescriptor, raw, this);
+    const instance = new this.coValueClass(
+      itemFieldDescriptor,
+      raw,
+      this as CoreCoFeedSchema<T>,
+    );
 
     if (init) {
       instance.$jazz.push(...init);
@@ -91,71 +100,59 @@ export class CoFeedSchema<
     return instance;
   }
 
-  fromRaw(raw: RawCoStream): CoFeedInstance<T> {
+  fromRaw(raw: RawCoStream): Loaded<CoreCoFeedSchema<T>> {
     const itemFieldDescriptor = schemaFieldToFieldDescriptor(
       this.element as SchemaField, // TODO we should enforce this at runtime
     );
     return new this.coValueClass(itemFieldDescriptor, raw, this);
   }
 
-  load<
-    const R extends RefsToResolve<
-      CoFeedInstanceCoValuesMaybeLoaded<T>
-      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
-    > = DefaultResolveQuery,
-  >(
+  load<const R extends ResolveQuery<CoreCoFeedSchema<T>> = DefaultResolveQuery>(
     id: string,
     options?: {
-      resolve?: RefsToResolveStrict<CoFeedInstanceCoValuesMaybeLoaded<T>, R>;
-      loadAs?: Account | AnonymousJazzAgent;
+      resolve?: ResolveQueryStrict<CoreCoFeedSchema<T>, R>;
+      loadAs?: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
     },
-  ): Promise<Settled<Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>>> {
+  ): Promise<Settled<CoreCoFeedSchema<T>, R>> {
     return loadCoValueWithoutMe(
       this,
       id,
-      withSchemaResolveQuery(options, this.resolveQuery),
-    ) as Promise<Settled<Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>>>;
+      withSchemaResolveQuery(this, options),
+    );
   }
 
   unstable_merge<
-    const R extends RefsToResolve<
-      CoFeedInstanceCoValuesMaybeLoaded<T>
-      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
-    > = DefaultResolveQuery,
+    const R extends ResolveQuery<CoreCoFeedSchema<T>> = DefaultResolveQuery,
   >(
     id: string,
     options: {
-      resolve?: RefsToResolveStrict<CoFeedInstanceCoValuesMaybeLoaded<T>, R>;
-      loadAs?: Account | AnonymousJazzAgent;
+      resolve?: ResolveQueryStrict<CoreCoFeedSchema<T>, R>;
+      loadAs?: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent;
       branch: BranchDefinition;
     },
   ): Promise<void> {
     return unstable_mergeBranchWithResolve(
       this,
       id,
-      // @ts-expect-error
-      withSchemaResolveQuery(options, this.resolveQuery),
+      withSchemaResolveQuery(this, options),
     );
   }
 
   subscribe(
     id: string,
     listener: (
-      value: Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, true>,
+      value: Loaded<CoreCoFeedSchema<T>, true>,
       unsubscribe: () => void,
     ) => void,
   ): () => void;
   subscribe<
-    const R extends RefsToResolve<
-      CoFeedInstanceCoValuesMaybeLoaded<T>
-      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
-    > = DefaultResolveQuery,
+    const R extends ResolveQuery<CoreCoFeedSchema<T>> = DefaultResolveQuery,
   >(
     id: string,
-    options: SubscribeListenerOptions<CoFeedInstanceCoValuesMaybeLoaded<T>, R>,
+    options: SubscribeListenerOptions<CoreCoFeedSchema<T>, R>,
     listener: (
-      value: Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>,
+      value: Loaded<CoreCoFeedSchema<T>, R>,
       unsubscribe: () => void,
     ) => void,
   ): () => void;
@@ -164,13 +161,9 @@ export class CoFeedSchema<
     return subscribeToCoValueWithoutMe(
       this,
       id,
-      withSchemaResolveQuery(options, this.resolveQuery),
-      listener as any,
+      withSchemaResolveQuery(this, options),
+      listener,
     );
-  }
-
-  getCoValueClass(): typeof CoFeed {
-    return this.coValueClass;
   }
 
   optional(): CoOptionalSchema<this> {
@@ -182,11 +175,11 @@ export class CoFeedSchema<
    * This resolve query will be used when no resolve query is provided to the load method.
    */
   resolved<
-    const R extends RefsToResolve<CoFeedInstanceCoValuesMaybeLoaded<T>> = true,
+    const R extends ResolveQuery<CoreCoFeedSchema<T>> = DefaultResolveQuery,
   >(
-    resolveQuery: RefsToResolveStrict<CoFeedInstanceCoValuesMaybeLoaded<T>, R>,
+    resolveQuery: R & ResolveQueryStrict<CoreCoFeedSchema<T>, R>,
   ): CoFeedSchema<T, R> {
-    return this.copy({ resolveQuery: resolveQuery as R });
+    return this.copy({ resolveQuery });
   }
 
   /**
@@ -198,18 +191,19 @@ export class CoFeedSchema<
     return this.copy({ permissions });
   }
 
-  private copy<ResolveQuery extends CoreResolveQuery = DefaultResolveQuery>({
+  private copy<
+    R extends ResolveQuery<CoreCoFeedSchema<T>> = DefaultResolveQuery,
+  >({
     permissions,
     resolveQuery,
   }: {
     permissions?: SchemaPermissions;
-    resolveQuery?: ResolveQuery;
-  }): CoFeedSchema<T, ResolveQuery> {
+    resolveQuery?: R;
+  }): CoFeedSchema<T, R> {
     const coreSchema = createCoreCoFeedSchema(this.element);
     // @ts-expect-error
-    const copy: CoFeedSchema<T, ResolveQuery> = asConstructable(coreSchema);
-    // @ts-expect-error TS cannot infer that the resolveQuery type is valid
-    copy.resolveQuery = resolveQuery ?? this.resolveQuery;
+    const copy: CoFeedSchema<T, R> = asConstructable(coreSchema);
+    copy.resolveQuery = resolveQuery ?? (this.resolveQuery as unknown as R);
     copy.permissions = permissions ?? this.permissions;
     return copy;
   }
@@ -233,10 +227,3 @@ export interface CoreCoFeedSchema<
   builtin: "CoFeed";
   element: T;
 }
-
-export type CoFeedInstance<T extends AnyZodOrCoValueSchema> = CoFeed<
-  InstanceOrPrimitiveOfSchema<T>
->;
-
-export type CoFeedInstanceCoValuesMaybeLoaded<T extends AnyZodOrCoValueSchema> =
-  CoFeed<InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded<T>>;

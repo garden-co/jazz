@@ -2,8 +2,11 @@ import type {
   Account,
   CoValue,
   Group,
-  RefsToResolve,
-  Resolved,
+  Loaded,
+  CoreCoValueSchema,
+  ResolveQuery,
+  CoreAccountSchema,
+  CoreGroupSchema,
 } from "../internal.js";
 import type { JazzError } from "./JazzError.js";
 
@@ -37,10 +40,13 @@ export type NotLoadedCoValueState =
   | typeof CoValueLoadingState.LOADING
   | CoValueErrorState;
 
-export type SubscriptionValue<D extends CoValue, R extends RefsToResolve<D>> =
+export type SubscriptionValue<
+  S extends CoreCoValueSchema,
+  R extends ResolveQuery<S>,
+> =
   | {
       type: typeof CoValueLoadingState.LOADED;
-      value: Resolved<D, R>;
+      value: Loaded<S, R>;
       id: string;
     }
   | JazzError;
@@ -49,4 +55,10 @@ export type SubscriptionValueLoading = {
   id: string;
 };
 
-export type BranchDefinition = { name: string; owner?: Group | Account | null };
+export type BranchDefinition = {
+  name: string;
+  owner?:
+    | Loaded<CoreAccountSchema, true>
+    | Loaded<CoreGroupSchema, true>
+    | null;
+};

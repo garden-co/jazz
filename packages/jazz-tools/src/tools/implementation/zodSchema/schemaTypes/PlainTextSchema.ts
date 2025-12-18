@@ -3,8 +3,11 @@ import {
   Account,
   BranchDefinition,
   CoPlainText,
+  CoreAccountSchema,
+  CoreGroupSchema,
   Group,
-  RefsToResolve,
+  Loaded,
+  ResolveQuery,
   Settled,
   SubscribeRestArgs,
   coOptionalDefiner,
@@ -52,11 +55,17 @@ export class PlainTextSchema implements CorePlainTextSchema {
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
   create(
     text: string,
-    options?: { owner: Account | Group } | Account | Group,
+    options?:
+      | { owner: Loaded<CoreAccountSchema, true> | Loaded<CoreGroupSchema> }
+      | Loaded<CoreAccountSchema, true>
+      | Loaded<CoreGroupSchema>,
   ): CoPlainText;
   create(
     text: string,
-    options?: { owner: Account | Group } | Account | Group,
+    options?:
+      | { owner: Loaded<CoreAccountSchema, true> | Loaded<CoreGroupSchema> }
+      | Loaded<CoreAccountSchema, true>
+      | Loaded<CoreGroupSchema>,
   ): CoPlainText {
     const optionsWithPermissions = withSchemaPermissions(
       options,
@@ -69,19 +78,19 @@ export class PlainTextSchema implements CorePlainTextSchema {
   load(
     id: string,
     options: {
-      loadAs: Account | AnonymousJazzAgent;
+      loadAs: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
     },
-  ): Promise<Settled<CoPlainText>> {
+  ): Promise<Settled<CorePlainTextSchema>> {
     return loadCoValueWithoutMe(this, id, options) as Promise<
-      Settled<CoPlainText>
+      Settled<CorePlainTextSchema>
     >;
   }
 
   subscribe(
     id: string,
     options: {
-      loadAs: Account | AnonymousJazzAgent;
+      loadAs: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
     },
     listener: (value: CoPlainText, unsubscribe: () => void) => void,
@@ -93,16 +102,16 @@ export class PlainTextSchema implements CorePlainTextSchema {
   subscribe(...args: [any, ...[any]]) {
     const [id, ...restArgs] = args;
     const { options, listener } = parseSubscribeRestArgs<
-      CoPlainText,
-      RefsToResolve<CoPlainText>
+      CorePlainTextSchema,
+      ResolveQuery<CorePlainTextSchema>
     >(restArgs);
-    return subscribeToCoValueWithoutMe(this, id, options, listener as any);
+    return subscribeToCoValueWithoutMe(this, id, options, listener);
   }
 
   unstable_merge(
     id: string,
     options: {
-      loadAs: Account | AnonymousJazzAgent;
+      loadAs: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
     },
   ): Promise<void> {
@@ -117,10 +126,6 @@ export class PlainTextSchema implements CorePlainTextSchema {
 
   fromRaw(raw: RawCoPlainText): CoPlainText {
     return new this.coValueClass({ fromRaw: raw }, this);
-  }
-
-  getCoValueClass(): typeof CoPlainText {
-    return this.coValueClass;
   }
 
   optional(): CoOptionalSchema<this> {

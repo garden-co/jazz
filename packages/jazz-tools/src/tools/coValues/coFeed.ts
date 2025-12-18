@@ -23,11 +23,7 @@ import {
   Settled,
   LoadedAndRequired,
   unstable_mergeBranch,
-  RefsToResolve,
-  RefsToResolveStrict,
-  Resolved,
   FieldDescriptor,
-  FieldDescriptorFor,
   SubscribeListenerOptions,
   SubscribeRestArgs,
   TypeSym,
@@ -48,26 +44,26 @@ import {
   subscribeToExistingCoValue,
   CoreCoFeedSchema,
   CoreFileStreamSchema,
+  coAccountDefiner,
+  PrimitiveOrInaccessible,
+  RefIfCoValue,
+  AnyZodOrCoValueSchema,
+  CoreAccountSchema,
+  ResolveQuery,
+  ResolveQueryStrict,
+  Loaded,
+  PrimitiveOrMaybeLoaded,
 } from "../internal.js";
 
-/** @deprecated Use CoFeedEntry instead */
-export type CoStreamEntry<Item> = CoFeedEntry<Item>;
+export type CoFeedEntry<Item extends AnyZodOrCoValueSchema> =
+  SingleCoFeedEntry<Item> & {
+    all: IterableIterator<SingleCoFeedEntry<Item>>;
+  };
 
-export type CoFeedEntry<Item> = SingleCoFeedEntry<Item> & {
-  all: IterableIterator<SingleCoFeedEntry<Item>>;
-};
-
-/** @deprecated Use SingleCoFeedEntry instead */
-export type SingleCoStreamEntry<Item> = SingleCoFeedEntry<Item>;
-
-export type SingleCoFeedEntry<Item> = {
-  value: LoadedAndRequired<Item> extends CoValue
-    ? MaybeLoaded<LoadedAndRequired<Item>>
-    : Item;
-  ref: LoadedAndRequired<Item> extends CoValue
-    ? Ref<LoadedAndRequired<Item>>
-    : never;
-  by: Account | null;
+export type SingleCoFeedEntry<Item extends AnyZodOrCoValueSchema> = {
+  value: PrimitiveOrMaybeLoaded<Item>;
+  ref: RefIfCoValue<Item>;
+  by: MaybeLoaded<CoreAccountSchema> | null;
   madeAt: Date;
   tx: CojsonInternalTypes.TransactionID;
 };
@@ -91,8 +87,11 @@ export { CoFeed as CoStream };
  *
  * @category CoValues
  */
-export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
-  declare $jazz: CoFeedJazzApi<this>;
+export class CoFeed<S extends CoreCoFeedSchema>
+  extends CoValueBase
+  implements CoValue
+{
+  declare $jazz: CoFeedJazzApi<this, S>;
 
   /** @category Type Helpers */
   declare [TypeSym]: "CoStream";
@@ -100,14 +99,11 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
     this.prototype[TypeSym] = "CoStream";
   }
 
-  /** @internal This is only a marker type and doesn't exist at runtime */
-  [ItemsMarker]!: Item;
-
   /**
    * The current account's view of this `CoFeed`
    * @category Content
    */
-  get byMe(): CoFeedEntry<Item> | undefined {
+  get byMe(): CoFeedEntry<S["element"]> | undefined {
     if (this.$jazz.loadedAs[TypeSym] === "Account") {
       return this.perAccount[this.$jazz.loadedAs.$jazz.id];
     } else {
@@ -138,7 +134,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
    * @category Content
    */
   get perAccount(): {
-    [key: ID<Account>]: CoFeedEntry<Item>;
+    [key: ID<CoreAccountSchema>]: CoFeedEntry<S["element"]>;
   } {
     return new Proxy({}, CoStreamPerAccountProxyHandler(this)) as any;
   }
@@ -148,7 +144,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
    * @category Content
    */
   get perSession(): {
-    [key: SessionID]: CoFeedEntry<Item>;
+    [key: SessionID]: CoFeedEntry<S["element"]>;
   } {
     return new Proxy(
       {},
@@ -163,7 +159,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
    *
    * @category Content
    */
-  get inCurrentSession(): CoFeedEntry<Item> | undefined {
+  get inCurrentSession(): CoFeedEntry<S["element"]> | undefined {
     if (this.$jazz.loadedAs[TypeSym] === "Account") {
       return this.perSession[this.$jazz.loadedAs.$jazz.sessionID!];
     } else {
@@ -236,7 +232,10 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
 /** @internal */
 type CoFeedItem<L> = L extends CoFeed<infer Item> ? Item : never;
 
-export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
+export class CoFeedJazzApi<
+  F extends CoFeed<S>,
+  S extends CoreCoFeedSchema,
+> extends CoValueJazzApi<F> {
   constructor(
     private coFeed: F,
     public raw: RawCoStream,
@@ -312,13 +311,13 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
    * @returns A new instance of the same CoFeed that's loaded to the specified depth
    * @category Subscription & Loading
    */
-  ensureLoaded<F extends CoFeed, const R extends RefsToResolve<F>>(
-    this: CoFeedJazzApi<F>,
+  ensureLoaded<F extends CoFeed<S>, const R extends ResolveQuery<S>>(
+    this: CoFeedJazzApi<F, S>,
     options?: {
-      resolve?: RefsToResolveStrict<F, R>;
+      resolve?: ResolveQueryStrict<S, R>;
       unstable_branch?: BranchDefinition;
     },
-  ): Promise<Resolved<F, R>> {
+  ): Promise<Settled<S, R>> {
     return ensureCoValueLoaded(this.coFeed, options);
   }
 
@@ -328,21 +327,21 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
    * No need to provide an ID or Account since they're already part of the instance.
    * @category Subscription & Loading
    */
-  subscribe<F extends CoFeed, const R extends RefsToResolve<F>>(
-    this: CoFeedJazzApi<F>,
-    listener: (value: Resolved<F, R>, unsubscribe: () => void) => void,
+  subscribe<F extends CoFeed<S>, const R extends ResolveQuery<S>>(
+    this: CoFeedJazzApi<F, S>,
+    listener: (value: Loaded<S, R>, unsubscribe: () => void) => void,
   ): () => void;
-  subscribe<F extends CoFeed, const R extends RefsToResolve<F>>(
-    this: CoFeedJazzApi<F>,
+  subscribe<F extends CoFeed<S>, const R extends ResolveQuery<S>>(
+    this: CoFeedJazzApi<F, S>,
     options: {
-      resolve?: RefsToResolveStrict<F, R>;
+      resolve?: ResolveQueryStrict<S, R>;
       unstable_branch?: BranchDefinition;
     },
-    listener: (value: Resolved<F, R>, unsubscribe: () => void) => void,
+    listener: (value: Loaded<S, R>, unsubscribe: () => void) => void,
   ): () => void;
-  subscribe<F extends CoFeed, const R extends RefsToResolve<F>>(
-    this: CoFeedJazzApi<F>,
-    ...args: SubscribeRestArgs<F, R>
+  subscribe<F extends CoFeed<S>, const R extends ResolveQuery<S>>(
+    this: CoFeedJazzApi<F, S>,
+    ...args: SubscribeRestArgs<S, R>
   ): () => void {
     const { options, listener } = parseSubscribeRestArgs(args);
     return subscribeToExistingCoValue(this.coFeed, options, listener);
@@ -370,7 +369,7 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
  * Converts a raw stream entry into a formatted CoFeed entry with proper typing and accessors.
  * @internal
  */
-function entryFromRawEntry<Item>(
+function entryFromRawEntry<S extends CoreCoFeedSchema>(
   accessFrom: CoValue,
   rawEntry: {
     by: RawAccountID | AgentID;
@@ -378,18 +377,15 @@ function entryFromRawEntry<Item>(
     at: Date;
     value: JsonValue;
   },
-  loadedAs: Account | AnonymousJazzAgent,
-  accountID: ID<Account> | undefined,
+  loadedAs: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent,
+  accountID: ID<CoreAccountSchema> | undefined,
   itemField: FieldDescriptor,
-): Omit<CoFeedEntry<Item>, "all"> {
+  sourceSchema: S,
+): Omit<CoFeedEntry<S["element"]>, "all"> {
   return {
-    get value(): LoadedAndRequired<Item> extends CoValue
-      ? MaybeLoaded<CoValue & Item>
-      : Item {
+    get value(): PrimitiveOrInaccessible<S["element"]> {
       if (itemField.type === "json") {
-        return rawEntry.value as LoadedAndRequired<Item> extends CoValue
-          ? MaybeLoaded<CoValue & Item>
-          : Item;
+        return rawEntry.value as PrimitiveOrInaccessible<S["element"]>;
       } else if (itemField.type === "encoded") {
         return itemField.decode(rawEntry.value);
       } else if (isRefEncoded(itemField)) {
@@ -397,26 +393,20 @@ function entryFromRawEntry<Item>(
           accessFrom,
           rawEntry.value as string,
           itemField,
-        ) as LoadedAndRequired<Item> extends CoValue
-          ? MaybeLoaded<CoValue & Item>
-          : Item;
+        ) as MaybeLoaded<S["element"]>;
       } else {
         throw new Error("Invalid item field schema");
       }
     },
-    get ref(): LoadedAndRequired<Item> extends CoValue
-      ? Ref<LoadedAndRequired<Item>>
-      : never {
+    get ref(): RefIfCoValue<S["element"]> {
       if (itemField.type !== "json" && isRefEncoded(itemField)) {
         const rawId = rawEntry.value;
         return new Ref(
-          rawId as unknown as ID<CoValue>,
+          rawId as unknown as ID<S["element"]>,
           loadedAs,
           itemField,
           accessFrom,
-        ) as LoadedAndRequired<Item> extends CoValue
-          ? Ref<LoadedAndRequired<Item>>
-          : never;
+        );
       } else {
         return undefined as never;
       }
@@ -426,10 +416,9 @@ function entryFromRawEntry<Item>(
 
       const account = accessChildById(accessFrom, accountID, {
         type: "ref",
-        ref: Account,
         optional: false,
-        sourceSchema: Account,
-      }) as Account;
+        sourceSchema: coAccountDefiner(),
+      });
 
       if (!account.$isLoaded) return null;
 
@@ -445,7 +434,7 @@ function entryFromRawEntry<Item>(
  * @internal
  */
 export const CoStreamPerAccountProxyHandler = (
-  innerTarget: CoFeed,
+  innerTarget: CoFeed<CoreCoFeedSchema>,
 ): ProxyHandler<{}> => ({
   get(_target, key, receiver) {
     if (typeof key === "string" && key.startsWith("co_")) {
@@ -456,8 +445,9 @@ export const CoStreamPerAccountProxyHandler = (
         receiver,
         rawEntry,
         innerTarget.$jazz.loadedAs,
-        key as unknown as ID<Account>,
+        key as unknown as ID<CoreAccountSchema>,
         innerTarget.$jazz.itemSchema,
+        innerTarget.$jazz.sourceSchema,
       );
 
       Object.defineProperty(entry, "all", {
@@ -473,8 +463,9 @@ export const CoStreamPerAccountProxyHandler = (
                 receiver,
                 rawEntry.value,
                 innerTarget.$jazz.loadedAs,
-                key as unknown as ID<Account>,
+                key as unknown as ID<CoreAccountSchema>,
                 innerTarget.$jazz.itemSchema,
+                innerTarget.$jazz.sourceSchema,
               );
             }
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -524,9 +515,10 @@ const CoStreamPerSessionProxyHandler = (
         rawEntry,
         innerTarget.$jazz.loadedAs,
         cojsonInternals.isAccountID(by)
-          ? (by as unknown as ID<Account>)
+          ? (by as unknown as ID<CoreAccountSchema>)
           : undefined,
         innerTarget.$jazz.itemSchema,
+        innerTarget.$jazz.sourceSchema,
       );
 
       Object.defineProperty(entry, "all", {
@@ -541,9 +533,10 @@ const CoStreamPerSessionProxyHandler = (
                 rawEntry.value,
                 innerTarget.$jazz.loadedAs,
                 cojsonInternals.isAccountID(by)
-                  ? (by as unknown as ID<Account>)
+                  ? (by as unknown as ID<CoreAccountSchema>)
                   : undefined,
                 innerTarget.$jazz.itemSchema,
+                innerTarget.$jazz.sourceSchema,
               );
             }
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -600,7 +593,7 @@ export class FileStream extends CoValueBase implements CoValue {
   constructor(
     options:
       | {
-          owner: Account | Group;
+          owner: Loaded<CoreAccountSchema, true> | Group;
         }
       | {
           fromRaw: RawBinaryCoStream;
@@ -740,7 +733,7 @@ export class FileStreamJazzApi<F extends FileStream> extends CoValueJazzApi<F> {
    */
   subscribe<B extends FileStream>(
     this: FileStreamJazzApi<B>,
-    listener: (value: Resolved<B, true>) => void,
+    listener: (value: Loaded<CoreFileStreamSchema, true>) => void,
   ): () => void {
     return subscribeToExistingCoValue(this.fileStream, {}, listener);
   }

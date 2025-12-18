@@ -20,6 +20,11 @@ import {
   RegisteredSchemas,
   CoreAccountSchema,
   asConstructable,
+  CoreCoValueSchema,
+  Settled,
+  Loaded,
+  NotLoaded,
+  Inaccessible,
 } from "../internal";
 
 const Crypto = await WasmCrypto.create();
@@ -147,15 +152,17 @@ export async function loadCoValueOrFail<V extends RawCoValue>(
   return value;
 }
 
-export function assertLoaded<T extends MaybeLoaded<CoValue>>(
-  coValue: T,
-): asserts coValue is LoadedAndRequired<T> {
-  assert(coValue.$isLoaded, "CoValue is not loaded");
+export function assertLoaded<V, S extends CoreCoValueSchema>(
+  coValue: V & Settled<S>, // explicit inference site
+): asserts coValue is Loaded<S> {
+  if (!coValue.$isLoaded) {
+    throw new Error("CoValue is not loaded");
+  }
 }
 
 export async function createAccountAs<S extends AccountSchema<any, any>>(
   schema: S,
-  as: Account,
+  as: Loaded<CoreAccountSchema, true>,
   options: {
     creationProps: { name: string };
   },

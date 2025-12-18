@@ -8,7 +8,6 @@ import {
   RegisteredSchemas,
   type SubscriptionScope,
   asConstructable,
-  coValueClassFromCoValueClassOrSchema,
   coValuesCache,
   exportCoValueFromSubscription,
   getSubscriptionScope,
@@ -16,6 +15,7 @@ import {
   unstable_mergeBranch,
 } from "../internal.js";
 import { Group, TypeSym } from "../internal.js";
+import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoValueSchema.js";
 
 /** @internal */
 export abstract class CoValueBase implements CoValue {
@@ -52,7 +52,8 @@ export abstract class CoValueBase implements CoValue {
 export abstract class CoValueJazzApi<V extends CoValue> {
   /** @category Internals */
   declare _instanceID: string;
-  declare _subscriptionScope: SubscriptionScope<CoValue> | undefined;
+  declare _subscriptionScope: SubscriptionScope<CoreCoValueSchema> | undefined;
+  declare abstract sourceSchema: CoreCoValueSchema;
 
   constructor(private coValue: V) {
     Object.defineProperty(this, "_instanceID", {
@@ -162,7 +163,7 @@ export abstract class CoValueJazzApi<V extends CoValue> {
     const subscriptionScope = getSubscriptionScope(this.coValue);
 
     return exportCoValueFromSubscription(
-      subscriptionScope as SubscriptionScope<CoValue>,
+      subscriptionScope as SubscriptionScope<CoreCoValueSchema>,
     );
   }
 }

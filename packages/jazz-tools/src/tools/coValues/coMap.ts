@@ -22,9 +22,6 @@ import {
   PartialOnUndefined,
   RefEncoded,
   RefIfCoValue,
-  RefsToResolve,
-  RefsToResolveStrict,
-  Resolved,
   FieldDescriptor,
   Simplify,
   SubscribeListenerOptions,
@@ -51,20 +48,38 @@ import {
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
   CoreCoMapSchema,
+  coAccountDefiner,
+  AnyZodOrCoValueSchema,
+  CoreCoValueSchema,
+  MaybeLoaded,
+  AnyZodSchema,
+  CoMapKeys,
+  ResolveQueryStrict,
+  Loaded,
+  ResolveQuery,
+  CoreCoRecordSchema,
+  CoreAccountSchema,
+  SchemaAtKey,
 } from "../internal.js";
+import { TypeOfZodSchema } from "../implementation/zodSchema/typeConverters/TypeOfZodSchema.js";
 
-export type CoMapEdit<V> = {
-  value?: V;
-  ref?: RefIfCoValue<V>;
-  by: Account | null;
+export type CoMapEdit<S extends AnyZodOrCoValueSchema> = {
+  value?: S extends CoreCoValueSchema
+    ? MaybeLoaded<S>
+    : S extends AnyZodSchema
+      ? TypeOfZodSchema<S>
+      : never;
+  ref?: RefIfCoValue<S>;
+  by: Loaded<CoreAccountSchema, true> | null;
   madeAt: Date;
   key?: string;
 };
 
-export type LastAndAllCoMapEdits<V> = CoMapEdit<V> & { all: CoMapEdit<V>[] };
+export type LastAndAllCoMapEdits<S extends AnyZodOrCoValueSchema> =
+  CoMapEdit<S> & { all: CoMapEdit<S>[] };
 
-export type CoMapEdits<M extends CoMap> = {
-  [Key in CoKeys<M>]?: LastAndAllCoMapEdits<M[Key]>;
+export type CoMapEdits<M extends CoreCoMapSchema> = {
+  [Key in CoMapKeys<M>]?: LastAndAllCoMapEdits<M["shape"][Key]>;
 };
 
 export type CoMapFieldSchema = {
@@ -104,7 +119,10 @@ export type CoMapFieldSchema = {
  *
  * @category CoValues
  *  */
-export class CoMap extends CoValueBase implements CoValue {
+export class CoMap<S extends CoreCoMapSchema | CoreCoRecordSchema>
+  extends CoValueBase
+  implements CoValue
+{
   /** @category Type Helpers */
   declare [TypeSym]: "CoMap";
   static {
@@ -118,20 +136,19 @@ export class CoMap extends CoValueBase implements CoValue {
    * access to Jazz methods, and also doesn't limit which key names can be
    * used inside CoMaps.
    */
-  declare $jazz: CoMapJazzApi<this>;
+  declare $jazz: CoMapJazzApi<this, S>;
 
   /** @internal */
   static fields: CoMapFieldSchema;
 
   /** @internal */
-  constructor(
-    fields: CoMapFieldSchema,
-    raw: RawCoMap,
-    sourceSchema: CoreCoMapSchema,
-  ) {
+  constructor(fields: CoMapFieldSchema, raw: RawCoMap, sourceSchema: S) {
     super();
 
-    const proxy = new Proxy(this, CoMapProxyHandler as ProxyHandler<this>);
+    const proxy = new Proxy(
+      this,
+      CoMapProxyHandler as unknown as ProxyHandler<this>,
+    );
 
     Object.defineProperties(this, {
       $jazz: {
@@ -154,7 +171,7 @@ export class CoMap extends CoValueBase implements CoValue {
     } as Record<string, any>;
 
     for (const key of this.$jazz.raw.keys()) {
-      const tKey = key as CoKeys<this>;
+      const tKey = key as CoMapKeys<S>;
       const descriptor = this.$jazz.getDescriptor(tKey);
 
       if (!descriptor) {
@@ -171,7 +188,7 @@ export class CoMap extends CoValueBase implements CoValue {
           continue;
         }
 
-        const ref = this[tKey];
+        const ref = this[tKey as keyof this];
 
         if (
           ref &&
@@ -196,103 +213,20 @@ export class CoMap extends CoValueBase implements CoValue {
   [inspect]() {
     return this.toJSON();
   }
-
-  /**
-   * Create a new `RawCoMap` from an initialization object
-   * @internal
-   */
-  static rawFromInit(
-    fields: CoMapFieldSchema,
-    init: object | undefined,
-    owner: Group,
-    uniqueness?: CoValueUniqueness,
-  ) {
-    const rawOwner = owner.$jazz.raw;
-
-    const rawInit = {} as {
-      [key: string]: JsonValue | undefined;
-    };
-
-    if (init)
-      for (const key of Object.keys(init)) {
-        const initValue = init[key as keyof typeof init];
-
-        const descriptor = fields?.[key] || fields?.[ItemsMarker];
-
-        if (!descriptor) {
-          continue;
-        }
-
-        if (descriptor.type === "json") {
-          rawInit[key] = initValue as JsonValue;
-        } else if (isRefEncoded(descriptor)) {
-          if (initValue != null) {
-            let refId = (initValue as unknown as CoValue).$jazz?.id;
-            if (!refId) {
-              const newOwnerStrategy =
-                descriptor.permissions?.newInlineOwnerStrategy;
-              const onCreate = descriptor.permissions?.onCreate;
-              const coValue = instantiateRefEncodedWithInit(
-                descriptor,
-                initValue,
-                owner,
-                newOwnerStrategy,
-                onCreate,
-              );
-              refId = coValue.$jazz.id;
-            }
-            rawInit[key] = refId;
-          }
-        } else if (descriptor.type == "encoded") {
-          rawInit[key] = descriptor.encode(
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            initValue as any,
-          );
-        }
-      }
-
-    return rawOwner.createMap(rawInit, null, "private", uniqueness);
-  }
-
-  /**
-   * Declare a Record-like CoMap schema, by extending `CoMap.Record(...)` and passing the value schema using `co`. Keys are always `string`.
-   *
-   * @example
-   * ```ts
-   * import { coField, CoMap } from "jazz-tools";
-   *
-   * class ColorToFruitMap extends CoMap.Record(
-   *  coField.ref(Fruit)
-   * ) {}
-   *
-   * // assume we have map: ColorToFruitMap
-   * // and strawberry: Fruit
-   * map["red"] = strawberry;
-   * ```
-   *
-   * @category Declaration
-   */
-  static Record<Value>(value: Value) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
-    class RecordLikeCoMap extends CoMap {
-      [ItemsMarker] = value;
-    }
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
-    interface RecordLikeCoMap extends Record<string, Value> {}
-
-    return RecordLikeCoMap;
-  }
 }
 
 /**
  * Contains CoMap Jazz methods that are part of the {@link CoMap.$jazz`} property.
  */
-class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
+class CoMapJazzApi<
+  M extends CoMap<S>,
+  S extends CoreCoMapSchema | CoreCoRecordSchema,
+> extends CoValueJazzApi<M> {
   constructor(
     private coMap: M,
     public raw: RawCoMap,
     private fields: CoMapFieldSchema,
-    public sourceSchema: CoreCoMapSchema,
+    public sourceSchema: S,
   ) {
     super(coMap);
 
@@ -314,7 +248,7 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
    * @returns True if the key is defined, false otherwise
    * @category Content
    */
-  has(key: CoKeys<M>): boolean {
+  has(key: CoMapKeys<S>): boolean {
     const entry = this.raw.getRaw(key);
     return entry?.change !== undefined && entry.change.op !== "del";
   }
@@ -327,7 +261,10 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
    *
    * @category Content
    */
-  set<K extends CoKeys<M>>(key: K, value: CoFieldInit<M[K]>): void {
+  set<K extends CoMapKeys<S>>(
+    key: K,
+    value: CoFieldInit<SchemaAtKey<S, K>>,
+  ): void {
     const descriptor = this.getDescriptor(key as string);
 
     if (!descriptor) {
@@ -375,7 +312,7 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
    * @category Content
    */
   delete(
-    key: OptionalCoKeys<M> | (string extends keyof M ? string : never),
+    key: OptionalCoKeys<S> | (string extends keyof M ? string : never),
   ): void {
     this.raw.delete(key);
   }
@@ -392,10 +329,10 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
    *
    * @category Content
    */
-  applyDiff(newValues: Partial<CoMapInit<M>>): M {
+  applyDiff(newValues: Partial<CoMapInit<S>>): M {
     for (const key in newValues) {
       if (Object.prototype.hasOwnProperty.call(newValues, key)) {
-        const tKey = key as keyof typeof newValues & keyof this;
+        const tKey = key as keyof typeof newValues & keyof M;
         const descriptor = this.getDescriptor(key);
 
         if (!descriptor) continue;
@@ -405,13 +342,13 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
 
         if (descriptor.type === "json" || descriptor.type == "encoded") {
           if (currentValue !== newValue) {
-            this.set(tKey as any, newValue as CoFieldInit<M[keyof M]>);
+            this.set(tKey as any, newValue as any);
           }
         } else if (isRefEncoded(descriptor)) {
           const currentId = (currentValue as CoValue | undefined)?.$jazz.id;
           let newId = (newValue as CoValue | undefined)?.$jazz?.id;
           if (currentId !== newId) {
-            this.set(tKey as any, newValue as CoFieldInit<M[keyof M]>);
+            this.set(tKey as any, newValue as any);
           }
         }
       }
@@ -426,13 +363,13 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
    *
    * @category Subscription & Loading
    */
-  ensureLoaded<Map extends CoMap, const R extends RefsToResolve<Map>>(
-    this: CoMapJazzApi<Map>,
+  ensureLoaded<S extends CoreCoMapSchema, const R extends ResolveQuery<S>>(
+    this: CoMapJazzApi<CoMap<S>, S>,
     options: {
-      resolve: RefsToResolveStrict<Map, R>;
+      resolve: ResolveQueryStrict<S, R>;
       unstable_branch?: BranchDefinition;
     },
-  ): Promise<Resolved<Map, R>> {
+  ): Promise<Settled<S, R>> {
     return ensureCoValueLoaded(this.coMap, options);
   }
 
@@ -445,21 +382,21 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
    *
    * @category Subscription & Loading
    **/
-  subscribe<Map extends CoMap, const R extends RefsToResolve<Map> = true>(
-    this: CoMapJazzApi<Map>,
-    listener: (value: Resolved<Map, R>, unsubscribe: () => void) => void,
+  subscribe<Map extends CoMap<S>, const R extends ResolveQuery<S> = true>(
+    this: CoMapJazzApi<Map, S>,
+    listener: (value: Loaded<S, R>, unsubscribe: () => void) => void,
   ): () => void;
-  subscribe<Map extends CoMap, const R extends RefsToResolve<Map> = true>(
-    this: CoMapJazzApi<Map>,
+  subscribe<Map extends CoMap<S>, const R extends ResolveQuery<S> = true>(
+    this: CoMapJazzApi<Map, S>,
     options: {
-      resolve?: RefsToResolveStrict<Map, R>;
+      resolve?: ResolveQueryStrict<S, R>;
       unstable_branch?: BranchDefinition;
     },
-    listener: (value: Resolved<Map, R>, unsubscribe: () => void) => void,
+    listener: (value: Loaded<S, R>, unsubscribe: () => void) => void,
   ): () => void;
-  subscribe<Map extends CoMap, const R extends RefsToResolve<Map>>(
-    this: CoMapJazzApi<Map>,
-    ...args: SubscribeRestArgs<Map, R>
+  subscribe<Map extends CoMap<S>, const R extends ResolveQuery<S>>(
+    this: CoMapJazzApi<Map, S>,
+    ...args: SubscribeRestArgs<S, R>
   ): () => void {
     const { options, listener } = parseSubscribeRestArgs(args);
     return subscribeToExistingCoValue(this.coMap, options, listener);
@@ -500,17 +437,17 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
    **/
   get refs(): Simplify<
     {
-      [Key in CoKeys<M> as LoadedAndRequired<M[Key]> extends CoValue
+      [Key in CoMapKeys<S> as SchemaAtKey<S, Key> extends CoreCoValueSchema
         ? Key
-        : never]?: RefIfCoValue<M[Key]>;
+        : never]?: RefIfCoValue<SchemaAtKey<S, Key>>;
     } & {
       // Non-loaded CoValue refs (i.e. refs with type CoValue | null) are still required refs
-      [Key in CoKeys<M> as AsLoaded<M[Key]> extends CoValue
+      [Key in CoMapKeys<S> as SchemaAtKey<S, Key> extends CoreCoValueSchema
         ? Key
-        : never]: RefIfCoValue<M[Key]>;
+        : never]: RefIfCoValue<SchemaAtKey<S, Key>>;
     }
   > {
-    return makeRefs<CoKeys<this>>(
+    return makeRefs<CoMapKeys<S>>(
       this.coMap,
       (key) => this.raw.get(key as string) as unknown as ID<CoValue>,
       () => {
@@ -519,12 +456,13 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
           return (
             descriptor && descriptor.type !== "json" && isRefEncoded(descriptor)
           );
-        }) as CoKeys<this>[];
+        }) as CoMapKeys<S>[];
 
         return keys;
       },
       this.loadedAs,
-      (key) => this.getDescriptor(key as string) as RefEncoded<CoValue>,
+      (key) =>
+        this.getDescriptor(key as string) as RefEncoded<CoreCoValueSchema>,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ) as any;
   }
@@ -534,7 +472,7 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
    *
    * @category Collaboration
    */
-  getEdits(): CoMapEdits<M> {
+  getEdits(): CoMapEdits<S> {
     const map = this.coMap;
     return new Proxy(
       {},
@@ -572,64 +510,30 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
   }
 }
 
-export type CoKeys<Map extends object> = Exclude<
-  keyof Map & string,
-  keyof CoMap
->;
-
 /**
  * Extract keys of properties that are required
  */
-export type RequiredCoKeys<Map extends object> = {
-  [K in CoKeys<Map>]: undefined extends Map[K] ? never : K;
-}[CoKeys<Map>];
+export type RequiredCoKeys<M extends CoreCoMapSchema | CoreCoRecordSchema> = {
+  [K in CoMapKeys<M>]: undefined extends SchemaAtKey<M, K> ? never : K;
+}[CoMapKeys<M>];
 
 /**
  * Extract keys of properties that can be undefined
  */
-export type OptionalCoKeys<Map extends object> = {
-  [K in CoKeys<Map>]: undefined extends Map[K] ? K : never;
-}[CoKeys<Map>];
+export type OptionalCoKeys<M extends CoreCoMapSchema | CoreCoRecordSchema> = {
+  [K in CoMapKeys<M>]: undefined extends SchemaAtKey<M, K> ? K : never;
+}[CoMapKeys<M>];
 
-/**
- * Force required ref fields to be non nullable
- *
- * Considering that:
- * - Optional refs are typed as coField<InstanceType<CoValueClass> | null | undefined>
- * - Required refs are typed as coField<InstanceType<CoValueClass> | null>
- *
- * This type works in two steps:
- * - Remove the null from both types
- * - Then we check if the input type accepts undefined, if positive we put the null union back
- *
- * So the optional refs stays unchanged while we safely remove the null union
- * from required refs
- *
- * This way required refs can be marked as required in the CoMapInit while
- * staying a nullable property for value access.
- *
- * Example:
- *
- * const map = MyCoMap.create({
- *   requiredRef: NestedMap.create({}) // null is not valid here
- * })
- *
- * map.requiredRef // this value is still nullable
- */
-type ForceRequiredRef<V> = V extends InstanceType<CoValueClass> | null
-  ? NonNullable<V>
-  : V extends InstanceType<CoValueClass> | undefined
-    ? V | null
-    : V;
-
-export type CoMapInit<Map extends object> = {
-  [K in RequiredCoKeys<Map>]: CoFieldInit<Map[K]>;
+export type CoMapInit<M extends CoreCoMapSchema | CoreCoRecordSchema> = {
+  [K in RequiredCoKeys<M>]: CoFieldInit<SchemaAtKey<M, K>>;
 } & {
-  [K in OptionalCoKeys<Map>]?: CoFieldInit<Map[K]> | undefined;
+  [K in OptionalCoKeys<M>]?: CoFieldInit<SchemaAtKey<M, K>> | undefined;
 };
 
 // TODO: cache handlers per descriptor for performance?
-const CoMapProxyHandler: ProxyHandler<CoMap> = {
+const CoMapProxyHandler: ProxyHandler<
+  CoMap<CoreCoMapSchema | CoreCoRecordSchema>
+> = {
   get(target, key, receiver) {
     if (key in target) {
       return Reflect.get(target, key, receiver);
@@ -717,7 +621,7 @@ const CoMapProxyHandler: ProxyHandler<CoMap> = {
 
 /** @internal */
 function getEditFromRaw(
-  target: CoMap,
+  target: CoMap<CoreCoMapSchema | CoreCoRecordSchema>,
   rawEdit: {
     by: RawAccountID | AgentID;
     tx: CojsonInternalTypes.TransactionID;
@@ -750,10 +654,9 @@ function getEditFromRaw(
 
       const account = accessChildById(target, rawEdit.by, {
         type: "ref",
-        ref: Account,
         optional: false,
-        sourceSchema: Account,
-      }) as Account;
+        sourceSchema: coAccountDefiner(),
+      });
 
       if (!account.$isLoaded) return null;
 

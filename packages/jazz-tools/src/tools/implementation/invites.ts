@@ -1,6 +1,12 @@
 import { AccountRole, type InviteSecret, cojsonInternals } from "cojson";
 import { Account } from "../coValues/account.js";
-import type { CoValue, CoValueClassOrSchema } from "../internal.js";
+import {
+  coAccountDefiner,
+  type CoValue,
+  type CoreAccountSchema,
+  type CoreCoValueSchema,
+  type Loaded,
+} from "../internal.js";
 
 /** @category Invite Links */
 export function createInviteLink<C extends CoValue>(
@@ -63,14 +69,14 @@ export function parseInviteLink(inviteURL: string):
 }
 
 /** @category Invite Links */
-export function consumeInviteLink<S extends CoValueClassOrSchema>({
+export function consumeInviteLink<S extends CoreCoValueSchema>({
   inviteURL,
-  as = Account.getMe(),
+  as = coAccountDefiner().getMe(),
   forValueHint,
   invitedObjectSchema,
 }: {
   inviteURL: string;
-  as?: Account;
+  as?: Loaded<CoreAccountSchema, true>;
   forValueHint?: string;
   invitedObjectSchema: S;
 }): Promise<

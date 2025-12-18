@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "vitest";
-import { type Account, CoMap, type Group, co, z } from "../exports";
+import { type Account, type CoMap, type Group, co, z } from "../exports";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing";
 import { assertLoaded } from "./utils";
 
@@ -47,7 +47,7 @@ describe("Jazz Test Sync", () => {
       isCurrentActiveAccount: true,
     });
 
-    expect(account1.root?.value).toBe("ok");
+    expect(account1.root.value).toBe("ok");
   });
 
   test("correctly manages the global me during the migrations", async () => {

@@ -16,15 +16,22 @@ import {
   ID,
   Settled,
   RefEncoded,
-  RefsToResolve,
-  RefsToResolveStrict,
-  Resolved,
   SubscribeListenerOptions,
   SubscribeRestArgs,
   TypeSym,
   CoMapFieldSchema,
   Profile,
   MaybeLoaded,
+  GroupSchema,
+  coGroupDefiner,
+  coProfileDefiner,
+  coAccountDefiner,
+  Loaded,
+  ResolveQuery,
+  ResolveQueryStrict,
+  CoProfileSchema,
+  CoreAccountSchema,
+  CoreCoValueSchema,
 } from "../internal.js";
 import {
   Account,
@@ -48,8 +55,8 @@ import {
 type GroupMember = {
   id: string;
   role: AccountRole;
-  ref: Ref<Account>;
-  account: Account;
+  ref: Ref<CoreAccountSchema>;
+  account: MaybeLoaded<CoreAccountSchema>;
 };
 
 /**
@@ -68,13 +75,12 @@ export class Group extends CoValueBase implements CoValue {
   static fields = {
     profile: {
       type: "ref",
-      ref: () => Profile,
       optional: true,
-      sourceSchema: Profile,
-    } satisfies RefEncoded<Profile>,
+      sourceSchema: coProfileDefiner(),
+    } satisfies RefEncoded<CoProfileSchema>,
   };
 
-  declare readonly profile: MaybeLoaded<Profile> | undefined;
+  declare readonly profile: MaybeLoaded<CoProfileSchema> | undefined;
 
   /** @deprecated Don't use constructor directly, use .create */
   constructor(raw: RawGroup, sourceSchema: CoreGroupSchema) {
@@ -104,7 +110,7 @@ export class Group extends CoValueBase implements CoValue {
   }
 
   addMember(member: Everyone, role: "writer" | "reader" | "writeOnly"): void;
-  addMember(member: Account, role: AccountRole): void;
+  addMember(member: Loaded<CoreAccountSchema, true>, role: AccountRole): void;
   /** @category Identity & Permissions
    * Gives members of a parent group membership in this group.
    * @param member The group that will gain access to this group.
@@ -112,11 +118,14 @@ export class Group extends CoValueBase implements CoValue {
    */
   addMember(member: Group, role?: GroupRole | "inherit"): void;
   addMember(
-    member: Group | Account,
+    member: Loaded<CoreGroupSchema> | Loaded<CoreAccountSchema, true>,
     role: "reader" | "writer" | "admin" | "manager",
   ): void;
   addMember(
-    member: Group | Everyone | Account,
+    member:
+      | Loaded<CoreGroupSchema>
+      | Loaded<CoreAccountSchema, true>
+      | Everyone,
     role?: AccountRole | "inherit",
   ): void {
     if (isGroupValue(member)) {
@@ -131,13 +140,24 @@ export class Group extends CoValueBase implements CoValue {
     }
   }
 
-  removeMember(member: Everyone | Account): void;
+  removeMember(member: Everyone | Loaded<CoreAccountSchema, true>): void;
   /** @category Identity & Permissions
    * Revokes membership from members a parent group.
    * @param member The group that will lose access to this group.
    */
-  removeMember(member: Group): void;
-  removeMember(member: Group | Everyone | Account) {
+  removeMember(member: Loaded<CoreGroupSchema>): void;
+  removeMember(
+    member:
+      | Loaded<CoreGroupSchema>
+      | Loaded<CoreAccountSchema, true>
+      | Everyone,
+  ): void;
+  removeMember(
+    member:
+      | Loaded<CoreGroupSchema>
+      | Loaded<CoreAccountSchema, true>
+      | Everyone,
+  ): void {
     if (isGroupValue(member)) {
       this.$jazz.raw.revokeExtend(member.$jazz.raw);
     } else {
@@ -154,10 +174,9 @@ export class Group extends CoValueBase implements CoValue {
 
     const refEncodedAccountSchema = {
       type: "ref",
-      ref: () => Account,
       optional: false,
-      sourceSchema: Account,
-    } satisfies RefEncoded<Account>;
+      sourceSchema: coAccountDefiner(),
+    } satisfies RefEncoded<CoreAccountSchema>;
 
     for (const accountID of accountIDs) {
       if (!isAccountID(accountID)) continue;
@@ -165,7 +184,7 @@ export class Group extends CoValueBase implements CoValue {
       const role = this.$jazz.raw.roleOf(accountID);
 
       if (isAccountRole(role)) {
-        const ref = new Ref<Account>(
+        const ref = new Ref<CoreAccountSchema>(
           accountID,
           this.$jazz.loadedAs,
           refEncodedAccountSchema,
@@ -175,7 +194,7 @@ export class Group extends CoValueBase implements CoValue {
         const group = this;
 
         members.push({
-          id: accountID as unknown as ID<Account>,
+          id: accountID as unknown as ID<Loaded<CoreAccountSchema, true>>,
           role,
           ref,
           get account() {
@@ -184,7 +203,7 @@ export class Group extends CoValueBase implements CoValue {
               group,
               accountID,
               refEncodedAccountSchema,
-            ) as Account;
+            ) as MaybeLoaded<CoreAccountSchema>;
           },
         });
       }
@@ -217,7 +236,9 @@ export class Group extends CoValueBase implements CoValue {
     return this.getMembersFromKeys(this.$jazz.raw.getMemberKeys());
   }
 
-  getRoleOf(member: Everyone | ID<Account> | "me"): Role | undefined {
+  getRoleOf(
+    member: Everyone | ID<Loaded<CoreAccountSchema, true>> | "me",
+  ): Role | undefined {
     const accountId =
       member === "me"
         ? (activeAccountContext.get().$jazz.id as RawAccountID)
@@ -310,26 +331,32 @@ export class GroupJazzApi<G extends Group> extends CoValueJazzApi<G> {
   }
 
   /** @category Subscription & Loading */
-  ensureLoaded<G extends Group, const R extends RefsToResolve<G>>(
+  ensureLoaded<const R extends ResolveQuery<CoreGroupSchema>>(
     this: GroupJazzApi<G>,
-    options?: { resolve?: RefsToResolveStrict<G, R> },
-  ): Promise<Resolved<G, R>> {
-    return ensureCoValueLoaded(this.group, options);
+    options?: { resolve?: ResolveQueryStrict<CoreGroupSchema, R> },
+  ): Promise<Loaded<CoreGroupSchema, R>> {
+    return ensureCoValueLoaded<Group, CoreGroupSchema, R>(this.group, options);
   }
 
   /** @category Subscription & Loading */
-  subscribe<G extends Group, const R extends RefsToResolve<G>>(
+  subscribe<const R extends ResolveQuery<CoreGroupSchema>>(
     this: GroupJazzApi<G>,
-    listener: (value: Resolved<G, R>, unsubscribe: () => void) => void,
+    listener: (
+      value: Loaded<CoreGroupSchema, R>,
+      unsubscribe: () => void,
+    ) => void,
   ): () => void;
-  subscribe<G extends Group, const R extends RefsToResolve<G>>(
+  subscribe<const R extends ResolveQuery<CoreGroupSchema>>(
     this: GroupJazzApi<G>,
-    options: { resolve?: RefsToResolveStrict<G, R> },
-    listener: (value: Resolved<G, R>, unsubscribe: () => void) => void,
+    options: { resolve?: ResolveQueryStrict<CoreGroupSchema, R> },
+    listener: (
+      value: Loaded<CoreGroupSchema, R>,
+      unsubscribe: () => void,
+    ) => void,
   ): () => void;
-  subscribe<G extends Group, const R extends RefsToResolve<G>>(
+  subscribe<const R extends ResolveQuery<CoreGroupSchema>>(
     this: GroupJazzApi<G>,
-    ...args: SubscribeRestArgs<G, R>
+    ...args: SubscribeRestArgs<CoreGroupSchema, R>
   ): () => void {
     const { options, listener } = parseSubscribeRestArgs(args);
     return subscribeToExistingCoValue(this.group, options, listener);
@@ -358,11 +385,12 @@ export function isAccountID(id: RawAccountID | AgentID): id is RawAccountID {
   return id.startsWith("co_");
 }
 
-export function getCoValueOwner(coValue: CoValue): Group {
+export function getCoValueOwner(
+  coValue: Loaded<CoreCoValueSchema>,
+): Loaded<CoreGroupSchema> {
   const group = accessChildById(coValue, coValue.$jazz.raw.group.id, {
     type: "ref",
-    ref: () => Group,
-    sourceSchema: Group,
+    sourceSchema: coGroupDefiner(),
     optional: false,
   });
   if (!group.$isLoaded) {
@@ -371,6 +399,8 @@ export function getCoValueOwner(coValue: CoValue): Group {
   return group;
 }
 
-function isGroupValue(value: Group | Everyone | Account): value is Group {
+function isGroupValue(
+  value: Loaded<CoreGroupSchema> | Everyone | Loaded<CoreAccountSchema, true>,
+): value is Loaded<CoreGroupSchema> {
   return value !== "everyone" && !(value.$jazz.raw instanceof RawAccount);
 }

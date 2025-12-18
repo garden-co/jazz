@@ -462,7 +462,7 @@ describe("co.discriminatedUnion", () => {
       owner: Person.create({ name: "John Doe" }),
     });
 
-    const loadedPet = await loadCoValue(Pet.getCoValueClass(), dog.$jazz.id, {
+    const loadedPet = await loadCoValue(Pet, dog.$jazz.id, {
       resolve: { owner: true },
       loadAs: account,
     });

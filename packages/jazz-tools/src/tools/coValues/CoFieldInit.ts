@@ -1,9 +1,15 @@
-import { CoFeed } from "./coFeed.js";
-import { CoList } from "./coList.js";
-import { CoMap, CoMapInit } from "./coMap.js";
-import { CoPlainText } from "./coPlainText.js";
-import { CoRichText } from "./coRichText.js";
-import { CoVector } from "./coVector.js";
+import { TypeOfZodSchema } from "../implementation/zodSchema/typeConverters/TypeOfZodSchema.js";
+import {
+  CoreCoFeedSchema,
+  CoreCoListSchema,
+  CoreCoMapSchema,
+  CoreCoVectorSchema,
+  CoreRichTextSchema,
+  CorePlainTextSchema,
+  Loaded,
+  AnyZodSchema,
+} from "../internal.js";
+import { CoMapInit } from "./coMap.js";
 
 /**
  * Returns the type of values that can be used to initialize a field of the provided type.
@@ -11,13 +17,14 @@ import { CoVector } from "./coVector.js";
  * For CoValue references, either a CoValue of the same type, or a plain JSON value that can be
  * converted to the CoValue type are allowed.
  */
-// Note: we don't define this type as V | ... because it prevents TS from inlining the type
-export type CoFieldInit<V> = V extends CoMap
-  ? V | CoMapInit<V>
-  : V extends CoList<infer T> | CoFeed<infer T>
-    ? V | ReadonlyArray<CoFieldInit<T>>
-    : V extends CoVector | Readonly<CoVector>
-      ? V | ReadonlyArray<number> | Float32Array
-      : V extends CoPlainText | CoRichText
-        ? V | string
-        : V;
+export type CoFieldInit<S> = S extends CoreCoMapSchema
+  ? Loaded<S> | CoMapInit<S>
+  : S extends CoreCoListSchema<infer T> | CoreCoFeedSchema<infer T>
+    ? Loaded<S> | ReadonlyArray<CoFieldInit<T>>
+    : S extends CoreCoVectorSchema
+      ? Loaded<S> | ReadonlyArray<number> | Float32Array
+      : S extends CorePlainTextSchema | CoreRichTextSchema
+        ? Loaded<S> | string
+        : S extends AnyZodSchema
+          ? TypeOfZodSchema<S>
+          : never;

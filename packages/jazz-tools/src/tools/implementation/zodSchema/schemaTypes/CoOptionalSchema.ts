@@ -1,8 +1,7 @@
 import { RawCoValue } from "cojson";
 import { CoValueSchemaFromCoreSchema } from "../zodSchema.js";
 import { CoreCoValueSchema } from "./CoValueSchema.js";
-import { InstanceOfSchema } from "../typeConverters/InstanceOfSchema.js";
-import { Group } from "../../../internal.js";
+import { Group, Loaded } from "../../../internal.js";
 
 type CoOptionalSchemaDefinition<
   Shape extends CoreCoValueSchema = CoreCoValueSchema,
@@ -19,8 +18,8 @@ export interface CoreCoOptionalSchema<
 }
 
 export class CoOptionalSchema<
-  Shape extends CoreCoValueSchema = CoreCoValueSchema,
-> implements CoreCoOptionalSchema<Shape>
+  Inner extends CoreCoValueSchema = CoreCoValueSchema,
+> implements CoreCoOptionalSchema<Inner>
 {
   readonly collaborative = true as const;
   readonly builtin = "CoOptional" as const;
@@ -29,13 +28,9 @@ export class CoOptionalSchema<
   });
   readonly resolveQuery = true as const;
 
-  constructor(public readonly innerType: Shape) {}
+  constructor(public readonly innerType: Inner) {}
 
-  getCoValueClass() {
-    return (this.innerType as any).getCoValueClass();
-  }
-
-  fromRaw(raw: RawCoValue): InstanceOfSchema<Shape> {
+  fromRaw(raw: RawCoValue): Loaded<Inner> {
     if (
       "fromRaw" in this.innerType &&
       typeof this.innerType.fromRaw === "function"
@@ -46,7 +41,7 @@ export class CoOptionalSchema<
     }
   }
 
-  create(init: any, owner: Group): InstanceOfSchema<Shape> {
+  create(init: any, owner: Group): Loaded<Inner> {
     if (
       "create" in this.innerType &&
       typeof this.innerType.create === "function"

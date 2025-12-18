@@ -1,11 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { Account, Group, co, z } from "../exports.js";
-import {
-  CoValueLoadingState,
-  InstanceOfSchema,
-  RefEncoded,
-  coValueClassFromCoValueClassOrSchema,
-} from "../internal.js";
+import { CoValueLoadingState, RefEncoded } from "../internal.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { JazzError } from "../subscribe/JazzError.js";
 import { SubscriptionScope } from "../subscribe/SubscriptionScope.js";
@@ -17,10 +12,9 @@ describe("SubscriptionScope", () => {
 
   const personField = {
     type: "ref",
-    ref: coValueClassFromCoValueClassOrSchema(Person),
     optional: false,
     sourceSchema: Person,
-  } satisfies RefEncoded<InstanceOfSchema<typeof Person>>;
+  } satisfies RefEncoded<typeof Person>;
 
   beforeEach(async () => {
     await setupJazzTestSync();

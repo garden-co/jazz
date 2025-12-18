@@ -5,7 +5,6 @@ import {
   Loaded,
   subscribeToCoValue,
   co,
-  coValueClassFromCoValueClassOrSchema,
   CoValueLoadingState,
   Account,
 } from "../internal.js";

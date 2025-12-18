@@ -7,24 +7,18 @@ import {
   CoValueClass,
   CoValueFromRaw,
   CoValueJazzApi,
+  CoreAccountSchema,
+  CoreGroupSchema,
   Group,
   ID,
+  Loaded,
   Settled,
-  RefsToResolve,
-  RefsToResolveStrict,
-  Resolved,
   Simplify,
   SubscribeListenerOptions,
   SubscribeRestArgs,
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
 } from "../internal.js";
-
-/**
- * Extends `SchemaUnion` with a non-abstract constructor.
- */
-export type SchemaUnionConcreteSubclass<V extends CoValue> =
-  typeof SchemaUnion & CoValueClass<V>;
 
 export type SchemaUnionDiscriminator<V extends CoValue> = (discriminable: {
   get(key: string): JsonValue | undefined;
@@ -107,7 +101,7 @@ export abstract class SchemaUnion extends CoValueBase implements CoValue {
       static override create<V extends CoValue>(
         this: CoValueClass<V>,
         init: object,
-        owner: Account | Group,
+        owner: Loaded<CoreAccountSchema, true> | Loaded<CoreGroupSchema, true>,
       ): V {
         const ResolvedClass = discriminator(new Map(Object.entries(init)));
         // @ts-expect-error - create is a static method in the CoMap class
@@ -129,7 +123,7 @@ export abstract class SchemaUnion extends CoValueBase implements CoValue {
   static create<V extends CoValue>(
     this: CoValueClass<V>,
     init: object,
-    owner: Account | Group,
+    owner: Loaded<CoreAccountSchema, true> | Loaded<CoreGroupSchema, true>,
   ): V {
     throw new Error("Not implemented");
   }

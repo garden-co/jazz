@@ -26,7 +26,6 @@ import {
   CoValueFromRaw,
   InstanceOfSchema,
   Loaded,
-  coValueClassFromCoValueClassOrSchema,
 } from "../internal";
 import {
   assertLoaded,

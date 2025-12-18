@@ -14,13 +14,13 @@ import {
   JazzContextManagerBaseProps,
   activeAccountContext,
   co,
-  coValueClassFromCoValueClassOrSchema,
   createAnonymousJazzContext,
   createJazzContext,
   randomSessionProvider,
   Loaded,
   PlatformSpecificContext,
   asConstructable,
+  AccountSchema,
 } from "./internal.js";
 
 export { assertLoaded } from "./lib/utils.js";
@@ -98,9 +98,9 @@ export async function createJazzTestAccount<
   AccountSchema?: S;
   creationProps?: Record<string, unknown>;
 }): Promise<InstanceOfSchema<S>> {
-  const AccountClass = options?.AccountSchema
-    ? coValueClassFromCoValueClassOrSchema(options.AccountSchema)
-    : Account;
+  const AccountSchemaToUse = options?.AccountSchema
+    ? asConstructable(options.AccountSchema)
+    : co.account();
   const peers = [];
   if (syncServer.current) {
     peers.push(getPeerConnectedToTestSyncServer());
@@ -126,7 +126,7 @@ export async function createJazzTestAccount<
 
       isMigrationActive = true;
 
-      const account = AccountClass.fromRaw(rawAccount);
+      const account = AccountSchemaToUse.fromRaw(rawAccount);
 
       // We need to set the account as current because the migration
       // will probably rely on the global me

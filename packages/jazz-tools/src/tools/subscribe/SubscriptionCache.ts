@@ -1,20 +1,17 @@
 import { LocalNode } from "cojson";
 import type {
-  CoValue,
-  CoValueClassOrSchema,
+  CoreCoValueSchema,
   RefEncoded,
-  RefsToResolve,
   ResolveQuery,
 } from "../internal.js";
-import { coValueClassFromCoValueClassOrSchema } from "../internal.js";
 import { SubscriptionScope } from "./SubscriptionScope.js";
 import type { BranchDefinition } from "./types.js";
 import { isEqualRefsToResolve } from "./utils.js";
 
 interface CacheEntry {
   subscriptionScope: SubscriptionScope<any>;
-  schema: CoValueClassOrSchema;
-  resolve: RefsToResolve<any>;
+  schema: CoreCoValueSchema;
+  resolve: ResolveQuery<any>;
   branch?: BranchDefinition;
   subscriberCount: number;
   cleanupTimeoutId?: ReturnType<typeof setTimeout>;
@@ -55,8 +52,8 @@ export class SubscriptionCache {
    */
   private matchesEntry(
     entry: CacheEntry,
-    schema: CoValueClassOrSchema,
-    resolve: RefsToResolve<any>,
+    schema: CoreCoValueSchema,
+    resolve: ResolveQuery<any>,
     branch?: BranchDefinition,
   ): boolean {
     // Compare schema by object identity
@@ -89,9 +86,9 @@ export class SubscriptionCache {
    * Uses id-based nesting to quickly filter candidates
    */
   private findMatchingEntry(
-    schema: CoValueClassOrSchema,
+    schema: CoreCoValueSchema,
     id: string,
-    resolve: RefsToResolve<any>,
+    resolve: ResolveQuery<any>,
     branch?: BranchDefinition,
   ): CacheEntry | undefined {
     // Get the inner set for this id (quick filter)
@@ -180,7 +177,7 @@ export class SubscriptionCache {
   /**
    * Get or create a SubscriptionScope from the cache
    */
-  getOrCreate<S extends CoValueClassOrSchema>(
+  getOrCreate<S extends CoreCoValueSchema>(
     node: LocalNode,
     schema: S,
     id: string,
@@ -188,7 +185,7 @@ export class SubscriptionCache {
     skipRetry?: boolean,
     bestEffortResolution?: boolean,
     branch?: BranchDefinition,
-  ): SubscriptionScope<CoValue> {
+  ): SubscriptionScope<S> {
     // Handle undefined/null id case
     if (!id) {
       throw new Error("Cannot create subscription with undefined or null id");
@@ -201,22 +198,20 @@ export class SubscriptionCache {
       // Found existing entry - cancel any pending cleanup since we're reusing it
       this.cancelCleanup(matchingEntry);
 
-      return matchingEntry.subscriptionScope as SubscriptionScope<CoValue>;
+      return matchingEntry.subscriptionScope as SubscriptionScope<S>;
     }
 
     // Create new SubscriptionScope
     // Transform schema to RefEncoded format
-    const refEncoded: RefEncoded<CoValue> = {
+    const refEncoded: RefEncoded<S> = {
       type: "ref",
-      ref: coValueClassFromCoValueClassOrSchema(schema) as any,
       optional: true,
       sourceSchema: schema,
     };
 
     // Create new SubscriptionScope with all required parameters
-    const subscriptionScope = new SubscriptionScope<CoValue>(
+    const subscriptionScope = new SubscriptionScope<S>(
       node,
-      // @ts-expect-error the SubscriptionScope is too generic for TS to infer its instances are CoValues
       resolve,
       id,
       refEncoded,

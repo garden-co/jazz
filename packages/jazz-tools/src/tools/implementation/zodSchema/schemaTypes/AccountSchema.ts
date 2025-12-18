@@ -6,9 +6,6 @@ import {
   coOptionalDefiner,
   Group,
   Settled,
-  RefsToResolveStrict,
-  RefsToResolve,
-  Resolved,
   Simplify,
   SubscribeListenerOptions,
   SubscribeRestArgs,
@@ -25,6 +22,8 @@ import {
   RegisteredSchemas,
   CoMap,
   asConstructable,
+  ResolveQueryStrict,
+  activeAccountContext,
 } from "../../../internal.js";
 import {
   cojsonInternals,
@@ -34,8 +33,6 @@ import {
   RawAccount,
 } from "cojson";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
-import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
-import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded.js";
 import { z } from "../zodReExport.js";
 import { AnyZodOrCoValueSchema } from "../zodSchema.js";
 import {
@@ -66,7 +63,7 @@ export type DefaultAccountShape = {
 
 export class AccountSchema<
   Shape extends BaseAccountShape = DefaultAccountShape,
-  DefaultResolveQuery extends ResolveQuery<AccountSchema<Shape>> = true,
+  DefaultResolveQuery extends ResolveQuery<CoreAccountSchema<Shape>> = true,
 > implements CoreAccountSchema<Shape>
 {
   collaborative = true as const;
@@ -114,19 +111,21 @@ export class AccountSchema<
   }
 
   load<
-    const R extends ResolveQuery<AccountSchema<Shape>> = DefaultResolveQuery,
+    const R extends ResolveQuery<
+      CoreAccountSchema<Shape>
+    > = DefaultResolveQuery,
   >(
     id: string,
     options?: {
-      loadAs?: Account | AnonymousJazzAgent;
-      resolve?: RefsToResolveStrict<AccountSchema<Shape>, R>;
+      loadAs?: Loaded<CoreAccountSchema> | AnonymousJazzAgent;
+      resolve?: ResolveQueryStrict<CoreAccountSchema<Shape>, R>;
     },
-  ): Promise<Settled<Loaded<AccountSchema<Shape>, R>>> {
-    return loadCoValueWithoutMe(
+  ): Promise<Settled<CoreAccountSchema<Shape>, R>> {
+    return loadCoValueWithoutMe<CoreAccountSchema<Shape>, R>(
       this,
       id,
-      withSchemaResolveQuery(options, this.resolveQuery) as any, // TODO: fix cast
-    ) as Promise<Settled<Loaded<AccountSchema<Shape>, R>>>;
+      withSchemaResolveQuery(this, options),
+    );
   }
 
   fromRaw(raw: RawAccount): Loaded<CoreAccountSchema<Shape>> {
@@ -234,46 +233,44 @@ export class AccountSchema<
   }
 
   unstable_merge<
-    R extends ResolveQuery<AccountSchema<Shape>> = DefaultResolveQuery,
+    R extends ResolveQuery<CoreAccountSchema<Shape>> = DefaultResolveQuery,
   >(
     id: string,
     options: {
       loadAs?: Loaded<CoreAccountSchema> | AnonymousJazzAgent;
-      resolve?: RefsToResolveStrict<AccountSchema<Shape>, R>;
+      resolve?: ResolveQueryStrict<CoreAccountSchema<Shape>, R>;
       branch: BranchDefinition;
     },
   ): Promise<void> {
     return unstable_mergeBranchWithResolve(
-      this,
+      this as CoreAccountSchema<Shape>,
       id,
-      withSchemaResolveQuery(options, this.resolveQuery) as any, // TODO: fix cast
+      withSchemaResolveQuery(this, options),
     );
   }
 
   subscribe<
-    const R extends RefsToResolve<
-      Simplify<AccountInstance<Shape>>
-      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+    const R extends ResolveQuery<
+      CoreAccountSchema<Shape>
     > = DefaultResolveQuery,
   >(
     id: string,
-    options: SubscribeListenerOptions<Simplify<AccountInstance<Shape>>, R>,
+    options: SubscribeListenerOptions<CoreAccountSchema<Shape>, R>,
     listener: (
-      value: Resolved<Simplify<AccountInstance<Shape>>, R>,
+      value: Loaded<CoreAccountSchema<Shape>, R>,
       unsubscribe: () => void,
     ) => void,
   ): () => void {
     return subscribeToCoValueWithoutMe(
-      this,
+      this as CoreAccountSchema<Shape>,
       id,
-      withSchemaResolveQuery(options, this.resolveQuery),
-      listener as any,
+      withSchemaResolveQuery(this, options),
+      listener,
     );
   }
 
   getMe(): Loaded<this, true> {
-    // @ts-expect-error
-    return this.coValueClass.getMe();
+    return activeAccountContext.get();
   }
 
   withMigration(
@@ -282,19 +279,12 @@ export class AccountSchema<
       creationProps?: { name: string },
     ) => void,
   ): AccountSchema<Shape, DefaultResolveQuery> {
-    (this.coValueClass.prototype as Account).migrate = async function (
-      this,
-      creationProps,
-    ) {
-      // @ts-expect-error
-      await migration(this, creationProps);
-    };
+    (this.coValueClass.prototype as Account<CoreAccountSchema<Shape>>).migrate =
+      async function (this, creationProps) {
+        await migration(this, creationProps);
+      };
 
     return this;
-  }
-
-  getCoValueClass(): typeof Account {
-    return this.coValueClass;
   }
 
   optional(): CoOptionalSchema<this> {
@@ -306,7 +296,7 @@ export class AccountSchema<
    * This resolve query will be used when no resolve query is provided to the load method.
    */
   resolved<R extends ResolveQuery<AccountSchema<Shape>>>(
-    resolveQuery: RefsToResolveStrict<AccountSchema<Shape>, R>,
+    resolveQuery: ResolveQueryStrict<AccountSchema<Shape>, R>,
   ): AccountSchema<Shape, R> {
     const coreSchema: CoreAccountSchema<Shape> = createCoreAccountSchema(
       this.shape,
@@ -335,7 +325,7 @@ export type DefaultProfileShape = {
 export type CoProfileSchema<
   Shape extends z.core.$ZodLooseShape = DefaultProfileShape,
   CatchAll extends AnyZodOrCoValueSchema | unknown = unknown,
-> = CoMapSchema<Shape & DefaultProfileShape, CatchAll, Group>;
+> = CoMapSchema<Shape & DefaultProfileShape, CatchAll>;
 
 // less precise version to avoid circularity issues and allow matching against
 export interface CoreAccountSchema<
@@ -343,10 +333,6 @@ export interface CoreAccountSchema<
 > extends Omit<CoreCoMapSchema<Shape>, "builtin"> {
   builtin: "Account";
 }
-
-export type AccountInstance<Shape extends z.core.$ZodLooseShape> = {
-  readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchema<Shape[key]>;
-} & Account;
 
 RegisteredSchemas["Account"] = new AccountSchema(
   createCoreAccountSchema({

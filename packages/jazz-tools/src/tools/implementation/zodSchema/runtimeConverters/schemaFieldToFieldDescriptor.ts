@@ -36,10 +36,7 @@ import { isCoValueSchema } from "./coValueSchemaTransformation.js";
  */
 export type SchemaField =
   // Schemas created with co.map(), co.record(), co.list(), etc.
-  | CoreCoValueSchema
-  // CoValue classes created with class syntax, or framework-provided classes like Group
-  | CoValueClass
-  | ZodSchemaField;
+  CoreCoValueSchema | ZodSchemaField;
 
 export type ZodSchemaField =
   | ZodPrimitiveSchema
@@ -101,18 +98,9 @@ export function schemaFieldToFieldDescriptor(
     return cachedCoFieldDef;
   }
 
-  if (isCoValueClass(schema)) {
+  if (isCoValueSchema(schema)) {
     return cacheSchemaField(schema, {
       type: "ref",
-      ref: schema,
-      permissions: getDefaultRefPermissions(),
-      optional: false,
-      sourceSchema: schema,
-    });
-  } else if (isCoValueSchema(schema)) {
-    return cacheSchemaField(schema, {
-      type: "ref",
-      ref: schema.getCoValueClass(),
       permissions: schemaFieldPermissions(schema),
       optional: schema.builtin === "CoOptional",
       sourceSchema: schema,

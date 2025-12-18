@@ -8,7 +8,6 @@ import {
   CoValueLoadingState,
   ID,
   Settled,
-  Resolved,
   SubscribeListenerOptions,
   SubscribeRestArgs,
   TypeSym,
@@ -20,6 +19,9 @@ import {
   subscribeToExistingCoValue,
   CorePlainTextSchema,
   CoreRichTextSchema,
+  CoreAccountSchema,
+  CoreGroupSchema,
+  Loaded,
 } from "../internal.js";
 import { Account } from "./account.js";
 import { getCoValueOwner, Group } from "./group.js";
@@ -36,7 +38,12 @@ export class CoPlainText extends String implements CoValue {
   constructor(
     options:
       | { fromRaw: RawCoPlainText }
-      | { text: string; owner: Account | Group }
+      | {
+          text: string;
+          owner:
+            | Loaded<CoreAccountSchema, true>
+            | Loaded<CoreGroupSchema, true>;
+        }
       | undefined,
     sourceSchema: CorePlainTextSchema | CoreRichTextSchema,
   ) {
@@ -164,7 +171,7 @@ export class CoTextJazzApi<T extends CoPlainText> extends CoValueJazzApi<T> {
     }
   }
 
-  get owner(): Group {
+  get owner(): Loaded<CoreGroupSchema, true> {
     return getCoValueOwner(this.coText);
   }
 
@@ -215,7 +222,10 @@ export class CoTextJazzApi<T extends CoPlainText> extends CoValueJazzApi<T> {
    **/
   subscribe<T extends CoPlainText>(
     this: CoTextJazzApi<T>,
-    listener: (value: Resolved<T, true>, unsubscribe: () => void) => void,
+    listener: (
+      value: Loaded<CorePlainTextSchema, true>,
+      unsubscribe: () => void,
+    ) => void,
   ): () => void {
     return subscribeToExistingCoValue(this.coText, {}, listener);
   }

@@ -8,7 +8,6 @@ import { AuthCredentials } from "../types.js";
 import { JazzContextType } from "../types.js";
 import { AnonymousJazzAgent } from "./anonymousJazzAgent.js";
 import { createAnonymousJazzContext } from "./createContext.js";
-import { InstanceOfSchema } from "./zodSchema/typeConverters/InstanceOfSchema.js";
 import { SubscriptionCache } from "../subscribe/SubscriptionCache.js";
 import {
   AccountSchema,
@@ -69,7 +68,7 @@ function getAnonymousFallback() {
     register: async () => {
       throw new Error("Not implemented");
     },
-  } satisfies JazzContextType<InstanceOfSchema<any>>;
+  } satisfies JazzContextType<CoreAccountSchema>;
 }
 
 export class JazzContextManager<

@@ -8,6 +8,7 @@ import {
   CoreCoMapSchema,
   DiscriminableCoValueSchemas,
   DiscriminableCoreCoValueSchema,
+  Loaded,
   SchemaUnionDiscriminator,
 } from "../../internal.js";
 import {
@@ -40,9 +41,9 @@ export function schemaUnionDiscriminatorFor(
 
     const availableOptions = getFlattenedUnionOptions(schema);
 
-    const determineSchema: SchemaUnionDiscriminator<CoMap> = (
-      discriminable,
-    ) => {
+    const determineSchema: SchemaUnionDiscriminator<
+      Loaded<CoreCoMapSchema, true>
+    > = (discriminable) => {
       // collect all keys of nested CoValues
       const allNestedRefKeys = new Set<string>();
       for (const option of availableOptions) {

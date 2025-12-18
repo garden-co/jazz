@@ -2,13 +2,11 @@ import {
   Account,
   AnonymousJazzAgent,
   CoVector,
+  CoreAccountSchema,
+  CoreGroupSchema,
   Group,
-  InstanceOrPrimitiveOfSchema,
-  InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded,
-  RefsToResolve,
-  Settled,
-  SubscribeListenerOptions,
-  SubscribeRestArgs,
+  Loaded,
+  ResolveQuery,
   coOptionalDefiner,
   loadCoValueWithoutMe,
   parseCoValueCreateOptions,
@@ -62,7 +60,7 @@ export class CoVectorSchema implements CoreCoVectorSchema {
   create(
     vector: number[] | Float32Array,
     options?: { owner: Group } | Group,
-  ): CoVectorInstance;
+  ): Loaded<CoreCoVectorSchema>;
   /**
    * Create a `CoVector` from a given vector.
    *
@@ -70,12 +68,18 @@ export class CoVectorSchema implements CoreCoVectorSchema {
    */
   create(
     vector: number[] | Float32Array,
-    options?: { owner: Account | Group } | Account | Group,
-  ): CoVectorInstance;
+    options?:
+      | { owner: Loaded<CoreAccountSchema, true> | Loaded<CoreGroupSchema> }
+      | Loaded<CoreAccountSchema, true>
+      | Loaded<CoreGroupSchema>,
+  ): Loaded<CoreCoVectorSchema>;
   create(
     vector: number[] | Float32Array,
-    options?: { owner: Account | Group } | Account | Group,
-  ): CoVectorInstance {
+    options?:
+      | { owner: Loaded<CoreAccountSchema, true> | Loaded<CoreGroupSchema> }
+      | Loaded<CoreAccountSchema, true>
+      | Loaded<CoreGroupSchema>,
+  ): Loaded<CoreCoVectorSchema> {
     const optionsWithPermissions = withSchemaPermissions(
       options,
       this.permissions,
@@ -120,7 +124,7 @@ export class CoVectorSchema implements CoreCoVectorSchema {
     return coVector;
   }
 
-  fromRaw(raw: RawBinaryCoStream): CoVectorInstance {
+  fromRaw(raw: RawBinaryCoStream): Loaded<CoreCoVectorSchema> {
     return new this.coValueClass({ fromRaw: raw }, this);
   }
 
@@ -129,8 +133,8 @@ export class CoVectorSchema implements CoreCoVectorSchema {
    */
   async load(
     id: string,
-    options?: { loadAs: Account | AnonymousJazzAgent },
-  ): Promise<MaybeLoadedCoVectorInstance> {
+    options?: { loadAs: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent },
+  ): Promise<Loaded<CoreCoVectorSchema>> {
     const coVector = (await loadCoValueWithoutMe(
       this,
       id,
@@ -156,15 +160,15 @@ export class CoVectorSchema implements CoreCoVectorSchema {
               (vectorValue.$jazz.raw as RawBinaryCoStream).isBinaryStreamEnded()
             ) {
               unsubscribe();
-              resolve(vectorValue as MaybeLoadedCoVectorInstance);
+              resolve(vectorValue as Loaded<CoreCoVectorSchema>);
             }
           },
         );
-      }) as Promise<MaybeLoadedCoVectorInstance>;
+      }) as Promise<Loaded<CoreCoVectorSchema>>;
     }
 
     coVector.loadVectorData();
-    return coVector as MaybeLoadedCoVectorInstance;
+    return coVector as Loaded<CoreCoVectorSchema>;
   }
 
   /**
@@ -172,30 +176,26 @@ export class CoVectorSchema implements CoreCoVectorSchema {
    */
   subscribe(
     id: string,
-    options: { loadAs: Account | AnonymousJazzAgent },
+    options: { loadAs: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent },
     listener: (
-      value: MaybeLoadedCoVectorInstance,
+      value: Loaded<CoreCoVectorSchema>,
       unsubscribe: () => void,
     ) => void,
   ): () => void;
   subscribe(
     id: string,
     listener: (
-      value: MaybeLoadedCoVectorInstance,
+      value: Loaded<CoreCoVectorSchema>,
       unsubscribe: () => void,
     ) => void,
   ): () => void;
   subscribe(...args: [any, ...[any]]) {
     const [id, ...restArgs] = args;
     const { options, listener } = parseSubscribeRestArgs<
-      CoVector,
-      RefsToResolve<CoVector>
+      CoreCoVectorSchema,
+      ResolveQuery<CoreCoVectorSchema>
     >(restArgs);
-    return subscribeToCoValueWithoutMe(this, id, options, listener as any);
-  }
-
-  getCoValueClass(): typeof CoVector {
-    return this.coValueClass;
+    return subscribeToCoValueWithoutMe(this, id, options, listener);
   }
 
   optional(): CoOptionalSchema<this> {
@@ -211,8 +211,3 @@ export class CoVectorSchema implements CoreCoVectorSchema {
     return copy;
   }
 }
-
-export type CoVectorInstance = InstanceOrPrimitiveOfSchema<CoVectorSchema>;
-
-export type MaybeLoadedCoVectorInstance =
-  InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded<CoVectorSchema>;

@@ -4,11 +4,15 @@ import {
   CoList,
   CoMap,
   type CoValue,
+  CoreCoFeedSchema,
+  CoreCoListSchema,
+  CoreCoMapSchema,
   type ID,
+  Loaded,
   MaybeLoaded,
   NotLoaded,
   type RefEncoded,
-  type RefsToResolve,
+  ResolveQuery,
   TypeSym,
   createUnloadedCoValue,
   instantiateRefEncodedFromRaw,
@@ -35,12 +39,13 @@ import {
   rejectedPromise,
   resolvedPromise,
 } from "./utils.js";
+import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoValueSchema.js";
 
-export class SubscriptionScope<D extends CoValue> {
-  childNodes = new Map<string, SubscriptionScope<CoValue>>();
+export class SubscriptionScope<S extends CoreCoValueSchema> {
+  childNodes = new Map<string, SubscriptionScope<CoreCoValueSchema>>();
   childValues: Map<string, SubscriptionValue<any, any>> = new Map<
     string,
-    SubscriptionValue<D, any>
+    SubscriptionValue<S, any>
   >();
   /**
    * Explicitly-loaded child ids that are unloaded
@@ -50,13 +55,13 @@ export class SubscriptionScope<D extends CoValue> {
    * Autoloaded child ids that are unloaded
    */
   pendingAutoloadedChildren: Set<string> = new Set();
-  value: SubscriptionValue<D, any> | SubscriptionValueLoading;
+  value: SubscriptionValue<S, any> | SubscriptionValueLoading;
   childErrors: Map<string, JazzError> = new Map();
   validationErrors: Map<string, JazzError> = new Map();
   errorFromChildren: JazzError | undefined;
   subscription: CoValueCoreSubscription;
   dirty = false;
-  resolve: RefsToResolve<any>;
+  resolve: ResolveQuery<S>;
   idsSubscribed = new Set<string>();
   autoloaded = new Set<string>();
   autoloadedKeys = new Set<string>();
@@ -78,9 +83,9 @@ export class SubscriptionScope<D extends CoValue> {
 
   constructor(
     public node: LocalNode,
-    resolve: RefsToResolve<D>,
-    public id: ID<D>,
-    public schema: RefEncoded<D>,
+    resolve: ResolveQuery<S>,
+    public id: ID<S>,
+    public schema: RefEncoded<S>,
     public skipRetry = false,
     public bestEffortResolution = false,
     public unstable_branch?: BranchDefinition,
@@ -156,7 +161,7 @@ export class SubscriptionScope<D extends CoValue> {
     );
   }
 
-  updateValue(value: SubscriptionValue<D, any>) {
+  updateValue(value: SubscriptionValue<S, any>) {
     this.value = value;
 
     // Flags that the value has changed and we need to trigger an update
@@ -325,16 +330,16 @@ export class SubscriptionScope<D extends CoValue> {
     return this.pendingLoadedChildren.size === 0;
   }
 
-  unloadedValue: NotLoaded<D> | undefined;
+  unloadedValue: NotLoaded<S> | undefined;
 
   lastPromise:
     | {
-        value: MaybeLoaded<D> | undefined;
-        promise: PromiseWithStatus<MaybeLoaded<D>>;
+        value: MaybeLoaded<S> | undefined;
+        promise: PromiseWithStatus<S>;
       }
     | undefined;
 
-  cachePromise(value: MaybeLoaded<D>, callback: () => PromiseWithStatus<D>) {
+  cachePromise(value: MaybeLoaded<S>, callback: () => PromiseWithStatus<S>) {
     if (this.lastPromise?.value === value) {
       return this.lastPromise.promise;
     }
@@ -363,7 +368,7 @@ export class SubscriptionScope<D extends CoValue> {
 
     // We need to cache rejected promises to make React Suspense happy
     return this.cachePromise(currentValue, () => {
-      return new Promise<D>((resolve, reject) => {
+      return new Promise<NotLoaded<S, true>>((resolve, reject) => {
         const unsubscribe = this.subscribe(() => {
           const currentValue = this.getCurrentValue();
 
@@ -387,7 +392,7 @@ export class SubscriptionScope<D extends CoValue> {
     });
   }
 
-  private getUnloadedValue(reason: NotLoadedCoValueState): NotLoaded<D> {
+  private getUnloadedValue(reason: NotLoadedCoValueState): NotLoaded<S, true> {
     if (this.unloadedValue?.$jazz.loadingState === reason) {
       return this.unloadedValue;
     }
@@ -401,7 +406,7 @@ export class SubscriptionScope<D extends CoValue> {
 
   lastErrorLogged: JazzError | undefined;
 
-  getCurrentValue(): MaybeLoaded<D> {
+  getCurrentValue(): MaybeLoaded<S> {
     const rawValue = this.getCurrentRawValue();
 
     if (
@@ -416,7 +421,7 @@ export class SubscriptionScope<D extends CoValue> {
     return rawValue;
   }
 
-  getCurrentRawValue(): D | NotLoadedCoValueState {
+  getCurrentRawValue(): DefInstance<S> | NotLoadedCoValueState {
     if (
       this.value.type === CoValueLoadingState.UNAUTHORIZED ||
       this.value.type === CoValueLoadingState.UNAVAILABLE
@@ -524,7 +529,7 @@ export class SubscriptionScope<D extends CoValue> {
     this.dirty = false;
   }
 
-  subscribers = new Set<(value: SubscriptionValue<D, any>) => void>();
+  subscribers = new Set<(value: SubscriptionValue<S, any>) => void>();
   subscriberChangeCallbacks = new Set<(count: number) => void>();
 
   /**
@@ -547,7 +552,7 @@ export class SubscriptionScope<D extends CoValue> {
     });
   }
 
-  subscribe(listener: (value: SubscriptionValue<D, any>) => void) {
+  subscribe(listener: (value: SubscriptionValue<S, any>) => void) {
     this.subscribers.add(listener);
     this.notifySubscriberChange();
 
@@ -557,7 +562,7 @@ export class SubscriptionScope<D extends CoValue> {
     };
   }
 
-  setListener(listener: (value: SubscriptionValue<D, any>) => void) {
+  setListener(listener: (value: SubscriptionValue<S, any>) => void) {
     const hadListener = this.subscribers.has(listener);
     this.subscribers.add(listener);
     // Only notify if this is a new listener (count actually changed)
@@ -593,11 +598,11 @@ export class SubscriptionScope<D extends CoValue> {
     this.silenceUpdates = true;
 
     if (value[TypeSym] === "CoMap" || value[TypeSym] === "Account") {
-      const map = value as CoMap;
+      const map = value as Loaded<CoreCoMapSchema, true>;
 
       this.loadCoMapKey(map, key, true);
     } else if (value[TypeSym] === "CoList") {
-      const list = value as CoList;
+      const list = value as Loaded<CoreCoListSchema, true>;
 
       this.loadCoListKey(list, key, true);
     }
@@ -619,7 +624,7 @@ export class SubscriptionScope<D extends CoValue> {
    *
    * Used to make the autoload work on closed subscription scopes
    */
-  pullValue(listener: (value: SubscriptionValue<D, any>) => void) {
+  pullValue(listener: (value: SubscriptionValue<S, any>) => void) {
     if (!this.closed) {
       throw new Error("Cannot pull a non-closed subscription scope");
     }
@@ -720,7 +725,7 @@ export class SubscriptionScope<D extends CoValue> {
         coValueType === "Account" ||
         coValueType === "Group"
       ) {
-        const map = value as CoMap;
+        const map = value as Loaded<CoreCoMapSchema, true>;
         const keys =
           "$each" in depth ? map.$jazz.raw.keys() : Object.keys(depth);
 
@@ -732,7 +737,7 @@ export class SubscriptionScope<D extends CoValue> {
           }
         }
       } else if (value[TypeSym] === "CoList") {
-        const list = value as CoList;
+        const list = value as Loaded<CoreCoListSchema, true>;
 
         const descriptor = list.$jazz.getItemsDescriptor();
 
@@ -751,7 +756,7 @@ export class SubscriptionScope<D extends CoValue> {
           }
         }
       } else if (value[TypeSym] === "CoStream") {
-        const stream = value as CoFeed;
+        const stream = value as Loaded<CoreCoFeedSchema, true>;
         const descriptor = stream.$jazz.getItemsDescriptor();
 
         if (descriptor && isRefEncoded(descriptor)) {
@@ -812,7 +817,11 @@ export class SubscriptionScope<D extends CoValue> {
     return hasChanged;
   }
 
-  loadCoMapKey(map: CoMap, key: string, depth: Record<string, any> | true) {
+  loadCoMapKey(
+    map: Loaded<CoreCoMapSchema, true>,
+    key: string,
+    depth: Record<string, any> | true,
+  ) {
     if (key === "$onError") {
       return undefined;
     }
@@ -854,7 +863,11 @@ export class SubscriptionScope<D extends CoValue> {
     return undefined;
   }
 
-  loadCoListKey(list: CoList, key: string, depth: Record<string, any> | true) {
+  loadCoListKey(
+    list: Loaded<CoreCoListSchema, true>,
+    key: string,
+    depth: Record<string, any> | true,
+  ) {
     const descriptor = list.$jazz.getItemsDescriptor();
 
     if (!descriptor || !isRefEncoded(descriptor)) {
@@ -894,28 +907,10 @@ export class SubscriptionScope<D extends CoValue> {
 
   loadChildNode(
     id: string,
-    query: RefsToResolve<any>,
+    query: ResolveQuery<any>,
     descriptor: RefEncoded<any>,
     key?: string,
   ) {
-    // TODO: remove
-    if (
-      (descriptor.sourceSchema as any).name &&
-      ((descriptor.sourceSchema as any).name.includes("CoList") ||
-        (descriptor.sourceSchema as any).name.includes("CoFeed") ||
-        (descriptor.sourceSchema as any).name.includes("CoVector") ||
-        (descriptor.sourceSchema as any).name.includes("CoPlainText") ||
-        (descriptor.sourceSchema as any).name.includes("CoRichText") ||
-        (descriptor.sourceSchema as any).name.includes("FileStream") ||
-        (descriptor.sourceSchema as any).name.includes("CoMap") ||
-        (descriptor.sourceSchema as any).name.includes("Account") ||
-        (descriptor.sourceSchema as any).name.includes("Group"))
-    ) {
-      throw new Error(
-        "use the CoListSchema, CoFeedSchema, CoVectorSchema, PlainTextSchema, RichTextSchema, FileStreamSchema, CoMapSchema, AccountSchema, or GroupSchema instead of the CoList, CoFeed, CoVector, CoPlainText, CoRichText, FileStream, CoMap, Account, or Group class",
-      );
-    }
-
     if (this.isSubscribedToId(id)) {
       return;
     }
