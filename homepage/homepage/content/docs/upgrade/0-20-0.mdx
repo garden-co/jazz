@@ -68,35 +68,14 @@ Warning: WASM crypto is not available. Falling back to JavaScript crypto.
 
 ### Expo
 
-1) If you use Expo, you need to install `cojson-core-rn` and make sure the version matches `jazz-tools`. `cojson-core-rn` is our new high-performance crypto provider for Expo, and it is **required** for Expo applications.
+If you had previously installed QuickCrypto, then you should follow the steps below. Otherwise, no action is needed to take advantage of RNCrypto!
 
-<CodeGroup>
-```bash
-npm install cojson-core-rn
-```
-</CodeGroup>
-
-<CodeGroup>
-```json
-"dependencies": {
-  "cojson-core-rn": "x.x.x", # same version as jazz-tools
-  "jazz-tools": "x.x.x" # same version as cojson-core-rn
-}
-```
-</CodeGroup>
-
-<Alert variant="warning" title="Versioning" className="mt-4">
-  While you can distribute your own JS code changes OTA, as the Jazz versions must be kept the same for both the JS and the native dependencies, if you updates your Jazz version, this *cannot* be distributed over the air, and requires a new store submission.
-</Alert>
-
-See also: [Expo setup](/docs/react-native-expo/project-setup).
-
-2) **Remove QuickCrypto dependencies/config** (only if you previously added them for `RNQuickCrypto`):
+1) **Remove QuickCrypto dependencies/config** (only if you previously added them for `RNQuickCrypto`):
 
 - Remove `react-native-quick-crypto` (and any associated config you added for it).
 - Remove any `SODIUM_ENABLED` / `sodiumEnabled` settings you added specifically for QuickCrypto.
 
-3) **Remove `CryptoProvider` entirely** (RNCrypto is now the default)
+2) **Remove `CryptoProvider` entirely** (RNCrypto is now the default)
 
 You have to remove the `CryptoProvider` option, it is no longer supported:
 
@@ -120,6 +99,10 @@ export function MyJazzProvider({ children }: { children: React.ReactNode }) {
 ```
 </CodeGroup>
 
+<Alert variant="warning" title="Versioning" className="mt-4">
+  While you can distribute your own JS code changes OTA, if you update your Jazz version, this will result in changes in the native dependencies, which *cannot* be distributed over the air and requires a new store submission.
+</Alert>
+
 ### React Native (non-Expo)
 
 If you use React Native, you need to install `cojson-core-rn` and make sure the version matches `jazz-tools`. `cojson-core-rn` is our new high-performance crypto provider for React Native, 
@@ -127,7 +110,7 @@ and it is **required** for React Native applications.
 
 1) **Install `cojson-core-rn` (required)** and make sure the version matches `jazz-tools`:
 
-<CodeGroup>
+<CodeGroup className="mb-4">
 ```bash
 npm install cojson-core-rn
 ```
@@ -143,7 +126,7 @@ npm install cojson-core-rn
 </CodeGroup>
 
 <Alert variant="warning" title="Versioning" className="mt-4">
-  While you can distribute your own JS code changes OTA, as the Jazz versions must be kept the same for both the JS and the native dependencies, if you updates your Jazz version, this *cannot* be distributed over the air, and requires a new store submission.
+  While you can distribute your own JS code changes OTA, if you update your Jazz version, this will result in changes in the native dependencies, which *cannot* be distributed over the air and requires a new store submission.
 </Alert>
 
 See also: [React Native setup](/docs/react-native/project-setup).
