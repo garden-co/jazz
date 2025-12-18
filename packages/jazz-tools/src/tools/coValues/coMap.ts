@@ -78,8 +78,8 @@ export type CoMapEdit<S extends AnyZodOrCoValueSchema> = {
 export type LastAndAllCoMapEdits<S extends AnyZodOrCoValueSchema> =
   CoMapEdit<S> & { all: CoMapEdit<S>[] };
 
-export type CoMapEdits<M extends CoreCoMapSchema> = {
-  [Key in CoMapKeys<M>]?: LastAndAllCoMapEdits<M["shape"][Key]>;
+export type CoMapEdits<M extends CoreCoMapSchema | CoreCoRecordSchema> = {
+  [Key in CoMapKeys<M>]?: LastAndAllCoMapEdits<SchemaAtKey<M, Key>>;
 };
 
 export type CoMapFieldSchema = {
@@ -119,7 +119,12 @@ export type CoMapFieldSchema = {
  *
  * @category CoValues
  *  */
-export class CoMap<S extends CoreCoMapSchema | CoreCoRecordSchema>
+export class CoMap<
+    S extends CoreCoMapSchema | CoreCoRecordSchema,
+    R extends ResolveQuery<S>,
+    Dep extends number[],
+    Lim extends number,
+  >
   extends CoValueBase
   implements CoValue
 {
@@ -136,7 +141,7 @@ export class CoMap<S extends CoreCoMapSchema | CoreCoRecordSchema>
    * access to Jazz methods, and also doesn't limit which key names can be
    * used inside CoMaps.
    */
-  declare $jazz: CoMapJazzApi<this, S>;
+  declare $jazz: CoMapJazzApi<S, R, Dep, Lim>;
 
   /** @internal */
   static fields: CoMapFieldSchema;
@@ -219,11 +224,13 @@ export class CoMap<S extends CoreCoMapSchema | CoreCoRecordSchema>
  * Contains CoMap Jazz methods that are part of the {@link CoMap.$jazz`} property.
  */
 class CoMapJazzApi<
-  M extends CoMap<S>,
   S extends CoreCoMapSchema | CoreCoRecordSchema,
-> extends CoValueJazzApi<M> {
+  R extends ResolveQuery<S>,
+  Dep extends number[],
+  Lim extends number,
+> extends CoValueJazzApi {
   constructor(
-    private coMap: M,
+    private coMap: CoMap<S, R, Dep, Lim>,
     public raw: RawCoMap,
     private fields: CoMapFieldSchema,
     public sourceSchema: S,
@@ -311,9 +318,7 @@ class CoMapJazzApi<
    *
    * @category Content
    */
-  delete(
-    key: OptionalCoKeys<S> | (string extends keyof M ? string : never),
-  ): void {
+  delete(key: OptionalCoKeys<S>): void {
     this.raw.delete(key);
   }
 
@@ -329,16 +334,16 @@ class CoMapJazzApi<
    *
    * @category Content
    */
-  applyDiff(newValues: Partial<CoMapInit<S>>): M {
+  applyDiff(newValues: Partial<CoMapInit<S>>): CoMap<S, R, Dep, Lim> {
     for (const key in newValues) {
       if (Object.prototype.hasOwnProperty.call(newValues, key)) {
-        const tKey = key as keyof typeof newValues & keyof M;
+        const tKey = key as keyof typeof newValues;
         const descriptor = this.getDescriptor(key);
 
         if (!descriptor) continue;
 
         const newValue = newValues[tKey];
-        const currentValue = this.coMap[tKey];
+        const currentValue = (this.coMap as any)[tKey];
 
         if (descriptor.type === "json" || descriptor.type == "encoded") {
           if (currentValue !== newValue) {
@@ -363,13 +368,10 @@ class CoMapJazzApi<
    *
    * @category Subscription & Loading
    */
-  ensureLoaded<S extends CoreCoMapSchema, const R extends ResolveQuery<S>>(
-    this: CoMapJazzApi<CoMap<S>, S>,
-    options: {
-      resolve: ResolveQueryStrict<S, R>;
-      unstable_branch?: BranchDefinition;
-    },
-  ): Promise<Settled<S, R>> {
+  ensureLoaded<const R2 extends ResolveQuery<S>>(options: {
+    resolve: ResolveQueryStrict<S, R2>;
+    unstable_branch?: BranchDefinition;
+  }): Promise<Settled<S, R2>> {
     return ensureCoValueLoaded(this.coMap, options);
   }
 
@@ -382,21 +384,18 @@ class CoMapJazzApi<
    *
    * @category Subscription & Loading
    **/
-  subscribe<Map extends CoMap<S>, const R extends ResolveQuery<S> = true>(
-    this: CoMapJazzApi<Map, S>,
-    listener: (value: Loaded<S, R>, unsubscribe: () => void) => void,
+  subscribe<const R2 extends ResolveQuery<S> = true>(
+    listener: (value: Loaded<S, R2>, unsubscribe: () => void) => void,
   ): () => void;
-  subscribe<Map extends CoMap<S>, const R extends ResolveQuery<S> = true>(
-    this: CoMapJazzApi<Map, S>,
+  subscribe<const R2 extends ResolveQuery<S>>(
     options: {
-      resolve?: ResolveQueryStrict<S, R>;
+      resolve?: ResolveQueryStrict<S, R2>;
       unstable_branch?: BranchDefinition;
     },
-    listener: (value: Loaded<S, R>, unsubscribe: () => void) => void,
+    listener: (value: Loaded<S, R2>, unsubscribe: () => void) => void,
   ): () => void;
-  subscribe<Map extends CoMap<S>, const R extends ResolveQuery<S>>(
-    this: CoMapJazzApi<Map, S>,
-    ...args: SubscribeRestArgs<S, R>
+  subscribe<const R2 extends ResolveQuery<S>>(
+    ...args: SubscribeRestArgs<S, R2>
   ): () => void {
     const { options, listener } = parseSubscribeRestArgs(args);
     return subscribeToExistingCoValue(this.coMap, options, listener);
@@ -532,7 +531,12 @@ export type CoMapInit<M extends CoreCoMapSchema | CoreCoRecordSchema> = {
 
 // TODO: cache handlers per descriptor for performance?
 const CoMapProxyHandler: ProxyHandler<
-  CoMap<CoreCoMapSchema | CoreCoRecordSchema>
+  CoMap<
+    CoreCoMapSchema | CoreCoRecordSchema,
+    ResolveQuery<CoreCoMapSchema | CoreCoRecordSchema>,
+    number[],
+    number
+  >
 > = {
   get(target, key, receiver) {
     if (key in target) {
@@ -620,8 +624,13 @@ const CoMapProxyHandler: ProxyHandler<
 };
 
 /** @internal */
-function getEditFromRaw(
-  target: CoMap<CoreCoMapSchema | CoreCoRecordSchema>,
+function getEditFromRaw<
+  S extends CoreCoMapSchema | CoreCoRecordSchema,
+  R extends ResolveQuery<S>,
+  Dep extends number[],
+  Lim extends number,
+>(
+  target: CoMap<S, R, Dep, Lim>,
   rawEdit: {
     by: RawAccountID | AgentID;
     tx: CojsonInternalTypes.TransactionID;

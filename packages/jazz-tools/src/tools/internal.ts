@@ -49,6 +49,7 @@ export * from "./implementation/zodSchema/schemaTypes/PlainTextSchema.js";
 export * from "./implementation/zodSchema/schemaTypes/RichTextSchema.js";
 export * from "./implementation/zodSchema/schemaTypes/GroupSchema.js";
 export * from "./implementation/zodSchema/schemaTypes/CoValueSchema.js";
+export * from "./implementation/zodSchema/typeConverters/ToCore.js";
 export * from "./implementation/zodSchema/typeConverters/CoFieldSchemaInit.js";
 export * from "./implementation/zodSchema/runtimeConverters/coValueSchemaTransformation.js";
 export * from "./implementation/zodSchema/runtimeConverters/schemaFieldToFieldDescriptor.js";

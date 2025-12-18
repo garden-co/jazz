@@ -87,11 +87,16 @@ export { CoFeed as CoStream };
  *
  * @category CoValues
  */
-export class CoFeed<S extends CoreCoFeedSchema>
+export class CoFeed<
+    S extends CoreCoFeedSchema,
+    R extends ResolveQuery<S>,
+    Dep extends number[],
+    Lim extends number,
+  >
   extends CoValueBase
   implements CoValue
 {
-  declare $jazz: CoFeedJazzApi<this, S>;
+  declare $jazz: CoFeedJazzApi<S, R, Dep, Lim>;
 
   /** @category Type Helpers */
   declare [TypeSym]: "CoStream";
@@ -230,14 +235,18 @@ export class CoFeed<S extends CoreCoFeedSchema>
 }
 
 /** @internal */
-type CoFeedItem<L> = L extends CoFeed<infer Item> ? Item : never;
+type CoFeedItem<L> = L extends CoFeed<infer S, any, any, any>
+  ? S["element"]
+  : never;
 
 export class CoFeedJazzApi<
-  F extends CoFeed<S>,
   S extends CoreCoFeedSchema,
-> extends CoValueJazzApi<F> {
+  R extends ResolveQuery<S>,
+  Dep extends number[],
+  Lim extends number,
+> extends CoValueJazzApi {
   constructor(
-    private coFeed: F,
+    private coFeed: CoFeed<S, R, Dep, Lim>,
     public raw: RawCoStream,
     public itemSchema: FieldDescriptor,
     public sourceSchema: CoreCoFeedSchema,

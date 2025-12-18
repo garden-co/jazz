@@ -44,6 +44,9 @@ import {
   MaybeLoaded,
   PrimitiveOrInaccessible,
   CoreAccountSchema,
+  PrimitiveOrLoaded,
+  ListElementResolveQuery,
+  CoListElement,
 } from "../internal.js";
 
 /**
@@ -68,11 +71,16 @@ import {
  * @category CoValues
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export class CoList<S extends CoreCoListSchema>
-  extends Array<PrimitiveOrInaccessible<S["element"]>>
-  implements ReadonlyArray<PrimitiveOrInaccessible<S["element"]>>, CoValue
+export class CoList<
+    S extends CoreCoListSchema,
+    R extends ResolveQuery<S>,
+    Dep extends number[],
+    Lim extends number,
+  >
+  extends Array<CoListElement<S, R, Dep, Lim>>
+  implements ReadonlyArray<CoListElement<S, R, Dep, Lim>>, CoValue
 {
-  declare $jazz: CoListJazzApi<this, S>;
+  declare $jazz: CoListJazzApi<S, R, Dep, Lim>;
   declare $isLoaded: true;
 
   /**
@@ -217,11 +225,13 @@ export class CoList<S extends CoreCoListSchema>
 }
 
 export class CoListJazzApi<
-  L extends CoList<S>,
   S extends CoreCoListSchema,
-> extends CoValueJazzApi<L> {
+  R extends ResolveQuery<S>,
+  Dep extends number[],
+  Lim extends number,
+> extends CoValueJazzApi {
   constructor(
-    private coList: L,
+    private coList: CoList<S, R, Dep, Lim>,
     public raw: RawCoList,
     /** @internal */
     public sourceSchema: S,
@@ -291,7 +301,7 @@ export class CoListJazzApi<
    *
    * @category Content
    */
-  pop(): PrimitiveOrInaccessible<S["element"]> | undefined {
+  pop(): CoListElement<S, R, Dep, Lim> | undefined {
     const last = this.coList[this.coList.length - 1];
 
     this.raw.delete(this.coList.length - 1);
@@ -305,7 +315,7 @@ export class CoListJazzApi<
    *
    * @category Content
    */
-  shift(): PrimitiveOrInaccessible<S["element"]> | undefined {
+  shift(): CoListElement<S, R, Dep, Lim> | undefined {
     const first = this.coList[0];
 
     this.raw.delete(0);
@@ -326,7 +336,7 @@ export class CoListJazzApi<
     start: number,
     deleteCount: number,
     ...items: CoFieldInit<S["element"]>[]
-  ): PrimitiveOrInaccessible<S["element"]>[] {
+  ): CoListElement<S, R, Dep, Lim>[] {
     const deleted = this.coList.slice(start, start + deleteCount);
 
     for (
@@ -390,7 +400,7 @@ export class CoListJazzApi<
    *
    * @category Content
    */
-  remove(...indices: number[]): PrimitiveOrInaccessible<S["element"]>[];
+  remove(...indices: number[]): CoListElement<S, R, Dep, Lim>[];
   /**
    * Removes the elements matching the predicate from the array.
    * @param predicate The predicate to match the elements to remove.
@@ -400,21 +410,21 @@ export class CoListJazzApi<
    */
   remove(
     predicate: (
-      item: PrimitiveOrInaccessible<S["element"]>,
+      item: CoListElement<S, R, Dep, Lim>,
       index: number,
-      coList: L,
+      coList: CoList<S, R, Dep, Lim>,
     ) => boolean,
-  ): PrimitiveOrInaccessible<S["element"]>[];
+  ): CoListElement<S, R, Dep, Lim>[];
   remove(
     ...args: (
       | number
       | ((
-          item: PrimitiveOrInaccessible<S["element"]>,
+          item: CoListElement<S, R, Dep, Lim>,
           index: number,
-          coList: L,
+          coList: CoList<S, R, Dep, Lim>,
         ) => boolean)
     )[]
-  ): PrimitiveOrInaccessible<S["element"]>[] {
+  ): CoListElement<S, R, Dep, Lim>[] {
     const predicate = args[0] instanceof Function ? args[0] : undefined;
     let indices: number[] = [];
     if (predicate) {
@@ -444,11 +454,11 @@ export class CoListJazzApi<
    */
   retain(
     predicate: (
-      item: PrimitiveOrInaccessible<S["element"]>,
+      item: CoListElement<S, R, Dep, Lim>,
       index: number,
-      coList: L,
+      coList: CoList<S, R, Dep, Lim>,
     ) => boolean,
-  ): PrimitiveOrInaccessible<S["element"]>[] {
+  ): CoListElement<S, R, Dep, Lim>[] {
     return this.remove((...args) => !predicate(...args));
   }
 
@@ -462,7 +472,7 @@ export class CoListJazzApi<
    *
    * @category Content
    */
-  applyDiff(result: CoFieldInit<S["element"]>[]): L {
+  applyDiff(result: CoFieldInit<S["element"]>[]): CoList<S, R, Dep, Lim> {
     const current = this.raw.asArray() as CoFieldInit<S["element"]>[];
     const itemDescriptor = schemaFieldToFieldDescriptor(
       this.sourceSchema.element as SchemaField,
@@ -502,13 +512,10 @@ export class CoListJazzApi<
    *
    * @category Subscription & Loading
    */
-  ensureLoaded<L extends CoList<S>, const R extends ResolveQuery<S>>(
-    this: CoListJazzApi<L, S>,
-    options: {
-      resolve: ResolveQueryStrict<S, R>;
-      unstable_branch?: BranchDefinition;
-    },
-  ): Promise<Settled<S, R>> {
+  ensureLoaded<const R2 extends ResolveQuery<S>>(options: {
+    resolve: ResolveQueryStrict<S, R2>;
+    unstable_branch?: BranchDefinition;
+  }): Promise<Settled<S, R2>> {
     return ensureCoValueLoaded(this.coList, options);
   }
 
@@ -521,21 +528,18 @@ export class CoListJazzApi<
    *
    * @category Subscription & Loading
    **/
-  subscribe<L extends CoList<S>, const R extends ResolveQuery<S> = true>(
-    this: CoListJazzApi<L, S>,
-    listener: (value: Loaded<S, R>, unsubscribe: () => void) => void,
+  subscribe<const R2 extends ResolveQuery<S> = true>(
+    listener: (value: Loaded<S, R2>, unsubscribe: () => void) => void,
   ): () => void;
-  subscribe<L extends CoList<S>, const R extends ResolveQuery<S> = true>(
-    this: CoListJazzApi<L, S>,
+  subscribe<const R2 extends ResolveQuery<S> = true>(
     options: {
-      resolve?: ResolveQueryStrict<S, R>;
+      resolve?: ResolveQueryStrict<S, R2>;
       unstable_branch?: BranchDefinition;
     },
-    listener: (value: Loaded<S, R>, unsubscribe: () => void) => void,
+    listener: (value: Loaded<S, R2>, unsubscribe: () => void) => void,
   ): () => void;
-  subscribe<L extends CoList<S>, const R extends ResolveQuery<S>>(
-    this: CoListJazzApi<L, S>,
-    ...args: SubscribeRestArgs<S, R>
+  subscribe<const R2 extends ResolveQuery<S>>(
+    ...args: SubscribeRestArgs<S, R2>
   ): () => void {
     const { options, listener } = parseSubscribeRestArgs(args);
     return subscribeToExistingCoValue(this.coList, options, listener);
@@ -594,7 +598,7 @@ export class CoListJazzApi<
    */
   getEdits(): {
     [idx: number]: {
-      value?: PrimitiveOrInaccessible<S["element"]>;
+      value?: CoListElement<S, R, Dep, Lim>;
       ref?: S["element"] extends CoreCoValueSchema ? Ref<S["element"]> : never;
       by: MaybeLoaded<CoreAccountSchema> | null;
       madeAt: Date;
@@ -648,7 +652,9 @@ export function toRawItems<Item>(
   return rawItems;
 }
 
-const CoListProxyHandler: ProxyHandler<CoList<CoreCoListSchema>> = {
+const CoListProxyHandler: ProxyHandler<
+  CoList<CoreCoListSchema, ResolveQuery<CoreCoListSchema>, number[], number>
+> = {
   get(target, key, receiver) {
     if (typeof key === "string" && !isNaN(+key)) {
       const itemDescriptor = schemaFieldToFieldDescriptor(

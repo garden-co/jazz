@@ -153,7 +153,7 @@ export async function loadCoValueOrFail<V extends RawCoValue>(
 }
 
 export function assertLoaded<V, S extends CoreCoValueSchema>(
-  coValue: V & Settled<S>, // explicit inference site
+  coValue: V & MaybeLoaded<S>, // explicit inference site
 ): asserts coValue is Loaded<S> {
   if (!coValue.$isLoaded) {
     throw new Error("CoValue is not loaded");

@@ -26,7 +26,7 @@ export { co } from "./internal.js";
 export type {
   CoValueClass,
   CoValueFromRaw,
-  LoadedWithResolveQuery as DeeplyLoaded,
+  Resolved as DeeplyLoaded,
   CoMapEdit,
   CoMapEdits,
   LastAndAllCoMapEdits,

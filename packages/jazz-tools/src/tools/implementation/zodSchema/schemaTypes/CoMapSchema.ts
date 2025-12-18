@@ -543,30 +543,6 @@ export interface CoreCoMapSchema<
   getDefinition: () => CoMapSchemaDefinition;
 }
 
-export type CoMapKeys<S extends CoreCoMapSchema | CoreCoRecordSchema> =
-  S extends CoreCoMapSchema
-    ? (keyof S["shape"] & string) | S["catchAll"] extends AnyZodOrCoValueSchema
-      ? string
-      : never
-    : S extends CoreCoRecordSchema
-      ? TypeOfZodSchema<S["keyType"]>
-      : never;
-
-export type SchemaAtKey<
-  S extends CoreCoMapSchema | CoreCoRecordSchema,
-  K extends CoMapKeys<S>,
-> = S extends CoreCoMapSchema
-  ? K extends keyof S["shape"]
-    ? S["shape"][K]
-    : S["catchAll"] extends AnyZodOrCoValueSchema
-      ? S["catchAll"]
-      : never
-  : S extends CoreCoRecordSchema
-    ? K extends S["keyType"]
-      ? S["valueType"]
-      : never
-    : never;
-
 export type PartialShape<
   Shape extends z.core.$ZodLooseShape,
   PartialKeys extends keyof Shape = keyof Shape,

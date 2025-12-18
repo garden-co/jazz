@@ -1,6 +1,7 @@
 import {
   CoDiscriminatedUnionSchema,
   CoValueClass,
+  CoreCoDiscriminatedUnionSchema,
   CoreCoFeedSchema,
   CoreCoListSchema,
   CoreCoMapSchema,
@@ -23,10 +24,10 @@ import { TypeOfZodSchema } from "./TypeOfZodSchema.js";
  * For CoValue fields, this can be either a shallowly-loaded CoValue instance
  * or a JSON object that will be used to create the CoValue.
  */
-export type CoFieldSchemaInit<S extends CoValueClass | AnyZodOrCoValueSchema> =
+export type CoFieldSchemaInit<S extends AnyZodOrCoValueSchema> =
   S extends CoreCoValueSchema
     ?
-        | Loaded<S>
+        | Loaded<ToCore<S>>
         | (S extends CoreCoRecordSchema<infer K, infer V>
             ? CoMapSchemaInit<{ [key in z.output<K> & string]: V }>
             : S extends CoreCoMapSchema<infer Shape>
@@ -46,9 +47,7 @@ export type CoFieldSchemaInit<S extends CoValueClass | AnyZodOrCoValueSchema> =
                           : never)
     : S extends z.core.$ZodType
       ? TypeOfZodSchema<S>
-      : S extends CoValueClass
-        ? InstanceType<S>
-        : never;
+      : never;
 
 // Due to a TS limitation with types that contain known properties and
 // an index signature, we cannot accept catchall properties on creation
@@ -85,7 +84,7 @@ export type CoVectorSchemaInit = ReadonlyArray<number> | Float32Array;
 /**
  * The convenience type for extracting the init type of a CoValue schema.
  */
-export type CoInput<S extends CoValueClass | AnyZodOrCoValueSchema> =
+export type CoInput<S extends AnyZodOrCoValueSchema> =
   S extends CoreCoValueSchema
     ? Exclude<CoFieldSchemaInit<S>, Loaded<S>>
     : CoFieldSchemaInit<S>;

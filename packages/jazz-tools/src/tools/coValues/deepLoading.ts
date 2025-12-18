@@ -24,13 +24,15 @@ import {
   CoValueBase,
   AnyZodOrCoValueSchema,
   AnyZodSchema,
+  Simplify,
 } from "../internal.js";
 import { type Account } from "./account.js";
-import { CoFeedEntry, FileStream } from "./coFeed.js";
+import { CoFeed, CoFeedEntry, FileStream } from "./coFeed.js";
 import { CoMap } from "./coMap.js";
 import { type CoValue, type ID } from "./interfaces.js";
 import { z } from "../implementation/zodSchema/zodReExport.js";
 import { TypeOfZodSchema } from "../implementation/zodSchema/typeConverters/TypeOfZodSchema.js";
+import { CoreCoOptionalSchema } from "../implementation/zodSchema/schemaTypes/CoOptionalSchema.js";
 
 /**
  * Returns a boolean for whether the given type is a union.
@@ -57,7 +59,7 @@ type IsUnion<T, U = T> = (
 export type MaybeLoaded<
   T extends CoreCoValueSchema,
   R extends ResolveQuery<T> = true,
-> = Loaded<T, R> | NotLoaded<T, R>;
+> = Loaded<T, R> | NotLoaded<T, R> | Inaccessible<T>;
 
 /**
  * A CoValue that is either successfully loaded or that could not be loaded.
@@ -190,82 +192,10 @@ export type ResolveQueryStrict<
 // TODO: remove/inline
 export type SchemaResolveQuery<T extends CoreCoValueSchema> = T["resolveQuery"];
 
-// export type RefsToResolve<
-//   V,
-//   DepthLimit extends number = 10,
-//   CurrentDepth extends number[] = [],
-// > =
-//   | boolean
-//   | (DepthLimit extends CurrentDepth["length"]
-//       ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
-//         any
-//       : // Basically V extends CoList - but if we used that we'd introduce circularity into the definition of CoList itself
-//         V extends ReadonlyArray<infer Item>
-//         ? LoadedAndRequired<Item> extends CoValue
-//           ?
-//               | ({
-//                   $each?: RefsToResolve<
-//                     AsLoaded<Item>,
-//                     DepthLimit,
-//                     [0, ...CurrentDepth]
-//                   >;
-//                 } & OnError)
-//               | boolean
-//           : OnError | boolean
-//         : // Basically V extends CoMap | Group | Account - but if we used that we'd introduce circularity into the definition of CoMap itself
-//           V extends { [TypeSym]: "CoMap" | "Group" | "Account" }
-//           ?
-//               | ({
-//                   [Key in CoKeys<V> as LoadedAndRequired<V[Key]> extends CoValue
-//                     ? Key
-//                     : never]?: RefsToResolve<
-//                     LoadedAndRequired<V[Key]>,
-//                     DepthLimit,
-//                     [0, ...CurrentDepth]
-//                   >;
-//                 } & OnError)
-//               | (ItemsMarker extends keyof V
-//                   ? {
-//                       $each: RefsToResolve<
-//                         LoadedAndRequired<V[ItemsMarker]>,
-//                         DepthLimit,
-//                         [0, ...CurrentDepth]
-//                       >;
-//                     } & OnError
-//                   : never)
-//               | boolean
-//           : V extends {
-//                 [TypeSym]: "CoStream";
-//                 byMe: CoFeedEntry<infer Item> | undefined;
-//               }
-//             ?
-//                 | ({
-//                     $each: RefsToResolve<
-//                       AsLoaded<Item>,
-//                       DepthLimit,
-//                       [0, ...CurrentDepth]
-//                     >;
-//                   } & OnError)
-//                 | boolean
-//             : V extends { [TypeSym]: "CoPlainText" | "BinaryCoStream" }
-//               ? boolean | OnError
-//               : boolean);
-
-// export type RefsToResolveStrict<T, V> = [V] extends [RefsToResolve<T>]
-//   ? RefsToResolve<T>
-//   : V;
-
-// export type Resolved<
-//   T,
-//   R extends RefsToResolve<T> | undefined = true,
-// > = DeeplyLoaded<T, R>;
-
 export type Loaded<
   T extends CoreCoValueSchema,
   R extends ResolveQuery<T> = SchemaResolveQuery<T>,
-> = LoadedWithResolveQuery<T, R>;
-
-type CoListAsArray<T> = ReadonlyArray<T> & CoList<T>; // the CoList base type needs to be intersected after so that built-in methods return the correct narrowed array type
+> = Resolved<T, R>;
 
 /**
  * If the resolve query contains `$onError: "catch"`, we return a not loaded value for this nested CoValue.
@@ -275,7 +205,7 @@ type OnErrorResolvedValue<S, Depth> = Depth extends { $onError: "catch" }
   ? NotLoaded<S>
   : never;
 
-export type LoadedWithResolveQuery<
+export type Resolved<
   S,
   R,
   Dep extends number[] = [],
@@ -290,32 +220,42 @@ export type LoadedWithResolveQuery<
       };
     }
   : S extends CoreCoListSchema
-    ? DeeplyLoadedList<S, R, Dep, Lim>
-    : S extends CoreCoMapSchema | CoreAccountSchema
-      ? DeeplyLoadedMap<S, R, Dep, Lim>
-      : S extends CoreCoRecordSchema
-        ? DeeplyLoadedRecord<S, R, Dep, Lim>
-        : S extends CoDiscriminatedUnionSchema<infer Options>
-          ? LoadedWithResolveQuery<Options[number], R, [0, ...Dep], Lim>
-          : S extends CoreGroupSchema
-            ? Group
-            : S extends CoreRichTextSchema
-              ? CoRichText
-              : S extends CorePlainTextSchema
-                ? CoPlainText
-                : S extends CoreFileStreamSchema
-                  ? FileStream
-                  : S extends CoreCoVectorSchema
-                    ? CoVector
-                    : CoValueBase;
+    ? R extends ResolveQuery<S>
+      ? CoList<S, R, Dep, Lim>
+      : never
+    : S extends CoreCoMapSchema | CoreCoRecordSchema
+      ? R extends ResolveQuery<S>
+        ? Simplify<ResolvedFields<S, R, Dep, Lim>> & CoMap<S, R, Dep, Lim>
+        : never
+      : S extends CoreAccountSchema
+        ? Simplify<ResolvedFields<S, R, Dep, Lim>> & Account<S>
+        : S extends CoreCoFeedSchema
+          ? R extends ResolveQuery<S>
+            ? CoFeed<S, R, Dep, Lim>
+            : never
+          : S extends CoreCoOptionalSchema<infer Inner>
+            ? Resolved<Inner, R, [0, ...Dep], Lim> // TODO | undefined
+            : S extends CoDiscriminatedUnionSchema<infer Options>
+              ? Resolved<Options[number], R, [0, ...Dep], Lim>
+              : S extends CoreGroupSchema
+                ? Group
+                : S extends CoreRichTextSchema
+                  ? CoRichText
+                  : S extends CorePlainTextSchema
+                    ? CoPlainText
+                    : S extends CoreFileStreamSchema
+                      ? FileStream
+                      : S extends CoreCoVectorSchema
+                        ? CoVector
+                        : CoValueBase & { $noMatchFor: S; $r: R };
 
-type PrimitiveOrLoaded<
+export type PrimitiveOrLoaded<
   S extends AnyZodOrCoValueSchema,
   R extends any,
   Dep extends number[] = [],
   Lim extends number = 10,
 > = S extends CoreCoValueSchema
-  ? LoadedWithResolveQuery<S, R, Dep, Lim>
+  ? Resolved<S, R, Dep, Lim>
   : S extends AnyZodSchema
     ? TypeOfZodSchema<S>
     : never;
@@ -334,67 +274,63 @@ export type PrimitiveOrMaybeLoaded<S extends AnyZodOrCoValueSchema> =
       ? TypeOfZodSchema<S>
       : never;
 
-type DeeplyLoadedList<
+export type CoListElement<
   S extends CoreCoListSchema,
-  R,
-  Dep extends number[] = [],
-  Lim extends number = 10,
+  R extends ResolveQuery<S>,
+  Dep extends number[],
+  Lim extends number,
 > = S["element"] extends CoreCoValueSchema
   ? R extends { $each: infer ElemR }
-    ? CoListAsArray<
-        | LoadedWithResolveQuery<S["element"], ElemR, [0, ...Dep], Lim>
-        | OnErrorResolvedValue<PrimitiveOrInaccessible<S["element"]>, ElemR>
-      >
-    : CoListAsArray<PrimitiveOrInaccessible<S["element"]>>
-  : CoListAsArray<PrimitiveOrInaccessible<S["element"]>>;
+    ? Resolved<S["element"], ElemR, Dep, Lim>
+    : MaybeLoaded<S["element"]>
+  : PrimitiveOrLoaded<S, R, Dep, Lim>;
 
-type DeeplyLoadedMap<
-  S extends CoreCoMapSchema | CoreAccountSchema,
+type ResolvedFields<
+  S extends CoreCoMapSchema | CoreCoRecordSchema | CoreAccountSchema,
   R,
   Dep extends number[] = [],
   Lim extends number = 10,
 > = {
-  readonly [key in keyof S["shape"] &
-    string]: S["shape"][key] extends CoreCoValueSchema
-    ? key extends Exclude<keyof R, "$onError">
+  readonly [key in CoMapKeys<S>]: SchemaAtKey<
+    S,
+    key
+  > extends infer SAtKey extends CoreCoValueSchema
+    ? key extends Exclude<keyof R, "$onError"> // is key also in resolve query?
       ?
-          | LoadedWithResolveQuery<
-              S["shape"][key],
-              ResolveQuery<S["shape"][key]>,
-              [0, ...Dep],
-              Lim
-            >
-          | OnErrorResolvedValue<
-              PrimitiveOrInaccessible<S["shape"][key]>,
-              R[key]
-            >
-      : PrimitiveOrInaccessible<S["shape"][key]>
-    : PrimitiveOrInaccessible<S["shape"][key]>;
-} & (S extends CoreCoMapSchema
-  ? CoMap<S>
-  : S extends CoreAccountSchema
-    ? Account<S>
-    : never);
+          | Resolved<SAtKey, R[key], [0, ...Dep], Lim>
+          | OnErrorResolvedValue<SAtKey, R[key]>
+      : PrimitiveOrMaybeLoaded<SAtKey>
+    : SchemaAtKey<S, key> extends AnyZodSchema
+      ? PrimitiveOrInaccessible<SchemaAtKey<S, key>>
+      : "NEVER GET HERE";
+};
 
-type DeeplyLoadedRecord<
-  S extends CoreCoRecordSchema,
-  R,
-  Dep extends number[] = [],
-  Lim extends number = 10,
-> = {
-  readonly [key in z.input<
-    S["keyType"]
-  >]: S["valueType"] extends CoreCoValueSchema
-    ? key extends keyof Exclude<keyof R, "$onError">
-      ? LoadedWithResolveQuery<
-          S["valueType"],
-          ResolveQuery<S["valueType"]>,
-          [0, ...Dep],
-          Lim
-        >
-      : PrimitiveOrInaccessible<S["valueType"]>
-    : PrimitiveOrInaccessible<S["valueType"]>;
-} & CoMap<S>;
+export type CoMapKeys<
+  S extends CoreCoMapSchema | CoreCoRecordSchema | CoreAccountSchema,
+> = S extends CoreCoMapSchema
+  ?
+      | (keyof S["shape"] & string)
+      | (S["catchAll"] extends AnyZodOrCoValueSchema ? string : never)
+  : S extends CoreCoRecordSchema
+    ? TypeOfZodSchema<S["keyType"]>
+    : S extends CoreAccountSchema
+      ? keyof S["shape"] & string
+      : never;
+
+export type SchemaAtKey<
+  S extends CoreCoMapSchema | CoreCoRecordSchema | CoreAccountSchema,
+  K extends CoMapKeys<S>,
+> = S extends CoreCoMapSchema | CoreAccountSchema
+  ? K extends keyof S["shape"]
+    ? S["shape"][K]
+    : S["catchAll"] extends AnyZodOrCoValueSchema
+      ? S["catchAll"]
+      : never
+  : S extends CoreCoRecordSchema
+    ? K extends S["keyType"]
+      ? S["valueType"]
+      : never
+    : never;
 
 // type CoMapLikeLoaded<
 //   V extends object,
