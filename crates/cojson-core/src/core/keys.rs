@@ -102,11 +102,6 @@ impl TryFrom<&KeySecret> for [u8; 32] {
     }
 }
 
-/// A unique identifier for a CoValue.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct CoID(pub String);
-
 /// Decode a base58 string with a "_z" prefix.
 /// Used for decoding keys and other encoded values.
 pub(crate) fn decode_z(value: &str) -> Result<Vec<u8>, CoJsonCoreError> {

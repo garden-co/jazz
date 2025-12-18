@@ -15,6 +15,10 @@ pub mod core {
     pub use error::*;
     pub mod config;
     pub use config::*;
+    pub mod known_state;
+    pub use known_state::*;
+    pub mod ids;
+    pub use ids::*;
 }
 
 pub mod hash {

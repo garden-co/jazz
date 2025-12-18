@@ -1,4 +1,4 @@
-use crate::core::{CoID, SessionID};
+use crate::core::ids::{CoID, SessionID};
 use serde_json::Value as JsonValue;
 
 #[derive(Clone)]

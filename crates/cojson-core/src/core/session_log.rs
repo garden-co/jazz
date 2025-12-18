@@ -8,11 +8,9 @@ use salsa20::{
 use serde::{Deserialize, Serialize};
 use serde_json::{value::RawValue, Number, Value as JsonValue};
 use crate::core::{CryptoCache, NonceGenerator, CoJsonCoreError};
-use crate::core::keys::{SignerID, SignerSecret, Signature, KeyID, KeySecret, CoID, decode_z};
+use crate::core::keys::{SignerID, SignerSecret, Signature, KeyID, KeySecret, decode_z};
+use crate::core::ids::{CoID, SessionID};
 use crate::core::config::MAX_TX_SIZE_BYTES;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SessionID(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionID {
