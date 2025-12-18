@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionID(pub String);
 
+impl SessionID {
+    pub fn new(session_id: &str) -> Self {
+        Self(session_id.to_string())
+    }
+}
+
 /// A unique identifier for a CoValue.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
