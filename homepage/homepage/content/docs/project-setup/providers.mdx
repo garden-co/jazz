@@ -192,10 +192,16 @@ Jazz for Expo includes built-in local persistence using SQLite. Following Expo's
 Local persistence is enabled by default with no additional configuration required. Your data will automatically persist across app restarts.
 </ContentByFramework>
 
-<ContentByFramework framework={['react-native', 'react-native-expo']}>
-## RNCrypto
+<ContentByFramework framework={["react-native", "react-native-expo"]}>
+## RNCrypto [!framework=react-native,react-native-expo]
+</ContentByFramework>
 
-For accelerated crypto operations, you can use the `RNCrypto` crypto provider. It is the most performant crypto provider available for React Native and Expo.
+<ContentByFramework framework="react-native-expo">
+**Starting from Expo SDK 54, you do not need to follow these steps, `RNCrypto` will be enabled for you by default. These steps below should be followed only if you are using an older Expo version.**
+</ContentByFramework>
+
+<ContentByFramework framework={["react-native", "react-native-expo"]}>
+For accelerated crypto operations, you can use the `RNCrypto` crypto provider. It is the most performant crypto provider available for React Native.
 
 To use it, install the following package:
 
@@ -207,7 +213,6 @@ pnpm add cojson-core-rn
 
 You must keep the versions of `cojson-core-rn` and `jazz-tools` the same.
 
-
 <CodeGroup>
 ```json
 "dependencies": {
@@ -218,7 +223,7 @@ You must keep the versions of `cojson-core-rn` and `jazz-tools` the same.
 </CodeGroup>
 
 <Alert variant="warning" title="Versioning" className="mt-4">
-  While you can distribute your own JS code changes OTA, as the Jazz versions must be kept the same for both the JS and the native dependencies, if you updates your Jazz version, this *cannot* be distributed over the air, and requires a new store submission.
+  While you can distribute your own JS code changes OTA, if you update your Jazz version, this will result in changes in the native dependencies, which *cannot* be distributed over the air and requires a new store submission.
 </Alert>
 
 </ContentByFramework>
