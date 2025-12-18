@@ -37,6 +37,13 @@ export function isAgentID(id: string): id is AgentID {
 }
 
 export type SessionID = `${RawAccountID | AgentID}_session_z${string}`;
+export type DeletedSessionID = `${SessionID}_deleted`;
+
+export function isDeletedSessionID(
+  sessionID: SessionID | DeletedSessionID,
+): sessionID is DeletedSessionID {
+  return sessionID.endsWith("_deleted");
+}
 
 export function isParentGroupReference(
   key: string,

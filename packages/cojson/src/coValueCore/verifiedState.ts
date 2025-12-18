@@ -14,12 +14,16 @@ import {
   Signature,
   SignerID,
 } from "../crypto/crypto.js";
-import { RawCoID, SessionID, TransactionID } from "../ids.js";
+import {
+  isDeletedSessionID,
+  RawCoID,
+  SessionID,
+  TransactionID,
+} from "../ids.js";
 import { Stringified } from "../jsonStringify.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { PermissionsDef as RulesetDef } from "../permissions.js";
 import { NewContentMessage } from "../sync.js";
-import { TryAddTransactionsError } from "./coValueCore.js";
 import { SessionMap } from "./SessionMap.js";
 import { ControlledAccountOrAgent } from "../coValues/account.js";
 import {
@@ -63,6 +67,7 @@ export class VerifiedState {
   public lastAccessed: number | undefined;
   public branchSourceId?: RawCoID;
   public branchName?: string;
+  private isDeleted: boolean = false;
 
   constructor(
     id: RawCoID,
@@ -85,6 +90,11 @@ export class VerifiedState {
       this.header,
       this.sessions.clone(),
     );
+  }
+
+  markAsDeleted() {
+    this.isDeleted = true;
+    this.sessions.markAsDeleted();
   }
 
   tryAddTransactions(
@@ -199,6 +209,10 @@ export class VerifiedState {
     const sessionSent = knownState?.sessions;
 
     for (const [sessionID, log] of this.sessions.sessions) {
+      if (this.isDeleted && !isDeletedSessionID(sessionID)) {
+        continue;
+      }
+
       const startFrom = sessionSent?.[sessionID] ?? 0;
 
       let currentSessionSize = 0;

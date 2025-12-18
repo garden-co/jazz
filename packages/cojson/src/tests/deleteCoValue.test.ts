@@ -1,8 +1,10 @@
 import { assert, beforeEach, expect, test } from "vitest";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
-import type { SessionID } from "../ids.js";
+import { type SessionID, isDeletedSessionID } from "../ids.js";
 import type { CoValueCore } from "../exports.js";
 import {
+  fillCoMapWithLargeData,
+  importContentIntoNode,
   setupTestAccount,
   setupTestNode,
   loadCoValueOrFail,
@@ -32,8 +34,9 @@ function makeDeleteMarkerTransaction(
   return { tx, signature: log.lastSignature };
 }
 
+let jazzCloud: ReturnType<typeof setupTestNode>;
 beforeEach(() => {
-  setupTestNode({ isSyncServer: true });
+  jazzCloud = setupTestNode({ isSyncServer: true });
 });
 
 test("deleteCoValue is blocked for Account and Group CoValues", async () => {
@@ -84,7 +87,6 @@ test("deleteCoValue creates a trusting {deleted:true} tombstone tx, marks the se
   map.core.deleteCoValue();
 
   expect(map.core.isDeleted).toBe(true);
-  expect(map.core.deleteSessionID?.endsWith("_deleted")).toBe(true);
 
   const txs = map.core.getValidSortedTransactions();
   const last = txs.at(-1);
@@ -131,7 +133,6 @@ test("rejects delete marker ingestion from non-admin (ownedByGroup, skipVerify=f
     reason: "NotAdmin",
   });
   expect(map.core.isDeleted).toBe(false);
-  expect(map.core.deleteSessionID).toBeUndefined();
   expect(map.core.verified?.sessions.get(deleteSessionID)).toBeUndefined();
 });
 
@@ -169,7 +170,6 @@ test("accepts delete marker ingestion from admin (ownedByGroup, skipVerify=false
 
   expect(error).toBeUndefined();
   expect(mapOnBob.core.isDeleted).toBe(true);
-  expect(mapOnBob.core.deleteSessionID).toBe(deleteSessionID);
 });
 
 test("skipVerify=true ingestion marks deleted even for non-admin delete marker", async () => {
@@ -204,7 +204,6 @@ test("skipVerify=true ingestion marks deleted even for non-admin delete marker",
 
   expect(error).toBeUndefined();
   expect(map.core.isDeleted).toBe(true);
-  expect(map.core.deleteSessionID).toBe(deleteSessionID);
 });
 
 test("rejects delete marker ingestion for non-owned covalue when verifying (skipVerify=false)", () => {
@@ -251,5 +250,102 @@ test("rejects delete marker ingestion for non-owned covalue when verifying (skip
     reason: "CannotVerifyPermissions",
   });
   expect(newEntry.isDeleted).toBe(false);
-  expect(newEntry.deleteSessionID).toBeUndefined();
+});
+
+test("deleted coValues return only the deleted session/transaction on the knownState", async () => {
+  const client = setupTestNode({
+    connected: true,
+  });
+  const group = client.node.createGroup();
+  const map = group.createMap();
+  map.set("hello", "world", "trusting");
+  map.core.deleteCoValue();
+
+  const knownState = map.core.knownState();
+  expect(
+    Object.keys(knownState.sessions).every((sessionID) =>
+      isDeletedSessionID(sessionID as SessionID),
+    ),
+  ).toBe(true);
+  expect(Object.keys(knownState.sessions)).toHaveLength(1);
+});
+
+test("deleted coValues return only the deleted session/transaction on the knownStateWithStreaming", async () => {
+  const streamingClient = setupTestNode();
+  const client = await setupTestAccount({ connected: true });
+  const group = streamingClient.node.createGroup();
+
+  group.addMemberInternal(client.account, "admin");
+
+  // Import the group content into the client
+  importContentIntoNode(group.core, client.node);
+
+  const map = group.createMap();
+  fillCoMapWithLargeData(map);
+
+  // Import only partially the map content into the client, to keep it in streaming state
+  importContentIntoNode(map.core, client.node, 1);
+
+  const mapOnClient = await loadCoValueOrFail(client.node, map.id);
+
+  expect(mapOnClient.core.isStreaming()).toBe(true);
+
+  mapOnClient.core.deleteCoValue();
+
+  const streamingSessions = mapOnClient.core.knownStateWithStreaming().sessions;
+
+  expect(
+    Object.keys(streamingSessions).every((sessionID) =>
+      isDeletedSessionID(sessionID as SessionID),
+    ),
+  ).toBe(true);
+  expect(Object.keys(streamingSessions)).toHaveLength(1);
+});
+
+test("waitForSync should wait only for the delete session/transaction", async () => {
+  const client = setupTestNode({
+    connected: true,
+  });
+  const group = client.node.createGroup();
+  const map = group.createMap();
+  map.set("hello", "world", "trusting");
+  map.core.deleteCoValue();
+
+  await map.core.waitForSync();
+
+  expect(jazzCloud.node.expectCoValueLoaded(map.id).isDeleted).toBe(true);
+});
+
+test("waitForSync should wait only for the delete session/transaction even if the coValue loading was in streaming", async () => {
+  const streamingClient = setupTestNode();
+  const client = await setupTestAccount({ connected: true });
+  const group = streamingClient.node.createGroup();
+
+  group.addMemberInternal(client.account, "admin");
+
+  // Import the group content into the client
+  importContentIntoNode(group.core, client.node);
+
+  const map = group.createMap();
+  fillCoMapWithLargeData(map);
+
+  // Import only partially the map content into the client, to keep it in streaming state
+  importContentIntoNode(map.core, client.node, 1);
+
+  const mapOnClient = await loadCoValueOrFail(client.node, map.id);
+
+  expect(mapOnClient.core.isStreaming()).toBe(true);
+
+  mapOnClient.core.deleteCoValue();
+
+  await mapOnClient.core.waitForSync();
+
+  const mapOnSyncServer = jazzCloud.node.expectCoValueLoaded(map.id);
+
+  expect(
+    Object.keys(mapOnSyncServer.knownState().sessions).every((sessionID) =>
+      isDeletedSessionID(sessionID as SessionID),
+    ),
+  ).toBe(true);
+  expect(jazzCloud.node.expectCoValueLoaded(map.id).isDeleted).toBe(true);
 });

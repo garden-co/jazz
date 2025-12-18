@@ -27,19 +27,19 @@ Numbered checklist of **coding tasks** only. Each task references the relevant r
    - Add and wire `isDeleted: boolean` and `deleteSessionID?: SessionID` on `CoValueCore` (and any necessary persistence/derivation via `verifiedState`).
    - Mark the coValue as deleted when a valid delete transaction is accepted.
 
-6. [ ] **Client-side immediate sync blocking: only allow delete session/tx to sync** (Req: US-4, US-7)
+6. [x] **Client-side immediate sync blocking: only allow delete session/tx to sync** (Req: US-4, US-7)
    - In sync logic (per design: `packages/cojson/src/sync.ts`), ensure that once `isDeleted` is true:
      - inbound `content` ignores any non-delete sessions/transactions
      - outbound sync only uploads the delete session/transaction (tombstone) for that coValue
      - historical content is blocked from syncing immediately
 
-7. [ ] **Implement “poisoned knownState” quenching for deleted coValues** (Req: US-4, US-7)
+7. [x] **Implement “poisoned knownState” quenching for deleted coValues** (Req: US-4, US-7)
    - In `load` handling, when local coValue is deleted:
      - respond with `deleteSessionID` counter, and
      - poison counters for other sessions present in the requester’s `msg.sessions` to stop repeated uploads of historical content.
    - Ensure this remains wire-compatible with existing `load/known/content/done` shapes.
 
-8. [ ] **Update `waitForSync` semantics for deleted coValues** (Req: US-7)
+8. [x] **Update `waitForSync` semantics for deleted coValues** (Req: US-7)
    - Once a delete session exists, `waitForSync()` must wait only for:
      - tombstone/header as applicable, and
      - the delete session counter to be uploaded/stored.
