@@ -361,6 +361,10 @@ export class StorageApiSync implements StorageAPI {
     return newLastIdx;
   }
 
+  markCoValueAsDeleted(id: RawCoID) {
+    this.dbClient.markCoValueAsDeleted(id);
+  }
+
   waitForSync(id: string, coValue: CoValueCore) {
     return this.knwonStates.waitForSync(id, coValue);
   }

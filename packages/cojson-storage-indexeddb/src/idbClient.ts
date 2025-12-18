@@ -19,6 +19,11 @@ import {
   queryIndexedDbStore,
 } from "./CoJsonIDBTransaction.js";
 
+type DeletedCoValueQueueEntry = {
+  coValueID: RawCoID;
+  status?: "pending" | "done";
+};
+
 export class IDBTransaction implements DBTransactionInterfaceAsync {
   constructor(private tx: CoJsonIDBTransaction) {}
 
@@ -37,6 +42,24 @@ export class IDBTransaction implements DBTransactionInterfaceAsync {
         .getObjectStore("sessions")
         .index("uniqueSessions")
         .get([coValueRowId, sessionID]),
+    );
+  }
+
+  async markCoValueAsDeleted(id: RawCoID): Promise<void> {
+    await this.run((tx) =>
+      tx.getObjectStore("deletedCoValues").put({
+        coValueID: id,
+        status: "pending",
+      } satisfies DeletedCoValueQueueEntry),
+    );
+  }
+
+  async markCoValueDeletionDone(id: RawCoID): Promise<void> {
+    await this.run((tx) =>
+      tx.getObjectStore("deletedCoValues").put({
+        coValueID: id,
+        status: "done",
+      } satisfies DeletedCoValueQueueEntry),
     );
   }
 
@@ -157,6 +180,41 @@ export class IDBClient implements DBClientInterfaceAsync {
       id,
       header,
     }).catch(() => this.getCoValueRowID(id));
+  }
+
+  async markCoValueAsDeleted(id: RawCoID): Promise<void> {
+    await putIndexedDbStore<DeletedCoValueQueueEntry, number>(
+      this.db,
+      "deletedCoValues",
+      {
+        coValueID: id,
+        // Default: "pending"
+        status: "pending",
+      },
+    );
+  }
+
+  async markCoValueDeletionDone(id: RawCoID): Promise<void> {
+    await putIndexedDbStore<DeletedCoValueQueueEntry, number>(
+      this.db,
+      "deletedCoValues",
+      {
+        coValueID: id,
+        status: "done",
+      },
+    );
+  }
+
+  async getAllCoValuesWaitingForDelete(): Promise<RawCoID[]> {
+    const entries = await queryIndexedDbStore<DeletedCoValueQueueEntry[]>(
+      this.db,
+      "deletedCoValues",
+      (store) =>
+        store.index("deletedCoValuesByStatus").getAll("pending") as IDBRequest<
+          DeletedCoValueQueueEntry[]
+        >,
+    );
+    return entries.map((e) => e.coValueID);
   }
 
   async transaction(

@@ -388,6 +388,15 @@ export class StorageApiAsync implements StorageAPI {
     return newLastIdx;
   }
 
+  markCoValueAsDeleted(id: RawCoID) {
+    this.dbClient.markCoValueAsDeleted(id).catch((error) => {
+      logger.error("Error marking coValue as deleted", {
+        error,
+        id,
+      });
+    });
+  }
+
   waitForSync(id: string, coValue: CoValueCore) {
     return this.knwonStates.waitForSync(id, coValue);
   }

@@ -325,17 +325,17 @@ export interface DBClientInterfaceAsync {
   // ... existing methods ...
   
   // Mark coValue as deleted when delete transaction is stored
-  markCoValueAsDeleted(coValueRowID: number): Promise<void>;
+  markCoValueAsDeleted(id: RawCoID): Promise<void>;
   
   // Get all deleted coValue IDs for batch processing
-  getAllDeletedCoValueIDs(): Promise<RawCoID[]>;
+  getAllCoValuesWaitingForDelete(): Promise<RawCoID[]>;
 }
 
 export interface DBClientInterfaceSync {
   // ... existing methods ...
   
-  markCoValueAsDeleted(coValueRowID: number): void;
-  getAllDeletedCoValueIDs(): RawCoID[];
+  markCoValueAsDeleted(id: RawCoID): void;
+  getAllCoValuesWaitingForDelete(): RawCoID[];
 }
 ```
 
@@ -362,29 +362,29 @@ Add a migration that introduces a separate table for deleted coValues:
 
 ```sql
 CREATE TABLE IF NOT EXISTS deletedCoValues (
-  coValueRowID INTEGER PRIMARY KEY
-  -- Optional (if foreign keys are enabled in the embedding runtime):
-  -- , FOREIGN KEY (coValueRowID) REFERENCES coValues(rowID) ON DELETE CASCADE
+  coValueID TEXT PRIMARY KEY,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'done'))
 );
 ```
 
-**Implementation: `markCoValueAsDeleted(coValueRowID)`**
+**Implementation: `markCoValueAsDeleted(coValueID)`**
 
-SQLite implementation is an idempotent insert (works for both sync and async variants):
+SQLite implementation is an idempotent enqueue (works for both sync and async variants):
 
 ```sql
-INSERT OR IGNORE INTO deletedCoValues (coValueRowID) VALUES (?);
+INSERT INTO deletedCoValues (coValueID, status) VALUES (?, 'pending')
+ON CONFLICT(coValueID) DO UPDATE SET status='pending';
 ```
 
 Notes:
-- the storage write path already has both `msg.id` and `storedCoValueRowID`; passing `storedCoValueRowID` is sufficient.
+- the storage write path already has `msg.id` (`RawCoID`); store that directly.
 
-**Implementation: `getAllDeletedCoValueIDs()`**
+**Implementation: `getAllCoValuesWaitingForDelete()`**
 
 ```sql
-SELECT c.id
-FROM deletedCoValues d
-JOIN coValues c ON c.rowID = d.coValueRowID;
+SELECT coValueID AS id
+FROM deletedCoValues
+WHERE status = 'pending';
 ```
 
 #### 7.2 IndexedDB (cojson-storage-indexeddb)
@@ -395,22 +395,21 @@ The IndexedDB schema is defined in `packages/cojson-storage-indexeddb/src/idbNod
 
 Add a new database version (bump from `indexedDB.open(name, 4)` to the next version) and introduce a new store:
 
-- Create `deletedCoValues` store with `keyPath: "coValueRowID"` and values containing:
-  - `coValueRowID: number` (the `coValues.rowID`)
-  - `id: RawCoID` (duplicated for efficient reads)
+- Create `deletedCoValues` store with `keyPath: "coValueID"` and values containing:
+  - `coValueID: RawCoID`
+  - `status: "pending" | "done"`
 
-**Implementation: `markCoValueAsDeleted(coValueRowID)`**
+**Implementation: `markCoValueAsDeleted(coValueID)`**
 
 Because `IDBClient` uses a transactional wrapper (`CoJsonIDBTransaction`), implement `markCoValueAsDeleted` by:
 
-1. `get` the `coValues` record by primary key (`rowID`) to retrieve the `id`
-2. `put` `{ coValueRowID, id }` into the `deletedCoValues` store (idempotent via key)
+1. `put` `{ coValueID, status: "pending" }` into the `deletedCoValues` store (idempotent via key)
 
 This should run inside the same write transaction that stores the delete transaction so the marker is not lost if the write rolls back.
 
-**Implementation: `getAllDeletedCoValueIDs()`**
+**Implementation: `getAllCoValuesWaitingForDelete()`**
 
-Read `getAll()` from the `deletedCoValues` store and return the `id` field from each row.
+Read `getAll()` from the `deletedCoValues` store and return the `coValueID` field from each row where `status === "pending"`.
 
 ### 8. Storage API Batch Delete
 
@@ -418,14 +417,14 @@ Read `getAll()` from the `deletedCoValues` store and return the `id` field from 
 
 **Changes**:
 - Storage API should expose a method to delete all deleted coValues
-- This method uses the DBClient's `getAllDeletedCoValueIDs()` to get the list
+- This method uses the DBClient's `getAllCoValuesWaitingForDelete()` to get the list
 - For each deleted coValue, perform physical deletion while preserving tombstone
 
 #### 8.1 When to run `ereaseAllDeletedCoValues()`
 
 **Background**: delete transactions provide immediate sync blocking (privacy + safety). Physical deletion is purely a **space-reclamation** step and can run later, in the background.
 
-`deletedCoValues` is treated as a **work queue**: after a coValue is physically erased (tombstone preserved), the queue entry is removed so it is not re-processed.
+`deletedCoValues` is treated as a **work queue**: entries are enqueued as `status: "pending"`, then flipped to `status: "done"` once the coValue has been physically erased (tombstone preserved). (An implementation may optionally delete `done` entries later for compaction.)
 
 **Where it should run**
 
@@ -459,13 +458,19 @@ To prevent long pauses/locks:
 export interface StorageAPI {
   // ... existing methods ...
   
+  /**
+   * Persist a "deleted coValue" marker (enqueue into the `deletedCoValues` work queue).
+   * Idempotent.
+   */
+  markCoValueAsDeleted(coValueID: RawCoID): Promise<void>;
+
   // Delete all deleted coValues (batch operation)
   ereaseAllDeletedCoValues(): Promise<void>;
 }
 
 // Implementation in StorageApiAsync/StorageApiSync
 async ereaseAllDeletedCoValues(): Promise<void> {
-  const deletedCoValueIDs = await this.dbClient.getAllDeletedCoValueIDs();
+  const deletedCoValueIDs = await this.dbClient.getAllCoValuesWaitingForDelete();
   
   for (const coValueID of deletedCoValueIDs) {
     // Perform physical deletion while preserving tombstone
@@ -490,17 +495,17 @@ export interface SQLiteDatabaseDriver {
   // ... existing methods ...
   
   // Get all deleted coValue IDs
-  getAllDeletedCoValueIDs(): RawCoID[];
+  getAllCoValuesWaitingForDelete(): RawCoID[];
 }
 
 export interface SQLiteDatabaseDriverAsync {
   // ... existing methods ...
   
-  getAllDeletedCoValueIDs(): Promise<RawCoID[]>;
+  getAllCoValuesWaitingForDelete(): Promise<RawCoID[]>;
 }
 
 // Implementation example (SQL)
-// SELECT coValueRowID FROM deletedCoValues
+// SELECT coValueID FROM deletedCoValues WHERE status = 'pending'
 ```
 
 ### 10. Delete Tombstone
@@ -552,9 +557,15 @@ The SQLite storage schema is:
 
 **Primitive signature (conceptual)**
 
-- `eraseCoValueButKeepTombstone(coValueRowID: number): void | Promise<void>`
+- `eraseCoValueButKeepTombstone(coValueID: RawCoID): void | Promise<void>`
 
 **Algorithm (single SQL transaction)**
+
+0. Resolve `coValueRowID` (from `coValues`) for the given `coValueID`.
+
+```sql
+SELECT rowID FROM coValues WHERE id = ?;
+```
 
 1. Identify non-delete sessions:
 
@@ -590,7 +601,7 @@ WHERE coValue = ?
 `deletedCoValues` is treated as a **work queue**, remove the row so the batch job won’t repeatedly re-process already-erased coValues:
 
 ```sql
-DELETE FROM deletedCoValues WHERE coValueRowID = ?;
+UPDATE deletedCoValues SET status = 'done' WHERE coValueID = ?;
 ```
 
 ##### 10.1.2 IndexedDB (cojson-storage-indexeddb)
@@ -601,14 +612,15 @@ The IndexedDB storage uses these stores:
 - `sessions` (keyPath `rowID`, indexed by `sessionsByCoValue`) — delete non-delete sessions
 - `transactions` (keyPath `["ses","idx"]`) — delete for non-delete sessions
 - `signatureAfter` (keyPath `["ses","idx"]`) — delete for non-delete sessions
-- `deletedCoValues` (keyPath `coValueRowID`) — optional queue semantics (see below)
+- `deletedCoValues` (keyPath `coValueID`) — status-tracked queue semantics (see below)
 
 **Primitive signature (conceptual)**
 
-- `eraseCoValueButKeepTombstone(coValueRowID: number): Promise<void>`
+- `eraseCoValueButKeepTombstone(coValueID: RawCoID): Promise<void>`
 
 **Algorithm (single IndexedDB readwrite transaction spanning all stores above)**
 
+0. Resolve `coValueRowID` (from `coValues`) for the given `coValueID`.
 1. Load all sessions for the coValue via the `sessionsByCoValue` index.
 2. Partition them into:
    - keep: `sessionID.endsWith("_deleted")`
@@ -617,14 +629,15 @@ The IndexedDB storage uses these stores:
    - delete all `transactions` keys in range `IDBKeyRange.bound([ses, 0], [ses, +∞])` (cursor delete)
    - delete all `signatureAfter` keys in the same `ses` range (cursor delete)
    - delete the `sessions` row by its `rowID`
-4. Optional queue semantics for `deletedCoValues`:
-   - if treated as a work queue, `deletedCoValues.delete(coValueRowID)`
-   - otherwise keep it.
+4. Queue semantics for `deletedCoValues`:
+   - set status to `done` (e.g. `deletedCoValues.put({ coValueID, status: "done" })`)
+   - (optional) later compaction can delete `done` entries.
 
 **Key Logic (pseudocode)**
 
 ```typescript
 // Conceptual pseudocode inside one IDB transaction:
+const coValueRowID = await resolveRowIDFromCoValuesById(coValueID);
 const allSessions = await sessionsByCoValue.getAll(coValueRowID);
 const sessionsToDelete = allSessions.filter((s) => !s.sessionID.endsWith("_deleted"));
 
@@ -635,7 +648,7 @@ for (const s of sessionsToDelete) {
   await sessionsStore.delete(s.rowID);
 }
 
-// optional: deletedCoValuesStore.delete(coValueRowID)
+await deletedCoValuesStore.put({ coValueID, status: "done" });
 ```
 
 
@@ -707,7 +720,7 @@ type CoValueDeletedState = {
    - Sync blocking logic - verify only delete session syncs
    - Tombstone storage - verify tombstone preservation
    - `DBClient.markCoValueAsDeleted()` - verify deleted coValues are tracked
-   - `DBClient.getAllDeletedCoValueIDs()` - verify correct IDs are returned
+   - `DBClient.getAllCoValuesWaitingForDelete()` - verify correct IDs are returned
    - `StorageAPI.ereaseAllDeletedCoValues()` - verify batch deletion
 
 2. **Integration Tests**:
@@ -751,7 +764,7 @@ type CoValueDeletedState = {
 1. Multiple coValues deleted (delete transactions stored)
 2. DBClient tracks deleted coValues
 3. Storage API calls `ereaseAllDeletedCoValues()`
-4. DBDriver extracts all deleted coValue IDs via `getAllDeletedCoValueIDs()`
+4. DBDriver extracts all deleted coValue IDs via `getAllCoValuesWaitingForDelete()`
 5. Physical deletion performed for each deleted coValue
 6. Tombstones preserved
 

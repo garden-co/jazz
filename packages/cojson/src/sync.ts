@@ -625,6 +625,7 @@ export class SyncManager {
     };
 
     let wasAlreadyDeleted = coValue.isDeleted;
+    const wasDeletedBeforeContent = coValue.isDeleted;
 
     /**
      * The coValue is in memory, load the transactions from the content message
@@ -851,6 +852,10 @@ export class SyncManager {
     if (!storage) return;
 
     const value = this.local.getCoValue(content.id);
+
+    if (value.isDeleted) {
+      storage.markCoValueAsDeleted(value.id);
+    }
 
     // Try to store the content as-is for performance
     // In case that some transactions are missing, a correction will be requested, but it's an edge case

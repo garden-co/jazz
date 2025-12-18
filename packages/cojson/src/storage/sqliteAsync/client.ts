@@ -28,6 +28,10 @@ export type RawTransactionRow = {
   tx: string;
 };
 
+type DeletedCoValueQueueRow = {
+  id: RawCoID;
+};
+
 export function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unknown error";
 }
@@ -143,6 +147,32 @@ export class SQLiteClientAsync
     }
 
     return result.rowID;
+  }
+
+  async markCoValueAsDeleted(id: RawCoID) {
+    // Work queue entry. Table only stores the coValueID.
+    // Idempotent by design.
+    await this.db.run(`INSERT INTO deletedCoValues (coValueID) VALUES (?)`, [
+      id,
+    ]);
+  }
+
+  async markCoValueDeletionDone(id: RawCoID) {
+    await this.db.run(
+      `INSERT INTO deletedCoValues (coValueID, status) VALUES (?, 'done')
+       ON CONFLICT(coValueID) DO UPDATE SET status='done'`,
+      [id],
+    );
+  }
+
+  async getAllCoValuesWaitingForDelete(): Promise<RawCoID[]> {
+    const rows = await this.db.query<DeletedCoValueQueueRow>(
+      `SELECT coValueID as id
+       FROM deletedCoValues
+       WHERE status = 'pending'`,
+      [],
+    );
+    return rows.map((r) => r.id);
   }
 
   async addSessionUpdate({

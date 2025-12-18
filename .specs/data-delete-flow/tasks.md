@@ -45,22 +45,22 @@ Numbered checklist of **coding tasks** only. Each task references the relevant r
      - the delete session counter to be uploaded/stored.
    - Ensure it does **not** wait for historical sessions for deleted values.
 
-9. [ ] **Persist “deleted coValue” marker in storage when delete tx is stored** (Req: US-3, US-6)
+9. [x] **Persist “deleted coValue” marker in storage when delete tx is stored** (Req: US-3, US-6)
    - Extend DB client interfaces in `packages/cojson/src/storage/types.ts`:
      - `markCoValueAsDeleted(...)`
-     - `getAllDeletedCoValueIDs(...)`
+     - `getAllCoValuesWaitingForDelete(...)`
    - Wire these calls into the normal storage path when a delete transaction is committed/stored.
    - Ensure storage shards (`skipVerify: true`) still persist the deleted marker and tombstone without doing permission verification.
    - Implement the marker as a **work queue** named `deletedCoValues`:
-     - **SQLite family**: new `deletedCoValues(coValueRowID INTEGER PRIMARY KEY)` table via `packages/cojson/src/storage/sqlite/sqliteMigrations.ts` (no `deletedAt` column).
-     - **IndexedDB**: new `deletedCoValues` object store with `keyPath: "coValueRowID"` and stored values `{ coValueRowID, id }` (no `deletedAt`).
+     - **SQLite family**: new `deletedCoValues(coValueID TEXT PRIMARY KEY)` table via `packages/cojson/src/storage/sqlite/sqliteMigrations.ts` (no `deletedAt` column).
+     - **IndexedDB**: new `deletedCoValues` object store with `keyPath: "coValueID"` and stored values `{ coValueID }` (no `deletedAt`).
 
 10. [ ] **Expose batch erase API for physically deleting deleted coValues (preserve tombstones)** (Req: US-5, US-6)
    - Add a storage API method (per design) in:
      - `packages/cojson/src/storage/storageSync.ts`
      - `packages/cojson/src/storage/storageAsync.ts`
    - Implementation should:
-     - enumerate deleted IDs via `getAllDeletedCoValueIDs()`
+     - enumerate deleted IDs via `getAllCoValuesWaitingForDelete()`
      - perform physical deletion per coValue while preserving tombstone (delete tx + header).
      - treat `deletedCoValues` as a **work queue**: remove each queue entry after successful physical deletion.
 
@@ -72,8 +72,8 @@ Numbered checklist of **coding tasks** only. Each task references the relevant r
        - the `coValues` row (header)
        - all delete-session(s) (`*_deleted`) and their transactions/signatures (tombstone)
    - After erasure, delete the queue entry:
-     - SQLite: `DELETE FROM deletedCoValues WHERE coValueRowID = ?;`
-     - IndexedDB: `deletedCoValues.delete(coValueRowID)`
+     - SQLite: `DELETE FROM deletedCoValues WHERE coValueID = ?;`
+     - IndexedDB: `deletedCoValues.delete(coValueID)`
    - Ensure post-delete sync behavior still advertises/serves the tombstone but never historical content.
 
 12. [ ] **Trigger batch erasure in the background (debounced + startup/resume)** (Req: US-5, US-6)
@@ -88,7 +88,7 @@ Numbered checklist of **coding tasks** only. Each task references the relevant r
      - optional `maxDurationMs` budget (e.g. 100–300ms)
 
 13. [ ] **Implement “get all deleted IDs” efficiently in DB drivers/implementations** (Req: US-3, US-6)
-   - Implement `markCoValueAsDeleted(...)` + `getAllDeletedCoValueIDs()` for each in-repo DBClient:
+   - Implement `markCoValueAsDeleted(...)` + `getAllCoValuesWaitingForDelete()` for each in-repo DBClient:
      - `packages/cojson/src/storage/sqlite/client.ts` (SQLite sync)
      - `packages/cojson/src/storage/sqliteAsync/client.ts` (SQLite async)
      - `packages/cojson-storage-indexeddb/src/idbClient.ts` (IndexedDB async)

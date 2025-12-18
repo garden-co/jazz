@@ -174,6 +174,35 @@ test("should send an empty content message if there is no content", async () => 
   node2Sync.restore();
 });
 
+test("persists deleted coValue marker as a deletedCoValues work queue entry", async () => {
+  const agentSecret = Crypto.newRandomAgentSecret();
+
+  const node = new LocalNode(
+    agentSecret,
+    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
+    Crypto,
+  );
+
+  const { storage } = createSQLiteStorage();
+  node.setStorage(storage);
+
+  const group = node.createGroup();
+  const map = group.createMap();
+  map.set("hello", "world");
+
+  // Give storage time to flush initial writes.
+  await map.core.waitForSync();
+
+  map.core.deleteCoValue();
+
+  // Give storage time to store the delete marker.
+  await map.core.waitForSync();
+
+  // @ts-expect-error - dbClient is private
+  const deletedCoValueIDs = storage.dbClient.getAllCoValuesWaitingForDelete();
+  expect(deletedCoValueIDs).toContain(map.id);
+});
+
 test("should load dependencies correctly (group inheritance)", async () => {
   const agentSecret = Crypto.newRandomAgentSecret();
 
