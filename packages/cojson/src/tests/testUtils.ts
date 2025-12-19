@@ -500,11 +500,11 @@ export function setupTestNode(
   }
 
   async function addAsyncStorage(
-    opts: { ourName?: string; filename?: string } = {},
+    opts: { ourName?: string; filename?: string; storageName?: string } = {},
   ) {
     const storage = await createAsyncStorage({
       nodeName: opts.ourName ?? "client",
-      storageName: "storage",
+      storageName: opts.storageName ?? "storage",
       filename: opts.filename,
     });
     node.setStorage(storage);
@@ -632,10 +632,12 @@ export async function setupTestAccount(
     return { storage };
   }
 
-  async function addAsyncStorage(opts: { ourName?: string } = {}) {
+  async function addAsyncStorage(
+    opts: { ourName?: string; storageName?: string } = {},
+  ) {
     const storage = await createAsyncStorage({
       nodeName: opts.ourName ?? "client",
-      storageName: "storage",
+      storageName: opts.storageName ?? "storage",
     });
     ctx.node.setStorage(storage);
 
