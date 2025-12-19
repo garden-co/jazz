@@ -76,7 +76,7 @@ Numbered checklist of **coding tasks** only. Each task references the relevant r
      - IndexedDB: `deletedCoValues.delete(coValueID)`
    - Ensure post-delete sync behavior still advertises/serves the tombstone but never historical content.
 
-12. [ ] **Trigger batch erasure in the background (debounced + startup/resume)** (Req: US-5, US-6)
+12. [x] **Trigger batch erasure in the background (debounced + startup/resume)** (Req: US-5, US-6)
    - Ensure `ereaseAllDeletedCoValues()` is not run inline in latency-sensitive paths; instead:
      - schedule a debounced run **after storing** a delete transaction
      - run once on **startup/resume** to drain any queued entries

@@ -54,4 +54,40 @@ describe("CoState", () => {
     );
     expect(stateValue.name).toBe("John Doe");
   });
+
+  it("should return a 'deleted' value when the coValue is deleted", async () => {
+    const Person = co.map({
+      name: co.plainText(),
+    });
+    const PersonWithName = Person.resolved({ name: true });
+    const person = Person.create({ name: "John Doe" }, publicGroup);
+
+    render(
+      TestCoStateWrapper,
+      {
+        Schema: PersonWithName,
+        id: person.$jazz.id,
+      },
+      {
+        account: clientAccount,
+      },
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("loading-state").textContent).toBe(
+        CoValueLoadingState.LOADED,
+      );
+    });
+
+    // Delete on the server (owner/admin) and ensure it propagates.
+    person.$jazz.raw.core.deleteCoValue();
+    await person.$jazz.raw.core.waitForSync();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("loading-state").textContent).toBe(
+        CoValueLoadingState.DELETED,
+      );
+      expect(screen.getByTestId("is-loaded").textContent).toBe("false");
+    });
+  });
 });

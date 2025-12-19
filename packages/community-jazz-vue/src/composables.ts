@@ -221,6 +221,9 @@ export function useCoState<
             onUnauthorized: (value) => {
               updateState(value);
             },
+            onDeleted: (value) => {
+              updateState(value);
+            },
             syncResolution: true,
           },
           (value: any) => {

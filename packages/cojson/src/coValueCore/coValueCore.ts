@@ -904,22 +904,11 @@ export class CoValueCore {
       }
     }
 
-    /**
-     * Use a dedicated delete session. It must remain compatible with the existing `SessionID` format
-     * (which is parsed via `_session`) while still carrying the `_deleted_` marker for future delete-aware logic.
-     */
-    const deleteSessionID = this.crypto.newDeleteSessionID(
-      this.node.getCurrentAccountOrAgentID(),
-    );
     this.makeTransaction(
       [], // Empty changes array
       "trusting", // Unencrypted
       { deleted: true }, // Delete metadata
-      Date.now(),
-      deleteSessionID,
     );
-
-    this.#markAsDeleted();
   }
 
   makeTransaction(
@@ -927,7 +916,6 @@ export class CoValueCore {
     privacy: "private" | "trusting",
     meta?: JsonObject,
     madeAt?: number,
-    sessionIDOverride?: SessionID,
   ): boolean {
     if (!this.verified) {
       throw new Error(
@@ -939,17 +927,24 @@ export class CoValueCore {
       throw new Error("Cannot make transaction on a deleted coValue");
     }
 
+    const isDeleted = meta?.deleted;
+
     validateTxSizeLimitInBytes(changes);
 
     // This is an ugly hack to get a unique but stable session ID for editing the current account
-    const sessionID =
-      sessionIDOverride ??
-      (this.verified.header.meta?.type === "account"
+    let sessionID =
+      this.verified.header.meta?.type === "account"
         ? (this.node.currentSessionID.replace(
             this.node.getCurrentAgent().id,
             this.node.getCurrentAgent().currentAgentID(),
           ) as SessionID)
-        : this.node.currentSessionID);
+        : this.node.currentSessionID;
+
+    if (isDeleted) {
+      sessionID = this.crypto.newDeleteSessionID(
+        this.node.getCurrentAccountOrAgentID(),
+      );
+    }
 
     const signerAgent = this.node.getCurrentAgent();
 
@@ -981,6 +976,10 @@ export class CoValueCore {
         meta,
         madeAt ?? Date.now(),
       );
+    }
+
+    if (isDeleted) {
+      this.#markAsDeleted();
     }
 
     const { transaction } = result;

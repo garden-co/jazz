@@ -818,8 +818,8 @@ describe("StorageApiAsync", () => {
 
       await vi.runAllTimersAsync();
 
-      // @ts-expect-error - dbClient is private
       expect(
+        // @ts-expect-error - dbClient is private
         await storage.dbClient.getAllCoValuesWaitingForDelete(),
       ).not.toContain(map.id);
     });

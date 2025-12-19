@@ -105,6 +105,9 @@ export class CoState<
             onUnauthorized: (value) => {
               this.update(value);
             },
+            onDeleted: (value) => {
+              this.update(value);
+            },
             syncResolution: true,
             unstable_branch: options?.unstable_branch,
           },
@@ -185,6 +188,9 @@ export class AccountCoState<
               this.update(value);
             },
             onUnauthorized: (value) => {
+              this.update(value);
+            },
+            onDeleted: (value) => {
               this.update(value);
             },
             syncResolution: true,

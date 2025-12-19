@@ -695,6 +695,18 @@ type CoValueDeletedState = {
 };
 ```
 
+### `jazz-tools` subscription loading state for deleted CoValues
+
+When consuming CoValues via `jazz-tools` subscriptions / loaders, deleted CoValues are surfaced as a **NotLoaded** value with:
+
+- `value.$jazz.loadingState === "deleted"` (`CoValueLoadingState.DELETED`)
+
+This state is treated like other terminal loading error states (`"unavailable"`, `"unauthorized"`):
+
+- it propagates through the subscription tree like other NotLoaded errors
+- `loadCoValue(...)` resolves (does not hang) when the root CoValue is deleted
+- userland can handle it via the loading state (and optionally an `onDeleted` callback)
+
 
 ## Error Handling / Testing Strategy
 

@@ -207,8 +207,8 @@ test("delete flow: markCoValueAsDeleted + eraseAllDeletedCoValues removes histor
   storage1.markCoValueAsDeleted(map.id);
 
   await waitFor(async () => {
-    // @ts-expect-error - dbClient is not public
     const queued =
+      // @ts-expect-error - dbClient is not public
       await node1.storage.dbClient.getAllCoValuesWaitingForDelete();
     expect(queued).toContain(map.id);
     return true;
@@ -218,8 +218,8 @@ test("delete flow: markCoValueAsDeleted + eraseAllDeletedCoValues removes histor
 
   // Queue drained
   await waitFor(async () => {
-    // @ts-expect-error - dbClient is not public
     const queued =
+      // @ts-expect-error - dbClient is not public
       await node1.storage.dbClient.getAllCoValuesWaitingForDelete();
     expect(queued).not.toContain(map.id);
     return true;

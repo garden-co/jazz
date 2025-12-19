@@ -178,6 +178,7 @@ export function loadCoValue<
         syncResolution: true,
         skipRetry: options.skipRetry,
         onUnavailable: resolve,
+        onDeleted: resolve,
         onUnauthorized: resolve,
         unstable_branch: options.unstable_branch,
       },
@@ -229,6 +230,7 @@ export type SubscribeListenerOptions<
 > = {
   resolve?: RefsToResolveStrict<V, R>;
   loadAs?: Account | AnonymousJazzAgent;
+  onDeleted?: (value: NotLoaded<V>) => void;
   onUnauthorized?: (value: NotLoaded<V>) => void;
   onUnavailable?: (value: NotLoaded<V>) => void;
   unstable_branch?: BranchDefinition;
@@ -257,6 +259,7 @@ export function parseSubscribeRestArgs<
         options: {
           resolve: args[0].resolve,
           loadAs: args[0].loadAs,
+          onDeleted: args[0].onDeleted,
           onUnauthorized: args[0].onUnauthorized,
           onUnavailable: args[0].onUnavailable,
           unstable_branch: args[0].unstable_branch,
@@ -304,6 +307,7 @@ export function subscribeToCoValue<
   options: {
     resolve?: RefsToResolveStrict<V, R>;
     loadAs: Account | AnonymousJazzAgent;
+    onDeleted?: (value: Inaccessible<V>) => void;
     onUnavailable?: (value: Inaccessible<V>) => void;
     onUnauthorized?: (value: Inaccessible<V>) => void;
     syncResolution?: boolean;
@@ -346,6 +350,11 @@ export function subscribeToCoValue<
       case CoValueLoadingState.UNAVAILABLE:
         options.onUnavailable?.(value as Inaccessible<V>);
         break;
+      case CoValueLoadingState.DELETED:
+        (options.onDeleted ?? options.onUnavailable)?.(
+          value as Inaccessible<V>,
+        );
+        break;
       case CoValueLoadingState.UNAUTHORIZED:
         options.onUnauthorized?.(value as Inaccessible<V>);
         break;
@@ -381,6 +390,7 @@ export function subscribeToExistingCoValue<
   options:
     | {
         resolve?: RefsToResolveStrict<V, R>;
+        onDeleted?: (value: NotLoaded<V>) => void;
         onUnavailable?: (value: NotLoaded<V>) => void;
         onUnauthorized?: (value: NotLoaded<V>) => void;
         unstable_branch?: BranchDefinition;
@@ -394,6 +404,7 @@ export function subscribeToExistingCoValue<
     {
       loadAs: existing.$jazz.loadedAs,
       resolve: options?.resolve,
+      onDeleted: options?.onDeleted,
       onUnavailable: options?.onUnavailable,
       onUnauthorized: options?.onUnauthorized,
       unstable_branch: options?.unstable_branch,
@@ -695,6 +706,7 @@ export async function exportCoValue<
       if (value.$isLoaded) {
         resolve(value as Loaded<S, R>);
       } else if (
+        value.$jazz.loadingState === CoValueLoadingState.DELETED ||
         value.$jazz.loadingState === CoValueLoadingState.UNAVAILABLE ||
         value.$jazz.loadingState === CoValueLoadingState.UNAUTHORIZED
       ) {
@@ -860,6 +872,8 @@ export async function unstable_mergeBranchWithResolve<
   await new Promise<void>((resolve, reject) => {
     rootNode.setListener((value) => {
       if (value.type === CoValueLoadingState.UNAVAILABLE) {
+        reject(new Error("Unable to load the branch. " + value.toString()));
+      } else if (value.type === CoValueLoadingState.DELETED) {
         reject(new Error("Unable to load the branch. " + value.toString()));
       } else if (value.type === CoValueLoadingState.UNAUTHORIZED) {
         reject(new Error("Unable to load the branch. " + value.toString()));

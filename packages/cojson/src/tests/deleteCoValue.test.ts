@@ -15,23 +15,17 @@ import { CO_VALUE_PRIORITY } from "../priority.js";
 
 const Crypto = await WasmCrypto.create();
 
-function makeDeleteMarkerTransaction(
-  core: CoValueCore,
-  deleteSessionID: SessionID,
-  madeAt: number,
-) {
-  core.makeTransaction(
-    [],
-    "trusting",
-    { deleted: true },
-    madeAt,
-    deleteSessionID,
-  );
+function makeDeleteMarkerTransaction(core: CoValueCore) {
+  core.makeTransaction([], "trusting", { deleted: true });
+  const deleteSessionID = Object.keys(core.knownState().sessions).find(
+    (sessionID) => isDeletedSessionID(sessionID as SessionID),
+  ) as SessionID;
+  assert(deleteSessionID);
   const log = core.verified?.sessions.get(deleteSessionID);
   assert(log?.lastSignature);
   const tx = log.transactions.at(-1);
   assert(tx);
-  return { tx, signature: log.lastSignature };
+  return { tx, signature: log.lastSignature, deleteSessionID };
 }
 
 let jazzCloud: ReturnType<typeof setupTestNode>;
@@ -112,13 +106,8 @@ test("rejects delete marker ingestion from non-admin (ownedByGroup, skipVerify=f
   const map = group.createMap();
   const mapOnBob = await loadCoValueOrFail(bob.node, map.id);
 
-  const deleteSessionID = bob.node.crypto.newDeleteSessionID(
-    bob.node.getCurrentAccountOrAgentID(),
-  );
-  const { tx, signature } = makeDeleteMarkerTransaction(
+  const { tx, signature, deleteSessionID } = makeDeleteMarkerTransaction(
     mapOnBob.core,
-    deleteSessionID,
-    Date.now(),
   );
 
   const error = map.core.tryAddTransactions(
@@ -152,13 +141,8 @@ test("accepts delete marker ingestion from admin (ownedByGroup, skipVerify=false
   await loadCoValueOrFail(bob.node, group.id);
   const mapOnBob = await loadCoValueOrFail(bob.node, map.id);
 
-  const deleteSessionID = alice.node.crypto.newDeleteSessionID(
-    alice.node.getCurrentAccountOrAgentID(),
-  );
-  const { tx, signature } = makeDeleteMarkerTransaction(
+  const { tx, signature, deleteSessionID } = makeDeleteMarkerTransaction(
     map.core,
-    deleteSessionID,
-    Date.now(),
   );
 
   const error = mapOnBob.core.tryAddTransactions(
@@ -186,13 +170,8 @@ test("skipVerify=true ingestion marks deleted even for non-admin delete marker",
   const map = group.createMap();
   const mapOnBob = await loadCoValueOrFail(bob.node, map.id);
 
-  const deleteSessionID = bob.node.crypto.newDeleteSessionID(
-    bob.node.getCurrentAccountOrAgentID(),
-  );
-  const { tx, signature } = makeDeleteMarkerTransaction(
+  const { tx, signature, deleteSessionID } = makeDeleteMarkerTransaction(
     mapOnBob.core,
-    deleteSessionID,
-    Date.now(),
   );
 
   const error = map.core.tryAddTransactions(
@@ -216,14 +195,8 @@ test("rejects delete marker ingestion for non-owned covalue when verifying (skip
     ...Crypto.createdNowUnique(),
   });
 
-  const deleteSessionID = node.crypto.newDeleteSessionID(
-    node.getCurrentAccountOrAgentID(),
-  );
-  const { tx, signature } = makeDeleteMarkerTransaction(
-    coValue,
-    deleteSessionID,
-    Date.now(),
-  );
+  const { tx, signature, deleteSessionID } =
+    makeDeleteMarkerTransaction(coValue);
 
   node.internalDeleteCoValue(coValue.id);
   node.syncManager.handleNewContent(
