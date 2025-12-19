@@ -9,11 +9,17 @@ export const performanceMarks = {
   transactionParsingEnd: "cojson.transaction_parsing.end",
 } as const;
 
+const performanceMarkAvailable = performance.hasOwnProperty("mark");
+
 export function trackPerformanceMark(
   mark: keyof typeof performanceMarks,
   coId: RawCoID,
   detail?: Record<string, string>,
 ) {
+  if (!performanceMarkAvailable) {
+    return;
+  }
+
   performance.mark(performanceMarks[mark] + "." + coId, {
     detail,
   });

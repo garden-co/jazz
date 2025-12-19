@@ -593,19 +593,21 @@ export class SubscriptionScope<D extends CoValue> {
         this.resolve,
       );
 
-      this.firstLoadMetric.record(loadMeasureDetail.firstLoad.duration, {
-        id: this.id,
-        result: error ? "error" : "loaded",
-        parent_id: this.parent,
-        parent_key: this.parentKey,
-        source_id: this.sourceId,
-        resolve: JSON.stringify(this.resolve),
-        loadFromStorage: loadMeasureDetail.loadFromStorage?.duration,
-        loadFromPeer: loadMeasureDetail.loadFromPeer?.duration,
-        transactionParsing: loadMeasureDetail.transactionParsing?.duration,
-      });
+      if (loadMeasureDetail) {
+        this.firstLoadMetric.record(loadMeasureDetail.firstLoad.duration, {
+          id: this.id,
+          result: error ? "error" : "loaded",
+          parent_id: this.parent,
+          parent_key: this.parentKey,
+          source_id: this.sourceId,
+          resolve: JSON.stringify(this.resolve),
+          loadFromStorage: loadMeasureDetail.loadFromStorage?.duration,
+          loadFromPeer: loadMeasureDetail.loadFromPeer?.duration,
+          transactionParsing: loadMeasureDetail.transactionParsing?.duration,
+        });
 
-      trackSubscriptionLoadSpans(this.subscriptionSpan, loadMeasureDetail);
+        trackSubscriptionLoadSpans(this.subscriptionSpan, loadMeasureDetail);
+      }
 
       this.firstLoadRecorded = true;
     }

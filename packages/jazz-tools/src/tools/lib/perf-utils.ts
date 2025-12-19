@@ -14,11 +14,17 @@ export const performanceMeasures = {
     "jazz.subscription.first_load.transaction_parsing",
 } as const;
 
+const performanceMarkAvailable = performance.hasOwnProperty("mark");
+
 export function trackPerformanceMark(
   mark: keyof typeof performanceMarks,
   coId: string,
   detail?: Record<string, string>,
 ) {
+  if (!performanceMarkAvailable) {
+    return;
+  }
+
   performance.mark(performanceMarks[mark] + "." + coId, {
     detail,
   });
@@ -35,21 +41,24 @@ export function measureSubscriptionLoad(
   coId: string,
   sourceId: string,
   resolve: any,
-): LoadMeasureDetail {
+): LoadMeasureDetail | null {
+  if (!performanceMarkAvailable) {
+    return null;
+  }
+
   const loadMeasureDetail: Omit<LoadMeasureDetail, "firstLoad"> = {};
 
-  if (
-    hasStartEndMarks(
-      coJsonPerf.performanceMarks.loadFromStorageStart,
-      coJsonPerf.performanceMarks.loadFromStorageEnd,
-      coId,
-    )
-  ) {
+  const loadFromStorage = extractStartEndMarks(
+    coJsonPerf.performanceMarks.loadFromStorageStart,
+    coJsonPerf.performanceMarks.loadFromStorageEnd,
+    coId,
+  );
+  if (loadFromStorage) {
     loadMeasureDetail.loadFromStorage = performance.measure(
       performanceMeasures.subscriptionLoadFromStorage + "." + coId,
       {
-        start: coJsonPerf.performanceMarks.loadFromStorageStart + "." + coId,
-        end: coJsonPerf.performanceMarks.loadFromStorageEnd + "." + coId,
+        start: loadFromStorage.start.startTime,
+        end: loadFromStorage.end.startTime,
         detail: {
           id: coId,
           source_id: sourceId,
@@ -63,25 +72,19 @@ export function measureSubscriptionLoad(
         },
       },
     );
-
-    clearMarks([
-      coJsonPerf.performanceMarks.loadFromStorageStart + "." + coId,
-      coJsonPerf.performanceMarks.loadFromStorageEnd + "." + coId,
-    ]);
   }
 
-  if (
-    hasStartEndMarks(
-      coJsonPerf.performanceMarks.loadFromPeerStart,
-      coJsonPerf.performanceMarks.loadFromPeerEnd,
-      coId,
-    )
-  ) {
+  const loadFromPeer = extractStartEndMarks(
+    coJsonPerf.performanceMarks.loadFromPeerStart,
+    coJsonPerf.performanceMarks.loadFromPeerEnd,
+    coId,
+  );
+  if (loadFromPeer) {
     loadMeasureDetail.loadFromPeer = performance.measure(
       performanceMeasures.subscriptionLoadFromPeer + "." + coId,
       {
-        start: coJsonPerf.performanceMarks.loadFromPeerStart + "." + coId,
-        end: coJsonPerf.performanceMarks.loadFromPeerEnd + "." + coId,
+        start: loadFromPeer.start.startTime,
+        end: loadFromPeer.end.startTime,
         detail: {
           id: coId,
           source_id: sourceId,
@@ -95,25 +98,19 @@ export function measureSubscriptionLoad(
         },
       },
     );
-
-    clearMarks([
-      coJsonPerf.performanceMarks.loadFromPeerStart + "." + coId,
-      coJsonPerf.performanceMarks.loadFromPeerEnd + "." + coId,
-    ]);
   }
 
-  if (
-    hasStartEndMarks(
-      coJsonPerf.performanceMarks.transactionParsingStart,
-      coJsonPerf.performanceMarks.transactionParsingEnd,
-      coId,
-    )
-  ) {
+  const transactionParsing = extractStartEndMarks(
+    coJsonPerf.performanceMarks.transactionParsingStart,
+    coJsonPerf.performanceMarks.transactionParsingEnd,
+    coId,
+  );
+  if (transactionParsing) {
     loadMeasureDetail.transactionParsing = performance.measure(
       performanceMeasures.subscriptionLoadTransactionParsing + "." + coId,
       {
-        start: coJsonPerf.performanceMarks.transactionParsingStart + "." + coId,
-        end: coJsonPerf.performanceMarks.transactionParsingEnd + "." + coId,
+        start: transactionParsing.start.startTime,
+        end: transactionParsing.end.startTime,
         detail: {
           id: coId,
           source_id: sourceId,
@@ -127,18 +124,23 @@ export function measureSubscriptionLoad(
         },
       },
     );
+  }
 
-    clearMarks([
-      coJsonPerf.performanceMarks.transactionParsingStart + "." + coId,
-      coJsonPerf.performanceMarks.transactionParsingEnd + "." + coId,
-    ]);
+  const firstLoad = extractStartEndMarks(
+    performanceMarks.subscriptionLoadStart,
+    performanceMarks.subscriptionLoadEnd,
+    coId,
+  );
+
+  if (!firstLoad) {
+    throw new Error("First load mark not found");
   }
 
   const loadMeasure = performance.measure(
     performanceMeasures.subscriptionLoad + "." + coId,
     {
-      start: performanceMarks.subscriptionLoadStart + "." + coId,
-      end: performanceMarks.subscriptionLoadEnd + "." + coId,
+      start: firstLoad.start.startTime,
+      end: firstLoad.end.startTime,
       detail: {
         id: coId,
         source_id: sourceId,
@@ -156,29 +158,33 @@ export function measureSubscriptionLoad(
     },
   );
 
-  clearMarks([
-    performanceMarks.subscriptionLoadStart + "." + coId,
-    performanceMarks.subscriptionLoadEnd + "." + coId,
-  ]);
-
   return {
     ...loadMeasureDetail,
     firstLoad: loadMeasure,
   };
 }
 
-function hasPerformanceMark(mark: string, coId: string) {
-  return performance.getEntriesByName(mark + "." + coId, "mark").length > 0;
-}
+function extractStartEndMarks(
+  startMark: string,
+  endMark: string,
+  coId: string,
+): { start: PerformanceEntry; end: PerformanceEntry } | null {
+  const endMarks = performance.getEntriesByName(endMark + "." + coId, "mark");
 
-function hasStartEndMarks(startMark: string, endMark: string, coId: string) {
-  return (
-    hasPerformanceMark(startMark, coId) && hasPerformanceMark(endMark, coId)
-  );
-}
+  // Assuming they are all sync, pick the last endMark entry position
+  const startMarkEntry = performance
+    .getEntriesByName(startMark + "." + coId, "mark")
+    .at(endMarks.length - 1);
+  const endMarkEntry = endMarks.at(-1);
 
-function clearMarks(marks: string[]): void {
-  marks.forEach((mark) => performance.clearMarks(mark));
+  if (!startMarkEntry || !endMarkEntry) {
+    return null;
+  }
+
+  return {
+    start: startMarkEntry,
+    end: endMarkEntry,
+  };
 }
 
 export function trackSubscriptionLoadSpans(
