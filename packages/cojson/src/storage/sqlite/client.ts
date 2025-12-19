@@ -149,7 +149,10 @@ export class SQLiteClient
   markCoValueAsDeleted(id: RawCoID) {
     // Work queue entry. Table only stores the coValueID.
     // Idempotent by design.
-    this.db.run(`INSERT INTO deletedCoValues (coValueID) VALUES (?)`, [id]);
+    this.db.run(
+      `INSERT INTO deletedCoValues (coValueID) VALUES (?) ON CONFLICT(coValueID) DO NOTHING`,
+      [id],
+    );
   }
 
   markCoValueDeletionDone(id: RawCoID) {
@@ -157,6 +160,49 @@ export class SQLiteClient
       `INSERT INTO deletedCoValues (coValueID, status) VALUES (?, 'done')
        ON CONFLICT(coValueID) DO UPDATE SET status='done'`,
       [id],
+    );
+  }
+
+  eraseCoValueButKeepTombstone(coValueId: RawCoID) {
+    const coValueRow = this.db.get<RawCoValueRow & { rowID: number }>(
+      "SELECT * FROM coValues WHERE id = ?",
+      [coValueId],
+    );
+
+    if (!coValueRow) {
+      logger.warn(`CoValue ${coValueId} not found, skipping deletion`);
+      return;
+    }
+
+    // Single-transaction primitive: delete non-delete sessions and their data,
+    // preserve header + delete sessions (tombstone).
+    //
+    // Note: `sessions.coValue` references `coValues.rowID`.
+    this.db.run(
+      `DELETE FROM transactions
+       WHERE ses IN (
+         SELECT rowID FROM sessions
+         WHERE coValue = ?
+           AND sessionID NOT LIKE '%_deleted'
+       )`,
+      [coValueRow.rowID],
+    );
+
+    this.db.run(
+      `DELETE FROM signatureAfter
+       WHERE ses IN (
+         SELECT rowID FROM sessions
+         WHERE coValue = ?
+           AND sessionID NOT LIKE '%_deleted'
+       )`,
+      [coValueRow.rowID],
+    );
+
+    this.db.run(
+      `DELETE FROM sessions
+       WHERE coValue = ?
+         AND sessionID NOT LIKE '%_deleted'`,
+      [coValueRow.rowID],
     );
   }
 

@@ -152,9 +152,10 @@ export class SQLiteClientAsync
   async markCoValueAsDeleted(id: RawCoID) {
     // Work queue entry. Table only stores the coValueID.
     // Idempotent by design.
-    await this.db.run(`INSERT INTO deletedCoValues (coValueID) VALUES (?)`, [
-      id,
-    ]);
+    await this.db.run(
+      `INSERT INTO deletedCoValues (coValueID) VALUES (?) ON CONFLICT(coValueID) DO NOTHING`,
+      [id],
+    );
   }
 
   async markCoValueDeletionDone(id: RawCoID) {
@@ -162,6 +163,45 @@ export class SQLiteClientAsync
       `INSERT INTO deletedCoValues (coValueID, status) VALUES (?, 'done')
        ON CONFLICT(coValueID) DO UPDATE SET status='done'`,
       [id],
+    );
+  }
+
+  async eraseCoValueButKeepTombstone(coValueId: RawCoID) {
+    const coValueRow = await this.db.get<RawCoValueRow & { rowID: number }>(
+      "SELECT * FROM coValues WHERE id = ?",
+      [coValueId],
+    );
+
+    if (!coValueRow) {
+      logger.warn(`CoValue ${coValueId} not found, skipping deletion`);
+      return;
+    }
+
+    await this.db.run(
+      `DELETE FROM transactions
+       WHERE ses IN (
+         SELECT rowID FROM sessions
+         WHERE coValue = ?
+           AND sessionID NOT LIKE '%_deleted'
+       )`,
+      [coValueRow.rowID],
+    );
+
+    await this.db.run(
+      `DELETE FROM signatureAfter
+       WHERE ses IN (
+         SELECT rowID FROM sessions
+         WHERE coValue = ?
+           AND sessionID NOT LIKE '%_deleted'
+       )`,
+      [coValueRow.rowID],
+    );
+
+    await this.db.run(
+      `DELETE FROM sessions
+       WHERE coValue = ?
+         AND sessionID NOT LIKE '%_deleted'`,
+      [coValueRow.rowID],
     );
   }
 

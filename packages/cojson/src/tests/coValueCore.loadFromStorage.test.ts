@@ -38,10 +38,12 @@ function createMockStorage(
     waitForSync?: (id: string, coValue: any) => Promise<void>;
     close?: () => Promise<unknown> | undefined;
     markCoValueAsDeleted?: (id: RawCoID) => void;
+    eraseAllDeletedCoValues?: () => Promise<void>;
   } = {},
 ): StorageAPI {
   return {
     markCoValueAsDeleted: opts.markCoValueAsDeleted || vi.fn(),
+    eraseAllDeletedCoValues: opts.eraseAllDeletedCoValues || vi.fn(),
     load: opts.load || vi.fn(),
     store: opts.store || vi.fn(),
     getKnownState: opts.getKnownState || vi.fn(),

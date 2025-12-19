@@ -5,6 +5,7 @@ import { NewContentMessage } from "../sync.js";
 import { CoValueKnownState, emptyKnownState } from "../knownState.js";
 import { createSyncStorage, getDbPath } from "./testStorage.js";
 import { loadCoValueOrFail, setupTestNode } from "./testUtils.js";
+import { isDeletedSessionID } from "../ids.js";
 
 /**
  * Helper function that gets new content since a known state, throwing if:
@@ -573,6 +574,91 @@ describe("StorageApiSync", () => {
 
       const finalMap = await loadCoValueOrFail(client.node, mapOnNode2.id);
       expect(finalMap.core.knownState()).toEqual(knownState);
+    });
+  });
+
+  describe("delete flow", () => {
+    test("markCoValueAsDeleted enqueues the coValue for erasure", async () => {
+      const client = setupTestNode();
+      const { storage } = client.addStorage({
+        storage: createSyncStorage({
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const fixtures = setupTestNode();
+      const id = fixtures.node.createGroup().id;
+
+      storage.markCoValueAsDeleted(id);
+
+      // @ts-expect-error - dbClient is private
+      const queued = storage.dbClient.getAllCoValuesWaitingForDelete();
+      expect(queued).toContain(id);
+    });
+
+    test("eraseAllDeletedCoValues deletes history but preserves tombstone; knownState keeps only delete session", async () => {
+      const dbPath = getDbPath();
+
+      const node = setupTestNode();
+      const { storage } = node.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const group = node.node.createGroup();
+      const map = group.createMap();
+      map.set("k", "v");
+      await map.core.waitForSync();
+
+      map.core.deleteCoValue();
+      await map.core.waitForSync();
+
+      storage.markCoValueAsDeleted(map.id as RawCoID);
+
+      // @ts-expect-error - dbClient is private
+      expect(storage.dbClient.getAllCoValuesWaitingForDelete()).toContain(
+        map.id,
+      );
+
+      await storage.eraseAllDeletedCoValues();
+
+      // Queue drained
+      // @ts-expect-error - dbClient is private
+      expect(storage.dbClient.getAllCoValuesWaitingForDelete()).not.toContain(
+        map.id,
+      );
+
+      // Tombstone preserved + history erased when loaded from storage
+      const client = setupTestNode();
+      const { storage: clientStorage } = client.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const loaded = await loadCoValueOrFail(
+        client.node,
+        map.id as CoID<RawCoMap>,
+      );
+
+      expect(loaded.core.isDeleted).toBe(true);
+      expect(loaded.get("k")).toBeUndefined();
+
+      // Storage known state: delete session only
+      const known = clientStorage.getKnownState(map.id);
+      const sessionIDs = Object.keys(known.sessions);
+      const deleteSessionIDs = sessionIDs.filter((s) =>
+        isDeletedSessionID(s as any),
+      );
+
+      expect(deleteSessionIDs).toHaveLength(1);
+      expect(sessionIDs).toEqual(deleteSessionIDs);
     });
   });
 

@@ -203,6 +203,56 @@ test("persists deleted coValue marker as a deletedCoValues work queue entry", as
   expect(deletedCoValueIDs).toContain(map.id);
 });
 
+test("delete flow: markCoValueAsDeleted + eraseAllDeletedCoValues removes history, preserves tombstone, drains queue, and keeps only delete session in knownState", async () => {
+  const agentSecret = Crypto.newRandomAgentSecret();
+
+  const node1 = new LocalNode(
+    agentSecret,
+    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
+    Crypto,
+  );
+
+  const { storage, dbPath } = createSQLiteStorage();
+  node1.setStorage(storage);
+
+  const group = node1.createGroup();
+  const map = group.createMap();
+  map.set("hello", "world");
+  await map.core.waitForSync();
+
+  map.core.deleteCoValue();
+  await map.core.waitForSync();
+
+  storage.markCoValueAsDeleted(map.id);
+
+  // @ts-expect-error - dbClient is private
+  expect(storage.dbClient.getAllCoValuesWaitingForDelete()).toContain(map.id);
+
+  await storage.eraseAllDeletedCoValues();
+
+  // Queue drained
+  // @ts-expect-error - dbClient is private
+  expect(storage.dbClient.getAllCoValuesWaitingForDelete()).not.toContain(
+    map.id,
+  );
+
+  // Tombstone-only load from storage (new node reading same DB)
+  const node2 = new LocalNode(
+    agentSecret,
+    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
+    Crypto,
+  );
+  node2.setStorage(createSQLiteStorage(dbPath).storage);
+
+  const map2 = await node2.load(map.id);
+  if (map2 === "unavailable") {
+    throw new Error("Map is unavailable");
+  }
+
+  expect(map2.core.isDeleted).toBe(true);
+  expect(map2.get("hello")).toBeUndefined();
+});
+
 test("should load dependencies correctly (group inheritance)", async () => {
   const agentSecret = Crypto.newRandomAgentSecret();
 

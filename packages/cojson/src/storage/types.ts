@@ -21,6 +21,12 @@ export type DeletedCoValueDeletionStatus = "pending" | "done";
 export interface StorageAPI {
   markCoValueAsDeleted(id: RawCoID): void;
 
+  /**
+   * Batch physical deletion for coValues queued in `deletedCoValues` with status `"pending"`.
+   * Must preserve tombstones (header + delete session(s) + their tx/signatures).
+   */
+  eraseAllDeletedCoValues(): Promise<void>;
+
   load(
     id: string,
     // This callback is fired when data is found, might be called multiple times if the content requires streaming (e.g when loading files)
@@ -74,6 +80,13 @@ export interface DBTransactionInterfaceAsync {
   markCoValueAsDeleted(id: RawCoID): Promise<unknown>;
 
   markCoValueDeletionDone(id: RawCoID): Promise<unknown>;
+
+  /**
+   * Physical deletion primitive: erase all persisted history for a deleted coValue,
+   * while preserving the tombstone (header + delete session(s)).
+   * Must run inside a single storage transaction.
+   */
+  eraseCoValueButKeepTombstone(coValueID: RawCoID): Promise<unknown>;
 
   addSessionUpdate({
     sessionUpdate,
@@ -155,6 +168,13 @@ export interface DBTransactionInterfaceSync {
   markCoValueAsDeleted(id: RawCoID): unknown;
 
   markCoValueDeletionDone(id: RawCoID): unknown;
+
+  /**
+   * Physical deletion primitive: erase all persisted history for a deleted coValue,
+   * while preserving the tombstone (header + delete session(s)).
+   * Must run inside a single storage transaction.
+   */
+  eraseCoValueButKeepTombstone(coValueID: RawCoID): unknown;
 
   addSessionUpdate({
     sessionUpdate,

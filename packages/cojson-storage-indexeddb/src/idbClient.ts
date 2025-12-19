@@ -63,6 +63,57 @@ export class IDBTransaction implements DBTransactionInterfaceAsync {
     );
   }
 
+  async eraseCoValueButKeepTombstone(coValueID: RawCoID): Promise<void> {
+    const coValue = await this.run((tx) =>
+      tx.getObjectStore("coValues").index("coValuesById").get(coValueID),
+    );
+
+    if (!coValue) {
+      console.warn(`CoValue ${coValueID} not found, skipping deletion`);
+      return;
+    }
+
+    const coValueRowID = (coValue as { rowID: number }).rowID;
+
+    const sessions = await this.run((tx) =>
+      tx
+        .getObjectStore("sessions")
+        .index("sessionsByCoValue")
+        .getAll(coValueRowID),
+    );
+
+    const sessionsToDelete = (
+      sessions as { rowID: number; sessionID: string }[]
+    )
+      .filter((s) => !s.sessionID.endsWith("_deleted"))
+      .map((s) => s.rowID);
+
+    for (const sessionRowID of sessionsToDelete) {
+      await this.#deleteAllBySesPrefix("transactions", sessionRowID);
+      await this.#deleteAllBySesPrefix("signatureAfter", sessionRowID);
+      await this.run((tx) =>
+        tx.getObjectStore("sessions").delete(sessionRowID),
+      );
+    }
+  }
+
+  async #deleteAllBySesPrefix(
+    storeName: "transactions" | "signatureAfter",
+    sesRowID: number,
+  ) {
+    const range = IDBKeyRange.bound(
+      [sesRowID, 0],
+      [sesRowID, Number.POSITIVE_INFINITY],
+    );
+    const keys = await this.run((tx) =>
+      tx.getObjectStore(storeName).getAllKeys(range),
+    );
+
+    for (const key of keys as IDBValidKey[]) {
+      await this.run((tx) => tx.getObjectStore(storeName).delete(key));
+    }
+  }
+
   async addSessionUpdate({
     sessionUpdate,
     sessionRow,

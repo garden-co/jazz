@@ -1,19 +1,24 @@
 import { LocalNode, StorageApiAsync } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { getIndexedDBStorage } from "../index.js";
+import { getIndexedDBStorage, internal_setDatabaseName } from "../index.js";
 import { toSimplifiedMessages } from "./messagesTestUtils.js";
 import { trackMessages, waitFor } from "./testUtils.js";
 
 const Crypto = await WasmCrypto.create();
 let syncMessages: ReturnType<typeof trackMessages>;
+let dbName: string;
 
 beforeEach(() => {
   syncMessages = trackMessages();
+  dbName = `test-jazz-storage-${Math.random().toString(16).slice(2)}`;
+  internal_setDatabaseName(dbName);
 });
 
 afterEach(() => {
   syncMessages.restore();
+  // best-effort cleanup
+  indexedDB.deleteDatabase(dbName);
 });
 
 test("should sync and load data from storage", async () => {
@@ -178,6 +183,68 @@ test("persists deleted coValue marker as a deletedCoValues work queue entry", as
     await node.storage.dbClient.getAllCoValuesWaitingForDelete();
   expect(deletedCoValueIDs).toContain(map.id);
   expect(deletedCoValueIDs).toContain(map2.id);
+});
+
+test("delete flow: markCoValueAsDeleted + eraseAllDeletedCoValues removes history, preserves tombstone, drains queue, and keeps only delete session in knownState", async () => {
+  const agentSecret = Crypto.newRandomAgentSecret();
+
+  const node1 = new LocalNode(
+    agentSecret,
+    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
+    Crypto,
+  );
+  const storage1 = await getIndexedDBStorage();
+  node1.setStorage(storage1);
+
+  const group = node1.createGroup();
+  const map = group.createMap();
+  map.set("hello", "world");
+  await map.core.waitForSync();
+
+  map.core.deleteCoValue();
+  await map.core.waitForSync();
+
+  storage1.markCoValueAsDeleted(map.id);
+
+  await waitFor(async () => {
+    // @ts-expect-error - dbClient is not public
+    const queued =
+      await node1.storage.dbClient.getAllCoValuesWaitingForDelete();
+    expect(queued).toContain(map.id);
+    return true;
+  });
+
+  await storage1.eraseAllDeletedCoValues();
+
+  // Queue drained
+  await waitFor(async () => {
+    // @ts-expect-error - dbClient is not public
+    const queued =
+      await node1.storage.dbClient.getAllCoValuesWaitingForDelete();
+    expect(queued).not.toContain(map.id);
+    return true;
+  });
+
+  // Tombstone-only load from storage (new node with same IDB dbName)
+  node1.gracefulShutdown();
+  syncMessages.clear();
+
+  internal_setDatabaseName(dbName);
+  const node2 = new LocalNode(
+    agentSecret,
+    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
+    Crypto,
+  );
+  const storage2 = await getIndexedDBStorage();
+  node2.setStorage(storage2);
+
+  const map2 = await node2.load(map.id);
+  if (map2 === "unavailable") {
+    throw new Error("Map is unavailable");
+  }
+
+  expect(map2.core.isDeleted).toBe(true);
+  expect(map2.get("hello")).toBeUndefined();
 });
 
 test("should load dependencies correctly (group inheritance)", async () => {

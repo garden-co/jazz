@@ -16,6 +16,7 @@ import {
   emptyKnownState,
   setSessionCounter,
 } from "../knownState.js";
+import { isDeletedSessionID } from "../ids.js";
 import { StorageKnownState } from "./knownState.js";
 import {
   collectNewTxs,
@@ -214,6 +215,42 @@ export class StorageApiAsync implements StorageAPI {
     this.storeQueue.processQueue(async (data, correctionCallback) => {
       return this.storeSingle(data, correctionCallback);
     });
+  }
+
+  async eraseAllDeletedCoValues(): Promise<void> {
+    const ids = await this.dbClient.getAllCoValuesWaitingForDelete();
+
+    for (const id of ids) {
+      await this.dbClient.transaction(async (tx) => {
+        await tx.eraseCoValueButKeepTombstone(id);
+        await tx.markCoValueDeletionDone(id);
+      });
+
+      // Refresh cached known state so it matches the post-erasure DB shape:
+      // header + delete session(s) only.
+      const coValueRow = await this.dbClient.getCoValue(id);
+      if (!coValueRow) continue;
+
+      const sessions = await this.dbClient.getCoValueSessions(coValueRow.rowID);
+      const knownState = this.knwonStates.getKnownState(id);
+      knownState.header = true;
+
+      for (const k of Object.keys(knownState.sessions)) {
+        delete knownState.sessions[k as SessionID];
+      }
+
+      for (const sessionRow of sessions) {
+        if (isDeletedSessionID(sessionRow.sessionID)) {
+          setSessionCounter(
+            knownState.sessions,
+            sessionRow.sessionID,
+            sessionRow.lastIdx,
+          );
+        }
+      }
+
+      this.knwonStates.handleUpdate(id, knownState);
+    }
   }
 
   /**
