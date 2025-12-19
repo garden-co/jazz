@@ -34,7 +34,7 @@ This specification defines the requirements for a data deletion flow that allows
 - WHEN a delete operation is performed on a coValue
 - THEN an unencrypted (trusting) transaction is created
 - AND the transaction has meta `{ deleted: true }`
-- AND the transaction is created in a session named `{accountId}_session_z{uniqueId}_deleted`
+- AND the transaction is created in a session named `{SessionID}_deleted`
 - AND the session naming works for all coValue types
 - AND the uniqueId ensures uniqueness across multiple delete operations
 
