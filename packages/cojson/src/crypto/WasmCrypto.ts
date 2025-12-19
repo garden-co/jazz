@@ -235,7 +235,9 @@ class SessionLogAdapter {
     skipVerify: boolean,
   ): void {
     this.sessionLog.tryAdd(
-      transactions.map((tx) => stableStringify(tx)),
+      // We can avoid stableStringify because in rust we will parse and stringify the transactions again.
+      // And the changes are in a string format already.
+      transactions.map((tx) => JSON.stringify(tx)),
       newSignature,
       skipVerify,
     );
@@ -250,12 +252,14 @@ class SessionLogAdapter {
     meta: JsonObject | undefined,
   ): { signature: Signature; transaction: PrivateTransaction } {
     const output = this.sessionLog.addNewPrivateTransaction(
-      stableStringify(changes),
+      // We can avoid stableStringify because it will be encrypted.
+      JSON.stringify(changes),
       signerAgent.currentSignerSecret(),
       keySecret,
       keyID,
       madeAt,
-      meta ? stableStringify(meta) : undefined,
+      // We can avoid stableStringify because it will be encrypted.
+      meta ? JSON.stringify(meta) : undefined,
     );
     const parsedOutput = JSON.parse(output);
     const transaction: PrivateTransaction = {
