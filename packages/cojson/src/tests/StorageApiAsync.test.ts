@@ -36,6 +36,7 @@ function getNewContentSince(
 
 afterEach(() => {
   SyncMessagesLog.clear();
+  vi.useRealTimers();
 });
 
 describe("StorageApiAsync", () => {
@@ -765,7 +766,65 @@ describe("StorageApiAsync", () => {
       });
     });
 
-    test("eraseAllDeletedCoValues deletes history but preserves tombstone; knownState keeps only delete session", async () => {
+    test("background erasure doesn't run if not enabled", async () => {
+      const dbPath = getDbPath();
+
+      const node = setupTestNode();
+      const { storage } = await node.addAsyncStorage({
+        ourName: "test",
+        storageName: "test-storage",
+        filename: dbPath,
+      });
+
+      const group = node.node.createGroup();
+      const map = group.createMap();
+      map.set("k", "v");
+      await map.core.waitForSync();
+
+      vi.useFakeTimers();
+
+      map.core.deleteCoValue();
+      await map.core.waitForSync();
+
+      await vi.runAllTimersAsync();
+
+      // @ts-expect-error - dbClient is private
+      expect(await storage.dbClient.getAllCoValuesWaitingForDelete()).toContain(
+        map.id,
+      );
+    });
+
+    test("background erasure runs if enabled", async () => {
+      const dbPath = getDbPath();
+
+      const node = setupTestNode();
+      const { storage } = await node.addAsyncStorage({
+        ourName: "test",
+        storageName: "test-storage",
+        filename: dbPath,
+      });
+
+      node.node.enableDeletedCoValuesErasure();
+
+      const group = node.node.createGroup();
+      const map = group.createMap();
+      map.set("k", "v");
+      await map.core.waitForSync();
+
+      vi.useFakeTimers();
+
+      map.core.deleteCoValue();
+      await map.core.waitForSync();
+
+      await vi.runAllTimersAsync();
+
+      // @ts-expect-error - dbClient is private
+      expect(
+        await storage.dbClient.getAllCoValuesWaitingForDelete(),
+      ).not.toContain(map.id);
+    });
+
+    test("eraseAllDeletedCoValues deletes history but preserves tombstone", async () => {
       const dbPath = getDbPath();
 
       const node = setupTestNode();

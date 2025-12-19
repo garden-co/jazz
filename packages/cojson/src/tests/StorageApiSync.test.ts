@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from "vitest";
+import { describe, expect, test, vi, afterEach } from "vitest";
 import { CoID, RawCoID, RawCoMap, logger } from "../exports.js";
 import { CoValueCore } from "../exports.js";
 import { NewContentMessage } from "../sync.js";
@@ -28,6 +28,10 @@ function getNewContentSince(
 
   return contentMessage;
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("StorageApiSync", () => {
   describe("getKnownState", () => {
@@ -597,7 +601,69 @@ describe("StorageApiSync", () => {
       expect(queued).toContain(id);
     });
 
-    test("eraseAllDeletedCoValues deletes history but preserves tombstone; knownState keeps only delete session", async () => {
+    test("background erasure doesn't run if not enabled", async () => {
+      const dbPath = getDbPath();
+      const node = setupTestNode();
+      const { storage } = node.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      const group = node.node.createGroup();
+      const map = group.createMap();
+      map.set("k", "v");
+      await map.core.waitForSync();
+
+      vi.useFakeTimers();
+
+      map.core.deleteCoValue();
+      await map.core.waitForSync();
+
+      await vi.advanceTimersByTimeAsync(70_000);
+
+      // Queue drained
+      // @ts-expect-error - dbClient is private
+      expect(storage.dbClient.getAllCoValuesWaitingForDelete()).toContain(
+        map.id,
+      );
+    });
+
+    test("background erasure run if enabled", async () => {
+      const dbPath = getDbPath();
+      const node = setupTestNode();
+      const { storage } = node.addStorage({
+        storage: createSyncStorage({
+          filename: dbPath,
+          nodeName: "test",
+          storageName: "test-storage",
+        }),
+      });
+
+      node.node.enableDeletedCoValuesErasure();
+
+      const group = node.node.createGroup();
+      const map = group.createMap();
+      map.set("k", "v");
+      await map.core.waitForSync();
+
+      vi.useFakeTimers();
+
+      map.core.deleteCoValue();
+      await map.core.waitForSync();
+
+      await vi.advanceTimersByTimeAsync(70_000);
+
+      // Queue drained
+      // @ts-expect-error - dbClient is private
+      expect(storage.dbClient.getAllCoValuesWaitingForDelete()).not.toContain(
+        map.id,
+      );
+    });
+
+    test("eraseAllDeletedCoValues deletes history but preserves tombstone", async () => {
       const dbPath = getDbPath();
 
       const node = setupTestNode();

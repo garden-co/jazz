@@ -16,8 +16,8 @@ import {
   emptyKnownState,
   setSessionCounter,
 } from "../knownState.js";
-import { isDeletedSessionID } from "../ids.js";
 import { StorageKnownState } from "./knownState.js";
+import { DeletedCoValuesEraserScheduler } from "./DeletedCoValuesEraserScheduler.js";
 import {
   collectNewTxs,
   getDependedOnCoValues,
@@ -36,6 +36,9 @@ export class StorageApiAsync implements StorageAPI {
   private readonly dbClient: DBClientInterfaceAsync;
 
   private loadedCoValues = new Set<RawCoID>();
+  private deletedCoValuesEraserScheduler:
+    | DeletedCoValuesEraserScheduler
+    | undefined;
 
   constructor(dbClient: DBClientInterfaceAsync) {
     this.dbClient = dbClient;
@@ -225,31 +228,6 @@ export class StorageApiAsync implements StorageAPI {
         await tx.eraseCoValueButKeepTombstone(id);
         await tx.markCoValueDeletionDone(id);
       });
-
-      // Refresh cached known state so it matches the post-erasure DB shape:
-      // header + delete session(s) only.
-      const coValueRow = await this.dbClient.getCoValue(id);
-      if (!coValueRow) continue;
-
-      const sessions = await this.dbClient.getCoValueSessions(coValueRow.rowID);
-      const knownState = this.knwonStates.getKnownState(id);
-      knownState.header = true;
-
-      for (const k of Object.keys(knownState.sessions)) {
-        delete knownState.sessions[k as SessionID];
-      }
-
-      for (const sessionRow of sessions) {
-        if (isDeletedSessionID(sessionRow.sessionID)) {
-          setSessionCounter(
-            knownState.sessions,
-            sessionRow.sessionID,
-            sessionRow.lastIdx,
-          );
-        }
-      }
-
-      this.knwonStates.handleUpdate(id, knownState);
     }
   }
 
@@ -432,6 +410,28 @@ export class StorageApiAsync implements StorageAPI {
         id,
       });
     });
+
+    if (this.deletedCoValuesEraserScheduler) {
+      this.deletedCoValuesEraserScheduler.onEnqueueDeletedCoValue();
+    }
+  }
+
+  enableDeletedCoValuesErasure() {
+    if (this.deletedCoValuesEraserScheduler) return;
+
+    this.deletedCoValuesEraserScheduler = new DeletedCoValuesEraserScheduler({
+      runOnce: async () => {
+        // Async storage: no max-time budgeting; drain to completion when scheduled.
+        await this.eraseAllDeletedCoValues();
+        const remaining = await this.dbClient.getAllCoValuesWaitingForDelete();
+        return { hasMore: remaining.length > 0 };
+      },
+      opts: {
+        throttleMs: 60_000,
+        startupDelayMs: 1_000,
+        followUpDelayMs: 1_000,
+      },
+    });
   }
 
   waitForSync(id: string, coValue: CoValueCore) {
@@ -439,6 +439,7 @@ export class StorageApiAsync implements StorageAPI {
   }
 
   close() {
+    this.deletedCoValuesEraserScheduler?.dispose();
     return this.storeQueue.close();
   }
 }

@@ -22,6 +22,12 @@ export interface StorageAPI {
   markCoValueAsDeleted(id: RawCoID): void;
 
   /**
+   * Enable the background erasure scheduler that drains the `deletedCoValues` work queue.
+   * This is intentionally opt-in and should be activated by `LocalNode`.
+   */
+  enableDeletedCoValuesErasure(): void;
+
+  /**
    * Batch physical deletion for coValues queued in `deletedCoValues` with status `"pending"`.
    * Must preserve tombstones (header + delete session(s) + their tx/signatures).
    */

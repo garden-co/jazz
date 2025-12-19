@@ -420,37 +420,51 @@ Read `getAll()` from the `deletedCoValues` store and return the `coValueID` fiel
 - This method uses the DBClient's `getAllCoValuesWaitingForDelete()` to get the list
 - For each deleted coValue, perform physical deletion while preserving tombstone
 
-#### 8.1 When to run `ereaseAllDeletedCoValues()`
+#### 8.1 When to run `eraseAllDeletedCoValues()`
 
 **Background**: delete transactions provide immediate sync blocking (privacy + safety). Physical deletion is purely a **space-reclamation** step and can run later, in the background.
 
 `deletedCoValues` is treated as a **work queue**: entries are enqueued as `status: "pending"`, then flipped to `status: "done"` once the coValue has been physically erased (tombstone preserved). (An implementation may optionally delete `done` entries later for compaction.)
 
-**Where it should run**
-
-- **Sync server / storage shard / backend storage process**: recommended default. These environments can run periodic background work reliably and are where large accounts need efficient cleanup.
-- **Local app storage (browser IndexedDB / local sqlite)**: optional. It’s safe to run, but should be strictly best-effort and low priority to avoid UI jank.
-
 **Default triggers**
 
 - **After a delete is stored**:
-  - schedule a near-future cleanup run (debounced), e.g. “run within the next minute”.
+  - schedule a near-future cleanup run (throttled), e.g. “run within the next minute”.
   - rationale: keeps queues short without doing heavy work synchronously in the user’s delete flow.
-- **On startup / resume**:
-  - run once shortly after boot (or after the first successful open of the DB).
+- **On startup**:
+  - run once shortly after storage initialization (or after the first successful open of the DB).
   - rationale: drains any queued deletions from prior runs.
 
-**Throttling / batching**
+**Opt-in activation**
 
-To prevent long pauses/locks:
-- process **at most** `maxCoValuesPerRun` (e.g. 50–500) per invocation.
-- optionally stop after a `maxDurationMs` budget (e.g. 100–300ms).
-- for each coValue, perform deletion in a **per-coValue transaction** (idempotent) so work can resume after interruptions.
+The physical erasure scheduler is **optional** and must be activated on `LocalNode`.
+
+- If not activated, delete transactions still provide immediate sync blocking (tombstones), and `deletedCoValues` still acts as a work queue, but no background erasure runs are scheduled.
+- When activated, the scheduler begins draining queued entries using the triggers above.
+
+**Scheduler component**
+
+The scheduling logic lives in a dedicated class (inside `cojson`), owned and orchestrated by the StorageAPI implementations:
+
+- `DeletedCoValuesEraserScheduler`
+  - schedules throttled runs after enqueue (does not push the run further into the future as more deletes arrive)
+  - schedules a one-shot startup drain
+  - enforces a simple re-entrancy guard (only one drain run in-flight per storage instance)
+  - can reschedule a follow-up run if more queue work remains
 
 **Concurrency / locking**
 - The operation should be guarded so only one eraser runs per database at a time.
   - sqlite: the DB is accessed only by a single process, use an in-memory “currently erasing” flag to avoid re-entrancy.
   - IndexedDB: rely on the single `readwrite` transaction semantics; also use an in-memory “currently erasing” flag to avoid re-entrancy in the same tab.
+
+**Time budgeting**
+
+There is no batching-by-count (`maxCoValuesPerRun`).
+
+- **Sync storage (`StorageApiSync`)**: use a strict `maxDurationMs = 100ms` per scheduled run to avoid blocking the main thread.
+- **Async storage (`StorageApiAsync`)**: no max-time budgeting; when scheduled, it drains the queue to completion.
+
+If a budget-limited run stops early and queue entries remain, the scheduler should schedule a follow-up run soon (e.g. ~1s) until the queue is drained.
 
 **Key Logic**:
 ```typescript
@@ -465,11 +479,11 @@ export interface StorageAPI {
   markCoValueAsDeleted(coValueID: RawCoID): Promise<void>;
 
   // Delete all deleted coValues (batch operation)
-  ereaseAllDeletedCoValues(): Promise<void>;
+  eraseAllDeletedCoValues(): Promise<void>;
 }
 
 // Implementation in StorageApiAsync/StorageApiSync
-async ereaseAllDeletedCoValues(): Promise<void> {
+async eraseAllDeletedCoValues(): Promise<void> {
   const deletedCoValueIDs = await this.dbClient.getAllCoValuesWaitingForDelete();
   
   for (const coValueID of deletedCoValueIDs) {
