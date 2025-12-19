@@ -8,10 +8,11 @@ import {
   CoreCoMapSchema,
   DiscriminableCoValueSchemas,
   DiscriminableCoreCoValueSchema,
+  Loaded,
   SchemaUnionDiscriminator,
 } from "../../internal.js";
 import {
-  hydrateCoreCoValueSchema,
+  asConstructable,
   isAnyCoValueSchema,
 } from "./runtimeConverters/coValueSchemaTransformation.js";
 import { z } from "./zodReExport.js";
@@ -40,9 +41,9 @@ export function schemaUnionDiscriminatorFor(
 
     const availableOptions = getFlattenedUnionOptions(schema);
 
-    const determineSchema: SchemaUnionDiscriminator<CoMap> = (
-      discriminable,
-    ) => {
+    const determineSchema: SchemaUnionDiscriminator<
+      Loaded<CoreCoMapSchema, true>
+    > = (discriminable) => {
       // collect all keys of nested CoValues
       const allNestedRefKeys = new Set<string>();
       for (const option of availableOptions) {
@@ -91,7 +92,7 @@ export function schemaUnionDiscriminatorFor(
         }
 
         if (match) {
-          const coValueSchema = hydrateCoreCoValueSchema(option as any);
+          const coValueSchema = asConstructable(option as any);
           const coValueClass = coValueSchema.getCoValueClass() as typeof CoMap;
 
           const dummyFieldNames = Array.from(allNestedRefKeys).filter(

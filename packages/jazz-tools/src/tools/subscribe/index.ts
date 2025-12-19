@@ -1,6 +1,8 @@
 import type {
+  CoreCoValueSchema,
   CoValue,
   CoValueClass,
+  Loaded,
   MaybeLoaded,
   RefEncoded,
 } from "../internal.js";
@@ -21,8 +23,7 @@ export function getSubscriptionScope<D extends CoValue>(value: D) {
 
   const newSubscriptionScope = new SubscriptionScope(node, resolve, id, {
     type: "ref",
-    ref: value.constructor as CoValueClass<D>,
-    field: value.constructor as CoValueClass<D>,
+    sourceSchema: value.$jazz.sourceSchema,
     optional: false,
   });
 
@@ -46,11 +47,11 @@ export function getSubscriptionScope<D extends CoValue>(value: D) {
  * By subscribing to a given key, the subscription will automatically react to the id changes
  * on that key (e.g. deleting the key value will result on unsubscribing from the id)
  */
-export function accessChildByKey<D extends CoValue>(
-  parent: D,
+export function accessChildByKey<S extends CoreCoValueSchema>(
+  parent: CoValue,
   childId: string,
   key: string,
-) {
+): MaybeLoaded<S> {
   const subscriptionScope = getSubscriptionScope(parent);
 
   const node = subscriptionScope.childNodes.get(childId);
@@ -69,7 +70,7 @@ export function accessChildByKey<D extends CoValue>(
   const value = subscriptionScope.childValues.get(childId);
 
   if (value?.type === CoValueLoadingState.LOADED) {
-    return value.value;
+    return value.value as Loaded<S, true>;
   }
 
   const childNode = subscriptionScope.childNodes.get(childId);
@@ -78,7 +79,7 @@ export function accessChildByKey<D extends CoValue>(
     return createUnloadedCoValue(childId, CoValueLoadingState.UNAVAILABLE);
   }
 
-  return childNode.getCurrentValue();
+  return childNode.getCurrentValue() as MaybeLoaded<S>;
 }
 
 /**
@@ -89,11 +90,11 @@ export function accessChildByKey<D extends CoValue>(
  *
  * Used for refs that never change (e.g. CoFeed entries, CoMap edits)
  */
-export function accessChildById<D extends CoValue>(
+export function accessChildById<S extends CoreCoValueSchema>(
   parent: CoValue,
   childId: string,
-  schema: RefEncoded<D>,
-) {
+  schema: RefEncoded<S>,
+): MaybeLoaded<S> {
   const subscriptionScope = getSubscriptionScope(parent);
 
   subscriptionScope.subscribeToId(childId, schema);
@@ -102,14 +103,14 @@ export function accessChildById<D extends CoValue>(
 
   // TODO: this doesn't check the subscription tree loading state
   if (value?.type === CoValueLoadingState.LOADED) {
-    return value.value;
+    return value.value as Loaded<S, true>;
   }
 
   const childNode = subscriptionScope.childNodes.get(childId);
 
   if (!childNode) {
-    return createUnloadedCoValue<D>(childId, CoValueLoadingState.UNAVAILABLE);
+    return createUnloadedCoValue<S>(childId, CoValueLoadingState.UNAVAILABLE);
   }
 
-  return childNode.getCurrentValue() as MaybeLoaded<D>;
+  return childNode.getCurrentValue() as MaybeLoaded<S>;
 }

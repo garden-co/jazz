@@ -10,15 +10,14 @@ import { type AvailableCoValueCore, type RawCoStream } from "cojson";
 import {
   type Account,
   CoValue,
-  CoValueClassOrSchema,
   CoValueLoadingState,
   ID,
-  InstanceOfSchema,
   activeAccountContext,
-  coValueClassFromCoValueClassOrSchema,
   loadCoValue,
 } from "../internal.js";
 import { isCoValueId } from "../lib/utils.js";
+import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoValueSchema.js";
+import { CoreAccountSchema, Loaded } from "../internal.js";
 
 export type InboxInvite = `${CoID<MessagesStream>}/${InviteSecret}`;
 type TxKey = `${SessionID}/${number}`;
@@ -37,7 +36,7 @@ export type InboxRoot = RawCoMap<{
   inviteLink: InboxInvite;
 }>;
 
-export function createInboxRoot(account: Account) {
+export function createInboxRoot(account: Loaded<CoreAccountSchema, true>) {
   if (!account.$jazz.isLocalNodeOwner) {
     throw new Error("Account is not controlled");
   }
@@ -172,14 +171,14 @@ class MessageQueue {
 }
 
 export class Inbox {
-  account: Account;
+  account: Loaded<CoreAccountSchema, true>;
   messages: MessagesStream;
   processed: TxKeyStream;
   failed: FailedMessagesStream;
   root: InboxRoot;
 
   private constructor(
-    account: Account,
+    account: Loaded<CoreAccountSchema, true>,
     root: InboxRoot,
     messages: MessagesStream,
     processed: TxKeyStream,
@@ -192,11 +191,11 @@ export class Inbox {
     this.failed = failed;
   }
 
-  subscribe<M extends CoValueClassOrSchema, O extends CoValue | undefined>(
+  subscribe<M extends CoreCoValueSchema, O extends CoValue | undefined>(
     Schema: M,
     callback: (
-      message: InstanceOfSchema<M>,
-      senderAccountID: ID<Account>,
+      message: Loaded<M>,
+      senderAccountID: ID<CoreAccountSchema>,
     ) => Promise<O | undefined | void>,
     options?: { concurrencyLimit?: number },
   ) {
@@ -229,13 +228,9 @@ export class Inbox {
         throw new Error(`Inbox: message ${messageId} is unavailable`);
       }
 
-      const value = await loadCoValue(
-        coValueClassFromCoValueClassOrSchema(Schema),
-        message.get("payload")!,
-        {
-          loadAs: account,
-        },
-      );
+      const value = await loadCoValue(Schema, message.get("payload")!, {
+        loadAs: account,
+      });
 
       if (!value) {
         throw new Error(
@@ -250,7 +245,7 @@ export class Inbox {
         throw new Error(`Inbox: Unknown account for message ${messageId}`);
       }
 
-      const result = await callback(value as InstanceOfSchema<M>, accountID);
+      const result = await callback(value as Loaded<M>, accountID);
 
       const inboxMessage = node
         .expectCoValueLoaded(messageId)
@@ -329,7 +324,7 @@ export class Inbox {
     };
   }
 
-  static async load(account: Account) {
+  static async load(account: Loaded<CoreAccountSchema, true>) {
     const profile = account.profile;
 
     if (!profile.$isLoaded) {
@@ -369,12 +364,12 @@ export class Inbox {
 }
 
 export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
-  currentAccount: Account;
+  currentAccount: Loaded<CoreAccountSchema, true>;
   owner: RawAccount;
   messages: MessagesStream;
 
   private constructor(
-    currentAccount: Account,
+    currentAccount: Loaded<CoreAccountSchema, true>,
     owner: RawAccount,
     messages: MessagesStream,
   ) {
@@ -413,7 +408,10 @@ export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
   static async load<
     I extends CoValue,
     O extends CoValue | undefined = undefined,
-  >(inboxOwnerID: ID<Account>, currentAccount?: Account) {
+  >(
+    inboxOwnerID: ID<CoreAccountSchema>,
+    currentAccount?: Loaded<CoreAccountSchema, true>,
+  ) {
     currentAccount ||= activeAccountContext.get();
 
     const node = currentAccount.$jazz.localNode;
@@ -462,7 +460,10 @@ export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
   }
 }
 
-async function acceptInvite(invite: string, account?: Account) {
+async function acceptInvite(
+  invite: string,
+  account?: Loaded<CoreAccountSchema, true>,
+) {
   account ||= activeAccountContext.get();
 
   const id = invite.slice(0, invite.indexOf("/")) as CoID<MessagesStream>;

@@ -12,13 +12,18 @@ import {
   isRefEncoded,
   createUnloadedCoValue,
   MaybeLoaded,
+  CoreCoValueSchema,
+  Loaded,
+  CoreAccountSchema,
 } from "../internal.js";
 
-export class Ref<out V extends CoValue> {
+export class Ref<out S extends CoreCoValueSchema> {
   constructor(
-    readonly id: ID<V>,
-    readonly controlledAccount: Account | AnonymousJazzAgent,
-    readonly schema: RefEncoded<V>,
+    readonly id: ID<S>,
+    readonly controlledAccount:
+      | Loaded<CoreAccountSchema, true>
+      | AnonymousJazzAgent,
+    readonly schema: RefEncoded<S>,
     readonly parent: CoValue,
   ) {
     if (!isRefEncoded(schema)) {
@@ -26,10 +31,10 @@ export class Ref<out V extends CoValue> {
     }
   }
 
-  async load(): Promise<MaybeLoaded<V>> {
+  async load(): Promise<MaybeLoaded<S>> {
     const subscriptionScope = getSubscriptionScope(this.parent);
 
-    let node: SubscriptionScope<CoValue> | undefined;
+    let node: SubscriptionScope<S> | undefined;
 
     /**
      * If the parent subscription scope is closed, we can't use it
@@ -37,7 +42,7 @@ export class Ref<out V extends CoValue> {
      * that is going to be destroyed immediately after the load
      */
     if (subscriptionScope.closed) {
-      node = new SubscriptionScope<CoValue>(
+      node = new SubscriptionScope<S>(
         subscriptionScope.node,
         true,
         this.id,
@@ -49,7 +54,9 @@ export class Ref<out V extends CoValue> {
     } else {
       subscriptionScope.subscribeToId(this.id, this.schema);
 
-      node = subscriptionScope.childNodes.get(this.id);
+      node = subscriptionScope.childNodes.get(this.id) as
+        | SubscriptionScope<S>
+        | undefined;
     }
 
     if (!node) {
@@ -59,15 +66,15 @@ export class Ref<out V extends CoValue> {
     const value = node.getCurrentValue();
 
     if (value.$isLoaded) {
-      return value as V;
+      return value;
     } else {
       return new Promise((resolve) => {
-        const unsubscribe = node.subscribe((value) => {
+        const unsubscribe = node.subscribe(() => {
           const currentValue = node.getCurrentValue();
 
           if (currentValue.$jazz.loadingState !== CoValueLoadingState.LOADING) {
             unsubscribe();
-            resolve(currentValue as V);
+            resolve(currentValue);
           }
 
           if (subscriptionScope.closed) {
@@ -78,7 +85,7 @@ export class Ref<out V extends CoValue> {
     }
   }
 
-  get value(): MaybeLoaded<V> {
+  get value(): MaybeLoaded<S> {
     return accessChildById(this.parent, this.id, this.schema);
   }
 }
@@ -87,14 +94,14 @@ export function makeRefs<Keys extends string | number>(
   parent: CoValue,
   getIdForKey: (key: Keys) => ID<CoValue> | undefined,
   getKeysWithIds: () => Keys[],
-  controlledAccount: Account | AnonymousJazzAgent,
-  refSchemaForKey: (key: Keys) => RefEncoded<CoValue>,
-): { [K in Keys]: Ref<CoValue> } & {
-  [Symbol.iterator]: () => IterableIterator<Ref<CoValue>>;
+  controlledAccount: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent,
+  refSchemaForKey: (key: Keys) => RefEncoded<CoreCoValueSchema>,
+): { [K in Keys]: Ref<CoreCoValueSchema> } & {
+  [Symbol.iterator]: () => IterableIterator<Ref<CoreCoValueSchema>>;
   length: number;
 } {
-  const refs = {} as { [K in Keys]: Ref<CoValue> } & {
-    [Symbol.iterator]: () => IterableIterator<Ref<CoValue>>;
+  const refs = {} as { [K in Keys]: Ref<CoreCoValueSchema> } & {
+    [Symbol.iterator]: () => IterableIterator<Ref<CoreCoValueSchema>>;
     length: number;
   };
   return new Proxy(refs, {
@@ -142,6 +149,4 @@ export function makeRefs<Keys extends string | number>(
   });
 }
 
-export type RefIfCoValue<V> = LoadedAndRequired<V> extends CoValue
-  ? Ref<LoadedAndRequired<V>>
-  : never;
+export type RefIfCoValue<S> = S extends CoreCoValueSchema ? Ref<S> : never;

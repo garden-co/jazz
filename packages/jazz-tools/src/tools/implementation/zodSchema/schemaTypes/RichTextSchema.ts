@@ -3,15 +3,21 @@ import {
   BranchDefinition,
   CoRichText,
   Group,
+  Loaded,
+  CoreAccountSchema,
+  ResolveQuery,
+  ResolveQueryStrict,
   Settled,
-  SubscribeRestArgs,
   coOptionalDefiner,
   loadCoValueWithoutMe,
+  parseCoValueCreateOptions,
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
+  CoreGroupSchema,
 } from "../../../internal.js";
+import { RawCoPlainText } from "cojson";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreCoValueSchema } from "./CoValueSchema.js";
@@ -41,39 +47,56 @@ export class RichTextSchema implements CoreRichTextSchema {
 
   constructor(private coValueClass: typeof CoRichText) {}
 
-  create(text: string, options?: { owner: Group } | Group): CoRichText;
+  create(
+    text: string,
+    options?:
+      | { owner: Loaded<CoreAccountSchema, true> | Loaded<CoreGroupSchema> }
+      | Loaded<CoreAccountSchema, true>
+      | Loaded<CoreGroupSchema>,
+  ): CoRichText;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
   create(
     text: string,
-    options?: { owner: Account | Group } | Account | Group,
+    options?:
+      | { owner: Loaded<CoreAccountSchema, true> | Loaded<CoreGroupSchema> }
+      | Loaded<CoreAccountSchema, true>
+      | Loaded<CoreGroupSchema>,
   ): CoRichText;
   create(
     text: string,
-    options?: { owner: Account | Group } | Account | Group,
+    options?:
+      | { owner: Loaded<CoreAccountSchema, true> | Loaded<CoreGroupSchema> }
+      | Loaded<CoreAccountSchema, true>
+      | Loaded<CoreGroupSchema>,
   ): CoRichText {
     const optionsWithPermissions = withSchemaPermissions(
       options,
       this.permissions,
     );
-    return this.coValueClass.create(text, optionsWithPermissions);
+    const { owner } = parseCoValueCreateOptions(optionsWithPermissions);
+    return new this.coValueClass({ text, owner }, this as any);
+  }
+
+  fromRaw(raw: RawCoPlainText): CoRichText {
+    return new this.coValueClass({ fromRaw: raw }, this as any);
   }
 
   load(
     id: string,
     options: {
-      loadAs: Account | AnonymousJazzAgent;
+      loadAs: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
     },
-  ): Promise<Settled<CoRichText>> {
-    return loadCoValueWithoutMe(this.coValueClass, id, options) as Promise<
-      Settled<CoRichText>
+  ): Promise<Settled<CoreRichTextSchema>> {
+    return loadCoValueWithoutMe(this, id, options) as Promise<
+      Settled<CoreRichTextSchema>
     >;
   }
 
   subscribe(
     id: string,
     options: {
-      loadAs: Account | AnonymousJazzAgent;
+      loadAs: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
     },
     listener: (value: CoRichText, unsubscribe: () => void) => void,
@@ -84,25 +107,27 @@ export class RichTextSchema implements CoreRichTextSchema {
   ): () => void;
   subscribe(...args: [any, ...[any]]) {
     const [id, ...restArgs] = args;
-    const { options, listener } = parseSubscribeRestArgs(restArgs);
-    return subscribeToCoValueWithoutMe(
-      this.coValueClass,
-      id,
-      options,
-      listener as any,
-    );
+    const { options, listener } = parseSubscribeRestArgs<
+      CoreRichTextSchema,
+      ResolveQuery<CoreRichTextSchema>
+    >(restArgs);
+    return subscribeToCoValueWithoutMe(this, id, options, listener as any);
   }
 
   unstable_merge(
     id: string,
-    options: { loadAs: Account | AnonymousJazzAgent },
+    options: {
+      loadAs: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent;
+      unstable_branch?: BranchDefinition;
+    },
   ): Promise<void> {
-    // @ts-expect-error
-    return unstable_mergeBranchWithResolve(this.coValueClass, id, options);
-  }
-
-  getCoValueClass(): typeof CoRichText {
-    return this.coValueClass;
+    if (!options.unstable_branch) {
+      throw new Error("unstable_branch is required for unstable_merge");
+    }
+    return unstable_mergeBranchWithResolve(this, id, {
+      ...options,
+      branch: options.unstable_branch,
+    });
   }
 
   optional(): CoOptionalSchema<this> {

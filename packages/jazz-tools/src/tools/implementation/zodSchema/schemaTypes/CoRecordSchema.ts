@@ -7,16 +7,16 @@ import {
   Group,
   ID,
   Settled,
-  RefsToResolve,
-  RefsToResolveStrict,
-  Resolved,
+  Loaded,
   Simplify,
   SubscribeListenerOptions,
+  ResolveQuery,
+  ResolveQueryStrict,
+  CoreGroupSchema,
+  CoreAccountSchema,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoFieldSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
-import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
-import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded.js";
 import { z } from "../zodReExport.js";
 import { AnyZodOrCoValueSchema } from "../zodSchema.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
@@ -33,70 +33,61 @@ type CoRecordInit<
 export interface CoRecordSchema<
   K extends z.core.$ZodString<string>,
   V extends AnyZodOrCoValueSchema,
-  DefaultResolveQuery extends CoreResolveQuery = true,
+  DefaultResolveQuery extends ResolveQuery<CoreCoRecordSchema<K, V>> = true,
 > extends CoreCoRecordSchema<K, V> {
   create(
     init: Simplify<CoRecordInit<K, V>>,
     options?:
       | { owner: Group; unique?: CoValueUniqueness["uniqueness"] }
       | Group,
-  ): CoRecordInstanceShape<K, V> & CoMap;
+  ): Loaded<CoreCoRecordSchema<K, V>>;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
   create(
     init: Simplify<CoRecordInit<K, V>>,
     options?:
-      | { owner: Account | Group; unique?: CoValueUniqueness["uniqueness"] }
-      | Account
-      | Group,
-  ): CoRecordInstanceShape<K, V> & CoMap;
+      | {
+          owner: Loaded<CoreAccountSchema, true> | Loaded<CoreGroupSchema>;
+          unique?: CoValueUniqueness["uniqueness"];
+        }
+      | Loaded<CoreAccountSchema, true>
+      | Loaded<CoreGroupSchema>,
+  ): Loaded<CoreCoRecordSchema<K, V>>;
 
   load<
-    const R extends RefsToResolve<
-      CoRecordInstanceCoValuesMaybeLoaded<K, V>
-      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+    const R extends ResolveQuery<
+      CoreCoRecordSchema<K, V>
     > = DefaultResolveQuery,
   >(
-    id: ID<CoRecordInstanceCoValuesMaybeLoaded<K, V>>,
+    id: ID<CoreCoRecordSchema<K, V>>,
     options?: {
-      resolve?: RefsToResolveStrict<
-        CoRecordInstanceCoValuesMaybeLoaded<K, V>,
-        R
-      >;
-      loadAs?: Account | AnonymousJazzAgent;
+      resolve?: ResolveQueryStrict<CoreCoRecordSchema<K, V>, R>;
+      loadAs?: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
     },
-  ): Promise<Settled<Resolved<CoRecordInstanceCoValuesMaybeLoaded<K, V>, R>>>;
+  ): Promise<Settled<CoreCoRecordSchema<K, V>, R>>;
 
   unstable_merge<
-    const R extends RefsToResolve<
-      CoRecordInstanceCoValuesMaybeLoaded<K, V>
-      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+    const R extends ResolveQuery<
+      CoreCoRecordSchema<K, V>
     > = DefaultResolveQuery,
   >(
     id: string,
     options: {
-      resolve?: RefsToResolveStrict<
-        CoRecordInstanceCoValuesMaybeLoaded<K, V>,
-        R
-      >;
-      loadAs?: Account | AnonymousJazzAgent;
+      resolve?: ResolveQueryStrict<CoreCoRecordSchema<K, V>, R>;
+      loadAs?: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent;
       branch: BranchDefinition;
     },
   ): Promise<void>;
 
   subscribe<
-    const R extends RefsToResolve<
-      CoRecordInstanceCoValuesMaybeLoaded<K, V>
-      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+    const R extends ResolveQuery<
+      CoreCoRecordSchema<K, V>
     > = DefaultResolveQuery,
   >(
-    id: ID<CoRecordInstanceCoValuesMaybeLoaded<K, V>>,
-    options: SubscribeListenerOptions<
-      CoRecordInstanceCoValuesMaybeLoaded<K, V>,
-      R
-    >,
+    id: ID<CoreCoRecordSchema<K, V>>,
+    options: SubscribeListenerOptions<CoreCoRecordSchema<K, V>, R>,
     listener: (
-      value: Resolved<CoRecordInstanceCoValuesMaybeLoaded<K, V>, R>,
+      value: Loaded<CoreCoRecordSchema<K, V>, R>,
       unsubscribe: () => void,
     ) => void,
   ): () => void;
@@ -104,40 +95,36 @@ export interface CoRecordSchema<
   /** @deprecated Use `CoMap.upsertUnique` and `CoMap.loadUnique` instead. */
   findUnique(
     unique: CoValueUniqueness["uniqueness"],
-    ownerID: ID<Account> | ID<Group>,
-    as?: Account | Group | AnonymousJazzAgent,
-  ): ID<CoRecordInstanceCoValuesMaybeLoaded<K, V>>;
+    ownerID: ID<Loaded<CoreAccountSchema, true>> | ID<Loaded<CoreGroupSchema>>,
+    as?:
+      | Loaded<CoreAccountSchema, true>
+      | Loaded<CoreGroupSchema>
+      | AnonymousJazzAgent,
+  ): ID<CoreCoRecordSchema<K, V>>;
 
   upsertUnique<
-    const R extends RefsToResolve<
-      CoRecordInstanceCoValuesMaybeLoaded<K, V>
-      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+    const R extends ResolveQuery<
+      CoreCoRecordSchema<K, V>
     > = DefaultResolveQuery,
   >(options: {
     value: Simplify<CoRecordInit<K, V>>;
     unique: CoValueUniqueness["uniqueness"];
-    owner: Account | Group;
-    resolve?: RefsToResolveStrict<CoRecordInstanceCoValuesMaybeLoaded<K, V>, R>;
-  }): Promise<Settled<Resolved<CoRecordInstanceCoValuesMaybeLoaded<K, V>, R>>>;
+    owner: Loaded<CoreAccountSchema, true> | Loaded<CoreGroupSchema>;
+    resolve?: ResolveQueryStrict<CoreCoRecordSchema<K, V>, R>;
+  }): Promise<Settled<CoreCoRecordSchema<K, V>, R>>;
 
   loadUnique<
-    const R extends RefsToResolve<
-      CoRecordInstanceCoValuesMaybeLoaded<K, V>
-      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+    const R extends ResolveQuery<
+      CoreCoRecordSchema<K, V>
     > = DefaultResolveQuery,
   >(
     unique: CoValueUniqueness["uniqueness"],
-    ownerID: ID<Account> | ID<Group>,
+    ownerID: ID<Loaded<CoreAccountSchema, true>> | ID<Loaded<CoreGroupSchema>>,
     options?: {
-      resolve?: RefsToResolveStrict<
-        CoRecordInstanceCoValuesMaybeLoaded<K, V>,
-        R
-      >;
-      loadAs?: Account | AnonymousJazzAgent;
+      resolve?: ResolveQueryStrict<CoreCoRecordSchema<K, V>, R>;
+      loadAs?: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent;
     },
-  ): Promise<Settled<Resolved<CoRecordInstanceCoValuesMaybeLoaded<K, V>, R>>>;
-
-  getCoValueClass: () => typeof CoMap;
+  ): Promise<Settled<CoreCoRecordSchema<K, V>, R>>;
 
   optional(): CoOptionalSchema<this>;
 
@@ -152,15 +139,8 @@ export interface CoRecordSchema<
    * Adds a default resolve query to be used when loading instances of this schema.
    * This resolve query will be used when no resolve query is provided to the load method.
    */
-  resolved<
-    const R extends RefsToResolve<
-      CoRecordInstanceCoValuesMaybeLoaded<K, V>
-    > = true,
-  >(
-    resolveQuery: RefsToResolveStrict<
-      CoRecordInstanceCoValuesMaybeLoaded<K, V>,
-      R
-    >,
+  resolved<const R extends ResolveQuery<CoreCoRecordSchema<K, V>> = true>(
+    resolveQuery: ResolveQueryStrict<CoreCoRecordSchema<K, V>, R>,
   ): CoRecordSchema<K, V, R>;
 
   /**
@@ -191,26 +171,7 @@ export interface CoreCoRecordSchema<
   V extends AnyZodOrCoValueSchema = AnyZodOrCoValueSchema,
 > extends CoreCoValueSchema {
   builtin: "CoMap";
+  keyType: K;
+  valueType: V;
   getDefinition: () => CoRecordSchemaDefinition<K, V>;
 }
-
-export type CoRecordInstance<
-  K extends z.core.$ZodString<string>,
-  V extends AnyZodOrCoValueSchema,
-> = {
-  [key in z.output<K>]: InstanceOrPrimitiveOfSchema<V>;
-} & CoMap;
-
-export type CoRecordInstanceCoValuesMaybeLoaded<
-  K extends z.core.$ZodString<string>,
-  V extends AnyZodOrCoValueSchema,
-> = {
-  readonly [key in z.output<K>]: InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded<V>;
-} & CoMap;
-
-export type CoRecordInstanceShape<
-  K extends z.core.$ZodString<string>,
-  V extends AnyZodOrCoValueSchema,
-> = {
-  readonly [key in z.output<K>]: InstanceOrPrimitiveOfSchema<V>;
-};

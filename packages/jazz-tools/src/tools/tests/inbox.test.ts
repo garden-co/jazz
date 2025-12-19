@@ -1,12 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { type Group, Inbox, InboxSender, z } from "../exports";
-import {
-  type Account,
-  Loaded,
-  co,
-  coValueClassFromCoValueClassOrSchema,
-  Account as AccountClass,
-} from "../internal";
+import { type Account, Loaded, co } from "../internal";
 import { setupTwoNodes, waitFor } from "./utils";
 import {
   createJazzTestAccount,
@@ -40,8 +34,7 @@ describe("Inbox", () => {
 
       const { clientAccount: sender, serverAccount: receiver } =
         await setupTwoNodes({
-          ServerAccountSchema:
-            coValueClassFromCoValueClassOrSchema(WorkerAccount),
+          ServerAccountSchema: WorkerAccount,
         });
 
       await expect(() =>
@@ -432,7 +425,7 @@ describe("Inbox", () => {
       sessionID: sessionID,
     });
 
-    const reloadedInbox = await Inbox.load(AccountClass.fromNode(node));
+    const reloadedInbox = await Inbox.load(co.account().fromNode(node));
 
     const subscribeEmitted = await new Promise((resolve) => {
       const unsubscribe = reloadedInbox.subscribe(Message, async (message) => {
@@ -503,7 +496,7 @@ describe("Inbox", () => {
       sessionID: sessionID,
     });
 
-    const reloadedInbox = await Inbox.load(AccountClass.fromNode(node));
+    const reloadedInbox = await Inbox.load(co.account().fromNode(node));
 
     const subscribeEmitted = await new Promise((resolve) => {
       const unsubscribe = reloadedInbox.subscribe(Message, async (message) => {

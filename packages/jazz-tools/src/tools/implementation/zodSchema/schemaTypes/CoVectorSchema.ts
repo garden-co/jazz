@@ -2,14 +2,14 @@ import {
   Account,
   AnonymousJazzAgent,
   CoVector,
+  CoreAccountSchema,
+  CoreGroupSchema,
   Group,
-  InstanceOrPrimitiveOfSchema,
-  InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded,
-  Settled,
-  SubscribeListenerOptions,
-  SubscribeRestArgs,
+  Loaded,
+  ResolveQuery,
   coOptionalDefiner,
   loadCoValueWithoutMe,
+  parseCoValueCreateOptions,
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   withSchemaPermissions,
@@ -20,6 +20,8 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
+import { RawBinaryCoStream } from "cojson";
+import { cojsonInternals } from "cojson";
 
 export interface CoreCoVectorSchema extends CoreCoValueSchema {
   builtin: "CoVector";
@@ -58,7 +60,7 @@ export class CoVectorSchema implements CoreCoVectorSchema {
   create(
     vector: number[] | Float32Array,
     options?: { owner: Group } | Group,
-  ): CoVectorInstance;
+  ): Loaded<CoreCoVectorSchema>;
   /**
    * Create a `CoVector` from a given vector.
    *
@@ -66,17 +68,64 @@ export class CoVectorSchema implements CoreCoVectorSchema {
    */
   create(
     vector: number[] | Float32Array,
-    options?: { owner: Account | Group } | Account | Group,
-  ): CoVectorInstance;
+    options?:
+      | { owner: Loaded<CoreAccountSchema, true> | Loaded<CoreGroupSchema> }
+      | Loaded<CoreAccountSchema, true>
+      | Loaded<CoreGroupSchema>,
+  ): Loaded<CoreCoVectorSchema>;
   create(
     vector: number[] | Float32Array,
-    options?: { owner: Account | Group } | Account | Group,
-  ): CoVectorInstance {
+    options?:
+      | { owner: Loaded<CoreAccountSchema, true> | Loaded<CoreGroupSchema> }
+      | Loaded<CoreAccountSchema, true>
+      | Loaded<CoreGroupSchema>,
+  ): Loaded<CoreCoVectorSchema> {
     const optionsWithPermissions = withSchemaPermissions(
       options,
       this.permissions,
     );
-    return this.coValueClass.create(vector, optionsWithPermissions);
+    const { owner } = parseCoValueCreateOptions(optionsWithPermissions);
+
+    const vectorAsFloat32Array =
+      vector instanceof Float32Array ? vector : new Float32Array(vector);
+
+    const givenVectorDimensions =
+      vectorAsFloat32Array.byteLength / vectorAsFloat32Array.BYTES_PER_ELEMENT;
+
+    if (givenVectorDimensions !== this.dimensions) {
+      throw new Error(
+        `Vector dimension mismatch! Expected ${this.dimensions} dimensions, got ${givenVectorDimensions}`,
+      );
+    }
+
+    const coVector = new this.coValueClass({ owner }, this);
+    coVector.setVectorData(vectorAsFloat32Array);
+
+    const byteArray = CoVector.toByteArray(vectorAsFloat32Array);
+
+    coVector.$jazz.raw.startBinaryStream({
+      mimeType: "application/vector+octet-stream",
+      totalSizeBytes: byteArray.byteLength,
+    });
+
+    const chunkSize =
+      cojsonInternals.TRANSACTION_CONFIG.MAX_RECOMMENDED_TX_SIZE;
+
+    // Although most embedding vectors are small
+    // (3072-dimensional vector is only 12,288 bytes),
+    // we should still chunk the data to avoid transaction size limits
+    for (let idx = 0; idx < byteArray.length; idx += chunkSize) {
+      coVector.$jazz.raw.pushBinaryStreamChunk(
+        byteArray.slice(idx, idx + chunkSize),
+      );
+    }
+    coVector.$jazz.raw.endBinaryStream();
+
+    return coVector;
+  }
+
+  fromRaw(raw: RawBinaryCoStream): Loaded<CoreCoVectorSchema> {
+    return new this.coValueClass({ fromRaw: raw }, this);
   }
 
   /**
@@ -84,32 +133,42 @@ export class CoVectorSchema implements CoreCoVectorSchema {
    */
   async load(
     id: string,
-    options?: { loadAs: Account | AnonymousJazzAgent },
-  ): Promise<MaybeLoadedCoVectorInstance> {
-    const coVector = await loadCoValueWithoutMe(this.coValueClass, id, options);
+    options?: { loadAs: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent },
+  ): Promise<Loaded<CoreCoVectorSchema>> {
+    const coVector = (await loadCoValueWithoutMe(
+      this,
+      id,
+      options,
+    )) as CoVector;
 
     /**
      * We are only interested in the entire vector. Since most vectors are small (<15kB),
      * we can wait for the stream to be complete before returning the vector
      */
-    if (!coVector.$isLoaded || !coVector.$jazz.raw.isBinaryStreamEnded()) {
+    if (
+      !coVector.$isLoaded ||
+      !(coVector.$jazz.raw as RawBinaryCoStream).isBinaryStreamEnded()
+    ) {
       return new Promise((resolve) => {
         subscribeToCoValueWithoutMe(
-          this.coValueClass,
+          this,
           id,
           options || {},
           (value, unsubscribe) => {
-            if (value.$jazz.raw.isBinaryStreamEnded()) {
+            const vectorValue = value as CoVector;
+            if (
+              (vectorValue.$jazz.raw as RawBinaryCoStream).isBinaryStreamEnded()
+            ) {
               unsubscribe();
-              resolve(value);
+              resolve(vectorValue as Loaded<CoreCoVectorSchema>);
             }
           },
         );
-      }) as Promise<MaybeLoadedCoVectorInstance>;
+      }) as Promise<Loaded<CoreCoVectorSchema>>;
     }
 
     coVector.loadVectorData();
-    return coVector as MaybeLoadedCoVectorInstance;
+    return coVector as Loaded<CoreCoVectorSchema>;
   }
 
   /**
@@ -117,32 +176,26 @@ export class CoVectorSchema implements CoreCoVectorSchema {
    */
   subscribe(
     id: string,
-    options: { loadAs: Account | AnonymousJazzAgent },
+    options: { loadAs: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent },
     listener: (
-      value: MaybeLoadedCoVectorInstance,
+      value: Loaded<CoreCoVectorSchema>,
       unsubscribe: () => void,
     ) => void,
   ): () => void;
   subscribe(
     id: string,
     listener: (
-      value: MaybeLoadedCoVectorInstance,
+      value: Loaded<CoreCoVectorSchema>,
       unsubscribe: () => void,
     ) => void,
   ): () => void;
   subscribe(...args: [any, ...[any]]) {
     const [id, ...restArgs] = args;
-    const { options, listener } = parseSubscribeRestArgs(restArgs);
-    return subscribeToCoValueWithoutMe(
-      this.coValueClass,
-      id,
-      options,
-      listener as any,
-    );
-  }
-
-  getCoValueClass(): typeof CoVector {
-    return this.coValueClass;
+    const { options, listener } = parseSubscribeRestArgs<
+      CoreCoVectorSchema,
+      ResolveQuery<CoreCoVectorSchema>
+    >(restArgs);
+    return subscribeToCoValueWithoutMe(this, id, options, listener);
   }
 
   optional(): CoOptionalSchema<this> {
@@ -158,8 +211,3 @@ export class CoVectorSchema implements CoreCoVectorSchema {
     return copy;
   }
 }
-
-export type CoVectorInstance = InstanceOrPrimitiveOfSchema<CoVectorSchema>;
-
-export type MaybeLoadedCoVectorInstance =
-  InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded<CoVectorSchema>;

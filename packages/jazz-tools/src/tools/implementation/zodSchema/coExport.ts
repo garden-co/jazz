@@ -1,5 +1,5 @@
-export { Loaded as loaded } from "./zodSchema.js";
-export { Loaded as output } from "./zodSchema.js";
+export { Loaded as loaded } from "../../coValues/deepLoading.js";
+export { Loaded as output } from "../../coValues/deepLoading.js";
 export { CoMapSchema as Map } from "./schemaTypes/CoMapSchema.js";
 export { CoRecordSchema as Record } from "./schemaTypes/CoRecordSchema.js";
 export { CoListSchema as List } from "./schemaTypes/CoListSchema.js";

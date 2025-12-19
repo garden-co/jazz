@@ -1,16 +1,11 @@
 import { LocalNode, RawAccount } from "cojson";
 import {
   Account,
-  AccountClass,
   LoadedAndRequired,
   CoRecordSchema,
   CoValueClass,
   CoValueFromRaw,
   CoreCoRecordSchema,
-  InstanceOfSchema,
-  RefsToResolve,
-  RefsToResolveStrict,
-  Resolved,
   Simplify,
 } from "../../internal.js";
 import {
@@ -46,7 +41,6 @@ import {
   CoreRichTextSchema,
   RichTextSchema,
 } from "./schemaTypes/RichTextSchema.js";
-import { InstanceOfSchemaCoValuesMaybeLoaded } from "./typeConverters/InstanceOfSchemaCoValuesMaybeLoaded.js";
 import { z } from "./zodReExport.js";
 import { CoreGroupSchema } from "./schemaTypes/GroupSchema.js";
 import { GroupSchema } from "./schemaTypes/GroupSchema.js";
@@ -58,8 +52,6 @@ export type ZodPrimitiveSchema =
   | z.core.$ZodNull
   | z.core.$ZodDate
   | z.core.$ZodLiteral;
-
-export type CoValueClassOrSchema = CoValueClass | CoreCoValueSchema;
 
 export type CoValueSchemaFromCoreSchema<S extends CoreCoValueSchema> =
   S extends CoreAccountSchema<infer Shape extends BaseAccountShape>
@@ -88,19 +80,7 @@ export type CoValueSchemaFromCoreSchema<S extends CoreCoValueSchema> =
                               infer Members
                             >
                           ? CoDiscriminatedUnionSchema<Members>
-                          : never;
-
-export type CoValueClassFromAnySchema<S extends CoValueClassOrSchema> =
-  S extends CoValueClass<any>
-    ? S
-    : CoValueClass<LoadedAndRequired<InstanceOfSchema<S>>> &
-        CoValueFromRaw<LoadedAndRequired<InstanceOfSchema<S>>> &
-        (S extends CoreAccountSchema ? AccountClassEssentials : {});
-
-type AccountClassEssentials = {
-  fromRaw: <A extends Account>(this: AccountClass<A>, raw: RawAccount) => A;
-  fromNode: <A extends Account>(this: AccountClass<A>, node: LocalNode) => A;
-};
+                          : `No Constructable for` & S;
 
 export type AnyCoreCoValueSchema =
   | CoreCoMapSchema
@@ -119,24 +99,3 @@ export type AnyCoreCoValueSchema =
 export type AnyZodSchema = z.core.$ZodType;
 
 export type AnyZodOrCoValueSchema = AnyZodSchema | CoreCoValueSchema;
-
-export type Loaded<
-  T extends CoValueClassOrSchema,
-  // @ts-expect-error
-  R extends ResolveQuery<T> = SchemaResolveQuery<T>,
-> = Resolved<LoadedAndRequired<InstanceOfSchemaCoValuesMaybeLoaded<T>>, R>;
-
-export type ResolveQuery<T extends CoValueClassOrSchema> = RefsToResolve<
-  LoadedAndRequired<InstanceOfSchemaCoValuesMaybeLoaded<T>>
->;
-
-export type ResolveQueryStrict<
-  T extends CoValueClassOrSchema,
-  R extends ResolveQuery<T>,
-> = RefsToResolveStrict<
-  LoadedAndRequired<InstanceOfSchemaCoValuesMaybeLoaded<T>>,
-  R
->;
-
-export type SchemaResolveQuery<T extends CoValueClassOrSchema> =
-  T extends CoreCoValueSchema ? T["resolveQuery"] : true;

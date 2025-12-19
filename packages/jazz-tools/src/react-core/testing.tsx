@@ -1,4 +1,4 @@
-import { Account, AnonymousJazzAgent } from "jazz-tools";
+import { Account, AnonymousJazzAgent, AnyAccountSchema } from "jazz-tools";
 import { TestJazzContextManager } from "jazz-tools/testing";
 import { useCallback, useState, useSyncExternalStore } from "react";
 import { JazzContext, JazzContextManagerContext } from "./provider.js";
@@ -13,9 +13,12 @@ export function JazzTestProvider<Acc extends Account>({
   isAuthenticated?: boolean;
 }) {
   const [contextManager] = useState(() => {
-    return TestJazzContextManager.fromAccountOrGuest<Acc>(account, {
-      isAuthenticated,
-    });
+    return TestJazzContextManager.fromAccountOrGuest<AnyAccountSchema>(
+      account,
+      {
+        isAuthenticated,
+      },
+    );
   });
 
   const value = useSyncExternalStore(

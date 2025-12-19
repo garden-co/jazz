@@ -1,7 +1,6 @@
 import { JazzClerkAuth, type MinimalClerkClient } from "jazz-tools";
 import {
   Account,
-  AccountClass,
   AnyAccountSchema,
   CoValueFromRaw,
   InMemoryKVStore,
@@ -42,11 +41,7 @@ function RegisterClerkAuth(props: {
   return props.children;
 }
 
-export const JazzReactProviderWithClerk = <
-  S extends
-    | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | AnyAccountSchema,
->(
+export const JazzReactProviderWithClerk = <S extends AnyAccountSchema>(
   props: {
     clerk: MinimalClerkClient;
   } & JazzProviderProps<S>,
@@ -71,7 +66,7 @@ export const JazzReactProviderWithClerk = <
   }
 
   return (
-    <JazzReactProvider {...props} onLogOut={props.clerk.signOut}>
+    <JazzReactProvider<S> {...props} onLogOut={props.clerk.signOut}>
       <RegisterClerkAuth clerk={props.clerk}>
         {props.children}
       </RegisterClerkAuth>

@@ -26,17 +26,13 @@ export { co } from "./internal.js";
 export type {
   CoValueClass,
   CoValueFromRaw,
-  DeeplyLoaded,
-  Resolved,
-  RefsToResolve,
-  RefsToResolveStrict,
+  Resolved as DeeplyLoaded,
   CoMapEdit,
   CoMapEdits,
   LastAndAllCoMapEdits,
   CoFeedEntry,
   SingleCoFeedEntry,
   TextPos,
-  AccountClass,
   AccountCreationProps,
   BaseProfileShape,
   ExportedCoValue,
@@ -112,11 +108,7 @@ export {
 export type * from "./types.js";
 
 export {
-  coValueClassFromCoValueClassOrSchema,
-  type InstanceOfSchema,
-  type InstanceOfSchemaCoValuesMaybeLoaded,
   type SchemaResolveQuery,
-  type CoValueClassOrSchema,
   CoValueLoadingState,
   type MaybeLoaded,
   type NotLoaded,
@@ -126,6 +118,7 @@ export {
   type CoreAccountSchema as AnyAccountSchema,
   type ResolveQuery,
   type ResolveQueryStrict,
+  AccountSchema,
   GroupSchema,
 } from "./internal.js";
 

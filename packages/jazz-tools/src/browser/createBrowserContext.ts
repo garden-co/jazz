@@ -4,7 +4,6 @@ import { WebSocketPeerWithReconnection } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import {
   Account,
-  AccountClass,
   AgentID,
   AnyAccountSchema,
   AuthCredentials,
@@ -23,6 +22,7 @@ import {
 import { createJazzContext } from "jazz-tools";
 import { StorageConfig, getStorageOptions } from "./storageOptions.js";
 import { setupInspector } from "./utils/export-account-inspector.js";
+import { PlatformSpecificContext } from "../tools/internal.js";
 
 setupInspector();
 
@@ -158,22 +158,18 @@ export async function createJazzBrowserGuestContext(
   };
 }
 
-export type BrowserContextOptions<
-  S extends
-    | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | AnyAccountSchema,
-> = {
+export type BrowserContextOptions<S extends AnyAccountSchema> = {
   credentials?: AuthCredentials;
   AccountSchema?: S;
   newAccountProps?: NewAccountProps;
   defaultProfileName?: string;
 } & BaseBrowserContextOptions;
 
-export async function createJazzBrowserContext<
-  S extends
-    | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | AnyAccountSchema,
->(options: BrowserContextOptions<S>) {
+export async function createJazzBrowserContext<S extends AnyAccountSchema>(
+  options: BrowserContextOptions<S>,
+): Promise<
+  PlatformSpecificContext<S> & { authSecretStorage: AuthSecretStorage }
+> {
   const {
     toggleNetwork,
     peers,

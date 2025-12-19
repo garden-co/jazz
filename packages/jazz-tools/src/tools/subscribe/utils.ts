@@ -2,32 +2,36 @@ import { RawAccount, RawCoValue, Role } from "cojson";
 import { RegisteredSchemas } from "../coValues/registeredSchemas.js";
 import {
   CoValue,
+  CoreCoValueSchema,
+  ID,
+  Loaded,
   RefEncoded,
-  RefsToResolve,
+  ResolveQuery,
   accountOrGroupToGroup,
   instantiateRefEncodedFromRaw,
 } from "../internal.js";
 import { coValuesCache } from "../lib/cache.js";
 import { SubscriptionScope } from "./SubscriptionScope.js";
 import { CoValueLoadingState } from "./types.js";
+import { asConstructable } from "../implementation/zodSchema/runtimeConverters/coValueSchemaTransformation.js";
 
 export function myRoleForRawValue(raw: RawCoValue): Role | undefined {
   const rawOwner = raw.group;
 
   const owner = coValuesCache.get(rawOwner, () =>
     rawOwner instanceof RawAccount
-      ? RegisteredSchemas["Account"].fromRaw(rawOwner)
+      ? asConstructable(RegisteredSchemas["Account"]).fromRaw(rawOwner)
       : RegisteredSchemas["Group"].fromRaw(rawOwner),
   );
 
   return accountOrGroupToGroup(owner).myRole();
 }
 
-export function createCoValue<D extends CoValue>(
-  ref: RefEncoded<D>,
+export function createCoValue<S extends CoreCoValueSchema>(
+  ref: RefEncoded<S>,
   raw: RawCoValue,
-  subscriptionScope: SubscriptionScope<D>,
-) {
+  subscriptionScope: SubscriptionScope<S>,
+): { type: typeof CoValueLoadingState.LOADED; value: Loaded<S>; id: ID<S> } {
   const freshValueInstance = instantiateRefEncodedFromRaw(ref, raw);
 
   Object.defineProperty(freshValueInstance.$jazz, "_subscriptionScope", {
@@ -65,8 +69,8 @@ export function rejectedPromise<T>(reason: unknown): PromiseWithStatus<T> {
 }
 
 export function isEqualRefsToResolve(
-  a: RefsToResolve<any>,
-  b: RefsToResolve<any>,
+  a: ResolveQuery<any>,
+  b: ResolveQuery<any>,
 ) {
   // Fast path: same reference
   if (a === b) {

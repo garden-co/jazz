@@ -1,7 +1,5 @@
 import React from "react";
 import {
-  Account,
-  AccountClass,
   AnyAccountSchema,
   CoValueClassOrSchema,
   CoValueLoadingState,
@@ -85,7 +83,7 @@ export function createCoValueSubscriptionContext<
 }
 
 export function createAccountSubscriptionContext<
-  A extends AccountClass<Account> | AnyAccountSchema,
+  A extends AnyAccountSchema,
   const R extends ResolveQuery<A> = true,
 >(schema: A, resolve?: ResolveQueryStrict<A, R>) {
   const Context = React.createContext<CoValueSubscription<A, R>>(null);

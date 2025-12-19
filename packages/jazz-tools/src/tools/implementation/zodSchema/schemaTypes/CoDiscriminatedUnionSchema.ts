@@ -3,20 +3,18 @@ import {
   AnonymousJazzAgent,
   LoadedAndRequired,
   BranchDefinition,
-  InstanceOfSchema,
-  InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded,
   Settled,
-  RefsToResolve,
-  RefsToResolveStrict,
-  Resolved,
+  ResolveQuery,
+  ResolveQueryStrict,
+  Loaded,
   SchemaUnion,
-  SchemaUnionConcreteSubclass,
   SubscribeListenerOptions,
   SubscribeRestArgs,
   coOptionalDefiner,
   loadCoValueWithoutMe,
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
+  CoreAccountSchema,
 } from "../../../internal.js";
 import { z } from "../zodReExport.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
@@ -51,7 +49,9 @@ export interface CoreCoDiscriminatedUnionSchema<
 }
 export class CoDiscriminatedUnionSchema<
   Options extends DiscriminableCoValueSchemas,
-  DefaultResolveQuery extends CoreResolveQuery = true,
+  DefaultResolveQuery extends ResolveQuery<
+    CoreCoDiscriminatedUnionSchema<Options>
+  > = true,
 > implements CoreCoDiscriminatedUnionSchema<Options>
 {
   readonly collaborative = true as const;
@@ -67,85 +67,52 @@ export class CoDiscriminatedUnionSchema<
 
   constructor(
     coreSchema: CoreCoDiscriminatedUnionSchema<Options>,
-    private coValueClass: SchemaUnionConcreteSubclass<
-      InstanceOfSchema<Options[number]>
-    >,
+    private coValueClass: SchemaUnion,
   ) {
     this.getDefinition = coreSchema.getDefinition;
   }
 
   load<
-    const R extends RefsToResolve<
-      CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion
-      // @ts-expect-error
+    const R extends ResolveQuery<
+      CoreCoDiscriminatedUnionSchema<Options>
     > = DefaultResolveQuery,
   >(
     id: string,
     options?: {
-      resolve?: RefsToResolveStrict<
-        CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion,
-        R
-      >;
-      loadAs?: Account | AnonymousJazzAgent;
+      resolve?: ResolveQueryStrict<CoreCoDiscriminatedUnionSchema<Options>, R>;
+      loadAs?: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent;
       skipRetry?: boolean;
       unstable_branch?: BranchDefinition;
     },
-  ): Promise<
-    Settled<
-      Resolved<
-        CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion,
-        R
-      >
-    >
-  > {
+  ): Promise<Settled<CoreCoDiscriminatedUnionSchema<Options>, R>> {
     return loadCoValueWithoutMe(
-      this.coValueClass,
+      this as CoreCoDiscriminatedUnionSchema<Options>,
       id,
-      // @ts-expect-error
-      withSchemaResolveQuery(options, this.resolveQuery),
-    ) as Promise<
-      Settled<
-        Resolved<
-          CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> &
-            SchemaUnion,
-          R
-        >
-      >
-    >;
+      withSchemaResolveQuery(this, options),
+    );
   }
 
   subscribe<
-    const R extends RefsToResolve<
-      CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion
-      // @ts-expect-error
+    const R extends ResolveQuery<
+      CoreCoDiscriminatedUnionSchema<Options>
     > = DefaultResolveQuery,
   >(
     id: string,
     options: SubscribeListenerOptions<
-      CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion,
+      CoreCoDiscriminatedUnionSchema<Options>,
       R
     >,
     listener: (
-      value: Resolved<
-        CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion,
-        R
-      >,
+      value: Loaded<CoreCoDiscriminatedUnionSchema<Options>, R>,
       unsubscribe: () => void,
     ) => void,
   ): () => void {
     return subscribeToCoValueWithoutMe(
-      this.coValueClass,
+      this as CoreCoDiscriminatedUnionSchema<Options>,
       id,
-      // @ts-expect-error
-      withSchemaResolveQuery(options, this.resolveQuery),
+      withSchemaResolveQuery(this, options),
       listener as any,
     );
-  }
-
-  getCoValueClass(): SchemaUnionConcreteSubclass<
-    InstanceOfSchema<Options[number]>
-  > {
-    return this.coValueClass;
   }
 
   optional(): CoOptionalSchema<this> {
@@ -157,12 +124,12 @@ export class CoDiscriminatedUnionSchema<
    * This resolve query will be used when no resolve query is provided to the load method.
    */
   resolved<
-    const R extends RefsToResolve<
-      CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion
+    const R extends ResolveQuery<
+      CoreCoDiscriminatedUnionSchema<Options>
     > = true,
   >(
-    resolveQuery: RefsToResolveStrict<
-      CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion,
+    resolveQuery: ResolveQueryStrict<
+      CoreCoDiscriminatedUnionSchema<Options>,
       R
     >,
   ): CoDiscriminatedUnionSchema<Options, R> {
@@ -217,9 +184,3 @@ export function createCoreCoDiscriminatedUnionSchema<
     resolveQuery: true as const,
   };
 }
-
-type CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<
-  Options extends DiscriminableCoValueSchemas,
-> = LoadedAndRequired<
-  InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded<Options[number]>
->;

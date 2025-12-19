@@ -16,7 +16,6 @@ import {
   Loaded,
   TypeSym,
   activeAccountContext,
-  coValueClassFromCoValueClassOrSchema,
   CoValueLoadingState,
   exportCoValue,
   MaybeLoaded,
@@ -1342,7 +1341,7 @@ describe("CoMap resolution", async () => {
     const spy = vi.fn((person) => updates.push(person));
 
     subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(Person), // TODO: we should get rid of the conversion in the future
+      Person,
       person.$jazz.id,
       {
         syncResolution: true,

@@ -17,6 +17,7 @@ import {
   co,
   SchemaField,
   ZodSchemaField,
+  Loaded,
 } from "../internal.js";
 import { CoreCoValueSchema } from "./zodSchema/schemaTypes/CoValueSchema.js";
 
@@ -38,17 +39,16 @@ export type EncodedAs<V> = { type: "encoded"; field: ZodSchemaField } & (
   | Encoder<V>
   | OptionalEncoder<V>
 );
-export type RefEncoded<V extends CoValue> = {
+export type RefEncoded<S extends CoreCoValueSchema = CoreCoValueSchema> = {
   type: "ref";
-  ref: CoValueClass<V> | ((raw: RawCoValue) => CoValueClass<V>);
   optional: boolean;
   permissions?: RefPermissions;
-  field: CoreCoValueSchema | CoValueClass;
+  sourceSchema: CoreCoValueSchema;
 };
 
-export function isRefEncoded<V extends CoValue>(
+export function isRefEncoded<S extends CoreCoValueSchema>(
   schema: FieldDescriptor,
-): schema is RefEncoded<V> {
+): schema is RefEncoded<S> {
   return (
     typeof schema === "object" &&
     "type" in schema &&
@@ -59,15 +59,23 @@ export function isRefEncoded<V extends CoValue>(
   );
 }
 
-export function instantiateRefEncodedFromRaw<V extends CoValue>(
-  schema: RefEncoded<V>,
+export function instantiateRefEncodedFromRaw<S extends CoreCoValueSchema>(
+  schema: RefEncoded<S>,
   raw: RawCoValue,
-): V {
-  return isCoValueClass<V>(schema.ref)
-    ? schema.ref.fromRaw(raw)
-    : (schema.ref as (raw: RawCoValue) => CoValueClass<V> & CoValueFromRaw<V>)(
-        raw,
-      ).fromRaw(raw);
+): Loaded<S> {
+  if (!schema.sourceSchema) {
+    throw new Error("sourceSchema is required");
+  }
+
+  if (
+    "fromRaw" in schema.sourceSchema &&
+    typeof schema.sourceSchema.fromRaw === "function"
+  ) {
+    // new path if CoValueSchema has a fromRaw method
+    return schema.sourceSchema.fromRaw(raw);
+  } else {
+    throw new Error("fromRaw method not found on sourceSchema");
+  }
 }
 
 /**
@@ -81,14 +89,19 @@ export function instantiateRefEncodedFromRaw<V extends CoValue>(
  * @param onCreate - The callback to call when the new CoValue is created
  * @returns The created CoValue.
  */
-export function instantiateRefEncodedWithInit<V extends CoValue>(
-  schema: RefEncoded<V>,
+export function instantiateRefEncodedWithInit<S extends CoreCoValueSchema>(
+  schema: RefEncoded<S>,
   init: any,
   containerOwner: Group,
   newOwnerStrategy: NewInlineOwnerStrategy = extendContainerOwner,
   onCreate?: RefOnCreateCallback,
-): V {
-  if (!isCoValueClass<V>(schema.ref)) {
+): Loaded<S> {
+  if (
+    !(
+      "create" in schema.sourceSchema &&
+      typeof schema.sourceSchema.create === "function"
+    )
+  ) {
     throw Error(
       `Cannot automatically create CoValue from value: ${JSON.stringify(init)}. Use the CoValue schema's create() method instead.`,
     );
@@ -99,6 +112,14 @@ export function instantiateRefEncodedWithInit<V extends CoValue>(
     init,
   );
   onCreate?.(owner, init);
+
+  if (
+    "create" in schema.sourceSchema &&
+    typeof schema.sourceSchema.create === "function"
+  ) {
+    // new path if CoValueSchema has a create method
+    return schema.sourceSchema.create(init, owner);
+  }
   // @ts-expect-error - create is a static method in all CoValue classes
   return schema.ref.create(init, owner);
 }
@@ -106,14 +127,8 @@ export function instantiateRefEncodedWithInit<V extends CoValue>(
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type FieldDescriptor =
   | JsonEncoded
-  | RefEncoded<CoValue>
+  | RefEncoded<CoreCoValueSchema>
   | EncodedAs<any>;
-
-export type FieldDescriptorFor<Field> = LoadedAndRequired<Field> extends CoValue
-  ? RefEncoded<LoadedAndRequired<Field>>
-  : LoadedAndRequired<Field> extends JsonValue
-    ? JsonEncoded
-    : EncodedAs<LoadedAndRequired<Field>>;
 
 export type Encoder<V> = {
   encode: (value: V) => JsonValue;

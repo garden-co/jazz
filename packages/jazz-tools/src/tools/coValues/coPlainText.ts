@@ -8,7 +8,6 @@ import {
   CoValueLoadingState,
   ID,
   Settled,
-  Resolved,
   SubscribeListenerOptions,
   SubscribeRestArgs,
   TypeSym,
@@ -18,6 +17,11 @@ import {
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
+  CorePlainTextSchema,
+  CoreRichTextSchema,
+  CoreAccountSchema,
+  CoreGroupSchema,
+  Loaded,
 } from "../internal.js";
 import { Account } from "./account.js";
 import { getCoValueOwner, Group } from "./group.js";
@@ -34,8 +38,14 @@ export class CoPlainText extends String implements CoValue {
   constructor(
     options:
       | { fromRaw: RawCoPlainText }
-      | { text: string; owner: Account | Group }
+      | {
+          text: string;
+          owner:
+            | Loaded<CoreAccountSchema, true>
+            | Loaded<CoreGroupSchema, true>;
+        }
       | undefined,
+    sourceSchema: CorePlainTextSchema | CoreRichTextSchema,
   ) {
     if (!options) {
       super(""); // Intialise as empty string
@@ -48,7 +58,7 @@ export class CoPlainText extends String implements CoValue {
       Object.defineProperties(this, {
         [TypeSym]: { value: "CoPlainText", enumerable: false },
         $jazz: {
-          value: new CoTextJazzApi(this, raw),
+          value: new CoTextJazzApi(this, raw, sourceSchema),
           enumerable: false,
         },
         $isLoaded: { value: true, enumerable: false },
@@ -62,7 +72,7 @@ export class CoPlainText extends String implements CoValue {
       Object.defineProperties(this, {
         [TypeSym]: { value: "CoPlainText", enumerable: false },
         $jazz: {
-          value: new CoTextJazzApi(this, raw),
+          value: new CoTextJazzApi(this, raw, sourceSchema),
           enumerable: false,
         },
         $isLoaded: { value: true, enumerable: false },
@@ -71,30 +81,6 @@ export class CoPlainText extends String implements CoValue {
     }
 
     throw new Error("Invalid constructor arguments");
-  }
-
-  /**
-   * Create a new `CoPlainText` with the given text and owner.
-   *
-   * The owner (a Group or Account) determines access rights to the CoPlainText.
-   *
-   * The CoPlainText will immediately be persisted and synced to connected peers.
-   *
-   * @example
-   * ```ts
-   * const text = CoPlainText.create("Hello, world!", { owner: me });
-   * ```
-   *
-   * @category Creation
-   * @deprecated Use `co.plainText(...).create` instead.
-   */
-  static create<T extends CoPlainText>(
-    this: CoValueClass<T>,
-    text: string,
-    options?: { owner: Account | Group } | Account | Group,
-  ) {
-    const { owner } = parseCoValueCreateOptions(options);
-    return new this({ text, owner });
   }
 
   get length() {
@@ -145,14 +131,6 @@ export class CoPlainText extends String implements CoValue {
     return this.$jazz.raw.mapping.idxAfterOpID[stringifyOpID(pos)];
   }
 
-  /** @category Internals */
-  static fromRaw<V extends CoPlainText>(
-    this: CoValueClass<V> & typeof CoPlainText,
-    raw: RawCoPlainText,
-  ) {
-    return new this({ fromRaw: raw });
-  }
-
   /**
    * Load a `CoPlainText` with a given ID, as a given account.
    *
@@ -184,11 +162,16 @@ export class CoTextJazzApi<T extends CoPlainText> extends CoValueJazzApi<T> {
   constructor(
     private coText: T,
     public raw: RawCoPlainText,
+    public sourceSchema: CorePlainTextSchema | CoreRichTextSchema,
   ) {
     super(coText);
+
+    if (!this.sourceSchema) {
+      throw new Error("sourceSchema is required");
+    }
   }
 
-  get owner(): Group {
+  get owner(): Loaded<CoreGroupSchema, true> {
     return getCoValueOwner(this.coText);
   }
 
@@ -239,7 +222,10 @@ export class CoTextJazzApi<T extends CoPlainText> extends CoValueJazzApi<T> {
    **/
   subscribe<T extends CoPlainText>(
     this: CoTextJazzApi<T>,
-    listener: (value: Resolved<T, true>, unsubscribe: () => void) => void,
+    listener: (
+      value: Loaded<CorePlainTextSchema, true>,
+      unsubscribe: () => void,
+    ) => void,
   ): () => void {
     return subscribeToExistingCoValue(this.coText, {}, listener);
   }

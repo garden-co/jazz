@@ -4,10 +4,12 @@ import {
   CoValue,
   CoValueClass,
   CoValueLoadingState,
+  CoreAccountSchema,
   ExportedCoValue,
+  Loaded,
   RegisteredSchemas,
   type SubscriptionScope,
-  coValueClassFromCoValueClassOrSchema,
+  asConstructable,
   coValuesCache,
   exportCoValueFromSubscription,
   getSubscriptionScope,
@@ -15,12 +17,13 @@ import {
   unstable_mergeBranch,
 } from "../internal.js";
 import { Group, TypeSym } from "../internal.js";
+import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoValueSchema.js";
 
 /** @internal */
 export abstract class CoValueBase implements CoValue {
   declare [TypeSym]: string;
 
-  declare abstract $jazz: CoValueJazzApi<this>;
+  declare abstract $jazz: CoValueJazzApi;
   declare $isLoaded: true;
 
   constructor() {
@@ -48,12 +51,13 @@ export abstract class CoValueBase implements CoValue {
   }
 }
 
-export abstract class CoValueJazzApi<V extends CoValue> {
+export abstract class CoValueJazzApi {
   /** @category Internals */
   declare _instanceID: string;
-  declare _subscriptionScope: SubscriptionScope<CoValue> | undefined;
+  declare _subscriptionScope: SubscriptionScope<CoreCoValueSchema> | undefined;
+  declare abstract sourceSchema: CoreCoValueSchema;
 
-  constructor(private coValue: V) {
+  constructor(private coValue: CoValue) {
     Object.defineProperty(this, "_instanceID", {
       value: `instance-${Math.random().toString(36).slice(2)}`,
       enumerable: false,
@@ -83,14 +87,12 @@ export abstract class CoValueJazzApi<V extends CoValue> {
   }
 
   /** @private */
-  get loadedAs() {
+  get loadedAs(): Loaded<CoreAccountSchema, true> | AnonymousJazzAgent {
     const agent = this.localNode.getCurrentAgent();
 
     if (agent instanceof ControlledAccount) {
-      return coValuesCache.get(agent.account, () =>
-        coValueClassFromCoValueClassOrSchema(
-          RegisteredSchemas["Account"],
-        ).fromRaw(agent.account),
+      return coValuesCache.get<CoreAccountSchema>(agent.account, () =>
+        asConstructable(RegisteredSchemas["Account"]).fromRaw(agent.account),
       );
     }
 
@@ -159,11 +161,14 @@ export abstract class CoValueJazzApi<V extends CoValue> {
     unstable_mergeBranch(subscriptionScope);
   }
 
-  export(): ExportedCoValue<V> {
-    const subscriptionScope = getSubscriptionScope(this.coValue);
+  export<S extends CoreCoValueSchema>(this: {
+    sourceSchema: S;
+    coValue: CoValue;
+  }): ExportedCoValue<S> {
+    const subscriptionScope = getSubscriptionScope(
+      this.coValue,
+    ) as unknown as SubscriptionScope<S>;
 
-    return exportCoValueFromSubscription(
-      subscriptionScope as SubscriptionScope<CoValue>,
-    );
+    return exportCoValueFromSubscription(subscriptionScope);
   }
 }

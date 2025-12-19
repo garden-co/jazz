@@ -1,15 +1,9 @@
-import {
-  Account,
-  AccountClass,
-  CoValueFromRaw,
-  JazzContextManager,
-  KvStore,
-  SyncConfig,
-} from "jazz-tools";
+import { JazzContextManager, KvStore, SyncConfig } from "jazz-tools";
 import type {
   AnyAccountSchema,
   InstanceOfSchema,
   JazzContextManagerAuthProps,
+  Loaded,
 } from "jazz-tools";
 import {
   BaseReactNativeContextOptions,
@@ -17,12 +11,9 @@ import {
   createJazzReactNativeGuestContext,
 } from "./platform.js";
 import { KvStoreContext } from "./storage/kv-store-context.js";
+import { PlatformSpecificContext } from "../tools/implementation/ContextManager.js";
 
-export type JazzContextManagerProps<
-  S extends
-    | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | AnyAccountSchema,
-> = {
+export type JazzContextManagerProps<S extends AnyAccountSchema> = {
   guestMode?: boolean;
   sync: SyncConfig;
   onLogOut?: () => void;
@@ -30,21 +21,17 @@ export type JazzContextManagerProps<
   storage?: BaseReactNativeContextOptions["storage"];
   AccountSchema?: S;
   defaultProfileName?: string;
-  onAnonymousAccountDiscarded?: (
-    anonymousAccount: InstanceOfSchema<S>,
-  ) => Promise<void>;
+  onAnonymousAccountDiscarded?: (anonymousAccount: Loaded<S>) => Promise<void>;
   CryptoProvider?: BaseReactNativeContextOptions["CryptoProvider"];
 };
 
 export class ReactNativeContextManager<
-  S extends
-    | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | AnyAccountSchema,
-> extends JazzContextManager<InstanceOfSchema<S>, JazzContextManagerProps<S>> {
+  S extends AnyAccountSchema,
+> extends JazzContextManager<S, JazzContextManagerProps<S>> {
   async getNewContext(
     props: JazzContextManagerProps<S>,
     authProps?: JazzContextManagerAuthProps,
-  ) {
+  ): Promise<PlatformSpecificContext<S>> {
     if (props.guestMode) {
       return createJazzReactNativeGuestContext({
         sync: props.sync,

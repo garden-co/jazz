@@ -11,10 +11,16 @@ import {
   co,
   type CoPlainText,
   CoValueLoadingState,
+  DefaultAccountShape,
   type Group,
+  Loaded,
   z,
 } from "../exports";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing";
+import {
+  AccountInstance,
+  CoreAccountSchema,
+} from "../implementation/zodSchema/schemaTypes/AccountSchema";
 import { assertLoaded, setupTwoNodes, waitFor } from "./utils";
 
 describe("Schema.resolved()", () => {
@@ -135,8 +141,8 @@ describe("Schema.resolved()", () => {
   });
 
   describe("the schema's resolve query is used when loading CoValues", () => {
-    let clientAccount: Account;
-    let serverAccount: Account;
+    let clientAccount: Loaded<CoreAccountSchema>;
+    let serverAccount: Loaded<CoreAccountSchema>;
     let publicGroup: Group;
 
     beforeAll(async () => {

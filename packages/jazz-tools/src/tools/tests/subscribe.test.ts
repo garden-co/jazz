@@ -16,9 +16,10 @@ import {
 } from "../index.js";
 import {
   CoValueLoadingState,
+  CoreAccountSchema,
+  CoreGroupSchema,
   Loaded,
   co,
-  coValueClassFromCoValueClassOrSchema,
   subscribeToCoValue,
 } from "../internal.js";
 import {
@@ -44,14 +45,20 @@ const ChatRoom = co.map({
   name: z.string(),
 });
 
-function createChatRoom(me: Account | Group, name: string) {
+function createChatRoom(
+  me: Loaded<CoreAccountSchema, true> | Loaded<CoreGroupSchema>,
+  name: string,
+) {
   return ChatRoom.create(
     { messages: co.list(Message).create([], { owner: me }), name },
     { owner: me },
   );
 }
 
-function createMessage(me: Account | Group, text: string) {
+function createMessage(
+  me: Loaded<CoreAccountSchema, true> | Loaded<CoreGroupSchema>,
+  text: string,
+) {
   return Message.create(
     { text, reactions: ReactionsFeed.create([], { owner: me }) },
     { owner: me },
@@ -77,7 +84,7 @@ describe("subscribeToCoValue", () => {
     let result = null as Loaded<typeof ChatRoom, true> | null;
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(ChatRoom),
+      ChatRoom,
       chatRoom.$jazz.id,
       { loadAs: meOnSecondPeer },
       (value) => {
@@ -125,7 +132,7 @@ describe("subscribeToCoValue", () => {
     let result = null as Loaded<typeof ChatRoom, {}> | null;
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(ChatRoom),
+      ChatRoom,
       chatRoom.$jazz.id,
       {
         loadAs: meOnSecondPeer,
@@ -166,7 +173,7 @@ describe("subscribeToCoValue", () => {
     messages.$jazz.push(createMessage(me, "Hello"));
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(ChatRoom),
+      ChatRoom,
       chatRoom.$jazz.id,
       {
         loadAs: meOnSecondPeer,
@@ -209,7 +216,7 @@ describe("subscribeToCoValue", () => {
     const updateFn = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(ChatRoom),
+      ChatRoom,
       chatRoom.$jazz.id,
       {
         loadAs: meOnSecondPeer,
@@ -269,7 +276,7 @@ describe("subscribeToCoValue", () => {
     >[];
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(ChatRoom),
+      ChatRoom,
       chatRoom.$jazz.id,
       {
         loadAs: meOnSecondPeer,
@@ -340,7 +347,7 @@ describe("subscribeToCoValue", () => {
     const updateFn = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(ChatRoom),
+      ChatRoom,
       chatRoom.$jazz.id,
       {
         loadAs: meOnSecondPeer,
@@ -404,7 +411,7 @@ describe("subscribeToCoValue", () => {
     const updateFn = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(TestList),
+      TestList,
       list.$jazz.id,
       {
         loadAs: account,
@@ -465,7 +472,7 @@ describe("subscribeToCoValue", () => {
     const onUnauthorized = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(TestList),
+      TestList,
       list.$jazz.id,
       {
         loadAs: reader,
@@ -538,7 +545,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(TestList),
+      TestList,
       list.$jazz.id,
       {
         loadAs: reader,
@@ -610,7 +617,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(TestList),
+      TestList,
       list.$jazz.id,
       {
         loadAs: reader,
@@ -680,7 +687,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(TestList),
+      TestList,
       list.$jazz.id,
       {
         loadAs: reader,
@@ -732,7 +739,7 @@ describe("subscribeToCoValue", () => {
     });
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(TestList),
+      TestList,
       list.$jazz.id,
       {
         loadAs: creator,
@@ -799,7 +806,7 @@ describe("subscribeToCoValue", () => {
     });
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(TestList),
+      TestList,
       list.$jazz.id,
       {
         loadAs: creator,
@@ -890,7 +897,7 @@ describe("subscribeToCoValue", () => {
     });
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(Person),
+      Person,
       person.$jazz.id,
       {
         loadAs: reader,
@@ -977,7 +984,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(TestList),
+      TestList,
       list.$jazz.id,
       {
         loadAs: reader,
@@ -1064,7 +1071,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(PersonList),
+      PersonList,
       list.$jazz.id,
       {
         loadAs: reader,
@@ -1170,7 +1177,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(PersonList),
+      PersonList,
       list.$jazz.id,
       {
         loadAs: reader,
@@ -1260,7 +1267,7 @@ describe("subscribeToCoValue", () => {
 
     // Test subscribing to the large coValue
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(LargeDataset),
+      LargeDataset,
       largeMap.$jazz.id,
       {
         loadAs: alice,
@@ -1321,7 +1328,7 @@ describe("subscribeToCoValue", () => {
     const spy = vi.fn();
     // Test subscribing to the large coValue
     const unsubscribe = subscribeToCoValue(
-      coValueClassFromCoValueClassOrSchema(PersonList),
+      PersonList,
       personList.$jazz.id,
       {
         loadAs: alice,
@@ -1383,7 +1390,7 @@ describe("subscribeToCoValue", () => {
       });
 
       const unsubscribe = subscribeToCoValue(
-        coValueClassFromCoValueClassOrSchema(Person),
+        Person,
         person.$jazz.id,
         {
           loadAs: reader,

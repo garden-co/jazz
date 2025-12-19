@@ -4,12 +4,9 @@ import {
   CoList,
   Group,
   co,
-  hydrateCoreCoValueSchema,
+  asConstructable,
   ID,
   Settled,
-  RefsToResolve,
-  RefsToResolveStrict,
-  Resolved,
   SubscribeListenerOptions,
   coOptionalDefiner,
   internalLoadUnique,
@@ -19,12 +16,20 @@ import {
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
   getIdFromHeader,
+  parseCoValueCreateOptions,
+  toRawItems,
+  schemaFieldToFieldDescriptor,
+  SchemaField,
+  ResolveQuery,
+  ResolveQueryStrict,
+  SubscribeListener,
+  Loaded,
+  CoreAccountSchema,
+  CoreGroupSchema,
 } from "../../../internal.js";
-import { CoValueUniqueness, RawCoID } from "cojson";
+import { CoValueUniqueness, RawCoID, RawCoList } from "cojson";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoListSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
-import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
-import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded.js";
 import { AnyZodOrCoValueSchema } from "../zodSchema.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
@@ -36,7 +41,7 @@ import {
 
 export class CoListSchema<
   T extends AnyZodOrCoValueSchema,
-  DefaultResolveQuery extends CoreResolveQuery = true,
+  DefaultResolveQuery extends ResolveQuery<CoreCoListSchema<T>> = true,
 > implements CoreCoListSchema<T>
 {
   collaborative = true as const;
@@ -65,101 +70,115 @@ export class CoListSchema<
     options?:
       | { owner: Group; unique?: CoValueUniqueness["uniqueness"] }
       | Group,
-  ): CoListInstance<T>;
+  ): Loaded<CoreCoListSchema<T>>;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
   create(
     items: CoListSchemaInit<T>,
     options?:
-      | { owner: Account | Group; unique?: CoValueUniqueness["uniqueness"] }
-      | Account
+      | {
+          owner: Loaded<CoreAccountSchema, true> | Group;
+          unique?: CoValueUniqueness["uniqueness"];
+        }
+      | Loaded<CoreAccountSchema, true>
       | Group,
-  ): CoListInstance<T>;
+  ): Loaded<CoreCoListSchema<T>>;
   create(
     items: CoListSchemaInit<T>,
     options?:
-      | { owner: Account | Group; unique?: CoValueUniqueness["uniqueness"] }
-      | Account
+      | {
+          owner: Loaded<CoreAccountSchema, true> | Group;
+          unique?: CoValueUniqueness["uniqueness"];
+        }
+      | Loaded<CoreAccountSchema, true>
       | Group,
-  ): CoListInstance<T> {
+  ): Loaded<CoreCoListSchema<T>> {
     const optionsWithPermissions = withSchemaPermissions(
       options,
       this.permissions,
     );
-    return this.coValueClass.create(
-      items as any,
+
+    const { owner, uniqueness } = parseCoValueCreateOptions(
       optionsWithPermissions,
-    ) as CoListInstance<T>;
+    );
+
+    const itemFieldDescriptor = schemaFieldToFieldDescriptor(
+      this.element as SchemaField, // TODO we should enforce this at runtime
+    );
+
+    const raw = owner.$jazz.raw.createList(
+      toRawItems([...items], itemFieldDescriptor, owner),
+      null,
+      "private",
+      uniqueness,
+    );
+
+    return new this.coValueClass(itemFieldDescriptor, raw, this);
   }
 
-  load<
-    const R extends RefsToResolve<
-      CoListInstanceCoValuesMaybeLoaded<T>
-    > = DefaultResolveQuery,
-  >(
+  fromRaw(raw: RawCoList): Loaded<CoreCoListSchema<T>> {
+    const itemFieldDescriptor = schemaFieldToFieldDescriptor(
+      this.element as SchemaField, // TODO we should enforce this at runtime
+    );
+
+    return new this.coValueClass(itemFieldDescriptor, raw, this);
+  }
+
+  load<const R extends ResolveQuery<CoreCoListSchema<T>> = DefaultResolveQuery>(
     id: string,
     options?: {
-      resolve?: RefsToResolveStrict<CoListInstanceCoValuesMaybeLoaded<T>, R>;
-      loadAs?: Account | AnonymousJazzAgent;
+      resolve?: ResolveQueryStrict<CoreCoListSchema<T>, R>;
+      loadAs?: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
     },
-  ): Promise<Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>> {
+  ): Promise<Settled<CoreCoListSchema<T>, R>> {
     return loadCoValueWithoutMe(
-      this.coValueClass,
+      this,
       id,
-      withSchemaResolveQuery(options, this.resolveQuery),
-    ) as Promise<Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>>;
+      withSchemaResolveQuery(this, options),
+    );
   }
 
   unstable_merge<
-    const R extends RefsToResolve<
-      CoListInstanceCoValuesMaybeLoaded<T>
-    > = DefaultResolveQuery,
+    const R extends ResolveQuery<CoreCoListSchema<T>> = DefaultResolveQuery,
   >(
     id: string,
     options: {
-      resolve?: RefsToResolveStrict<CoListInstanceCoValuesMaybeLoaded<T>, R>;
-      loadAs?: Account | AnonymousJazzAgent;
+      resolve?: ResolveQueryStrict<CoreCoListSchema<T>, R>;
+      loadAs?: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent;
       branch: BranchDefinition;
     },
   ): Promise<void> {
     return unstable_mergeBranchWithResolve(
-      this.coValueClass,
+      this,
       id,
-      // @ts-expect-error
-      withSchemaResolveQuery(options, this.resolveQuery),
+      withSchemaResolveQuery(this, options),
     );
   }
 
   subscribe<
-    const R extends RefsToResolve<
-      CoListInstanceCoValuesMaybeLoaded<T>
-    > = DefaultResolveQuery,
+    const R extends ResolveQuery<CoreCoListSchema<T>> = DefaultResolveQuery,
   >(
     id: string,
-    options: SubscribeListenerOptions<CoListInstanceCoValuesMaybeLoaded<T>, R>,
-    listener: (
-      value: Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>,
-      unsubscribe: () => void,
-    ) => void,
+    options: SubscribeListenerOptions<CoreCoListSchema<T>, R>,
+    listener: SubscribeListener<CoreCoListSchema<T>, R>,
   ): () => void {
     return subscribeToCoValueWithoutMe(
-      this.coValueClass,
+      this,
       id,
-      withSchemaResolveQuery(options, this.resolveQuery),
-      listener as any,
+      withSchemaResolveQuery(this, options),
+      listener,
     );
-  }
-
-  getCoValueClass(): typeof CoList {
-    return this.coValueClass;
   }
 
   /** @deprecated Use `CoList.upsertUnique` and `CoList.loadUnique` instead. */
   findUnique(
     unique: CoValueUniqueness["uniqueness"],
-    ownerID: ID<Account> | ID<Group>,
-    as?: Account | Group | AnonymousJazzAgent,
-  ): ID<CoListInstanceCoValuesMaybeLoaded<T>> {
+    ownerID: ID<Loaded<CoreAccountSchema, true>> | ID<Group>,
+    as?:
+      | Loaded<CoreAccountSchema, true>
+      | Loaded<CoreGroupSchema>
+      | AnonymousJazzAgent,
+  ): ID<CoreCoListSchema<T>> {
     const header = this._getUniqueHeader(unique, ownerID);
     return getIdFromHeader(header, as);
   }
@@ -167,7 +186,7 @@ export class CoListSchema<
   /** @internal */
   private _getUniqueHeader(
     unique: CoValueUniqueness["uniqueness"],
-    ownerID: ID<Account> | ID<Group>,
+    ownerID: ID<Loaded<CoreAccountSchema, true>> | ID<Loaded<CoreGroupSchema>>,
   ) {
     return {
       type: "colist" as const,
@@ -181,27 +200,22 @@ export class CoListSchema<
   }
 
   upsertUnique<
-    const R extends RefsToResolve<
-      CoListInstanceCoValuesMaybeLoaded<T>
-    > = DefaultResolveQuery,
+    const R extends ResolveQuery<CoreCoListSchema<T>> = DefaultResolveQuery,
   >(options: {
     value: CoListSchemaInit<T>;
     unique: CoValueUniqueness["uniqueness"];
-    owner: Account | Group;
-    resolve?: RefsToResolveStrict<CoListInstanceCoValuesMaybeLoaded<T>, R>;
-  }): Promise<Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>> {
+    owner: Loaded<CoreAccountSchema, true> | Loaded<CoreGroupSchema>;
+    resolve?: ResolveQueryStrict<CoreCoListSchema<T>, R>;
+  }): Promise<Settled<CoreCoListSchema<T>, R>> {
     const header = this._getUniqueHeader(
       options.unique,
       options.owner.$jazz.id,
     );
 
-    return internalLoadUnique(this.coValueClass, {
+    return internalLoadUnique<CoreCoListSchema<T>, R>(this, {
       header,
       owner: options.owner,
-      resolve: withSchemaResolveQuery(
-        options.resolve ? { resolve: options.resolve } : undefined,
-        this.resolveQuery,
-      )?.resolve as any,
+      resolve: withSchemaResolveQuery(this, options)?.resolve,
       onCreateWhenMissing: () => {
         this.create(options.value, {
           owner: options.owner,
@@ -209,40 +223,35 @@ export class CoListSchema<
         });
       },
       onUpdateWhenFound(value) {
-        (
-          value as Resolved<CoListInstanceCoValuesMaybeLoaded<T>>
-        ).$jazz.applyDiff(options.value as any);
+        (value as Loaded<CoreCoListSchema<T>, R>).$jazz.applyDiff(
+          options.value,
+        );
       },
-    }) as Promise<Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>>;
+    }) as Promise<Settled<CoreCoListSchema<T>, R>>;
   }
 
   async loadUnique<
-    const R extends RefsToResolve<
-      CoListInstanceCoValuesMaybeLoaded<T>
-    > = DefaultResolveQuery,
+    const R extends ResolveQuery<CoreCoListSchema<T>> = DefaultResolveQuery,
   >(
     unique: CoValueUniqueness["uniqueness"],
-    ownerID: ID<Account> | ID<Group>,
+    ownerID: ID<Loaded<CoreAccountSchema, true>> | ID<Loaded<CoreGroupSchema>>,
     options?: {
-      resolve?: RefsToResolveStrict<CoListInstanceCoValuesMaybeLoaded<T>, R>;
-      loadAs?: Account | AnonymousJazzAgent;
+      resolve?: ResolveQueryStrict<CoreCoListSchema<T>, R>;
+      loadAs?: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent;
     },
-  ): Promise<Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>> {
+  ): Promise<Settled<CoreCoListSchema<T>, R>> {
     const header = this._getUniqueHeader(unique, ownerID);
 
     const owner = await co.group().load(ownerID, {
       loadAs: options?.loadAs,
     });
-    if (!owner.$isLoaded) return owner as any;
+    if (!owner.$isLoaded) return owner;
 
-    return internalLoadUnique(this.coValueClass, {
+    return internalLoadUnique<CoreCoListSchema<T>, R>(this, {
       header,
       owner,
-      resolve: withSchemaResolveQuery(
-        options?.resolve ? { resolve: options.resolve } : undefined,
-        this.resolveQuery,
-      )?.resolve as any,
-    }) as Promise<Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>>;
+      resolve: withSchemaResolveQuery(this, options)?.resolve,
+    });
   }
 
   optional(): CoOptionalSchema<this> {
@@ -253,10 +262,8 @@ export class CoListSchema<
    * Adds a default resolve query to be used when loading instances of this schema.
    * This resolve query will be used when no resolve query is provided to the load method.
    */
-  resolved<
-    const R extends RefsToResolve<CoListInstanceCoValuesMaybeLoaded<T>> = true,
-  >(
-    resolveQuery: RefsToResolveStrict<CoListInstanceCoValuesMaybeLoaded<T>, R>,
+  resolved<const R extends ResolveQuery<CoreCoListSchema<T>> = true>(
+    resolveQuery: ResolveQueryStrict<CoreCoListSchema<T>, R>,
   ): CoListSchema<T, R> {
     return this.copy({ resolveQuery: resolveQuery as R });
   }
@@ -270,19 +277,18 @@ export class CoListSchema<
     return this.copy({ permissions });
   }
 
-  private copy<ResolveQuery extends CoreResolveQuery = DefaultResolveQuery>({
+  private copy<
+    R extends ResolveQuery<CoreCoListSchema<T>> = DefaultResolveQuery,
+  >({
     permissions,
     resolveQuery,
   }: {
     permissions?: SchemaPermissions;
-    resolveQuery?: ResolveQuery;
-  }): CoListSchema<T, ResolveQuery> {
+    resolveQuery?: R;
+  }): CoListSchema<T, R> {
     const coreSchema = createCoreCoListSchema(this.element);
-    // @ts-expect-error
-    const copy: CoListSchema<T, ResolveQuery> =
-      hydrateCoreCoValueSchema(coreSchema);
-    // @ts-expect-error TS cannot infer that the resolveQuery type is valid
-    copy.resolveQuery = resolveQuery ?? this.resolveQuery;
+    const copy = asConstructable(coreSchema) as unknown as CoListSchema<T, R>;
+    copy.resolveQuery = resolveQuery ?? (this.resolveQuery as unknown as R);
     copy.permissions = permissions ?? this.permissions;
     return copy;
   }
@@ -306,10 +312,3 @@ export interface CoreCoListSchema<
   builtin: "CoList";
   element: T;
 }
-
-export type CoListInstance<T extends AnyZodOrCoValueSchema> = CoList<
-  InstanceOrPrimitiveOfSchema<T>
->;
-
-export type CoListInstanceCoValuesMaybeLoaded<T extends AnyZodOrCoValueSchema> =
-  CoList<InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded<T>>;

@@ -1,5 +1,5 @@
 import { assert } from "vitest";
-import { AccountClass, isControlledAccount } from "../coValues/account";
+import { isControlledAccount } from "../coValues/account";
 
 import { CoID, LocalNode, RawCoValue } from "cojson";
 import { cojsonInternals } from "cojson";
@@ -17,7 +17,14 @@ import {
   MaybeLoaded,
   LoadedAndRequired,
   AccountSchema,
-  Account as AccountClassImpl,
+  RegisteredSchemas,
+  CoreAccountSchema,
+  asConstructable,
+  CoreCoValueSchema,
+  Settled,
+  Loaded,
+  NotLoaded,
+  Inaccessible,
 } from "../internal";
 
 const Crypto = await WasmCrypto.create();
@@ -57,9 +64,9 @@ export async function setupAccount() {
 }
 
 export async function setupTwoNodes(options?: {
-  ServerAccountSchema?: CoValueFromRaw<Account> & AccountClass<Account>;
+  ServerAccountSchema?: CoreAccountSchema;
 }) {
-  const ServerAccountSchema = options?.ServerAccountSchema ?? AccountClassImpl;
+  const ServerAccountSchema = options?.ServerAccountSchema ?? co.account();
 
   const [serverAsPeer, clientAsPeer] = cojsonInternals.connectedPeers(
     "clientToServer",
@@ -75,7 +82,7 @@ export async function setupTwoNodes(options?: {
     crypto: Crypto,
     creationProps: { name: "Client" },
     migration: async (rawAccount, _node, creationProps) => {
-      const account = AccountClassImpl.fromRaw(rawAccount);
+      const account = co.account().fromRaw(rawAccount);
 
       await account.applyMigration(creationProps);
     },
@@ -86,7 +93,7 @@ export async function setupTwoNodes(options?: {
     crypto: Crypto,
     creationProps: { name: "Server" },
     migration: async (rawAccount, _node, creationProps) => {
-      const account = ServerAccountSchema.fromRaw(rawAccount);
+      const account = asConstructable(ServerAccountSchema).fromRaw(rawAccount);
 
       await account.applyMigration(creationProps);
     },
@@ -95,10 +102,10 @@ export async function setupTwoNodes(options?: {
   return {
     clientNode: client.node,
     serverNode: server.node,
-    clientAccount: AccountClassImpl.fromRaw(
-      await loadCoValueOrFail(client.node, client.accountID),
-    ),
-    serverAccount: ServerAccountSchema.fromRaw(
+    clientAccount: co
+      .account()
+      .fromRaw(await loadCoValueOrFail(client.node, client.accountID)),
+    serverAccount: asConstructable(ServerAccountSchema).fromRaw(
       await loadCoValueOrFail(server.node, server.accountID),
     ),
   };
@@ -145,15 +152,17 @@ export async function loadCoValueOrFail<V extends RawCoValue>(
   return value;
 }
 
-export function assertLoaded<T extends MaybeLoaded<CoValue>>(
-  coValue: T,
-): asserts coValue is LoadedAndRequired<T> {
-  assert(coValue.$isLoaded, "CoValue is not loaded");
+export function assertLoaded<V, S extends CoreCoValueSchema>(
+  coValue: V & MaybeLoaded<S>, // explicit inference site
+): asserts coValue is Loaded<S> {
+  if (!coValue.$isLoaded) {
+    throw new Error("CoValue is not loaded");
+  }
 }
 
 export async function createAccountAs<S extends AccountSchema<any, any>>(
   schema: S,
-  as: Account,
+  as: Loaded<CoreAccountSchema, true>,
   options: {
     creationProps: { name: string };
   },

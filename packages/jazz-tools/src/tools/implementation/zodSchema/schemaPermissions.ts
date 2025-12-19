@@ -1,4 +1,13 @@
-import { Account, co, Group, TypeSym, type GroupRole } from "../../internal.js";
+import {
+  Account,
+  co,
+  CoreAccountSchema,
+  CoreGroupSchema,
+  Group,
+  Loaded,
+  TypeSym,
+  type GroupRole,
+} from "../../internal.js";
 
 /**
  * Defines how a nested CoValue’s owner is obtained when creating CoValues from JSON.
@@ -110,7 +119,7 @@ export const extendContainerOwnerFactory =
     // TODO: why is this unused?
     const node = containerOwner.$jazz.localNode;
     const rawGroup = node.createGroup();
-    const owner = Group.fromRaw(rawGroup);
+    const owner = co.group().fromRaw(rawGroup);
     owner.addMember(containerOwner, roleOverride);
     return owner;
   };
@@ -165,8 +174,12 @@ export function getDefaultRefPermissions(): RefPermissions {
   return schemaToRefPermissions(DEFAULT_SCHEMA_PERMISSIONS);
 }
 
-export function withSchemaPermissions<T extends { owner?: Account | Group }>(
-  options?: T | Account | Group,
+export function withSchemaPermissions<
+  T extends {
+    owner?: Loaded<CoreAccountSchema, true> | Loaded<CoreGroupSchema, true>;
+  },
+>(
+  options?: T | Loaded<CoreAccountSchema, true> | Loaded<CoreGroupSchema, true>,
   schemaPermissions?: SchemaPermissions,
 ): T & { onCreate?: OnCreateCallback } {
   const onCreate = schemaPermissions?.onCreate;

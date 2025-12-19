@@ -1,6 +1,7 @@
 import type { BetterAuthClientPlugin } from "better-auth";
 import type {
   Account,
+  AnyAccountSchema,
   AuthSecretStorage,
   AuthSetPayload,
   JazzContextType,
@@ -23,7 +24,7 @@ const SIGNUP_URLS = [
  * ```
  */
 export const jazzPluginClient = () => {
-  let jazzContext: JazzContextType<Account>;
+  let jazzContext: JazzContextType<AnyAccountSchema>;
   let authSecretStorage: AuthSecretStorage;
   let signOutUnsubscription: () => void;
 
@@ -45,7 +46,7 @@ export const jazzPluginClient = () => {
     getActions: ($fetch, $store) => {
       return {
         jazz: {
-          setJazzContext: (context: JazzContextType<Account>) => {
+          setJazzContext: (context: JazzContextType<AnyAccountSchema>) => {
             jazzContext = context;
           },
           setAuthSecretStorage: (storage: AuthSecretStorage) => {

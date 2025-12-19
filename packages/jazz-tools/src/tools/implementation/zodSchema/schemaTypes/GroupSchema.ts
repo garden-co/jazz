@@ -8,16 +8,21 @@ import {
 import {
   Account,
   Settled,
-  RefsToResolve,
-  RefsToResolveStrict,
-  Resolved,
   ResolveQuery,
+  ResolveQueryStrict,
+  Loaded,
   loadCoValueWithoutMe,
+  parseGroupCreateOptions,
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   AnonymousJazzAgent,
   co,
+  isControlledAccount,
+  TypeSym,
+  RegisteredSchemas,
+  CoreAccountSchema,
 } from "../../../internal.js";
+import { RawGroup } from "cojson";
 import { CoreCoValueSchema } from "./CoValueSchema.js";
 import { coOptionalDefiner } from "../zodCo.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
@@ -40,32 +45,44 @@ export class GroupSchema implements CoreGroupSchema {
   readonly builtin = "Group" as const;
   readonly resolveQuery = true as const;
 
-  getCoValueClass(): typeof Group {
-    return Group;
-  }
-
   optional(): CoOptionalSchema<this> {
     return coOptionalDefiner(this);
   }
 
-  create(options?: { owner: Account } | Account): Group {
-    return Group.create(options);
+  create(
+    options?:
+      | { owner: Loaded<CoreAccountSchema, true> }
+      | Loaded<CoreAccountSchema, true>,
+  ): Loaded<CoreGroupSchema> {
+    const initOwner = parseGroupCreateOptions(options).owner;
+    if (!initOwner) throw new Error("No owner provided");
+    if (initOwner[TypeSym] === "Account" && isControlledAccount(initOwner)) {
+      const rawOwner = initOwner.$jazz.raw;
+      const raw = rawOwner.core.node.createGroup();
+      return new Group(raw, this);
+    } else {
+      throw new Error("Can only construct group as a controlled account");
+    }
   }
 
-  load<G extends Group, R extends ResolveQuery<GroupSchema>>(
-    id: ID<G>,
-    options?: {
-      loadAs?: Account | AnonymousJazzAgent;
-      resolve?: RefsToResolveStrict<Group, R>;
-    },
-  ): Promise<Settled<Group>> {
-    return loadCoValueWithoutMe(Group, id, options) as Promise<Settled<Group>>;
+  fromRaw(raw: RawGroup): Group {
+    return new Group(raw, this);
   }
-  async createInvite<G extends Group>(
-    id: ID<G>,
-    options?: { role?: AccountRole; loadAs?: Account },
+
+  load<R extends ResolveQuery<CoreGroupSchema>>(
+    id: ID<CoreGroupSchema>,
+    options?: {
+      loadAs?: Loaded<CoreAccountSchema, true> | AnonymousJazzAgent;
+      resolve?: ResolveQueryStrict<CoreGroupSchema, R>;
+    },
+  ): Promise<Settled<CoreGroupSchema, R>> {
+    return loadCoValueWithoutMe(this, id, options);
+  }
+  async createInvite<R extends ResolveQuery<CoreGroupSchema>>(
+    id: ID<CoreGroupSchema>,
+    options?: { role?: AccountRole; loadAs?: Loaded<CoreAccountSchema, true> },
   ): Promise<InviteSecret> {
-    const group = await loadCoValueWithoutMe(Group, id, {
+    const group = await loadCoValueWithoutMe(this, id, {
       loadAs: options?.loadAs,
     });
     if (!group.$isLoaded) {
@@ -73,25 +90,28 @@ export class GroupSchema implements CoreGroupSchema {
     }
     return group.$jazz.createInvite(options?.role ?? "reader");
   }
-  subscribe<G extends Group, const R extends RefsToResolve<G>>(
-    id: ID<G>,
-    listener: (value: Resolved<G, R>, unsubscribe: () => void) => void,
+  subscribe<R extends ResolveQuery<CoreGroupSchema>>(
+    id: ID<CoreGroupSchema>,
+    listener: (
+      value: Loaded<CoreGroupSchema, R>,
+      unsubscribe: () => void,
+    ) => void,
   ): () => void;
-  subscribe<G extends Group, const R extends RefsToResolve<G>>(
-    id: ID<G>,
-    options: SubscribeListenerOptions<G, R>,
-    listener: (value: Resolved<G, R>, unsubscribe: () => void) => void,
+  subscribe<R extends ResolveQuery<CoreGroupSchema>>(
+    id: ID<CoreGroupSchema>,
+    options: SubscribeListenerOptions<CoreGroupSchema, R>,
+    listener: (
+      value: Loaded<CoreGroupSchema, R>,
+      unsubscribe: () => void,
+    ) => void,
   ): () => void;
-  subscribe<G extends Group, const R extends RefsToResolve<G>>(
-    id: ID<G>,
-    ...args: SubscribeRestArgs<G, R>
+  subscribe<R extends ResolveQuery<CoreGroupSchema>>(
+    id: ID<CoreGroupSchema>,
+    ...args: SubscribeRestArgs<CoreGroupSchema, R>
   ): () => void {
     const { options, listener } = parseSubscribeRestArgs(args);
-    return subscribeToCoValueWithoutMe(
-      Group as unknown as CoValueClass<G>,
-      id,
-      options,
-      listener as any,
-    );
+    return subscribeToCoValueWithoutMe(this, id, options, listener as any);
   }
 }
+
+RegisteredSchemas["Group"] = new GroupSchema();

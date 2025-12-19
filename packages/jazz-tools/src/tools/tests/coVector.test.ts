@@ -85,9 +85,10 @@ describe("Creating a CoVector", async () => {
   });
 
   test("directly instantiating CoVector.create • throws an error", () => {
-    expect(() => CoVector.create([1, 2, 3])).toThrow(
-      "Instantiating CoVector without a dimensions count is not allowed. Use co.vector(...).create() instead.",
-    );
+    expect(() => {
+      // @ts-expect-error - CoVector.create is deprecated and removed
+      CoVector.create([1, 2, 3]);
+    }).toThrow();
   });
 
   test("given a Array<number> with valid dimensions count • creates a CoVector", () => {

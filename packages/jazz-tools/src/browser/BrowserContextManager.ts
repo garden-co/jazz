@@ -1,7 +1,7 @@
 import {
   Account,
-  AccountClass,
   AnyAccountSchema,
+  AuthSecretStorage,
   CoValueFromRaw,
   InMemoryKVStore,
   InstanceOfSchema,
@@ -15,29 +15,22 @@ import {
   createJazzBrowserContext,
   createJazzBrowserGuestContext,
 } from "./createBrowserContext.js";
+import { Loaded, PlatformSpecificContext } from "../tools/internal.js";
 
-export type JazzContextManagerProps<
-  S extends
-    | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | AnyAccountSchema,
-> = {
+export type JazzContextManagerProps<S extends AnyAccountSchema> = {
   guestMode?: boolean;
   sync: SyncConfig;
   onLogOut?: () => void;
   logOutReplacement?: () => void;
-  onAnonymousAccountDiscarded?: (
-    anonymousAccount: InstanceOfSchema<S>,
-  ) => Promise<void>;
+  onAnonymousAccountDiscarded?: (anonymousAccount: Loaded<S>) => Promise<void>;
   storage?: BaseBrowserContextOptions["storage"];
   AccountSchema?: S;
   defaultProfileName?: string;
 };
 
 export class JazzBrowserContextManager<
-  S extends
-    | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | AnyAccountSchema,
-> extends JazzContextManager<InstanceOfSchema<S>, JazzContextManagerProps<S>> {
+  S extends AnyAccountSchema,
+> extends JazzContextManager<S, JazzContextManagerProps<S>> {
   // TODO: When the storage changes, if the user is changed, update the context
   getKvStore() {
     if (typeof window === "undefined") {
@@ -51,7 +44,7 @@ export class JazzBrowserContextManager<
   async getNewContext(
     props: JazzContextManagerProps<S>,
     authProps?: JazzContextManagerAuthProps,
-  ) {
+  ): Promise<PlatformSpecificContext<S>> {
     if (props.guestMode) {
       return createJazzBrowserGuestContext({
         sync: props.sync,

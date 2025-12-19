@@ -1,8 +1,16 @@
-import { Account, JazzContextManager } from "jazz-tools";
+import {
+  Account,
+  AnonymousJazzAgent,
+  AnyAccountSchema,
+  JazzContextManager,
+  Loaded,
+} from "jazz-tools";
 
-export function getCurrentAccountFromContextManager<Acc extends Account>(
+export function getCurrentAccountFromContextManager<
+  Acc extends AnyAccountSchema,
+>(
   contextManager: JazzContextManager<Acc, any>,
-) {
+): AnonymousJazzAgent | Loaded<Acc> {
   const context = contextManager.getCurrentValue();
 
   if (!context) {
@@ -12,7 +20,7 @@ export function getCurrentAccountFromContextManager<Acc extends Account>(
   return "me" in context ? context.me : context.guest;
 }
 
-export function subscribeToContextManager<Acc extends Account>(
+export function subscribeToContextManager<Acc extends AnyAccountSchema>(
   contextManager: JazzContextManager<Acc, any>,
   callback: () => () => void,
 ) {

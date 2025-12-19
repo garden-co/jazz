@@ -13,6 +13,7 @@ import { createJazzTestAccount } from "jazz-tools/testing";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { JazzClerkAuth } from "../index";
 import type { MinimalClerkClient } from "../types";
+import { CoreAccountSchema } from "../../../internal";
 
 KvStoreContext.getInstance().initialize(new InMemoryKVStore());
 const authSecretStorage = new AuthSecretStorage();
@@ -56,7 +57,7 @@ describe("JazzClerkAuth", () => {
     it("should call signIn for new users", async () => {
       // Set up local auth
       await authSecretStorage.set({
-        accountID: "test123" as ID<Account>,
+        accountID: "test123" as ID<CoreAccountSchema>,
         secretSeed: new Uint8Array([1, 2, 3]),
         accountSecret: "secret123" as AgentSecret,
         provider: "anonymous",
@@ -132,7 +133,7 @@ describe("JazzClerkAuth", () => {
     it("should call LogOut", async () => {
       // Set up local auth
       await authSecretStorage.set({
-        accountID: "xxxx" as ID<Account>,
+        accountID: "xxxx" as ID<CoreAccountSchema>,
         secretSeed: new Uint8Array([2, 2, 2]),
         accountSecret: "xxxx" as AgentSecret,
         provider: "anonymous",

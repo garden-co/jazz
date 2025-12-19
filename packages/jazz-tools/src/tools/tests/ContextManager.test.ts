@@ -3,7 +3,6 @@ import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { assert, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   type Account,
-  AccountClass,
   AuthSecretStorage,
   type Group,
   InMemoryKVStore,
@@ -16,16 +15,17 @@ import {
   JazzContextManager,
   JazzContextManagerAuthProps,
   JazzContextManagerBaseProps,
+  PlatformSpecificContext,
 } from "../implementation/ContextManager";
 import {
   createJazzContext,
   randomSessionProvider,
 } from "../implementation/createContext";
 import {
+  CoreAccountSchema,
   CoValueFromRaw,
   InstanceOfSchema,
   Loaded,
-  coValueClassFromCoValueClassOrSchema,
 } from "../internal";
 import {
   assertLoaded,
@@ -38,22 +38,24 @@ import { createAsyncStorage, getDbPath } from "./testStorage";
 
 const Crypto = await WasmCrypto.create();
 
-class TestJazzContextManager<Acc extends Account> extends JazzContextManager<
+class TestJazzContextManager<
+  Acc extends CoreAccountSchema,
+> extends JazzContextManager<
   Acc,
   JazzContextManagerBaseProps<Acc> & {
     defaultProfileName?: string;
-    AccountSchema?: AccountClass<Acc>;
+    AccountSchema?: Acc;
     storage?: string;
   }
 > {
   async getNewContext(
     props: JazzContextManagerBaseProps<Acc> & {
       defaultProfileName?: string;
-      AccountSchema?: AccountClass<Acc> & CoValueFromRaw<Acc>;
+      AccountSchema?: Acc;
       storage?: string;
     },
     authProps?: JazzContextManagerAuthProps,
-  ) {
+  ): Promise<PlatformSpecificContext<Acc>> {
     const context = await createJazzContext({
       credentials: authProps?.credentials,
       defaultProfileName: props.defaultProfileName,
@@ -82,11 +84,11 @@ class TestJazzContextManager<Acc extends Account> extends JazzContextManager<
 }
 
 describe("ContextManager", () => {
-  let manager: TestJazzContextManager<Account>;
+  let manager: TestJazzContextManager<co.Account>;
   let authSecretStorage: AuthSecretStorage;
 
   function getCurrentValue() {
-    return manager.getCurrentValue() as JazzAuthContext<Account>;
+    return manager.getCurrentValue() as JazzAuthContext<co.Account>;
   }
 
   beforeEach(async () => {
@@ -95,7 +97,7 @@ describe("ContextManager", () => {
     await authSecretStorage.clear();
     await setupJazzTestSync();
 
-    manager = new TestJazzContextManager<Account>();
+    manager = new TestJazzContextManager<co.Account>();
   });
 
   test("creates new context when initialized", async () => {
@@ -271,12 +273,10 @@ describe("ContextManager", () => {
         );
       });
 
-    const customManager = new TestJazzContextManager<
-      InstanceOfSchema<typeof CustomAccount>
-    >();
+    const customManager = new TestJazzContextManager<typeof CustomAccount>();
 
     await customManager.createContext({
-      AccountSchema: coValueClassFromCoValueClassOrSchema(CustomAccount),
+      AccountSchema: CustomAccount,
       storage: dbFilename,
       onAnonymousAccountDiscarded: async (anonymousAccount) => {
         const anonymousAccountWithRoot =
@@ -297,9 +297,7 @@ describe("ContextManager", () => {
     expect(prevContextNode.storage).toBeDefined();
 
     const account = (
-      customManager.getCurrentValue() as JazzAuthContext<
-        InstanceOfSchema<typeof CustomAccount>
-      >
+      customManager.getCurrentValue() as JazzAuthContext<typeof CustomAccount>
     ).me;
 
     await customManager.authenticate({
@@ -337,19 +335,15 @@ describe("ContextManager", () => {
         lastRootId = account.root!.$jazz.id;
       });
 
-    const customManager = new TestJazzContextManager<
-      InstanceOfSchema<typeof CustomAccount>
-    >();
+    const customManager = new TestJazzContextManager<typeof CustomAccount>();
 
     // Create initial anonymous context
     await customManager.createContext({
-      AccountSchema: coValueClassFromCoValueClassOrSchema(CustomAccount),
+      AccountSchema: CustomAccount,
     });
 
     const account = (
-      customManager.getCurrentValue() as JazzAuthContext<
-        InstanceOfSchema<typeof CustomAccount>
-      >
+      customManager.getCurrentValue() as JazzAuthContext<typeof CustomAccount>
     ).me;
 
     await customManager.authenticate({
@@ -391,19 +385,15 @@ describe("ContextManager", () => {
           root.$jazz.set("value", 2);
         }
       });
-    const customManager = new TestJazzContextManager<
-      InstanceOfSchema<typeof CustomAccount>
-    >();
+    const customManager = new TestJazzContextManager<typeof CustomAccount>();
 
     // Create initial anonymous context
     await customManager.createContext({
-      AccountSchema: coValueClassFromCoValueClassOrSchema(CustomAccount),
+      AccountSchema: CustomAccount,
     });
 
     const account = (
-      customManager.getCurrentValue() as JazzAuthContext<
-        InstanceOfSchema<typeof CustomAccount>
-      >
+      customManager.getCurrentValue() as JazzAuthContext<typeof CustomAccount>
     ).me;
 
     await customManager.authenticate({
@@ -444,7 +434,7 @@ describe("ContextManager", () => {
       });
 
     const onAnonymousAccountDiscarded = async (
-      anonymousAccount: Loaded<typeof CustomAccount, { root: true }>,
+      anonymousAccount: Loaded<typeof CustomAccount>,
     ) => {
       const anonymousAccountWithRoot =
         await anonymousAccount.$jazz.ensureLoaded({
@@ -466,14 +456,12 @@ describe("ContextManager", () => {
       meWithRoot.root.$jazz.set("transferredRoot", rootToTransfer);
     };
 
-    const customManager = new TestJazzContextManager<
-      InstanceOfSchema<typeof CustomAccount>
-    >();
+    const customManager = new TestJazzContextManager<typeof CustomAccount>();
 
     // Create initial anonymous context
     await customManager.createContext({
       onAnonymousAccountDiscarded,
-      AccountSchema: coValueClassFromCoValueClassOrSchema(CustomAccount),
+      AccountSchema: CustomAccount,
     });
 
     const account = await createJazzTestAccount({
@@ -552,7 +540,7 @@ describe("ContextManager", () => {
   describe("configurable storage key", () => {
     test("uses the configured storage key", async () => {
       const KEY = "test-auth-secret";
-      const manager = new TestJazzContextManager<Account>({
+      const manager = new TestJazzContextManager<co.Account>({
         authSecretStorageKey: KEY,
       });
       expect(manager.getAuthSecretStorage().getStorageKey()).toBe(KEY);
@@ -681,9 +669,7 @@ describe("ContextManager", () => {
           );
         });
 
-      const customManager = new TestJazzContextManager<
-        InstanceOfSchema<typeof CustomAccount>
-      >();
+      const customManager = new TestJazzContextManager<typeof CustomAccount>();
 
       const onAnonymousAccountDiscarded = vi
         .fn()
@@ -704,14 +690,12 @@ describe("ContextManager", () => {
         });
 
       await customManager.createContext({
-        AccountSchema: coValueClassFromCoValueClassOrSchema(CustomAccount),
+        AccountSchema: CustomAccount,
         onAnonymousAccountDiscarded,
       });
 
       const account = (
-        customManager.getCurrentValue() as JazzAuthContext<
-          InstanceOfSchema<typeof CustomAccount>
-        >
+        customManager.getCurrentValue() as JazzAuthContext<typeof CustomAccount>
       ).me;
 
       // Start multiple concurrent authentication attempts
@@ -813,7 +797,7 @@ describe("ContextManager", () => {
 
   describe("SubscriptionCache integration", () => {
     test("initializes cache on construction", () => {
-      const newManager = new TestJazzContextManager<Account>();
+      const newManager = new TestJazzContextManager<co.Account>();
       const cache = newManager.getSubscriptionScopeCache();
 
       expect(cache).toBeDefined();
