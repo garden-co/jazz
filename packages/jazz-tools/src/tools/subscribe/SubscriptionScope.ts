@@ -2,7 +2,9 @@ import {
   type UpDownCounter,
   ValueType,
   metrics,
-  Histogram,
+  trace,
+  type Histogram,
+  type Span,
 } from "@opentelemetry/api";
 import type { LocalNode, RawCoValue } from "cojson";
 import {
@@ -41,6 +43,11 @@ import {
   rejectedPromise,
   resolvedPromise,
 } from "./utils.js";
+import {
+  measureSubscriptionLoad,
+  trackPerformanceMark,
+  trackSubscriptionLoadSpans,
+} from "../lib/perf-utils.js";
 
 export class SubscriptionScope<D extends CoValue> {
   childNodes = new Map<string, SubscriptionScope<CoValue>>();
@@ -73,8 +80,9 @@ export class SubscriptionScope<D extends CoValue> {
   migrating = false;
   closed = false;
   constructionTime = performance.now();
-  firstLoadRecorded = false;
-  sourceId: ID<D>;
+
+  private firstLoadRecorded = false;
+  private readonly sourceId: ID<D>;
 
   private activeSubCounter: UpDownCounter = metrics
     .getMeter("jazz-tools")
@@ -92,6 +100,8 @@ export class SubscriptionScope<D extends CoValue> {
       unit: "ms",
       valueType: ValueType.DOUBLE,
     });
+
+  public readonly subscriptionSpan: Span;
 
   silenceUpdates = false;
 
@@ -112,8 +122,8 @@ export class SubscriptionScope<D extends CoValue> {
     public unstable_branch?: BranchDefinition,
     callerStack?: Error | undefined,
     sourceId?: ID<D>,
-    public parent?: ID<D>,
-    public parentKey?: string,
+    private readonly parent?: ID<D>,
+    private readonly parentKey?: string,
   ) {
     // Use caller stack if provided, otherwise capture here (less useful but better than nothing)
     this.callerStack = callerStack;
@@ -125,6 +135,20 @@ export class SubscriptionScope<D extends CoValue> {
       | RawCoValue
       | typeof CoValueLoadingState.UNAVAILABLE
       | undefined;
+
+    trackPerformanceMark("subscriptionLoadStart", id);
+
+    this.subscriptionSpan = trace
+      .getTracer("jazz-tools")
+      .startSpan("jazz.subscription", {
+        attributes: {
+          id: this.id,
+          parent_id: this.parent,
+          parent_key: this.parentKey,
+          source_id: this.sourceId,
+          resolve: JSON.stringify(this.resolve),
+        },
+      });
 
     this.activeSubCounter.add(1, {
       // It increments/decrements counters comparing the attributes
@@ -561,40 +585,27 @@ export class SubscriptionScope<D extends CoValue> {
     }
 
     if (!this.firstLoadRecorded) {
-      const firstLoadTime = performance.now();
-      const duration = firstLoadTime - this.constructionTime;
-      this.firstLoadMetric.record(duration, {
+      trackPerformanceMark("subscriptionLoadEnd", this.id);
+
+      const loadMeasureDetail = measureSubscriptionLoad(
+        this.id,
+        this.sourceId,
+        this.resolve,
+      );
+
+      this.firstLoadMetric.record(loadMeasureDetail.firstLoad.duration, {
         id: this.id,
         result: error ? "error" : "loaded",
         parent_id: this.parent,
         parent_key: this.parentKey,
         source_id: this.sourceId,
         resolve: JSON.stringify(this.resolve),
+        loadFromStorage: loadMeasureDetail.loadFromStorage?.duration,
+        loadFromPeer: loadMeasureDetail.loadFromPeer?.duration,
+        transactionParsing: loadMeasureDetail.transactionParsing?.duration,
       });
 
-      performance.measure(
-        (this.parentKey ? this.parentKey + "-" : "") +
-          this.id +
-          "-" +
-          Object.keys(this.resolve).join(","),
-        {
-          start: this.constructionTime,
-          detail: {
-            id: this.id,
-            resolve: this.resolve,
-            type: error ? "error" : "loaded",
-            devtools: {
-              track: this.sourceId,
-              trackGroup: "SubscriptionScopes",
-              color: error ? "error" : "primary",
-              tooltipText: `Loaded from ${this.sourceId}`,
-              properties: {
-                resolve: this.resolve,
-              },
-            },
-          },
-        },
-      );
+      trackSubscriptionLoadSpans(this.subscriptionSpan, loadMeasureDetail);
 
       this.firstLoadRecorded = true;
     }
@@ -785,21 +796,21 @@ export class SubscriptionScope<D extends CoValue> {
       return false;
     }
 
-    performance.measure(
-      (this.parentKey ? this.parentKey + "-" : "") + this.id + "-" + "self",
-      {
-        start: this.constructionTime,
-        detail: {
-          id: this.id,
-          resolve: this.resolve,
-          devtools: {
-            track: this.sourceId,
-            trackGroup: "SubscriptionScopes",
-            color: "secondary",
-          },
-        },
-      },
-    );
+    // performance.measure(
+    //   (this.parentKey ? this.parentKey + "-" : "") + this.id + "-" + "self",
+    //   {
+    //     start: this.constructionTime,
+    //     detail: {
+    //       id: this.id,
+    //       resolve: this.resolve,
+    //       devtools: {
+    //         track: this.sourceId,
+    //         trackGroup: "SubscriptionScopes",
+    //         color: "secondary",
+    //       },
+    //     },
+    //   },
+    // );
 
     const value = this.value.value;
 

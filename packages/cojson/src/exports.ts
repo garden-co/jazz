@@ -92,6 +92,7 @@ import { CO_VALUE_PRIORITY, getPriorityFromHeader } from "./priority.js";
 import { getDependedOnCoValues } from "./storage/syncUtils.js";
 import { canBeBranched } from "./coValueCore/branching.js";
 import type { PeerState } from "./PeerState.js";
+import { performanceMarks } from "./perf-utils.js";
 
 type Value = JsonValue | AnyRawCoValue;
 
@@ -180,6 +181,8 @@ export {
   hwrServerPeerSelector,
   isAccountRole,
 };
+
+export const perf = { performanceMarks };
 
 export type {
   Value,

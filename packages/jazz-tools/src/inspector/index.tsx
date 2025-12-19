@@ -5,7 +5,7 @@ import { Account } from "jazz-tools";
 import { InspectorInApp } from "./in-app.js";
 import { Position } from "./viewer/inspector-button.js";
 
-export { recordMetrics } from "./utils/instrumentation";
+export { recordMetrics, jazzMetricReader } from "./utils/instrumentation";
 
 export function JazzInspector({ position = "right" }: { position?: Position }) {
   const context = useJazzContext<Account>();

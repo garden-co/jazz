@@ -1,0 +1,20 @@
+import { RawCoID } from "./exports";
+
+export const performanceMarks = {
+  loadFromStorageStart: "cojson.load_from_storage.start",
+  loadFromStorageEnd: "cojson.load_from_storage.end",
+  loadFromPeerStart: "cojson.load_from_peer.start",
+  loadFromPeerEnd: "cojson.load_from_peer.end",
+  transactionParsingStart: "cojson.transaction_parsing.start",
+  transactionParsingEnd: "cojson.transaction_parsing.end",
+} as const;
+
+export function trackPerformanceMark(
+  mark: keyof typeof performanceMarks,
+  coId: RawCoID,
+  detail?: Record<string, string>,
+) {
+  performance.mark(performanceMarks[mark] + "." + coId, {
+    detail,
+  });
+}

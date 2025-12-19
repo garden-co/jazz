@@ -1,208 +1,13 @@
 import { useEffect, useState } from "react";
-import type {
-  DataPoint,
-  Histogram,
-  ResourceMetrics,
-  ScopeMetrics,
-} from "@opentelemetry/sdk-metrics";
 import { styled } from "goober";
 import { CoID, RawCoValue } from "cojson";
-import { jazzMetricReader } from "../utils/otel";
 import { Accordion } from "../ui/accordion";
 import { DataTable, type ColumnDef } from "../ui/data-table";
 import { Heading } from "../ui/heading";
 import { Text } from "../ui/text";
 import { useRouter } from "../router";
-
-function getSumOfCounterMetric(
-  metrics: ScopeMetrics[],
-  scope: string,
-  name: string,
-  attributes?: Record<string, string>,
-) {
-  const dp = metrics
-    .find((sm) => sm.scope.name === scope)
-    ?.metrics.find((m) => m.descriptor.name === name)?.dataPoints;
-
-  if (!dp) {
-    return 0;
-  }
-
-  return dp.reduce((acc, dp) => {
-    if (typeof dp.value !== "number") {
-      throw new Error(`Metric ${name} has a value that is not a number`);
-    }
-
-    // if attributes is defined, and the attributes do not match, skip this counter
-    if (
-      attributes &&
-      !Object.keys(attributes).every(
-        (key) => dp.attributes[key] === attributes[key],
-      )
-    ) {
-      return acc;
-    }
-
-    return acc + dp.value;
-  }, 0);
-}
-
-function getActiveSubscriptions(metrics: ScopeMetrics[]) {
-  const scope = "jazz-tools";
-  const name = "jazz.subscription.active";
-
-  const dp = metrics
-    .find((sm) => sm.scope.name === scope)
-    ?.metrics.find((m) => m.descriptor.name === name)?.dataPoints as
-    | DataPoint<number>[]
-    | undefined;
-
-  if (!dp) {
-    return [];
-  }
-
-  return dp
-    .filter((dp) => dp.value > 0)
-    .map((dp) => ({
-      id: dp.attributes.id as string,
-      source_id: dp.attributes.source_id as string | undefined,
-      value: dp.value,
-    }));
-}
-
-function getLoadTimes(metrics: ScopeMetrics[]) {
-  const scope = "jazz-tools";
-  const name = "jazz.subscription.first_load";
-
-  const dp = metrics
-    .find((sm) => sm.scope.name === scope)
-    ?.metrics.find((m) => m.descriptor.name === name)?.dataPoints as
-    | DataPoint<Histogram>[]
-    | undefined;
-
-  if (!dp) {
-    return [];
-  }
-
-  return dp.map((dp) => ({
-    id: dp.attributes.id as string,
-    source_id: dp.attributes.source_id as string | undefined,
-    parent_id: dp.attributes.parent_id as string | undefined,
-    resolve: dp.attributes.resolve as string | undefined,
-    loadTime: dp.value.min ?? 0,
-  }));
-}
-
-type PerfMetrics = {
-  transport: {
-    ingress: number;
-    egress: number;
-  };
-  cojson: {
-    available: number;
-    loading: number;
-    unknown: number;
-    unavailable: number;
-  };
-  tools: {
-    activeSubscriptions: {
-      id: string;
-      source_id?: string;
-      value: number;
-    }[];
-    loadTimes: {
-      id: string;
-      source_id?: string;
-      parent_id?: string;
-      resolve?: string;
-      loadTime: number;
-    }[];
-  };
-};
-
-function exportMetrics(resourceMetrics: ResourceMetrics[]): PerfMetrics | null {
-  const scopedMetrics = resourceMetrics.at(0)?.scopeMetrics;
-
-  if (!scopedMetrics) {
-    return null;
-  }
-
-  const ingress = getSumOfCounterMetric(
-    scopedMetrics,
-    "cojson-transport-ws",
-    "jazz.usage.ingress",
-  );
-  const egress = getSumOfCounterMetric(
-    scopedMetrics,
-    "cojson-transport-ws",
-    "jazz.usage.egress",
-  );
-  const availableCoValues = getSumOfCounterMetric(
-    scopedMetrics,
-    "cojson",
-    "jazz.covalues.loaded",
-    {
-      state: "available",
-    },
-  );
-  const loadingCoValues = getSumOfCounterMetric(
-    scopedMetrics,
-    "cojson",
-    "jazz.covalues.loaded",
-    {
-      state: "loading",
-    },
-  );
-
-  const unknownCoValues = getSumOfCounterMetric(
-    scopedMetrics,
-    "cojson",
-    "jazz.covalues.loaded",
-    {
-      state: "unknown",
-    },
-  );
-
-  const unavailableCoValues = getSumOfCounterMetric(
-    scopedMetrics,
-    "cojson",
-    "jazz.covalues.loaded",
-    {
-      state: "unavailable",
-    },
-  );
-
-  return {
-    transport: {
-      ingress,
-      egress,
-    },
-    cojson: {
-      available: availableCoValues,
-      loading: loadingCoValues,
-      unknown: unknownCoValues,
-      unavailable: unavailableCoValues,
-    },
-    tools: {
-      loadTimes: getLoadTimes(scopedMetrics),
-      activeSubscriptions: getActiveSubscriptions(scopedMetrics),
-    },
-  };
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i]}`;
-}
-
-function formatTime(ms: number): string {
-  if (ms < 1) return `${(ms * 1000).toFixed(2)} μs`;
-  if (ms < 1000) return `${ms.toFixed(2)} ms`;
-  return `${(ms / 1000).toFixed(2)} s`;
-}
+import { jazzMetricReader } from "../utils/instrumentation";
+import { exportMetrics, type PerfMetrics } from "../utils/performances";
 
 export default function Perf() {
   const [metricsError, setMetricsError] = useState<Error | null>(null);
@@ -329,7 +134,29 @@ export default function Perf() {
             —
           </Text>
         ),
+      sortable: false,
+    },
+    {
+      id: "loadFromStorage",
+      header: "Load From Storage",
+      accessor: (row) => formatTime(row.loadFromStorage ?? 0),
       sortable: true,
+      sortFn: (a, b) => (a.loadFromStorage ?? 0) - (b.loadFromStorage ?? 0),
+    },
+    {
+      id: "loadFromPeer",
+      header: "Load From Peer",
+      accessor: (row) => formatTime(row.loadFromPeer ?? 0),
+      sortable: true,
+      sortFn: (a, b) => (a.loadFromPeer ?? 0) - (b.loadFromPeer ?? 0),
+    },
+    {
+      id: "transactionParsing",
+      header: "Transaction Parsing",
+      accessor: (row) => formatTime(row.transactionParsing ?? 0),
+      sortable: true,
+      sortFn: (a, b) =>
+        (a.transactionParsing ?? 0) - (b.transactionParsing ?? 0),
     },
   ];
 
@@ -353,37 +180,34 @@ export default function Perf() {
       sortable: true,
     },
     {
-      id: "source_id",
-      header: "Source ID",
+      id: "sources",
+      header: "Sources",
       accessor: (row) =>
-        row.source_id ? (
+        row.sources.map((source) => (
           <ClickableId
+            key={source}
             onClick={() =>
               addPages([
                 {
-                  coId: row.source_id as CoID<RawCoValue>,
-                  name: row.source_id,
+                  coId: source as CoID<RawCoValue>,
+                  name: source,
                 },
               ])
             }
           >
             <Text mono small>
-              {row.source_id}
+              {source}
             </Text>
           </ClickableId>
-        ) : (
-          <Text muted small>
-            —
-          </Text>
-        ),
-      sortable: true,
+        )),
+      sortable: false,
     },
     {
-      id: "value",
+      id: "count",
       header: "Count",
-      accessor: (row) => <Text small>{row.value}</Text>,
+      accessor: (row) => <Text small>{row.count}</Text>,
       sortable: true,
-      sortFn: (a, b) => b.value - a.value,
+      sortFn: (a, b) => a.count - b.count,
     },
   ];
 
@@ -428,6 +252,7 @@ export default function Perf() {
             columns={subscriptionColumns}
             data={metrics.tools.activeSubscriptions}
             pageSize={10}
+            initialSort={{ columnId: "count", direction: "desc" }}
             getRowKey={(row, index) => `${row.id}-${index}`}
             emptyMessage="No active subscriptions"
           />
@@ -453,6 +278,20 @@ export default function Perf() {
       </Accordion>
     </DashboardContainer>
   );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i]}`;
+}
+
+function formatTime(ms: number): string {
+  if (ms < 1) return `${(ms * 1000).toFixed(2)} μs`;
+  if (ms < 1000) return `${ms.toFixed(2)} ms`;
+  return `${(ms / 1000).toFixed(2)} s`;
 }
 
 const DashboardContainer = styled("div")`
