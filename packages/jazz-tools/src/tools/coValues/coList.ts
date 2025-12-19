@@ -46,7 +46,7 @@ import {
   CoreAccountSchema,
   PrimitiveOrLoaded,
   ListElementResolveQuery,
-  CoListElement,
+  ResolvedElement,
 } from "../internal.js";
 
 /**
@@ -71,16 +71,11 @@ import {
  * @category CoValues
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export class CoList<
-    S extends CoreCoListSchema,
-    R extends ResolveQuery<S>,
-    Dep extends number[],
-    Lim extends number,
-  >
-  extends Array<CoListElement<S, R, Dep, Lim>>
-  implements ReadonlyArray<CoListElement<S, R, Dep, Lim>>, CoValue
+export class CoList<S extends CoreCoListSchema, R extends ResolveQuery<S>>
+  extends Array<ResolvedElement<S, R>>
+  implements ReadonlyArray<ResolvedElement<S, R>>, CoValue
 {
-  declare $jazz: CoListJazzApi<S, R, Dep, Lim>;
+  declare $jazz: CoListJazzApi<S, R>;
   declare $isLoaded: true;
 
   /**
@@ -227,11 +222,9 @@ export class CoList<
 export class CoListJazzApi<
   S extends CoreCoListSchema,
   R extends ResolveQuery<S>,
-  Dep extends number[],
-  Lim extends number,
 > extends CoValueJazzApi {
   constructor(
-    private coList: CoList<S, R, Dep, Lim>,
+    private coList: CoList<S, R>,
     public raw: RawCoList,
     /** @internal */
     public sourceSchema: S,
@@ -301,7 +294,7 @@ export class CoListJazzApi<
    *
    * @category Content
    */
-  pop(): CoListElement<S, R, Dep, Lim> | undefined {
+  pop(): ResolvedElement<S, R> | undefined {
     const last = this.coList[this.coList.length - 1];
 
     this.raw.delete(this.coList.length - 1);
@@ -315,7 +308,7 @@ export class CoListJazzApi<
    *
    * @category Content
    */
-  shift(): CoListElement<S, R, Dep, Lim> | undefined {
+  shift(): ResolvedElement<S, R> | undefined {
     const first = this.coList[0];
 
     this.raw.delete(0);
@@ -336,7 +329,7 @@ export class CoListJazzApi<
     start: number,
     deleteCount: number,
     ...items: CoFieldInit<S["element"]>[]
-  ): CoListElement<S, R, Dep, Lim>[] {
+  ): ResolvedElement<S, R>[] {
     const deleted = this.coList.slice(start, start + deleteCount);
 
     for (
@@ -400,7 +393,7 @@ export class CoListJazzApi<
    *
    * @category Content
    */
-  remove(...indices: number[]): CoListElement<S, R, Dep, Lim>[];
+  remove(...indices: number[]): ResolvedElement<S, R>[];
   /**
    * Removes the elements matching the predicate from the array.
    * @param predicate The predicate to match the elements to remove.
@@ -410,21 +403,21 @@ export class CoListJazzApi<
    */
   remove(
     predicate: (
-      item: CoListElement<S, R, Dep, Lim>,
+      item: ResolvedElement<S, R>,
       index: number,
-      coList: CoList<S, R, Dep, Lim>,
+      coList: CoList<S, R>,
     ) => boolean,
-  ): CoListElement<S, R, Dep, Lim>[];
+  ): ResolvedElement<S, R>[];
   remove(
     ...args: (
       | number
       | ((
-          item: CoListElement<S, R, Dep, Lim>,
+          item: ResolvedElement<S, R>,
           index: number,
-          coList: CoList<S, R, Dep, Lim>,
+          coList: CoList<S, R>,
         ) => boolean)
     )[]
-  ): CoListElement<S, R, Dep, Lim>[] {
+  ): ResolvedElement<S, R>[] {
     const predicate = args[0] instanceof Function ? args[0] : undefined;
     let indices: number[] = [];
     if (predicate) {
@@ -454,11 +447,11 @@ export class CoListJazzApi<
    */
   retain(
     predicate: (
-      item: CoListElement<S, R, Dep, Lim>,
+      item: ResolvedElement<S, R>,
       index: number,
-      coList: CoList<S, R, Dep, Lim>,
+      coList: CoList<S, R>,
     ) => boolean,
-  ): CoListElement<S, R, Dep, Lim>[] {
+  ): ResolvedElement<S, R>[] {
     return this.remove((...args) => !predicate(...args));
   }
 
@@ -472,7 +465,7 @@ export class CoListJazzApi<
    *
    * @category Content
    */
-  applyDiff(result: CoFieldInit<S["element"]>[]): CoList<S, R, Dep, Lim> {
+  applyDiff(result: CoFieldInit<S["element"]>[]): CoList<S, R> {
     const current = this.raw.asArray() as CoFieldInit<S["element"]>[];
     const itemDescriptor = schemaFieldToFieldDescriptor(
       this.sourceSchema.element as SchemaField,
@@ -598,7 +591,7 @@ export class CoListJazzApi<
    */
   getEdits(): {
     [idx: number]: {
-      value?: CoListElement<S, R, Dep, Lim>;
+      value?: ResolvedElement<S, R>;
       ref?: S["element"] extends CoreCoValueSchema ? Ref<S["element"]> : never;
       by: MaybeLoaded<CoreAccountSchema> | null;
       madeAt: Date;

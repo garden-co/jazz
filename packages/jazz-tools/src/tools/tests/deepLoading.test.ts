@@ -29,6 +29,7 @@ import {
   isControlledAccount,
   z,
   co as coFromIndex,
+  CoList,
 } from "../index.js";
 import { createJazzTestAccount, linkAccounts } from "../testing.js";
 import { assertLoaded, waitFor } from "./utils.js";
@@ -149,20 +150,14 @@ describe("Deep loading with depth arg", async () => {
           $isLoaded: false;
         };
 
-    type T1 = (MaybeLoaded<typeof TestMap> & {
-      $isLoaded: true;
-    })["list"]["$jazz"];
-    type T2 = (typeof map2 & { $isLoaded: true })["list"]["$jazz"];
-
-    const t: T1 = {} as T2;
-
     function matches(value: ExpectedType) {
       return value;
     }
     matches(map2);
     assertLoaded(map2);
     assertLoaded(map2.list);
-    expect(map2.list[0]?.$jazz.loadingState).toBe(CoValueLoadingState.LOADING);
+
+    expect(map2.list[0]!.$jazz.loadingState).toBe(CoValueLoadingState.LOADING);
   });
 
   test("load with resolve { list: { $each: true } }", async () => {
@@ -173,10 +168,10 @@ describe("Deep loading with depth arg", async () => {
     type ExpectedType =
       | {
           $isLoaded: true;
-          list: {
+          list: ReadonlyArray<{
             $isLoaded: true;
             stream: MaybeLoaded<typeof TestFeed>;
-          }[] & { $isLoaded: true };
+          }> & { $isLoaded: true };
           optionalRef: MaybeLoaded<typeof InnermostMap> | undefined;
         }
       | {
@@ -198,11 +193,20 @@ describe("Deep loading with depth arg", async () => {
       loadAs: meOnSecondPeer,
       resolve: { optionalRef: true } as const,
     });
-    type ExpectedType = MaybeLoaded<
-      Loaded<typeof TestMap> & {
-        readonly optionalRef: Loaded<typeof InnermostMap> | undefined;
-      }
-    >;
+    type ExpectedType =
+      | {
+          $isLoaded: true;
+          list: MaybeLoaded<typeof TestList>;
+          optionalRef:
+            | {
+                $isLoaded: true;
+                value: string;
+              }
+            | undefined;
+        }
+      | {
+          $isLoaded: false;
+        };
     function matches(value: ExpectedType) {
       return value;
     }
@@ -215,24 +219,33 @@ describe("Deep loading with depth arg", async () => {
       loadAs: meOnSecondPeer,
       resolve: { list: { $each: { stream: true } } },
     });
-    type ExpectedType = MaybeLoaded<
-      Loaded<typeof TestMap> & {
-        readonly list: Loaded<typeof TestList> &
-          ReadonlyArray<
-            Loaded<typeof InnerMap> & {
-              readonly stream: Loaded<typeof TestFeed>;
-            }
-          >;
-      }
-    >;
+    type ExpectedType =
+      | {
+          $isLoaded: true;
+          list: ReadonlyArray<{
+            $isLoaded: true;
+            stream: {
+              $isLoaded: true;
+              perSession: {
+                [sessionID: SessionID]: {
+                  value: MaybeLoaded<typeof InnermostMap>;
+                };
+              };
+            };
+          }> & { $isLoaded: true };
+        }
+      | {
+          $isLoaded: false;
+        };
     function matches(value: ExpectedType) {
       return value;
     }
     matches(map4);
     assertLoaded(map4);
-    expect(map4.list[0]?.stream).toBeTruthy();
-    expect(map4.list[0]?.stream?.perAccount[me.$jazz.id]).toBeTruthy();
-    expect(map4.list[0]?.stream?.byMe?.value.$jazz.loadingState).toBe(
+
+    expect(map4.list[0]!.stream).toBeTruthy();
+    expect(map4.list[0]!.stream.perAccount[me.$jazz.id]).toBeTruthy();
+    expect(map4.list[0]!.stream.byMe?.value.$jazz.loadingState).toBe(
       CoValueLoadingState.LOADING,
     );
   });
@@ -242,34 +255,35 @@ describe("Deep loading with depth arg", async () => {
       loadAs: meOnSecondPeer,
       resolve: { list: { $each: { stream: { $each: true } } } },
     });
-    type ExpectedMap5 = MaybeLoaded<
-      Loaded<typeof TestMap> & {
-        readonly list: Loaded<typeof TestList> &
-          ReadonlyArray<
-            Loaded<typeof InnerMap> & {
-              readonly stream: Loaded<typeof TestFeed> & {
-                byMe?: { value: Loaded<typeof InnermostMap> };
-                inCurrentSession?: { value: Loaded<typeof InnermostMap> };
-                perSession: {
-                  [sessionID: SessionID]: {
-                    value: Loaded<typeof InnermostMap>;
+    type ExpectedMap5 =
+      | {
+          $isLoaded: true;
+          list: ReadonlyArray<{
+            $isLoaded: true;
+            stream: {
+              $isLoaded: true;
+              perSession: {
+                [sessionID: SessionID]: {
+                  value: {
+                    $isLoaded: true;
+                    value: string;
                   };
                 };
-              } & {
-                [key: ID<Account>]: { value: Loaded<typeof InnermostMap> };
               };
-            }
-          >;
-      }
-    >;
+            };
+          }> & { $isLoaded: true };
+        }
+      | {
+          $isLoaded: false;
+        };
     function matches(value: ExpectedMap5) {
       return value;
     }
     matches(map5);
     assertLoaded(map5);
 
-    expect(map5.list[0]?.stream?.perAccount[me.$jazz.id]?.value).toBeTruthy();
-    expect(map5.list[0]?.stream?.byMe?.value).toBeTruthy();
+    expect(map5.list[0]!.stream.perAccount[me.$jazz.id]?.value).toBeTruthy();
+    expect(map5.list[0]!.stream.byMe?.value).toBeTruthy();
   });
 });
 

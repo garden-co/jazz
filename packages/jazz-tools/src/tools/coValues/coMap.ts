@@ -122,8 +122,6 @@ export type CoMapFieldSchema = {
 export class CoMap<
     S extends CoreCoMapSchema | CoreCoRecordSchema,
     R extends ResolveQuery<S>,
-    Dep extends number[],
-    Lim extends number,
   >
   extends CoValueBase
   implements CoValue
@@ -141,7 +139,7 @@ export class CoMap<
    * access to Jazz methods, and also doesn't limit which key names can be
    * used inside CoMaps.
    */
-  declare $jazz: CoMapJazzApi<S, R, Dep, Lim>;
+  declare $jazz: CoMapJazzApi<S, R>;
 
   /** @internal */
   static fields: CoMapFieldSchema;
@@ -226,11 +224,9 @@ export class CoMap<
 class CoMapJazzApi<
   S extends CoreCoMapSchema | CoreCoRecordSchema,
   R extends ResolveQuery<S>,
-  Dep extends number[],
-  Lim extends number,
 > extends CoValueJazzApi {
   constructor(
-    private coMap: CoMap<S, R, Dep, Lim>,
+    private coMap: CoMap<S, R>,
     public raw: RawCoMap,
     private fields: CoMapFieldSchema,
     public sourceSchema: S,
@@ -334,7 +330,7 @@ class CoMapJazzApi<
    *
    * @category Content
    */
-  applyDiff(newValues: Partial<CoMapInit<S>>): CoMap<S, R, Dep, Lim> {
+  applyDiff(newValues: Partial<CoMapInit<S>>): CoMap<S, R> {
     for (const key in newValues) {
       if (Object.prototype.hasOwnProperty.call(newValues, key)) {
         const tKey = key as keyof typeof newValues;
@@ -630,7 +626,7 @@ function getEditFromRaw<
   Dep extends number[],
   Lim extends number,
 >(
-  target: CoMap<S, R, Dep, Lim>,
+  target: CoMap<S, R>,
   rawEdit: {
     by: RawAccountID | AgentID;
     tx: CojsonInternalTypes.TransactionID;

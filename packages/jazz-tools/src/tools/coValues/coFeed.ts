@@ -53,16 +53,22 @@ import {
   ResolveQueryStrict,
   Loaded,
   PrimitiveOrMaybeLoaded,
+  ResolvedElement,
 } from "../internal.js";
 
-export type CoFeedEntry<Item extends AnyZodOrCoValueSchema> =
-  SingleCoFeedEntry<Item> & {
-    all: IterableIterator<SingleCoFeedEntry<Item>>;
-  };
+export type CoFeedEntry<
+  S extends CoreCoFeedSchema,
+  R extends ResolveQuery<S>,
+> = SingleCoFeedEntry<S, R> & {
+  all: IterableIterator<SingleCoFeedEntry<S, R>>;
+};
 
-export type SingleCoFeedEntry<Item extends AnyZodOrCoValueSchema> = {
-  value: PrimitiveOrMaybeLoaded<Item>;
-  ref: RefIfCoValue<Item>;
+export type SingleCoFeedEntry<
+  S extends CoreCoFeedSchema,
+  R extends ResolveQuery<S>,
+> = {
+  value: ResolvedElement<S, R>;
+  ref: RefIfCoValue<S["element"]>;
   by: MaybeLoaded<CoreAccountSchema> | null;
   madeAt: Date;
   tx: CojsonInternalTypes.TransactionID;
@@ -87,16 +93,11 @@ export { CoFeed as CoStream };
  *
  * @category CoValues
  */
-export class CoFeed<
-    S extends CoreCoFeedSchema,
-    R extends ResolveQuery<S>,
-    Dep extends number[],
-    Lim extends number,
-  >
+export class CoFeed<S extends CoreCoFeedSchema, R extends ResolveQuery<S>>
   extends CoValueBase
   implements CoValue
 {
-  declare $jazz: CoFeedJazzApi<S, R, Dep, Lim>;
+  declare $jazz: CoFeedJazzApi<S, R>;
 
   /** @category Type Helpers */
   declare [TypeSym]: "CoStream";
@@ -108,7 +109,7 @@ export class CoFeed<
    * The current account's view of this `CoFeed`
    * @category Content
    */
-  get byMe(): CoFeedEntry<S["element"]> | undefined {
+  get byMe(): CoFeedEntry<S, R> | undefined {
     if (this.$jazz.loadedAs[TypeSym] === "Account") {
       return this.perAccount[this.$jazz.loadedAs.$jazz.id];
     } else {
@@ -139,7 +140,7 @@ export class CoFeed<
    * @category Content
    */
   get perAccount(): {
-    [key: ID<CoreAccountSchema>]: CoFeedEntry<S["element"]>;
+    [key: ID<CoreAccountSchema>]: CoFeedEntry<S, R>;
   } {
     return new Proxy({}, CoStreamPerAccountProxyHandler(this)) as any;
   }
@@ -149,7 +150,7 @@ export class CoFeed<
    * @category Content
    */
   get perSession(): {
-    [key: SessionID]: CoFeedEntry<S["element"]>;
+    [key: SessionID]: CoFeedEntry<S, R>;
   } {
     return new Proxy(
       {},
@@ -164,7 +165,7 @@ export class CoFeed<
    *
    * @category Content
    */
-  get inCurrentSession(): CoFeedEntry<S["element"]> | undefined {
+  get inCurrentSession(): CoFeedEntry<S, R> | undefined {
     if (this.$jazz.loadedAs[TypeSym] === "Account") {
       return this.perSession[this.$jazz.loadedAs.$jazz.sessionID!];
     } else {
@@ -234,19 +235,12 @@ export class CoFeed<
   }
 }
 
-/** @internal */
-type CoFeedItem<L> = L extends CoFeed<infer S, any, any, any>
-  ? S["element"]
-  : never;
-
 export class CoFeedJazzApi<
   S extends CoreCoFeedSchema,
   R extends ResolveQuery<S>,
-  Dep extends number[],
-  Lim extends number,
 > extends CoValueJazzApi {
   constructor(
-    private coFeed: CoFeed<S, R, Dep, Lim>,
+    private coFeed: CoFeed<S, R>,
     public raw: RawCoStream,
     public itemSchema: FieldDescriptor,
     public sourceSchema: CoreCoFeedSchema,
@@ -282,13 +276,13 @@ export class CoFeedJazzApi<
    *
    * @category Content
    */
-  push(...items: CoFieldInit<CoFeedItem<F>>[]): void {
+  push(...items: CoFieldInit<S["element"]>[]): void {
     for (const item of items) {
       this.pushItem(item);
     }
   }
 
-  private pushItem(item: CoFieldInit<CoFeedItem<F>>) {
+  private pushItem(item: CoFieldInit<S["element"]>) {
     const itemDescriptor = this.itemSchema;
 
     if (itemDescriptor.type === "json") {
