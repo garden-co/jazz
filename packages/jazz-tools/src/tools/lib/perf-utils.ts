@@ -14,7 +14,7 @@ export const performanceMeasures = {
     "jazz.subscription.first_load.transaction_parsing",
 } as const;
 
-const performanceMarkAvailable = performance.hasOwnProperty("mark");
+const performanceMarkAvailable = "mark" in performance;
 
 export function trackPerformanceMark(
   mark: keyof typeof performanceMarks,
