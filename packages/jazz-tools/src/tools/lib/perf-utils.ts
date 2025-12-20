@@ -53,6 +53,7 @@ export function measureSubscriptionLoad(
     coJsonPerf.performanceMarks.loadFromStorageEnd,
     coId,
   );
+
   if (loadFromStorage) {
     loadMeasureDetail.loadFromStorage = performance.measure(
       performanceMeasures.subscriptionLoadFromStorage + "." + coId,
@@ -170,11 +171,13 @@ function extractStartEndMarks(
   coId: string,
 ): { start: PerformanceEntry; end: PerformanceEntry } | null {
   const endMarks = performance.getEntriesByName(endMark + "." + coId, "mark");
+  const startMarks = performance.getEntriesByName(
+    startMark + "." + coId,
+    "mark",
+  );
 
   // Assuming they are all sync, pick the last endMark entry position
-  const startMarkEntry = performance
-    .getEntriesByName(startMark + "." + coId, "mark")
-    .at(endMarks.length - 1);
+  const startMarkEntry = startMarks.at(startMarks.length - 1);
   const endMarkEntry = endMarks.at(-1);
 
   if (!startMarkEntry || !endMarkEntry) {

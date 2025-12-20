@@ -9,7 +9,7 @@ export const performanceMarks = {
   transactionParsingEnd: "cojson.transaction_parsing.end",
 } as const;
 
-const performanceMarkAvailable = performance.hasOwnProperty("mark");
+const performanceMarkAvailable = "mark" in performance;
 
 export function trackPerformanceMark(
   mark: keyof typeof performanceMarks,
