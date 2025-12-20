@@ -88,3 +88,28 @@ Check out the [music player app](https://github.com/garden-co/jazz/blob/main/exa
 <ContentByFramework framework="svelte">
 Check out the [file share app](https://github.com/garden-co/jazz/blob/main/examples/file-share-svelte/src/routes/%2Blayout.svelte) for a full example.
 </ContentByFramework>
+
+## Performance Tab
+
+The Inspector includes a Performance tab that helps you analyze the runtime behavior of your Jazz app. To enable performance recording, you need to call `recordMetrics()` at the start of your application.
+
+### Enabling performance recording
+
+Import and call `recordMetrics()` before your app renders:
+
+<CodeGroup>
+```tsx index.tsx#RecordMetrics
+```
+</CodeGroup>
+
+### What gets tracked
+
+Once enabled, the Performance tab displays several metrics:
+
+- **Active subscriptions** — The number of CoValue subscriptions currently active in your app
+- **First load time** — How long it takes for a subscription to receive its first data
+- **Load breakdown** — Detailed timing for storage reads, peer fetches, and transaction parsing
+
+These metrics help you identify slow-loading CoValues, understand where time is spent during data loading, and optimize your app's performance.
+
+The Performance tab also integrates with Chrome DevTools' Performance panel, allowing you to see Jazz-specific timing marks alongside your other performance data.

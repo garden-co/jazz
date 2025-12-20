@@ -1,0 +1,110 @@
+import { CodeGroup } from '@/components/forMdx'
+
+export const metadata = {
+  description: "Learn how to integrate Jazz with OpenTelemetry for metrics and tracing."
+};
+
+# Observability
+
+Jazz exposes metrics and spans using the [OpenTelemetry](https://opentelemetry.io/) protocol. This allows you to integrate Jazz's internal performance data with your existing observability stack, whether that's a console logger for development or a full observability platform in production.
+
+## Available metrics
+
+Jazz tracks the following metrics:
+
+<table>
+  <thead>
+    <tr>
+      <th>Metric</th>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>jazz.subscription.active</code></td>
+      <td>UpDownCounter</td>
+      <td>Number of active CoValue subscriptions</td>
+    </tr>
+    <tr>
+      <td><code>jazz.subscription.first_load</code></td>
+      <td>Histogram</td>
+      <td>Time for a subscription to receive its first data (ms)</td>
+    </tr>
+    <tr>
+      <td><code>jazz.peers</code></td>
+      <td>UpDownCounter</td>
+      <td>Number of connected peers</td>
+    </tr>
+    <tr>
+      <td><code>jazz.transactions.size</code></td>
+      <td>Histogram</td>
+      <td>Size of transactions (bytes)</td>
+    </tr>
+    <tr>
+      <td><code>jazz.usage.ingress</code></td>
+      <td>Counter</td>
+      <td>Total bytes received from peers</td>
+    </tr>
+    <tr>
+      <td><code>jazz.usage.egress</code></td>
+      <td>Counter</td>
+      <td>Total bytes sent to peers</td>
+    </tr>
+  </tbody>
+</table>
+
+## Available spans
+
+Jazz creates spans to track the subscription lifecycle:
+
+<table>
+  <thead>
+    <tr>
+      <th>Span</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>jazz.subscription</code></td>
+      <td>Parent span for the entire subscription lifecycle</td>
+    </tr>
+    <tr>
+      <td><code>jazz.subscription.first_load</code></td>
+      <td>Span for the initial data load</td>
+    </tr>
+    <tr>
+      <td><code>jazz.subscription.first_load.from_storage</code></td>
+      <td>Time spent loading from local storage</td>
+    </tr>
+    <tr>
+      <td><code>jazz.subscription.first_load.load_from_peer</code></td>
+      <td>Time spent fetching from a peer</td>
+    </tr>
+    <tr>
+      <td><code>jazz.subscription.first_load.transaction_parsing</code></td>
+      <td>Time spent parsing transactions</td>
+    </tr>
+  </tbody>
+</table>
+
+## Setting up metrics
+
+To collect metrics, you need to configure an OpenTelemetry `MeterProvider` with a reader that exports the data. Here's a simple example that logs metrics to the console:
+
+<CodeGroup>
+```ts tooling-and-resources/observability/observability.ts#Metrics
+```
+</CodeGroup>
+
+## Setting up tracing
+
+To collect spans, configure a `TracerProvider` with a span processor. Here's an example that logs spans to the console:
+
+<CodeGroup>
+```ts tooling-and-resources/observability/observability.ts#Tracing
+```
+</CodeGroup>
+
+Check the [OpenTelemetry JS documentation](https://opentelemetry.io/docs/languages/js/) for more details on available exporters and configuration options.
