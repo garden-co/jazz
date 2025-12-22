@@ -224,7 +224,7 @@ tryAddTransactions(
 **Location**: `packages/cojson/src/coValueCore/coValueCore.ts` - `#canAuthorDeleteCoValueAtTime(...)`
 
 **Changes**:
-- Check that transaction author has admin permissions when meta contains `{ deleted: true }`
+- Check that transaction author had admin permissions on `tx.madeAt` when meta contains `{ deleted: true }`
 - Reject delete transactions from non-admin accounts
 
 **Key Logic (final implementation)**:
