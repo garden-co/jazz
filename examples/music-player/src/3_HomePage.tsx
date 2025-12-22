@@ -16,6 +16,7 @@ import { SidebarInset, SidebarTrigger } from "./components/ui/sidebar";
 import { usePlayState } from "./lib/audio/usePlayState";
 import { useState } from "react";
 import { useSuspenseAccount, useSuspenseCoState } from "jazz-tools/react-core";
+import { useIsMobile } from "./hooks/use-mobile";
 
 export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
   const playState = usePlayState();
@@ -36,6 +37,7 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
   const playlistId = useSuspenseAccount(MusicaAccount, {
     select: (me) => params.playlistId ?? me.root.$jazz.refs.rootPlaylist.id,
   });
+  const isMobile = useIsMobile();
 
   const playlist = useSuspenseCoState(PlaylistWithTracks, playlistId);
 
@@ -97,7 +99,7 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
                         onClick={() => setIsAddTracksModalOpen(true)}
                         variant="outline"
                       >
-                        Add tracks from library
+                        {isMobile ? "Add tracks" : "Add tracks from library"}
                       </Button>
                     )}
                     {canEdit && (

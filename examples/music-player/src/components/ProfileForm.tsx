@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState } from "react";
 import { Image, useSuspenseAccount } from "jazz-tools/react";
 import { createImage } from "jazz-tools/media";
 import { Button } from "./ui/button";
