@@ -48,6 +48,7 @@
     "lint": "oxlint . && cargo fmt -- --check",
     "generate:npm": "napi create-npm-dirs",
     "test": "vitest --watch --project cojson-core-napi",
+    "test:leak": "node --expose-gc memory-leak-checker.ts",
     "test:ci": "vitest run --watch=false"
   },
   "devDependencies": {
