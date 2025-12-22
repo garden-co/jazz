@@ -74,20 +74,12 @@ impl SessionLog {
         new_signature_str: String,
         skip_verify: bool,
     ) -> Result<(), SessionLogError> {
-        let transactions: Vec<Box<RawValue>> = transactions_json
-            .into_iter()
-            .map(|s| {
-                serde_json::from_str(&s).map_err(|e| {
-                    SessionLogError::Generic(format!("Failed to parse transaction string: {}", e))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
 
         let new_signature = Signature(new_signature_str);
 
         if let Ok(mut internal) = self.internal.lock() {
             internal
-                .try_add(transactions, &new_signature, skip_verify)
+                .try_add(transactions_json, &new_signature, skip_verify)
                 .map_err(Into::into)
         } else {
             Err(SessionLogError::LockError)

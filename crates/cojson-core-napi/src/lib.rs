@@ -83,20 +83,11 @@ impl SessionLog {
     new_signature_str: String,
     skip_verify: bool,
   ) -> napi::Result<()> {
-    let transactions: Vec<Box<RawValue>> = transactions_json
-      .into_iter()
-      .map(|s| {
-        serde_json::from_str(&s)
-          .map_err(|e| CojsonCoreError::Js(format!("Failed to parse transaction string: {}", e)))
-      })
-      .collect::<Result<Vec<_>, _>>()
-      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
-
     let new_signature = Signature(new_signature_str);
 
     self
       .internal
-      .try_add(transactions, &new_signature, skip_verify)
+      .try_add(transactions_json, &new_signature, skip_verify)
       .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
 
     Ok(())
