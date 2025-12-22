@@ -22,7 +22,7 @@ export const DemoToDo = () => {
 
   return (
     <div className="my-4 grid w-full grid-cols-1 gap-6 p-1 md:grid-cols-2">
-      <div className="rounded-2xl outline-4">
+      <div className="overflow-hidden rounded-2xl outline-4">
         <iframe
           ref={frameA}
           src="/minimal-example/index.html"
@@ -32,7 +32,7 @@ export const DemoToDo = () => {
         />
       </div>
 
-      <div className="rounded-2xl outline-4">
+      <div className="overflow-hidden rounded-2xl outline-4">
         {activeListId ? (
           <iframe
             ref={frameB}

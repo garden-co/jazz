@@ -1,6 +1,6 @@
 import * as React from "react";
 import { JazzExpoProvider } from "jazz-tools/expo";
-import { View, Text } from "react-native";
+import { View, Text, Settings } from "react-native";
 
 const App = () => {
   return <View></View>;
@@ -8,6 +8,7 @@ const App = () => {
 
 // #region Basic
 import { useAgent, useIsAuthenticated } from "jazz-tools/expo";
+import { useState } from "react";
 
 function AuthStateIndicator() {
   const agent = useAgent();
@@ -85,3 +86,32 @@ function example3() {
 // #endregion
   );
 }
+
+// #region IsolateStorage
+function RootLayout() {
+  const [authSecretStorageKey, setAuthSecretStorageKey] = useState<
+    string | null
+  >(() => {
+    const stored = Settings.get("jazz-authSecretStorageKey");
+    if (stored) return stored;
+    const newKey = "jazz-" + new Date();
+    Settings.set({ "jazz-authSecretStorageKey": newKey });
+    return newKey;
+  });
+
+  if (!authSecretStorageKey) {
+    return null;
+  }
+  return (
+    <JazzExpoProvider
+      sync={{
+        peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+        when: "never",
+      }}
+      authSecretStorageKey={authSecretStorageKey}
+    >
+      <App />
+    </JazzExpoProvider>
+  );
+}
+// #endregion
