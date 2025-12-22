@@ -128,7 +128,7 @@ impl SessionLogInternal {
     /// Updates the internal hash state and transaction log if successful.
     pub fn try_add(
         &mut self,
-        transactions: Vec<Box<RawValue>>,
+        transactions: Vec<String>,
         new_signature: &Signature,
         skip_verify: bool,
     ) -> Result<(), CoJsonCoreError> {
@@ -136,7 +136,7 @@ impl SessionLogInternal {
         let transactions = transactions
             .iter()
             .map(|tx| {
-                let transaction: Transaction = serde_json::from_str(tx.get())?;
+                let transaction: Transaction = serde_json::from_str(tx)?;
                 serde_json::to_string(&transaction)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -173,6 +173,7 @@ impl SessionLogInternal {
             self.hasher = hasher;
         }
 
+        // Add new transactions to the session log.
         self.transactions_json.extend(transactions);
 
         // Update the last signature.
@@ -381,18 +382,16 @@ mod tests {
     fn test_add_from_example_json() {
         #[derive(Deserialize, Debug)]
         #[serde(rename_all = "camelCase")]
-        struct TestSession<'a> {
+        struct TestSession {
             last_signature: Signature,
-            #[serde(borrow)]
-            transactions: Vec<&'a RawValue>,
+            transactions: Vec<Transaction>,
             last_hash: String,
         }
 
         #[derive(Deserialize, Debug)]
         #[serde(rename_all = "camelCase")]
-        struct Root<'a> {
-            #[serde(borrow)]
-            example_base: HashMap<String, TestSession<'a>>,
+        struct Root {
+            example_base: HashMap<String, TestSession>,
             #[serde(rename = "signerID")]
             signer_id: SignerID,
         }
@@ -416,7 +415,7 @@ mod tests {
         let new_signature = example.last_signature;
 
         let result = session.try_add(
-            vec![example.transactions[0].to_owned()],
+            vec![serde_json::to_string(&example.transactions[0]).unwrap()],
             &new_signature,
             false,
         );
@@ -446,18 +445,16 @@ mod tests {
     fn test_add_from_example_json_multi_tx() {
         #[derive(Deserialize, Debug)]
         #[serde(rename_all = "camelCase")]
-        struct TestSession<'a> {
+        struct TestSession {
             last_signature: Signature,
-            #[serde(borrow)]
-            transactions: Vec<&'a RawValue>,
+            transactions: Vec<Transaction>,
             last_hash: String,
         }
 
         #[derive(Deserialize, Debug)]
         #[serde(rename_all = "camelCase")]
-        struct Root<'a> {
-            #[serde(borrow)]
-            example_base: HashMap<String, TestSession<'a>>,
+        struct Root {
+            example_base: HashMap<String, TestSession>,
             #[serde(rename = "signerID")]
             signer_id: SignerID,
         }
@@ -484,7 +481,7 @@ mod tests {
             example
                 .transactions
                 .into_iter()
-                .map(|tx| tx.to_owned())
+                .map(|tx| serde_json::to_string(&tx).unwrap())
                 .collect(),
             &new_signature,
             false,
@@ -591,7 +588,7 @@ mod tests {
 
         session2
             .try_add(
-                vec![serde_json::from_str(&created_tx_json).unwrap()],
+                vec![created_tx_json.clone()],
                 &new_signature,
                 false,
             )
@@ -609,19 +606,15 @@ mod tests {
 
         #[derive(Deserialize, Debug)]
         #[serde(rename_all = "camelCase")]
-        #[serde(bound(deserialize = "'de: 'a"))]
-        struct TestSession<'a> {
+        struct TestSession {
             last_signature: String,
-            #[serde(borrow)]
-            transactions: Vec<&'a RawValue>,
+            transactions: Vec<Transaction>,
         }
 
         #[derive(Deserialize, Debug)]
         #[serde(rename_all = "camelCase")]
-        #[serde(bound(deserialize = "'de: 'a"))]
-        struct Root<'a> {
-            #[serde(borrow)]
-            example_base: HashMap<String, TestSession<'a>>,
+        struct Root {
+            example_base: HashMap<String, TestSession>,
             #[serde(rename = "signerID")]
             signer_id: SignerID,
             known_keys: Vec<KnownKey>,
@@ -649,7 +642,7 @@ mod tests {
                 example
                     .transactions
                     .into_iter()
-                    .map(|v| v.to_owned())
+                    .map(|tx| serde_json::to_string(&tx).unwrap())
                     .collect(),
                 &new_signature,
                 true, // Skipping verification because we don't have the right initial state
@@ -677,19 +670,15 @@ mod tests {
 
         #[derive(Deserialize, Debug)]
         #[serde(rename_all = "camelCase")]
-        #[serde(bound(deserialize = "'de: 'a"))]
-        struct TestSession<'a> {
+        struct TestSession {
             last_signature: String,
-            #[serde(borrow)]
-            transactions: Vec<&'a RawValue>,
+            transactions: Vec<Transaction>,
         }
 
         #[derive(Deserialize, Debug)]
         #[serde(rename_all = "camelCase")]
-        #[serde(bound(deserialize = "'de: 'a"))]
-        struct Root<'a> {
-            #[serde(borrow)]
-            example_base: HashMap<String, TestSession<'a>>,
+        struct Root {
+            example_base: HashMap<String, TestSession>,
             #[serde(rename = "signerID")]
             signer_id: SignerID,
             known_keys: Vec<KnownKey>,
@@ -717,7 +706,7 @@ mod tests {
                 example
                     .transactions
                     .into_iter()
-                    .map(|v| v.to_owned())
+                    .map(|v| serde_json::to_string(&v).unwrap())
                     .collect(),
                 &new_signature,
                 true, // Skipping verification because we don't have the right initial state
@@ -808,7 +797,7 @@ mod tests {
 
         session2
             .try_add(
-                vec![serde_json::from_str(&created_tx_json).unwrap()],
+                vec![created_tx_json.clone()],
                 &new_signature,
                 false,
             )
@@ -894,7 +883,7 @@ mod tests {
         });
 
         let tx_json = serde_json::to_string(&tx).unwrap();
-        let transactions = vec![serde_json::from_str(&tx_json).unwrap()];
+        let transactions = vec![tx_json];
 
         // Generate a wrong signature
         let wrong_signing_key = SigningKey::generate(&mut csprng);
@@ -923,7 +912,7 @@ mod tests {
         });
 
         let tx_json = serde_json::to_string(&tx).unwrap();
-        let transactions = vec![serde_json::from_str(&tx_json).unwrap()];
+        let transactions = vec![tx_json];
 
         let mut csprng = OsRng;
         let signing_key = SigningKey::generate(&mut csprng);
@@ -1069,7 +1058,7 @@ mod tests {
         });
 
         let tx_json = serde_json::to_string(&tx).unwrap();
-        let transactions = vec![serde_json::from_str(&tx_json).unwrap()];
+        let transactions = vec![tx_json];
 
         // Use a completely wrong signature but skip verification
         let wrong_signature: Signature = signing_key.sign(b"completely wrong data").into();
@@ -1302,9 +1291,22 @@ mod tests {
             None,
         );
 
-        let tx1 = serde_json::from_str(r#"{"test": "data1"}"#).unwrap();
-        let tx2 = serde_json::from_str(r#"{"test": "data2"}"#).unwrap();
-        let transactions = vec![tx1, tx2];
+        let tx1 = r#"{"test":"data1"}"#.to_string();
+        let tx2 = r#"{"test":"data2"}"#.to_string();
+        let transactions = vec![
+            Transaction::Trusting(TrustingTransaction {
+                changes: tx1,
+                made_at: Number::from(1234567890),
+                meta: None,
+                privacy: "trusting".to_string(),
+            }),
+            Transaction::Trusting(TrustingTransaction {
+                changes: tx2,
+                made_at: Number::from(1234567890),
+                meta: None,
+                privacy: "trusting".to_string(),
+            }),
+        ];
 
         // This tests the expected_hash_after function indirectly
         // We can't call it directly since it's private, but we can test it through try_add
@@ -1312,7 +1314,7 @@ mod tests {
         let signature: Signature = SigningKey::generate(&mut OsRng).sign(b"test").into();
 
         // This should work with skip_verify = true
-        let result = test_session.try_add(transactions, &signature, true);
+        let result = test_session.try_add(transactions.iter().map(|tx| serde_json::to_string(tx).unwrap()).collect(), &signature, true);
         assert!(result.is_ok());
         assert_eq!(test_session.transactions_json.len(), 2);
     }
