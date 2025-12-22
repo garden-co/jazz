@@ -83,7 +83,7 @@ overrides:
 
 patchedDependencies:
   uniffi-bindgen-react-native@0.29.3-1:
-    hash: 651a1477b2643feac62679f63fd8996d65d416d6b2f5ee7f84fea45a8561bacb
+    hash: be558a419d0e87e2dd2ef8dda81f8f0c83ada20b23b0a575f2503fe782de36ec
     path: patches/uniffi-bindgen-react-native@0.29.3-1.patch
 
 importers:
@@ -252,7 +252,7 @@ importers:
     dependencies:
       uniffi-bindgen-react-native:
         specifier: 0.29.3-1
-        version: 0.29.3-1(patch_hash=651a1477b2643feac62679f63fd8996d65d416d6b2f5ee7f84fea45a8561bacb)
+        version: 0.29.3-1(patch_hash=be558a419d0e87e2dd2ef8dda81f8f0c83ada20b23b0a575f2503fe782de36ec)
     devDependencies:
       '@commitlint/config-conventional':
         specifier: ^19.8.1
@@ -38596,7 +38596,7 @@ snapshots:
 
   unicorn-magic@0.3.0: {}
 
-  uniffi-bindgen-react-native@0.29.3-1(patch_hash=651a1477b2643feac62679f63fd8996d65d416d6b2f5ee7f84fea45a8561bacb): {}
+  uniffi-bindgen-react-native@0.29.3-1(patch_hash=be558a419d0e87e2dd2ef8dda81f8f0c83ada20b23b0a575f2503fe782de36ec): {}
 
   uniqolor@1.1.1: {}
 
