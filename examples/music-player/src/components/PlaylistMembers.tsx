@@ -31,9 +31,6 @@ export function PlaylistMembers({
             />
           ))}
         </div>
-        <span className="text-sm text-gray-600 ml-2">
-          ({memberIds.length} member{memberIds.length !== 1 ? "s" : ""})
-        </span>
       </button>
     </>
   );
