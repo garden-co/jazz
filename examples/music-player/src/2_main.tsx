@@ -7,6 +7,7 @@ import { RouterProvider, createHashRouter } from "react-router-dom";
 import { HomePage } from "./3_HomePage";
 import { useMediaPlayer } from "./5_useMediaPlayer";
 import { InvitePage } from "./6_InvitePage";
+import { SettingsPage } from "./7_SettingsPage";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import "./index.css";
@@ -59,6 +60,14 @@ function AppContent({
       element: (
         <ErrorBoundary>
           <HomePage mediaPlayer={mediaPlayer} />
+        </ErrorBoundary>
+      ),
+    },
+    {
+      path: "/settings",
+      element: (
+        <ErrorBoundary>
+          <SettingsPage mediaPlayer={mediaPlayer} />
         </ErrorBoundary>
       ),
     },

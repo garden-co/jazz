@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState } from "react";
 import { Image, useSuspenseAccount } from "jazz-tools/react";
 import { createImage } from "jazz-tools/media";
 import { Button } from "./ui/button";
@@ -31,13 +31,20 @@ export function ProfileForm({
   cancelButtonText = "Cancel",
   className = "",
 }: ProfileFormProps) {
-  const profile = useSuspenseAccount(MusicaAccount, {
+  const originalProfile = useSuspenseAccount(MusicaAccount, {
     select: (me) => me.profile,
   });
 
-  const [username, setUsername] = useState(profile.name);
+  const profile = useSuspenseAccount(MusicaAccount, {
+    select: (me) => me.profile,
+    // Edit the profile on a private branch
+    unstable_branch: {
+      name: "profile-form",
+      owner: useState(() => Group.create())[0], // Create a new group for the branch
+    },
+  });
+
   const [isUploading, setIsUploading] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   if (!profile) return null;
 
@@ -66,22 +73,32 @@ export function ProfileForm({
     }
   };
 
+  const currentAvatar = profile.avatar;
+  const isAvatarChanged =
+    currentAvatar?.$jazz.id !== originalProfile.avatar?.$jazz.id;
+  const isNameChanged = profile.name !== originalProfile.name;
+  const isChanged = isAvatarChanged || isNameChanged;
+  const isSubmitEnabled = profile.name.trim() && !isUploading && isChanged;
+
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
 
-    if (!username.trim()) return;
+    if (!isSubmitEnabled) return;
 
-    // Update username
-    profile.$jazz.set("name", username.trim());
+    // Trim the name before merging
+    const name = profile.name.trim();
+    if (name !== profile.name) {
+      profile.$jazz.set("name", name);
+    }
+
+    // Merge the branch changes to confirm
+    profile.$jazz.unstable_merge();
 
     // Call custom onSubmit if provided
     if (onSubmit) {
-      onSubmit({ username: username.trim(), avatar: profile.avatar });
+      onSubmit({ username: profile.name, avatar: profile.avatar });
     }
   };
-
-  const currentAvatar = profile.avatar;
-  const canSubmit = username.trim();
 
   return (
     <div className={className}>
@@ -104,7 +121,10 @@ export function ProfileForm({
             Profile Picture
           </Label>
 
-          <div className="flex flex-col items-center space-y-3">
+          <label
+            htmlFor="avatar"
+            className="flex flex-col items-center space-y-3"
+          >
             {/* Current Avatar Display */}
             <div className="relative">
               <div className="w-24 h-24 rounded-full overflow-hidden border-4 border-white shadow-lg">
@@ -126,7 +146,6 @@ export function ProfileForm({
               {/* Upload Overlay */}
               <button
                 type="button"
-                onClick={() => fileInputRef.current?.click()}
                 disabled={isUploading}
                 className="absolute -bottom-1 -right-1 w-8 h-8 bg-blue-500 rounded-full flex items-center justify-center text-white hover:bg-blue-700 disabled:opacity-50 transition-colors cursor-pointer"
                 title="Change avatar"
@@ -140,7 +159,6 @@ export function ProfileForm({
             </div>
 
             <input
-              ref={fileInputRef}
               type="file"
               id="avatar"
               accept="image/*"
@@ -152,7 +170,7 @@ export function ProfileForm({
             <p className="text-xs text-gray-500 text-center">
               Click the camera icon to upload a profile picture
             </p>
-          </div>
+          </label>
         </div>
 
         <Separator />
@@ -169,8 +187,8 @@ export function ProfileForm({
             id="username"
             type="text"
             placeholder="Enter your username"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
+            value={profile.name}
+            onChange={(e) => profile.$jazz.set("name", e.target.value)}
             className="w-full"
             maxLength={30}
           />
@@ -194,7 +212,7 @@ export function ProfileForm({
           )}
           <Button
             type="submit"
-            disabled={!canSubmit}
+            disabled={!isSubmitEnabled}
             className={`${showCancelButton ? "flex-1" : "w-full"} bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed`}
             size="lg"
           >
