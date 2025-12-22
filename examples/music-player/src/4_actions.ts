@@ -220,3 +220,64 @@ export async function deletePlaylist(playlistId: string) {
     }
   }
 }
+
+export async function deleteMyMusicPlayerAccount() {
+  const me = await MusicaAccount.getMe().$jazz.ensureLoaded({
+    resolve: {
+      profile: {
+        avatar: {
+          $each: true,
+        },
+      },
+      root: {
+        rootPlaylist: {
+          tracks: {
+            $each: {
+              file: true,
+              waveform: true,
+            },
+          },
+        },
+        playlists: { $each: { $onError: "catch" } },
+        activeTrack: { $onError: "catch" },
+        activePlaylist: { $onError: "catch" },
+      },
+    },
+  });
+
+  const profile = me.profile;
+  const avatar = profile.avatar;
+
+  if (avatar) {
+    for (const image of Object.values(avatar)) {
+      if (image.$isLoaded && !image.$jazz.raw.core.isDeleted) {
+        image.$jazz.raw.core.deleteCoValue();
+      }
+    }
+
+    avatar.$jazz.raw.core.deleteCoValue();
+  }
+
+  profile.$jazz.raw.core.deleteCoValue();
+
+  const root = me.root;
+  const rootPlaylist = root.rootPlaylist;
+
+  // Delete all tracks from the user library (root playlist).
+  for (const track of rootPlaylist.tracks.values()) {
+    track.file.$jazz.raw.core.deleteCoValue();
+    track.waveform.$jazz.raw.core.deleteCoValue();
+    track.$jazz.raw.core.deleteCoValue();
+  }
+
+  // Delete all playlists referenced in the user's root. (This may include invited playlists.)
+  for (const playlist of root.playlists.values()) {
+    if (!playlist.$isLoaded) continue;
+    if (!me.canAdmin(playlist)) continue;
+
+    playlist.$jazz.raw.core.deleteCoValue();
+  }
+  root.$jazz.raw.core.deleteCoValue();
+
+  await me.$jazz.waitForAllCoValuesSync();
+}

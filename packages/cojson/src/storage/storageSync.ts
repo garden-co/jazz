@@ -395,6 +395,7 @@ export class StorageApiSync implements StorageAPI {
         followUpDelayMs: DELETED_COVALUES_ERASER_FOLLOW_UP_DELAY_MS,
       },
     });
+    this.deletedCoValuesEraserScheduler.scheduleStartupDrain();
   }
 
   waitForSync(id: string, coValue: CoValueCore) {
