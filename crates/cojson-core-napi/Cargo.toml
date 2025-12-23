@@ -8,8 +8,8 @@ version = "0.1.0"
 crate-type = ["cdylib"]
 
 [dependencies]
-napi = { version = "3.0.0", features = ["napi9", "serde-json"] }
-napi-derive = "3.0.0"
+napi = { version = "3.7.1", features = ["napi9", "serde-json"] }
+napi-derive = "3.4.1"
 serde_json = "1.0"
 cojson-core = { path = "../cojson-core" }
 console_error_panic_hook = { version = "0.1.7", optional = true }
