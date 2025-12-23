@@ -1,3 +1,7 @@
+Released Jazz 0.19.14:
+- Introduced support for 16KB page sizes to Android builds. This update ensures our Native Core remains compatible with upcoming Android hardware and Google Play standards.
+- Upgraded Node-API Rust crate to 3.7.1 to mitigate potential memory leaks.
+
 Released Jazz 0.19.13:
 - Introduced a new API to define the permissions at Schema level. Docs [here](https://jazz.tools/docs/react/permissions-and-sharing/overview#defining-permissions-at-the-schema-level)!
 - Bugfix: improved the session lock system for web apps. Before the first session of an account wasn't locked, and there was some race conditions in the lock algorithm that would cause a slow initialization or load failures when opening multiple tabs
