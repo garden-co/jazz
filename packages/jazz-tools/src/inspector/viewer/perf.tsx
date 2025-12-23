@@ -273,7 +273,7 @@ export default function Perf() {
         </MetricsSummaryColumn>
       </MetricsSummaryRow>
 
-      {otelError && (
+      {!!otelError || (
         <Accordion
           title={`Active Subscriptions (${activeSubscriptions.length})`}
           storageKey="perf-active-subscriptions"
