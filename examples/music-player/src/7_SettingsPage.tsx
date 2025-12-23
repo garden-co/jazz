@@ -1,5 +1,4 @@
 import type { MediaPlayer } from "@/5_useMediaPlayer";
-import { MusicaAccount } from "@/1_schema";
 import { PlayerControls } from "@/components/PlayerControls";
 import { DeleteAccountDialog } from "@/components/DeleteAccountDialog";
 import { ProfileForm } from "@/components/ProfileForm";
