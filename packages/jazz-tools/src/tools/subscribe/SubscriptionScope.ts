@@ -46,8 +46,12 @@ import {
 import {
   measureSubscriptionLoad,
   trackPerformanceMark,
-  trackSubscriptionLoadSpans,
 } from "../lib/perf-utils.js";
+import {
+  isOpenTelemetryInstrumentationEnabled,
+  recordLoadTimeToOTelMetric,
+  recordLoadTimeToOTelSpan,
+} from "../lib/instrumentation.js";
 
 export class SubscriptionScope<D extends CoValue> {
   childNodes = new Map<string, SubscriptionScope<CoValue>>();
@@ -101,7 +105,7 @@ export class SubscriptionScope<D extends CoValue> {
       valueType: ValueType.DOUBLE,
     });
 
-  public readonly subscriptionSpan: Span;
+  public readonly subscriptionSpan: Span | undefined;
 
   silenceUpdates = false;
 
@@ -138,17 +142,18 @@ export class SubscriptionScope<D extends CoValue> {
 
     trackPerformanceMark("subscriptionLoadStart", id);
 
-    this.subscriptionSpan = trace
-      .getTracer("jazz-tools")
-      .startSpan("jazz.subscription", {
-        attributes: {
-          id: this.id,
-          parent_id: this.parent,
-          parent_key: this.parentKey,
-          source_id: this.sourceId,
-          resolve: JSON.stringify(this.resolve),
-        },
-      });
+    if (isOpenTelemetryInstrumentationEnabled())
+      this.subscriptionSpan = trace
+        .getTracer("jazz-tools")
+        .startSpan("jazz.subscription", {
+          attributes: {
+            id: this.id,
+            parent_id: this.parent,
+            parent_key: this.parentKey,
+            source_id: this.sourceId,
+            resolve: JSON.stringify(this.resolve),
+          },
+        });
 
     this.activeSubCounter.add(1, {
       // It increments/decrements counters comparing the attributes
@@ -596,18 +601,15 @@ export class SubscriptionScope<D extends CoValue> {
       );
 
       if (loadMeasureDetail) {
-        this.firstLoadMetric.record(loadMeasureDetail.firstLoad.duration, {
-          id: this.id,
-          result: error ? "error" : "loaded",
-          parent_id: this.parent,
-          parent_key: this.parentKey,
-          source_id: this.sourceId,
-          resolve: JSON.stringify(this.resolve),
-          loadFromStorage: loadMeasureDetail.loadFromStorage?.duration,
-          loadFromPeer: loadMeasureDetail.loadFromPeer?.duration,
-        });
-
-        trackSubscriptionLoadSpans(this.subscriptionSpan, loadMeasureDetail);
+        recordLoadTimeToOTelMetric(
+          this.firstLoadMetric,
+          loadMeasureDetail,
+          this.id,
+          !!error,
+        );
+        if (this.subscriptionSpan) {
+          recordLoadTimeToOTelSpan(this.subscriptionSpan, loadMeasureDetail);
+        }
       }
 
       this.firstLoadRecorded = true;
@@ -1078,6 +1080,7 @@ export class SubscriptionScope<D extends CoValue> {
     this.subscriberChangeCallbacks.clear();
     this.childNodes.forEach((child) => child.destroy());
 
+    this.subscriptionSpan?.end();
     this.activeSubCounter.add(-1, {
       id: this.id,
       source_id: this.sourceId,

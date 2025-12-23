@@ -1,12 +1,31 @@
 import { CodeGroup } from '@/components/forMdx'
 
 export const metadata = {
-  description: "Learn how to integrate Jazz with OpenTelemetry for metrics and tracing."
+  description: "Unstable API: Learn how to integrate Jazz with OpenTelemetry for metrics and tracing."
 };
 
 # Observability
 
+<div className="not-prose rounded-lg border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-sm text-amber-900 dark:text-amber-100">
+  ⚠️ **Unstable API**: The observability API is experimental and subject to breaking changes in future releases. Use with caution in production environments.
+</div>
+
 Jazz exposes metrics and spans using the [OpenTelemetry](https://opentelemetry.io/) protocol. This allows you to integrate Jazz's internal performance data with your existing observability stack, whether that's a console logger for development or a full observability platform in production.
+
+## Enabling instrumentation
+
+OpenTelemetry instrumentation is **opt-in** and disabled by default for performance reasons. To enable it, call `unstable_setOpenTelemetryInstrumentationEnabled` before setting up your OpenTelemetry providers:
+
+```ts
+import { unstable_setOpenTelemetryInstrumentationEnabled } from "jazz-tools";
+
+// Enable instrumentation - do this before setting up your OpenTelemetry providers
+unstable_setOpenTelemetryInstrumentationEnabled(true);
+```
+
+<div className="not-prose rounded-lg border border-blue-500/50 bg-blue-500/10 px-4 py-3 text-sm text-blue-900 dark:text-blue-100">
+  💡 **Note**: You only need to enable instrumentation when you want to collect metrics or traces. If you're not using OpenTelemetry, leave it disabled to avoid any performance overhead.
+</div>
 
 ## Available metrics
 
@@ -91,7 +110,11 @@ Jazz creates spans to track the subscription lifecycle:
 
 ## Setting up metrics
 
-To collect metrics, you need to configure an OpenTelemetry `MeterProvider` with a reader that exports the data. Here's a simple example that logs metrics to the console:
+To collect metrics, you need to:
+1. Enable instrumentation using `unstable_setOpenTelemetryInstrumentationEnabled(true)`
+2. Configure an OpenTelemetry `MeterProvider` with a reader that exports the data
+
+Here's a simple example that logs metrics to the console:
 
 <CodeGroup>
 ```ts tooling-and-resources/observability/observability.ts#Metrics
@@ -102,7 +125,11 @@ To collect metrics, you need to configure an OpenTelemetry `MeterProvider` with 
 
 ## Setting up tracing
 
-To collect spans, configure a `TracerProvider` with a span processor. Here's an example that logs spans to the console:
+To collect spans, you need to:
+1. Enable instrumentation using `unstable_setOpenTelemetryInstrumentationEnabled(true)`
+2. Configure a `TracerProvider` with a span processor
+
+Here's an example that logs spans to the console:
 
 <CodeGroup>
 ```ts tooling-and-resources/observability/observability.ts#Tracing
@@ -110,3 +137,18 @@ To collect spans, configure a `TracerProvider` with a span processor. Here's an 
 </CodeGroup>
 
 Check the [OpenTelemetry JS documentation](https://opentelemetry.io/docs/languages/js/) for more details on available exporters and configuration options.
+
+## Production setup
+
+In production, you'll typically want to use OTLP exporters to send data to your observability platform (like Jaeger, Prometheus, or a managed service). Here's a complete example:
+
+<CodeGroup>
+```ts tooling-and-resources/observability/observability.ts#Production
+```
+</CodeGroup>
+
+This example uses HTTP-based OTLP exporters, but you can also use gRPC-based exporters depending on your infrastructure. The key differences from development setup are:
+
+- Using `BatchSpanProcessor` for more efficient span batching in production
+- Longer export intervals (60 seconds vs 10 seconds) to reduce network overhead
+- OTLP exporters that send data to your collector or observability platform

@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Account, Group, co, z } from "../exports.js";
+import {
+  co,
+  unstable_setOpenTelemetryInstrumentationEnabled,
+  z,
+} from "../exports.js";
 import {
   CoValueLoadingState,
   coValueClassFromCoValueClassOrSchema,
@@ -478,6 +482,7 @@ describe("SubscriptionScope", () => {
     });
 
     it("tracks the duration of the first load", async () => {
+      unstable_setOpenTelemetryInstrumentationEnabled(true);
       const schema = {
         ref: coValueClassFromCoValueClassOrSchema(Person),
         optional: false,
@@ -503,6 +508,8 @@ describe("SubscriptionScope", () => {
       ).toBeGreaterThan(0);
 
       scope.destroy();
+
+      unstable_setOpenTelemetryInstrumentationEnabled(false);
     });
   });
 });

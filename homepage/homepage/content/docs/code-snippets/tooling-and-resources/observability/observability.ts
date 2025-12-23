@@ -1,10 +1,14 @@
 // #region Metrics
+import { unstable_setOpenTelemetryInstrumentationEnabled } from "jazz-tools";
 import {
   MeterProvider,
   PeriodicExportingMetricReader,
   ConsoleMetricExporter,
 } from "@opentelemetry/sdk-metrics";
 import { metrics } from "@opentelemetry/api";
+
+// Enable instrumentation (required for metrics and tracing)
+unstable_setOpenTelemetryInstrumentationEnabled(true);
 
 // Create a console exporter for development
 const metricExporter = new ConsoleMetricExporter();
@@ -24,12 +28,16 @@ metrics.setGlobalMeterProvider(meterProvider);
 // #endregion
 
 // #region Tracing
+import { unstable_setOpenTelemetryInstrumentationEnabled } from "jazz-tools";
 import {
   BasicTracerProvider,
   SimpleSpanProcessor,
   ConsoleSpanExporter,
 } from "@opentelemetry/sdk-trace-base";
 import { trace } from "@opentelemetry/api";
+
+// Enable instrumentation (required for metrics and tracing)
+unstable_setOpenTelemetryInstrumentationEnabled(true);
 
 // Create a console exporter for development
 const spanExporter = new ConsoleSpanExporter();
@@ -40,10 +48,11 @@ const tracerProvider = new BasicTracerProvider({
 });
 
 // Register the provider globally
-trace.setTracerProvider(tracerProvider);
+trace.setGlobalTracerProvider(tracerProvider);
 // #endregion
 
 // #region Production
+import { unstable_setOpenTelemetryInstrumentationEnabled } from "jazz-tools";
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import {
@@ -55,6 +64,9 @@ import {
   BatchSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 import { metrics as metricsProd, trace as traceProd } from "@opentelemetry/api";
+
+// Enable instrumentation (required for metrics and tracing)
+unstable_setOpenTelemetryInstrumentationEnabled(true);
 
 // Configure OTLP exporters pointing to your collector
 const otlpMetricExporter = new OTLPMetricExporter({
@@ -80,5 +92,5 @@ const prodTracerProvider = new BasicTracerProviderProd({
 });
 
 metricsProd.setGlobalMeterProvider(prodMeterProvider);
-traceProd.setTracerProvider(prodTracerProvider);
+traceProd.setGlobalTracerProvider(prodTracerProvider);
 // #endregion

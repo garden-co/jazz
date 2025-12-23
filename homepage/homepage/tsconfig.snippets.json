@@ -49,6 +49,10 @@
       ],
       "@react-navigation/*": [
         "./content/docs/code-snippets/project-setup/*"
+      ],
+      "@opentelemetry/*": [
+        "./content/docs/code-snippets/tooling-and-resources/inspector/*",
+        "./content/docs/code-snippets/tooling-and-resources/observability/*"
       ]
     }
   },

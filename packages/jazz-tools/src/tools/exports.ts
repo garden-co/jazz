@@ -143,3 +143,5 @@ export * from "./ssr/index.js";
 export { captureStack } from "./subscribe/errorReporting.js";
 
 export * as jazzConfig from "./config.js";
+
+export { setOpenTelemetryInstrumentationEnabled as unstable_setOpenTelemetryInstrumentationEnabled } from "./lib/instrumentation.js";
