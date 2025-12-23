@@ -1,5 +1,11 @@
 # cojson-core-napi-darwin-x64
 
+## 0.19.14
+
+### Patch Changes
+
+- 241123b: Upgraded NAPI bindings from 3.3.x to 3.7.1 to mitigate potential memory leaks.
+
 ## 0.19.13
 
 ## 0.19.12
