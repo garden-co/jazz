@@ -32,6 +32,7 @@ import {
 } from "../internal.js";
 import type { BranchDefinition } from "../subscribe/types.js";
 import { CoValueHeader } from "cojson";
+import { JazzError } from "../subscribe/JazzError.js";
 
 /** @category Abstract interfaces */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -699,26 +700,8 @@ export async function exportCoValue<
     options.unstable_branch,
   );
 
-  const value = await new Promise<Loaded<S, R> | null>((resolve) => {
-    rootNode.setListener(() => {
-      const value = rootNode.getCurrentValue();
-
-      if (value.$isLoaded) {
-        resolve(value as Loaded<S, R>);
-      } else if (
-        value.$jazz.loadingState === CoValueLoadingState.DELETED ||
-        value.$jazz.loadingState === CoValueLoadingState.UNAVAILABLE ||
-        value.$jazz.loadingState === CoValueLoadingState.UNAUTHORIZED
-      ) {
-        resolve(null);
-        rootNode.destroy();
-      }
-    });
-  });
-
-  if (!value) {
-    return null;
-  }
+  await rootNode.getPromise();
+  rootNode.destroy();
 
   const valuesExported = new Set<string>();
   const contentPieces: CojsonInternalTypes.NewContentMessage[] = [];
@@ -869,21 +852,118 @@ export async function unstable_mergeBranchWithResolve<
     options.branch,
   );
 
-  await new Promise<void>((resolve, reject) => {
-    rootNode.setListener((value) => {
-      if (value.type === CoValueLoadingState.UNAVAILABLE) {
-        reject(new Error("Unable to load the branch. " + value.toString()));
-      } else if (value.type === CoValueLoadingState.DELETED) {
-        reject(new Error("Unable to load the branch. " + value.toString()));
-      } else if (value.type === CoValueLoadingState.UNAUTHORIZED) {
-        reject(new Error("Unable to load the branch. " + value.toString()));
-      } else if (value.type === CoValueLoadingState.LOADED) {
-        resolve();
-      }
-
-      rootNode.destroy();
-    });
-  });
+  await rootNode.getPromise();
+  rootNode.destroy();
 
   unstable_mergeBranch(rootNode);
+}
+
+/**
+ * Permanently delete a group of coValues
+ *
+ * This operation is irreversible and will permanently delete the coValues from the local machine and the sync servers.
+ *
+ */
+export async function deleteCoValues<
+  S extends CoValueClassOrSchema,
+  const R extends ResolveQuery<S>,
+>(
+  cls: S,
+  id: ID<CoValue>,
+  options: {
+    resolve?: ResolveQueryStrict<S, R>;
+    loadAs?: Account | AnonymousJazzAgent;
+  } = {},
+) {
+  const loadAs = options.loadAs ?? activeAccountContext.get();
+  const node = "node" in loadAs ? loadAs.node : loadAs.$jazz.localNode;
+
+  const resolve = options.resolve ?? true;
+
+  const rootNode = new SubscriptionScope<CoValue>(
+    node,
+    resolve as any,
+    id,
+    {
+      ref: coValueClassFromCoValueClassOrSchema(cls),
+      optional: false,
+    },
+    false,
+    false,
+    undefined,
+  );
+
+  await rootNode.getPromise();
+  rootNode.destroy();
+
+  const errors = validateDeletePermissions(rootNode);
+
+  if (errors.length > 0) {
+    const combined = new JazzError(
+      id,
+      CoValueLoadingState.DELETED,
+      errors.flatMap((e) => e.issues),
+    );
+    throw new Error(combined.toString());
+  }
+
+  const deletedValues = deleteCoValueFromSubscription(rootNode);
+
+  await Promise.all(Array.from(deletedValues, (value) => value.waitForSync()));
+}
+
+function validateDeletePermissions(
+  rootNode: SubscriptionScope<CoValue>,
+  path: string[] = [],
+  errors: JazzError[] = [],
+): JazzError[] {
+  for (const [key, childNode] of rootNode.childNodes.entries()) {
+    validateDeletePermissions(childNode, [...path, key], errors);
+  }
+
+  if (rootNode.value.type !== CoValueLoadingState.LOADED) {
+    return errors;
+  }
+
+  const core = rootNode.value.value.$jazz.raw.core;
+
+  const result = core.validateDeletePermissions();
+  if (!result.ok) {
+    errors.push(
+      new JazzError(core.id, CoValueLoadingState.DELETED, [
+        {
+          code: "deleteError",
+          message: `Jazz Delete Error: ${result.message}`,
+          params: {},
+          path,
+        },
+      ]),
+    );
+  }
+
+  return errors;
+}
+
+function deleteCoValueFromSubscription(
+  rootNode: SubscriptionScope<CoValue>,
+  values = new Set<AvailableCoValueCore>(),
+) {
+  for (const childNode of rootNode.childNodes.values()) {
+    deleteCoValueFromSubscription(childNode, values);
+  }
+
+  if (rootNode.value.type !== CoValueLoadingState.LOADED) {
+    return values;
+  }
+
+  const core = rootNode.value.value.$jazz.raw.core;
+
+  try {
+    core.deleteCoValue();
+    values.add(core);
+  } catch (error) {
+    console.error("Failed to delete coValue", error);
+  }
+
+  return values;
 }

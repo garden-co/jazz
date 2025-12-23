@@ -1,0 +1,148 @@
+import { beforeEach, describe, expect, test } from "vitest";
+import {
+  Account,
+  CoValueLoadingState,
+  Group,
+  co,
+  deleteCoValues,
+  z,
+} from "../exports.js";
+import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
+import { assertLoaded, waitFor } from "./utils.js";
+
+beforeEach(async () => {
+  await setupJazzTestSync();
+  await createJazzTestAccount({
+    isCurrentActiveAccount: true,
+  });
+});
+
+describe("deleteCoValues", () => {
+  test("deletes a resolved graph (tombstones) and loads as DELETED", async () => {
+    const Meta = co.map({
+      tag: z.string(),
+    });
+
+    const Note = co.map({
+      text: co.plainText(),
+      meta: Meta,
+    });
+
+    const owner = Account.getMe();
+    const group = Group.create(owner).makePublic("reader");
+
+    const note = Note.create(
+      {
+        text: "hello",
+        meta: { tag: "t1" },
+      },
+      group,
+    );
+
+    const text = note.text;
+    const meta = note.meta;
+
+    await note.$jazz.raw.core.waitForSync();
+
+    await deleteCoValues(Note, note.$jazz.id, {
+      loadAs: owner,
+      resolve: { text: true, meta: true },
+    });
+
+    expect(note.$jazz.raw.core.isDeleted).toBe(true);
+    expect(text.$jazz.raw.core.isDeleted).toBe(true);
+    expect(meta.$jazz.raw.core.isDeleted).toBe(true);
+
+    const viewer = await createJazzTestAccount();
+    const loaded = await Note.load(note.$jazz.id, {
+      loadAs: viewer,
+      skipRetry: true,
+    });
+
+    expect(loaded.$isLoaded).toBe(false);
+    expect(loaded.$jazz.loadingState).toBe(CoValueLoadingState.DELETED);
+  });
+
+  test("rejects deletion for non-admin on a group-owned value", async () => {
+    const Meta = co.map({
+      tag: z.string(),
+    });
+
+    const Note = co.map({
+      meta: Meta,
+    });
+
+    const owner = Account.getMe();
+    const writer = await createJazzTestAccount();
+
+    const group = Group.create(owner);
+    group.addMember(writer, "writer");
+
+    const note = Note.create({ meta: { tag: "t1" } }, group);
+    await note.$jazz.raw.core.waitForSync();
+
+    await expect(
+      deleteCoValues(Note, note.$jazz.id, {
+        loadAs: writer,
+        resolve: { meta: true },
+      }),
+    ).rejects.toThrow(/admin permissions/i);
+
+    expect(note.$jazz.raw.core.isDeleted).toBe(false);
+  });
+
+  test("rejects deletion when a resolved child is not deletable (error includes path)", async () => {
+    const Child = co.map({
+      value: z.string(),
+    });
+
+    const Root = co.map({
+      child: Child,
+    });
+
+    const owner = Account.getMe();
+    const otherOwner = await createJazzTestAccount();
+
+    const groupA = Group.create(owner).makePublic("reader");
+    const groupB = Group.create({ owner: otherOwner }).makePublic("reader");
+
+    const child = Child.create({ value: "child" }, groupB);
+    await child.$jazz.raw.core.waitForSync();
+
+    const root = Root.create({ child }, groupA);
+    await root.$jazz.raw.core.waitForSync();
+
+    await expect(
+      deleteCoValues(Root, root.$jazz.id, {
+        loadAs: owner,
+        resolve: { child: true },
+      }),
+    ).rejects.toThrow(
+      new RegExp(
+        `Subscription starts from ${root.$jazz.id}.*path ${child.$jazz.id}`,
+      ),
+    );
+
+    expect(root.$jazz.raw.core.isDeleted).toBe(false);
+    expect(child.$jazz.raw.core.isDeleted).toBe(false);
+  });
+
+  test("hard rejects Account and Group CoValues", async () => {
+    const me = Account.getMe();
+
+    await expect(
+      deleteCoValues(Account, me.$jazz.id, {
+        loadAs: me,
+      }),
+    ).rejects.toThrow(/Cannot delete Group or Account coValues/);
+
+    const group = Group.create(me).makePublic("reader");
+    await group.$jazz.raw.core.waitForSync();
+
+    await expect(
+      deleteCoValues(Group, group.$jazz.id, {
+        loadAs: me,
+      }),
+    ).rejects.toThrow(/Cannot delete Group or Account coValues/);
+  });
+});

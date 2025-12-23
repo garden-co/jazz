@@ -29,7 +29,6 @@ import {
 } from "./errorReporting.js";
 import {
   createCoValue,
-  isEqualRefsToResolve,
   myRoleForRawValue,
   PromiseWithStatus,
   rejectedPromise,

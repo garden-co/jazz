@@ -67,6 +67,7 @@ export {
   unstable_loadUnique,
   getUnloadedCoValueWithoutId,
   setDefaultSchemaPermissions,
+  deleteCoValues,
 } from "./internal.js";
 
 export {

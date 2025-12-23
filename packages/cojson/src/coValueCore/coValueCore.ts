@@ -875,6 +875,46 @@ export class CoValueCore {
     };
   }
 
+  validateDeletePermissions() {
+    if (!this.verified) {
+      return {
+        ok: false,
+        reason: "CannotVerifyPermissions",
+        message: "Cannot verify delete permissions without verified state",
+      };
+    }
+
+    if (this.isGroupOrAccount()) {
+      return {
+        ok: false,
+        reason: "CoValueNotDeletable",
+        message: "Cannot delete Group or Account coValues",
+      };
+    }
+
+    const group = this.safeGetGroup();
+    if (!group) {
+      return {
+        ok: false,
+        reason: "CannotVerifyPermissions",
+        message:
+          "Cannot verify delete permissions for coValues not owned by a group",
+      };
+    }
+
+    const role = group.myRole();
+    if (role !== "admin") {
+      return {
+        ok: false,
+        reason: "NotAdmin",
+        message:
+          "The current account lacks admin permissions to delete this coValue",
+      };
+    }
+
+    return { ok: true };
+  }
+
   /**
    * Creates a delete marker transaction for this CoValue and sets the coValue as deleted
    *
@@ -883,25 +923,13 @@ export class CoValueCore {
    * - Only admins can delete a coValue.
    */
   deleteCoValue() {
-    if (!this.verified) {
-      throw new Error("Cannot delete coValue without verified state");
-    }
-
-    if (this.isGroupOrAccount()) {
-      throw new Error("Cannot delete Group or Account coValues");
-    }
-
     if (this.isDeleted) {
-      throw new Error("CoValue is already deleted");
+      return;
     }
 
-    // Enforce admin-only permissions for values owned by groups
-    const group = this.safeGetGroup();
-    if (group) {
-      const role = group.myRole();
-      if (role !== "admin") {
-        throw new Error("Only admins can delete coValues");
-      }
+    const result = this.validateDeletePermissions();
+    if (!result.ok) {
+      throw new Error(result.message);
     }
 
     this.makeTransaction(
@@ -922,12 +950,11 @@ export class CoValueCore {
         "CoValueCore: makeTransaction called on coValue without verified state",
       );
     }
+    const isDeleteTransaction = meta?.deleted;
 
-    if (this.isDeleted) {
+    if (this.isDeleted && !isDeleteTransaction) {
       throw new Error("Cannot make transaction on a deleted coValue");
     }
-
-    const isDeleted = meta?.deleted;
 
     validateTxSizeLimitInBytes(changes);
 
@@ -940,7 +967,7 @@ export class CoValueCore {
           ) as SessionID)
         : this.node.currentSessionID;
 
-    if (isDeleted) {
+    if (isDeleteTransaction) {
       sessionID = this.crypto.newDeleteSessionID(
         this.node.getCurrentAccountOrAgentID(),
       );
@@ -978,7 +1005,7 @@ export class CoValueCore {
       );
     }
 
-    if (isDeleted) {
+    if (isDeleteTransaction) {
       this.#markAsDeleted();
     }
 

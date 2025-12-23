@@ -52,7 +52,8 @@ export type JazzErrorIssue = {
     | typeof CoValueLoadingState.UNAVAILABLE
     | typeof CoValueLoadingState.DELETED
     | typeof CoValueLoadingState.UNAUTHORIZED
-    | "validationError";
+    | "validationError"
+    | "deleteError";
   message: string;
   params: Record<string, any>;
   path: string[];
