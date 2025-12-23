@@ -661,9 +661,33 @@ export class CoValueCore {
     // - in a delete session (sessionID ends with `_deleted`)
     // - trusting (unencrypted)
     // - have meta `{ deleted: true }`
-    const deleteTransaction = isDeletedSessionID(sessionID)
-      ? newTransactions.find((tx) => this.#isDeleteMarkerTransaction(tx))
-      : undefined;
+    let deleteTransaction: Transaction | undefined = undefined;
+
+    if (isDeletedSessionID(sessionID)) {
+      if (
+        newTransactions.length !== 1 ||
+        this.verified.sessions.get(sessionID)
+      ) {
+        return {
+          type: "DeleteTransactionRejected",
+          id: this.id,
+          sessionID,
+          reason: "InvalidDeleteTransaction",
+          error: new Error(
+            "Delete transaction must be the only transaction in the session",
+          ),
+        } as const;
+      }
+
+      const firstTransaction = newTransactions[0];
+
+      if (
+        firstTransaction &&
+        this.#isDeleteMarkerTransaction(firstTransaction)
+      ) {
+        deleteTransaction = firstTransaction;
+      }
+    }
 
     if (!skipVerify && deleteTransaction) {
       const author = accountOrAgentIDfromSessionID(sessionID);
