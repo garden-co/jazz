@@ -10,11 +10,10 @@ export const performanceMeasures = {
   subscriptionLoad: "jazz.subscription.first_load",
   subscriptionLoadFromStorage: "jazz.subscription.first_load.from_storage",
   subscriptionLoadFromPeer: "jazz.subscription.first_load.load_from_peer",
-  subscriptionLoadTransactionParsing:
-    "jazz.subscription.first_load.transaction_parsing",
 } as const;
 
-const performanceMarkAvailable = "mark" in performance;
+const performanceMarkAvailable =
+  "mark" in performance && "getEntriesByName" in performance;
 
 export function trackPerformanceMark(
   mark: keyof typeof performanceMarks,
@@ -34,12 +33,13 @@ interface LoadMeasureDetail {
   firstLoad: PerformanceMeasure;
   loadFromStorage?: PerformanceMeasure;
   loadFromPeer?: PerformanceMeasure;
-  transactionParsing?: PerformanceMeasure;
 }
 
 export function measureSubscriptionLoad(
   coId: string,
   sourceId: string,
+  parentId: string | undefined,
+  parentKey: string | undefined,
   resolve: any,
 ): LoadMeasureDetail | null {
   if (!performanceMarkAvailable) {
@@ -63,6 +63,8 @@ export function measureSubscriptionLoad(
         detail: {
           id: coId,
           source_id: sourceId,
+          parent_id: parentId,
+          parent_key: parentKey,
           resolve,
           devtools: {
             track: sourceId,
@@ -89,37 +91,13 @@ export function measureSubscriptionLoad(
         detail: {
           id: coId,
           source_id: sourceId,
+          parent_id: parentId,
+          parent_key: parentKey,
           resolve,
           devtools: {
             track: sourceId,
             trackGroup: "SubscriptionScopes",
             tooltipText: "Internal load from peer",
-            color: "secondary",
-          },
-        },
-      },
-    );
-  }
-
-  const transactionParsing = extractStartEndMarks(
-    coJsonPerf.performanceMarks.transactionParsingStart,
-    coJsonPerf.performanceMarks.transactionParsingEnd,
-    coId,
-  );
-  if (transactionParsing) {
-    loadMeasureDetail.transactionParsing = performance.measure(
-      performanceMeasures.subscriptionLoadTransactionParsing + "." + coId,
-      {
-        start: transactionParsing.start.startTime,
-        end: transactionParsing.end.startTime,
-        detail: {
-          id: coId,
-          source_id: sourceId,
-          resolve,
-          devtools: {
-            track: sourceId,
-            trackGroup: "SubscriptionScopes",
-            tooltipText: "Transaction parsing",
             color: "secondary",
           },
         },
@@ -145,10 +123,11 @@ export function measureSubscriptionLoad(
       detail: {
         id: coId,
         source_id: sourceId,
+        parent_id: parentId,
+        parent_key: parentKey,
         resolve,
         loadFromStorage: loadMeasureDetail.loadFromStorage?.duration,
         loadFromPeer: loadMeasureDetail.loadFromPeer?.duration,
-        transactionParsing: loadMeasureDetail.transactionParsing?.duration,
         devtools: {
           track: sourceId,
           trackGroup: "SubscriptionScopes",
@@ -182,6 +161,12 @@ function extractStartEndMarks(
 
   if (!startMarkEntry || !endMarkEntry) {
     return null;
+  }
+
+  // clean up marks once they are synchronized
+  if (endMarks.length === startMarks.length) {
+    performance.clearMarks(startMark + "." + coId);
+    performance.clearMarks(endMark + "." + coId);
   }
 
   return {
@@ -240,23 +225,6 @@ export function trackSubscriptionLoadSpans(
         performance.timeOrigin +
           loadMeasureDetail.loadFromPeer?.startTime +
           loadMeasureDetail.loadFromPeer?.duration,
-      );
-  }
-  if (loadMeasureDetail.transactionParsing) {
-    tracer
-      .startSpan(
-        "jazz.subscription.first_load.transaction_parsing",
-        {
-          startTime:
-            performance.timeOrigin +
-            loadMeasureDetail.transactionParsing?.startTime,
-        },
-        loadContext,
-      )
-      .end(
-        performance.timeOrigin +
-          loadMeasureDetail.transactionParsing?.startTime +
-          loadMeasureDetail.transactionParsing?.duration,
       );
   }
 

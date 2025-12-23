@@ -7,21 +7,33 @@ import { Heading } from "../ui/heading";
 import { Text } from "../ui/text";
 import { useRouter } from "../router";
 import { jazzMetricReader } from "../utils/instrumentation";
-import { exportMetrics, type PerfMetrics } from "../utils/performances";
+import {
+  exportOTelMetrics,
+  getLoadTimes,
+  type OTelMetrics,
+  type LoadTimeMetric,
+} from "../utils/performances";
 
 export default function Perf() {
-  const [metricsError, setMetricsError] = useState<Error | null>(null);
-  const [metrics, setMetrics] = useState<PerfMetrics | null>(null);
+  const [otelError, setOtelError] = useState<Error | null>(null);
+  const [otelMetrics, setOtelMetrics] = useState<OTelMetrics | null>(null);
+  const [loadTimes, setLoadTimes] = useState<LoadTimeMetric[]>([]);
+  const [loadTimesResetTimestamp, setLoadTimesResetTimestamp] = useState<
+    number | null
+  >(null);
   const { addPages } = useRouter();
 
   useEffect(() => {
     async function fetchMetrics() {
       try {
         const metrics = await jazzMetricReader.collectMetrics();
-        setMetrics(exportMetrics(metrics));
+        setOtelMetrics(exportOTelMetrics(metrics));
+        setOtelError(null);
       } catch (error) {
-        setMetricsError(error as Error);
+        setOtelError(error as Error);
       }
+
+      setLoadTimes(getLoadTimes());
     }
 
     const interval = setInterval(fetchMetrics, 1_000);
@@ -29,15 +41,27 @@ export default function Perf() {
     return () => clearInterval(interval);
   }, []);
 
-  if (metricsError) {
+  const hasAnyData = otelMetrics !== null || loadTimes.length > 0;
+
+  if (!hasAnyData && otelError) {
     return (
       <DashboardContainer>
-        <Text>Error fetching metrics: {metricsError.message}</Text>
+        <Text>
+          Error fetching metrics: {otelError.message}. Check the{" "}
+          <a
+            href="https://jazz.tools/docs/tooling-and-resources/inspector#performance-tab"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            docs
+          </a>
+          .
+        </Text>
       </DashboardContainer>
     );
   }
 
-  if (!metrics) {
+  if (!hasAnyData) {
     return (
       <DashboardContainer>
         <Text>Loading metrics...</Text>
@@ -45,9 +69,7 @@ export default function Perf() {
     );
   }
 
-  const loadTimeColumns: ColumnDef<
-    PerfMetrics["tools"]["loadTimes"][number]
-  >[] = [
+  const loadTimeColumns: ColumnDef<LoadTimeMetric>[] = [
     {
       id: "loadTime",
       header: "Load Time",
@@ -99,7 +121,7 @@ export default function Perf() {
     },
     {
       id: "parent_id",
-      header: "Parent ID",
+      header: "Parent",
       accessor: (row) =>
         row.parent_id ? (
           <ClickableId
@@ -137,31 +159,15 @@ export default function Perf() {
       sortable: false,
     },
     {
-      id: "loadFromStorage",
-      header: "Load From Storage",
-      accessor: (row) => formatTime(row.loadFromStorage ?? 0),
-      sortable: true,
-      sortFn: (a, b) => (a.loadFromStorage ?? 0) - (b.loadFromStorage ?? 0),
-    },
-    {
-      id: "loadFromPeer",
-      header: "Load From Peer",
-      accessor: (row) => formatTime(row.loadFromPeer ?? 0),
-      sortable: true,
-      sortFn: (a, b) => (a.loadFromPeer ?? 0) - (b.loadFromPeer ?? 0),
-    },
-    {
-      id: "transactionParsing",
-      header: "Transaction Parsing",
-      accessor: (row) => formatTime(row.transactionParsing ?? 0),
-      sortable: true,
-      sortFn: (a, b) =>
-        (a.transactionParsing ?? 0) - (b.transactionParsing ?? 0),
+      id: "loadFrom",
+      header: "Loaded from",
+      accessor: (row) => row.loadFrom,
+      sortable: false,
     },
   ];
 
   const subscriptionColumns: ColumnDef<
-    PerfMetrics["tools"]["activeSubscriptions"][number]
+    OTelMetrics["activeSubscriptions"][number]
   >[] = [
     {
       id: "id",
@@ -211,64 +217,100 @@ export default function Perf() {
     },
   ];
 
-  const slowLoadTimesCount = metrics.tools.loadTimes.filter(
+  const filteredLoadTimes = loadTimesResetTimestamp
+    ? loadTimes.filter((lt) => lt.startTime >= loadTimesResetTimestamp)
+    : loadTimes;
+
+  const slowLoadTimesCount = filteredLoadTimes.filter(
     (lt) => lt.loadTime > 200,
   ).length;
 
+  const activeSubscriptions = otelMetrics?.activeSubscriptions ?? [];
+
   return (
     <DashboardContainer>
+      {otelError && (
+        <ErrorBanner>
+          <Text>OTel metrics error: {otelError.message}</Text>
+        </ErrorBanner>
+      )}
+
       <MetricsSummaryRow>
         <MetricsSummaryColumn>
           <SectionHeading>CoValues by State</SectionHeading>
-          <MetricsSummaryItems>
-            <div>{metrics.cojson.available} available</div>
-            <div>{metrics.cojson.loading} loading</div>
-            <div>{metrics.cojson.unknown} unknown</div>
-            <div>{metrics.cojson.unavailable} unavailable</div>
-          </MetricsSummaryItems>
+          {otelMetrics ? (
+            <MetricsSummaryItems>
+              <div>{otelMetrics.cojson.available} available</div>
+              <div>{otelMetrics.cojson.loading} loading</div>
+              <div>{otelMetrics.cojson.unknown} unknown</div>
+              <div>{otelMetrics.cojson.unavailable} unavailable</div>
+            </MetricsSummaryItems>
+          ) : (
+            <Text muted small>
+              Not available
+            </Text>
+          )}
         </MetricsSummaryColumn>
 
         <MetricsSummaryColumn>
           <SectionHeading>Transport Metrics</SectionHeading>
-          <MetricsSummaryItems>
-            <div>
-              <strong>In:</strong> {formatBytes(metrics.transport.ingress)}
-            </div>
-            <div>
-              <strong>Out:</strong> {formatBytes(metrics.transport.egress)}
-            </div>
-          </MetricsSummaryItems>
+          {otelMetrics ? (
+            <MetricsSummaryItems>
+              <div>
+                <strong>In:</strong>{" "}
+                {formatBytes(otelMetrics.transport.ingress)}
+              </div>
+              <div>
+                <strong>Out:</strong>{" "}
+                {formatBytes(otelMetrics.transport.egress)}
+              </div>
+            </MetricsSummaryItems>
+          ) : (
+            <Text muted small>
+              Not available
+            </Text>
+          )}
         </MetricsSummaryColumn>
       </MetricsSummaryRow>
 
-      <Accordion
-        title={`Active Subscriptions (${metrics.tools.activeSubscriptions.length})`}
-        storageKey="perf-active-subscriptions"
-      >
-        {metrics.tools.activeSubscriptions.length === 0 ? (
-          <Text muted>No active subscriptions</Text>
-        ) : (
-          <DataTable
-            columns={subscriptionColumns}
-            data={metrics.tools.activeSubscriptions}
-            pageSize={10}
-            initialSort={{ columnId: "count", direction: "desc" }}
-            getRowKey={(row, index) => `${row.id}-${index}`}
-            emptyMessage="No active subscriptions"
-          />
-        )}
-      </Accordion>
+      {otelError && (
+        <Accordion
+          title={`Active Subscriptions (${activeSubscriptions.length})`}
+          storageKey="perf-active-subscriptions"
+        >
+          {activeSubscriptions.length === 0 ? (
+            <Text muted>No active subscriptions</Text>
+          ) : (
+            <DataTable
+              columns={subscriptionColumns}
+              data={activeSubscriptions}
+              pageSize={10}
+              initialSort={{ columnId: "count", direction: "desc" }}
+              getRowKey={(row, index) => `${row.id}-${index}`}
+              emptyMessage="No active subscriptions"
+            />
+          )}
+        </Accordion>
+      )}
 
       <Accordion
         title={`CoValues load times ${slowLoadTimesCount > 0 ? `(${slowLoadTimesCount} slow)` : ""}`}
         storageKey="perf-load-times"
       >
-        {metrics.tools.loadTimes.length === 0 ? (
+        <AccordionToolbar>
+          <ResetButton
+            onClick={() => setLoadTimesResetTimestamp(Date.now())}
+            title="Reset load times"
+          >
+            Reset
+          </ResetButton>
+        </AccordionToolbar>
+        {filteredLoadTimes.length === 0 ? (
           <Text muted>No load time data available</Text>
         ) : (
           <DataTable
             columns={loadTimeColumns}
-            data={metrics.tools.loadTimes}
+            data={filteredLoadTimes}
             pageSize={10}
             initialSort={{ columnId: "loadTime", direction: "desc" }}
             getRowKey={(row, index) => `${row.id}-${index}`}
@@ -338,5 +380,35 @@ const ClickableId = styled("span")`
 
   &:hover {
     opacity: 0.8;
+  }
+`;
+
+const ErrorBanner = styled("div")`
+  padding: 0.75rem 1rem;
+  background-color: var(--j-error-bg, rgba(239, 68, 68, 0.1));
+  border: 1px solid var(--j-error-border, rgba(239, 68, 68, 0.3));
+  border-radius: 4px;
+  color: var(--j-error-color, #ef4444);
+`;
+
+const AccordionToolbar = styled("div")`
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+`;
+
+const ResetButton = styled("button")`
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+  background-color: var(--j-button-bg, rgba(128, 128, 128, 0.2));
+  border: 1px solid var(--j-button-border, rgba(128, 128, 128, 0.3));
+  border-radius: 4px;
+  color: var(--j-text-color, inherit);
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--j-button-hover-bg, rgba(128, 128, 128, 0.3));
   }
 `;

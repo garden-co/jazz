@@ -5,11 +5,10 @@ export const performanceMarks = {
   loadFromStorageEnd: "cojson.load_from_storage.end",
   loadFromPeerStart: "cojson.load_from_peer.start",
   loadFromPeerEnd: "cojson.load_from_peer.end",
-  transactionParsingStart: "cojson.transaction_parsing.start",
-  transactionParsingEnd: "cojson.transaction_parsing.end",
 } as const;
 
-const performanceMarkAvailable = "mark" in performance;
+const performanceMarkAvailable =
+  "mark" in performance && "getEntriesByName" in performance;
 
 export function trackPerformanceMark(
   mark: keyof typeof performanceMarks,

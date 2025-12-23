@@ -4,8 +4,9 @@ import { useJazzContext } from "jazz-tools/react-core";
 import { Account } from "jazz-tools";
 import { InspectorInApp } from "./in-app.js";
 import { Position } from "./viewer/inspector-button.js";
+import { recordMetrics } from "./utils/instrumentation";
 
-export { recordMetrics, jazzMetricReader } from "./utils/instrumentation";
+export { jazzMetricReader } from "./utils/instrumentation";
 
 export function JazzInspector({ position = "right" }: { position?: Position }) {
   const context = useJazzContext<Account>();
@@ -31,3 +32,4 @@ export function JazzInspector({ position = "right" }: { position?: Position }) {
 }
 
 setup(React.createElement);
+recordMetrics();

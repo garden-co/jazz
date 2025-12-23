@@ -1087,7 +1087,6 @@ export class CoValueCore {
       return;
     }
 
-    trackPerformanceMark("transactionParsingStart", this.id);
     this.loadVerifiedTransactionsFromLogs();
     this.determineValidTransactions();
 
@@ -1105,7 +1104,6 @@ export class CoValueCore {
     for (const transaction of toParseMetaTransactions) {
       this.parseMetaInformation(transaction);
     }
-    trackPerformanceMark("transactionParsingEnd", this.id);
   }
 
   /**

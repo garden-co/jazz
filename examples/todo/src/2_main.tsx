@@ -30,7 +30,6 @@ import {
 } from "./basicComponents/index.ts";
 import { wordlist } from "./wordlist.ts";
 
-recordMetrics();
 /**
  * Walkthrough: The top-level provider `<JazzReactProvider/>`
  *

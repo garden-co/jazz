@@ -91,20 +91,24 @@ Check out the [file share app](https://github.com/garden-co/jazz/blob/main/examp
 
 ## Performance Tab
 
-The Inspector includes a Performance tab that helps you analyze the runtime behavior of your Jazz app. To enable performance recording, you need to call `recordMetrics()` at the start of your application.
+The Inspector includes a Performance tab that helps you analyze the runtime behavior of your Jazz app. The Performance tab uses OpenTelemetry under the hood to collect metrics.
 
-### Enabling performance recording
+Metrics instrumentation is registered automatically if no OpenTelemetry configuration is found.
 
-Import and call `recordMetrics()` before your app renders:
+### Using with your existing OpenTelemetry setup
+
+If you already have OpenTelemetry configured in your frontend, you should add `jazzMetricReader` to your MeterProvider's readers array to enable the Performance tab:
 
 <CodeGroup>
-```tsx index.tsx#RecordMetrics
+```tsx index.tsx#WithOpenTelemetry
 ```
 </CodeGroup>
 
+This allows the Inspector's Performance tab to access the metrics while your existing observability setup continues to work normally.
+
 ### What gets tracked
 
-Once enabled, the Performance tab displays several metrics:
+The Performance tab displays several metrics:
 
 - **Active subscriptions** — The number of CoValue subscriptions currently active in your app
 - **First load time** — How long it takes for a subscription to receive its first data

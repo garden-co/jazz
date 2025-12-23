@@ -11,6 +11,30 @@ type ActiveSubscription = {
   count: number;
 };
 
+export type LoadTimeMetric = {
+  id: string;
+  source_id?: string;
+  parent_id?: string;
+  resolve?: string;
+  loadTime: number;
+  loadFrom: "storage" | "network";
+  startTime: number;
+};
+
+export type OTelMetrics = {
+  transport: {
+    ingress: number;
+    egress: number;
+  };
+  cojson: {
+    available: number;
+    loading: number;
+    unknown: number;
+    unavailable: number;
+  };
+  activeSubscriptions: ActiveSubscription[];
+};
+
 export type PerfMetrics = {
   transport: {
     ingress: number;
@@ -24,16 +48,7 @@ export type PerfMetrics = {
   };
   tools: {
     activeSubscriptions: ActiveSubscription[];
-    loadTimes: {
-      id: string;
-      source_id?: string;
-      parent_id?: string;
-      resolve?: string;
-      loadTime: number;
-      loadFromStorage?: number;
-      loadFromPeer?: number;
-      transactionParsing?: number;
-    }[];
+    loadTimes: LoadTimeMetric[];
   };
 };
 
@@ -80,9 +95,9 @@ export function getActiveSubscriptions(
   return Array.from(subs.values());
 }
 
-export function exportMetrics(
+export function exportOTelMetrics(
   resourceMetrics: ResourceMetrics[],
-): PerfMetrics | null {
+): OTelMetrics | null {
   const scopedMetrics = resourceMetrics.at(0)?.scopeMetrics;
 
   if (!scopedMetrics) {
@@ -145,9 +160,25 @@ export function exportMetrics(
       unknown: unknownCoValues,
       unavailable: unavailableCoValues,
     },
+    activeSubscriptions: getActiveSubscriptions(scopedMetrics),
+  };
+}
+
+export function exportMetrics(
+  resourceMetrics: ResourceMetrics[],
+): PerfMetrics | null {
+  const otelMetrics = exportOTelMetrics(resourceMetrics);
+
+  if (!otelMetrics) {
+    return null;
+  }
+
+  return {
+    transport: otelMetrics.transport,
+    cojson: otelMetrics.cojson,
     tools: {
-      loadTimes: getLoadTimes(scopedMetrics),
-      activeSubscriptions: getActiveSubscriptions(scopedMetrics),
+      loadTimes: getLoadTimes(),
+      activeSubscriptions: otelMetrics.activeSubscriptions,
     },
   };
 }
@@ -185,28 +216,35 @@ function getSumOfCounterMetric(
   }, 0);
 }
 
-export function getLoadTimes(metrics: ScopeMetrics[]) {
-  const scope = "jazz-tools";
-  const name = "jazz.subscription.first_load";
-
-  const dp = metrics
-    .find((sm) => sm.scope.name === scope)
-    ?.metrics.find((m) => m.descriptor.name === name)?.dataPoints as
-    | DataPoint<Histogram>[]
-    | undefined;
-
-  if (!dp) {
+export function getLoadTimes() {
+  if (
+    typeof performance === "undefined" ||
+    !("getEntriesByType" in performance)
+  ) {
     return [];
   }
 
-  return dp.map((dp) => ({
-    id: dp.attributes.id as string,
-    source_id: dp.attributes.source_id as string | undefined,
-    parent_id: dp.attributes.parent_id as string | undefined,
-    resolve: dp.attributes.resolve as string | undefined,
-    loadTime: dp.value.min ?? 0,
-    loadFromStorage: dp.attributes.loadFromStorage as number | undefined,
-    loadFromPeer: dp.attributes.loadFromPeer as number | undefined,
-    transactionParsing: dp.attributes.transactionParsing as number | undefined,
-  }));
+  const measures = performance.getEntriesByType(
+    "measure",
+  ) as PerformanceMeasure[];
+  const loadMeasures = measures.filter((measure) =>
+    measure.name.startsWith("jazz.subscription.first_load."),
+  );
+
+  return loadMeasures.map((measure) => {
+    const detail = (measure as any).detail || {};
+    return {
+      id: detail.id as string,
+      source_id: detail.source_id as string | undefined,
+      parent_id: [detail.parent_id, detail.parent_key]
+        .filter(Boolean)
+        .join("."),
+      resolve: JSON.stringify(detail.resolve as any),
+      loadTime: measure.duration,
+      loadFrom: detail.loadFromStorage
+        ? ("storage" as const)
+        : ("network" as const),
+      startTime: performance.timeOrigin + measure.startTime,
+    };
+  });
 }

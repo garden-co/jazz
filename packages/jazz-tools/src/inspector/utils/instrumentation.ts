@@ -42,10 +42,7 @@ export class JazzOTelMetricReader extends MetricReader {
 
   async collectMetrics() {
     if (!this.initialized) {
-      // TODO: link to documentation
-      throw new Error(
-        "JazzOTelMetricReader not initialized. Have you called recordMetrics?",
-      );
+      throw new Error("JazzOTelMetricReader not initialized.");
     }
 
     await this.collectAndExport();
@@ -71,6 +68,14 @@ export class JazzOTelMetricReader extends MetricReader {
 export const jazzMetricReader = new JazzOTelMetricReader();
 
 export function recordMetrics() {
+  const globalMeterHasBeenSet = !metrics
+    .getMeterProvider()
+    .constructor.name.startsWith("Noop");
+
+  if (globalMeterHasBeenSet) {
+    return;
+  }
+
   const meterProvider = new MeterProvider({
     resource: resourceFromAttributes({
       [ATTR_SERVICE_NAME]: "jazz-tools",

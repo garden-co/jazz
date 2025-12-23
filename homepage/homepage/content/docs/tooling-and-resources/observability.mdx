@@ -98,6 +98,8 @@ To collect metrics, you need to configure an OpenTelemetry `MeterProvider` with 
 ```
 </CodeGroup>
 
+**Tip:** If you're using the [Jazz Inspector](/docs/tooling-and-resources/inspector#performance-tab) in your app, add `jazzMetricReader` from `jazz-tools/inspector` to your MeterProvider's readers array to enable the Performance tab.
+
 ## Setting up tracing
 
 To collect spans, configure a `TracerProvider` with a span processor. Here's an example that logs spans to the console:

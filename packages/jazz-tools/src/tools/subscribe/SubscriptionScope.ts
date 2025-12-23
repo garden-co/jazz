@@ -590,6 +590,8 @@ export class SubscriptionScope<D extends CoValue> {
       const loadMeasureDetail = measureSubscriptionLoad(
         this.id,
         this.sourceId,
+        this.parent,
+        this.parentKey,
         this.resolve,
       );
 
@@ -603,7 +605,6 @@ export class SubscriptionScope<D extends CoValue> {
           resolve: JSON.stringify(this.resolve),
           loadFromStorage: loadMeasureDetail.loadFromStorage?.duration,
           loadFromPeer: loadMeasureDetail.loadFromPeer?.duration,
-          transactionParsing: loadMeasureDetail.transactionParsing?.duration,
         });
 
         trackSubscriptionLoadSpans(this.subscriptionSpan, loadMeasureDetail);
