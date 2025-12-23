@@ -161,6 +161,12 @@ export class HomePage {
       .nth(index)
       .click();
 
+    await this.page
+      .getByRole("button", {
+        name: "Apply changes",
+      })
+      .click();
+
     expect(
       await this.page
         .getByRole("dialog")
