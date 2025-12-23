@@ -66,7 +66,7 @@ test("deleteCoValue throws when called by a non-admin on a group-owned CoValue",
   });
 
   expect(() => mapOnBob.core.deleteCoValue()).toThrow(
-    /Only admins can delete coValues/,
+    /The current account lacks admin permissions to delete this coValue/,
   );
 });
 

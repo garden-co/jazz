@@ -700,8 +700,13 @@ export async function exportCoValue<
     options.unstable_branch,
   );
 
-  await rootNode.getPromise();
-  rootNode.destroy();
+  try {
+    await rootNode.getPromise();
+    rootNode.destroy();
+  } catch (error) {
+    rootNode.destroy();
+    return null;
+  }
 
   const valuesExported = new Set<string>();
   const contentPieces: CojsonInternalTypes.NewContentMessage[] = [];

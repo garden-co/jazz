@@ -642,14 +642,14 @@ describe("StorageApiSync", () => {
         }),
       });
 
+      vi.useFakeTimers();
+
       node.node.enableDeletedCoValuesErasure();
 
       const group = node.node.createGroup();
       const map = group.createMap();
       map.set("k", "v");
       await map.core.waitForSync();
-
-      vi.useFakeTimers();
 
       map.core.deleteCoValue();
       await map.core.waitForSync();
