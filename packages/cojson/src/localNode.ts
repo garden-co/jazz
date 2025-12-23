@@ -395,10 +395,6 @@ export class LocalNode {
     return coValue;
   }
 
-  hasLoadingSources(id: RawCoID) {
-    return this.storage || this.syncManager.getServerPeers(id).length > 0;
-  }
-
   /** @internal */
   async loadCoValueCore(
     id: RawCoID,
