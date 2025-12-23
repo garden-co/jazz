@@ -15,7 +15,6 @@ import { NewContentMessage } from "../sync.js";
  */
 export class LocalTransactionsSyncQueue {
   private batch: NewContentMessage[] = [];
-  private firstChunks = new Map<RawCoID, NewContentMessage>();
   private lastUpdatedValue: VerifiedState | undefined;
   private lastUpdatedValueKnownState: CoValueKnownState | undefined;
 
@@ -78,7 +77,6 @@ export class LocalTransactionsSyncQueue {
 
       this.lastUpdatedValue = undefined;
       this.lastUpdatedValueKnownState = undefined;
-      this.firstChunks = new Map();
       this.batch = [];
       this.nextBatchScheduled = false;
 
