@@ -6,7 +6,7 @@ import {
 } from "react-router-dom";
 import "./index.css";
 
-import { JazzInspector, recordMetrics } from "jazz-tools/inspector";
+import { JazzInspector } from "jazz-tools/inspector";
 import {
   JazzReactProvider,
   PassphraseAuthBasicUI,

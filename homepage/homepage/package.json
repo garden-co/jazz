@@ -67,6 +67,8 @@
     "@biomejs/biome": "catalog:default",
     "@evilmartians/harmony": "^1.4.0",
     "@next/mdx": "^15.3.3",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.208.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.208.0",
     "@opentelemetry/sdk-metrics": "^2.2.0",
     "@opentelemetry/sdk-trace-base": "^2.2.0",
     "@playwright/test": "^1.52.0",
