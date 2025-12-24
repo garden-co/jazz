@@ -1513,7 +1513,7 @@ export class CoValueCore {
     }
   }
 
-  internalLoadFromPeer(peer: PeerState) {
+  private internalLoadFromPeer(peer: PeerState) {
     if (peer.closed && !peer.persistent) {
       this.markNotFoundInPeer(peer.id);
       return;
