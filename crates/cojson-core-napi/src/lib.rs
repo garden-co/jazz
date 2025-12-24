@@ -4,7 +4,6 @@ use cojson_core::core::{
 };
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
 use thiserror::Error;
 
 pub mod hash {
