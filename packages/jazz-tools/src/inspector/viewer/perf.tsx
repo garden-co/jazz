@@ -93,58 +93,32 @@ export default function Perf() {
       ),
       sortable: true,
     },
-    {
-      id: "source_id",
-      header: "Initiator",
-      accessor: (row) =>
-        row.source_id ? (
-          <ClickableId
-            onClick={() =>
-              addPages([
-                {
-                  coId: row.source_id as CoID<RawCoValue>,
-                  name: row.source_id,
-                },
-              ])
-            }
-          >
-            <Text mono small>
-              {row.source_id}
-            </Text>
-          </ClickableId>
-        ) : (
-          <Text muted small>
-            —
-          </Text>
-        ),
-      sortable: true,
-    },
-    {
-      id: "parent_id",
-      header: "Parent",
-      accessor: (row) =>
-        row.parent_id ? (
-          <ClickableId
-            onClick={() =>
-              addPages([
-                {
-                  coId: row.parent_id as CoID<RawCoValue>,
-                  name: row.parent_id,
-                },
-              ])
-            }
-          >
-            <Text mono small>
-              {row.parent_id}
-            </Text>
-          </ClickableId>
-        ) : (
-          <Text muted small>
-            —
-          </Text>
-        ),
-      sortable: true,
-    },
+    // Path is visible only for nested subscriptions, now ignored
+    // {
+    //   id: "source_id",
+    //   header: "Path",
+    //   accessor: (row) => {
+    //     if(row.source_id === row.id || row.source_id === undefined) {
+    //       return <Text mono small>-</Text>;
+    //     }
+
+    //     const elements: React.ReactNode[] = [];
+
+    //     elements.push(<CoID key={row.source_id} id={row.source_id} />);
+    //     const keys = (row.parent_key ?? '').split(".");
+
+    //     keys.forEach((key, index) => {
+    //       if(index === keys.length - 2) {
+    //         elements.push(<>.<CoID key={row.parent_id} id={row.parent_id!} name={key} /></>)
+    //       } else {
+    //         elements.push(`.${key}`)
+    //       }
+    //     })
+
+    //     return <Text mono small>{elements}</Text>;
+    //   },
+    //   sortable: true,
+    // },
     {
       id: "resolve",
       header: "Resolve",
@@ -184,29 +158,6 @@ export default function Perf() {
         </ClickableId>
       ),
       sortable: true,
-    },
-    {
-      id: "sources",
-      header: "Sources",
-      accessor: (row) =>
-        row.sources.map((source) => (
-          <ClickableId
-            key={source}
-            onClick={() =>
-              addPages([
-                {
-                  coId: source as CoID<RawCoValue>,
-                  name: source,
-                },
-              ])
-            }
-          >
-            <Text mono small>
-              {source}
-            </Text>
-          </ClickableId>
-        )),
-      sortable: false,
     },
     {
       id: "count",

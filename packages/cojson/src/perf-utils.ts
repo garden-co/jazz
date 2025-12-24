@@ -13,7 +13,7 @@ const performanceMarkAvailable =
 export function trackPerformanceMark(
   mark: keyof typeof performanceMarks,
   coId: RawCoID,
-  detail?: Record<string, string>,
+  detail?: Record<string, any>,
 ) {
   if (!performanceMarkAvailable) {
     return;

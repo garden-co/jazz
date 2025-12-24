@@ -7,8 +7,8 @@ export const performanceMarks = {
 
 export const performanceMeasures = {
   subscriptionLoad: "jazz.subscription.first_load",
-  subscriptionLoadFromStorage: "jazz.subscription.first_load.from_storage",
-  subscriptionLoadFromPeer: "jazz.subscription.first_load.load_from_peer",
+  subscriptionLoadFromStorage: "jazz.subscription.load_from_storage",
+  subscriptionLoadFromPeer: "jazz.subscription.load_load_from_peer",
 } as const;
 
 const performanceMarkAvailable =
@@ -36,7 +36,7 @@ export interface LoadMeasureDetail {
 
 export function measureSubscriptionLoad(
   coId: string,
-  sourceId: string,
+  sourceId: string | undefined,
   parentId: string | undefined,
   parentKey: string | undefined,
   resolve: any,
@@ -54,26 +54,29 @@ export function measureSubscriptionLoad(
   );
 
   if (loadFromStorage) {
-    loadMeasureDetail.loadFromStorage = performance.measure(
-      performanceMeasures.subscriptionLoadFromStorage + "." + coId,
-      {
-        start: loadFromStorage.start.startTime,
-        end: loadFromStorage.end.startTime,
-        detail: {
-          id: coId,
-          source_id: sourceId,
-          parent_id: parentId,
-          parent_key: parentKey,
-          resolve,
-          devtools: {
-            track: sourceId,
-            trackGroup: "SubscriptionScopes",
-            tooltipText: "Load from storage",
-            color: "secondary",
+    // In case of missed value, we don't want to measure the load from storage
+    if (loadFromStorage.end.detail.found) {
+      loadMeasureDetail.loadFromStorage = performance.measure(
+        performanceMeasures.subscriptionLoadFromStorage + "." + coId,
+        {
+          start: loadFromStorage.start.startTime,
+          end: loadFromStorage.end.startTime,
+          detail: {
+            id: coId,
+            source_id: sourceId,
+            parent_id: parentId,
+            parent_key: parentKey,
+            resolve,
+            // devtools: {
+            //   track: sourceId,
+            //   trackGroup: "SubscriptionScopes",
+            //   tooltipText: "Load from storage",
+            //   color: "secondary",
+            // },
           },
         },
-      },
-    );
+      );
+    }
   }
 
   const loadFromPeer = extractStartEndMarks(
@@ -93,12 +96,12 @@ export function measureSubscriptionLoad(
           parent_id: parentId,
           parent_key: parentKey,
           resolve,
-          devtools: {
-            track: sourceId,
-            trackGroup: "SubscriptionScopes",
-            tooltipText: "Internal load from peer",
-            color: "secondary",
-          },
+          // devtools: {
+          //   track: sourceId,
+          //   trackGroup: "SubscriptionScopes",
+          //   tooltipText: "Internal load from peer",
+          //   color: "secondary",
+          // },
         },
       },
     );
@@ -127,12 +130,15 @@ export function measureSubscriptionLoad(
         resolve,
         loadFromStorage: loadMeasureDetail.loadFromStorage?.duration,
         loadFromPeer: loadMeasureDetail.loadFromPeer?.duration,
-        devtools: {
-          track: sourceId,
-          trackGroup: "SubscriptionScopes",
-          tooltipText: "First load time",
-          color: "primary",
-        },
+        // Show in devtools only top-level subscriptions
+        devtools: parentId
+          ? undefined
+          : {
+              track: sourceId,
+              trackGroup: "SubscriptionScopes",
+              tooltipText: "First load time",
+              color: "primary",
+            },
       },
     },
   );
@@ -147,7 +153,7 @@ function extractStartEndMarks(
   startMark: string,
   endMark: string,
   coId: string,
-): { start: PerformanceEntry; end: PerformanceEntry } | null {
+): { start: PerformanceMark; end: PerformanceMark } | null {
   const endMarks = performance.getEntriesByName(endMark + "." + coId, "mark");
   const startMarks = performance.getEntriesByName(
     startMark + "." + coId,
@@ -169,7 +175,7 @@ function extractStartEndMarks(
   }
 
   return {
-    start: startMarkEntry,
-    end: endMarkEntry,
+    start: startMarkEntry as PerformanceMark,
+    end: endMarkEntry as PerformanceMark,
   };
 }

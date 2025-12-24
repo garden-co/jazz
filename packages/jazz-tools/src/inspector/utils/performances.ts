@@ -15,6 +15,7 @@ export type LoadTimeMetric = {
   id: string;
   source_id?: string;
   parent_id?: string;
+  parent_key?: string;
   resolve?: string;
   loadTime: number;
   loadFrom: "storage" | "network";
@@ -78,6 +79,11 @@ export function getActiveSubscriptions(
     const id = dp.attributes.id as string;
     const source_id = dp.attributes.source_id as string | undefined;
     const value = dp.value;
+
+    // In the inspector, we only want to count the top-level subscriptions
+    if (source_id !== undefined) {
+      continue;
+    }
 
     let sub = subs.get(id);
     if (!sub) {
@@ -216,7 +222,7 @@ function getSumOfCounterMetric(
   }, 0);
 }
 
-export function getLoadTimes() {
+export function getLoadTimes(): LoadTimeMetric[] {
   if (
     typeof performance === "undefined" ||
     !("getEntriesByType" in performance)
@@ -231,20 +237,21 @@ export function getLoadTimes() {
     measure.name.startsWith("jazz.subscription.first_load."),
   );
 
-  return loadMeasures.map((measure) => {
-    const detail = (measure as any).detail || {};
-    return {
-      id: detail.id as string,
-      source_id: detail.source_id as string | undefined,
-      parent_id: [detail.parent_id, detail.parent_key]
-        .filter(Boolean)
-        .join("."),
-      resolve: JSON.stringify(detail.resolve as any),
-      loadTime: measure.duration,
-      loadFrom: detail.loadFromStorage
-        ? ("storage" as const)
-        : ("network" as const),
-      startTime: performance.timeOrigin + measure.startTime,
-    };
-  });
+  return loadMeasures
+    .filter((measure) => !measure.detail?.parent_id)
+    .map((measure) => {
+      const detail = measure.detail || {};
+      return {
+        id: detail.id as string,
+        source_id: detail.source_id as string | undefined,
+        parent_id: detail.parent_id,
+        parent_key: detail.parent_key,
+        resolve: JSON.stringify(detail.resolve as any),
+        loadTime: measure.duration,
+        loadFrom: detail.loadFromStorage
+          ? ("storage" as const)
+          : ("network" as const),
+        startTime: performance.timeOrigin + measure.startTime,
+      };
+    });
 }

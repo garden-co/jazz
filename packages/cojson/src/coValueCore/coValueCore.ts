@@ -1487,7 +1487,7 @@ export class CoValueCore {
         node.syncManager.handleNewContent(data, "storage");
       },
       (found) => {
-        trackPerformanceMark("loadFromStorageEnd", this.id);
+        trackPerformanceMark("loadFromStorageEnd", this.id, { found });
         done?.(found);
 
         if (!found) {

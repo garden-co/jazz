@@ -86,7 +86,6 @@ export class SubscriptionScope<D extends CoValue> {
   constructionTime = performance.now();
 
   private firstLoadRecorded = false;
-  private readonly sourceId: ID<D>;
 
   private activeSubCounter: UpDownCounter = metrics
     .getMeter("jazz-tools")
@@ -125,7 +124,7 @@ export class SubscriptionScope<D extends CoValue> {
     public bestEffortResolution = false,
     public unstable_branch?: BranchDefinition,
     callerStack?: Error | undefined,
-    sourceId?: ID<D>,
+    private readonly sourceId?: ID<D>,
     private readonly parent?: ID<D>,
     private readonly parentKey?: string,
   ) {
@@ -133,7 +132,6 @@ export class SubscriptionScope<D extends CoValue> {
     this.callerStack = callerStack;
     this.resolve = resolve;
     this.value = { type: CoValueLoadingState.LOADING, id };
-    this.sourceId = sourceId ?? id;
 
     let lastUpdate:
       | RawCoValue
@@ -776,7 +774,7 @@ export class SubscriptionScope<D extends CoValue> {
       this.bestEffortResolution,
       this.unstable_branch,
       undefined,
-      this.sourceId,
+      this.sourceId ?? this.id,
       this.id,
       "direct-by-id",
     );
@@ -1050,9 +1048,9 @@ export class SubscriptionScope<D extends CoValue> {
       this.bestEffortResolution,
       this.unstable_branch,
       undefined,
-      this.sourceId,
+      this.sourceId ?? this.id,
       this.id,
-      key,
+      this.parentKey ? `${this.parentKey}.${key}` : key,
     );
     this.childNodes.set(id, child);
     child.setListener((value) => this.handleChildUpdate(id, value, key));
