@@ -9,6 +9,7 @@ type ActiveSubscription = {
   id: string;
   sources: string[];
   count: number;
+  resolve?: string;
 };
 
 export type LoadTimeMetric = {
@@ -85,10 +86,17 @@ export function getActiveSubscriptions(
       continue;
     }
 
-    let sub = subs.get(id);
+    const key = `${id}-${dp.attributes.resolve}`;
+
+    let sub = subs.get(key);
     if (!sub) {
-      sub = { id, sources: [], count: 0 };
-      subs.set(id, sub);
+      sub = {
+        id,
+        sources: [],
+        count: 0,
+        resolve: dp.attributes.resolve as string,
+      };
+      subs.set(key, sub);
     }
 
     if (source_id) {

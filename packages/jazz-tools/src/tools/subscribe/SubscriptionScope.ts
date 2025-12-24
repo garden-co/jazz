@@ -157,6 +157,7 @@ export class SubscriptionScope<D extends CoValue> {
       // It increments/decrements counters comparing the attributes
       id: this.id,
       source_id: this.sourceId,
+      resolve: JSON.stringify(this.resolve),
     });
     this.subscription = new CoValueCoreSubscription(
       node,
@@ -1082,6 +1083,7 @@ export class SubscriptionScope<D extends CoValue> {
     this.activeSubCounter.add(-1, {
       id: this.id,
       source_id: this.sourceId,
+      resolve: JSON.stringify(this.resolve),
     });
   }
 }

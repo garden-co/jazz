@@ -160,6 +160,14 @@ export default function Perf() {
       sortable: true,
     },
     {
+      id: "resolve",
+      header: "Resolve",
+      accessor: (row) => (
+        <Text small>{row.resolve === "true" ? "" : row.resolve}</Text>
+      ),
+      sortable: false,
+    },
+    {
       id: "count",
       header: "Count",
       accessor: (row) => <Text small>{row.count}</Text>,
