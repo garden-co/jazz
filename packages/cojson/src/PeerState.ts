@@ -114,7 +114,7 @@ export class PeerState {
     this.triggerUpdate(id, knownState);
   }
 
-  listeners = new Set<(id: RawCoID, value: PeerKnownState) => void>();
+  private listeners = new Set<(id: RawCoID, value: PeerKnownState) => void>();
 
   private triggerUpdate(id: RawCoID, value: PeerKnownState) {
     for (const listener of this.listeners) {
