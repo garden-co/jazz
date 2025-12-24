@@ -7,7 +7,7 @@ use salsa20::{
     XSalsa20,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{value::RawValue, Number, Value as JsonValue};
+use serde_json::{Number, Value as JsonValue};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionID(pub String);

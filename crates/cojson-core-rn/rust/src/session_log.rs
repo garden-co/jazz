@@ -3,7 +3,6 @@ use cojson_core::core::{
     SignerSecret, Transaction, TransactionMode,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
 use thiserror::Error;
 
 #[derive(Error, Debug, uniffi::Error)]
