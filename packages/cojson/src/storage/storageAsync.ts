@@ -17,6 +17,7 @@ import {
   setSessionCounter,
 } from "../knownState.js";
 import { StorageKnownState } from "./knownState.js";
+import { DeletedCoValuesEraserScheduler } from "./DeletedCoValuesEraserScheduler.js";
 import {
   collectNewTxs,
   getDependedOnCoValues,
@@ -35,6 +36,9 @@ export class StorageApiAsync implements StorageAPI {
   private readonly dbClient: DBClientInterfaceAsync;
 
   private loadedCoValues = new Set<RawCoID>();
+  private deletedCoValuesEraserScheduler:
+    | DeletedCoValuesEraserScheduler
+    | undefined;
 
   constructor(dbClient: DBClientInterfaceAsync) {
     this.dbClient = dbClient;
@@ -216,6 +220,17 @@ export class StorageApiAsync implements StorageAPI {
     });
   }
 
+  async eraseAllDeletedCoValues(): Promise<void> {
+    const ids = await this.dbClient.getAllCoValuesWaitingForDelete();
+
+    for (const id of ids) {
+      await this.dbClient.transaction(async (tx) => {
+        await tx.eraseCoValueButKeepTombstone(id);
+        await tx.markCoValueDeletionDone(id);
+      });
+    }
+  }
+
   /**
    * This function is called when the storage lacks the information required to store the incoming content.
    *
@@ -388,11 +403,44 @@ export class StorageApiAsync implements StorageAPI {
     return newLastIdx;
   }
 
+  markCoValueAsDeleted(id: RawCoID) {
+    this.dbClient.markCoValueAsDeleted(id).catch((error) => {
+      logger.error("Error marking coValue as deleted", {
+        error,
+        id,
+      });
+    });
+
+    if (this.deletedCoValuesEraserScheduler) {
+      this.deletedCoValuesEraserScheduler.onEnqueueDeletedCoValue();
+    }
+  }
+
+  enableDeletedCoValuesErasure() {
+    if (this.deletedCoValuesEraserScheduler) return;
+
+    this.deletedCoValuesEraserScheduler = new DeletedCoValuesEraserScheduler({
+      runOnce: async () => {
+        // Async storage: no max-time budgeting; drain to completion when scheduled.
+        await this.eraseAllDeletedCoValues();
+        const remaining = await this.dbClient.getAllCoValuesWaitingForDelete();
+        return { hasMore: remaining.length > 0 };
+      },
+      opts: {
+        throttleMs: 60_000,
+        startupDelayMs: 1_000,
+        followUpDelayMs: 1_000,
+      },
+    });
+    this.deletedCoValuesEraserScheduler.scheduleStartupDrain();
+  }
+
   waitForSync(id: string, coValue: CoValueCore) {
     return this.knownStates.waitForSync(id, coValue);
   }
 
   close() {
+    this.deletedCoValuesEraserScheduler?.dispose();
     return this.storeQueue.close();
   }
 }

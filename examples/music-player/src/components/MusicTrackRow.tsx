@@ -6,7 +6,7 @@ import {
 } from "@/1_schema";
 import {
   addTrackToPlaylist,
-  removeTrackFromAllPlaylists,
+  deleteMusicTrack,
   removeTrackFromPlaylist,
 } from "@/4_actions";
 import {
@@ -64,7 +64,7 @@ export function MusicTrackRow({
   }
 
   function deleteTrack() {
-    removeTrackFromAllPlaylists(track);
+    deleteMusicTrack(track);
   }
 
   function handleEdit() {
