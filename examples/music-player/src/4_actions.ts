@@ -108,7 +108,7 @@ export async function removeTrackFromPlaylist(
   track.$jazz.owner.removeMember(playlist.$jazz.owner);
 }
 
-export async function removeTrackFromAllPlaylists(track: MusicTrack) {
+export async function deleteMusicTrack(track: MusicTrack) {
   const me = await MusicaAccount.getMe().$jazz.ensureLoaded({
     resolve: {
       root: {
