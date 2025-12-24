@@ -332,7 +332,7 @@ export class SubscriptionScope<D extends CoValue> {
 
   private lastPromise: PromiseWithStatus<D> | undefined;
 
-  private getPromise() {
+  getPromise() {
     const currentValue = this.getCurrentValue();
 
     if (currentValue.$isLoaded) {
