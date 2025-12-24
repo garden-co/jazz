@@ -1,4 +1,12 @@
-import { LocalNode, RawCoValue } from "cojson";
+import {
+  type UpDownCounter,
+  ValueType,
+  metrics,
+  trace,
+  type Histogram,
+  type Span,
+} from "@opentelemetry/api";
+import type { LocalNode, RawCoValue } from "cojson";
 import {
   CoFeed,
   CoList,
@@ -34,6 +42,15 @@ import {
   rejectedPromise,
   resolvedPromise,
 } from "./utils.js";
+import {
+  measureSubscriptionLoad,
+  trackPerformanceMark,
+} from "../lib/perf-utils.js";
+import {
+  isOpenTelemetryInstrumentationEnabled,
+  recordLoadTimeToOTelMetric,
+  recordLoadTimeToOTelSpan,
+} from "../lib/instrumentation.js";
 
 export class SubscriptionScope<D extends CoValue> {
   childNodes = new Map<string, SubscriptionScope<CoValue>>();
@@ -65,6 +82,28 @@ export class SubscriptionScope<D extends CoValue> {
   private migrated = false;
   private migrating = false;
   closed = false;
+  constructionTime = performance.now();
+
+  private firstLoadRecorded = false;
+
+  private activeSubCounter: UpDownCounter = metrics
+    .getMeter("jazz-tools")
+    .createUpDownCounter("jazz.subscription.active", {
+      description: "The number of active subscriptions",
+      unit: "covalue",
+      valueType: ValueType.INT,
+    });
+
+  private firstLoadMetric: Histogram = metrics
+    .getMeter("jazz-tools")
+    .createHistogram("jazz.subscription.first_load", {
+      description:
+        "Time elapsed between SubscriptionScope construction and first TriggerUpdate",
+      unit: "ms",
+      valueType: ValueType.DOUBLE,
+    });
+
+  public readonly subscriptionSpan: Span | undefined;
 
   private silenceUpdates = false;
 
@@ -84,6 +123,9 @@ export class SubscriptionScope<D extends CoValue> {
     public bestEffortResolution = false,
     public unstable_branch?: BranchDefinition,
     callerStack?: Error | undefined,
+    private readonly sourceId?: ID<D>,
+    private readonly parent?: ID<D>,
+    private readonly parentKey?: string,
   ) {
     // Use caller stack if provided, otherwise capture here (less useful but better than nothing)
     this.callerStack = callerStack;
@@ -95,6 +137,27 @@ export class SubscriptionScope<D extends CoValue> {
       | typeof CoValueLoadingState.UNAVAILABLE
       | undefined;
 
+    trackPerformanceMark("subscriptionLoadStart", id);
+
+    if (isOpenTelemetryInstrumentationEnabled())
+      this.subscriptionSpan = trace
+        .getTracer("jazz-tools")
+        .startSpan("jazz.subscription", {
+          attributes: {
+            id: this.id,
+            parent_id: this.parent,
+            parent_key: this.parentKey,
+            source_id: this.sourceId,
+            resolve: JSON.stringify(this.resolve),
+          },
+        });
+
+    this.activeSubCounter.add(1, {
+      // It increments/decrements counters comparing the attributes
+      id: this.id,
+      source_id: this.sourceId,
+      resolve: JSON.stringify(this.resolve),
+    });
     this.subscription = new CoValueCoreSubscription(
       node,
       id,
@@ -526,6 +589,32 @@ export class SubscriptionScope<D extends CoValue> {
       this.subscribers.forEach((listener) => listener(value));
     }
 
+    if (!this.firstLoadRecorded) {
+      trackPerformanceMark("subscriptionLoadEnd", this.id);
+
+      const loadMeasureDetail = measureSubscriptionLoad(
+        this.id,
+        this.sourceId,
+        this.parent,
+        this.parentKey,
+        this.resolve,
+      );
+
+      if (loadMeasureDetail) {
+        recordLoadTimeToOTelMetric(
+          this.firstLoadMetric,
+          loadMeasureDetail,
+          this.id,
+          !!error,
+        );
+        if (this.subscriptionSpan) {
+          recordLoadTimeToOTelSpan(this.subscriptionSpan, loadMeasureDetail);
+        }
+      }
+
+      this.firstLoadRecorded = true;
+    }
+
     this.dirty = false;
   }
 
@@ -686,6 +775,10 @@ export class SubscriptionScope<D extends CoValue> {
       this.skipRetry,
       this.bestEffortResolution,
       this.unstable_branch,
+      undefined,
+      this.sourceId ?? this.id,
+      this.id,
+      "direct-by-id",
     );
     this.childNodes.set(id, child);
     child.setListener((value) => this.handleChildUpdate(id, value));
@@ -707,6 +800,22 @@ export class SubscriptionScope<D extends CoValue> {
     if (this.value.type !== CoValueLoadingState.LOADED) {
       return false;
     }
+
+    // performance.measure(
+    //   (this.parentKey ? this.parentKey + "-" : "") + this.id + "-" + "self",
+    //   {
+    //     start: this.constructionTime,
+    //     detail: {
+    //       id: this.id,
+    //       resolve: this.resolve,
+    //       devtools: {
+    //         track: this.sourceId,
+    //         trackGroup: "SubscriptionScopes",
+    //         color: "secondary",
+    //       },
+    //     },
+    //   },
+    // );
 
     const value = this.value.value;
 
@@ -948,6 +1057,10 @@ export class SubscriptionScope<D extends CoValue> {
       this.skipRetry,
       this.bestEffortResolution,
       this.unstable_branch,
+      undefined,
+      this.sourceId ?? this.id,
+      this.id,
+      this.parentKey ? `${this.parentKey}.${key}` : key,
     );
     this.childNodes.set(id, child);
     child.setListener((value) => this.handleChildUpdate(id, value, key));
@@ -974,6 +1087,13 @@ export class SubscriptionScope<D extends CoValue> {
     // Clear subscriber change callbacks to prevent memory leaks
     this.subscriberChangeCallbacks.clear();
     this.childNodes.forEach((child) => child.destroy());
+
+    this.subscriptionSpan?.end();
+    this.activeSubCounter.add(-1, {
+      id: this.id,
+      source_id: this.sourceId,
+      resolve: JSON.stringify(this.resolve),
+    });
   }
 }
 

@@ -1,4 +1,4 @@
-import { UpDownCounter, ValueType, metrics } from "@opentelemetry/api";
+import { type UpDownCounter, ValueType, metrics } from "@opentelemetry/api";
 import type { PeerState } from "../PeerState.js";
 import type { RawCoValue } from "../coValue.js";
 import type { ControlledAccountOrAgent } from "../coValues/account.js";
@@ -50,6 +50,7 @@ import {
   KnownStateSessions,
 } from "../knownState.js";
 import { safeParseJSON } from "../jsonStringify.js";
+import { trackPerformanceMark } from "../perf-utils.js";
 
 export function idforHeader(
   header: CoValueHeader,
@@ -1091,6 +1092,7 @@ export class CoValueCore {
     if (!this.isAvailable()) {
       return;
     }
+
     this.loadVerifiedTransactionsFromLogs();
     this.determineValidTransactions();
 
@@ -1483,12 +1485,15 @@ export class CoValueCore {
     }
 
     this.markPending("storage");
+
+    trackPerformanceMark("loadFromStorageStart", this.id);
     node.storage.load(
       this.id,
       (data) => {
         node.syncManager.handleNewContent(data, "storage");
       },
       (found) => {
+        trackPerformanceMark("loadFromStorageEnd", this.id, { found });
         done?.(found);
 
         if (!found) {
@@ -1546,6 +1551,10 @@ export class CoValueCore {
       ? undefined
       : peer.addCloseListener(markNotFound);
 
+    trackPerformanceMark("loadFromPeerStart", this.id, {
+      peerID: peer.id,
+    });
+
     this.subscribe((state, unsubscribe) => {
       const peerState = state.getLoadingStateForPeer(peer.id);
       if (
@@ -1554,6 +1563,9 @@ export class CoValueCore {
         peerState === "errored" ||
         peerState === "unavailable"
       ) {
+        trackPerformanceMark("loadFromPeerEnd", this.id, {
+          peerID: peer.id,
+        });
         unsubscribe();
         removeCloseListener?.();
         clearTimeout(timeout);
