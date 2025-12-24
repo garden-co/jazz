@@ -71,6 +71,21 @@ deleteCoValue() {
 }
 ```
 
+### 1.1 High-level delete helper in `jazz-tools`: `deleteCoValues(...)`
+
+**Location**: `packages/jazz-tools/src/tools/coValues/interfaces.ts`
+
+`jazz-tools` exposes an **application-facing helper** `deleteCoValues(cls, id, { resolve?, loadAs? })` that deletes a *group/graph* of coValues starting at a root coValue ID:
+
+- It loads the root coValue with a `SubscriptionScope` (optionally with `resolve`) so nested referenced coValues are available in the subscription tree.
+- It validates delete permissions across the loaded subscription tree (via `core.validateDeletePermissions()`), and **fails fast** if any loaded node is not deletable.
+  - Validation errors are aggregated into a single thrown error (constructed from a `JazzError`) that can include multiple issues and their paths in the resolved tree.
+- It then calls the lower-level `coValue.$jazz.raw.core.deleteCoValue()` on each loaded coValue in that tree.
+- If `core.deleteCoValue()` throws for a specific coValue during this phase, the current implementation treats it as **best-effort**: it logs `console.error("Failed to delete coValue", error)` and continues deleting the rest of the tree.
+- Finally it `waitForSync()` on each deleted core so the delete tombstones are propagated.
+
+This helper is **built on top of** the deletion mechanics in this design (delete-marker transaction + `_deleted` session + sync blocking). It does not change the wire protocol; it is a convenience API that orchestrates deletion across a resolved set of coValues.
+
 ### 2. Delete Transaction Creation
 
 **Location**: `packages/cojson/src/coValueCore/coValueCore.ts` - `makeTransaction()`
@@ -832,6 +847,11 @@ This state is treated like other terminal loading error states (`"unavailable"`,
    - If non-admin tries to call `deleteCoValue()`
    - **Handling**: Throw error immediately before creating transaction
    - **Test**: Attempt delete as non-admin, verify error thrown
+
+2.1 **Delete helper (`deleteCoValues`) encounters non-deletable values in the resolved tree**:
+   - If the root (or any resolved referenced coValue) cannot be deleted (e.g. not admin, not owned by a group, or Group/Account)
+   - **Handling**: `deleteCoValues(...)` rejects before issuing deletes by collecting `core.validateDeletePermissions()` results into a single aggregated error (via `JazzError`, including per-node paths)
+   - **Test**: Attempt `deleteCoValues` on a tree containing a non-deletable coValue, verify it errors and does not partially delete
 
 3. **Invalid Delete Transaction**:
    - If delete transaction from non-admin is received

@@ -24,6 +24,22 @@ This specification defines the requirements for a data deletion flow that allows
 - AND if the account is not an admin, the operation throws an error
 - AND if the account is an admin and the coValue is not an account or group, the delete operation proceeds
 
+### US-1.1: High-level Delete Helper (`jazz-tools`)
+
+**As a** developer  
+**I want to** delete a coValue and its resolved referenced coValues using a single helper  
+**So that** applications can reliably delete a coValue “tree” without manually iterating dependencies
+
+**Acceptance Criteria:**
+- WHEN code calls `deleteCoValues(cls, id, { resolve?, loadAs? })` (in `packages/jazz-tools/src/tools/coValues/interfaces.ts`)
+- THEN it loads the root coValue and (optionally) resolves nested references according to `resolve`
+- AND it validates delete permissions for every loaded coValue in the resolved subscription tree (e.g. via `core.validateDeletePermissions()`)
+- AND if any loaded coValue is not deletable (including Account/Group), the operation rejects **before issuing deletes**
+- AND the rejection is an aggregated error that can report multiple permission issues (including their paths in the resolved tree)
+- AND if all loaded coValues are deletable, the helper calls `coValue.$jazz.raw.core.deleteCoValue()` for each loaded coValue in the tree
+- AND if deletion throws for an individual coValue during this phase, the current behavior is best-effort: it logs the error and continues deleting the rest
+- AND the helper waits for the delete tombstones to sync (e.g. via `waitForSync()` on each deleted coValue)
+
 ### US-2: Delete Transaction Creation
 
 **As a** system  
