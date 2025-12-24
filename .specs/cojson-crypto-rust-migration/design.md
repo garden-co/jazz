@@ -5,8 +5,9 @@ This feature removes TypeScript-side canonicalization (`stableStringify`) from t
 Key goals:
 
 - Preserve the current TypeScript API surface and string formats (`signerSecret_z…`, `signature_z…`, `encrypted_U…`, `sealed_U…`, `hash_z…`, `shortHash_z…`).
-- Preserve backwards compatibility for signatures, sealed payloads, encrypted payloads, and hashes by matching `stableStringify` semantics in Rust.
+- Preserve backwards compatibility for signatures, sealed payloads, encrypted payloads, and hashes by matching legacy `stableStringify` semantics **via Rust-owned structure serialization**.
 - Do **not** change random number generation behavior (US7).
+- Keep high performance across an **incremental** JS↔Rust migration by minimizing boundary conversions and enabling Rust-backed reuse of parsed structures (US8, US9).
 
 Non-goals:
 
@@ -47,6 +48,69 @@ Where:
 - `SealNonceMaterial` and other nonce materials are *typed* records/structs.
 Determinism is obtained by `serde` serialization of these concrete Rust types (including deterministic map types where relevant).
 
+#### Example (realistic): seal a read key using typed nonce material (WASM/N-API shape)
+
+Rust (exported by `cojson-core-wasm` / `cojson-core-napi`):
+
+```rust
+// Minimal handle objects (stored in Rust; getters/setters exposed by binding layer).
+pub struct KeySecretHandle {
+    pub value: String, // "keySecret_z..."
+}
+
+pub struct SealNonceHandle {
+    pub in_co_id: String,  // "co_z..."
+    pub session_id: String, // "..._session_z..."
+    pub tx_index: u32,
+}
+
+// Exported function that consumes handles and calls existing crypto::seal::seal
+pub fn seal_key_secret_from_handles(
+    secret: &KeySecretHandle,
+    from_sealer_secret: &str, // "sealerSecret_z..."
+    to_sealer_id: &str,       // "sealer_z..."
+    nonce: &SealNonceHandle,
+) -> String {
+    // Typed nonce -> deterministic bytes (serde)
+    let nonce_json = serde_json::json!({
+        "in": nonce.in_co_id,
+        "tx": { "sessionID": nonce.session_id, "txIndex": nonce.tx_index }
+    });
+    let nonce_bytes = serde_json::to_vec(&nonce_json).unwrap();
+
+    let sealed = crate::crypto::seal::seal(secret.value.as_bytes(), from_sealer_secret, to_sealer_id, &nonce_bytes).unwrap();
+    format!("sealed_U{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&*sealed))
+}
+```
+
+TypeScript consumer (short-hand getters/setters + passing handles back into Rust):
+
+```ts
+import {
+  KeySecretHandle,
+  SealNonceHandle,
+  sealKeySecretFromHandles,
+} from "cojson-core-wasm"; // or "cojson-core-napi"
+
+const readKey = new KeySecretHandle("keySecret_z...");
+const nonce = new SealNonceHandle("co_zGROUP...", "co_zGROUP..._session_z...", 0);
+
+// shorthand mutation via setters (Rust owns the fields)
+nonce.inCoId = "co_zGROUP...";
+nonce.txIndex = 1;
+
+// pass handles back into Rust crypto
+const sealed = sealKeySecretFromHandles(
+  readKey,
+  "sealerSecret_zSENDER...",
+  "sealer_zRECIPIENT...",
+  nonce,
+);
+
+// store `sealed_U...` exactly like current `cojson` does
+group.set(`${readKeyId}_for_${agentId}`, sealed, "trusting");
+```
+
 ### 3) Bindings: WASM / N-API / RN expose Rust-backed data structures (getters/setters)
 
 Bindings should expose the Rust data models as **first-class objects** to JavaScript/TypeScript, so that:
@@ -58,11 +122,28 @@ Bindings should expose the Rust data models as **first-class objects** to JavaSc
 Implementation model:
 
 - JS holds an opaque handle to a Rust object (WASM class / N-API class / UniFFI object).
-- The Rust object internally stores the typed model (e.g. `CoValueHeader`, `SealNonceMaterial`, `CanonicalValue`, etc.).
+- The Rust object internally stores the typed model (e.g. `CoValueHeader`, `SealNonceMaterial`, `KeyWrapNonceMaterial`, etc.).
 - Rust provides:
   - **getters** for reading fields
   - **setters** for mutation (where mutation is allowed by the domain model)
   - operation methods (sign/hash/seal/encrypt/…)
+
+#### Example (realistic): handle reuse across multiple Rust calls
+
+```ts
+import { CoValueHeaderHandle, shortHashHeader } from "cojson-core-wasm";
+
+// Create once (Rust owns structure)
+const header = new CoValueHeaderHandle();
+header.type = "group";
+header.ruleset = { /* ... */ };
+header.uniqueness = "zABC...";
+
+// Reuse without re-parsing:
+const h1 = shortHashHeader(header);   // pass handle into Rust
+header.type = "account";             // mutate in Rust via setter
+const h2 = shortHashHeader(header);   // pass same handle again
+```
 
 Platform notes:
 
@@ -73,6 +154,13 @@ Platform notes:
 Performance note (optional optimization):
 
 - We may keep a parallel JS representation for hot-path convenience (dual JS+Rust mirrors), but the **source of truth** must be the Rust structure and all updates must be applied in Rust (the JS mirror, if present, is a cache).
+
+### Incremental migration strategy (performance-oriented)
+
+To keep performance high while migrating step-by-step:
+
+- Prefer **Rust handles** for repeated operations (e.g. header hashing, nonce reuse) to avoid repeated JS→Rust conversions.
+- Avoid intermediate JSON strings and avoid JS re-serialization in hot paths; conversions occur once at the boundary.
 
 ### 4) TypeScript providers call structured Rust entrypoints (no `stableStringify`)
 
