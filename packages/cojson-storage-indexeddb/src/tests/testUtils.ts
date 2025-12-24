@@ -1,6 +1,8 @@
-import type { RawCoID, SyncMessage } from "cojson";
-import { StorageApiAsync } from "cojson";
+import type { RawCoID, SessionID, StorageAPI, SyncMessage } from "cojson";
+import { StorageApiAsync, cojsonInternals } from "cojson";
 import { onTestFinished } from "vitest";
+
+const { knownStateFromContent } = cojsonInternals;
 
 export function trackMessages() {
   const messages: {
@@ -84,6 +86,32 @@ export function trackMessages() {
     restore,
     clear,
   };
+}
+
+export function getAllCoValuesWaitingForDelete(
+  storage: StorageAPI,
+): Promise<RawCoID[]> {
+  // @ts-expect-error - dbClient is private
+  return storage.dbClient.getAllCoValuesWaitingForDelete();
+}
+
+export async function getCoValueStoredSessions(
+  storage: StorageAPI,
+  id: RawCoID,
+): Promise<SessionID[]> {
+  return new Promise<SessionID[]>((resolve) => {
+    storage.load(
+      id,
+      (content) => {
+        if (content.id === id) {
+          resolve(
+            Object.keys(knownStateFromContent(content).sessions) as SessionID[],
+          );
+        }
+      },
+      () => {},
+    );
+  });
 }
 
 export function waitFor(

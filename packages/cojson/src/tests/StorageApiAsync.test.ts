@@ -2,7 +2,12 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { CoID, RawCoMap, logger } from "../exports.js";
 import { CoValueCore } from "../exports.js";
 import { NewContentMessage } from "../sync.js";
-import { createAsyncStorage, getDbPath } from "./testStorage.js";
+import {
+  createAsyncStorage,
+  getAllCoValuesWaitingForDelete,
+  getCoValueStoredSessions,
+  getDbPath,
+} from "./testStorage.js";
 import {
   SyncMessagesLog,
   loadCoValueOrFail,
@@ -10,7 +15,6 @@ import {
   waitFor,
 } from "./testUtils.js";
 import { CoValueKnownState, emptyKnownState } from "../knownState.js";
-import { isDeletedSessionID } from "../ids.js";
 
 /**
  * Helper function that gets new content since a known state, throwing if:
@@ -759,8 +763,7 @@ describe("StorageApiAsync", () => {
       storage.markCoValueAsDeleted(id);
 
       await waitFor(async () => {
-        // @ts-expect-error - dbClient is private
-        const queued = await storage.dbClient.getAllCoValuesWaitingForDelete();
+        const queued = await getAllCoValuesWaitingForDelete(storage);
         expect(queued).toContain(id);
         return true;
       });
@@ -788,10 +791,7 @@ describe("StorageApiAsync", () => {
 
       await vi.runAllTimersAsync();
 
-      // @ts-expect-error - dbClient is private
-      expect(await storage.dbClient.getAllCoValuesWaitingForDelete()).toContain(
-        map.id,
-      );
+      expect(await getAllCoValuesWaitingForDelete(storage)).toContain(map.id);
     });
 
     test("background erasure runs if enabled", async () => {
@@ -817,10 +817,14 @@ describe("StorageApiAsync", () => {
 
       await vi.runAllTimersAsync();
 
-      expect(
-        // @ts-expect-error - dbClient is private
-        await storage.dbClient.getAllCoValuesWaitingForDelete(),
-      ).not.toContain(map.id);
+      expect(await getAllCoValuesWaitingForDelete(storage)).not.toContain(
+        map.id,
+      );
+
+      const sessionIDs = await getCoValueStoredSessions(storage, map.id);
+
+      expect(sessionIDs).toHaveLength(1);
+      expect(sessionIDs[0]).toMatch(/_deleted$/);
     });
 
     test("eraseAllDeletedCoValues deletes history but preserves tombstone", async () => {
@@ -844,16 +848,14 @@ describe("StorageApiAsync", () => {
       storage.markCoValueAsDeleted(map.id as any);
 
       await waitFor(async () => {
-        // @ts-expect-error - dbClient is private
-        const queued = await storage.dbClient.getAllCoValuesWaitingForDelete();
+        const queued = await getAllCoValuesWaitingForDelete(storage);
         expect(queued).toContain(map.id);
         return true;
       });
 
       await storage.eraseAllDeletedCoValues();
 
-      // @ts-expect-error - dbClient is private
-      const queued = await storage.dbClient.getAllCoValuesWaitingForDelete();
+      const queued = await getAllCoValuesWaitingForDelete(storage);
       expect(queued).not.toContain(map.id);
 
       // Tombstone preserved + history erased when loaded from storage
@@ -872,15 +874,10 @@ describe("StorageApiAsync", () => {
       expect(loaded.core.isDeleted).toBe(true);
       expect(loaded.get("k")).toBeUndefined();
 
-      // Storage known state: delete session only
-      const known = clientStorage.getKnownState(map.id);
-      const sessionIDs = Object.keys(known.sessions);
-      const deleteSessionIDs = sessionIDs.filter((s) =>
-        isDeletedSessionID(s as any),
-      );
+      const sessionIDs = await getCoValueStoredSessions(clientStorage, map.id);
 
-      expect(deleteSessionIDs).toHaveLength(1);
-      expect(sessionIDs).toEqual(deleteSessionIDs);
+      expect(sessionIDs).toHaveLength(1);
+      expect(sessionIDs[0]).toMatch(/_deleted$/);
     });
   });
 

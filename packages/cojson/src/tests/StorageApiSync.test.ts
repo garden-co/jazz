@@ -3,9 +3,13 @@ import { CoID, RawCoID, RawCoMap, logger } from "../exports.js";
 import { CoValueCore } from "../exports.js";
 import { NewContentMessage } from "../sync.js";
 import { CoValueKnownState, emptyKnownState } from "../knownState.js";
-import { createSyncStorage, getDbPath } from "./testStorage.js";
+import {
+  createSyncStorage,
+  getAllCoValuesWaitingForDelete,
+  getCoValueStoredSessions,
+  getDbPath,
+} from "./testStorage.js";
 import { loadCoValueOrFail, setupTestNode } from "./testUtils.js";
-import { isDeletedSessionID } from "../ids.js";
 
 /**
  * Helper function that gets new content since a known state, throwing if:
@@ -596,8 +600,7 @@ describe("StorageApiSync", () => {
 
       storage.markCoValueAsDeleted(id);
 
-      // @ts-expect-error - dbClient is private
-      const queued = storage.dbClient.getAllCoValuesWaitingForDelete();
+      const queued = await getAllCoValuesWaitingForDelete(storage);
       expect(queued).toContain(id);
     });
 
@@ -625,10 +628,7 @@ describe("StorageApiSync", () => {
       await vi.advanceTimersByTimeAsync(70_000);
 
       // Queue drained
-      // @ts-expect-error - dbClient is private
-      expect(storage.dbClient.getAllCoValuesWaitingForDelete()).toContain(
-        map.id,
-      );
+      expect(await getAllCoValuesWaitingForDelete(storage)).toContain(map.id);
     });
 
     test("background erasure run if enabled", async () => {
@@ -657,10 +657,14 @@ describe("StorageApiSync", () => {
       await vi.advanceTimersByTimeAsync(70_000);
 
       // Queue drained
-      // @ts-expect-error - dbClient is private
-      expect(storage.dbClient.getAllCoValuesWaitingForDelete()).not.toContain(
+      expect(await getAllCoValuesWaitingForDelete(storage)).not.toContain(
         map.id,
       );
+
+      const sessionIDs = await getCoValueStoredSessions(storage, map.id);
+
+      expect(sessionIDs).toHaveLength(1);
+      expect(sessionIDs[0]).toMatch(/_deleted$/);
     });
 
     test("eraseAllDeletedCoValues deletes history but preserves tombstone", async () => {
@@ -685,16 +689,12 @@ describe("StorageApiSync", () => {
 
       storage.markCoValueAsDeleted(map.id as RawCoID);
 
-      // @ts-expect-error - dbClient is private
-      expect(storage.dbClient.getAllCoValuesWaitingForDelete()).toContain(
-        map.id,
-      );
+      expect(await getAllCoValuesWaitingForDelete(storage)).toContain(map.id);
 
       await storage.eraseAllDeletedCoValues();
 
       // Queue drained
-      // @ts-expect-error - dbClient is private
-      expect(storage.dbClient.getAllCoValuesWaitingForDelete()).not.toContain(
+      expect(await getAllCoValuesWaitingForDelete(storage)).not.toContain(
         map.id,
       );
 
@@ -716,15 +716,10 @@ describe("StorageApiSync", () => {
       expect(loaded.core.isDeleted).toBe(true);
       expect(loaded.get("k")).toBeUndefined();
 
-      // Storage known state: delete session only
-      const known = clientStorage.getKnownState(map.id);
-      const sessionIDs = Object.keys(known.sessions);
-      const deleteSessionIDs = sessionIDs.filter((s) =>
-        isDeletedSessionID(s as any),
-      );
+      const sessionIDs = await getCoValueStoredSessions(clientStorage, map.id);
 
-      expect(deleteSessionIDs).toHaveLength(1);
-      expect(sessionIDs).toEqual(deleteSessionIDs);
+      expect(sessionIDs).toHaveLength(1);
+      expect(sessionIDs[0]).toMatch(/_deleted$/);
     });
   });
 

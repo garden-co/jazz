@@ -3,7 +3,12 @@ import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { getIndexedDBStorage, internal_setDatabaseName } from "../index.js";
 import { toSimplifiedMessages } from "./messagesTestUtils.js";
-import { trackMessages, waitFor } from "./testUtils.js";
+import {
+  getAllCoValuesWaitingForDelete,
+  getCoValueStoredSessions,
+  trackMessages,
+  waitFor,
+} from "./testUtils.js";
 
 const Crypto = await WasmCrypto.create();
 let syncMessages: ReturnType<typeof trackMessages>;
@@ -160,7 +165,8 @@ test("persists deleted coValue marker as a deletedCoValues work queue entry", as
     Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
     Crypto,
   );
-  node.setStorage(await getIndexedDBStorage());
+  const storage = await getIndexedDBStorage();
+  node.setStorage(storage);
 
   const group = node.createGroup();
   const map = group.createMap();
@@ -178,9 +184,7 @@ test("persists deleted coValue marker as a deletedCoValues work queue entry", as
   await map.core.waitForSync();
   await map2.core.waitForSync();
 
-  const deletedCoValueIDs =
-    // @ts-expect-error - dbClient is not public
-    await node.storage.dbClient.getAllCoValuesWaitingForDelete();
+  const deletedCoValueIDs = await getAllCoValuesWaitingForDelete(storage);
   expect(deletedCoValueIDs).toContain(map.id);
   expect(deletedCoValueIDs).toContain(map2.id);
 });
@@ -207,9 +211,7 @@ test("delete flow: markCoValueAsDeleted + eraseAllDeletedCoValues removes histor
   storage1.markCoValueAsDeleted(map.id);
 
   await waitFor(async () => {
-    const queued =
-      // @ts-expect-error - dbClient is not public
-      await node1.storage.dbClient.getAllCoValuesWaitingForDelete();
+    const queued = await getAllCoValuesWaitingForDelete(storage1);
     expect(queued).toContain(map.id);
     return true;
   });
@@ -218,9 +220,7 @@ test("delete flow: markCoValueAsDeleted + eraseAllDeletedCoValues removes histor
 
   // Queue drained
   await waitFor(async () => {
-    const queued =
-      // @ts-expect-error - dbClient is not public
-      await node1.storage.dbClient.getAllCoValuesWaitingForDelete();
+    const queued = await getAllCoValuesWaitingForDelete(storage1);
     expect(queued).not.toContain(map.id);
     return true;
   });
@@ -245,6 +245,10 @@ test("delete flow: markCoValueAsDeleted + eraseAllDeletedCoValues removes histor
 
   expect(map2.core.isDeleted).toBe(true);
   expect(map2.get("hello")).toBeUndefined();
+
+  const sessionIDs = await getCoValueStoredSessions(storage2, map.id);
+  expect(sessionIDs).toHaveLength(1);
+  expect(sessionIDs[0]).toMatch(/_deleted$/);
 });
 
 test("should load dependencies correctly (group inheritance)", async () => {
