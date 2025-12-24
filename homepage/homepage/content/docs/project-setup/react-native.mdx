@@ -56,16 +56,20 @@ In the React Native ecosystem, the Autolinking process (which links native code 
 relies on scanning the dependencies listed in your application's root package.json. As a result, `cojson-core-rn` must be a direct dependency of the app, and not a dependency of a dependency.
 </Alert>
 
-**Pay Attention:** The version of `cojson-core-rn` must be the same as the version of `jazz-tools`.
+You must keep the versions of the two packages (`jazz-tools` and `cojson-core-rn`) the same.
 
 <CodeGroup>
 ```json
 "dependencies": {
-  "cojson-core-rn": "x.x.x", # same version as jazz-tools
-  "jazz-tools": "x.x.x" # same version as cojson-core-rn
+  "cojson-core-rn": "x.x.x", # same version as jazz-tools
+  "jazz-tools": "x.x.x" # same version as cojson-core-rn
 }
 ```
 </CodeGroup>
+
+<Alert variant="warning" title="Versioning" className="mt-4">
+  While you can distribute your own JS code changes OTA, if you update your Jazz version, this will result in changes in the native dependencies, which *cannot* be distributed over the air and requires a new store submission.
+</Alert>
 
 ### Add polyfills
 
