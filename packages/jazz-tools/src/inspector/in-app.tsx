@@ -1,5 +1,6 @@
 import { CoID, LocalNode, RawAccount } from "cojson";
 import { styled } from "goober";
+import { useEffect, useRef } from "react";
 import { PageStack } from "./viewer/page-stack.js";
 import { GlobalStyles } from "./ui/global-styles.js";
 import { InspectorButton, type Position } from "./viewer/inspector-button.js";
@@ -7,6 +8,8 @@ import { useOpenInspector } from "./viewer/use-open-inspector.js";
 import { NodeProvider } from "./contexts/node.js";
 import { InMemoryRouterProvider } from "./router/in-memory-router.js";
 import { Header } from "./viewer/header.js";
+
+let instanceCount = 0;
 
 export function InspectorInApp({
   position = "right",
@@ -18,6 +21,22 @@ export function InspectorInApp({
   accountId?: CoID<RawAccount>;
 }) {
   const [open, setOpen] = useOpenInspector();
+  const hasWarnedRef = useRef(false);
+
+  useEffect(() => {
+    instanceCount++;
+
+    if (instanceCount > 1 && !hasWarnedRef.current) {
+      console.error(
+        `[InspectorInApp] Multiple instances detected (${instanceCount}). Only one InspectorInApp should be rendered at a time.`,
+      );
+      hasWarnedRef.current = true;
+    }
+
+    return () => {
+      instanceCount--;
+    };
+  }, []);
 
   if (!open) {
     return (
