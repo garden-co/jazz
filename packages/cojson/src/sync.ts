@@ -625,7 +625,6 @@ export class SyncManager {
     };
 
     let wasAlreadyDeleted = coValue.isDeleted;
-    const wasDeletedBeforeContent = coValue.isDeleted;
 
     /**
      * The coValue is in memory, load the transactions from the content message

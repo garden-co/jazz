@@ -108,8 +108,7 @@ export class LocalNode {
    * only reclaims local storage space by deleting historical content while preserving
    * the tombstone (header + delete session).
    *
-   * This is opt-in and affects only the currently configured storage (if any) and
-   * any future storage set via `setStorage()`.
+   * This is opt-in and affects only the currently configured storage (if any)
    *
    * @category 3. Low-level
    */

@@ -857,8 +857,13 @@ export async function unstable_mergeBranchWithResolve<
     options.branch,
   );
 
-  await rootNode.getPromise();
-  rootNode.destroy();
+  try {
+    await rootNode.getPromise();
+    rootNode.destroy();
+  } catch (error) {
+    rootNode.destroy();
+    throw error;
+  }
 
   unstable_mergeBranch(rootNode);
 }
@@ -898,9 +903,15 @@ export async function deleteCoValues<
     undefined,
   );
 
-  await rootNode.getPromise();
-  rootNode.destroy();
+  try {
+    await rootNode.getPromise();
+    rootNode.destroy();
+  } catch (error) {
+    rootNode.destroy();
+    throw error;
+  }
 
+  // We validate permissions to fail early if one of the loaded coValues is not deletable
   const errors = validateDeletePermissions(rootNode);
 
   if (errors.length > 0) {

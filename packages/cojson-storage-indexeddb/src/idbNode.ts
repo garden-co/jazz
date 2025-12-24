@@ -9,7 +9,7 @@ export function internal_setDatabaseName(name: string) {
 
 export async function getIndexedDBStorage(name = DATABASE_NAME) {
   const dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open(name, 6);
+    const request = indexedDB.open(name, 5);
     request.onerror = () => {
       reject(request.error);
     };
