@@ -1,4 +1,10 @@
-import type { RawCoID, SessionID, StorageAPI, SyncMessage } from "cojson";
+import type {
+  RawCoID,
+  RawCoMap,
+  SessionID,
+  StorageAPI,
+  SyncMessage,
+} from "cojson";
 import { StorageApiAsync, cojsonInternals } from "cojson";
 import { onTestFinished } from "vitest";
 
@@ -142,4 +148,21 @@ export function waitFor(
       }
     }, 100);
   });
+}
+
+export function fillCoMapWithLargeData(map: RawCoMap) {
+  const dataSize = 1 * 1024 * 200;
+  const chunkSize = 1024; // 1KB chunks
+  const chunks = dataSize / chunkSize;
+
+  const value = btoa(
+    new Array(chunkSize).fill("value$").join("").slice(0, chunkSize),
+  );
+
+  for (let i = 0; i < chunks; i++) {
+    const key = `key${i}`;
+    map.set(key, value, "trusting");
+  }
+
+  return map;
 }

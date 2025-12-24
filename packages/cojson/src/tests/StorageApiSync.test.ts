@@ -9,7 +9,11 @@ import {
   getCoValueStoredSessions,
   getDbPath,
 } from "./testStorage.js";
-import { loadCoValueOrFail, setupTestNode } from "./testUtils.js";
+import {
+  fillCoMapWithLargeData,
+  loadCoValueOrFail,
+  setupTestNode,
+} from "./testUtils.js";
 
 /**
  * Helper function that gets new content since a known state, throwing if:
@@ -720,6 +724,43 @@ describe("StorageApiSync", () => {
 
       expect(sessionIDs).toHaveLength(1);
       expect(sessionIDs[0]).toMatch(/_deleted$/);
+    });
+
+    test("eraseAllDeletedCoValues does not break when called while a coValue is streaming from storage", async () => {
+      const dbPath = getDbPath();
+
+      const node = setupTestNode();
+
+      const storage = createSyncStorage({
+        filename: dbPath,
+        nodeName: "test",
+        storageName: "test-storage",
+      });
+      node.addStorage({ storage });
+
+      const group = node.node.createGroup();
+      const map = group.createMap();
+      fillCoMapWithLargeData(map);
+      await map.core.waitForSync();
+      map.core.deleteCoValue();
+      await map.core.waitForSync();
+
+      storage.close();
+
+      const newStorage = createSyncStorage({
+        filename: dbPath,
+        nodeName: "test",
+        storageName: "test-storage",
+      });
+
+      const callback = vi.fn();
+
+      const loadPromise = new Promise((resolve) => {
+        newStorage.load(map.id, callback, resolve);
+      });
+      await newStorage.eraseAllDeletedCoValues();
+
+      expect(await loadPromise).toBe(true);
     });
   });
 

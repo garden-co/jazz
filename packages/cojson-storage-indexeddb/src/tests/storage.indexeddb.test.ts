@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { getIndexedDBStorage, internal_setDatabaseName } from "../index.js";
 import { toSimplifiedMessages } from "./messagesTestUtils.js";
 import {
+  fillCoMapWithLargeData,
   getAllCoValuesWaitingForDelete,
   getCoValueStoredSessions,
   trackMessages,
@@ -249,6 +250,38 @@ test("delete flow: markCoValueAsDeleted + eraseAllDeletedCoValues removes histor
   const sessionIDs = await getCoValueStoredSessions(storage2, map.id);
   expect(sessionIDs).toHaveLength(1);
   expect(sessionIDs[0]).toMatch(/_deleted$/);
+});
+
+test("eraseAllDeletedCoValues does not break when called while a coValue is streaming from storage", async () => {
+  const agentSecret = Crypto.newRandomAgentSecret();
+
+  const node = new LocalNode(
+    agentSecret,
+    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
+    Crypto,
+  );
+  const storage = await getIndexedDBStorage();
+  node.setStorage(storage);
+
+  const group = node.createGroup();
+  const map = group.createMap();
+  fillCoMapWithLargeData(map);
+  await map.core.waitForSync();
+  map.core.deleteCoValue();
+  await map.core.waitForSync();
+
+  storage.close();
+
+  const newStorage = await getIndexedDBStorage();
+
+  const callback = vi.fn();
+
+  const loadPromise = new Promise((resolve) => {
+    newStorage.load(map.id, callback, resolve);
+  });
+  await newStorage.eraseAllDeletedCoValues();
+
+  expect(await loadPromise).toBe(true);
 });
 
 test("should load dependencies correctly (group inheritance)", async () => {

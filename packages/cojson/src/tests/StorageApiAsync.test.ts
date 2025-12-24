@@ -10,6 +10,7 @@ import {
 } from "./testStorage.js";
 import {
   SyncMessagesLog,
+  fillCoMapWithLargeData,
   loadCoValueOrFail,
   setupTestNode,
   waitFor,
@@ -878,6 +879,42 @@ describe("StorageApiAsync", () => {
 
       expect(sessionIDs).toHaveLength(1);
       expect(sessionIDs[0]).toMatch(/_deleted$/);
+    });
+
+    test("eraseAllDeletedCoValues does not break when called while a coValue is streaming from storage", async () => {
+      const dbPath = getDbPath();
+
+      const node = setupTestNode();
+      const { storage } = await node.addAsyncStorage({
+        ourName: "test",
+        storageName: "test-storage",
+        filename: dbPath,
+      });
+
+      const group = node.node.createGroup();
+      const map = group.createMap();
+      fillCoMapWithLargeData(map);
+      await map.core.waitForSync();
+      map.core.deleteCoValue();
+      await map.core.waitForSync();
+
+      storage.close();
+
+      const newSession = node.spawnNewSession();
+      const { storage: newStorage } = await newSession.addAsyncStorage({
+        ourName: "test",
+        storageName: "test-storage",
+        filename: dbPath,
+      });
+
+      const callback = vi.fn();
+
+      const loadPromise = new Promise((resolve) => {
+        newStorage.load(map.id, callback, resolve);
+      });
+      await newStorage.eraseAllDeletedCoValues();
+
+      expect(await loadPromise).toBe(true);
     });
   });
 
