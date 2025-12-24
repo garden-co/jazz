@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, onTestFinished, test, vi } from "vitest";
-import { PeerSyncStateListenerCallback } from "../SyncStateManager.js";
+import {
+  GlobalSyncStateListenerCallback,
+  PeerSyncStateListenerCallback,
+} from "../SyncStateManager.js";
 import { connectedPeers } from "../streamUtils.js";
 import { emptyKnownState } from "../exports.js";
 import {
@@ -20,6 +23,37 @@ beforeEach(async () => {
 });
 
 describe("SyncStateManager", () => {
+  test("subscribeToUpdates receives updates when peer state changes", async () => {
+    // Setup nodes
+    const client = setupTestNode({ connected: true });
+    const { peerState } = client.connectToSyncServer();
+
+    // Create test data
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    map.set("key1", "value1", "trusting");
+
+    const subscriptionManager = client.node.syncManager.syncState;
+
+    const updateSpy: GlobalSyncStateListenerCallback = vi.fn();
+    const unsubscribe = subscriptionManager.subscribeToUpdates(updateSpy);
+
+    await waitFor(() => {
+      return subscriptionManager.isSynced(peerState, map.core.id);
+    });
+
+    const newPeerState = client.node.syncManager.peers[peerState.id]!;
+
+    expect(updateSpy).toHaveBeenCalledWith(
+      peerState.id,
+      newPeerState.getKnownState(map.core.id)!,
+      { uploaded: true },
+    );
+
+    // Cleanup
+    unsubscribe();
+  });
+
   test("subscribeToPeerUpdates receives updates only for specific peer", async () => {
     // Setup nodes
     const client = setupTestNode({ connected: true });
@@ -103,12 +137,14 @@ describe("SyncStateManager", () => {
 
     const subscriptionManager = client.node.syncManager.syncState;
     const anyUpdateSpy = vi.fn();
-    const unsubscribe = subscriptionManager.subscribeToPeerUpdates(
+    const unsubscribe1 = subscriptionManager.subscribeToUpdates(anyUpdateSpy);
+    const unsubscribe2 = subscriptionManager.subscribeToPeerUpdates(
       peerState.id,
       anyUpdateSpy,
     );
 
-    unsubscribe();
+    unsubscribe1();
+    unsubscribe2();
 
     anyUpdateSpy.mockClear();
 
