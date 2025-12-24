@@ -619,6 +619,10 @@ export class CoValueCore {
     newSignature: Signature,
     skipVerify: boolean = false,
   ) {
+    if (newTransactions.length === 0) {
+      return;
+    }
+
     let signerID: SignerID | undefined;
 
     // sync should never try to add transactions to a deleted coValue
@@ -664,10 +668,9 @@ export class CoValueCore {
     let deleteTransaction: Transaction | undefined = undefined;
 
     if (isDeletedSessionID(sessionID)) {
-      if (
-        newTransactions.length !== 1 ||
-        this.verified.sessions.get(sessionID)
-      ) {
+      const txCount =
+        this.verified.sessions.get(sessionID)?.transactions.length ?? 0;
+      if (txCount > 0 || newTransactions.length > 1) {
         return {
           type: "DeleteTransactionRejected",
           id: this.id,
