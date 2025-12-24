@@ -156,6 +156,105 @@ test("accepts delete marker ingestion from admin (ownedByGroup, skipVerify=false
   expect(mapOnBob.core.isDeleted).toBe(true);
 });
 
+test("rejects delete session ingestion when attempting to append a second transaction (txCount > 0)", async () => {
+  const alice = await setupTestAccount({ connected: true });
+  const bob = await setupTestAccount({ connected: true });
+
+  await loadCoValueOrFail(alice.node, bob.accountID);
+  await loadCoValueOrFail(bob.node, alice.accountID);
+
+  const group = alice.node.createGroup();
+  const bobAccount = await loadCoValueOrFail(alice.node, bob.accountID);
+  group.addMember(bobAccount, "writer");
+  await group.core.waitForSync();
+
+  const map = group.createMap();
+  await loadCoValueOrFail(bob.node, group.id);
+  const mapOnBob = await loadCoValueOrFail(bob.node, map.id);
+
+  const { tx, signature, deleteSessionID } = makeDeleteMarkerTransaction(
+    map.core,
+  );
+
+  const first = mapOnBob.core.tryAddTransactions(
+    deleteSessionID,
+    [tx],
+    signature,
+    false,
+  );
+
+  expect(first).toBeUndefined();
+  expect(mapOnBob.core.isDeleted).toBe(true);
+  expect(
+    mapOnBob.core.verified?.sessions.get(deleteSessionID)?.transactions,
+  ).toHaveLength(1);
+
+  const second = mapOnBob.core.tryAddTransactions(
+    deleteSessionID,
+    [tx],
+    signature,
+    false,
+  );
+
+  expect(second).toMatchObject({
+    type: "DeleteTransactionRejected",
+    reason: "InvalidDeleteTransaction",
+  });
+  expect(second && "error" in second).toBe(true);
+  const secondErr = (second as { error: unknown }).error;
+  expect(secondErr).toBeInstanceOf(Error);
+  if (secondErr instanceof Error) {
+    expect(secondErr.message).toMatch(
+      /Delete transaction must be the only transaction in the session/,
+    );
+  }
+  expect(
+    mapOnBob.core.verified?.sessions.get(deleteSessionID)?.transactions,
+  ).toHaveLength(1);
+});
+
+test("rejects delete session ingestion when attempting to add multiple delete transactions", async () => {
+  const alice = await setupTestAccount({ connected: true });
+  const bob = await setupTestAccount({ connected: true });
+
+  await loadCoValueOrFail(alice.node, bob.accountID);
+  await loadCoValueOrFail(bob.node, alice.accountID);
+
+  const group = alice.node.createGroup();
+  const bobAccount = await loadCoValueOrFail(alice.node, bob.accountID);
+  group.addMember(bobAccount, "writer");
+  await group.core.waitForSync();
+
+  const map = group.createMap();
+  await loadCoValueOrFail(bob.node, group.id);
+  const mapOnBob = await loadCoValueOrFail(bob.node, map.id);
+
+  const { tx, signature, deleteSessionID } = makeDeleteMarkerTransaction(
+    map.core,
+  );
+
+  const first = mapOnBob.core.tryAddTransactions(
+    deleteSessionID,
+    [tx, tx],
+    signature,
+    false,
+  );
+
+  expect(first).toMatchObject({
+    type: "DeleteTransactionRejected",
+    reason: "InvalidDeleteTransaction",
+  });
+  expect(first && "error" in first).toBe(true);
+  const err = (first as { error: unknown }).error;
+  expect(err).toBeInstanceOf(Error);
+  if (err instanceof Error) {
+    expect(err.message).toMatch(
+      /Delete transaction must be the only transaction in the session/,
+    );
+  }
+  expect(mapOnBob.core.verified?.sessions.get(deleteSessionID)).toBeUndefined();
+});
+
 test("skipVerify=true ingestion marks deleted even for non-admin delete marker", async () => {
   const alice = await setupTestAccount({ connected: true });
   const bob = await setupTestAccount({ connected: true });
