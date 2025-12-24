@@ -9,6 +9,12 @@
 
 This feature migrates the remaining crypto-layer logic (including canonical serialization concerns) fully into Rust, and **eliminates `stableStringify` usage** from the crypto pipeline by using Rust-owned canonical serialization (via `serde`) over **predefined Rust data models** (typed structs/enums with deterministic ordering).
 
+### Goals
+
+- **Remove `stableStringify` to unblock Rust migration**: eliminate the TS-only canonicalization dependency so `cojson-core` can evolve in Rust without being coupled to a TS canonicalizer.
+- **Migrate all the remaining crypto-related logic to Rust**: remove all the remaining crypto-related logic from the TypeScript layer and move it to the Rust layer.
+- **Keep high performance during incremental migration**: as behavior moves step-by-step from TS to Rust (and across bindings), avoid perf regressions by minimizing boundary conversions and re-parsing/re-serializing.
+
 ## User stories + acceptance criteria (EARS)
 
 - **US1 — Single-source crypto implementation**
@@ -57,6 +63,13 @@ This feature migrates the remaining crypto-layer logic (including canonical seri
   - Acceptance criteria:
     - WHEN running the test suite THEN there are tests that validate identical outputs (or interoperable outputs where appropriate) for sign/verify, seal/unseal, encrypt/decrypt, and hash functions across all providers.
     - WHEN a serialization/canonicalization change is proposed THEN it is guarded by stable test vectors committed to the repo.
+
+- **US9 — Performance is preserved across incremental migration**
+  - As a maintainer, I want to migrate functionality from JS to Rust incrementally without performance regressions, so we can ship improvements safely in multiple steps.
+  - Acceptance criteria:
+    - WHEN a structure is passed from JS to Rust THEN it is converted once and can be reused (Rust-backed handles/objects), rather than repeatedly re-parsed/re-serialized.
+    - WHEN operating on crypto-critical structures THEN JS does not perform “convert → call Rust → convert back” loops in hot paths except where strictly required for compatibility.
+    - WHEN migrating a step (e.g. moving hashing or sealing) THEN we add/keep benchmarks or targeted perf checks for that step to catch regressions early.
 
 - **US7 — Don't touch random number generation**
   - As a maintainer, I want to avoid touching the random number generation code, this should be done in a next feature request.
