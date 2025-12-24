@@ -44,10 +44,10 @@ export class StorageApiAsync implements StorageAPI {
     this.dbClient = dbClient;
   }
 
-  knwonStates = new StorageKnownState();
+  knownStates = new StorageKnownState();
 
   getKnownState(id: string): CoValueKnownState {
-    return this.knwonStates.getKnownState(id);
+    return this.knownStates.getKnownState(id);
   }
 
   async load(
@@ -95,7 +95,7 @@ export class StorageApiAsync implements StorageAPI {
       }),
     );
 
-    const knownState = this.knwonStates.getKnownState(coValueRow.id);
+    const knownState = this.knownStates.getKnownState(coValueRow.id);
     knownState.header = true;
 
     for (const sessionRow of allCoValueSessions) {
@@ -173,7 +173,7 @@ export class StorageApiAsync implements StorageAPI {
       );
     }
 
-    this.knwonStates.handleUpdate(coValueRow.id, knownState);
+    this.knownStates.handleUpdate(coValueRow.id, knownState);
     done?.(true);
   }
 
@@ -285,12 +285,12 @@ export class StorageApiAsync implements StorageAPI {
 
     if (!storedCoValueRowID) {
       const knownState = emptyKnownState(id as RawCoID);
-      this.knwonStates.setKnownState(id, knownState);
+      this.knownStates.setKnownState(id, knownState);
 
       return this.handleCorrection(knownState, correctionCallback);
     }
 
-    const knownState = this.knwonStates.getKnownState(id);
+    const knownState = this.knownStates.getKnownState(id);
     knownState.header = true;
 
     let invalidAssumptions = false;
@@ -328,7 +328,7 @@ export class StorageApiAsync implements StorageAPI {
       });
     }
 
-    this.knwonStates.handleUpdate(id, knownState);
+    this.knownStates.handleUpdate(id, knownState);
 
     if (invalidAssumptions) {
       return this.handleCorrection(knownState, correctionCallback);
@@ -436,7 +436,7 @@ export class StorageApiAsync implements StorageAPI {
   }
 
   waitForSync(id: string, coValue: CoValueCore) {
-    return this.knwonStates.waitForSync(id, coValue);
+    return this.knownStates.waitForSync(id, coValue);
   }
 
   close() {
