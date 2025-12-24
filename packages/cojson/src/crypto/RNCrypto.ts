@@ -47,6 +47,7 @@ import {
   Blake3Hasher,
   SessionLog,
 } from "cojson-core-rn";
+import { WasmCrypto } from "./WasmCrypto.js";
 
 type Blake3State = Blake3Hasher;
 

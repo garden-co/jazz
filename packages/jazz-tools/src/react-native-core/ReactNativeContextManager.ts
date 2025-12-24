@@ -33,7 +33,6 @@ export type JazzContextManagerProps<
   onAnonymousAccountDiscarded?: (
     anonymousAccount: InstanceOfSchema<S>,
   ) => Promise<void>;
-  CryptoProvider?: BaseReactNativeContextOptions["CryptoProvider"];
 };
 
 export class ReactNativeContextManager<
@@ -50,7 +49,6 @@ export class ReactNativeContextManager<
         sync: props.sync,
         storage: props.storage,
         authSecretStorage: this.authSecretStorage,
-        CryptoProvider: props.CryptoProvider,
       });
     } else {
       return createJazzReactNativeContext<S>({
@@ -61,7 +59,6 @@ export class ReactNativeContextManager<
         newAccountProps: authProps?.newAccountProps,
         defaultProfileName: props.defaultProfileName,
         authSecretStorage: this.authSecretStorage,
-        CryptoProvider: props.CryptoProvider,
       });
     }
   }

@@ -45,6 +45,11 @@ export const docNavigationItems = [
     prefix: "/docs/upgrade",
     items: [
       {
+        name: "0.20.0 - Full native crypto",
+        href: "/docs/upgrade/0-20-0",
+        done: 100,
+      },
+      {
         name: "0.19.0 - Explicit loading states",
         href: "/docs/upgrade/0-19-0",
         done: 100,

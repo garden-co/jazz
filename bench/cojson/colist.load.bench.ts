@@ -5,16 +5,10 @@ import * as cojsonFromNpm from "cojson-latest";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { WasmCrypto as WasmCryptoLatest } from "cojson-latest/crypto/WasmCrypto";
 import { NapiCrypto } from "cojson/crypto/NapiCrypto";
-import { PureJSCrypto } from "cojson/crypto/PureJSCrypto";
-import { PureJSCrypto as PureJSCryptoLatest } from "cojson-latest/crypto/PureJSCrypto";
 
-const PUREJS = false;
-
-const crypto = PUREJS ? await PureJSCrypto.create() : await WasmCrypto.create();
+const crypto = await WasmCrypto.create();
 const napiCrypto = await NapiCrypto.create();
-const cryptoFromNpm = PUREJS
-  ? await PureJSCryptoLatest.create()
-  : await WasmCryptoLatest.create();
+const cryptoFromNpm = await WasmCryptoLatest.create();
 
 const NUM_ITEMS = 1000;
 
