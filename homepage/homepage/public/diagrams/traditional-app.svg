@@ -1,0 +1,268 @@
+<svg id="graph-138" xmlns="http://www.w3.org/2000/svg" style="overflow: hidden; max-width: 100%; touch-action: none; user-select: none;" role="graphics-document document" aria-roledescription="sequence" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:ev="http://www.w3.org/2001/xml-events" viewBox="139.9 309.85 733.2 675.65"><defs><marker id="arrowhead" refX="7.9" refY="5" markerUnits="userSpaceOnUse" markerWidth="12" markerHeight="12" orient="auto-start-reverse"><path d="M -1 0 L 10 5 L 0 10 z"></path></marker></defs><defs><marker id="crosshead" markerWidth="15" markerHeight="8" orient="auto" refX="4" refY="4.5"><path fill="none" stroke="#000000" style="stroke-dasharray: 0px, 0px;" stroke-width="1pt" d="M 1,2 L 6,7 M 6,2 L 1,7"></path></marker></defs><defs><marker id="filled-head" refX="15.5" refY="7" markerWidth="20" markerHeight="28" orient="auto"><path d="M 18,7 L9,13 L14,7 L9,1 Z"></path></marker></defs><defs><marker id="sequencenumber" refX="15" refY="15" markerWidth="60" markerHeight="40" orient="auto"><circle cx="15" cy="15" r="6"></circle></marker></defs><g id="viewport-20251203101214899" class="svg-pan-zoom_viewport" transform="matrix(1.1395667791366577,0,0,1.1395667791366577,163.7740020751953,316.6321105957031)" style="transform: matrix(1.13957, 0, 0, 1.13957, 163.774, 316.632);"><g><rect x="209" y="-5" fill="transparent" class="cloud-box rect" width="412.5" height="591"></rect><text x="415.25" y="16.5" style="text-anchor: middle; font-size: 16px; font-weight: 400; font-family: Manrope;" dominant-baseline="central" alignment-baseline="central" class="text"><tspan x="415.25" dy="0">Cloud</tspan></text></g><g><rect x="-20" y="-5" fill="transparent" class="local-box rect" width="209" height="591"></rect><text x="84.5" y="16.5" style="text-anchor: middle; font-size: 16px; font-weight: 400; font-family: Manrope;" dominant-baseline="central" alignment-baseline="central" class="text"><tspan x="84.5" dy="0">Local Device</tspan></text></g><g><rect x="446.5" y="501" fill="#eaeaea" stroke="#666" width="150" height="65" name="DB" rx="3" ry="3" class="actor actor-bottom"></rect><text x="521.5" y="533.5" style="text-anchor: middle; font-size: 16px; font-weight: 400; font-family: Manrope;" dominant-baseline="central" alignment-baseline="central" class="actor actor-box"><tspan x="521.5" dy="0">Database</tspan></text></g><g><rect x="234" y="501" fill="#eaeaea" stroke="#666" width="159" height="65" name="BE" rx="3" ry="3" class="actor actor-bottom"></rect><text x="313.5" y="533.5" style="text-anchor: middle; font-size: 16px; font-weight: 400; font-family: Manrope;" dominant-baseline="central" alignment-baseline="central" class="actor actor-box"><tspan x="313.5" dy="0">Back-End (Server)</tspan></text></g><g><rect x="5" y="501" fill="#eaeaea" stroke="#666" width="159" height="65" name="FE" rx="3" ry="3" class="actor actor-bottom"></rect><text x="84.5" y="533.5" style="text-anchor: middle; font-size: 16px; font-weight: 400; font-family: Manrope;" dominant-baseline="central" alignment-baseline="central" class="actor actor-box"><tspan x="84.5" dy="0">Front-End (Client)</tspan></text></g><g><line id="actor413" x1="521.5" y1="98" x2="521.5" y2="501" class="actor-line 200" stroke-width="0.5px" stroke="#999" name="DB"></line><g id="root-413"><rect x="446.5" y="33" fill="#eaeaea" stroke="#666" width="150" height="65" name="DB" rx="3" ry="3" class="actor actor-top"></rect><text x="521.5" y="65.5" style="text-anchor: middle; font-size: 16px; font-weight: 400; font-family: Manrope;" dominant-baseline="central" alignment-baseline="central" class="actor actor-box"><tspan x="521.5" dy="0">Database</tspan></text></g></g><g><line id="actor412" x1="313.5" y1="98" x2="313.5" y2="501" class="actor-line 200" stroke-width="0.5px" stroke="#999" name="BE"></line><g id="root-412"><rect x="234" y="33" fill="#eaeaea" stroke="#666" width="159" height="65" name="BE" rx="3" ry="3" class="actor actor-top"></rect><text x="313.5" y="65.5" style="text-anchor: middle; font-size: 16px; font-weight: 400; font-family: Manrope;" dominant-baseline="central" alignment-baseline="central" class="actor actor-box"><tspan x="313.5" dy="0">Back-End (Server)</tspan></text></g></g><g><line id="actor411" x1="84.5" y1="98" x2="84.5" y2="501" class="actor-line 200" stroke-width="0.5px" stroke="#999" name="FE"></line><g id="root-411"><rect x="5" y="33" fill="#eaeaea" stroke="#666" width="159" height="65" name="FE" rx="3" ry="3" class="actor actor-top"></rect><text x="84.5" y="65.5" style="text-anchor: middle; font-size: 16px; font-weight: 400; font-family: Manrope;" dominant-baseline="central" alignment-baseline="central" class="actor actor-box"><tspan x="84.5" dy="0">Front-End (Client)</tspan></text></g></g><style>
+/* Light mode (default) */
+#graph-138 {
+  font-family: Manrope;
+  font-size: 16px;
+  fill: #151414;
+  background-color: rgb(255, 255, 255);
+}
+
+#graph-138 .cloud-box,
+#graph-138 .local-box {
+  stroke: rgb(0, 0, 0, 0.5);
+}
+
+#graph-138 .actor {
+  stroke: #151414;
+  fill: white;
+}
+
+#graph-138 text.actor>tspan {
+  fill: #151414;
+  stroke: none;
+}
+
+#graph-138 .actor-line {
+  stroke: #151414;
+}
+
+#graph-138 .messageLine0 {
+  stroke-width: 1.5;
+  stroke-dasharray: none;
+  stroke: #151414;
+}
+
+#graph-138 .messageLine1 {
+  stroke-width: 1.5;
+  stroke-dasharray: 2, 2;
+  stroke: #151414;
+}
+
+#graph-138 #arrowhead path {
+  fill: #151414;
+  stroke: #151414;
+}
+
+#graph-138 .messageText {
+  fill: #151414;
+  stroke: none;
+}
+
+/* Dark mode */
+@media (prefers-color-scheme: dark) {
+  #graph-138 {
+    fill: white;
+    background-color: rgb(2, 8, 23);
+  }
+
+  #graph-138 .cloud-box,
+  #graph-138 .local-box {
+    stroke: #fff;
+  }
+
+  #graph-138 .actor {
+    stroke: white;
+    fill: transparent;
+  }
+
+  #graph-138 text.actor>tspan {
+    fill: white;
+    stroke: none;
+  }
+
+  #graph-138 .actor-line {
+    stroke: white;
+  }
+
+  #graph-138 .messageLine0 {
+    stroke: white;
+  }
+
+  #graph-138 .messageLine1 {
+    stroke: white;
+  }
+
+  #graph-138 #arrowhead path {
+    fill: white;
+    stroke: white;
+  }
+
+  #graph-138 .messageText {
+    fill: white;
+    stroke: none;
+  }
+}
+
+@keyframes edge-animation-frame {
+  from {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes dash {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+#graph-138 .edge-animation-slow {
+  stroke-dasharray: 9, 5 !important;
+  stroke-dashoffset: 900;
+  animation: dash 50s linear infinite;
+  stroke-linecap: round;
+}
+
+#graph-138 .edge-animation-fast {
+  stroke-dasharray: 9, 5 !important;
+  stroke-dashoffset: 900;
+  animation: dash 20s linear infinite;
+  stroke-linecap: round;
+}
+
+#graph-138 .error-icon {
+  fill: hsl(180, 0%, 100%);
+}
+
+#graph-138 .error-text {
+  fill: rgb(0, 0, 0);
+  stroke: rgb(0, 0, 0);
+}
+
+#graph-138 .edge-thickness-normal {
+  stroke-width: 1px;
+}
+
+#graph-138 .edge-thickness-thick {
+  stroke-width: 3.5px;
+}
+
+#graph-138 .edge-pattern-solid {
+  stroke-dasharray: 0;
+}
+
+#graph-138 .edge-thickness-invisible {
+  stroke-width: 0;
+  fill: none;
+}
+
+#graph-138 .edge-pattern-dashed {
+  stroke-dasharray: 3;
+}
+
+#graph-138 .edge-pattern-dotted {
+  stroke-dasharray: 2;
+}
+
+#graph-138 .marker {
+  fill: #0b0b0b;
+  stroke: #0b0b0b;
+}
+
+#graph-138 .marker.cross {
+  stroke: #0b0b0b;
+}
+
+#graph-138 svg {
+  font-family: Manrope;
+  font-size: 16px;
+}
+
+#graph-138 p {
+  margin: 0;
+}
+
+#graph-138 .innerArc {
+  stroke-width: 1.5;
+  stroke-dasharray: none;
+}
+
+#graph-138 .sequenceNumber {
+  fill: #f4f4f4;
+}
+
+#graph-138 #sequencenumber {
+  fill: #151414;
+}
+
+#graph-138 #crosshead path {
+  fill: #151414;
+  stroke: #151414;
+}
+
+#graph-138 .labelBox {
+  stroke: #151414;
+  fill: white;
+}
+
+#graph-138 .labelText,
+#graph-138 .labelText>tspan {
+  fill: #151414;
+  stroke: none;
+}
+
+#graph-138 .loopText,
+#graph-138 .loopText>tspan {
+  fill: #151414;
+  stroke: none;
+}
+
+#graph-138 .loopLine {
+  stroke-width: 2px;
+  stroke-dasharray: 2, 2;
+  stroke: #151414;
+  fill: #151414;
+}
+
+#graph-138 .note {
+  stroke: #0088ff;
+  fill: white;
+}
+
+#graph-138 .noteText,
+#graph-138 .noteText>tspan {
+  fill: #151414;
+  stroke: none;
+}
+
+#graph-138 .activation0 {
+  fill: hsl(-120, 0%, 100%);
+  stroke: hsl(-120, 0%, 90%);
+}
+
+#graph-138 .activation1 {
+  fill: hsl(-120, 0%, 100%);
+  stroke: hsl(-120, 0%, 90%);
+}
+
+#graph-138 .activation2 {
+  fill: hsl(-120, 0%, 100%);
+  stroke: hsl(-120, 0%, 90%);
+}
+
+#graph-138 .actorPopupMenu {
+  position: absolute;
+}
+
+#graph-138 .actorPopupMenuPanel {
+  position: absolute;
+  fill: white;
+  box-shadow: 0px 8px 16px 0px rgba(0, 0, 0, 0.2);
+  filter: drop-shadow(3px 5px 2px rgb(0 0 0 / 0.4));
+}
+
+#graph-138 .actor-man line {
+  stroke: #151414;
+  fill: white;
+}
+
+#graph-138 .actor-man circle,
+#graph-138 line {
+  stroke: #151414;
+  fill: white;
+  stroke-width: 2px;
+}
+
+#graph-138 :root {
+  --mermaid-font-family: Manrope;
+}
+</style><g></g><g><rect x="234" y="164" fill="#EDF2AE" stroke="#666" width="159" height="43" class="note"></rect><text x="314" y="169" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" style="font-family: Manrope; font-size: 16px; font-weight: 400;" class="noteText" dy="1em"><tspan x="314">Auth</tspan></text></g><g><rect x="234" y="217" fill="#EDF2AE" stroke="#666" width="159" height="43" class="note"></rect><text x="314" y="222" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" style="font-family: Manrope; font-size: 16px; font-weight: 400;" class="noteText" dy="1em"><tspan x="314">Business logic</tspan></text></g><g><rect x="234" y="382" fill="#EDF2AE" stroke="#666" width="159" height="43" class="note"></rect><text x="314" y="387" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" style="font-family: Manrope; font-size: 16px; font-weight: 400;" class="noteText" dy="1em"><tspan x="314">Build response</tspan></text></g><text x="198" y="113" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" style="font-family: Manrope; font-size: 16px; font-weight: 400;" class="messageText" dy="1em">Send request</text><line x1="85.5" y1="154" x2="309.5" y2="154" class="messageLine0" stroke-width="2" stroke="none" style="fill: none;" marker-end="url(#arrowhead)"></line><text x="416" y="275" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" style="font-family: Manrope; font-size: 16px; font-weight: 400;" class="messageText" dy="1em">Read or write data</text><line x1="314.5" y1="316" x2="517.5" y2="316" class="messageLine0" stroke-width="2" stroke="none" style="fill: none;" marker-end="url(#arrowhead)"></line><text x="419" y="331" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" style="font-family: Manrope; font-size: 16px; font-weight: 400;" class="messageText" dy="1em">Return result</text><line x1="520.5" y1="372" x2="317.5" y2="372" style="stroke-dasharray: 3px, 3px; fill: none;" class="messageLine1" stroke-width="2" stroke="none" marker-end="url(#arrowhead)"></line><text x="201" y="440" text-anchor="middle" dominant-baseline="middle" alignment-baseline="middle" style="font-family: Manrope; font-size: 16px; font-weight: 400;" class="messageText" dy="1em">Return response</text><line x1="312.5" y1="481" x2="88.5" y2="481" style="stroke-dasharray: 3px, 3px; fill: none;" class="messageLine1" stroke-width="2" stroke="none" marker-end="url(#arrowhead)"></line></g></svg>
