@@ -2,7 +2,7 @@ export const metadata = {
   description: "Integrate Clerk with your Jazz app to authenticate users. This method combines Clerk's comprehensive authentication services with Jazz's local-first capabilities."
 };
 
-import { CodeGroup, ContentByFramework, FileName, ReactLogo, ExpoLogo, RNLogo, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
+import { CodeGroup, ContentByFramework, FileName, ReactLogo, ExpoLogo, RNLogo, SvelteLogo, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
 
 # Clerk Authentication
 
@@ -36,7 +36,19 @@ Use `<JazzReactProviderWithClerk />` to wrap your app:
 Use `<JazzExpoProviderWithClerk />` to wrap your app.
 </ContentByFramework>
 
-<FileName>App.tsx</FileName>
+<ContentByFramework framework="svelte">
+Use `<JazzSvelteProviderWithClerk />` to wrap your app:
+</ContentByFramework>
+
+<ContentByFramework framework="react">
+  <FileName>App.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="react-native-expo">
+  <FileName>App.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/routes/+layout.svelte</FileName>
+</ContentByFramework>
 
 <TabbedCodeGroup default="react" savedPreferenceKey="framework" id="wrap-in-provider" className="mb-4">
 <TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
@@ -47,10 +59,25 @@ Use `<JazzExpoProviderWithClerk />` to wrap your app.
 ```tsx expo.tsx#Basic
 ```
 </TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```svelte svelte.svelte
+```
+```svelte JazzClerkWrapper.svelte
+```
+</TabbedCodeGroupItem>
 </TabbedCodeGroup>
 
-<FileName>AuthButton.tsx</FileName>
-<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="wrap-in-provider" >
+<ContentByFramework framework="react">
+  <FileName>AuthButton.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="react-native-expo">
+  <FileName>AuthButton.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/lib/components/AuthButton.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="auth-button" >
 <TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
 ```tsx react-snippet.tsx#AuthButton
 ```
@@ -58,6 +85,10 @@ Use `<JazzExpoProviderWithClerk />` to wrap your app.
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem icon={<ExpoLogo />} label="Expo" value="react-native-expo" preferWrap>
 ```tsx expo.tsx#AuthButton
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+```svelte AuthButton.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
