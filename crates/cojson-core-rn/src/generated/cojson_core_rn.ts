@@ -576,6 +576,22 @@ export function sign(message: ArrayBuffer, secret: string): string /*throws*/ {
     )
   );
 }
+export function stableStringify(value: string): string /*throws*/ {
+  return FfiConverterString.lift(
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeSessionLogError.lift.bind(
+        FfiConverterTypeSessionLogError
+      ),
+      /*caller:*/ (callStatus) => {
+        return nativeModule().ubrn_uniffi_cojson_core_rn_fn_func_stable_stringify(
+          FfiConverterString.lower(value),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    )
+  );
+}
 /**
  * Uniffi-exposed function for unsealing a message using X25519 + XSalsa20-Poly1305.
  * Provides authenticated decryption with perfect forward secrecy.
@@ -813,6 +829,7 @@ export enum CryptoErrorUniffi_Tags {
   CipherError = 'CipherError',
   InvalidPrefix = 'InvalidPrefix',
   Base58Error = 'Base58Error',
+  JsonParse = 'JsonParse',
 }
 export const CryptoErrorUniffi = (() => {
   type InvalidKeyLength__interface = {
@@ -1150,6 +1167,41 @@ export const CryptoErrorUniffi = (() => {
     }
   }
 
+  type JsonParse__interface = {
+    tag: CryptoErrorUniffi_Tags.JsonParse;
+    inner: Readonly<[string]>;
+  };
+
+  class JsonParse_ extends UniffiError implements JsonParse__interface {
+    /**
+     * @private
+     * This field is private and should not be used, use `tag` instead.
+     */
+    readonly [uniffiTypeNameSymbol] = 'CryptoErrorUniffi';
+    readonly tag = CryptoErrorUniffi_Tags.JsonParse;
+    readonly inner: Readonly<[string]>;
+    constructor(v0: string) {
+      super('CryptoErrorUniffi', 'JsonParse');
+      this.inner = Object.freeze([v0]);
+    }
+
+    static new(v0: string): JsonParse_ {
+      return new JsonParse_(v0);
+    }
+
+    static instanceOf(obj: any): obj is JsonParse_ {
+      return obj.tag === CryptoErrorUniffi_Tags.JsonParse;
+    }
+
+    static hasInner(obj: any): obj is JsonParse_ {
+      return JsonParse_.instanceOf(obj);
+    }
+
+    static getInner(obj: JsonParse_): Readonly<[string]> {
+      return obj.inner;
+    }
+  }
+
   function instanceOf(obj: any): obj is CryptoErrorUniffi {
     return obj[uniffiTypeNameSymbol] === 'CryptoErrorUniffi';
   }
@@ -1166,6 +1218,7 @@ export const CryptoErrorUniffi = (() => {
     CipherError: CipherError_,
     InvalidPrefix: InvalidPrefix_,
     Base58Error: Base58Error_,
+    JsonParse: JsonParse_,
   });
 })();
 
@@ -1212,6 +1265,8 @@ const FfiConverterTypeCryptoErrorUniffi = (() => {
           return new CryptoErrorUniffi.Base58Error(
             FfiConverterString.read(from)
           );
+        case 11:
+          return new CryptoErrorUniffi.JsonParse(FfiConverterString.read(from));
         default:
           throw new UniffiInternalError.UnexpectedEnumCase();
       }
@@ -1270,6 +1325,12 @@ const FfiConverterTypeCryptoErrorUniffi = (() => {
           FfiConverterString.write(inner[0], into);
           return;
         }
+        case CryptoErrorUniffi_Tags.JsonParse: {
+          ordinalConverter.write(11, into);
+          const inner = value.inner;
+          FfiConverterString.write(inner[0], into);
+          return;
+        }
         default:
           // Throwing from here means that CryptoErrorUniffi_Tags hasn't matched an ordinal.
           throw new UniffiInternalError.UnexpectedEnumCase();
@@ -1321,6 +1382,12 @@ const FfiConverterTypeCryptoErrorUniffi = (() => {
         case CryptoErrorUniffi_Tags.Base58Error: {
           const inner = value.inner;
           let size = ordinalConverter.allocationSize(10);
+          size += FfiConverterString.allocationSize(inner[0]);
+          return size;
+        }
+        case CryptoErrorUniffi_Tags.JsonParse: {
+          const inner = value.inner;
+          let size = ordinalConverter.allocationSize(11);
           size += FfiConverterString.allocationSize(inner[0]);
           return size;
         }
@@ -2208,6 +2275,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_func_sign'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_func_stable_stringify() !==
+    34312
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_func_stable_stringify'
     );
   }
   if (

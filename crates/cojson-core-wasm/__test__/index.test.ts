@@ -221,10 +221,10 @@ describe("ed25519", () => {
 describe("encrypt/decrypt", () => {
   // Example base58-encoded key with "keySecret_z" prefix (32 bytes of zeros)
   const keySecret = "keySecret_z11111111111111111111111111111111";
-  const nonceMaterial = new TextEncoder().encode("test_nonce_material");
+  const nonceMaterial = new TextEncoder().encode("{\"nonce\":\"test_nonce_material\"}");
 
   test("encrypt and decrypt roundtrip", () => {
-    const plaintext = new TextEncoder().encode("Hello, World!");
+    const plaintext = new TextEncoder().encode("{\"a\":1,\"b\":2}");
     const ciphertext = encrypt(plaintext, keySecret, nonceMaterial);
     expect(ciphertext.length).toBeGreaterThan(0);
 
@@ -233,14 +233,14 @@ describe("encrypt/decrypt", () => {
   });
 
   test("invalid key secret format", () => {
-    const plaintext = new TextEncoder().encode("test");
+    const plaintext = new TextEncoder().encode("{\"a\":1,\"b\":2}");
     const invalidKey = "invalid_key";
     expect(() => encrypt(plaintext, invalidKey, nonceMaterial)).toThrow();
     expect(() => decrypt(plaintext, invalidKey, nonceMaterial)).toThrow();
   });
 
   test("invalid base58 encoding", () => {
-    const plaintext = new TextEncoder().encode("test");
+    const plaintext = new TextEncoder().encode("{\"a\":1,\"b\":2}");
     const badKey = "keySecret_z!!!!";
     expect(() => encrypt(plaintext, badKey, nonceMaterial)).toThrow();
     expect(() => decrypt(plaintext, badKey, nonceMaterial)).toThrow();
@@ -251,10 +251,10 @@ describe("encrypt/decrypt", () => {
 describe("encrypt/decrypt", () => {
   // Example base58-encoded key with "keySecret_z" prefix (32 bytes of zeros)
   const keySecret = "keySecret_z11111111111111111111111111111111";
-  const nonceMaterial = new TextEncoder().encode("test_nonce_material");
+  const nonceMaterial = new TextEncoder().encode("{\"nonce\":\"test_nonce_material\"}");
 
   test("encrypt and decrypt roundtrip", () => {
-    const plaintext = new TextEncoder().encode("Hello, World!");
+    const plaintext = new TextEncoder().encode("{\"a\":1,\"b\":2}");
     const ciphertext = encrypt(plaintext, keySecret, nonceMaterial);
     expect(ciphertext.length).toBeGreaterThan(0);
 
@@ -263,14 +263,14 @@ describe("encrypt/decrypt", () => {
   });
 
   test("invalid key secret format", () => {
-    const plaintext = new TextEncoder().encode("test");
+    const plaintext = new TextEncoder().encode("{\"a\":1,\"b\":2}");
     const invalidKey = "invalid_key";
     expect(() => encrypt(plaintext, invalidKey, nonceMaterial)).toThrow();
     expect(() => decrypt(plaintext, invalidKey, nonceMaterial)).toThrow();
   });
 
   test("invalid base58 encoding", () => {
-    const plaintext = new TextEncoder().encode("test");
+    const plaintext = new TextEncoder().encode("{\"a\":1,\"b\":2}");
     const badKey = "keySecret_z!!!!";
     expect(() => encrypt(plaintext, badKey, nonceMaterial)).toThrow();
     expect(() => decrypt(plaintext, badKey, nonceMaterial)).toThrow();
@@ -283,11 +283,11 @@ describe("seal/unseal", () => {
   const zeroKey = new Uint8Array(32);
   const senderSecret = "sealerSecret_z" + base58.encode(zeroKey);
   const recipientId = "sealer_z" + base58.encode(zeroKey);
-  const nonceMaterial = new TextEncoder().encode("test_nonce_material");
+  const nonceMaterial = new TextEncoder().encode("{\"nonce\":\"test_nonce_material\"}");
 
   test("seal and unseal roundtrip", () => {
     // Import seal/unseal from the module
-    const message = new TextEncoder().encode("Secret message");
+    const message = new TextEncoder().encode("{\"a\":1,\"b\":2}");
 
     const sealed = seal(message, senderSecret, recipientId, nonceMaterial);
     expect(sealed.length).toBeGreaterThan(0);
@@ -297,19 +297,19 @@ describe("seal/unseal", () => {
   });
 
   test("invalid sender secret format", () => {
-    const message = new TextEncoder().encode("test");
+    const message = new TextEncoder().encode("{\"a\":1,\"b\":2}");
     const invalidSenderSecret = "invalid_key";
     expect(() => seal(message, invalidSenderSecret, recipientId, nonceMaterial)).toThrow();
   });
 
   test("invalid recipient id format", () => {
-    const message = new TextEncoder().encode("test");
+    const message = new TextEncoder().encode("{\"a\":1,\"b\":2}");
     const invalidRecipientId = "invalid_key";
     expect(() => seal(message, senderSecret, invalidRecipientId, nonceMaterial)).toThrow();
   });
 
   test("invalid base58 encoding", () => {
-    const message = new TextEncoder().encode("test");
+    const message = new TextEncoder().encode("{\"a\":1,\"b\":2}");
     const badSenderSecret = "sealerSecret_z!!!!";
     expect(() => seal(message, badSenderSecret, recipientId, nonceMaterial)).toThrow();
   });
@@ -329,7 +329,7 @@ describe("sign/verify (Ed25519, base58-wrapped)", () => {
 
   test("sign and verify roundtrip", () => {
     const { secret, signerId } = makeKeyPair();
-    const message = encoder.encode("hello world");
+    const message = encoder.encode("{\"a\":1,\"b\":2}");
 
     // sign_internal: sign message with secret
     const signature = sign(message, secret);

@@ -201,6 +201,10 @@ interface NativeModuleInterface {
     secret: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
+  ubrn_uniffi_cojson_core_rn_fn_func_stable_stringify(
+    value: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
   ubrn_uniffi_cojson_core_rn_fn_func_unseal(
     sealedMessage: Uint8Array,
     recipientSecret: Uint8Array,
@@ -244,6 +248,7 @@ interface NativeModuleInterface {
   ubrn_uniffi_cojson_core_rn_checksum_func_new_x25519_private_key(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_seal(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_sign(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_func_stable_stringify(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_unseal(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_verify(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_x25519_diffie_hellman(): number;

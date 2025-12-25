@@ -83,7 +83,7 @@ export class NapiCrypto extends CryptoProvider<Blake3State> {
 
   sign(secret: SignerSecret, message: JsonValue): Signature {
     return sign(
-      textEncoder.encode(stableStringify(message)),
+      textEncoder.encode(JSON.stringify(message)),
       textEncoder.encode(secret),
     ) as Signature;
   }
@@ -91,7 +91,7 @@ export class NapiCrypto extends CryptoProvider<Blake3State> {
   verify(signature: Signature, message: JsonValue, id: SignerID): boolean {
     const result = verify(
       textEncoder.encode(signature),
-      textEncoder.encode(stableStringify(message)),
+      textEncoder.encode(JSON.stringify(message)),
       textEncoder.encode(id),
     );
 
@@ -113,9 +113,9 @@ export class NapiCrypto extends CryptoProvider<Blake3State> {
   ): Encrypted<T, N> {
     return `encrypted_U${bytesToBase64url(
       encrypt(
-        textEncoder.encode(stableStringify(value)),
+        textEncoder.encode(JSON.stringify(value)),
         keySecret,
-        textEncoder.encode(stableStringify(nOnceMaterial)),
+        textEncoder.encode(JSON.stringify(nOnceMaterial)),
       ),
     )}` as Encrypted<T, N>;
   }
@@ -129,7 +129,7 @@ export class NapiCrypto extends CryptoProvider<Blake3State> {
       decrypt(
         base64URLtoBytes(encrypted.substring("encrypted_U".length)),
         keySecret,
-        textEncoder.encode(stableStringify(nOnceMaterial)),
+        textEncoder.encode(JSON.stringify(nOnceMaterial)),
       ),
     ) as Stringified<T>;
   }
@@ -147,10 +147,10 @@ export class NapiCrypto extends CryptoProvider<Blake3State> {
   }): Sealed<T> {
     return `sealed_U${bytesToBase64url(
       seal(
-        textEncoder.encode(stableStringify(message)),
+        textEncoder.encode(JSON.stringify(message)),
         from,
         to,
-        textEncoder.encode(stableStringify(nOnceMaterial)),
+        textEncoder.encode(JSON.stringify(nOnceMaterial)),
       ),
     )}` as Sealed<T>;
   }
@@ -166,7 +166,7 @@ export class NapiCrypto extends CryptoProvider<Blake3State> {
         base64URLtoBytes(sealed.substring("sealed_U".length)),
         sealer,
         from,
-        textEncoder.encode(stableStringify(nOnceMaterial)),
+        textEncoder.encode(JSON.stringify(nOnceMaterial)),
       ),
     );
     try {
@@ -191,7 +191,7 @@ class SessionLogAdapter {
     skipVerify: boolean,
   ): void {
     this.sessionLog.tryAdd(
-      transactions.map((tx) => stableStringify(tx)),
+      transactions.map((tx) => JSON.stringify(tx)),
       newSignature,
       skipVerify,
     );
@@ -206,12 +206,12 @@ class SessionLogAdapter {
     meta: JsonObject | undefined,
   ): { signature: Signature; transaction: PrivateTransaction } {
     const output = this.sessionLog.addNewPrivateTransaction(
-      stableStringify(changes),
+      JSON.stringify(changes),
       signerAgent.currentSignerSecret(),
       keySecret,
       keyID,
       madeAt,
-      meta ? stableStringify(meta) : undefined,
+      meta ? JSON.stringify(meta) : undefined,
     );
     const parsedOutput = JSON.parse(output);
     const transaction: PrivateTransaction = {
@@ -233,10 +233,10 @@ class SessionLogAdapter {
     const stringifiedChanges = stableStringify(changes);
     const stringifiedMeta = meta ? stableStringify(meta) : undefined;
     const output = this.sessionLog.addNewTrustingTransaction(
-      stringifiedChanges,
+      JSON.stringify(changes),
       signerAgent.currentSignerSecret(),
       madeAt,
-      stringifiedMeta,
+      meta ? JSON.stringify(meta) : undefined,
     );
     const transaction: TrustingTransaction = {
       privacy: "trusting",
