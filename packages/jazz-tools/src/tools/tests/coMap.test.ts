@@ -26,6 +26,7 @@ import {
   disableJazzTestSync,
   getPeerConnectedToTestSyncServer,
   runWithoutActiveAccount,
+  setActiveAccount,
   setupJazzTestSync,
 } from "../testing.js";
 import { assertLoaded, setupTwoNodes, waitFor } from "./utils.js";
@@ -2316,28 +2317,93 @@ describe("CoMap migration", () => {
   });
 });
 
-describe("createdAt & lastUpdatedAt", () => {
+describe("createdAt, lastUpdatedAt, createdBy", () => {
   test("empty map created time", () => {
     const emptyMap = co.map({}).create({});
 
     expect(emptyMap.$jazz.lastUpdatedAt).toEqual(emptyMap.$jazz.createdAt);
   });
 
+  test("empty map created by", () => {
+    const emptyMap = co.map({}).create({});
+    const me = Account.getMe();
+    expect(emptyMap.$jazz.createdBy).toEqual(me.$jazz.id);
+  });
+
   test("created time and last updated time", async () => {
     const Person = co.map({
       name: z.string(),
     });
+    const me = Account.getMe();
 
     const person = Person.create({ name: "John" });
 
     const createdAt = person.$jazz.createdAt;
     expect(person.$jazz.lastUpdatedAt).toEqual(createdAt);
 
+    const createdBy = person.$jazz.createdBy;
+    expect(createdBy).toEqual(me.$jazz.id);
+
     await new Promise((r) => setTimeout(r, 10));
     person.$jazz.set("name", "Jane");
 
     expect(person.$jazz.createdAt).toEqual(createdAt);
     expect(person.$jazz.lastUpdatedAt).not.toEqual(createdAt);
+
+    // Double check after update.
+    expect(createdBy).toEqual(me.$jazz.id);
+  });
+
+  test("createdBy does not change when updated", async () => {
+    const Person = co.map({
+      name: z.string(),
+    });
+    const me = Account.getMe();
+
+    const person = Person.create({ name: "John" });
+
+    const createdBy = person.$jazz.createdBy;
+    expect(createdBy).toEqual(me.$jazz.id);
+
+    await new Promise((r) => setTimeout(r, 10));
+    person.$jazz.set("name", "Jane");
+
+    // Double check after update.
+    expect(createdBy).toEqual(me.$jazz.id);
+  });
+
+  test("createdBy is after key rotation", async () => {
+    const Person = co.map({
+      name: z.string(),
+    });
+    const me = Account.getMe();
+
+    // Create person
+    const person = Person.create({ name: "John" });
+
+    // True created by
+    const createdBy = person.$jazz.createdBy;
+
+    // Create a user, grant access, then kick to trigger key rotation.
+    const newUser = await createJazzTestAccount();
+
+    person.$jazz.owner.addMember(newUser, "reader");
+
+    // This should trigger read key rotation
+    person.$jazz.owner.removeMember(newUser);
+
+    // Now create a new user and grant access
+    const newUser2 = await createJazzTestAccount();
+    person.$jazz.owner.addMember(newUser2, "reader");
+
+    // Load the CoValue as the new user:
+    setActiveAccount(newUser2);
+
+    const personLoadedAsUser2 = await Person.load(person.$jazz.id);
+    assertLoaded(personLoadedAsUser2);
+    const createdByPerUser2 = personLoadedAsUser2.$jazz.createdBy;
+    // Double check after update.
+    expect(createdBy).toEqual(createdByPerUser2);
   });
 });
 
