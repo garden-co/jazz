@@ -6,6 +6,7 @@ import { JAZZ_AUTH_CTX, JAZZ_CTX } from "../jazz.svelte";
 
 type JazzExtendedOptions = {
   account: Account | { guest: AnonymousJazzAgent };
+  isAuthenticated?: boolean;
 };
 
 const render = <T extends Component>(
@@ -13,7 +14,9 @@ const render = <T extends Component>(
   props: ComponentProps<T>,
   jazzOptions: JazzExtendedOptions,
 ) => {
-  const ctx = TestJazzContextManager.fromAccountOrGuest(jazzOptions.account);
+  const ctx = TestJazzContextManager.fromAccountOrGuest(jazzOptions.account, {
+    isAuthenticated: jazzOptions.isAuthenticated,
+  });
 
   return renderSvelte(
     // @ts-expect-error Svelte new Component type is not compatible with @testing-library/svelte
