@@ -2,6 +2,7 @@ import { md5 } from "@noble/hashes/legacy";
 import { Histogram, ValueType, metrics } from "@opentelemetry/api";
 import { PeerState } from "./PeerState.js";
 import { SyncStateManager } from "./SyncStateManager.js";
+import { UnsyncedCoValuesTracker } from "./UnsyncedCoValuesTracker.js";
 import {
   getContenDebugInfo,
   getNewTransactionsFromContentMessage,
@@ -121,6 +122,7 @@ export class SyncManager {
   constructor(local: LocalNode) {
     this.local = local;
     this.syncState = new SyncStateManager(this);
+    this.unsyncedTracker = new UnsyncedCoValuesTracker(() => local.storage);
 
     this.transactionsSizeHistogram = metrics
       .getMeter("cojson")
@@ -132,6 +134,7 @@ export class SyncManager {
   }
 
   syncState: SyncStateManager;
+  unsyncedTracker: UnsyncedCoValuesTracker;
 
   disableTransactionVerification() {
     this.skipVerify = true;
@@ -152,6 +155,10 @@ export class SyncManager {
     return this.serverPeerSelector
       ? this.serverPeerSelector(id, serverPeers)
       : serverPeers;
+  }
+
+  getPersistentServerPeers(id: RawCoID): PeerState[] {
+    return this.getServerPeers(id).filter((peer) => peer.persistent);
   }
 
   handleSyncMessage(msg: SyncMessage, peer: PeerState) {
@@ -734,6 +741,10 @@ export class SyncManager {
       this.storeContent(validNewContent);
     }
 
+    if (sourceRole === "client" && hasNewContent) {
+      this.trackSyncState(coValue.id);
+    }
+
     for (const peer of this.getPeers(coValue.id)) {
       /**
        * We sync the content against the source peer if it is a client or server peers
@@ -787,6 +798,8 @@ export class SyncManager {
 
     this.storeContent(content);
 
+    this.trackSyncState(coValue.id);
+
     const contentKnownState = knownStateFromContent(content);
 
     for (const peer of this.getPeers(coValue.id)) {
@@ -808,6 +821,24 @@ export class SyncManager {
       this.trySendToPeer(peer, content);
       peer.combineOptimisticWith(coValue.id, contentKnownState);
       peer.trackToldKnownState(coValue.id);
+    }
+  }
+
+  private trackSyncState(coValueId: RawCoID): void {
+    for (const peer of this.getPersistentServerPeers(coValueId)) {
+      this.unsyncedTracker.add(coValueId, peer.id);
+
+      const unsubscribe = this.syncState.subscribeToPeerUpdates(
+        peer.id,
+        (knownState, syncState) => {
+          console.log("peer state updated", knownState, syncState);
+          // Only handle updates for this specific CoValue
+          if (knownState.id === coValueId && syncState.uploaded) {
+            this.unsyncedTracker.remove(coValueId, peer.id);
+            unsubscribe();
+          }
+        },
+      );
     }
   }
 

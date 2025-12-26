@@ -33,7 +33,7 @@ export interface StorageAPI {
   /**
    * Track the sync status of a CoValue for a specific peer.
    */
-  trackCoValueSyncStatus(id: RawCoID, peerId: PeerID, synced: boolean): void;
+  trackCoValueSyncState(id: RawCoID, peerId: PeerID, synced: boolean): void;
 
   /**
    * Get all CoValue IDs that have at least one unsynced peer.
@@ -45,7 +45,7 @@ export interface StorageAPI {
   /**
    * Stop tracking sync status for a CoValue (remove all peer entries).
    */
-  stopTrackingSyncStatus(id: RawCoID): void;
+  stopTrackingSyncState(id: RawCoID): void;
 
   close(): Promise<unknown> | undefined;
 }
@@ -137,7 +137,7 @@ export interface DBClientInterfaceAsync {
     callback: (tx: DBTransactionInterfaceAsync) => Promise<unknown>,
   ): Promise<unknown>;
 
-  trackCoValueSyncStatus(
+  trackCoValueSyncState(
     id: RawCoID,
     peerId: PeerID,
     synced: boolean,
@@ -145,7 +145,7 @@ export interface DBClientInterfaceAsync {
 
   getUnsyncedCoValueIDs(): Promise<RawCoID[]>;
 
-  stopTrackingSyncStatus(id: RawCoID): Promise<void>;
+  stopTrackingSyncState(id: RawCoID): Promise<void>;
 }
 
 export interface DBTransactionInterfaceSync {
@@ -199,9 +199,9 @@ export interface DBClientInterfaceSync {
 
   transaction(callback: (tx: DBTransactionInterfaceSync) => unknown): unknown;
 
-  trackCoValueSyncStatus(id: RawCoID, peerId: PeerID, synced: boolean): void;
+  trackCoValueSyncState(id: RawCoID, peerId: PeerID, synced: boolean): void;
 
   getUnsyncedCoValueIDs(): RawCoID[];
 
-  stopTrackingSyncStatus(id: RawCoID): void;
+  stopTrackingSyncState(id: RawCoID): void;
 }

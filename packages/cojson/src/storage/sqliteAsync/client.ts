@@ -203,7 +203,7 @@ export class SQLiteClientAsync
     return this.db.transaction(() => operationsCallback(this));
   }
 
-  async trackCoValueSyncStatus(
+  async trackCoValueSyncState(
     id: RawCoID,
     peerId: PeerID,
     synced: boolean,
@@ -231,7 +231,7 @@ export class SQLiteClientAsync
     return rows.map((row) => row.co_value_id);
   }
 
-  async stopTrackingSyncStatus(id: RawCoID): Promise<void> {
+  async stopTrackingSyncState(id: RawCoID): Promise<void> {
     await this.db.run("DELETE FROM unsynced_covalues WHERE co_value_id = ?", [
       id,
     ]);
