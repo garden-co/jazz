@@ -6,7 +6,7 @@ Currently, Jazz only resumes sync on CoValues that are loaded in memory. This cr
 
 This feature will implement automatic tracking and resumption of sync for all CoValues with pending changes, regardless of whether they are currently loaded in memory. The solution must work across all platforms (web, React Native, Node.js, cloud workers) and be performant enough to run in cloud environments.
 
-Tracking unsynced CoValues also allows providing reactive APIs for tracking if CoValues have been synced. This includes refactoring `waitForSync` so that we don't need to create a subscription, and adding new subscription APIs for monitoring sync state at different levels of granularity: `CoValueCore.subscribeToSyncStatus` and `SyncManager.subscribeToSyncStatus`.
+Tracking unsynced CoValues also allows providing reactive APIs for tracking if CoValues have been synced. This includes refactoring `waitForSync` so that we don't need to create a subscription, and adding new subscription APIs for monitoring sync state at different levels of granularity: `CoValueCore.subscribeToSyncState` and `SyncManager.subscribeToSyncState`.
 
 ## User Stories
 
@@ -36,7 +36,7 @@ Tracking unsynced CoValues also allows providing reactive APIs for tracking if C
 **So that** I can reactively monitor when a CoValue becomes synced
 
 **Acceptance Criteria:**
-- [ ] `CoValueCore.subscribeToSyncStatus(listener)` method subscribes to sync state changes
+- [ ] `CoValueCore.subscribeToSyncState(listener)` method subscribes to sync state changes
 - [ ] The listener receives a boolean indicating if the CoValue is synced to all persistent server peers
 - [ ] The method returns an unsubscribe function
 - [ ] The subscription uses the unsynced CoValues tracking for efficient updates
@@ -48,7 +48,7 @@ Tracking unsynced CoValues also allows providing reactive APIs for tracking if C
 **So that** I can reactively determine when all pending changes have been uploaded
 
 **Acceptance Criteria:**
-- [ ] `SyncManager.subscribeToSyncStatus(listener)` method subscribes to global sync state changes
+- [ ] `SyncManager.subscribeToSyncState(listener)` method subscribes to global sync state changes
 - [ ] The listener receives a boolean indicating if all CoValues are synced
 - [ ] The method returns an unsubscribe function
 - [ ] The subscription uses the unsynced CoValues tracking for efficient implementation
