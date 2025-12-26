@@ -2,12 +2,12 @@
 
 ## Overview
 
-This design implements automatic tracking of CoValues with unsynced changes and provides mechanisms to resume syncing them on app restart. The solution integrates with the existing sync infrastructure and provides reactive APIs for monitoring sync status.
+This design implements automatic tracking of CoValues with unsynced changes and provides mechanisms to resume syncing them on app restart. The solution integrates with the existing sync infrastructure and provides reactive APIs for monitoring sync state.
 
-The core idea is to maintain a set of CoValue IDs that have pending changes not yet fully synced to all peers. This set is persisted across app restarts and used to:
+The core idea is to maintain a set of CoValue IDs that have pending changes not yet fully synced to all persistent server peers. This set is persisted across app restarts and used to:
 1. Automatically resume syncing on startup
-2. Provide efficient sync status queries
-3. Enable reactive sync status subscriptions
+2. Provide efficient sync state queries
+3. Enable reactive sync state subscriptions
 
 ## Architecture / Components
 
@@ -24,6 +24,7 @@ export interface StorageAPI {
   
   trackCoValueSyncStatus(id: RawCoID, peerId: PeerID, synced: boolean): void;
   getUnsyncedCoValueIDs(callback: (data: RawCoID[]) => void);
+  stopTrackingSyncStatus(id: RawCoID): void;
 }
 ```
 
@@ -60,38 +61,132 @@ A new class that manages the set of unsynced CoValue IDs.
 **Changes:**
 - Add `unsyncedTracker: UnsyncedCoValuesTracker` property to `SyncManager`
 - Initialize tracker in `SyncManager` constructor: `new UnsyncedCoValuesTracker(local.storage, this)`
-- Update `syncContent()` method to keep track of unsynced CoValues:
+- Update `syncContent()` method to keep track of unsynced CoValues created locally:
  ```ts
  syncContent(content: NewContentMessage) {
   const coValue = this.local.getCoValue(content.id);
 
   this.storeContent(content);
 
-  const contentKnownState = knownStateFromContent(content);
+  this.trackSyncState(coValue.id);
 
-  for (const peer of this.getPeers(coValue.id)) {
-    this.unsyncedTracker.add(coValue.id, peer.id);
+  // ...
+ }
 
-    // ...
+ trackSyncState(coValueId: RawCoID): void {
+  for (const peer of this.getPersistentServerPeers()) {
+    this.unsyncedTracker.add(coValueId, peer.id);
 
-    this.trySendToPeer(peer, content);
     const unsubscribe = this.syncState.subscribeToPeerUpdates(
+      coValueId,
       peer.id,
-      (knownState, syncState) => {
-        if (syncState.uploaded && knownState.id === coValue.id) {
-          this.unsyncedTracker.remove(coValue.id, peer.id);
+      (_knownState, syncState) => {
+        if (syncState.uploaded) {
+          this.unsyncedTracker.remove(coValueId, peer.id);
           unsubscribe();
         }
       },
     );
-
-    peer.combineOptimisticWith(coValue.id, contentKnownState);
-    peer.trackToldKnownState(coValue.id);
   }
-}
+ }
+ ```
+- Update `handleNewContent` method to keep track of unsynced CoValues received from other peers:
+ ```ts
+ handleNewContent(
+    msg: NewContentMessage,
+    from: PeerState | "storage" | "import",
+  ) {
+    const coValue = this.local.getCoValue(msg.id);
+    const peer = from === "storage" || from === "import" ? undefined : from;
+    const sourceRole =
+      from === "storage"
+        ? "storage"
+        : from === "import"
+          ? "import"
+          : peer?.role;
+    
+    // ...
+
+    if (from !== "storage" && hasNewContent) {
+      this.storeContent(validNewContent);
+    }
+
+    if (sourceRole === "client" && hasNewContent) {
+      this.trackSyncState(coValue.id);
+    }
+
+    // ...
+  }
  ```
 - Add method `async resumeUnsyncedCoValues()` to load and resume syncing unsynced CoValues. This happens asynchronously and doesn't block initialization
 - Call `resumeUnsyncedCoValues` as part of `SyncManager.startPeerReconciliation`.
+
+**`resumeUnsyncedCoValues()` implementation:**
+
+```typescript
+async resumeUnsyncedCoValues(): Promise<void> {
+  if (!this.local.storage) {
+    // No storage available, skip resumption
+    return;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    // Load all persisted unsynced CoValues from storage
+    this.local.storage!.getUnsyncedCoValueIDs((unsyncedCoValueIDs) => {
+      if (unsyncedCoValueIDs.length === 0) {
+        resolve();
+        return;
+      }
+
+      const BATCH_SIZE = 10;
+      let processed = 0;
+
+      const processBatch = async () => {
+        const batch = unsyncedCoValueIDs.slice(
+          processed,
+          processed + BATCH_SIZE,
+        );
+        
+        await Promise.all(
+          batch.map(async (coValueId) => {
+            try {
+              // Load the CoValue from storage (this will trigger sync if peers are connected)
+              const coValue = await this.local.loadCoValueCore(coValueId);
+
+              if (coValue.isAvailable()) {
+                // CoValue was successfully loaded. Resume tracking sync state for this CoValue
+                // This will add it back to the tracker and set up subscriptions
+                this.trackSyncState(coValueId);
+              } else {
+                // CoValue not found in storage. Remove all peer entries for this CoValue
+                this.local.storage!.stopTrackingSyncStatus(coValueId);
+              }
+            } catch (error) {
+              // Handle errors gracefully - log but don't fail the entire resumption
+              logger.warn(
+                `Failed to resume sync for CoValue ${coValueId}:`,
+                error,
+              );
+              this.local.storage!.stopTrackingSyncStatus(coValueId);
+            }
+          }),
+        );
+
+        processed += batch.length;
+
+        if (processed < unsyncedCoValueIDs.length) {
+          // Process next batch asynchronously to avoid blocking
+          setTimeout(processBatch, 0);
+        } else {
+          resolve();
+        }
+      };
+
+      processBatch().catch(reject);
+    });
+  });
+}
+```
 
 ### 4. Sync Status Subscriptions
 
@@ -99,7 +194,7 @@ A new class that manages the set of unsynced CoValue IDs.
 
 **CoValueCore.subscribeToSyncStatus:**
 - Subscribe to changes in whether this specific CoValue is synced
-- Uses `syncManager.unsyncedTracker.subscribe(coValueId)` to get notified when the CoValue's sync status changes
+- Uses `syncManager.unsyncedTracker.subscribe(coValueId)` to get notified when the CoValue's sync state changes
 - Calls listener immediately with current state on subscription
 
 **SyncManager.subscribeToSyncStatus:**
