@@ -21,7 +21,7 @@
   - Implement `stopTrackingSyncStatus` in `StorageApiAsync` and `StorageApiSync` for SQLite
   - Update SQLite client implementations in `packages/cojson/src/storage/sqlite/` and `packages/cojson/src/storage/sqliteAsync/`
 
-- [ ] **Task 4**: Create `UnsyncedCoValuesTracker` class (US1, US3, US4)
+- [x] **Task 4**: Create `UnsyncedCoValuesTracker` class (US1, US3, US4)
   - Create `packages/cojson/src/sync/UnsyncedCoValuesTracker.ts`
   - Implement in-memory `Map<RawCoID, Set<PeerID>>` for tracking unsynced CoValues per peer
   - Implement `add(id, peerId)`, `remove(id, peerId)`, `getAll()`, `isAllSynced()` methods
