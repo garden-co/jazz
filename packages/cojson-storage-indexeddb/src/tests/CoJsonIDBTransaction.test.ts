@@ -23,6 +23,18 @@ describe("CoJsonIDBTransaction", () => {
         });
         db.createObjectStore("transactions", { keyPath: "id" });
         db.createObjectStore("signatureAfter", { keyPath: "id" });
+        const unsyncedCoValues = db.createObjectStore("unsyncedCoValues", {
+          keyPath: "rowID",
+        });
+        unsyncedCoValues.createIndex("byCoValueId", "coValueId");
+        unsyncedCoValues.createIndex("byPeerId", "peerId");
+        unsyncedCoValues.createIndex(
+          "uniqueUnsyncedCoValues",
+          ["coValueId", "peerId"],
+          {
+            unique: true,
+          },
+        );
       };
 
       request.onsuccess = () => {

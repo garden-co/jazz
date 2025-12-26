@@ -5,6 +5,7 @@ import type {
 import { Signature } from "../crypto/crypto.js";
 import type { CoValueCore, RawCoID, SessionID } from "../exports.js";
 import { NewContentMessage } from "../sync.js";
+import type { PeerID } from "../sync.js";
 import { CoValueKnownState } from "../knownState.js";
 
 export type CorrectionCallback = (
@@ -28,6 +29,23 @@ export interface StorageAPI {
   getKnownState(id: string): CoValueKnownState;
 
   waitForSync(id: string, coValue: CoValueCore): Promise<void>;
+
+  /**
+   * Track the sync status of a CoValue for a specific peer.
+   */
+  trackCoValueSyncStatus(id: RawCoID, peerId: PeerID, synced: boolean): void;
+
+  /**
+   * Get all CoValue IDs that have at least one unsynced peer.
+   */
+  getUnsyncedCoValueIDs(
+    callback: (unsyncedCoValueIDs: RawCoID[]) => void,
+  ): void;
+
+  /**
+   * Stop tracking sync status for a CoValue (remove all peer entries).
+   */
+  stopTrackingSyncStatus(id: RawCoID): void;
 
   close(): Promise<unknown> | undefined;
 }
@@ -118,6 +136,16 @@ export interface DBClientInterfaceAsync {
   transaction(
     callback: (tx: DBTransactionInterfaceAsync) => Promise<unknown>,
   ): Promise<unknown>;
+
+  trackCoValueSyncStatus(
+    id: RawCoID,
+    peerId: PeerID,
+    synced: boolean,
+  ): Promise<void>;
+
+  getUnsyncedCoValueIDs(): Promise<RawCoID[]>;
+
+  stopTrackingSyncStatus(id: RawCoID): Promise<void>;
 }
 
 export interface DBTransactionInterfaceSync {
@@ -170,4 +198,10 @@ export interface DBClientInterfaceSync {
   ): Pick<SignatureAfterRow, "idx" | "signature">[];
 
   transaction(callback: (tx: DBTransactionInterfaceSync) => unknown): unknown;
+
+  trackCoValueSyncStatus(id: RawCoID, peerId: PeerID, synced: boolean): void;
+
+  getUnsyncedCoValueIDs(): RawCoID[];
+
+  stopTrackingSyncStatus(id: RawCoID): void;
 }

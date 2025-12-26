@@ -2,19 +2,19 @@
 
 ## Core Infrastructure
 
-- [ ] **Task 1**: Extend `StorageAPI` interface with unsynced CoValues tracking methods (US1)
+- [x] **Task 1**: Extend `StorageAPI` interface with unsynced CoValues tracking methods (US1)
   - Add `trackCoValueSyncStatus(id: RawCoID, peerId: PeerID, synced: boolean): void` to `StorageAPI` interface in `packages/cojson/src/storage/types.ts`
   - Add `getUnsyncedCoValueIDs(callback: (data: RawCoID[]) => void)` to `StorageAPI` interface
   - Add `stopTrackingSyncStatus(id: RawCoID): void` to `StorageAPI` interface
 
-- [ ] **Task 2**: Implement `trackCoValueSyncStatus`, `getUnsyncedCoValueIDs`, and `stopTrackingSyncStatus` for IndexedDB storage (US1)
+- [x] **Task 2**: Implement `trackCoValueSyncStatus`, `getUnsyncedCoValueIDs`, and `stopTrackingSyncStatus` for IndexedDB storage (US1)
   - Add new object store `"unsyncedCoValues"` in IndexedDB schema (upgrade version)
   - Implement `trackCoValueSyncStatus` in `StorageApiAsync` to upsert/delete records
   - Implement `getUnsyncedCoValueIDs` to query all unsynced CoValue IDs
   - Implement `stopTrackingSyncStatus` to delete all records for a CoValue ID
   - Update `packages/cojson-storage-indexeddb/src/idbNode.ts` for schema migration
 
-- [ ] **Task 3**: Implement `trackCoValueSyncStatus`, `getUnsyncedCoValueIDs`, and `stopTrackingSyncStatus` for SQLite storage (US1)
+- [x] **Task 3**: Implement `trackCoValueSyncStatus`, `getUnsyncedCoValueIDs`, and `stopTrackingSyncStatus` for SQLite storage (US1)
   - Add `unsynced_covalues` table to SQLite schema
   - Implement `trackCoValueSyncStatus` in `StorageApiAsync` and `StorageApiSync` for SQLite
   - Implement `getUnsyncedCoValueIDs` in `StorageApiAsync` and `StorageApiSync` for SQLite

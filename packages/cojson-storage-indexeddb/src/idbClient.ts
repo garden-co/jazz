@@ -171,4 +171,82 @@ export class IDBClient implements DBClientInterfaceAsync {
       tx.rollback();
     }
   }
+
+  async trackCoValueSyncStatus(
+    id: RawCoID,
+    peerId: string,
+    synced: boolean,
+  ): Promise<void> {
+    if (synced) {
+      // Delete the record if synced
+      await queryIndexedDbStore(this.db, "unsyncedCoValues", (store) =>
+        store.delete([id, peerId]),
+      );
+    } else {
+      // Add the record if unsynced
+      await putIndexedDbStore(this.db, "unsyncedCoValues", {
+        coValueId: id,
+        peerId: peerId,
+      });
+    }
+  }
+
+  async getUnsyncedCoValueIDs(): Promise<RawCoID[]> {
+    return queryIndexedDbStore<RawCoID[]>(
+      this.db,
+      "unsyncedCoValues",
+      (store) =>
+        store.index("byCoValueId").getAllKeys() as IDBRequest<RawCoID[]>,
+    );
+  }
+
+  async stopTrackingSyncStatus(id: RawCoID): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const tx = this.db.transaction("unsyncedCoValues", "readwrite");
+      const store = tx.objectStore("unsyncedCoValues");
+      const index = store.index("byCoValueId");
+
+      // Get all records for this CoValue ID
+      const getAllRequest = index.getAll(id);
+
+      getAllRequest.onerror = () => {
+        reject(getAllRequest.error);
+      };
+
+      getAllRequest.onsuccess = () => {
+        const records = getAllRequest.result as {
+          rowID: number;
+          coValueId: RawCoID;
+          peerId: string;
+        }[];
+
+        if (records.length === 0) {
+          resolve();
+          tx.commit();
+          return;
+        }
+
+        // Delete all records in the same transaction
+        let completed = 0;
+        let hasError = false;
+
+        for (const record of records) {
+          const deleteRequest = store.delete(record.rowID);
+          deleteRequest.onerror = () => {
+            if (!hasError) {
+              hasError = true;
+              reject(deleteRequest.error);
+            }
+          };
+          deleteRequest.onsuccess = () => {
+            completed++;
+            if (completed === records.length && !hasError) {
+              resolve();
+              tx.commit();
+            }
+          };
+        }
+      };
+    });
+  }
 }
