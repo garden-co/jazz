@@ -3,26 +3,29 @@
 ## Core Infrastructure
 
 - [ ] **Task 1**: Extend `StorageAPI` interface with unsynced CoValues tracking methods (US1)
-  - Add `trackCoValueSyncStatus(id: RawCoID, synced: boolean): void` to `StorageAPI` interface in `packages/cojson/src/storage/types.ts`
+  - Add `trackCoValueSyncStatus(id: RawCoID, peerId: PeerID, synced: boolean): void` to `StorageAPI` interface in `packages/cojson/src/storage/types.ts`
   - Add `getUnsyncedCoValueIDs(callback: (data: RawCoID[]) => void)` to `StorageAPI` interface
+  - Add `stopTrackingSyncStatus(id: RawCoID): void` to `StorageAPI` interface
 
-- [ ] **Task 2**: Implement `trackCoValueSyncStatus` and `getUnsyncedCoValueIDs` for IndexedDB storage (US1)
+- [ ] **Task 2**: Implement `trackCoValueSyncStatus`, `getUnsyncedCoValueIDs`, and `stopTrackingSyncStatus` for IndexedDB storage (US1)
   - Add new object store `"unsyncedCoValues"` in IndexedDB schema (upgrade version)
-  - Implement `trackCoValueSyncStatus` in `StorageApiAsync` to upsert records
+  - Implement `trackCoValueSyncStatus` in `StorageApiAsync` to upsert/delete records
   - Implement `getUnsyncedCoValueIDs` to query all unsynced CoValue IDs
+  - Implement `stopTrackingSyncStatus` to delete all records for a CoValue ID
   - Update `packages/cojson-storage-indexeddb/src/idbNode.ts` for schema migration
 
-- [ ] **Task 3**: Implement `trackCoValueSyncStatus` and `getUnsyncedCoValueIDs` for SQLite storage (US1)
+- [ ] **Task 3**: Implement `trackCoValueSyncStatus`, `getUnsyncedCoValueIDs`, and `stopTrackingSyncStatus` for SQLite storage (US1)
   - Add `unsynced_covalues` table to SQLite schema
-  - Implement methods in `StorageApiAsync` and `StorageApiSync` for SQLite
+  - Implement `trackCoValueSyncStatus` in `StorageApiAsync` and `StorageApiSync` for SQLite
+  - Implement `getUnsyncedCoValueIDs` in `StorageApiAsync` and `StorageApiSync` for SQLite
+  - Implement `stopTrackingSyncStatus` in `StorageApiAsync` and `StorageApiSync` for SQLite
   - Update SQLite client implementations in `packages/cojson/src/storage/sqlite/` and `packages/cojson/src/storage/sqliteAsync/`
 
 - [ ] **Task 4**: Create `UnsyncedCoValuesTracker` class (US1, US3, US4)
   - Create `packages/cojson/src/sync/UnsyncedCoValuesTracker.ts`
-  - Implement in-memory Set of unsynced CoValue IDs
-  - Implement `add(id)`, `remove(id)`, `getAll()`, `isAllSynced()` methods
+  - Implement in-memory `Map<RawCoID, Set<PeerID>>` for tracking unsynced CoValues per peer
+  - Implement `add(id, peerId)`, `remove(id, peerId)`, `getAll()`, `isAllSynced()` methods
   - Implement batched/async persistence using `StorageAPI.trackCoValueSyncStatus`
-  - Implement `loadPersisted()` to restore from storage
   - Implement `subscribe(id, listener)` for per-CoValue subscriptions
   - Implement `subscribe(listener)` for global "all synced" subscriptions
   - Handle storage errors gracefully (fallback to in-memory only)
@@ -31,16 +34,23 @@
 
 - [ ] **Task 5**: Integrate `UnsyncedCoValuesTracker` into `SyncManager` (US1)
   - Add `unsyncedTracker` property to `SyncManager` class
-  - Initialize tracker in `SyncManager` constructor with `local.storage`
-  - Update `syncContent()` method to call `unsyncedTracker.add()` after storing content
-  - Add per-peer subscription logic in `syncContent()` to remove from tracker when synced
-  - Handle unsubscribe cleanup when CoValue becomes synced
+  - Initialize tracker in `SyncManager` constructor: `new UnsyncedCoValuesTracker(local.storage, this)`
+  - Create `trackSyncState(coValueId)` helper method that:
+    - Iterates through all persistent server peers using `getPersistentServerPeers()`
+    - Calls `unsyncedTracker.add(coValueId, peer.id)` for each peer
+    - Subscribes to `syncState.subscribeToPeerUpdates()` for each peer to remove from tracker when synced
+    - Handles unsubscribe cleanup when CoValue becomes synced to a peer
+  - Update `syncContent()` method to call `trackSyncState(coValue.id)` after storing content
+  - Update `handleNewContent()` method to call `trackSyncState(coValue.id)` when receiving content from client peers
 
 - [ ] **Task 6**: Implement `resumeUnsyncedCoValues()` method (US2)
   - Add `async resumeUnsyncedCoValues()` method to `SyncManager`
-  - Load persisted unsynced CoValue IDs from tracker
-  - For each unsynced CoValue ID, load the CoValue and trigger sync
-  - Handle missing CoValues gracefully (remove from tracker if not found)
+  - Load persisted unsynced CoValue IDs from storage using `storage.getUnsyncedCoValueIDs()`
+  - Process CoValues in batches (e.g., 10 at a time) to avoid blocking
+  - For each unsynced CoValue ID, load the CoValue using `local.loadCoValueCore()`
+  - If CoValue loads successfully, call `trackSyncState()` to resume tracking
+  - If CoValue fails to load or is unavailable, call `storage.stopTrackingSyncStatus()` to clean up
+  - Use `setTimeout(processBatch, 0)` to yield control between batches
   - Call `resumeUnsyncedCoValues()` in `startPeerReconciliation()` method
   - Ensure it runs asynchronously and doesn't block initialization
 
@@ -49,7 +59,7 @@
 - [ ] **Task 7**: Implement `CoValueCore.subscribeToSyncStatus()` (US3)
   - Add `subscribeToSyncStatus(listener)` method to `CoValueCore` class
   - Use `syncManager.unsyncedTracker.subscribe(this.id, listener)` internally
-  - Call listener immediately with current state (`!unsyncedTracker.has(this.id)`)
+  - Call listener immediately with current state (check if CoValue ID is in `unsyncedTracker.getAll()`)
   - Return unsubscribe function
   - Update `packages/cojson/src/coValueCore/coValueCore.ts`
 
@@ -72,10 +82,11 @@
 ## Testing
 
 - [ ] **Task 10**: Write unit tests for `UnsyncedCoValuesTracker` (US1, US3, US4)
-  - Test `add()`, `remove()`, `getAll()`, `isAllSynced()` operations
-  - Test persistence and loading from storage
+  - Test `add(id, peerId)`, `remove(id, peerId)`, `getAll()`, `isAllSynced()` operations
+  - Test persistence using `StorageAPI.trackCoValueSyncStatus`
   - Test subscription notifications (both per-CoValue and global)
-  - Test error handling when storage is unavailable
+  - Test that listeners are called immediately with current state on subscription
+  - Test error handling when storage is unavailable (fallback to in-memory only)
   - Create `packages/cojson/src/sync/__tests__/UnsyncedCoValuesTracker.test.ts`
 
 - [ ] **Task 11**: Write integration tests for sync tracking (US1, US2)
