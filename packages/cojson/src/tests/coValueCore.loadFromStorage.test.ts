@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { RawCoID } from "../ids";
+import { PeerID } from "../sync";
 import { StorageAPI } from "../storage/types";
 import {
   createTestMetricReader,
@@ -36,6 +37,15 @@ function createMockStorage(
     store?: (data: any, correctionCallback: any) => void;
     getKnownState?: (id: RawCoID) => any;
     waitForSync?: (id: string, coValue: any) => Promise<void>;
+    trackCoValueSyncStatus?: (
+      id: RawCoID,
+      peerId: PeerID,
+      synced: boolean,
+    ) => void;
+    getUnsyncedCoValueIDs?: (
+      callback: (unsyncedCoValueIDs: RawCoID[]) => void,
+    ) => void;
+    stopTrackingSyncStatus?: (id: RawCoID) => void;
     close?: () => Promise<unknown> | undefined;
   } = {},
 ): StorageAPI {
@@ -44,6 +54,9 @@ function createMockStorage(
     store: opts.store || vi.fn(),
     getKnownState: opts.getKnownState || vi.fn(),
     waitForSync: opts.waitForSync || vi.fn().mockResolvedValue(undefined),
+    trackCoValueSyncStatus: opts.trackCoValueSyncStatus || vi.fn(),
+    getUnsyncedCoValueIDs: opts.getUnsyncedCoValueIDs || vi.fn(),
+    stopTrackingSyncStatus: opts.stopTrackingSyncStatus || vi.fn(),
     close: opts.close || vi.fn().mockResolvedValue(undefined),
   };
 }

@@ -4,6 +4,7 @@ import type {
 } from "../../coValueCore/verifiedState.js";
 import type { Signature } from "../../crypto/crypto.js";
 import type { RawCoID, SessionID } from "../../exports.js";
+import type { PeerID } from "../../sync.js";
 import { logger } from "../../logger.js";
 import type {
   DBClientInterfaceSync,
@@ -192,5 +193,33 @@ export class SQLiteClient
   transaction(operationsCallback: (tx: DBTransactionInterfaceSync) => unknown) {
     this.db.transaction(() => operationsCallback(this));
     return undefined;
+  }
+
+  trackCoValueSyncStatus(id: RawCoID, peerId: PeerID, synced: boolean): void {
+    if (synced) {
+      // Delete the record if synced
+      this.db.run(
+        "DELETE FROM unsynced_covalues WHERE co_value_id = ? AND peer_id = ?",
+        [id, peerId],
+      );
+    } else {
+      // Insert or replace the record if unsynced
+      this.db.run(
+        "INSERT OR REPLACE INTO unsynced_covalues (co_value_id, peer_id) VALUES (?, ?)",
+        [id, peerId],
+      );
+    }
+  }
+
+  getUnsyncedCoValueIDs(): RawCoID[] {
+    const rows = this.db.query<{ co_value_id: RawCoID }>(
+      "SELECT DISTINCT co_value_id FROM unsynced_covalues",
+      [],
+    ) as { co_value_id: RawCoID }[];
+    return rows.map((row) => row.co_value_id);
+  }
+
+  stopTrackingSyncStatus(id: RawCoID): void {
+    this.db.run("DELETE FROM unsynced_covalues WHERE co_value_id = ?", [id]);
   }
 }

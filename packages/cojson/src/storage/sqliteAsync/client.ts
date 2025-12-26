@@ -15,6 +15,7 @@ import type {
   TransactionRow,
 } from "../types.js";
 import type { SQLiteDatabaseDriverAsync } from "./types.js";
+import type { PeerID } from "../../sync.js";
 
 export type RawCoValueRow = {
   id: RawCoID;
@@ -200,5 +201,39 @@ export class SQLiteClientAsync
     operationsCallback: (tx: DBTransactionInterfaceAsync) => Promise<unknown>,
   ) {
     return this.db.transaction(() => operationsCallback(this));
+  }
+
+  async trackCoValueSyncStatus(
+    id: RawCoID,
+    peerId: PeerID,
+    synced: boolean,
+  ): Promise<void> {
+    if (synced) {
+      // Delete the record if synced
+      await this.db.run(
+        "DELETE FROM unsynced_covalues WHERE co_value_id = ? AND peer_id = ?",
+        [id, peerId],
+      );
+    } else {
+      // Insert or replace the record if unsynced
+      await this.db.run(
+        "INSERT OR REPLACE INTO unsynced_covalues (co_value_id, peer_id) VALUES (?, ?)",
+        [id, peerId],
+      );
+    }
+  }
+
+  async getUnsyncedCoValueIDs(): Promise<RawCoID[]> {
+    const rows = await this.db.query<{ co_value_id: RawCoID }>(
+      "SELECT DISTINCT co_value_id FROM unsynced_covalues",
+      [],
+    );
+    return rows.map((row) => row.co_value_id);
+  }
+
+  async stopTrackingSyncStatus(id: RawCoID): Promise<void> {
+    await this.db.run("DELETE FROM unsynced_covalues WHERE co_value_id = ?", [
+      id,
+    ]);
   }
 }
