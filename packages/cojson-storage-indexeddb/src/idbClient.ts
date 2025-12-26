@@ -218,12 +218,14 @@ export class IDBClient implements DBClientInterfaceAsync {
   }
 
   async getUnsyncedCoValueIDs(): Promise<RawCoID[]> {
-    return queryIndexedDbStore<RawCoID[]>(
-      this.db,
-      "unsyncedCoValues",
-      (store) =>
-        store.index("byCoValueId").getAllKeys() as IDBRequest<RawCoID[]>,
-    );
+    const records = await queryIndexedDbStore<
+      Array<{ rowID: number; coValueId: RawCoID; peerId: string }>
+    >(this.db, "unsyncedCoValues", (store) => store.getAll());
+    const uniqueIds = new Set<RawCoID>();
+    for (const record of records) {
+      uniqueIds.add(record.coValueId);
+    }
+    return Array.from(uniqueIds);
   }
 
   async stopTrackingSyncState(id: RawCoID): Promise<void> {

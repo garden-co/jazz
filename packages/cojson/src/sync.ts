@@ -266,7 +266,75 @@ export class SyncManager {
     }
   }
 
+  async resumeUnsyncedCoValues(): Promise<void> {
+    if (!this.local.storage) {
+      // No storage available, skip resumption
+      return;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      // Load all persisted unsynced CoValues from storage
+      this.local.storage!.getUnsyncedCoValueIDs((unsyncedCoValueIDs) => {
+        if (unsyncedCoValueIDs.length === 0) {
+          resolve();
+          return;
+        }
+
+        const BATCH_SIZE = 10;
+        let processed = 0;
+
+        const processBatch = async () => {
+          const batch = unsyncedCoValueIDs.slice(
+            processed,
+            processed + BATCH_SIZE,
+          );
+
+          await Promise.all(
+            batch.map(async (coValueId) => {
+              try {
+                // Load the CoValue from storage (this will trigger sync if peers are connected)
+                const coValue = await this.local.loadCoValueCore(coValueId);
+
+                if (coValue.isAvailable()) {
+                  // CoValue was successfully loaded. Resume tracking sync state for this CoValue
+                  // This will add it back to the tracker and set up subscriptions
+                  this.trackSyncState(coValueId);
+                } else {
+                  // CoValue not found in storage. Remove all peer entries for this CoValue
+                  this.local.storage!.stopTrackingSyncState(coValueId);
+                }
+              } catch (error) {
+                // Handle errors gracefully - log but don't fail the entire resumption
+                logger.warn(`Failed to resume sync for CoValue ${coValueId}:`, {
+                  err: error,
+                  coValueId,
+                });
+                this.local.storage!.stopTrackingSyncState(coValueId);
+              }
+            }),
+          );
+
+          processed += batch.length;
+
+          if (processed < unsyncedCoValueIDs.length) {
+            // Process next batch asynchronously to avoid blocking
+            setTimeout(processBatch, 0);
+          } else {
+            resolve();
+          }
+        };
+
+        processBatch().catch(reject);
+      });
+    });
+  }
+
   startPeerReconciliation(peer: PeerState) {
+    // Resume syncing unsynced CoValues asynchronously
+    this.resumeUnsyncedCoValues().catch((error) => {
+      logger.warn("Failed to resume unsynced CoValues:", error);
+    });
+
     const coValuesOrderedByDependency: CoValueCore[] = [];
 
     const seen = new Set<string>();
