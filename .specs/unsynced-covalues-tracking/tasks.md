@@ -3,29 +3,29 @@
 ## Core Infrastructure
 
 - [x] **Task 1**: Extend `StorageAPI` interface with unsynced CoValues tracking methods (US1)
-  - Add `trackCoValueSyncStatus(id: RawCoID, peerId: PeerID, synced: boolean): void` to `StorageAPI` interface in `packages/cojson/src/storage/types.ts`
+  - Add `trackCoValueSyncState(id: RawCoID, peerId: PeerID, synced: boolean): void` to `StorageAPI` interface in `packages/cojson/src/storage/types.ts`
   - Add `getUnsyncedCoValueIDs(callback: (data: RawCoID[]) => void)` to `StorageAPI` interface
-  - Add `stopTrackingSyncStatus(id: RawCoID): void` to `StorageAPI` interface
+  - Add `stopTrackingSyncState(id: RawCoID): void` to `StorageAPI` interface
 
-- [x] **Task 2**: Implement `trackCoValueSyncStatus`, `getUnsyncedCoValueIDs`, and `stopTrackingSyncStatus` for IndexedDB storage (US1)
+- [x] **Task 2**: Implement `trackCoValueSyncState`, `getUnsyncedCoValueIDs`, and `stopTrackingSyncState` for IndexedDB storage (US1)
   - Add new object store `"unsyncedCoValues"` in IndexedDB schema (upgrade version)
-  - Implement `trackCoValueSyncStatus` in `StorageApiAsync` to upsert/delete records
+  - Implement `trackCoValueSyncState` in `StorageApiAsync` to upsert/delete records
   - Implement `getUnsyncedCoValueIDs` to query all unsynced CoValue IDs
-  - Implement `stopTrackingSyncStatus` to delete all records for a CoValue ID
+  - Implement `stopTrackingSyncState` to delete all records for a CoValue ID
   - Update `packages/cojson-storage-indexeddb/src/idbNode.ts` for schema migration
 
-- [x] **Task 3**: Implement `trackCoValueSyncStatus`, `getUnsyncedCoValueIDs`, and `stopTrackingSyncStatus` for SQLite storage (US1)
+- [x] **Task 3**: Implement `trackCoValueSyncState`, `getUnsyncedCoValueIDs`, and `stopTrackingSyncState` for SQLite storage (US1)
   - Add `unsynced_covalues` table to SQLite schema
-  - Implement `trackCoValueSyncStatus` in `StorageApiAsync` and `StorageApiSync` for SQLite
+  - Implement `trackCoValueSyncState` in `StorageApiAsync` and `StorageApiSync` for SQLite
   - Implement `getUnsyncedCoValueIDs` in `StorageApiAsync` and `StorageApiSync` for SQLite
-  - Implement `stopTrackingSyncStatus` in `StorageApiAsync` and `StorageApiSync` for SQLite
+  - Implement `stopTrackingSyncState` in `StorageApiAsync` and `StorageApiSync` for SQLite
   - Update SQLite client implementations in `packages/cojson/src/storage/sqlite/` and `packages/cojson/src/storage/sqliteAsync/`
 
 - [x] **Task 4**: Create `UnsyncedCoValuesTracker` class (US1, US3, US4)
   - Create `packages/cojson/src/sync/UnsyncedCoValuesTracker.ts`
   - Implement in-memory `Map<RawCoID, Set<PeerID>>` for tracking unsynced CoValues per peer
   - Implement `add(id, peerId)`, `remove(id, peerId)`, `getAll()`, `isAllSynced()` methods
-  - Implement batched/async persistence using `StorageAPI.trackCoValueSyncStatus`
+  - Implement batched/async persistence using `StorageAPI.trackCoValueSyncState`
   - Implement `subscribe(id, listener)` for per-CoValue subscriptions
   - Implement `subscribe(listener)` for global "all synced" subscriptions
   - Handle storage errors gracefully (fallback to in-memory only)
@@ -49,22 +49,22 @@
   - Process CoValues in batches (e.g., 10 at a time) to avoid blocking
   - For each unsynced CoValue ID, load the CoValue using `local.loadCoValueCore()`
   - If CoValue loads successfully, call `trackSyncState()` to resume tracking
-  - If CoValue fails to load or is unavailable, call `storage.stopTrackingSyncStatus()` to clean up
+  - If CoValue fails to load or is unavailable, call `storage.stopTrackingSyncState()` to clean up
   - Use `setTimeout(processBatch, 0)` to yield control between batches
   - Call `resumeUnsyncedCoValues()` in `startPeerReconciliation()` method
   - Ensure it runs asynchronously and doesn't block initialization
 
 ## Subscription APIs
 
-- [ ] **Task 7**: Implement `CoValueCore.subscribeToSyncStatus()` (US3)
-  - Add `subscribeToSyncStatus(listener)` method to `CoValueCore` class
+- [ ] **Task 7**: Implement `CoValueCore.subscribeToSyncState()` (US3)
+  - Add `subscribeToSyncState(listener)` method to `CoValueCore` class
   - Use `syncManager.unsyncedTracker.subscribe(this.id, listener)` internally
   - Call listener immediately with current state (check if CoValue ID is in `unsyncedTracker.getAll()`)
   - Return unsubscribe function
   - Update `packages/cojson/src/coValueCore/coValueCore.ts`
 
-- [ ] **Task 8**: Implement `SyncManager.subscribeToSyncStatus()` (US4)
-  - Add `subscribeToSyncStatus(listener)` method to `SyncManager` class
+- [ ] **Task 8**: Implement `SyncManager.subscribeToSyncState()` (US4)
+  - Add `subscribeToSyncState(listener)` method to `SyncManager` class
   - Use `unsyncedTracker.subscribe(listener)` internally
   - Call listener immediately with current state (`unsyncedTracker.isAllSynced()`)
   - Return unsubscribe function
@@ -83,7 +83,7 @@
 
 - [ ] **Task 10**: Write unit tests for `UnsyncedCoValuesTracker` (US1, US3, US4)
   - Test `add(id, peerId)`, `remove(id, peerId)`, `getAll()`, `isAllSynced()` operations
-  - Test persistence using `StorageAPI.trackCoValueSyncStatus`
+  - Test persistence using `StorageAPI.trackCoValueSyncState`
   - Test subscription notifications (both per-CoValue and global)
   - Test that listeners are called immediately with current state on subscription
   - Test error handling when storage is unavailable (fallback to in-memory only)
@@ -97,8 +97,8 @@
   - Create/update integration tests in `packages/cojson/src/tests/`
 
 - [ ] **Task 12**: Write tests for subscription APIs (US3, US4)
-  - Test `CoValueCore.subscribeToSyncStatus()` notifies on status changes
-  - Test `SyncManager.subscribeToSyncStatus()` notifies when all synced
+  - Test `CoValueCore.subscribeToSyncState()` notifies on status changes
+  - Test `SyncManager.subscribeToSyncState()` notifies when all synced
   - Test immediate callback with current state on subscription
   - Test unsubscribe functionality
 

@@ -22,9 +22,9 @@ Extend the existing `StorageAPI` interface to include methods for tracking unsyn
 export interface StorageAPI {
   // ... existing methods ...
   
-  trackCoValueSyncStatus(id: RawCoID, peerId: PeerID, synced: boolean): void;
+  trackCoValueSyncState(id: RawCoID, peerId: PeerID, synced: boolean): void;
   getUnsyncedCoValueIDs(callback: (data: RawCoID[]) => void);
-  stopTrackingSyncStatus(id: RawCoID): void;
+  stopTrackingSyncState(id: RawCoID): void;
 }
 ```
 
@@ -41,7 +41,7 @@ A new class that manages the set of unsynced CoValue IDs.
 
 **Responsibilities:**
 - Maintain an in-memory Set of unsynced CoValue IDs (including peers pending sync)
-- Persist the set to storage using `StorageAPI.trackCoValueSyncStatus` if available. Persistence can be batched and performed asynchronously, to avoid the cost of N extra storage writes per update (where N is the number of peers). 
+- Persist the set to storage using `StorageAPI.trackCoValueSyncState` if available. Persistence can be batched and performed asynchronously, to avoid the cost of N extra storage writes per update (where N is the number of peers). 
 - Load persisted unsynced CoValues on initialization using `StorageAPI.getUnsyncedCoValueIDs` + `LocalNode.loadCoValueCore` if storage is available
 - Notify listeners when the set changes
 
@@ -159,7 +159,7 @@ async resumeUnsyncedCoValues(): Promise<void> {
                 this.trackSyncState(coValueId);
               } else {
                 // CoValue not found in storage. Remove all peer entries for this CoValue
-                this.local.storage!.stopTrackingSyncStatus(coValueId);
+                this.local.storage!.stopTrackingSyncState(coValueId);
               }
             } catch (error) {
               // Handle errors gracefully - log but don't fail the entire resumption
@@ -167,7 +167,7 @@ async resumeUnsyncedCoValues(): Promise<void> {
                 `Failed to resume sync for CoValue ${coValueId}:`,
                 error,
               );
-              this.local.storage!.stopTrackingSyncStatus(coValueId);
+              this.local.storage!.stopTrackingSyncState(coValueId);
             }
           }),
         );
@@ -192,12 +192,12 @@ async resumeUnsyncedCoValues(): Promise<void> {
 
 **Location:** `packages/cojson/src/coValueCore/coValueCore.ts` and `packages/cojson/src/sync.ts`
 
-**CoValueCore.subscribeToSyncStatus:**
+**CoValueCore.subscribeToSyncState:**
 - Subscribe to changes in whether this specific CoValue is synced
 - Uses `syncManager.unsyncedTracker.subscribe(coValueId)` to get notified when the CoValue's sync state changes
 - Calls listener immediately with current state on subscription
 
-**SyncManager.subscribeToSyncStatus:**
+**SyncManager.subscribeToSyncState:**
 - Subscribe to changes in whether all CoValues are synced
 - Uses `syncManager.unsyncedTracker.subscribe()` to get notified when the unsynced set changes
 - Calls listener immediately with current state on subscription (check `unsyncedTracker.isAllSynced()`)
@@ -249,7 +249,7 @@ CREATE INDEX idx_unsynced_covalues_co_value_id ON unsynced_covalues(co_value_id)
 ```
 
 **Storage Operations:**
-- `trackCoValueSyncStatus(coValueId, peerId, synced)`:
+- `trackCoValueSyncState(coValueId, peerId, synced)`:
   - If `synced === true`: DELETE row where `co_value_id = coValueId AND peer_id = peerId`
   - If `synced === false`: INSERT OR REPLACE row with `(coValueId, peerId)`
 - `getUnsyncedCoValueIDs(callback)`:
@@ -308,7 +308,7 @@ This represents:
    - Test that CoValues are tracked when they become unsynced
    - Test that CoValues are removed when they become synced
    - Test resumption on LocalNode initialization
-   - Test subscription APIs (`subscribeToSyncStatus`)
+   - Test subscription APIs (`subscribeToSyncState`)
    - Test refactored `waitForSync`
 
 3. **E2E Tests:**
