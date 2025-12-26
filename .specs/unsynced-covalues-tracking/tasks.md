@@ -32,7 +32,7 @@
 
 ## Integration with Sync System
 
-- [ ] **Task 5**: Integrate `UnsyncedCoValuesTracker` into `SyncManager` (US1)
+- [x] **Task 5**: Integrate `UnsyncedCoValuesTracker` into `SyncManager` (US1)
   - Add `unsyncedTracker` property to `SyncManager` class
   - Initialize tracker in `SyncManager` constructor: `new UnsyncedCoValuesTracker(local.storage, this)`
   - Create `trackSyncState(coValueId)` helper method that:

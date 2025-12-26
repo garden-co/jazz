@@ -54,6 +54,13 @@ export async function getIndexedDBStorage(name = DATABASE_NAME) {
         });
         unsyncedCoValues.createIndex("byCoValueId", "coValueId");
         unsyncedCoValues.createIndex("byPeerId", "peerId");
+        unsyncedCoValues.createIndex(
+          "uniqueUnsyncedCoValues",
+          ["coValueId", "peerId"],
+          {
+            unique: true,
+          },
+        );
       }
     };
   });

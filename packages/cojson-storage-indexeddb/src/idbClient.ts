@@ -172,16 +172,42 @@ export class IDBClient implements DBClientInterfaceAsync {
     }
   }
 
-  async trackCoValueSyncStatus(
+  async trackCoValueSyncState(
     id: RawCoID,
     peerId: string,
     synced: boolean,
   ): Promise<void> {
     if (synced) {
       // Delete the record if synced
-      await queryIndexedDbStore(this.db, "unsyncedCoValues", (store) =>
-        store.delete([id, peerId]),
-      );
+      // First, find the record using the unique index to get the rowID
+      return new Promise<void>((resolve, reject) => {
+        const tx = this.db.transaction("unsyncedCoValues", "readwrite");
+        const store = tx.objectStore("unsyncedCoValues");
+        const index = store.index("uniqueUnsyncedCoValues");
+
+        const recordRequest = index.get([id, peerId]);
+        recordRequest.onerror = () => {
+          reject(recordRequest.error);
+        };
+        recordRequest.onsuccess = () => {
+          const record = recordRequest.result as
+            | { rowID: number; coValueId: RawCoID; peerId: string }
+            | undefined;
+          if (record) {
+            const deleteRequest = store.delete(record.rowID);
+            deleteRequest.onerror = () => {
+              reject(deleteRequest.error);
+            };
+            deleteRequest.onsuccess = () => {
+              resolve();
+              tx.commit();
+            };
+          } else {
+            resolve();
+            tx.commit();
+          }
+        };
+      });
     } else {
       // Add the record if unsynced
       await putIndexedDbStore(this.db, "unsyncedCoValues", {
@@ -200,7 +226,7 @@ export class IDBClient implements DBClientInterfaceAsync {
     );
   }
 
-  async stopTrackingSyncStatus(id: RawCoID): Promise<void> {
+  async stopTrackingSyncState(id: RawCoID): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       const tx = this.db.transaction("unsyncedCoValues", "readwrite");
       const store = tx.objectStore("unsyncedCoValues");

@@ -195,7 +195,7 @@ export class SQLiteClient
     return undefined;
   }
 
-  trackCoValueSyncStatus(id: RawCoID, peerId: PeerID, synced: boolean): void {
+  trackCoValueSyncState(id: RawCoID, peerId: PeerID, synced: boolean): void {
     if (synced) {
       // Delete the record if synced
       this.db.run(
@@ -219,7 +219,7 @@ export class SQLiteClient
     return rows.map((row) => row.co_value_id);
   }
 
-  stopTrackingSyncStatus(id: RawCoID): void {
+  stopTrackingSyncState(id: RawCoID): void {
     this.db.run("DELETE FROM unsynced_covalues WHERE co_value_id = ?", [id]);
   }
 }

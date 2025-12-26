@@ -14,7 +14,7 @@ export class UnsyncedCoValuesTracker {
   // Listeners for global "all synced" status changes
   private globalListeners: Set<(synced: boolean) => void> = new Set();
 
-  constructor(private storage?: StorageAPI) {}
+  constructor(private getStorage: () => StorageAPI | undefined) {}
 
   /**
    * Add a CoValue as unsynced to a specific peer.
@@ -62,9 +62,10 @@ export class UnsyncedCoValuesTracker {
   }
 
   private persist(id: RawCoID, peerId: PeerID, synced: boolean): void {
-    if (this.storage) {
+    const storage = this.storage;
+    if (storage) {
       try {
-        this.storage.trackCoValueSyncStatus(id, peerId, synced);
+        storage.trackCoValueSyncState(id, peerId, synced);
       } catch (error) {
         logger.warn("Failed to persist unsynced CoValue tracking", {
           err: error,
@@ -155,5 +156,9 @@ export class UnsyncedCoValuesTracker {
     for (const listener of this.globalListeners) {
       listener(allSynced);
     }
+  }
+
+  private get storage(): StorageAPI | undefined {
+    return this.getStorage?.();
   }
 }
