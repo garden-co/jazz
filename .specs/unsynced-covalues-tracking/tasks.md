@@ -43,7 +43,7 @@
   - Update `syncContent()` method to call `trackSyncState(coValue.id)` after storing content
   - Update `handleNewContent()` method to call `trackSyncState(coValue.id)` when receiving content from client peers
 
-- [ ] **Task 6**: Implement `resumeUnsyncedCoValues()` method (US2)
+- [x] **Task 6**: Implement `resumeUnsyncedCoValues()` method (US2)
   - Add `async resumeUnsyncedCoValues()` method to `SyncManager`
   - Load persisted unsynced CoValue IDs from storage using `storage.getUnsyncedCoValueIDs()`
   - Process CoValues in batches (e.g., 10 at a time) to avoid blocking
