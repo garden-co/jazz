@@ -9,7 +9,7 @@ import {
 } from "vitest";
 import { CoValueCore, idforHeader } from "../coValueCore/coValueCore.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
-import { stableStringify } from "../jsonStringify.js";
+import { Stringified } from "../jsonStringify.js";
 import { LocalNode } from "../localNode.js";
 import {
   agentAndSessionIDFromSecret,
@@ -26,6 +26,7 @@ import {
 } from "./testUtils.js";
 import { CO_VALUE_PRIORITY } from "../priority.js";
 import { setMaxTxSizeBytes } from "../config.js";
+import { JsonValue } from "../jsonValue.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -357,7 +358,9 @@ test("changing parent and child group trigger only one invalidation on the local
 test("correctly records transactions", async () => {
   const node = nodeWithRandomAgentAndSessionID();
 
-  const changes1 = stableStringify([{ hello: "world" }]);
+  const changes1 = JSON.stringify([{ hello: "world" }]) as Stringified<
+    JsonValue[]
+  >;
   node.syncManager.recordTransactionsSize(
     [
       {
@@ -376,7 +379,7 @@ test("correctly records transactions", async () => {
   expect(value.count).toBe(1);
   expect(value.sum).toBe(changes1.length);
 
-  const changes2 = stableStringify([{ foo: "bar" }]);
+  const changes2 = JSON.stringify([{ foo: "bar" }]) as Stringified<JsonValue[]>;
   node.syncManager.recordTransactionsSize(
     [
       {
