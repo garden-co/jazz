@@ -633,7 +633,7 @@ export class SyncManager {
       sessionID,
       newContentForSession,
     ] of getSessionEntriesFromContentMessage(msg)) {
-      if (coValue.isDeleted && !isDeletedSessionID(sessionID)) {
+      if (wasAlreadyDeleted && !isDeletedSessionID(sessionID)) {
         continue;
       }
 

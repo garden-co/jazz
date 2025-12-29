@@ -233,18 +233,6 @@ export class IDBClient implements DBClientInterfaceAsync {
     }).catch(() => this.getCoValueRowID(id));
   }
 
-  async markCoValueAsDeleted(id: RawCoID): Promise<void> {
-    await putIndexedDbStore<DeletedCoValueQueueEntry, number>(
-      this.db,
-      "deletedCoValues",
-      {
-        coValueID: id,
-        // Default: "pending"
-        status: "pending",
-      },
-    );
-  }
-
   async markCoValueDeletionDone(id: RawCoID): Promise<void> {
     await putIndexedDbStore<DeletedCoValueQueueEntry, number>(
       this.db,

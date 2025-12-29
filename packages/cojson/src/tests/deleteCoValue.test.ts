@@ -9,14 +9,15 @@ import {
   setupTestNode,
   loadCoValueOrFail,
   nodeWithRandomAgentAndSessionID,
+  hotSleep,
   waitFor,
 } from "./testUtils.js";
 import { CO_VALUE_PRIORITY } from "../priority.js";
 
 const Crypto = await WasmCrypto.create();
 
-function makeDeleteMarkerTransaction(core: CoValueCore) {
-  core.makeTransaction([], "trusting", { deleted: true });
+function makeDeleteMarkerTransaction(core: CoValueCore, madeAt?: number) {
+  core.makeTransaction([], "trusting", { deleted: true }, madeAt);
   const deleteSessionID = Object.keys(core.knownState().sessions).find(
     (sessionID) => isDeletedSessionID(sessionID as SessionID),
   ) as SessionID;
@@ -282,6 +283,54 @@ test("skipVerify=true ingestion marks deleted even for non-admin delete marker",
 
   expect(error).toBeUndefined();
   expect(map.core.isDeleted).toBe(true);
+});
+
+test("rejects delete marker ingestion when tx.madeAt predates admin rights (time travel permission check)", async () => {
+  const alice = await setupTestAccount({ connected: true });
+  const bob = await setupTestAccount({ connected: true });
+
+  const bobAccount = await loadCoValueOrFail(alice.node, bob.accountID);
+  await loadCoValueOrFail(bob.node, alice.accountID);
+
+  const group = alice.node.createGroup();
+  group.addMember(bobAccount, "writer");
+  await group.core.waitForSync();
+
+  const map = group.createMap();
+  const mapOnBob = await loadCoValueOrFail(bob.node, map.id);
+
+  // Ensure Bob is still a writer at tx creation time
+  await waitFor(() => {
+    expect(mapOnBob.core.safeGetGroup()?.myRole()).toBe("writer");
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  const { tx, signature, deleteSessionID } = makeDeleteMarkerTransaction(
+    mapOnBob.core,
+  );
+
+  // Later, Bob gets admin rights...
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  group.addMember(bobAccount, "admin");
+  await group.core.waitForSync();
+
+  // ...but ingestion should still validate permissions at tx.madeAt (writer), not "now" (admin).
+  expect(group.roleOf(bob.accountID)).toBe("admin");
+
+  const error = map.core.tryAddTransactions(
+    deleteSessionID,
+    [tx],
+    signature,
+    false,
+  );
+
+  expect(error).toMatchObject({
+    type: "DeleteTransactionRejected",
+    reason: "NotAdmin",
+  });
+  expect(map.core.isDeleted).toBe(false);
 });
 
 test("rejects delete marker ingestion for non-owned covalue when verifying (skipVerify=false)", () => {

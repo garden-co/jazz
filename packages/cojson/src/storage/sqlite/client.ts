@@ -14,6 +14,7 @@ import type {
   StoredSessionRow,
   TransactionRow,
 } from "../types.js";
+import { DeletedCoValueDeletionStatus } from "../types.js";
 import type { SQLiteDatabaseDriver } from "./types.js";
 
 export type RawCoValueRow = {
@@ -156,15 +157,19 @@ export class SQLiteClient
 
   markCoValueDeletionDone(id: RawCoID) {
     this.db.run(
-      `INSERT INTO deletedCoValues (coValueID, status) VALUES (?, 'done')
-       ON CONFLICT(coValueID) DO UPDATE SET status='done'`,
-      [id],
+      `INSERT INTO deletedCoValues (coValueID, status) VALUES (?, ?)
+       ON CONFLICT(coValueID) DO UPDATE SET status=?`,
+      [
+        id,
+        DeletedCoValueDeletionStatus.Done,
+        DeletedCoValueDeletionStatus.Done,
+      ],
     );
   }
 
   eraseCoValueButKeepTombstone(coValueId: RawCoID) {
-    const coValueRow = this.db.get<RawCoValueRow & { rowID: number }>(
-      "SELECT * FROM coValues WHERE id = ?",
+    const coValueRow = this.db.get<{ rowID: number }>(
+      "SELECT rowID FROM coValues WHERE id = ?",
       [coValueId],
     );
 
@@ -210,8 +215,8 @@ export class SQLiteClient
       .query<DeletedCoValueQueueRow>(
         `SELECT coValueID as id
          FROM deletedCoValues
-         WHERE status = 'pending'`,
-        [],
+         WHERE status = ?`,
+        [DeletedCoValueDeletionStatus.Pending],
       )
       .map((r) => r.id);
   }

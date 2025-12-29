@@ -273,6 +273,10 @@ export class StorageApiSync implements StorageAPI {
 
     for (const sessionID of Object.keys(msg.new) as SessionID[]) {
       this.dbClient.transaction((tx) => {
+        if (this.deletedValues.has(id) && isDeletedSessionID(sessionID)) {
+          tx.markCoValueAsDeleted(id);
+        }
+
         const sessionRow = tx.getSingleCoValueSession(
           storedCoValueRowID,
           sessionID,
@@ -375,8 +379,11 @@ export class StorageApiSync implements StorageAPI {
     return newLastIdx;
   }
 
+  deletedValues = new Set<RawCoID>();
+
   markCoValueAsDeleted(id: RawCoID) {
-    this.dbClient.markCoValueAsDeleted(id);
+    this.deletedValues.add(id);
+
     if (this.deletedCoValuesEraserScheduler) {
       this.deletedCoValuesEraserScheduler.onEnqueueDeletedCoValue();
     }
@@ -385,7 +392,7 @@ export class StorageApiSync implements StorageAPI {
   enableDeletedCoValuesErasure() {
     if (this.deletedCoValuesEraserScheduler) return;
     this.deletedCoValuesEraserScheduler = new DeletedCoValuesEraserScheduler({
-      runOnce: async () =>
+      run: async () =>
         this.eraseDeletedCoValuesOnceBudgeted(
           DELETED_COVALUES_ERASER_MAX_DURATION_MS,
         ),

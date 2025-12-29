@@ -31,6 +31,7 @@ import type {
   StoredCoValueRow,
   StoredSessionRow,
 } from "./types.js";
+import { isDeletedSessionID } from "../ids.js";
 
 export class StorageApiAsync implements StorageAPI {
   private readonly dbClient: DBClientInterfaceAsync;
@@ -302,6 +303,10 @@ export class StorageApiAsync implements StorageAPI {
           sessionID,
         );
 
+        if (this.deletedValues.has(id) && isDeletedSessionID(sessionID)) {
+          await tx.markCoValueAsDeleted(id);
+        }
+
         if (sessionRow) {
           setSessionCounter(
             knownState.sessions,
@@ -403,13 +408,10 @@ export class StorageApiAsync implements StorageAPI {
     return newLastIdx;
   }
 
+  deletedValues = new Set<RawCoID>();
+
   markCoValueAsDeleted(id: RawCoID) {
-    this.dbClient.markCoValueAsDeleted(id).catch((error) => {
-      logger.error("Error marking coValue as deleted", {
-        error,
-        id,
-      });
-    });
+    this.deletedValues.add(id);
 
     if (this.deletedCoValuesEraserScheduler) {
       this.deletedCoValuesEraserScheduler.onEnqueueDeletedCoValue();
@@ -420,7 +422,7 @@ export class StorageApiAsync implements StorageAPI {
     if (this.deletedCoValuesEraserScheduler) return;
 
     this.deletedCoValuesEraserScheduler = new DeletedCoValuesEraserScheduler({
-      runOnce: async () => {
+      run: async () => {
         // Async storage: no max-time budgeting; drain to completion when scheduled.
         await this.eraseAllDeletedCoValues();
         const remaining = await this.dbClient.getAllCoValuesWaitingForDelete();

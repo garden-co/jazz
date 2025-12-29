@@ -11,7 +11,17 @@ export type CorrectionCallback = (
   correction: CoValueKnownState,
 ) => NewContentMessage[] | undefined;
 
-export type DeletedCoValueDeletionStatus = "pending" | "done";
+/**
+ * Deletion work queue status for `deletedCoValues` (SQLite).
+ *
+ * Stored as an INTEGER in SQLite:
+ * - 0 = pending
+ * - 1 = done
+ */
+export enum DeletedCoValueDeletionStatus {
+  Pending = 0,
+  Done = 1,
+}
 
 /**
  * The StorageAPI is the interface that the StorageSync and StorageAsync classes implement.
@@ -19,6 +29,11 @@ export type DeletedCoValueDeletionStatus = "pending" | "done";
  * It uses callbacks instead of promises to have no overhead when using the StorageSync and less overhead when using the StorageAsync.
  */
 export interface StorageAPI {
+  /**
+   * Flags that the coValue delete is valid.
+   *
+   * When the delete tx is stored, the storage will mark the coValue as deleted.
+   */
   markCoValueAsDeleted(id: RawCoID): void;
 
   /**
@@ -28,7 +43,7 @@ export interface StorageAPI {
   enableDeletedCoValuesErasure(): void;
 
   /**
-   * Batch physical deletion for coValues queued in `deletedCoValues` with status `"pending"`.
+   * Batch physical deletion for coValues queued in `deletedCoValues` with status `Pending`.
    * Must preserve tombstones (header + delete session(s) + their tx/signatures).
    */
   eraseAllDeletedCoValues(): Promise<void>;
@@ -83,6 +98,11 @@ export interface DBTransactionInterfaceAsync {
     sessionID: SessionID,
   ): Promise<StoredSessionRow | undefined>;
 
+  /**
+   * Persist a "deleted coValue" marker in storage (work queue entry).
+   * This is an enqueue signal: implementations should set status to `Pending`.
+   * This is expected to be idempotent (safe to call repeatedly).
+   */
   markCoValueAsDeleted(id: RawCoID): Promise<unknown>;
 
   markCoValueDeletionDone(id: RawCoID): Promise<unknown>;
@@ -130,13 +150,6 @@ export interface DBClientInterfaceAsync {
   ): Promise<number | undefined>;
 
   /**
-   * Persist a "deleted coValue" marker in storage (work queue entry).
-   * This is an enqueue signal: implementations should set status to `"pending"`.
-   * This is expected to be idempotent (safe to call repeatedly).
-   */
-  markCoValueAsDeleted(id: RawCoID): Promise<unknown>;
-
-  /**
    * Mark a deleted coValue work-queue entry as processed (physically erased while keeping the tombstone).
    * Implementations should set status to `"done"`. Idempotent.
    */
@@ -171,6 +184,11 @@ export interface DBTransactionInterfaceSync {
     sessionID: SessionID,
   ): StoredSessionRow | undefined;
 
+  /**
+   * Persist a "deleted coValue" marker in storage (work queue entry).
+   * This is an enqueue signal: implementations should set status to `"pending"`.
+   * This is expected to be idempotent (safe to call repeatedly).
+   */
   markCoValueAsDeleted(id: RawCoID): unknown;
 
   markCoValueDeletionDone(id: RawCoID): unknown;
@@ -211,13 +229,6 @@ export interface DBClientInterfaceSync {
   getCoValue(coValueId: string): StoredCoValueRow | undefined;
 
   upsertCoValue(id: string, header?: CoValueHeader): number | undefined;
-
-  /**
-   * Persist a "deleted coValue" marker in storage (work queue entry).
-   * This is an enqueue signal: implementations should set status to `"pending"`.
-   * This is expected to be idempotent (safe to call repeatedly).
-   */
-  markCoValueAsDeleted(id: RawCoID): unknown;
 
   /**
    * Mark a deleted coValue work-queue entry as processed (physically erased while keeping the tombstone).

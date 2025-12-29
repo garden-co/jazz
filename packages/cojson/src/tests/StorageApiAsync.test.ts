@@ -752,22 +752,21 @@ describe("StorageApiAsync", () => {
   });
 
   describe("delete flow", () => {
-    test("markCoValueAsDeleted enqueues the coValue for erasure", async () => {
+    test("deleteCoValue enqueues the coValue for erasure", async () => {
       const storage = await createAsyncStorage({
         nodeName: "test",
         storageName: "test-storage",
       });
 
-      const fixtures = setupTestNode();
-      const id = fixtures.node.createGroup().id;
+      const client = setupTestNode();
+      client.addStorage({ storage });
 
-      storage.markCoValueAsDeleted(id);
+      const group = client.node.createGroup();
+      const map = group.createMap();
+      map.core.deleteCoValue();
+      await map.core.waitForSync();
 
-      await waitFor(async () => {
-        const queued = await getAllCoValuesWaitingForDelete(storage);
-        expect(queued).toContain(id);
-        return true;
-      });
+      expect(await getAllCoValuesWaitingForDelete(storage)).toContain(map.id);
     });
 
     test("background erasure doesn't run if not enabled", async () => {
@@ -845,8 +844,6 @@ describe("StorageApiAsync", () => {
 
       map.core.deleteCoValue();
       await map.core.waitForSync();
-
-      storage.markCoValueAsDeleted(map.id as any);
 
       await waitFor(async () => {
         const queued = await getAllCoValuesWaitingForDelete(storage);

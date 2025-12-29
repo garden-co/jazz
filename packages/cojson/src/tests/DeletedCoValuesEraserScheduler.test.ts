@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { logger } from "../logger.js";
 import { DeletedCoValuesEraserScheduler } from "../storage/DeletedCoValuesEraserScheduler.js";
 
 describe("DeletedCoValuesEraserScheduler", () => {
@@ -14,7 +15,7 @@ describe("DeletedCoValuesEraserScheduler", () => {
   test("scheduleStartupDrain runs once after startupDelayMs (when idle)", async () => {
     let runs = 0;
     const scheduler = new DeletedCoValuesEraserScheduler({
-      runOnce: async () => {
+      run: async () => {
         runs += 1;
         return { hasMore: false };
       },
@@ -32,7 +33,7 @@ describe("DeletedCoValuesEraserScheduler", () => {
   test("onEnqueueDeletedCoValue is throttled (multiple enqueues -> one run)", async () => {
     let runs = 0;
     const scheduler = new DeletedCoValuesEraserScheduler({
-      runOnce: async () => {
+      run: async () => {
         runs += 1;
         return { hasMore: false };
       },
@@ -56,11 +57,11 @@ describe("DeletedCoValuesEraserScheduler", () => {
     scheduler.dispose();
   });
 
-  test("schedules follow-up phases while runOnce reports hasMore=true", async () => {
+  test("schedules follow-up phases while run reports hasMore=true", async () => {
     let remaining = 3;
     let runs = 0;
     const scheduler = new DeletedCoValuesEraserScheduler({
-      runOnce: async () => {
+      run: async () => {
         runs += 1;
         remaining -= 1;
         return { hasMore: remaining > 0 };
@@ -75,13 +76,13 @@ describe("DeletedCoValuesEraserScheduler", () => {
     scheduler.dispose();
   });
 
-  test("never runs runOnce concurrently (re-entrancy guard via internal state machine)", async () => {
+  test("never runs run concurrently (re-entrancy guard via internal state machine)", async () => {
     let concurrent = 0;
     let maxConcurrent = 0;
     let remaining = 2;
 
     const scheduler = new DeletedCoValuesEraserScheduler({
-      runOnce: async () => {
+      run: async () => {
         concurrent += 1;
         maxConcurrent = Math.max(maxConcurrent, concurrent);
 
@@ -111,7 +112,7 @@ describe("DeletedCoValuesEraserScheduler", () => {
   test("ignores enqueues while not idle, but schedules again once idle", async () => {
     let runs = 0;
     const scheduler = new DeletedCoValuesEraserScheduler({
-      runOnce: async () => {
+      run: async () => {
         runs += 1;
         return { hasMore: false };
       },
@@ -136,7 +137,7 @@ describe("DeletedCoValuesEraserScheduler", () => {
   test("dispose cancels any scheduled run", async () => {
     let runs = 0;
     const scheduler = new DeletedCoValuesEraserScheduler({
-      runOnce: async () => {
+      run: async () => {
         runs += 1;
         return { hasMore: false };
       },
@@ -148,5 +149,37 @@ describe("DeletedCoValuesEraserScheduler", () => {
 
     await vi.advanceTimersByTimeAsync(60);
     expect(runs).toBe(0);
+  });
+
+  test("recovers when run throws (logs error and returns to idle so it can run again)", async () => {
+    const err = new Error("boom");
+    const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
+
+    let runs = 0;
+    const scheduler = new DeletedCoValuesEraserScheduler({
+      run: async () => {
+        runs += 1;
+        if (runs === 1) throw err;
+        return { hasMore: false };
+      },
+      opts: { throttleMs: 10, startupDelayMs: 10, followUpDelayMs: 10 },
+    });
+
+    scheduler.onEnqueueDeletedCoValue();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(runs).toBe(1);
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      "Error running deleted co values eraser scheduler",
+      expect.objectContaining({ err }),
+    );
+
+    // If the scheduler didn't reset back to idle after the error, this enqueue would be ignored.
+    scheduler.onEnqueueDeletedCoValue();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(runs).toBe(2);
+
+    scheduler.dispose();
+    errorSpy.mockRestore();
   });
 });

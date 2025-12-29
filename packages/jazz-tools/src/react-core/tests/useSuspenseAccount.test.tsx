@@ -9,7 +9,6 @@ import { useSuspenseAccount, useLogOut } from "../hooks.js";
 import {
   createJazzTestAccount,
   createJazzTestGuest,
-  setActiveAccount,
   setupJazzTestSync,
 } from "../testing.js";
 import { act, render, renderHook, waitFor } from "./testUtils.js";

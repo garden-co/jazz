@@ -67,7 +67,7 @@ export class SessionMap {
     // We reset the known state to report only the deleted session/transaction
     this.knownState = { id: this.id, header: true, sessions: {} };
 
-    // We remove the streaming stauses, because once deleted we don't need
+    // We remove the streaming statuses, because once deleted we don't need
     // to wait for any streaming to be completed
     this.knownStateWithStreaming = undefined;
     this.streamingKnownState = undefined;

@@ -590,7 +590,7 @@ describe("StorageApiSync", () => {
   });
 
   describe("delete flow", () => {
-    test("markCoValueAsDeleted enqueues the coValue for erasure", async () => {
+    test("deleteCoValue enqueues the coValue for erasure", async () => {
       const client = setupTestNode();
       const { storage } = client.addStorage({
         storage: createSyncStorage({
@@ -599,13 +599,13 @@ describe("StorageApiSync", () => {
         }),
       });
 
-      const fixtures = setupTestNode();
-      const id = fixtures.node.createGroup().id;
-
-      storage.markCoValueAsDeleted(id);
+      const group = client.node.createGroup();
+      const map = group.createMap();
+      map.core.deleteCoValue();
+      await map.core.waitForSync();
 
       const queued = await getAllCoValuesWaitingForDelete(storage);
-      expect(queued).toContain(id);
+      expect(queued).toContain(map.id);
     });
 
     test("background erasure doesn't run if not enabled", async () => {
@@ -690,8 +690,6 @@ describe("StorageApiSync", () => {
 
       map.core.deleteCoValue();
       await map.core.waitForSync();
-
-      storage.markCoValueAsDeleted(map.id as RawCoID);
 
       expect(await getAllCoValuesWaitingForDelete(storage)).toContain(map.id);
 

@@ -14,6 +14,7 @@ import type {
   StoredSessionRow,
   TransactionRow,
 } from "../types.js";
+import { DeletedCoValueDeletionStatus } from "../types.js";
 import type { SQLiteDatabaseDriverAsync } from "./types.js";
 
 export type RawCoValueRow = {
@@ -159,9 +160,13 @@ export class SQLiteClientAsync
 
   async markCoValueDeletionDone(id: RawCoID) {
     await this.db.run(
-      `INSERT INTO deletedCoValues (coValueID, status) VALUES (?, 'done')
-       ON CONFLICT(coValueID) DO UPDATE SET status='done'`,
-      [id],
+      `INSERT INTO deletedCoValues (coValueID, status) VALUES (?, ?)
+       ON CONFLICT(coValueID) DO UPDATE SET status=?`,
+      [
+        id,
+        DeletedCoValueDeletionStatus.Done,
+        DeletedCoValueDeletionStatus.Done,
+      ],
     );
   }
 
@@ -208,8 +213,8 @@ export class SQLiteClientAsync
     const rows = await this.db.query<DeletedCoValueQueueRow>(
       `SELECT coValueID as id
        FROM deletedCoValues
-       WHERE status = 'pending'`,
-      [],
+       WHERE status = ?`,
+      [DeletedCoValueDeletionStatus.Pending],
     );
     return rows.map((r) => r.id);
   }

@@ -190,7 +190,7 @@ test("persists deleted coValue marker as a deletedCoValues work queue entry", as
   expect(deletedCoValueIDs).toContain(map2.id);
 });
 
-test("delete flow: markCoValueAsDeleted + eraseAllDeletedCoValues removes history, preserves tombstone, drains queue, and keeps only delete session in knownState", async () => {
+test("delete flow: eraseAllDeletedCoValues removes history, preserves tombstone, drains queue, and keeps only delete session in knownState", async () => {
   const agentSecret = Crypto.newRandomAgentSecret();
 
   const node1 = new LocalNode(
@@ -208,8 +208,6 @@ test("delete flow: markCoValueAsDeleted + eraseAllDeletedCoValues removes histor
 
   map.core.deleteCoValue();
   await map.core.waitForSync();
-
-  storage1.markCoValueAsDeleted(map.id);
 
   await waitFor(async () => {
     const queued = await getAllCoValuesWaitingForDelete(storage1);

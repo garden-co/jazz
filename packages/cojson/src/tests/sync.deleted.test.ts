@@ -128,9 +128,7 @@ describe("syncing deleted coValues", () => {
 
     SyncMessagesLog.clear();
 
-    expect(() => {
-      mapOnClient.set("x", "y", "trusting");
-    }).toThrow(/deleted coValue/i);
+    mapOnClient.set("x", "y", "trusting");
 
     await new Promise((resolve) => setTimeout(resolve, 10));
 

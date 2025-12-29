@@ -1,3 +1,5 @@
+import { logger } from "../logger.js";
+
 export type DeletedCoValuesEraserSchedulerRunResult = {
   hasMore: boolean;
 };
@@ -17,27 +19,30 @@ type SchedulerState =
   | "disposed";
 
 export class DeletedCoValuesEraserScheduler {
-  private readonly runOnce: () => Promise<DeletedCoValuesEraserSchedulerRunResult>;
+  private readonly runCallback: () => Promise<DeletedCoValuesEraserSchedulerRunResult>;
   private readonly opts: DeletedCoValuesEraserSchedulerOpts;
 
   private state: SchedulerState = "idle";
-  private disposed = false;
+
+  private isDisposed(): boolean {
+    return this.state === "disposed";
+  }
 
   private scheduledTimeout: ReturnType<typeof setTimeout> | undefined;
 
   constructor({
-    runOnce,
+    run,
     opts,
   }: {
-    runOnce: () => Promise<DeletedCoValuesEraserSchedulerRunResult>;
+    run: () => Promise<DeletedCoValuesEraserSchedulerRunResult>;
     opts: DeletedCoValuesEraserSchedulerOpts;
   }) {
-    this.runOnce = runOnce;
+    this.runCallback = run;
     this.opts = opts;
   }
 
   scheduleStartupDrain() {
-    if (this.disposed) return;
+    if (this.isDisposed()) return;
 
     // Only schedule startup drain if nothing is already scheduled/running.
     if (this.state !== "idle") return;
@@ -46,7 +51,7 @@ export class DeletedCoValuesEraserScheduler {
   }
 
   onEnqueueDeletedCoValue() {
-    if (this.disposed) return;
+    if (this.isDisposed()) return;
 
     // While we're already draining (or have a follow-up scheduled), ignore enqueue
     // to avoid overlapping phases. The active drain loop will pick up new work.
@@ -57,8 +62,7 @@ export class DeletedCoValuesEraserScheduler {
   }
 
   dispose() {
-    if (this.disposed) return;
-    this.disposed = true;
+    if (this.isDisposed()) return;
     this.state = "disposed";
 
     if (this.scheduledTimeout) clearTimeout(this.scheduledTimeout);
@@ -69,7 +73,7 @@ export class DeletedCoValuesEraserScheduler {
     state: Exclude<SchedulerState, "idle" | "running" | "disposed">,
     delayMs: number,
   ) {
-    if (this.disposed) return;
+    if (this.isDisposed()) return;
     if (this.scheduledTimeout) return;
 
     this.state = state;
@@ -80,14 +84,27 @@ export class DeletedCoValuesEraserScheduler {
   }
 
   private async run() {
-    if (this.disposed) return;
+    if (this.isDisposed()) return;
 
     // Clear any pre-run scheduled state and enter running state.
     this.state = "running";
 
-    const result = await this.runOnce();
+    let result: DeletedCoValuesEraserSchedulerRunResult;
+    try {
+      result = await this.runCallback();
+    } catch (error) {
+      logger.error("Error running deleted co values eraser scheduler", {
+        err: error,
+      });
+      // If the run callback fails, recover to idle so future enqueues/startup drains
+      // can retry instead of getting stuck in "running".
+      if (!this.isDisposed()) {
+        this.state = "idle";
+      }
+      return;
+    }
 
-    if (this.disposed) return;
+    if (this.isDisposed()) return;
 
     if (result.hasMore) {
       // One follow-up phase at a time. Further enqueues while follow-up is scheduled

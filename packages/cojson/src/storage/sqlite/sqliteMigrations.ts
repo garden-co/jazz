@@ -34,8 +34,9 @@ export const migrations: Record<number, string[]> = {
   4: [
     `CREATE TABLE IF NOT EXISTS deletedCoValues (
       coValueID TEXT PRIMARY KEY,
-      status TEXT NOT NULL DEFAULT 'pending'
+      status INTEGER NOT NULL DEFAULT 0
     ) WITHOUT ROWID;`,
+    "CREATE INDEX IF NOT EXISTS deletedCoValuesByStatus ON deletedCoValues (status);",
   ],
 };
 
