@@ -264,10 +264,6 @@ export async function createJazzContext<
 
   const credentials = options.credentials ?? (await authSecretStorage.get());
 
-  if (options.storage) {
-    options.storage.enableDeletedCoValuesErasure();
-  }
-
   if (credentials && !options.newAccountProps) {
     context = await createJazzContextFromExistingCredentials({
       credentials: {
