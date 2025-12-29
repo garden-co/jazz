@@ -127,6 +127,90 @@ describe("deleteCoValues", () => {
     expect(child.$jazz.raw.core.isDeleted).toBe(false);
   });
 
+  test("rejects deletion when a the value cannot be loaded", async () => {
+    const Root = co.map({
+      value: z.string(),
+    });
+
+    const owner = Account.getMe();
+    const otherOwner = await createJazzTestAccount();
+    const root = Root.create(
+      { value: "root" },
+      Group.create({ owner: otherOwner }),
+    );
+    await root.$jazz.raw.core.waitForSync();
+
+    await expect(
+      deleteCoValues(Root, root.$jazz.id, {
+        loadAs: owner,
+      }),
+    ).rejects.toThrow(new RegExp(`Jazz Authorization Error`));
+
+    expect(root.$jazz.raw.core.isDeleted).toBe(false);
+  });
+
+  test("rejects deletion when a child could not be loaded", async () => {
+    const Child = co.map({
+      value: z.string(),
+    });
+
+    const Root = co.map({
+      child: Child,
+    });
+
+    const owner = Account.getMe();
+    const otherOwner = await createJazzTestAccount();
+
+    const groupA = Group.create(owner).makePublic("reader");
+    const groupB = Group.create({ owner: otherOwner });
+
+    const child = Child.create({ value: "child" }, groupB);
+    await child.$jazz.raw.core.waitForSync();
+
+    const root = Root.create({ child }, groupA);
+    await root.$jazz.raw.core.waitForSync();
+
+    await expect(
+      deleteCoValues(Root, root.$jazz.id, {
+        loadAs: owner,
+        resolve: { child: true },
+      }),
+    ).rejects.toThrow(new RegExp(`Jazz Authorization Error`));
+
+    expect(root.$jazz.raw.core.isDeleted).toBe(false);
+    expect(child.$jazz.raw.core.isDeleted).toBe(false);
+  });
+
+  test("delete the CoValue when the child cannot be loaded but is marked with $onError", async () => {
+    const Child = co.map({
+      value: z.string(),
+    });
+
+    const Root = co.map({
+      child: Child,
+    });
+
+    const owner = Account.getMe();
+    const otherOwner = await createJazzTestAccount();
+
+    const groupA = Group.create(owner).makePublic("reader");
+    const groupB = Group.create({ owner: otherOwner });
+
+    const child = Child.create({ value: "child" }, groupB);
+    await child.$jazz.raw.core.waitForSync();
+
+    const root = Root.create({ child }, groupA);
+    await root.$jazz.raw.core.waitForSync();
+
+    await deleteCoValues(Root, root.$jazz.id, {
+      loadAs: owner,
+      resolve: { child: { $onError: "catch" } },
+    });
+
+    expect(root.$jazz.raw.core.isDeleted).toBe(true);
+    expect(child.$jazz.raw.core.isDeleted).toBe(false);
+  });
+
   test("hard rejects Account and Group CoValues", async () => {
     const me = Account.getMe();
 

@@ -1,9 +1,12 @@
+import { getJazzErrorType } from "jazz-tools";
+import { CoValueErrorState } from "node_modules/jazz-tools/dist/tools/internal";
 import React from "react";
 
 interface ErrorBoundaryState {
   hasError: boolean;
   isAuthorizationError?: boolean;
   error?: Error;
+  errorType?: CoValueErrorState | "unknown";
 }
 
 interface ErrorBoundaryProps {
@@ -21,11 +24,7 @@ export class ErrorBoundary extends React.Component<
   }
 
   static getDerivedStateFromError(error: Error): ErrorBoundaryState {
-    if (error.message.includes("Jazz Authorization Error")) {
-      return { hasError: true, isAuthorizationError: true, error };
-    }
-
-    return { hasError: true, error };
+    return { hasError: true, error, errorType: getJazzErrorType(error) };
   }
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo): void {
@@ -38,12 +37,52 @@ export class ErrorBoundary extends React.Component<
         return this.props.fallback(this.state.error);
       }
 
-      if (this.state.isAuthorizationError) {
+      if (this.state.errorType === "unauthorized") {
         return (
           <div className="flex min-h-screen items-center justify-center p-8">
             <div className="max-w-2xl space-y-4">
               <h1 className="text-2xl font-semibold text-red-600">
                 You are not authorized to access this page
+              </h1>
+              <button
+                onClick={() => {
+                  window.location.href = "/";
+                }}
+                className="mt-4 rounded-md bg-primary px-4 py-2 text-primary-foreground hover:bg-primary/90"
+              >
+                Go to home page
+              </button>
+            </div>
+          </div>
+        );
+      }
+
+      if (this.state.errorType === "deleted") {
+        return (
+          <div className="flex min-h-screen items-center justify-center p-8">
+            <div className="max-w-2xl space-y-4">
+              <h1 className="text-2xl font-semibold text-red-600">
+                The page you are trying to access has been deleted
+              </h1>
+              <button
+                onClick={() => {
+                  window.location.href = "/";
+                }}
+                className="mt-4 rounded-md bg-primary px-4 py-2 text-primary-foreground hover:bg-primary/90"
+              >
+                Go to home page
+              </button>
+            </div>
+          </div>
+        );
+      }
+
+      if (this.state.errorType === "unavailable") {
+        return (
+          <div className="flex min-h-screen items-center justify-center p-8">
+            <div className="max-w-2xl space-y-4">
+              <h1 className="text-2xl font-semibold text-red-600">
+                The page you are trying to access is unavailable
               </h1>
               <button
                 onClick={() => {

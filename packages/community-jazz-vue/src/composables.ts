@@ -215,13 +215,7 @@ export function useCoState<
           {
             resolve: options?.resolve as any,
             loadAs: safeLoadAsAgent,
-            onUnavailable: (value) => {
-              updateState(value);
-            },
-            onUnauthorized: (value) => {
-              updateState(value);
-            },
-            onDeleted: (value) => {
+            onError: (value) => {
               updateState(value);
             },
             syncResolution: true,

@@ -831,7 +831,7 @@ This state is treated like other terminal loading error states (`"unavailable"`,
 
 - it propagates through the subscription tree like other NotLoaded errors
 - `loadCoValue(...)` resolves (does not hang) when the root CoValue is deleted
-- userland can handle it via the loading state (and optionally an `onDeleted` callback)
+- userland can handle it via the loading state (and optionally an `onError` callback)
 
 
 ## Error Handling / Testing Strategy

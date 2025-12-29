@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { cojsonInternals } from "cojson";
-import { Account, Group, Loaded, co, z } from "jazz-tools";
+import { Account, Group, Loaded, co, getJazzErrorType, z } from "jazz-tools";
 import { assertLoaded } from "jazz-tools/testing";
 import { beforeEach, describe, expect, expectTypeOf, it } from "vitest";
 import React, { Suspense } from "react";
@@ -29,6 +29,10 @@ beforeEach(async () => {
 });
 
 cojsonInternals.setCoValueLoadingRetryDelay(10);
+
+function ErrorFallback(props: { error: Error }) {
+  return <div>Error: {getJazzErrorType(props.error)}</div>;
+}
 
 describe("useSuspenseAccount", () => {
   it("should return loaded account without suspending when data is available", async () => {
@@ -287,7 +291,7 @@ describe("useSuspenseAccount", () => {
 
     const { container } = await act(async () => {
       return render(
-        <ErrorBoundary fallback={<div>Error!</div>}>
+        <ErrorBoundary FallbackComponent={ErrorFallback}>
           <Suspense fallback={<div>Loading...</div>}>
             <TestComponent />
           </Suspense>
@@ -298,7 +302,7 @@ describe("useSuspenseAccount", () => {
 
     await waitFor(
       () => {
-        expect(container.textContent).toContain("Error!");
+        expect(container.textContent).toContain("Error: deleted");
       },
       { timeout: 10_000 },
     );
@@ -323,7 +327,7 @@ describe("useSuspenseAccount", () => {
 
     const { container } = await act(async () => {
       return render(
-        <ErrorBoundary fallback={<div>Error!</div>}>
+        <ErrorBoundary FallbackComponent={ErrorFallback}>
           <Suspense fallback={<div>Loading...</div>}>
             <TestComponent />
           </Suspense>
@@ -337,7 +341,7 @@ describe("useSuspenseAccount", () => {
     // Verify error is displayed in error boundary
     await waitFor(
       () => {
-        expect(container.textContent).toContain("Error!");
+        expect(container.textContent).toContain("Error: unknown");
       },
       { timeout: 1000 },
     );
@@ -376,7 +380,9 @@ describe("useSuspenseAccount", () => {
 
     const wrapper = ({ children }: { children: React.ReactNode }) => (
       <Suspense fallback={<div>Loading...</div>}>
-        <ErrorBoundary fallback={<div>Error!</div>}>{children}</ErrorBoundary>
+        <ErrorBoundary FallbackComponent={ErrorFallback}>
+          {children}
+        </ErrorBoundary>
       </Suspense>
     );
 

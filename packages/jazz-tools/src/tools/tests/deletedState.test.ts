@@ -21,7 +21,7 @@ describe("deleted loading state", () => {
     cojsonInternals.CO_VALUE_LOADING_CONFIG.TIMEOUT = 50;
   });
 
-  it("subscribeToCoValue calls onDeleted and stops emitting loaded updates", async () => {
+  it("subscribeToCoValue calls onError and stops emitting loaded updates", async () => {
     const TestMap = co.map({
       value: z.string(),
     });
@@ -31,7 +31,7 @@ describe("deleted loading state", () => {
     const map = TestMap.create({ value: "hello" }, me);
 
     const onLoaded = vi.fn();
-    const onDeleted = vi.fn();
+    const onError = vi.fn();
     const onUnavailable = vi.fn();
     const onUnauthorized = vi.fn();
 
@@ -40,7 +40,7 @@ describe("deleted loading state", () => {
       map.$jazz.id,
       {
         loadAs: meOnSecondPeer,
-        onDeleted,
+        onError,
         onUnavailable,
         onUnauthorized,
       },
@@ -59,10 +59,10 @@ describe("deleted loading state", () => {
     await map.$jazz.raw.core.waitForSync();
 
     await waitFor(() => {
-      expect(onDeleted).toHaveBeenCalled();
+      expect(onError).toHaveBeenCalled();
     });
 
-    const deletedValue = onDeleted.mock.calls[0]?.[0];
+    const deletedValue = onError.mock.calls[0]?.[0];
     expect(deletedValue?.$isLoaded).toBe(false);
     expect(deletedValue?.$jazz.loadingState).toBe(CoValueLoadingState.DELETED);
 
