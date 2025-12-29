@@ -172,49 +172,64 @@ export class IDBClient implements DBClientInterfaceAsync {
     }
   }
 
-  async trackCoValueSyncState(
-    id: RawCoID,
-    peerId: string,
-    synced: boolean,
+  async trackCoValuesSyncState(
+    operations: Array<{ id: RawCoID; peerId: string; synced: boolean }>,
   ): Promise<void> {
-    if (synced) {
-      // Delete the record if synced
-      // First, find the record using the unique index to get the rowID
-      return new Promise<void>((resolve, reject) => {
-        const tx = this.db.transaction("unsyncedCoValues", "readwrite");
-        const store = tx.objectStore("unsyncedCoValues");
-        const index = store.index("uniqueUnsyncedCoValues");
-
-        const recordRequest = index.get([id, peerId]);
-        recordRequest.onerror = () => {
-          reject(recordRequest.error);
-        };
-        recordRequest.onsuccess = () => {
-          const record = recordRequest.result as
-            | { rowID: number; coValueId: RawCoID; peerId: string }
-            | undefined;
-          if (record) {
-            const deleteRequest = store.delete(record.rowID);
-            deleteRequest.onerror = () => {
-              reject(deleteRequest.error);
-            };
-            deleteRequest.onsuccess = () => {
-              resolve();
-              tx.commit();
-            };
-          } else {
-            resolve();
-            tx.commit();
-          }
-        };
-      });
-    } else {
-      // Add the record if unsynced
-      await putIndexedDbStore(this.db, "unsyncedCoValues", {
-        coValueId: id,
-        peerId: peerId,
-      });
+    if (operations.length === 0) {
+      return;
     }
+
+    return new Promise<void>((resolve, reject) => {
+      const tx = this.db.transaction("unsyncedCoValues", "readwrite");
+      const store = tx.objectStore("unsyncedCoValues");
+      const index = store.index("uniqueUnsyncedCoValues");
+
+      let completed = 0;
+      let hasError = false;
+
+      const handleComplete = () => {
+        completed++;
+        if (completed === operations.length && !hasError) {
+          resolve();
+          tx.commit();
+        }
+      };
+
+      const handleError = (error: DOMException) => {
+        if (!hasError) {
+          hasError = true;
+          reject(error);
+        }
+      };
+
+      for (const op of operations) {
+        if (op.synced) {
+          // Delete: find record first, then delete by rowID
+          const recordRequest = index.get([op.id, op.peerId]);
+          recordRequest.onerror = () => handleError(recordRequest.error!);
+          recordRequest.onsuccess = () => {
+            const record = recordRequest.result as
+              | { rowID: number; coValueId: RawCoID; peerId: string }
+              | undefined;
+            if (record) {
+              const deleteRequest = store.delete(record.rowID);
+              deleteRequest.onerror = () => handleError(deleteRequest.error!);
+              deleteRequest.onsuccess = () => handleComplete();
+            } else {
+              handleComplete();
+            }
+          };
+        } else {
+          // Insert: use put which will handle upsert
+          const putRequest = store.put({
+            coValueId: op.id,
+            peerId: op.peerId,
+          });
+          putRequest.onerror = () => handleError(putRequest.error!);
+          putRequest.onsuccess = () => handleComplete();
+        }
+      }
+    });
   }
 
   async getUnsyncedCoValueIDs(): Promise<RawCoID[]> {

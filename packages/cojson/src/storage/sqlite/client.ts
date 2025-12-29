@@ -195,28 +195,36 @@ export class SQLiteClient
     return undefined;
   }
 
-  trackCoValueSyncState(id: RawCoID, peerId: PeerID, synced: boolean): void {
-    if (synced) {
-      // Delete the record if synced
-      this.db.run(
-        "DELETE FROM unsynced_covalues WHERE co_value_id = ? AND peer_id = ?",
-        [id, peerId],
-      );
-    } else {
-      // Insert or replace the record if unsynced
-      this.db.run(
-        "INSERT OR REPLACE INTO unsynced_covalues (co_value_id, peer_id) VALUES (?, ?)",
-        [id, peerId],
-      );
-    }
-  }
-
   getUnsyncedCoValueIDs(): RawCoID[] {
     const rows = this.db.query<{ co_value_id: RawCoID }>(
       "SELECT DISTINCT co_value_id FROM unsynced_covalues",
       [],
     ) as { co_value_id: RawCoID }[];
     return rows.map((row) => row.co_value_id);
+  }
+
+  trackCoValuesSyncState(
+    operations: Array<{ id: RawCoID; peerId: PeerID; synced: boolean }>,
+  ): void {
+    if (operations.length === 0) {
+      return;
+    }
+
+    this.db.transaction(() => {
+      for (const op of operations) {
+        if (op.synced) {
+          this.db.run(
+            "DELETE FROM unsynced_covalues WHERE co_value_id = ? AND peer_id = ?",
+            [op.id, op.peerId],
+          );
+        } else {
+          this.db.run(
+            "INSERT OR REPLACE INTO unsynced_covalues (co_value_id, peer_id) VALUES (?, ?)",
+            [op.id, op.peerId],
+          );
+        }
+      }
+    });
   }
 
   stopTrackingSyncState(id: RawCoID): void {

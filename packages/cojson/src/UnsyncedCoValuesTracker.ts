@@ -7,12 +7,23 @@ import type { StorageAPI } from "./storage/types.js";
  * Tracks CoValues that have unsynced changes to specific peers.
  * Maintains an in-memory map and periodically persists to storage.
  */
+type PendingOperation = {
+  id: RawCoID;
+  peerId: PeerID;
+  synced: boolean;
+};
+
 export class UnsyncedCoValuesTracker {
   private unsynced: Map<RawCoID, Set<PeerID>> = new Map();
   private coValueListeners: Map<RawCoID, Set<(synced: boolean) => void>> =
     new Map();
   // Listeners for global "all synced" status changes
   private globalListeners: Set<(synced: boolean) => void> = new Set();
+
+  // Pending operations to be persisted
+  private pendingOperations: PendingOperation[] = [];
+  private flushTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly BATCH_DELAY_MS = 1000; // Flush after 1s
 
   constructor(private getStorage: () => StorageAPI | undefined) {}
 
@@ -30,7 +41,7 @@ export class UnsyncedCoValuesTracker {
     if (!peerSet.has(peerId)) {
       peerSet.add(peerId);
 
-      this.persist(id, peerId, false);
+      this.schedulePersist(id, peerId, false);
 
       this.notifyCoValueListeners(id, false);
       this.notifyGlobalListeners(false);
@@ -54,23 +65,54 @@ export class UnsyncedCoValuesTracker {
       this.unsynced.delete(id);
     }
 
-    this.persist(id, peerId, true);
+    this.schedulePersist(id, peerId, true);
 
     const isSynced = !this.unsynced.has(id);
     this.notifyCoValueListeners(id, isSynced);
     this.notifyGlobalListeners(this.isAllSynced());
   }
 
-  private persist(id: RawCoID, peerId: PeerID, synced: boolean): void {
+  private schedulePersist(id: RawCoID, peerId: PeerID, synced: boolean): void {
     const storage = this.storage;
-    if (storage) {
-      try {
-        storage.trackCoValueSyncState(id, peerId, synced);
-      } catch (error) {
-        logger.warn("Failed to persist unsynced CoValue tracking", {
-          err: error,
-        });
-      }
+    if (!storage) {
+      return;
+    }
+
+    this.pendingOperations.push({ id, peerId, synced });
+    if (!this.flushTimer) {
+      this.flushTimer = setTimeout(() => {
+        this.flush();
+      }, this.BATCH_DELAY_MS);
+    }
+  }
+
+  /**
+   * Flush all pending persistence operations in a batch
+   */
+  private flush(): void {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = undefined;
+    }
+
+    if (this.pendingOperations.length === 0) {
+      return;
+    }
+
+    const storage = this.storage;
+    if (!storage) {
+      return;
+    }
+
+    const operations = this.pendingOperations;
+    this.pendingOperations = [];
+
+    try {
+      storage.trackCoValuesSyncState(operations);
+    } catch (error) {
+      logger.warn("Failed to persist batched unsynced CoValue tracking", {
+        err: error,
+      });
     }
   }
 

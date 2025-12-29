@@ -37,10 +37,8 @@ function createMockStorage(
     store?: (data: any, correctionCallback: any) => void;
     getKnownState?: (id: RawCoID) => any;
     waitForSync?: (id: string, coValue: any) => Promise<void>;
-    trackCoValueSyncState?: (
-      id: RawCoID,
-      peerId: PeerID,
-      synced: boolean,
+    trackCoValuesSyncState?: (
+      operations: Array<{ id: RawCoID; peerId: PeerID; synced: boolean }>,
     ) => void;
     getUnsyncedCoValueIDs?: (
       callback: (unsyncedCoValueIDs: RawCoID[]) => void,
@@ -54,7 +52,7 @@ function createMockStorage(
     store: opts.store || vi.fn(),
     getKnownState: opts.getKnownState || vi.fn(),
     waitForSync: opts.waitForSync || vi.fn().mockResolvedValue(undefined),
-    trackCoValueSyncState: opts.trackCoValueSyncState || vi.fn(),
+    trackCoValuesSyncState: opts.trackCoValuesSyncState || vi.fn(),
     getUnsyncedCoValueIDs: opts.getUnsyncedCoValueIDs || vi.fn(),
     stopTrackingSyncState: opts.stopTrackingSyncState || vi.fn(),
     close: opts.close || vi.fn().mockResolvedValue(undefined),
