@@ -9,5 +9,5 @@ export async function initialize() {
 }
 
 export function initializeSync() {
-  return initSync({module: Buffer.from(wasm, 'base64').buffer});
+  return initSync({ module: wasm });  
 }
