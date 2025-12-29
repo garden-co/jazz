@@ -22,7 +22,7 @@ Extend the existing `StorageAPI` interface to include methods for tracking unsyn
 export interface StorageAPI {
   // ... existing methods ...
   
-  trackCoValueSyncState(id: RawCoID, peerId: PeerID, synced: boolean): void;
+  trackCoValuesSyncState(operations: Array<{ id: RawCoID; peerId: PeerID; synced: boolean }>): void;
   getUnsyncedCoValueIDs(callback: (data: RawCoID[]) => void);
   stopTrackingSyncState(id: RawCoID): void;
 }
@@ -41,16 +41,17 @@ A new class that manages the set of unsynced CoValue IDs.
 
 **Responsibilities:**
 - Maintain an in-memory Set of unsynced CoValue IDs (including peers pending sync)
-- Persist the set to storage using `StorageAPI.trackCoValueSyncState` if available. Persistence can be batched and performed asynchronously, to avoid the cost of N extra storage writes per update (where N is the number of peers). 
+- Persist the set to storage using `StorageAPI.trackCoValuesSyncState` if available. Persistence is batched and performed asynchronously, to avoid the cost of N extra storage writes per update (where N is the number of peers). 
 - Load persisted unsynced CoValues on initialization using `StorageAPI.getUnsyncedCoValueIDs` + `LocalNode.loadCoValueCore` if storage is available
 - Notify listeners when the set changes
 
 **Key Methods:**
-- `constructor(storage?: StorageAPI)`: Initialize with optional storage for persistence
-- `add(id: RawCoID, peerId: PeerID)`: Add a CoValue to the unsynced set (triggers persistence if storage available)
-- `remove(id: RawCoID, peerId: PeerID)`: Remove a CoValue from the unsynced set (triggers persistence if storage available)
+- `constructor(getStorage: () => StorageAPI | undefined)`: Initialize with storage getter for persistence
+- `add(id: RawCoID, peerId: PeerID)`: Add a CoValue to the unsynced set (queues for batched persistence)
+- `remove(id: RawCoID, peerId: PeerID)`: Remove a CoValue from the unsynced set (queues for batched persistence)
 - `getAll()`: Returns all unsynced CoValue IDs 
 - `isAllSynced()`: Check if all CoValues are synced (O(1), returns `size() === 0`)
+- `private flush()`: Flush all pending persistence operations in a batch
 - `subscribe(id: RawCoID, listener: (synced: boolean) => void)`: Subscribe to changes in whether a CoValue is synced
 - `subscribe(listener: (synced: boolean) => void)`: Subscribe to changes in whether all CoValues are synced
 
@@ -249,9 +250,12 @@ CREATE INDEX idx_unsynced_covalues_co_value_id ON unsynced_covalues(co_value_id)
 ```
 
 **Storage Operations:**
-- `trackCoValueSyncState(coValueId, peerId, synced)`:
-  - If `synced === true`: DELETE row where `co_value_id = coValueId AND peer_id = peerId`
-  - If `synced === false`: INSERT OR REPLACE row with `(coValueId, peerId)`
+- `trackCoValuesSyncState(operations)`:
+  - Takes an array of operations `{ id: RawCoID, peerId: PeerID, synced: boolean }[]`
+  - Executes all operations in a single transaction
+  - For each operation:
+    - If `synced === true`: DELETE row where `co_value_id = id AND peer_id = peerId`
+    - If `synced === false`: INSERT OR REPLACE row with `(id, peerId)`
 - `getUnsyncedCoValueIDs(callback)`:
   - Query all distinct `co_value_id` values (SELECT DISTINCT co_value_id)
   - Return array of unique CoValue IDs that have at least one unsynced peer
