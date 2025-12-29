@@ -898,9 +898,9 @@ export class SyncManager {
 
       const unsubscribe = this.syncState.subscribeToPeerUpdates(
         peer.id,
-        (knownState, syncState) => {
-          // Only handle updates for this specific CoValue
-          if (knownState.id === coValueId && syncState.uploaded) {
+        coValueId,
+        (_knownState, syncState) => {
+          if (syncState.uploaded) {
             this.unsyncedTracker.remove(coValueId, peer.id);
             unsubscribe();
           }
@@ -958,8 +958,9 @@ export class SyncManager {
     return new Promise((resolve, reject) => {
       const unsubscribe = this.syncState.subscribeToPeerUpdates(
         peerId,
-        (knownState, syncState) => {
-          if (syncState.uploaded && knownState.id === id) {
+        id,
+        (_knownState, syncState) => {
+          if (syncState.uploaded) {
             resolve(true);
             unsubscribe?.();
             clearTimeout(timeoutId);

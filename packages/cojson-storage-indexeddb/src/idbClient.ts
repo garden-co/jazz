@@ -276,6 +276,7 @@ export class IDBClient implements DBClientInterfaceAsync {
         for (const record of records) {
           const deleteRequest = store.delete(record.rowID);
           deleteRequest.onerror = () => {
+            console.error(deleteRequest.error);
             if (!hasError) {
               hasError = true;
               reject(deleteRequest.error);
