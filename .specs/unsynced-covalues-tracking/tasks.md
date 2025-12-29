@@ -3,29 +3,30 @@
 ## Core Infrastructure
 
 - [x] **Task 1**: Extend `StorageAPI` interface with unsynced CoValues tracking methods (US1)
-  - Add `trackCoValueSyncState(id: RawCoID, peerId: PeerID, synced: boolean): void` to `StorageAPI` interface in `packages/cojson/src/storage/types.ts`
+  - Add `trackCoValuesSyncState(operations: Array<{ id: RawCoID; peerId: PeerID; synced: boolean }>): void` to `StorageAPI` interface in `packages/cojson/src/storage/types.ts`
   - Add `getUnsyncedCoValueIDs(callback: (data: RawCoID[]) => void)` to `StorageAPI` interface
   - Add `stopTrackingSyncState(id: RawCoID): void` to `StorageAPI` interface
 
-- [x] **Task 2**: Implement `trackCoValueSyncState`, `getUnsyncedCoValueIDs`, and `stopTrackingSyncState` for IndexedDB storage (US1)
+- [x] **Task 2**: Implement `trackCoValuesSyncState`, `getUnsyncedCoValueIDs`, and `stopTrackingSyncState` for IndexedDB storage (US1)
   - Add new object store `"unsyncedCoValues"` in IndexedDB schema (upgrade version)
-  - Implement `trackCoValueSyncState` in `StorageApiAsync` to upsert/delete records
+  - Implement `trackCoValuesSyncState` in `StorageApiAsync` to batch upsert/delete records in a single transaction
   - Implement `getUnsyncedCoValueIDs` to query all unsynced CoValue IDs
   - Implement `stopTrackingSyncState` to delete all records for a CoValue ID
   - Update `packages/cojson-storage-indexeddb/src/idbNode.ts` for schema migration
 
-- [x] **Task 3**: Implement `trackCoValueSyncState`, `getUnsyncedCoValueIDs`, and `stopTrackingSyncState` for SQLite storage (US1)
+- [x] **Task 3**: Implement `trackCoValuesSyncState`, `getUnsyncedCoValueIDs`, and `stopTrackingSyncState` for SQLite storage (US1)
   - Add `unsynced_covalues` table to SQLite schema
-  - Implement `trackCoValueSyncState` in `StorageApiAsync` and `StorageApiSync` for SQLite
+  - Implement `trackCoValuesSyncState` in `StorageApiAsync` and `StorageApiSync` for SQLite (batch operations in transaction)
   - Implement `getUnsyncedCoValueIDs` in `StorageApiAsync` and `StorageApiSync` for SQLite
   - Implement `stopTrackingSyncState` in `StorageApiAsync` and `StorageApiSync` for SQLite
   - Update SQLite client implementations in `packages/cojson/src/storage/sqlite/` and `packages/cojson/src/storage/sqliteAsync/`
 
 - [x] **Task 4**: Create `UnsyncedCoValuesTracker` class (US1, US3, US4)
-  - Create `packages/cojson/src/sync/UnsyncedCoValuesTracker.ts`
+  - Create `packages/cojson/src/UnsyncedCoValuesTracker.ts`
   - Implement in-memory `Map<RawCoID, Set<PeerID>>` for tracking unsynced CoValues per peer
   - Implement `add(id, peerId)`, `remove(id, peerId)`, `getAll()`, `isAllSynced()` methods
-  - Implement batched/async persistence using `StorageAPI.trackCoValueSyncState`
+  - Implement batched persistence using `StorageAPI.trackCoValuesSyncState` with automatic flushing (1s delay or on shutdown)
+  - Implement `flush()` method to immediately persist pending operations
   - Implement `subscribe(id, listener)` for per-CoValue subscriptions
   - Implement `subscribe(listener)` for global "all synced" subscriptions
   - Handle storage errors gracefully (fallback to in-memory only)
@@ -83,11 +84,13 @@
 
 - [ ] **Task 10**: Write unit tests for `UnsyncedCoValuesTracker` (US1, US3, US4)
   - Test `add(id, peerId)`, `remove(id, peerId)`, `getAll()`, `isAllSynced()` operations
-  - Test persistence using `StorageAPI.trackCoValueSyncState`
+  - Test batched persistence using `StorageAPI.trackCoValuesSyncState`
+  - Test automatic flushing after delay
+  - Test `flush()` method for immediate persistence
   - Test subscription notifications (both per-CoValue and global)
   - Test that listeners are called immediately with current state on subscription
   - Test error handling when storage is unavailable (fallback to in-memory only)
-  - Create `packages/cojson/src/sync/__tests__/UnsyncedCoValuesTracker.test.ts`
+  - Create `packages/cojson/src/__tests__/UnsyncedCoValuesTracker.test.ts`
 
 - [ ] **Task 11**: Write integration tests for sync tracking (US1, US2)
   - Test that CoValues are tracked when `syncContent()` is called
