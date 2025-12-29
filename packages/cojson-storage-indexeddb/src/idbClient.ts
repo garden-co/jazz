@@ -203,9 +203,9 @@ export class IDBClient implements DBClientInterfaceAsync {
       };
 
       for (const op of operations) {
+        const recordRequest = index.get([op.id, op.peerId]);
         if (op.synced) {
-          // Delete: find record first, then delete by rowID
-          const recordRequest = index.get([op.id, op.peerId]);
+          // Delete
           recordRequest.onerror = () => handleError(recordRequest.error!);
           recordRequest.onsuccess = () => {
             const record = recordRequest.result as
@@ -220,13 +220,30 @@ export class IDBClient implements DBClientInterfaceAsync {
             }
           };
         } else {
-          // Insert: use put which will handle upsert
-          const putRequest = store.put({
-            coValueId: op.id,
-            peerId: op.peerId,
-          });
-          putRequest.onerror = () => handleError(putRequest.error!);
-          putRequest.onsuccess = () => handleComplete();
+          // Insert or update
+          recordRequest.onerror = () => handleError(recordRequest.error!);
+          recordRequest.onsuccess = () => {
+            const existingRecord = recordRequest.result as
+              | { rowID: number; coValueId: RawCoID; peerId: string }
+              | undefined;
+
+            // If record exists, update it by including rowID
+            // If it doesn't exist, insert new record without rowID (auto-increment)
+            const putRequest = store.put(
+              existingRecord
+                ? {
+                    rowID: existingRecord.rowID,
+                    coValueId: op.id,
+                    peerId: op.peerId,
+                  }
+                : {
+                    coValueId: op.id,
+                    peerId: op.peerId,
+                  },
+            );
+            putRequest.onerror = () => handleError(putRequest.error!);
+            putRequest.onsuccess = () => handleComplete();
+          };
         }
       }
     });

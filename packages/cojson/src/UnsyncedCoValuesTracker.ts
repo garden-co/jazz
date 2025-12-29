@@ -104,11 +104,17 @@ export class UnsyncedCoValuesTracker {
       return;
     }
 
-    const operations = this.pendingOperations;
+    const filteredOperations = this.simplifyPendingOperations(
+      this.pendingOperations,
+    );
     this.pendingOperations = [];
 
+    if (filteredOperations.length === 0) {
+      return;
+    }
+
     try {
-      storage.trackCoValuesSyncState(operations);
+      storage.trackCoValuesSyncState(filteredOperations);
     } catch (error) {
       logger.warn("Failed to persist batched unsynced CoValue tracking", {
         err: error,
@@ -198,6 +204,19 @@ export class UnsyncedCoValuesTracker {
     for (const listener of this.globalListeners) {
       listener(allSynced);
     }
+  }
+
+  /**
+   * Keep only the last operation for each (id, peerId) combination
+   */
+  private simplifyPendingOperations(
+    operations: PendingOperation[],
+  ): PendingOperation[] {
+    const latestOps = new Map<string, PendingOperation>();
+    for (const op of operations) {
+      latestOps.set(`${op.id}|${op.peerId}`, op);
+    }
+    return Array.from(latestOps.values());
   }
 
   private get storage(): StorageAPI | undefined {
