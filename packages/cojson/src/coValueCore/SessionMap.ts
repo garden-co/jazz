@@ -232,7 +232,7 @@ export class SessionMap {
   ): { signature: Signature; transaction: Transaction } {
     if (this.isDeleted) {
       throw new Error(
-        "Cannot make new private transaction on a deleted coValue",
+        "Cannot make new trusting transaction on a deleted coValue",
       );
     }
 
