@@ -19,7 +19,7 @@ export type LoadTimeMetric = {
   parent_key?: string;
   resolve?: string;
   loadTime: number;
-  loadFrom: "storage" | "network";
+  loadFrom: "storage" | "network" | "memory";
   startTime: number;
 };
 
@@ -258,7 +258,9 @@ export function getLoadTimes(): LoadTimeMetric[] {
         loadTime: measure.duration,
         loadFrom: detail.loadFromStorage
           ? ("storage" as const)
-          : ("network" as const),
+          : detail.loadFromPeer
+            ? ("network" as const)
+            : ("memory" as const),
         startTime: performance.timeOrigin + measure.startTime,
       };
     });

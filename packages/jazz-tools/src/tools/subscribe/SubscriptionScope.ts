@@ -576,6 +576,9 @@ export class SubscriptionScope<D extends CoValue> {
   triggerUpdate() {
     if (!this.shouldSendUpdates()) return;
     if (!this.dirty) return;
+
+    this.trackFirstLoad();
+
     if (this.subscribers.size === 0) return;
     if (this.silenceUpdates) return;
 
@@ -588,6 +591,10 @@ export class SubscriptionScope<D extends CoValue> {
       this.subscribers.forEach((listener) => listener(value));
     }
 
+    this.dirty = false;
+  }
+
+  private trackFirstLoad() {
     if (!this.firstLoadRecorded) {
       trackPerformanceMark("subscriptionLoadEnd", this.id);
 
@@ -604,7 +611,7 @@ export class SubscriptionScope<D extends CoValue> {
           this.firstLoadMetric,
           loadMeasureDetail,
           this.id,
-          !!error,
+          !!this.errorFromChildren,
         );
         if (this.subscriptionSpan) {
           recordLoadTimeToOTelSpan(this.subscriptionSpan, loadMeasureDetail);
@@ -613,8 +620,6 @@ export class SubscriptionScope<D extends CoValue> {
 
       this.firstLoadRecorded = true;
     }
-
-    this.dirty = false;
   }
 
   subscribers = new Set<(value: SubscriptionValue<D, any>) => void>();
@@ -799,22 +804,6 @@ export class SubscriptionScope<D extends CoValue> {
     if (this.value.type !== CoValueLoadingState.LOADED) {
       return false;
     }
-
-    // performance.measure(
-    //   (this.parentKey ? this.parentKey + "-" : "") + this.id + "-" + "self",
-    //   {
-    //     start: this.constructionTime,
-    //     detail: {
-    //       id: this.id,
-    //       resolve: this.resolve,
-    //       devtools: {
-    //         track: this.sourceId,
-    //         trackGroup: "SubscriptionScopes",
-    //         color: "secondary",
-    //       },
-    //     },
-    //   },
-    // );
 
     const value = this.value.value;
 

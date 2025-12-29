@@ -134,7 +134,7 @@ export function measureSubscriptionLoad(
         devtools: parentId
           ? undefined
           : {
-              track: sourceId,
+              track: sourceId ?? coId,
               trackGroup: "SubscriptionScopes",
               tooltipText: "First load time",
               color: "primary",
