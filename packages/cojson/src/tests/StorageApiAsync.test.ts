@@ -913,6 +913,87 @@ describe("StorageApiAsync", () => {
 
       expect(await loadPromise).toBe(true);
     });
+
+    test("load interrupts eraseAllDeletedCoValues mid-run (resolves early, leaves some queued)", async () => {
+      const dbPath = getDbPath();
+
+      const node = setupTestNode();
+      const { storage } = await node.addAsyncStorage({
+        ourName: "test",
+        storageName: "test-storage",
+        filename: dbPath,
+      });
+
+      const group = node.node.createGroup();
+
+      const map1 = group.createMap();
+      map1.set("k", "v");
+      await map1.core.waitForSync();
+
+      const map2 = group.createMap();
+      map2.set("k", "v");
+      await map2.core.waitForSync();
+
+      map1.core.deleteCoValue();
+      map2.core.deleteCoValue();
+      await map1.core.waitForSync();
+      await map2.core.waitForSync();
+
+      await waitFor(async () => {
+        const queued = await getAllCoValuesWaitingForDelete(storage);
+        expect(queued).toEqual(expect.arrayContaining([map1.id, map2.id]));
+        return true;
+      });
+
+      let releaseBarrier!: () => void;
+      const barrier = new Promise<void>((resolve) => {
+        releaseBarrier = resolve;
+      });
+
+      let firstTxStartedResolve!: () => void;
+      const firstTxStarted = new Promise<void>((resolve) => {
+        firstTxStartedResolve = resolve;
+      });
+
+      // @ts-expect-error - dbClient is private
+      const dbClient = storage.dbClient;
+      const originalTransaction = dbClient.transaction.bind(dbClient);
+
+      let txCalls = 0;
+      const txSpy = vi
+        .spyOn(dbClient, "transaction")
+        .mockImplementation(async (callback) => {
+          txCalls += 1;
+          return originalTransaction(async (tx) => {
+            if (txCalls === 1) {
+              firstTxStartedResolve();
+              await barrier;
+            }
+            return callback(tx);
+          });
+        });
+
+      const erasePromise = storage.eraseAllDeletedCoValues();
+
+      // Ensure the eraser is in-flight and inside its first transaction.
+      await firstTxStarted;
+
+      // Trigger interruption. We don't await the load immediately to avoid doing
+      // DB reads while the transaction is being held open by the barrier.
+      const loadDone = new Promise<boolean>((resolve) => {
+        void storage.load("non-existent-id", () => {}, resolve);
+      });
+
+      releaseBarrier();
+
+      await erasePromise;
+      await loadDone;
+
+      const queuedAfter = await getAllCoValuesWaitingForDelete(storage);
+      expect(queuedAfter).toHaveLength(1);
+
+      txSpy.mockRestore();
+    });
   });
 
   describe("dependencies", () => {

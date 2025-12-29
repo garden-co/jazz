@@ -40,6 +40,7 @@ export class StorageApiAsync implements StorageAPI {
   private deletedCoValuesEraserScheduler:
     | DeletedCoValuesEraserScheduler
     | undefined;
+  private eraserController: AbortController | undefined;
 
   constructor(dbClient: DBClientInterfaceAsync) {
     this.dbClient = dbClient;
@@ -64,6 +65,7 @@ export class StorageApiAsync implements StorageAPI {
     callback: (data: NewContentMessage) => void,
     done: (found: boolean) => void,
   ) {
+    this.interruptEraser("load");
     const coValueRow = await this.dbClient.getCoValue(id);
 
     if (!coValueRow) {
@@ -217,14 +219,31 @@ export class StorageApiAsync implements StorageAPI {
     this.storeQueue.push(msg, correctionCallback);
 
     this.storeQueue.processQueue(async (data, correctionCallback) => {
+      this.interruptEraser("store");
       return this.storeSingle(data, correctionCallback);
     });
   }
 
-  async eraseAllDeletedCoValues(): Promise<void> {
+  private interruptEraser(reason: string) {
+    // Cooperative cancellation: a DB transaction already in progress will complete,
+    // but the eraser loop will stop starting further work at its next abort check.
+    if (this.eraserController) {
+      this.eraserController.abort(reason);
+      this.eraserController = undefined;
+    }
+  }
+
+  async eraseAllDeletedCoValues() {
     const ids = await this.dbClient.getAllCoValuesWaitingForDelete();
 
+    this.eraserController = new AbortController();
+    const signal = this.eraserController.signal;
+
     for (const id of ids) {
+      if (signal.aborted) {
+        return;
+      }
+
       await this.dbClient.transaction(async (tx) => {
         await tx.eraseCoValueButKeepTombstone(id);
         await tx.markCoValueDeletionDone(id);
@@ -274,6 +293,7 @@ export class StorageApiAsync implements StorageAPI {
     msg: NewContentMessage,
     correctionCallback: CorrectionCallback,
   ): Promise<boolean> {
+    this.interruptEraser("store");
     if (this.storeQueue.closed) {
       return false;
     }
