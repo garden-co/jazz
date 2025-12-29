@@ -54,8 +54,6 @@ class TestMetricReader extends MetricReader {
   ) {
     const dp1 = await this.getMetricDataPoints(scope, name);
 
-    console.log(dp1);
-
     const dp = attributes
       ? dp1.find(
           (dp) => JSON.stringify(dp.attributes) === JSON.stringify(attributes),

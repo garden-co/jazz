@@ -114,7 +114,7 @@ export function measureSubscriptionLoad(
   );
 
   if (!firstLoad) {
-    throw new Error("First load mark not found");
+    return null;
   }
 
   const loadMeasure = performance.measure(

@@ -140,7 +140,7 @@ export class SubscriptionScope<D extends CoValue> {
 
     trackPerformanceMark("subscriptionLoadStart", id);
 
-    if (isOpenTelemetryInstrumentationEnabled())
+    if (isOpenTelemetryInstrumentationEnabled()) {
       this.subscriptionSpan = trace
         .getTracer("jazz-tools")
         .startSpan("jazz.subscription", {
@@ -152,7 +152,9 @@ export class SubscriptionScope<D extends CoValue> {
             resolve: JSON.stringify(this.resolve),
           },
         });
+    }
 
+    // This OTel counter is also used to track the number of active subscriptions in the inspector
     this.activeSubCounter.add(1, {
       // It increments/decrements counters comparing the attributes
       id: this.id,
