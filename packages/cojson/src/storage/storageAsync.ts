@@ -428,11 +428,6 @@ export class StorageApiAsync implements StorageAPI {
         const remaining = await this.dbClient.getAllCoValuesWaitingForDelete();
         return { hasMore: remaining.length > 0 };
       },
-      opts: {
-        throttleMs: 60_000,
-        startupDelayMs: 1_000,
-        followUpDelayMs: 1_000,
-      },
     });
     this.deletedCoValuesEraserScheduler.scheduleStartupDrain();
   }

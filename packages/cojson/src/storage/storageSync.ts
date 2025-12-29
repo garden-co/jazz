@@ -31,12 +31,12 @@ import type {
   StoredCoValueRow,
   StoredSessionRow,
 } from "./types.js";
-import { DeletedCoValuesEraserScheduler } from "./DeletedCoValuesEraserScheduler.js";
+import {
+  DEFAULT_DELETE_SCHEDULE_OPTS,
+  DeletedCoValuesEraserScheduler,
+} from "./DeletedCoValuesEraserScheduler.js";
 
-const DELETED_COVALUES_ERASER_THROTTLE_MS = 60_000;
-const DELETED_COVALUES_ERASER_STARTUP_DELAY_MS = 1_000;
-const DELETED_COVALUES_ERASER_FOLLOW_UP_DELAY_MS = 1_000;
-const DELETED_COVALUES_ERASER_MAX_DURATION_MS = 100;
+const MAX_DELETE_SCHEDULE_DURATION_MS = 100;
 
 export class StorageApiSync implements StorageAPI {
   private streamingCounter: UpDownCounter;
@@ -393,14 +393,7 @@ export class StorageApiSync implements StorageAPI {
     if (this.deletedCoValuesEraserScheduler) return;
     this.deletedCoValuesEraserScheduler = new DeletedCoValuesEraserScheduler({
       run: async () =>
-        this.eraseDeletedCoValuesOnceBudgeted(
-          DELETED_COVALUES_ERASER_MAX_DURATION_MS,
-        ),
-      opts: {
-        throttleMs: DELETED_COVALUES_ERASER_THROTTLE_MS,
-        startupDelayMs: DELETED_COVALUES_ERASER_STARTUP_DELAY_MS,
-        followUpDelayMs: DELETED_COVALUES_ERASER_FOLLOW_UP_DELAY_MS,
-      },
+        this.eraseDeletedCoValuesOnceBudgeted(MAX_DELETE_SCHEDULE_DURATION_MS),
     });
     this.deletedCoValuesEraserScheduler.scheduleStartupDrain();
   }

@@ -18,6 +18,12 @@ type SchedulerState =
   | "running"
   | "disposed";
 
+export const DEFAULT_DELETE_SCHEDULE_OPTS = {
+  throttleMs: 60_000,
+  startupDelayMs: 1_000,
+  followUpDelayMs: 1_000,
+} satisfies DeletedCoValuesEraserSchedulerOpts;
+
 export class DeletedCoValuesEraserScheduler {
   private readonly runCallback: () => Promise<DeletedCoValuesEraserSchedulerRunResult>;
   private readonly opts: DeletedCoValuesEraserSchedulerOpts;
@@ -35,10 +41,10 @@ export class DeletedCoValuesEraserScheduler {
     opts,
   }: {
     run: () => Promise<DeletedCoValuesEraserSchedulerRunResult>;
-    opts: DeletedCoValuesEraserSchedulerOpts;
+    opts?: DeletedCoValuesEraserSchedulerOpts;
   }) {
     this.runCallback = run;
-    this.opts = opts;
+    this.opts = opts || DEFAULT_DELETE_SCHEDULE_OPTS;
   }
 
   scheduleStartupDrain() {
