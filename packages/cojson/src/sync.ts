@@ -318,7 +318,7 @@ export class SyncManager {
 
           if (processed < unsyncedCoValueIDs.length) {
             // Process next batch asynchronously to avoid blocking
-            setTimeout(processBatch, 0);
+            setTimeout(() => processBatch().catch(reject), 0);
           } else {
             resolve();
           }
@@ -899,7 +899,6 @@ export class SyncManager {
       const unsubscribe = this.syncState.subscribeToPeerUpdates(
         peer.id,
         (knownState, syncState) => {
-          console.log("peer state updated", knownState, syncState);
           // Only handle updates for this specific CoValue
           if (knownState.id === coValueId && syncState.uploaded) {
             this.unsyncedTracker.remove(coValueId, peer.id);
