@@ -278,10 +278,9 @@ class SessionLogAdapter {
     madeAt: number,
     meta: JsonObject | undefined,
   ): { signature: Signature; transaction: TrustingTransaction } {
-    // We can avoid stableStringify because in rust we will parse and stringify the transactions again.
-    // And the changes are in a string format already.
+    // We can avoid stableStringify because the changes will be in a string format already.
     const stringifiedChanges = JSON.stringify(changes);
-    // We can avoid stableStringify because it will be in a string format already.
+    // We can avoid stableStringify because the meta will be in a string format already.
     const stringifiedMeta = meta ? JSON.stringify(meta) : undefined;
     const output = this.sessionLog.addNewTrustingTransaction(
       stringifiedChanges,

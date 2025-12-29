@@ -264,8 +264,10 @@ class SessionLogAdapter implements SessionLogImpl {
     madeAt: number,
     meta: JsonObject | undefined,
   ) {
-    const stringifiedChanges = stableStringify(changes);
-    const stringifiedMeta = meta ? stableStringify(meta) : undefined;
+    // We can avoid stableStringify because the changes will be in a string format already.
+    const stringifiedChanges = JSON.stringify(changes);
+    // We can avoid stableStringify because the meta will be in a string format already.
+    const stringifiedMeta = meta ? JSON.stringify(meta) : undefined;
     const output = this.sessionLog.addNewTrustingTransaction(
       stringifiedChanges,
       signerAgent.currentSignerSecret(),
@@ -275,8 +277,8 @@ class SessionLogAdapter implements SessionLogImpl {
     const transaction: TrustingTransaction = {
       privacy: "trusting",
       madeAt,
-      changes: stringifiedChanges,
-      meta: stringifiedMeta,
+      changes: stringifiedChanges as Stringified<JsonValue[]>,
+      meta: stringifiedMeta as Stringified<JsonObject> | undefined,
     };
     return { signature: output as Signature, transaction };
   }
