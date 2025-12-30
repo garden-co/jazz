@@ -5,9 +5,10 @@ import {
   CoValueFromRaw,
   KvStore,
 } from "jazz-tools";
-import { JazzContext, useJazzProviderCheck } from "jazz-tools/react-core";
+import { JazzContext } from "jazz-tools/react-core";
 import React, {
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -48,7 +49,12 @@ export function JazzProviderCore<
   authSecretStorageKey,
   fallback = null,
 }: JazzProviderProps<S>) {
-  useJazzProviderCheck();
+  if (useContext(JazzContext)) {
+    throw new Error(
+      "You can't nest a JazzProvider inside another JazzProvider.",
+    );
+  }
+
   setupKvStore(kvStore);
 
   const [contextManager] = React.useState(

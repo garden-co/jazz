@@ -8,8 +8,15 @@ import {
   JazzBrowserContextManager,
   JazzContextManagerProps,
 } from "jazz-tools/browser";
-import { JazzContext, useJazzProviderCheck } from "jazz-tools/react-core";
-import React, { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { JazzContext } from "jazz-tools/react-core";
+import React, {
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useSyncExternalStore,
+} from "react";
 
 export type JazzProviderProps<
   S extends
@@ -41,7 +48,11 @@ export function JazzReactProvider<
   fallback = null,
   authSecretStorageKey,
 }: JazzProviderProps<S>) {
-  useJazzProviderCheck();
+  if (useContext(JazzContext)) {
+    throw new Error(
+      "You can't nest a JazzProvider inside another JazzProvider.",
+    );
+  }
 
   const [contextManager] = React.useState(
     () =>

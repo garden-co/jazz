@@ -36,16 +36,6 @@ import { getCurrentAccountFromContextManager } from "./utils.js";
 import { CoValueSubscription } from "./types.js";
 import { use } from "./use.js";
 
-export function useJazzProviderCheck() {
-  const contextManager = useContext(JazzContext);
-
-  if (contextManager) {
-    throw new Error(
-      "You can't nest a JazzProvider inside another JazzProvider.",
-    );
-  }
-}
-
 export function useJazzContext<Acc extends Account>() {
   const value = useContext(JazzContext) as JazzContextManager<Acc, {}>;
 
@@ -82,15 +72,7 @@ export function useJazzContextValue<Acc extends Account>() {
 }
 
 export function useAuthSecretStorage() {
-  const value = useContext(JazzContext);
-
-  if (!value) {
-    throw new Error(
-      "You need to set up a JazzProvider on top of your app to use this useAuthSecretStorage.",
-    );
-  }
-
-  return value.getAuthSecretStorage();
+  return useJazzContext().getAuthSecretStorage();
 }
 
 export function useIsAuthenticated() {
