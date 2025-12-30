@@ -284,7 +284,10 @@ export class SyncManager {
     await new Promise<void>((resolve, reject) => {
       // Load all persisted unsynced CoValues from storage
       this.local.storage!.getUnsyncedCoValueIDs((unsyncedCoValueIDs) => {
-        if (unsyncedCoValueIDs.length === 0) {
+        const coValuesToLoad = unsyncedCoValueIDs.filter(
+          (coValueId) => !this.local.hasCoValue(coValueId),
+        );
+        if (coValuesToLoad.length === 0) {
           resolve();
           return;
         }
@@ -293,10 +296,7 @@ export class SyncManager {
         let processed = 0;
 
         const processBatch = async () => {
-          const batch = unsyncedCoValueIDs.slice(
-            processed,
-            processed + BATCH_SIZE,
-          );
+          const batch = coValuesToLoad.slice(processed, processed + BATCH_SIZE);
 
           await Promise.all(
             batch.map(async (coValueId) => {
@@ -326,7 +326,7 @@ export class SyncManager {
 
           processed += batch.length;
 
-          if (processed < unsyncedCoValueIDs.length) {
+          if (processed < coValuesToLoad.length) {
             // Process next batch asynchronously to avoid blocking
             setTimeout(() => processBatch().catch(reject), 0);
           } else {
