@@ -194,6 +194,15 @@ describe("CoMap.Record", async () => {
         $jazz: expect.objectContaining({ id: me.$jazz.id }),
       });
     });
+
+    test("getEdits() keys should return deleted keys", () => {
+      const Person = co.record(z.string(), z.string());
+      const person = Person.create({ name: "John" });
+      person.$jazz.set("name", "Jane");
+      person.$jazz.delete("name");
+
+      expect(Object.keys(person.$jazz.getEdits())).toEqual(["name"]);
+    });
   });
 
   describe("Record resolution", async () => {

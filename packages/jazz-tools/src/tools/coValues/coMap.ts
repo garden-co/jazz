@@ -825,7 +825,7 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
           };
         },
         ownKeys(_target) {
-          return map.$jazz.raw.keys();
+          return Object.keys(map.$jazz.raw.ops);
         },
         getOwnPropertyDescriptor(target, key) {
           return {
