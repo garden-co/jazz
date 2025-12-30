@@ -3,15 +3,13 @@ import {
   AccountClass,
   AnyAccountSchema,
   CoValueFromRaw,
-  InstanceOfSchema,
-  JazzContextType,
 } from "jazz-tools";
 import {
   JazzBrowserContextManager,
   JazzContextManagerProps,
 } from "jazz-tools/browser";
-import { JazzContext, JazzContextManagerContext } from "jazz-tools/react-core";
-import React, { useEffect, useRef } from "react";
+import { JazzContext, useJazzProviderCheck } from "jazz-tools/react-core";
+import React, { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 
 export type JazzProviderProps<
   S extends
@@ -43,6 +41,8 @@ export function JazzReactProvider<
   fallback = null,
   authSecretStorageKey,
 }: JazzProviderProps<S>) {
+  useJazzProviderCheck();
+
   const [contextManager] = React.useState(
     () =>
       new JazzBrowserContextManager<S>({
@@ -56,45 +56,40 @@ export function JazzReactProvider<
   const onAnonymousAccountDiscardedRefCallback = useRefCallback(
     onAnonymousAccountDiscarded,
   );
-  const logoutReplacementActiveRef = useRef(false);
-  logoutReplacementActiveRef.current = Boolean(logOutReplacement);
-  const onAnonymousAccountDiscardedEnabled = Boolean(
-    onAnonymousAccountDiscarded,
-  );
 
-  const value = React.useSyncExternalStore<
-    JazzContextType<InstanceOfSchema<S>> | undefined
-  >(
-    React.useCallback(
+  const props = useMemo(() => {
+    return {
+      AccountSchema,
+      guestMode,
+      sync,
+      storage,
+      defaultProfileName,
+      onLogOut: onLogOutRefCallback,
+      logOutReplacement: logOutReplacement
+        ? logOutReplacementRefCallback
+        : undefined,
+      onAnonymousAccountDiscarded: onAnonymousAccountDiscarded
+        ? onAnonymousAccountDiscardedRefCallback
+        : undefined,
+    } satisfies JazzContextManagerProps<S>;
+  }, [guestMode, sync.peer, sync.when, storage]);
+
+  if (contextManager.propsChanged(props)) {
+    contextManager.createContext(props).catch((error) => {
+      console.log(error.stack);
+      console.error("Error creating Jazz browser context:", error);
+    });
+  }
+
+  const isReady = useSyncExternalStore(
+    useCallback(
       (callback) => {
-        const props = {
-          AccountSchema,
-          guestMode,
-          sync,
-          storage,
-          defaultProfileName,
-          onLogOut: onLogOutRefCallback,
-          logOutReplacement: logoutReplacementActiveRef.current
-            ? logOutReplacementRefCallback
-            : undefined,
-          onAnonymousAccountDiscarded: onAnonymousAccountDiscardedEnabled
-            ? onAnonymousAccountDiscardedRefCallback
-            : undefined,
-        } satisfies JazzContextManagerProps<S>;
-
-        if (contextManager.propsChanged(props)) {
-          contextManager.createContext(props).catch((error) => {
-            console.log(error.stack);
-            console.error("Error creating Jazz browser context:", error);
-          });
-        }
-
         return contextManager.subscribe(callback);
       },
-      [sync, guestMode].concat(storage as any),
+      [contextManager],
     ),
-    () => contextManager.getCurrentValue(),
-    () => contextManager.getCurrentValue(),
+    () => Boolean(contextManager.getCurrentValue()),
+    () => Boolean(contextManager.getCurrentValue()),
   );
 
   useEffect(() => {
@@ -108,10 +103,8 @@ export function JazzReactProvider<
   }, []);
 
   return (
-    <JazzContext.Provider value={value}>
-      <JazzContextManagerContext.Provider value={contextManager}>
-        {value ? children : fallback}
-      </JazzContextManagerContext.Provider>
+    <JazzContext.Provider value={contextManager}>
+      {isReady ? children : fallback}
     </JazzContext.Provider>
   );
 }

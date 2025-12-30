@@ -3,12 +3,16 @@ import {
   AccountClass,
   AnyAccountSchema,
   CoValueFromRaw,
-  InstanceOfSchema,
-  JazzContextType,
   KvStore,
 } from "jazz-tools";
-import { JazzContext, JazzContextManagerContext } from "jazz-tools/react-core";
-import React, { useEffect, useRef } from "react";
+import { JazzContext, useJazzProviderCheck } from "jazz-tools/react-core";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useSyncExternalStore,
+} from "react";
 import type { JazzContextManagerProps } from "./ReactNativeContextManager.js";
 import { ReactNativeContextManager } from "./ReactNativeContextManager.js";
 import { setupKvStore } from "./platform.js";
@@ -20,6 +24,7 @@ export type JazzProviderProps<
 > = {
   children: React.ReactNode;
   kvStore?: KvStore;
+  fallback?: React.ReactNode | null;
   authSecretStorageKey?: string;
 } & JazzContextManagerProps<S>;
 
@@ -41,7 +46,9 @@ export function JazzProviderCore<
   kvStore,
   CryptoProvider,
   authSecretStorageKey,
+  fallback = null,
 }: JazzProviderProps<S>) {
+  useJazzProviderCheck();
   setupKvStore(kvStore);
 
   const [contextManager] = React.useState(
@@ -53,46 +60,41 @@ export function JazzProviderCore<
   const onAnonymousAccountDiscardedRefCallback = useRefCallback(
     onAnonymousAccountDiscarded,
   );
-  const logoutReplacementActiveRef = useRef(false);
-  logoutReplacementActiveRef.current = Boolean(logOutReplacement);
-  const onAnonymousAccountDiscardedEnabled = Boolean(
-    onAnonymousAccountDiscarded,
-  );
 
-  const value = React.useSyncExternalStore<
-    JazzContextType<InstanceOfSchema<S>> | undefined
-  >(
-    React.useCallback(
+  const props = useMemo(() => {
+    return {
+      AccountSchema,
+      guestMode,
+      sync,
+      storage,
+      defaultProfileName,
+      onLogOut: onLogOutRefCallback,
+      logOutReplacement: logOutReplacement
+        ? logOutReplacementRefCallback
+        : undefined,
+      onAnonymousAccountDiscarded: onAnonymousAccountDiscarded
+        ? onAnonymousAccountDiscardedRefCallback
+        : undefined,
+      CryptoProvider,
+    } satisfies JazzContextManagerProps<S>;
+  }, [guestMode, sync.peer, sync.when, storage]);
+
+  if (contextManager.propsChanged(props)) {
+    contextManager.createContext(props).catch((error) => {
+      console.log(error.stack);
+      console.error("Error creating Jazz React Native context:", error);
+    });
+  }
+
+  const isReady = useSyncExternalStore(
+    useCallback(
       (callback) => {
-        const props = {
-          AccountSchema,
-          guestMode,
-          sync,
-          storage,
-          defaultProfileName,
-          onLogOut: onLogOutRefCallback,
-          logOutReplacement: logoutReplacementActiveRef.current
-            ? logOutReplacementRefCallback
-            : undefined,
-          onAnonymousAccountDiscarded: onAnonymousAccountDiscardedEnabled
-            ? onAnonymousAccountDiscardedRefCallback
-            : undefined,
-          CryptoProvider,
-        } satisfies JazzContextManagerProps<S>;
-
-        if (contextManager.propsChanged(props)) {
-          contextManager.createContext(props).catch((error) => {
-            console.log(error.stack);
-            console.error("Error creating Jazz React Native context:", error);
-          });
-        }
-
         return contextManager.subscribe(callback);
       },
-      [sync, guestMode].concat(storage as any),
+      [contextManager],
     ),
-    () => contextManager.getCurrentValue(),
-    () => contextManager.getCurrentValue(),
+    () => Boolean(contextManager.getCurrentValue()),
+    () => Boolean(contextManager.getCurrentValue()),
   );
 
   useEffect(() => {
@@ -106,10 +108,8 @@ export function JazzProviderCore<
   }, []);
 
   return (
-    <JazzContext.Provider value={value}>
-      <JazzContextManagerContext.Provider value={contextManager}>
-        {value && children}
-      </JazzContextManagerContext.Provider>
+    <JazzContext.Provider value={contextManager}>
+      {isReady ? children : fallback}
     </JazzContext.Provider>
   );
 }

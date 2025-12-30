@@ -2,7 +2,7 @@
 
 import { Account, RefsToResolve, co, z, Group } from "jazz-tools";
 import { assert, beforeEach, describe, expect, it } from "vitest";
-import { useAccount, useJazzContextManager } from "../hooks.js";
+import { useAccount, useJazzContext } from "../hooks.js";
 import { useIsAuthenticated } from "../index.js";
 import {
   createJazzTestAccount,

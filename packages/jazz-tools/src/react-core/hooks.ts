@@ -19,11 +19,9 @@ import {
   InboxSender,
   InstanceOfSchema,
   JazzContextManager,
-  JazzContextType,
   Loaded,
   MaybeLoaded,
   NotLoaded,
-  RefsToResolve,
   ResolveQuery,
   ResolveQueryStrict,
   SchemaResolveQuery,
@@ -33,40 +31,58 @@ import {
   getUnloadedCoValueWithoutId,
   type BranchDefinition,
 } from "jazz-tools";
-import { JazzContext, JazzContextManagerContext } from "./provider.js";
+import { JazzContext } from "./provider.js";
 import { getCurrentAccountFromContextManager } from "./utils.js";
 import { CoValueSubscription } from "./types.js";
 import { use } from "./use.js";
 
+export function useJazzProviderCheck() {
+  const contextManager = useContext(JazzContext);
+
+  if (contextManager) {
+    throw new Error(
+      "You can't nest a JazzProvider inside another JazzProvider.",
+    );
+  }
+}
+
 export function useJazzContext<Acc extends Account>() {
-  const value = useContext(JazzContext) as JazzContextType<Acc>;
+  const value = useContext(JazzContext) as JazzContextManager<Acc, {}>;
 
   if (!value) {
     throw new Error(
-      "You need to set up a JazzProvider on top of your app to use this hook.",
+      "You need to set up a JazzProvider on top of your app to use this hook",
     );
   }
 
   return value;
 }
 
-export function useJazzContextManager<Acc extends Account>() {
-  const value = useContext(JazzContextManagerContext) as JazzContextManager<
-    Acc,
-    {}
-  >;
+export function useJazzContextValue<Acc extends Account>() {
+  const contextManager = useJazzContext<Acc>();
 
-  if (!value) {
+  const context = useSyncExternalStore(
+    useCallback(
+      (callback) => {
+        return contextManager.subscribe(callback);
+      },
+      [contextManager],
+    ),
+    () => contextManager.getCurrentValue(),
+    () => contextManager.getCurrentValue(),
+  );
+
+  if (!context) {
     throw new Error(
       "You need to set up a JazzProvider on top of your app to use this hook.",
     );
   }
 
-  return value;
+  return context;
 }
 
 export function useAuthSecretStorage() {
-  const value = useContext(JazzContextManagerContext);
+  const value = useContext(JazzContext);
 
   if (!value) {
     throw new Error(
@@ -104,7 +120,7 @@ export function useCoValueSubscription<
     unstable_branch?: BranchDefinition;
   },
 ) {
-  const contextManager = useJazzContextManager();
+  const contextManager = useJazzContext();
   const agent = useAgent();
 
   const callerStack = React.useRef<Error | undefined>(undefined);
@@ -563,7 +579,7 @@ export function useAccountSubscription<
     unstable_branch?: BranchDefinition;
   },
 ) {
-  const contextManager = useJazzContextManager();
+  const contextManager = useJazzContext();
 
   // Capture stack trace at hook call time
   const callerStack = React.useRef<Error | undefined>(undefined);
@@ -858,7 +874,7 @@ export function useSuspenseAccount<
  * Returns a function for logging out of the current account.
  */
 export function useLogOut(): () => void {
-  const contextManager = useJazzContextManager();
+  const contextManager = useJazzContext();
   return contextManager.logOut;
 }
 
@@ -873,7 +889,7 @@ export function useLogOut(): () => void {
 export function useAgent<
   A extends AccountClass<Account> | AnyAccountSchema = typeof Account,
 >(): AnonymousJazzAgent | Loaded<A, true> {
-  const contextManager = useJazzContextManager<InstanceOfSchema<A>>();
+  const contextManager = useJazzContext<InstanceOfSchema<A>>();
 
   const getCurrentValue = () =>
     getCurrentAccountFromContextManager(contextManager) as
@@ -896,7 +912,7 @@ export function experimental_useInboxSender<
   I extends CoValue,
   O extends CoValue | undefined,
 >(inboxOwnerID: string | undefined) {
-  const context = useJazzContext();
+  const context = useJazzContextValue();
 
   if (!("me" in context)) {
     throw new Error(
@@ -943,7 +959,7 @@ export function experimental_useInboxSender<
  * after 5 seconds of not receiving a ping from the server.
  */
 export function useSyncConnectionStatus() {
-  const context = useJazzContext();
+  const context = useJazzContextValue();
 
   const connected = useSyncExternalStore(
     useCallback(

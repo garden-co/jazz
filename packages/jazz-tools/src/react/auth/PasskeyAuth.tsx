@@ -2,7 +2,7 @@ import { BrowserPasskeyAuth } from "jazz-tools/browser";
 import {
   useAuthSecretStorage,
   useIsAuthenticated,
-  useJazzContext,
+  useJazzContextValue,
 } from "jazz-tools/react-core";
 import { useMemo, useState } from "react";
 
@@ -23,7 +23,7 @@ export function usePasskeyAuth({
   appName: string;
   appHostname?: string;
 }) {
-  const context = useJazzContext();
+  const context = useJazzContextValue();
   const authSecretStorage = useAuthSecretStorage();
 
   if ("guest" in context) {
