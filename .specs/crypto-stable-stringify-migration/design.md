@@ -6,10 +6,11 @@ This design addresses the migration from JS `stableStringify`-based canonicaliza
 
 The approach involves:
 
-1. **Defining explicit data shapes** for all crypto-relevant inputs currently flowing through `stableStringify`
-2. **Moving canonical encoding to Rust** (cojson-core) and exposing it via WASM/RN/NAPI bindings
-3. **Constraining crypto APIs** to accept bytes/strings rather than arbitrary JSON
-4. **Keeping request/auth serialization in jazz-tools** outside the crypto layer
+1. **Using Rust handlers for data structures** that require canonical serialization (e.g., `CoValueHeaderBuilder`)
+2. **Moving canonical encoding to Rust** (cojson-core) with deterministic serialization via `BTreeMap`
+3. **Exposing handlers via WASM/RN/NAPI bindings** following the existing `SessionLog` pattern
+4. **Constraining crypto APIs** to accept bytes/strings rather than arbitrary JSON
+5. **Replacing `JsonValue` with typed enums** where the actual value space is constrained
 
 ## Architecture
 
@@ -49,18 +50,20 @@ The approach involves:
 │    - Passes string/bytes to crypto                              │
 ├─────────────────────────────────────────────────────────────────┤
 │  cojson CryptoProvider                                          │
-│    - shortHash(header: CoValueHeader) → calls Rust encoder      │
+│    - Creates Rust handlers: new CoValueHeaderBuilder()          │
+│    - Manipulates handlers: builder.setType("comap")             │
+│    - Computes results: builder.computeId() → RawCoID            │
 │    - sign(secret, message: string | bytes)                      │
-│    - verify(sig, message: string | bytes, id)                   │
-│    - encrypt/seal with typed nonce material                     │
+│    - encrypt/seal with typed nonce material handlers            │
 │                             │                                   │
 │                             ▼                                   │
 ├─────────────────────────────────────────────────────────────────┤
 │                      Rust Core (cojson-core)                    │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │  Canonical Encoders (Rust-owned)                         │   │
-│  │    - encodeCoValueHeader(header) → bytes                 │   │
-│  │    - encodeNonceMaterial(material) → bytes               │   │
+│  │  Rust Handlers (opaque structs exposed to JS)            │   │
+│  │    - CoValueHeaderBuilder (builds header, computes ID)   │   │
+│  │    - NonceMaterialBuilder (builds nonce material)        │   │
+│  │    - Uses BTreeMap for sorted key serialization          │   │
 │  │    - Transaction serialization (serde-based)             │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                             │                                   │
@@ -69,50 +72,273 @@ The approach involves:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-## Components
+### Handler Pattern (Existing Precedent)
 
-### 1. Canonical Encoders (Rust - cojson-core)
+This approach follows the existing `SessionLog` pattern in the codebase:
 
-New module in `crates/cojson-core/src/core/canonical.rs`:
+```typescript
+// JS creates and manipulates Rust-owned handle
+const sessionLog = new SessionLog(coID, sessionID, signerID);
+sessionLog.tryAdd(transactions, signature, skipVerify);
+sessionLog.addNewPrivateTransaction(changes, signerSecret, ...);
+```
+
+The Rust struct is exposed via `#[wasm_bindgen]` / `#[napi]` as an opaque handle:
 
 ```rust
-/// Canonical encoding for CoValueHeader
-/// Produces bytes that match legacy stableStringify output for backward compatibility
-pub fn encode_header(header: &CoValueHeader) -> Vec<u8>;
+#[wasm_bindgen]
+pub struct SessionLog {
+    internal: SessionLogInternal,
+}
 
+#[wasm_bindgen]
+impl SessionLog {
+    #[wasm_bindgen(constructor)]
+    pub fn new(co_id: String, session_id: String, signer_id: Option<String>) -> SessionLog { ... }
+    
+    #[wasm_bindgen(js_name = tryAdd)]
+    pub fn try_add(&mut self, transactions: Vec<String>, signature: String, skip_verify: bool) -> Result<(), JsError> { ... }
+}
+```
+
+Memory management is handled automatically:
+- **WASM**: `FinalizationRegistry` cleans up when JS object is garbage collected
+- **NAPI**: Automatic via napi-rs
+- **React Native**: UniFFI generates pointer-based handles with cleanup
+
+## Components
+
+### 1. CoValueHeaderBuilder (Rust Handler)
+
+New handler in `crates/cojson-core/src/core/header.rs`:
+
+```rust
+use std::collections::BTreeMap;
+
+/// Builder pattern for CoValueHeader - exposed as opaque handle to JS
+/// JS manipulates this handle; Rust owns the data and serialization
+#[wasm_bindgen]
+pub struct CoValueHeaderBuilder {
+    covalue_type: Option<CoValueType>,
+    ruleset: Option<Ruleset>,
+    meta: Option<BTreeMap<String, serde_json::Value>>,
+    uniqueness: Option<Uniqueness>,
+    created_at: Option<CreatedAt>,
+}
+
+#[wasm_bindgen]
+impl CoValueHeaderBuilder {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            covalue_type: None,
+            ruleset: None,
+            meta: None,
+            uniqueness: None,
+            created_at: None,
+        }
+    }
+
+    /// Set the CoValue type
+    #[wasm_bindgen(js_name = setType)]
+    pub fn set_type(&mut self, covalue_type: &str) -> Result<(), JsError> {
+        self.covalue_type = Some(match covalue_type {
+            "comap" => CoValueType::Comap,
+            "colist" => CoValueType::Colist,
+            "coplaintext" => CoValueType::Coplaintext,
+            "costream" => CoValueType::Costream,
+            "BinaryCoStream" => CoValueType::BinaryCoStream,
+            _ => return Err(JsError::new(&format!("Invalid CoValue type: {}", covalue_type))),
+        });
+        Ok(())
+    }
+
+    /// Set ruleset to group with initial admin
+    #[wasm_bindgen(js_name = setRulesetGroup)]
+    pub fn set_ruleset_group(&mut self, initial_admin: &str) {
+        self.ruleset = Some(Ruleset::Group {
+            initial_admin: initial_admin.to_string(),
+        });
+    }
+
+    /// Set ruleset to owned by group
+    #[wasm_bindgen(js_name = setRulesetOwnedByGroup)]
+    pub fn set_ruleset_owned_by_group(&mut self, group_id: &str) {
+        self.ruleset = Some(Ruleset::OwnedByGroup {
+            group: CoID(group_id.to_string()),
+        });
+    }
+
+    /// Set ruleset to unsafe allow all
+    #[wasm_bindgen(js_name = setRulesetUnsafeAllowAll)]
+    pub fn set_ruleset_unsafe_allow_all(&mut self) {
+        self.ruleset = Some(Ruleset::UnsafeAllowAll);
+    }
+
+    /// Set meta from JSON string (parsed into BTreeMap for sorted serialization)
+    #[wasm_bindgen(js_name = setMeta)]
+    pub fn set_meta(&mut self, meta_json: Option<String>) -> Result<(), JsError> {
+        self.meta = match meta_json {
+            Some(json) => {
+                let value: serde_json::Value = serde_json::from_str(&json)?;
+                match value {
+                    serde_json::Value::Object(map) => {
+                        // Convert to BTreeMap for sorted key serialization
+                        Some(map.into_iter().collect())
+                    }
+                    serde_json::Value::Null => None,
+                    _ => return Err(JsError::new("meta must be an object or null")),
+                }
+            }
+            None => None,
+        };
+        Ok(())
+    }
+
+    /// Set uniqueness to null
+    #[wasm_bindgen(js_name = setUniquenessNull)]
+    pub fn set_uniqueness_null(&mut self) {
+        self.uniqueness = Some(Uniqueness::Null);
+    }
+
+    /// Set uniqueness to a string value
+    #[wasm_bindgen(js_name = setUniquenessString)]
+    pub fn set_uniqueness_string(&mut self, value: &str) {
+        self.uniqueness = Some(Uniqueness::String(value.to_string()));
+    }
+
+    /// Set createdAt to null
+    #[wasm_bindgen(js_name = setCreatedAtNull)]
+    pub fn set_created_at_null(&mut self) {
+        self.created_at = Some(CreatedAt::Null);
+    }
+
+    /// Set createdAt to a timestamp string
+    #[wasm_bindgen(js_name = setCreatedAtTimestamp)]
+    pub fn set_created_at_timestamp(&mut self, timestamp: &str) {
+        self.created_at = Some(CreatedAt::Timestamp(timestamp.to_string()));
+    }
+
+    /// Compute the CoValue ID from the header
+    /// Returns the ID in format "co_z${hash}"
+    #[wasm_bindgen(js_name = computeId)]
+    pub fn compute_id(&self) -> Result<String, JsError> {
+        let bytes = self.canonical_bytes()?;
+        let hash = blake3::hash(&bytes);
+        // Take first 19 bytes for short hash
+        Ok(format!("co_z{}", bs58::encode(&hash.as_bytes()[..19]).into_string()))
+    }
+
+    /// Get the canonical bytes (for testing/debugging)
+    #[wasm_bindgen(js_name = canonicalBytes)]
+    pub fn canonical_bytes_js(&self) -> Result<Box<[u8]>, JsError> {
+        Ok(self.canonical_bytes()?.into_boxed_slice())
+    }
+
+    /// Internal: produce canonical JSON bytes matching stableStringify output
+    fn canonical_bytes(&self) -> Result<Vec<u8>, JsError> {
+        // Build a BTreeMap to ensure sorted key order
+        let mut map: BTreeMap<&str, serde_json::Value> = BTreeMap::new();
+
+        // Add fields in any order - BTreeMap sorts them alphabetically
+        if let Some(ref created_at) = self.created_at {
+            map.insert("createdAt", serde_json::to_value(created_at)?);
+        }
+
+        map.insert("meta", match &self.meta {
+            Some(m) => serde_json::to_value(m)?,
+            None => serde_json::Value::Null,
+        });
+
+        map.insert("ruleset", serde_json::to_value(
+            self.ruleset.as_ref().ok_or_else(|| JsError::new("ruleset not set"))?
+        )?);
+
+        map.insert("type", serde_json::to_value(
+            self.covalue_type.as_ref().ok_or_else(|| JsError::new("type not set"))?
+        )?);
+
+        map.insert("uniqueness", serde_json::to_value(
+            self.uniqueness.as_ref().ok_or_else(|| JsError::new("uniqueness not set"))?
+        )?);
+
+        Ok(serde_json::to_vec(&map)?)
+    }
+}
+```
+
+### 1b. Canonical Encoders (Rust - cojson-core)
+
+Additional encoding functions in `crates/cojson-core/src/core/canonical.rs`:
+
+```rust
 /// Canonical encoding for seal/encrypt nonce material
-pub fn encode_nonce_material(material: &NonceMaterial) -> Vec<u8>;
+pub fn encode_nonce_material(material: &SealNonceMaterial) -> Vec<u8>;
 
 /// Canonical encoding for key-wrapping nonce material
 pub fn encode_key_nonce_material(encrypted_id: &KeyID, encrypting_id: &KeyID) -> Vec<u8>;
 ```
 
-These encoders produce JSON bytes with sorted keys (matching `stableStringify` behavior) for backward compatibility.
+These encoders use `BTreeMap` internally to produce JSON bytes with sorted keys (matching `stableStringify` behavior) for backward compatibility.
 
 ### 2. Typed Data Structures (Rust)
 
 ```rust
-/// CoValueHeader shapes for ID derivation
-pub struct CoValueHeader {
-    pub covalue_type: CoValueType,
-    pub ruleset: Ruleset,
-    pub meta: Option<JsonObject>,
-    pub uniqueness: JsonValue,
-    pub created_at: Option<String>,
+use std::collections::BTreeMap;
+use serde::{Serialize, Deserialize};
+
+/// Uniqueness value - constrained to actual usage patterns
+/// Analysis of codebase shows only these values are used:
+/// - null (accounts, some tests)
+/// - z${string} (random 12 bytes base58 from uniquenessForHeader())
+/// - "" (empty string for branches)
+/// - User-provided strings (findUnique, upsertUnique, loadUnique)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Uniqueness {
+    Null,
+    String(String),
 }
 
+/// CoValue type enumeration
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CoValueType {
+    Comap,
+    Colist,
+    Coplaintext,
+    Costream,
+    BinaryCoStream,
+}
+
+/// Ruleset enumeration with serde for canonical JSON output
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum Ruleset {
-    Group { initial_admin: String },
+    Group { 
+        #[serde(rename = "initialAdmin")]
+        initial_admin: String 
+    },
     OwnedByGroup { group: CoID },
     UnsafeAllowAll,
 }
 
-pub enum CoValueType {
-    CoMap,
-    CoList,
-    CoPlainText,
-    CoStream,
-    BinaryCoStream,
+/// CreatedAt value - constrained to actual usage patterns
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CreatedAt {
+    Null,
+    Timestamp(String),  // ISO 8601 format starting with "2"
+}
+
+/// Internal CoValueHeader structure
+/// Uses BTreeMap for meta to ensure sorted key serialization
+pub struct CoValueHeaderInternal {
+    pub covalue_type: CoValueType,
+    pub ruleset: Ruleset,
+    pub meta: Option<BTreeMap<String, serde_json::Value>>,
+    pub uniqueness: Uniqueness,
+    pub created_at: Option<CreatedAt>,
 }
 
 /// Nonce material for seal/unseal operations
@@ -127,6 +353,19 @@ pub struct KeyNonceMaterial {
     pub encrypting_id: KeyID,
 }
 ```
+
+#### Uniqueness Type Rationale
+
+The `uniqueness` field is typed as `JsonValue` in TypeScript but actual usage is constrained:
+
+| Value | Usage | Location |
+|-------|-------|----------|
+| `null` | Account headers | `account.ts` |
+| `z${string}` | Random uniqueness | `crypto.ts` `uniquenessForHeader()` |
+| `""` | Branch headers | `branching.ts` |
+| User string | Unique lookups | `coMap.ts`, `coList.ts` |
+
+No objects or arrays are ever used as uniqueness values, allowing us to simplify to `Uniqueness::Null | Uniqueness::String(String)`.
 
 ### 3. Updated CryptoProvider Interface (TypeScript)
 
@@ -172,13 +411,69 @@ abstract class CryptoProvider {
 New exports from `cojson-core-wasm` and `cojson-core-napi`:
 
 ```typescript
-// Canonical encoding functions
-export function encodeCoValueHeader(header: CoValueHeaderJs): Uint8Array;
-export function encodeNonceMaterial(material: SealNonceMaterialJs): Uint8Array;
-export function encodeKeyNonceMaterial(encryptedId: string, encryptingId: string): Uint8Array;
+// CoValueHeaderBuilder - Rust handler exposed to JS
+export class CoValueHeaderBuilder {
+  constructor();
+  free(): void;
+  
+  // Type setters
+  setType(covalue_type: string): void;
+  
+  // Ruleset setters
+  setRulesetGroup(initial_admin: string): void;
+  setRulesetOwnedByGroup(group_id: string): void;
+  setRulesetUnsafeAllowAll(): void;
+  
+  // Meta setter (accepts JSON string or null)
+  setMeta(meta_json: string | null): void;
+  
+  // Uniqueness setters
+  setUniquenessNull(): void;
+  setUniquenessString(value: string): void;
+  
+  // CreatedAt setters
+  setCreatedAtNull(): void;
+  setCreatedAtTimestamp(timestamp: string): void;
+  
+  // Compute the CoValue ID without returning serialized bytes
+  computeId(): string;
+  
+  // Get canonical bytes (for testing/debugging)
+  canonicalBytes(): Uint8Array;
+}
 
-// Updated shortHash that accepts typed header
-export function shortHashHeader(header: CoValueHeaderJs): string;
+// NonceMaterialBuilder - Rust handler for nonce material
+export class NonceMaterialBuilder {
+  constructor();
+  free(): void;
+  
+  // For seal nonce material
+  setInId(co_id: string): void;
+  setTxSessionId(session_id: string): void;
+  setTxIndex(tx_index: number): void;
+  
+  // For key nonce material
+  setEncryptedId(key_id: string): void;
+  setEncryptingId(key_id: string): void;
+  
+  // Get canonical bytes
+  canonicalBytes(): Uint8Array;
+}
+```
+
+**Usage Example:**
+
+```typescript
+// Creating a CoValue ID using the Rust handler
+const builder = new CoValueHeaderBuilder();
+builder.setType("comap");
+builder.setRulesetOwnedByGroup(groupId);
+builder.setMeta(null);
+builder.setUniquenessString(crypto.uniquenessForHeader());
+builder.setCreatedAtTimestamp(new Date().toISOString());
+
+const coValueId = builder.computeId();  // "co_z..."
+builder.free();  // Or let FinalizationRegistry handle it
 ```
 
 ### 5. Request/Auth Layer (jazz-tools)
@@ -217,15 +512,33 @@ type CoValueHeader = {
     | { type: "group"; initialAdmin: RawAccountID | AgentID }
     | { type: "ownedByGroup"; group: RawCoID }
     | { type: "unsafeAllowAll" };
-  meta: JsonObject | null; // TODO: We should convert JsonObject into the meta values used in cojson
-  uniqueness: JsonValue;  // typically `z${string}` but can be any JSON string (TODO: verifiy if it's true)
+  meta: JsonObject | null;
+  uniqueness: Uniqueness;  // Constrained type (see below)
   createdAt?: `2${string}` | null;
 };
+
+// Uniqueness is NOT arbitrary JsonValue - analysis shows only these values:
+type Uniqueness = 
+  | null                    // Account headers, some tests
+  | `z${string}`            // Random 12 bytes base58 (main case)
+  | ""                      // Empty string for branches
+  | string;                 // User-provided for findUnique/upsertUnique/loadUnique
+```
+
+**Key Finding**: The `uniqueness` field was typed as `JsonValue` but actual usage is strictly `null | string`. No objects or arrays are ever used. This allows the Rust enum:
+
+```rust
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Uniqueness {
+    Null,
+    String(String),
+}
 ```
 
 The canonical encoding must:
 
-1. Sort object keys alphabetically (matching `stableStringify`)
+1. Sort object keys alphabetically (matching `stableStringify`) - achieved via `BTreeMap`
 2. Produce identical bytes to legacy `stableStringify(header)` for all existing header shapes
 3. Handle the `createdAt` field correctly (omit if undefined, include if null or string)
 
@@ -265,31 +578,41 @@ The Rust core's serde serialization naturally produces deterministic output for 
 
 ## Migration Strategy
 
-### Phase 1: Add Rust Canonical Encoders
+### Phase 1: Implement Rust Handlers
 
-1. Implement `encode_header`, `encode_nonce_material`, `encode_key_nonce_material` in Rust
-2. Add comprehensive tests comparing Rust output to JS `stableStringify` output
-3. Expose via WASM/NAPI bindings
+1. Implement `CoValueHeaderBuilder` handler in `crates/cojson-core/src/core/header.rs`
+2. Implement `NonceMaterialBuilder` handler for seal/encrypt nonce material
+3. Use `BTreeMap` internally for sorted key serialization
+4. Add `Uniqueness` and `CreatedAt` enums with proper serde attributes
+5. Add comprehensive parity tests comparing Rust output to JS `stableStringify` output
 
-### Phase 2: Update CryptoProvider
+### Phase 2: Expose Handlers via Bindings
+
+1. Export `CoValueHeaderBuilder` via WASM (`#[wasm_bindgen]`)
+2. Export `CoValueHeaderBuilder` via NAPI (`#[napi]`)
+3. Export via React Native bindings (UniFFI)
+4. Ensure memory management is correct (FinalizationRegistry for WASM)
+
+### Phase 3: Update CryptoProvider
 
 1. Add new byte/string-oriented methods (`signBytes`, `signString`, etc.)
-2. Add `shortHashHeader` that uses Rust canonical encoding
-3. Update seal/encrypt to use typed nonce material with Rust encoding
+2. Update `idforHeader` to use `CoValueHeaderBuilder.computeId()`
+3. Update seal/encrypt to use `NonceMaterialBuilder` for nonce encoding
 4. Keep legacy methods as deprecated wrappers
 
-### Phase 3: Update Callers
+### Phase 4: Update Callers
 
-1. Update `idforHeader` to use `shortHashHeader`
-2. Update seal/encrypt call sites to use typed nonce material
+1. Update all `idforHeader` call sites to use the builder pattern
+2. Update seal/encrypt call sites to use typed nonce material builders
 3. Update request/auth code in jazz-tools to use string-based signing
-4. Remove `stableStringify` usage from session log adapter (already handled by Rust)
+4. Verify `stableStringify` usage in session log adapter is already handled by Rust
 
-### Phase 4: Remove Legacy Code
+### Phase 5: Remove Legacy Code
 
 1. Remove deprecated `sign(message: JsonValue)` methods
 2. Remove `stableStringify` from crypto layer
 3. Keep `stableStringify` only where needed outside crypto (e.g., debugging, tests)
+4. Update TypeScript types to use constrained `Uniqueness` type instead of `JsonValue`
 
 ## Backward Compatibility
 
@@ -411,16 +734,76 @@ Benchmark against current `stableStringify`-based implementation:
 2. Signing/verification throughput
 3. Large request payload handling (contentPieces)
 
+## Benefits of Handler Approach
+
+### 1. Avoids Serialization Overhead
+
+Instead of serializing data in JS, passing it across the boundary, and deserializing in Rust, JS directly manipulates a Rust-owned handle:
+
+```typescript
+// Old approach: serialize → transfer → deserialize → serialize again
+const bytes = textEncoder.encode(stableStringify(header));
+const id = computeIdFromBytes(bytes);
+
+// New approach: direct manipulation, no intermediate serialization
+const builder = new CoValueHeaderBuilder();
+builder.setType("comap");
+builder.setRulesetGroup(adminId);
+// ... Rust computes canonical bytes internally
+const id = builder.computeId();
+```
+
+### 2. Type Safety at Compile Time
+
+The handler API enforces correct structure:
+
+```typescript
+// Old: accepts any JsonValue, errors at runtime
+crypto.shortHash({ invalid: "structure" });
+
+// New: TypeScript enforces valid method calls
+builder.setType("comap");           // ✓ Valid
+builder.setType("invalid");         // ✗ Runtime error with clear message
+builder.setUniquenessString("z.."); // ✓ Explicitly typed
+```
+
+### 3. BTreeMap Guarantees Sorted Keys
+
+Rust's `BTreeMap` naturally maintains sorted key order, matching `stableStringify` behavior:
+
+```rust
+// Keys automatically sorted alphabetically
+let mut map: BTreeMap<&str, Value> = BTreeMap::new();
+map.insert("type", ...);      // Will appear after "ruleset"
+map.insert("meta", ...);      // Will appear after "createdAt"
+map.insert("createdAt", ...); // Will appear first
+
+// Serializes as: {"createdAt":...,"meta":...,"ruleset":...,"type":...,"uniqueness":...}
+```
+
+### 4. Follows Existing Patterns
+
+The approach mirrors the existing `SessionLog` implementation, reducing learning curve and ensuring consistency across the codebase.
+
+### 5. Simplified Value Types
+
+By constraining `uniqueness` to `Uniqueness` enum instead of `JsonValue`, we:
+- Reduce complexity in serialization logic
+- Catch invalid values at compile time
+- Make the API more self-documenting
+
 ## Open Questions Resolution
 
 ### Q1: Byte-for-byte compatibility vs. narrowing header shapes
 
 **Decision**: Maintain byte-for-byte compatibility.
 
-The Rust `encode_header` function produces output identical to `stableStringify` for all currently used header shapes. This is achievable because:
+The Rust `CoValueHeaderBuilder.canonical_bytes()` produces output identical to `stableStringify` for all currently used header shapes. This is achievable because:
 
 - `stableStringify` behavior is well-defined (sorted keys, specific number/string handling)
+- `BTreeMap` naturally produces sorted keys
 - The header shapes are finite and known
+- The `Uniqueness` type is constrained to `null | string` (no complex JSON)
 - We can add comprehensive parity tests
 
 ### Q2: Sealed message shapes - structured vs opaque
@@ -434,7 +817,7 @@ seal({
   message: T,                    // Caller provides JSON value
   from: SealerSecret,
   to: SealerID,
-  nOnceMaterial: SealNonceMaterial, // Typed, Rust-encoded
+  nOnceMaterial: NonceMaterialBuilder, // Rust handler for nonce
 }): Sealed<T>
 ```
 
@@ -444,5 +827,16 @@ The `message` is serialized using `JSON.stringify` (not `stableStringify`) befor
 - Determinism is only needed for nonce material
 - This simplifies the API and allows any JSON value
 
-The nonce material uses the Rust canonical encoder because it must be deterministic for encryption/decryption to work correctly.
+The nonce material uses the Rust `NonceMaterialBuilder` handler because it must be deterministic for encryption/decryption to work correctly.
+
+### Q3: Handler vs function-based API
+
+**Decision**: Use handler (builder) pattern.
+
+Reasons:
+- Headers are often built incrementally in application code
+- Builder pattern allows validation at each step
+- Matches existing `SessionLog` pattern in codebase
+- Enables future extensions (e.g., adding new fields) without breaking API
+- Memory management is well-understood (FinalizationRegistry for WASM)
 
