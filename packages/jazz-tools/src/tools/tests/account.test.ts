@@ -522,7 +522,7 @@ describe("createAs", () => {
       creationProps: { name: "Test Account" },
     });
 
-    assertLoaded(createdAccount);
-    expect(createdAccount.$jazz.createdBy).toBe(undefined);
+    assertLoaded(createdAccount.account);
+    expect(createdAccount.account.$jazz.createdBy).toBe(undefined);
   });
 });
