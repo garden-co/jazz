@@ -894,7 +894,10 @@ export class SyncManager {
 
   private trackSyncState(coValueId: RawCoID): void {
     for (const peer of this.getPersistentServerPeers(coValueId)) {
-      this.unsyncedTracker.add(coValueId, peer.id);
+      const alreadyTracked = this.unsyncedTracker.add(coValueId, peer.id);
+      if (alreadyTracked) {
+        continue;
+      }
 
       const unsubscribe = this.syncState.subscribeToPeerUpdates(
         peer.id,

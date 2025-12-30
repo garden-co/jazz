@@ -30,15 +30,17 @@ export class UnsyncedCoValuesTracker {
   /**
    * Add a CoValue as unsynced to a specific peer.
    * Triggers persistence if storage is available.
+   * @returns true if the CoValue was already tracked, false otherwise.
    */
-  add(id: RawCoID, peerId: PeerID): void {
+  add(id: RawCoID, peerId: PeerID): boolean {
     if (!this.unsynced.has(id)) {
       this.unsynced.set(id, new Set());
     }
     const peerSet = this.unsynced.get(id)!;
 
-    // Only update if this is a new peer
-    if (!peerSet.has(peerId)) {
+    const alreadyTracked = peerSet.has(peerId);
+    if (!alreadyTracked) {
+      // Only update if this is a new peer
       peerSet.add(peerId);
 
       this.schedulePersist(id, peerId, false);
@@ -46,6 +48,8 @@ export class UnsyncedCoValuesTracker {
       this.notifyCoValueListeners(id, false);
       this.notifyGlobalListeners(false);
     }
+
+    return alreadyTracked;
   }
 
   /**
