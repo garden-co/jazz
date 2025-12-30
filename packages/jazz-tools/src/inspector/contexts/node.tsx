@@ -7,7 +7,6 @@ import {
 } from "react";
 import { CoID, LocalNode, RawAccount } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
-import type { PureJSCrypto } from "cojson/dist/crypto/PureJSCrypto";
 import { createWebSocketPeer } from "cojson-transport-ws";
 
 type NodeContextType = {
@@ -40,7 +39,7 @@ type NodeProviderProps = PropsWithChildren<{
   server?: string;
 }>;
 
-let crypto: WasmCrypto | PureJSCrypto | null = null;
+let crypto: WasmCrypto | null = null;
 
 async function getCrypto() {
   if (crypto) return crypto;

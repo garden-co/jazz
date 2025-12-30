@@ -43,15 +43,31 @@ npx expo install expo-linking expo-secure-store expo-sqlite expo-file-system @re
 
 # React Native polyfills
 npm install @azure/core-asynciterator-polyfill react-native-url-polyfill readable-stream react-native-get-random-values react-native-fast-encoder
-
-# Jazz dependencies
-npm install jazz-tools
 ```
 </CodeGroup>
 
-<Alert variant="info" className="mt-4" title="Note"> 
-Requires at least Node.js v20. See our [Troubleshooting Guide](/docs/troubleshooting) for quick fixes.
+<Alert variant="warning" title="Versioning" className="mt-4">
+  While you can distribute your own JS code changes OTA, if you update your Jazz version, this will result in changes in the native dependencies, which *cannot* be distributed over the air and requires a new store submission.
 </Alert>
+
+<details>
+<summary>
+Using Expo SDK 53 or lower?
+</summary>
+
+Expo SDK 54 will automatically link the native dependency for you, but older versions of Expo do not. As a result, either upgrade to Expo 54, or install `cojson-core-rn` as an explicit dependency manually.
+
+**Pay Attention:** The version of `cojson-core-rn` must be the same as the version of `jazz-tools`.
+
+<CodeGroup>
+```json
+"dependencies": {
+  "cojson-core-rn": "x.x.x", # same version as jazz-tools
+  "jazz-tools": "x.x.x" # same version as cojson-core-rn
+}
+```
+</CodeGroup>
+</details>
 
 #### Fix incompatible dependencies
 

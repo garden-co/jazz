@@ -30,6 +30,19 @@ We can create this user using the `createSSRJazzAgent` function. In this example
 ```
 </CodeGroup>
 
+If you want to initialize the WASM asynchronously (**Suggested**), you can use the `initWasm` function.
+Otherwise, the WASM will be initialized synchronously and will block the main thread (**Not Recommended**).
+<ContentByFramework framework="react">
+<FileName>app/jazzSSR.ts</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+<FileName>src/lib/jazzSSR.ts</FileName>
+</ContentByFramework>
+<CodeGroup className="mt-4 [&_span]:[tab-size:2]" preferWrap>
+```ts jazzSSRInitWasm.ts
+```
+</CodeGroup>
+
 ## Telling Jazz to use the SSR agent
 
 Normally, Jazz expects a logged in user (or an anonymous user) to be accessing data. We can use the `enableSSR` setting to tell Jazz that this may not be the case, and the data on the page may be being accessed by an agent.

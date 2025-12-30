@@ -45,7 +45,6 @@ export function JazzProviderCore<
   logOutReplacement,
   onAnonymousAccountDiscarded,
   kvStore,
-  CryptoProvider,
   authSecretStorageKey,
   fallback = null,
 }: JazzProviderProps<S>) {
@@ -81,7 +80,6 @@ export function JazzProviderCore<
       onAnonymousAccountDiscarded: onAnonymousAccountDiscarded
         ? onAnonymousAccountDiscardedRefCallback
         : undefined,
-      CryptoProvider,
     } satisfies JazzContextManagerProps<S>;
   }, [guestMode, sync.peer, sync.when, storage]);
 

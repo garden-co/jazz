@@ -1,16 +1,9 @@
 import { assert, describe, expect, it } from "vitest";
 import { WasmCrypto } from "../crypto/WasmCrypto";
-import { JsonValue, LocalNode, SessionID } from "../exports";
-import {
-  agentAndSessionIDFromSecret,
-  randomAgentAndSessionID,
-} from "./testUtils";
-import { PureJSCrypto } from "../crypto/PureJSCrypto";
-import { Encrypted } from "../crypto/crypto";
-import { PrivateTransaction } from "../coValueCore/verifiedState";
+import { LocalNode } from "../exports";
+import { agentAndSessionIDFromSecret } from "./testUtils";
 
 const wasmCrypto = await WasmCrypto.create();
-const jsCrypto = await PureJSCrypto.create();
 
 const agentSecret =
   "sealerSecret_zE3Nr7YFr1KkVbJSx4JDCzYn4ApYdm8kJ5ghNBxREHQya/signerSecret_z9fEu4eNG1eXHMak3YSzY7uLdoG8HESSJ8YW4xWdNNDSP";
@@ -20,7 +13,7 @@ function createTestNode() {
   return {
     agent,
     session,
-    node: new LocalNode(agent.agentSecret, session, jsCrypto),
+    node: new LocalNode(agent.agentSecret, session, wasmCrypto),
   };
 }
 
