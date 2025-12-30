@@ -41,7 +41,7 @@ export function useJazzContext<Acc extends Account>() {
 
   if (!value) {
     throw new Error(
-      "You need to set up a JazzProvider on top of your app to use this hook",
+      "You need to set up a JazzProvider on top of your app to use this hook.",
     );
   }
 
@@ -64,7 +64,7 @@ export function useJazzContextValue<Acc extends Account>() {
 
   if (!context) {
     throw new Error(
-      "You need to set up a JazzProvider on top of your app to use this hook.",
+      "The JazzProvider is not initialized yet. This looks like a bug, please report it.",
     );
   }
 
