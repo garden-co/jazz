@@ -196,12 +196,46 @@ describe("CoMap.Record", async () => {
     });
 
     test("getEdits() keys should return deleted keys", () => {
+      const me = Account.getMe();
+
       const Person = co.record(z.string(), z.string());
       const person = Person.create({ name: "John" });
       person.$jazz.set("name", "Jane");
       person.$jazz.delete("name");
 
       expect(Object.keys(person.$jazz.getEdits())).toEqual(["name"]);
+
+      const edits = person.$jazz.getEdits().name?.all;
+
+      expect(edits).toEqual([
+        expect.objectContaining({
+          value: "John",
+          key: "name",
+          ref: undefined,
+          madeAt: expect.any(Date),
+        }),
+        expect.objectContaining({
+          value: "Jane",
+          key: "name",
+          ref: undefined,
+          madeAt: expect.any(Date),
+        }),
+        expect.objectContaining({
+          value: undefined,
+          key: "name",
+          ref: undefined,
+          madeAt: expect.any(Date),
+        }),
+      ]);
+
+      expect(edits?.[0]?.by).toMatchObject({
+        [TypeSym]: "Account",
+        $jazz: expect.objectContaining({ id: me.$jazz.id }),
+      });
+      expect(edits?.[1]?.by).toMatchObject({
+        [TypeSym]: "Account",
+        $jazz: expect.objectContaining({ id: me.$jazz.id }),
+      });
     });
   });
 
