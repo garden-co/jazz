@@ -358,7 +358,7 @@ export class SyncManager {
       });
 
     if (!skipReconciliation && peerState.role === "server") {
-      void this.startPeerReconciliation(peerState);
+      this.startPeerReconciliation(peerState);
     }
 
     peerState.incoming.onMessage((msg) => {

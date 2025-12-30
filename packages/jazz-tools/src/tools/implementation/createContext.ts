@@ -274,8 +274,8 @@ export async function createJazzContext<
       crypto,
       AccountSchema: options.AccountSchema,
       sessionProvider: options.sessionProvider,
-      onLogOut: () => {
-        authSecretStorage.clearWithoutNotify();
+      onLogOut: async () => {
+        await authSecretStorage.clearWithoutNotify();
       },
       storage: options.storage,
       asActiveAccount: true,

@@ -200,8 +200,8 @@ test("create a new playlist, share with manager role who will add and remove a r
     peachPage.getByRole("button", { name: "Share" }),
   ).not.toBeVisible();
 
-  await marioHome.removeMember(2); // Peach
-  await marioHome.removeMember(1); // Luigi
+  await marioHome.removeMember(1); // Peach
+  await marioHome.removeMember(0); // Luigi
 
   await sleep(4000); // Wait for the sync to complete
 

@@ -29,7 +29,6 @@ import {
 } from "./errorReporting.js";
 import {
   createCoValue,
-  isEqualRefsToResolve,
   myRoleForRawValue,
   PromiseWithStatus,
   rejectedPromise,
@@ -49,25 +48,25 @@ export class SubscriptionScope<D extends CoValue> {
   /**
    * Autoloaded child ids that are unloaded
    */
-  pendingAutoloadedChildren: Set<string> = new Set();
+  private pendingAutoloadedChildren: Set<string> = new Set();
   value: SubscriptionValue<D, any> | SubscriptionValueLoading;
-  childErrors: Map<string, JazzError> = new Map();
-  validationErrors: Map<string, JazzError> = new Map();
+  private childErrors: Map<string, JazzError> = new Map();
+  private validationErrors: Map<string, JazzError> = new Map();
   errorFromChildren: JazzError | undefined;
-  subscription: CoValueCoreSubscription;
-  dirty = false;
-  resolve: RefsToResolve<any>;
-  idsSubscribed = new Set<string>();
-  autoloaded = new Set<string>();
-  autoloadedKeys = new Set<string>();
-  skipInvalidKeys = new Set<string>();
-  totalValidTransactions = 0;
-  version = 0;
-  migrated = false;
-  migrating = false;
+  private subscription: CoValueCoreSubscription;
+  private dirty = false;
+  private resolve: RefsToResolve<any>;
+  private idsSubscribed = new Set<string>();
+  private autoloaded = new Set<string>();
+  private autoloadedKeys = new Set<string>();
+  private skipInvalidKeys = new Set<string>();
+  private totalValidTransactions = 0;
+  private version = 0;
+  private migrated = false;
+  private migrating = false;
   closed = false;
 
-  silenceUpdates = false;
+  private silenceUpdates = false;
 
   /**
    * Stack trace captured at subscription creation time.
@@ -145,7 +144,9 @@ export class SubscriptionScope<D extends CoValue> {
     this.dirty = true;
   }
 
-  handleUpdate(update: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE) {
+  private handleUpdate(
+    update: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE,
+  ) {
     if (update === CoValueLoadingState.UNAVAILABLE) {
       if (this.value.type === CoValueLoadingState.LOADING) {
         const error = new JazzError(this.id, CoValueLoadingState.UNAVAILABLE, [
@@ -213,7 +214,7 @@ export class SubscriptionScope<D extends CoValue> {
     this.triggerUpdate();
   }
 
-  computeChildErrors() {
+  private computeChildErrors() {
     let issues: JazzErrorIssue[] = [];
     let errorType: JazzError["type"] = CoValueLoadingState.UNAVAILABLE;
 
@@ -259,11 +260,11 @@ export class SubscriptionScope<D extends CoValue> {
     return undefined;
   }
 
-  handleChildUpdate = (
+  handleChildUpdate(
     id: string,
     value: SubscriptionValue<any, any> | SubscriptionValueLoading,
     key?: string,
-  ) => {
+  ) {
     if (value.type === CoValueLoadingState.LOADING) {
       return;
     }
@@ -296,9 +297,9 @@ export class SubscriptionScope<D extends CoValue> {
     }
 
     this.triggerUpdate();
-  };
+  }
 
-  shouldSendUpdates() {
+  private shouldSendUpdates() {
     if (this.value.type === CoValueLoadingState.LOADING) return false;
 
     // If the value is in error, we send the update regardless of the children statuses
@@ -309,9 +310,9 @@ export class SubscriptionScope<D extends CoValue> {
 
   unloadedValue: NotLoaded<D> | undefined;
 
-  lastPromise: PromiseWithStatus<D> | undefined;
+  private lastPromise: PromiseWithStatus<D> | undefined;
 
-  getPromise() {
+  private getPromise() {
     const currentValue = this.getCurrentValue();
 
     if (currentValue.$isLoaded) {
@@ -403,7 +404,7 @@ export class SubscriptionScope<D extends CoValue> {
     return unloadedValue;
   }
 
-  lastErrorLogged: JazzError | undefined;
+  private lastErrorLogged: JazzError | undefined;
 
   getCurrentValue(): MaybeLoaded<D> {
     const rawValue = this.getCurrentRawValue();
@@ -420,7 +421,7 @@ export class SubscriptionScope<D extends CoValue> {
     return rawValue;
   }
 
-  getCurrentRawValue(): D | NotLoadedCoValueState {
+  private getCurrentRawValue(): D | NotLoadedCoValueState {
     if (
       this.value.type === CoValueLoadingState.UNAUTHORIZED ||
       this.value.type === CoValueLoadingState.UNAVAILABLE
@@ -443,7 +444,7 @@ export class SubscriptionScope<D extends CoValue> {
     return CoValueLoadingState.LOADING;
   }
 
-  getCreationStackLines() {
+  private getCreationStackLines() {
     const stack = this.callerStack?.stack;
 
     if (!stack) {
@@ -474,7 +475,7 @@ export class SubscriptionScope<D extends CoValue> {
     return result;
   }
 
-  getError() {
+  private getError() {
     if (
       this.value.type === CoValueLoadingState.UNAUTHORIZED ||
       this.value.type === CoValueLoadingState.UNAVAILABLE
@@ -487,7 +488,7 @@ export class SubscriptionScope<D extends CoValue> {
     }
   }
 
-  logError() {
+  private logError() {
     const error = this.getError();
 
     if (!error || this.lastErrorLogged === error) {
@@ -510,7 +511,7 @@ export class SubscriptionScope<D extends CoValue> {
     }
   }
 
-  triggerUpdate() {
+  private triggerUpdate() {
     if (!this.shouldSendUpdates()) return;
     if (!this.dirty) return;
     if (this.subscribers.size === 0) return;
@@ -700,7 +701,7 @@ export class SubscriptionScope<D extends CoValue> {
     this.silenceUpdates = false;
   }
 
-  loadChildren() {
+  private loadChildren() {
     const { resolve } = this;
 
     if (this.value.type !== CoValueLoadingState.LOADED) {
@@ -816,7 +817,11 @@ export class SubscriptionScope<D extends CoValue> {
     return hasChanged;
   }
 
-  loadCoMapKey(map: CoMap, key: string, depth: Record<string, any> | true) {
+  private loadCoMapKey(
+    map: CoMap,
+    key: string,
+    depth: Record<string, any> | true,
+  ) {
     if (key === "$onError") {
       return undefined;
     }
@@ -858,7 +863,11 @@ export class SubscriptionScope<D extends CoValue> {
     return undefined;
   }
 
-  loadCoListKey(list: CoList, key: string, depth: Record<string, any> | true) {
+  private loadCoListKey(
+    list: CoList,
+    key: string,
+    depth: Record<string, any> | true,
+  ) {
     const descriptor = list.$jazz.getItemsDescriptor();
 
     if (!descriptor || !isRefEncoded(descriptor)) {
@@ -896,7 +905,7 @@ export class SubscriptionScope<D extends CoValue> {
     return undefined;
   }
 
-  loadChildNode(
+  private loadChildNode(
     id: string,
     query: RefsToResolve<any>,
     descriptor: RefEncoded<any>,
