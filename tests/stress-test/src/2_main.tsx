@@ -170,6 +170,14 @@ function HomeScreen() {
                   e.currentTarget.style.borderColor = "#e1e5e9";
                 }}
               >
+                <DeleteButton
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    me.root.projects.$jazz.remove(
+                      (p) => p.$jazz.id === project.$jazz.id,
+                    );
+                  }}
+                />
                 <div
                   style={{
                     position: "absolute",
@@ -239,5 +247,48 @@ function HomeScreen() {
           })}
       </div>
     </div>
+  );
+}
+
+function DeleteButton({
+  onClick,
+}: {
+  onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        position: "absolute",
+        top: "24px",
+        right: "24px",
+        background: "white",
+        border: "1px solid #e1e5e9",
+        borderRadius: "6px",
+        padding: "6px",
+        cursor: "pointer",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        transition: "all 0.2s ease-in-out",
+        zIndex: 10,
+      }}
+      title="Delete project"
+    >
+      <svg
+        width="16"
+        height="16"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="#6b7280"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M3 6h18" />
+        <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
+        <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+      </svg>
+    </button>
   );
 }
