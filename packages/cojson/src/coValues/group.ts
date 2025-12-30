@@ -1248,7 +1248,10 @@ export class RawGroup<
           group: this.id,
         },
         meta: meta || null,
-        ...uniqueness,
+        ...(uniqueness.createdAt !== undefined
+          ? { createdAt: uniqueness.createdAt }
+          : {}),
+        uniqueness: uniqueness.uniqueness,
       })
       .getCurrentContent() as M;
 
@@ -1282,7 +1285,10 @@ export class RawGroup<
           group: this.id,
         },
         meta: meta || null,
-        ...uniqueness,
+        ...(uniqueness.createdAt !== undefined
+          ? { createdAt: uniqueness.createdAt }
+          : {}),
+        uniqueness: uniqueness.uniqueness,
       })
       .getCurrentContent() as L;
 
@@ -1339,7 +1345,10 @@ export class RawGroup<
           group: this.id,
         },
         meta: meta || null,
-        ...uniqueness,
+        ...(uniqueness.createdAt !== undefined
+          ? { createdAt: uniqueness.createdAt }
+          : {}),
+        uniqueness: uniqueness.uniqueness,
       })
       .getCurrentContent() as C;
 
@@ -1364,7 +1373,10 @@ export class RawGroup<
           group: this.id,
         },
         meta: meta,
-        ...uniqueness,
+        ...(uniqueness.createdAt !== undefined
+          ? { createdAt: uniqueness.createdAt }
+          : {}),
+        uniqueness: uniqueness.uniqueness,
       })
       .getCurrentContent() as C;
   }
