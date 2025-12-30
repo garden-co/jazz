@@ -1,5 +1,20 @@
 # jazz-tools
 
+## 0.19.15
+
+### Patch Changes
+
+- 94012a1: Added a locking system for session IDs in React Native
+
+  Now it should be safer to mount multiple JazzProviders, but still not advised as it is really expensive
+
+- 86f9676: Adds a createdBy getter
+- b27dbc2: Fix Object.keys(coMap.getEdits()) to return also deleted keys
+- Updated dependencies [71ed9d6]
+  - cojson@0.19.15
+  - cojson-storage-indexeddb@0.19.15
+  - cojson-transport-ws@0.19.15
+
 ## 0.19.14
 
 ### Patch Changes
