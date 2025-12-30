@@ -1,6 +1,8 @@
 import type { AgentSecret, LocalNode } from "cojson";
 import type { Account, AnonymousJazzAgent, ID } from "./internal.js";
 
+export type { SyncWhen } from "cojson";
+
 export type AuthCredentials = {
   accountID: ID<Account>;
   secretSeed?: Uint8Array;

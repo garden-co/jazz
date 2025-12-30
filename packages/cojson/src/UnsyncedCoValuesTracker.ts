@@ -4,6 +4,12 @@ import type { PeerID } from "./sync.js";
 import type { StorageAPI } from "./storage/types.js";
 
 /**
+ * Used to track a CoValue that hasn't been synced to any peer,
+ * because none is currently connected.
+ */
+const ANY_PEER_ID: PeerID = "any";
+
+/**
  * Tracks CoValues that have unsynced changes to specific peers.
  * Maintains an in-memory map and periodically persists to storage.
  */
@@ -32,7 +38,7 @@ export class UnsyncedCoValuesTracker {
    * Triggers persistence if storage is available.
    * @returns true if the CoValue was already tracked, false otherwise.
    */
-  add(id: RawCoID, peerId: PeerID): boolean {
+  add(id: RawCoID, peerId: PeerID = ANY_PEER_ID): boolean {
     if (!this.unsynced.has(id)) {
       this.unsynced.set(id, new Set());
     }
@@ -56,7 +62,7 @@ export class UnsyncedCoValuesTracker {
    * Remove a CoValue from being unsynced to a specific peer.
    * Triggers persistence if storage is available.
    */
-  remove(id: RawCoID, peerId: PeerID): void {
+  remove(id: RawCoID, peerId: PeerID = ANY_PEER_ID): void {
     const peerSet = this.unsynced.get(id);
     if (!peerSet || !peerSet.has(peerId)) {
       return;

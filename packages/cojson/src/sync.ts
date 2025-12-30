@@ -64,6 +64,15 @@ export type DoneMessage = {
   id: RawCoID;
 };
 
+/**
+ * Determines when network sync is enabled.
+ * - "always": sync is enabled for both Anonymous Authentication and Authenticated Account
+ * - "signedUp": sync is enabled when the user is authenticated
+ * - "never": sync is disabled, content stays local
+ * Can be dynamically modified to control sync behavior at runtime.
+ */
+export type SyncWhen = "always" | "signedUp" | "never";
+
 export type PeerID = string;
 
 export type DisconnectedError = "Disconnected";
@@ -298,6 +307,7 @@ export class SyncManager {
                 if (coValue.isAvailable()) {
                   // CoValue was successfully loaded. Resume tracking sync state for this CoValue
                   // This will add it back to the tracker and set up subscriptions
+                  // TODO delete outdated tracking before new tracking
                   this.trackSyncState(coValueId);
                 } else {
                   // CoValue not found in storage. Remove all peer entries for this CoValue
@@ -893,7 +903,25 @@ export class SyncManager {
   }
 
   private trackSyncState(coValueId: RawCoID): void {
-    for (const peer of this.getPersistentServerPeers(coValueId)) {
+    const peers = this.getPersistentServerPeers(coValueId);
+
+    const isSyncRequired = this.local.syncWhen !== "never";
+    if (isSyncRequired && peers.length === 0) {
+      this.unsyncedTracker.add(coValueId);
+
+      const unsubscribe = this.syncState.subscribeToCoValueUpdates(
+        coValueId,
+        (_peerId, _knownState, syncState) => {
+          if (syncState.uploaded) {
+            this.unsyncedTracker.remove(coValueId);
+            unsubscribe();
+          }
+        },
+      );
+      return;
+    }
+
+    for (const peer of peers) {
       const alreadyTracked = this.unsyncedTracker.add(coValueId, peer.id);
       if (alreadyTracked) {
         continue;

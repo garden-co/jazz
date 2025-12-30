@@ -65,7 +65,7 @@ import type { AgentID, RawCoID, SessionID } from "./ids.js";
 import type { JsonObject, JsonValue } from "./jsonValue.js";
 import type * as Media from "./media.js";
 import { isAccountRole } from "./permissions.js";
-import type { Peer, SyncMessage } from "./sync.js";
+import type { Peer, SyncMessage, SyncWhen } from "./sync.js";
 import {
   DisconnectedError,
   SyncManager,
@@ -193,6 +193,7 @@ export type {
   AccountRole,
   AvailableCoValueCore,
   PeerState,
+  SyncWhen,
   CoValueHeader,
 };
 

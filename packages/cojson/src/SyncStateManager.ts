@@ -16,6 +16,8 @@ export type GlobalSyncStateListenerCallback = (
   sync: SyncState,
 ) => void;
 
+export type CoValueSyncStateListenerCallback = GlobalSyncStateListenerCallback;
+
 export type PeerSyncStateListenerCallback = (
   knownState: CoValueKnownState,
   sync: SyncState,
@@ -25,6 +27,10 @@ export class SyncStateManager {
   constructor(private syncManager: SyncManager) {}
 
   private listeners = new Set<GlobalSyncStateListenerCallback>();
+  private listenersByCoValues = new Map<
+    RawCoID,
+    Set<CoValueSyncStateListenerCallback>
+  >();
   private listenersByPeersAndCoValues = new Map<
     PeerID,
     Map<RawCoID, Set<PeerSyncStateListenerCallback>>
@@ -35,6 +41,25 @@ export class SyncStateManager {
 
     return () => {
       this.listeners.delete(listener);
+    };
+  }
+
+  subscribeToCoValueUpdates(
+    coValueId: RawCoID,
+    listener: CoValueSyncStateListenerCallback,
+  ) {
+    let listeners = this.listenersByCoValues.get(coValueId);
+    if (!listeners) {
+      listeners = new Set();
+      this.listenersByCoValues.set(coValueId, listeners);
+    }
+    listeners.add(listener);
+
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) {
+        this.listenersByCoValues.delete(coValueId);
+      }
     };
   }
 
@@ -69,10 +94,16 @@ export class SyncStateManager {
   }
 
   triggerUpdate(peerId: PeerID, id: RawCoID, knownState: CoValueKnownState) {
+    const globalListeners = this.listeners;
+    const coValueListeners = this.listenersByCoValues.get(id);
     const peerMap = this.listenersByPeersAndCoValues.get(peerId);
-    const coValueListeners = peerMap?.get(id);
+    const coValueAndPeerListeners = peerMap?.get(id);
 
-    if (!coValueListeners?.size && !this.listeners.size) {
+    if (
+      !globalListeners.size &&
+      !coValueListeners?.size &&
+      !coValueAndPeerListeners?.size
+    ) {
       // If we don't have any active listeners do nothing
       return;
     }
@@ -87,6 +118,12 @@ export class SyncStateManager {
 
     if (coValueListeners) {
       for (const listener of coValueListeners) {
+        listener(peerId, knownState, syncState);
+      }
+    }
+
+    if (coValueAndPeerListeners) {
+      for (const listener of coValueAndPeerListeners) {
         listener(knownState, syncState);
       }
     }
