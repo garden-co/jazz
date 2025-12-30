@@ -1,5 +1,14 @@
 # cojson
 
+## 0.19.15
+
+### Patch Changes
+
+- 71ed9d6: Fixed an issue where spreading the uniqueness object when creating CoValues could introduce unexpected properties into the header
+  - cojson-core-wasm@0.19.15
+  - cojson-core-rn@0.19.15
+  - cojson-core-napi@0.19.15
+
 ## 0.19.14
 
 ### Patch Changes

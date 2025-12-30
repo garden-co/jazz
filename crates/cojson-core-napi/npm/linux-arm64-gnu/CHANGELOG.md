@@ -1,5 +1,7 @@
 # cojson-core-napi-linux-arm64-gnu
 
+## 0.19.15
+
 ## 0.19.14
 
 ### Patch Changes

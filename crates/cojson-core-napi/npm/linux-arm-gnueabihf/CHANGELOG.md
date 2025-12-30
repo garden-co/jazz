@@ -1,5 +1,7 @@
 # cojson-core-napi-linux-arm-gnueabihf
 
+## 0.19.15
+
 ## 0.19.14
 
 ### Patch Changes
