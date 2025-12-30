@@ -198,13 +198,22 @@ impl CoValueHeaderBuilder {
     /// Set uniqueness to null
     #[wasm_bindgen(js_name = setUniquenessNull)]
     pub fn set_uniqueness_null(&mut self) {
-        self.uniqueness = Some(Uniqueness::Null);
+        self.uniqueness = Some(CanonicalJsonValue::Null);
     }
 
-    /// Set uniqueness to a string value
+    /// Set uniqueness to a string value (most common case)
     #[wasm_bindgen(js_name = setUniquenessString)]
     pub fn set_uniqueness_string(&mut self, value: &str) {
-        self.uniqueness = Some(Uniqueness::String(value.to_string()));
+        self.uniqueness = Some(CanonicalJsonValue::String(value.to_string()));
+    }
+
+    /// Set uniqueness from arbitrary JSON (for user-provided objects)
+    /// The JSON is parsed into CanonicalJsonValue which uses BTreeMap for sorted keys
+    #[wasm_bindgen(js_name = setUniquenessJson)]
+    pub fn set_uniqueness_json(&mut self, json: &str) -> Result<(), JsError> {
+        let value: serde_json::Value = serde_json::from_str(json)?;
+        self.uniqueness = Some(json_value_to_canonical(value));
+        Ok(())
     }
 
     /// Set createdAt to null
@@ -287,17 +296,30 @@ These encoders use `BTreeMap` internally to produce JSON bytes with sorted keys 
 use std::collections::BTreeMap;
 use serde::{Serialize, Deserialize};
 
-/// Uniqueness value - constrained to actual usage patterns
-/// Analysis of codebase shows only these values are used:
+/// Uniqueness value - must support full JsonValue since users can pass arbitrary JSON
+/// through the public API (findUnique, upsertUnique, loadUnique, create options)
+/// 
+/// Common internal usages:
 /// - null (accounts, some tests)
 /// - z${string} (random 12 bytes base58 from uniquenessForHeader())
 /// - "" (empty string for branches)
 /// - User-provided strings (findUnique, upsertUnique, loadUnique)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// - User-provided objects (possible via public API)
+/// 
+/// We use CanonicalJsonValue which wraps serde_json::Value but uses BTreeMap
+/// for objects to ensure deterministic key ordering.
+pub type Uniqueness = CanonicalJsonValue;
+
+/// A JSON value that serializes objects with sorted keys (using BTreeMap)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
-pub enum Uniqueness {
+pub enum CanonicalJsonValue {
     Null,
+    Bool(bool),
+    Number(serde_json::Number),
     String(String),
+    Array(Vec<CanonicalJsonValue>),
+    Object(BTreeMap<String, CanonicalJsonValue>),  // BTreeMap ensures sorted keys
 }
 
 /// CoValue type enumeration
@@ -336,9 +358,29 @@ pub enum CreatedAt {
 pub struct CoValueHeaderInternal {
     pub covalue_type: CoValueType,
     pub ruleset: Ruleset,
-    pub meta: Option<BTreeMap<String, serde_json::Value>>,
-    pub uniqueness: Uniqueness,
+    pub meta: Option<BTreeMap<String, CanonicalJsonValue>>,
+    pub uniqueness: CanonicalJsonValue,
     pub created_at: Option<CreatedAt>,
+}
+
+/// Convert serde_json::Value to CanonicalJsonValue (using BTreeMap for objects)
+fn json_value_to_canonical(value: serde_json::Value) -> CanonicalJsonValue {
+    match value {
+        serde_json::Value::Null => CanonicalJsonValue::Null,
+        serde_json::Value::Bool(b) => CanonicalJsonValue::Bool(b),
+        serde_json::Value::Number(n) => CanonicalJsonValue::Number(n),
+        serde_json::Value::String(s) => CanonicalJsonValue::String(s),
+        serde_json::Value::Array(arr) => {
+            CanonicalJsonValue::Array(arr.into_iter().map(json_value_to_canonical).collect())
+        }
+        serde_json::Value::Object(map) => {
+            CanonicalJsonValue::Object(
+                map.into_iter()
+                    .map(|(k, v)| (k, json_value_to_canonical(v)))
+                    .collect()  // BTreeMap::collect sorts by key
+            )
+        }
+    }
 }
 
 /// Nonce material for seal/unseal operations
@@ -356,7 +398,15 @@ pub struct KeyNonceMaterial {
 
 #### Uniqueness Type Rationale
 
-The `uniqueness` field is typed as `JsonValue` in TypeScript but actual usage is constrained:
+The `uniqueness` field is typed as `JsonValue` in TypeScript. While internal usage is constrained to strings/null, the **public API allows users to pass any JSON value**:
+
+```typescript
+// In interfaces.ts - users can pass any JsonValue
+unique?: CoValueUniqueness["uniqueness"]  // = JsonValue
+
+// In coMap.ts _getUniqueHeader
+uniqueness: unique,  // Directly assigned without validation
+```
 
 | Value | Usage | Location |
 |-------|-------|----------|
@@ -364,8 +414,9 @@ The `uniqueness` field is typed as `JsonValue` in TypeScript but actual usage is
 | `z${string}` | Random uniqueness | `crypto.ts` `uniquenessForHeader()` |
 | `""` | Branch headers | `branching.ts` |
 | User string | Unique lookups | `coMap.ts`, `coList.ts` |
+| **User object** | Custom uniqueness via API | `CoMap.create({ unique: {...} })` |
 
-No objects or arrays are ever used as uniqueness values, allowing us to simplify to `Uniqueness::Null | Uniqueness::String(String)`.
+Since users can pass arbitrary JSON objects through `findUnique`, `upsertUnique`, `loadUnique`, and `create` options, we must support the full `JsonValue` type. This requires using `serde_json::Value` in Rust and ensuring proper canonical serialization with `BTreeMap` for objects.
 
 ### 3. Updated CryptoProvider Interface (TypeScript)
 
@@ -430,6 +481,7 @@ export class CoValueHeaderBuilder {
   // Uniqueness setters
   setUniquenessNull(): void;
   setUniquenessString(value: string): void;
+  setUniquenessJson(json: string): void;  // For user-provided objects
   
   // CreatedAt setters
   setCreatedAtNull(): void;
@@ -513,26 +565,30 @@ type CoValueHeader = {
     | { type: "ownedByGroup"; group: RawCoID }
     | { type: "unsafeAllowAll" };
   meta: JsonObject | null;
-  uniqueness: Uniqueness;  // Constrained type (see below)
+  uniqueness: JsonValue;  // Full JsonValue - users can pass objects via API
   createdAt?: `2${string}` | null;
 };
-
-// Uniqueness is NOT arbitrary JsonValue - analysis shows only these values:
-type Uniqueness = 
-  | null                    // Account headers, some tests
-  | `z${string}`            // Random 12 bytes base58 (main case)
-  | ""                      // Empty string for branches
-  | string;                 // User-provided for findUnique/upsertUnique/loadUnique
 ```
 
-**Key Finding**: The `uniqueness` field was typed as `JsonValue` but actual usage is strictly `null | string`. No objects or arrays are ever used. This allows the Rust enum:
+**Key Finding**: While internal usage of `uniqueness` is mostly `null | string`, the **public API allows users to pass any JSON value** through:
+- `CoMap.create({ unique: {...} })`
+- `CoMap.findUnique({...}, ownerID)`
+- `CoMap.upsertUnique({ unique: {...}, ... })`
+- `CoMap.loadUnique({...}, ownerID)`
+
+This requires supporting the full `JsonValue` type in Rust using `CanonicalJsonValue`:
 
 ```rust
+/// JSON value that serializes objects with sorted keys (via BTreeMap)
 #[derive(Serialize, Deserialize)]
 #[serde(untagged)]
-pub enum Uniqueness {
+pub enum CanonicalJsonValue {
     Null,
+    Bool(bool),
+    Number(serde_json::Number),
     String(String),
+    Array(Vec<CanonicalJsonValue>),
+    Object(BTreeMap<String, CanonicalJsonValue>),  // BTreeMap ensures sorted keys
 }
 ```
 
@@ -785,12 +841,13 @@ map.insert("createdAt", ...); // Will appear first
 
 The approach mirrors the existing `SessionLog` implementation, reducing learning curve and ensuring consistency across the codebase.
 
-### 5. Simplified Value Types
+### 5. Canonical JSON Value Type
 
-By constraining `uniqueness` to `Uniqueness` enum instead of `JsonValue`, we:
-- Reduce complexity in serialization logic
-- Catch invalid values at compile time
-- Make the API more self-documenting
+By using `CanonicalJsonValue` (which wraps `serde_json::Value` with `BTreeMap` for objects), we:
+- Ensure deterministic serialization with sorted keys at all nesting levels
+- Support the full `JsonValue` type required by the public API (users can pass objects)
+- Provide convenience methods for common cases (`setUniquenessNull`, `setUniquenessString`)
+- Maintain backward compatibility with any existing uniqueness values
 
 ## Open Questions Resolution
 
@@ -798,13 +855,13 @@ By constraining `uniqueness` to `Uniqueness` enum instead of `JsonValue`, we:
 
 **Decision**: Maintain byte-for-byte compatibility.
 
-The Rust `CoValueHeaderBuilder.canonical_bytes()` produces output identical to `stableStringify` for all currently used header shapes. This is achievable because:
+The Rust `CoValueHeaderBuilder.canonical_bytes()` produces output identical to `stableStringify` for all header shapes. This is achievable because:
 
 - `stableStringify` behavior is well-defined (sorted keys, specific number/string handling)
-- `BTreeMap` naturally produces sorted keys
-- The header shapes are finite and known
-- The `Uniqueness` type is constrained to `null | string` (no complex JSON)
-- We can add comprehensive parity tests
+- `BTreeMap` naturally produces sorted keys in Rust
+- `CanonicalJsonValue` recursively uses `BTreeMap` for nested objects
+- The `uniqueness` field supports full `JsonValue` since users can pass objects via the public API
+- We can add comprehensive parity tests for all JSON value types
 
 ### Q2: Sealed message shapes - structured vs opaque
 
