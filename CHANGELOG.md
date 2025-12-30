@@ -11,7 +11,7 @@ Changes:
 Full migration guide: [here](https://jazz.tools/docs/upgrade/0-20-0)
 
 Released Jazz 0.19.15:
-- Added a locking system for session IDs in React Native to make mounting multiple JazzProviders safer (still not advised as it is expensive)
+- Added a locking system for session IDs in React Native to make mounting multiple JazzProviders safer (still not advised as duplicate the data loading effort)
 - Added a value.$jazz.createdBy getter to CoValues
 - Bugfix: fixed coMap.getEdits() to also return deleted keys
 - Bugfix: fixed an issue where spreading the uniqueness object when creating CoValues could introduce unexpected properties into the header
