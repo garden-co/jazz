@@ -94,7 +94,6 @@ function Main() {
   return (
     <SidebarProvider>
       <AppContent mediaPlayer={mediaPlayer} />
-      <JazzInspector />
     </SidebarProvider>
   );
 }
@@ -116,10 +115,8 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       authSecretStorageKey="examples/music-player"
       onAnonymousAccountDiscarded={onAnonymousAccountDiscarded}
     >
-      <SidebarProvider>
-        <Main />
-        <JazzInspector />
-      </SidebarProvider>
+      <Main />
+      <JazzInspector />
     </JazzReactProvider>
   </React.StrictMode>,
 );
