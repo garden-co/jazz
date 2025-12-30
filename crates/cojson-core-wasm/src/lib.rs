@@ -3,7 +3,6 @@ use cojson_core::core::{
     SignerSecret, Transaction, TransactionMode,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
 use thiserror::Error;
 use wasm_bindgen::prelude::*;
 
@@ -85,22 +84,10 @@ impl SessionLog {
         new_signature_str: String,
         skip_verify: bool,
     ) -> Result<(), CojsonCoreWasmError> {
-        let transactions: Vec<Box<RawValue>> = transactions_json
-            .into_iter()
-            .map(|s| {
-                serde_json::from_str(&s).map_err(|e| {
-                    CojsonCoreWasmError::Js(JsValue::from(format!(
-                        "Failed to parse transaction string: {}",
-                        e
-                    )))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
         let new_signature = Signature(new_signature_str);
 
         self.internal
-            .try_add(transactions, &new_signature, skip_verify)?;
+            .try_add(transactions_json, &new_signature, skip_verify)?;
 
         Ok(())
     }
