@@ -1,3 +1,15 @@
+**Jazz 0.20.0 released - Full native crypto**
+
+With this release we complete the migration to a pure Rust toolchain and remove the JavaScript crypto compatibility layer. The native Rust core now runs everywhere: React Native, Edge runtimes, all server-side environments, and the web.
+
+Changes:
+- **Removed `PureJSCrypto`** from `cojson` (including the `cojson/crypto/PureJSCrypto` export).
+- **Removed `RNQuickCrypto`** from `jazz-tools`.
+- **No more fallback to JavaScript crypto**: if crypto fails to initialize, Jazz now throws an error instead of falling back silently.
+- **React Native + Expo**: **`RNCrypto` (via `cojson-core-rn`) is now the default**.
+
+Full migration guide: [here](https://jazz.tools/docs/upgrade/0-20-0)
+
 Released Jazz 0.19.15:
 - Added a locking system for session IDs in React Native to make mounting multiple JazzProviders safer (still not advised as duplicate the data loading effort)
 - Added a value.$jazz.createdBy getter to CoValues
@@ -74,8 +86,9 @@ Released Jazz 0.19.2:
 Released Jazz 0.19.1:
 - co.discriminatedUnion schemas now support resolve queries! (thanks @gabrola for this amazing contribution :rocket:)
 
-**Jazz 0.19.0 released - Explicit CoValue loading states
-This release introduces explicit loading states when loading CoValues, as well as a new way to define how CoValues are loaded.**
+**Jazz 0.19.0 released - Explicit CoValue loading states**
+
+This release introduces explicit loading states when loading CoValues, as well as a new way to define how CoValues are loaded.
 
 Changes:
 - Added a new  $isLoaded field to discriminate between loaded and unloaded CoValues

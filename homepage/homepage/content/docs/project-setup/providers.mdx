@@ -120,10 +120,6 @@ The provider accepts these additional options:
   - `MMKVStoreAdapter` (default)
 - `AccountSchema`
   - `Account` (default)
-- `CryptoProvider`
-  - `PureJSCrypto` (default) - Pure JavaScript crypto provider
-  - `RNQuickCrypto` - C++ accelerated crypto provider
-  - `RNCrypto` - Native crypto provider  
 </ContentByFramework>
 
 <ContentByFramework framework="react-native-expo">
@@ -131,10 +127,6 @@ The provider accepts these additional options:
     - `ExpoSecureStoreAdapter` (default)
   - `AccountSchema`
     - `Account` (default)
-  - `CryptoProvider`
-    - `PureJSCrypto` (default) - Pure JavaScript crypto provider
-    - `RNQuickCrypto` - C++ accelerated crypto provider
-    - `RNCrypto` - Native crypto provider  
 </ContentByFramework>
 
 <ContentByFramework framework={['react', 'svelte']}>
@@ -180,7 +172,7 @@ Implementing PassphraseAuth is straightforward:
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
 
-## Local Persistence [!framework=react-native,expo]
+## Local Persistence [!framework=react-native,react-native-expo]
 </ContentByFramework>
 
 <ContentByFramework framework="react-native">
@@ -202,10 +194,16 @@ Jazz for Expo includes built-in local persistence using SQLite. Following Expo's
 Local persistence is enabled by default with no additional configuration required. Your data will automatically persist across app restarts.
 </ContentByFramework>
 
-<ContentByFramework framework={['react-native', 'react-native-expo']}>
-## RNCrypto
+<ContentByFramework framework={["react-native", "react-native-expo"]}>
+## RNCrypto [!framework=react-native,react-native-expo]
+</ContentByFramework>
 
-For accelerated crypto operations, you can use the `RNCrypto` crypto provider. It is the most performant crypto provider available for React Native and Expo.
+<ContentByFramework framework="react-native-expo">
+**Starting from Expo SDK 54, you do not need to follow these steps, `RNCrypto` will be enabled for you by default. These steps below should be followed only if you are using an older Expo version.**
+</ContentByFramework>
+
+<ContentByFramework framework={["react-native", "react-native-expo"]}>
+For accelerated crypto operations, you can use the `RNCrypto` crypto provider. It is the most performant crypto provider available for React Native.
 
 To use it, install the following package:
 
@@ -215,7 +213,7 @@ pnpm add cojson-core-rn
 ```
 </CodeGroup>
 
-**Pay Attention:** The version of `cojson-core-rn` must be the same as the version of `jazz-tools`.
+You must keep the versions of `cojson-core-rn` and `jazz-tools` the same.
 
 <CodeGroup>
 ```json
@@ -226,84 +224,10 @@ pnpm add cojson-core-rn
 ```
 </CodeGroup>
 
-Then add the following to your provider:
+<Alert variant="warning" title="Versioning" className="mt-4">
+  While you can distribute your own JS code changes OTA, if you update your Jazz version, this will result in changes in the native dependencies, which *cannot* be distributed over the air and requires a new store submission.
+</Alert>
 
-<TabbedCodeGroup id="rncrypto" savedPreferenceKey="framework">
-  <TabbedCodeGroupItem label="React Native" value="react-native" icon={<RNLogo />} preferWrap>
-```tsx rn-crypto-rn.tsx#RNC
-```
-</TabbedCodeGroupItem>
-<TabbedCodeGroupItem label="Expo" value="react-native-expo" icon={<ExpoLogo />} preferWrap>
-```tsx rn-crypto-expo.tsx#RNC
-```
-</TabbedCodeGroupItem>
-</TabbedCodeGroup>
-
-</ContentByFramework>
-
-<ContentByFramework framework={['react-native', 'react-native-expo']}>
-## Quick Crypto
-
-For accelerated crypto operations, you can use the `RNQuickCrypto` crypto provider.
-
-To use it, install the following Packages:
-
-<CodeGroup>
-```bash
-pnpm add react-native-quick-crypto@1.0.0-beta.18 react-native-nitro-modules react-native-fast-encoder
-```
-</CodeGroup>
-
-Then add the following to your provider:
-
-<TabbedCodeGroup id="quick-crypto" savedPreferenceKey="framework">
-  <TabbedCodeGroupItem label="React Native" value="react-native" icon={<RNLogo />} preferWrap>
-```tsx quickcrypto-rn.tsx#QC
-```
-</TabbedCodeGroupItem>
-<TabbedCodeGroupItem label="Expo" value="react-native-expo" icon={<ExpoLogo />} preferWrap>
-```tsx quickcrypto-expo.tsx#QC
-```
-</TabbedCodeGroupItem>
-</TabbedCodeGroup>
-</ContentByFramework>
-<ContentByFramework framework="react-native">
-For configuration, add the following settings:
-
-<CodeGroup>
-```ruby
-# ios/Podfile
-ENV['SODIUM_ENABLED'] = '1'
-```
-</CodeGroup>
-and
-<CodeGroup>
-```groovy
-// android/gradle.properties
-sodiumEnabled=true
-```
-</CodeGroup>
-</ContentByFramework>
-
-<ContentByFramework framework="react-native-expo">
-  For configuration, use the RNQC Expo config plugin:
-
-  <CodeGroup>
-  ```json
-  {
-    "expo": {
-      "plugins": [
-        [
-          "react-native-quick-crypto",
-          {
-            "sodiumEnabled": true
-          }
-        ]
-      ]
-    }
-  }
-  ```
-  </CodeGroup>
 </ContentByFramework>
 
 ## Need Help?
