@@ -283,7 +283,7 @@ export class SyncManager {
 
     await new Promise<void>((resolve, reject) => {
       // Load all persisted unsynced CoValues from storage
-      this.local.storage!.getUnsyncedCoValueIDs((unsyncedCoValueIDs) => {
+      this.local.storage?.getUnsyncedCoValueIDs((unsyncedCoValueIDs) => {
         const coValuesToLoad = unsyncedCoValueIDs.filter(
           (coValueId) => !this.local.hasCoValue(coValueId),
         );
@@ -304,14 +304,12 @@ export class SyncManager {
                 // Load the CoValue from storage (this will trigger sync if peers are connected)
                 const coValue = await this.local.loadCoValueCore(coValueId);
 
+                // Clear previous tracking
+                this.local.storage?.stopTrackingSyncState(coValueId);
                 if (coValue.isAvailable()) {
                   // CoValue was successfully loaded. Resume tracking sync state for this CoValue
                   // This will add it back to the tracker and set up subscriptions
-                  // TODO delete outdated tracking before new tracking
                   this.trackSyncState(coValueId);
-                } else {
-                  // CoValue not found in storage. Remove all peer entries for this CoValue
-                  this.local.storage!.stopTrackingSyncState(coValueId);
                 }
               } catch (error) {
                 // Handle errors gracefully - log but don't fail the entire resumption
@@ -319,7 +317,7 @@ export class SyncManager {
                   err: error,
                   coValueId,
                 });
-                this.local.storage!.stopTrackingSyncState(coValueId);
+                this.local.storage?.stopTrackingSyncState(coValueId);
               }
             }),
           );
