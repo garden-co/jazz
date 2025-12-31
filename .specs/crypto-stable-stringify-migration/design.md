@@ -418,6 +418,24 @@ uniqueness: unique,  // Directly assigned without validation
 
 Since users can pass arbitrary JSON objects through `findUnique`, `upsertUnique`, `loadUnique`, and `create` options, we must support the full `JsonValue` type. This requires using `serde_json::Value` in Rust and ensuring proper canonical serialization with `BTreeMap` for objects.
 
+> **TODO: Production DB Analysis**
+> 
+> We are investigating whether `uniqueness` can be made more statically typed by analyzing actual usage in the production database. The analysis will determine:
+> 
+> 1. **JSON structure depth**: Are uniqueness values flat JSON objects (single level) or do they contain nested JSON structures? If all values are flat or primitive, we can constrain the type more tightly.
+> 
+> 2. **Float values**: We need to check if any uniqueness values contain floating-point numbers. Floats are problematic for deterministic canonical encoding because:
+>    - Floating-point serialization is not deterministic across platforms
+>    - JavaScript's `JSON.stringify` and Rust's `serde_json` produce different string representations for the same float value (e.g., precision, trailing zeros, scientific notation thresholds)
+>    - This would break byte-for-byte compatibility between JS and Rust canonical encodings
+>    
+>    If floats are found in production, we may need to either:
+>    - Document this as unsupported and add validation to reject floats
+>    - Implement a custom float serialization that matches JS behavior exactly (complex and error-prone)
+>    - Accept that existing data with floats may not be compatible with Rust-based hashing
+> 
+> Depending on the analysis results, we may be able to simplify `Uniqueness` to a more constrained type like `null | string | FlatJsonObject` instead of full `JsonValue`.
+
 ### 3. Updated CryptoProvider Interface (TypeScript)
 
 ```typescript
