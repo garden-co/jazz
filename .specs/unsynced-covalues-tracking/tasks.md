@@ -3,7 +3,7 @@
 ## Core Infrastructure
 
 - [x] **Task 1**: Extend `StorageAPI` interface with unsynced CoValues tracking methods (US1)
-  - Add `trackCoValuesSyncState(operations: Array<{ id: RawCoID; peerId: PeerID; synced: boolean }>): void` to `StorageAPI` interface in `packages/cojson/src/storage/types.ts`
+  - Add `trackCoValuesSyncState(updates: { id: RawCoID; peerId: PeerID; synced: boolean }[]): void` to `StorageAPI` interface in `packages/cojson/src/storage/types.ts`
   - Add `getUnsyncedCoValueIDs(callback: (data: RawCoID[]) => void)` to `StorageAPI` interface
   - Add `stopTrackingSyncState(id: RawCoID): void` to `StorageAPI` interface
 

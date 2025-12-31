@@ -212,27 +212,23 @@ export class SQLiteClientAsync
   }
 
   async trackCoValuesSyncState(
-    operations: Array<{ id: RawCoID; peerId: PeerID; synced: boolean }>,
+    updates: { id: RawCoID; peerId: PeerID; synced: boolean }[],
   ): Promise<void> {
-    if (operations.length === 0) {
-      return;
-    }
-
-    await this.db.transaction(async () => {
-      for (const op of operations) {
-        if (op.synced) {
+    await Promise.all(
+      updates.map(async (update) => {
+        if (update.synced) {
           await this.db.run(
             "DELETE FROM unsynced_covalues WHERE co_value_id = ? AND peer_id = ?",
-            [op.id, op.peerId],
+            [update.id, update.peerId],
           );
         } else {
           await this.db.run(
             "INSERT OR REPLACE INTO unsynced_covalues (co_value_id, peer_id) VALUES (?, ?)",
-            [op.id, op.peerId],
+            [update.id, update.peerId],
           );
         }
-      }
-    });
+      }),
+    );
   }
 
   async stopTrackingSyncState(id: RawCoID): Promise<void> {

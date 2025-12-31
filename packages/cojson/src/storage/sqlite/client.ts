@@ -204,27 +204,21 @@ export class SQLiteClient
   }
 
   trackCoValuesSyncState(
-    operations: Array<{ id: RawCoID; peerId: PeerID; synced: boolean }>,
+    updates: { id: RawCoID; peerId: PeerID; synced: boolean }[],
   ): void {
-    if (operations.length === 0) {
-      return;
-    }
-
-    this.db.transaction(() => {
-      for (const op of operations) {
-        if (op.synced) {
-          this.db.run(
-            "DELETE FROM unsynced_covalues WHERE co_value_id = ? AND peer_id = ?",
-            [op.id, op.peerId],
-          );
-        } else {
-          this.db.run(
-            "INSERT OR REPLACE INTO unsynced_covalues (co_value_id, peer_id) VALUES (?, ?)",
-            [op.id, op.peerId],
-          );
-        }
+    for (const update of updates) {
+      if (update.synced) {
+        this.db.run(
+          "DELETE FROM unsynced_covalues WHERE co_value_id = ? AND peer_id = ?",
+          [update.id, update.peerId],
+        );
+      } else {
+        this.db.run(
+          "INSERT OR REPLACE INTO unsynced_covalues (co_value_id, peer_id) VALUES (?, ?)",
+          [update.id, update.peerId],
+        );
       }
-    });
+    }
   }
 
   stopTrackingSyncState(id: RawCoID): void {
