@@ -22,7 +22,7 @@ Extend the existing `StorageAPI` interface to include methods for tracking unsyn
 export interface StorageAPI {
   // ... existing methods ...
   
-  trackCoValuesSyncState(operations: Array<{ id: RawCoID; peerId: PeerID; synced: boolean }>): void;
+  trackCoValuesSyncState(updates: { id: RawCoID; peerId: PeerID; synced: boolean }[]): void;
   getUnsyncedCoValueIDs(callback: (data: RawCoID[]) => void);
   stopTrackingSyncState(id: RawCoID): void;
 }
@@ -250,7 +250,7 @@ CREATE INDEX idx_unsynced_covalues_co_value_id ON unsynced_covalues(co_value_id)
 ```
 
 **Storage Operations:**
-- `trackCoValuesSyncState(operations)`:
+- `trackCoValuesSyncState(updates)`:
   - Takes an array of operations `{ id: RawCoID, peerId: PeerID, synced: boolean }[]`
   - Executes all operations in a single transaction
   - For each operation:

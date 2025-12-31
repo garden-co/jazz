@@ -9,16 +9,16 @@ import type { StorageAPI } from "./storage/types.js";
  */
 const ANY_PEER_ID: PeerID = "any";
 
-/**
- * Tracks CoValues that have unsynced changes to specific peers.
- * Maintains an in-memory map and periodically persists to storage.
- */
-type PendingOperation = {
+type PendingUpdate = {
   id: RawCoID;
   peerId: PeerID;
   synced: boolean;
 };
 
+/**
+ * Tracks CoValues that have unsynced changes to specific peers.
+ * Maintains an in-memory map and periodically persists to storage.
+ */
 export class UnsyncedCoValuesTracker {
   private unsynced: Map<RawCoID, Set<PeerID>> = new Map();
   private coValueListeners: Map<RawCoID, Set<(synced: boolean) => void>> =
@@ -26,8 +26,8 @@ export class UnsyncedCoValuesTracker {
   // Listeners for global "all synced" status changes
   private globalListeners: Set<(synced: boolean) => void> = new Set();
 
-  // Pending operations to be persisted
-  private pendingOperations: PendingOperation[] = [];
+  // Pending updates to be persisted
+  private pendingUpdates: PendingUpdate[] = [];
   private flushTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly BATCH_DELAY_MS = 1000; // Flush after 1s
 
@@ -88,7 +88,7 @@ export class UnsyncedCoValuesTracker {
       return;
     }
 
-    this.pendingOperations.push({ id, peerId, synced });
+    this.pendingUpdates.push({ id, peerId, synced });
     if (!this.flushTimer) {
       this.flushTimer = setTimeout(() => {
         this.flush();
@@ -97,7 +97,7 @@ export class UnsyncedCoValuesTracker {
   }
 
   /**
-   * Flush all pending persistence operations in a batch
+   * Flush all pending persistence updates in a batch
    */
   private flush(): void {
     if (this.flushTimer) {
@@ -105,7 +105,7 @@ export class UnsyncedCoValuesTracker {
       this.flushTimer = undefined;
     }
 
-    if (this.pendingOperations.length === 0) {
+    if (this.pendingUpdates.length === 0) {
       return;
     }
 
@@ -114,17 +114,15 @@ export class UnsyncedCoValuesTracker {
       return;
     }
 
-    const filteredOperations = this.simplifyPendingOperations(
-      this.pendingOperations,
-    );
-    this.pendingOperations = [];
+    const filteredUpdates = this.simplifyPendingUpdates(this.pendingUpdates);
+    this.pendingUpdates = [];
 
-    if (filteredOperations.length === 0) {
+    if (filteredUpdates.length === 0) {
       return;
     }
 
     try {
-      storage.trackCoValuesSyncState(filteredOperations);
+      storage.trackCoValuesSyncState(filteredUpdates);
     } catch (error) {
       logger.warn("Failed to persist batched unsynced CoValue tracking", {
         err: error,
@@ -217,16 +215,14 @@ export class UnsyncedCoValuesTracker {
   }
 
   /**
-   * Keep only the last operation for each (id, peerId) combination
+   * Keep only the last update for each (id, peerId) combination
    */
-  private simplifyPendingOperations(
-    operations: PendingOperation[],
-  ): PendingOperation[] {
-    const latestOps = new Map<string, PendingOperation>();
-    for (const op of operations) {
-      latestOps.set(`${op.id}|${op.peerId}`, op);
+  private simplifyPendingUpdates(updates: PendingUpdate[]): PendingUpdate[] {
+    const latestUpdates = new Map<string, PendingUpdate>();
+    for (const update of updates) {
+      latestUpdates.set(`${update.id}|${update.peerId}`, update);
     }
-    return Array.from(latestOps.values());
+    return Array.from(latestUpdates.values());
   }
 
   private get storage(): StorageAPI | undefined {

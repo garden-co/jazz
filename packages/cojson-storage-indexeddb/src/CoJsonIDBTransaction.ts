@@ -5,9 +5,11 @@ export type StoreName =
   | "signatureAfter"
   | "unsyncedCoValues";
 
-// A access unit for the IndexedDB Jazz database
-// It's a wrapper around the IDBTransaction object that helps on batching multiple operations
-// in a single transaction.
+/**
+ * An access unit for the IndexedDB Jazz database.
+ * It's a wrapper around the IDBTransaction object that helps on batching multiple operations
+ * in a single transaction.
+ */
 export class CoJsonIDBTransaction {
   db: IDBDatabase;
   declare tx: IDBTransaction;
@@ -49,12 +51,6 @@ export class CoJsonIDBTransaction {
 
   rollback() {
     this.tx.abort();
-  }
-
-  startedAt = performance.now();
-  isReusable() {
-    const delta = performance.now() - this.startedAt;
-    return !this.done && !this.failed && delta <= 100;
   }
 
   getObjectStore(name: StoreName) {
