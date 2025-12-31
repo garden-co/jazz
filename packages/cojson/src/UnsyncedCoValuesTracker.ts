@@ -138,10 +138,17 @@ export class UnsyncedCoValuesTracker {
   }
 
   /**
-   * Check if all CoValues are synced (O(1)).
+   * Check if all CoValues are synced
    */
   isAllSynced(): boolean {
     return this.unsynced.size === 0;
+  }
+
+  /**
+   * Check if a specific CoValue is tracked as unsynced.
+   */
+  has(id: RawCoID): boolean {
+    return this.unsynced.has(id);
   }
 
   /**
