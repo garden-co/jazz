@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test } from "vitest";
+import { setSyncStateTrackingBatchDelay } from "../UnsyncedCoValuesTracker";
 import {
   blockMessageTypeOnOutgoingPeer,
   SyncMessagesLog,
@@ -154,5 +155,52 @@ describe("coValue sync state tracking", () => {
       ),
     );
     expect(unsyncedTracker.has(map.id)).toBe(false);
+  });
+});
+
+describe("sync state persistence", () => {
+  beforeEach(() => {
+    setSyncStateTrackingBatchDelay(0);
+  });
+
+  afterEach(() => {
+    setSyncStateTrackingBatchDelay(1000);
+  });
+
+  test("unsynced coValues are asynchronously persisted to storage", async () => {
+    const { node: client, addStorage } = setupTestNode({ connected: false });
+    addStorage();
+
+    const group = client.createGroup();
+    const map = group.createMap();
+    map.set("key", "value");
+
+    // Wait for the unsynced coValues to be persisted to storage
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+
+    const unsyncedCoValueIDs = await new Promise((resolve) =>
+      client.storage?.getUnsyncedCoValueIDs(resolve),
+    );
+    expect(unsyncedCoValueIDs).toHaveLength(2);
+    expect(unsyncedCoValueIDs).toContain(map.id);
+    expect(unsyncedCoValueIDs).toContain(group.id);
+  });
+
+  test("synced coValues are removed from storage", async () => {
+    const { node: client, addStorage } = setupTestNode({ connected: true });
+    addStorage();
+
+    const group = client.createGroup();
+    const map = group.createMap();
+    map.set("key", "value");
+
+    // Wait enough time for the coValue to be synced
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+
+    const unsyncedCoValueIDs = await new Promise((resolve) =>
+      client.storage?.getUnsyncedCoValueIDs(resolve),
+    );
+    expect(unsyncedCoValueIDs).toHaveLength(0);
+    expect(client.syncManager.unsyncedTracker.has(map.id)).toBe(false);
   });
 });
