@@ -9,6 +9,17 @@ import type { StorageAPI } from "./storage/types.js";
  */
 const ANY_PEER_ID: PeerID = "any";
 
+// Flush pending updates to storage after 1 second
+let BATCH_DELAY_MS = 1000;
+
+/**
+ * Set the delay for flushing pending sync state updates to storage.
+ * @internal
+ */
+export function setSyncStateTrackingBatchDelay(delay: number): void {
+  BATCH_DELAY_MS = delay;
+}
+
 type PendingUpdate = {
   id: RawCoID;
   peerId: PeerID;
@@ -29,7 +40,6 @@ export class UnsyncedCoValuesTracker {
   // Pending updates to be persisted
   private pendingUpdates: PendingUpdate[] = [];
   private flushTimer: ReturnType<typeof setTimeout> | undefined;
-  private readonly BATCH_DELAY_MS = 1000; // Flush after 1s
 
   constructor(private getStorage: () => StorageAPI | undefined) {}
 
@@ -92,7 +102,7 @@ export class UnsyncedCoValuesTracker {
     if (!this.flushTimer) {
       this.flushTimer = setTimeout(() => {
         this.flush();
-      }, this.BATCH_DELAY_MS);
+      }, BATCH_DELAY_MS);
     }
   }
 
