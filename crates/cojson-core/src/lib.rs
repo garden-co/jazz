@@ -2,6 +2,9 @@
 #[cfg(feature = "lzy")]
 pub use lzy;
 
+pub mod utils;
+pub use utils::*;
+
 pub mod core {
     pub mod nonce;
     pub mod session_log;
