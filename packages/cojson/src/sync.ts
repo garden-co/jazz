@@ -301,15 +301,19 @@ export class SyncManager {
           await Promise.all(
             batch.map(async (coValueId) => {
               try {
+                // Clear previous tracking (as it may include outdated peers)
+                this.local.storage?.stopTrackingSyncState(coValueId);
+
+                // Resume tracking sync state for this CoValue
+                // This will add it back to the tracker and set up subscriptions
+                this.trackSyncState(coValueId);
+
                 // Load the CoValue from storage (this will trigger sync if peers are connected)
                 const coValue = await this.local.loadCoValueCore(coValueId);
 
-                // Clear previous tracking
-                this.local.storage?.stopTrackingSyncState(coValueId);
-                if (coValue.isAvailable()) {
-                  // CoValue was successfully loaded. Resume tracking sync state for this CoValue
-                  // This will add it back to the tracker and set up subscriptions
-                  this.trackSyncState(coValueId);
+                if (!coValue.isAvailable()) {
+                  // CoValue could not be loaded from storage, stop tracking
+                  this.local.storage?.stopTrackingSyncState(coValueId);
                 }
               } catch (error) {
                 // Handle errors gracefully - log but don't fail the entire resumption
@@ -325,8 +329,7 @@ export class SyncManager {
           processed += batch.length;
 
           if (processed < coValuesToLoad.length) {
-            // Process next batch asynchronously to avoid blocking
-            setTimeout(() => processBatch().catch(reject), 0);
+            processBatch().catch(reject);
           } else {
             resolve();
           }
