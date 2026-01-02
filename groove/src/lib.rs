@@ -4,6 +4,7 @@ mod merge;
 mod node;
 mod object;
 mod signal;
+pub mod sql;
 mod storage;
 
 pub use branch::Branch;
