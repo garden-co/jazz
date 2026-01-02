@@ -6,7 +6,7 @@ import { Account, ID, InMemoryKVStore, KvStoreContext } from "jazz-tools";
 import { createJazzTestAccount } from "jazz-tools/testing";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { JazzClerkAuth } from "../index";
-import type { ClerkUser, MinimalClerkClient } from "../types";
+import type { ClerkEventSchema, ClerkUser, MinimalClerkClient } from "../types";
 
 KvStoreContext.getInstance().initialize(new InMemoryKVStore());
 const authSecretStorage = new AuthSecretStorage();
@@ -143,7 +143,7 @@ describe("JazzClerkAuth", () => {
 
   describe("registerListener", () => {
     function setupMockClerk(user: ClerkUser | null) {
-      const listners = new Set<(clerkClient: ClerkUser) => void>();
+      const listners = new Set<(clerkClient: ClerkEventSchema) => void>();
 
       return {
         client: {
@@ -155,9 +155,9 @@ describe("JazzClerkAuth", () => {
             };
           }),
         } as unknown as MinimalClerkClient,
-        triggerUserChange: (user: unknown) => {
+        triggerUserChange: (user: ClerkUser | null | undefined) => {
           for (const listener of listners) {
-            listener(user as ClerkUser);
+            listener({ user });
           }
         },
       };

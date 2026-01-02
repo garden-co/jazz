@@ -32,6 +32,7 @@ const ClerkUserSchema = z.object({
 export const ClerkEventSchema = z.object({
   user: ClerkUserSchema.nullish(),
 });
+export type ClerkEventSchema = z.infer<typeof ClerkEventSchema>;
 
 export type ClerkUser = z.infer<typeof ClerkUserSchema>;
 
