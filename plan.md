@@ -19,19 +19,29 @@
 - [x] Branch merging (merge_branches)
 
 **Current module structure**:
-- `commit.rs` - CommitId, Commit
+- `commit.rs` - CommitId, Commit with ContentRef
 - `branch.rs` - Branch with LCA, frontier tracking
 - `merge.rs` - MergeStrategy trait, LastWriterWins
-- `object.rs` - Object (CoValue) with branches
+- `object.rs` - Object with branches, sync/async read/write
 - `node.rs` - LocalNode, generate_object_id()
+- `storage.rs` - ContentRef, ChunkHash, storage traits, MemoryContentStore
 
 **Future optimizations** (after tests are solid):
 - [ ] Delta encoding for commits
 - [ ] Relative pointers instead of explicit hashes
 - [ ] Compression
+- [ ] FastCDC for content-defined chunking (currently using fixed-size chunking)
 
-### Persistence
-- [ ] Define KV store interface
+### Storage Abstraction
+- [x] ContentRef enum (Inline ≤1KB, Chunked >1KB)
+- [x] ChunkHash type (BLAKE3)
+- [x] ContentStore trait (async get/put/has chunk)
+- [x] CommitStore trait (async commit operations)
+- [x] MemoryContentStore (in-memory implementation for testing)
+- [x] Sync read/write methods (write_sync, read_sync)
+- [x] Async read/write methods (write, read)
+
+### Persistence Backends
 - [ ] Implement RocksDB backend
 - [ ] Implement SQLite fallback
 - [ ] Implement IndexedDB for browser
