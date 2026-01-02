@@ -281,4 +281,42 @@ describe("sync resumption", () => {
       client.node.syncManager.syncState.isSynced(newServerPeerState, map.id),
     ).toBe(true);
   });
+
+  test("sync resumption is skipped when adding a peer that is not a persistent server", async () => {
+    const client = setupTestNode({ connected: false });
+    const { storage } = client.addStorage();
+
+    const getUnsyncedCoValueIDsFromStorage = async () =>
+      new Promise<string[]>((resolve) =>
+        client.node.storage?.getUnsyncedCoValueIDs(resolve),
+      );
+
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    map.set("key", "value");
+
+    // Wait for the unsynced coValues to be persisted to storage
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+
+    let unsyncedCoValueIDs = await getUnsyncedCoValueIDsFromStorage();
+    expect(unsyncedCoValueIDs).toHaveLength(2);
+    expect(unsyncedCoValueIDs).toContain(map.id);
+    expect(unsyncedCoValueIDs).toContain(group.id);
+
+    client.restart();
+    client.addStorage({ storage });
+    const newPeer = setupTestNode({ isSyncServer: true });
+    client.connectToSyncServer({
+      syncServer: newPeer.node,
+      persistent: false,
+    });
+
+    // Wait to confirm sync is not resumed
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+
+    unsyncedCoValueIDs = await getUnsyncedCoValueIDsFromStorage();
+    expect(unsyncedCoValueIDs).toHaveLength(2);
+    expect(unsyncedCoValueIDs).toContain(map.id);
+    expect(unsyncedCoValueIDs).toContain(group.id);
+  });
 });
