@@ -27,7 +27,12 @@ import {
   getDependenciesFromGroupRawTransactions,
   getDependenciesFromHeader,
 } from "./utils.js";
-import { CoValueHeader, Transaction, VerifiedState } from "./verifiedState.js";
+import {
+  CoValueHeader,
+  Transaction,
+  Uniqueness,
+  VerifiedState,
+} from "./verifiedState.js";
 import { SessionMap } from "./SessionMap.js";
 import {
   MergeCommit,
@@ -50,6 +55,31 @@ import {
   KnownStateSessions,
 } from "../knownState.js";
 import { safeParseJSON } from "../jsonStringify.js";
+
+function assertValidUniqueness(uniqueness: Uniqueness) {
+  if (typeof uniqueness === "number" && !Number.isInteger(uniqueness)) {
+    throw new Error(
+      "Uniqueness cannot be a non-integer number, got " + uniqueness,
+    );
+  }
+
+  if (Array.isArray(uniqueness)) {
+    throw new Error("Uniqueness cannot be an array, got " + uniqueness);
+  }
+
+  if (typeof uniqueness === "object" && uniqueness !== null) {
+    for (let [key, value] of Object.entries(uniqueness)) {
+      if (typeof value !== "string") {
+        throw new Error(
+          "Uniqueness object values must be a string, got " +
+            value +
+            " for key " +
+            key,
+        );
+      }
+    }
+  }
+}
 
 export function idforHeader(
   header: CoValueHeader,
@@ -474,6 +504,16 @@ export class CoValueCore {
     skipVerify?: boolean,
   ) {
     if (!skipVerify) {
+      try {
+        assertValidUniqueness(header.uniqueness);
+      } catch (e) {
+        logger.error("Invalid uniqueness", {
+          header,
+          error: e instanceof Error ? e.message : String(e),
+        });
+        return false;
+      }
+
       const expectedId = idforHeader(header, this.node.crypto);
 
       if (this.id !== expectedId) {
