@@ -905,16 +905,6 @@ export class SyncManager {
     const isSyncRequired = this.local.syncWhen !== "never";
     if (isSyncRequired && peers.length === 0) {
       this.unsyncedTracker.add(coValueId);
-
-      const unsubscribe = this.syncState.subscribeToCoValueUpdates(
-        coValueId,
-        (_peerId, _knownState, syncState) => {
-          if (syncState.uploaded) {
-            this.unsyncedTracker.remove(coValueId);
-            unsubscribe();
-          }
-        },
-      );
       return;
     }
 
