@@ -300,31 +300,40 @@ export class SyncManager {
           const batch = coValuesToLoad.slice(processed, processed + BATCH_SIZE);
 
           await Promise.all(
-            batch.map(async (coValueId) => {
-              try {
-                // Clear previous tracking (as it may include outdated peers)
-                this.local.storage?.stopTrackingSyncState(coValueId);
+            batch.map(
+              async (coValueId) =>
+                new Promise<void>((resolve) => {
+                  try {
+                    // Clear previous tracking (as it may include outdated peers)
+                    this.local.storage?.stopTrackingSyncState(coValueId);
 
-                // Resume tracking sync state for this CoValue
-                // This will add it back to the tracker and set up subscriptions
-                this.trackSyncState(coValueId);
+                    // Resume tracking sync state for this CoValue
+                    // This will add it back to the tracker and set up subscriptions
+                    this.trackSyncState(coValueId);
 
-                // Load the CoValue from storage (this will trigger sync if peers are connected)
-                const coValue = await this.local.loadCoValueCore(coValueId);
-
-                if (!coValue.isAvailable()) {
-                  // CoValue could not be loaded from storage, stop tracking
-                  this.local.storage?.stopTrackingSyncState(coValueId);
-                }
-              } catch (error) {
-                // Handle errors gracefully - log but don't fail the entire resumption
-                logger.warn(`Failed to resume sync for CoValue ${coValueId}:`, {
-                  err: error,
-                  coValueId,
-                });
-                this.local.storage?.stopTrackingSyncState(coValueId);
-              }
-            }),
+                    // Load the CoValue from storage (this will trigger sync if peers are connected)
+                    const coValue = this.local.getCoValue(coValueId);
+                    coValue.loadFromStorage((found) => {
+                      if (!found) {
+                        // CoValue could not be loaded from storage, stop tracking
+                        this.local.storage?.stopTrackingSyncState(coValueId);
+                      }
+                      resolve();
+                    });
+                  } catch (error) {
+                    // Handle errors gracefully - log but don't fail the entire resumption
+                    logger.warn(
+                      `Failed to resume sync for CoValue ${coValueId}:`,
+                      {
+                        err: error,
+                        coValueId,
+                      },
+                    );
+                    this.local.storage?.stopTrackingSyncState(coValueId);
+                    resolve();
+                  }
+                }),
+            ),
           );
 
           processed += batch.length;
