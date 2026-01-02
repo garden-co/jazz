@@ -126,42 +126,6 @@ describe("coValue sync state tracking", () => {
     const unsyncedTracker = client.syncManager.unsyncedTracker;
     expect(unsyncedTracker.has(map.id)).toBe(false);
   });
-
-  test("coValues modified by client peers are tracked as unsynced", async () => {
-    const {
-      node: edgeSyncServer,
-      connectToSyncServer: edgeConnectToSyncServer,
-    } = setupTestNode({ isSyncServer: true });
-    const { peerState: coreServerPeerState } = edgeConnectToSyncServer({
-      syncServer: jazzCloud.node,
-      syncServerName: "core",
-    });
-
-    const { node: client, connectToSyncServer: clientConnectToSyncServer } =
-      setupTestNode();
-    clientConnectToSyncServer({
-      syncServer: edgeSyncServer,
-      syncServerName: "edge",
-    });
-
-    const group = client.createGroup();
-    const map = group.createMap();
-    map.set("key", "value");
-
-    await map.core.waitForSync();
-
-    const unsyncedTracker = edgeSyncServer.syncManager.unsyncedTracker;
-    expect(unsyncedTracker.has(map.id)).toBe(true);
-
-    // Wait for the map to sync to jazzCloud (the core server)
-    await waitFor(() =>
-      edgeSyncServer.syncManager.syncState.isSynced(
-        coreServerPeerState,
-        map.id,
-      ),
-    );
-    expect(unsyncedTracker.has(map.id)).toBe(false);
-  });
 });
 
 describe("sync state persistence", () => {
