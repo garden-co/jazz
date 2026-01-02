@@ -64,6 +64,7 @@ async function setupPeers(options: BaseBrowserContextOptions) {
       connected: () => false,
       toggleNetwork: () => {},
       peers,
+      syncWhen: options.sync.when,
       storage,
       setNode: () => {},
       crypto,
@@ -114,6 +115,7 @@ async function setupPeers(options: BaseBrowserContextOptions) {
       return wsPeer.connected;
     },
     peers,
+    syncWhen: options.sync.when,
     storage,
     setNode,
     crypto,
@@ -126,6 +128,7 @@ export async function createJazzBrowserGuestContext(
   const {
     toggleNetwork,
     peers,
+    syncWhen,
     setNode,
     crypto,
     storage,
@@ -136,6 +139,7 @@ export async function createJazzBrowserGuestContext(
   const context = await createAnonymousJazzContext({
     crypto,
     peers,
+    syncWhen,
     storage,
   });
 
@@ -178,6 +182,7 @@ export async function createJazzBrowserContext<
   const {
     toggleNetwork,
     peers,
+    syncWhen,
     setNode,
     crypto,
     storage,
@@ -207,6 +212,7 @@ export async function createJazzBrowserContext<
     credentials: options.credentials,
     newAccountProps: options.newAccountProps,
     peers,
+    syncWhen,
     storage,
     crypto,
     defaultProfileName: options.defaultProfileName,

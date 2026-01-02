@@ -2,13 +2,22 @@ export type StoreName =
   | "coValues"
   | "sessions"
   | "transactions"
-  | "signatureAfter";
+  | "signatureAfter"
+  | "unsyncedCoValues";
 
-// A access unit for the IndexedDB Jazz database
-// It's a wrapper around the IDBTransaction object that helps on batching multiple operations
-// in a single transaction.
+const DEFAULT_TX_STORES: StoreName[] = [
+  "coValues",
+  "sessions",
+  "transactions",
+  "signatureAfter",
+];
+
+/**
+ * An access unit for the IndexedDB Jazz database.
+ * It's a wrapper around the IDBTransaction object that helps on batching multiple operations
+ * in a single transaction.
+ */
 export class CoJsonIDBTransaction {
-  db: IDBDatabase;
   declare tx: IDBTransaction;
 
   pendingRequests: ((txEntry: this) => void)[] = [];
@@ -20,17 +29,16 @@ export class CoJsonIDBTransaction {
   failed = false;
   done = false;
 
-  constructor(db: IDBDatabase) {
-    this.db = db;
-
+  constructor(
+    public db: IDBDatabase,
+    // The object stores this transaction will operate on
+    private storeNames: StoreName[] = DEFAULT_TX_STORES,
+  ) {
     this.refresh();
   }
 
   refresh() {
-    this.tx = this.db.transaction(
-      ["coValues", "sessions", "transactions", "signatureAfter"],
-      "readwrite",
-    );
+    this.tx = this.db.transaction(this.storeNames, "readwrite");
 
     this.tx.oncomplete = () => {
       this.done = true;
@@ -42,12 +50,6 @@ export class CoJsonIDBTransaction {
 
   rollback() {
     this.tx.abort();
-  }
-
-  startedAt = performance.now();
-  isReusable() {
-    const delta = performance.now() - this.startedAt;
-    return !this.done && !this.failed && delta <= 100;
   }
 
   getObjectStore(name: StoreName) {

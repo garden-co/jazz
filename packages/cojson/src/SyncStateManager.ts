@@ -16,6 +16,8 @@ export type GlobalSyncStateListenerCallback = (
   sync: SyncState,
 ) => void;
 
+export type CoValueSyncStateListenerCallback = GlobalSyncStateListenerCallback;
+
 export type PeerSyncStateListenerCallback = (
   knownState: CoValueKnownState,
   sync: SyncState,
@@ -25,9 +27,13 @@ export class SyncStateManager {
   constructor(private syncManager: SyncManager) {}
 
   private listeners = new Set<GlobalSyncStateListenerCallback>();
-  private listenersByPeers = new Map<
+  private listenersByCoValues = new Map<
+    RawCoID,
+    Set<CoValueSyncStateListenerCallback>
+  >();
+  private listenersByPeersAndCoValues = new Map<
     PeerID,
-    Set<PeerSyncStateListenerCallback>
+    Map<RawCoID, Set<PeerSyncStateListenerCallback>>
   >();
 
   subscribeToUpdates(listener: GlobalSyncStateListenerCallback) {
@@ -38,28 +44,67 @@ export class SyncStateManager {
     };
   }
 
+  subscribeToCoValueUpdates(
+    coValueId: RawCoID,
+    listener: CoValueSyncStateListenerCallback,
+  ) {
+    let listeners = this.listenersByCoValues.get(coValueId);
+    if (!listeners) {
+      listeners = new Set();
+      this.listenersByCoValues.set(coValueId, listeners);
+    }
+    listeners.add(listener);
+
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) {
+        this.listenersByCoValues.delete(coValueId);
+      }
+    };
+  }
+
   subscribeToPeerUpdates(
     peerId: PeerID,
+    coValueId: RawCoID,
     listener: PeerSyncStateListenerCallback,
   ) {
-    const listeners = this.listenersByPeers.get(peerId) ?? new Set();
+    let peerMap = this.listenersByPeersAndCoValues.get(peerId);
+    if (!peerMap) {
+      peerMap = new Map();
+      this.listenersByPeersAndCoValues.set(peerId, peerMap);
+    }
 
-    if (listeners.size === 0) {
-      this.listenersByPeers.set(peerId, listeners);
+    let listeners = peerMap.get(coValueId);
+    if (!listeners) {
+      listeners = new Set();
+      peerMap.set(coValueId, listeners);
     }
 
     listeners.add(listener);
 
     return () => {
       listeners.delete(listener);
+      if (listeners.size === 0) {
+        peerMap.delete(coValueId);
+        if (peerMap.size === 0) {
+          this.listenersByPeersAndCoValues.delete(peerId);
+        }
+      }
     };
   }
 
   triggerUpdate(peerId: PeerID, id: RawCoID, knownState: CoValueKnownState) {
-    const peerListeners = this.listenersByPeers.get(peerId);
+    const globalListeners = this.listeners;
+    const coValueListeners = this.listenersByCoValues.get(id);
+    const peerMap = this.listenersByPeersAndCoValues.get(peerId);
+    const coValueAndPeerListeners = peerMap?.get(id);
 
-    // If we don't have any active listeners do nothing
-    if (!peerListeners?.size && !this.listeners.size) {
+    if (
+      !globalListeners.size &&
+      !coValueListeners?.size &&
+      !coValueAndPeerListeners?.size
+    ) {
+      // If we don't have any active listeners do nothing
       return;
     }
 
@@ -71,10 +116,16 @@ export class SyncStateManager {
       listener(peerId, knownState, syncState);
     }
 
-    if (!peerListeners) return;
+    if (coValueListeners) {
+      for (const listener of coValueListeners) {
+        listener(peerId, knownState, syncState);
+      }
+    }
 
-    for (const listener of peerListeners) {
-      listener(knownState, syncState);
+    if (coValueAndPeerListeners) {
+      for (const listener of coValueAndPeerListeners) {
+        listener(knownState, syncState);
+      }
     }
   }
 

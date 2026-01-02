@@ -1,29 +1,37 @@
-import { LocalNode, StorageApiAsync } from "cojson";
+import { LocalNode, StorageApiAsync, cojsonInternals } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
-import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { getIndexedDBStorage } from "../index.js";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { getIndexedDBStorage, internal_setDatabaseName } from "../index.js";
 import { toSimplifiedMessages } from "./messagesTestUtils.js";
-import { trackMessages, waitFor } from "./testUtils.js";
+import {
+  clearObjectStore,
+  connectToSyncServer,
+  createTestNode,
+  trackMessages,
+  waitFor,
+} from "./testUtils.js";
 
 const Crypto = await WasmCrypto.create();
 let syncMessages: ReturnType<typeof trackMessages>;
 
+const DATABASE_NAME = "jazz-storage";
+internal_setDatabaseName(DATABASE_NAME);
+
 beforeEach(() => {
   syncMessages = trackMessages();
+  cojsonInternals.setSyncStateTrackingBatchDelay(0);
+  cojsonInternals.setCoValueLoadingRetryDelay(10);
 });
 
-afterEach(() => {
+afterEach(async () => {
   syncMessages.restore();
+  cojsonInternals.setSyncStateTrackingBatchDelay(1000);
+
+  await clearObjectStore(DATABASE_NAME, "unsyncedCoValues");
 });
 
 test("should sync and load data from storage", async () => {
-  const agentSecret = Crypto.newRandomAgentSecret();
-
-  const node1 = new LocalNode(
-    agentSecret,
-    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
-    Crypto,
-  );
+  const node1 = createTestNode();
   node1.setStorage(await getIndexedDBStorage());
 
   const group = node1.createGroup();
@@ -51,12 +59,7 @@ test("should sync and load data from storage", async () => {
   node1.gracefulShutdown();
   syncMessages.clear();
 
-  const node2 = new LocalNode(
-    agentSecret,
-    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
-    Crypto,
-  );
-
+  const node2 = createTestNode({ secret: node1.agentSecret });
   node2.setStorage(await getIndexedDBStorage());
 
   const map2 = await node2.load(map.id);
@@ -84,13 +87,7 @@ test("should sync and load data from storage", async () => {
 });
 
 test("should send an empty content message if there is no content", async () => {
-  const agentSecret = Crypto.newRandomAgentSecret();
-
-  const node1 = new LocalNode(
-    agentSecret,
-    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
-    Crypto,
-  );
+  const node1 = createTestNode();
 
   node1.setStorage(await getIndexedDBStorage());
 
@@ -117,11 +114,7 @@ test("should send an empty content message if there is no content", async () => 
   syncMessages.clear();
   node1.gracefulShutdown();
 
-  const node2 = new LocalNode(
-    agentSecret,
-    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
-    Crypto,
-  );
+  const node2 = createTestNode({ secret: node1.agentSecret });
 
   node2.setStorage(await getIndexedDBStorage());
 
@@ -148,13 +141,7 @@ test("should send an empty content message if there is no content", async () => 
 });
 
 test("should load dependencies correctly (group inheritance)", async () => {
-  const agentSecret = Crypto.newRandomAgentSecret();
-
-  const node1 = new LocalNode(
-    agentSecret,
-    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
-    Crypto,
-  );
+  const node1 = createTestNode();
 
   node1.setStorage(await getIndexedDBStorage());
   const group = node1.createGroup();
@@ -189,11 +176,7 @@ test("should load dependencies correctly (group inheritance)", async () => {
   syncMessages.clear();
   node1.gracefulShutdown();
 
-  const node2 = new LocalNode(
-    agentSecret,
-    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
-    Crypto,
-  );
+  const node2 = createTestNode({ secret: node1.agentSecret });
 
   node2.setStorage(await getIndexedDBStorage());
 
@@ -223,13 +206,7 @@ test("should load dependencies correctly (group inheritance)", async () => {
 });
 
 test("should not send the same dependency value twice", async () => {
-  const agentSecret = Crypto.newRandomAgentSecret();
-
-  const node1 = new LocalNode(
-    agentSecret,
-    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
-    Crypto,
-  );
+  const node1 = createTestNode();
 
   node1.setStorage(await getIndexedDBStorage());
 
@@ -250,11 +227,7 @@ test("should not send the same dependency value twice", async () => {
   syncMessages.clear();
   node1.gracefulShutdown();
 
-  const node2 = new LocalNode(
-    agentSecret,
-    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
-    Crypto,
-  );
+  const node2 = createTestNode({ secret: node1.agentSecret });
 
   node2.setStorage(await getIndexedDBStorage());
 
@@ -289,13 +262,7 @@ test("should not send the same dependency value twice", async () => {
 });
 
 test("should recover from data loss", async () => {
-  const agentSecret = Crypto.newRandomAgentSecret();
-
-  const node1 = new LocalNode(
-    agentSecret,
-    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
-    Crypto,
-  );
+  const node1 = createTestNode();
 
   const storage = await getIndexedDBStorage();
   node1.setStorage(storage);
@@ -347,11 +314,7 @@ test("should recover from data loss", async () => {
   syncMessages.clear();
   node1.gracefulShutdown();
 
-  const node2 = new LocalNode(
-    agentSecret,
-    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
-    Crypto,
-  );
+  const node2 = createTestNode({ secret: node1.agentSecret });
 
   node2.setStorage(await getIndexedDBStorage());
 
@@ -386,13 +349,7 @@ test("should recover from data loss", async () => {
 });
 
 test("should sync multiple sessions in a single content message", async () => {
-  const agentSecret = Crypto.newRandomAgentSecret();
-
-  const node1 = new LocalNode(
-    agentSecret,
-    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
-    Crypto,
-  );
+  const node1 = createTestNode();
 
   node1.setStorage(await getIndexedDBStorage());
 
@@ -406,11 +363,7 @@ test("should sync multiple sessions in a single content message", async () => {
 
   node1.gracefulShutdown();
 
-  const node2 = new LocalNode(
-    agentSecret,
-    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
-    Crypto,
-  );
+  const node2 = createTestNode({ secret: node1.agentSecret });
 
   node2.setStorage(await getIndexedDBStorage());
 
@@ -427,11 +380,7 @@ test("should sync multiple sessions in a single content message", async () => {
 
   node2.gracefulShutdown();
 
-  const node3 = new LocalNode(
-    agentSecret,
-    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
-    Crypto,
-  );
+  const node3 = createTestNode({ secret: node1.agentSecret });
 
   syncMessages.clear();
 
@@ -462,13 +411,7 @@ test("should sync multiple sessions in a single content message", async () => {
 });
 
 test("large coValue upload streaming", async () => {
-  const agentSecret = Crypto.newRandomAgentSecret();
-
-  const node1 = new LocalNode(
-    agentSecret,
-    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
-    Crypto,
-  );
+  const node1 = createTestNode();
 
   node1.setStorage(await getIndexedDBStorage());
 
@@ -494,11 +437,7 @@ test("large coValue upload streaming", async () => {
 
   node1.gracefulShutdown();
 
-  const node2 = new LocalNode(
-    agentSecret,
-    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
-    Crypto,
-  );
+  const node2 = createTestNode({ secret: node1.agentSecret });
 
   syncMessages.clear();
 
@@ -602,4 +541,95 @@ test("should sync and load accounts from storage", async () => {
   `);
 
   expect(node2.getCoValue(accountID).isAvailable()).toBeTruthy();
+});
+
+describe("sync state persistence", () => {
+  test("unsynced coValues are asynchronously persisted to storage", async () => {
+    // Client is not connected to a sync server, so sync will not be completed
+    const client = createTestNode();
+    client.setStorage(await getIndexedDBStorage());
+
+    const group = client.createGroup();
+    const map = group.createMap();
+    map.set("key", "value");
+
+    // Wait for the unsynced coValues to be persisted to storage
+    await new Promise<void>((resolve) => setTimeout(resolve, 500));
+
+    const unsyncedCoValueIDs = await new Promise((resolve) =>
+      client.storage?.getUnsyncedCoValueIDs(resolve),
+    );
+    expect(unsyncedCoValueIDs).toHaveLength(2);
+    expect(unsyncedCoValueIDs).toContain(map.id);
+    expect(unsyncedCoValueIDs).toContain(group.id);
+
+    await client.gracefulShutdown();
+  });
+
+  test("synced coValues are removed from storage", async () => {
+    const syncServer = createTestNode();
+    const client = createTestNode();
+    client.setStorage(await getIndexedDBStorage());
+
+    connectToSyncServer(client, syncServer);
+
+    const group = client.createGroup();
+    const map = group.createMap();
+    map.set("key", "value");
+
+    // Wait enough time for the coValue to be synced
+    await new Promise<void>((resolve) => setTimeout(resolve, 500));
+
+    const unsyncedCoValueIDs = await new Promise((resolve) =>
+      client.storage?.getUnsyncedCoValueIDs(resolve),
+    );
+    expect(unsyncedCoValueIDs).toHaveLength(0);
+    expect(client.syncManager.unsyncedTracker.has(map.id)).toBe(false);
+
+    await client.gracefulShutdown();
+    await syncServer.gracefulShutdown();
+  });
+});
+
+describe("sync resumption", () => {
+  test("unsynced coValues are resumed when the node is restarted", async () => {
+    // Client is not connected to a sync server, so sync will not be completed
+    const node1 = createTestNode();
+    const storage = await getIndexedDBStorage();
+    node1.setStorage(storage);
+
+    const getUnsyncedCoValueIDsFromStorage = async () =>
+      new Promise<string[]>((resolve) =>
+        node1.storage?.getUnsyncedCoValueIDs(resolve),
+      );
+
+    const group = node1.createGroup();
+    const map = group.createMap();
+    map.set("key", "value");
+
+    // Wait for the unsynced coValues to be persisted to storage
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+
+    const unsyncedTracker = node1.syncManager.unsyncedTracker;
+    expect(unsyncedTracker.has(map.id)).toBe(true);
+    expect(await getUnsyncedCoValueIDsFromStorage()).toHaveLength(2);
+
+    node1.gracefulShutdown();
+
+    // Create second node with the same storage
+    const node2 = createTestNode();
+    node2.setStorage(storage);
+
+    // Connect to sync server
+    const syncServer = createTestNode();
+    connectToSyncServer(node2, syncServer);
+
+    await node2.syncManager.waitForAllCoValuesSync();
+    // Wait for sync to resume & complete
+    await waitFor(
+      async () => (await getUnsyncedCoValueIDsFromStorage()).length === 0,
+    );
+
+    await node2.gracefulShutdown();
+  });
 });
