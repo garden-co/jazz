@@ -1,9 +1,15 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use bytes::Bytes;
+use futures::stream::Stream;
+use futures::io::AsyncRead;
 
 use crate::branch::Branch;
 use crate::commit::{Commit, CommitId};
 use crate::merge::MergeStrategy;
-use crate::storage::{ContentRef, ContentStore, INLINE_THRESHOLD};
+use crate::storage::{ChunkHash, ContentRef, ContentStore, INLINE_THRESHOLD};
 
 /// An object (CoValue) with its commit graph.
 #[derive(Debug)]
@@ -390,6 +396,230 @@ impl Object {
 
         branch.add_commit(commit)
     }
+
+    // ========== Streaming Read/Write Methods ==========
+
+    /// Write content from an async reader to the main branch.
+    /// Chunks the content as it streams in.
+    pub async fn write_stream<R: AsyncRead + Unpin>(
+        &mut self,
+        reader: R,
+        author: &str,
+        timestamp: u64,
+        store: &dyn ContentStore,
+    ) -> std::io::Result<CommitId> {
+        self.write_stream_branch("main", reader, author, timestamp, store)
+            .await
+    }
+
+    /// Write content from an async reader to a specific branch.
+    /// Chunks the content as it streams in using fixed-size chunks.
+    pub async fn write_stream_branch<R: AsyncRead + Unpin>(
+        &mut self,
+        branch_name: &str,
+        mut reader: R,
+        author: &str,
+        timestamp: u64,
+        store: &dyn ContentStore,
+    ) -> std::io::Result<CommitId> {
+        use futures::io::AsyncReadExt;
+
+        let mut hashes = Vec::new();
+        let mut buffer = vec![0u8; INLINE_THRESHOLD];
+        let mut first_chunk: Option<Vec<u8>> = None;
+
+        loop {
+            let mut chunk_data = Vec::new();
+            let mut remaining = INLINE_THRESHOLD;
+
+            // Fill the buffer up to INLINE_THRESHOLD
+            while remaining > 0 {
+                let to_read = remaining.min(buffer.len());
+                let n = reader.read(&mut buffer[..to_read]).await?;
+                if n == 0 {
+                    break;
+                }
+                chunk_data.extend_from_slice(&buffer[..n]);
+                remaining -= n;
+            }
+
+            if chunk_data.is_empty() {
+                break;
+            }
+
+            // If this is the first chunk and it's the only one, we might inline it
+            if first_chunk.is_none() && remaining > 0 {
+                // This is the first and last chunk (didn't fill the buffer)
+                first_chunk = Some(chunk_data);
+                break;
+            } else if first_chunk.is_none() {
+                // First chunk but more data coming - store it
+                first_chunk = Some(chunk_data);
+            } else {
+                // Store the previous first_chunk if we haven't yet
+                if let Some(fc) = first_chunk.take() {
+                    let hash = store.put_chunk(fc.into()).await;
+                    hashes.push(hash);
+                }
+                // Store current chunk
+                let hash = store.put_chunk(chunk_data.into()).await;
+                hashes.push(hash);
+            }
+        }
+
+        // Determine content ref based on what we collected
+        let content_ref = if let Some(fc) = first_chunk {
+            if hashes.is_empty() && fc.len() <= INLINE_THRESHOLD {
+                // Small enough to inline
+                ContentRef::inline(fc)
+            } else {
+                // Need to store first chunk too
+                let hash = store.put_chunk(fc.into()).await;
+                hashes.insert(0, hash);
+                ContentRef::chunked(hashes)
+            }
+        } else if hashes.is_empty() {
+            // Empty content
+            ContentRef::inline(Vec::new())
+        } else {
+            ContentRef::chunked(hashes)
+        };
+
+        let branch = self
+            .branches
+            .get_mut(branch_name)
+            .expect("branch not found");
+
+        let parents = branch.frontier().to_vec();
+
+        let commit = Commit {
+            parents,
+            content: content_ref,
+            author: author.to_string(),
+            timestamp,
+            meta: None,
+        };
+
+        Ok(branch.add_commit(commit))
+    }
+
+    /// Stream content from the frontier of the main branch.
+    /// Returns a stream of chunks.
+    pub fn read_stream<'a>(
+        &'a self,
+        store: &'a dyn ContentStore,
+    ) -> Option<ContentStream<'a>> {
+        self.read_stream_branch("main", store)
+    }
+
+    /// Stream content from the frontier of a specific branch.
+    /// Returns a stream of chunks, or None if branch is empty or has multiple tips.
+    pub fn read_stream_branch<'a>(
+        &'a self,
+        branch_name: &str,
+        store: &'a dyn ContentStore,
+    ) -> Option<ContentStream<'a>> {
+        let branch = self.branches.get(branch_name)?;
+        let frontier = branch.frontier();
+
+        // Only return content if there's exactly one tip
+        if frontier.len() != 1 {
+            return None;
+        }
+
+        let commit = branch.get_commit(&frontier[0])?;
+
+        Some(ContentStream::new(&commit.content, store))
+    }
+}
+
+/// A stream that yields chunks of content.
+///
+/// For inline content, yields a single chunk containing all data.
+/// For chunked content, yields each chunk as it's loaded from the store.
+pub struct ContentStream<'a> {
+    inner: ContentStreamInner<'a>,
+}
+
+enum ContentStreamInner<'a> {
+    /// Inline content - yields once then done
+    Inline(Option<Bytes>),
+    /// Chunked content - yields each chunk
+    Chunked {
+        hashes: Vec<ChunkHash>,
+        index: usize,
+        store: &'a dyn ContentStore,
+    },
+    /// Stream exhausted
+    Done,
+}
+
+impl<'a> ContentStream<'a> {
+    fn new(content: &ContentRef, store: &'a dyn ContentStore) -> Self {
+        let inner = match content {
+            ContentRef::Inline(data) => {
+                ContentStreamInner::Inline(Some(Bytes::copy_from_slice(data)))
+            }
+            ContentRef::Chunked(hashes) => ContentStreamInner::Chunked {
+                hashes: hashes.clone(),
+                index: 0,
+                store,
+            },
+        };
+        ContentStream { inner }
+    }
+
+    /// Collect all chunks into a single Vec<u8>.
+    pub async fn collect_bytes(self) -> Vec<u8> {
+        use futures::stream::StreamExt;
+        let chunks: Vec<Bytes> = self.collect().await;
+        chunks.iter().flat_map(|c| c.iter().copied()).collect()
+    }
+}
+
+impl<'a> Stream for ContentStream<'a> {
+    type Item = Bytes;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match &mut self.inner {
+            ContentStreamInner::Inline(data) => {
+                match data.take() {
+                    Some(d) => Poll::Ready(Some(d)),
+                    None => {
+                        self.inner = ContentStreamInner::Done;
+                        Poll::Ready(None)
+                    }
+                }
+            }
+            ContentStreamInner::Chunked { hashes, index, store } => {
+                if *index >= hashes.len() {
+                    self.inner = ContentStreamInner::Done;
+                    return Poll::Ready(None);
+                }
+
+                let hash = hashes[*index];
+                let store_ref = *store;
+
+                // Create and poll a future to fetch the chunk
+                let fut = async move { store_ref.get_chunk(&hash).await };
+                let mut pinned = Box::pin(fut);
+
+                match pinned.as_mut().poll(cx) {
+                    Poll::Ready(Some(bytes)) => {
+                        *index += 1;
+                        Poll::Ready(Some(bytes))
+                    }
+                    Poll::Ready(None) => {
+                        // Chunk not found
+                        self.inner = ContentStreamInner::Done;
+                        Poll::Ready(None)
+                    }
+                    Poll::Pending => Poll::Pending,
+                }
+            }
+            ContentStreamInner::Done => Poll::Ready(None),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -597,5 +827,167 @@ mod tests {
             obj.read(&store).await
         });
         assert_eq!(content.unwrap(), b"hello");
+    }
+
+    // Streaming tests
+    use futures::io::AllowStdIo;
+    use futures::stream::StreamExt;
+    use std::io::Cursor;
+
+    #[test]
+    fn stream_write_small_content() {
+        let mut obj = Object::new(1, "test");
+        let store = MemoryContentStore::new();
+
+        // Small content should be inlined
+        let data = b"hello streaming world";
+        let cursor = AllowStdIo::new(Cursor::new(data.to_vec()));
+
+        block_on(async {
+            obj.write_stream(cursor, "alice", 1000, &store).await.unwrap();
+        });
+
+        // Should be readable via sync (inline)
+        let content = obj.read_sync().unwrap();
+        assert_eq!(content, data);
+    }
+
+    #[test]
+    fn stream_write_large_content() {
+        let mut obj = Object::new(1, "test");
+        let store = MemoryContentStore::new();
+
+        // Large content should be chunked
+        let large_content: Vec<u8> = (0..INLINE_THRESHOLD * 5)
+            .map(|i| (i % 256) as u8)
+            .collect();
+        let cursor = AllowStdIo::new(Cursor::new(large_content.clone()));
+
+        block_on(async {
+            obj.write_stream(cursor, "alice", 1000, &store).await.unwrap();
+        });
+
+        // Should NOT be readable via sync (chunked)
+        assert!(obj.read_sync().is_none());
+
+        // But should be readable via async
+        let content = block_on(async {
+            obj.read(&store).await
+        });
+        assert_eq!(content.unwrap(), large_content);
+    }
+
+    #[test]
+    fn stream_write_empty_content() {
+        let mut obj = Object::new(1, "test");
+        let store = MemoryContentStore::new();
+
+        let cursor = AllowStdIo::new(Cursor::new(Vec::<u8>::new()));
+
+        block_on(async {
+            obj.write_stream(cursor, "alice", 1000, &store).await.unwrap();
+        });
+
+        // Empty content should be inline
+        let content = obj.read_sync().unwrap();
+        assert_eq!(content, b"");
+    }
+
+    #[test]
+    fn stream_read_inline_content() {
+        let mut obj = Object::new(1, "test");
+        let store = MemoryContentStore::new();
+
+        // Write inline content
+        obj.write_sync(b"hello", "alice", 1000);
+
+        // Stream read should work
+        let chunks: Vec<Bytes> = block_on(async {
+            let stream = obj.read_stream(&store).unwrap();
+            stream.collect().await
+        });
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(&chunks[0][..], b"hello");
+    }
+
+    #[test]
+    fn stream_read_chunked_content() {
+        let mut obj = Object::new(1, "test");
+        let store = MemoryContentStore::new();
+
+        // Write chunked content
+        let large_content: Vec<u8> = (0..INLINE_THRESHOLD * 3)
+            .map(|i| (i % 256) as u8)
+            .collect();
+
+        block_on(async {
+            obj.write(&large_content, "alice", 1000, &store).await;
+        });
+
+        // Stream read should yield multiple chunks
+        let chunks: Vec<Bytes> = block_on(async {
+            let stream = obj.read_stream(&store).unwrap();
+            stream.collect().await
+        });
+
+        // Should have 3 chunks
+        assert_eq!(chunks.len(), 3);
+
+        // Concatenated should equal original
+        let reassembled: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
+        assert_eq!(reassembled, large_content);
+    }
+
+    #[test]
+    fn stream_read_empty_branch_returns_none() {
+        let obj = Object::new(1, "test");
+        let store = MemoryContentStore::new();
+
+        assert!(obj.read_stream(&store).is_none());
+    }
+
+    #[test]
+    fn stream_roundtrip_exact_threshold() {
+        let mut obj = Object::new(1, "test");
+        let store = MemoryContentStore::new();
+
+        // Content exactly at threshold should be inline
+        let data: Vec<u8> = (0..INLINE_THRESHOLD).map(|i| (i % 256) as u8).collect();
+        let cursor = AllowStdIo::new(Cursor::new(data.clone()));
+
+        block_on(async {
+            obj.write_stream(cursor, "alice", 1000, &store).await.unwrap();
+        });
+
+        // Should be inline
+        let content = obj.read_sync().unwrap();
+        assert_eq!(content, data);
+    }
+
+    #[test]
+    fn stream_roundtrip_just_over_threshold() {
+        let mut obj = Object::new(1, "test");
+        let store = MemoryContentStore::new();
+
+        // Content just over threshold should be chunked
+        let data: Vec<u8> = (0..INLINE_THRESHOLD + 1).map(|i| (i % 256) as u8).collect();
+        let cursor = AllowStdIo::new(Cursor::new(data.clone()));
+
+        block_on(async {
+            obj.write_stream(cursor, "alice", 1000, &store).await.unwrap();
+        });
+
+        // Should be chunked (not readable via sync)
+        assert!(obj.read_sync().is_none());
+
+        // But readable via stream
+        let chunks: Vec<Bytes> = block_on(async {
+            let stream = obj.read_stream(&store).unwrap();
+            stream.collect().await
+        });
+
+        let reassembled: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
+        assert_eq!(reassembled, data);
     }
 }
