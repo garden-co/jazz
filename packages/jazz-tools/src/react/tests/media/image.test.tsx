@@ -1,9 +1,13 @@
 // @vitest-environment happy-dom
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Account, FileStream, ImageDefinition } from "../../../";
 import { Image } from "../../media/image";
 import { createJazzTestAccount } from "../../testing";
 import { render, screen, waitFor } from "../testUtils";
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 describe("Image", async () => {
   const account = await createJazzTestAccount({

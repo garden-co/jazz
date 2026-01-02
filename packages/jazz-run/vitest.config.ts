@@ -3,12 +3,7 @@ import { playwright } from "@vitest/browser-playwright";
 
 export default defineProject({
   test: {
-    name: "cojson-storage-indexeddb",
-    browser: {
-      enabled: true,
-      provider: playwright(),
-      instances: [{ browser: "chromium", headless: true }],
-    },
+    name: "jazz-run",
     include: ["src/**/*.test.ts"],
   },
 });

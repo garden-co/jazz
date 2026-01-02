@@ -1,4 +1,4 @@
-import { page, userEvent } from "@vitest/browser/context";
+import { page, userEvent } from "vitest/browser";
 import { AuthSecretStorage } from "jazz-tools";
 import { createImage, highestResAvailable } from "jazz-tools/media";
 import { assert, afterEach, describe, expect, test } from "vitest";

@@ -272,12 +272,11 @@ export function blockMessageTypeOnOutgoingPeer(
   },
 ) {
   const push = peer.outgoing.push;
-  const pushSpy = vi.spyOn(peer.outgoing, "push");
 
   const blockedMessages: SyncMessage[] = [];
   const blockedIds = new Set<string>();
 
-  pushSpy.mockImplementation(async (msg) => {
+  peer.outgoing.push = async (msg) => {
     if (
       typeof msg === "object" &&
       msg.action === messageType &&
@@ -288,9 +287,8 @@ export function blockMessageTypeOnOutgoingPeer(
       blockedIds.add(msg.id);
       return Promise.resolve();
     }
-
     return push.call(peer.outgoing, msg);
-  });
+  };
 
   return {
     blockedMessages,
@@ -300,7 +298,9 @@ export function blockMessageTypeOnOutgoingPeer(
       }
       blockedMessages.length = 0;
     },
-    unblock: () => pushSpy.mockRestore(),
+    unblock: () => {
+      peer.outgoing.push = push;
+    },
   };
 }
 
