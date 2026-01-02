@@ -17,6 +17,7 @@ import {
   CoJsonIDBTransaction,
   putIndexedDbStore,
   queryIndexedDbStore,
+  StoreName,
 } from "./CoJsonIDBTransaction.js";
 
 export class IDBTransaction implements DBTransactionInterfaceAsync {
@@ -210,8 +211,9 @@ export class IDBClient implements DBClientInterfaceAsync {
 
   async transaction(
     operationsCallback: (tx: DBTransactionInterfaceAsync) => Promise<unknown>,
+    storeNames?: StoreName[],
   ) {
-    const tx = new CoJsonIDBTransaction(this.db);
+    const tx = new CoJsonIDBTransaction(this.db, storeNames);
 
     try {
       await operationsCallback(new IDBTransaction(tx));
@@ -228,37 +230,40 @@ export class IDBClient implements DBClientInterfaceAsync {
       return;
     }
 
-    await this.transaction(async (tx) => {
-      const idbTx = tx as IDBTransaction;
-      await Promise.all(
-        updates.map(async (update) => {
-          const record = await idbTx.getUnsyncedCoValueRecord(
-            update.id,
-            update.peerId,
-          );
-          if (update.synced) {
-            // Delete
-            if (record) {
-              await idbTx.deleteUnsyncedCoValueRecord(record.rowID);
-            }
-          } else {
-            // Insert or update
-            await idbTx.putUnsyncedCoValueRecord(
-              record
-                ? {
-                    rowID: record.rowID,
-                    coValueId: update.id,
-                    peerId: update.peerId,
-                  }
-                : {
-                    coValueId: update.id,
-                    peerId: update.peerId,
-                  },
+    await this.transaction(
+      async (tx) => {
+        const idbTx = tx as IDBTransaction;
+        await Promise.all(
+          updates.map(async (update) => {
+            const record = await idbTx.getUnsyncedCoValueRecord(
+              update.id,
+              update.peerId,
             );
-          }
-        }),
-      );
-    });
+            if (update.synced) {
+              // Delete
+              if (record) {
+                await idbTx.deleteUnsyncedCoValueRecord(record.rowID);
+              }
+            } else {
+              // Insert or update
+              await idbTx.putUnsyncedCoValueRecord(
+                record
+                  ? {
+                      rowID: record.rowID,
+                      coValueId: update.id,
+                      peerId: update.peerId,
+                    }
+                  : {
+                      coValueId: update.id,
+                      peerId: update.peerId,
+                    },
+              );
+            }
+          }),
+        );
+      },
+      ["unsyncedCoValues"],
+    );
   }
 
   async getUnsyncedCoValueIDs(): Promise<RawCoID[]> {
@@ -273,14 +278,17 @@ export class IDBClient implements DBClientInterfaceAsync {
   }
 
   async stopTrackingSyncState(id: RawCoID): Promise<void> {
-    await this.transaction(async (tx) => {
-      const idbTx = tx as IDBTransaction;
-      const records = await idbTx.getAllUnsyncedCoValueRecords(id);
-      await Promise.all(
-        records.map((record) =>
-          idbTx.deleteUnsyncedCoValueRecord(record.rowID),
-        ),
-      );
-    });
+    await this.transaction(
+      async (tx) => {
+        const idbTx = tx as IDBTransaction;
+        const records = await idbTx.getAllUnsyncedCoValueRecords(id);
+        await Promise.all(
+          records.map((record) =>
+            idbTx.deleteUnsyncedCoValueRecord(record.rowID),
+          ),
+        );
+      },
+      ["unsyncedCoValues"],
+    );
   }
 }

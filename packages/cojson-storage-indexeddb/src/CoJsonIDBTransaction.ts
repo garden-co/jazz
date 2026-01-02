@@ -5,13 +5,19 @@ export type StoreName =
   | "signatureAfter"
   | "unsyncedCoValues";
 
+const DEFAULT_TX_STORES: StoreName[] = [
+  "coValues",
+  "sessions",
+  "transactions",
+  "signatureAfter",
+];
+
 /**
  * An access unit for the IndexedDB Jazz database.
  * It's a wrapper around the IDBTransaction object that helps on batching multiple operations
  * in a single transaction.
  */
 export class CoJsonIDBTransaction {
-  db: IDBDatabase;
   declare tx: IDBTransaction;
 
   pendingRequests: ((txEntry: this) => void)[] = [];
@@ -23,23 +29,16 @@ export class CoJsonIDBTransaction {
   failed = false;
   done = false;
 
-  constructor(db: IDBDatabase) {
-    this.db = db;
-
+  constructor(
+    public db: IDBDatabase,
+    // The object stores this transaction will operate on
+    private storeNames: StoreName[] = DEFAULT_TX_STORES,
+  ) {
     this.refresh();
   }
 
   refresh() {
-    this.tx = this.db.transaction(
-      [
-        "coValues",
-        "sessions",
-        "transactions",
-        "signatureAfter",
-        "unsyncedCoValues",
-      ],
-      "readwrite",
-    );
+    this.tx = this.db.transaction(this.storeNames, "readwrite");
 
     this.tx.oncomplete = () => {
       this.done = true;

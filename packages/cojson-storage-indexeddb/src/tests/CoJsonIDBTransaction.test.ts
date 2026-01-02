@@ -178,4 +178,80 @@ describe("CoJsonIDBTransaction", () => {
 
     expect(badTx.failed).toBe(true);
   });
+
+  test("transaction with custom stores only includes specified stores", async () => {
+    const tx = new CoJsonIDBTransaction(db, ["coValues", "sessions"]);
+
+    // Should work with included stores
+    await tx.handleRequest((tx) =>
+      tx.getObjectStore("coValues").put({
+        id: "test1",
+        value: "hello",
+      }),
+    );
+
+    await tx.handleRequest((tx) =>
+      tx.getObjectStore("sessions").put({
+        id: "session1",
+        data: "session data",
+      }),
+    );
+
+    // Should fail when trying to access a store not included in transaction
+    await expect(
+      tx.handleRequest((tx) =>
+        tx.getObjectStore("transactions").put({
+          id: "tx1",
+          data: "tx data",
+        }),
+      ),
+    ).rejects.toThrow(
+      "Failed to execute 'objectStore' on 'IDBTransaction': The specified object store was not found.",
+    );
+  });
+
+  test("if no custom stores are provided, transaction uses default stores", async () => {
+    const tx = new CoJsonIDBTransaction(db);
+
+    await tx.handleRequest((tx) =>
+      tx.getObjectStore("coValues").put({
+        id: "test1",
+        value: "hello",
+      }),
+    );
+
+    await tx.handleRequest((tx) =>
+      tx.getObjectStore("sessions").put({
+        id: "session1",
+        data: "session data",
+      }),
+    );
+
+    await tx.handleRequest((tx) =>
+      tx.getObjectStore("transactions").put({
+        id: "tx1",
+        data: "tx data",
+      }),
+    );
+
+    await tx.handleRequest((tx) =>
+      tx.getObjectStore("signatureAfter").put({
+        id: "sig1",
+        data: "sig data",
+      }),
+    );
+
+    // Should fail when trying to access unsyncedCoValues (not in default)
+    await expect(
+      tx.handleRequest((tx) =>
+        tx.getObjectStore("unsyncedCoValues").put({
+          rowID: 1,
+          coValueId: "coValue1",
+          peerId: "peer1",
+        }),
+      ),
+    ).rejects.toThrow(
+      "Failed to execute 'objectStore' on 'IDBTransaction': The specified object store was not found.",
+    );
+  });
 });
