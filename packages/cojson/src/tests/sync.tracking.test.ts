@@ -201,6 +201,46 @@ describe("sync resumption", () => {
     ).toBe(true);
   });
 
+  test("lots of unsynced coValues are resumed in batches when the node is restarted", async () => {
+    const client = setupTestNode({ connected: false });
+    const { storage } = client.addStorage();
+
+    const getUnsyncedCoValueIDsFromStorage = async () =>
+      new Promise<string[]>((resolve) =>
+        client.node.storage?.getUnsyncedCoValueIDs(resolve),
+      );
+
+    const group = client.node.createGroup();
+    const maps = Array.from({ length: 100 }, () => {
+      const map = group.createMap();
+      map.set("key", "value");
+      return map;
+    });
+
+    // Wait for the unsynced coValues to be persisted to storage
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+
+    const unsyncedTracker = client.node.syncManager.unsyncedTracker;
+    for (const map of maps) {
+      expect(unsyncedTracker.has(map.id)).toBe(true);
+    }
+    expect(await getUnsyncedCoValueIDsFromStorage()).toHaveLength(101);
+
+    client.restart();
+    client.addStorage({ storage });
+    const { peerState: serverPeerState } = client.connectToSyncServer();
+
+    // Wait for sync to resume & complete
+    await waitFor(
+      async () => (await getUnsyncedCoValueIDsFromStorage()).length === 0,
+    );
+    for (const map of maps) {
+      expect(
+        client.node.syncManager.syncState.isSynced(serverPeerState, map.id),
+      ).toBe(true);
+    }
+  });
+
   test("old peer entries are removed from storage when restarting with new peers", async () => {
     const client = setupTestNode();
     const { peer: serverPeer } = client.connectToSyncServer({
