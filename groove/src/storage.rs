@@ -1,0 +1,198 @@
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures::stream::BoxStream;
+
+use crate::commit::CommitId;
+
+/// Threshold for inline content storage (bytes).
+/// Content at or below this size is stored directly in the commit.
+/// Content above this size is chunked and stored separately.
+pub const INLINE_THRESHOLD: usize = 1024; // 1KB
+
+/// A chunk hash is the BLAKE3 hash of a content chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ChunkHash([u8; 32]);
+
+impl ChunkHash {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        ChunkHash(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Compute hash of content chunk.
+    pub fn compute(data: &[u8]) -> Self {
+        ChunkHash(*blake3::hash(data).as_bytes())
+    }
+}
+
+/// Reference to commit content - either inline or chunked.
+#[derive(Debug, Clone)]
+pub enum ContentRef {
+    /// Small content stored directly in the commit.
+    Inline(Box<[u8]>),
+    /// Large content split into chunks, referenced by hash.
+    Chunked(Vec<ChunkHash>),
+}
+
+impl ContentRef {
+    /// Create a ContentRef from bytes.
+    /// Uses inline storage if within threshold, otherwise caller must chunk.
+    pub fn inline(data: impl Into<Box<[u8]>>) -> Self {
+        ContentRef::Inline(data.into())
+    }
+
+    /// Create a chunked ContentRef from chunk hashes.
+    pub fn chunked(hashes: Vec<ChunkHash>) -> Self {
+        ContentRef::Chunked(hashes)
+    }
+
+    /// Returns true if content is stored inline.
+    pub fn is_inline(&self) -> bool {
+        matches!(self, ContentRef::Inline(_))
+    }
+
+    /// Returns inline content if available.
+    pub fn as_inline(&self) -> Option<&[u8]> {
+        match self {
+            ContentRef::Inline(data) => Some(data),
+            ContentRef::Chunked(_) => None,
+        }
+    }
+
+    /// Returns chunk hashes if content is chunked.
+    pub fn as_chunks(&self) -> Option<&[ChunkHash]> {
+        match self {
+            ContentRef::Inline(_) => None,
+            ContentRef::Chunked(hashes) => Some(hashes),
+        }
+    }
+}
+
+/// Metadata about a commit (without content).
+#[derive(Debug, Clone)]
+pub struct CommitMeta {
+    pub id: CommitId,
+    pub parents: Vec<CommitId>,
+    pub author: String,
+    pub timestamp: u64,
+    /// Whether content is inline or chunked.
+    pub content_ref: ContentRef,
+}
+
+/// Storage interface for content chunks.
+#[async_trait]
+pub trait ContentStore: Send + Sync {
+    /// Get chunk by hash, returns None if not found.
+    async fn get_chunk(&self, hash: &ChunkHash) -> Option<Bytes>;
+
+    /// Store chunk, returns its hash.
+    async fn put_chunk(&self, data: Bytes) -> ChunkHash;
+
+    /// Check if chunk exists.
+    async fn has_chunk(&self, hash: &ChunkHash) -> bool;
+}
+
+/// Storage interface for commits.
+#[async_trait]
+pub trait CommitStore: Send + Sync {
+    /// Get commit metadata (without loading chunked content).
+    async fn get_commit_meta(&self, id: &CommitId) -> Option<CommitMeta>;
+
+    /// Get full commit (loads inline content, but not chunked).
+    async fn get_commit(&self, id: &CommitId) -> Option<crate::commit::Commit>;
+
+    /// Store commit.
+    async fn put_commit(&self, commit: &crate::commit::Commit) -> CommitId;
+
+    /// Get frontier commit IDs for a branch.
+    async fn get_frontier(&self, object_id: u128, branch: &str) -> Vec<CommitId>;
+
+    /// Update frontier for a branch.
+    async fn set_frontier(&self, object_id: u128, branch: &str, frontier: &[CommitId]);
+
+    /// Stream commit IDs for an object's branch (for partial loading).
+    fn list_commits(&self, object_id: u128, branch: &str) -> BoxStream<'_, CommitId>;
+}
+
+/// Combined storage interface.
+#[async_trait]
+pub trait Storage: ContentStore + CommitStore {}
+
+// Blanket impl
+impl<T: ContentStore + CommitStore> Storage for T {}
+
+// ========== In-Memory Store for Testing ==========
+
+use std::sync::RwLock;
+
+/// Simple in-memory content store for testing.
+#[derive(Debug, Default)]
+pub struct MemoryContentStore {
+    chunks: RwLock<std::collections::HashMap<ChunkHash, Bytes>>,
+}
+
+impl MemoryContentStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl ContentStore for MemoryContentStore {
+    async fn get_chunk(&self, hash: &ChunkHash) -> Option<Bytes> {
+        self.chunks.read().unwrap().get(hash).cloned()
+    }
+
+    async fn put_chunk(&self, data: Bytes) -> ChunkHash {
+        let hash = ChunkHash::compute(&data);
+        self.chunks.write().unwrap().insert(hash, data);
+        hash
+    }
+
+    async fn has_chunk(&self, hash: &ChunkHash) -> bool {
+        self.chunks.read().unwrap().contains_key(hash)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_hash_deterministic() {
+        let data = b"hello world";
+        let hash1 = ChunkHash::compute(data);
+        let hash2 = ChunkHash::compute(data);
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn chunk_hash_different_for_different_data() {
+        let hash1 = ChunkHash::compute(b"hello");
+        let hash2 = ChunkHash::compute(b"world");
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn content_ref_inline() {
+        let content = ContentRef::inline(b"small data".to_vec());
+        assert!(content.is_inline());
+        assert_eq!(content.as_inline(), Some(b"small data".as_slice()));
+        assert!(content.as_chunks().is_none());
+    }
+
+    #[test]
+    fn content_ref_chunked() {
+        let hashes = vec![
+            ChunkHash::compute(b"chunk1"),
+            ChunkHash::compute(b"chunk2"),
+        ];
+        let content = ContentRef::chunked(hashes.clone());
+        assert!(!content.is_inline());
+        assert!(content.as_inline().is_none());
+        assert_eq!(content.as_chunks(), Some(hashes.as_slice()));
+    }
+}

@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::branch::Branch;
 use crate::commit::{Commit, CommitId};
 use crate::merge::MergeStrategy;
+use crate::storage::{ContentRef, ContentStore, INLINE_THRESHOLD};
 
 /// An object (CoValue) with its commit graph.
 #[derive(Debug)]
@@ -187,25 +188,32 @@ impl Object {
         }
 
         // Get base content (from first LCA if exists)
-        let base_content: Option<Box<[u8]>> = lca_commits
+        // Note: This only works with inline content. Chunked content would need async loading.
+        let base_content: Option<Vec<u8>> = lca_commits
             .first()
             .and_then(|id| target.commits.get(id))
-            .map(|c| c.content.clone());
+            .and_then(|c| c.content.as_inline().map(|b| b.to_vec()));
 
-        // Collect tip contents
-        let tip_contents: Vec<&[u8]> = all_tips
+        // Collect tip contents (only inline supported for sync merge)
+        let tip_contents: Vec<Vec<u8>> = all_tips
             .iter()
             .filter_map(|id| target.commits.get(id))
-            .map(|c| c.content.as_ref())
+            .filter_map(|c| c.content.as_inline().map(|b| b.to_vec()))
             .collect();
 
+        if tip_contents.len() != all_tips.len() {
+            return Err("cannot merge: some commits have chunked content (use async merge)");
+        }
+
+        let tip_refs: Vec<&[u8]> = tip_contents.iter().map(|v| v.as_slice()).collect();
+
         // Perform merge
-        let merged_content = strategy.merge(base_content.as_deref(), &tip_contents)?;
+        let merged_content = strategy.merge(base_content.as_deref(), &tip_refs)?;
 
         // Create merge commit
         let merge_commit = Commit {
             parents: all_tips,
-            content: merged_content,
+            content: ContentRef::inline(merged_content),
             author: author.to_string(),
             timestamp,
             meta: None,
@@ -225,6 +233,163 @@ impl Object {
 
         Ok(merge_id)
     }
+
+    // ========== Sync Read/Write Methods ==========
+
+    /// Read content from the frontier of the main branch (sync).
+    /// Returns None if the branch is empty or content is not inline.
+    pub fn read_sync(&self) -> Option<&[u8]> {
+        self.read_sync_branch("main")
+    }
+
+    /// Read content from the frontier of a specific branch (sync).
+    /// Returns None if the branch is empty, has multiple tips, or content is not inline.
+    pub fn read_sync_branch(&self, branch: &str) -> Option<&[u8]> {
+        let branch = self.branches.get(branch)?;
+        let frontier = branch.frontier();
+
+        // Only return content if there's exactly one tip
+        if frontier.len() != 1 {
+            return None;
+        }
+
+        let commit = branch.get_commit(&frontier[0])?;
+        commit.content.as_inline()
+    }
+
+    /// Write content to the main branch (sync).
+    /// Panics if content exceeds INLINE_THRESHOLD.
+    /// Returns the new commit ID.
+    pub fn write_sync(
+        &mut self,
+        content: &[u8],
+        author: &str,
+        timestamp: u64,
+    ) -> CommitId {
+        self.write_sync_branch("main", content, author, timestamp)
+    }
+
+    /// Write content to a specific branch (sync).
+    /// Panics if content exceeds INLINE_THRESHOLD.
+    /// Returns the new commit ID.
+    pub fn write_sync_branch(
+        &mut self,
+        branch_name: &str,
+        content: &[u8],
+        author: &str,
+        timestamp: u64,
+    ) -> CommitId {
+        assert!(
+            content.len() <= INLINE_THRESHOLD,
+            "content exceeds INLINE_THRESHOLD ({} bytes), use write() for large content",
+            INLINE_THRESHOLD
+        );
+
+        let branch = self
+            .branches
+            .get_mut(branch_name)
+            .expect("branch not found");
+
+        let parents = branch.frontier().to_vec();
+
+        let commit = Commit {
+            parents,
+            content: ContentRef::inline(content.to_vec()),
+            author: author.to_string(),
+            timestamp,
+            meta: None,
+        };
+
+        branch.add_commit(commit)
+    }
+
+    // ========== Async Read/Write Methods ==========
+
+    /// Read content from the frontier of the main branch (async).
+    /// Loads chunked content from storage if needed.
+    pub async fn read(&self, store: &dyn ContentStore) -> Option<Vec<u8>> {
+        self.read_branch("main", store).await
+    }
+
+    /// Read content from the frontier of a specific branch (async).
+    /// Loads chunked content from storage if needed.
+    pub async fn read_branch(&self, branch_name: &str, store: &dyn ContentStore) -> Option<Vec<u8>> {
+        let branch = self.branches.get(branch_name)?;
+        let frontier = branch.frontier();
+
+        // Only return content if there's exactly one tip
+        if frontier.len() != 1 {
+            return None;
+        }
+
+        let commit = branch.get_commit(&frontier[0])?;
+
+        match &commit.content {
+            ContentRef::Inline(data) => Some(data.to_vec()),
+            ContentRef::Chunked(hashes) => {
+                // Load all chunks and concatenate
+                let mut result = Vec::new();
+                for hash in hashes {
+                    let chunk = store.get_chunk(hash).await?;
+                    result.extend_from_slice(&chunk);
+                }
+                Some(result)
+            }
+        }
+    }
+
+    /// Write content to the main branch (async).
+    /// Automatically chunks content that exceeds INLINE_THRESHOLD.
+    pub async fn write(
+        &mut self,
+        content: &[u8],
+        author: &str,
+        timestamp: u64,
+        store: &dyn ContentStore,
+    ) -> CommitId {
+        self.write_branch("main", content, author, timestamp, store).await
+    }
+
+    /// Write content to a specific branch (async).
+    /// Automatically chunks content that exceeds INLINE_THRESHOLD.
+    pub async fn write_branch(
+        &mut self,
+        branch_name: &str,
+        content: &[u8],
+        author: &str,
+        timestamp: u64,
+        store: &dyn ContentStore,
+    ) -> CommitId {
+        let content_ref = if content.len() <= INLINE_THRESHOLD {
+            ContentRef::inline(content.to_vec())
+        } else {
+            // For now, simple fixed-size chunking
+            // TODO: Use FastCDC for content-defined chunking
+            let mut hashes = Vec::new();
+            for chunk in content.chunks(INLINE_THRESHOLD) {
+                let hash = store.put_chunk(chunk.to_vec().into()).await;
+                hashes.push(hash);
+            }
+            ContentRef::chunked(hashes)
+        };
+
+        let branch = self
+            .branches
+            .get_mut(branch_name)
+            .expect("branch not found");
+
+        let parents = branch.frontier().to_vec();
+
+        let commit = Commit {
+            parents,
+            content: content_ref,
+            author: author.to_string(),
+            timestamp,
+            meta: None,
+        };
+
+        branch.add_commit(commit)
+    }
 }
 
 #[cfg(test)]
@@ -235,7 +400,7 @@ mod tests {
     fn make_commit(content: &[u8], parents: Vec<CommitId>) -> Commit {
         Commit {
             parents,
-            content: content.to_vec().into_boxed_slice(),
+            content: ContentRef::inline(content.to_vec()),
             author: "test-author".to_string(),
             timestamp: 1000,
             meta: None,
@@ -305,7 +470,7 @@ mod tests {
         // Add commit to main
         let c2 = Commit {
             parents: vec![id1],
-            content: b"main-change".to_vec().into_boxed_slice(),
+            content: ContentRef::inline(b"main-change".to_vec()),
             author: "alice".to_string(),
             timestamp: 2000,
             meta: None,
@@ -315,7 +480,7 @@ mod tests {
         // Add commit to feature
         let c3 = Commit {
             parents: vec![id1],
-            content: b"feature-change".to_vec().into_boxed_slice(),
+            content: ContentRef::inline(b"feature-change".to_vec()),
             author: "bob".to_string(),
             timestamp: 2001,
             meta: None,
@@ -335,5 +500,102 @@ mod tests {
         // Merge commit should have 2 parents
         let merge_commit = obj.main_branch().get_commit(&merge_id).unwrap();
         assert_eq!(merge_commit.parents.len(), 2);
+    }
+
+    #[test]
+    fn sync_write_and_read() {
+        let mut obj = Object::new(1, "test");
+
+        // Write some content
+        let id = obj.write_sync(b"hello world", "alice", 1000);
+
+        // Read it back
+        let content = obj.read_sync().unwrap();
+        assert_eq!(content, b"hello world");
+
+        // Write more content
+        obj.write_sync(b"updated", "alice", 2000);
+
+        // Read the updated content
+        let content = obj.read_sync().unwrap();
+        assert_eq!(content, b"updated");
+
+        // Verify commit chain
+        assert_eq!(obj.main_branch().len(), 2);
+        let latest = obj.main_branch().get_commit(&obj.main_branch().frontier()[0]).unwrap();
+        assert_eq!(latest.parents.len(), 1);
+        assert_eq!(latest.parents[0], id);
+    }
+
+    #[test]
+    fn read_sync_empty_branch_returns_none() {
+        let obj = Object::new(1, "test");
+        assert!(obj.read_sync().is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "content exceeds INLINE_THRESHOLD")]
+    fn write_sync_panics_on_large_content() {
+        let mut obj = Object::new(1, "test");
+        let large_content = vec![0u8; INLINE_THRESHOLD + 1];
+        obj.write_sync(&large_content, "alice", 1000);
+    }
+
+    // Async tests using futures executor
+    use crate::storage::MemoryContentStore;
+    use futures::executor::block_on;
+
+    #[test]
+    fn async_write_small_content() {
+        let mut obj = Object::new(1, "test");
+        let store = MemoryContentStore::new();
+
+        // Write small content (should be inline)
+        block_on(async {
+            obj.write(b"hello", "alice", 1000, &store).await;
+        });
+
+        // Read back
+        let content = obj.read_sync().unwrap();
+        assert_eq!(content, b"hello");
+    }
+
+    #[test]
+    fn async_write_large_content() {
+        let mut obj = Object::new(1, "test");
+        let store = MemoryContentStore::new();
+
+        // Write large content (should be chunked)
+        let large_content: Vec<u8> = (0..INLINE_THRESHOLD * 3)
+            .map(|i| (i % 256) as u8)
+            .collect();
+
+        block_on(async {
+            obj.write(&large_content, "alice", 1000, &store).await;
+        });
+
+        // Read sync should return None (content is chunked)
+        assert!(obj.read_sync().is_none());
+
+        // Read async should work
+        let content = block_on(async {
+            obj.read(&store).await
+        });
+        assert_eq!(content.unwrap(), large_content);
+    }
+
+    #[test]
+    fn async_read_inline_content() {
+        let mut obj = Object::new(1, "test");
+        let store = MemoryContentStore::new();
+
+        // Write using sync (inline)
+        obj.write_sync(b"hello", "alice", 1000);
+
+        // Read using async should also work
+        let content = block_on(async {
+            obj.read(&store).await
+        });
+        assert_eq!(content.unwrap(), b"hello");
     }
 }

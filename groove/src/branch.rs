@@ -163,11 +163,12 @@ impl Branch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::ContentRef;
 
     fn make_commit(content: &[u8], parents: Vec<CommitId>) -> Commit {
         Commit {
             parents,
-            content: content.to_vec().into_boxed_slice(),
+            content: ContentRef::inline(content.to_vec()),
             author: "test-author".to_string(),
             timestamp: 1000,
             meta: None,
@@ -219,7 +220,7 @@ mod tests {
         // Two concurrent commits from root
         let c1 = Commit {
             parents: vec![root_id],
-            content: b"branch-a".to_vec().into_boxed_slice(),
+            content: ContentRef::inline(b"branch-a".to_vec()),
             author: "alice".to_string(),
             timestamp: 2000,
             meta: None,
@@ -228,7 +229,7 @@ mod tests {
 
         let c2 = Commit {
             parents: vec![root_id],
-            content: b"branch-b".to_vec().into_boxed_slice(),
+            content: ContentRef::inline(b"branch-b".to_vec()),
             author: "bob".to_string(),
             timestamp: 2001,
             meta: None,
@@ -252,7 +253,7 @@ mod tests {
         // Two concurrent branches
         let c1 = Commit {
             parents: vec![root_id],
-            content: b"a".to_vec().into_boxed_slice(),
+            content: ContentRef::inline(b"a".to_vec()),
             author: "alice".to_string(),
             timestamp: 2000,
             meta: None,
@@ -261,7 +262,7 @@ mod tests {
 
         let c2 = Commit {
             parents: vec![root_id],
-            content: b"b".to_vec().into_boxed_slice(),
+            content: ContentRef::inline(b"b".to_vec()),
             author: "bob".to_string(),
             timestamp: 2001,
             meta: None,
@@ -273,7 +274,7 @@ mod tests {
         // Merge commit
         let merge = Commit {
             parents: vec![id1, id2],
-            content: b"merged".to_vec().into_boxed_slice(),
+            content: ContentRef::inline(b"merged".to_vec()),
             author: "alice".to_string(),
             timestamp: 3000,
             meta: None,
@@ -331,7 +332,7 @@ mod tests {
 
         let c2 = Commit {
             parents: vec![id1],
-            content: b"left".to_vec().into_boxed_slice(),
+            content: ContentRef::inline(b"left".to_vec()),
             author: "alice".to_string(),
             timestamp: 2000,
             meta: None,
@@ -340,7 +341,7 @@ mod tests {
 
         let c3 = Commit {
             parents: vec![id1],
-            content: b"right".to_vec().into_boxed_slice(),
+            content: ContentRef::inline(b"right".to_vec()),
             author: "bob".to_string(),
             timestamp: 2001,
             meta: None,
@@ -354,7 +355,7 @@ mod tests {
         // Now merge them
         let c4 = Commit {
             parents: vec![id2, id3],
-            content: b"merged".to_vec().into_boxed_slice(),
+            content: ContentRef::inline(b"merged".to_vec()),
             author: "alice".to_string(),
             timestamp: 3000,
             meta: None,
