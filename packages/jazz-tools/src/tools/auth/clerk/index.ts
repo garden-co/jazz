@@ -145,8 +145,8 @@ export class JazzClerkAuth {
       jazzAccountSecret: credentials.accountSecret,
       jazzAccountSeed,
     };
-    // user.update triggers the listener, so we need to set the previous user to the new credentials
-    // to avoid triggering a logIn
+    // user.update will cause the Clerk user change listener to fire; updating this.previousUser beforehand
+    // ensures the listener sees the new credentials and does not trigger an unnecessary logIn operation
     this.previousUser = { unsafeMetadata: clerkCredentials };
 
     if (clerkClient.user) {
