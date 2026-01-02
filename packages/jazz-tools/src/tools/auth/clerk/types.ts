@@ -36,21 +36,38 @@ export type ClerkCredentials = {
  * **Note**: It does not validate the credentials, only checks if the necessary fields are present in the metadata object.
  */
 export function isClerkCredentials(
-  data: NonNullable<MinimalClerkClient["user"]>["unsafeMetadata"] | undefined,
+  data:
+    | NonNullable<MinimalClerkClient["user"]>["unsafeMetadata"]
+    | null
+    | undefined,
 ): data is ClerkCredentials {
   return !!data && "jazzAccountID" in data && "jazzAccountSecret" in data;
 }
 
 export function isClerkAuthStateEqual(
-  previousUser: MinimalClerkClient["user"] | null | undefined,
-  newUser: MinimalClerkClient["user"] | null | undefined,
+  previousUser:
+    | Pick<NonNullable<MinimalClerkClient["user"]>, "unsafeMetadata">
+    | null
+    | undefined,
+  newUser:
+    | Pick<NonNullable<MinimalClerkClient["user"]>, "unsafeMetadata">
+    | null
+    | undefined,
 ) {
   if (Boolean(previousUser) !== Boolean(newUser)) {
     return false;
   }
 
-  const previousCredentials = isClerkCredentials(previousUser?.unsafeMetadata);
-  const newCredentials = isClerkCredentials(newUser?.unsafeMetadata);
+  const previousCredentials = isClerkCredentials(previousUser?.unsafeMetadata)
+    ? previousUser?.unsafeMetadata
+    : null;
+  const newCredentials = isClerkCredentials(newUser?.unsafeMetadata)
+    ? newUser?.unsafeMetadata
+    : null;
 
-  return previousCredentials === newCredentials;
+  if (!previousCredentials || !newCredentials) {
+    return previousCredentials === newCredentials;
+  }
+
+  return previousCredentials.jazzAccountID === newCredentials.jazzAccountID;
 }

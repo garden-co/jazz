@@ -53,18 +53,21 @@ export class JazzClerkAuth {
   }
 
   private isFirstCall = true;
+  private previousUser: Pick<
+    NonNullable<MinimalClerkClient["user"]>,
+    "unsafeMetadata"
+  > | null = null;
 
   registerListener(clerkClient: MinimalClerkClient) {
-    let previousUser: MinimalClerkClient["user"] | null =
-      clerkClient.user ?? null;
+    this.previousUser = clerkClient.user ?? null;
 
     // Need to use addListener because the clerk user object is not updated when the user logs in
     return clerkClient.addListener((event) => {
       const user = (event as Pick<MinimalClerkClient, "user">).user ?? null;
 
-      if (!isClerkAuthStateEqual(previousUser, user) || this.isFirstCall) {
+      if (!isClerkAuthStateEqual(this.previousUser, user) || this.isFirstCall) {
+        this.previousUser = user;
         this.onClerkUserChange({ user });
-        previousUser = user;
         this.isFirstCall = false;
       }
     });
@@ -137,13 +140,20 @@ export class JazzClerkAuth {
       ? Array.from(credentials.secretSeed)
       : undefined;
 
-    await clerkClient.user?.update({
-      unsafeMetadata: {
-        jazzAccountID: credentials.accountID,
-        jazzAccountSecret: credentials.accountSecret,
-        jazzAccountSeed,
-      } satisfies ClerkCredentials,
-    });
+    const clerkCredentials = {
+      jazzAccountID: credentials.accountID,
+      jazzAccountSecret: credentials.accountSecret,
+      jazzAccountSeed,
+    };
+    // user.update triggers the listener, so we need to set the previous user to the new credentials
+    // to avoid triggering a logIn
+    this.previousUser = { unsafeMetadata: clerkCredentials };
+
+    if (clerkClient.user) {
+      await clerkClient.user.update({
+        unsafeMetadata: clerkCredentials,
+      });
+    }
 
     const currentAccount = await Account.getMe().$jazz.ensureLoaded({
       resolve: {
