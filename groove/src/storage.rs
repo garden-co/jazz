@@ -207,8 +207,7 @@ impl CommitStore for MemoryEnvironment {
     }
 
     fn list_commits(&self, object_id: u128, branch: &str) -> BoxStream<'_, CommitId> {
-        // For now, just return frontier commits
-        // A real implementation would stream all commits for the branch
+        // Walk back from frontier through parent links to find all commits
         let frontier = self
             .frontiers
             .read()
@@ -216,7 +215,29 @@ impl CommitStore for MemoryEnvironment {
             .get(&(object_id, branch.to_string()))
             .cloned()
             .unwrap_or_default();
-        Box::pin(futures::stream::iter(frontier))
+
+        let commits = self.commits.read().unwrap();
+        let mut all_commits = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        let mut to_visit: Vec<CommitId> = frontier;
+
+        while let Some(id) = to_visit.pop() {
+            if visited.contains(&id) {
+                continue;
+            }
+            visited.insert(id);
+            all_commits.push(id);
+
+            if let Some(commit) = commits.get(&id) {
+                for parent in &commit.parents {
+                    if !visited.contains(parent) {
+                        to_visit.push(*parent);
+                    }
+                }
+            }
+        }
+
+        Box::pin(futures::stream::iter(all_commits))
     }
 }
 
@@ -286,5 +307,56 @@ mod tests {
         assert!(!content.is_inline());
         assert!(content.as_inline().is_none());
         assert_eq!(content.as_chunks(), Some(hashes.as_slice()));
+    }
+
+    use futures::executor::block_on;
+    use futures::stream::StreamExt;
+
+    #[test]
+    fn list_commits_returns_all_commits_not_just_frontier() {
+        let env = MemoryEnvironment::new();
+        let object_id: u128 = 1;
+        let branch = "main";
+
+        // Create a chain of 3 commits: c1 <- c2 <- c3
+        let c1 = crate::commit::Commit {
+            parents: vec![],
+            content: ContentRef::inline(b"first".to_vec()),
+            author: "alice".to_string(),
+            timestamp: 1000,
+            meta: None,
+        };
+        let id1 = block_on(env.put_commit(&c1));
+
+        let c2 = crate::commit::Commit {
+            parents: vec![id1],
+            content: ContentRef::inline(b"second".to_vec()),
+            author: "alice".to_string(),
+            timestamp: 2000,
+            meta: None,
+        };
+        let id2 = block_on(env.put_commit(&c2));
+
+        let c3 = crate::commit::Commit {
+            parents: vec![id2],
+            content: ContentRef::inline(b"third".to_vec()),
+            author: "alice".to_string(),
+            timestamp: 3000,
+            meta: None,
+        };
+        let id3 = block_on(env.put_commit(&c3));
+
+        // Set frontier to just the tip (c3)
+        block_on(env.set_frontier(object_id, branch, &[id3]));
+
+        // list_commits should return ALL commits, not just the frontier
+        let commits: Vec<CommitId> = block_on(async {
+            env.list_commits(object_id, branch).collect().await
+        });
+
+        assert_eq!(commits.len(), 3, "should return all 3 commits, not just frontier");
+        assert!(commits.contains(&id1), "should contain first commit");
+        assert!(commits.contains(&id2), "should contain second commit");
+        assert!(commits.contains(&id3), "should contain third commit (frontier)");
     }
 }
