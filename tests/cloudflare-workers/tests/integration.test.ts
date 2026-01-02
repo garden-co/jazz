@@ -1,6 +1,6 @@
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
-import { execa, $ } from "execa";
+import { execa } from "execa";
 import { expect, test, describe, onTestFinished } from "vitest";
 
 // @ts-ignore
