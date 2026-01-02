@@ -76,24 +76,24 @@
 ## Phase 1.5: SQL Layer
 
 ### Step 1: Basic Storage
-- [ ] `ColumnType` and `ColumnDef` types
-- [ ] `TableSchema` type with serialization
-- [ ] Row binary encoding/decoding (length-prefix header + column values)
-- [ ] Nullable column handling (1-byte presence flag in content)
-- [ ] SQL parser: CREATE TABLE, INSERT, UPDATE, SELECT
-- [ ] `create_table` - store schema as Object
-- [ ] `insert` - create row Object with encoded data
-- [ ] `get` - fetch and decode row by ID
-- [ ] `update` - create new commit on row Object
-- [ ] `delete` - tombstone commit on row Object
-- [ ] `execute()` method for SQL strings
+- [x] `ColumnType` and `ColumnDef` types
+- [x] `TableSchema` type with serialization
+- [x] Row binary encoding/decoding (length-prefix header + column values)
+- [x] Nullable column handling (1-byte presence flag in content)
+- [x] SQL parser: CREATE TABLE, INSERT, UPDATE, SELECT
+- [x] `create_table` - store schema as Object
+- [x] `insert` - create row Object with encoded data
+- [x] `get` - fetch and decode row by ID
+- [x] `update` - create new commit on row Object
+- [x] `delete` - tombstone commit on row Object
+- [x] `execute()` method for SQL strings
 
 ### Step 2: References and Queries
-- [ ] `Ref` column type with target schema validation
-- [ ] Index object creation per (source_table, source_column) Ref column
-- [ ] Synchronous index maintenance on insert/update/delete
-- [ ] `select` with scan-based where clause (`=` only)
-- [ ] `find_referencing` using index lookup
+- [x] `Ref` column type with target schema validation
+- [x] Index object creation per (source_table, source_column) Ref column
+- [x] Synchronous index maintenance on insert/update/delete
+- [x] `select` with scan-based where clause (`=` only)
+- [x] `find_referencing` using index lookup
 - [ ] `subscribe_select` for reactive queries
 - [ ] `execute_reactive()` for reactive SELECT
 

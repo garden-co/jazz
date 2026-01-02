@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::node::{generate_object_id, LocalNode};
 use crate::sql::parser::{self, Statement};
 use crate::sql::row::{decode_row, encode_row, Row, RowError, Value};
-use crate::sql::schema::{SchemaError, TableSchema};
+use crate::sql::schema::{ColumnType, SchemaError, TableSchema};
 use crate::storage::Environment;
 
 /// Object ID type alias.
@@ -12,6 +12,62 @@ pub type ObjectId = u128;
 
 /// Schema ID type alias (object ID of schema object).
 pub type SchemaId = u128;
+
+/// Key for a reference index: (source_table, source_column).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IndexKey {
+    pub source_table: String,
+    pub source_column: String,
+}
+
+impl IndexKey {
+    pub fn new(source_table: impl Into<String>, source_column: impl Into<String>) -> Self {
+        IndexKey {
+            source_table: source_table.into(),
+            source_column: source_column.into(),
+        }
+    }
+}
+
+/// Reference index: maps target_id -> set of source_row_ids.
+/// One index per (source_table, source_column) pair.
+#[derive(Debug, Clone, Default)]
+pub struct RefIndex {
+    /// target_id -> source_row_ids that reference it
+    entries: HashMap<ObjectId, HashSet<ObjectId>>,
+}
+
+impl RefIndex {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a reference: source_row references target_id.
+    pub fn add(&mut self, target_id: ObjectId, source_row_id: ObjectId) {
+        self.entries
+            .entry(target_id)
+            .or_default()
+            .insert(source_row_id);
+    }
+
+    /// Remove a reference.
+    pub fn remove(&mut self, target_id: ObjectId, source_row_id: ObjectId) {
+        if let Some(set) = self.entries.get_mut(&target_id) {
+            set.remove(&source_row_id);
+            if set.is_empty() {
+                self.entries.remove(&target_id);
+            }
+        }
+    }
+
+    /// Get all source rows referencing a target.
+    pub fn get(&self, target_id: ObjectId) -> impl Iterator<Item = ObjectId> + '_ {
+        self.entries
+            .get(&target_id)
+            .into_iter()
+            .flat_map(|set| set.iter().copied())
+    }
+}
 
 /// Database providing SQL operations on top of LocalNode.
 pub struct Database {
@@ -22,6 +78,8 @@ pub struct Database {
     schemas: HashMap<SchemaId, TableSchema>,
     /// Map from row object ID to its table name.
     row_table: HashMap<ObjectId, String>,
+    /// Reference indexes: (source_table, source_column) -> RefIndex.
+    indexes: HashMap<IndexKey, RefIndex>,
 }
 
 /// Result of executing a SQL statement.
@@ -64,6 +122,10 @@ pub enum DatabaseError {
     MissingColumn(String),
     /// Storage error.
     Storage(String),
+    /// Invalid reference: target row doesn't exist.
+    InvalidReference { column: String, target_table: String, target_id: ObjectId },
+    /// Column is not a reference type.
+    NotAReference(String),
 }
 
 impl std::fmt::Display for DatabaseError {
@@ -84,6 +146,11 @@ impl std::fmt::Display for DatabaseError {
             }
             DatabaseError::MissingColumn(name) => write!(f, "missing required column: {}", name),
             DatabaseError::Storage(e) => write!(f, "storage error: {}", e),
+            DatabaseError::InvalidReference { column, target_table, target_id } => {
+                write!(f, "invalid reference in '{}': row {:032x} not found in table '{}'",
+                       column, target_id, target_table)
+            }
+            DatabaseError::NotAReference(name) => write!(f, "column '{}' is not a reference", name),
         }
     }
 }
@@ -116,6 +183,7 @@ impl Database {
             tables: HashMap::new(),
             schemas: HashMap::new(),
             row_table: HashMap::new(),
+            indexes: HashMap::new(),
         }
     }
 
@@ -126,6 +194,7 @@ impl Database {
             tables: HashMap::new(),
             schemas: HashMap::new(),
             row_table: HashMap::new(),
+            indexes: HashMap::new(),
         }
     }
 
@@ -145,6 +214,15 @@ impl Database {
             return Err(DatabaseError::TableExists(schema.name.clone()));
         }
 
+        // Validate that referenced tables exist (for Ref columns)
+        for col in &schema.columns {
+            if let ColumnType::Ref(target_table) = &col.ty {
+                if !self.tables.contains_key(target_table) {
+                    return Err(DatabaseError::TableNotFound(target_table.clone()));
+                }
+            }
+        }
+
         // Create object for schema
         let schema_id = self.node.create_object(&format!("schema:{}", schema.name));
 
@@ -153,6 +231,14 @@ impl Database {
         self.node
             .write_sync(schema_id, "main", &schema_bytes, "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+
+        // Create indexes for Ref columns
+        for col in &schema.columns {
+            if matches!(col.ty, ColumnType::Ref(_)) {
+                let key = IndexKey::new(&schema.name, &col.name);
+                self.indexes.insert(key, RefIndex::new());
+            }
+        }
 
         // Cache schema
         self.tables.insert(schema.name.clone(), schema_id);
@@ -201,6 +287,31 @@ impl Database {
             }
         }
 
+        // Validate references: check that referenced rows exist
+        for (i, col) in schema.columns.iter().enumerate() {
+            if let ColumnType::Ref(target_table) = &col.ty {
+                if let Value::Ref(target_id) = &row_values[i] {
+                    // Check target row exists
+                    if !self.row_table.contains_key(target_id) {
+                        return Err(DatabaseError::InvalidReference {
+                            column: col.name.clone(),
+                            target_table: target_table.clone(),
+                            target_id: *target_id,
+                        });
+                    }
+                    // Also verify target row is in the correct table
+                    if self.row_table.get(target_id) != Some(target_table) {
+                        return Err(DatabaseError::InvalidReference {
+                            column: col.name.clone(),
+                            target_table: target_table.clone(),
+                            target_id: *target_id,
+                        });
+                    }
+                }
+                // Null refs are ok if column is nullable (already validated above)
+            }
+        }
+
         // Encode row
         let row_bytes = encode_row(&row_values, &schema)?;
 
@@ -214,6 +325,18 @@ impl Database {
 
         // Track row -> table mapping
         self.row_table.insert(row_id, table.to_string());
+
+        // Update indexes for Ref columns
+        for (i, col) in schema.columns.iter().enumerate() {
+            if matches!(col.ty, ColumnType::Ref(_)) {
+                if let Value::Ref(target_id) = &row_values[i] {
+                    let key = IndexKey::new(table, &col.name);
+                    if let Some(index) = self.indexes.get_mut(&key) {
+                        index.add(*target_id, row_id);
+                    }
+                }
+            }
+        }
 
         Ok(row_id)
     }
@@ -268,32 +391,103 @@ impl Database {
         };
 
         // Decode current values
-        let mut values = decode_row(&data, &schema)?;
+        let old_values = decode_row(&data, &schema)?;
+        let mut new_values = old_values.clone();
 
         // Apply assignments
         for (col_name, value) in assignments {
             let idx = schema.column_index(col_name)
                 .ok_or_else(|| DatabaseError::ColumnNotFound(col_name.to_string()))?;
-            values[idx] = value.clone();
+            new_values[idx] = value.clone();
+        }
+
+        // Validate new references
+        for (i, col) in schema.columns.iter().enumerate() {
+            if let ColumnType::Ref(target_table) = &col.ty {
+                if let Value::Ref(target_id) = &new_values[i] {
+                    if !self.row_table.contains_key(target_id) {
+                        return Err(DatabaseError::InvalidReference {
+                            column: col.name.clone(),
+                            target_table: target_table.clone(),
+                            target_id: *target_id,
+                        });
+                    }
+                    if self.row_table.get(target_id) != Some(target_table) {
+                        return Err(DatabaseError::InvalidReference {
+                            column: col.name.clone(),
+                            target_table: target_table.clone(),
+                            target_id: *target_id,
+                        });
+                    }
+                }
+            }
         }
 
         // Re-encode row
-        let row_bytes = encode_row(&values, &schema)?;
+        let row_bytes = encode_row(&new_values, &schema)?;
 
         // Write updated row
         self.node
             .write_sync(id, "main", &row_bytes, "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
+        // Update indexes for changed Ref columns
+        for (i, col) in schema.columns.iter().enumerate() {
+            if matches!(col.ty, ColumnType::Ref(_)) {
+                let old_ref = old_values[i].as_ref();
+                let new_ref = new_values[i].as_ref();
+
+                if old_ref != new_ref {
+                    let key = IndexKey::new(table, &col.name);
+                    if let Some(index) = self.indexes.get_mut(&key) {
+                        // Remove old reference
+                        if let Some(old_target) = old_ref {
+                            index.remove(old_target, id);
+                        }
+                        // Add new reference
+                        if let Some(new_target) = new_ref {
+                            index.add(new_target, id);
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(true)
     }
 
     /// Delete a row by ID (tombstone).
     pub fn delete(&mut self, table: &str, id: ObjectId) -> Result<bool, DatabaseError> {
+        let schema = self.get_table(table)
+            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?
+            .clone();
+
         // Check row exists and belongs to table
         match self.row_table.get(&id) {
             Some(t) if t == table => {}
             _ => return Ok(false),
+        }
+
+        // Read current row data to get ref values for index cleanup
+        let data = match self.node.read_sync(id, "main") {
+            Ok(Some(data)) if !data.is_empty() => Some(data),
+            _ => None,
+        };
+
+        // Remove from indexes
+        if let Some(data) = data {
+            if let Ok(values) = decode_row(&data, &schema) {
+                for (i, col) in schema.columns.iter().enumerate() {
+                    if matches!(col.ty, ColumnType::Ref(_)) {
+                        if let Value::Ref(target_id) = &values[i] {
+                            let key = IndexKey::new(table, &col.name);
+                            if let Some(index) = self.indexes.get_mut(&key) {
+                                index.remove(*target_id, id);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Write tombstone marker (empty content)
@@ -382,6 +576,42 @@ impl Database {
                     }
                 }
                 Err(_) => continue,
+            }
+        }
+
+        Ok(rows)
+    }
+
+    /// Find all rows referencing a target ID via a specific column.
+    /// Uses the reverse index for O(1) lookup.
+    pub fn find_referencing(
+        &self,
+        source_table: &str,
+        source_column: &str,
+        target_id: ObjectId,
+    ) -> Result<Vec<Row>, DatabaseError> {
+        let schema = self.get_table(source_table)
+            .ok_or_else(|| DatabaseError::TableNotFound(source_table.to_string()))?;
+
+        // Verify column is a Ref type
+        let col = schema.column(source_column)
+            .ok_or_else(|| DatabaseError::ColumnNotFound(source_column.to_string()))?;
+        if !matches!(col.ty, ColumnType::Ref(_)) {
+            return Err(DatabaseError::NotAReference(source_column.to_string()));
+        }
+
+        // Look up in index
+        let key = IndexKey::new(source_table, source_column);
+        let source_ids: Vec<ObjectId> = match self.indexes.get(&key) {
+            Some(index) => index.get(target_id).collect(),
+            None => return Ok(vec![]), // No index means no refs
+        };
+
+        // Fetch the actual rows
+        let mut rows = Vec::new();
+        for row_id in source_ids {
+            if let Some(row) = self.get(source_table, row_id)? {
+                rows.push(row);
             }
         }
 
@@ -722,5 +952,231 @@ mod tests {
 
         let row = db.get("users", id).unwrap().unwrap();
         assert_eq!(row.values[1], Value::I64(31));
+    }
+
+    // ========== Step 2: References and Indexes ==========
+
+    #[test]
+    fn create_table_with_ref_requires_target_table() {
+        let mut db = Database::in_memory();
+
+        // Cannot create posts table before users table exists
+        let result = db.create_table(TableSchema::new(
+            "posts",
+            vec![
+                ColumnDef::required("author", ColumnType::Ref("users".into())),
+                ColumnDef::required("title", ColumnType::String),
+            ],
+        ));
+        assert!(matches!(result, Err(DatabaseError::TableNotFound(_))));
+
+        // Create users first
+        db.create_table(TableSchema::new(
+            "users",
+            vec![ColumnDef::required("name", ColumnType::String)],
+        )).unwrap();
+
+        // Now posts works
+        db.create_table(TableSchema::new(
+            "posts",
+            vec![
+                ColumnDef::required("author", ColumnType::Ref("users".into())),
+                ColumnDef::required("title", ColumnType::String),
+            ],
+        )).unwrap();
+    }
+
+    #[test]
+    fn insert_validates_ref() {
+        let mut db = Database::in_memory();
+
+        db.create_table(TableSchema::new(
+            "users",
+            vec![ColumnDef::required("name", ColumnType::String)],
+        )).unwrap();
+
+        db.create_table(TableSchema::new(
+            "posts",
+            vec![
+                ColumnDef::required("author", ColumnType::Ref("users".into())),
+                ColumnDef::required("title", ColumnType::String),
+            ],
+        )).unwrap();
+
+        // Insert with non-existent user fails
+        let result = db.insert("posts", &["author", "title"], vec![
+            Value::Ref(0x12345),  // fake user ID
+            Value::String("Hello".into()),
+        ]);
+        assert!(matches!(result, Err(DatabaseError::InvalidReference { .. })));
+
+        // Create a user
+        let user_id = db.insert("users", &["name"], vec![Value::String("Alice".into())]).unwrap();
+
+        // Now insert post with valid ref works
+        let post_id = db.insert("posts", &["author", "title"], vec![
+            Value::Ref(user_id),
+            Value::String("Hello".into()),
+        ]).unwrap();
+
+        let post = db.get("posts", post_id).unwrap().unwrap();
+        assert_eq!(post.values[0], Value::Ref(user_id));
+    }
+
+    #[test]
+    fn find_referencing_uses_index() {
+        let mut db = Database::in_memory();
+
+        db.create_table(TableSchema::new(
+            "users",
+            vec![ColumnDef::required("name", ColumnType::String)],
+        )).unwrap();
+
+        db.create_table(TableSchema::new(
+            "posts",
+            vec![
+                ColumnDef::required("author", ColumnType::Ref("users".into())),
+                ColumnDef::required("title", ColumnType::String),
+            ],
+        )).unwrap();
+
+        // Create users
+        let alice_id = db.insert("users", &["name"], vec![Value::String("Alice".into())]).unwrap();
+        let bob_id = db.insert("users", &["name"], vec![Value::String("Bob".into())]).unwrap();
+
+        // Create posts
+        db.insert("posts", &["author", "title"], vec![Value::Ref(alice_id), Value::String("Post 1".into())]).unwrap();
+        db.insert("posts", &["author", "title"], vec![Value::Ref(alice_id), Value::String("Post 2".into())]).unwrap();
+        db.insert("posts", &["author", "title"], vec![Value::Ref(bob_id), Value::String("Post 3".into())]).unwrap();
+
+        // Find Alice's posts
+        let alice_posts = db.find_referencing("posts", "author", alice_id).unwrap();
+        assert_eq!(alice_posts.len(), 2);
+
+        // Find Bob's posts
+        let bob_posts = db.find_referencing("posts", "author", bob_id).unwrap();
+        assert_eq!(bob_posts.len(), 1);
+        assert_eq!(bob_posts[0].values[1], Value::String("Post 3".into()));
+
+        // Non-existent user has no posts
+        let nobody_posts = db.find_referencing("posts", "author", 0x99999).unwrap();
+        assert!(nobody_posts.is_empty());
+    }
+
+    #[test]
+    fn update_maintains_index() {
+        let mut db = Database::in_memory();
+
+        db.create_table(TableSchema::new(
+            "users",
+            vec![ColumnDef::required("name", ColumnType::String)],
+        )).unwrap();
+
+        db.create_table(TableSchema::new(
+            "posts",
+            vec![
+                ColumnDef::required("author", ColumnType::Ref("users".into())),
+                ColumnDef::required("title", ColumnType::String),
+            ],
+        )).unwrap();
+
+        let alice_id = db.insert("users", &["name"], vec![Value::String("Alice".into())]).unwrap();
+        let bob_id = db.insert("users", &["name"], vec![Value::String("Bob".into())]).unwrap();
+
+        let post_id = db.insert("posts", &["author", "title"], vec![
+            Value::Ref(alice_id),
+            Value::String("A Post".into()),
+        ]).unwrap();
+
+        // Initially Alice has the post
+        assert_eq!(db.find_referencing("posts", "author", alice_id).unwrap().len(), 1);
+        assert_eq!(db.find_referencing("posts", "author", bob_id).unwrap().len(), 0);
+
+        // Reassign post to Bob
+        db.update("posts", post_id, &[("author", Value::Ref(bob_id))]).unwrap();
+
+        // Now Bob has the post, Alice doesn't
+        assert_eq!(db.find_referencing("posts", "author", alice_id).unwrap().len(), 0);
+        assert_eq!(db.find_referencing("posts", "author", bob_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn delete_maintains_index() {
+        let mut db = Database::in_memory();
+
+        db.create_table(TableSchema::new(
+            "users",
+            vec![ColumnDef::required("name", ColumnType::String)],
+        )).unwrap();
+
+        db.create_table(TableSchema::new(
+            "posts",
+            vec![
+                ColumnDef::required("author", ColumnType::Ref("users".into())),
+                ColumnDef::required("title", ColumnType::String),
+            ],
+        )).unwrap();
+
+        let alice_id = db.insert("users", &["name"], vec![Value::String("Alice".into())]).unwrap();
+        let post_id = db.insert("posts", &["author", "title"], vec![
+            Value::Ref(alice_id),
+            Value::String("A Post".into()),
+        ]).unwrap();
+
+        assert_eq!(db.find_referencing("posts", "author", alice_id).unwrap().len(), 1);
+
+        // Delete the post
+        db.delete("posts", post_id).unwrap();
+
+        // Index should be updated
+        assert_eq!(db.find_referencing("posts", "author", alice_id).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn find_referencing_on_non_ref_column_fails() {
+        let mut db = Database::in_memory();
+
+        db.create_table(TableSchema::new(
+            "users",
+            vec![ColumnDef::required("name", ColumnType::String)],
+        )).unwrap();
+
+        let result = db.find_referencing("users", "name", 123);
+        assert!(matches!(result, Err(DatabaseError::NotAReference(_))));
+    }
+
+    #[test]
+    fn nullable_ref_column() {
+        let mut db = Database::in_memory();
+
+        db.create_table(TableSchema::new(
+            "users",
+            vec![ColumnDef::required("name", ColumnType::String)],
+        )).unwrap();
+
+        db.create_table(TableSchema::new(
+            "posts",
+            vec![
+                ColumnDef::optional("author", ColumnType::Ref("users".into())),
+                ColumnDef::required("title", ColumnType::String),
+            ],
+        )).unwrap();
+
+        // Insert post with no author
+        let post_id = db.insert("posts", &["title"], vec![Value::String("Anonymous".into())]).unwrap();
+        let post = db.get("posts", post_id).unwrap().unwrap();
+        assert_eq!(post.values[0], Value::Null);
+
+        // Insert post with author
+        let user_id = db.insert("users", &["name"], vec![Value::String("Alice".into())]).unwrap();
+        let post2_id = db.insert("posts", &["author", "title"], vec![
+            Value::Ref(user_id),
+            Value::String("By Alice".into()),
+        ]).unwrap();
+
+        // Only the authored post shows in index
+        let posts = db.find_referencing("posts", "author", user_id).unwrap();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].id, post2_id);
     }
 }
