@@ -27,23 +27,16 @@ describe("JazzClerkAuth", () => {
 
   describe("onClerkUserChange", () => {
     it("should do nothing if no clerk user", async () => {
-      const mockClerk = {
-        user: null,
-      } as MinimalClerkClient;
-
-      await auth.onClerkUserChange(mockClerk);
+      await auth.onClerkUserChange(null);
       expect(mockAuthenticate).not.toHaveBeenCalled();
     });
 
     it("should throw if not authenticated locally", async () => {
-      const mockClerk = {
-        user: {
-          unsafeMetadata: {},
-        },
-        signOut: vi.fn(),
-      } as unknown as MinimalClerkClient;
+      const user = {
+        unsafeMetadata: {},
+      } as NonNullable<MinimalClerkClient["user"]>;
 
-      await expect(auth.onClerkUserChange(mockClerk)).rejects.toThrow();
+      await expect(auth.onClerkUserChange(user)).rejects.toThrow();
       expect(mockAuthenticate).not.toHaveBeenCalled();
     });
 
@@ -65,7 +58,7 @@ describe("JazzClerkAuth", () => {
         signOut: vi.fn(),
       } as unknown as MinimalClerkClient;
 
-      await auth.onClerkUserChange(mockClerk);
+      await auth.onClerkUserChange(mockClerk.user);
 
       expect(mockClerk.user?.update).toHaveBeenCalledWith({
         unsafeMetadata: {
@@ -106,11 +99,11 @@ describe("JazzClerkAuth", () => {
             jazzAccountSecret: "secret123",
             jazzAccountSeed: [1, 2, 3],
           },
+          update: vi.fn(),
         },
-        signOut: vi.fn(),
       } as unknown as MinimalClerkClient;
 
-      await auth.onClerkUserChange(mockClerk);
+      await auth.onClerkUserChange(mockClerk.user);
 
       expect(mockAuthenticate).toHaveBeenCalledWith({
         accountID: "test123",
@@ -137,13 +130,12 @@ describe("JazzClerkAuth", () => {
             jazzAccountSecret: "secret123",
             jazzAccountSeed: [1, 2, 3],
           },
+          update: vi.fn(),
         },
-        signOut: vi.fn(),
       } as unknown as MinimalClerkClient;
 
-      await auth.onClerkUserChange(mockClerk);
-
-      await auth.onClerkUserChange({ user: null });
+      await auth.onClerkUserChange(mockClerk.user);
+      await auth.onClerkUserChange(null);
 
       expect(authSecretStorage.isAuthenticated).toBe(false);
       expect(mockLogOut).toHaveBeenCalled();
@@ -211,6 +203,7 @@ describe("JazzClerkAuth", () => {
           jazzAccountSecret: "secret123",
           jazzAccountSeed: [1, 2, 3],
         },
+        update: vi.fn(),
       });
 
       expect(onClerkUserChangeSpy).toHaveBeenCalledTimes(2);
@@ -251,6 +244,7 @@ describe("JazzClerkAuth", () => {
           jazzAccountSecret: "secret123",
           jazzAccountSeed: [1, 2, 3],
         },
+        update: vi.fn(),
       });
 
       triggerUserChange({
@@ -259,6 +253,7 @@ describe("JazzClerkAuth", () => {
           jazzAccountSecret: "secret123",
           jazzAccountSeed: [1, 2, 3],
         },
+        update: vi.fn(),
       });
 
       expect(onClerkUserChangeSpy).toHaveBeenCalledTimes(1);
@@ -308,7 +303,10 @@ describe("JazzClerkAuth", () => {
 
       // 3. Trigger event with new Clerk user (no Jazz credentials yet)
       const mockUserUpdate = vi.fn((data) => {
-        triggerUserChange(data);
+        triggerUserChange({
+          ...data,
+          update: mockUserUpdate,
+        });
       });
 
       const signInSpy = vi.spyOn(auth, "signIn");

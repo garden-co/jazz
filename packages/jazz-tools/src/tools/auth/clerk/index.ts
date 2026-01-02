@@ -7,6 +7,8 @@ import {
 import { getClerkUsername } from "./getClerkUsername.js";
 import {
   ClerkCredentials,
+  ClerkEventSchema,
+  ClerkUser,
   MinimalClerkClient,
   isClerkAuthStateEqual,
   isClerkCredentials,
@@ -53,32 +55,30 @@ export class JazzClerkAuth {
   }
 
   private isFirstCall = true;
-  private previousUser: Pick<
-    NonNullable<MinimalClerkClient["user"]>,
-    "unsafeMetadata"
-  > | null = null;
+  private previousUser: Pick<ClerkUser, "unsafeMetadata"> | null = null;
 
   registerListener(clerkClient: MinimalClerkClient) {
-    this.previousUser = clerkClient.user ?? null;
+    this.previousUser = ClerkEventSchema.parse(clerkClient).user ?? null;
 
     // Need to use addListener because the clerk user object is not updated when the user logs in
     return clerkClient.addListener((event) => {
-      const user = (event as Pick<MinimalClerkClient, "user">).user ?? null;
+      const user =
+        (ClerkEventSchema.parse(event).user as ClerkUser | null) ?? null;
 
       if (!isClerkAuthStateEqual(this.previousUser, user) || this.isFirstCall) {
         this.previousUser = user;
-        this.onClerkUserChange({ user });
+        this.onClerkUserChange(user);
         this.isFirstCall = false;
       }
     });
   }
 
-  onClerkUserChange = async (clerkClient: Pick<MinimalClerkClient, "user">) => {
+  onClerkUserChange = async (clerkUser: ClerkUser | null | undefined) => {
     const isAuthenticated = this.authSecretStorage.isAuthenticated;
 
     // LogOut is driven by Clerk. The framework adapters will need to pass `logOutReplacement` to the `JazzProvider`
     // to make the logOut work correctly.
-    if (!clerkClient.user) {
+    if (!clerkUser) {
       if (isAuthenticated) {
         this.authSecretStorage.clear();
         await this.logOut();
@@ -88,22 +88,15 @@ export class JazzClerkAuth {
 
     if (isAuthenticated) return;
 
-    const clerkCredentials = clerkClient.user
-      .unsafeMetadata as ClerkCredentials;
-
-    if (!clerkCredentials.jazzAccountID) {
-      await this.signIn(clerkClient);
+    if (!clerkUser.unsafeMetadata.jazzAccountID) {
+      await this.signIn(clerkUser);
     } else {
-      await this.logIn(clerkClient);
+      await this.logIn(clerkUser);
     }
   };
 
-  logIn = async (clerkClient: Pick<MinimalClerkClient, "user">) => {
-    if (!clerkClient.user) {
-      throw new Error("Not signed in on Clerk");
-    }
-
-    const clerkCredentials = clerkClient.user.unsafeMetadata;
+  logIn = async (clerkUser: ClerkUser) => {
+    const clerkCredentials = clerkUser.unsafeMetadata;
     if (!isClerkCredentials(clerkCredentials)) {
       throw new Error("No credentials found on Clerk");
     }
@@ -129,7 +122,7 @@ export class JazzClerkAuth {
     );
   };
 
-  signIn = async (clerkClient: Pick<MinimalClerkClient, "user">) => {
+  signIn = async (clerkUser: ClerkUser) => {
     const credentials = await this.authSecretStorage.get();
 
     if (!credentials) {
@@ -149,11 +142,9 @@ export class JazzClerkAuth {
     // ensures the listener sees the new credentials and does not trigger an unnecessary logIn operation
     this.previousUser = { unsafeMetadata: clerkCredentials };
 
-    if (clerkClient.user) {
-      await clerkClient.user.update({
-        unsafeMetadata: clerkCredentials,
-      });
-    }
+    await clerkUser.update({
+      unsafeMetadata: clerkCredentials,
+    });
 
     const currentAccount = await Account.getMe().$jazz.ensureLoaded({
       resolve: {
@@ -161,7 +152,7 @@ export class JazzClerkAuth {
       },
     });
 
-    const username = getClerkUsername(clerkClient);
+    const username = getClerkUsername({ user: clerkUser });
 
     if (username) {
       currentAccount.profile.$jazz.set("name", username);
