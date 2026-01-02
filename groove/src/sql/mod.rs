@@ -3,7 +3,10 @@ mod parser;
 mod row;
 mod schema;
 
-pub use database::{Database, DatabaseError, ExecuteResult, IndexKey, ObjectId, RefIndex, SchemaId};
+pub use database::{
+    Database, DatabaseError, ExecuteResult, IndexKey, ObjectId, QueryKey, QueryRegistry,
+    QuerySignal, QueryState, RefIndex, SchemaId, TableRows,
+};
 pub use parser::{
     parse, Condition, CreateTable, FromClause, Insert, Join, JoinCondition, ParseError,
     Projection, QualifiedColumn, Select, Statement, Update,
