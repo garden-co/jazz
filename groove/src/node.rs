@@ -18,9 +18,12 @@ pub fn generate_object_id() -> u128 {
 ///
 /// The node owns the Environment (storage) and SignalRegistry, providing methods
 /// for subscribing to objects and reading/writing with automatic signal notification.
+///
+/// Uses internal mutability so that objects can be created and written to
+/// without requiring exclusive access to the node.
 #[derive(Debug)]
 pub struct LocalNode {
-    objects: BTreeMap<u128, Arc<RwLock<Object>>>,
+    objects: RwLock<BTreeMap<u128, Arc<RwLock<Object>>>>,
     signals: SignalRegistry,
     env: Arc<dyn Environment>,
 }
@@ -35,7 +38,7 @@ impl LocalNode {
     /// Create a new LocalNode with the given environment.
     pub fn new(env: Arc<dyn Environment>) -> Self {
         LocalNode {
-            objects: BTreeMap::new(),
+            objects: RwLock::new(BTreeMap::new()),
             signals: SignalRegistry::new(),
             env,
         }
@@ -52,16 +55,17 @@ impl LocalNode {
     }
 
     /// Create a new object with the given prefix. Returns the object ID.
-    pub fn create_object(&mut self, prefix: impl Into<String>) -> u128 {
+    /// Uses internal mutability so it can be called with just &self.
+    pub fn create_object(&self, prefix: impl Into<String>) -> u128 {
         let id = generate_object_id();
         let object = Object::new(id, prefix);
-        self.objects.insert(id, Arc::new(RwLock::new(object)));
+        self.objects.write().unwrap().insert(id, Arc::new(RwLock::new(object)));
         id
     }
 
     /// Get an object by ID.
     pub fn get_object(&self, id: u128) -> Option<Arc<RwLock<Object>>> {
-        self.objects.get(&id).cloned()
+        self.objects.read().unwrap().get(&id).cloned()
     }
 
     /// Get a reference to the signal registry.
@@ -77,7 +81,10 @@ impl LocalNode {
     pub fn subscribe(&self, object_id: u128, branch: &str) -> Result<ObjectSignal, SignalError> {
         let obj_lock = self
             .objects
+            .read()
+            .unwrap()
             .get(&object_id)
+            .cloned()
             .ok_or(SignalError::NotFound)?;
 
         let key = SignalKey::new(object_id, branch);
@@ -111,7 +118,10 @@ impl LocalNode {
     ) -> Result<Option<Vec<u8>>, SignalError> {
         let obj_lock = self
             .objects
+            .read()
+            .unwrap()
             .get(&object_id)
+            .cloned()
             .ok_or(SignalError::NotFound)?;
 
         let obj = obj_lock.read().unwrap();
@@ -127,7 +137,10 @@ impl LocalNode {
     ) -> Result<Option<Vec<u8>>, SignalError> {
         let obj_lock = self
             .objects
+            .read()
+            .unwrap()
             .get(&object_id)
+            .cloned()
             .ok_or(SignalError::NotFound)?;
 
         let obj = obj_lock.read().unwrap();
@@ -156,7 +169,10 @@ impl LocalNode {
     ) -> Result<CommitId, SignalError> {
         let obj_lock = self
             .objects
+            .read()
+            .unwrap()
             .get(&object_id)
+            .cloned()
             .ok_or(SignalError::NotFound)?;
 
         let obj = obj_lock.read().unwrap();
@@ -180,7 +196,10 @@ impl LocalNode {
     ) -> Result<CommitId, SignalError> {
         let obj_lock = self
             .objects
+            .read()
+            .unwrap()
             .get(&object_id)
+            .cloned()
             .ok_or(SignalError::NotFound)?;
 
         let commit_id = {
@@ -210,7 +229,10 @@ impl LocalNode {
     ) -> Result<CommitId, SignalError> {
         let obj_lock = self
             .objects
+            .read()
+            .unwrap()
             .get(&object_id)
+            .cloned()
             .ok_or(SignalError::NotFound)?;
 
         let commit_id = {
@@ -233,7 +255,10 @@ impl LocalNode {
     pub fn frontier(&self, object_id: u128, branch: &str) -> Result<Option<Vec<CommitId>>, SignalError> {
         let obj_lock = self
             .objects
+            .read()
+            .unwrap()
             .get(&object_id)
+            .cloned()
             .ok_or(SignalError::NotFound)?;
 
         let obj = obj_lock.read().unwrap();
@@ -256,7 +281,7 @@ impl LocalNode {
     /// Notify all signals for an object.
     /// Use this after external changes to the object (e.g., sync from peers).
     pub fn notify_object(&self, object_id: u128) {
-        let obj_lock = match self.objects.get(&object_id) {
+        let obj_lock = match self.objects.read().unwrap().get(&object_id).cloned() {
             Some(o) => o,
             None => return,
         };
@@ -281,7 +306,7 @@ impl LocalNode {
 
     /// Load content for a commit (handles both inline and chunked).
     pub async fn load_content(&self, object_id: u128, branch: &str, commit_id: &CommitId) -> Option<Bytes> {
-        let obj_lock = self.objects.get(&object_id)?;
+        let obj_lock = self.objects.read().unwrap().get(&object_id).cloned()?;
         let obj = obj_lock.read().unwrap();
         let branch = obj.branch(branch)?;
         let commit = branch.get_commit(commit_id)?;
@@ -311,7 +336,7 @@ mod tests {
 
     #[test]
     fn local_node_create_and_get_objects() {
-        let mut node = LocalNode::in_memory();
+        let node = LocalNode::in_memory();
 
         let id1 = node.create_object("chat");
         let id2 = node.create_object("message");
@@ -341,7 +366,7 @@ mod tests {
 
     #[test]
     fn local_node_uses_uuidv7() {
-        let mut node = LocalNode::in_memory();
+        let node = LocalNode::in_memory();
 
         let id1 = node.create_object("test1");
         std::thread::sleep(std::time::Duration::from_millis(1));
@@ -356,7 +381,7 @@ mod tests {
 
     #[test]
     fn subscribe_to_empty_object() {
-        let mut node = LocalNode::in_memory();
+        let node = LocalNode::in_memory();
         let id = node.create_object("test");
 
         let signal = node.subscribe(id, "main").unwrap();
@@ -380,7 +405,7 @@ mod tests {
 
     #[test]
     fn subscribe_nonexistent_branch_errors() {
-        let mut node = LocalNode::in_memory();
+        let node = LocalNode::in_memory();
         let id = node.create_object("test");
 
         let result = node.subscribe(id, "nonexistent");
@@ -389,7 +414,7 @@ mod tests {
 
     #[test]
     fn write_sync_and_notify() {
-        let mut node = LocalNode::in_memory();
+        let node = LocalNode::in_memory();
         let id = node.create_object("test");
 
         // Subscribe before writing
@@ -433,7 +458,7 @@ mod tests {
 
     #[test]
     fn write_without_subscriber() {
-        let mut node = LocalNode::in_memory();
+        let node = LocalNode::in_memory();
         let id = node.create_object("test");
 
         // Write without subscribing - should not error
@@ -450,7 +475,7 @@ mod tests {
 
     #[test]
     fn notify_object() {
-        let mut node = LocalNode::in_memory();
+        let node = LocalNode::in_memory();
         let id = node.create_object("test");
 
         // Subscribe
@@ -479,7 +504,7 @@ mod tests {
 
     #[test]
     fn multiple_subscribers_share_signal() {
-        let mut node = LocalNode::in_memory();
+        let node = LocalNode::in_memory();
         let id = node.create_object("test");
 
         let signal1 = node.subscribe(id, "main").unwrap();
@@ -498,7 +523,7 @@ mod tests {
 
     #[test]
     fn read_write_roundtrip() {
-        let mut node = LocalNode::in_memory();
+        let node = LocalNode::in_memory();
         let id = node.create_object("test");
 
         // Write through node

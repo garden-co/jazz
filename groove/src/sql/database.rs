@@ -199,6 +199,7 @@ impl QueryState {
 }
 
 /// Internal data for a query signal.
+/// Holds a reference to the database state for auto-evaluation.
 struct QuerySignalData {
     /// Current query state.
     state: Mutable<QueryState>,
@@ -212,6 +213,11 @@ struct QuerySignalData {
     row_signals: RwLock<Vec<ObjectSignal>>,
     /// Signals for index objects relevant to the query.
     index_signals: RwLock<Vec<ObjectSignal>>,
+    /// Reference to database state for re-evaluation.
+    db_state: Arc<DatabaseState>,
+    /// Version counter - incremented when we re-evaluate.
+    /// Used to detect when underlying signals have changed.
+    version: Mutable<u64>,
 }
 
 impl std::fmt::Debug for QuerySignalData {
@@ -321,6 +327,7 @@ impl QueryRegistry {
         key: QueryKey,
         select: Select,
         table_rows_signal: Option<ObjectSignal>,
+        db_state: Arc<DatabaseState>,
     ) -> QuerySignal {
         // Try to get existing
         {
@@ -350,10 +357,20 @@ impl QueryRegistry {
                 table_rows_signal,
                 row_signals: RwLock::new(Vec::new()),
                 index_signals: RwLock::new(Vec::new()),
+                db_state,
+                version: Mutable::new(0),
             });
             signals.insert(key, Arc::downgrade(&data));
             QuerySignal { data }
         }
+    }
+
+    /// Get an existing query signal by key, if it's still active.
+    fn get_signal(&self, key: &QueryKey) -> Option<QuerySignal> {
+        let signals = self.signals.read().unwrap();
+        signals.get(key)
+            .and_then(|weak| weak.upgrade())
+            .map(|data| QuerySignal { data })
     }
 
     /// Update a query signal with new results and track row signals.
@@ -417,6 +434,58 @@ impl QueryRegistry {
     pub fn active_count(&self) -> usize {
         let signals = self.signals.read().unwrap();
         signals.values().filter(|w| w.strong_count() > 0).count()
+    }
+}
+
+/// Shared database state that can be held by queries for re-evaluation.
+/// This is the core data that queries need access to.
+pub struct DatabaseState {
+    node: LocalNode,
+    /// Map from table name to schema object ID.
+    tables: RwLock<HashMap<String, SchemaId>>,
+    /// Cached schemas by ID.
+    schemas: RwLock<HashMap<SchemaId, TableSchema>>,
+    /// Map from table name to table rows object ID.
+    table_rows_objects: RwLock<HashMap<String, ObjectId>>,
+    /// Map from row object ID to its table name.
+    row_table: RwLock<HashMap<ObjectId, String>>,
+    /// Reference index objects: (source_table, source_column) -> object ID.
+    index_objects: RwLock<HashMap<IndexKey, ObjectId>>,
+    /// Registry for reactive query signals.
+    queries: QueryRegistry,
+}
+
+impl std::fmt::Debug for DatabaseState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DatabaseState")
+            .field("tables", &self.tables.read().unwrap().keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl DatabaseState {
+    fn new(env: Arc<dyn Environment>) -> Self {
+        DatabaseState {
+            node: LocalNode::new(env),
+            tables: RwLock::new(HashMap::new()),
+            schemas: RwLock::new(HashMap::new()),
+            table_rows_objects: RwLock::new(HashMap::new()),
+            row_table: RwLock::new(HashMap::new()),
+            index_objects: RwLock::new(HashMap::new()),
+            queries: QueryRegistry::new(),
+        }
+    }
+
+    fn in_memory() -> Self {
+        DatabaseState {
+            node: LocalNode::in_memory(),
+            tables: RwLock::new(HashMap::new()),
+            schemas: RwLock::new(HashMap::new()),
+            table_rows_objects: RwLock::new(HashMap::new()),
+            row_table: RwLock::new(HashMap::new()),
+            index_objects: RwLock::new(HashMap::new()),
+            queries: QueryRegistry::new(),
+        }
     }
 }
 
@@ -497,22 +566,12 @@ impl TableRows {
 }
 
 /// Database providing SQL operations on top of LocalNode.
+///
+/// The Database uses shared state internally so that reactive queries
+/// can hold references to the same data and auto-update when changes occur.
 pub struct Database {
-    node: LocalNode,
-    /// Map from table name to schema object ID.
-    tables: HashMap<String, SchemaId>,
-    /// Cached schemas by ID.
-    schemas: HashMap<SchemaId, TableSchema>,
-    /// Map from table name to table rows object ID.
-    /// The object stores which row IDs belong to the table.
-    table_rows_objects: HashMap<String, ObjectId>,
-    /// Map from row object ID to its table name (for quick lookup).
-    row_table: HashMap<ObjectId, String>,
-    /// Reference indexes: (source_table, source_column) -> index object ID.
-    /// The actual RefIndex is stored in the object's content.
-    index_objects: HashMap<IndexKey, ObjectId>,
-    /// Registry for reactive query signals.
-    queries: QueryRegistry,
+    /// Shared database state.
+    state: Arc<DatabaseState>,
 }
 
 /// Result of executing a SQL statement.
@@ -612,47 +671,31 @@ impl Database {
     /// Create a new database with the given environment.
     pub fn new(env: Arc<dyn Environment>) -> Self {
         Database {
-            node: LocalNode::new(env),
-            tables: HashMap::new(),
-            schemas: HashMap::new(),
-            table_rows_objects: HashMap::new(),
-            row_table: HashMap::new(),
-            index_objects: HashMap::new(),
-            queries: QueryRegistry::new(),
+            state: Arc::new(DatabaseState::new(env)),
         }
     }
 
     /// Create a new in-memory database (for testing).
     pub fn in_memory() -> Self {
         Database {
-            node: LocalNode::in_memory(),
-            tables: HashMap::new(),
-            schemas: HashMap::new(),
-            table_rows_objects: HashMap::new(),
-            row_table: HashMap::new(),
-            index_objects: HashMap::new(),
-            queries: QueryRegistry::new(),
+            state: Arc::new(DatabaseState::in_memory()),
         }
     }
 
     /// Get the underlying LocalNode.
     pub fn node(&self) -> &LocalNode {
-        &self.node
-    }
-
-    /// Get mutable reference to underlying LocalNode.
-    pub fn node_mut(&mut self) -> &mut LocalNode {
-        &mut self.node
+        &self.state.node
     }
 
     // ========== Index Object Helpers ==========
 
     /// Read an index from its object.
     fn read_index(&self, key: &IndexKey) -> Result<RefIndex, DatabaseError> {
-        let index_id = self.index_objects.get(key)
+        let index_objects = self.state.index_objects.read().unwrap();
+        let index_id = index_objects.get(key)
             .ok_or_else(|| DatabaseError::ColumnNotFound(key.source_column.clone()))?;
 
-        let data = self.node.read_sync(*index_id, "main")
+        let data = self.state.node.read_sync(*index_id, "main")
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
             .unwrap_or_default();
 
@@ -666,10 +709,11 @@ impl Database {
 
     /// Write an index to its object.
     fn write_index(&self, key: &IndexKey, index: &RefIndex) -> Result<(), DatabaseError> {
-        let index_id = self.index_objects.get(key)
+        let index_objects = self.state.index_objects.read().unwrap();
+        let index_id = index_objects.get(key)
             .ok_or_else(|| DatabaseError::ColumnNotFound(key.source_column.clone()))?;
 
-        self.node
+        self.state.node
             .write_sync(*index_id, "main", &index.to_bytes(), "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
@@ -678,17 +722,18 @@ impl Database {
 
     /// Get the object ID for an index.
     pub fn index_object_id(&self, key: &IndexKey) -> Option<ObjectId> {
-        self.index_objects.get(key).copied()
+        self.state.index_objects.read().unwrap().get(key).copied()
     }
 
     // ========== Table Rows Object Helpers ==========
 
     /// Read table rows from its object.
     fn read_table_rows(&self, table: &str) -> Result<TableRows, DatabaseError> {
-        let rows_id = self.table_rows_objects.get(table)
+        let table_rows_objects = self.state.table_rows_objects.read().unwrap();
+        let rows_id = table_rows_objects.get(table)
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
-        let data = self.node.read_sync(*rows_id, "main")
+        let data = self.state.node.read_sync(*rows_id, "main")
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
             .unwrap_or_default();
 
@@ -702,10 +747,11 @@ impl Database {
 
     /// Write table rows to its object.
     fn write_table_rows(&self, table: &str, rows: &TableRows) -> Result<(), DatabaseError> {
-        let rows_id = self.table_rows_objects.get(table)
+        let table_rows_objects = self.state.table_rows_objects.read().unwrap();
+        let rows_id = table_rows_objects.get(table)
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
-        self.node
+        self.state.node
             .write_sync(*rows_id, "main", &rows.to_bytes(), "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
@@ -714,80 +760,84 @@ impl Database {
 
     /// Get the object ID for a table's row set.
     pub fn table_rows_object_id(&self, table: &str) -> Option<ObjectId> {
-        self.table_rows_objects.get(table).copied()
+        self.state.table_rows_objects.read().unwrap().get(table).copied()
     }
 
     /// Create a new table from schema.
-    pub fn create_table(&mut self, schema: TableSchema) -> Result<SchemaId, DatabaseError> {
-        if self.tables.contains_key(&schema.name) {
-            return Err(DatabaseError::TableExists(schema.name.clone()));
-        }
+    pub fn create_table(&self, schema: TableSchema) -> Result<SchemaId, DatabaseError> {
+        {
+            let tables = self.state.tables.read().unwrap();
+            if tables.contains_key(&schema.name) {
+                return Err(DatabaseError::TableExists(schema.name.clone()));
+            }
 
-        // Validate that referenced tables exist (for Ref columns)
-        for col in &schema.columns {
-            if let ColumnType::Ref(target_table) = &col.ty {
-                if !self.tables.contains_key(target_table) {
-                    return Err(DatabaseError::TableNotFound(target_table.clone()));
+            // Validate that referenced tables exist (for Ref columns)
+            for col in &schema.columns {
+                if let ColumnType::Ref(target_table) = &col.ty {
+                    if !tables.contains_key(target_table) {
+                        return Err(DatabaseError::TableNotFound(target_table.clone()));
+                    }
                 }
             }
         }
 
-        // Create object for schema
-        let schema_id = self.node.create_object(&format!("schema:{}", schema.name));
+        // Create object for schema (uses internal mutability)
+        let schema_id = self.state.node.create_object(&format!("schema:{}", schema.name));
 
         // Serialize and store schema
         let schema_bytes = schema.to_bytes();
-        self.node
+        self.state.node
             .write_sync(schema_id, "main", &schema_bytes, "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         // Create table rows object to track row membership
-        let rows_id = self.node.create_object(&format!("rows:{}", schema.name));
+        let rows_id = self.state.node.create_object(&format!("rows:{}", schema.name));
         let empty_rows = TableRows::new();
-        self.node
+        self.state.node
             .write_sync(rows_id, "main", &empty_rows.to_bytes(), "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
-        self.table_rows_objects.insert(schema.name.clone(), rows_id);
+        self.state.table_rows_objects.write().unwrap().insert(schema.name.clone(), rows_id);
 
         // Create index objects for Ref columns
         for col in &schema.columns {
             if matches!(col.ty, ColumnType::Ref(_)) {
                 let key = IndexKey::new(&schema.name, &col.name);
-                let index_id = self.node.create_object(&format!("index:{}:{}", schema.name, col.name));
+                let index_id = self.state.node.create_object(&format!("index:{}:{}", schema.name, col.name));
 
                 // Initialize with empty index
                 let empty_index = RefIndex::new();
-                self.node
+                self.state.node
                     .write_sync(index_id, "main", &empty_index.to_bytes(), "system", timestamp_now())
                     .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
-                self.index_objects.insert(key, index_id);
+                self.state.index_objects.write().unwrap().insert(key, index_id);
             }
         }
 
         // Cache schema
-        self.tables.insert(schema.name.clone(), schema_id);
-        self.schemas.insert(schema_id, schema);
+        self.state.tables.write().unwrap().insert(schema.name.clone(), schema_id);
+        self.state.schemas.write().unwrap().insert(schema_id, schema);
 
         Ok(schema_id)
     }
 
     /// Get table schema by name.
-    pub fn get_table(&self, name: &str) -> Option<&TableSchema> {
-        let schema_id = self.tables.get(name)?;
-        self.schemas.get(schema_id)
+    pub fn get_table(&self, name: &str) -> Option<TableSchema> {
+        let tables = self.state.tables.read().unwrap();
+        let schema_id = tables.get(name)?;
+        let schemas = self.state.schemas.read().unwrap();
+        schemas.get(schema_id).cloned()
     }
 
     /// List all table names.
-    pub fn list_tables(&self) -> Vec<&str> {
-        self.tables.keys().map(|s| s.as_str()).collect()
+    pub fn list_tables(&self) -> Vec<String> {
+        self.state.tables.read().unwrap().keys().cloned().collect()
     }
 
     /// Insert a new row into a table.
-    pub fn insert(&mut self, table: &str, columns: &[&str], values: Vec<Value>) -> Result<ObjectId, DatabaseError> {
+    pub fn insert(&self, table: &str, columns: &[&str], values: Vec<Value>) -> Result<ObjectId, DatabaseError> {
         let schema = self.get_table(table)
-            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?
-            .clone();
+            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
         // Build full row values in schema order
         let mut row_values = vec![Value::Null; schema.columns.len()];
@@ -813,27 +863,30 @@ impl Database {
         }
 
         // Validate references: check that referenced rows exist
-        for (i, col) in schema.columns.iter().enumerate() {
-            if let ColumnType::Ref(target_table) = &col.ty {
-                if let Value::Ref(target_id) = &row_values[i] {
-                    // Check target row exists
-                    if !self.row_table.contains_key(target_id) {
-                        return Err(DatabaseError::InvalidReference {
-                            column: col.name.clone(),
-                            target_table: target_table.clone(),
-                            target_id: *target_id,
-                        });
+        {
+            let row_table = self.state.row_table.read().unwrap();
+            for (i, col) in schema.columns.iter().enumerate() {
+                if let ColumnType::Ref(target_table) = &col.ty {
+                    if let Value::Ref(target_id) = &row_values[i] {
+                        // Check target row exists
+                        if !row_table.contains_key(target_id) {
+                            return Err(DatabaseError::InvalidReference {
+                                column: col.name.clone(),
+                                target_table: target_table.clone(),
+                                target_id: *target_id,
+                            });
+                        }
+                        // Also verify target row is in the correct table
+                        if row_table.get(target_id) != Some(target_table) {
+                            return Err(DatabaseError::InvalidReference {
+                                column: col.name.clone(),
+                                target_table: target_table.clone(),
+                                target_id: *target_id,
+                            });
+                        }
                     }
-                    // Also verify target row is in the correct table
-                    if self.row_table.get(target_id) != Some(target_table) {
-                        return Err(DatabaseError::InvalidReference {
-                            column: col.name.clone(),
-                            target_table: target_table.clone(),
-                            target_id: *target_id,
-                        });
-                    }
+                    // Null refs are ok if column is nullable (already validated above)
                 }
-                // Null refs are ok if column is nullable (already validated above)
             }
         }
 
@@ -841,15 +894,15 @@ impl Database {
         let row_bytes = encode_row(&row_values, &schema)?;
 
         // Create object for row
-        let row_id = self.node.create_object(&format!("row:{}:{:032x}", table, generate_object_id()));
+        let row_id = self.state.node.create_object(&format!("row:{}:{:032x}", table, generate_object_id()));
 
         // Store row data
-        self.node
+        self.state.node
             .write_sync(row_id, "main", &row_bytes, "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         // Track row -> table mapping
-        self.row_table.insert(row_id, table.to_string());
+        self.state.row_table.write().unwrap().insert(row_id, table.to_string());
 
         // Add to table rows object (for reactive queries)
         let mut table_rows = self.read_table_rows(table)?;
@@ -861,7 +914,7 @@ impl Database {
             if matches!(col.ty, ColumnType::Ref(_)) {
                 if let Value::Ref(target_id) = &row_values[i] {
                     let key = IndexKey::new(table, &col.name);
-                    if self.index_objects.contains_key(&key) {
+                    if self.state.index_objects.read().unwrap().contains_key(&key) {
                         let mut index = self.read_index(&key)?;
                         index.add(*target_id, row_id);
                         self.write_index(&key, &index)?;
@@ -869,6 +922,9 @@ impl Database {
                 }
             }
         }
+
+        // Re-evaluate affected queries synchronously
+        self.refresh_table_queries(table);
 
         Ok(row_id)
     }
@@ -879,44 +935,49 @@ impl Database {
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
         // Check if row belongs to this table
-        match self.row_table.get(&id) {
-            Some(t) if t == table => {}
-            Some(_) => return Ok(None), // Row exists but in different table
-            None => return Ok(None),    // Row doesn't exist
+        {
+            let row_table = self.state.row_table.read().unwrap();
+            match row_table.get(&id) {
+                Some(t) if t == table => {}
+                Some(_) => return Ok(None), // Row exists but in different table
+                None => return Ok(None),    // Row doesn't exist
+            }
         }
 
         // Read row data
-        let data = match self.node.read_sync(id, "main") {
+        let data = match self.state.node.read_sync(id, "main") {
             Ok(Some(data)) => data,
             Ok(None) => return Ok(None),
             Err(e) => return Err(DatabaseError::Storage(format!("{:?}", e))),
         };
 
         // Decode row
-        let values = decode_row(&data, schema)?;
+        let values = decode_row(&data, &schema)?;
 
         Ok(Some(Row::new(id, values)))
     }
 
     /// Update a row by ID.
     pub fn update(
-        &mut self,
+        &self,
         table: &str,
         id: ObjectId,
         assignments: &[(&str, Value)],
     ) -> Result<bool, DatabaseError> {
         let schema = self.get_table(table)
-            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?
-            .clone();
+            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
         // Check row exists and belongs to table
-        match self.row_table.get(&id) {
-            Some(t) if t == table => {}
-            _ => return Ok(false),
+        {
+            let row_table = self.state.row_table.read().unwrap();
+            match row_table.get(&id) {
+                Some(t) if t == table => {}
+                _ => return Ok(false),
+            }
         }
 
         // Read current row data
-        let data = match self.node.read_sync(id, "main") {
+        let data = match self.state.node.read_sync(id, "main") {
             Ok(Some(data)) => data,
             Ok(None) => return Ok(false),
             Err(e) => return Err(DatabaseError::Storage(format!("{:?}", e))),
@@ -934,22 +995,25 @@ impl Database {
         }
 
         // Validate new references
-        for (i, col) in schema.columns.iter().enumerate() {
-            if let ColumnType::Ref(target_table) = &col.ty {
-                if let Value::Ref(target_id) = &new_values[i] {
-                    if !self.row_table.contains_key(target_id) {
-                        return Err(DatabaseError::InvalidReference {
-                            column: col.name.clone(),
-                            target_table: target_table.clone(),
-                            target_id: *target_id,
-                        });
-                    }
-                    if self.row_table.get(target_id) != Some(target_table) {
-                        return Err(DatabaseError::InvalidReference {
-                            column: col.name.clone(),
-                            target_table: target_table.clone(),
-                            target_id: *target_id,
-                        });
+        {
+            let row_table = self.state.row_table.read().unwrap();
+            for (i, col) in schema.columns.iter().enumerate() {
+                if let ColumnType::Ref(target_table) = &col.ty {
+                    if let Value::Ref(target_id) = &new_values[i] {
+                        if !row_table.contains_key(target_id) {
+                            return Err(DatabaseError::InvalidReference {
+                                column: col.name.clone(),
+                                target_table: target_table.clone(),
+                                target_id: *target_id,
+                            });
+                        }
+                        if row_table.get(target_id) != Some(target_table) {
+                            return Err(DatabaseError::InvalidReference {
+                                column: col.name.clone(),
+                                target_table: target_table.clone(),
+                                target_id: *target_id,
+                            });
+                        }
                     }
                 }
             }
@@ -959,7 +1023,7 @@ impl Database {
         let row_bytes = encode_row(&new_values, &schema)?;
 
         // Write updated row
-        self.node
+        self.state.node
             .write_sync(id, "main", &row_bytes, "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
@@ -971,7 +1035,7 @@ impl Database {
 
                 if old_ref != new_ref {
                     let key = IndexKey::new(table, &col.name);
-                    if self.index_objects.contains_key(&key) {
+                    if self.state.index_objects.read().unwrap().contains_key(&key) {
                         let mut index = self.read_index(&key)?;
                         // Remove old reference
                         if let Some(old_target) = old_ref {
@@ -987,23 +1051,28 @@ impl Database {
             }
         }
 
+        // Re-evaluate affected queries synchronously
+        self.refresh_table_queries(table);
+
         Ok(true)
     }
 
     /// Delete a row by ID (tombstone).
-    pub fn delete(&mut self, table: &str, id: ObjectId) -> Result<bool, DatabaseError> {
+    pub fn delete(&self, table: &str, id: ObjectId) -> Result<bool, DatabaseError> {
         let schema = self.get_table(table)
-            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?
-            .clone();
+            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
         // Check row exists and belongs to table
-        match self.row_table.get(&id) {
-            Some(t) if t == table => {}
-            _ => return Ok(false),
+        {
+            let row_table = self.state.row_table.read().unwrap();
+            match row_table.get(&id) {
+                Some(t) if t == table => {}
+                _ => return Ok(false),
+            }
         }
 
         // Read current row data to get ref values for index cleanup
-        let data = match self.node.read_sync(id, "main") {
+        let data = match self.state.node.read_sync(id, "main") {
             Ok(Some(data)) if !data.is_empty() => Some(data),
             _ => None,
         };
@@ -1015,7 +1084,7 @@ impl Database {
                     if matches!(col.ty, ColumnType::Ref(_)) {
                         if let Value::Ref(target_id) = &values[i] {
                             let key = IndexKey::new(table, &col.name);
-                            if self.index_objects.contains_key(&key) {
+                            if self.state.index_objects.read().unwrap().contains_key(&key) {
                                 let mut index = self.read_index(&key)?;
                                 index.remove(*target_id, id);
                                 self.write_index(&key, &index)?;
@@ -1027,17 +1096,20 @@ impl Database {
         }
 
         // Write tombstone marker (empty content)
-        self.node
+        self.state.node
             .write_sync(id, "main", &[], "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         // Remove from row_table (logically deleted)
-        self.row_table.remove(&id);
+        self.state.row_table.write().unwrap().remove(&id);
 
         // Remove from table rows object (for reactive queries)
         let mut table_rows = self.read_table_rows(table)?;
         table_rows.remove(id);
         self.write_table_rows(table, &table_rows)?;
+
+        // Re-evaluate affected queries synchronously
+        self.refresh_table_queries(table);
 
         Ok(true)
     }
@@ -1051,19 +1123,20 @@ impl Database {
         let mut rows = Vec::new();
 
         // Find all rows for this table
-        for (&row_id, row_table) in &self.row_table {
-            if row_table != table {
+        let row_table = self.state.row_table.read().unwrap();
+        for (&row_id, row_tbl) in row_table.iter() {
+            if row_tbl != table {
                 continue;
             }
 
             // Read row data
-            let data = match self.node.read_sync(row_id, "main") {
+            let data = match self.state.node.read_sync(row_id, "main") {
                 Ok(Some(data)) if !data.is_empty() => data,
                 _ => continue, // Skip deleted or missing rows
             };
 
             // Decode row
-            match decode_row(&data, schema) {
+            match decode_row(&data, &schema) {
                 Ok(values) => rows.push(Row::new(row_id, values)),
                 Err(_) => continue, // Skip malformed rows
             }
@@ -1100,17 +1173,18 @@ impl Database {
         let mut rows = Vec::new();
 
         // Scan all rows
-        for (&row_id, row_table) in &self.row_table {
-            if row_table != table {
+        let row_table = self.state.row_table.read().unwrap();
+        for (&row_id, row_tbl) in row_table.iter() {
+            if row_tbl != table {
                 continue;
             }
 
-            let data = match self.node.read_sync(row_id, "main") {
+            let data = match self.state.node.read_sync(row_id, "main") {
                 Ok(Some(data)) if !data.is_empty() => data,
                 _ => continue,
             };
 
-            match decode_row(&data, schema) {
+            match decode_row(&data, &schema) {
                 Ok(values) => {
                     if &values[col_idx] == value {
                         rows.push(Row::new(row_id, values));
@@ -1143,7 +1217,7 @@ impl Database {
 
         // Look up in index
         let key = IndexKey::new(source_table, source_column);
-        let source_ids: Vec<ObjectId> = if self.index_objects.contains_key(&key) {
+        let source_ids: Vec<ObjectId> = if self.state.index_objects.read().unwrap().contains_key(&key) {
             let index = self.read_index(&key)?;
             index.get(target_id).collect()
         } else {
@@ -1162,7 +1236,7 @@ impl Database {
     }
 
     /// Execute a SQL statement.
-    pub fn execute(&mut self, sql: &str) -> Result<ExecuteResult, DatabaseError> {
+    pub fn execute(&self, sql: &str) -> Result<ExecuteResult, DatabaseError> {
         let stmt = parser::parse(sql)?;
 
         match stmt {
@@ -1240,34 +1314,39 @@ impl Database {
     // ========== Reactive Queries ==========
 
     /// Subscribe to a SELECT query. Returns a signal that updates whenever
-    /// matching rows change. The signal immediately evaluates the query.
+    /// matching rows change. The signal auto-updates on local writes.
     ///
     /// The returned QuerySignal contains:
     /// - A table_rows_signal that tracks when rows are added/removed from the table
     /// - Row signals for each row in the result set
     /// - Index signals for relevant Ref column indexes
     ///
-    /// Use these signals with futures-signals combinators to build fully reactive UIs.
-    /// Call `refresh()` to re-evaluate the query when signals indicate changes.
+    /// On local writes (insert/update/delete), the query automatically re-evaluates
+    /// and updates its state synchronously.
     pub fn subscribe_select(&self, select: Select) -> Result<QuerySignal, DatabaseError> {
         // Validate table exists
         let table = &select.from.table;
-        if !self.tables.contains_key(table) {
+        if !self.state.tables.read().unwrap().contains_key(table) {
             return Err(DatabaseError::TableNotFound(table.clone()));
         }
 
         // Subscribe to table rows object
-        let table_rows_signal = if let Some(rows_id) = self.table_rows_objects.get(table) {
-            self.node.subscribe(*rows_id, "main").ok()
-        } else {
-            None
+        let table_rows_signal = {
+            let table_rows_objects = self.state.table_rows_objects.read().unwrap();
+            table_rows_objects.get(table)
+                .and_then(|rows_id| self.state.node.subscribe(*rows_id, "main").ok())
         };
 
         // Create query key for deduplication
         let key = QueryKey::new(table, &select.where_clause);
 
-        // Get or create signal
-        let signal = self.queries.get_or_create(key.clone(), select.clone(), table_rows_signal);
+        // Get or create signal (passing db_state for re-evaluation)
+        let signal = self.state.queries.get_or_create(
+            key.clone(),
+            select.clone(),
+            table_rows_signal,
+            self.state.clone(),
+        );
 
         // Evaluate query and set up row signals
         let rows = self.evaluate_select(&select)?;
@@ -1275,17 +1354,18 @@ impl Database {
         // Subscribe to each row object in the result
         let row_signals: Vec<ObjectSignal> = rows
             .iter()
-            .filter_map(|row| self.node.subscribe(row.id, "main").ok())
+            .filter_map(|row| self.state.node.subscribe(row.id, "main").ok())
             .collect();
 
         // Subscribe to index objects for the table's Ref columns
         let index_signals: Vec<ObjectSignal> = if let Some(schema) = self.get_table(table) {
+            let index_objects = self.state.index_objects.read().unwrap();
             schema.columns.iter()
                 .filter(|col| matches!(col.ty, ColumnType::Ref(_)))
                 .filter_map(|col| {
                     let key = IndexKey::new(table, &col.name);
-                    self.index_objects.get(&key)
-                        .and_then(|id| self.node.subscribe(*id, "main").ok())
+                    index_objects.get(&key)
+                        .and_then(|id| self.state.node.subscribe(*id, "main").ok())
                 })
                 .collect()
         } else {
@@ -1293,13 +1373,13 @@ impl Database {
         };
 
         // Update with results and signals
-        self.queries.update_with_signals(&key, rows, row_signals, index_signals);
+        self.state.queries.update_with_signals(&key, rows, row_signals, index_signals);
 
         Ok(signal)
     }
 
     /// Refresh a query signal by re-evaluating it.
-    /// Call this when `may_need_refresh()` returns true or periodically.
+    /// This is called automatically on local writes, but can also be called manually.
     /// Returns the new rows, or None if the query is no longer active.
     pub fn refresh_query(&self, signal: &QuerySignal) -> Result<Option<Vec<Row>>, DatabaseError> {
         let select = &signal.data.select;
@@ -1311,16 +1391,36 @@ impl Database {
         // Subscribe to new row objects
         let row_signals: Vec<ObjectSignal> = rows
             .iter()
-            .filter_map(|row| self.node.subscribe(row.id, "main").ok())
+            .filter_map(|row| self.state.node.subscribe(row.id, "main").ok())
             .collect();
 
         // Get index signals (these don't usually change)
         let index_signals = signal.index_signals();
 
         // Update the signal
-        self.queries.update_with_signals(key, rows.clone(), row_signals, index_signals);
+        self.state.queries.update_with_signals(key, rows.clone(), row_signals, index_signals);
 
         Ok(Some(rows))
+    }
+
+    /// Internal: Re-evaluate all active queries for a table.
+    /// Called synchronously after insert/update/delete operations.
+    fn refresh_table_queries(&self, table: &str) {
+        let keys = self.state.queries.keys_for_table(table);
+
+        for key in keys {
+            if let Some(signal) = self.state.queries.get_signal(&key) {
+                // Re-evaluate and update the signal
+                if let Ok(rows) = self.evaluate_select(&signal.data.select) {
+                    let row_signals: Vec<ObjectSignal> = rows
+                        .iter()
+                        .filter_map(|row| self.state.node.subscribe(row.id, "main").ok())
+                        .collect();
+                    let index_signals = signal.index_signals();
+                    self.state.queries.update_with_signals(&key, rows, row_signals, index_signals);
+                }
+            }
+        }
     }
 
     /// Execute a SQL SELECT statement reactively.
@@ -1367,7 +1467,7 @@ impl Database {
 
     /// Get the query registry (for testing/inspection).
     pub fn query_registry(&self) -> &QueryRegistry {
-        &self.queries
+        &self.state.queries
     }
 }
 
@@ -1387,7 +1487,7 @@ mod tests {
 
     #[test]
     fn create_table() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         let schema = TableSchema::new(
             "users",
@@ -1411,7 +1511,7 @@ mod tests {
 
     #[test]
     fn insert_and_get() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.create_table(TableSchema::new(
             "users",
@@ -1434,7 +1534,7 @@ mod tests {
 
     #[test]
     fn insert_with_null() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.create_table(TableSchema::new(
             "users",
@@ -1454,7 +1554,7 @@ mod tests {
 
     #[test]
     fn insert_missing_required_column() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.create_table(TableSchema::new(
             "users",
@@ -1469,7 +1569,7 @@ mod tests {
 
     #[test]
     fn update_row() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.create_table(TableSchema::new(
             "users",
@@ -1493,7 +1593,7 @@ mod tests {
 
     #[test]
     fn delete_row() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.create_table(TableSchema::new(
             "users",
@@ -1513,7 +1613,7 @@ mod tests {
 
     #[test]
     fn select_all() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.create_table(TableSchema::new(
             "users",
@@ -1533,7 +1633,7 @@ mod tests {
 
     #[test]
     fn select_where() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.create_table(TableSchema::new(
             "users",
@@ -1557,7 +1657,7 @@ mod tests {
 
     #[test]
     fn execute_create_table() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         let result = db.execute("CREATE TABLE users (name STRING NOT NULL, age I64)").unwrap();
         assert!(matches!(result, ExecuteResult::Created(_)));
@@ -1567,7 +1667,7 @@ mod tests {
 
     #[test]
     fn execute_insert() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.execute("CREATE TABLE users (name STRING NOT NULL, age I64)").unwrap();
 
@@ -1584,7 +1684,7 @@ mod tests {
 
     #[test]
     fn execute_select() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)").unwrap();
         db.execute("INSERT INTO users (name, active) VALUES ('Alice', true)").unwrap();
@@ -1610,7 +1710,7 @@ mod tests {
 
     #[test]
     fn execute_update() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.execute("CREATE TABLE users (name STRING NOT NULL, age I64)").unwrap();
         let id = match db.execute("INSERT INTO users (name, age) VALUES ('Alice', 30)").unwrap() {
@@ -1634,7 +1734,7 @@ mod tests {
 
     #[test]
     fn create_table_with_ref_requires_target_table() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         // Cannot create posts table before users table exists
         let result = db.create_table(TableSchema::new(
@@ -1664,7 +1764,7 @@ mod tests {
 
     #[test]
     fn insert_validates_ref() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.create_table(TableSchema::new(
             "users",
@@ -1701,7 +1801,7 @@ mod tests {
 
     #[test]
     fn find_referencing_uses_index() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.create_table(TableSchema::new(
             "users",
@@ -1741,7 +1841,7 @@ mod tests {
 
     #[test]
     fn update_maintains_index() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.create_table(TableSchema::new(
             "users",
@@ -1778,7 +1878,7 @@ mod tests {
 
     #[test]
     fn delete_maintains_index() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.create_table(TableSchema::new(
             "users",
@@ -1810,7 +1910,7 @@ mod tests {
 
     #[test]
     fn find_referencing_on_non_ref_column_fails() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.create_table(TableSchema::new(
             "users",
@@ -1823,7 +1923,7 @@ mod tests {
 
     #[test]
     fn nullable_ref_column() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.create_table(TableSchema::new(
             "users",
@@ -1860,7 +1960,7 @@ mod tests {
 
     #[test]
     fn subscribe_select_returns_current_rows() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)").unwrap();
         db.execute("INSERT INTO users (name, active) VALUES ('Alice', true)").unwrap();
@@ -1877,7 +1977,7 @@ mod tests {
 
     #[test]
     fn subscribe_select_with_where_clause() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)").unwrap();
         db.execute("INSERT INTO users (name, active) VALUES ('Alice', true)").unwrap();
@@ -1892,7 +1992,7 @@ mod tests {
 
     #[test]
     fn table_rows_object_created() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
 
@@ -1907,7 +2007,7 @@ mod tests {
 
     #[test]
     fn index_object_created() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
         db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)").unwrap();
@@ -1924,7 +2024,7 @@ mod tests {
 
     #[test]
     fn table_rows_updates_on_insert() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
 
@@ -1948,7 +2048,7 @@ mod tests {
 
     #[test]
     fn table_rows_updates_on_delete() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
         let id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
@@ -1980,7 +2080,7 @@ mod tests {
 
     #[test]
     fn execute_reactive_only_accepts_select() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
 
@@ -1995,7 +2095,7 @@ mod tests {
 
     #[test]
     fn reactive_query_has_table_rows_signal() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
         db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap();
@@ -2008,7 +2108,7 @@ mod tests {
 
     #[test]
     fn reactive_query_has_row_signals() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
         db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap();
@@ -2023,7 +2123,7 @@ mod tests {
 
     #[test]
     fn reactive_query_refresh_after_insert() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
         db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap();
@@ -2033,23 +2133,20 @@ mod tests {
         // Initially has 1 row
         assert_eq!(signal.rows().unwrap().len(), 1);
 
-        // Insert another row
+        // Insert another row - signal auto-updates synchronously
         db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap();
 
-        // Original signal still has 1 row (not auto-updated)
-        assert_eq!(signal.rows().unwrap().len(), 1);
+        // Signal immediately has 2 rows (auto-updated on insert)
+        assert_eq!(signal.rows().unwrap().len(), 2);
 
-        // Refresh the query
+        // Manual refresh also works and returns 2 rows
         let new_rows = db.refresh_query(&signal).unwrap().unwrap();
         assert_eq!(new_rows.len(), 2);
-
-        // Signal now has 2 rows
-        assert_eq!(signal.rows().unwrap().len(), 2);
     }
 
     #[test]
     fn reactive_query_refresh_after_update() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
         let id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
@@ -2070,7 +2167,7 @@ mod tests {
 
     #[test]
     fn reactive_query_refresh_after_delete() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
         let id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
@@ -2091,7 +2188,7 @@ mod tests {
 
     #[test]
     fn reactive_query_has_index_signals() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
         db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)").unwrap();
@@ -2115,7 +2212,7 @@ mod tests {
 
     #[test]
     fn reactive_query_may_need_refresh() {
-        let mut db = Database::in_memory();
+        let db = Database::in_memory();
 
         db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
         db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap();
