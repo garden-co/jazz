@@ -62,8 +62,14 @@ export class JazzClerkAuth {
 
     // Need to use addListener because the clerk user object is not updated when the user logs in
     return clerkClient.addListener((event) => {
-      const user =
-        (ClerkEventSchema.parse(event).user as ClerkUser | null) ?? null;
+      const parsedEvent = ClerkEventSchema.safeParse(event);
+
+      if (!parsedEvent.success) {
+        console.error("Invalid Clerk event", parsedEvent.error);
+        return;
+      }
+
+      const user = parsedEvent.data.user ?? null;
 
       if (!isClerkAuthStateEqual(this.previousUser, user) || this.isFirstCall) {
         this.previousUser = user;

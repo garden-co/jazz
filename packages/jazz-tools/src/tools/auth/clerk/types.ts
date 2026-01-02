@@ -1,24 +1,28 @@
-import { AgentSecret } from "cojson";
-import { Account, ID } from "jazz-tools";
+import { type AgentSecret } from "cojson";
 import { z } from "zod/v4";
 
+const ClerkJazzCredentialsSchema = z.object({
+  jazzAccountID: z.string(),
+  jazzAccountSecret: z.string(),
+  jazzAccountSeed: z.array(z.number()).optional(),
+});
+
 const ClerkUserSchema = z.object({
-  fullName: z.string().nullable().optional(),
-  username: z.string().nullable().optional(),
-  firstName: z.string().nullable().optional(),
-  lastName: z.string().nullable().optional(),
+  fullName: z.string().nullish(),
+  username: z.string().nullish(),
+  firstName: z.string().nullish(),
+  lastName: z.string().nullish(),
   id: z.string().optional(),
   primaryEmailAddress: z
     .object({
       emailAddress: z.string().nullable(),
     })
-    .nullable()
-    .optional(),
-  unsafeMetadata: z.record(z.string(), z.any()),
+    .nullish(),
+  unsafeMetadata: ClerkJazzCredentialsSchema.partial(),
   update: z.function({
     input: [
       z.object({
-        unsafeMetadata: z.record(z.string(), z.any()),
+        unsafeMetadata: ClerkJazzCredentialsSchema,
       }),
     ],
     output: z.promise(z.unknown()),
@@ -26,7 +30,7 @@ const ClerkUserSchema = z.object({
 });
 
 export const ClerkEventSchema = z.object({
-  user: ClerkUserSchema.nullable().optional(),
+  user: ClerkUserSchema.nullish(),
 });
 
 export type ClerkUser = z.infer<typeof ClerkUserSchema>;
@@ -38,7 +42,7 @@ export type MinimalClerkClient = {
 };
 
 export type ClerkCredentials = {
-  jazzAccountID: ID<Account>;
+  jazzAccountID: string;
   jazzAccountSecret: AgentSecret;
   jazzAccountSeed?: number[];
 };
