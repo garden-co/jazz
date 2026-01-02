@@ -341,10 +341,12 @@ export class SyncManager {
   }
 
   startPeerReconciliation(peer: PeerState) {
-    // Resume syncing unsynced CoValues asynchronously
-    this.resumeUnsyncedCoValues().catch((error) => {
-      logger.warn("Failed to resume unsynced CoValues:", error);
-    });
+    if (peer.role === "server" && peer.persistent) {
+      // Resume syncing unsynced CoValues asynchronously
+      this.resumeUnsyncedCoValues().catch((error) => {
+        logger.warn("Failed to resume unsynced CoValues:", error);
+      });
+    }
 
     const coValuesOrderedByDependency: CoValueCore[] = [];
 
