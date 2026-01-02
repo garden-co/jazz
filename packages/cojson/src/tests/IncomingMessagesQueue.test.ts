@@ -9,12 +9,10 @@ import {
 } from "./testUtils.js";
 
 // Mock performance.now for consistent timing tests
-const mockPerformanceNow = vi.fn();
-Object.defineProperty(global, "performance", {
-  value: {
-    now: mockPerformanceNow,
-  },
-  writable: true,
+let mockPerformanceNow = vi.spyOn(performance, "now");
+
+beforeEach(() => {
+  vi.clearAllMocks();
 });
 
 function createMockPeer(id: string): Peer {

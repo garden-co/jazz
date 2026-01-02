@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { commands } from "@vitest/browser/context";
+import { commands } from "vitest/browser";
 import { AuthSecretStorage, co, z } from "jazz-tools";
 import {
   JazzReactProvider,

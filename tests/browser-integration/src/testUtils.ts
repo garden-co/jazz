@@ -1,4 +1,4 @@
-import { commands } from "@vitest/browser/context";
+import { commands } from "vitest/browser";
 import { internal_setDatabaseName } from "cojson-storage-indexeddb";
 import {
   Account,
