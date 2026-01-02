@@ -817,10 +817,6 @@ export class SyncManager {
       this.storeContent(validNewContent);
     }
 
-    if (sourceRole === "client" && hasNewContent) {
-      this.trackSyncState(coValue.id);
-    }
-
     for (const peer of this.getPeers(coValue.id)) {
       /**
        * We sync the content against the source peer if it is a client or server peers
