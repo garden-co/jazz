@@ -533,4 +533,46 @@ mod tests {
         let content = node.read_sync(id, "main").unwrap().unwrap();
         assert_eq!(content, b"hello world");
     }
+
+    /// Verify that write_sync wakes signal subscribers synchronously.
+    #[test]
+    fn write_sync_wakes_subscriber() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::task::{Context, Wake, Waker};
+        use std::future::Future;
+        use futures_signals::signal::SignalExt;
+
+        let node = LocalNode::in_memory();
+        let id = node.create_object("test");
+        let signal = node.subscribe(id, "main").unwrap();
+
+        let waker_called = Arc::new(AtomicBool::new(false));
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let waker_called_clone = waker_called.clone();
+        let call_count_clone = call_count.clone();
+
+        struct TrackingWaker { called: Arc<AtomicBool> }
+        impl Wake for TrackingWaker {
+            fn wake(self: Arc<Self>) { self.called.store(true, Ordering::SeqCst); }
+        }
+
+        let future = signal.signal().signal_cloned().for_each(move |_| {
+            call_count_clone.fetch_add(1, Ordering::SeqCst);
+            async {}
+        });
+
+        let waker = Waker::from(Arc::new(TrackingWaker { called: waker_called_clone }));
+        let mut cx = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+
+        let _ = future.as_mut().poll(&mut cx);
+        waker_called.store(false, Ordering::SeqCst);
+
+        node.write_sync(id, "main", b"hello", "alice", 1000).unwrap();
+
+        assert!(waker_called.load(Ordering::SeqCst), "Waker should be called by write_sync");
+        let _ = future.as_mut().poll(&mut cx);
+        assert!(call_count.load(Ordering::SeqCst) >= 2, "Callback should receive the update");
+    }
 }

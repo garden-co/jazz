@@ -1054,4 +1054,112 @@ mod tests {
         let diff = state.diff(&strategy).unwrap();
         assert!(diff.is_changed());
     }
+
+    /// Verify that futures_signals::Mutable wakes the waker synchronously when set() is called.
+    #[test]
+    fn mutable_wakes_on_set() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::task::{Context, Wake, Waker};
+        use std::future::Future;
+        use futures_signals::signal::{Mutable, SignalExt};
+
+        let mutable = Mutable::new(1u32);
+        let waker_called = Arc::new(AtomicBool::new(false));
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let waker_called_clone = waker_called.clone();
+        let call_count_clone = call_count.clone();
+
+        struct TrackingWaker { called: Arc<AtomicBool> }
+        impl Wake for TrackingWaker {
+            fn wake(self: Arc<Self>) { self.called.store(true, Ordering::SeqCst); }
+        }
+
+        let future = mutable.signal().for_each(move |_| {
+            call_count_clone.fetch_add(1, Ordering::SeqCst);
+            async {}
+        });
+
+        let waker = Waker::from(Arc::new(TrackingWaker { called: waker_called_clone }));
+        let mut cx = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+
+        let _ = future.as_mut().poll(&mut cx);
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+
+        waker_called.store(false, Ordering::SeqCst);
+        mutable.set(42);
+
+        assert!(waker_called.load(Ordering::SeqCst), "Mutable.set() should wake synchronously");
+        let _ = future.as_mut().poll(&mut cx);
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
+    }
+
+    /// Verify that ObjectSignal properly wakes when updated via SignalRegistry.
+    #[test]
+    fn object_signal_wakes_on_update() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::{Context, Wake, Waker};
+        use std::future::Future;
+        use futures_signals::signal::SignalExt;
+        use crate::storage::MemoryEnvironment;
+        use crate::commit::Commit;
+        use crate::storage::ContentRef;
+
+        let env: Arc<dyn Environment> = Arc::new(MemoryEnvironment::new());
+        let registry = SignalRegistry::new();
+
+        let mut branch = Branch::new("main");
+        let commit1 = Commit {
+            parents: vec![],
+            content: ContentRef::inline(b"initial".to_vec()),
+            author: "alice".to_string(),
+            timestamp: 1000,
+            meta: None,
+        };
+        let id1 = branch.add_commit(commit1);
+        let branch_ref = Arc::new(RwLock::new(branch));
+
+        let key = SignalKey::new(1, "main");
+        let signal = registry.get_or_create(key.clone(), env.clone());
+        registry.update(&key, vec![id1], branch_ref.clone());
+
+        let waker_called = Arc::new(AtomicBool::new(false));
+        let call_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waker_called_clone = waker_called.clone();
+        let call_count_clone = call_count.clone();
+
+        struct TrackingWaker { called: Arc<AtomicBool> }
+        impl Wake for TrackingWaker {
+            fn wake(self: Arc<Self>) { self.called.store(true, Ordering::SeqCst); }
+        }
+
+        let future = signal.signal().signal_cloned().for_each(move |_| {
+            call_count_clone.fetch_add(1, Ordering::SeqCst);
+            async {}
+        });
+
+        let waker = Waker::from(Arc::new(TrackingWaker { called: waker_called_clone }));
+        let mut cx = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+
+        let _ = future.as_mut().poll(&mut cx);
+        waker_called.store(false, Ordering::SeqCst);
+
+        let id2 = {
+            let mut b = branch_ref.write().unwrap();
+            b.add_commit(Commit {
+                parents: vec![id1],
+                content: ContentRef::inline(b"updated".to_vec()),
+                author: "alice".to_string(),
+                timestamp: 2000,
+                meta: None,
+            })
+        };
+
+        registry.update(&key, vec![id2], branch_ref);
+        assert!(waker_called.load(Ordering::SeqCst), "ObjectSignal should wake on registry.update()");
+
+        let _ = future.as_mut().poll(&mut cx);
+        assert!(call_count.load(Ordering::SeqCst) >= 2, "Callback should receive update");
+    }
 }

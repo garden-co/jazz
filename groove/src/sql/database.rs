@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock, Weak};
 
-use futures_signals::signal::{Mutable, ReadOnlyMutable};
+use futures_signals::signal::{Mutable, ReadOnlyMutable, Signal, SignalExt};
 
 use crate::node::{generate_object_id, LocalNode};
 use crate::signal::ObjectSignal;
@@ -304,6 +304,236 @@ impl QuerySignal {
         }
 
         false
+    }
+}
+
+// ========== Experimental: Truly Composed Reactive Query ==========
+
+/// A truly reactive query that composes signals from underlying objects.
+/// This implements the `futures_signals::signal::Signal` trait directly,
+/// so it can be used with `for_each`, `map`, etc.
+///
+/// When the table_rows signal changes (rows added/removed), or when any
+/// row's content changes, this signal will emit a new value.
+pub struct ReactiveQuery {
+    /// Reference to database state for re-evaluation.
+    db_state: Arc<DatabaseState>,
+    /// The SELECT statement to evaluate.
+    select: Select,
+    /// The underlying table_rows object signal (if available).
+    /// Public for testing.
+    pub table_rows_object_signal: Option<ObjectSignal>,
+    /// Current result state.
+    result: Mutable<QueryState>,
+}
+
+impl ReactiveQuery {
+    fn new(
+        db_state: Arc<DatabaseState>,
+        select: Select,
+        table_rows_object_signal: Option<ObjectSignal>,
+    ) -> Self {
+        ReactiveQuery {
+            db_state,
+            select,
+            table_rows_object_signal,
+            result: Mutable::new(QueryState::Loading),
+        }
+    }
+
+    /// Evaluate the query and update the result.
+    fn evaluate(&self) -> QueryState {
+        let table = &self.select.from.table;
+
+        // Read the table rows to get current row IDs
+        let row_ids: Vec<ObjectId> = {
+            let table_rows_objects = self.db_state.table_rows_objects.read().unwrap();
+            if let Some(rows_id) = table_rows_objects.get(table) {
+                if let Ok(Some(data)) = self.db_state.node.read_sync(*rows_id, "main") {
+                    if !data.is_empty() {
+                        if let Ok(table_rows) = TableRows::from_bytes(&data) {
+                            table_rows.row_ids.into_iter().collect()
+                        } else {
+                            vec![]
+                        }
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                }
+            } else {
+                return QueryState::Error("Table not found".to_string());
+            }
+        };
+
+        // Get schema
+        let schema = {
+            let tables = self.db_state.tables.read().unwrap();
+            let schemas = self.db_state.schemas.read().unwrap();
+            tables.get(table)
+                .and_then(|id| schemas.get(id).cloned())
+        };
+
+        let schema = match schema {
+            Some(s) => s,
+            None => return QueryState::Error("Schema not found".to_string()),
+        };
+
+        // Read and filter rows
+        let mut rows = Vec::new();
+        for row_id in row_ids {
+            let data = match self.db_state.node.read_sync(row_id, "main") {
+                Ok(Some(data)) if !data.is_empty() => data,
+                _ => continue,
+            };
+
+            let values = match decode_row(&data, &schema) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            // Apply WHERE clause filtering
+            let matches = self.matches_where(&values, &schema);
+            if matches {
+                rows.push(Row::new(row_id, values));
+            }
+        }
+
+        QueryState::Loaded(rows)
+    }
+
+    fn matches_where(&self, values: &[Value], schema: &TableSchema) -> bool {
+        for cond in &self.select.where_clause {
+            let col_idx = match schema.column_index(&cond.column.column) {
+                Some(idx) => idx,
+                None => return false,
+            };
+            if &values[col_idx] != &cond.value {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Get the current result state.
+    pub fn get(&self) -> QueryState {
+        self.result.get_cloned()
+    }
+
+    /// Get the rows if loaded.
+    pub fn rows(&self) -> Option<Vec<Row>> {
+        self.get().rows().map(|r| r.to_vec())
+    }
+
+    /// Create a signal that emits whenever the query result changes.
+    /// This composes the table_rows signal to trigger re-evaluation.
+    ///
+    /// Returns a boxed Signal to handle the different signal types uniformly.
+    pub fn to_signal(self) -> impl Signal<Item = QueryState> + Unpin {
+        let db_state = self.db_state.clone();
+        let select = self.select.clone();
+        let result = self.result.clone();
+
+        // If we have a table_rows_signal, map it to trigger re-evaluation
+        if let Some(table_signal) = self.table_rows_object_signal {
+            // IMPORTANT: We must keep the ObjectSignal alive so that the SignalRegistry
+            // can still update it. The ObjectSignal contains an Arc<SignalData>, and
+            // the registry only has a Weak<SignalData>. If we drop the ObjectSignal,
+            // the registry's Weak reference becomes invalid and updates won't propagate.
+            //
+            // We capture `table_signal` in the closure to keep it alive for the
+            // lifetime of the composed signal.
+            let signal_ref = table_signal.signal().signal_cloned();
+            let sig = signal_ref.map(move |_state| {
+                // Keep table_signal alive by referencing it (this is a no-op)
+                let _ = &table_signal;
+                // Re-evaluate query
+                let query_state = Self::evaluate_static(&db_state, &select);
+                result.set(query_state.clone());
+                query_state
+            });
+            Box::pin(sig) as std::pin::Pin<Box<dyn Signal<Item = QueryState> + Unpin>>
+        } else {
+            // No table signal, just return the current state
+            let sig = result.signal_cloned();
+            Box::pin(sig) as std::pin::Pin<Box<dyn Signal<Item = QueryState> + Unpin>>
+        }
+    }
+
+    /// Static evaluation helper for use in signal map.
+    fn evaluate_static(db_state: &Arc<DatabaseState>, select: &Select) -> QueryState {
+        let table = &select.from.table;
+
+        // Read the table rows to get current row IDs
+        let row_ids: Vec<ObjectId> = {
+            let table_rows_objects = db_state.table_rows_objects.read().unwrap();
+            if let Some(rows_id) = table_rows_objects.get(table) {
+                if let Ok(Some(data)) = db_state.node.read_sync(*rows_id, "main") {
+                    if !data.is_empty() {
+                        if let Ok(table_rows) = TableRows::from_bytes(&data) {
+                            table_rows.row_ids.into_iter().collect()
+                        } else {
+                            vec![]
+                        }
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                }
+            } else {
+                return QueryState::Error("Table not found".to_string());
+            }
+        };
+
+        // Get schema
+        let schema = {
+            let tables = db_state.tables.read().unwrap();
+            let schemas = db_state.schemas.read().unwrap();
+            tables.get(table)
+                .and_then(|id| schemas.get(id).cloned())
+        };
+
+        let schema = match schema {
+            Some(s) => s,
+            None => return QueryState::Error("Schema not found".to_string()),
+        };
+
+        // Read and filter rows
+        let mut rows = Vec::new();
+        for row_id in row_ids {
+            let data = match db_state.node.read_sync(row_id, "main") {
+                Ok(Some(data)) if !data.is_empty() => data,
+                _ => continue,
+            };
+
+            let values = match decode_row(&data, &schema) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            // Apply WHERE clause filtering
+            let matches = Self::matches_where_static(&select.where_clause, &values, &schema);
+            if matches {
+                rows.push(Row::new(row_id, values));
+            }
+        }
+
+        QueryState::Loaded(rows)
+    }
+
+    fn matches_where_static(where_clause: &[Condition], values: &[Value], schema: &TableSchema) -> bool {
+        for cond in where_clause {
+            let col_idx = match schema.column_index(&cond.column.column) {
+                Some(idx) => idx,
+                None => return false,
+            };
+            if &values[col_idx] != &cond.value {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -1469,6 +1699,51 @@ impl Database {
     pub fn query_registry(&self) -> &QueryRegistry {
         &self.state.queries
     }
+
+    // ========== Experimental: Truly Composed Reactive Query ==========
+
+    /// Create a reactive query that composes signals from underlying objects.
+    /// Returns a ReactiveQuery that can be converted to a Signal using `to_signal()`.
+    ///
+    /// This is the experimental approach that uses pure signal composition
+    /// without any manual refresh logic.
+    pub fn reactive_query(&self, sql: &str) -> Result<ReactiveQuery, DatabaseError> {
+        let stmt = parser::parse(sql)?;
+
+        let select = match stmt {
+            Statement::Select(s) => s,
+            _ => return Err(DatabaseError::Parse(parser::ParseError {
+                message: "reactive_query only supports SELECT statements".to_string(),
+                position: 0,
+            })),
+        };
+
+        let table = &select.from.table;
+
+        // Validate table exists
+        if !self.state.tables.read().unwrap().contains_key(table) {
+            return Err(DatabaseError::TableNotFound(table.clone()));
+        }
+
+        // Subscribe to table rows object
+        let table_rows_signal = {
+            let table_rows_objects = self.state.table_rows_objects.read().unwrap();
+            table_rows_objects.get(table)
+                .and_then(|rows_id| self.state.node.subscribe(*rows_id, "main").ok())
+        };
+
+        let query = ReactiveQuery::new(
+            self.state.clone(),
+            select,
+            table_rows_signal,
+        );
+
+        // Do initial evaluation
+        let initial = query.evaluate();
+        query.result.set(initial);
+
+        Ok(query)
+    }
 }
 
 /// Get current timestamp in milliseconds.
@@ -2230,5 +2505,109 @@ mod tests {
         // (This depends on the signal tracking previous state)
         let table_signal = signal.table_rows_signal().unwrap();
         assert!(table_signal.get().is_loaded());
+    }
+
+    // ========== Experimental: Composed Signal Tests ==========
+
+    #[test]
+    fn reactive_query_initial_evaluation() {
+        let db = Database::in_memory();
+
+        db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+        db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap();
+        db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap();
+
+        let query = db.reactive_query("SELECT * FROM users").unwrap();
+
+        // Should have initial rows
+        let rows = query.rows().unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn reactive_query_to_signal_compiles() {
+        use futures_signals::signal::SignalExt;
+
+        let db = Database::in_memory();
+
+        db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+        db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap();
+
+        let query = db.reactive_query("SELECT * FROM users").unwrap();
+
+        // This should compile - proving we can use signal combinators
+        let signal = query.to_signal();
+
+        // Map it to row count
+        let _count_signal = signal.map(|state| {
+            match state {
+                QueryState::Loaded(rows) => rows.len(),
+                _ => 0,
+            }
+        });
+    }
+
+    /// Test that ReactiveQuery signal composition works correctly:
+    /// - Waker is called synchronously when underlying data changes
+    /// - Callback receives updated data on re-poll
+    #[test]
+    fn reactive_query_signal_updates_on_insert() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::future::Future;
+        use std::task::{Context, Wake, Waker};
+        use futures_signals::signal::SignalExt;
+
+        let db = Database::in_memory();
+        db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+        db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap();
+
+        let query = db.reactive_query("SELECT * FROM users").unwrap();
+        let signal = query.to_signal();
+
+        // Track waker calls and row counts
+        let waker_called = Arc::new(AtomicBool::new(false));
+        let row_counts = Arc::new(RwLock::new(Vec::<usize>::new()));
+        let waker_called_clone = waker_called.clone();
+        let row_counts_clone = row_counts.clone();
+
+        struct TrackingWaker {
+            called: Arc<AtomicBool>,
+        }
+        impl Wake for TrackingWaker {
+            fn wake(self: Arc<Self>) {
+                self.called.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let future = signal.for_each(move |state| {
+            if let QueryState::Loaded(rows) = state {
+                row_counts_clone.write().unwrap().push(rows.len());
+            }
+            async {}
+        });
+
+        let waker = Waker::from(Arc::new(TrackingWaker { called: waker_called_clone }));
+        let mut cx = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+
+        // First poll - process initial state
+        let _ = future.as_mut().poll(&mut cx);
+        assert_eq!(row_counts.read().unwrap().as_slice(), &[1]);
+
+        // Reset waker flag
+        waker_called.store(false, Ordering::SeqCst);
+
+        // Insert another row
+        db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap();
+
+        // Waker should have been called synchronously during insert
+        assert!(waker_called.load(Ordering::SeqCst), "Waker should be called on insert");
+
+        // Second poll - process update
+        let _ = future.as_mut().poll(&mut cx);
+
+        // Should have received both initial and updated states
+        let counts = row_counts.read().unwrap();
+        assert_eq!(counts.as_slice(), &[1, 2], "Should see 1 row then 2 rows");
     }
 }
