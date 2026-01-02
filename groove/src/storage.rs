@@ -117,21 +117,113 @@ pub trait CommitStore: Send + Sync {
     fn list_commits(&self, object_id: u128, branch: &str) -> BoxStream<'_, CommitId>;
 }
 
-/// Combined storage interface.
+/// Combined storage interface (legacy alias).
 #[async_trait]
 pub trait Storage: ContentStore + CommitStore {}
 
 // Blanket impl
 impl<T: ContentStore + CommitStore> Storage for T {}
 
-// ========== In-Memory Store for Testing ==========
+/// Environment trait - combines all storage capabilities.
+/// This is the main trait that LocalNode uses for storage.
+pub trait Environment: ContentStore + CommitStore + Send + Sync + std::fmt::Debug {}
 
+// Blanket impl for Environment
+impl<T: ContentStore + CommitStore + Send + Sync + std::fmt::Debug> Environment for T {}
+
+// ========== In-Memory Environment for Testing ==========
+
+use std::collections::HashMap;
 use std::sync::RwLock;
 
-/// Simple in-memory content store for testing.
+/// In-memory environment for testing.
+/// Implements both ContentStore and CommitStore.
+#[derive(Debug, Default)]
+pub struct MemoryEnvironment {
+    chunks: RwLock<HashMap<ChunkHash, Bytes>>,
+    commits: RwLock<HashMap<CommitId, crate::commit::Commit>>,
+    frontiers: RwLock<HashMap<(u128, String), Vec<CommitId>>>,
+}
+
+impl MemoryEnvironment {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl ContentStore for MemoryEnvironment {
+    async fn get_chunk(&self, hash: &ChunkHash) -> Option<Bytes> {
+        self.chunks.read().unwrap().get(hash).cloned()
+    }
+
+    async fn put_chunk(&self, data: Bytes) -> ChunkHash {
+        let hash = ChunkHash::compute(&data);
+        self.chunks.write().unwrap().insert(hash, data);
+        hash
+    }
+
+    async fn has_chunk(&self, hash: &ChunkHash) -> bool {
+        self.chunks.read().unwrap().contains_key(hash)
+    }
+}
+
+#[async_trait]
+impl CommitStore for MemoryEnvironment {
+    async fn get_commit_meta(&self, id: &CommitId) -> Option<CommitMeta> {
+        self.commits.read().unwrap().get(id).map(|c| CommitMeta {
+            id: *id,
+            parents: c.parents.clone(),
+            author: c.author.clone(),
+            timestamp: c.timestamp,
+            content_ref: c.content.clone(),
+        })
+    }
+
+    async fn get_commit(&self, id: &CommitId) -> Option<crate::commit::Commit> {
+        self.commits.read().unwrap().get(id).cloned()
+    }
+
+    async fn put_commit(&self, commit: &crate::commit::Commit) -> CommitId {
+        let id = commit.compute_id();
+        self.commits.write().unwrap().insert(id, commit.clone());
+        id
+    }
+
+    async fn get_frontier(&self, object_id: u128, branch: &str) -> Vec<CommitId> {
+        self.frontiers
+            .read()
+            .unwrap()
+            .get(&(object_id, branch.to_string()))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    async fn set_frontier(&self, object_id: u128, branch: &str, frontier: &[CommitId]) {
+        self.frontiers
+            .write()
+            .unwrap()
+            .insert((object_id, branch.to_string()), frontier.to_vec());
+    }
+
+    fn list_commits(&self, object_id: u128, branch: &str) -> BoxStream<'_, CommitId> {
+        // For now, just return frontier commits
+        // A real implementation would stream all commits for the branch
+        let frontier = self
+            .frontiers
+            .read()
+            .unwrap()
+            .get(&(object_id, branch.to_string()))
+            .cloned()
+            .unwrap_or_default();
+        Box::pin(futures::stream::iter(frontier))
+    }
+}
+
+/// Simple in-memory content store (legacy, for backwards compatibility).
 #[derive(Debug, Default)]
 pub struct MemoryContentStore {
-    chunks: RwLock<std::collections::HashMap<ChunkHash, Bytes>>,
+    chunks: RwLock<HashMap<ChunkHash, Bytes>>,
 }
 
 impl MemoryContentStore {

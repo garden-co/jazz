@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::pin::Pin;
+use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use futures::stream::Stream;
 use futures::io::AsyncRead;
+use futures::stream::Stream;
 
 use crate::branch::Branch;
 use crate::commit::{Commit, CommitId};
@@ -18,8 +19,8 @@ pub struct Object {
     pub id: u128,
     /// Type prefix (e.g., "chat", "message")
     pub prefix: String,
-    /// Named branches
-    branches: HashMap<String, Branch>,
+    /// Named branches (wrapped in Arc<RwLock<>> for signal access)
+    branches: HashMap<String, Arc<RwLock<Branch>>>,
     /// Object-level metadata
     pub meta: Option<BTreeMap<String, String>>,
 }
@@ -29,7 +30,10 @@ impl Object {
     /// Automatically creates a "main" branch.
     pub fn new(id: u128, prefix: impl Into<String>) -> Self {
         let mut branches = HashMap::new();
-        branches.insert("main".to_string(), Branch::new("main"));
+        branches.insert(
+            "main".to_string(),
+            Arc::new(RwLock::new(Branch::new("main"))),
+        );
 
         Object {
             id,
@@ -39,24 +43,20 @@ impl Object {
         }
     }
 
-    /// Get the main branch.
-    pub fn main_branch(&self) -> &Branch {
-        self.branches.get("main").expect("main branch always exists")
+    /// Get a reference to a branch (Arc<RwLock<Branch>>).
+    /// Use this when you need to share the branch with signals.
+    pub fn branch_ref(&self, name: &str) -> Option<Arc<RwLock<Branch>>> {
+        self.branches.get(name).cloned()
     }
 
-    /// Get the main branch mutably.
-    pub fn main_branch_mut(&mut self) -> &mut Branch {
-        self.branches.get_mut("main").expect("main branch always exists")
+    /// Get a branch by name (read lock).
+    pub fn branch(&self, name: &str) -> Option<std::sync::RwLockReadGuard<'_, Branch>> {
+        self.branches.get(name).map(|b| b.read().unwrap())
     }
 
-    /// Get a branch by name.
-    pub fn branch(&self, name: &str) -> Option<&Branch> {
-        self.branches.get(name)
-    }
-
-    /// Get a branch by name mutably.
-    pub fn branch_mut(&mut self, name: &str) -> Option<&mut Branch> {
-        self.branches.get_mut(name)
+    /// Get a branch by name mutably (write lock).
+    pub fn branch_mut(&self, name: &str) -> Option<std::sync::RwLockWriteGuard<'_, Branch>> {
+        self.branches.get(name).map(|b| b.write().unwrap())
     }
 
     /// Create a new branch starting from a commit in an existing branch.
@@ -73,7 +73,12 @@ impl Object {
             return Err("branch already exists");
         }
 
-        let source = self.branches.get(from_branch).ok_or("source branch not found")?;
+        let source = self
+            .branches
+            .get(from_branch)
+            .ok_or("source branch not found")?
+            .read()
+            .unwrap();
 
         if !source.commits.contains_key(from_commit) {
             return Err("commit not found in source branch");
@@ -111,7 +116,9 @@ impl Object {
         // Set frontier to just the starting commit
         new_branch.frontier = vec![*from_commit];
 
-        self.branches.insert(name, new_branch);
+        drop(source); // Release read lock before modifying self.branches
+        self.branches
+            .insert(name, Arc::new(RwLock::new(new_branch)));
         Ok(())
     }
 
@@ -124,7 +131,7 @@ impl Object {
     /// Creates a merge commit in the target branch that combines the tips of both.
     /// Returns the new merge commit ID.
     pub fn merge_branches(
-        &mut self,
+        &self,
         target_branch: &str,
         source_branch: &str,
         strategy: &dyn MergeStrategy,
@@ -132,25 +139,22 @@ impl Object {
         timestamp: u64,
     ) -> Result<CommitId, &'static str> {
         // Get source frontier
-        let source_frontier: Vec<CommitId> = self
+        let source_lock = self
             .branches
             .get(source_branch)
-            .ok_or("source branch not found")?
-            .frontier()
-            .to_vec();
+            .ok_or("source branch not found")?;
+        let source = source_lock.read().unwrap();
 
-        let source_commits: HashMap<CommitId, Commit> = self
-            .branches
-            .get(source_branch)
-            .ok_or("source branch not found")?
-            .commits()
-            .clone();
+        let source_frontier: Vec<CommitId> = source.frontier().to_vec();
+        let source_commits: HashMap<CommitId, Commit> = source.commits().clone();
+        drop(source); // Release read lock
 
         // Get target branch
-        let target = self
+        let target_lock = self
             .branches
-            .get_mut(target_branch)
+            .get(target_branch)
             .ok_or("target branch not found")?;
+        let mut target = target_lock.write().unwrap();
 
         let target_frontier = target.frontier().to_vec();
 
@@ -242,16 +246,10 @@ impl Object {
 
     // ========== Sync Read/Write Methods ==========
 
-    /// Read content from the frontier of the main branch (sync).
-    /// Returns None if the branch is empty or content is not inline.
-    pub fn read_sync(&self) -> Option<&[u8]> {
-        self.read_sync_branch("main")
-    }
-
-    /// Read content from the frontier of a specific branch (sync).
+    /// Read content from the frontier of a branch (sync).
     /// Returns None if the branch is empty, has multiple tips, or content is not inline.
-    pub fn read_sync_branch(&self, branch: &str) -> Option<&[u8]> {
-        let branch = self.branches.get(branch)?;
+    pub fn read_sync_branch(&self, branch_name: &str) -> Option<Vec<u8>> {
+        let branch = self.branches.get(branch_name)?.read().unwrap();
         let frontier = branch.frontier();
 
         // Only return content if there's exactly one tip
@@ -260,26 +258,14 @@ impl Object {
         }
 
         let commit = branch.get_commit(&frontier[0])?;
-        commit.content.as_inline()
+        commit.content.as_inline().map(|b| b.to_vec())
     }
 
-    /// Write content to the main branch (sync).
-    /// Panics if content exceeds INLINE_THRESHOLD.
-    /// Returns the new commit ID.
-    pub fn write_sync(
-        &mut self,
-        content: &[u8],
-        author: &str,
-        timestamp: u64,
-    ) -> CommitId {
-        self.write_sync_branch("main", content, author, timestamp)
-    }
-
-    /// Write content to a specific branch (sync).
+    /// Write content to a branch (sync).
     /// Panics if content exceeds INLINE_THRESHOLD.
     /// Returns the new commit ID.
     pub fn write_sync_branch(
-        &mut self,
+        &self,
         branch_name: &str,
         content: &[u8],
         author: &str,
@@ -291,10 +277,12 @@ impl Object {
             INLINE_THRESHOLD
         );
 
-        let branch = self
+        let mut branch = self
             .branches
-            .get_mut(branch_name)
-            .expect("branch not found");
+            .get(branch_name)
+            .expect("branch not found")
+            .write()
+            .unwrap();
 
         let parents = branch.frontier().to_vec();
 
@@ -311,16 +299,10 @@ impl Object {
 
     // ========== Async Read/Write Methods ==========
 
-    /// Read content from the frontier of the main branch (async).
-    /// Loads chunked content from storage if needed.
-    pub async fn read(&self, store: &dyn ContentStore) -> Option<Vec<u8>> {
-        self.read_branch("main", store).await
-    }
-
-    /// Read content from the frontier of a specific branch (async).
+    /// Read content from the frontier of a branch (async).
     /// Loads chunked content from storage if needed.
     pub async fn read_branch(&self, branch_name: &str, store: &dyn ContentStore) -> Option<Vec<u8>> {
-        let branch = self.branches.get(branch_name)?;
+        let branch = self.branches.get(branch_name)?.read().unwrap();
         let frontier = branch.frontier();
 
         // Only return content if there's exactly one tip
@@ -334,9 +316,12 @@ impl Object {
             ContentRef::Inline(data) => Some(data.to_vec()),
             ContentRef::Chunked(hashes) => {
                 // Load all chunks and concatenate
+                let hashes = hashes.clone();
+                drop(branch); // Release lock before async ops
+
                 let mut result = Vec::new();
                 for hash in hashes {
-                    let chunk = store.get_chunk(hash).await?;
+                    let chunk = store.get_chunk(&hash).await?;
                     result.extend_from_slice(&chunk);
                 }
                 Some(result)
@@ -344,22 +329,10 @@ impl Object {
         }
     }
 
-    /// Write content to the main branch (async).
-    /// Automatically chunks content that exceeds INLINE_THRESHOLD.
-    pub async fn write(
-        &mut self,
-        content: &[u8],
-        author: &str,
-        timestamp: u64,
-        store: &dyn ContentStore,
-    ) -> CommitId {
-        self.write_branch("main", content, author, timestamp, store).await
-    }
-
-    /// Write content to a specific branch (async).
+    /// Write content to a branch (async).
     /// Automatically chunks content that exceeds INLINE_THRESHOLD.
     pub async fn write_branch(
-        &mut self,
+        &self,
         branch_name: &str,
         content: &[u8],
         author: &str,
@@ -379,10 +352,12 @@ impl Object {
             ContentRef::chunked(hashes)
         };
 
-        let branch = self
+        let mut branch = self
             .branches
-            .get_mut(branch_name)
-            .expect("branch not found");
+            .get(branch_name)
+            .expect("branch not found")
+            .write()
+            .unwrap();
 
         let parents = branch.frontier().to_vec();
 
@@ -399,23 +374,10 @@ impl Object {
 
     // ========== Streaming Read/Write Methods ==========
 
-    /// Write content from an async reader to the main branch.
-    /// Chunks the content as it streams in.
-    pub async fn write_stream<R: AsyncRead + Unpin>(
-        &mut self,
-        reader: R,
-        author: &str,
-        timestamp: u64,
-        store: &dyn ContentStore,
-    ) -> std::io::Result<CommitId> {
-        self.write_stream_branch("main", reader, author, timestamp, store)
-            .await
-    }
-
-    /// Write content from an async reader to a specific branch.
+    /// Write content from an async reader to a branch.
     /// Chunks the content as it streams in using fixed-size chunks.
     pub async fn write_stream_branch<R: AsyncRead + Unpin>(
-        &mut self,
+        &self,
         branch_name: &str,
         mut reader: R,
         author: &str,
@@ -485,10 +447,12 @@ impl Object {
             ContentRef::chunked(hashes)
         };
 
-        let branch = self
+        let mut branch = self
             .branches
-            .get_mut(branch_name)
-            .expect("branch not found");
+            .get(branch_name)
+            .expect("branch not found")
+            .write()
+            .unwrap();
 
         let parents = branch.frontier().to_vec();
 
@@ -503,23 +467,14 @@ impl Object {
         Ok(branch.add_commit(commit))
     }
 
-    /// Stream content from the frontier of the main branch.
-    /// Returns a stream of chunks.
-    pub fn read_stream<'a>(
-        &'a self,
-        store: &'a dyn ContentStore,
-    ) -> Option<ContentStream<'a>> {
-        self.read_stream_branch("main", store)
-    }
-
-    /// Stream content from the frontier of a specific branch.
+    /// Stream content from the frontier of a branch.
     /// Returns a stream of chunks, or None if branch is empty or has multiple tips.
     pub fn read_stream_branch<'a>(
         &'a self,
         branch_name: &str,
         store: &'a dyn ContentStore,
     ) -> Option<ContentStream<'a>> {
-        let branch = self.branches.get(branch_name)?;
+        let branch = self.branches.get(branch_name)?.read().unwrap();
         let frontier = branch.frontier();
 
         // Only return content if there's exactly one tip
@@ -528,8 +483,16 @@ impl Object {
         }
 
         let commit = branch.get_commit(&frontier[0])?;
+        let content = commit.content.clone();
+        drop(branch); // Release lock before returning stream
 
-        Some(ContentStream::new(&commit.content, store))
+        Some(ContentStream::new(content, store))
+    }
+
+    /// Get the frontier commit IDs for a branch.
+    pub fn frontier(&self, branch_name: &str) -> Option<Vec<CommitId>> {
+        let branch = self.branches.get(branch_name)?.read().unwrap();
+        Some(branch.frontier().to_vec())
     }
 }
 
@@ -555,13 +518,13 @@ enum ContentStreamInner<'a> {
 }
 
 impl<'a> ContentStream<'a> {
-    fn new(content: &ContentRef, store: &'a dyn ContentStore) -> Self {
+    fn new(content: ContentRef, store: &'a dyn ContentStore) -> Self {
         let inner = match content {
             ContentRef::Inline(data) => {
-                ContentStreamInner::Inline(Some(Bytes::copy_from_slice(data)))
+                ContentStreamInner::Inline(Some(Bytes::copy_from_slice(&data)))
             }
             ContentRef::Chunked(hashes) => ContentStreamInner::Chunked {
-                hashes: hashes.clone(),
+                hashes,
                 index: 0,
                 store,
             },
@@ -582,16 +545,18 @@ impl<'a> Stream for ContentStream<'a> {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match &mut self.inner {
-            ContentStreamInner::Inline(data) => {
-                match data.take() {
-                    Some(d) => Poll::Ready(Some(d)),
-                    None => {
-                        self.inner = ContentStreamInner::Done;
-                        Poll::Ready(None)
-                    }
+            ContentStreamInner::Inline(data) => match data.take() {
+                Some(d) => Poll::Ready(Some(d)),
+                None => {
+                    self.inner = ContentStreamInner::Done;
+                    Poll::Ready(None)
                 }
-            }
-            ContentStreamInner::Chunked { hashes, index, store } => {
+            },
+            ContentStreamInner::Chunked {
+                hashes,
+                index,
+                store,
+            } => {
                 if *index >= hashes.len() {
                     self.inner = ContentStreamInner::Done;
                     return Poll::Ready(None);
@@ -642,7 +607,7 @@ mod tests {
         let obj = Object::new(1, "test");
 
         assert_eq!(obj.branch_names(), vec!["main"]);
-        assert!(obj.main_branch().is_empty());
+        assert!(obj.branch("main").unwrap().is_empty());
     }
 
     #[test]
@@ -651,7 +616,7 @@ mod tests {
 
         // Add a commit to main
         let commit = make_commit(b"initial", vec![]);
-        let commit_id = obj.main_branch_mut().add_commit(commit);
+        let commit_id = obj.branch_mut("main").unwrap().add_commit(commit);
 
         // Create a feature branch from that commit
         obj.create_branch("feature", "main", &commit_id).unwrap();
@@ -675,11 +640,13 @@ mod tests {
         assert!(obj.create_branch("feature", "main", &fake_id).is_err());
 
         // Can't create branch from non-existent source branch
-        assert!(obj.create_branch("feature", "nonexistent", &fake_id).is_err());
+        assert!(obj
+            .create_branch("feature", "nonexistent", &fake_id)
+            .is_err());
 
         // Add a commit and create a branch
         let commit = make_commit(b"test", vec![]);
-        let id = obj.main_branch_mut().add_commit(commit);
+        let id = obj.branch_mut("main").unwrap().add_commit(commit);
         obj.create_branch("feature", "main", &id).unwrap();
 
         // Can't create duplicate branch
@@ -692,7 +659,7 @@ mod tests {
 
         // Add initial commit to main
         let c1 = make_commit(b"initial", vec![]);
-        let id1 = obj.main_branch_mut().add_commit(c1);
+        let id1 = obj.branch_mut("main").unwrap().add_commit(c1);
 
         // Create feature branch
         obj.create_branch("feature", "main", &id1).unwrap();
@@ -705,7 +672,7 @@ mod tests {
             timestamp: 2000,
             meta: None,
         };
-        obj.main_branch_mut().add_commit(c2);
+        obj.branch_mut("main").unwrap().add_commit(c2);
 
         // Add commit to feature
         let c3 = Commit {
@@ -724,35 +691,37 @@ mod tests {
             .unwrap();
 
         // Main should now have single tip (the merge commit)
-        assert!(!obj.main_branch().needs_merge());
-        assert_eq!(obj.main_branch().frontier(), &[merge_id]);
+        assert!(!obj.branch("main").unwrap().needs_merge());
+        assert_eq!(obj.branch("main").unwrap().frontier(), &[merge_id]);
 
         // Merge commit should have 2 parents
-        let merge_commit = obj.main_branch().get_commit(&merge_id).unwrap();
+        let main = obj.branch("main").unwrap();
+        let merge_commit = main.get_commit(&merge_id).unwrap();
         assert_eq!(merge_commit.parents.len(), 2);
     }
 
     #[test]
     fn sync_write_and_read() {
-        let mut obj = Object::new(1, "test");
+        let obj = Object::new(1, "test");
 
         // Write some content
-        let id = obj.write_sync(b"hello world", "alice", 1000);
+        let id = obj.write_sync_branch("main", b"hello world", "alice", 1000);
 
         // Read it back
-        let content = obj.read_sync().unwrap();
+        let content = obj.read_sync_branch("main").unwrap();
         assert_eq!(content, b"hello world");
 
         // Write more content
-        obj.write_sync(b"updated", "alice", 2000);
+        obj.write_sync_branch("main", b"updated", "alice", 2000);
 
         // Read the updated content
-        let content = obj.read_sync().unwrap();
+        let content = obj.read_sync_branch("main").unwrap();
         assert_eq!(content, b"updated");
 
         // Verify commit chain
-        assert_eq!(obj.main_branch().len(), 2);
-        let latest = obj.main_branch().get_commit(&obj.main_branch().frontier()[0]).unwrap();
+        let main = obj.branch("main").unwrap();
+        assert_eq!(main.len(), 2);
+        let latest = main.get_commit(&main.frontier()[0]).unwrap();
         assert_eq!(latest.parents.len(), 1);
         assert_eq!(latest.parents[0], id);
     }
@@ -760,15 +729,15 @@ mod tests {
     #[test]
     fn read_sync_empty_branch_returns_none() {
         let obj = Object::new(1, "test");
-        assert!(obj.read_sync().is_none());
+        assert!(obj.read_sync_branch("main").is_none());
     }
 
     #[test]
     #[should_panic(expected = "content exceeds INLINE_THRESHOLD")]
     fn write_sync_panics_on_large_content() {
-        let mut obj = Object::new(1, "test");
+        let obj = Object::new(1, "test");
         let large_content = vec![0u8; INLINE_THRESHOLD + 1];
-        obj.write_sync(&large_content, "alice", 1000);
+        obj.write_sync_branch("main", &large_content, "alice", 1000);
     }
 
     // Async tests using futures executor
@@ -777,22 +746,22 @@ mod tests {
 
     #[test]
     fn async_write_small_content() {
-        let mut obj = Object::new(1, "test");
+        let obj = Object::new(1, "test");
         let store = MemoryContentStore::new();
 
         // Write small content (should be inline)
         block_on(async {
-            obj.write(b"hello", "alice", 1000, &store).await;
+            obj.write_branch("main", b"hello", "alice", 1000, &store).await;
         });
 
         // Read back
-        let content = obj.read_sync().unwrap();
+        let content = obj.read_sync_branch("main").unwrap();
         assert_eq!(content, b"hello");
     }
 
     #[test]
     fn async_write_large_content() {
-        let mut obj = Object::new(1, "test");
+        let obj = Object::new(1, "test");
         let store = MemoryContentStore::new();
 
         // Write large content (should be chunked)
@@ -801,31 +770,27 @@ mod tests {
             .collect();
 
         block_on(async {
-            obj.write(&large_content, "alice", 1000, &store).await;
+            obj.write_branch("main", &large_content, "alice", 1000, &store).await;
         });
 
         // Read sync should return None (content is chunked)
-        assert!(obj.read_sync().is_none());
+        assert!(obj.read_sync_branch("main").is_none());
 
         // Read async should work
-        let content = block_on(async {
-            obj.read(&store).await
-        });
+        let content = block_on(async { obj.read_branch("main", &store).await });
         assert_eq!(content.unwrap(), large_content);
     }
 
     #[test]
     fn async_read_inline_content() {
-        let mut obj = Object::new(1, "test");
+        let obj = Object::new(1, "test");
         let store = MemoryContentStore::new();
 
         // Write using sync (inline)
-        obj.write_sync(b"hello", "alice", 1000);
+        obj.write_sync_branch("main", b"hello", "alice", 1000);
 
         // Read using async should also work
-        let content = block_on(async {
-            obj.read(&store).await
-        });
+        let content = block_on(async { obj.read_branch("main", &store).await });
         assert_eq!(content.unwrap(), b"hello");
     }
 
@@ -836,7 +801,7 @@ mod tests {
 
     #[test]
     fn stream_write_small_content() {
-        let mut obj = Object::new(1, "test");
+        let obj = Object::new(1, "test");
         let store = MemoryContentStore::new();
 
         // Small content should be inlined
@@ -844,17 +809,19 @@ mod tests {
         let cursor = AllowStdIo::new(Cursor::new(data.to_vec()));
 
         block_on(async {
-            obj.write_stream(cursor, "alice", 1000, &store).await.unwrap();
+            obj.write_stream_branch("main", cursor, "alice", 1000, &store)
+                .await
+                .unwrap();
         });
 
         // Should be readable via sync (inline)
-        let content = obj.read_sync().unwrap();
+        let content = obj.read_sync_branch("main").unwrap();
         assert_eq!(content, data);
     }
 
     #[test]
     fn stream_write_large_content() {
-        let mut obj = Object::new(1, "test");
+        let obj = Object::new(1, "test");
         let store = MemoryContentStore::new();
 
         // Large content should be chunked
@@ -864,46 +831,48 @@ mod tests {
         let cursor = AllowStdIo::new(Cursor::new(large_content.clone()));
 
         block_on(async {
-            obj.write_stream(cursor, "alice", 1000, &store).await.unwrap();
+            obj.write_stream_branch("main", cursor, "alice", 1000, &store)
+                .await
+                .unwrap();
         });
 
         // Should NOT be readable via sync (chunked)
-        assert!(obj.read_sync().is_none());
+        assert!(obj.read_sync_branch("main").is_none());
 
         // But should be readable via async
-        let content = block_on(async {
-            obj.read(&store).await
-        });
+        let content = block_on(async { obj.read_branch("main", &store).await });
         assert_eq!(content.unwrap(), large_content);
     }
 
     #[test]
     fn stream_write_empty_content() {
-        let mut obj = Object::new(1, "test");
+        let obj = Object::new(1, "test");
         let store = MemoryContentStore::new();
 
         let cursor = AllowStdIo::new(Cursor::new(Vec::<u8>::new()));
 
         block_on(async {
-            obj.write_stream(cursor, "alice", 1000, &store).await.unwrap();
+            obj.write_stream_branch("main", cursor, "alice", 1000, &store)
+                .await
+                .unwrap();
         });
 
         // Empty content should be inline
-        let content = obj.read_sync().unwrap();
+        let content = obj.read_sync_branch("main").unwrap();
         assert_eq!(content, b"");
     }
 
     #[test]
     fn stream_read_inline_content() {
-        let mut obj = Object::new(1, "test");
+        let obj = Object::new(1, "test");
         let store = MemoryContentStore::new();
 
         // Write inline content
-        obj.write_sync(b"hello", "alice", 1000);
+        obj.write_sync_branch("main", b"hello", "alice", 1000);
 
         // Stream read should work
         let chunks: Vec<Bytes> = block_on(async {
-            let stream = obj.read_stream(&store).unwrap();
+            let stream = obj.read_stream_branch("main", &store).unwrap();
             stream.collect().await
         });
 
@@ -913,7 +882,7 @@ mod tests {
 
     #[test]
     fn stream_read_chunked_content() {
-        let mut obj = Object::new(1, "test");
+        let obj = Object::new(1, "test");
         let store = MemoryContentStore::new();
 
         // Write chunked content
@@ -922,12 +891,12 @@ mod tests {
             .collect();
 
         block_on(async {
-            obj.write(&large_content, "alice", 1000, &store).await;
+            obj.write_branch("main", &large_content, "alice", 1000, &store).await;
         });
 
         // Stream read should yield multiple chunks
         let chunks: Vec<Bytes> = block_on(async {
-            let stream = obj.read_stream(&store).unwrap();
+            let stream = obj.read_stream_branch("main", &store).unwrap();
             stream.collect().await
         });
 
@@ -944,12 +913,12 @@ mod tests {
         let obj = Object::new(1, "test");
         let store = MemoryContentStore::new();
 
-        assert!(obj.read_stream(&store).is_none());
+        assert!(obj.read_stream_branch("main", &store).is_none());
     }
 
     #[test]
     fn stream_roundtrip_exact_threshold() {
-        let mut obj = Object::new(1, "test");
+        let obj = Object::new(1, "test");
         let store = MemoryContentStore::new();
 
         // Content exactly at threshold should be inline
@@ -957,17 +926,19 @@ mod tests {
         let cursor = AllowStdIo::new(Cursor::new(data.clone()));
 
         block_on(async {
-            obj.write_stream(cursor, "alice", 1000, &store).await.unwrap();
+            obj.write_stream_branch("main", cursor, "alice", 1000, &store)
+                .await
+                .unwrap();
         });
 
         // Should be inline
-        let content = obj.read_sync().unwrap();
+        let content = obj.read_sync_branch("main").unwrap();
         assert_eq!(content, data);
     }
 
     #[test]
     fn stream_roundtrip_just_over_threshold() {
-        let mut obj = Object::new(1, "test");
+        let obj = Object::new(1, "test");
         let store = MemoryContentStore::new();
 
         // Content just over threshold should be chunked
@@ -975,19 +946,36 @@ mod tests {
         let cursor = AllowStdIo::new(Cursor::new(data.clone()));
 
         block_on(async {
-            obj.write_stream(cursor, "alice", 1000, &store).await.unwrap();
+            obj.write_stream_branch("main", cursor, "alice", 1000, &store)
+                .await
+                .unwrap();
         });
 
         // Should be chunked (not readable via sync)
-        assert!(obj.read_sync().is_none());
+        assert!(obj.read_sync_branch("main").is_none());
 
         // But readable via stream
         let chunks: Vec<Bytes> = block_on(async {
-            let stream = obj.read_stream(&store).unwrap();
+            let stream = obj.read_stream_branch("main", &store).unwrap();
             stream.collect().await
         });
 
         let reassembled: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
         assert_eq!(reassembled, data);
+    }
+
+    #[test]
+    fn branch_ref_access() {
+        let obj = Object::new(1, "test");
+
+        // Can get branch ref
+        let branch_ref = obj.branch_ref("main").unwrap();
+        assert!(branch_ref.read().unwrap().is_empty());
+
+        // Write through regular API
+        obj.write_sync_branch("main", b"hello", "alice", 1000);
+
+        // Branch ref sees the change
+        assert_eq!(branch_ref.read().unwrap().len(), 1);
     }
 }
