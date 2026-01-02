@@ -1,5 +1,14 @@
 # cojson
 
+## 0.19.16
+
+### Patch Changes
+
+- 265d0e9: Improved sync timeout error messages to include known state, peer state, and any error information when waiting for sync times out
+  - cojson-core-wasm@0.19.16
+  - cojson-core-rn@0.19.16
+  - cojson-core-napi@0.19.16
+
 ## 0.19.15
 
 ### Patch Changes
