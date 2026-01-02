@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isClerkCredentials } from "../types";
+import { ClerkUser, isClerkCredentials } from "../types";
 
 describe("isClerkCredentials", () => {
   it.each([
@@ -44,6 +44,8 @@ describe("isClerkCredentials", () => {
       description: "missing jazzAccountSecret",
     },
   ])("fails for invalid credentials: $description", ({ metadata }) => {
-    expect(isClerkCredentials(metadata)).toBe(false);
+    expect(isClerkCredentials(metadata as ClerkUser["unsafeMetadata"])).toBe(
+      false,
+    );
   });
 });
