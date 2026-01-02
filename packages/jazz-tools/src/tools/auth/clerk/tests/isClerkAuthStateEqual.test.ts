@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isClerkAuthStateEqual } from "../types";
+import { ClerkUser, isClerkAuthStateEqual } from "../types";
 
 describe("isClerkAuthStateEqual", () => {
   const validCredentials = {
@@ -91,7 +91,9 @@ describe("isClerkAuthStateEqual", () => {
         description: "both have incomplete credentials",
       },
     ])("returns true when $description", ({ previous, next }) => {
-      expect(isClerkAuthStateEqual(previous, next)).toBe(true);
+      expect(
+        isClerkAuthStateEqual(previous as ClerkUser, next as ClerkUser),
+      ).toBe(true);
     });
   });
 
@@ -118,7 +120,9 @@ describe("isClerkAuthStateEqual", () => {
         description: "previous has incomplete, next has credentials",
       },
     ])("returns false when $description", ({ previous, next }) => {
-      expect(isClerkAuthStateEqual(previous, next)).toBe(false);
+      expect(
+        isClerkAuthStateEqual(previous as ClerkUser, next as ClerkUser),
+      ).toBe(false);
     });
   });
 });

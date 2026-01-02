@@ -18,7 +18,7 @@ const ClerkUserSchema = z.object({
       emailAddress: z.string().nullable(),
     })
     .nullish(),
-  unsafeMetadata: ClerkJazzCredentialsSchema.partial(),
+  unsafeMetadata: z.union([z.object({}), ClerkJazzCredentialsSchema]),
   update: z.function({
     input: [
       z.object({
