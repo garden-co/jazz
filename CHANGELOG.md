@@ -1,3 +1,6 @@
+Released Jazz 0.19.16:
+- Improved sync timeout error messages to include known state, peer state, and any error information when waiting for sync times out
+
 Released Jazz 0.19.15:
 - Added a locking system for session IDs in React Native to make mounting multiple JazzProviders safer (still not advised as duplicate the data loading effort)
 - Added a value.$jazz.createdBy getter to CoValues
