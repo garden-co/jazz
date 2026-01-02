@@ -61,6 +61,8 @@ SQL (a parsed subset) as the query interface for API users:
 - Can query local state
 - Can send queries to sync server to use indices and "warm up" syncing
 - Server proactively pushes matching CoValues (saves roundtrips)
+- **Reactive by default**: Queries are subscriptions; one-time load is the special case
+- SQL determines *what* to watch; changes to matching data trigger updates
 
 ### Indices
 
