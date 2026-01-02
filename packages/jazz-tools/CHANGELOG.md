@@ -1,5 +1,15 @@
 # jazz-tools
 
+## 0.19.16
+
+### Patch Changes
+
+- 25268bf: Bugfix: fixed a race condition in Clerk auth where the signup flow could trigger a duplicate login attempt
+- Updated dependencies [265d0e9]
+  - cojson@0.19.16
+  - cojson-storage-indexeddb@0.19.16
+  - cojson-transport-ws@0.19.16
+
 ## 0.19.15
 
 ### Patch Changes
