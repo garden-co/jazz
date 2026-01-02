@@ -1,5 +1,22 @@
 # Streaming and Persistence Design
 
+## Implementation Status
+
+**Implemented:**
+- ContentRef (Inline ≤1KB, Chunked >1KB)
+- ContentStore and CommitStore traits
+- Environment trait combining all storage capabilities
+- MemoryEnvironment for testing
+- Async read/write with automatic chunking
+- Streaming read/write for large content
+- Fixed-size chunking (1KB chunks)
+
+**Not yet implemented:**
+- FastCDC (content-defined chunking)
+- Persistence backends (SQLite, RocksDB, IndexedDB)
+- Memory budget / cache eviction
+- Prefetching
+
 ## Problem Statement
 
 Current implementation assumes all commits and content fit in memory. This breaks for:
@@ -105,37 +122,31 @@ fn chunk(data: &[u8], min: usize, avg: usize, max: usize) -> Vec<Range> {
 Default average: 8KB (good for most structured data).
 For large binary files: 32-64KB (set on object creation).
 
-### Storage Interface
+### Storage Interface (Implemented)
 
 ```rust
-trait ContentStore {
-    /// Get chunk by hash, returns None if not found
-    async fn get_chunk(&self, hash: &ChunkHash) -> Option<Vec<u8>>;
-
-    /// Store chunk, returns its hash
-    async fn put_chunk(&self, data: &[u8]) -> ChunkHash;
-
-    /// Check if chunk exists
+#[async_trait]
+pub trait ContentStore: Send + Sync {
+    async fn get_chunk(&self, hash: &ChunkHash) -> Option<Bytes>;
+    async fn put_chunk(&self, data: Bytes) -> ChunkHash;
     async fn has_chunk(&self, hash: &ChunkHash) -> bool;
-
-    /// Stream chunks for content
-    fn stream_content(&self, chunks: &[ChunkHash]) -> impl Stream<Item = Vec<u8>>;
 }
 
-trait CommitStore {
-    /// Get commit metadata (without content)
+#[async_trait]
+pub trait CommitStore: Send + Sync {
     async fn get_commit_meta(&self, id: &CommitId) -> Option<CommitMeta>;
-
-    /// Store commit
-    async fn put_commit(&self, commit: &Commit);
-
-    /// Get frontier for a branch
+    async fn get_commit(&self, id: &CommitId) -> Option<Commit>;
+    async fn put_commit(&self, commit: &Commit) -> CommitId;
     async fn get_frontier(&self, object_id: u128, branch: &str) -> Vec<CommitId>;
-
-    /// List commits (for partial loading)
-    fn list_commits(&self, object_id: u128, branch: &str) -> impl Stream<Item = CommitId>;
+    async fn set_frontier(&self, object_id: u128, branch: &str, frontier: &[CommitId]);
+    fn list_commits(&self, object_id: u128, branch: &str) -> BoxStream<'_, CommitId>;
 }
+
+/// Combined environment trait - what LocalNode uses
+pub trait Environment: ContentStore + CommitStore + Send + Sync + Debug {}
 ```
+
+Note: `list_commits` walks back from frontier through parent links to return all commits in a branch.
 
 ### Sync Implications
 
