@@ -6,7 +6,7 @@ import { Account, ID, InMemoryKVStore, KvStoreContext } from "jazz-tools";
 import { createJazzTestAccount } from "jazz-tools/testing";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { JazzClerkAuth } from "../index";
-import type { MinimalClerkClient } from "../types";
+import type { ClerkUser, MinimalClerkClient } from "../types";
 
 KvStoreContext.getInstance().initialize(new InMemoryKVStore());
 const authSecretStorage = new AuthSecretStorage();
@@ -34,7 +34,7 @@ describe("JazzClerkAuth", () => {
     it("should throw if not authenticated locally", async () => {
       const user = {
         unsafeMetadata: {},
-      } as NonNullable<MinimalClerkClient["user"]>;
+      } as ClerkUser;
 
       await expect(auth.onClerkUserChange(user)).rejects.toThrow();
       expect(mockAuthenticate).not.toHaveBeenCalled();
@@ -54,9 +54,8 @@ describe("JazzClerkAuth", () => {
           fullName: "Guido",
           unsafeMetadata: {},
           update: vi.fn(),
-        },
-        signOut: vi.fn(),
-      } as unknown as MinimalClerkClient;
+        } as ClerkUser,
+      };
 
       await auth.onClerkUserChange(mockClerk.user);
 
@@ -100,8 +99,8 @@ describe("JazzClerkAuth", () => {
             jazzAccountSeed: [1, 2, 3],
           },
           update: vi.fn(),
-        },
-      } as unknown as MinimalClerkClient;
+        } as ClerkUser,
+      };
 
       await auth.onClerkUserChange(mockClerk.user);
 
@@ -131,8 +130,8 @@ describe("JazzClerkAuth", () => {
             jazzAccountSeed: [1, 2, 3],
           },
           update: vi.fn(),
-        },
-      } as unknown as MinimalClerkClient;
+        } as ClerkUser,
+      };
 
       await auth.onClerkUserChange(mockClerk.user);
       await auth.onClerkUserChange(null);
@@ -143,10 +142,8 @@ describe("JazzClerkAuth", () => {
   });
 
   describe("registerListener", () => {
-    function setupMockClerk(user: MinimalClerkClient["user"]) {
-      const listners = new Set<
-        (clerkClient: Pick<MinimalClerkClient, "user">) => void
-      >();
+    function setupMockClerk(user: ClerkUser | null) {
+      const listners = new Set<(clerkClient: ClerkUser) => void>();
 
       return {
         client: {
@@ -160,7 +157,7 @@ describe("JazzClerkAuth", () => {
         } as unknown as MinimalClerkClient,
         triggerUserChange: (user: unknown) => {
           for (const listener of listners) {
-            listener({ user } as Pick<MinimalClerkClient, "user">);
+            listener(user as ClerkUser);
           }
         },
       };

@@ -35,8 +35,16 @@ export const ClerkEventSchema = z.object({
 
 export type ClerkUser = z.infer<typeof ClerkUserSchema>;
 
+// Need to provide a permissive type externally to accept
+type PermissiveClerkUser = Omit<ClerkUser, "unsafeMetadata" | "update"> & {
+  unsafeMetadata: Record<string, unknown>;
+  update: (args: {
+    unsafeMetadata: Record<string, unknown>;
+  }) => Promise<unknown>;
+};
+
 export type MinimalClerkClient = {
-  user: ClerkUser | null | undefined;
+  user: PermissiveClerkUser | null | undefined;
   signOut: () => Promise<void>;
   addListener: (listener: (data: unknown) => void) => void;
 };
@@ -52,7 +60,7 @@ export type ClerkCredentials = {
  * **Note**: It does not validate the credentials, only checks if the necessary fields are present in the metadata object.
  */
 export function isClerkCredentials(
-  data: ClerkUser["unsafeMetadata"] | undefined,
+  data: Record<string, unknown> | undefined,
 ): data is ClerkCredentials {
   return !!data && "jazzAccountID" in data && "jazzAccountSecret" in data;
 }

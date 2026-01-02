@@ -158,7 +158,7 @@ export class JazzClerkAuth {
       },
     });
 
-    const username = getClerkUsername({ user: clerkUser });
+    const username = getClerkUsername(clerkUser);
 
     if (username) {
       currentAccount.profile.$jazz.set("name", username);
