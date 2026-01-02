@@ -95,11 +95,13 @@ export class LocalNode {
 
   setStorage(storage: StorageAPI) {
     this.storage = storage;
+    this.syncManager.setStorage(storage);
   }
 
   removeStorage() {
     this.storage?.close();
     this.storage = undefined;
+    this.syncManager.removeStorage();
   }
 
   hasCoValue(id: RawCoID) {

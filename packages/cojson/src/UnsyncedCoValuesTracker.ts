@@ -41,7 +41,7 @@ export class UnsyncedCoValuesTracker {
   private pendingUpdates: PendingUpdate[] = [];
   private flushTimer: ReturnType<typeof setTimeout> | undefined;
 
-  constructor(private getStorage: () => StorageAPI | undefined) {}
+  private storage?: StorageAPI;
 
   /**
    * Add a CoValue as unsynced to a specific peer.
@@ -210,6 +210,14 @@ export class UnsyncedCoValuesTracker {
     };
   }
 
+  setStorage(storage: StorageAPI) {
+    this.storage = storage;
+  }
+
+  removeStorage() {
+    this.storage = undefined;
+  }
+
   /**
    * Notify all listeners for a specific CoValue about sync status change.
    */
@@ -240,9 +248,5 @@ export class UnsyncedCoValuesTracker {
       latestUpdates.set(`${update.id}|${update.peerId}`, update);
     }
     return Array.from(latestUpdates.values());
-  }
-
-  private get storage(): StorageAPI | undefined {
-    return this.getStorage?.();
   }
 }

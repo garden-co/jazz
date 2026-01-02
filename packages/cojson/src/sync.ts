@@ -24,6 +24,7 @@ import {
   knownStateFrom,
   KnownStateSessions,
 } from "./knownState.js";
+import { StorageAPI } from "./storage/index.js";
 
 export type SyncMessage =
   | LoadMessage
@@ -131,7 +132,7 @@ export class SyncManager {
   constructor(local: LocalNode) {
     this.local = local;
     this.syncState = new SyncStateManager(this);
-    this.unsyncedTracker = new UnsyncedCoValuesTracker(() => local.storage);
+    this.unsyncedTracker = new UnsyncedCoValuesTracker();
 
     this.transactionsSizeHistogram = metrics
       .getMeter("cojson")
@@ -1033,6 +1034,14 @@ export class SyncManager {
     return Promise.all(
       validCoValues.map((coValue) => this.waitForSync(coValue.id, timeout)),
     );
+  }
+
+  setStorage(storage: StorageAPI) {
+    this.unsyncedTracker.setStorage(storage);
+  }
+
+  removeStorage() {
+    this.unsyncedTracker.removeStorage();
   }
 
   gracefulShutdown() {
