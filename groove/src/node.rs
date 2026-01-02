@@ -115,7 +115,7 @@ impl LocalNode {
             .ok_or(SignalError::NotFound)?;
 
         let obj = obj_lock.read().unwrap();
-        Ok(obj.read_sync_branch(branch))
+        Ok(obj.read_sync(branch))
     }
 
     /// Read content from the frontier of an object's branch (async).
@@ -131,7 +131,7 @@ impl LocalNode {
             .ok_or(SignalError::NotFound)?;
 
         let obj = obj_lock.read().unwrap();
-        Ok(obj.read_branch(branch, self.env.as_ref()).await)
+        Ok(obj.read(branch, self.env.as_ref()).await)
     }
 
     // Note: Streaming read methods are available directly on Object.
@@ -139,7 +139,7 @@ impl LocalNode {
     // must be done by obtaining the object reference directly:
     //   let obj = node.get_object(id)?;
     //   let guard = obj.read().unwrap();
-    //   let stream = guard.read_stream_branch(branch, env);
+    //   let stream = guard.read_stream(branch, env);
 
     // ========== Write API with Auto-Notify ==========
 
@@ -160,7 +160,7 @@ impl LocalNode {
             .ok_or(SignalError::NotFound)?;
 
         let obj = obj_lock.read().unwrap();
-        let commit_id = obj.write_sync_branch(branch, content, author, timestamp);
+        let commit_id = obj.write_sync(branch, content, author, timestamp);
 
         // Notify signal if it exists
         self.notify_signal(object_id, branch, &obj);
@@ -185,7 +185,7 @@ impl LocalNode {
 
         let commit_id = {
             let obj = obj_lock.read().unwrap();
-            obj.write_branch(branch, content, author, timestamp, self.env.as_ref())
+            obj.write(branch, content, author, timestamp, self.env.as_ref())
                 .await
         };
 
@@ -215,7 +215,7 @@ impl LocalNode {
 
         let commit_id = {
             let obj = obj_lock.read().unwrap();
-            obj.write_stream_branch(branch, reader, author, timestamp, self.env.as_ref())
+            obj.write_stream(branch, reader, author, timestamp, self.env.as_ref())
                 .await
                 .map_err(|e| SignalError::StorageError(e.to_string()))?
         };
@@ -460,7 +460,7 @@ mod tests {
         {
             let obj_lock = node.get_object(id).unwrap();
             let obj = obj_lock.read().unwrap();
-            obj.write_sync_branch("main", b"direct write", "alice", 1000);
+            obj.write_sync("main", b"direct write", "alice", 1000);
         }
 
         // Signal not updated yet

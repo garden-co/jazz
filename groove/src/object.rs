@@ -248,7 +248,7 @@ impl Object {
 
     /// Read content from the frontier of a branch (sync).
     /// Returns None if the branch is empty, has multiple tips, or content is not inline.
-    pub fn read_sync_branch(&self, branch_name: &str) -> Option<Vec<u8>> {
+    pub fn read_sync(&self, branch_name: &str) -> Option<Vec<u8>> {
         let branch = self.branches.get(branch_name)?.read().unwrap();
         let frontier = branch.frontier();
 
@@ -264,7 +264,7 @@ impl Object {
     /// Write content to a branch (sync).
     /// Panics if content exceeds INLINE_THRESHOLD.
     /// Returns the new commit ID.
-    pub fn write_sync_branch(
+    pub fn write_sync(
         &self,
         branch_name: &str,
         content: &[u8],
@@ -301,7 +301,7 @@ impl Object {
 
     /// Read content from the frontier of a branch (async).
     /// Loads chunked content from storage if needed.
-    pub async fn read_branch(&self, branch_name: &str, store: &dyn ContentStore) -> Option<Vec<u8>> {
+    pub async fn read(&self, branch_name: &str, store: &dyn ContentStore) -> Option<Vec<u8>> {
         let branch = self.branches.get(branch_name)?.read().unwrap();
         let frontier = branch.frontier();
 
@@ -331,7 +331,7 @@ impl Object {
 
     /// Write content to a branch (async).
     /// Automatically chunks content that exceeds INLINE_THRESHOLD.
-    pub async fn write_branch(
+    pub async fn write(
         &self,
         branch_name: &str,
         content: &[u8],
@@ -376,7 +376,7 @@ impl Object {
 
     /// Write content from an async reader to a branch.
     /// Chunks the content as it streams in using fixed-size chunks.
-    pub async fn write_stream_branch<R: AsyncRead + Unpin>(
+    pub async fn write_stream<R: AsyncRead + Unpin>(
         &self,
         branch_name: &str,
         mut reader: R,
@@ -469,7 +469,7 @@ impl Object {
 
     /// Stream content from the frontier of a branch.
     /// Returns a stream of chunks, or None if branch is empty or has multiple tips.
-    pub fn read_stream_branch<'a>(
+    pub fn read_stream<'a>(
         &'a self,
         branch_name: &str,
         store: &'a dyn ContentStore,
@@ -705,17 +705,17 @@ mod tests {
         let obj = Object::new(1, "test");
 
         // Write some content
-        let id = obj.write_sync_branch("main", b"hello world", "alice", 1000);
+        let id = obj.write_sync("main", b"hello world", "alice", 1000);
 
         // Read it back
-        let content = obj.read_sync_branch("main").unwrap();
+        let content = obj.read_sync("main").unwrap();
         assert_eq!(content, b"hello world");
 
         // Write more content
-        obj.write_sync_branch("main", b"updated", "alice", 2000);
+        obj.write_sync("main", b"updated", "alice", 2000);
 
         // Read the updated content
-        let content = obj.read_sync_branch("main").unwrap();
+        let content = obj.read_sync("main").unwrap();
         assert_eq!(content, b"updated");
 
         // Verify commit chain
@@ -729,7 +729,7 @@ mod tests {
     #[test]
     fn read_sync_empty_branch_returns_none() {
         let obj = Object::new(1, "test");
-        assert!(obj.read_sync_branch("main").is_none());
+        assert!(obj.read_sync("main").is_none());
     }
 
     #[test]
@@ -737,7 +737,7 @@ mod tests {
     fn write_sync_panics_on_large_content() {
         let obj = Object::new(1, "test");
         let large_content = vec![0u8; INLINE_THRESHOLD + 1];
-        obj.write_sync_branch("main", &large_content, "alice", 1000);
+        obj.write_sync("main", &large_content, "alice", 1000);
     }
 
     // Async tests using futures executor
@@ -751,11 +751,11 @@ mod tests {
 
         // Write small content (should be inline)
         block_on(async {
-            obj.write_branch("main", b"hello", "alice", 1000, &store).await;
+            obj.write("main", b"hello", "alice", 1000, &store).await;
         });
 
         // Read back
-        let content = obj.read_sync_branch("main").unwrap();
+        let content = obj.read_sync("main").unwrap();
         assert_eq!(content, b"hello");
     }
 
@@ -770,14 +770,14 @@ mod tests {
             .collect();
 
         block_on(async {
-            obj.write_branch("main", &large_content, "alice", 1000, &store).await;
+            obj.write("main", &large_content, "alice", 1000, &store).await;
         });
 
         // Read sync should return None (content is chunked)
-        assert!(obj.read_sync_branch("main").is_none());
+        assert!(obj.read_sync("main").is_none());
 
         // Read async should work
-        let content = block_on(async { obj.read_branch("main", &store).await });
+        let content = block_on(async { obj.read("main", &store).await });
         assert_eq!(content.unwrap(), large_content);
     }
 
@@ -787,10 +787,10 @@ mod tests {
         let store = MemoryContentStore::new();
 
         // Write using sync (inline)
-        obj.write_sync_branch("main", b"hello", "alice", 1000);
+        obj.write_sync("main", b"hello", "alice", 1000);
 
         // Read using async should also work
-        let content = block_on(async { obj.read_branch("main", &store).await });
+        let content = block_on(async { obj.read("main", &store).await });
         assert_eq!(content.unwrap(), b"hello");
     }
 
@@ -809,13 +809,13 @@ mod tests {
         let cursor = AllowStdIo::new(Cursor::new(data.to_vec()));
 
         block_on(async {
-            obj.write_stream_branch("main", cursor, "alice", 1000, &store)
+            obj.write_stream("main", cursor, "alice", 1000, &store)
                 .await
                 .unwrap();
         });
 
         // Should be readable via sync (inline)
-        let content = obj.read_sync_branch("main").unwrap();
+        let content = obj.read_sync("main").unwrap();
         assert_eq!(content, data);
     }
 
@@ -831,16 +831,16 @@ mod tests {
         let cursor = AllowStdIo::new(Cursor::new(large_content.clone()));
 
         block_on(async {
-            obj.write_stream_branch("main", cursor, "alice", 1000, &store)
+            obj.write_stream("main", cursor, "alice", 1000, &store)
                 .await
                 .unwrap();
         });
 
         // Should NOT be readable via sync (chunked)
-        assert!(obj.read_sync_branch("main").is_none());
+        assert!(obj.read_sync("main").is_none());
 
         // But should be readable via async
-        let content = block_on(async { obj.read_branch("main", &store).await });
+        let content = block_on(async { obj.read("main", &store).await });
         assert_eq!(content.unwrap(), large_content);
     }
 
@@ -852,13 +852,13 @@ mod tests {
         let cursor = AllowStdIo::new(Cursor::new(Vec::<u8>::new()));
 
         block_on(async {
-            obj.write_stream_branch("main", cursor, "alice", 1000, &store)
+            obj.write_stream("main", cursor, "alice", 1000, &store)
                 .await
                 .unwrap();
         });
 
         // Empty content should be inline
-        let content = obj.read_sync_branch("main").unwrap();
+        let content = obj.read_sync("main").unwrap();
         assert_eq!(content, b"");
     }
 
@@ -868,11 +868,11 @@ mod tests {
         let store = MemoryContentStore::new();
 
         // Write inline content
-        obj.write_sync_branch("main", b"hello", "alice", 1000);
+        obj.write_sync("main", b"hello", "alice", 1000);
 
         // Stream read should work
         let chunks: Vec<Bytes> = block_on(async {
-            let stream = obj.read_stream_branch("main", &store).unwrap();
+            let stream = obj.read_stream("main", &store).unwrap();
             stream.collect().await
         });
 
@@ -891,12 +891,12 @@ mod tests {
             .collect();
 
         block_on(async {
-            obj.write_branch("main", &large_content, "alice", 1000, &store).await;
+            obj.write("main", &large_content, "alice", 1000, &store).await;
         });
 
         // Stream read should yield multiple chunks
         let chunks: Vec<Bytes> = block_on(async {
-            let stream = obj.read_stream_branch("main", &store).unwrap();
+            let stream = obj.read_stream("main", &store).unwrap();
             stream.collect().await
         });
 
@@ -913,7 +913,7 @@ mod tests {
         let obj = Object::new(1, "test");
         let store = MemoryContentStore::new();
 
-        assert!(obj.read_stream_branch("main", &store).is_none());
+        assert!(obj.read_stream("main", &store).is_none());
     }
 
     #[test]
@@ -926,13 +926,13 @@ mod tests {
         let cursor = AllowStdIo::new(Cursor::new(data.clone()));
 
         block_on(async {
-            obj.write_stream_branch("main", cursor, "alice", 1000, &store)
+            obj.write_stream("main", cursor, "alice", 1000, &store)
                 .await
                 .unwrap();
         });
 
         // Should be inline
-        let content = obj.read_sync_branch("main").unwrap();
+        let content = obj.read_sync("main").unwrap();
         assert_eq!(content, data);
     }
 
@@ -946,17 +946,17 @@ mod tests {
         let cursor = AllowStdIo::new(Cursor::new(data.clone()));
 
         block_on(async {
-            obj.write_stream_branch("main", cursor, "alice", 1000, &store)
+            obj.write_stream("main", cursor, "alice", 1000, &store)
                 .await
                 .unwrap();
         });
 
         // Should be chunked (not readable via sync)
-        assert!(obj.read_sync_branch("main").is_none());
+        assert!(obj.read_sync("main").is_none());
 
         // But readable via stream
         let chunks: Vec<Bytes> = block_on(async {
-            let stream = obj.read_stream_branch("main", &store).unwrap();
+            let stream = obj.read_stream("main", &store).unwrap();
             stream.collect().await
         });
 
@@ -973,7 +973,7 @@ mod tests {
         assert!(branch_ref.read().unwrap().is_empty());
 
         // Write through regular API
-        obj.write_sync_branch("main", b"hello", "alice", 1000);
+        obj.write_sync("main", b"hello", "alice", 1000);
 
         // Branch ref sees the change
         assert_eq!(branch_ref.read().unwrap().len(), 1);
