@@ -71,6 +71,7 @@ import {
   SyncManager,
   hwrServerPeerSelector,
 } from "./sync.js";
+import { setSyncStateTrackingBatchDelay } from "./UnsyncedCoValuesTracker.js";
 import { emptyKnownState } from "./knownState.js";
 
 import {
@@ -125,6 +126,7 @@ export const cojsonInternals = {
   setCoValueLoadingRetryDelay,
   setCoValueLoadingMaxRetries,
   setCoValueLoadingTimeout,
+  setSyncStateTrackingBatchDelay,
   ConnectedPeerChannel,
   textEncoder,
   textDecoder,

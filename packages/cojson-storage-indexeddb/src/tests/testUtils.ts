@@ -1,5 +1,11 @@
-import type { RawCoID, SyncMessage } from "cojson";
-import { StorageApiAsync } from "cojson";
+import type { AgentSecret, RawCoID, SessionID, SyncMessage } from "cojson";
+import {
+  cojsonInternals,
+  ControlledAgent,
+  LocalNode,
+  StorageApiAsync,
+} from "cojson";
+import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { onTestFinished } from "vitest";
 
 export function trackMessages() {
@@ -114,4 +120,79 @@ export function waitFor(
       }
     }, 100);
   });
+}
+
+export async function clearObjectStore(
+  dbName: string,
+  storeName: string,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const openReq = indexedDB.open(dbName);
+
+    openReq.onerror = () => reject(openReq.error);
+
+    openReq.onsuccess = () => {
+      const db = openReq.result;
+
+      if (!db.objectStoreNames.contains(storeName)) {
+        db.close();
+        resolve();
+        return;
+      }
+
+      const tx = db.transaction(storeName, "readwrite");
+      const store = tx.objectStore(storeName);
+
+      const clearReq = store.clear();
+
+      clearReq.onerror = () => reject(clearReq.error);
+
+      tx.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+
+      tx.onerror = () => {
+        db.close();
+        reject(tx.error);
+      };
+
+      tx.onabort = () => {
+        db.close();
+        reject(tx.error || new Error("Transaction aborted"));
+      };
+    };
+  });
+}
+
+const Crypto = await WasmCrypto.create();
+
+export function getAgentAndSessionID(
+  secret: AgentSecret = Crypto.newRandomAgentSecret(),
+): [ControlledAgent, SessionID] {
+  const sessionID = Crypto.newRandomSessionID(Crypto.getAgentID(secret));
+  return [new ControlledAgent(secret, Crypto), sessionID];
+}
+
+export function createTestNode(opts?: { secret?: AgentSecret }) {
+  const [admin, session] = getAgentAndSessionID(opts?.secret);
+  return new LocalNode(admin.agentSecret, session, Crypto);
+}
+
+export function connectToSyncServer(
+  client: LocalNode,
+  syncServer: LocalNode,
+): void {
+  const [clientPeer, serverPeer] = cojsonInternals.connectedPeers(
+    client.currentSessionID,
+    syncServer.currentSessionID,
+    {
+      peer1role: "client",
+      peer2role: "server",
+      persistent: true,
+    },
+  );
+
+  client.syncManager.addPeer(serverPeer);
+  syncServer.syncManager.addPeer(clientPeer);
 }
