@@ -39,7 +39,6 @@ export const migrations: Record<number, string[]> = {
       UNIQUE (co_value_id, peer_id)
     );`,
     "CREATE INDEX IF NOT EXISTS idx_unsynced_covalues_co_value_id ON unsynced_covalues(co_value_id);",
-    "CREATE INDEX IF NOT EXISTS idx_unsynced_covalues_peer_id ON unsynced_covalues(peer_id);",
   ],
 };
 

@@ -53,7 +53,6 @@ export async function getIndexedDBStorage(name = DATABASE_NAME) {
           keyPath: "rowID",
         });
         unsyncedCoValues.createIndex("byCoValueId", "coValueId");
-        unsyncedCoValues.createIndex("byPeerId", "peerId");
         unsyncedCoValues.createIndex(
           "uniqueUnsyncedCoValues",
           ["coValueId", "peerId"],

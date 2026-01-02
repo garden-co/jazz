@@ -27,7 +27,6 @@ describe("CoJsonIDBTransaction", () => {
           keyPath: "rowID",
         });
         unsyncedCoValues.createIndex("byCoValueId", "coValueId");
-        unsyncedCoValues.createIndex("byPeerId", "peerId");
         unsyncedCoValues.createIndex(
           "uniqueUnsyncedCoValues",
           ["coValueId", "peerId"],
