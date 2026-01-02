@@ -13,4 +13,12 @@ Cargo.lock
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
 
+# Node.js
+node_modules/
+
+# WASM build artifacts
+pkg/
+*.wasm
+
+
 

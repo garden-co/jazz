@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "groove",
+    "groove-wasm",
 ]
 resolver = "2"
 

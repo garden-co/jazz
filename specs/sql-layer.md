@@ -238,12 +238,28 @@ impl LocalNode {
         target_id: ObjectId,
     ) -> Result<Vec<Row>>;
 
-    /// Subscribe to query results (reactive signal)
-    pub fn subscribe_select(
+    /// Subscribe to query results with synchronous callback
+    pub fn reactive_query(
         &self,
-        table: &str,
-        where_clause: Option<(&str, Value)>,
-    ) -> ObjectSignal<Vec<Row>>;
+        sql: &str,
+    ) -> Result<ReactiveQuery>;
+}
+
+/// A reactive query with synchronous callback support.
+/// Callbacks fire synchronously during the same call stack as mutations.
+pub struct ReactiveQuery {
+    // ...
+}
+
+impl ReactiveQuery {
+    /// Subscribe with a callback that fires immediately and on every change.
+    pub fn subscribe(&self, callback: impl Fn(Arc<Vec<Row>>)) -> ListenerId;
+
+    /// Unsubscribe a callback.
+    pub fn unsubscribe(&self, id: ListenerId) -> bool;
+
+    /// Get current rows.
+    pub fn get(&self) -> QueryState;
 }
 ```
 

@@ -5,26 +5,38 @@ use bytes::Bytes;
 use futures::io::AsyncRead;
 
 use crate::commit::CommitId;
+use crate::listener::{ListenerId, ListenerError, ObjectCallback, ObjectKey, ObjectListenerRegistry, ObjectState};
 use crate::object::Object;
-use crate::signal::{ObjectSignal, SignalError, SignalKey, SignalRegistry};
 use crate::storage::{Environment, MemoryEnvironment};
 
 /// Generate a new UUIDv7 as u128.
+#[cfg(not(feature = "wasm"))]
 pub fn generate_object_id() -> u128 {
     uuid::Uuid::now_v7().as_u128()
 }
 
-/// A local node managing multiple objects with signal support.
+/// Generate a new UUIDv7 as u128 (WASM version using web-time).
+#[cfg(feature = "wasm")]
+pub fn generate_object_id() -> u128 {
+    use uuid::{NoContext, Timestamp, Uuid};
+    let now = web_time::SystemTime::now();
+    let duration = now
+        .duration_since(web_time::UNIX_EPOCH)
+        .expect("time went backwards");
+    let ts = Timestamp::from_unix(NoContext, duration.as_secs(), duration.subsec_nanos());
+    Uuid::new_v7(ts).as_u128()
+}
+
+/// A local node managing multiple objects with listener support.
 ///
-/// The node owns the Environment (storage) and SignalRegistry, providing methods
-/// for subscribing to objects and reading/writing with automatic signal notification.
+/// The node owns the Environment (storage) and ObjectListenerRegistry, providing methods
+/// for subscribing to objects and reading/writing with automatic listener notification.
 ///
 /// Uses internal mutability so that objects can be created and written to
 /// without requiring exclusive access to the node.
-#[derive(Debug)]
 pub struct LocalNode {
     objects: RwLock<BTreeMap<u128, Arc<RwLock<Object>>>>,
-    signals: SignalRegistry,
+    listeners: ObjectListenerRegistry,
     env: Arc<dyn Environment>,
 }
 
@@ -34,12 +46,21 @@ impl Default for LocalNode {
     }
 }
 
+impl std::fmt::Debug for LocalNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalNode")
+            .field("objects", &self.objects.read().unwrap().len())
+            .field("listeners", &self.listeners)
+            .finish()
+    }
+}
+
 impl LocalNode {
     /// Create a new LocalNode with the given environment.
     pub fn new(env: Arc<dyn Environment>) -> Self {
         LocalNode {
             objects: RwLock::new(BTreeMap::new()),
-            signals: SignalRegistry::new(),
+            listeners: ObjectListenerRegistry::new(),
             env,
         }
     }
@@ -68,43 +89,65 @@ impl LocalNode {
         self.objects.read().unwrap().get(&id).cloned()
     }
 
-    /// Get a reference to the signal registry.
-    pub fn signals(&self) -> &SignalRegistry {
-        &self.signals
+    /// Get a reference to the listener registry.
+    pub fn listeners(&self) -> &ObjectListenerRegistry {
+        &self.listeners
     }
 
     // ========== Subscription API ==========
 
-    /// Subscribe to an object's branch.
-    /// Creates a signal and immediately updates it with current state.
-    /// Returns an error if the object or branch doesn't exist.
-    pub fn subscribe(&self, object_id: u128, branch: &str) -> Result<ObjectSignal, SignalError> {
+    /// Subscribe to an object's branch with a callback.
+    /// The callback is called immediately with current state (if any),
+    /// and then synchronously on every subsequent write.
+    /// Returns a listener ID that can be used to unsubscribe.
+    pub fn subscribe(
+        &self,
+        object_id: u128,
+        branch: &str,
+        callback: ObjectCallback,
+    ) -> Result<ListenerId, ListenerError> {
         let obj_lock = self
             .objects
             .read()
             .unwrap()
             .get(&object_id)
             .cloned()
-            .ok_or(SignalError::NotFound)?;
+            .ok_or(ListenerError::NotFound)?;
 
-        let key = SignalKey::new(object_id, branch);
-        let signal = self.signals.get_or_create(key.clone(), self.env.clone());
+        let key = ObjectKey::new(object_id, branch);
 
-        // Get branch reference and current tips
+        // Verify branch exists
         let obj = obj_lock.read().unwrap();
         let branch_ref = obj
             .branch_ref(branch)
-            .ok_or(SignalError::BranchNotFound)?;
+            .ok_or(ListenerError::BranchNotFound)?;
 
+        // Get current tips
         let tips = {
             let b = branch_ref.read().unwrap();
             b.frontier().to_vec()
         };
 
-        // Update signal with current state
-        self.signals.update(&key, tips, branch_ref);
+        // Ensure initial state is set (only if not already set)
+        // This must happen BEFORE subscribe so the callback gets called with initial state
+        self.listeners.ensure_initial_state(&key, self.env.clone(), tips, branch_ref);
 
-        Ok(signal)
+        // Subscribe with the callback - it will be called immediately with current state
+        let id = self.listeners.subscribe(key, self.env.clone(), callback);
+
+        Ok(id)
+    }
+
+    /// Unsubscribe a listener by ID.
+    pub fn unsubscribe(&self, object_id: u128, branch: &str, listener_id: ListenerId) -> bool {
+        let key = ObjectKey::new(object_id, branch);
+        self.listeners.unsubscribe(&key, listener_id)
+    }
+
+    /// Get current cached state for an object's branch.
+    pub fn get_current_state(&self, object_id: u128, branch: &str) -> Option<Arc<ObjectState>> {
+        let key = ObjectKey::new(object_id, branch);
+        self.listeners.get_current(&key)
     }
 
     // ========== Read API ==========
@@ -115,14 +158,14 @@ impl LocalNode {
         &self,
         object_id: u128,
         branch: &str,
-    ) -> Result<Option<Vec<u8>>, SignalError> {
+    ) -> Result<Option<Vec<u8>>, ListenerError> {
         let obj_lock = self
             .objects
             .read()
             .unwrap()
             .get(&object_id)
             .cloned()
-            .ok_or(SignalError::NotFound)?;
+            .ok_or(ListenerError::NotFound)?;
 
         let obj = obj_lock.read().unwrap();
         Ok(obj.read_sync(branch))
@@ -134,14 +177,14 @@ impl LocalNode {
         &self,
         object_id: u128,
         branch: &str,
-    ) -> Result<Option<Vec<u8>>, SignalError> {
+    ) -> Result<Option<Vec<u8>>, ListenerError> {
         let obj_lock = self
             .objects
             .read()
             .unwrap()
             .get(&object_id)
             .cloned()
-            .ok_or(SignalError::NotFound)?;
+            .ok_or(ListenerError::NotFound)?;
 
         let obj = obj_lock.read().unwrap();
         Ok(obj.read(branch, self.env.as_ref()).await)
@@ -156,7 +199,7 @@ impl LocalNode {
 
     // ========== Write API with Auto-Notify ==========
 
-    /// Write content to an object's branch and notify all signals.
+    /// Write content to an object's branch and notify all listeners.
     /// Returns the new commit ID.
     /// Panics if content exceeds INLINE_THRESHOLD.
     pub fn write_sync(
@@ -166,25 +209,25 @@ impl LocalNode {
         content: &[u8],
         author: &str,
         timestamp: u64,
-    ) -> Result<CommitId, SignalError> {
+    ) -> Result<CommitId, ListenerError> {
         let obj_lock = self
             .objects
             .read()
             .unwrap()
             .get(&object_id)
             .cloned()
-            .ok_or(SignalError::NotFound)?;
+            .ok_or(ListenerError::NotFound)?;
 
         let obj = obj_lock.read().unwrap();
         let commit_id = obj.write_sync(branch, content, author, timestamp);
 
-        // Notify signal if it exists
-        self.notify_signal(object_id, branch, &obj);
+        // Notify listeners synchronously
+        self.notify_listeners(object_id, branch, &obj);
 
         Ok(commit_id)
     }
 
-    /// Write content to an object's branch (async) and notify all signals.
+    /// Write content to an object's branch (async) and notify all listeners.
     /// Automatically chunks content that exceeds INLINE_THRESHOLD.
     pub async fn write(
         &self,
@@ -193,14 +236,14 @@ impl LocalNode {
         content: &[u8],
         author: &str,
         timestamp: u64,
-    ) -> Result<CommitId, SignalError> {
+    ) -> Result<CommitId, ListenerError> {
         let obj_lock = self
             .objects
             .read()
             .unwrap()
             .get(&object_id)
             .cloned()
-            .ok_or(SignalError::NotFound)?;
+            .ok_or(ListenerError::NotFound)?;
 
         let commit_id = {
             let obj = obj_lock.read().unwrap();
@@ -208,10 +251,10 @@ impl LocalNode {
                 .await
         };
 
-        // Notify signal if it exists
+        // Notify listeners synchronously
         {
             let obj = obj_lock.read().unwrap();
-            self.notify_signal(object_id, branch, &obj);
+            self.notify_listeners(object_id, branch, &obj);
         }
 
         Ok(commit_id)
@@ -226,59 +269,59 @@ impl LocalNode {
         reader: R,
         author: &str,
         timestamp: u64,
-    ) -> Result<CommitId, SignalError> {
+    ) -> Result<CommitId, ListenerError> {
         let obj_lock = self
             .objects
             .read()
             .unwrap()
             .get(&object_id)
             .cloned()
-            .ok_or(SignalError::NotFound)?;
+            .ok_or(ListenerError::NotFound)?;
 
         let commit_id = {
             let obj = obj_lock.read().unwrap();
             obj.write_stream(branch, reader, author, timestamp, self.env.as_ref())
                 .await
-                .map_err(|e| SignalError::StorageError(e.to_string()))?
+                .map_err(|e| ListenerError::StorageError(e.to_string()))?
         };
 
-        // Notify signal if it exists
+        // Notify listeners synchronously
         {
             let obj = obj_lock.read().unwrap();
-            self.notify_signal(object_id, branch, &obj);
+            self.notify_listeners(object_id, branch, &obj);
         }
 
         Ok(commit_id)
     }
 
     /// Get the frontier commit IDs for an object's branch.
-    pub fn frontier(&self, object_id: u128, branch: &str) -> Result<Option<Vec<CommitId>>, SignalError> {
+    pub fn frontier(&self, object_id: u128, branch: &str) -> Result<Option<Vec<CommitId>>, ListenerError> {
         let obj_lock = self
             .objects
             .read()
             .unwrap()
             .get(&object_id)
             .cloned()
-            .ok_or(SignalError::NotFound)?;
+            .ok_or(ListenerError::NotFound)?;
 
         let obj = obj_lock.read().unwrap();
         Ok(obj.frontier(branch))
     }
 
-    /// Internal: notify signal for a branch update.
-    fn notify_signal(&self, object_id: u128, branch: &str, obj: &Object) {
-        let key = SignalKey::new(object_id, branch);
+    /// Internal: notify listeners for a branch update.
+    fn notify_listeners(&self, object_id: u128, branch: &str, obj: &Object) {
+        let key = ObjectKey::new(object_id, branch);
 
         if let Some(branch_ref) = obj.branch_ref(branch) {
             let tips = {
                 let b = branch_ref.read().unwrap();
                 b.frontier().to_vec()
             };
-            self.signals.update(&key, tips, branch_ref);
+            self.listeners.notify(&key, tips, branch_ref);
         }
     }
 
-    /// Notify all signals for an object.
+    /// Notify all listeners for an object.
     /// Use this after external changes to the object (e.g., sync from peers).
     pub fn notify_object(&self, object_id: u128) {
         let obj_lock = match self.objects.read().unwrap().get(&object_id).cloned() {
@@ -288,8 +331,8 @@ impl LocalNode {
 
         let obj = obj_lock.read().unwrap();
 
-        // Find all active signals for this object
-        let keys = self.signals.keys_for_object(object_id);
+        // Find all active listeners for this object
+        let keys = self.listeners.keys_for_object(object_id);
 
         for key in keys {
             if let Some(branch_ref) = obj.branch_ref(&key.branch) {
@@ -297,7 +340,7 @@ impl LocalNode {
                     let b = branch_ref.read().unwrap();
                     b.frontier().to_vec()
                 };
-                self.signals.update(&key, tips, branch_ref);
+                self.listeners.notify(&key, tips, branch_ref);
             }
         }
     }
@@ -332,7 +375,7 @@ impl LocalNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signal::SignalState;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn local_node_create_and_get_objects() {
@@ -345,7 +388,6 @@ mod tests {
         assert!(node.get_object(id2).is_some());
         assert!(node.get_object(999).is_none());
 
-        // Access through Arc<RwLock<>>
         assert_eq!(node.get_object(id1).unwrap().read().unwrap().prefix, "chat");
         assert_eq!(
             node.get_object(id2).unwrap().read().unwrap().prefix,
@@ -360,7 +402,6 @@ mod tests {
         let id2 = generate_object_id();
 
         assert_ne!(id1, id2);
-        // UUIDv7 should be roughly time-ordered
         assert!(id2 > id1);
     }
 
@@ -372,10 +413,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1));
         let id2 = node.create_object("test2");
 
-        // IDs should be valid UUIDv7 (time-ordered)
         assert!(id2 > id1);
-
-        // Should be large numbers (not sequential 1, 2, 3...)
         assert!(id1 > 1000);
     }
 
@@ -384,22 +422,24 @@ mod tests {
         let node = LocalNode::in_memory();
         let id = node.create_object("test");
 
-        let signal = node.subscribe(id, "main").unwrap();
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_clone = call_count.clone();
 
-        // Should be loaded (even though empty)
-        assert!(signal.get().is_loaded());
-
-        if let SignalState::Loaded(state) = signal.get() {
+        let _listener_id = node.subscribe(id, "main", Box::new(move |state| {
+            call_count_clone.fetch_add(1, Ordering::SeqCst);
             // Empty branch has no tips
             assert!(state.tips.is_empty());
-        }
+        })).unwrap();
+
+        // Should be called once for initial state
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 
     #[test]
     fn subscribe_nonexistent_object_errors() {
         let node = LocalNode::in_memory();
 
-        let result = node.subscribe(999, "main");
+        let result = node.subscribe(999, "main", Box::new(|_| {}));
         assert!(result.is_err());
     }
 
@@ -408,52 +448,41 @@ mod tests {
         let node = LocalNode::in_memory();
         let id = node.create_object("test");
 
-        let result = node.subscribe(id, "nonexistent");
+        let result = node.subscribe(id, "nonexistent", Box::new(|_| {}));
         assert!(result.is_err());
     }
 
     #[test]
-    fn write_sync_and_notify() {
+    fn write_sync_notifies_listener() {
         let node = LocalNode::in_memory();
         let id = node.create_object("test");
 
-        // Subscribe before writing
-        let signal = node.subscribe(id, "main").unwrap();
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let tip_counts = Arc::new(RwLock::new(Vec::new()));
+        let call_count_clone = call_count.clone();
+        let tip_counts_clone = tip_counts.clone();
 
-        // Initial state - empty
-        if let SignalState::Loaded(state) = signal.get() {
-            assert!(state.tips.is_empty());
-            assert!(!state.has_previous());
-        }
+        let _listener_id = node.subscribe(id, "main", Box::new(move |state| {
+            call_count_clone.fetch_add(1, Ordering::SeqCst);
+            tip_counts_clone.write().unwrap().push(state.tips.len());
+        })).unwrap();
+
+        // Initial call
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+        assert_eq!(*tip_counts.read().unwrap(), vec![0]); // empty initially
 
         // Write through node (auto-notifies)
-        let commit_id = node.write_sync(id, "main", b"hello", "alice", 1000).unwrap();
+        node.write_sync(id, "main", b"hello", "alice", 1000).unwrap();
 
-        // Signal should be updated
-        if let SignalState::Loaded(state) = signal.get() {
-            assert_eq!(state.tips.len(), 1);
-            assert_eq!(state.tips[0], commit_id);
-            // Now has previous (the empty tips)
-            assert!(state.has_previous());
-        }
+        // Callback should be called synchronously
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
+        assert_eq!(*tip_counts.read().unwrap(), vec![0, 1]); // now has 1 tip
 
         // Write again
-        let commit_id2 = node.write_sync(id, "main", b"world", "alice", 2000).unwrap();
+        node.write_sync(id, "main", b"world", "alice", 2000).unwrap();
 
-        // Signal should track the change
-        if let SignalState::Loaded(state) = signal.get() {
-            assert_eq!(state.tips.len(), 1);
-            assert_eq!(state.tips[0], commit_id2);
-
-            // Previous should be the first commit
-            let prev = state.previous_tips.as_ref().unwrap();
-            assert_eq!(prev.len(), 1);
-            assert_eq!(prev[0], commit_id);
-
-            // Diff should show change
-            let diff = state.diff_raw();
-            assert!(diff.is_changed());
-        }
+        assert_eq!(call_count.load(Ordering::SeqCst), 3);
+        assert_eq!(*tip_counts.read().unwrap(), vec![0, 1, 1]); // still 1 tip
     }
 
     #[test]
@@ -464,13 +493,17 @@ mod tests {
         // Write without subscribing - should not error
         let commit_id = node.write_sync(id, "main", b"hello", "alice", 1000).unwrap();
 
-        // Now subscribe and verify content
-        let signal = node.subscribe(id, "main").unwrap();
+        // Now subscribe and verify content in callback
+        let received_tips = Arc::new(RwLock::new(Vec::new()));
+        let received_tips_clone = received_tips.clone();
 
-        if let SignalState::Loaded(state) = signal.get() {
-            assert_eq!(state.tips.len(), 1);
-            assert_eq!(state.tips[0], commit_id);
-        }
+        let _listener_id = node.subscribe(id, "main", Box::new(move |state| {
+            received_tips_clone.write().unwrap().extend(state.tips.clone());
+        })).unwrap();
+
+        let tips = received_tips.read().unwrap();
+        assert_eq!(tips.len(), 1);
+        assert_eq!(tips[0], commit_id);
     }
 
     #[test]
@@ -478,8 +511,14 @@ mod tests {
         let node = LocalNode::in_memory();
         let id = node.create_object("test");
 
-        // Subscribe
-        let signal = node.subscribe(id, "main").unwrap();
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_clone = call_count.clone();
+
+        let _listener_id = node.subscribe(id, "main", Box::new(move |_state| {
+            call_count_clone.fetch_add(1, Ordering::SeqCst);
+        })).unwrap();
+
+        assert_eq!(call_count.load(Ordering::SeqCst), 1); // initial
 
         // Write directly to object (bypassing node's write method)
         {
@@ -488,37 +527,43 @@ mod tests {
             obj.write_sync("main", b"direct write", "alice", 1000);
         }
 
-        // Signal not updated yet
-        if let SignalState::Loaded(state) = signal.get() {
-            assert!(state.tips.is_empty());
-        }
+        // Listener not notified yet
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
 
         // Now notify
         node.notify_object(id);
 
-        // Signal should be updated
-        if let SignalState::Loaded(state) = signal.get() {
-            assert_eq!(state.tips.len(), 1);
-        }
+        // Listener should be notified
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
     }
 
     #[test]
-    fn multiple_subscribers_share_signal() {
+    fn multiple_subscribers_all_notified() {
         let node = LocalNode::in_memory();
         let id = node.create_object("test");
 
-        let signal1 = node.subscribe(id, "main").unwrap();
-        let signal2 = node.subscribe(id, "main").unwrap();
+        let count1 = Arc::new(AtomicUsize::new(0));
+        let count2 = Arc::new(AtomicUsize::new(0));
+        let count1_clone = count1.clone();
+        let count2_clone = count2.clone();
+
+        let _id1 = node.subscribe(id, "main", Box::new(move |_| {
+            count1_clone.fetch_add(1, Ordering::SeqCst);
+        })).unwrap();
+        let _id2 = node.subscribe(id, "main", Box::new(move |_| {
+            count2_clone.fetch_add(1, Ordering::SeqCst);
+        })).unwrap();
+
+        // Both called for initial state
+        assert_eq!(count1.load(Ordering::SeqCst), 1);
+        assert_eq!(count2.load(Ordering::SeqCst), 1);
 
         // Write
         node.write_sync(id, "main", b"hello", "alice", 1000).unwrap();
 
-        // Both signals should see the update
-        if let SignalState::Loaded(state1) = signal1.get() {
-            if let SignalState::Loaded(state2) = signal2.get() {
-                assert_eq!(state1.tips, state2.tips);
-            }
-        }
+        // Both should be notified
+        assert_eq!(count1.load(Ordering::SeqCst), 2);
+        assert_eq!(count2.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -526,53 +571,58 @@ mod tests {
         let node = LocalNode::in_memory();
         let id = node.create_object("test");
 
-        // Write through node
         node.write_sync(id, "main", b"hello world", "alice", 1000).unwrap();
 
-        // Read through node
         let content = node.read_sync(id, "main").unwrap().unwrap();
         assert_eq!(content, b"hello world");
     }
 
-    /// Verify that write_sync wakes signal subscribers synchronously.
     #[test]
-    fn write_sync_wakes_subscriber() {
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        use std::sync::Arc;
-        use std::task::{Context, Wake, Waker};
-        use std::future::Future;
-        use futures_signals::signal::SignalExt;
+    fn unsubscribe_stops_notifications() {
+        let node = LocalNode::in_memory();
+        let id = node.create_object("test");
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_clone = call_count.clone();
+
+        let listener_id = node.subscribe(id, "main", Box::new(move |_| {
+            call_count_clone.fetch_add(1, Ordering::SeqCst);
+        })).unwrap();
+
+        assert_eq!(call_count.load(Ordering::SeqCst), 1); // initial
+
+        node.write_sync(id, "main", b"hello", "alice", 1000).unwrap();
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
+
+        // Unsubscribe
+        assert!(node.unsubscribe(id, "main", listener_id));
+
+        // Write again - should not notify
+        node.write_sync(id, "main", b"world", "alice", 2000).unwrap();
+        assert_eq!(call_count.load(Ordering::SeqCst), 2); // still 2
+    }
+
+    #[test]
+    fn callback_called_synchronously() {
+        use std::sync::atomic::AtomicBool;
 
         let node = LocalNode::in_memory();
         let id = node.create_object("test");
-        let signal = node.subscribe(id, "main").unwrap();
 
-        let waker_called = Arc::new(AtomicBool::new(false));
-        let call_count = Arc::new(AtomicUsize::new(0));
-        let waker_called_clone = waker_called.clone();
-        let call_count_clone = call_count.clone();
+        let was_called = Arc::new(AtomicBool::new(false));
+        let was_called_clone = was_called.clone();
 
-        struct TrackingWaker { called: Arc<AtomicBool> }
-        impl Wake for TrackingWaker {
-            fn wake(self: Arc<Self>) { self.called.store(true, Ordering::SeqCst); }
-        }
+        let _listener_id = node.subscribe(id, "main", Box::new(move |_| {
+            was_called_clone.store(true, Ordering::SeqCst);
+        })).unwrap();
 
-        let future = signal.signal().signal_cloned().for_each(move |_| {
-            call_count_clone.fetch_add(1, Ordering::SeqCst);
-            async {}
-        });
+        was_called.store(false, Ordering::SeqCst);
 
-        let waker = Waker::from(Arc::new(TrackingWaker { called: waker_called_clone }));
-        let mut cx = Context::from_waker(&waker);
-        let mut future = std::pin::pin!(future);
+        // Write - callback should be called SYNCHRONOUSLY (before write_sync returns)
+        node.write_sync(id, "main", b"test", "alice", 1000).unwrap();
 
-        let _ = future.as_mut().poll(&mut cx);
-        waker_called.store(false, Ordering::SeqCst);
-
-        node.write_sync(id, "main", b"hello", "alice", 1000).unwrap();
-
-        assert!(waker_called.load(Ordering::SeqCst), "Waker should be called by write_sync");
-        let _ = future.as_mut().poll(&mut cx);
-        assert!(call_count.load(Ordering::SeqCst) >= 2, "Callback should receive the update");
+        // This assertion happens IMMEDIATELY after write_sync returns
+        // If callback was async, this would fail
+        assert!(was_called.load(Ordering::SeqCst), "Callback must be called synchronously");
     }
 }

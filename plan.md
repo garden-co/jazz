@@ -36,26 +36,23 @@
 - [x] Async read/write methods (write, read) - require explicit branch
 - [x] Streaming read/write methods (write_stream, read_stream) - require explicit branch
 
-### Signals (Local Subscriptions)
-- [x] `futures-signals` integration
-- [x] SignalState enum (Loading, Loaded, Error)
-- [x] LoadedState with previous tips and current tips (raw data)
-- [x] TipState for accessing individual tips
-- [x] SignalRegistry for deduplication by (object_id, branch)
-- [x] ObjectSignal handles with automatic cleanup when dropped
-- [x] Helper functions: build_tip_states, merge_tips, compute_change_ranges
-- [x] LoadedState.merge() - compute merge preview on demand
-- [x] LoadedState.diff() - compute byte-level diff on demand
-- [x] LoadedState.diff_raw() - diff without merge (for single-tip case)
-- [x] notify_object_update for batch signal updates
-- [x] Async content loading in LoadedState (merge_async, get_tip_content_async, load_all_tips)
+### Listeners (Local Subscriptions)
+- [x] Synchronous callback system (replaced futures-signals)
+- [x] ObjectListenerRegistry for managing subscriptions by (object_id, branch)
+- [x] ObjectCallback type: `Box<dyn Fn(Arc<ObjectState>) + Send + Sync>`
+- [x] ObjectState with previous tips and current tips
+- [x] ListenerId for subscription management
+- [x] subscribe() returns ListenerId, calls callback immediately with current state
+- [x] unsubscribe() removes listener by ID
+- [x] Helper functions: compute_change_ranges, ByteDiff, DiffRange
+- [x] Callbacks fire synchronously during write operations (same call stack)
 
 ### LocalNode Architecture
 - [x] LocalNode owns Arc<dyn Environment> for storage
 - [x] LocalNode.in_memory() convenience constructor with MemoryEnvironment
 - [x] All read/write methods on LocalNode use storage internally
-- [x] Signals hold environment reference for async content loading
-- [x] SignalRegistry.get_or_create() requires environment parameter
+- [x] ObjectListenerRegistry for synchronous callback management
+- [x] write_sync/write/write_stream automatically notify listeners
 - [x] No main branch convenience methods - all operations require explicit branch name
 
 **Current module structure**:
@@ -65,7 +62,7 @@
 - `object.rs` - Object with branches, sync/async/streaming read/write, ContentStream
 - `node.rs` - LocalNode (owns Environment), generate_object_id(), read/write/subscribe APIs
 - `storage.rs` - ContentRef, ChunkHash, ContentStore, CommitStore, Environment, MemoryEnvironment
-- `signal.rs` - SignalRegistry, ObjectSignal, SignalState, LoadedState (with env), TipState, LazyDiff
+- `listener.rs` - ObjectListenerRegistry, ObjectCallback, ObjectState, ListenerId, ByteDiff
 
 ### Persistence Backends
 - [ ] Implement RocksDB backend
@@ -94,8 +91,10 @@
 - [x] Synchronous index maintenance on insert/update/delete
 - [x] `select` with scan-based where clause (`=` only)
 - [x] `find_referencing` using index lookup
-- [ ] `subscribe_select` for reactive queries
-- [ ] `execute_reactive()` for reactive SELECT
+- [x] `reactive_query()` for callback-based reactive queries
+- [x] ReactiveQuery with subscribe()/unsubscribe() for synchronous callbacks
+- [x] ReactiveQueryRegistry for tracking active queries per table
+- [x] Callbacks fire synchronously on insert/update/delete
 
 ### Syncing Objects
 - [ ] Design sync protocol for commit graph reconciliation

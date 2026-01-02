@@ -5,7 +5,7 @@ mod schema;
 
 pub use database::{
     Database, DatabaseError, ExecuteResult, IndexKey, ObjectId, QueryKey, QueryRegistry,
-    QuerySignal, QueryState, RefIndex, SchemaId, TableRows,
+    QuerySubscription, QueryState, ReactiveQuery, RefIndex, SchemaId, TableRows,
 };
 pub use parser::{
     parse, Condition, CreateTable, FromClause, Insert, Join, JoinCondition, ParseError,
