@@ -6,13 +6,24 @@
 
 **Approach**: Start with naive implementation using explicit IDs and uncompressed storage everywhere. Build comprehensive test suite first, then optimize later.
 
-- [ ] Implement Object with commit graph structure
-- [ ] Implement Commit with content, parents, metadata
-- [ ] Implement Branch with frontier tracking
-- [ ] Content hashing for CommitID (BLAKE3)
-- [ ] Tests for commit graph operations (add commit, find frontier, etc.)
-- [ ] Tests for branching (create branch, list branches)
-- [ ] Tests for merging scenarios (sequential, concurrent tips)
+- [x] Implement Object with commit graph structure
+- [x] Implement Commit with content, parents, metadata
+- [x] Implement Branch with frontier tracking
+- [x] Content hashing for CommitID (BLAKE3)
+- [x] UUIDv7 generation for Object IDs
+- [x] Tests for commit graph operations (add commit, find frontier, etc.)
+- [x] Tests for branching (create branch, list branches)
+- [x] Tests for merging scenarios (sequential, concurrent tips)
+- [x] LCA (Lowest Common Ancestor) computation
+- [x] MergeStrategy trait with LastWriterWins implementation
+- [x] Branch merging (merge_branches)
+
+**Current module structure**:
+- `commit.rs` - CommitId, Commit
+- `branch.rs` - Branch with LCA, frontier tracking
+- `merge.rs` - MergeStrategy trait, LastWriterWins
+- `object.rs` - Object (CoValue) with branches
+- `node.rs` - LocalNode, generate_object_id()
 
 **Future optimizations** (after tests are solid):
 - [ ] Delta encoding for commits
@@ -58,7 +69,7 @@
 
 ## Phase 4: Advanced Features
 
-- [ ] Merge strategies
+- [ ] Additional merge strategies (beyond LastWriterWins)
 - [ ] Migration branches
 - [ ] Opt-in E2EE for sensitive data
 - [ ] Index optimization (beyond brute-force)

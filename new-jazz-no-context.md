@@ -103,3 +103,17 @@ Modeled as branching operations:
 - Offline clients can remain on old branch
 - Read-only clients can preview-apply migrations on unmigrated data
 - Uses same mechanism as merge previews
+
+---
+
+## Implementation Status
+
+Core commit graph implemented in Rust (`groove` crate):
+- `CommitId` - BLAKE3 content hash (256-bit)
+- `Commit` - snapshot with parents, author, timestamp, metadata
+- `Branch` - named branch with frontier tracking, LCA computation
+- `Object` - CoValue with branches, default "main" branch
+- `LocalNode` - manages objects with UUIDv7 IDs
+- `MergeStrategy` trait with `LastWriterWins` implementation
+
+17 tests covering commit hashing, sequential/concurrent commits, branching, LCA, and merging.
