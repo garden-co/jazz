@@ -282,6 +282,83 @@ describe("JazzClerkAuth", () => {
 
       expect(onClerkUserChangeSpy).toHaveBeenCalledTimes(1);
     });
+
+    it("should complete signup flow when new Clerk user is detected", async () => {
+      // 1. Setup local credentials (simulating anonymous user)
+      await authSecretStorage.set({
+        accountID: "test-account-id" as ID<Account>,
+        secretSeed: new Uint8Array([1, 2, 3]),
+        accountSecret: "test-secret" as AgentSecret,
+        provider: "anonymous",
+      });
+
+      const { client, triggerUserChange } = setupMockClerk(null);
+
+      const auth = new JazzClerkAuth(
+        mockAuthenticate,
+        mockLogOut,
+        authSecretStorage,
+      );
+
+      // 2. Register listener with null user (no one logged in yet)
+      auth.registerListener(client);
+
+      // Initial trigger with no user
+      triggerUserChange(null);
+
+      // 3. Trigger event with new Clerk user (no Jazz credentials yet)
+      const mockUserUpdate = vi.fn((data) => {
+        triggerUserChange(data);
+      });
+
+      const signInSpy = vi.spyOn(auth, "signIn");
+      const logInSpy = vi.spyOn(auth, "logIn");
+
+      const newClerkUser = {
+        fullName: "Test User",
+        firstName: "Test",
+        lastName: "User",
+        username: "testuser",
+        id: "clerk-user-123",
+        primaryEmailAddress: { emailAddress: "test@example.com" },
+        unsafeMetadata: {}, // No Jazz credentials yet
+        update: mockUserUpdate,
+      };
+
+      triggerUserChange(newClerkUser);
+
+      // Wait for async operations to complete
+      await vi.waitFor(() => {
+        expect(mockUserUpdate).toHaveBeenCalled();
+      });
+
+      // 4. Verify credentials synced to Clerk
+      expect(mockUserUpdate).toHaveBeenCalledWith({
+        unsafeMetadata: {
+          jazzAccountID: "test-account-id",
+          jazzAccountSecret: "test-secret",
+          jazzAccountSeed: [1, 2, 3],
+        },
+      });
+
+      // Verify profile name was updated from Clerk username
+      const me = await Account.getMe().$jazz.ensureLoaded({
+        resolve: { profile: true },
+      });
+      expect(me.profile.name).toBe("Test User");
+
+      // Verify authSecretStorage is updated with provider "clerk"
+      const storedCredentials = await authSecretStorage.get();
+      expect(storedCredentials).toEqual({
+        accountID: "test-account-id",
+        accountSecret: "test-secret",
+        secretSeed: new Uint8Array([1, 2, 3]),
+        provider: "clerk",
+      });
+
+      expect(signInSpy).toHaveBeenCalled();
+      expect(logInSpy).not.toHaveBeenCalled();
+    });
   });
 
   describe("initializeAuth", () => {
