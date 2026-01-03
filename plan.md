@@ -63,6 +63,7 @@
 - `node.rs` - LocalNode (owns Environment), generate_object_id(), read/write/subscribe APIs
 - `storage.rs` - ContentRef, ChunkHash, ContentStore, CommitStore, Environment, MemoryEnvironment
 - `listener.rs` - ObjectListenerRegistry, ObjectCallback, ObjectState, ListenerId, ByteDiff
+- `sql/` - SQL layer module (see below)
 
 ### Persistence Backends
 - [ ] Implement RocksDB backend
@@ -72,7 +73,7 @@
 
 ## Phase 1.5: SQL Layer
 
-### Step 1: Basic Storage
+### Step 1: Basic Storage (Complete)
 - [x] `ColumnType` and `ColumnDef` types
 - [x] `TableSchema` type with serialization
 - [x] Row binary encoding/decoding (length-prefix header + column values)
@@ -85,7 +86,7 @@
 - [x] `delete` - tombstone commit on row Object
 - [x] `execute()` method for SQL strings
 
-### Step 2: References and Queries
+### Step 2: References and Queries (Complete)
 - [x] `Ref` column type with target schema validation
 - [x] Index object creation per (source_table, source_column) Ref column
 - [x] Synchronous index maintenance on insert/update/delete
@@ -95,39 +96,88 @@
 - [x] ReactiveQuery with subscribe()/unsubscribe() for synchronous callbacks
 - [x] ReactiveQueryRegistry for tracking active queries per table
 - [x] Callbacks fire synchronously on insert/update/delete
+- [x] JOIN support in SQL parser and executor
+- [x] Qualified column references (table.column) in projections and WHERE
+- [x] Table-qualified star projection (table.*)
 
-### Syncing Objects
+### Step 3: ObjectId Type System (Complete)
+- [x] `ObjectId` newtype wrapping u128
+- [x] Crockford Base32 encoding (26 chars, case-insensitive, I/L→1, O→0)
+- [x] `Display` and `Debug` traits showing Base32 format
+- [x] `FromStr` for parsing Base32 strings
+- [x] ObjectId used throughout public API (LocalNode, ObjectKey, Row, etc.)
+- [x] SQL parser accepts ObjectIds as plain string literals
+- [x] Value coercion in database executor (String→Ref for Ref columns)
+- [x] WASM bindings accept Base32 strings for ObjectIds
+
+### Step 4: Incremental Query System (In Progress)
+
+See `specs/incremental-queries.md` for full design.
+
+**Phase 1: Core Types**
+- [ ] `RowDelta`, `PriorState`, `DeltaBatch` - change representation
+- [ ] `Predicate` - filter conditions with `matches()`
+- [ ] `RowCache` - shared row data cache
+- [ ] `QueryNode` - graph nodes (TableScan, Filter, Output)
+- [ ] `QueryGraph` - DAG with lazy init and delta propagation
+- [ ] `QueryGraphBuilder` - programmatic construction API
+
+**Phase 2: Integration**
+- [ ] `GraphRegistry` - manages active graphs, routes changes
+- [ ] `IncrementalQuery` - user-facing handle
+- [ ] Database integration (incremental_query method, mutation hooks)
+
+**Phase 3: Future Extensions**
+- [ ] Batched propagation for server sync (begin_batch/flush_batch)
+- [ ] Shared subgraphs across queries
+- [ ] JOIN support in query graphs
+- [ ] Index-aware source nodes (IndexLookup)
+- [ ] ReBAC constraint merging at graph construction
+
+### SQL Module Structure
+```
+sql/
+├── mod.rs          - Re-exports and module organization
+├── types.rs        - ObjectId, SchemaId, IndexKey, QueryState
+├── schema.rs       - ColumnType, ColumnDef, TableSchema
+├── row.rs          - Value, Row, encode_row, decode_row
+├── parser.rs       - SQL parser (CREATE, INSERT, UPDATE, SELECT)
+├── index.rs        - RefIndex for reverse lookups
+├── table_rows.rs   - TableRows for row membership tracking
+├── database/
+│   ├── mod.rs      - Database, ReactiveQuery, coercion logic
+│   └── tests.rs    - Database unit tests
+└── query_graph/    - Incremental query system
+    ├── mod.rs      - Public API exports
+    ├── delta.rs    - RowDelta, PriorState, DeltaBatch
+    ├── predicate.rs - Predicate enum and matching
+    ├── cache.rs    - RowCache
+    ├── node.rs     - NodeId, QueryNode, evaluation
+    ├── graph.rs    - QueryGraph, GraphState, GraphId
+    ├── builder.rs  - QueryGraphBuilder
+    └── registry.rs - GraphRegistry
+```
+
+### WASM Bindings (groove-wasm)
+- [x] WasmDatabase wrapper with execute() method
+- [x] WasmQueryHandle for reactive query subscriptions
+- [x] JavaScript callback integration
+- [x] Panic hook for better error messages
+- [x] update_row() accepts Base32 ObjectId strings
+
+## Phase 2: Syncing
 - [ ] Design sync protocol for commit graph reconciliation
 - [ ] Implement client-side sync
 - [ ] Implement server-side sync
 - [ ] Tests for sync scenarios (sequential commits, concurrent commits, reconnection)
 
-## Phase 2: SQL Interface
-
-### Basic Tables
-- [ ] Schema definition (code-gen build step)
-- [ ] Create simple tables (maps to CoValue type)
-- [ ] Basic CRUD via SQL subset
-
-### References
-- [ ] Allow referencing other tables (foreign keys to other CoValues)
-- [ ] Maintain reverse pointer index over all objects (backlinks)
-
-### Querying
-- [ ] SQL parser for subset
-- [ ] Brute-force scan implementation
-- [ ] Historical queries via magic column filters
-- [ ] Reactive subscriptions (default) with one-time load as special case
-
 ## Phase 3: Permissions & Identity
-
 - [ ] Server-authenticated accounts
 - [ ] ReBAC rules in schema
 - [ ] Permission evaluation on server
 - [ ] Creation rules
 
 ## Phase 4: Advanced Features
-
 - [ ] Additional merge strategies (beyond LastWriterWins)
 - [ ] Migration branches
 - [ ] Opt-in E2EE for sensitive data
@@ -135,6 +185,29 @@
 
 ---
 
+## Test Coverage
+
+Current test count: **141 tests** passing across all modules
+
+- Unit tests in `sql/row.rs`, `sql/types.rs`, `sql/database/tests.rs`
+- Integration tests in `tests/` directory:
+  - `branch.rs` - Branch operations and LCA
+  - `commit.rs` - Commit ID determinism
+  - `listener.rs` - ObjectListenerRegistry
+  - `node.rs` - LocalNode operations
+  - `object.rs` - Object read/write/streaming
+  - `sql_database.rs` - Full SQL layer tests
+  - `sql_parser.rs` - SQL parsing tests
+  - `sql_row.rs` - Row encoding/decoding
+  - `sql_schema.rs` - Schema serialization
+  - `storage.rs` - Storage abstractions
+
+---
+
 ## Clarifications
 
 **Reactive SQL**: Queries are still reactive (subscription as default, one-time load as special case). The data you subscribe to is determined by an SQL query - the query defines *what* to watch, and changes to matching data trigger updates.
+
+**ObjectId Format**: ObjectIds are displayed and parsed as 26-character Crockford Base32 strings (e.g., `0000000000000034NBSM938NKR`). This format is case-insensitive and substitutes commonly confused characters (I/L→1, O→0).
+
+**Value Coercion**: The SQL parser produces `Value::String` for all string literals. The database executor coerces strings to `Value::Ref(ObjectId)` when the target column type is `Ref`. This avoids ambiguity since strings like "ALICE" are valid Base32 but should remain as strings for String columns.
