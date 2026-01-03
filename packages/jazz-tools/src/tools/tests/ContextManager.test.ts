@@ -604,6 +604,22 @@ describe("ContextManager", () => {
       expect(onAnonymousAccountDiscarded).toHaveBeenCalledTimes(1);
     });
 
+    test("prevents concurrent logout attempts", async () => {
+      const onLogOut = vi.fn();
+      await manager.createContext({ onLogOut });
+
+      // Start multiple concurrent logout attempts
+      const promises = [];
+      for (let i = 0; i < 5; i++) {
+        promises.push(manager.logOut());
+      }
+
+      await Promise.all(promises);
+
+      // onLogOut should only be called once despite multiple logOut calls
+      expect(onLogOut).toHaveBeenCalledTimes(1);
+    });
+
     test("allows authentication after logout", async () => {
       const account = await createJazzTestAccount();
       const onAnonymousAccountDiscarded = vi.fn();
