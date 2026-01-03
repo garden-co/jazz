@@ -1,5 +1,14 @@
 # jazz-tools
 
+## 0.19.17
+
+### Patch Changes
+
+- d46cffd: Bugfix: fixed an issue where calling logOut multiple times concurrently could trigger duplicate logout operations
+  - cojson@0.19.17
+  - cojson-storage-indexeddb@0.19.17
+  - cojson-transport-ws@0.19.17
+
 ## 0.19.16
 
 ### Patch Changes
