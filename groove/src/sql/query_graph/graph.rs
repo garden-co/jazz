@@ -7,6 +7,7 @@ use crate::sql::query_graph::delta::{DeltaBatch, RowDelta};
 use crate::sql::query_graph::node::{NodeId, QueryNode};
 use crate::sql::row::Row;
 use crate::sql::schema::TableSchema;
+use crate::sql::ObjectId;
 
 use super::DatabaseState;
 
@@ -114,12 +115,20 @@ impl QueryGraph {
 
     /// Get current output rows, initializing lazily if needed.
     pub fn get_output(&mut self, cache: &mut RowCache, db: &DatabaseState) -> Vec<Row> {
-        self.ensure_initialized(cache, db);
+        self.ensure_initialized_skip(cache, db, None);
         self.collect_output(cache)
     }
 
-    /// Ensure the graph is initialized.
-    fn ensure_initialized(&mut self, cache: &mut RowCache, db: &DatabaseState) {
+    /// Ensure the graph is initialized, optionally skipping a specific row ID.
+    ///
+    /// The skip_id is used when initializing during a row change notification -
+    /// we skip that row because it will be processed as part of the delta.
+    fn ensure_initialized_skip(
+        &mut self,
+        cache: &mut RowCache,
+        db: &DatabaseState,
+        skip_id: Option<ObjectId>,
+    ) {
         if self.state != GraphState::Uninitialized {
             return;
         }
@@ -131,6 +140,11 @@ impl QueryGraph {
 
         // Populate cache and process through graph
         for row in rows {
+            // Skip the triggering row - it will be processed as a delta
+            if skip_id == Some(row.id) {
+                continue;
+            }
+
             cache.insert(&self.table, row.clone());
 
             // Process as Added delta through all nodes
@@ -171,7 +185,10 @@ impl QueryGraph {
         cache: &mut RowCache,
         db: &DatabaseState,
     ) -> DeltaBatch {
-        self.ensure_initialized(cache, db);
+        // Get the row ID being changed - we need to skip it during init
+        // because it's already in the database but we want to process it as a delta
+        let skip_id = Some(delta.row_id());
+        self.ensure_initialized_skip(cache, db, skip_id);
 
         // Update cache with new value
         match &delta {

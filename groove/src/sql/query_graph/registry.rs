@@ -20,6 +20,13 @@ pub type OutputCallback = Box<dyn Fn(&DeltaBatch) + Send + Sync>;
 #[cfg(feature = "wasm")]
 pub type OutputCallback = Box<dyn Fn(&DeltaBatch)>;
 
+/// Arc-wrapped callback for internal storage (allows cloning for lock-free notification).
+#[cfg(not(feature = "wasm"))]
+type ArcCallback = std::sync::Arc<dyn Fn(&DeltaBatch) + Send + Sync>;
+
+#[cfg(feature = "wasm")]
+type ArcCallback = std::sync::Arc<dyn Fn(&DeltaBatch)>;
+
 /// Callback type for full row updates (convenience wrapper).
 #[cfg(not(feature = "wasm"))]
 pub type RowsCallback = Box<dyn Fn(Vec<Row>) + Send + Sync>;
@@ -30,7 +37,7 @@ pub type RowsCallback = Box<dyn Fn(Vec<Row>)>;
 /// A registered query with its graph and callbacks.
 struct RegisteredQuery {
     graph: QueryGraph,
-    callbacks: HashMap<ListenerId, OutputCallback>,
+    callbacks: HashMap<ListenerId, ArcCallback>,
     next_listener_id: u64,
 }
 
@@ -46,7 +53,8 @@ impl RegisteredQuery {
     fn subscribe(&mut self, callback: OutputCallback) -> ListenerId {
         let id = ListenerId::new(self.next_listener_id);
         self.next_listener_id += 1;
-        self.callbacks.insert(id, callback);
+        // Convert Box to Arc for clonability
+        self.callbacks.insert(id, std::sync::Arc::from(callback));
         id
     }
 
@@ -54,10 +62,9 @@ impl RegisteredQuery {
         self.callbacks.remove(&id).is_some()
     }
 
-    fn notify(&self, delta: &DeltaBatch) {
-        for callback in self.callbacks.values() {
-            callback(delta);
-        }
+    /// Get clones of all callbacks (for lock-free notification).
+    fn get_callbacks(&self) -> Vec<ArcCallback> {
+        self.callbacks.values().cloned().collect()
     }
 }
 
@@ -191,16 +198,30 @@ impl GraphRegistry {
             return;
         }
 
-        let mut cache = self.cache.write().unwrap();
-        let mut queries = self.queries.write().unwrap();
+        // Phase 1: Process graphs and collect output deltas + callbacks (with locks held)
+        let pending: Vec<(DeltaBatch, Vec<ArcCallback>)> = {
+            let mut cache = self.cache.write().unwrap();
+            let mut queries = self.queries.write().unwrap();
 
-        for graph_id in graph_ids {
-            if let Some(query) = queries.get_mut(&graph_id) {
-                let output_delta = query.graph.process_change(delta.clone(), &mut cache, db);
+            graph_ids
+                .into_iter()
+                .filter_map(|graph_id| {
+                    queries.get_mut(&graph_id).map(|query| {
+                        let output_delta = query.graph.process_change(delta.clone(), &mut cache, db);
+                        let callbacks = query.get_callbacks();
+                        (output_delta, callbacks)
+                    })
+                })
+                .filter(|(delta, _)| !delta.is_empty())
+                .collect()
+        };
+        // All locks released here
 
-                if !output_delta.is_empty() {
-                    query.notify(&output_delta);
-                }
+        // Phase 2: Call callbacks without holding any locks (prevents deadlock)
+        // Callbacks may call get_output() which needs to acquire locks
+        for (output_delta, callbacks) in pending {
+            for callback in callbacks {
+                callback(&output_delta);
             }
         }
     }

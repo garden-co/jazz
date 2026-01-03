@@ -7,7 +7,7 @@ mod schema;
 mod table_rows;
 mod types;
 
-pub use database::{Database, DatabaseError, DatabaseState, ExecuteResult, ReactiveQuery};
+pub use database::{Database, DatabaseError, DatabaseState, ExecuteResult, IncrementalQuery, ReactiveQuery};
 pub use index::RefIndex;
 pub use parser::{
     parse, Condition, CreateTable, FromClause, Insert, Join, JoinCondition, ParseError,
