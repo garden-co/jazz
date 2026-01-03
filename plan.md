@@ -194,6 +194,7 @@ See `specs/rebac-policies.md` for full design.
 - [x] INSERT policy evaluation (CHECK on @new)
 - [x] UPDATE policy evaluation (WHERE on existing, CHECK on @old/@new)
 - [x] DELETE policy evaluation (WHERE, fallback to UPDATE)
+- [x] Database integration (`insert_as`, `update_as`, `delete_as` methods)
 
 **Phase 3.4: Query Integration**
 - [ ] Combine policy predicates with user query predicates
@@ -218,7 +219,7 @@ See `specs/rebac-policies.md` for full design.
 
 ## Test Coverage
 
-Current test count: **186 tests** passing across all modules
+Current test count: **219 tests** passing across all modules
 
 - Unit tests in `sql/row.rs`, `sql/types.rs`, `sql/database/tests.rs`
 - Integration tests in `tests/` directory:

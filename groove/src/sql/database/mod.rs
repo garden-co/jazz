@@ -653,6 +653,8 @@ pub enum DatabaseError {
     NotAReference(String),
     /// Policy error.
     Policy(PolicyError),
+    /// Policy denied the operation.
+    PolicyDenied { action: PolicyAction, reason: String },
 }
 
 impl std::fmt::Display for DatabaseError {
@@ -679,6 +681,9 @@ impl std::fmt::Display for DatabaseError {
             }
             DatabaseError::NotAReference(name) => write!(f, "column '{}' is not a reference", name),
             DatabaseError::Policy(e) => write!(f, "policy error: {}", e),
+            DatabaseError::PolicyDenied { action, reason } => {
+                write!(f, "{} denied: {}", action, reason)
+            }
         }
     }
 }
@@ -1345,6 +1350,148 @@ impl Database {
         rows.into_iter()
             .filter(|row| evaluator.check_select(table, row).is_allowed())
             .collect()
+    }
+
+    // ========== Policy-Checked Write Operations ==========
+
+    /// Insert a new row, checking INSERT policy for the given viewer.
+    pub fn insert_as(
+        &self,
+        table: &str,
+        columns: &[&str],
+        values: Vec<Value>,
+        viewer: ObjectId,
+    ) -> Result<ObjectId, DatabaseError> {
+        use crate::sql::policy::{PolicyConfig, PolicyEvaluator, PolicyResult};
+
+        let schema = self.get_table(table)
+            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+
+        // Build the row values first (to validate and check policy)
+        let mut row_values = vec![Value::Null; schema.columns.len()];
+
+        if columns.len() != values.len() {
+            return Err(DatabaseError::ColumnMismatch {
+                expected: columns.len(),
+                got: values.len(),
+            });
+        }
+
+        for (col_name, value) in columns.iter().zip(values.clone()) {
+            let idx = schema.column_index(col_name)
+                .ok_or_else(|| DatabaseError::ColumnNotFound(col_name.to_string()))?;
+            row_values[idx] = coerce_value(value, &schema.columns[idx].ty);
+        }
+
+        // Check for missing non-nullable columns
+        for (i, col) in schema.columns.iter().enumerate() {
+            if !col.nullable && row_values[i].is_null() {
+                return Err(DatabaseError::MissingColumn(col.name.clone()));
+            }
+        }
+
+        // Create a temporary row for policy evaluation
+        let temp_row = Row::new(ObjectId::default(), row_values);
+
+        // Check INSERT policy
+        let config = PolicyConfig::default();
+        let mut evaluator = PolicyEvaluator::new(self, self, viewer, config);
+        let result = evaluator.check_insert(table, &temp_row);
+
+        match result {
+            PolicyResult::Denied { reason } => {
+                return Err(DatabaseError::PolicyDenied {
+                    action: PolicyAction::Insert,
+                    reason,
+                });
+            }
+            PolicyResult::Allowed { .. } => {}
+        }
+
+        // Policy passed, perform the actual insert
+        self.insert(table, columns, values)
+    }
+
+    /// Update a row, checking UPDATE policy for the given viewer.
+    pub fn update_as(
+        &self,
+        table: &str,
+        id: ObjectId,
+        assignments: &[(&str, Value)],
+        viewer: ObjectId,
+    ) -> Result<bool, DatabaseError> {
+        use crate::sql::policy::{PolicyConfig, PolicyEvaluator, PolicyResult};
+
+        let schema = self.get_table(table)
+            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+
+        // Get the existing row
+        let old_row = match self.get(table, id)? {
+            Some(row) => row,
+            None => return Ok(false),
+        };
+
+        // Build the new row values
+        let mut new_values = old_row.values.clone();
+        for (col_name, value) in assignments {
+            let idx = schema.column_index(col_name)
+                .ok_or_else(|| DatabaseError::ColumnNotFound(col_name.to_string()))?;
+            new_values[idx] = coerce_value(value.clone(), &schema.columns[idx].ty);
+        }
+
+        let new_row = Row::new(id, new_values);
+
+        // Check UPDATE policy
+        let config = PolicyConfig::default();
+        let mut evaluator = PolicyEvaluator::new(self, self, viewer, config);
+        let result = evaluator.check_update(table, &old_row, &new_row);
+
+        match result {
+            PolicyResult::Denied { reason } => {
+                return Err(DatabaseError::PolicyDenied {
+                    action: PolicyAction::Update,
+                    reason,
+                });
+            }
+            PolicyResult::Allowed { .. } => {}
+        }
+
+        // Policy passed, perform the actual update
+        self.update(table, id, assignments)
+    }
+
+    /// Delete a row, checking DELETE policy for the given viewer.
+    pub fn delete_as(
+        &self,
+        table: &str,
+        id: ObjectId,
+        viewer: ObjectId,
+    ) -> Result<bool, DatabaseError> {
+        use crate::sql::policy::{PolicyConfig, PolicyEvaluator, PolicyResult};
+
+        // Get the existing row
+        let row = match self.get(table, id)? {
+            Some(row) => row,
+            None => return Ok(false),
+        };
+
+        // Check DELETE policy
+        let config = PolicyConfig::default();
+        let mut evaluator = PolicyEvaluator::new(self, self, viewer, config);
+        let result = evaluator.check_delete(table, &row);
+
+        match result {
+            PolicyResult::Denied { reason } => {
+                return Err(DatabaseError::PolicyDenied {
+                    action: PolicyAction::Delete,
+                    reason,
+                });
+            }
+            PolicyResult::Allowed { .. } => {}
+        }
+
+        // Policy passed, perform the actual delete
+        self.delete(table, id)
     }
 
     /// Find all rows referencing a target ID via a specific column.

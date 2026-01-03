@@ -422,3 +422,198 @@ fn select_all_as_with_inheritance() {
     let bob_docs = db.select_all_as("documents", bob_id).unwrap();
     assert_eq!(bob_docs.len(), 0);
 }
+
+// ========== Write Policy Tests ==========
+
+#[test]
+fn insert_as_checks_policy() {
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, author_id REFERENCES users NOT NULL)").unwrap();
+
+    // Create users
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Add INSERT policy: author_id must be viewer
+    db.execute("CREATE POLICY ON documents FOR INSERT CHECK (@new.author_id = @viewer)").unwrap();
+
+    // Alice can insert doc with herself as author
+    let result = db.insert_as(
+        "documents",
+        &["title", "author_id"],
+        vec![Value::String("Alice's Doc".into()), Value::Ref(alice_id)],
+        alice_id,
+    );
+    assert!(result.is_ok(), "owner should be able to insert: {:?}", result);
+
+    // Alice cannot insert doc with Bob as author
+    let result = db.insert_as(
+        "documents",
+        &["title", "author_id"],
+        vec![Value::String("Forged Doc".into()), Value::Ref(bob_id)],
+        alice_id,
+    );
+    assert!(matches!(result, Err(DatabaseError::PolicyDenied { .. })),
+        "should deny insert with other as author: {:?}", result);
+}
+
+#[test]
+fn update_as_checks_policy() {
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+
+    // Create users
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Create a document owned by Alice
+    let doc_id = db.insert("documents", &["title", "owner_id"], vec![
+        Value::String("Original".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    // Add UPDATE policy: owner can update
+    db.execute("CREATE POLICY ON documents FOR UPDATE WHERE owner_id = @viewer").unwrap();
+
+    // Alice can update
+    let result = db.update_as("documents", doc_id, &[("title", Value::String("Updated".into()))], alice_id);
+    assert!(result.is_ok(), "owner should be able to update: {:?}", result);
+
+    // Bob cannot update
+    let result = db.update_as("documents", doc_id, &[("title", Value::String("Hacked".into()))], bob_id);
+    assert!(matches!(result, Err(DatabaseError::PolicyDenied { .. })),
+        "non-owner should not be able to update: {:?}", result);
+}
+
+#[test]
+fn update_as_checks_both_where_and_check() {
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    let doc_id = db.insert("documents", &["title", "owner_id"], vec![
+        Value::String("Original".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    // Add UPDATE policy: owner can update, but cannot change owner
+    db.execute("CREATE POLICY ON documents FOR UPDATE WHERE owner_id = @viewer CHECK (@new.owner_id = @old.owner_id)").unwrap();
+
+    // Alice can update title
+    let result = db.update_as("documents", doc_id, &[("title", Value::String("New Title".into()))], alice_id);
+    assert!(result.is_ok(), "should allow updating title: {:?}", result);
+
+    // Alice cannot change owner
+    let result = db.update_as("documents", doc_id, &[("owner_id", Value::Ref(bob_id))], alice_id);
+    assert!(matches!(result, Err(DatabaseError::PolicyDenied { .. })),
+        "should deny changing owner: {:?}", result);
+}
+
+#[test]
+fn delete_as_checks_policy() {
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    let doc_id = db.insert("documents", &["title", "owner_id"], vec![
+        Value::String("To Delete".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    // Add DELETE policy: owner can delete
+    db.execute("CREATE POLICY ON documents FOR DELETE WHERE owner_id = @viewer").unwrap();
+
+    // Bob cannot delete
+    let result = db.delete_as("documents", doc_id, bob_id);
+    assert!(matches!(result, Err(DatabaseError::PolicyDenied { .. })),
+        "non-owner should not be able to delete: {:?}", result);
+
+    // Alice can delete
+    let result = db.delete_as("documents", doc_id, alice_id);
+    assert!(result.is_ok(), "owner should be able to delete: {:?}", result);
+}
+
+#[test]
+fn delete_as_falls_back_to_update_policy() {
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    let doc_id = db.insert("documents", &["title", "owner_id"], vec![
+        Value::String("Deletable".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    // Only add UPDATE policy (no DELETE policy)
+    db.execute("CREATE POLICY ON documents FOR UPDATE WHERE owner_id = @viewer").unwrap();
+
+    // Bob cannot delete (UPDATE policy check fails)
+    let result = db.delete_as("documents", doc_id, bob_id);
+    assert!(matches!(result, Err(DatabaseError::PolicyDenied { .. })),
+        "non-owner should not be able to delete via UPDATE fallback: {:?}", result);
+
+    // Alice can delete (UPDATE policy allows it)
+    let result = db.delete_as("documents", doc_id, alice_id);
+    assert!(result.is_ok(), "owner should be able to delete via UPDATE fallback: {:?}", result);
+}
