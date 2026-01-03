@@ -1224,3 +1224,242 @@ fn join_multiple_conditions_where() {
         _ => panic!("Expected Selected"),
     }
 }
+
+// ========== Reactive Query JOIN Tests ==========
+
+#[test]
+fn reactive_join_basic() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
+        .unwrap();
+
+    let alice_id = match db
+        .execute("INSERT INTO users (name) VALUES ('Alice')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
+
+    db.execute(&format!(
+        "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'First Post')",
+        alice_id
+    ))
+    .unwrap();
+
+    // Create reactive query with JOIN
+    let query = db
+        .reactive_query("SELECT * FROM posts JOIN users ON posts.author = users.id")
+        .unwrap();
+
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let row_counts = Arc::new(RwLock::new(Vec::<usize>::new()));
+    let call_count_clone = call_count.clone();
+    let row_counts_clone = row_counts.clone();
+
+    let _sub_id = query.subscribe(Box::new(move |rows| {
+        call_count_clone.fetch_add(1, Ordering::SeqCst);
+        row_counts_clone.write().unwrap().push(rows.len());
+    }));
+
+    // Initial callback with 1 joined row
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    assert_eq!(*row_counts.read().unwrap(), vec![1]);
+
+    // Insert another post - should trigger callback
+    db.execute(&format!(
+        "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Second Post')",
+        alice_id
+    ))
+    .unwrap();
+
+    assert_eq!(call_count.load(Ordering::SeqCst), 2);
+    assert_eq!(*row_counts.read().unwrap(), vec![1, 2]);
+}
+
+#[test]
+fn reactive_join_updates_on_joined_table_change() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
+        .unwrap();
+
+    let alice_id = match db
+        .execute("INSERT INTO users (name) VALUES ('Alice')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
+
+    db.execute(&format!(
+        "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Test Post')",
+        alice_id
+    ))
+    .unwrap();
+
+    // Create reactive query with JOIN and filter on users table
+    let query = db
+        .reactive_query("SELECT * FROM posts JOIN users ON posts.author = users.id WHERE users.name = 'Alice'")
+        .unwrap();
+
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let row_counts = Arc::new(RwLock::new(Vec::<usize>::new()));
+    let call_count_clone = call_count.clone();
+    let row_counts_clone = row_counts.clone();
+
+    let _sub_id = query.subscribe(Box::new(move |rows| {
+        call_count_clone.fetch_add(1, Ordering::SeqCst);
+        row_counts_clone.write().unwrap().push(rows.len());
+    }));
+
+    // Initial callback with 1 row
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    assert_eq!(*row_counts.read().unwrap(), vec![1]);
+
+    // Add another user - should trigger re-eval but still 1 row (no matching posts)
+    db.execute("INSERT INTO users (name) VALUES ('Bob')")
+        .unwrap();
+
+    assert_eq!(call_count.load(Ordering::SeqCst), 2);
+    assert_eq!(*row_counts.read().unwrap(), vec![1, 1]);
+
+    // Update Alice's name to something else - should now return 0 rows
+    db.execute(&format!(
+        "UPDATE users SET name = 'Alicia' WHERE id = x'{:032x}'",
+        alice_id
+    ))
+    .unwrap();
+
+    assert_eq!(call_count.load(Ordering::SeqCst), 3);
+    assert_eq!(*row_counts.read().unwrap(), vec![1, 1, 0]);
+}
+
+#[test]
+fn reactive_join_reference_repointing() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
+        .unwrap();
+
+    // Create two users
+    let alice_id = match db
+        .execute("INSERT INTO users (name) VALUES ('Alice')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
+    let bob_id = match db
+        .execute("INSERT INTO users (name) VALUES ('Bob')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
+
+    // Create a post by Alice
+    let post_id = match db
+        .execute(&format!(
+            "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Test Post')",
+            alice_id
+        ))
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
+
+    // Reactive query filtering for Alice's posts
+    let query = db
+        .reactive_query("SELECT * FROM posts JOIN users ON posts.author = users.id WHERE users.name = 'Alice'")
+        .unwrap();
+
+    let names_seen = Arc::new(RwLock::new(Vec::<String>::new()));
+    let names_clone = names_seen.clone();
+
+    let _sub_id = query.subscribe(Box::new(move |rows| {
+        // Track which user name is in each callback
+        if rows.is_empty() {
+            names_clone.write().unwrap().push("(empty)".to_string());
+        } else {
+            // Row has: author, title, name -> name is index 2
+            if let Value::String(name) = &rows[0].values[2] {
+                names_clone.write().unwrap().push(name.clone());
+            }
+        }
+    }));
+
+    // Initial: should see Alice
+    assert_eq!(*names_seen.read().unwrap(), vec!["Alice"]);
+
+    // Re-point the post from Alice to Bob
+    db.execute(&format!(
+        "UPDATE posts SET author = x'{:032x}' WHERE id = x'{:032x}'",
+        bob_id, post_id
+    ))
+    .unwrap();
+
+    // Now should be empty (filtering for Alice but post points to Bob)
+    assert_eq!(*names_seen.read().unwrap(), vec!["Alice", "(empty)"]);
+
+    // Query for Bob's posts should work
+    let query_bob = db
+        .reactive_query("SELECT * FROM posts JOIN users ON posts.author = users.id WHERE users.name = 'Bob'")
+        .unwrap();
+
+    let rows = query_bob.once();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values[2], Value::String("Bob".to_string()));
+}
+
+#[test]
+fn reactive_join_delete_from_joined_table() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
+        .unwrap();
+
+    let alice_id = match db
+        .execute("INSERT INTO users (name) VALUES ('Alice')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
+
+    db.execute(&format!(
+        "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Test Post')",
+        alice_id
+    ))
+    .unwrap();
+
+    let query = db
+        .reactive_query("SELECT * FROM posts JOIN users ON posts.author = users.id")
+        .unwrap();
+
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let row_counts = Arc::new(RwLock::new(Vec::<usize>::new()));
+    let call_count_clone = call_count.clone();
+    let row_counts_clone = row_counts.clone();
+
+    let _sub_id = query.subscribe(Box::new(move |rows| {
+        call_count_clone.fetch_add(1, Ordering::SeqCst);
+        row_counts_clone.write().unwrap().push(rows.len());
+    }));
+
+    // Initial: 1 joined row
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    assert_eq!(*row_counts.read().unwrap(), vec![1]);
+
+    // Delete the user - join should now return 0 rows
+    db.delete("users", alice_id).unwrap();
+
+    assert_eq!(call_count.load(Ordering::SeqCst), 2);
+    assert_eq!(*row_counts.read().unwrap(), vec![1, 0]);
+}

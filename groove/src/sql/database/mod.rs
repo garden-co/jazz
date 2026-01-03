@@ -185,66 +185,117 @@ impl ReactiveQueryInner {
     }
 
     fn evaluate(&self) -> Vec<Row> {
-        let table = &self.select.from.table;
+        let primary_table = &self.select.from.table;
 
-        // Read the table rows to get current row IDs
-        let row_ids: Vec<ObjectId> = {
-            let table_rows_objects = self.db_state.table_rows_objects.read().unwrap();
-            if let Some(rows_id) = table_rows_objects.get(table) {
-                if let Ok(Some(data)) = self.db_state.node.read_sync(*rows_id, "main") {
-                    if !data.is_empty() {
-                        if let Ok(table_rows) = TableRows::from_bytes(&data) {
-                            table_rows.into_vec()
-                        } else {
-                            vec![]
-                        }
-                    } else {
-                        vec![]
+        // Get primary table schema
+        let primary_schema = match self.db_state.get_schema(primary_table) {
+            Some(s) => s,
+            None => return vec![],
+        };
+
+        // Read all rows from primary table
+        let primary_rows = self.db_state.read_all_rows(primary_table);
+
+        if self.select.from.joins.is_empty() {
+            // Simple case: no JOINs
+            primary_rows
+                .into_iter()
+                .filter(|row| self.matches_where_simple(&row.values, &primary_schema))
+                .collect()
+        } else {
+            // JOIN case: build joined rows
+            let mut joined_rows: Vec<JoinedRow> = primary_rows
+                .into_iter()
+                .map(|row| JoinedRow::from_single(primary_table, &primary_schema, row))
+                .collect();
+
+            // Apply each join
+            for join in &self.select.from.joins {
+                joined_rows = self.apply_join(joined_rows, join);
+            }
+
+            // Apply WHERE filtering on joined results
+            for cond in &self.select.where_clause {
+                joined_rows.retain(|jr| jr.matches_condition(cond));
+            }
+
+            // Apply projection and convert to output
+            joined_rows
+                .into_iter()
+                .map(|jr| jr.to_output_row(&self.select.projection))
+                .collect()
+        }
+    }
+
+    /// Apply a single JOIN to a set of joined rows.
+    fn apply_join(&self, rows: Vec<JoinedRow>, join: &Join) -> Vec<JoinedRow> {
+        let join_schema = match self.db_state.get_schema(&join.table) {
+            Some(s) => s,
+            None => return vec![],
+        };
+
+        let mut result = Vec::new();
+
+        for jr in rows {
+            let left_table = join.on.left.table.as_deref();
+            let left_column = &join.on.left.column;
+            let right_table = join.on.right.table.as_deref();
+            let right_column = &join.on.right.column;
+
+            // Determine which side references the join table
+            let (lookup_value, join_column) = if right_table == Some(join.table.as_str()) ||
+                (right_table.is_none() && join_schema.column_index(right_column).is_some()) {
+                // Right side is from join table
+                let left_val = if left_column == "id" {
+                    let table_name = left_table.unwrap_or(&jr.primary_table);
+                    jr.get_row_id(table_name).map(Value::Ref)
+                } else {
+                    jr.get_column(left_table, left_column).cloned()
+                };
+                (left_val, right_column.as_str())
+            } else {
+                // Left side is from join table
+                let right_val = if right_column == "id" {
+                    let table_name = right_table.unwrap_or(&jr.primary_table);
+                    jr.get_row_id(table_name).map(Value::Ref)
+                } else {
+                    jr.get_column(right_table, right_column).cloned()
+                };
+                (right_val, left_column.as_str())
+            };
+
+            let lookup_value = match lookup_value {
+                Some(v) => v,
+                None => continue,
+            };
+
+            // Find matching rows from the join table
+            let matching = if join_column == "id" {
+                if let Value::Ref(id) = &lookup_value {
+                    match self.db_state.get_row(&join.table, *id) {
+                        Some(row) => vec![row],
+                        None => vec![],
                     }
                 } else {
                     vec![]
                 }
             } else {
-                return vec![];
-            }
-        };
-
-        // Get schema
-        let schema = {
-            let tables = self.db_state.tables.read().unwrap();
-            let schemas = self.db_state.schemas.read().unwrap();
-            tables.get(table)
-                .and_then(|id| schemas.get(id).cloned())
-        };
-
-        let schema = match schema {
-            Some(s) => s,
-            None => return vec![],
-        };
-
-        // Read and filter rows
-        let mut rows = Vec::new();
-        for row_id in row_ids {
-            let data = match self.db_state.node.read_sync(row_id, "main") {
-                Ok(Some(data)) if !data.is_empty() => data,
-                _ => continue,
+                self.db_state.select_where(&join.table, join_column, &lookup_value)
             };
 
-            let values = match decode_row(&data, &schema) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            // Apply WHERE clause filtering
-            if self.matches_where(&values, &schema) {
-                rows.push(Row::new(row_id, values));
+            // Produce cartesian product of matches (inner join)
+            for matched_row in matching {
+                let mut new_jr = jr.clone();
+                new_jr.add_table(&join.table, &join_schema, matched_row);
+                result.push(new_jr);
             }
         }
 
-        rows
+        result
     }
 
-    fn matches_where(&self, values: &[Value], schema: &TableSchema) -> bool {
+    /// Simple WHERE matching for non-JOIN queries.
+    fn matches_where_simple(&self, values: &[Value], schema: &TableSchema) -> bool {
         for cond in &self.select.where_clause {
             let col_idx = match schema.column_index(&cond.column.column) {
                 Some(idx) => idx,
@@ -362,13 +413,15 @@ impl ReactiveQueryRegistry {
         }
     }
 
-    /// Register a query.
-    fn register(&self, query: &ReactiveQuery) {
+    /// Register a query for all tables it depends on.
+    fn register(&self, query: &ReactiveQuery, tables: &[String]) {
         let mut queries = self.queries.write().unwrap();
-        queries
-            .entry(query.inner.table.clone())
-            .or_default()
-            .push(query.inner_weak());
+        for table in tables {
+            queries
+                .entry(table.clone())
+                .or_default()
+                .push(query.inner_weak());
+        }
     }
 
     /// Refresh all active queries for a table.
@@ -460,6 +513,115 @@ impl DatabaseState {
             index_objects: RwLock::new(HashMap::new()),
             reactive_queries: ReactiveQueryRegistry::new(),
         }
+    }
+
+    /// Get a table schema by name.
+    fn get_schema(&self, table: &str) -> Option<TableSchema> {
+        let tables = self.tables.read().unwrap();
+        let schema_id = tables.get(table)?;
+        let schemas = self.schemas.read().unwrap();
+        schemas.get(schema_id).cloned()
+    }
+
+    /// Read all rows from a table.
+    fn read_all_rows(&self, table: &str) -> Vec<Row> {
+        let schema = match self.get_schema(table) {
+            Some(s) => s,
+            None => return vec![],
+        };
+
+        let row_ids: Vec<ObjectId> = {
+            let table_rows_objects = self.table_rows_objects.read().unwrap();
+            if let Some(rows_id) = table_rows_objects.get(table) {
+                if let Ok(Some(data)) = self.node.read_sync(*rows_id, "main") {
+                    if !data.is_empty() {
+                        if let Ok(table_rows) = TableRows::from_bytes(&data) {
+                            table_rows.into_vec()
+                        } else {
+                            vec![]
+                        }
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                }
+            } else {
+                return vec![];
+            }
+        };
+
+        let mut rows = Vec::new();
+        for row_id in row_ids {
+            let data = match self.node.read_sync(row_id, "main") {
+                Ok(Some(data)) if !data.is_empty() => data,
+                _ => continue,
+            };
+
+            let values = match decode_row(&data, &schema) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            rows.push(Row::new(row_id, values));
+        }
+
+        rows
+    }
+
+    /// Get a single row by ID.
+    fn get_row(&self, table: &str, id: ObjectId) -> Option<Row> {
+        let schema = self.get_schema(table)?;
+
+        // Check if row belongs to this table
+        {
+            let row_table = self.row_table.read().unwrap();
+            match row_table.get(&id) {
+                Some(t) if t == table => {}
+                _ => return None,
+            }
+        }
+
+        let data = match self.node.read_sync(id, "main") {
+            Ok(Some(data)) if !data.is_empty() => data,
+            _ => return None,
+        };
+
+        let values = match decode_row(&data, &schema) {
+            Ok(v) => v,
+            Err(_) => return None,
+        };
+
+        Some(Row::new(id, values))
+    }
+
+    /// Find rows matching a column = value condition.
+    fn select_where(&self, table: &str, column: &str, value: &Value) -> Vec<Row> {
+        let schema = match self.get_schema(table) {
+            Some(s) => s,
+            None => return vec![],
+        };
+
+        // Special case: id column
+        if column == "id" {
+            if let Value::Ref(id) = value {
+                return match self.get_row(table, *id) {
+                    Some(row) => vec![row],
+                    None => vec![],
+                };
+            }
+            return vec![];
+        }
+
+        let col_idx = match schema.column_index(column) {
+            Some(idx) => idx,
+            None => return vec![],
+        };
+
+        self.read_all_rows(table)
+            .into_iter()
+            .filter(|row| row.values.get(col_idx) == Some(value))
+            .collect()
     }
 }
 
@@ -1353,18 +1515,28 @@ impl Database {
             })),
         };
 
-        let table = &select.from.table;
+        let primary_table = &select.from.table;
 
-        // Validate table exists
-        if !self.state.tables.read().unwrap().contains_key(table) {
-            return Err(DatabaseError::TableNotFound(table.clone()));
+        // Validate primary table exists
+        if !self.state.tables.read().unwrap().contains_key(primary_table) {
+            return Err(DatabaseError::TableNotFound(primary_table.clone()));
+        }
+
+        // Collect all tables this query depends on (primary + joined)
+        let mut all_tables = vec![primary_table.clone()];
+        for join in &select.from.joins {
+            // Validate joined table exists
+            if !self.state.tables.read().unwrap().contains_key(&join.table) {
+                return Err(DatabaseError::TableNotFound(join.table.clone()));
+            }
+            all_tables.push(join.table.clone());
         }
 
         // Create the reactive query
         let query = ReactiveQuery::new(self.state.clone(), select);
 
-        // Register the query so it gets refreshed when table data changes
-        self.state.reactive_queries.register(&query);
+        // Register the query for all tables it depends on
+        self.state.reactive_queries.register(&query, &all_tables);
 
         Ok(query)
     }
