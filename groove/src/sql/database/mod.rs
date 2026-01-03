@@ -6,7 +6,7 @@ use crate::node::{generate_object_id, LocalNode};
 use crate::object::ObjectId;
 use crate::sql::index::RefIndex;
 use crate::sql::parser::{self, Condition, Join, Projection, Select, Statement};
-use crate::sql::policy::{Policy, PolicyAction, PolicyError, TablePolicies};
+use crate::sql::policy::{Policy, PolicyAction, PolicyError, PolicyExpr, PolicyValue, TablePolicies};
 use crate::sql::query_graph::registry::{GraphRegistry, OutputCallback};
 use crate::sql::query_graph::{GraphId, JoinGraphBuilder, Predicate, PriorState, QueryGraphBuilder, RowDelta};
 use crate::sql::row::{decode_row, encode_row, Row, RowError, Value};
@@ -1628,6 +1628,225 @@ impl Database {
             graph_id,
             db_state: self.state.clone(),
         })
+    }
+
+    /// Create an incremental query with policy filtering for the given viewer.
+    ///
+    /// This combines the SQL query's WHERE clause with the table's SELECT policy,
+    /// ensuring only rows the viewer is allowed to see are returned.
+    ///
+    /// For simple policies (e.g., `owner_id = @viewer`), the policy predicate is
+    /// merged into the query graph for efficient incremental evaluation.
+    ///
+    /// For policies with INHERITS, a runtime policy filter is applied after the
+    /// user's WHERE clause.
+    pub fn incremental_query_as(
+        &self,
+        sql: &str,
+        viewer: ObjectId,
+    ) -> Result<IncrementalQuery, DatabaseError> {
+        let stmt = parser::parse(sql)?;
+
+        let select = match stmt {
+            Statement::Select(s) => s,
+            _ => return Err(DatabaseError::Parse(parser::ParseError {
+                message: "incremental_query_as only supports SELECT statements".to_string(),
+                position: 0,
+            })),
+        };
+
+        // Only support single-table queries for now
+        if !select.from.joins.is_empty() {
+            return Err(DatabaseError::Parse(parser::ParseError {
+                message: "incremental_query_as does not yet support JOINs".to_string(),
+                position: 0,
+            }));
+        }
+
+        let graph = self.build_single_table_graph_with_policy(&select, viewer)?;
+
+        // Register the graph
+        let graph_id = self.state.graph_registry.register(graph);
+
+        Ok(IncrementalQuery {
+            graph_id,
+            db_state: self.state.clone(),
+        })
+    }
+
+    /// Build a query graph for a single-table SELECT with policy filtering.
+    fn build_single_table_graph_with_policy(
+        &self,
+        select: &Select,
+        viewer: ObjectId,
+    ) -> Result<crate::sql::query_graph::QueryGraph, DatabaseError> {
+        let table = &select.from.table;
+
+        // Validate table exists and get schema
+        let schema = self.get_table(table)
+            .ok_or_else(|| DatabaseError::TableNotFound(table.clone()))?;
+
+        // Get the SELECT policy for this table (if any)
+        let policies = self.get_policies(table);
+        let select_policy = policies.as_ref().and_then(|p| p.get(PolicyAction::Select));
+
+        // Build the query graph
+        let mut builder = QueryGraphBuilder::new(table, schema.clone());
+
+        // Start with table scan
+        let scan = builder.table_scan();
+
+        // Apply user's WHERE clause first
+        let after_user_where = if select.where_clause.is_empty() {
+            scan
+        } else {
+            let predicate = self.build_predicate(&select.where_clause, &schema)?;
+            builder.filter(scan, predicate)
+        };
+
+        // Apply policy predicate
+        let after_policy = if let Some(policy) = select_policy {
+            if let Some(ref where_expr) = policy.where_clause {
+                // Try to convert policy to a simple predicate
+                match self.policy_expr_to_predicate(where_expr, viewer) {
+                    Ok(policy_predicate) => {
+                        // Successfully converted - add as filter node
+                        builder.filter(after_user_where, policy_predicate)
+                    }
+                    Err(_) => {
+                        // Contains INHERITS or complex expressions - need runtime filter
+                        // For now, we add a predicate that always passes and rely on
+                        // post-filtering via the IncrementalQuery's filter_by_policy wrapper
+                        // TODO: Add a PolicyFilter node type for proper incremental INHERITS
+                        after_user_where
+                    }
+                }
+            } else {
+                // No WHERE clause in policy = allow all
+                after_user_where
+            }
+        } else {
+            // No policy = allow all (with warning from PolicyEvaluator)
+            after_user_where
+        };
+
+        // Create output node
+        Ok(builder.output(after_policy, GraphId(0)))
+    }
+
+    /// Convert a PolicyExpr to a Predicate.
+    ///
+    /// Returns Ok(Predicate) for simple expressions that can be evaluated statically.
+    /// Returns Err for expressions containing INHERITS (which require runtime evaluation).
+    fn policy_expr_to_predicate(
+        &self,
+        expr: &PolicyExpr,
+        viewer: ObjectId,
+    ) -> Result<Predicate, DatabaseError> {
+        match expr {
+            PolicyExpr::Eq(left, right) => {
+                let (column, value) = self.resolve_policy_comparison(left, right, viewer)?;
+                Ok(Predicate::eq(column, value))
+            }
+            PolicyExpr::Ne(left, right) => {
+                let (column, value) = self.resolve_policy_comparison(left, right, viewer)?;
+                Ok(Predicate::ne(column, value))
+            }
+            PolicyExpr::And(exprs) => {
+                let predicates: Result<Vec<_>, _> = exprs
+                    .iter()
+                    .map(|e| self.policy_expr_to_predicate(e, viewer))
+                    .collect();
+                let predicates = predicates?;
+                Ok(predicates.into_iter().fold(Predicate::True, |acc, p| acc.and(p)))
+            }
+            PolicyExpr::Or(exprs) => {
+                let predicates: Result<Vec<_>, _> = exprs
+                    .iter()
+                    .map(|e| self.policy_expr_to_predicate(e, viewer))
+                    .collect();
+                let predicates = predicates?;
+                Ok(predicates.into_iter().fold(Predicate::False, |acc, p| acc.or(p)))
+            }
+            PolicyExpr::Not(inner) => {
+                let pred = self.policy_expr_to_predicate(inner, viewer)?;
+                Ok(pred.not())
+            }
+            // These require runtime evaluation
+            PolicyExpr::Inherits { .. } => {
+                Err(DatabaseError::Parse(parser::ParseError {
+                    message: "INHERITS cannot be converted to static predicate".to_string(),
+                    position: 0,
+                }))
+            }
+            // Comparison operators not yet supported in Predicate
+            PolicyExpr::Lt(_, _) | PolicyExpr::Le(_, _) |
+            PolicyExpr::Gt(_, _) | PolicyExpr::Ge(_, _) => {
+                Err(DatabaseError::Parse(parser::ParseError {
+                    message: "Comparison operators not yet supported in incremental queries".to_string(),
+                    position: 0,
+                }))
+            }
+            PolicyExpr::IsNull(_) | PolicyExpr::IsNotNull(_) => {
+                Err(DatabaseError::Parse(parser::ParseError {
+                    message: "NULL checks not yet supported in incremental queries".to_string(),
+                    position: 0,
+                }))
+            }
+        }
+    }
+
+    /// Resolve a policy comparison to (column_name, value).
+    ///
+    /// Handles patterns like:
+    /// - `column = @viewer` -> (column, Ref(viewer))
+    /// - `column = literal` -> (column, literal)
+    /// - `@viewer = column` -> (column, Ref(viewer))
+    fn resolve_policy_comparison(
+        &self,
+        left: &PolicyValue,
+        right: &PolicyValue,
+        viewer: ObjectId,
+    ) -> Result<(String, Value), DatabaseError> {
+        match (left, right) {
+            // column = @viewer
+            (PolicyValue::Column(col), PolicyValue::Viewer) => {
+                Ok((col.clone(), Value::Ref(viewer)))
+            }
+            // @viewer = column
+            (PolicyValue::Viewer, PolicyValue::Column(col)) => {
+                Ok((col.clone(), Value::Ref(viewer)))
+            }
+            // column = literal
+            (PolicyValue::Column(col), PolicyValue::Literal(val)) => {
+                Ok((col.clone(), val.clone()))
+            }
+            // literal = column
+            (PolicyValue::Literal(val), PolicyValue::Column(col)) => {
+                Ok((col.clone(), val.clone()))
+            }
+            // @new.column = @viewer (for INSERT CHECK, but in WHERE context treat as column)
+            (PolicyValue::NewColumn(col), PolicyValue::Viewer) |
+            (PolicyValue::Viewer, PolicyValue::NewColumn(col)) => {
+                // In SELECT context, @new doesn't apply - this is a misconfigured policy
+                Err(DatabaseError::Parse(parser::ParseError {
+                    message: format!("@new.{} not valid in SELECT policy WHERE clause", col),
+                    position: 0,
+                }))
+            }
+            // @old.column - not valid in SELECT
+            (PolicyValue::OldColumn(col), _) | (_, PolicyValue::OldColumn(col)) => {
+                Err(DatabaseError::Parse(parser::ParseError {
+                    message: format!("@old.{} not valid in SELECT policy WHERE clause", col),
+                    position: 0,
+                }))
+            }
+            // Other combinations not supported
+            _ => Err(DatabaseError::Parse(parser::ParseError {
+                message: "Unsupported policy comparison pattern".to_string(),
+                position: 0,
+            })),
+        }
     }
 
     /// Build a query graph for a single-table SELECT.

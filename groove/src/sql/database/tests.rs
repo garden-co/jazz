@@ -617,3 +617,207 @@ fn delete_as_falls_back_to_update_policy() {
     let result = db.delete_as("documents", doc_id, alice_id);
     assert!(result.is_ok(), "owner should be able to delete via UPDATE fallback: {:?}", result);
 }
+
+// ========== Incremental Query with Policy Tests ==========
+
+#[test]
+fn incremental_query_as_filters_by_policy() {
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+
+    // Create users
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Create documents
+    db.insert("documents", &["title", "owner_id"], vec![
+        Value::String("Alice's Doc".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+    db.insert("documents", &["title", "owner_id"], vec![
+        Value::String("Bob's Doc".into()),
+        Value::Ref(bob_id),
+    ]).unwrap();
+
+    // Add SELECT policy: owner can read
+    db.execute("CREATE POLICY ON documents FOR SELECT WHERE owner_id = @viewer").unwrap();
+
+    // Alice's incremental query should only see her document
+    let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id).unwrap();
+    let alice_rows = alice_query.rows();
+    assert_eq!(alice_rows.len(), 1);
+    assert_eq!(alice_rows[0].values[0], Value::String("Alice's Doc".into()));
+
+    // Bob's incremental query should only see his document
+    let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id).unwrap();
+    let bob_rows = bob_query.rows();
+    assert_eq!(bob_rows.len(), 1);
+    assert_eq!(bob_rows[0].values[0], Value::String("Bob's Doc".into()));
+}
+
+#[test]
+fn incremental_query_as_updates_on_insert() {
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Add SELECT policy: owner can read
+    db.execute("CREATE POLICY ON documents FOR SELECT WHERE owner_id = @viewer").unwrap();
+
+    // Create query before any documents
+    let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id).unwrap();
+    assert!(alice_query.rows().is_empty());
+
+    // Insert document for Alice
+    db.insert("documents", &["title", "owner_id"], vec![
+        Value::String("Alice's Doc".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    // Alice should see it
+    assert_eq!(alice_query.rows().len(), 1);
+
+    // Insert document for Bob
+    db.insert("documents", &["title", "owner_id"], vec![
+        Value::String("Bob's Doc".into()),
+        Value::Ref(bob_id),
+    ]).unwrap();
+
+    // Alice should still only see 1 document
+    assert_eq!(alice_query.rows().len(), 1);
+}
+
+#[test]
+fn incremental_query_as_combines_with_where_clause() {
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, owner_id REFERENCES users NOT NULL, published BOOL NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Add SELECT policy
+    db.execute("CREATE POLICY ON documents FOR SELECT WHERE owner_id = @viewer").unwrap();
+
+    // Insert multiple documents for Alice
+    db.insert("documents", &["title", "owner_id", "published"], vec![
+        Value::String("Draft".into()),
+        Value::Ref(alice_id),
+        Value::Bool(false),
+    ]).unwrap();
+    db.insert("documents", &["title", "owner_id", "published"], vec![
+        Value::String("Published".into()),
+        Value::Ref(alice_id),
+        Value::Bool(true),
+    ]).unwrap();
+
+    // Query with user WHERE clause combined with policy
+    let query = db.incremental_query_as("SELECT * FROM documents WHERE published = true", alice_id).unwrap();
+    let rows = query.rows();
+
+    // Should only see published documents owned by Alice
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values[0], Value::String("Published".into()));
+}
+
+#[test]
+fn incremental_query_as_no_policy_allows_all() {
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE items (name STRING NOT NULL)").unwrap();
+
+    db.insert("items", &["name"], vec![Value::String("Item 1".into())]).unwrap();
+    db.insert("items", &["name"], vec![Value::String("Item 2".into())]).unwrap();
+
+    // No policy - should see all items (with warning)
+    let query = db.incremental_query_as("SELECT * FROM items", ObjectId::new(999)).unwrap();
+    assert_eq!(query.rows().len(), 2);
+}
+
+#[test]
+fn incremental_query_as_or_policy() {
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, owner_id REFERENCES users NOT NULL, public BOOL NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Policy: owner OR public
+    db.execute("CREATE POLICY ON documents FOR SELECT WHERE owner_id = @viewer OR public = true").unwrap();
+
+    // Create documents
+    db.insert("documents", &["title", "owner_id", "public"], vec![
+        Value::String("Alice Private".into()),
+        Value::Ref(alice_id),
+        Value::Bool(false),
+    ]).unwrap();
+    db.insert("documents", &["title", "owner_id", "public"], vec![
+        Value::String("Alice Public".into()),
+        Value::Ref(alice_id),
+        Value::Bool(true),
+    ]).unwrap();
+    db.insert("documents", &["title", "owner_id", "public"], vec![
+        Value::String("Bob Private".into()),
+        Value::Ref(bob_id),
+        Value::Bool(false),
+    ]).unwrap();
+
+    // Alice can see: her private, her public, bob's public (but not bob's private)
+    // Actually with "owner_id = @viewer OR public = true":
+    // - Alice Private: owner=alice ✓
+    // - Alice Public: owner=alice ✓ (also public)
+    // - Bob Private: owner=bob, public=false ✗
+    let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id).unwrap();
+    assert_eq!(alice_query.rows().len(), 2);
+
+    // Bob can see: his private, alice's public
+    // - Alice Private: owner=alice, public=false ✗
+    // - Alice Public: public=true ✓
+    // - Bob Private: owner=bob ✓
+    let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id).unwrap();
+    assert_eq!(bob_query.rows().len(), 2);
+}
