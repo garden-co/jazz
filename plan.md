@@ -187,7 +187,7 @@ sql/
 
 ## Test Coverage
 
-Current test count: **141 tests** passing across all modules
+Current test count: **186 tests** passing across all modules
 
 - Unit tests in `sql/row.rs`, `sql/types.rs`, `sql/database/tests.rs`
 - Integration tests in `tests/` directory:

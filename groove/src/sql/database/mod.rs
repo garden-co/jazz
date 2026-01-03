@@ -11,6 +11,25 @@ use crate::sql::table_rows::TableRows;
 use crate::sql::types::{IndexKey, ObjectId, QueryState, SchemaId};
 use crate::storage::Environment;
 
+/// Coerce a Value to match the expected ColumnType.
+/// This is primarily used to convert String values to Ref(ObjectId) when
+/// the column type is Ref, since the SQL parser parses all string literals
+/// as Value::String (to avoid ambiguity with regular strings).
+fn coerce_value(value: Value, ty: &ColumnType) -> Value {
+    match (&value, ty) {
+        // String to Ref coercion: parse the string as ObjectId
+        (Value::String(s), ColumnType::Ref(_)) => {
+            if let Ok(id) = s.parse::<ObjectId>() {
+                Value::Ref(id)
+            } else {
+                value // Keep as string if not a valid ObjectId
+            }
+        }
+        // No coercion needed
+        _ => value,
+    }
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -81,27 +100,41 @@ impl JoinedRow {
 
         // Handle special "id" column
         if column == "id" {
-            if let Value::Ref(target_id) = &cond.value {
+            // Coerce String to Ref for id comparison
+            let coerced = coerce_value(cond.value.clone(), &ColumnType::Ref("".to_string()));
+            if let Value::Ref(target_id) = coerced {
                 if let Some(table_name) = table {
                     if let Some(row_id) = self.get_row_id(table_name) {
-                        return row_id == *target_id;
+                        return row_id == target_id;
                     }
                 } else {
                     // Unqualified id - check primary table
                     if let Some(row_id) = self.get_row_id(&self.primary_table) {
-                        return row_id == *target_id;
+                        return row_id == target_id;
                     }
                 }
             }
             return false;
         }
 
-        // Regular column
-        if let Some(value) = self.get_column(table, column) {
-            value == &cond.value
+        // Regular column - find the column type and coerce
+        if let Some(table_name) = table {
+            if let Some((schema, _, values)) = self.tables.get(table_name) {
+                if let Some(idx) = schema.column_index(column) {
+                    let coerced = coerce_value(cond.value.clone(), &schema.columns[idx].ty);
+                    return values.get(idx) == Some(&coerced);
+                }
+            }
         } else {
-            false
+            // Unqualified column: search all tables
+            for (schema, _, values) in self.tables.values() {
+                if let Some(idx) = schema.column_index(column) {
+                    let coerced = coerce_value(cond.value.clone(), &schema.columns[idx].ty);
+                    return values.get(idx) == Some(&coerced);
+                }
+            }
         }
+        false
     }
 
     /// Convert to output Row with combined values from all tables.
@@ -404,7 +437,7 @@ impl DatabaseState {
     }
 
     /// Read all rows from a table.
-    fn read_all_rows(&self, table: &str) -> Vec<Row> {
+    pub fn read_all_rows(&self, table: &str) -> Vec<Row> {
         let schema = match self.get_schema(table) {
             Some(s) => s,
             None => return vec![],
@@ -413,7 +446,7 @@ impl DatabaseState {
         let row_ids: Vec<ObjectId> = {
             let table_rows_objects = self.table_rows_objects.read().unwrap();
             if let Some(rows_id) = table_rows_objects.get(table) {
-                if let Ok(Some(data)) = self.node.read_sync(rows_id.0, "main") {
+                if let Ok(Some(data)) = self.node.read_sync(*rows_id, "main") {
                     if !data.is_empty() {
                         if let Ok(table_rows) = TableRows::from_bytes(&data) {
                             table_rows.into_vec()
@@ -433,7 +466,7 @@ impl DatabaseState {
 
         let mut rows = Vec::new();
         for row_id in row_ids {
-            let data = match self.node.read_sync(row_id.0, "main") {
+            let data = match self.node.read_sync(row_id, "main") {
                 Ok(Some(data)) if !data.is_empty() => data,
                 _ => continue,
             };
@@ -462,7 +495,7 @@ impl DatabaseState {
             }
         }
 
-        let data = match self.node.read_sync(id.0, "main") {
+        let data = match self.node.read_sync(id, "main") {
             Ok(Some(data)) if !data.is_empty() => data,
             _ => return None,
         };
@@ -482,10 +515,12 @@ impl DatabaseState {
             None => return vec![],
         };
 
-        // Special case: id column
+        // Special case: id column (implicit Ref type)
         if column == "id" {
-            if let Value::Ref(id) = value {
-                return match self.get_row(table, *id) {
+            // Coerce String to Ref for id comparison
+            let coerced = coerce_value(value.clone(), &ColumnType::Ref("".to_string()));
+            if let Value::Ref(id) = coerced {
+                return match self.get_row(table, id) {
                     Some(row) => vec![row],
                     None => vec![],
                 };
@@ -498,9 +533,12 @@ impl DatabaseState {
             None => return vec![],
         };
 
+        // Coerce the value to match the column type
+        let coerced = coerce_value(value.clone(), &schema.columns[col_idx].ty);
+
         self.read_all_rows(table)
             .into_iter()
-            .filter(|row| row.values.get(col_idx) == Some(value))
+            .filter(|row| row.values.get(col_idx) == Some(&coerced))
             .collect()
     }
 
@@ -623,7 +661,9 @@ impl DatabaseState {
                 Some(idx) => idx,
                 None => return false,
             };
-            if &values[col_idx] != &cond.value {
+            // Coerce the condition value to match the column type
+            let coerced = coerce_value(cond.value.clone(), &schema.columns[col_idx].ty);
+            if values[col_idx] != coerced {
                 return false;
             }
         }
@@ -753,6 +793,11 @@ impl Database {
         &self.state.node
     }
 
+    /// Get the shared database state.
+    pub fn state(&self) -> &DatabaseState {
+        &self.state
+    }
+
     /// Get the count of active reactive queries (for testing).
     /// This triggers cleanup of expired weak references first.
     #[cfg(test)]
@@ -774,7 +819,7 @@ impl Database {
         let index_id = index_objects.get(key)
             .ok_or_else(|| DatabaseError::ColumnNotFound(key.source_column.clone()))?;
 
-        let data = self.state.node.read_sync(index_id.0, "main")
+        let data = self.state.node.read_sync(*index_id, "main")
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
             .unwrap_or_default();
 
@@ -793,7 +838,7 @@ impl Database {
             .ok_or_else(|| DatabaseError::ColumnNotFound(key.source_column.clone()))?;
 
         self.state.node
-            .write_sync(index_id.0, "main", &index.to_bytes(), "system", timestamp_now())
+            .write_sync(*index_id, "main", &index.to_bytes(), "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         Ok(())
@@ -812,7 +857,7 @@ impl Database {
         let rows_id = table_rows_objects.get(table)
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
-        let data = self.state.node.read_sync(rows_id.0, "main")
+        let data = self.state.node.read_sync(*rows_id, "main")
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
             .unwrap_or_default();
 
@@ -831,7 +876,7 @@ impl Database {
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
         self.state.node
-            .write_sync(rows_id.0, "main", &rows.to_bytes(), "system", timestamp_now())
+            .write_sync(*rows_id, "main", &rows.to_bytes(), "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         Ok(())
@@ -861,19 +906,19 @@ impl Database {
         }
 
         // Create object for schema (uses internal mutability)
-        let schema_id = ObjectId::new(self.state.node.create_object(&format!("schema:{}", schema.name)));
+        let schema_id = self.state.node.create_object(&format!("schema:{}", schema.name));
 
         // Serialize and store schema
         let schema_bytes = schema.to_bytes();
         self.state.node
-            .write_sync(schema_id.0, "main", &schema_bytes, "system", timestamp_now())
+            .write_sync(schema_id, "main", &schema_bytes, "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         // Create table rows object to track row membership
-        let rows_id = ObjectId::new(self.state.node.create_object(&format!("rows:{}", schema.name)));
+        let rows_id = self.state.node.create_object(&format!("rows:{}", schema.name));
         let empty_rows = TableRows::new();
         self.state.node
-            .write_sync(rows_id.0, "main", &empty_rows.to_bytes(), "system", timestamp_now())
+            .write_sync(rows_id, "main", &empty_rows.to_bytes(), "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
         self.state.table_rows_objects.write().unwrap().insert(schema.name.clone(), rows_id);
 
@@ -881,12 +926,12 @@ impl Database {
         for col in &schema.columns {
             if matches!(col.ty, ColumnType::Ref(_)) {
                 let key = IndexKey::new(&schema.name, &col.name);
-                let index_id = ObjectId::new(self.state.node.create_object(&format!("index:{}:{}", schema.name, col.name)));
+                let index_id = self.state.node.create_object(&format!("index:{}:{}", schema.name, col.name));
 
                 // Initialize with empty index
                 let empty_index = RefIndex::new();
                 self.state.node
-                    .write_sync(index_id.0, "main", &empty_index.to_bytes(), "system", timestamp_now())
+                    .write_sync(index_id, "main", &empty_index.to_bytes(), "system", timestamp_now())
                     .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
                 self.state.index_objects.write().unwrap().insert(key, index_id);
@@ -931,7 +976,8 @@ impl Database {
         for (col_name, value) in columns.iter().zip(values) {
             let idx = schema.column_index(col_name)
                 .ok_or_else(|| DatabaseError::ColumnNotFound(col_name.to_string()))?;
-            row_values[idx] = value;
+            // Coerce the value to match the column type (e.g., String -> Ref)
+            row_values[idx] = coerce_value(value, &schema.columns[idx].ty);
         }
 
         // Check for missing non-nullable columns
@@ -973,11 +1019,11 @@ impl Database {
         let row_bytes = encode_row(&row_values, &schema)?;
 
         // Create object for row
-        let row_id = ObjectId::new(self.state.node.create_object(&format!("row:{}:{}", table, ObjectId::new(generate_object_id()))));
+        let row_id = self.state.node.create_object(&format!("row:{}:{}", table, generate_object_id()));
 
         // Store row data
         self.state.node
-            .write_sync(row_id.0, "main", &row_bytes, "system", timestamp_now())
+            .write_sync(row_id, "main", &row_bytes, "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         // Track row -> table mapping
@@ -1024,7 +1070,7 @@ impl Database {
         }
 
         // Read row data
-        let data = match self.state.node.read_sync(id.0, "main") {
+        let data = match self.state.node.read_sync(id, "main") {
             Ok(Some(data)) => data,
             Ok(None) => return Ok(None),
             Err(e) => return Err(DatabaseError::Storage(format!("{:?}", e))),
@@ -1056,7 +1102,7 @@ impl Database {
         }
 
         // Read current row data
-        let data = match self.state.node.read_sync(id.0, "main") {
+        let data = match self.state.node.read_sync(id, "main") {
             Ok(Some(data)) => data,
             Ok(None) => return Ok(false),
             Err(e) => return Err(DatabaseError::Storage(format!("{:?}", e))),
@@ -1070,7 +1116,8 @@ impl Database {
         for (col_name, value) in assignments {
             let idx = schema.column_index(col_name)
                 .ok_or_else(|| DatabaseError::ColumnNotFound(col_name.to_string()))?;
-            new_values[idx] = value.clone();
+            // Coerce the value to match the column type (e.g., String -> Ref)
+            new_values[idx] = coerce_value(value.clone(), &schema.columns[idx].ty);
         }
 
         // Validate new references
@@ -1103,7 +1150,7 @@ impl Database {
 
         // Write updated row
         self.state.node
-            .write_sync(id.0, "main", &row_bytes, "system", timestamp_now())
+            .write_sync(id, "main", &row_bytes, "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         // Update indexes for changed Ref columns
@@ -1151,7 +1198,7 @@ impl Database {
         }
 
         // Read current row data to get ref values for index cleanup
-        let data = match self.state.node.read_sync(id.0, "main") {
+        let data = match self.state.node.read_sync(id, "main") {
             Ok(Some(data)) if !data.is_empty() => Some(data),
             _ => None,
         };
@@ -1176,7 +1223,7 @@ impl Database {
 
         // Write tombstone marker (empty content)
         self.state.node
-            .write_sync(id.0, "main", &[], "system", timestamp_now())
+            .write_sync(id, "main", &[], "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         // Remove from row_table (logically deleted)
@@ -1209,7 +1256,7 @@ impl Database {
             }
 
             // Read row data
-            let data = match self.state.node.read_sync(row_id.0, "main") {
+            let data = match self.state.node.read_sync(row_id, "main") {
                 Ok(Some(data)) if !data.is_empty() => data,
                 _ => continue, // Skip deleted or missing rows
             };
@@ -1236,18 +1283,23 @@ impl Database {
 
         // Special case: id column (implicit, not in schema)
         if column == "id" {
-            if let Value::Ref(id) = value {
-                return match self.get(table, *id)? {
+            // Coerce String to Ref for id comparison
+            let coerced = coerce_value(value.clone(), &ColumnType::Ref("".to_string()));
+            if let Value::Ref(id) = coerced {
+                return match self.get(table, id)? {
                     Some(row) => Ok(vec![row]),
                     None => Ok(vec![]),
                 };
             }
-            // id column but non-Ref value - no matches
+            // id column but non-Ref value and not coercible - no matches
             return Ok(vec![]);
         }
 
         let col_idx = schema.column_index(column)
             .ok_or_else(|| DatabaseError::ColumnNotFound(column.to_string()))?;
+
+        // Coerce the value to match the column type
+        let coerced = coerce_value(value.clone(), &schema.columns[col_idx].ty);
 
         let mut rows = Vec::new();
 
@@ -1258,14 +1310,14 @@ impl Database {
                 continue;
             }
 
-            let data = match self.state.node.read_sync(row_id.0, "main") {
+            let data = match self.state.node.read_sync(row_id, "main") {
                 Ok(Some(data)) if !data.is_empty() => data,
                 _ => continue,
             };
 
             match decode_row(&data, &schema) {
                 Ok(values) => {
-                    if &values[col_idx] == value {
+                    if values[col_idx] == coerced {
                         rows.push(Row::new(row_id, values));
                     }
                 }
