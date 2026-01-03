@@ -1136,6 +1136,7 @@ fn join_multiple_conditions_where() {
     db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
         .unwrap();
 
+    // Alice is active, Bob is inactive, Charlie is active
     let alice_id = match db
         .execute("INSERT INTO users (name, active) VALUES ('Alice', true)")
         .unwrap()
@@ -1150,26 +1151,75 @@ fn join_multiple_conditions_where() {
         ExecuteResult::Inserted(id) => id,
         _ => panic!("Expected Inserted"),
     };
+    let charlie_id = match db
+        .execute("INSERT INTO users (name, active) VALUES ('Charlie', true)")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
 
+    // Create posts:
+    // - Alice has "Hello" (active=true, title matches)     -> SHOULD MATCH
+    // - Alice has "Goodbye" (active=true, title no match)  -> should NOT match
+    // - Bob has "Hello" (active=false, title matches)      -> should NOT match
+    // - Charlie has "World" (active=true, title no match)  -> should NOT match
     db.execute(&format!(
-        "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Alice Post')",
+        "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Hello')",
         alice_id
     ))
     .unwrap();
     db.execute(&format!(
-        "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Bob Post')",
+        "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Goodbye')",
+        alice_id
+    ))
+    .unwrap();
+    db.execute(&format!(
+        "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Hello')",
         bob_id
+    ))
+    .unwrap();
+    db.execute(&format!(
+        "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'World')",
+        charlie_id
     ))
     .unwrap();
 
     // WHERE with multiple conditions across tables
+    // Only Alice's "Hello" post should match (active=true AND title='Hello')
     let result = db
-        .execute("SELECT * FROM posts JOIN users ON posts.author = users.id WHERE users.active = true AND posts.title = 'Alice Post'")
+        .execute("SELECT * FROM posts JOIN users ON posts.author = users.id WHERE users.active = true AND posts.title = 'Hello'")
         .unwrap();
 
     match result {
         ExecuteResult::Selected(rows) => {
-            assert_eq!(rows.len(), 1, "Should return 1 row matching both conditions");
+            assert_eq!(rows.len(), 1, "Should return only 1 row matching both conditions");
+            // Verify it's Alice's post (the name column should be 'Alice')
+            // Row has: author (ref), title, name, active -> name is index 2
+            assert_eq!(rows[0].values[2], Value::String("Alice".to_string()));
+            assert_eq!(rows[0].values[1], Value::String("Hello".to_string()));
+        }
+        _ => panic!("Expected Selected"),
+    }
+
+    // Verify that without the title condition, we'd get 2 rows (Alice's posts + Charlie's)
+    let result_active_only = db
+        .execute("SELECT * FROM posts JOIN users ON posts.author = users.id WHERE users.active = true")
+        .unwrap();
+    match result_active_only {
+        ExecuteResult::Selected(rows) => {
+            assert_eq!(rows.len(), 3, "Should return 3 rows for active users (2 Alice + 1 Charlie)");
+        }
+        _ => panic!("Expected Selected"),
+    }
+
+    // Verify that without the active condition, we'd get 2 rows with title='Hello'
+    let result_title_only = db
+        .execute("SELECT * FROM posts JOIN users ON posts.author = users.id WHERE posts.title = 'Hello'")
+        .unwrap();
+    match result_title_only {
+        ExecuteResult::Selected(rows) => {
+            assert_eq!(rows.len(), 2, "Should return 2 rows with title='Hello' (Alice + Bob)");
         }
         _ => panic!("Expected Selected"),
     }
