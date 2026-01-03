@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock, Weak};
 
 use crate::node::{generate_object_id, LocalNode};
 use crate::listener::ListenerId;
-use crate::sql::parser::{self, Condition, Select, Statement};
+use crate::sql::parser::{self, Select, Statement};
 use crate::sql::row::{decode_row, encode_row, Row, RowError, Value};
 use crate::sql::schema::{ColumnType, SchemaError, TableSchema};
 use crate::storage::Environment;
@@ -142,27 +142,6 @@ impl RefIndex {
     }
 }
 
-/// Unique key for deduplicating query subscriptions.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct QueryKey {
-    /// The table being queried.
-    pub table: String,
-    /// Serialized where clause for deduplication.
-    pub where_key: String,
-}
-
-impl QueryKey {
-    pub fn new(table: impl Into<String>, conditions: &[Condition]) -> Self {
-        let table = table.into();
-        // Create a stable string representation of conditions for deduplication
-        let where_key = conditions
-            .iter()
-            .map(|c| format!("{}={:?}", c.column.column, c.value))
-            .collect::<Vec<_>>()
-            .join("&");
-        QueryKey { table, where_key }
-    }
-}
 
 /// State of a query subscription.
 #[derive(Debug, Clone)]
@@ -204,69 +183,6 @@ pub type QueryCallback = Box<dyn Fn(Arc<Vec<Row>>) + Send + Sync>;
 
 #[cfg(feature = "wasm")]
 pub type QueryCallback = Box<dyn Fn(Arc<Vec<Row>>)>;
-
-/// Internal data for a query subscription.
-struct QuerySubscriptionData {
-    /// Query key for identification.
-    key: QueryKey,
-    /// The parsed SELECT statement.
-    select: Select,
-    /// Reference to database state for re-evaluation.
-    db_state: Arc<DatabaseState>,
-    /// Current cached result.
-    current: RwLock<Option<Arc<Vec<Row>>>>,
-    /// Listener IDs for table rows object.
-    table_rows_listener: RwLock<Option<ListenerId>>,
-    /// Listener IDs for individual row objects.
-    row_listeners: RwLock<Vec<ListenerId>>,
-    /// User callbacks.
-    callbacks: RwLock<HashMap<ListenerId, QueryCallback>>,
-    /// Next callback ID counter.
-    next_callback_id: RwLock<u64>,
-}
-
-impl std::fmt::Debug for QuerySubscriptionData {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("QuerySubscriptionData")
-            .field("key", &self.key)
-            .finish()
-    }
-}
-
-/// Handle to an active query subscription.
-/// Use this to access current results or add callbacks.
-#[derive(Clone)]
-pub struct QuerySubscription {
-    data: Arc<QuerySubscriptionData>,
-}
-
-impl std::fmt::Debug for QuerySubscription {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("QuerySubscription")
-            .field("key", &self.data.key)
-            .finish()
-    }
-}
-
-impl QuerySubscription {
-    /// Get the current query state.
-    pub fn get(&self) -> QueryState {
-        match self.data.current.read().unwrap().as_ref() {
-            Some(rows) => QueryState::Loaded(rows.as_ref().clone()),
-            None => QueryState::Loading,
-        }
-    }
-
-    /// Get the query key.
-    pub fn key(&self) -> &QueryKey {
-        &self.data.key
-    }
-
-    /// Get the current rows (convenience method).
-    pub fn rows(&self) -> Option<Vec<Row>> {
-        self.data.current.read().unwrap().as_ref().map(|r| r.as_ref().clone())
-    }
-}
 
 // ========== Callback-based Reactive Query ==========
 
@@ -410,12 +326,6 @@ impl ReactiveQuery {
         &self.inner.table
     }
 
-    /// Internal: re-evaluate and notify callbacks.
-    /// Called by the database when table data changes.
-    fn refresh(&self) {
-        self.inner.evaluate_and_notify();
-    }
-
     /// Get the current query state.
     pub fn get(&self) -> QueryState {
         match self.inner.current.read().unwrap().as_ref() {
@@ -454,121 +364,15 @@ impl ReactiveQuery {
         self.inner.callbacks.write().unwrap().remove(&id).is_some()
     }
 
+    /// Execute a one-shot query: get the current rows and immediately unsubscribe.
+    /// This is useful for non-reactive queries where you just want the current state.
+    pub fn once(self) -> Vec<Row> {
+        self.rows().unwrap_or_default()
+    }
+
     /// Get the inner Arc (for registry).
     fn inner_weak(&self) -> Weak<ReactiveQueryInner> {
         Arc::downgrade(&self.inner)
-    }
-}
-
-/// Registry for query subscriptions (deduplication).
-#[derive(Debug, Default)]
-pub struct QueryRegistry {
-    /// Active query subscriptions.
-    subscriptions: RwLock<HashMap<QueryKey, Weak<QuerySubscriptionData>>>,
-}
-
-impl QueryRegistry {
-    pub fn new() -> Self {
-        QueryRegistry {
-            subscriptions: RwLock::new(HashMap::new()),
-        }
-    }
-
-    /// Get or create a query subscription.
-    fn get_or_create(
-        &self,
-        key: QueryKey,
-        select: Select,
-        db_state: Arc<DatabaseState>,
-    ) -> QuerySubscription {
-        // Try to get existing
-        {
-            let subs = self.subscriptions.read().unwrap();
-            if let Some(weak) = subs.get(&key) {
-                if let Some(data) = weak.upgrade() {
-                    return QuerySubscription { data };
-                }
-            }
-        }
-
-        // Create new
-        {
-            let mut subs = self.subscriptions.write().unwrap();
-
-            // Double-check
-            if let Some(weak) = subs.get(&key) {
-                if let Some(data) = weak.upgrade() {
-                    return QuerySubscription { data };
-                }
-            }
-
-            let data = Arc::new(QuerySubscriptionData {
-                key: key.clone(),
-                select,
-                db_state,
-                current: RwLock::new(None),
-                table_rows_listener: RwLock::new(None),
-                row_listeners: RwLock::new(Vec::new()),
-                callbacks: RwLock::new(HashMap::new()),
-                next_callback_id: RwLock::new(1),
-            });
-            subs.insert(key, Arc::downgrade(&data));
-            QuerySubscription { data }
-        }
-    }
-
-    /// Get an existing query subscription by key, if it's still active.
-    #[allow(dead_code)]
-    fn get(&self, key: &QueryKey) -> Option<QuerySubscription> {
-        let subs = self.subscriptions.read().unwrap();
-        subs.get(key)
-            .and_then(|weak| weak.upgrade())
-            .map(|data| QuerySubscription { data })
-    }
-
-    /// Update a query subscription with new results.
-    fn update(&self, key: &QueryKey, rows: Vec<Row>) {
-        let subs = self.subscriptions.read().unwrap();
-        if let Some(weak) = subs.get(key) {
-            if let Some(data) = weak.upgrade() {
-                let rows = Arc::new(rows);
-                *data.current.write().unwrap() = Some(rows.clone());
-
-                // Notify all callbacks synchronously
-                let callbacks = data.callbacks.read().unwrap();
-                for callback in callbacks.values() {
-                    callback(rows.clone());
-                }
-            }
-        }
-    }
-
-    /// Log an error for a query (we don't have error state in the new system).
-    #[allow(dead_code)]
-    fn set_error(&self, _key: &QueryKey, error: String) {
-        eprintln!("Query error: {}", error);
-    }
-
-    /// Get all active query keys for a table.
-    fn keys_for_table(&self, table: &str) -> Vec<QueryKey> {
-        let subs = self.subscriptions.read().unwrap();
-        subs
-            .iter()
-            .filter(|(k, w)| k.table == table && w.strong_count() > 0)
-            .map(|(k, _)| k.clone())
-            .collect()
-    }
-
-    /// Clean up expired subscriptions.
-    pub fn cleanup(&self) {
-        let mut subs = self.subscriptions.write().unwrap();
-        subs.retain(|_, weak| weak.strong_count() > 0);
-    }
-
-    /// Get the number of active query subscriptions.
-    pub fn active_count(&self) -> usize {
-        let subs = self.subscriptions.read().unwrap();
-        subs.values().filter(|w| w.strong_count() > 0).count()
     }
 }
 
@@ -610,12 +414,30 @@ impl ReactiveQueryRegistry {
     }
 
     /// Clean up expired queries.
+    #[cfg(test)]
     fn cleanup(&self) {
         let mut queries = self.queries.write().unwrap();
         for table_queries in queries.values_mut() {
             table_queries.retain(|w| w.strong_count() > 0);
         }
         queries.retain(|_, v| !v.is_empty());
+    }
+
+    /// Count the number of active queries (for testing).
+    /// This cleans up expired weak references first, then counts.
+    #[cfg(test)]
+    fn active_query_count(&self) -> usize {
+        self.cleanup();
+        let queries = self.queries.read().unwrap();
+        queries.values().map(|v| v.len()).sum()
+    }
+
+    /// Count the number of active queries for a specific table (for testing).
+    #[cfg(test)]
+    fn active_query_count_for_table(&self, table: &str) -> usize {
+        self.cleanup();
+        let queries = self.queries.read().unwrap();
+        queries.get(table).map(|v| v.len()).unwrap_or(0)
     }
 }
 
@@ -633,9 +455,7 @@ pub struct DatabaseState {
     row_table: RwLock<HashMap<ObjectId, String>>,
     /// Reference index objects: (source_table, source_column) -> object ID.
     index_objects: RwLock<HashMap<IndexKey, ObjectId>>,
-    /// Registry for query subscriptions (legacy API).
-    queries: QueryRegistry,
-    /// Registry for ReactiveQuery instances (new callback API).
+    /// Registry for ReactiveQuery instances.
     reactive_queries: ReactiveQueryRegistry,
 }
 
@@ -656,7 +476,6 @@ impl DatabaseState {
             table_rows_objects: RwLock::new(HashMap::new()),
             row_table: RwLock::new(HashMap::new()),
             index_objects: RwLock::new(HashMap::new()),
-            queries: QueryRegistry::new(),
             reactive_queries: ReactiveQueryRegistry::new(),
         }
     }
@@ -669,7 +488,6 @@ impl DatabaseState {
             table_rows_objects: RwLock::new(HashMap::new()),
             row_table: RwLock::new(HashMap::new()),
             index_objects: RwLock::new(HashMap::new()),
-            queries: QueryRegistry::new(),
             reactive_queries: ReactiveQueryRegistry::new(),
         }
     }
@@ -871,6 +689,19 @@ impl Database {
     /// Get the underlying LocalNode.
     pub fn node(&self) -> &LocalNode {
         &self.state.node
+    }
+
+    /// Get the count of active reactive queries (for testing).
+    /// This triggers cleanup of expired weak references first.
+    #[cfg(test)]
+    pub fn active_query_count(&self) -> usize {
+        self.state.reactive_queries.active_query_count()
+    }
+
+    /// Get the count of active reactive queries for a specific table (for testing).
+    #[cfg(test)]
+    pub fn active_query_count_for_table(&self, table: &str) -> usize {
+        self.state.reactive_queries.active_query_count_for_table(table)
     }
 
     // ========== Index Object Helpers ==========
@@ -1499,115 +1330,11 @@ impl Database {
 
     // ========== Reactive Queries ==========
 
-    /// Subscribe to a SELECT query with callback-based updates.
-    /// Returns a QuerySubscription that can be used to get current rows.
-    /// The query automatically re-evaluates on local writes.
-    pub fn subscribe_select(&self, select: Select) -> Result<QuerySubscription, DatabaseError> {
-        // Validate table exists
-        let table = &select.from.table;
-        if !self.state.tables.read().unwrap().contains_key(table) {
-            return Err(DatabaseError::TableNotFound(table.clone()));
-        }
-
-        // Create query key for deduplication
-        let key = QueryKey::new(table, &select.where_clause);
-
-        // Get or create subscription
-        let subscription = self.state.queries.get_or_create(
-            key.clone(),
-            select.clone(),
-            self.state.clone(),
-        );
-
-        // Evaluate query and update
-        let rows = self.evaluate_select(&select)?;
-        self.state.queries.update(&key, rows);
-
-        Ok(subscription)
-    }
-
-    /// Refresh a query by re-evaluating it.
-    /// This is called automatically on local writes, but can also be called manually.
-    /// Returns the new rows.
-    pub fn refresh_query(&self, subscription: &QuerySubscription) -> Result<Option<Vec<Row>>, DatabaseError> {
-        let select = &subscription.data.select;
-        let key = subscription.key();
-
-        // Re-evaluate the query
-        let rows = self.evaluate_select(select)?;
-
-        // Update the subscription (this notifies callbacks synchronously)
-        self.state.queries.update(key, rows.clone());
-
-        Ok(Some(rows))
-    }
-
     /// Internal: Re-evaluate all active queries for a table.
     /// Called synchronously after insert/update/delete operations.
     fn refresh_table_queries(&self, table: &str) {
-        // Refresh old-style QuerySubscription instances
-        let keys = self.state.queries.keys_for_table(table);
-        for key in keys {
-            if let Some(sub) = self.state.queries.get(&key) {
-                // Re-evaluate and update (notifies callbacks synchronously)
-                if let Ok(rows) = self.evaluate_select(&sub.data.select) {
-                    self.state.queries.update(&key, rows);
-                }
-            }
-        }
-
-        // Refresh new-style ReactiveQuery instances
         self.state.reactive_queries.refresh_table(table);
     }
-
-    /// Execute a SQL SELECT statement reactively.
-    /// Returns a QuerySubscription that updates when matching data changes.
-    pub fn execute_reactive(&self, sql: &str) -> Result<QuerySubscription, DatabaseError> {
-        let stmt = parser::parse(sql)?;
-
-        match stmt {
-            Statement::Select(select) => self.subscribe_select(select),
-            _ => Err(DatabaseError::Parse(parser::ParseError {
-                message: "execute_reactive only supports SELECT statements".to_string(),
-                position: 0,
-            })),
-        }
-    }
-
-    /// Evaluate a SELECT statement and return matching rows.
-    fn evaluate_select(&self, select: &Select) -> Result<Vec<Row>, DatabaseError> {
-        let table = &select.from.table;
-
-        let rows = if select.where_clause.is_empty() {
-            self.select_all(table)?
-        } else if select.where_clause.len() == 1 {
-            let cond = &select.where_clause[0];
-            self.select_where(table, &cond.column.column, &cond.value)?
-        } else {
-            // Multiple conditions
-            let cond = &select.where_clause[0];
-            let mut rows = self.select_where(table, &cond.column.column, &cond.value)?;
-            let schema = self.get_table(table).unwrap();
-
-            for cond in &select.where_clause[1..] {
-                let col_idx = schema.column_index(&cond.column.column)
-                    .ok_or_else(|| DatabaseError::ColumnNotFound(cond.column.column.clone()))?;
-                rows.retain(|row| &row.values[col_idx] == &cond.value);
-            }
-            rows
-        };
-
-        // TODO: Handle JOINs and projections
-
-        Ok(rows)
-    }
-
-    /// Get the query registry (for testing/inspection).
-    pub fn query_registry(&self) -> &QueryRegistry {
-        &self.state.queries
-    }
-
-    // ========== Callback-based Reactive Query ==========
 
     /// Create a reactive query with synchronous callback support.
     /// Returns a ReactiveQuery that can have callbacks registered.
@@ -2139,24 +1866,24 @@ mod tests {
     // ========== Reactive Query Tests ==========
 
     #[test]
-    fn subscribe_select_returns_current_rows() {
+    fn reactive_query_returns_current_rows() {
         let db = Database::in_memory();
 
         db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)").unwrap();
         db.execute("INSERT INTO users (name, active) VALUES ('Alice', true)").unwrap();
         db.execute("INSERT INTO users (name, active) VALUES ('Bob', false)").unwrap();
 
-        let sub = db.execute_reactive("SELECT * FROM users").unwrap();
+        let query = db.reactive_query("SELECT * FROM users").unwrap();
 
         // Should immediately have the current rows
-        let state = sub.get();
+        let state = query.get();
         assert!(state.is_loaded());
         let rows = state.rows().unwrap();
         assert_eq!(rows.len(), 2);
     }
 
     #[test]
-    fn subscribe_select_with_where_clause() {
+    fn reactive_query_with_where_clause() {
         let db = Database::in_memory();
 
         db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)").unwrap();
@@ -2164,9 +1891,22 @@ mod tests {
         db.execute("INSERT INTO users (name, active) VALUES ('Bob', false)").unwrap();
         db.execute("INSERT INTO users (name, active) VALUES ('Carol', true)").unwrap();
 
-        let sub = db.execute_reactive("SELECT * FROM users WHERE active = true").unwrap();
+        let query = db.reactive_query("SELECT * FROM users WHERE active = true").unwrap();
 
-        let rows = sub.rows().unwrap();
+        let rows = query.rows().unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn reactive_query_once_helper() {
+        let db = Database::in_memory();
+
+        db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+        db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap();
+        db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap();
+
+        // Use once() for a one-shot query
+        let rows = db.reactive_query("SELECT * FROM users").unwrap().once();
         assert_eq!(rows.len(), 2);
     }
 
@@ -2232,58 +1972,50 @@ mod tests {
     }
 
     #[test]
-    fn query_subscription_deduplication() {
+    fn reactive_query_nonexistent_table_fails() {
         let db = Database::in_memory();
 
-        // Create two subscriptions for the same non-existent table - should fail
-        let result1 = db.execute_reactive("SELECT * FROM users");
-        let result2 = db.execute_reactive("SELECT * FROM users");
-
-        // Both should fail since table doesn't exist
-        assert!(result1.is_err());
-        assert!(result2.is_err());
+        // Query for non-existent table should fail
+        let result = db.reactive_query("SELECT * FROM users");
+        assert!(result.is_err());
     }
 
     #[test]
-    fn execute_reactive_only_accepts_select() {
+    fn reactive_query_only_accepts_select() {
         let db = Database::in_memory();
 
         db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
 
         // SELECT should work
-        let result = db.execute_reactive("SELECT * FROM users");
+        let result = db.reactive_query("SELECT * FROM users");
         assert!(result.is_ok());
 
         // INSERT should fail
-        let result = db.execute_reactive("INSERT INTO users (name) VALUES ('Alice')");
+        let result = db.reactive_query("INSERT INTO users (name) VALUES ('Alice')");
         assert!(result.is_err());
     }
 
     #[test]
-    fn reactive_query_refresh_after_insert() {
+    fn reactive_query_auto_updates_on_insert() {
         let db = Database::in_memory();
 
         db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
         db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap();
 
-        let sub = db.execute_reactive("SELECT * FROM users").unwrap();
+        let query = db.reactive_query("SELECT * FROM users").unwrap();
 
         // Initially has 1 row
-        assert_eq!(sub.rows().unwrap().len(), 1);
+        assert_eq!(query.rows().unwrap().len(), 1);
 
-        // Insert another row - subscription auto-updates synchronously
+        // Insert another row - query auto-updates synchronously
         db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap();
 
-        // Subscription immediately has 2 rows (auto-updated on insert)
-        assert_eq!(sub.rows().unwrap().len(), 2);
-
-        // Manual refresh also works and returns 2 rows
-        let new_rows = db.refresh_query(&sub).unwrap().unwrap();
-        assert_eq!(new_rows.len(), 2);
+        // Query immediately has 2 rows (auto-updated on insert)
+        assert_eq!(query.rows().unwrap().len(), 2);
     }
 
     #[test]
-    fn reactive_query_refresh_after_update() {
+    fn reactive_query_auto_updates_on_update() {
         let db = Database::in_memory();
 
         db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
@@ -2292,19 +2024,18 @@ mod tests {
             _ => panic!("expected Inserted"),
         };
 
-        let sub = db.execute_reactive("SELECT * FROM users WHERE name = 'Alice'").unwrap();
-        assert_eq!(sub.rows().unwrap().len(), 1);
+        let query = db.reactive_query("SELECT * FROM users WHERE name = 'Alice'").unwrap();
+        assert_eq!(query.rows().unwrap().len(), 1);
 
         // Update the row to have a different name
         db.update("users", id, &[("name", Value::String("Alicia".into()))]).unwrap();
 
-        // Refresh - should now return 0 rows (name no longer matches)
-        db.refresh_query(&sub).unwrap();
-        assert_eq!(sub.rows().unwrap().len(), 0);
+        // Query auto-updates - should now return 0 rows (name no longer matches)
+        assert_eq!(query.rows().unwrap().len(), 0);
     }
 
     #[test]
-    fn reactive_query_refresh_after_delete() {
+    fn reactive_query_auto_updates_on_delete() {
         let db = Database::in_memory();
 
         db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
@@ -2313,15 +2044,14 @@ mod tests {
             _ => panic!("expected Inserted"),
         };
 
-        let sub = db.execute_reactive("SELECT * FROM users").unwrap();
-        assert_eq!(sub.rows().unwrap().len(), 1);
+        let query = db.reactive_query("SELECT * FROM users").unwrap();
+        assert_eq!(query.rows().unwrap().len(), 1);
 
         // Delete the row
         db.delete("users", id).unwrap();
 
-        // Refresh - should now return 0 rows
-        db.refresh_query(&sub).unwrap();
-        assert_eq!(sub.rows().unwrap().len(), 0);
+        // Query auto-updates - should now return 0 rows
+        assert_eq!(query.rows().unwrap().len(), 0);
     }
 
     // ========== Callback-based Reactive Query Tests ==========
@@ -2439,5 +2169,182 @@ mod tests {
         // Callback called with 1 row
         assert_eq!(call_count.load(Ordering::SeqCst), 2);
         assert_eq!(*row_counts.read().unwrap(), vec![2, 1]);
+    }
+
+    // ========== Subscription Cleanup Tests ==========
+
+    #[test]
+    fn dropping_reactive_query_removes_from_registry() {
+        let db = Database::in_memory();
+        db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+
+        // No active queries initially
+        assert_eq!(db.active_query_count(), 0);
+
+        // Create a query
+        let query = db.reactive_query("SELECT * FROM users").unwrap();
+        assert_eq!(db.active_query_count(), 1);
+        assert_eq!(db.active_query_count_for_table("users"), 1);
+
+        // Drop the query
+        drop(query);
+
+        // Query should be removed from registry
+        assert_eq!(db.active_query_count(), 0);
+        assert_eq!(db.active_query_count_for_table("users"), 0);
+    }
+
+    #[test]
+    fn once_consumes_and_drops_query() {
+        let db = Database::in_memory();
+        db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+        db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap();
+
+        assert_eq!(db.active_query_count(), 0);
+
+        // Use once() - query should be created, evaluated, and dropped
+        let rows = db.reactive_query("SELECT * FROM users").unwrap().once();
+        assert_eq!(rows.len(), 1);
+
+        // Query should have been dropped after once()
+        assert_eq!(db.active_query_count(), 0);
+    }
+
+    #[test]
+    fn multiple_queries_tracked_independently() {
+        let db = Database::in_memory();
+        db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+        db.execute("CREATE TABLE posts (title STRING NOT NULL)").unwrap();
+
+        assert_eq!(db.active_query_count(), 0);
+
+        let query1 = db.reactive_query("SELECT * FROM users").unwrap();
+        assert_eq!(db.active_query_count(), 1);
+        assert_eq!(db.active_query_count_for_table("users"), 1);
+        assert_eq!(db.active_query_count_for_table("posts"), 0);
+
+        let query2 = db.reactive_query("SELECT * FROM users WHERE name = 'Alice'").unwrap();
+        assert_eq!(db.active_query_count(), 2);
+        assert_eq!(db.active_query_count_for_table("users"), 2);
+
+        let query3 = db.reactive_query("SELECT * FROM posts").unwrap();
+        assert_eq!(db.active_query_count(), 3);
+        assert_eq!(db.active_query_count_for_table("users"), 2);
+        assert_eq!(db.active_query_count_for_table("posts"), 1);
+
+        // Drop query1
+        drop(query1);
+        assert_eq!(db.active_query_count(), 2);
+        assert_eq!(db.active_query_count_for_table("users"), 1);
+
+        // Drop query2
+        drop(query2);
+        assert_eq!(db.active_query_count(), 1);
+        assert_eq!(db.active_query_count_for_table("users"), 0);
+
+        // Drop query3
+        drop(query3);
+        assert_eq!(db.active_query_count(), 0);
+    }
+
+    #[test]
+    fn unsubscribe_callback_does_not_drop_query() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let db = Database::in_memory();
+        db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+
+        let query = db.reactive_query("SELECT * FROM users").unwrap();
+        assert_eq!(db.active_query_count(), 1);
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_clone = call_count.clone();
+
+        // Subscribe
+        let listener_id = query.subscribe(Box::new(move |_rows| {
+            call_count_clone.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        // Called once on subscribe
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+
+        // Unsubscribe the callback
+        assert!(query.unsubscribe(listener_id));
+
+        // Query should still be active (only callback removed, not query)
+        assert_eq!(db.active_query_count(), 1);
+
+        // Insert should still trigger query re-evaluation but callback not called
+        db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap();
+        assert_eq!(call_count.load(Ordering::SeqCst), 1); // Still 1, callback was removed
+
+        // Query still active
+        assert_eq!(db.active_query_count(), 1);
+
+        // Now drop the query
+        drop(query);
+        assert_eq!(db.active_query_count(), 0);
+    }
+
+    #[test]
+    fn dropped_query_stops_receiving_updates() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let db = Database::in_memory();
+        db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+
+        {
+            let query = db.reactive_query("SELECT * FROM users").unwrap();
+            let call_count_clone = call_count.clone();
+
+            let _id = query.subscribe(Box::new(move |_rows| {
+                call_count_clone.fetch_add(1, Ordering::SeqCst);
+            }));
+
+            // Called once on subscribe
+            assert_eq!(call_count.load(Ordering::SeqCst), 1);
+
+            // Insert triggers callback
+            db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap();
+            assert_eq!(call_count.load(Ordering::SeqCst), 2);
+
+            // Query dropped here
+        }
+
+        // Query should be gone
+        assert_eq!(db.active_query_count(), 0);
+
+        // Further inserts should NOT trigger the callback (query is dropped)
+        db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap();
+        assert_eq!(call_count.load(Ordering::SeqCst), 2); // Still 2, not 3
+    }
+
+    #[test]
+    fn cloned_query_shares_inner_state() {
+        let db = Database::in_memory();
+        db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+
+        let query1 = db.reactive_query("SELECT * FROM users").unwrap();
+        assert_eq!(db.active_query_count(), 1);
+
+        // Clone the query
+        let query2 = query1.clone();
+
+        // Still only 1 active query (they share the same inner Arc)
+        assert_eq!(db.active_query_count(), 1);
+
+        // Drop one clone
+        drop(query1);
+
+        // Query still active because query2 holds a reference
+        assert_eq!(db.active_query_count(), 1);
+
+        // Drop the other
+        drop(query2);
+
+        // Now it's gone
+        assert_eq!(db.active_query_count(), 0);
     }
 }

@@ -4,8 +4,8 @@ mod row;
 mod schema;
 
 pub use database::{
-    Database, DatabaseError, ExecuteResult, IndexKey, ObjectId, QueryKey, QueryRegistry,
-    QuerySubscription, QueryState, ReactiveQuery, RefIndex, SchemaId, TableRows,
+    Database, DatabaseError, ExecuteResult, IndexKey, ObjectId, QueryState, ReactiveQuery,
+    RefIndex, SchemaId, TableRows,
 };
 pub use parser::{
     parse, Condition, CreateTable, FromClause, Insert, Join, JoinCondition, ParseError,
