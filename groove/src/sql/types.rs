@@ -79,7 +79,7 @@ const CROCKFORD_DECODE: [u8; 128] = {
 /// Object ID - a 128-bit unique identifier.
 ///
 /// Displayed and parsed as Crockford Base32 (26 characters for 128 bits).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct ObjectId(pub u128);
 
 impl ObjectId {

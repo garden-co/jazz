@@ -1,5 +1,5 @@
 use wasm_bindgen::prelude::*;
-use groove::sql::{Database, ReactiveQuery, Value, ExecuteResult, Row};
+use groove::sql::{Database, ReactiveQuery, Value, ExecuteResult, Row, ObjectId};
 use groove::ListenerId;
 use std::sync::Arc;
 
@@ -52,10 +52,13 @@ impl WasmDatabase {
     }
 
     /// Update a specific row's column value.
+    /// row_id should be a Base32 ObjectId string.
     #[wasm_bindgen]
-    pub fn update_row(&self, table: &str, row_id: u128, column: &str, value: &str) -> Result<bool, JsValue> {
+    pub fn update_row(&self, table: &str, row_id: &str, column: &str, value: &str) -> Result<bool, JsValue> {
+        let id: ObjectId = row_id.parse()
+            .map_err(|e| JsValue::from_str(&format!("invalid row_id: {:?}", e)))?;
         self.db
-            .update(table, row_id, &[(column, Value::String(value.to_string()))])
+            .update(table, id, &[(column, Value::String(value.to_string()))])
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))
     }
 

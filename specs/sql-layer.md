@@ -1,5 +1,24 @@
 # SQL Layer Design
 
+## Implementation Status
+
+**Implemented:**
+- Full SQL parser (CREATE TABLE, INSERT, UPDATE, SELECT with JOIN)
+- Database with CRUD operations
+- Ref columns with referential integrity validation
+- Reverse index for efficient backlink queries
+- Reactive queries with synchronous callbacks
+- ObjectId newtype with Crockford Base32 encoding
+- Value coercion (String→Ref) at execution time
+- WASM bindings (groove-wasm)
+
+**Not yet implemented:**
+- Additional operators beyond `=` in WHERE clauses
+- ORDER BY, LIMIT, OFFSET
+- DELETE via SQL (only programmatic API)
+- Schema migrations
+- Composite indexes
+
 ## Overview
 
 The SQL layer provides a relational interface on top of Jazz's distributed commit graph. Each table is a schema definition object, and each row is a separate Object with its own commit graph. This enables fine-grained sync and per-row conflict resolution.
@@ -25,6 +44,27 @@ The SQL layer provides a relational interface on top of Jazz's distributed commi
 └─────────────────────────────────────────────────────┘
 ```
 
+## ObjectId Type
+
+ObjectId is a newtype wrapper around `u128` with Crockford Base32 encoding:
+
+```rust
+/// Object identifier using Crockford Base32 encoding.
+///
+/// Crockford Base32 uses 26 characters for 128 bits, excludes I/L/O/U
+/// to avoid confusion, and is case-insensitive.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct ObjectId(pub u128);
+
+impl ObjectId {
+    pub fn new(value: u128) -> Self { ObjectId(value) }
+    pub fn from_le_bytes(bytes: [u8; 16]) -> Self { ... }
+}
+
+// Display: "0000000000000034NBSM938NKR"
+// FromStr: case-insensitive, I/L→1, O→0
+```
+
 ## Schema Objects
 
 A table schema is itself an Object with a commit graph, allowing schema evolution tracking.
@@ -47,7 +87,7 @@ enum ColumnType {
     F64,              // 8 bytes, IEEE 754 little-endian
     String,           // varint length + UTF-8 bytes
     Bytes,            // varint length + raw bytes
-    Ref(String),      // 16 bytes (u128 object ID), references a row in named table
+    Ref(String),      // 16 bytes (ObjectId), references a row in named table
 }
 ```
 
@@ -87,7 +127,7 @@ The format is type-less (schema provides types) with a length-prefix header for 
 | Bool   | 1 byte     | 0x00 = false, 0x01 = true |
 | I64    | 8 bytes    | Little-endian |
 | F64    | 8 bytes    | IEEE 754 little-endian |
-| Ref    | 16 bytes   | u128 object ID, little-endian |
+| Ref    | 16 bytes   | ObjectId, little-endian |
 | String | variable   | varint len in header, UTF-8 data in body |
 | Bytes  | variable   | varint len in header, raw data in body |
 
@@ -172,119 +212,99 @@ pub enum Value {
 /// A row with its object ID
 pub struct Row {
     pub id: ObjectId,
-    pub schema_id: SchemaId,
     pub values: Vec<Value>,  // In schema column order
 }
 
 /// Schema identifier (object ID of schema object)
 pub type SchemaId = ObjectId;
-
-/// Object identifier (UUIDv7)
-pub type ObjectId = u128;
 ```
+
+## Value Coercion
+
+The SQL parser produces `Value::String` for all string literals. The database executor coerces strings to the appropriate type when needed:
+
+```rust
+fn coerce_value(value: Value, ty: &ColumnType) -> Value {
+    match (&value, ty) {
+        // String to Ref coercion: parse the string as ObjectId
+        (Value::String(s), ColumnType::Ref(_)) => {
+            if let Ok(id) = s.parse::<ObjectId>() {
+                Value::Ref(id)
+            } else {
+                value // Keep as string if not a valid ObjectId
+            }
+        }
+        _ => value,
+    }
+}
+```
+
+This approach avoids ambiguity since strings like "ALICE" are valid Crockford Base32 but should remain as strings for String columns. The coercion only happens when the target column is known to be a Ref type.
 
 ## API Design
 
 ### Table Operations
 
 ```rust
-impl LocalNode {
+impl Database {
     /// Create a new table, returns schema ID
-    pub async fn create_table(&self, schema: TableSchema) -> Result<SchemaId>;
+    pub fn create_table(&self, schema: TableSchema) -> Result<SchemaId>;
 
     /// Get table schema by name
-    pub async fn get_table(&self, name: &str) -> Result<Option<TableSchema>>;
+    pub fn get_table(&self, name: &str) -> Option<TableSchema>;
 
     /// List all tables
-    pub async fn list_tables(&self) -> Result<Vec<TableSchema>>;
+    pub fn list_tables(&self) -> Vec<String>;
 }
 ```
 
 ### Row Operations
 
 ```rust
-impl LocalNode {
+impl Database {
     /// Insert a new row, returns row ID (generated UUIDv7)
-    pub async fn insert(&self, table: &str, values: Vec<Value>) -> Result<ObjectId>;
+    pub fn insert(&self, table: &str, columns: &[&str], values: Vec<Value>) -> Result<ObjectId>;
 
     /// Get row by ID
-    pub async fn get(&self, table: &str, id: ObjectId) -> Result<Option<Row>>;
+    pub fn get(&self, table: &str, id: ObjectId) -> Result<Option<Row>>;
 
     /// Update row by ID
-    pub async fn update(&self, table: &str, id: ObjectId, values: Vec<Value>) -> Result<()>;
+    pub fn update(&self, table: &str, id: ObjectId, assignments: &[(&str, Value)]) -> Result<bool>;
 
     /// Delete row by ID
-    pub async fn delete(&self, table: &str, id: ObjectId) -> Result<()>;
+    pub fn delete(&self, table: &str, id: ObjectId) -> Result<bool>;
 }
 ```
 
-### Query Operations (Step 2)
+### Query Operations
 
 ```rust
-impl LocalNode {
-    /// Simple select with optional where clause
-    /// WHERE clause supports only `column = value` for now
-    pub async fn select(
-        &self,
-        table: &str,
-        where_clause: Option<(&str, Value)>,
-    ) -> Result<Vec<Row>>;
-
-    /// Reverse lookup via index: find all rows referencing target_id
-    pub async fn find_referencing(
-        &self,
-        source_table: &str,
-        source_column: &str,
-        target_id: ObjectId,
-    ) -> Result<Vec<Row>>;
+impl Database {
+    /// Execute a SQL statement
+    pub fn execute(&self, sql: &str) -> Result<ExecuteResult>;
 
     /// Subscribe to query results with synchronous callback
-    pub fn reactive_query(
-        &self,
-        sql: &str,
-    ) -> Result<ReactiveQuery>;
+    pub fn reactive_query(&self, sql: &str) -> Result<ReactiveQuery>;
 }
 
 /// A reactive query with synchronous callback support.
 /// Callbacks fire synchronously during the same call stack as mutations.
-pub struct ReactiveQuery {
-    // ...
-}
+pub struct ReactiveQuery { ... }
 
 impl ReactiveQuery {
     /// Subscribe with a callback that fires immediately and on every change.
-    pub fn subscribe(&self, callback: impl Fn(Arc<Vec<Row>>)) -> ListenerId;
+    pub fn subscribe(&self, callback: QueryCallback) -> ListenerId;
 
     /// Unsubscribe a callback.
     pub fn unsubscribe(&self, id: ListenerId) -> bool;
 
     /// Get current rows.
     pub fn get(&self) -> QueryState;
+
+    /// Execute once and return rows (consumes query).
+    pub fn once(self) -> Vec<Row>;
 }
 ```
-
-## Implementation Phases
-
-### Step 1: Basic Storage
-- [ ] `ColumnType` and `ColumnDef` types
-- [ ] `TableSchema` type with serialization
-- [ ] Row binary encoding/decoding
-- [ ] SQL parser: CREATE TABLE, INSERT, UPDATE, SELECT
-- [ ] `create_table` - store schema as Object
-- [ ] `insert` - create row Object with encoded data
-- [ ] `get` - fetch and decode row by ID
-- [ ] `update` - create new commit on row Object
-- [ ] `delete` - tombstone commit on row Object
-- [ ] `execute()` method for SQL strings
-
-### Step 2: References and Queries
-- [ ] `Ref` column type with target schema validation
-- [ ] Index object creation per Ref column
-- [ ] Synchronous index maintenance on insert/update/delete
-- [ ] `select` with scan-based where clause (`=` only)
-- [ ] `find_referencing` using index lookup
-- [ ] `subscribe_select` for reactive queries
-- [ ] `execute_reactive()` for reactive SELECT
 
 ## SQL Parser
 
@@ -322,15 +342,15 @@ Note: Every table implicitly has an `id` column (the Object ID / UUIDv7 primary 
 INSERT INTO users (name, email, age, active)
 VALUES ('Alice', 'alice@example.com', 30, true);
 
--- With explicit NULL
+-- With Ref column (ObjectId as string literal)
 INSERT INTO posts (author, title, body, published)
-VALUES (x'0192...', 'Hello World', NULL, false);
+VALUES ('0000000000000034NBSM938NKR', 'Hello World', NULL, false);
 ```
 
 **UPDATE:**
 ```sql
 UPDATE users SET email = 'new@example.com', age = 31
-WHERE id = x'0192...';
+WHERE id = '0000000000000034NBSM938NKR';
 ```
 
 **SELECT:**
@@ -341,33 +361,30 @@ SELECT * FROM users;
 -- Select specific columns
 SELECT name, email FROM users;
 
--- Match by ID
-SELECT * FROM users WHERE id = x'0192...';
+-- Match by ID (ObjectId as string literal)
+SELECT * FROM users WHERE id = '0000000000000034NBSM938NKR';
 
 -- Filter with =
 SELECT * FROM users WHERE active = true;
 SELECT * FROM posts WHERE published = false;
 
--- Join via reference (implicit join through REFERENCES column)
-SELECT * FROM posts WHERE author = x'0192...';
+-- Filter by Ref column
+SELECT * FROM posts WHERE author = '0000000000000034NBSM938NKR';
 
--- Combined: join + filter
-SELECT * FROM posts WHERE author = x'0192...' AND published = true;
+-- Combined: filter + filter
+SELECT * FROM posts WHERE author = '0000000000000034NBSM938NKR' AND published = true;
 
--- Multi-table join: find all comments by a user on published posts
+-- JOIN: find all comments by a user on published posts
 SELECT comments.*
 FROM comments
 JOIN posts ON comments.post = posts.id
-WHERE comments.author = x'0192...' AND posts.published = true;
-
--- Reverse lookup: find all posts by a specific author
-SELECT * FROM posts WHERE author = x'0192...';
+WHERE comments.author = '0000000000000034NBSM938NKR' AND posts.published = true;
 
 -- Chained joins: get user info for all commenters on a post
 SELECT users.*
 FROM comments
 JOIN users ON comments.author = users.id
-WHERE comments.post = x'0192...';
+WHERE comments.post = '0000000000000034NBSM938NKR';
 ```
 
 ### Grammar
@@ -391,22 +408,23 @@ assignments   = assignment ("," assignment)*
 assignment    = identifier "=" value
 
 select        = "SELECT" projection "FROM" from_clause where_clause?
-projection    = "*" | qualified_columns
+projection    = "*" | table_star | qualified_columns
+table_star    = identifier ".*"
 qualified_columns = qualified_column ("," qualified_column)*
 qualified_column  = (identifier ".")? identifier   -- table.column or just column
 
 from_clause   = identifier join_clause*
-join_clause   = "JOIN" identifier "ON" condition
+join_clause   = "JOIN" identifier "ON" join_condition
+join_condition = qualified_column "=" qualified_column
 
 where_clause  = "WHERE" conditions
 conditions    = condition ("AND" condition)*
 condition     = qualified_column "=" value
 
-value         = string_lit | number_lit | bool_lit | "NULL" | uuid_lit
+value         = string_lit | number_lit | bool_lit | "NULL"
 string_lit    = "'" [^']* "'"
 number_lit    = "-"? [0-9]+ ("." [0-9]+)?
 bool_lit      = "true" | "false"
-uuid_lit      = "x'" hex_chars "'"
 identifier    = [a-zA-Z_][a-zA-Z0-9_]*
 ```
 
@@ -445,8 +463,8 @@ pub struct Select {
 
 pub enum Projection {
     All,                              // *
-    Qualified(Vec<QualifiedColumn>),  // table.column or column
     TableAll(String),                 // table.*
+    Columns(Vec<QualifiedColumn>),    // table.column or column
 }
 
 pub struct QualifiedColumn {
@@ -461,12 +479,17 @@ pub struct FromClause {
 
 pub struct Join {
     pub table: String,
-    pub on: Condition,
+    pub on: JoinCondition,
+}
+
+pub struct JoinCondition {
+    pub left: QualifiedColumn,
+    pub right: QualifiedColumn,
 }
 
 pub struct Condition {
-    pub left: QualifiedColumn,
-    pub right: Value,
+    pub column: QualifiedColumn,
+    pub value: Value,
 }
 
 /// Parse a SQL string into a statement
@@ -476,14 +499,6 @@ pub fn parse(sql: &str) -> Result<Statement, ParseError>;
 ### Execution
 
 ```rust
-impl LocalNode {
-    /// Execute a SQL statement
-    pub async fn execute(&self, sql: &str) -> Result<ExecuteResult>;
-
-    /// Execute and subscribe to reactive results (for SELECT)
-    pub fn execute_reactive(&self, sql: &str) -> Result<ObjectSignal<Vec<Row>>>;
-}
-
 pub enum ExecuteResult {
     /// CREATE TABLE - returns schema ID
     Created(SchemaId),
@@ -498,15 +513,19 @@ pub enum ExecuteResult {
 
 ### Query Execution Strategy
 
-1. **Match by ID** (`WHERE id = x'...'`): Direct object lookup, O(1)
+1. **Match by ID** (`WHERE id = '...'`): Direct object lookup, O(1)
 2. **Filter with =** (`WHERE column = value`): Table scan with filter
 3. **Join via reference**: Use reverse index for `REFERENCES` columns
 4. **Combined**: Apply in order - use indexes where available, then scan/filter
 
 ## Open Questions
 
-1. **Tombstones vs hard delete**: How to represent deleted rows? Tombstone commit with special marker?
+1. **Tombstones vs hard delete**: Currently rows are tombstoned (empty content). May need explicit tombstone marker for sync.
 
 2. **Schema changes**: Future work - how to handle adding/removing/modifying columns?
 
 3. **Composite indexes**: Future work - indexes on multiple columns?
+
+4. **Additional operators**: Currently only `=` is supported. Future: `<`, `>`, `!=`, `LIKE`, `IN`
+
+5. **ORDER BY / LIMIT**: Not yet implemented.

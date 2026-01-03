@@ -7,24 +7,25 @@ use futures::io::AsyncRead;
 use crate::commit::CommitId;
 use crate::listener::{ListenerId, ListenerError, ObjectCallback, ObjectKey, ObjectListenerRegistry, ObjectState};
 use crate::object::Object;
+use crate::sql::ObjectId;
 use crate::storage::{Environment, MemoryEnvironment};
 
-/// Generate a new UUIDv7 as u128.
+/// Generate a new UUIDv7 as ObjectId.
 #[cfg(not(feature = "wasm"))]
-pub fn generate_object_id() -> u128 {
-    uuid::Uuid::now_v7().as_u128()
+pub fn generate_object_id() -> ObjectId {
+    ObjectId::new(uuid::Uuid::now_v7().as_u128())
 }
 
-/// Generate a new UUIDv7 as u128 (WASM version using web-time).
+/// Generate a new UUIDv7 as ObjectId (WASM version using web-time).
 #[cfg(feature = "wasm")]
-pub fn generate_object_id() -> u128 {
+pub fn generate_object_id() -> ObjectId {
     use uuid::{NoContext, Timestamp, Uuid};
     let now = web_time::SystemTime::now();
     let duration = now
         .duration_since(web_time::UNIX_EPOCH)
         .expect("time went backwards");
     let ts = Timestamp::from_unix(NoContext, duration.as_secs(), duration.subsec_nanos());
-    Uuid::new_v7(ts).as_u128()
+    ObjectId::new(Uuid::new_v7(ts).as_u128())
 }
 
 /// A local node managing multiple objects with listener support.
@@ -35,7 +36,7 @@ pub fn generate_object_id() -> u128 {
 /// Uses internal mutability so that objects can be created and written to
 /// without requiring exclusive access to the node.
 pub struct LocalNode {
-    objects: RwLock<BTreeMap<u128, Arc<RwLock<Object>>>>,
+    objects: RwLock<BTreeMap<ObjectId, Arc<RwLock<Object>>>>,
     listeners: ObjectListenerRegistry,
     env: Arc<dyn Environment>,
 }
@@ -77,7 +78,7 @@ impl LocalNode {
 
     /// Create a new object with the given prefix. Returns the object ID.
     /// Uses internal mutability so it can be called with just &self.
-    pub fn create_object(&self, prefix: impl Into<String>) -> u128 {
+    pub fn create_object(&self, prefix: impl Into<String>) -> ObjectId {
         let id = generate_object_id();
         let object = Object::new(id, prefix);
         self.objects.write().unwrap().insert(id, Arc::new(RwLock::new(object)));
@@ -85,7 +86,7 @@ impl LocalNode {
     }
 
     /// Get an object by ID.
-    pub fn get_object(&self, id: u128) -> Option<Arc<RwLock<Object>>> {
+    pub fn get_object(&self, id: ObjectId) -> Option<Arc<RwLock<Object>>> {
         self.objects.read().unwrap().get(&id).cloned()
     }
 
@@ -102,7 +103,7 @@ impl LocalNode {
     /// Returns a listener ID that can be used to unsubscribe.
     pub fn subscribe(
         &self,
-        object_id: u128,
+        object_id: ObjectId,
         branch: &str,
         callback: ObjectCallback,
     ) -> Result<ListenerId, ListenerError> {
@@ -139,13 +140,13 @@ impl LocalNode {
     }
 
     /// Unsubscribe a listener by ID.
-    pub fn unsubscribe(&self, object_id: u128, branch: &str, listener_id: ListenerId) -> bool {
+    pub fn unsubscribe(&self, object_id: ObjectId, branch: &str, listener_id: ListenerId) -> bool {
         let key = ObjectKey::new(object_id, branch);
         self.listeners.unsubscribe(&key, listener_id)
     }
 
     /// Get current cached state for an object's branch.
-    pub fn get_current_state(&self, object_id: u128, branch: &str) -> Option<Arc<ObjectState>> {
+    pub fn get_current_state(&self, object_id: ObjectId, branch: &str) -> Option<Arc<ObjectState>> {
         let key = ObjectKey::new(object_id, branch);
         self.listeners.get_current(&key)
     }
@@ -156,7 +157,7 @@ impl LocalNode {
     /// Returns None if the branch is empty, has multiple tips, or content is chunked.
     pub fn read_sync(
         &self,
-        object_id: u128,
+        object_id: ObjectId,
         branch: &str,
     ) -> Result<Option<Vec<u8>>, ListenerError> {
         let obj_lock = self
@@ -175,7 +176,7 @@ impl LocalNode {
     /// Loads chunked content from storage if needed.
     pub async fn read(
         &self,
-        object_id: u128,
+        object_id: ObjectId,
         branch: &str,
     ) -> Result<Option<Vec<u8>>, ListenerError> {
         let obj_lock = self
@@ -204,7 +205,7 @@ impl LocalNode {
     /// Panics if content exceeds INLINE_THRESHOLD.
     pub fn write_sync(
         &self,
-        object_id: u128,
+        object_id: ObjectId,
         branch: &str,
         content: &[u8],
         author: &str,
@@ -231,7 +232,7 @@ impl LocalNode {
     /// Automatically chunks content that exceeds INLINE_THRESHOLD.
     pub async fn write(
         &self,
-        object_id: u128,
+        object_id: ObjectId,
         branch: &str,
         content: &[u8],
         author: &str,
@@ -264,7 +265,7 @@ impl LocalNode {
     /// Chunks the content as it streams in.
     pub async fn write_stream<R: AsyncRead + Unpin>(
         &self,
-        object_id: u128,
+        object_id: ObjectId,
         branch: &str,
         reader: R,
         author: &str,
@@ -295,7 +296,7 @@ impl LocalNode {
     }
 
     /// Get the frontier commit IDs for an object's branch.
-    pub fn frontier(&self, object_id: u128, branch: &str) -> Result<Option<Vec<CommitId>>, ListenerError> {
+    pub fn frontier(&self, object_id: ObjectId, branch: &str) -> Result<Option<Vec<CommitId>>, ListenerError> {
         let obj_lock = self
             .objects
             .read()
@@ -309,7 +310,7 @@ impl LocalNode {
     }
 
     /// Internal: notify listeners for a branch update.
-    fn notify_listeners(&self, object_id: u128, branch: &str, obj: &Object) {
+    fn notify_listeners(&self, object_id: ObjectId, branch: &str, obj: &Object) {
         let key = ObjectKey::new(object_id, branch);
 
         if let Some(branch_ref) = obj.branch_ref(branch) {
@@ -323,7 +324,7 @@ impl LocalNode {
 
     /// Notify all listeners for an object.
     /// Use this after external changes to the object (e.g., sync from peers).
-    pub fn notify_object(&self, object_id: u128) {
+    pub fn notify_object(&self, object_id: ObjectId) {
         let obj_lock = match self.objects.read().unwrap().get(&object_id).cloned() {
             Some(o) => o,
             None => return,
@@ -348,7 +349,7 @@ impl LocalNode {
     // ========== Helper: Load content for a commit ==========
 
     /// Load content for a commit (handles both inline and chunked).
-    pub async fn load_content(&self, object_id: u128, branch: &str, commit_id: &CommitId) -> Option<Bytes> {
+    pub async fn load_content(&self, object_id: ObjectId, branch: &str, commit_id: &CommitId) -> Option<Bytes> {
         let obj_lock = self.objects.read().unwrap().get(&object_id).cloned()?;
         let obj = obj_lock.read().unwrap();
         let branch = obj.branch(branch)?;

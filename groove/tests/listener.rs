@@ -1,6 +1,6 @@
 //! Integration tests for ObjectListenerRegistry.
 
-use groove::{Branch, Commit, ContentRef, Environment, MemoryEnvironment, ObjectKey, ObjectListenerRegistry, ObjectState};
+use groove::{Branch, Commit, ContentRef, Environment, MemoryEnvironment, ObjectKey, ObjectListenerRegistry, ObjectState, ObjectId};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -26,7 +26,7 @@ fn basic_subscribe_and_notify() {
     let registry = ObjectListenerRegistry::new();
     let env = make_env();
     let (branch, id) = make_branch_with_commit(b"hello");
-    let key = ObjectKey::new(1, "main");
+    let key = ObjectKey::new(ObjectId::new(1), "main");
 
     let call_count = Arc::new(AtomicUsize::new(0));
     let call_count_clone = call_count.clone();
@@ -52,7 +52,7 @@ fn new_subscriber_gets_current_state() {
     let registry = ObjectListenerRegistry::new();
     let env = make_env();
     let (branch, id) = make_branch_with_commit(b"hello");
-    let key = ObjectKey::new(1, "main");
+    let key = ObjectKey::new(ObjectId::new(1), "main");
 
     // First subscriber
     let _id1 = registry.subscribe(key.clone(), env.clone(), Box::new(|_| {}));
@@ -75,7 +75,7 @@ fn multiple_listeners_all_called() {
     let registry = ObjectListenerRegistry::new();
     let env = make_env();
     let (branch, id) = make_branch_with_commit(b"hello");
-    let key = ObjectKey::new(1, "main");
+    let key = ObjectKey::new(ObjectId::new(1), "main");
 
     let count1 = Arc::new(AtomicUsize::new(0));
     let count2 = Arc::new(AtomicUsize::new(0));
@@ -100,7 +100,7 @@ fn state_tracks_previous_tips() {
     let registry = ObjectListenerRegistry::new();
     let env = make_env();
     let (branch, id1) = make_branch_with_commit(b"first");
-    let key = ObjectKey::new(1, "main");
+    let key = ObjectKey::new(ObjectId::new(1), "main");
 
     let has_previous = Arc::new(RwLock::new(Vec::new()));
     let has_previous_clone = has_previous.clone();
@@ -137,7 +137,7 @@ fn get_current_state() {
     let registry = ObjectListenerRegistry::new();
     let env = make_env();
     let (branch, id) = make_branch_with_commit(b"hello");
-    let key = ObjectKey::new(1, "main");
+    let key = ObjectKey::new(ObjectId::new(1), "main");
 
     // No state yet
     assert!(registry.get_current(&key).is_none());
@@ -157,7 +157,7 @@ fn unsubscribe_removes_listener() {
     let registry = ObjectListenerRegistry::new();
     let env = make_env();
     let (branch, id) = make_branch_with_commit(b"hello");
-    let key = ObjectKey::new(1, "main");
+    let key = ObjectKey::new(ObjectId::new(1), "main");
 
     let call_count = Arc::new(AtomicUsize::new(0));
     let call_count_clone = call_count.clone();

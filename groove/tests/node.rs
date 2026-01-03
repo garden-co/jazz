@@ -1,6 +1,6 @@
 //! Integration tests for LocalNode.
 
-use groove::{generate_object_id, LocalNode};
+use groove::{generate_object_id, LocalNode, ObjectId};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -13,7 +13,7 @@ fn local_node_create_and_get_objects() {
 
     assert!(node.get_object(id1).is_some());
     assert!(node.get_object(id2).is_some());
-    assert!(node.get_object(999).is_none());
+    assert!(node.get_object(ObjectId::new(999)).is_none());
 
     assert_eq!(node.get_object(id1).unwrap().read().unwrap().prefix, "chat");
     assert_eq!(
@@ -41,7 +41,7 @@ fn local_node_uses_uuidv7() {
     let id2 = node.create_object("test2");
 
     assert!(id2 > id1);
-    assert!(id1 > 1000);
+    assert!(id1 > ObjectId::new(1000));
 }
 
 #[test]
@@ -72,7 +72,7 @@ fn subscribe_to_empty_object() {
 fn subscribe_nonexistent_object_errors() {
     let node = LocalNode::in_memory();
 
-    let result = node.subscribe(999, "main", Box::new(|_| {}));
+    let result = node.subscribe(ObjectId::new(999), "main", Box::new(|_| {}));
     assert!(result.is_err());
 }
 

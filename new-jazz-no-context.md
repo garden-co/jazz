@@ -136,12 +136,31 @@ Modeled as branching operations:
 
 ## Implementation Status
 
-Core commit graph implemented in Rust (`groove` crate):
+Core commit graph and SQL layer implemented in Rust (`groove` crate):
+
+### Core Layer
 - `CommitId` - BLAKE3 content hash (256-bit)
 - `Commit` - snapshot with parents, author, timestamp, metadata
 - `Branch` - named branch with frontier tracking, LCA computation
 - `Object` - with branches, default "main" branch
 - `LocalNode` - manages objects with UUIDv7 IDs
 - `MergeStrategy` trait with `LastWriterWins` implementation
+- `ObjectListenerRegistry` - synchronous callback system for reactivity
 
-17 tests covering commit hashing, sequential/concurrent commits, branching, LCA, and merging.
+### SQL Layer
+- `ObjectId` - newtype with Crockford Base32 encoding (26 chars, case-insensitive)
+- `Database` - CRUD operations on top of LocalNode
+- `TableSchema` - schema definitions stored as Objects
+- `Row` - compact binary encoding with length-prefix header
+- `Value` - runtime value representation (Null, Bool, I64, F64, String, Bytes, Ref)
+- `RefIndex` - reverse index for efficient backlink queries
+- SQL parser - CREATE TABLE, INSERT, UPDATE, SELECT with JOIN
+- `ReactiveQuery` - synchronous callback-based reactive queries
+- Value coercion - String→Ref at execution time for Ref columns
+
+### WASM Bindings
+- `groove-wasm` crate with WasmDatabase and WasmQueryHandle
+- JavaScript callback integration for reactive queries
+- Base32 ObjectId strings in public API
+
+**141 tests** covering commit graph, storage, listeners, SQL parsing, row encoding, and reactive queries.

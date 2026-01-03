@@ -1,6 +1,5 @@
 use crate::sql::schema::{ColumnDef, ColumnType};
 use crate::sql::row::Value;
-use crate::sql::types::ObjectId;
 
 /// Parsed SQL statement.
 #[derive(Debug, Clone, PartialEq)]
@@ -258,37 +257,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_uuid_literal(&mut self) -> Result<ObjectId, ParseError> {
-        self.skip_whitespace();
-
-        // Expect x'...'
-        if !self.try_keyword("x") {
-            return Err(self.error("expected x'...' for UUID literal"));
-        }
-        self.expect_char('\'')?;
-
-        let start = self.pos;
-        while self.pos < self.input.len() {
-            let c = self.input.as_bytes()[self.pos];
-            if c == b'\'' {
-                break;
-            }
-            if !c.is_ascii_hexdigit() {
-                return Err(self.error("invalid hex character in UUID"));
-            }
-            self.pos += 1;
-        }
-
-        let hex_str = &self.input[start..self.pos];
-        self.expect_char('\'')?;
-
-        // Parse as u128
-        let value = u128::from_str_radix(hex_str, 16)
-            .map_err(|_| self.error("invalid UUID hex value"))?;
-
-        Ok(ObjectId::new(value))
-    }
-
     fn parse_value(&mut self) -> Result<Value, ParseError> {
         self.skip_whitespace();
 
@@ -305,13 +273,8 @@ impl<'a> Parser<'a> {
             return Ok(Value::Bool(false));
         }
 
-        // UUID literal x'...'
-        if self.remaining().to_uppercase().starts_with("X'") {
-            let id = self.parse_uuid_literal()?;
-            return Ok(Value::Ref(id));
-        }
-
-        // String literal
+        // String literal - always parse as String.
+        // The database executor coerces to ObjectId when inserting into Ref columns.
         if self.peek_char() == Some('\'') {
             let s = self.parse_string_literal()?;
             return Ok(Value::String(s));

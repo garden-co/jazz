@@ -16,6 +16,7 @@ use bytes::Bytes;
 
 use crate::branch::Branch;
 use crate::commit::CommitId;
+use crate::sql::ObjectId;
 use crate::storage::Environment;
 
 /// Unique ID for a listener subscription.
@@ -35,13 +36,13 @@ impl ListenerId {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ObjectKey {
     /// Object ID (UUIDv7)
-    pub object_id: u128,
+    pub object_id: ObjectId,
     /// Branch name
     pub branch: String,
 }
 
 impl ObjectKey {
-    pub fn new(object_id: u128, branch: impl Into<String>) -> Self {
+    pub fn new(object_id: ObjectId, branch: impl Into<String>) -> Self {
         ObjectKey {
             object_id,
             branch: branch.into(),
@@ -524,7 +525,7 @@ impl ObjectListenerRegistry {
     }
 
     /// Get all keys for a specific object ID (across all branches).
-    pub fn keys_for_object(&self, object_id: u128) -> Vec<ObjectKey> {
+    pub fn keys_for_object(&self, object_id: ObjectId) -> Vec<ObjectKey> {
         let states = self.states.read().unwrap();
         states
             .keys()

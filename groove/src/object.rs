@@ -10,13 +10,14 @@ use futures::stream::Stream;
 use crate::branch::Branch;
 use crate::commit::{Commit, CommitId};
 use crate::merge::MergeStrategy;
+use crate::sql::ObjectId;
 use crate::storage::{ChunkHash, ContentRef, ContentStore, INLINE_THRESHOLD};
 
 /// An object (CoValue) with its commit graph.
 #[derive(Debug)]
 pub struct Object {
     /// Unique object ID (UUIDv7)
-    pub id: u128,
+    pub id: ObjectId,
     /// Type prefix (e.g., "chat", "message")
     pub prefix: String,
     /// Named branches (wrapped in Arc<RwLock<>> for signal access)
@@ -28,7 +29,7 @@ pub struct Object {
 impl Object {
     /// Create a new object with the given ID and prefix.
     /// Automatically creates a "main" branch.
-    pub fn new(id: u128, prefix: impl Into<String>) -> Self {
+    pub fn new(id: ObjectId, prefix: impl Into<String>) -> Self {
         let mut branches = HashMap::new();
         branches.insert(
             "main".to_string(),

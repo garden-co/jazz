@@ -5,7 +5,7 @@ use futures::executor::block_on;
 use futures::io::AllowStdIo;
 use futures::stream::StreamExt;
 use groove::{
-    Commit, CommitId, ContentRef, LastWriterWins, MemoryContentStore, Object, INLINE_THRESHOLD,
+    Commit, CommitId, ContentRef, LastWriterWins, MemoryContentStore, Object, ObjectId, INLINE_THRESHOLD,
 };
 use std::io::Cursor;
 
@@ -21,7 +21,7 @@ fn make_commit(content: &[u8], parents: Vec<CommitId>) -> Commit {
 
 #[test]
 fn object_has_main_branch() {
-    let obj = Object::new(1, "test");
+    let obj = Object::new(ObjectId::new(1), "test");
 
     assert_eq!(obj.branch_names(), vec!["main"]);
     assert!(obj.branch("main").unwrap().is_empty());
@@ -29,7 +29,7 @@ fn object_has_main_branch() {
 
 #[test]
 fn object_create_branch() {
-    let mut obj = Object::new(1, "test");
+    let mut obj = Object::new(ObjectId::new(1), "test");
 
     // Add a commit to main
     let commit = make_commit(b"initial", vec![]);
@@ -50,7 +50,7 @@ fn object_create_branch() {
 
 #[test]
 fn object_branch_errors() {
-    let mut obj = Object::new(1, "test");
+    let mut obj = Object::new(ObjectId::new(1), "test");
     let fake_id = CommitId::from_bytes([0; 32]);
 
     // Can't create branch from non-existent commit
@@ -72,7 +72,7 @@ fn object_branch_errors() {
 
 #[test]
 fn merge_branches_simple() {
-    let mut obj = Object::new(1, "test");
+    let mut obj = Object::new(ObjectId::new(1), "test");
 
     // Add initial commit to main
     let c1 = make_commit(b"initial", vec![]);
@@ -119,7 +119,7 @@ fn merge_branches_simple() {
 
 #[test]
 fn sync_write_and_read() {
-    let obj = Object::new(1, "test");
+    let obj = Object::new(ObjectId::new(1), "test");
 
     // Write some content
     let id = obj.write_sync("main", b"hello world", "alice", 1000);
@@ -145,21 +145,21 @@ fn sync_write_and_read() {
 
 #[test]
 fn read_sync_empty_branch_returns_none() {
-    let obj = Object::new(1, "test");
+    let obj = Object::new(ObjectId::new(1), "test");
     assert!(obj.read_sync("main").is_none());
 }
 
 #[test]
 #[should_panic(expected = "content exceeds INLINE_THRESHOLD")]
 fn write_sync_panics_on_large_content() {
-    let obj = Object::new(1, "test");
+    let obj = Object::new(ObjectId::new(1), "test");
     let large_content = vec![0u8; INLINE_THRESHOLD + 1];
     obj.write_sync("main", &large_content, "alice", 1000);
 }
 
 #[test]
 fn async_write_small_content() {
-    let obj = Object::new(1, "test");
+    let obj = Object::new(ObjectId::new(1), "test");
     let store = MemoryContentStore::new();
 
     // Write small content (should be inline)
@@ -174,7 +174,7 @@ fn async_write_small_content() {
 
 #[test]
 fn async_write_large_content() {
-    let obj = Object::new(1, "test");
+    let obj = Object::new(ObjectId::new(1), "test");
     let store = MemoryContentStore::new();
 
     // Write large content (should be chunked)
@@ -195,7 +195,7 @@ fn async_write_large_content() {
 
 #[test]
 fn async_read_inline_content() {
-    let obj = Object::new(1, "test");
+    let obj = Object::new(ObjectId::new(1), "test");
     let store = MemoryContentStore::new();
 
     // Write using sync (inline)
@@ -208,7 +208,7 @@ fn async_read_inline_content() {
 
 #[test]
 fn stream_write_small_content() {
-    let obj = Object::new(1, "test");
+    let obj = Object::new(ObjectId::new(1), "test");
     let store = MemoryContentStore::new();
 
     // Small content should be inlined
@@ -228,7 +228,7 @@ fn stream_write_small_content() {
 
 #[test]
 fn stream_write_large_content() {
-    let obj = Object::new(1, "test");
+    let obj = Object::new(ObjectId::new(1), "test");
     let store = MemoryContentStore::new();
 
     // Large content should be chunked
@@ -251,7 +251,7 @@ fn stream_write_large_content() {
 
 #[test]
 fn stream_write_empty_content() {
-    let obj = Object::new(1, "test");
+    let obj = Object::new(ObjectId::new(1), "test");
     let store = MemoryContentStore::new();
 
     let cursor = AllowStdIo::new(Cursor::new(Vec::<u8>::new()));
@@ -269,7 +269,7 @@ fn stream_write_empty_content() {
 
 #[test]
 fn stream_read_inline_content() {
-    let obj = Object::new(1, "test");
+    let obj = Object::new(ObjectId::new(1), "test");
     let store = MemoryContentStore::new();
 
     // Write inline content
@@ -287,7 +287,7 @@ fn stream_read_inline_content() {
 
 #[test]
 fn stream_read_chunked_content() {
-    let obj = Object::new(1, "test");
+    let obj = Object::new(ObjectId::new(1), "test");
     let store = MemoryContentStore::new();
 
     // Write chunked content
@@ -314,7 +314,7 @@ fn stream_read_chunked_content() {
 
 #[test]
 fn stream_read_empty_branch_returns_none() {
-    let obj = Object::new(1, "test");
+    let obj = Object::new(ObjectId::new(1), "test");
     let store = MemoryContentStore::new();
 
     assert!(obj.read_stream("main", &store).is_none());
@@ -322,7 +322,7 @@ fn stream_read_empty_branch_returns_none() {
 
 #[test]
 fn stream_roundtrip_exact_threshold() {
-    let obj = Object::new(1, "test");
+    let obj = Object::new(ObjectId::new(1), "test");
     let store = MemoryContentStore::new();
 
     // Content exactly at threshold should be inline
@@ -342,7 +342,7 @@ fn stream_roundtrip_exact_threshold() {
 
 #[test]
 fn stream_roundtrip_just_over_threshold() {
-    let obj = Object::new(1, "test");
+    let obj = Object::new(ObjectId::new(1), "test");
     let store = MemoryContentStore::new();
 
     // Content just over threshold should be chunked
@@ -370,7 +370,7 @@ fn stream_roundtrip_just_over_threshold() {
 
 #[test]
 fn branch_ref_access() {
-    let obj = Object::new(1, "test");
+    let obj = Object::new(ObjectId::new(1), "test");
 
     // Can get branch ref
     let branch_ref = obj.branch_ref("main").unwrap();

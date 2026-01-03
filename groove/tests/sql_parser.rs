@@ -72,13 +72,18 @@ fn parse_insert_with_null() {
 }
 
 #[test]
-fn parse_insert_with_uuid() {
-    let sql = "INSERT INTO posts (author, title) VALUES (x'0192abcd12345678', 'Hello')";
-    let stmt = parse(sql).unwrap();
+fn parse_insert_with_object_id() {
+    // ObjectIds are passed as string literals containing Base32.
+    // The parser produces Value::String; the executor coerces to Value::Ref
+    // when inserting into a Ref column.
+    let id = groove::sql::ObjectId::new(0x0192abcd12345678);
+    let sql = format!("INSERT INTO posts (author, title) VALUES ('{}', 'Hello')", id);
+    let stmt = parse(&sql).unwrap();
 
     match stmt {
         Statement::Insert(ins) => {
-            assert_eq!(ins.values[0], Value::Ref(groove::sql::ObjectId::new(0x0192abcd12345678)));
+            // Parser produces String, not Ref (executor handles coercion)
+            assert_eq!(ins.values[0], Value::String(id.to_string()));
         }
         _ => panic!("expected Insert"),
     }
@@ -86,8 +91,12 @@ fn parse_insert_with_uuid() {
 
 #[test]
 fn parse_update() {
-    let sql = "UPDATE users SET email = 'new@example.com', age = 31 WHERE id = x'abc123'";
-    let stmt = parse(sql).unwrap();
+    // ObjectIds are passed as string literals containing Base32.
+    // The parser produces Value::String; the executor coerces to Value::Ref
+    // when comparing against id or Ref columns.
+    let id = groove::sql::ObjectId::new(0xabc123);
+    let sql = format!("UPDATE users SET email = 'new@example.com', age = 31 WHERE id = '{}'", id);
+    let stmt = parse(&sql).unwrap();
 
     match stmt {
         Statement::Update(upd) => {
@@ -100,6 +109,8 @@ fn parse_update() {
             assert_eq!(upd.assignments[1], ("age".into(), Value::I64(31)));
             assert_eq!(upd.where_clause.len(), 1);
             assert_eq!(upd.where_clause[0].column.column, "id");
+            // Parser produces String, not Ref (executor handles coercion)
+            assert_eq!(upd.where_clause[0].value, Value::String(id.to_string()));
         }
         _ => panic!("expected Update"),
     }
