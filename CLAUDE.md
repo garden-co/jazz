@@ -23,6 +23,7 @@ Read these to understand the architecture:
 - [specs/sql-layer.md](specs/sql-layer.md) - SQL interface design and status
 - [specs/incremental-queries.md](specs/incremental-queries.md) - Incremental query computation graphs
 - [specs/streaming-and-persistence.md](specs/streaming-and-persistence.md) - Content storage and streaming
+- [specs/rebac-policies.md](specs/rebac-policies.md) - ReBAC permission policies
 
 ## Key Concepts
 

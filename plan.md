@@ -172,10 +172,41 @@ sql/
 - [ ] Tests for sync scenarios (sequential commits, concurrent commits, reconnection)
 
 ## Phase 3: Permissions & Identity
+
+See `specs/rebac-policies.md` for full design.
+
+### ReBAC Policy System
+
+**Phase 3.1: Core Types and Parser**
+- [ ] `PolicyAction`, `Policy`, `PolicyExpr` AST types
+- [ ] SQL parser for CREATE POLICY
+- [ ] Store policies in TableSchema
+- [ ] Policy serialization/deserialization
+
+**Phase 3.2: Evaluation Engine**
+- [ ] `PolicyEvaluator` with cycle detection and depth limit
+- [ ] Basic expression evaluation (comparisons, AND/OR/NOT)
+- [ ] INHERITS evaluation with recursive lookup
+- [ ] Integration with SELECT queries (filter results)
+- [ ] Default allow with warning for missing policies
+
+**Phase 3.3: Write Policies**
+- [ ] INSERT policy evaluation (CHECK on @new)
+- [ ] UPDATE policy evaluation (WHERE on existing, CHECK on @old/@new)
+- [ ] DELETE policy evaluation (WHERE, fallback to UPDATE)
+
+**Phase 3.4: Query Integration**
+- [ ] Combine policy predicates with user query predicates
+- [ ] Integrate with incremental query graph builder
+- [ ] Optimize predicate ordering by selectivity
+
+**Phase 3.5: Testing and Debugging**
+- [ ] EXPLAIN POLICY command
+- [ ] `check_policy()` programmatic API
+
+### Identity (Future)
 - [ ] Server-authenticated accounts
-- [ ] ReBAC rules in schema
-- [ ] Permission evaluation on server
-- [ ] Creation rules
+- [ ] @viewer binding from authentication context
 
 ## Phase 4: Advanced Features
 - [ ] Additional merge strategies (beyond LastWriterWins)
@@ -201,6 +232,12 @@ Current test count: **186 tests** passing across all modules
   - `sql_row.rs` - Row encoding/decoding
   - `sql_schema.rs` - Schema serialization
   - `storage.rs` - Storage abstractions
+
+---
+
+## Open Design Questions
+
+- [ ] Revisit whether primary key `id` (ObjectId/UUIDv7) column should be implicit or explicit in CREATE TABLE syntax. Currently implicit - may want to require explicit declaration for clarity.
 
 ---
 
