@@ -821,3 +821,111 @@ fn incremental_query_as_or_policy() {
     let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id).unwrap();
     assert_eq!(bob_query.rows().len(), 2);
 }
+
+#[test]
+fn incremental_query_as_inherits_flattened_to_join() {
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE folders (name STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
+
+    // Create users
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Create folders
+    let alice_folder = db.insert("folders", &["name", "owner_id"], vec![
+        Value::String("Alice's Folder".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+    let bob_folder = db.insert("folders", &["name", "owner_id"], vec![
+        Value::String("Bob's Folder".into()),
+        Value::Ref(bob_id),
+    ]).unwrap();
+
+    // Create documents
+    db.insert("documents", &["title", "folder_id"], vec![
+        Value::String("Alice's Doc".into()),
+        Value::Ref(alice_folder),
+    ]).unwrap();
+    db.insert("documents", &["title", "folder_id"], vec![
+        Value::String("Bob's Doc".into()),
+        Value::Ref(bob_folder),
+    ]).unwrap();
+
+    // Add policies:
+    // - folders: owner can read
+    // - documents: inherit from folder
+    db.execute("CREATE POLICY ON folders FOR SELECT WHERE owner_id = @viewer").unwrap();
+    db.execute("CREATE POLICY ON documents FOR SELECT WHERE INHERITS SELECT FROM folder_id").unwrap();
+
+    // Alice can only see her document (via folder ownership)
+    let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id).unwrap();
+    let alice_rows = alice_query.rows();
+    assert_eq!(alice_rows.len(), 1, "Alice should see 1 doc: {:?}", alice_rows);
+
+    // Bob can only see his document
+    let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id).unwrap();
+    let bob_rows = bob_query.rows();
+    assert_eq!(bob_rows.len(), 1, "Bob should see 1 doc: {:?}", bob_rows);
+}
+
+#[test]
+fn incremental_query_as_inherits_incremental_updates() {
+    use crate::sql::policy::clear_policy_warnings;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE folders (name STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Create folder and policy before documents
+    let alice_folder = db.insert("folders", &["name", "owner_id"], vec![
+        Value::String("Alice's Folder".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    db.execute("CREATE POLICY ON folders FOR SELECT WHERE owner_id = @viewer").unwrap();
+    db.execute("CREATE POLICY ON documents FOR SELECT WHERE INHERITS SELECT FROM folder_id").unwrap();
+
+    // Create query before any documents
+    let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id).unwrap();
+    assert!(alice_query.rows().is_empty());
+
+    // Track changes via subscription
+    let change_count = Arc::new(AtomicUsize::new(0));
+    let change_count_clone = change_count.clone();
+    let _listener = alice_query.subscribe_delta(Box::new(move |delta| {
+        change_count_clone.fetch_add(delta.len(), Ordering::SeqCst);
+    }));
+
+    // Insert document into Alice's folder - should trigger update
+    db.insert("documents", &["title", "folder_id"], vec![
+        Value::String("New Doc".into()),
+        Value::Ref(alice_folder),
+    ]).unwrap();
+
+    // Query should now have one row
+    assert_eq!(alice_query.rows().len(), 1);
+    // And we should have received a delta
+    assert!(change_count.load(Ordering::SeqCst) > 0, "Should have received delta notification");
+}

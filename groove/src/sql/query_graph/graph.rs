@@ -114,16 +114,37 @@ impl QueryGraph {
         node_indices: HashMap<NodeId, usize>,
         output_node: NodeId,
     ) -> Self {
+        use crate::sql::schema::ColumnDef;
+
         let mut all_schemas = HashMap::new();
         all_schemas.insert(left_table.clone(), left_schema.clone());
-        all_schemas.insert(right_table.clone(), right_schema);
+        all_schemas.insert(right_table.clone(), right_schema.clone());
+
+        // Build a combined schema for filter evaluation on joined rows.
+        // Columns are: [left_cols..., right_cols...] with qualified names.
+        let mut combined_columns = Vec::new();
+        for col in &left_schema.columns {
+            combined_columns.push(ColumnDef {
+                name: format!("{}.{}", left_table, col.name),
+                ty: col.ty.clone(),
+                nullable: col.nullable,
+            });
+        }
+        for col in &right_schema.columns {
+            combined_columns.push(ColumnDef {
+                name: format!("{}.{}", right_table, col.name),
+                ty: col.ty.clone(),
+                nullable: col.nullable,
+            });
+        }
+        let combined_schema = TableSchema::new("_joined", combined_columns);
 
         Self {
             id,
             state: GraphState::Uninitialized,
             table: left_table.clone(),
             all_tables: vec![left_table, right_table],
-            schema: left_schema,
+            schema: combined_schema, // Use combined schema for JOIN graphs
             all_schemas,
             is_join: true,
             nodes,

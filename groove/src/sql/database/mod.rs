@@ -622,6 +622,21 @@ pub enum ExecuteResult {
     Selected(Vec<Row>),
 }
 
+/// Information about an INHERITS clause for JOIN expansion.
+///
+/// Used internally when flattening INHERITS policies into JOIN predicates
+/// for incremental query graphs.
+struct InheritsInfo {
+    /// The Ref column in the source table (e.g., "folder_id")
+    ref_column: String,
+    /// The target table being referenced (e.g., "folders")
+    target_table: String,
+    /// The flattened predicate from the target table's policy
+    target_predicate: Option<PolicyExpr>,
+    /// Any additional predicates from AND clauses in the source policy
+    additional_predicates: Vec<PolicyExpr>,
+}
+
 /// Database errors.
 #[derive(Debug, Clone)]
 pub enum DatabaseError {
@@ -1690,10 +1705,18 @@ impl Database {
         let policies = self.get_policies(table);
         let select_policy = policies.as_ref().and_then(|p| p.get(PolicyAction::Select));
 
-        // Build the query graph
-        let mut builder = QueryGraphBuilder::new(table, schema.clone());
+        // Check if policy contains INHERITS - if so, we need to build a JOIN graph
+        if let Some(policy) = select_policy {
+            if let Some(ref where_expr) = policy.where_clause {
+                if let Some(inherits_info) = self.extract_inherits(where_expr, table, &schema)? {
+                    // Build a JOIN graph to handle INHERITS
+                    return self.build_inherits_join_graph(select, viewer, &inherits_info);
+                }
+            }
+        }
 
-        // Start with table scan
+        // No INHERITS - build a simple single-table graph
+        let mut builder = QueryGraphBuilder::new(table, schema.clone());
         let scan = builder.table_scan();
 
         // Apply user's WHERE clause first
@@ -1707,31 +1730,230 @@ impl Database {
         // Apply policy predicate
         let after_policy = if let Some(policy) = select_policy {
             if let Some(ref where_expr) = policy.where_clause {
-                // Try to convert policy to a simple predicate
                 match self.policy_expr_to_predicate(where_expr, viewer) {
-                    Ok(policy_predicate) => {
-                        // Successfully converted - add as filter node
-                        builder.filter(after_user_where, policy_predicate)
-                    }
-                    Err(_) => {
-                        // Contains INHERITS or complex expressions - need runtime filter
-                        // For now, we add a predicate that always passes and rely on
-                        // post-filtering via the IncrementalQuery's filter_by_policy wrapper
-                        // TODO: Add a PolicyFilter node type for proper incremental INHERITS
-                        after_user_where
-                    }
+                    Ok(policy_predicate) => builder.filter(after_user_where, policy_predicate),
+                    Err(_) => after_user_where, // Shouldn't happen - INHERITS handled above
                 }
             } else {
-                // No WHERE clause in policy = allow all
                 after_user_where
             }
         } else {
-            // No policy = allow all (with warning from PolicyEvaluator)
             after_user_where
         };
 
-        // Create output node
         Ok(builder.output(after_policy, GraphId(0)))
+    }
+
+    /// Extract INHERITS information from a policy expression.
+    ///
+    /// Returns Some(InheritsInfo) if the policy contains a simple INHERITS clause
+    /// that can be flattened to a JOIN. Returns None for simple predicates.
+    fn extract_inherits(
+        &self,
+        expr: &PolicyExpr,
+        source_table: &str,
+        source_schema: &TableSchema,
+    ) -> Result<Option<InheritsInfo>, DatabaseError> {
+        match expr {
+            PolicyExpr::Inherits { action, column } => {
+                if *action != PolicyAction::Select {
+                    return Err(DatabaseError::Parse(parser::ParseError {
+                        message: format!("INHERITS {} not supported in incremental queries, only INHERITS SELECT", action),
+                        position: 0,
+                    }));
+                }
+
+                let col_name = column.column_name();
+
+                // Find the target table from the Ref column
+                let col_def = source_schema.column(col_name)
+                    .ok_or_else(|| DatabaseError::ColumnNotFound(col_name.to_string()))?;
+
+                let target_table = match &col_def.ty {
+                    ColumnType::Ref(t) => t.clone(),
+                    _ => return Err(DatabaseError::NotAReference(col_name.to_string())),
+                };
+
+                // Get the target table's SELECT policy
+                let target_policies = self.get_policies(&target_table);
+                let target_select = target_policies.as_ref().and_then(|p| p.get(PolicyAction::Select));
+                let target_predicate = target_select.and_then(|p| p.where_clause.clone());
+
+                Ok(Some(InheritsInfo {
+                    ref_column: col_name.to_string(),
+                    target_table,
+                    target_predicate,
+                    additional_predicates: vec![],
+                }))
+            }
+            PolicyExpr::And(exprs) => {
+                // Check if any sub-expression is INHERITS
+                let mut inherits_info: Option<InheritsInfo> = None;
+                let mut additional: Vec<PolicyExpr> = vec![];
+
+                for e in exprs {
+                    if let Some(info) = self.extract_inherits(e, source_table, source_schema)? {
+                        if inherits_info.is_some() {
+                            // Multiple INHERITS in AND - not yet supported
+                            return Err(DatabaseError::Parse(parser::ParseError {
+                                message: "Multiple INHERITS in AND not yet supported".to_string(),
+                                position: 0,
+                            }));
+                        }
+                        inherits_info = Some(info);
+                    } else {
+                        additional.push(e.clone());
+                    }
+                }
+
+                if let Some(mut info) = inherits_info {
+                    info.additional_predicates = additional;
+                    Ok(Some(info))
+                } else {
+                    Ok(None)
+                }
+            }
+            // Other expressions don't contain INHERITS at the top level
+            _ => Ok(None),
+        }
+    }
+
+    /// Build a JOIN graph to handle INHERITS policies.
+    ///
+    /// Transforms a query like `SELECT * FROM documents` with policy
+    /// `INHERITS SELECT FROM folder_id` into an equivalent JOIN query.
+    fn build_inherits_join_graph(
+        &self,
+        select: &Select,
+        viewer: ObjectId,
+        inherits: &InheritsInfo,
+    ) -> Result<crate::sql::query_graph::QueryGraph, DatabaseError> {
+        let left_table = &select.from.table;
+        let left_schema = self.get_table(left_table)
+            .ok_or_else(|| DatabaseError::TableNotFound(left_table.clone()))?;
+        let right_schema = self.get_table(&inherits.target_table)
+            .ok_or_else(|| DatabaseError::TableNotFound(inherits.target_table.clone()))?;
+
+        // Build a JOIN graph
+        let mut builder = JoinGraphBuilder::new(
+            left_table,
+            left_schema.clone(),
+            &inherits.target_table,
+            right_schema.clone(),
+            &inherits.ref_column,
+        );
+
+        let join_node = builder.join();
+
+        // Apply user's WHERE clause (needs qualified column handling)
+        let after_user_where = if select.where_clause.is_empty() {
+            join_node
+        } else {
+            let predicate = self.build_predicate(&select.where_clause, &left_schema)?;
+            builder.filter(join_node, predicate)
+        };
+
+        // Apply additional predicates from source policy (non-INHERITS parts)
+        let after_additional = if inherits.additional_predicates.is_empty() {
+            after_user_where
+        } else {
+            let mut combined = Predicate::True;
+            for expr in &inherits.additional_predicates {
+                let pred = self.policy_expr_to_predicate(expr, viewer)?;
+                combined = combined.and(pred);
+            }
+            builder.filter(after_user_where, combined)
+        };
+
+        // Apply the target table's policy predicate (the flattened INHERITS)
+        let after_policy = if let Some(ref target_expr) = inherits.target_predicate {
+            // Convert target policy to predicate, but with column names qualified to right table
+            let predicate = self.policy_expr_to_predicate_qualified(target_expr, viewer, &inherits.target_table)?;
+            builder.filter(after_additional, predicate)
+        } else {
+            // No policy on target table = allow all
+            after_additional
+        };
+
+        Ok(builder.output(after_policy, GraphId(0)))
+    }
+
+    /// Convert a PolicyExpr to a Predicate with qualified column names.
+    ///
+    /// This is used when flattening INHERITS - the target table's policy columns
+    /// need to be prefixed with the table name for the JOIN context.
+    fn policy_expr_to_predicate_qualified(
+        &self,
+        expr: &PolicyExpr,
+        viewer: ObjectId,
+        table_prefix: &str,
+    ) -> Result<Predicate, DatabaseError> {
+        match expr {
+            PolicyExpr::Eq(left, right) => {
+                let (column, value) = self.resolve_policy_comparison_qualified(left, right, viewer, table_prefix)?;
+                Ok(Predicate::eq(column, value))
+            }
+            PolicyExpr::Ne(left, right) => {
+                let (column, value) = self.resolve_policy_comparison_qualified(left, right, viewer, table_prefix)?;
+                Ok(Predicate::ne(column, value))
+            }
+            PolicyExpr::And(exprs) => {
+                let predicates: Result<Vec<_>, _> = exprs
+                    .iter()
+                    .map(|e| self.policy_expr_to_predicate_qualified(e, viewer, table_prefix))
+                    .collect();
+                Ok(predicates?.into_iter().fold(Predicate::True, |acc, p| acc.and(p)))
+            }
+            PolicyExpr::Or(exprs) => {
+                let predicates: Result<Vec<_>, _> = exprs
+                    .iter()
+                    .map(|e| self.policy_expr_to_predicate_qualified(e, viewer, table_prefix))
+                    .collect();
+                Ok(predicates?.into_iter().fold(Predicate::False, |acc, p| acc.or(p)))
+            }
+            PolicyExpr::Not(inner) => {
+                Ok(self.policy_expr_to_predicate_qualified(inner, viewer, table_prefix)?.not())
+            }
+            PolicyExpr::Inherits { .. } => {
+                // Nested INHERITS - would need recursive flattening
+                Err(DatabaseError::Parse(parser::ParseError {
+                    message: "Nested INHERITS not yet supported in incremental queries".to_string(),
+                    position: 0,
+                }))
+            }
+            _ => Err(DatabaseError::Parse(parser::ParseError {
+                message: "Unsupported policy expression in INHERITS target".to_string(),
+                position: 0,
+            })),
+        }
+    }
+
+    /// Resolve a policy comparison with qualified column names for JOIN context.
+    fn resolve_policy_comparison_qualified(
+        &self,
+        left: &PolicyValue,
+        right: &PolicyValue,
+        viewer: ObjectId,
+        table_prefix: &str,
+    ) -> Result<(String, Value), DatabaseError> {
+        match (left, right) {
+            (PolicyValue::Column(col), PolicyValue::Viewer) => {
+                Ok((format!("{}.{}", table_prefix, col), Value::Ref(viewer)))
+            }
+            (PolicyValue::Viewer, PolicyValue::Column(col)) => {
+                Ok((format!("{}.{}", table_prefix, col), Value::Ref(viewer)))
+            }
+            (PolicyValue::Column(col), PolicyValue::Literal(val)) => {
+                Ok((format!("{}.{}", table_prefix, col), val.clone()))
+            }
+            (PolicyValue::Literal(val), PolicyValue::Column(col)) => {
+                Ok((format!("{}.{}", table_prefix, col), val.clone()))
+            }
+            _ => Err(DatabaseError::Parse(parser::ParseError {
+                message: "Unsupported policy comparison pattern in INHERITS target".to_string(),
+                position: 0,
+            })),
+        }
     }
 
     /// Convert a PolicyExpr to a Predicate.
