@@ -1,15 +1,18 @@
 mod database;
+mod index;
 mod parser;
 mod row;
 mod schema;
+mod table_rows;
+mod types;
 
-pub use database::{
-    Database, DatabaseError, ExecuteResult, IndexKey, ObjectId, QueryState, ReactiveQuery,
-    RefIndex, SchemaId, TableRows,
-};
+pub use database::{Database, DatabaseError, ExecuteResult, ReactiveQuery};
+pub use index::RefIndex;
 pub use parser::{
     parse, Condition, CreateTable, FromClause, Insert, Join, JoinCondition, ParseError,
     Projection, QualifiedColumn, Select, Statement, Update,
 };
 pub use row::{decode_row, encode_row, Row, RowError, Value};
 pub use schema::{ColumnDef, ColumnType, SchemaError, TableSchema};
+pub use table_rows::TableRows;
+pub use types::{IndexKey, ObjectId, QueryState, SchemaId};

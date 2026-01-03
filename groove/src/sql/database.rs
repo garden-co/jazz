@@ -1,179 +1,15 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock, Weak};
 
 use crate::node::{generate_object_id, LocalNode};
 use crate::listener::ListenerId;
+use crate::sql::index::RefIndex;
 use crate::sql::parser::{self, Select, Statement};
 use crate::sql::row::{decode_row, encode_row, Row, RowError, Value};
 use crate::sql::schema::{ColumnType, SchemaError, TableSchema};
+use crate::sql::table_rows::TableRows;
+use crate::sql::types::{IndexKey, ObjectId, QueryState, SchemaId};
 use crate::storage::Environment;
-
-/// Object ID type alias.
-pub type ObjectId = u128;
-
-/// Schema ID type alias (object ID of schema object).
-pub type SchemaId = u128;
-
-/// Key for a reference index: (source_table, source_column).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct IndexKey {
-    pub source_table: String,
-    pub source_column: String,
-}
-
-impl IndexKey {
-    pub fn new(source_table: impl Into<String>, source_column: impl Into<String>) -> Self {
-        IndexKey {
-            source_table: source_table.into(),
-            source_column: source_column.into(),
-        }
-    }
-}
-
-/// Reference index: maps target_id -> set of source_row_ids.
-/// One index per (source_table, source_column) pair.
-#[derive(Debug, Clone, Default)]
-pub struct RefIndex {
-    /// target_id -> source_row_ids that reference it
-    entries: HashMap<ObjectId, HashSet<ObjectId>>,
-}
-
-impl RefIndex {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Add a reference: source_row references target_id.
-    pub fn add(&mut self, target_id: ObjectId, source_row_id: ObjectId) {
-        self.entries
-            .entry(target_id)
-            .or_default()
-            .insert(source_row_id);
-    }
-
-    /// Remove a reference.
-    pub fn remove(&mut self, target_id: ObjectId, source_row_id: ObjectId) {
-        if let Some(set) = self.entries.get_mut(&target_id) {
-            set.remove(&source_row_id);
-            if set.is_empty() {
-                self.entries.remove(&target_id);
-            }
-        }
-    }
-
-    /// Get all source rows referencing a target.
-    pub fn get(&self, target_id: ObjectId) -> impl Iterator<Item = ObjectId> + '_ {
-        self.entries
-            .get(&target_id)
-            .into_iter()
-            .flat_map(|set| set.iter().copied())
-    }
-
-    /// Serialize the index to bytes.
-    /// Format: [entry_count: u32] [entries...]
-    /// Each entry: [target_id: u128] [source_count: u32] [source_ids: u128...]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-
-        // Entry count
-        buf.extend_from_slice(&(self.entries.len() as u32).to_le_bytes());
-
-        for (target_id, source_ids) in &self.entries {
-            // Target ID
-            buf.extend_from_slice(&target_id.to_le_bytes());
-            // Source count
-            buf.extend_from_slice(&(source_ids.len() as u32).to_le_bytes());
-            // Source IDs
-            for source_id in source_ids {
-                buf.extend_from_slice(&source_id.to_le_bytes());
-            }
-        }
-
-        buf
-    }
-
-    /// Deserialize an index from bytes.
-    pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
-        if data.len() < 4 {
-            return Ok(Self::new()); // Empty index
-        }
-
-        let mut pos = 0;
-        let entry_count = u32::from_le_bytes(
-            data[pos..pos + 4].try_into().map_err(|_| "invalid entry count")?
-        ) as usize;
-        pos += 4;
-
-        let mut entries = HashMap::new();
-
-        for _ in 0..entry_count {
-            if pos + 16 > data.len() {
-                return Err("truncated target_id".to_string());
-            }
-            let target_id = u128::from_le_bytes(
-                data[pos..pos + 16].try_into().map_err(|_| "invalid target_id")?
-            );
-            pos += 16;
-
-            if pos + 4 > data.len() {
-                return Err("truncated source_count".to_string());
-            }
-            let source_count = u32::from_le_bytes(
-                data[pos..pos + 4].try_into().map_err(|_| "invalid source_count")?
-            ) as usize;
-            pos += 4;
-
-            let mut source_ids = HashSet::new();
-            for _ in 0..source_count {
-                if pos + 16 > data.len() {
-                    return Err("truncated source_id".to_string());
-                }
-                let source_id = u128::from_le_bytes(
-                    data[pos..pos + 16].try_into().map_err(|_| "invalid source_id")?
-                );
-                pos += 16;
-                source_ids.insert(source_id);
-            }
-
-            entries.insert(target_id, source_ids);
-        }
-
-        Ok(RefIndex { entries })
-    }
-}
-
-
-/// State of a query subscription.
-#[derive(Debug, Clone)]
-pub enum QueryState {
-    /// Query is loading.
-    Loading,
-    /// Query has results.
-    Loaded(Vec<Row>),
-    /// Query encountered an error.
-    Error(String),
-}
-
-impl QueryState {
-    pub fn is_loading(&self) -> bool {
-        matches!(self, QueryState::Loading)
-    }
-
-    pub fn is_loaded(&self) -> bool {
-        matches!(self, QueryState::Loaded(_))
-    }
-
-    pub fn is_error(&self) -> bool {
-        matches!(self, QueryState::Error(_))
-    }
-
-    pub fn rows(&self) -> Option<&[Row]> {
-        match self {
-            QueryState::Loaded(rows) => Some(rows),
-            _ => None,
-        }
-    }
-}
 
 /// Type alias for query callbacks.
 /// For native builds, requires Send + Sync for thread safety.
@@ -224,7 +60,7 @@ impl ReactiveQueryInner {
                 if let Ok(Some(data)) = self.db_state.node.read_sync(*rows_id, "main") {
                     if !data.is_empty() {
                         if let Ok(table_rows) = TableRows::from_bytes(&data) {
-                            table_rows.row_ids.into_iter().collect()
+                            table_rows.into_vec()
                         } else {
                             vec![]
                         }
@@ -490,82 +326,6 @@ impl DatabaseState {
             index_objects: RwLock::new(HashMap::new()),
             reactive_queries: ReactiveQueryRegistry::new(),
         }
-    }
-}
-
-/// Table row set: tracks which row IDs belong to a table.
-/// Stored as an object for reactive updates.
-#[derive(Debug, Clone, Default)]
-pub struct TableRows {
-    /// Set of row IDs in the table.
-    row_ids: HashSet<ObjectId>,
-}
-
-impl TableRows {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn add(&mut self, row_id: ObjectId) {
-        self.row_ids.insert(row_id);
-    }
-
-    pub fn remove(&mut self, row_id: ObjectId) {
-        self.row_ids.remove(&row_id);
-    }
-
-    pub fn contains(&self, row_id: ObjectId) -> bool {
-        self.row_ids.contains(&row_id)
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = ObjectId> + '_ {
-        self.row_ids.iter().copied()
-    }
-
-    pub fn len(&self) -> usize {
-        self.row_ids.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.row_ids.is_empty()
-    }
-
-    /// Serialize to bytes.
-    /// Format: [count: u32] [row_ids: u128...]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&(self.row_ids.len() as u32).to_le_bytes());
-        for row_id in &self.row_ids {
-            buf.extend_from_slice(&row_id.to_le_bytes());
-        }
-        buf
-    }
-
-    /// Deserialize from bytes.
-    pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
-        if data.len() < 4 {
-            return Ok(Self::new());
-        }
-
-        let count = u32::from_le_bytes(
-            data[0..4].try_into().map_err(|_| "invalid count")?
-        ) as usize;
-
-        let mut row_ids = HashSet::new();
-        let mut pos = 4;
-
-        for _ in 0..count {
-            if pos + 16 > data.len() {
-                return Err("truncated row_id".to_string());
-            }
-            let row_id = u128::from_le_bytes(
-                data[pos..pos + 16].try_into().map_err(|_| "invalid row_id")?
-            );
-            pos += 16;
-            row_ids.insert(row_id);
-        }
-
-        Ok(TableRows { row_ids })
     }
 }
 
