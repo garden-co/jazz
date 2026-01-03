@@ -184,16 +184,16 @@ See `specs/rebac-policies.md` for full design.
 - [x] Policy serialization/deserialization
 
 **Phase 3.2: Evaluation Engine**
-- [ ] `PolicyEvaluator` with cycle detection and depth limit
-- [ ] Basic expression evaluation (comparisons, AND/OR/NOT)
-- [ ] INHERITS evaluation with recursive lookup
+- [x] `PolicyEvaluator` with cycle detection and depth limit
+- [x] Basic expression evaluation (comparisons, AND/OR/NOT)
+- [x] INHERITS evaluation with recursive lookup
 - [ ] Integration with SELECT queries (filter results)
-- [ ] Default allow with warning for missing policies
+- [x] Default allow with warning for missing policies
 
 **Phase 3.3: Write Policies**
-- [ ] INSERT policy evaluation (CHECK on @new)
-- [ ] UPDATE policy evaluation (WHERE on existing, CHECK on @old/@new)
-- [ ] DELETE policy evaluation (WHERE, fallback to UPDATE)
+- [x] INSERT policy evaluation (CHECK on @new)
+- [x] UPDATE policy evaluation (WHERE on existing, CHECK on @old/@new)
+- [x] DELETE policy evaluation (WHERE, fallback to UPDATE)
 
 **Phase 3.4: Query Integration**
 - [ ] Combine policy predicates with user query predicates

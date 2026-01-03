@@ -16,7 +16,9 @@ pub use parser::{
 };
 // Policy types are also re-exported from parser for convenience (via Statement::CreatePolicy)
 pub use policy::{
-    Policy, PolicyAction, PolicyColumnRef, PolicyError, PolicyExpr, PolicyValue, TablePolicies,
+    clear_policy_warnings, EvalContext, Policy, PolicyAction, PolicyColumnRef, PolicyConfig,
+    PolicyError, PolicyEvaluator, PolicyExpr, PolicyLookup, PolicyResult, PolicyValue,
+    RowLookup, TablePolicies,
 };
 pub use row::{decode_row, encode_row, Row, RowError, Value};
 pub use schema::{ColumnDef, ColumnType, SchemaError, TableSchema};
