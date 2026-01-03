@@ -1,6 +1,9 @@
 //! Integration tests for SQL parser.
 
-use groove::sql::{parse, ColumnType, Projection, Statement, Value};
+use groove::sql::{
+    parse, ColumnType, PolicyAction, PolicyColumnRef, PolicyExpr, PolicyValue, Projection,
+    Statement, Value,
+};
 use groove::ObjectId;
 
 #[test]
@@ -258,5 +261,271 @@ fn case_insensitive_keywords() {
             assert_eq!(sel.where_clause[0].value, Value::Bool(true));
         }
         _ => panic!("expected Select"),
+    }
+}
+
+// ========== Policy Parsing Tests ==========
+
+#[test]
+fn parse_policy_simple_select() {
+    let sql = "CREATE POLICY ON documents FOR SELECT WHERE owner_id = @viewer";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::CreatePolicy(policy) => {
+            assert_eq!(policy.table, "documents");
+            assert_eq!(policy.action, PolicyAction::Select);
+            assert!(policy.check_clause.is_none());
+
+            match policy.where_clause {
+                Some(PolicyExpr::Eq(left, right)) => {
+                    assert_eq!(left, PolicyValue::Column("owner_id".into()));
+                    assert_eq!(right, PolicyValue::Viewer);
+                }
+                _ => panic!("expected Eq expression"),
+            }
+        }
+        _ => panic!("expected CreatePolicy"),
+    }
+}
+
+#[test]
+fn parse_policy_with_inherits() {
+    let sql = "CREATE POLICY ON documents FOR SELECT WHERE INHERITS SELECT FROM folder_id";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::CreatePolicy(policy) => {
+            assert_eq!(policy.action, PolicyAction::Select);
+
+            match policy.where_clause {
+                Some(PolicyExpr::Inherits { action, column }) => {
+                    assert_eq!(action, PolicyAction::Select);
+                    assert_eq!(column, PolicyColumnRef::Current("folder_id".into()));
+                }
+                _ => panic!("expected Inherits expression"),
+            }
+        }
+        _ => panic!("expected CreatePolicy"),
+    }
+}
+
+#[test]
+fn parse_policy_with_or() {
+    let sql = "CREATE POLICY ON tasks FOR SELECT WHERE assignee_id = @viewer OR INHERITS SELECT FROM project_id";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::CreatePolicy(policy) => {
+            match policy.where_clause {
+                Some(PolicyExpr::Or(exprs)) => {
+                    assert_eq!(exprs.len(), 2);
+
+                    match &exprs[0] {
+                        PolicyExpr::Eq(left, right) => {
+                            assert_eq!(*left, PolicyValue::Column("assignee_id".into()));
+                            assert_eq!(*right, PolicyValue::Viewer);
+                        }
+                        _ => panic!("expected Eq"),
+                    }
+
+                    match &exprs[1] {
+                        PolicyExpr::Inherits { action, column } => {
+                            assert_eq!(*action, PolicyAction::Select);
+                            assert_eq!(*column, PolicyColumnRef::Current("project_id".into()));
+                        }
+                        _ => panic!("expected Inherits"),
+                    }
+                }
+                _ => panic!("expected Or expression"),
+            }
+        }
+        _ => panic!("expected CreatePolicy"),
+    }
+}
+
+#[test]
+fn parse_policy_insert_with_check() {
+    let sql = "CREATE POLICY ON documents FOR INSERT CHECK (@new.author_id = @viewer AND INHERITS UPDATE FROM @new.folder_id)";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::CreatePolicy(policy) => {
+            assert_eq!(policy.action, PolicyAction::Insert);
+            assert!(policy.where_clause.is_none());
+
+            match policy.check_clause {
+                Some(PolicyExpr::And(exprs)) => {
+                    assert_eq!(exprs.len(), 2);
+
+                    match &exprs[0] {
+                        PolicyExpr::Eq(left, right) => {
+                            assert_eq!(*left, PolicyValue::NewColumn("author_id".into()));
+                            assert_eq!(*right, PolicyValue::Viewer);
+                        }
+                        _ => panic!("expected Eq"),
+                    }
+
+                    match &exprs[1] {
+                        PolicyExpr::Inherits { action, column } => {
+                            assert_eq!(*action, PolicyAction::Update);
+                            assert_eq!(*column, PolicyColumnRef::New("folder_id".into()));
+                        }
+                        _ => panic!("expected Inherits"),
+                    }
+                }
+                _ => panic!("expected And expression"),
+            }
+        }
+        _ => panic!("expected CreatePolicy"),
+    }
+}
+
+#[test]
+fn parse_policy_update_with_where_and_check() {
+    let sql = "CREATE POLICY ON documents FOR UPDATE WHERE author_id = @viewer CHECK (@new.author_id = @old.author_id)";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::CreatePolicy(policy) => {
+            assert_eq!(policy.action, PolicyAction::Update);
+
+            // WHERE clause
+            match &policy.where_clause {
+                Some(PolicyExpr::Eq(left, right)) => {
+                    assert_eq!(*left, PolicyValue::Column("author_id".into()));
+                    assert_eq!(*right, PolicyValue::Viewer);
+                }
+                _ => panic!("expected WHERE Eq"),
+            }
+
+            // CHECK clause
+            match &policy.check_clause {
+                Some(PolicyExpr::Eq(left, right)) => {
+                    assert_eq!(*left, PolicyValue::NewColumn("author_id".into()));
+                    assert_eq!(*right, PolicyValue::OldColumn("author_id".into()));
+                }
+                _ => panic!("expected CHECK Eq"),
+            }
+        }
+        _ => panic!("expected CreatePolicy"),
+    }
+}
+
+#[test]
+fn parse_policy_with_literal() {
+    let sql = "CREATE POLICY ON tasks FOR SELECT WHERE status != 'draft' AND priority > 5";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::CreatePolicy(policy) => {
+            match policy.where_clause {
+                Some(PolicyExpr::And(exprs)) => {
+                    assert_eq!(exprs.len(), 2);
+
+                    match &exprs[0] {
+                        PolicyExpr::Ne(left, right) => {
+                            assert_eq!(*left, PolicyValue::Column("status".into()));
+                            assert_eq!(*right, PolicyValue::Literal(Value::String("draft".into())));
+                        }
+                        _ => panic!("expected Ne"),
+                    }
+
+                    match &exprs[1] {
+                        PolicyExpr::Gt(left, right) => {
+                            assert_eq!(*left, PolicyValue::Column("priority".into()));
+                            assert_eq!(*right, PolicyValue::Literal(Value::I64(5)));
+                        }
+                        _ => panic!("expected Gt"),
+                    }
+                }
+                _ => panic!("expected And expression"),
+            }
+        }
+        _ => panic!("expected CreatePolicy"),
+    }
+}
+
+#[test]
+fn parse_policy_with_not_and_parens() {
+    let sql = "CREATE POLICY ON docs FOR SELECT WHERE NOT (status = 'deleted')";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::CreatePolicy(policy) => {
+            match policy.where_clause {
+                Some(PolicyExpr::Not(inner)) => {
+                    match *inner {
+                        PolicyExpr::Eq(left, right) => {
+                            assert_eq!(left, PolicyValue::Column("status".into()));
+                            assert_eq!(right, PolicyValue::Literal(Value::String("deleted".into())));
+                        }
+                        _ => panic!("expected Eq inside Not"),
+                    }
+                }
+                _ => panic!("expected Not expression"),
+            }
+        }
+        _ => panic!("expected CreatePolicy"),
+    }
+}
+
+#[test]
+fn parse_policy_is_null() {
+    let sql = "CREATE POLICY ON folders FOR SELECT WHERE parent_id IS NULL OR owner_id = @viewer";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::CreatePolicy(policy) => {
+            match policy.where_clause {
+                Some(PolicyExpr::Or(exprs)) => {
+                    assert_eq!(exprs.len(), 2);
+
+                    match &exprs[0] {
+                        PolicyExpr::IsNull(val) => {
+                            assert_eq!(*val, PolicyValue::Column("parent_id".into()));
+                        }
+                        _ => panic!("expected IsNull"),
+                    }
+                }
+                _ => panic!("expected Or expression"),
+            }
+        }
+        _ => panic!("expected CreatePolicy"),
+    }
+}
+
+#[test]
+fn parse_policy_delete() {
+    let sql = "CREATE POLICY ON documents FOR DELETE WHERE owner_id = @viewer";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::CreatePolicy(policy) => {
+            assert_eq!(policy.action, PolicyAction::Delete);
+        }
+        _ => panic!("expected CreatePolicy"),
+    }
+}
+
+#[test]
+fn parse_policy_cross_action_inherits() {
+    // "Anyone who can UPDATE the folder can INSERT documents into it"
+    let sql = "CREATE POLICY ON documents FOR INSERT CHECK (INHERITS UPDATE FROM @new.folder_id)";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::CreatePolicy(policy) => {
+            assert_eq!(policy.action, PolicyAction::Insert);
+
+            match policy.check_clause {
+                Some(PolicyExpr::Inherits { action, column }) => {
+                    assert_eq!(action, PolicyAction::Update);
+                    assert_eq!(column, PolicyColumnRef::New("folder_id".into()));
+                }
+                _ => panic!("expected Inherits expression"),
+            }
+        }
+        _ => panic!("expected CreatePolicy"),
     }
 }

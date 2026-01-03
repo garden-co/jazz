@@ -178,10 +178,10 @@ See `specs/rebac-policies.md` for full design.
 ### ReBAC Policy System
 
 **Phase 3.1: Core Types and Parser**
-- [ ] `PolicyAction`, `Policy`, `PolicyExpr` AST types
-- [ ] SQL parser for CREATE POLICY
-- [ ] Store policies in TableSchema
-- [ ] Policy serialization/deserialization
+- [x] `PolicyAction`, `Policy`, `PolicyExpr` AST types
+- [x] SQL parser for CREATE POLICY
+- [x] Store policies in Database (via `create_policy()`)
+- [x] Policy serialization/deserialization
 
 **Phase 3.2: Evaluation Engine**
 - [ ] `PolicyEvaluator` with cycle detection and depth limit

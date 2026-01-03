@@ -28,6 +28,9 @@ impl WasmDatabase {
                     ExecuteResult::Created(_) => {
                         serde_wasm_bindgen::to_value(&"created").unwrap()
                     }
+                    ExecuteResult::PolicyCreated { table, action } => {
+                        serde_wasm_bindgen::to_value(&format!("policy_created:{}:{}", table, action)).unwrap()
+                    }
                     ExecuteResult::Inserted(id) => {
                         serde_wasm_bindgen::to_value(&format!("inserted:{}", id)).unwrap()
                     }

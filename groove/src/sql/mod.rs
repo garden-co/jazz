@@ -1,6 +1,7 @@
 mod database;
 mod index;
 mod parser;
+mod policy;
 pub mod query_graph;
 mod row;
 mod schema;
@@ -12,6 +13,10 @@ pub use index::RefIndex;
 pub use parser::{
     parse, Condition, CreateTable, FromClause, Insert, Join, JoinCondition, ParseError,
     Projection, QualifiedColumn, Select, Statement, Update,
+};
+// Policy types are also re-exported from parser for convenience (via Statement::CreatePolicy)
+pub use policy::{
+    Policy, PolicyAction, PolicyColumnRef, PolicyError, PolicyExpr, PolicyValue, TablePolicies,
 };
 pub use row::{decode_row, encode_row, Row, RowError, Value};
 pub use schema::{ColumnDef, ColumnType, SchemaError, TableSchema};

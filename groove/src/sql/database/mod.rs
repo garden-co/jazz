@@ -1,17 +1,18 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use crate::node::{generate_object_id, LocalNode};
 use crate::listener::ListenerId;
+use crate::node::{generate_object_id, LocalNode};
+use crate::object::ObjectId;
 use crate::sql::index::RefIndex;
 use crate::sql::parser::{self, Condition, Join, Projection, Select, Statement};
+use crate::sql::policy::{Policy, PolicyAction, PolicyError, TablePolicies};
 use crate::sql::query_graph::registry::{GraphRegistry, OutputCallback};
 use crate::sql::query_graph::{GraphId, JoinGraphBuilder, Predicate, PriorState, QueryGraphBuilder, RowDelta};
 use crate::sql::row::{decode_row, encode_row, Row, RowError, Value};
 use crate::sql::schema::{ColumnType, SchemaError, TableSchema};
 use crate::sql::table_rows::TableRows;
 use crate::sql::types::{IndexKey, SchemaId};
-use crate::object::ObjectId;
 use crate::storage::Environment;
 
 /// Coerce a Value to match the expected ColumnType.
@@ -304,6 +305,8 @@ pub struct DatabaseState {
     row_table: RwLock<HashMap<ObjectId, String>>,
     /// Reference index objects: (source_table, source_column) -> object ID.
     index_objects: RwLock<HashMap<IndexKey, ObjectId>>,
+    /// Policies per table.
+    policies: RwLock<HashMap<String, TablePolicies>>,
     /// Registry for incremental QueryGraph instances.
     graph_registry: GraphRegistry,
 }
@@ -325,6 +328,7 @@ impl DatabaseState {
             table_rows_objects: RwLock::new(HashMap::new()),
             row_table: RwLock::new(HashMap::new()),
             index_objects: RwLock::new(HashMap::new()),
+            policies: RwLock::new(HashMap::new()),
             graph_registry: GraphRegistry::new(),
         }
     }
@@ -337,6 +341,7 @@ impl DatabaseState {
             table_rows_objects: RwLock::new(HashMap::new()),
             row_table: RwLock::new(HashMap::new()),
             index_objects: RwLock::new(HashMap::new()),
+            policies: RwLock::new(HashMap::new()),
             graph_registry: GraphRegistry::new(),
         }
     }
@@ -605,6 +610,8 @@ pub struct Database {
 pub enum ExecuteResult {
     /// CREATE TABLE - returns schema ID
     Created(SchemaId),
+    /// CREATE POLICY - returns table name and action
+    PolicyCreated { table: String, action: PolicyAction },
     /// INSERT - returns new row ID
     Inserted(ObjectId),
     /// UPDATE - returns number of rows affected
@@ -644,6 +651,8 @@ pub enum DatabaseError {
     InvalidReference { column: String, target_table: String, target_id: ObjectId },
     /// Column is not a reference type.
     NotAReference(String),
+    /// Policy error.
+    Policy(PolicyError),
 }
 
 impl std::fmt::Display for DatabaseError {
@@ -669,6 +678,7 @@ impl std::fmt::Display for DatabaseError {
                        column, target_id, target_table)
             }
             DatabaseError::NotAReference(name) => write!(f, "column '{}' is not a reference", name),
+            DatabaseError::Policy(e) => write!(f, "policy error: {}", e),
         }
     }
 }
@@ -684,6 +694,12 @@ impl From<SchemaError> for DatabaseError {
 impl From<RowError> for DatabaseError {
     fn from(e: RowError) -> Self {
         DatabaseError::Row(e)
+    }
+}
+
+impl From<PolicyError> for DatabaseError {
+    fn from(e: PolicyError) -> Self {
+        DatabaseError::Policy(e)
     }
 }
 
@@ -863,6 +879,32 @@ impl Database {
     /// List all table names.
     pub fn list_tables(&self) -> Vec<String> {
         self.state.tables.read().unwrap().keys().cloned().collect()
+    }
+
+    /// Create a policy for a table.
+    pub fn create_policy(&self, policy: Policy) -> Result<(), DatabaseError> {
+        // Verify table exists
+        {
+            let tables = self.state.tables.read().unwrap();
+            if !tables.contains_key(&policy.table) {
+                return Err(DatabaseError::TableNotFound(policy.table.clone()));
+            }
+        }
+
+        // Add policy to table's policy collection
+        let mut policies = self.state.policies.write().unwrap();
+        let table_policies = policies
+            .entry(policy.table.clone())
+            .or_insert_with(TablePolicies::new);
+
+        table_policies.add(policy)?;
+        Ok(())
+    }
+
+    /// Get policies for a table.
+    pub fn get_policies(&self, table: &str) -> Option<TablePolicies> {
+        let policies = self.state.policies.read().unwrap();
+        policies.get(table).cloned()
     }
 
     /// Insert a new row into a table.
@@ -1299,6 +1341,12 @@ impl Database {
                 let schema = TableSchema::new(ct.name, ct.columns);
                 let id = self.create_table(schema)?;
                 Ok(ExecuteResult::Created(id))
+            }
+            Statement::CreatePolicy(policy) => {
+                let table = policy.table.clone();
+                let action = policy.action;
+                self.create_policy(policy)?;
+                Ok(ExecuteResult::PolicyCreated { table, action })
             }
             Statement::Insert(ins) => {
                 let columns: Vec<&str> = ins.columns.iter().map(|s| s.as_str()).collect();

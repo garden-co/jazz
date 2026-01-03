@@ -1,10 +1,12 @@
-use crate::sql::schema::{ColumnDef, ColumnType};
+use crate::sql::policy::{Policy, PolicyAction, PolicyColumnRef, PolicyExpr, PolicyValue};
 use crate::sql::row::Value;
+use crate::sql::schema::{ColumnDef, ColumnType};
 
 /// Parsed SQL statement.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
     CreateTable(CreateTable),
+    CreatePolicy(Policy),
     Insert(Insert),
     Update(Update),
     Select(Select),
@@ -597,6 +599,10 @@ impl<'a> Parser<'a> {
         self.skip_whitespace();
 
         if self.try_keyword("CREATE") {
+            self.skip_whitespace();
+            if self.try_keyword("POLICY") {
+                return Ok(Statement::CreatePolicy(self.parse_create_policy()?));
+            }
             return Ok(Statement::CreateTable(self.parse_create_table()?));
         }
         if self.try_keyword("INSERT") {
@@ -611,6 +617,280 @@ impl<'a> Parser<'a> {
 
         Err(self.error("expected CREATE, INSERT, UPDATE, or SELECT"))
     }
+
+    // ========== Policy Parsing ==========
+
+    fn parse_create_policy(&mut self) -> Result<Policy, ParseError> {
+        // CREATE POLICY ON <table> FOR <action> [WHERE <expr>] [CHECK (<expr>)]
+        self.expect_keyword("ON")?;
+        let table = self.parse_identifier()?;
+
+        self.expect_keyword("FOR")?;
+        let action = self.parse_policy_action()?;
+
+        let mut policy = Policy::new(table, action);
+
+        // Parse WHERE clause (for SELECT, UPDATE, DELETE)
+        if self.try_keyword("WHERE") {
+            let expr = self.parse_policy_expr()?;
+            policy.where_clause = Some(expr);
+        }
+
+        // Parse CHECK clause (for INSERT, UPDATE)
+        if self.try_keyword("CHECK") {
+            self.expect_char('(')?;
+            let expr = self.parse_policy_expr()?;
+            self.expect_char(')')?;
+            policy.check_clause = Some(expr);
+        }
+
+        // Optional semicolon
+        self.skip_whitespace();
+        if self.peek_char() == Some(';') {
+            self.consume_char();
+        }
+
+        Ok(policy)
+    }
+
+    fn parse_policy_action(&mut self) -> Result<PolicyAction, ParseError> {
+        self.skip_whitespace();
+
+        if self.try_keyword("SELECT") {
+            return Ok(PolicyAction::Select);
+        }
+        if self.try_keyword("INSERT") {
+            return Ok(PolicyAction::Insert);
+        }
+        if self.try_keyword("UPDATE") {
+            return Ok(PolicyAction::Update);
+        }
+        if self.try_keyword("DELETE") {
+            return Ok(PolicyAction::Delete);
+        }
+
+        Err(self.error("expected SELECT, INSERT, UPDATE, or DELETE"))
+    }
+
+    fn parse_policy_expr(&mut self) -> Result<PolicyExpr, ParseError> {
+        self.parse_policy_or_expr()
+    }
+
+    fn parse_policy_or_expr(&mut self) -> Result<PolicyExpr, ParseError> {
+        let mut left = self.parse_policy_and_expr()?;
+
+        while self.try_keyword("OR") {
+            let right = self.parse_policy_and_expr()?;
+            left = match left {
+                PolicyExpr::Or(mut exprs) => {
+                    exprs.push(right);
+                    PolicyExpr::Or(exprs)
+                }
+                _ => PolicyExpr::Or(vec![left, right]),
+            };
+        }
+
+        Ok(left)
+    }
+
+    fn parse_policy_and_expr(&mut self) -> Result<PolicyExpr, ParseError> {
+        let mut left = self.parse_policy_unary_expr()?;
+
+        while self.try_keyword("AND") {
+            let right = self.parse_policy_unary_expr()?;
+            left = match left {
+                PolicyExpr::And(mut exprs) => {
+                    exprs.push(right);
+                    PolicyExpr::And(exprs)
+                }
+                _ => PolicyExpr::And(vec![left, right]),
+            };
+        }
+
+        Ok(left)
+    }
+
+    fn parse_policy_unary_expr(&mut self) -> Result<PolicyExpr, ParseError> {
+        self.skip_whitespace();
+
+        // NOT expression
+        if self.try_keyword("NOT") {
+            let expr = self.parse_policy_unary_expr()?;
+            return Ok(PolicyExpr::Not(Box::new(expr)));
+        }
+
+        // Parenthesized expression
+        if self.peek_char() == Some('(') {
+            self.consume_char();
+            let expr = self.parse_policy_expr()?;
+            self.expect_char(')')?;
+            return Ok(expr);
+        }
+
+        // INHERITS clause
+        if self.try_keyword("INHERITS") {
+            let action = self.parse_policy_action()?;
+            self.expect_keyword("FROM")?;
+            let column = self.parse_policy_column_ref()?;
+            return Ok(PolicyExpr::Inherits { action, column });
+        }
+
+        // Primary expression (comparison or IS NULL)
+        self.parse_policy_primary_expr()
+    }
+
+    fn parse_policy_primary_expr(&mut self) -> Result<PolicyExpr, ParseError> {
+        let left = self.parse_policy_value()?;
+
+        self.skip_whitespace();
+
+        // Check for IS NULL / IS NOT NULL
+        if self.try_keyword("IS") {
+            if self.try_keyword("NOT") {
+                self.expect_keyword("NULL")?;
+                return Ok(PolicyExpr::IsNotNull(left));
+            }
+            self.expect_keyword("NULL")?;
+            return Ok(PolicyExpr::IsNull(left));
+        }
+
+        // Check for comparison operators
+        let op = self.parse_comparison_op()?;
+        let right = self.parse_policy_value()?;
+
+        Ok(match op {
+            CompOp::Eq => PolicyExpr::Eq(left, right),
+            CompOp::Ne => PolicyExpr::Ne(left, right),
+            CompOp::Lt => PolicyExpr::Lt(left, right),
+            CompOp::Le => PolicyExpr::Le(left, right),
+            CompOp::Gt => PolicyExpr::Gt(left, right),
+            CompOp::Ge => PolicyExpr::Ge(left, right),
+        })
+    }
+
+    fn parse_comparison_op(&mut self) -> Result<CompOp, ParseError> {
+        self.skip_whitespace();
+
+        // Check two-character operators first
+        if self.remaining().starts_with("!=") {
+            self.pos += 2;
+            return Ok(CompOp::Ne);
+        }
+        if self.remaining().starts_with("<>") {
+            self.pos += 2;
+            return Ok(CompOp::Ne);
+        }
+        if self.remaining().starts_with("<=") {
+            self.pos += 2;
+            return Ok(CompOp::Le);
+        }
+        if self.remaining().starts_with(">=") {
+            self.pos += 2;
+            return Ok(CompOp::Ge);
+        }
+
+        // Single-character operators
+        match self.peek_char() {
+            Some('=') => {
+                self.consume_char();
+                Ok(CompOp::Eq)
+            }
+            Some('<') => {
+                self.consume_char();
+                Ok(CompOp::Lt)
+            }
+            Some('>') => {
+                self.consume_char();
+                Ok(CompOp::Gt)
+            }
+            _ => Err(self.error("expected comparison operator (=, !=, <, <=, >, >=)")),
+        }
+    }
+
+    fn parse_policy_value(&mut self) -> Result<PolicyValue, ParseError> {
+        self.skip_whitespace();
+
+        // @viewer, @old, @new
+        if self.peek_char() == Some('@') {
+            self.consume_char();
+            let ident = self.parse_identifier()?;
+
+            match ident.to_lowercase().as_str() {
+                "viewer" => return Ok(PolicyValue::Viewer),
+                "old" => {
+                    self.expect_char('.')?;
+                    let col = self.parse_identifier()?;
+                    return Ok(PolicyValue::OldColumn(col));
+                }
+                "new" => {
+                    self.expect_char('.')?;
+                    let col = self.parse_identifier()?;
+                    return Ok(PolicyValue::NewColumn(col));
+                }
+                _ => return Err(self.error(format!("unknown special variable @{}", ident))),
+            }
+        }
+
+        // Literal values
+        if self.try_keyword("NULL") {
+            return Ok(PolicyValue::Literal(Value::Null));
+        }
+        if self.try_keyword("true") {
+            return Ok(PolicyValue::Literal(Value::Bool(true)));
+        }
+        if self.try_keyword("false") {
+            return Ok(PolicyValue::Literal(Value::Bool(false)));
+        }
+
+        // String literal
+        if self.peek_char() == Some('\'') {
+            let s = self.parse_string_literal()?;
+            return Ok(PolicyValue::Literal(Value::String(s)));
+        }
+
+        // Number
+        if self.peek_char().map(|c| c.is_ascii_digit() || c == '-').unwrap_or(false) {
+            let val = self.parse_number()?;
+            return Ok(PolicyValue::Literal(val));
+        }
+
+        // Column reference (identifier)
+        let col = self.parse_identifier()?;
+        Ok(PolicyValue::Column(col))
+    }
+
+    fn parse_policy_column_ref(&mut self) -> Result<PolicyColumnRef, ParseError> {
+        self.skip_whitespace();
+
+        // @new.column
+        if self.peek_char() == Some('@') {
+            self.consume_char();
+            let ident = self.parse_identifier()?;
+
+            if ident.to_lowercase() != "new" {
+                return Err(self.error("INHERITS FROM only supports @new.column or column references"));
+            }
+
+            self.expect_char('.')?;
+            let col = self.parse_identifier()?;
+            return Ok(PolicyColumnRef::New(col));
+        }
+
+        // Plain column name
+        let col = self.parse_identifier()?;
+        Ok(PolicyColumnRef::Current(col))
+    }
+}
+
+/// Comparison operator (internal use).
+#[derive(Debug, Clone, Copy)]
+enum CompOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }
 
 /// Parse a SQL string into a statement.
