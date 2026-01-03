@@ -921,3 +921,256 @@ fn reactive_query_callback_on_delete() {
     assert_eq!(call_count.load(Ordering::SeqCst), 2);
     assert_eq!(*row_counts.read().unwrap(), vec![2, 1]);
 }
+
+// ========== JOIN Tests ==========
+
+#[test]
+fn join_basic() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
+        .unwrap();
+
+    // Insert a user
+    let alice_id = match db
+        .execute("INSERT INTO users (name) VALUES ('Alice')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
+
+    // Insert posts by Alice
+    db.execute(&format!(
+        "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'First Post')",
+        alice_id
+    ))
+    .unwrap();
+    db.execute(&format!(
+        "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Second Post')",
+        alice_id
+    ))
+    .unwrap();
+
+    // JOIN posts with users
+    let result = db
+        .execute("SELECT * FROM posts JOIN users ON posts.author = users.id")
+        .unwrap();
+
+    match result {
+        ExecuteResult::Selected(rows) => {
+            assert_eq!(rows.len(), 2, "Should return 2 joined rows");
+            // Each row should have values from both tables (author, title, name)
+            for row in &rows {
+                assert_eq!(row.values.len(), 3, "Should have 3 columns (2 from posts + 1 from users)");
+            }
+        }
+        _ => panic!("Expected Selected"),
+    }
+}
+
+#[test]
+fn join_with_where_on_primary_table() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
+        .unwrap();
+
+    let alice_id = match db
+        .execute("INSERT INTO users (name) VALUES ('Alice')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
+
+    db.execute(&format!(
+        "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'First Post')",
+        alice_id
+    ))
+    .unwrap();
+    db.execute(&format!(
+        "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Second Post')",
+        alice_id
+    ))
+    .unwrap();
+
+    // JOIN with WHERE filtering on primary table
+    let result = db
+        .execute("SELECT * FROM posts JOIN users ON posts.author = users.id WHERE posts.title = 'First Post'")
+        .unwrap();
+
+    match result {
+        ExecuteResult::Selected(rows) => {
+            assert_eq!(rows.len(), 1, "Should return 1 row matching WHERE clause");
+        }
+        _ => panic!("Expected Selected"),
+    }
+}
+
+#[test]
+fn join_with_where_on_joined_table() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
+        .unwrap();
+
+    let alice_id = match db
+        .execute("INSERT INTO users (name) VALUES ('Alice')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
+    let bob_id = match db
+        .execute("INSERT INTO users (name) VALUES ('Bob')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
+
+    // Alice's posts
+    db.execute(&format!(
+        "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Alice Post 1')",
+        alice_id
+    ))
+    .unwrap();
+    db.execute(&format!(
+        "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Alice Post 2')",
+        alice_id
+    ))
+    .unwrap();
+
+    // Bob's post
+    db.execute(&format!(
+        "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Bob Post')",
+        bob_id
+    ))
+    .unwrap();
+
+    // JOIN with WHERE filtering on joined table
+    let result = db
+        .execute("SELECT * FROM posts JOIN users ON posts.author = users.id WHERE users.name = 'Alice'")
+        .unwrap();
+
+    match result {
+        ExecuteResult::Selected(rows) => {
+            assert_eq!(rows.len(), 2, "Should return 2 posts by Alice");
+        }
+        _ => panic!("Expected Selected"),
+    }
+}
+
+#[test]
+fn join_no_matches() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
+        .unwrap();
+
+    // Insert a user but no posts
+    db.execute("INSERT INTO users (name) VALUES ('Alice')")
+        .unwrap();
+
+    // JOIN should return empty since no posts exist
+    let result = db
+        .execute("SELECT * FROM posts JOIN users ON posts.author = users.id")
+        .unwrap();
+
+    match result {
+        ExecuteResult::Selected(rows) => {
+            assert!(rows.is_empty(), "Should return no rows when no matches");
+        }
+        _ => panic!("Expected Selected"),
+    }
+}
+
+#[test]
+fn join_table_star_projection() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
+        .unwrap();
+
+    let alice_id = match db
+        .execute("INSERT INTO users (name) VALUES ('Alice')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
+
+    db.execute(&format!(
+        "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Test Post')",
+        alice_id
+    ))
+    .unwrap();
+
+    // SELECT only users.* columns from join
+    let result = db
+        .execute("SELECT users.* FROM posts JOIN users ON posts.author = users.id")
+        .unwrap();
+
+    match result {
+        ExecuteResult::Selected(rows) => {
+            assert_eq!(rows.len(), 1);
+            // Should only have 1 column (name) from users table
+            assert_eq!(rows[0].values.len(), 1, "Should only have users columns");
+            assert_eq!(rows[0].values[0], Value::String("Alice".to_string()));
+        }
+        _ => panic!("Expected Selected"),
+    }
+}
+
+#[test]
+fn join_multiple_conditions_where() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
+        .unwrap();
+
+    let alice_id = match db
+        .execute("INSERT INTO users (name, active) VALUES ('Alice', true)")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
+    let bob_id = match db
+        .execute("INSERT INTO users (name, active) VALUES ('Bob', false)")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
+
+    db.execute(&format!(
+        "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Alice Post')",
+        alice_id
+    ))
+    .unwrap();
+    db.execute(&format!(
+        "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Bob Post')",
+        bob_id
+    ))
+    .unwrap();
+
+    // WHERE with multiple conditions across tables
+    let result = db
+        .execute("SELECT * FROM posts JOIN users ON posts.author = users.id WHERE users.active = true AND posts.title = 'Alice Post'")
+        .unwrap();
+
+    match result {
+        ExecuteResult::Selected(rows) => {
+            assert_eq!(rows.len(), 1, "Should return 1 row matching both conditions");
+        }
+        _ => panic!("Expected Selected"),
+    }
+}

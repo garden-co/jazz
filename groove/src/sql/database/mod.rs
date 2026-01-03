@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock, Weak};
 use crate::node::{generate_object_id, LocalNode};
 use crate::listener::ListenerId;
 use crate::sql::index::RefIndex;
-use crate::sql::parser::{self, Select, Statement};
+use crate::sql::parser::{self, Condition, Join, Projection, Select, Statement};
 use crate::sql::row::{decode_row, encode_row, Row, RowError, Value};
 use crate::sql::schema::{ColumnType, SchemaError, TableSchema};
 use crate::sql::table_rows::TableRows;
@@ -13,6 +13,137 @@ use crate::storage::Environment;
 
 #[cfg(test)]
 mod tests;
+
+// ========== JOIN Support ==========
+
+/// A row resulting from a JOIN, containing data from multiple tables.
+#[derive(Clone)]
+struct JoinedRow {
+    /// Primary table name (for output row ID).
+    primary_table: String,
+    /// Table name → (schema, row_id, values)
+    tables: HashMap<String, (TableSchema, ObjectId, Vec<Value>)>,
+}
+
+impl JoinedRow {
+    /// Create a JoinedRow from a single table's row.
+    fn from_single(table: &str, schema: &TableSchema, row: Row) -> Self {
+        let mut tables = HashMap::new();
+        tables.insert(table.to_string(), (schema.clone(), row.id, row.values));
+        JoinedRow {
+            primary_table: table.to_string(),
+            tables,
+        }
+    }
+
+    /// Add another table's row to this joined row.
+    fn add_table(&mut self, table: &str, schema: &TableSchema, row: Row) {
+        self.tables.insert(table.to_string(), (schema.clone(), row.id, row.values));
+    }
+
+    /// Get a column value by optional table qualifier and column name.
+    /// If table is None, searches all tables (returns first match).
+    fn get_column(&self, table: Option<&str>, column: &str) -> Option<&Value> {
+        if column == "id" {
+            // Special case: id is the row's object ID
+            // Can't return reference to temporary Value, this is handled specially in matches_condition
+            return None;
+        }
+
+        if let Some(table_name) = table {
+            // Qualified column: look in specific table
+            if let Some((schema, _, values)) = self.tables.get(table_name) {
+                if let Some(idx) = schema.column_index(column) {
+                    return values.get(idx);
+                }
+            }
+            None
+        } else {
+            // Unqualified column: search all tables
+            for (schema, _, values) in self.tables.values() {
+                if let Some(idx) = schema.column_index(column) {
+                    return values.get(idx);
+                }
+            }
+            None
+        }
+    }
+
+    /// Get the row ID for a specific table.
+    fn get_row_id(&self, table: &str) -> Option<ObjectId> {
+        self.tables.get(table).map(|(_, id, _)| *id)
+    }
+
+    /// Check if this joined row matches a WHERE condition.
+    fn matches_condition(&self, cond: &Condition) -> bool {
+        let table = cond.column.table.as_deref();
+        let column = &cond.column.column;
+
+        // Handle special "id" column
+        if column == "id" {
+            if let Value::Ref(target_id) = &cond.value {
+                if let Some(table_name) = table {
+                    if let Some(row_id) = self.get_row_id(table_name) {
+                        return row_id == *target_id;
+                    }
+                } else {
+                    // Unqualified id - check primary table
+                    if let Some(row_id) = self.get_row_id(&self.primary_table) {
+                        return row_id == *target_id;
+                    }
+                }
+            }
+            return false;
+        }
+
+        // Regular column
+        if let Some(value) = self.get_column(table, column) {
+            value == &cond.value
+        } else {
+            false
+        }
+    }
+
+    /// Convert to output Row with combined values from all tables.
+    /// Uses primary table's row ID as the output row ID.
+    fn to_output_row(self, projection: &Projection) -> Row {
+        let row_id = self.tables.get(&self.primary_table)
+            .map(|(_, id, _)| *id)
+            .unwrap_or(0);
+
+        let values = match projection {
+            Projection::All => {
+                // Combine all values from all tables (primary first, then joins in insertion order)
+                let mut all_values = Vec::new();
+                if let Some((_, _, values)) = self.tables.get(&self.primary_table) {
+                    all_values.extend(values.iter().cloned());
+                }
+                for (table_name, (_, _, values)) in &self.tables {
+                    if table_name != &self.primary_table {
+                        all_values.extend(values.iter().cloned());
+                    }
+                }
+                all_values
+            }
+            Projection::TableAll(table_name) => {
+                // Only values from specified table
+                if let Some((_, _, values)) = self.tables.get(table_name) {
+                    values.clone()
+                } else {
+                    vec![]
+                }
+            }
+            Projection::Columns(cols) => {
+                // Specific columns
+                cols.iter()
+                    .filter_map(|qc| self.get_column(qc.table.as_deref(), &qc.column).cloned())
+                    .collect()
+            }
+        };
+
+        Row::new(row_id, values)
+    }
+}
 
 /// Type alias for query callbacks.
 /// For native builds, requires Send + Sync for thread safety.
@@ -1015,6 +1146,110 @@ impl Database {
         Ok(rows)
     }
 
+    // ========== JOIN Execution ==========
+
+    /// Execute a SELECT with JOINs.
+    fn execute_select_with_joins(&self, sel: &Select) -> Result<Vec<Row>, DatabaseError> {
+        let primary_table = &sel.from.table;
+        let primary_schema = self.get_table(primary_table)
+            .ok_or_else(|| DatabaseError::TableNotFound(primary_table.clone()))?;
+
+        // Start with all rows from primary table
+        let primary_rows = self.select_all(primary_table)?;
+
+        // Build joined rows
+        let mut joined_rows: Vec<JoinedRow> = primary_rows.into_iter()
+            .map(|row| JoinedRow::from_single(primary_table, &primary_schema, row))
+            .collect();
+
+        // Apply each join
+        for join in &sel.from.joins {
+            joined_rows = self.apply_join(joined_rows, join)?;
+        }
+
+        // Apply WHERE filtering on joined results
+        for cond in &sel.where_clause {
+            joined_rows.retain(|jr| jr.matches_condition(cond));
+        }
+
+        // Apply projection and convert to output
+        Ok(joined_rows.into_iter()
+            .map(|jr| jr.to_output_row(&sel.projection))
+            .collect())
+    }
+
+    /// Apply a single JOIN to a set of joined rows.
+    fn apply_join(&self, rows: Vec<JoinedRow>, join: &Join) -> Result<Vec<JoinedRow>, DatabaseError> {
+        let join_schema = self.get_table(&join.table)
+            .ok_or_else(|| DatabaseError::TableNotFound(join.table.clone()))?;
+
+        let mut result = Vec::new();
+
+        for jr in rows {
+            // Get the value from the left side of the join condition
+            let left_table = join.on.left.table.as_deref();
+            let left_column = &join.on.left.column;
+            let right_table = join.on.right.table.as_deref();
+            let right_column = &join.on.right.column;
+
+            // Determine which side references the join table and which references existing tables
+            // Case 1: left is from existing tables, right is from join table (e.g., posts.author = users.id)
+            // Case 2: left is from join table, right is from existing tables (e.g., users.id = posts.author)
+            let (lookup_value, join_column) = if right_table == Some(join.table.as_str()) ||
+                (right_table.is_none() && join_schema.column_index(right_column).is_some()) {
+                // Right side is from join table
+                let left_val = if left_column == "id" {
+                    // Left side is an ID
+                    let table_name = left_table.unwrap_or(&jr.primary_table);
+                    jr.get_row_id(table_name).map(Value::Ref)
+                } else {
+                    jr.get_column(left_table, left_column).cloned()
+                };
+                (left_val, right_column.as_str())
+            } else {
+                // Left side is from join table
+                let right_val = if right_column == "id" {
+                    // Right side is an ID
+                    let table_name = right_table.unwrap_or(&jr.primary_table);
+                    jr.get_row_id(table_name).map(Value::Ref)
+                } else {
+                    jr.get_column(right_table, right_column).cloned()
+                };
+                (right_val, left_column.as_str())
+            };
+
+            let lookup_value = match lookup_value {
+                Some(v) => v,
+                None => continue, // No value to join on
+            };
+
+            // Find matching rows from the join table
+            let matching = if join_column == "id" {
+                // Joining on ID - direct lookup
+                if let Value::Ref(id) = &lookup_value {
+                    match self.get(&join.table, *id)? {
+                        Some(row) => vec![row],
+                        None => vec![],
+                    }
+                } else {
+                    vec![]
+                }
+            } else {
+                // Joining on a regular column
+                self.select_where(&join.table, join_column, &lookup_value)?
+            };
+
+            // Produce cartesian product of matches (inner join)
+            for matched_row in matching {
+                let mut new_jr = jr.clone();
+                new_jr.add_table(&join.table, &join_schema, matched_row);
+                result.push(new_jr);
+            }
+        }
+
+        Ok(result)
+    }
+
     /// Execute a SQL statement.
     pub fn execute(&self, sql: &str) -> Result<ExecuteResult, DatabaseError> {
         let stmt = parser::parse(sql)?;
@@ -1064,27 +1299,31 @@ impl Database {
                 Ok(ExecuteResult::Updated(count))
             }
             Statement::Select(sel) => {
-                // Simple SELECT implementation
-                let rows = if sel.where_clause.is_empty() {
-                    self.select_all(&sel.from.table)?
-                } else if sel.where_clause.len() == 1 {
-                    let cond = &sel.where_clause[0];
-                    self.select_where(&sel.from.table, &cond.column.column, &cond.value)?
+                let rows = if !sel.from.joins.is_empty() {
+                    // SELECT with JOINs
+                    self.execute_select_with_joins(&sel)?
                 } else {
-                    // Multiple conditions
-                    let cond = &sel.where_clause[0];
-                    let mut rows = self.select_where(&sel.from.table, &cond.column.column, &cond.value)?;
-                    let schema = self.get_table(&sel.from.table).unwrap();
+                    // Simple SELECT without JOINs
+                    let rows = if sel.where_clause.is_empty() {
+                        self.select_all(&sel.from.table)?
+                    } else if sel.where_clause.len() == 1 {
+                        let cond = &sel.where_clause[0];
+                        self.select_where(&sel.from.table, &cond.column.column, &cond.value)?
+                    } else {
+                        // Multiple conditions
+                        let cond = &sel.where_clause[0];
+                        let mut rows = self.select_where(&sel.from.table, &cond.column.column, &cond.value)?;
+                        let schema = self.get_table(&sel.from.table).unwrap();
 
-                    for cond in &sel.where_clause[1..] {
-                        let col_idx = schema.column_index(&cond.column.column)
-                            .ok_or_else(|| DatabaseError::ColumnNotFound(cond.column.column.clone()))?;
-                        rows.retain(|row| &row.values[col_idx] == &cond.value);
-                    }
+                        for cond in &sel.where_clause[1..] {
+                            let col_idx = schema.column_index(&cond.column.column)
+                                .ok_or_else(|| DatabaseError::ColumnNotFound(cond.column.column.clone()))?;
+                            rows.retain(|row| &row.values[col_idx] == &cond.value);
+                        }
+                        rows
+                    };
                     rows
                 };
-
-                // TODO: Handle JOINs and projections
 
                 Ok(ExecuteResult::Selected(rows))
             }
