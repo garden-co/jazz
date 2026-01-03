@@ -1,4 +1,4 @@
-import type { CoValue, ID } from "../internal.js";
+import type { CoValue, CoValueErrorState, ID } from "../internal.js";
 import { CoValueLoadingState } from "./types.js";
 
 export class JazzError {
@@ -6,6 +6,7 @@ export class JazzError {
     public id: ID<CoValue> | undefined,
     public type:
       | typeof CoValueLoadingState.UNAVAILABLE
+      | typeof CoValueLoadingState.DELETED
       | typeof CoValueLoadingState.UNAUTHORIZED,
     public issues: JazzErrorIssue[],
   ) {}
@@ -49,9 +50,35 @@ export class JazzError {
 export type JazzErrorIssue = {
   code:
     | typeof CoValueLoadingState.UNAVAILABLE
+    | typeof CoValueLoadingState.DELETED
     | typeof CoValueLoadingState.UNAUTHORIZED
-    | "validationError";
+    | "validationError"
+    | "deleteError";
   message: string;
   params: Record<string, any>;
   path: string[];
 };
+
+export function jazzErrorToError(
+  error: Error,
+  jazzError: JazzError | undefined,
+) {
+  if (!jazzError) {
+    return error;
+  }
+
+  error.message = jazzError.toString();
+  error.name = `jazz-error-${jazzError.type}`;
+
+  return error;
+}
+
+export function getJazzErrorType(
+  error: unknown,
+): CoValueErrorState | "unknown" {
+  if (error instanceof Error && error.name.startsWith("jazz-error-")) {
+    return error.name.replace("jazz-error-", "") as CoValueErrorState;
+  }
+
+  return "unknown";
+}

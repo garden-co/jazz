@@ -5,7 +5,7 @@ import {
   MeterProvider,
   MetricReader,
 } from "@opentelemetry/sdk-metrics";
-import { expect, onTestFinished, vi } from "vitest";
+import { assert, expect, onTestFinished, vi } from "vitest";
 import { ControlledAccount, ControlledAgent } from "../coValues/account.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import {
@@ -500,11 +500,11 @@ export function setupTestNode(
   }
 
   async function addAsyncStorage(
-    opts: { ourName?: string; filename?: string } = {},
+    opts: { ourName?: string; filename?: string; storageName?: string } = {},
   ) {
     const storage = await createAsyncStorage({
       nodeName: opts.ourName ?? "client",
-      storageName: "storage",
+      storageName: opts.storageName ?? "storage",
       filename: opts.filename,
     });
     node.setStorage(storage);
@@ -632,10 +632,12 @@ export async function setupTestAccount(
     return { storage };
   }
 
-  async function addAsyncStorage(opts: { ourName?: string } = {}) {
+  async function addAsyncStorage(
+    opts: { ourName?: string; storageName?: string } = {},
+  ) {
     const storage = await createAsyncStorage({
       nodeName: opts.ourName ?? "client",
-      storageName: "storage",
+      storageName: opts.storageName ?? "storage",
     });
     ctx.node.setStorage(storage);
 
@@ -650,9 +652,14 @@ export async function setupTestAccount(
     ctx.node.gracefulShutdown();
   });
 
+  const account = ctx.node
+    .getCoValue(ctx.accountID)
+    .getCurrentContent() as RawAccount;
+
   return {
     node: ctx.node,
     accountID: ctx.accountID,
+    account,
     connectToSyncServer,
     addStorage,
     addAsyncStorage,
@@ -792,4 +799,19 @@ export function fillCoMapWithLargeData(map: RawCoMap) {
   }
 
   return map;
+}
+
+export function importContentIntoNode(
+  coValue: CoValueCore,
+  node: LocalNode,
+  chunks?: number,
+) {
+  const content = coValue.newContentSince(undefined);
+  assert(content);
+  for (const [i, chunk] of content.entries()) {
+    if (chunks && i >= chunks) {
+      break;
+    }
+    node.syncManager.handleNewContent(chunk, "import");
+  }
 }

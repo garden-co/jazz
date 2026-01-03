@@ -1,6 +1,14 @@
-import type { RawCoID, SyncMessage } from "cojson";
-import { StorageApiAsync } from "cojson";
+import type {
+  RawCoID,
+  RawCoMap,
+  SessionID,
+  StorageAPI,
+  SyncMessage,
+} from "cojson";
+import { StorageApiAsync, cojsonInternals } from "cojson";
 import { onTestFinished } from "vitest";
+
+const { knownStateFromContent } = cojsonInternals;
 
 export function trackMessages() {
   const messages: {
@@ -86,6 +94,32 @@ export function trackMessages() {
   };
 }
 
+export function getAllCoValuesWaitingForDelete(
+  storage: StorageAPI,
+): Promise<RawCoID[]> {
+  // @ts-expect-error - dbClient is private
+  return storage.dbClient.getAllCoValuesWaitingForDelete();
+}
+
+export async function getCoValueStoredSessions(
+  storage: StorageAPI,
+  id: RawCoID,
+): Promise<SessionID[]> {
+  return new Promise<SessionID[]>((resolve) => {
+    storage.load(
+      id,
+      (content) => {
+        if (content.id === id) {
+          resolve(
+            Object.keys(knownStateFromContent(content).sessions) as SessionID[],
+          );
+        }
+      },
+      () => {},
+    );
+  });
+}
+
 export function waitFor(
   callback: () => boolean | undefined | Promise<boolean | undefined>,
 ) {
@@ -114,4 +148,21 @@ export function waitFor(
       }
     }, 100);
   });
+}
+
+export function fillCoMapWithLargeData(map: RawCoMap) {
+  const dataSize = 1 * 1024 * 200;
+  const chunkSize = 1024; // 1KB chunks
+  const chunks = dataSize / chunkSize;
+
+  const value = btoa(
+    new Array(chunkSize).fill("value$").join("").slice(0, chunkSize),
+  );
+
+  for (let i = 0; i < chunks; i++) {
+    const key = `key${i}`;
+    map.set(key, value, "trusting");
+  }
+
+  return map;
 }

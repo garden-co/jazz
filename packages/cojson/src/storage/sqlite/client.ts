@@ -14,6 +14,7 @@ import type {
   StoredSessionRow,
   TransactionRow,
 } from "../types.js";
+import { DeletedCoValueDeletionStatus } from "../types.js";
 import type { SQLiteDatabaseDriver } from "./types.js";
 
 export type RawCoValueRow = {
@@ -25,6 +26,10 @@ export type RawTransactionRow = {
   ses: number;
   idx: number;
   tx: string;
+};
+
+type DeletedCoValueQueueRow = {
+  id: RawCoID;
 };
 
 export function getErrorMessage(error: unknown) {
@@ -139,6 +144,81 @@ export class SQLiteClient
     }
 
     return result.rowID;
+  }
+
+  markCoValueAsDeleted(id: RawCoID) {
+    // Work queue entry. Table only stores the coValueID.
+    // Idempotent by design.
+    this.db.run(
+      `INSERT INTO deletedCoValues (coValueID) VALUES (?) ON CONFLICT(coValueID) DO NOTHING`,
+      [id],
+    );
+  }
+
+  markCoValueDeletionDone(id: RawCoID) {
+    this.db.run(
+      `INSERT INTO deletedCoValues (coValueID, status) VALUES (?, ?)
+       ON CONFLICT(coValueID) DO UPDATE SET status=?`,
+      [
+        id,
+        DeletedCoValueDeletionStatus.Done,
+        DeletedCoValueDeletionStatus.Done,
+      ],
+    );
+  }
+
+  eraseCoValueButKeepTombstone(coValueId: RawCoID) {
+    const coValueRow = this.db.get<{ rowID: number }>(
+      "SELECT rowID FROM coValues WHERE id = ?",
+      [coValueId],
+    );
+
+    if (!coValueRow) {
+      logger.warn(`CoValue ${coValueId} not found, skipping deletion`);
+      return;
+    }
+
+    // Single-transaction primitive: delete non-delete sessions and their data,
+    // preserve header + delete sessions (tombstone).
+    //
+    // Note: `sessions.coValue` references `coValues.rowID`.
+    this.db.run(
+      `DELETE FROM transactions
+       WHERE ses IN (
+         SELECT rowID FROM sessions
+         WHERE coValue = ?
+           AND sessionID NOT LIKE '%_deleted'
+       )`,
+      [coValueRow.rowID],
+    );
+
+    this.db.run(
+      `DELETE FROM signatureAfter
+       WHERE ses IN (
+         SELECT rowID FROM sessions
+         WHERE coValue = ?
+           AND sessionID NOT LIKE '%_deleted'
+       )`,
+      [coValueRow.rowID],
+    );
+
+    this.db.run(
+      `DELETE FROM sessions
+       WHERE coValue = ?
+         AND sessionID NOT LIKE '%_deleted'`,
+      [coValueRow.rowID],
+    );
+  }
+
+  getAllCoValuesWaitingForDelete(): RawCoID[] {
+    return this.db
+      .query<DeletedCoValueQueueRow>(
+        `SELECT coValueID as id
+         FROM deletedCoValues
+         WHERE status = ?`,
+        [DeletedCoValueDeletionStatus.Pending],
+      )
+      .map((r) => r.id);
   }
 
   addSessionUpdate({ sessionUpdate }: { sessionUpdate: SessionRow }): number {

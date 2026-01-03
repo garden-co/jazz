@@ -76,6 +76,7 @@ import { emptyKnownState } from "./knownState.js";
 import {
   getContentMessageSize,
   getTransactionSize,
+  knownStateFromContent,
 } from "./coValueContentMessage.js";
 import { getDependedOnCoValuesFromRawData } from "./coValueCore/utils.js";
 import {
@@ -98,6 +99,7 @@ type Value = JsonValue | AnyRawCoValue;
 export { PriorityBasedMessageQueue } from "./queue/PriorityBasedMessageQueue.js";
 /** @hidden */
 export const cojsonInternals = {
+  knownStateFromContent,
   connectedPeers,
   rawCoIDtoBytes,
   rawCoIDfromBytes,

@@ -1,5 +1,5 @@
 import { getAudioFileData } from "@/lib/audio/getAudioFileData";
-import { Group } from "jazz-tools";
+import { Group, deleteCoValues } from "jazz-tools";
 import {
   MusicTrack,
   MusicaAccount,
@@ -108,10 +108,11 @@ export async function removeTrackFromPlaylist(
   track.$jazz.owner.removeMember(playlist.$jazz.owner);
 }
 
-export async function removeTrackFromAllPlaylists(track: MusicTrack) {
-  const { root } = await MusicaAccount.getMe().$jazz.ensureLoaded({
+export async function deleteMusicTrack(track: MusicTrack) {
+  const me = await MusicaAccount.getMe().$jazz.ensureLoaded({
     resolve: {
       root: {
+        rootPlaylist: PlaylistWithTracks.resolveQuery,
         playlists: {
           $each: {
             $onError: "catch",
@@ -122,12 +123,23 @@ export async function removeTrackFromAllPlaylists(track: MusicTrack) {
     },
   });
 
-  const playlists = root.playlists;
+  const playlists = me.root.playlists;
 
   for (const playlist of playlists.values()) {
     if (!playlist.$isLoaded) continue;
 
     removeTrackFromPlaylist(playlist, track);
+  }
+
+  removeTrackFromPlaylist(me.root.rootPlaylist, track);
+
+  if (me.canAdmin(track)) {
+    await deleteCoValues(MusicTrack, track.$jazz.id, {
+      resolve: {
+        file: true,
+        waveform: true,
+      },
+    });
   }
 }
 
@@ -192,7 +204,7 @@ export async function onAnonymousAccountDiscarded(
 }
 
 export async function deletePlaylist(playlistId: string) {
-  const { root } = await MusicaAccount.getMe().$jazz.ensureLoaded({
+  const me = await MusicaAccount.getMe().$jazz.ensureLoaded({
     resolve: {
       root: {
         playlists: true,
@@ -203,7 +215,9 @@ export async function deletePlaylist(playlistId: string) {
     },
   });
 
-  const index = root.playlists.findIndex((p) => p?.$jazz.id === playlistId);
+  const root = me.root;
+
+  const index = root.playlists.findIndex((p) => p.$jazz.id === playlistId);
   if (index > -1) {
     root.playlists?.$jazz.splice(index, 1);
   }
@@ -219,4 +233,53 @@ export async function deletePlaylist(playlistId: string) {
       root.$jazz.set("activeTrack", undefined);
     }
   }
+
+  const playlist = await Playlist.load(playlistId);
+
+  if (playlist.$isLoaded && me.canAdmin(playlist)) {
+    await deleteCoValues(Playlist, playlist.$jazz.id);
+  }
+}
+
+export async function deleteMyMusicPlayerAccount() {
+  const me = await MusicaAccount.getMe().$jazz.ensureLoaded({
+    resolve: {
+      root: {
+        playlists: {
+          $each: { $onError: "catch" },
+        },
+      },
+    },
+  });
+
+  // Delete all playlists referenced in the user's root. (This may include invited playlists.)
+  for (const playlist of me.root.playlists.values()) {
+    if (!playlist.$isLoaded) continue;
+    if (me.canAdmin(playlist)) {
+      await deleteCoValues(Playlist, playlist.$jazz.id);
+    } else {
+      playlist.$jazz.owner.removeMember(me);
+    }
+  }
+
+  await deleteCoValues(MusicaAccount, me.$jazz.id, {
+    resolve: {
+      profile: {
+        avatar: {
+          $each: true,
+        },
+      },
+      root: {
+        rootPlaylist: {
+          tracks: {
+            $each: {
+              file: true,
+              waveform: true,
+            },
+          },
+        },
+        playlists: true,
+      },
+    },
+  });
 }

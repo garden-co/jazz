@@ -31,6 +31,13 @@ export const migrations: Record<number, string[]> = {
     ) WITHOUT ROWID;`,
     "ALTER TABLE sessions ADD COLUMN bytesSinceLastSignature INTEGER;",
   ],
+  4: [
+    `CREATE TABLE IF NOT EXISTS deletedCoValues (
+      coValueID TEXT PRIMARY KEY,
+      status INTEGER NOT NULL DEFAULT 0
+    ) WITHOUT ROWID;`,
+    "CREATE INDEX IF NOT EXISTS deletedCoValuesByStatus ON deletedCoValues (status);",
+  ],
 };
 
 type Migration = {

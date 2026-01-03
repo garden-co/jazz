@@ -17,6 +17,7 @@ import {
   emptyKnownState,
   setSessionCounter,
 } from "../knownState.js";
+import { isDeletedSessionID } from "../ids.js";
 import {
   collectNewTxs,
   getDependedOnCoValues,
@@ -30,12 +31,21 @@ import type {
   StoredCoValueRow,
   StoredSessionRow,
 } from "./types.js";
+import {
+  DEFAULT_DELETE_SCHEDULE_OPTS,
+  DeletedCoValuesEraserScheduler,
+} from "./DeletedCoValuesEraserScheduler.js";
+
+const MAX_DELETE_SCHEDULE_DURATION_MS = 100;
 
 export class StorageApiSync implements StorageAPI {
   private streamingCounter: UpDownCounter;
 
   private readonly dbClient: DBClientInterfaceSync;
   private loadedCoValues = new Set<RawCoID>();
+  private deletedCoValuesEraserScheduler:
+    | DeletedCoValuesEraserScheduler
+    | undefined;
 
   constructor(dbClient: DBClientInterfaceSync) {
     this.dbClient = dbClient;
@@ -203,6 +213,10 @@ export class StorageApiSync implements StorageAPI {
     return this.storeSingle(msg, correctionCallback);
   }
 
+  async eraseAllDeletedCoValues(): Promise<void> {
+    this.eraseDeletedCoValuesOnceBudgeted();
+  }
+
   /**
    * This function is called when the storage lacks the information required to store the incoming content.
    *
@@ -259,6 +273,10 @@ export class StorageApiSync implements StorageAPI {
 
     for (const sessionID of Object.keys(msg.new) as SessionID[]) {
       this.dbClient.transaction((tx) => {
+        if (this.deletedValues.has(id) && isDeletedSessionID(sessionID)) {
+          tx.markCoValueAsDeleted(id);
+        }
+
         const sessionRow = tx.getSingleCoValueSession(
           storedCoValueRowID,
           sessionID,
@@ -361,11 +379,54 @@ export class StorageApiSync implements StorageAPI {
     return newLastIdx;
   }
 
+  deletedValues = new Set<RawCoID>();
+
+  markCoValueAsDeleted(id: RawCoID) {
+    this.deletedValues.add(id);
+
+    if (this.deletedCoValuesEraserScheduler) {
+      this.deletedCoValuesEraserScheduler.onEnqueueDeletedCoValue();
+    }
+  }
+
+  enableDeletedCoValuesErasure() {
+    if (this.deletedCoValuesEraserScheduler) return;
+    this.deletedCoValuesEraserScheduler = new DeletedCoValuesEraserScheduler({
+      run: async () =>
+        this.eraseDeletedCoValuesOnceBudgeted(MAX_DELETE_SCHEDULE_DURATION_MS),
+    });
+    this.deletedCoValuesEraserScheduler.scheduleStartupDrain();
+  }
+
   waitForSync(id: string, coValue: CoValueCore) {
     return this.knownStates.waitForSync(id, coValue);
   }
 
   close() {
+    this.deletedCoValuesEraserScheduler?.dispose();
     return undefined;
+  }
+
+  private async eraseDeletedCoValuesOnceBudgeted(
+    budgetMs?: number,
+  ): Promise<{ hasMore: boolean }> {
+    const startedAt = Date.now();
+    const ids = this.dbClient.getAllCoValuesWaitingForDelete();
+
+    for (const id of ids) {
+      // Strict time budget for sync storage to avoid blocking.
+      if (budgetMs && Date.now() - startedAt >= budgetMs) {
+        break;
+      }
+
+      this.dbClient.transaction((tx) => {
+        tx.eraseCoValueButKeepTombstone(id);
+        tx.markCoValueDeletionDone(id);
+      });
+    }
+
+    return {
+      hasMore: this.dbClient.getAllCoValuesWaitingForDelete().length > 0,
+    };
   }
 }

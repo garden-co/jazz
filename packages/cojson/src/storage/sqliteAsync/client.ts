@@ -14,6 +14,7 @@ import type {
   StoredSessionRow,
   TransactionRow,
 } from "../types.js";
+import { DeletedCoValueDeletionStatus } from "../types.js";
 import type { SQLiteDatabaseDriverAsync } from "./types.js";
 
 export type RawCoValueRow = {
@@ -25,6 +26,10 @@ export type RawTransactionRow = {
   ses: number;
   idx: number;
   tx: string;
+};
+
+type DeletedCoValueQueueRow = {
+  id: RawCoID;
 };
 
 export function getErrorMessage(error: unknown) {
@@ -142,6 +147,76 @@ export class SQLiteClientAsync
     }
 
     return result.rowID;
+  }
+
+  async markCoValueAsDeleted(id: RawCoID) {
+    // Work queue entry. Table only stores the coValueID.
+    // Idempotent by design.
+    await this.db.run(
+      `INSERT INTO deletedCoValues (coValueID) VALUES (?) ON CONFLICT(coValueID) DO NOTHING`,
+      [id],
+    );
+  }
+
+  async markCoValueDeletionDone(id: RawCoID) {
+    await this.db.run(
+      `INSERT INTO deletedCoValues (coValueID, status) VALUES (?, ?)
+       ON CONFLICT(coValueID) DO UPDATE SET status=?`,
+      [
+        id,
+        DeletedCoValueDeletionStatus.Done,
+        DeletedCoValueDeletionStatus.Done,
+      ],
+    );
+  }
+
+  async eraseCoValueButKeepTombstone(coValueId: RawCoID) {
+    const coValueRow = await this.db.get<RawCoValueRow & { rowID: number }>(
+      "SELECT * FROM coValues WHERE id = ?",
+      [coValueId],
+    );
+
+    if (!coValueRow) {
+      logger.warn(`CoValue ${coValueId} not found, skipping deletion`);
+      return;
+    }
+
+    await this.db.run(
+      `DELETE FROM transactions
+       WHERE ses IN (
+         SELECT rowID FROM sessions
+         WHERE coValue = ?
+           AND sessionID NOT LIKE '%_deleted'
+       )`,
+      [coValueRow.rowID],
+    );
+
+    await this.db.run(
+      `DELETE FROM signatureAfter
+       WHERE ses IN (
+         SELECT rowID FROM sessions
+         WHERE coValue = ?
+           AND sessionID NOT LIKE '%_deleted'
+       )`,
+      [coValueRow.rowID],
+    );
+
+    await this.db.run(
+      `DELETE FROM sessions
+       WHERE coValue = ?
+         AND sessionID NOT LIKE '%_deleted'`,
+      [coValueRow.rowID],
+    );
+  }
+
+  async getAllCoValuesWaitingForDelete(): Promise<RawCoID[]> {
+    const rows = await this.db.query<DeletedCoValueQueueRow>(
+      `SELECT coValueID as id
+       FROM deletedCoValues
+       WHERE status = ?`,
+      [DeletedCoValueDeletionStatus.Pending],
+    );
+    return rows.map((r) => r.id);
   }
 
   async addSessionUpdate({
