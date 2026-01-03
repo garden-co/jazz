@@ -10,7 +10,8 @@ use crate::sql::query_graph::{GraphId, JoinGraphBuilder, Predicate, PriorState, 
 use crate::sql::row::{decode_row, encode_row, Row, RowError, Value};
 use crate::sql::schema::{ColumnType, SchemaError, TableSchema};
 use crate::sql::table_rows::TableRows;
-use crate::sql::types::{IndexKey, ObjectId, SchemaId};
+use crate::sql::types::{IndexKey, SchemaId};
+use crate::object::ObjectId;
 use crate::storage::Environment;
 
 /// Coerce a Value to match the expected ColumnType.

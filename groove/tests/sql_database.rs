@@ -4,8 +4,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use groove::sql::{
-    ColumnDef, ColumnType, Database, DatabaseError, ExecuteResult, ObjectId, TableSchema, Value,
+    ColumnDef, ColumnType, Database, DatabaseError, ExecuteResult, TableSchema, Value,
 };
+use groove::ObjectId;
 
 // ========== Table Creation Tests ==========
 

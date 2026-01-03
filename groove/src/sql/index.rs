@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::sql::types::ObjectId;
+use crate::object::ObjectId;
 
 /// Reference index: maps target_id -> set of source_row_ids.
 /// One index per (source_table, source_column) pair.

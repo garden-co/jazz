@@ -7,7 +7,7 @@ use crate::sql::query_graph::node::{NodeId, QueryNode};
 use crate::sql::query_graph::predicate::Predicate;
 use crate::sql::schema::TableSchema;
 use crate::sql::types::IndexKey;
-use crate::sql::ObjectId;
+use crate::object::ObjectId;
 
 /// Builder for constructing `QueryGraph` instances.
 ///

@@ -1,5 +1,6 @@
 use wasm_bindgen::prelude::*;
-use groove::sql::{Database, IncrementalQuery, Value, ExecuteResult, Row, ObjectId};
+use groove::sql::{Database, IncrementalQuery, Value, ExecuteResult, Row};
+use groove::ObjectId;
 use groove::ListenerId;
 
 /// WASM-exposed database wrapper.

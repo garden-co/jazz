@@ -1,6 +1,7 @@
 //! Integration tests for SQL row encoding/decoding.
 
-use groove::sql::{decode_row, encode_row, ColumnDef, ColumnType, ObjectId, RowError, TableSchema, Value};
+use groove::sql::{decode_row, encode_row, ColumnDef, ColumnType, RowError, TableSchema, Value};
+use groove::ObjectId;
 
 #[test]
 fn encode_decode_simple_row() {

@@ -7,7 +7,7 @@ use crate::sql::query_graph::delta::{DeltaBatch, RowDelta};
 use crate::sql::query_graph::node::{NodeId, QueryNode};
 use crate::sql::row::Row;
 use crate::sql::schema::TableSchema;
-use crate::sql::ObjectId;
+use crate::object::ObjectId;
 
 use super::DatabaseState;
 
@@ -391,7 +391,8 @@ mod tests {
     use crate::sql::query_graph::predicate::Predicate;
     use crate::sql::row::Value;
     use crate::sql::schema::{ColumnDef, ColumnType};
-    use crate::sql::{Database, ObjectId};
+    use crate::sql::Database;
+    use crate::object::ObjectId;
 
     fn test_schema() -> TableSchema {
         TableSchema::new(

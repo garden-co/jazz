@@ -1,6 +1,7 @@
 //! Integration tests for SQL parser.
 
 use groove::sql::{parse, ColumnType, Projection, Statement, Value};
+use groove::ObjectId;
 
 #[test]
 fn parse_create_table_simple() {
@@ -76,7 +77,7 @@ fn parse_insert_with_object_id() {
     // ObjectIds are passed as string literals containing Base32.
     // The parser produces Value::String; the executor coerces to Value::Ref
     // when inserting into a Ref column.
-    let id = groove::sql::ObjectId::new(0x0192abcd12345678);
+    let id = ObjectId::new(0x0192abcd12345678);
     let sql = format!("INSERT INTO posts (author, title) VALUES ('{}', 'Hello')", id);
     let stmt = parse(&sql).unwrap();
 
@@ -94,7 +95,7 @@ fn parse_update() {
     // ObjectIds are passed as string literals containing Base32.
     // The parser produces Value::String; the executor coerces to Value::Ref
     // when comparing against id or Ref columns.
-    let id = groove::sql::ObjectId::new(0xabc123);
+    let id = ObjectId::new(0xabc123);
     let sql = format!("UPDATE users SET email = 'new@example.com', age = 31 WHERE id = '{}'", id);
     let stmt = parse(&sql).unwrap();
 

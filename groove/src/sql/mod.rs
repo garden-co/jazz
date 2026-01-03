@@ -16,4 +16,4 @@ pub use parser::{
 pub use row::{decode_row, encode_row, Row, RowError, Value};
 pub use schema::{ColumnDef, ColumnType, SchemaError, TableSchema};
 pub use table_rows::TableRows;
-pub use types::{IndexKey, ObjectId, QueryState, SchemaId};
+pub use types::{IndexKey, ObjectIdParseError, QueryState, SchemaId};

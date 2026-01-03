@@ -16,7 +16,7 @@ use bytes::Bytes;
 
 use crate::branch::Branch;
 use crate::commit::CommitId;
-use crate::sql::ObjectId;
+use crate::object::ObjectId;
 use crate::storage::Environment;
 
 /// Unique ID for a listener subscription.

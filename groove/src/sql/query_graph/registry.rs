@@ -228,7 +228,7 @@ impl GraphRegistry {
     }
 
     /// Invalidate a cached row (e.g., when synced from server).
-    pub fn invalidate_row(&self, table: &str, id: crate::sql::ObjectId) {
+    pub fn invalidate_row(&self, table: &str, id: crate::object::ObjectId) {
         self.cache.write().unwrap().invalidate(table, id);
     }
 
@@ -273,7 +273,7 @@ mod tests {
 
     fn make_row(id: u128, name: &str, active: bool) -> Row {
         Row::new(
-            crate::sql::ObjectId::new(id),
+            crate::object::ObjectId::new(id),
             vec![Value::String(name.to_string()), Value::Bool(active)],
         )
     }

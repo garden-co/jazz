@@ -2,7 +2,7 @@
 
 use crate::sql::row::{Row, Value};
 use crate::sql::schema::TableSchema;
-use crate::sql::ObjectId;
+use crate::object::ObjectId;
 
 /// A predicate for filtering rows.
 #[derive(Clone, Debug, PartialEq)]

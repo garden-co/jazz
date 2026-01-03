@@ -6,8 +6,7 @@ use futures::io::AsyncRead;
 
 use crate::commit::CommitId;
 use crate::listener::{ListenerId, ListenerError, ObjectCallback, ObjectKey, ObjectListenerRegistry, ObjectState};
-use crate::object::Object;
-use crate::sql::ObjectId;
+use crate::object::{Object, ObjectId};
 use crate::storage::{Environment, MemoryEnvironment};
 
 /// Generate a new UUIDv7 as ObjectId.

@@ -8,7 +8,7 @@ use crate::sql::query_graph::predicate::Predicate;
 use crate::sql::row::{Row, Value};
 use crate::sql::schema::TableSchema;
 use crate::sql::types::IndexKey;
-use crate::sql::ObjectId;
+use crate::object::ObjectId;
 
 /// Unique identifier for a node within a query graph.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -567,7 +567,7 @@ mod tests {
     use super::*;
     use crate::sql::row::{Row, Value};
     use crate::sql::schema::{ColumnDef, ColumnType};
-    use crate::sql::ObjectId;
+    use crate::object::ObjectId;
 
     fn test_schema() -> TableSchema {
         TableSchema::new(

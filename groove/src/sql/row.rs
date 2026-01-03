@@ -1,5 +1,5 @@
 use crate::sql::schema::{ColumnType, TableSchema};
-use crate::sql::types::ObjectId;
+use crate::object::ObjectId;
 
 /// Runtime value representation.
 #[derive(Debug, Clone, PartialEq)]

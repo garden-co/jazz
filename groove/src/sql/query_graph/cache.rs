@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::sql::row::Row;
-use crate::sql::ObjectId;
+use crate::object::ObjectId;
 
 /// Shared cache of row data, accessible to all query graphs.
 ///

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::commit::CommitId;
 use crate::sql::row::{Row, Value};
 use crate::sql::schema::TableSchema;
-use crate::sql::ObjectId;
+use crate::object::ObjectId;
 
 /// Reference to prior row state via commit graph.
 ///

@@ -15,8 +15,7 @@ pub use listener::{
 };
 pub use merge::{LastWriterWins, MergeStrategy};
 pub use node::{generate_object_id, LocalNode};
-pub use object::{ContentStream, Object};
-pub use sql::ObjectId;
+pub use object::{ContentStream, Object, ObjectId, ObjectIdParseError, SchemaId};
 pub use storage::{
     ChunkHash, CommitMeta, CommitStore, ContentRef, ContentStore, Environment, MemoryContentStore,
     MemoryEnvironment, Storage, INLINE_THRESHOLD,

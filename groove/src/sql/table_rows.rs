@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::sql::types::ObjectId;
+use crate::object::ObjectId;
 
 /// Table row set: tracks which row IDs belong to a table.
 /// Stored as an object for reactive updates.
