@@ -78,7 +78,7 @@ fn parse_insert_with_uuid() {
 
     match stmt {
         Statement::Insert(ins) => {
-            assert_eq!(ins.values[0], Value::Ref(0x0192abcd12345678));
+            assert_eq!(ins.values[0], Value::Ref(groove::sql::ObjectId::new(0x0192abcd12345678)));
         }
         _ => panic!("expected Insert"),
     }

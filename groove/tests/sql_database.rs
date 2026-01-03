@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use groove::sql::{
-    ColumnDef, ColumnType, Database, DatabaseError, ExecuteResult, TableSchema, Value,
+    ColumnDef, ColumnType, Database, DatabaseError, ExecuteResult, ObjectId, TableSchema, Value,
 };
 
 // ========== Table Creation Tests ==========
@@ -22,7 +22,7 @@ fn create_table() {
     );
 
     let id = db.create_table(schema).unwrap();
-    assert!(id > 0);
+    assert!(id.0 > 0);
 
     // Check table exists
     assert!(db.get_table("users").is_some());
@@ -317,7 +317,7 @@ fn execute_update() {
     let result = db
         .execute(&format!(
             "UPDATE users SET age = 31 WHERE id = x'{:032x}'",
-            id
+            id.0
         ))
         .unwrap();
     match result {
@@ -389,7 +389,7 @@ fn insert_validates_ref() {
         "posts",
         &["author", "title"],
         vec![
-            Value::Ref(0x12345), // fake user ID
+            Value::Ref(ObjectId::new(0x12345)), // fake user ID
             Value::String("Hello".into()),
         ],
     );
@@ -592,7 +592,7 @@ fn find_referencing_on_non_ref_column_fails() {
     ))
     .unwrap();
 
-    let result = db.find_referencing("users", "name", 123);
+    let result = db.find_referencing("users", "name", ObjectId::new(123));
     assert!(matches!(result, Err(DatabaseError::NotAReference(_))));
 }
 
@@ -944,12 +944,12 @@ fn join_basic() {
     // Insert posts by Alice
     db.execute(&format!(
         "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'First Post')",
-        alice_id
+        alice_id.0
     ))
     .unwrap();
     db.execute(&format!(
         "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Second Post')",
-        alice_id
+        alice_id.0
     ))
     .unwrap();
 
@@ -988,12 +988,12 @@ fn join_with_where_on_primary_table() {
 
     db.execute(&format!(
         "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'First Post')",
-        alice_id
+        alice_id.0
     ))
     .unwrap();
     db.execute(&format!(
         "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Second Post')",
-        alice_id
+        alice_id.0
     ))
     .unwrap();
 
@@ -1036,19 +1036,19 @@ fn join_with_where_on_joined_table() {
     // Alice's posts
     db.execute(&format!(
         "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Alice Post 1')",
-        alice_id
+        alice_id.0
     ))
     .unwrap();
     db.execute(&format!(
         "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Alice Post 2')",
-        alice_id
+        alice_id.0
     ))
     .unwrap();
 
     // Bob's post
     db.execute(&format!(
         "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Bob Post')",
-        bob_id
+        bob_id.0
     ))
     .unwrap();
 
@@ -1108,7 +1108,7 @@ fn join_table_star_projection() {
 
     db.execute(&format!(
         "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Test Post')",
-        alice_id
+        alice_id.0
     ))
     .unwrap();
 
@@ -1166,22 +1166,22 @@ fn join_multiple_conditions_where() {
     // - Charlie has "World" (active=true, title no match)  -> should NOT match
     db.execute(&format!(
         "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Hello')",
-        alice_id
+        alice_id.0
     ))
     .unwrap();
     db.execute(&format!(
         "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Goodbye')",
-        alice_id
+        alice_id.0
     ))
     .unwrap();
     db.execute(&format!(
         "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Hello')",
-        bob_id
+        bob_id.0
     ))
     .unwrap();
     db.execute(&format!(
         "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'World')",
-        charlie_id
+        charlie_id.0
     ))
     .unwrap();
 
@@ -1245,7 +1245,7 @@ fn reactive_join_basic() {
 
     db.execute(&format!(
         "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'First Post')",
-        alice_id
+        alice_id.0
     ))
     .unwrap();
 
@@ -1271,7 +1271,7 @@ fn reactive_join_basic() {
     // Insert another post - should trigger callback
     db.execute(&format!(
         "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Second Post')",
-        alice_id
+        alice_id.0
     ))
     .unwrap();
 
@@ -1297,7 +1297,7 @@ fn reactive_join_updates_on_joined_table_change() {
 
     db.execute(&format!(
         "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Test Post')",
-        alice_id
+        alice_id.0
     ))
     .unwrap();
 
@@ -1330,7 +1330,7 @@ fn reactive_join_updates_on_joined_table_change() {
     // Update Alice's name to something else - should now return 0 rows
     db.execute(&format!(
         "UPDATE users SET name = 'Alicia' WHERE id = x'{:032x}'",
-        alice_id
+        alice_id.0
     ))
     .unwrap();
 
@@ -1366,7 +1366,7 @@ fn reactive_join_reference_repointing() {
     let post_id = match db
         .execute(&format!(
             "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Test Post')",
-            alice_id
+            alice_id.0
         ))
         .unwrap()
     {
@@ -1400,7 +1400,7 @@ fn reactive_join_reference_repointing() {
     // Re-point the post from Alice to Bob
     db.execute(&format!(
         "UPDATE posts SET author = x'{:032x}' WHERE id = x'{:032x}'",
-        bob_id, post_id
+        bob_id.0, post_id.0
     ))
     .unwrap();
 
@@ -1435,7 +1435,7 @@ fn reactive_join_delete_from_joined_table() {
 
     db.execute(&format!(
         "INSERT INTO posts (author, title) VALUES (x'{:032x}', 'Test Post')",
-        alice_id
+        alice_id.0
     ))
     .unwrap();
 

@@ -52,12 +52,12 @@ impl RefIndex {
 
         for (target_id, source_ids) in &self.entries {
             // Target ID
-            buf.extend_from_slice(&target_id.to_le_bytes());
+            buf.extend_from_slice(&target_id.0.to_le_bytes());
             // Source count
             buf.extend_from_slice(&(source_ids.len() as u32).to_le_bytes());
             // Source IDs
             for source_id in source_ids {
-                buf.extend_from_slice(&source_id.to_le_bytes());
+                buf.extend_from_slice(&source_id.0.to_le_bytes());
             }
         }
 
@@ -82,7 +82,7 @@ impl RefIndex {
             if pos + 16 > data.len() {
                 return Err("truncated target_id".to_string());
             }
-            let target_id = u128::from_le_bytes(
+            let target_id = ObjectId::from_le_bytes(
                 data[pos..pos + 16].try_into().map_err(|_| "invalid target_id")?
             );
             pos += 16;
@@ -100,7 +100,7 @@ impl RefIndex {
                 if pos + 16 > data.len() {
                     return Err("truncated source_id".to_string());
                 }
-                let source_id = u128::from_le_bytes(
+                let source_id = ObjectId::from_le_bytes(
                     data[pos..pos + 16].try_into().map_err(|_| "invalid source_id")?
                 );
                 pos += 16;

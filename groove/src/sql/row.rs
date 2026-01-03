@@ -1,4 +1,5 @@
 use crate::sql::schema::{ColumnType, TableSchema};
+use crate::sql::types::ObjectId;
 
 /// Runtime value representation.
 #[derive(Debug, Clone, PartialEq)]
@@ -9,7 +10,7 @@ pub enum Value {
     F64(f64),
     String(String),
     Bytes(Vec<u8>),
-    Ref(u128),
+    Ref(ObjectId),
 }
 
 impl Value {
@@ -59,7 +60,7 @@ impl Value {
     }
 
     /// Try to get as ref (object ID).
-    pub fn as_ref(&self) -> Option<u128> {
+    pub fn as_ref(&self) -> Option<ObjectId> {
         match self {
             Value::Ref(id) => Some(*id),
             _ => None,
@@ -70,13 +71,13 @@ impl Value {
 /// A row with its object ID and values.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Row {
-    pub id: u128,
+    pub id: ObjectId,
     pub values: Vec<Value>,
 }
 
 impl Row {
     /// Create a new row with generated ID.
-    pub fn new(id: u128, values: Vec<Value>) -> Self {
+    pub fn new(id: ObjectId, values: Vec<Value>) -> Self {
         Row { id, values }
     }
 
@@ -214,7 +215,7 @@ fn encode_column_value(value: &Value, ty: &ColumnType, nullable: bool) -> Result
             buf.extend_from_slice(b);
         }
         (Value::Ref(id), ColumnType::Ref(_)) => {
-            buf.extend_from_slice(&id.to_le_bytes());
+            buf.extend_from_slice(&id.0.to_le_bytes());
         }
         _ => {
             return Err(RowError::TypeMismatch {
@@ -309,7 +310,7 @@ fn decode_fixed_column(data: &[u8], ty: &ColumnType, nullable: bool) -> Result<V
                 return Err(RowError::UnexpectedEof);
             }
             let bytes: [u8; 16] = data[pos..pos + 16].try_into().unwrap();
-            Ok(Value::Ref(u128::from_le_bytes(bytes)))
+            Ok(Value::Ref(ObjectId::from_le_bytes(bytes)))
         }
         _ => Err(RowError::TypeMismatch {
             expected: "fixed-size type".into(),

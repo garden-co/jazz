@@ -1,5 +1,6 @@
 use crate::sql::schema::{ColumnDef, ColumnType};
 use crate::sql::row::Value;
+use crate::sql::types::ObjectId;
 
 /// Parsed SQL statement.
 #[derive(Debug, Clone, PartialEq)]
@@ -257,7 +258,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_uuid_literal(&mut self) -> Result<u128, ParseError> {
+    fn parse_uuid_literal(&mut self) -> Result<ObjectId, ParseError> {
         self.skip_whitespace();
 
         // Expect x'...'
@@ -285,7 +286,7 @@ impl<'a> Parser<'a> {
         let value = u128::from_str_radix(hex_str, 16)
             .map_err(|_| self.error("invalid UUID hex value"))?;
 
-        Ok(value)
+        Ok(ObjectId::new(value))
     }
 
     fn parse_value(&mut self) -> Result<Value, ParseError> {

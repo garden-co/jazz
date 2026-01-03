@@ -50,7 +50,7 @@ impl TableRows {
         let mut buf = Vec::new();
         buf.extend_from_slice(&(self.row_ids.len() as u32).to_le_bytes());
         for row_id in &self.row_ids {
-            buf.extend_from_slice(&row_id.to_le_bytes());
+            buf.extend_from_slice(&row_id.0.to_le_bytes());
         }
         buf
     }
@@ -72,7 +72,7 @@ impl TableRows {
             if pos + 16 > data.len() {
                 return Err("truncated row_id".to_string());
             }
-            let row_id = u128::from_le_bytes(
+            let row_id = ObjectId::from_le_bytes(
                 data[pos..pos + 16].try_into().map_err(|_| "invalid row_id")?
             );
             pos += 16;

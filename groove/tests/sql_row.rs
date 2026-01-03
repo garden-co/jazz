@@ -1,6 +1,6 @@
 //! Integration tests for SQL row encoding/decoding.
 
-use groove::sql::{decode_row, encode_row, ColumnDef, ColumnType, RowError, TableSchema, Value};
+use groove::sql::{decode_row, encode_row, ColumnDef, ColumnType, ObjectId, RowError, TableSchema, Value};
 
 #[test]
 fn encode_decode_simple_row() {
@@ -77,7 +77,7 @@ fn encode_decode_with_refs() {
         ],
     );
 
-    let author_id: u128 = 0x0192_abcd_1234_5678_9abc_def0_1234_5678;
+    let author_id = ObjectId::new(0x0192_abcd_1234_5678_9abc_def0_1234_5678);
     let values = vec![
         Value::Ref(author_id),
         Value::String("Hello World".into()),

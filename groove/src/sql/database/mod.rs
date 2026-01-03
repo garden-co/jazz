@@ -109,7 +109,7 @@ impl JoinedRow {
     fn to_output_row(self, projection: &Projection) -> Row {
         let row_id = self.tables.get(&self.primary_table)
             .map(|(_, id, _)| *id)
-            .unwrap_or(0);
+            .unwrap_or(ObjectId::default());
 
         let values = match projection {
             Projection::All => {
@@ -413,7 +413,7 @@ impl DatabaseState {
         let row_ids: Vec<ObjectId> = {
             let table_rows_objects = self.table_rows_objects.read().unwrap();
             if let Some(rows_id) = table_rows_objects.get(table) {
-                if let Ok(Some(data)) = self.node.read_sync(*rows_id, "main") {
+                if let Ok(Some(data)) = self.node.read_sync(rows_id.0, "main") {
                     if !data.is_empty() {
                         if let Ok(table_rows) = TableRows::from_bytes(&data) {
                             table_rows.into_vec()
@@ -433,7 +433,7 @@ impl DatabaseState {
 
         let mut rows = Vec::new();
         for row_id in row_ids {
-            let data = match self.node.read_sync(row_id, "main") {
+            let data = match self.node.read_sync(row_id.0, "main") {
                 Ok(Some(data)) if !data.is_empty() => data,
                 _ => continue,
             };
@@ -462,7 +462,7 @@ impl DatabaseState {
             }
         }
 
-        let data = match self.node.read_sync(id, "main") {
+        let data = match self.node.read_sync(id.0, "main") {
             Ok(Some(data)) if !data.is_empty() => data,
             _ => return None,
         };
@@ -691,7 +691,7 @@ impl std::fmt::Display for DatabaseError {
         match self {
             DatabaseError::TableExists(name) => write!(f, "table '{}' already exists", name),
             DatabaseError::TableNotFound(name) => write!(f, "table '{}' not found", name),
-            DatabaseError::RowNotFound(id) => write!(f, "row {:032x} not found", id),
+            DatabaseError::RowNotFound(id) => write!(f, "row {} not found", id),
             DatabaseError::ColumnNotFound(name) => write!(f, "column '{}' not found", name),
             DatabaseError::Schema(e) => write!(f, "schema error: {}", e),
             DatabaseError::Row(e) => write!(f, "row error: {}", e),
@@ -705,7 +705,7 @@ impl std::fmt::Display for DatabaseError {
             DatabaseError::MissingColumn(name) => write!(f, "missing required column: {}", name),
             DatabaseError::Storage(e) => write!(f, "storage error: {}", e),
             DatabaseError::InvalidReference { column, target_table, target_id } => {
-                write!(f, "invalid reference in '{}': row {:032x} not found in table '{}'",
+                write!(f, "invalid reference in '{}': row {} not found in table '{}'",
                        column, target_id, target_table)
             }
             DatabaseError::NotAReference(name) => write!(f, "column '{}' is not a reference", name),
@@ -774,7 +774,7 @@ impl Database {
         let index_id = index_objects.get(key)
             .ok_or_else(|| DatabaseError::ColumnNotFound(key.source_column.clone()))?;
 
-        let data = self.state.node.read_sync(*index_id, "main")
+        let data = self.state.node.read_sync(index_id.0, "main")
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
             .unwrap_or_default();
 
@@ -793,7 +793,7 @@ impl Database {
             .ok_or_else(|| DatabaseError::ColumnNotFound(key.source_column.clone()))?;
 
         self.state.node
-            .write_sync(*index_id, "main", &index.to_bytes(), "system", timestamp_now())
+            .write_sync(index_id.0, "main", &index.to_bytes(), "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         Ok(())
@@ -812,7 +812,7 @@ impl Database {
         let rows_id = table_rows_objects.get(table)
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
-        let data = self.state.node.read_sync(*rows_id, "main")
+        let data = self.state.node.read_sync(rows_id.0, "main")
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
             .unwrap_or_default();
 
@@ -831,7 +831,7 @@ impl Database {
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
         self.state.node
-            .write_sync(*rows_id, "main", &rows.to_bytes(), "system", timestamp_now())
+            .write_sync(rows_id.0, "main", &rows.to_bytes(), "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         Ok(())
@@ -861,19 +861,19 @@ impl Database {
         }
 
         // Create object for schema (uses internal mutability)
-        let schema_id = self.state.node.create_object(&format!("schema:{}", schema.name));
+        let schema_id = ObjectId::new(self.state.node.create_object(&format!("schema:{}", schema.name)));
 
         // Serialize and store schema
         let schema_bytes = schema.to_bytes();
         self.state.node
-            .write_sync(schema_id, "main", &schema_bytes, "system", timestamp_now())
+            .write_sync(schema_id.0, "main", &schema_bytes, "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         // Create table rows object to track row membership
-        let rows_id = self.state.node.create_object(&format!("rows:{}", schema.name));
+        let rows_id = ObjectId::new(self.state.node.create_object(&format!("rows:{}", schema.name)));
         let empty_rows = TableRows::new();
         self.state.node
-            .write_sync(rows_id, "main", &empty_rows.to_bytes(), "system", timestamp_now())
+            .write_sync(rows_id.0, "main", &empty_rows.to_bytes(), "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
         self.state.table_rows_objects.write().unwrap().insert(schema.name.clone(), rows_id);
 
@@ -881,12 +881,12 @@ impl Database {
         for col in &schema.columns {
             if matches!(col.ty, ColumnType::Ref(_)) {
                 let key = IndexKey::new(&schema.name, &col.name);
-                let index_id = self.state.node.create_object(&format!("index:{}:{}", schema.name, col.name));
+                let index_id = ObjectId::new(self.state.node.create_object(&format!("index:{}:{}", schema.name, col.name)));
 
                 // Initialize with empty index
                 let empty_index = RefIndex::new();
                 self.state.node
-                    .write_sync(index_id, "main", &empty_index.to_bytes(), "system", timestamp_now())
+                    .write_sync(index_id.0, "main", &empty_index.to_bytes(), "system", timestamp_now())
                     .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
                 self.state.index_objects.write().unwrap().insert(key, index_id);
@@ -973,11 +973,11 @@ impl Database {
         let row_bytes = encode_row(&row_values, &schema)?;
 
         // Create object for row
-        let row_id = self.state.node.create_object(&format!("row:{}:{:032x}", table, generate_object_id()));
+        let row_id = ObjectId::new(self.state.node.create_object(&format!("row:{}:{}", table, ObjectId::new(generate_object_id()))));
 
         // Store row data
         self.state.node
-            .write_sync(row_id, "main", &row_bytes, "system", timestamp_now())
+            .write_sync(row_id.0, "main", &row_bytes, "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         // Track row -> table mapping
@@ -1024,7 +1024,7 @@ impl Database {
         }
 
         // Read row data
-        let data = match self.state.node.read_sync(id, "main") {
+        let data = match self.state.node.read_sync(id.0, "main") {
             Ok(Some(data)) => data,
             Ok(None) => return Ok(None),
             Err(e) => return Err(DatabaseError::Storage(format!("{:?}", e))),
@@ -1056,7 +1056,7 @@ impl Database {
         }
 
         // Read current row data
-        let data = match self.state.node.read_sync(id, "main") {
+        let data = match self.state.node.read_sync(id.0, "main") {
             Ok(Some(data)) => data,
             Ok(None) => return Ok(false),
             Err(e) => return Err(DatabaseError::Storage(format!("{:?}", e))),
@@ -1103,7 +1103,7 @@ impl Database {
 
         // Write updated row
         self.state.node
-            .write_sync(id, "main", &row_bytes, "system", timestamp_now())
+            .write_sync(id.0, "main", &row_bytes, "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         // Update indexes for changed Ref columns
@@ -1151,7 +1151,7 @@ impl Database {
         }
 
         // Read current row data to get ref values for index cleanup
-        let data = match self.state.node.read_sync(id, "main") {
+        let data = match self.state.node.read_sync(id.0, "main") {
             Ok(Some(data)) if !data.is_empty() => Some(data),
             _ => None,
         };
@@ -1176,7 +1176,7 @@ impl Database {
 
         // Write tombstone marker (empty content)
         self.state.node
-            .write_sync(id, "main", &[], "system", timestamp_now())
+            .write_sync(id.0, "main", &[], "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         // Remove from row_table (logically deleted)
@@ -1209,7 +1209,7 @@ impl Database {
             }
 
             // Read row data
-            let data = match self.state.node.read_sync(row_id, "main") {
+            let data = match self.state.node.read_sync(row_id.0, "main") {
                 Ok(Some(data)) if !data.is_empty() => data,
                 _ => continue, // Skip deleted or missing rows
             };
@@ -1258,7 +1258,7 @@ impl Database {
                 continue;
             }
 
-            let data = match self.state.node.read_sync(row_id, "main") {
+            let data = match self.state.node.read_sync(row_id.0, "main") {
                 Ok(Some(data)) if !data.is_empty() => data,
                 _ => continue,
             };
