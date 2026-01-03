@@ -187,7 +187,7 @@ See `specs/rebac-policies.md` for full design.
 - [x] `PolicyEvaluator` with cycle detection and depth limit
 - [x] Basic expression evaluation (comparisons, AND/OR/NOT)
 - [x] INHERITS evaluation with recursive lookup
-- [ ] Integration with SELECT queries (filter results)
+- [x] Integration with SELECT queries (`select_all_as`, `select_where_as`)
 - [x] Default allow with warning for missing policies
 
 **Phase 3.3: Write Policies**

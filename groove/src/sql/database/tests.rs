@@ -323,3 +323,102 @@ fn incremental_query_column_not_found() {
     let result = db.incremental_query("SELECT * FROM users WHERE nonexistent = 'foo'");
     assert!(matches!(result, Err(DatabaseError::ColumnNotFound(_))));
 }
+
+// ========== Policy-Filtered Query Tests ==========
+
+#[test]
+fn select_all_as_filters_by_policy() {
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    // Create users table
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+
+    // Create documents table with owner_id
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+
+    // Create users
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Create documents
+    db.insert("documents", &["title", "owner_id"], vec![
+        Value::String("Alice's Doc".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+    db.insert("documents", &["title", "owner_id"], vec![
+        Value::String("Bob's Doc".into()),
+        Value::Ref(bob_id),
+    ]).unwrap();
+
+    // Without policy: both users see all documents
+    let all_docs = db.select_all("documents").unwrap();
+    assert_eq!(all_docs.len(), 2);
+
+    // Add policy: owner can read their own documents
+    db.execute("CREATE POLICY ON documents FOR SELECT WHERE owner_id = @viewer").unwrap();
+
+    // Alice can only see her document
+    let alice_docs = db.select_all_as("documents", alice_id).unwrap();
+    assert_eq!(alice_docs.len(), 1);
+    assert_eq!(alice_docs[0].values[0], Value::String("Alice's Doc".into()));
+
+    // Bob can only see his document
+    let bob_docs = db.select_all_as("documents", bob_id).unwrap();
+    assert_eq!(bob_docs.len(), 1);
+    assert_eq!(bob_docs[0].values[0], Value::String("Bob's Doc".into()));
+}
+
+#[test]
+fn select_all_as_with_inheritance() {
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE folders (name STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
+
+    // Create users
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Create folders
+    let alice_folder = db.insert("folders", &["name", "owner_id"], vec![
+        Value::String("Alice's Folder".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    // Create document in Alice's folder
+    db.insert("documents", &["title", "folder_id"], vec![
+        Value::String("Secret Doc".into()),
+        Value::Ref(alice_folder),
+    ]).unwrap();
+
+    // Add policies
+    db.execute("CREATE POLICY ON folders FOR SELECT WHERE owner_id = @viewer").unwrap();
+    db.execute("CREATE POLICY ON documents FOR SELECT WHERE INHERITS SELECT FROM folder_id").unwrap();
+
+    // Alice can see the document (via folder ownership)
+    let alice_docs = db.select_all_as("documents", alice_id).unwrap();
+    assert_eq!(alice_docs.len(), 1);
+
+    // Bob cannot see the document
+    let bob_docs = db.select_all_as("documents", bob_id).unwrap();
+    assert_eq!(bob_docs.len(), 0);
+}

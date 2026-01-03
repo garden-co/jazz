@@ -709,6 +709,27 @@ impl From<parser::ParseError> for DatabaseError {
     }
 }
 
+// ========== Policy Lookup Traits ==========
+
+use crate::sql::policy::{PolicyLookup, RowLookup};
+
+impl RowLookup for Database {
+    fn get_row(&self, table: &str, id: ObjectId) -> Option<Row> {
+        self.get(table, id).ok().flatten()
+    }
+
+    fn get_schema(&self, table: &str) -> Option<TableSchema> {
+        self.get_table(table)
+    }
+}
+
+impl PolicyLookup for Database {
+    fn get_policies(&self, table: &str) -> Option<TablePolicies> {
+        let policies = self.state.policies.read().unwrap();
+        policies.get(table).cloned()
+    }
+}
+
 impl Database {
     /// Create a new database with the given environment.
     pub fn new(env: Arc<dyn Environment>) -> Self {
@@ -1292,6 +1313,38 @@ impl Database {
         }
 
         Ok(rows)
+    }
+
+    // ========== Policy-Filtered Queries ==========
+
+    /// Select all rows from a table, filtered by policy for the given viewer.
+    pub fn select_all_as(&self, table: &str, viewer: ObjectId) -> Result<Vec<Row>, DatabaseError> {
+        let rows = self.select_all(table)?;
+        Ok(self.filter_rows_by_policy(table, rows, viewer))
+    }
+
+    /// Select rows matching a condition, filtered by policy for the given viewer.
+    pub fn select_where_as(
+        &self,
+        table: &str,
+        column: &str,
+        value: &Value,
+        viewer: ObjectId,
+    ) -> Result<Vec<Row>, DatabaseError> {
+        let rows = self.select_where(table, column, value)?;
+        Ok(self.filter_rows_by_policy(table, rows, viewer))
+    }
+
+    /// Filter a list of rows by SELECT policy for the given viewer.
+    fn filter_rows_by_policy(&self, table: &str, rows: Vec<Row>, viewer: ObjectId) -> Vec<Row> {
+        use crate::sql::policy::{PolicyConfig, PolicyEvaluator};
+
+        let config = PolicyConfig::default();
+        let mut evaluator = PolicyEvaluator::new(self, self, viewer, config);
+
+        rows.into_iter()
+            .filter(|row| evaluator.check_select(table, row).is_allowed())
+            .collect()
     }
 
     /// Find all rows referencing a target ID via a specific column.
