@@ -201,7 +201,7 @@ See `specs/rebac-policies.md` for full design.
 - [x] Integrate with incremental query graph builder (`incremental_query_as` method)
 - [x] `policy_expr_to_predicate` converts simple policies to Predicate for efficient filtering
 - [x] INHERITS flattened to JOINs for true incremental evaluation
-- [ ] Optimize predicate ordering by selectivity
+- [x] Optimize predicate ordering by selectivity
 
 **Phase 3.5: Testing and Debugging**
 - [ ] EXPLAIN POLICY command
@@ -221,7 +221,7 @@ See `specs/rebac-policies.md` for full design.
 
 ## Test Coverage
 
-Current test count: **226 tests** passing across all modules
+Current test count: **229 tests** passing across all modules
 
 - Unit tests in `sql/row.rs`, `sql/types.rs`, `sql/database/tests.rs`
 - Integration tests in `tests/` directory:

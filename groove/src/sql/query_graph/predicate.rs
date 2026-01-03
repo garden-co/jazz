@@ -153,6 +153,64 @@ impl Predicate {
             other => Predicate::Not(Box::new(other)),
         }
     }
+
+    /// Estimate the selectivity of this predicate (lower = more selective).
+    ///
+    /// Used for ordering predicates in AND expressions to evaluate
+    /// the most selective ones first for better performance.
+    pub fn selectivity(&self) -> u32 {
+        match self {
+            // Constants - trivial to evaluate
+            Predicate::True => 0,
+            Predicate::False => 0,
+
+            // Equality on id - most selective (unique)
+            Predicate::Eq { column, .. } if column == "id" => 1,
+
+            // Equality on Ref columns - very selective (indexed)
+            Predicate::Eq { column, .. } if column.ends_with("_id") => 2,
+
+            // Equality on other columns - moderately selective
+            Predicate::Eq { .. } => 3,
+
+            // Inequality - slightly less selective
+            Predicate::Ne { .. } => 4,
+
+            // NOT - depends on inner, add small penalty
+            Predicate::Not(inner) => inner.selectivity() + 1,
+
+            // AND - use min selectivity (will short-circuit on first failure)
+            Predicate::And(preds) => {
+                preds.iter().map(|p| p.selectivity()).min().unwrap_or(10)
+            }
+
+            // OR - use max selectivity (must evaluate until first success)
+            Predicate::Or(preds) => {
+                preds.iter().map(|p| p.selectivity()).max().unwrap_or(10)
+            }
+        }
+    }
+
+    /// Optimize this predicate by reordering AND clauses by selectivity.
+    ///
+    /// More selective predicates are evaluated first, allowing early cutoff.
+    pub fn optimize(self) -> Predicate {
+        match self {
+            Predicate::And(mut preds) => {
+                // Recursively optimize children
+                preds = preds.into_iter().map(|p| p.optimize()).collect();
+                // Sort by selectivity (most selective first)
+                preds.sort_by_key(|p| p.selectivity());
+                Predicate::And(preds)
+            }
+            Predicate::Or(preds) => {
+                // Recursively optimize children (but don't reorder OR)
+                Predicate::Or(preds.into_iter().map(|p| p.optimize()).collect())
+            }
+            Predicate::Not(inner) => Predicate::Not(Box::new(inner.optimize())),
+            other => other,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -306,5 +364,67 @@ mod tests {
         // NOT NOT x = x
         let p = Predicate::eq("a", Value::I64(1)).not().not();
         assert!(matches!(p, Predicate::Eq { .. }));
+    }
+
+    #[test]
+    fn selectivity_ordering() {
+        // id is most selective
+        assert!(Predicate::eq("id", Value::I64(1)).selectivity() <
+                Predicate::eq("name", Value::String("x".into())).selectivity());
+
+        // _id columns (Refs) are more selective than regular columns
+        assert!(Predicate::eq("owner_id", Value::I64(1)).selectivity() <
+                Predicate::eq("name", Value::String("x".into())).selectivity());
+
+        // Equality is more selective than inequality
+        assert!(Predicate::eq("name", Value::String("x".into())).selectivity() <
+                Predicate::ne("name", Value::String("x".into())).selectivity());
+    }
+
+    #[test]
+    fn predicate_optimize_reorders_and() {
+        // Create an AND with less selective predicate first
+        let p = Predicate::And(vec![
+            Predicate::eq("name", Value::String("Alice".into())), // selectivity 3
+            Predicate::eq("owner_id", Value::I64(1)),              // selectivity 2
+            Predicate::eq("id", Value::I64(42)),                   // selectivity 1
+        ]);
+
+        let optimized = p.optimize();
+
+        // After optimization, should be ordered by selectivity
+        if let Predicate::And(preds) = optimized {
+            // id should be first
+            assert!(matches!(&preds[0], Predicate::Eq { column, .. } if column == "id"));
+            // owner_id should be second
+            assert!(matches!(&preds[1], Predicate::Eq { column, .. } if column == "owner_id"));
+            // name should be last
+            assert!(matches!(&preds[2], Predicate::Eq { column, .. } if column == "name"));
+        } else {
+            panic!("Expected And predicate");
+        }
+    }
+
+    #[test]
+    fn predicate_optimize_nested() {
+        // Nested AND within OR should optimize the AND
+        let inner_and = Predicate::And(vec![
+            Predicate::eq("name", Value::String("x".into())),
+            Predicate::eq("id", Value::I64(1)),
+        ]);
+        let p = Predicate::Or(vec![inner_and, Predicate::True]);
+
+        let optimized = p.optimize();
+
+        if let Predicate::Or(preds) = optimized {
+            if let Predicate::And(inner) = &preds[0] {
+                // id should now be first in the inner AND
+                assert!(matches!(&inner[0], Predicate::Eq { column, .. } if column == "id"));
+            } else {
+                panic!("Expected And predicate");
+            }
+        } else {
+            panic!("Expected Or predicate");
+        }
     }
 }

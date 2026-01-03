@@ -2256,8 +2256,9 @@ impl Database {
             predicates.push(Predicate::eq(column, value));
         }
 
-        // AND all conditions together
-        Ok(predicates.into_iter().reduce(|a, b| a.and(b)).unwrap_or(Predicate::True))
+        // AND all conditions together and optimize
+        let combined = predicates.into_iter().reduce(|a, b| a.and(b)).unwrap_or(Predicate::True);
+        Ok(combined.optimize())
     }
 
     /// Build a Predicate from SQL WHERE conditions.
@@ -2291,8 +2292,9 @@ impl Database {
             predicates.push(Predicate::eq(column, value));
         }
 
-        // AND all conditions together
-        Ok(predicates.into_iter().reduce(|a, b| a.and(b)).unwrap_or(Predicate::True))
+        // AND all conditions together and optimize
+        let combined = predicates.into_iter().reduce(|a, b| a.and(b)).unwrap_or(Predicate::True);
+        Ok(combined.optimize())
     }
 }
 
