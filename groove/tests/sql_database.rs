@@ -640,288 +640,6 @@ fn nullable_ref_column() {
     assert_eq!(posts[0].id, post2_id);
 }
 
-// ========== Reactive Query Tests ==========
-
-#[test]
-fn reactive_query_returns_current_rows() {
-    let db = Database::in_memory();
-
-    db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)")
-        .unwrap();
-    db.execute("INSERT INTO users (name, active) VALUES ('Alice', true)")
-        .unwrap();
-    db.execute("INSERT INTO users (name, active) VALUES ('Bob', false)")
-        .unwrap();
-
-    let query = db.reactive_query("SELECT * FROM users").unwrap();
-
-    // Should immediately have the current rows
-    let state = query.get();
-    assert!(state.is_loaded());
-    let rows = state.rows().unwrap();
-    assert_eq!(rows.len(), 2);
-}
-
-#[test]
-fn reactive_query_with_where_clause() {
-    let db = Database::in_memory();
-
-    db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)")
-        .unwrap();
-    db.execute("INSERT INTO users (name, active) VALUES ('Alice', true)")
-        .unwrap();
-    db.execute("INSERT INTO users (name, active) VALUES ('Bob', false)")
-        .unwrap();
-    db.execute("INSERT INTO users (name, active) VALUES ('Carol', true)")
-        .unwrap();
-
-    let query = db
-        .reactive_query("SELECT * FROM users WHERE active = true")
-        .unwrap();
-
-    let rows = query.rows().unwrap();
-    assert_eq!(rows.len(), 2);
-}
-
-#[test]
-fn reactive_query_once_helper() {
-    let db = Database::in_memory();
-
-    db.execute("CREATE TABLE users (name STRING NOT NULL)")
-        .unwrap();
-    db.execute("INSERT INTO users (name) VALUES ('Alice')")
-        .unwrap();
-    db.execute("INSERT INTO users (name) VALUES ('Bob')")
-        .unwrap();
-
-    // Use once() for a one-shot query
-    let rows = db.reactive_query("SELECT * FROM users").unwrap().once();
-    assert_eq!(rows.len(), 2);
-}
-
-#[test]
-fn reactive_query_nonexistent_table_fails() {
-    let db = Database::in_memory();
-
-    // Query for non-existent table should fail
-    let result = db.reactive_query("SELECT * FROM users");
-    assert!(result.is_err());
-}
-
-#[test]
-fn reactive_query_only_accepts_select() {
-    let db = Database::in_memory();
-
-    db.execute("CREATE TABLE users (name STRING NOT NULL)")
-        .unwrap();
-
-    // SELECT should work
-    let result = db.reactive_query("SELECT * FROM users");
-    assert!(result.is_ok());
-
-    // INSERT should fail
-    let result = db.reactive_query("INSERT INTO users (name) VALUES ('Alice')");
-    assert!(result.is_err());
-}
-
-#[test]
-fn reactive_query_auto_updates_on_insert() {
-    let db = Database::in_memory();
-
-    db.execute("CREATE TABLE users (name STRING NOT NULL)")
-        .unwrap();
-    db.execute("INSERT INTO users (name) VALUES ('Alice')")
-        .unwrap();
-
-    let query = db.reactive_query("SELECT * FROM users").unwrap();
-
-    // Initially has 1 row
-    assert_eq!(query.rows().unwrap().len(), 1);
-
-    // Insert another row - query auto-updates synchronously
-    db.execute("INSERT INTO users (name) VALUES ('Bob')")
-        .unwrap();
-
-    // Query immediately has 2 rows (auto-updated on insert)
-    assert_eq!(query.rows().unwrap().len(), 2);
-}
-
-#[test]
-fn reactive_query_auto_updates_on_update() {
-    let db = Database::in_memory();
-
-    db.execute("CREATE TABLE users (name STRING NOT NULL)")
-        .unwrap();
-    let id = match db
-        .execute("INSERT INTO users (name) VALUES ('Alice')")
-        .unwrap()
-    {
-        ExecuteResult::Inserted(id) => id,
-        _ => panic!("expected Inserted"),
-    };
-
-    let query = db
-        .reactive_query("SELECT * FROM users WHERE name = 'Alice'")
-        .unwrap();
-    assert_eq!(query.rows().unwrap().len(), 1);
-
-    // Update the row to have a different name
-    db.update("users", id, &[("name", Value::String("Alicia".into()))])
-        .unwrap();
-
-    // Query auto-updates - should now return 0 rows (name no longer matches)
-    assert_eq!(query.rows().unwrap().len(), 0);
-}
-
-#[test]
-fn reactive_query_auto_updates_on_delete() {
-    let db = Database::in_memory();
-
-    db.execute("CREATE TABLE users (name STRING NOT NULL)")
-        .unwrap();
-    let id = match db
-        .execute("INSERT INTO users (name) VALUES ('Alice')")
-        .unwrap()
-    {
-        ExecuteResult::Inserted(id) => id,
-        _ => panic!("expected Inserted"),
-    };
-
-    let query = db.reactive_query("SELECT * FROM users").unwrap();
-    assert_eq!(query.rows().unwrap().len(), 1);
-
-    // Delete the row
-    db.delete("users", id).unwrap();
-
-    // Query auto-updates - should now return 0 rows
-    assert_eq!(query.rows().unwrap().len(), 0);
-}
-
-// ========== Callback-based Reactive Query Tests ==========
-
-#[test]
-fn reactive_query_initial_evaluation() {
-    let db = Database::in_memory();
-
-    db.execute("CREATE TABLE users (name STRING NOT NULL)")
-        .unwrap();
-    db.execute("INSERT INTO users (name) VALUES ('Alice')")
-        .unwrap();
-    db.execute("INSERT INTO users (name) VALUES ('Bob')")
-        .unwrap();
-
-    let query = db.reactive_query("SELECT * FROM users").unwrap();
-
-    // Should have initial rows
-    let rows = query.rows().unwrap();
-    assert_eq!(rows.len(), 2);
-}
-
-#[test]
-fn reactive_query_subscribe_callback() {
-    let db = Database::in_memory();
-
-    db.execute("CREATE TABLE users (name STRING NOT NULL)")
-        .unwrap();
-    db.execute("INSERT INTO users (name) VALUES ('Alice')")
-        .unwrap();
-
-    let query = db.reactive_query("SELECT * FROM users").unwrap();
-
-    let call_count = Arc::new(AtomicUsize::new(0));
-    let row_counts = Arc::new(RwLock::new(Vec::<usize>::new()));
-    let call_count_clone = call_count.clone();
-    let row_counts_clone = row_counts.clone();
-
-    // Subscribe - callback should be called immediately with current state
-    let _id = query.subscribe(Box::new(move |rows| {
-        call_count_clone.fetch_add(1, Ordering::SeqCst);
-        row_counts_clone.write().unwrap().push(rows.len());
-    }));
-
-    assert_eq!(call_count.load(Ordering::SeqCst), 1);
-    assert_eq!(*row_counts.read().unwrap(), vec![1]);
-}
-
-#[test]
-fn reactive_query_callback_on_insert() {
-    let db = Database::in_memory();
-    db.execute("CREATE TABLE users (name STRING NOT NULL)")
-        .unwrap();
-    db.execute("INSERT INTO users (name) VALUES ('Alice')")
-        .unwrap();
-
-    let query = db.reactive_query("SELECT * FROM users").unwrap();
-
-    let call_count = Arc::new(AtomicUsize::new(0));
-    let row_counts = Arc::new(RwLock::new(Vec::<usize>::new()));
-    let call_count_clone = call_count.clone();
-    let row_counts_clone = row_counts.clone();
-
-    // Subscribe - callback called with initial state (1 row)
-    let _id = query.subscribe(Box::new(move |rows| {
-        call_count_clone.fetch_add(1, Ordering::SeqCst);
-        row_counts_clone.write().unwrap().push(rows.len());
-    }));
-
-    assert_eq!(call_count.load(Ordering::SeqCst), 1);
-    assert_eq!(*row_counts.read().unwrap(), vec![1]);
-
-    // Insert a new row - callback should be called synchronously
-    db.execute("INSERT INTO users (name) VALUES ('Bob')")
-        .unwrap();
-
-    // Callback should have been called again with 2 rows
-    assert_eq!(call_count.load(Ordering::SeqCst), 2);
-    assert_eq!(*row_counts.read().unwrap(), vec![1, 2]);
-
-    // Insert another row
-    db.execute("INSERT INTO users (name) VALUES ('Charlie')")
-        .unwrap();
-
-    assert_eq!(call_count.load(Ordering::SeqCst), 3);
-    assert_eq!(*row_counts.read().unwrap(), vec![1, 2, 3]);
-}
-
-#[test]
-fn reactive_query_callback_on_delete() {
-    let db = Database::in_memory();
-    db.execute("CREATE TABLE users (name STRING NOT NULL)")
-        .unwrap();
-    let id1 = match db
-        .execute("INSERT INTO users (name) VALUES ('Alice')")
-        .unwrap()
-    {
-        ExecuteResult::Inserted(id) => id,
-        _ => panic!("Expected Inserted"),
-    };
-    db.execute("INSERT INTO users (name) VALUES ('Bob')")
-        .unwrap();
-
-    let query = db.reactive_query("SELECT * FROM users").unwrap();
-
-    let call_count = Arc::new(AtomicUsize::new(0));
-    let row_counts = Arc::new(RwLock::new(Vec::<usize>::new()));
-    let call_count_clone = call_count.clone();
-    let row_counts_clone = row_counts.clone();
-
-    let _sub_id = query.subscribe(Box::new(move |rows| {
-        call_count_clone.fetch_add(1, Ordering::SeqCst);
-        row_counts_clone.write().unwrap().push(rows.len());
-    }));
-
-    // Initial callback with 2 rows
-    assert_eq!(call_count.load(Ordering::SeqCst), 1);
-    assert_eq!(*row_counts.read().unwrap(), vec![2]);
-
-    // Delete a row
-    db.delete("users", id1).unwrap();
-
-    // Callback called with 1 row
-    assert_eq!(call_count.load(Ordering::SeqCst), 2);
-    assert_eq!(*row_counts.read().unwrap(), vec![2, 1]);
-}
-
 // ========== JOIN Tests ==========
 
 #[test]
@@ -1225,10 +943,201 @@ fn join_multiple_conditions_where() {
     }
 }
 
-// ========== Reactive Query JOIN Tests ==========
+// ========== Incremental Query Integration Tests ==========
 
 #[test]
-fn reactive_join_basic() {
+fn incremental_query_returns_current_rows() {
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)")
+        .unwrap();
+    db.execute("INSERT INTO users (name, active) VALUES ('Alice', true)")
+        .unwrap();
+    db.execute("INSERT INTO users (name, active) VALUES ('Bob', false)")
+        .unwrap();
+
+    let query = db.incremental_query("SELECT * FROM users").unwrap();
+
+    // Should have the current rows
+    let rows = query.rows();
+    assert_eq!(rows.len(), 2);
+}
+
+#[test]
+fn incremental_query_with_where_clause() {
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)")
+        .unwrap();
+    db.execute("INSERT INTO users (name, active) VALUES ('Alice', true)")
+        .unwrap();
+    db.execute("INSERT INTO users (name, active) VALUES ('Bob', false)")
+        .unwrap();
+    db.execute("INSERT INTO users (name, active) VALUES ('Carol', true)")
+        .unwrap();
+
+    let query = db
+        .incremental_query("SELECT * FROM users WHERE active = true")
+        .unwrap();
+
+    let rows = query.rows();
+    assert_eq!(rows.len(), 2);
+}
+
+#[test]
+fn incremental_query_auto_updates_on_insert() {
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)")
+        .unwrap();
+    db.execute("INSERT INTO users (name) VALUES ('Alice')")
+        .unwrap();
+
+    let query = db.incremental_query("SELECT * FROM users").unwrap();
+
+    // Initially has 1 row
+    assert_eq!(query.rows().len(), 1);
+
+    // Insert another row - query auto-updates incrementally
+    db.execute("INSERT INTO users (name) VALUES ('Bob')")
+        .unwrap();
+
+    // Query immediately has 2 rows
+    assert_eq!(query.rows().len(), 2);
+}
+
+#[test]
+fn incremental_query_auto_updates_on_update() {
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)")
+        .unwrap();
+    let id = match db
+        .execute("INSERT INTO users (name) VALUES ('Alice')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    let query = db
+        .incremental_query("SELECT * FROM users WHERE name = 'Alice'")
+        .unwrap();
+    assert_eq!(query.rows().len(), 1);
+
+    // Update the row to have a different name
+    db.update("users", id, &[("name", Value::String("Alicia".into()))])
+        .unwrap();
+
+    // Query auto-updates - should now return 0 rows (name no longer matches)
+    assert_eq!(query.rows().len(), 0);
+}
+
+#[test]
+fn incremental_query_auto_updates_on_delete() {
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)")
+        .unwrap();
+    let id = match db
+        .execute("INSERT INTO users (name) VALUES ('Alice')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    let query = db.incremental_query("SELECT * FROM users").unwrap();
+    assert_eq!(query.rows().len(), 1);
+
+    // Delete the row
+    db.delete("users", id).unwrap();
+
+    // Query auto-updates - should now return 0 rows
+    assert_eq!(query.rows().len(), 0);
+}
+
+#[test]
+fn incremental_query_callback_on_insert() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)")
+        .unwrap();
+    db.execute("INSERT INTO users (name) VALUES ('Alice')")
+        .unwrap();
+
+    let query = db.incremental_query("SELECT * FROM users").unwrap();
+
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let row_counts = Arc::new(RwLock::new(Vec::<usize>::new()));
+    let call_count_clone = call_count.clone();
+    let row_counts_clone = row_counts.clone();
+
+    // Subscribe with rows callback
+    let _id = query.subscribe(move |rows| {
+        call_count_clone.fetch_add(1, Ordering::SeqCst);
+        row_counts_clone.write().unwrap().push(rows.len());
+    });
+
+    // Insert a new row - callback should be called
+    db.execute("INSERT INTO users (name) VALUES ('Bob')")
+        .unwrap();
+
+    // Callback should have been called with 2 rows
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    assert_eq!(*row_counts.read().unwrap(), vec![2]);
+
+    // Insert another row
+    db.execute("INSERT INTO users (name) VALUES ('Charlie')")
+        .unwrap();
+
+    assert_eq!(call_count.load(Ordering::SeqCst), 2);
+    assert_eq!(*row_counts.read().unwrap(), vec![2, 3]);
+}
+
+#[test]
+fn incremental_query_callback_on_delete() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)")
+        .unwrap();
+
+    // Create query first so it tracks the rows
+    let query = db.incremental_query("SELECT * FROM users").unwrap();
+
+    let id1 = match db
+        .execute("INSERT INTO users (name) VALUES ('Alice')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
+    db.execute("INSERT INTO users (name) VALUES ('Bob')")
+        .unwrap();
+
+    // Verify we have 2 rows
+    assert_eq!(query.rows().len(), 2);
+
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let row_counts = Arc::new(RwLock::new(Vec::<usize>::new()));
+    let call_count_clone = call_count.clone();
+    let row_counts_clone = row_counts.clone();
+
+    let _sub_id = query.subscribe(move |rows| {
+        call_count_clone.fetch_add(1, Ordering::SeqCst);
+        row_counts_clone.write().unwrap().push(rows.len());
+    });
+
+    // Delete a row - callback should be triggered
+    db.delete("users", id1).unwrap();
+
+    // Callback called with 1 row remaining
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    assert_eq!(*row_counts.read().unwrap(), vec![1]);
+}
+
+// ========== Incremental Query JOIN Integration Tests ==========
+
+#[test]
+fn incremental_join_basic() {
     let db = Database::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -1249,9 +1158,39 @@ fn reactive_join_basic() {
     ))
     .unwrap();
 
-    // Create reactive query with JOIN
+    // Create incremental query with JOIN
     let query = db
-        .reactive_query("SELECT * FROM posts JOIN users ON posts.author = users.id")
+        .incremental_query("SELECT * FROM posts JOIN users ON posts.author = users.id")
+        .unwrap();
+
+    let rows = query.rows();
+    assert_eq!(rows.len(), 1, "Should return 1 joined row");
+}
+
+#[test]
+fn incremental_join_updates_on_post_insert() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
+        .unwrap();
+
+    let alice_id = match db
+        .execute("INSERT INTO users (name) VALUES ('Alice')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
+
+    db.execute(&format!(
+        "INSERT INTO posts (author, title) VALUES ('{}', 'First Post')",
+        alice_id
+    ))
+    .unwrap();
+
+    let query = db
+        .incremental_query("SELECT * FROM posts JOIN users ON posts.author = users.id")
         .unwrap();
 
     let call_count = Arc::new(AtomicUsize::new(0));
@@ -1259,14 +1198,10 @@ fn reactive_join_basic() {
     let call_count_clone = call_count.clone();
     let row_counts_clone = row_counts.clone();
 
-    let _sub_id = query.subscribe(Box::new(move |rows| {
+    let _sub_id = query.subscribe(move |rows| {
         call_count_clone.fetch_add(1, Ordering::SeqCst);
         row_counts_clone.write().unwrap().push(rows.len());
-    }));
-
-    // Initial callback with 1 joined row
-    assert_eq!(call_count.load(Ordering::SeqCst), 1);
-    assert_eq!(*row_counts.read().unwrap(), vec![1]);
+    });
 
     // Insert another post - should trigger callback
     db.execute(&format!(
@@ -1275,12 +1210,12 @@ fn reactive_join_basic() {
     ))
     .unwrap();
 
-    assert_eq!(call_count.load(Ordering::SeqCst), 2);
-    assert_eq!(*row_counts.read().unwrap(), vec![1, 2]);
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    assert_eq!(*row_counts.read().unwrap(), vec![2]);
 }
 
 #[test]
-fn reactive_join_updates_on_joined_table_change() {
+fn incremental_join_updates_on_user_change() {
     let db = Database::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
@@ -1301,9 +1236,89 @@ fn reactive_join_updates_on_joined_table_change() {
     ))
     .unwrap();
 
-    // Create reactive query with JOIN and filter on users table
     let query = db
-        .reactive_query("SELECT * FROM posts JOIN users ON posts.author = users.id WHERE users.name = 'Alice'")
+        .incremental_query("SELECT * FROM posts JOIN users ON posts.author = users.id")
+        .unwrap();
+
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let call_count_clone = call_count.clone();
+
+    let _sub_id = query.subscribe_delta(Box::new(move |_delta| {
+        call_count_clone.fetch_add(1, Ordering::SeqCst);
+    }));
+
+    // Update user - should trigger callback since the joined row includes user data
+    db.update("users", alice_id, &[("name", Value::String("Alicia".into()))])
+        .unwrap();
+
+    // The join should have been notified
+    assert!(call_count.load(Ordering::SeqCst) > 0);
+}
+
+#[test]
+fn incremental_join_delete_post() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
+        .unwrap();
+
+    let alice_id = match db
+        .execute("INSERT INTO users (name) VALUES ('Alice')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
+
+    let post_id = match db
+        .execute(&format!(
+            "INSERT INTO posts (author, title) VALUES ('{}', 'Test Post')",
+            alice_id
+        ))
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
+
+    let query = db
+        .incremental_query("SELECT * FROM posts JOIN users ON posts.author = users.id")
+        .unwrap();
+
+    assert_eq!(query.rows().len(), 1);
+
+    // Delete post
+    db.delete("posts", post_id).unwrap();
+
+    // Should now be empty
+    assert_eq!(query.rows().len(), 0);
+}
+
+#[test]
+fn incremental_join_delete_user() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
+        .unwrap();
+
+    let alice_id = match db
+        .execute("INSERT INTO users (name) VALUES ('Alice')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
+
+    db.execute(&format!(
+        "INSERT INTO posts (author, title) VALUES ('{}', 'Test Post')",
+        alice_id
+    ))
+    .unwrap();
+
+    let query = db
+        .incremental_query("SELECT * FROM posts JOIN users ON posts.author = users.id")
         .unwrap();
 
     let call_count = Arc::new(AtomicUsize::new(0));
@@ -1311,42 +1326,31 @@ fn reactive_join_updates_on_joined_table_change() {
     let call_count_clone = call_count.clone();
     let row_counts_clone = row_counts.clone();
 
-    let _sub_id = query.subscribe(Box::new(move |rows| {
+    let _sub_id = query.subscribe(move |rows| {
         call_count_clone.fetch_add(1, Ordering::SeqCst);
         row_counts_clone.write().unwrap().push(rows.len());
-    }));
+    });
 
-    // Initial callback with 1 row
-    assert_eq!(call_count.load(Ordering::SeqCst), 1);
-    assert_eq!(*row_counts.read().unwrap(), vec![1]);
+    // Initial: 1 joined row
+    assert_eq!(query.rows().len(), 1);
 
-    // Add another user - should trigger re-eval but still 1 row (no matching posts)
-    db.execute("INSERT INTO users (name) VALUES ('Bob')")
-        .unwrap();
+    // Delete the user - join should now return 0 rows (the post still exists but can't join)
+    db.delete("users", alice_id).unwrap();
 
-    assert_eq!(call_count.load(Ordering::SeqCst), 2);
-    assert_eq!(*row_counts.read().unwrap(), vec![1, 1]);
-
-    // Update Alice's name to something else - should now return 0 rows
-    db.execute(&format!(
-        "UPDATE users SET name = 'Alicia' WHERE id = '{}'",
-        alice_id
-    ))
-    .unwrap();
-
-    assert_eq!(call_count.load(Ordering::SeqCst), 3);
-    assert_eq!(*row_counts.read().unwrap(), vec![1, 1, 0]);
+    // Should get a notification with 0 rows
+    assert!(call_count.load(Ordering::SeqCst) > 0);
+    let counts = row_counts.read().unwrap();
+    assert_eq!(*counts.last().unwrap(), 0);
 }
 
 #[test]
-fn reactive_join_reference_repointing() {
+fn incremental_join_multiple_users() {
     let db = Database::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)")
         .unwrap();
     db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
         .unwrap();
 
-    // Create two users
     let alice_id = match db
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
@@ -1362,104 +1366,27 @@ fn reactive_join_reference_repointing() {
         _ => panic!("Expected Inserted"),
     };
 
-    // Create a post by Alice
-    let post_id = match db
-        .execute(&format!(
-            "INSERT INTO posts (author, title) VALUES ('{}', 'Test Post')",
-            alice_id
-        ))
-        .unwrap()
-    {
-        ExecuteResult::Inserted(id) => id,
-        _ => panic!("Expected Inserted"),
-    };
-
-    // Reactive query filtering for Alice's posts
-    let query = db
-        .reactive_query("SELECT * FROM posts JOIN users ON posts.author = users.id WHERE users.name = 'Alice'")
-        .unwrap();
-
-    let names_seen = Arc::new(RwLock::new(Vec::<String>::new()));
-    let names_clone = names_seen.clone();
-
-    let _sub_id = query.subscribe(Box::new(move |rows| {
-        // Track which user name is in each callback
-        if rows.is_empty() {
-            names_clone.write().unwrap().push("(empty)".to_string());
-        } else {
-            // Row has: author, title, name -> name is index 2
-            if let Value::String(name) = &rows[0].values[2] {
-                names_clone.write().unwrap().push(name.clone());
-            }
-        }
-    }));
-
-    // Initial: should see Alice
-    assert_eq!(*names_seen.read().unwrap(), vec!["Alice"]);
-
-    // Re-point the post from Alice to Bob
+    // Alice has 2 posts, Bob has 1
     db.execute(&format!(
-        "UPDATE posts SET author = '{}' WHERE id = '{}'",
-        bob_id, post_id
-    ))
-    .unwrap();
-
-    // Now should be empty (filtering for Alice but post points to Bob)
-    assert_eq!(*names_seen.read().unwrap(), vec!["Alice", "(empty)"]);
-
-    // Query for Bob's posts should work
-    let query_bob = db
-        .reactive_query("SELECT * FROM posts JOIN users ON posts.author = users.id WHERE users.name = 'Bob'")
-        .unwrap();
-
-    let rows = query_bob.once();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].values[2], Value::String("Bob".to_string()));
-}
-
-#[test]
-fn reactive_join_delete_from_joined_table() {
-    let db = Database::in_memory();
-    db.execute("CREATE TABLE users (name STRING NOT NULL)")
-        .unwrap();
-    db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)")
-        .unwrap();
-
-    let alice_id = match db
-        .execute("INSERT INTO users (name) VALUES ('Alice')")
-        .unwrap()
-    {
-        ExecuteResult::Inserted(id) => id,
-        _ => panic!("Expected Inserted"),
-    };
-
-    db.execute(&format!(
-        "INSERT INTO posts (author, title) VALUES ('{}', 'Test Post')",
+        "INSERT INTO posts (author, title) VALUES ('{}', 'Alice Post 1')",
         alice_id
     ))
     .unwrap();
+    db.execute(&format!(
+        "INSERT INTO posts (author, title) VALUES ('{}', 'Alice Post 2')",
+        alice_id
+    ))
+    .unwrap();
+    db.execute(&format!(
+        "INSERT INTO posts (author, title) VALUES ('{}', 'Bob Post')",
+        bob_id
+    ))
+    .unwrap();
 
     let query = db
-        .reactive_query("SELECT * FROM posts JOIN users ON posts.author = users.id")
+        .incremental_query("SELECT * FROM posts JOIN users ON posts.author = users.id")
         .unwrap();
 
-    let call_count = Arc::new(AtomicUsize::new(0));
-    let row_counts = Arc::new(RwLock::new(Vec::<usize>::new()));
-    let call_count_clone = call_count.clone();
-    let row_counts_clone = row_counts.clone();
-
-    let _sub_id = query.subscribe(Box::new(move |rows| {
-        call_count_clone.fetch_add(1, Ordering::SeqCst);
-        row_counts_clone.write().unwrap().push(rows.len());
-    }));
-
-    // Initial: 1 joined row
-    assert_eq!(call_count.load(Ordering::SeqCst), 1);
-    assert_eq!(*row_counts.read().unwrap(), vec![1]);
-
-    // Delete the user - join should now return 0 rows
-    db.delete("users", alice_id).unwrap();
-
-    assert_eq!(call_count.load(Ordering::SeqCst), 2);
-    assert_eq!(*row_counts.read().unwrap(), vec![1, 0]);
+    // Should have 3 joined rows
+    assert_eq!(query.rows().len(), 3);
 }

@@ -116,6 +116,111 @@ impl QueryGraphBuilder {
     }
 }
 
+/// Builder for constructing JOIN query graphs.
+///
+/// This builder creates graphs that join a left (primary) table with a right
+/// table on a reference column.
+pub struct JoinGraphBuilder {
+    left_table: String,
+    left_schema: TableSchema,
+    right_table: String,
+    right_schema: TableSchema,
+    left_column: String,
+    nodes: Vec<QueryNode>,
+    next_id: u32,
+}
+
+impl JoinGraphBuilder {
+    /// Create a new builder for a JOIN query.
+    ///
+    /// - `left_table`: The primary table (FROM clause)
+    /// - `left_schema`: Schema of the primary table
+    /// - `right_table`: The joined table (JOIN clause)
+    /// - `right_schema`: Schema of the joined table
+    /// - `left_column`: The Ref column in left table that references right table
+    pub fn new(
+        left_table: impl Into<String>,
+        left_schema: TableSchema,
+        right_table: impl Into<String>,
+        right_schema: TableSchema,
+        left_column: impl Into<String>,
+    ) -> Self {
+        Self {
+            left_table: left_table.into(),
+            left_schema,
+            right_table: right_table.into(),
+            right_schema,
+            left_column: left_column.into(),
+            nodes: Vec::new(),
+            next_id: 0,
+        }
+    }
+
+    /// Allocate a new node ID.
+    fn alloc_id(&mut self) -> NodeId {
+        let id = NodeId(self.next_id);
+        self.next_id += 1;
+        id
+    }
+
+    /// Add the join node as a source.
+    ///
+    /// This is the first node in a JOIN graph - it handles the join logic.
+    pub fn join(&mut self) -> NodeId {
+        let id = self.alloc_id();
+        self.nodes.push(QueryNode::Join {
+            left_table: self.left_table.clone(),
+            right_table: self.right_table.clone(),
+            left_column: self.left_column.clone(),
+            right_schema: self.right_schema.clone(),
+            cached_pairs: HashSet::new(),
+            cached_joined: HashMap::new(),
+        });
+        id
+    }
+
+    /// Add a filter node on the joined result.
+    ///
+    /// Note: The predicate should match the joined row structure
+    /// (left columns first, then right columns).
+    pub fn filter(&mut self, input: NodeId, predicate: Predicate) -> NodeId {
+        let id = self.alloc_id();
+        self.nodes.push(QueryNode::Filter {
+            table: self.left_table.clone(), // Primary table for identification
+            input,
+            predicate,
+            cached_ids: HashSet::new(),
+        });
+        id
+    }
+
+    /// Add the output node and build the graph.
+    pub fn output(mut self, input: NodeId, graph_id: GraphId) -> QueryGraph {
+        let output_id = self.alloc_id();
+        self.nodes.push(QueryNode::Output {
+            table: self.left_table.clone(),
+            input,
+        });
+
+        // Build node_indices map
+        let mut node_indices = HashMap::new();
+        for (idx, _) in self.nodes.iter().enumerate() {
+            node_indices.insert(NodeId(idx as u32), idx);
+        }
+
+        QueryGraph::new_join(
+            graph_id,
+            self.left_table,
+            self.left_schema,
+            self.right_table,
+            self.right_schema,
+            self.nodes,
+            node_indices,
+            output_id,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

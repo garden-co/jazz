@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 
 use crate::commit::CommitId;
-use crate::sql::row::Row;
+use crate::sql::row::{Row, Value};
+use crate::sql::schema::TableSchema;
 use crate::sql::ObjectId;
 
 /// Reference to prior row state via commit graph.
@@ -230,10 +231,81 @@ impl DeltaBatch {
     }
 }
 
+/// A row that has been joined from multiple tables.
+///
+/// This represents the result of a JOIN operation, containing the
+/// row data from the primary table plus any joined tables.
+#[derive(Clone, Debug)]
+pub struct JoinedRow {
+    /// The primary (left) table name.
+    pub primary_table: String,
+    /// Row ID from the primary table.
+    pub primary_id: ObjectId,
+    /// Column values from all tables in order: primary columns, then join1 columns, etc.
+    pub values: Vec<Value>,
+    /// Map from table name to (row_id, start_column_index).
+    /// This allows looking up which columns belong to which table.
+    table_offsets: HashMap<String, (ObjectId, usize)>,
+}
+
+impl JoinedRow {
+    /// Create a JoinedRow from a single table's row.
+    pub fn from_single(table: &str, row: Row) -> Self {
+        let mut table_offsets = HashMap::new();
+        table_offsets.insert(table.to_string(), (row.id, 0));
+
+        Self {
+            primary_table: table.to_string(),
+            primary_id: row.id,
+            values: row.values,
+            table_offsets,
+        }
+    }
+
+    /// Add columns from a joined table.
+    pub fn add_joined(&mut self, table: &str, row: Row) {
+        let start_idx = self.values.len();
+        self.table_offsets.insert(table.to_string(), (row.id, start_idx));
+        self.values.extend(row.values);
+    }
+
+    /// Get the row ID for a specific table.
+    pub fn get_row_id(&self, table: &str) -> Option<ObjectId> {
+        self.table_offsets.get(table).map(|(id, _)| *id)
+    }
+
+    /// Get a column value by table and column index within that table.
+    pub fn get_value(&self, table: &str, col_idx: usize) -> Option<&Value> {
+        let (_, start) = self.table_offsets.get(table)?;
+        self.values.get(start + col_idx)
+    }
+
+    /// Get a column value by table name and column name.
+    pub fn get_column(&self, table: &str, column: &str, schema: &TableSchema) -> Option<&Value> {
+        let col_idx = schema.column_index(column)?;
+        self.get_value(table, col_idx)
+    }
+
+    /// Convert to an output Row using the joined values.
+    /// The output row ID is the primary table's row ID.
+    pub fn to_output_row(&self) -> Row {
+        Row::new(self.primary_id, self.values.clone())
+    }
+
+    /// Check if this joined row contains a specific table.
+    pub fn has_table(&self, table: &str) -> bool {
+        self.table_offsets.contains_key(table)
+    }
+
+    /// Get all table names in this joined row.
+    pub fn tables(&self) -> impl Iterator<Item = &str> {
+        self.table_offsets.keys().map(|s| s.as_str())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sql::row::Value;
 
     fn make_row(id: u128, name: &str) -> Row {
         Row::new(ObjectId::new(id), vec![Value::String(name.to_string())])

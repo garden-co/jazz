@@ -43,7 +43,7 @@ mod predicate;
 pub mod registry;
 
 // Re-export main types
-pub use builder::QueryGraphBuilder;
+pub use builder::{JoinGraphBuilder, QueryGraphBuilder};
 pub use cache::RowCache;
 pub use delta::{DeltaBatch, PriorState, RowDelta};
 pub use graph::{GraphId, GraphState, QueryGraph};

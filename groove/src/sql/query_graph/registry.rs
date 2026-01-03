@@ -27,13 +27,6 @@ type ArcCallback = std::sync::Arc<dyn Fn(&DeltaBatch) + Send + Sync>;
 #[cfg(feature = "wasm")]
 type ArcCallback = std::sync::Arc<dyn Fn(&DeltaBatch)>;
 
-/// Callback type for full row updates (convenience wrapper).
-#[cfg(not(feature = "wasm"))]
-pub type RowsCallback = Box<dyn Fn(Vec<Row>) + Send + Sync>;
-
-#[cfg(feature = "wasm")]
-pub type RowsCallback = Box<dyn Fn(Vec<Row>)>;
-
 /// A registered query with its graph and callbacks.
 struct RegisteredQuery {
     graph: QueryGraph,
@@ -118,7 +111,9 @@ impl GraphRegistry {
         };
 
         graph.set_id(id);
-        let table = graph.table().to_string();
+
+        // Get all tables this graph depends on (for JOIN queries)
+        let tables: Vec<String> = graph.all_tables().iter().cloned().collect();
 
         // Add to queries
         self.queries
@@ -126,13 +121,11 @@ impl GraphRegistry {
             .unwrap()
             .insert(id, RegisteredQuery::new(graph));
 
-        // Add to table index
-        self.table_index
-            .write()
-            .unwrap()
-            .entry(table)
-            .or_default()
-            .push(id);
+        // Add to table index for ALL tables this graph depends on
+        let mut index = self.table_index.write().unwrap();
+        for table in tables {
+            index.entry(table).or_default().push(id);
+        }
 
         id
     }
@@ -141,13 +134,14 @@ impl GraphRegistry {
     pub fn unregister(&self, id: GraphId) {
         let mut queries = self.queries.write().unwrap();
         if let Some(query) = queries.remove(&id) {
-            // Remove from table index
+            // Remove from table index for ALL tables
             let mut index = self.table_index.write().unwrap();
-            let table = query.graph.table();
-            if let Some(graphs) = index.get_mut(table) {
-                graphs.retain(|&g| g != id);
-                if graphs.is_empty() {
-                    index.remove(table);
+            for table in query.graph.all_tables() {
+                if let Some(graphs) = index.get_mut(table) {
+                    graphs.retain(|&g| g != id);
+                    if graphs.is_empty() {
+                        index.remove(table);
+                    }
                 }
             }
         }
@@ -187,8 +181,9 @@ impl GraphRegistry {
     /// Notify all relevant graphs of a row change.
     ///
     /// This is called by the database after insert/update/delete operations.
+    /// For JOIN queries, the graph will process the delta from the source table.
     pub fn notify_row_change(&self, table: &str, delta: RowDelta, db: &DatabaseState) {
-        // Find all graphs for this table
+        // Find all graphs that depend on this table
         let graph_ids: Vec<GraphId> = {
             let index = self.table_index.read().unwrap();
             index.get(table).cloned().unwrap_or_default()
@@ -207,7 +202,13 @@ impl GraphRegistry {
                 .into_iter()
                 .filter_map(|graph_id| {
                     queries.get_mut(&graph_id).map(|query| {
-                        let output_delta = query.graph.process_change(delta.clone(), &mut cache, db);
+                        // Use process_change_from_table so JOIN graphs know which table changed
+                        let output_delta = query.graph.process_change_from_table(
+                            delta.clone(),
+                            table,
+                            &mut cache,
+                            db,
+                        );
                         let callbacks = query.get_callbacks();
                         (output_delta, callbacks)
                     })

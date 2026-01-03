@@ -1,16 +1,16 @@
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, RwLock};
 
 use crate::node::{generate_object_id, LocalNode};
 use crate::listener::ListenerId;
 use crate::sql::index::RefIndex;
 use crate::sql::parser::{self, Condition, Join, Projection, Select, Statement};
 use crate::sql::query_graph::registry::{GraphRegistry, OutputCallback};
-use crate::sql::query_graph::{GraphId, Predicate, PriorState, QueryGraphBuilder, RowDelta};
+use crate::sql::query_graph::{GraphId, JoinGraphBuilder, Predicate, PriorState, QueryGraphBuilder, RowDelta};
 use crate::sql::row::{decode_row, encode_row, Row, RowError, Value};
 use crate::sql::schema::{ColumnType, SchemaError, TableSchema};
 use crate::sql::table_rows::TableRows;
-use crate::sql::types::{IndexKey, ObjectId, QueryState, SchemaId};
+use crate::sql::types::{IndexKey, ObjectId, SchemaId};
 use crate::storage::Environment;
 
 /// Coerce a Value to match the expected ColumnType.
@@ -180,145 +180,12 @@ impl JoinedRow {
     }
 }
 
-/// Type alias for query callbacks.
-/// For native builds, requires Send + Sync for thread safety.
-/// For WASM, allows non-Send/Sync callbacks (WASM is single-threaded).
-#[cfg(not(feature = "wasm"))]
-pub type QueryCallback = Box<dyn Fn(Arc<Vec<Row>>) + Send + Sync>;
-
-#[cfg(feature = "wasm")]
-pub type QueryCallback = Box<dyn Fn(Arc<Vec<Row>>)>;
-
-// ========== Callback-based Reactive Query ==========
-
-/// Internal shared state for a ReactiveQuery.
-struct ReactiveQueryInner {
-    /// Reference to database state for re-evaluation.
-    db_state: Arc<DatabaseState>,
-    /// The parsed SELECT statement.
-    select: Select,
-    /// Table name (for registry lookup).
-    table: String,
-    /// Current cached result.
-    current: RwLock<Option<Arc<Vec<Row>>>>,
-    /// User callbacks for query changes.
-    callbacks: RwLock<HashMap<ListenerId, QueryCallback>>,
-    /// Next callback ID counter.
-    next_callback_id: RwLock<u64>,
-}
-
-impl ReactiveQueryInner {
-    fn evaluate_and_notify(&self) {
-        let rows = Arc::new(self.evaluate());
-        *self.current.write().unwrap() = Some(rows.clone());
-
-        // Notify all callbacks synchronously
-        let callbacks = self.callbacks.read().unwrap();
-        for callback in callbacks.values() {
-            callback(rows.clone());
-        }
-    }
-
-    fn evaluate(&self) -> Vec<Row> {
-        self.db_state.execute_select(&self.select)
-    }
-}
-
-/// A reactive query with synchronous callback support.
-/// When underlying data changes, all registered callbacks are called synchronously.
-#[derive(Clone)]
-pub struct ReactiveQuery {
-    inner: Arc<ReactiveQueryInner>,
-}
-
-impl std::fmt::Debug for ReactiveQuery {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ReactiveQuery")
-            .field("table", &self.inner.table)
-            .finish()
-    }
-}
-
-impl ReactiveQuery {
-    fn new(db_state: Arc<DatabaseState>, select: Select) -> Self {
-        let table = select.from.table.clone();
-        let inner = Arc::new(ReactiveQueryInner {
-            db_state,
-            select,
-            table,
-            current: RwLock::new(None),
-            callbacks: RwLock::new(HashMap::new()),
-            next_callback_id: RwLock::new(1),
-        });
-
-        // Evaluate immediately
-        inner.evaluate_and_notify();
-
-        ReactiveQuery { inner }
-    }
-
-    /// Get the table name this query is for.
-    pub fn table(&self) -> &str {
-        &self.inner.table
-    }
-
-    /// Get the current query state.
-    pub fn get(&self) -> QueryState {
-        match self.inner.current.read().unwrap().as_ref() {
-            Some(rows) => QueryState::Loaded(rows.as_ref().clone()),
-            None => QueryState::Loading,
-        }
-    }
-
-    /// Get the rows if loaded.
-    pub fn rows(&self) -> Option<Vec<Row>> {
-        self.inner.current.read().unwrap().as_ref().map(|r| r.as_ref().clone())
-    }
-
-    /// Subscribe to query updates with a callback.
-    /// The callback is called immediately with current state, then on every update.
-    /// Returns a listener ID that can be used to unsubscribe.
-    pub fn subscribe(&self, callback: QueryCallback) -> ListenerId {
-        let id = {
-            let mut next = self.inner.next_callback_id.write().unwrap();
-            let id = ListenerId::new(*next);
-            *next += 1;
-            id
-        };
-
-        // Call immediately with current state
-        if let Some(rows) = self.inner.current.read().unwrap().as_ref() {
-            callback(rows.clone());
-        }
-
-        self.inner.callbacks.write().unwrap().insert(id, callback);
-        id
-    }
-
-    /// Unsubscribe a callback.
-    pub fn unsubscribe(&self, id: ListenerId) -> bool {
-        self.inner.callbacks.write().unwrap().remove(&id).is_some()
-    }
-
-    /// Execute a one-shot query: get the current rows and immediately unsubscribe.
-    /// This is useful for non-reactive queries where you just want the current state.
-    pub fn once(self) -> Vec<Row> {
-        self.rows().unwrap_or_default()
-    }
-
-    /// Get the inner Arc (for registry).
-    fn inner_weak(&self) -> Weak<ReactiveQueryInner> {
-        Arc::downgrade(&self.inner)
-    }
-}
-
 // ========== Incremental Query (Query Graph based) ==========
 
 /// A handle to an incremental query graph.
 ///
-/// Unlike `ReactiveQuery` which re-evaluates the entire query on changes,
-/// `IncrementalQuery` uses incremental computation - only processing the
-/// delta from each change and propagating it through the computation graph.
+/// Uses incremental computation - only processing the delta from each
+/// change and propagating it through the computation graph.
 ///
 /// The query is automatically cleaned up when this handle is dropped.
 #[derive(Clone)]
@@ -360,7 +227,29 @@ impl IncrementalQuery {
     ///
     /// This is a convenience wrapper that provides the full current row set
     /// on each change, rather than the delta. Less efficient but simpler.
+    #[cfg(not(feature = "wasm"))]
     pub fn subscribe(&self, callback: impl Fn(Vec<Row>) + Send + Sync + 'static) -> Option<ListenerId> {
+        let db_state = self.db_state.clone();
+        let graph_id = self.graph_id;
+
+        self.db_state.graph_registry.subscribe(
+            self.graph_id,
+            Box::new(move |_delta| {
+                let rows = db_state
+                    .graph_registry
+                    .get_output(graph_id, &db_state)
+                    .unwrap_or_default();
+                callback(rows);
+            }),
+        )
+    }
+
+    /// Subscribe to query output changes with a full rows callback (WASM version).
+    ///
+    /// This is a convenience wrapper that provides the full current row set
+    /// on each change, rather than the delta. Less efficient but simpler.
+    #[cfg(feature = "wasm")]
+    pub fn subscribe(&self, callback: impl Fn(Vec<Row>) + 'static) -> Option<ListenerId> {
         let db_state = self.db_state.clone();
         let graph_id = self.graph_id;
 
@@ -400,73 +289,6 @@ impl Drop for IncrementalQuery {
     }
 }
 
-/// Registry for ReactiveQuery instances.
-/// Uses weak references so queries are automatically cleaned up when dropped.
-#[derive(Default)]
-struct ReactiveQueryRegistry {
-    /// Active queries by table name.
-    /// Multiple queries can exist for the same table.
-    queries: RwLock<HashMap<String, Vec<Weak<ReactiveQueryInner>>>>,
-}
-
-impl ReactiveQueryRegistry {
-    fn new() -> Self {
-        ReactiveQueryRegistry {
-            queries: RwLock::new(HashMap::new()),
-        }
-    }
-
-    /// Register a query for all tables it depends on.
-    fn register(&self, query: &ReactiveQuery, tables: &[String]) {
-        let mut queries = self.queries.write().unwrap();
-        for table in tables {
-            queries
-                .entry(table.clone())
-                .or_default()
-                .push(query.inner_weak());
-        }
-    }
-
-    /// Refresh all active queries for a table.
-    fn refresh_table(&self, table: &str) {
-        let queries = self.queries.read().unwrap();
-        if let Some(table_queries) = queries.get(table) {
-            for weak in table_queries {
-                if let Some(inner) = weak.upgrade() {
-                    inner.evaluate_and_notify();
-                }
-            }
-        }
-    }
-
-    /// Clean up expired queries.
-    #[cfg(test)]
-    fn cleanup(&self) {
-        let mut queries = self.queries.write().unwrap();
-        for table_queries in queries.values_mut() {
-            table_queries.retain(|w| w.strong_count() > 0);
-        }
-        queries.retain(|_, v| !v.is_empty());
-    }
-
-    /// Count the number of active queries (for testing).
-    /// This cleans up expired weak references first, then counts.
-    #[cfg(test)]
-    fn active_query_count(&self) -> usize {
-        self.cleanup();
-        let queries = self.queries.read().unwrap();
-        queries.values().map(|v| v.len()).sum()
-    }
-
-    /// Count the number of active queries for a specific table (for testing).
-    #[cfg(test)]
-    fn active_query_count_for_table(&self, table: &str) -> usize {
-        self.cleanup();
-        let queries = self.queries.read().unwrap();
-        queries.get(table).map(|v| v.len()).unwrap_or(0)
-    }
-}
-
 /// Shared database state that can be held by queries for re-evaluation.
 /// This is the core data that queries need access to.
 pub struct DatabaseState {
@@ -481,8 +303,6 @@ pub struct DatabaseState {
     row_table: RwLock<HashMap<ObjectId, String>>,
     /// Reference index objects: (source_table, source_column) -> object ID.
     index_objects: RwLock<HashMap<IndexKey, ObjectId>>,
-    /// Registry for ReactiveQuery instances (legacy).
-    reactive_queries: ReactiveQueryRegistry,
     /// Registry for incremental QueryGraph instances.
     graph_registry: GraphRegistry,
 }
@@ -504,7 +324,6 @@ impl DatabaseState {
             table_rows_objects: RwLock::new(HashMap::new()),
             row_table: RwLock::new(HashMap::new()),
             index_objects: RwLock::new(HashMap::new()),
-            reactive_queries: ReactiveQueryRegistry::new(),
             graph_registry: GraphRegistry::new(),
         }
     }
@@ -517,7 +336,6 @@ impl DatabaseState {
             table_rows_objects: RwLock::new(HashMap::new()),
             row_table: RwLock::new(HashMap::new()),
             index_objects: RwLock::new(HashMap::new()),
-            reactive_queries: ReactiveQueryRegistry::new(),
             graph_registry: GraphRegistry::new(),
         }
     }
@@ -577,7 +395,7 @@ impl DatabaseState {
     }
 
     /// Get a single row by ID.
-    fn get_row(&self, table: &str, id: ObjectId) -> Option<Row> {
+    pub fn get_row(&self, table: &str, id: ObjectId) -> Option<Row> {
         let schema = self.get_schema(table)?;
 
         // Check if row belongs to this table
@@ -600,6 +418,13 @@ impl DatabaseState {
         };
 
         Some(Row::new(id, values))
+    }
+
+    /// Find all rows where `column` references `target_id`.
+    ///
+    /// This is used by JOIN queries to find all left rows referencing a right row.
+    pub fn find_referencing(&self, table: &str, column: &str, target_id: ObjectId) -> Vec<Row> {
+        self.select_where(table, column, &Value::Ref(target_id))
     }
 
     /// Find rows matching a column = value condition.
@@ -892,19 +717,6 @@ impl Database {
         &self.state
     }
 
-    /// Get the count of active reactive queries (for testing).
-    /// This triggers cleanup of expired weak references first.
-    #[cfg(test)]
-    pub fn active_query_count(&self) -> usize {
-        self.state.reactive_queries.active_query_count()
-    }
-
-    /// Get the count of active reactive queries for a specific table (for testing).
-    #[cfg(test)]
-    pub fn active_query_count_for_table(&self, table: &str) -> usize {
-        self.state.reactive_queries.active_query_count_for_table(table)
-    }
-
     // ========== Index Object Helpers ==========
 
     /// Read an index from its object.
@@ -1142,10 +954,7 @@ impl Database {
             }
         }
 
-        // Re-evaluate affected queries synchronously
-        self.refresh_table_queries(table);
-
-        // Notify incremental query graphs
+        // Notify query graphs of the change
         let row = Row::new(row_id, row_values);
         self.state.graph_registry.notify_row_change(table, RowDelta::Added(row), &*self.state);
 
@@ -1275,10 +1084,7 @@ impl Database {
             }
         }
 
-        // Re-evaluate affected queries synchronously
-        self.refresh_table_queries(table);
-
-        // Notify incremental query graphs
+        // Notify query graphs of the change
         let new_row = Row::new(id, new_values);
         self.state.graph_registry.notify_row_change(
             table,
@@ -1339,15 +1145,12 @@ impl Database {
         // Remove from row_table (logically deleted)
         self.state.row_table.write().unwrap().remove(&id);
 
-        // Remove from table rows object (for reactive queries)
+        // Remove from table rows object
         let mut table_rows = self.read_table_rows(table)?;
         table_rows.remove(id);
         self.write_table_rows(table, &table_rows)?;
 
-        // Re-evaluate affected queries synchronously
-        self.refresh_table_queries(table);
-
-        // Notify incremental query graphs
+        // Notify query graphs of the change
         self.state.graph_registry.notify_row_change(
             table,
             RowDelta::Removed {
@@ -1541,65 +1344,15 @@ impl Database {
         }
     }
 
-    // ========== Reactive Queries ==========
-
-    /// Internal: Re-evaluate all active queries for a table.
-    /// Called synchronously after insert/update/delete operations.
-    fn refresh_table_queries(&self, table: &str) {
-        self.state.reactive_queries.refresh_table(table);
-    }
-
-    /// Create a reactive query with synchronous callback support.
-    /// Returns a ReactiveQuery that can have callbacks registered.
-    ///
-    /// When underlying data changes, callbacks are called synchronously.
-    pub fn reactive_query(&self, sql: &str) -> Result<ReactiveQuery, DatabaseError> {
-        let stmt = parser::parse(sql)?;
-
-        let select = match stmt {
-            Statement::Select(s) => s,
-            _ => return Err(DatabaseError::Parse(parser::ParseError {
-                message: "reactive_query only supports SELECT statements".to_string(),
-                position: 0,
-            })),
-        };
-
-        let primary_table = &select.from.table;
-
-        // Validate primary table exists
-        if !self.state.tables.read().unwrap().contains_key(primary_table) {
-            return Err(DatabaseError::TableNotFound(primary_table.clone()));
-        }
-
-        // Collect all tables this query depends on (primary + joined)
-        let mut all_tables = vec![primary_table.clone()];
-        for join in &select.from.joins {
-            // Validate joined table exists
-            if !self.state.tables.read().unwrap().contains_key(&join.table) {
-                return Err(DatabaseError::TableNotFound(join.table.clone()));
-            }
-            all_tables.push(join.table.clone());
-        }
-
-        // Create the reactive query
-        let query = ReactiveQuery::new(self.state.clone(), select);
-
-        // Register the query for all tables it depends on
-        self.state.reactive_queries.register(&query, &all_tables);
-
-        Ok(query)
-    }
-
     // ========== Incremental Queries ==========
 
     /// Create an incremental query using a computation graph.
     ///
-    /// This is more efficient than `reactive_query()` for high-frequency updates
-    /// because it only processes the delta from each change rather than
-    /// re-evaluating the entire query.
+    /// Uses true incremental computation - only processing the delta from
+    /// each change rather than re-evaluating the entire query.
     ///
-    /// Currently supports single-table queries with optional WHERE filters.
-    /// JOIN support will be added in a future phase.
+    /// Supports single-table queries with optional WHERE filters, as well as
+    /// JOIN queries between two tables.
     pub fn incremental_query(&self, sql: &str) -> Result<IncrementalQuery, DatabaseError> {
         let stmt = parser::parse(sql)?;
 
@@ -1611,14 +1364,28 @@ impl Database {
             })),
         };
 
-        // For now, only support single-table queries (no JOINs)
-        if !select.from.joins.is_empty() {
-            return Err(DatabaseError::Parse(parser::ParseError {
-                message: "incremental_query does not yet support JOINs".to_string(),
-                position: 0,
-            }));
-        }
+        let graph = if select.from.joins.is_empty() {
+            // Single-table query
+            self.build_single_table_graph(&select)?
+        } else {
+            // JOIN query
+            self.build_join_graph(&select)?
+        };
 
+        // Register the graph
+        let graph_id = self.state.graph_registry.register(graph);
+
+        Ok(IncrementalQuery {
+            graph_id,
+            db_state: self.state.clone(),
+        })
+    }
+
+    /// Build a query graph for a single-table SELECT.
+    fn build_single_table_graph(
+        &self,
+        select: &Select,
+    ) -> Result<crate::sql::query_graph::QueryGraph, DatabaseError> {
         let table = &select.from.table;
 
         // Validate table exists and get schema
@@ -1641,15 +1408,166 @@ impl Database {
         };
 
         // Create output node
-        let graph = builder.output(filtered, GraphId(0)); // ID will be assigned by registry
+        Ok(builder.output(filtered, GraphId(0))) // ID will be assigned by registry
+    }
 
-        // Register the graph
-        let graph_id = self.state.graph_registry.register(graph);
+    /// Build a query graph for a JOIN SELECT.
+    fn build_join_graph(
+        &self,
+        select: &Select,
+    ) -> Result<crate::sql::query_graph::QueryGraph, DatabaseError> {
+        // Currently only support single JOIN
+        if select.from.joins.len() != 1 {
+            return Err(DatabaseError::Parse(parser::ParseError {
+                message: "incremental_query only supports single JOINs".to_string(),
+                position: 0,
+            }));
+        }
 
-        Ok(IncrementalQuery {
-            graph_id,
-            db_state: self.state.clone(),
-        })
+        let join = &select.from.joins[0];
+        let left_table = &select.from.table;
+        let right_table = &join.table;
+
+        // Get schemas for both tables
+        let left_schema = self.get_table(left_table)
+            .ok_or_else(|| DatabaseError::TableNotFound(left_table.clone()))?;
+        let right_schema = self.get_table(right_table)
+            .ok_or_else(|| DatabaseError::TableNotFound(right_table.clone()))?;
+
+        // Determine the join column (the Ref column in the left table pointing to right table)
+        // The ON clause is: left.column = right.column
+        // We need to find which side has the Ref column pointing to the other table
+        let left_column = self.find_join_column(&join.on, left_table, right_table, &left_schema)?;
+
+        // Build the JOIN query graph
+        let mut builder = JoinGraphBuilder::new(
+            left_table,
+            left_schema.clone(),
+            right_table,
+            right_schema.clone(),
+            &left_column,
+        );
+
+        // Start with join node
+        let join_node = builder.join();
+
+        // Apply WHERE filters (if any)
+        let filtered = if select.where_clause.is_empty() {
+            join_node
+        } else {
+            // For JOIN queries, we need to handle qualified column names
+            let predicate = self.build_join_predicate(&select.where_clause, &left_schema, &right_schema)?;
+            builder.filter(join_node, predicate)
+        };
+
+        // Create output node
+        Ok(builder.output(filtered, GraphId(0))) // ID will be assigned by registry
+    }
+
+    /// Find the Ref column in the left table that joins to the right table.
+    fn find_join_column(
+        &self,
+        on: &parser::JoinCondition,
+        left_table: &str,
+        right_table: &str,
+        left_schema: &TableSchema,
+    ) -> Result<String, DatabaseError> {
+        // Check if the left side of the ON clause references the left table
+        let left_is_from_left = on.left.table.as_ref().map(|t| t == left_table).unwrap_or(true);
+        let right_is_from_right = on.right.table.as_ref().map(|t| t == right_table).unwrap_or(true);
+
+        if left_is_from_left && right_is_from_right {
+            // ON left_table.col = right_table.id pattern
+            // The left column should be a Ref column
+            let col_name = &on.left.column;
+            if let Some(col) = left_schema.column(col_name) {
+                if matches!(&col.ty, ColumnType::Ref(target) if target == right_table) {
+                    return Ok(col_name.clone());
+                }
+            }
+        }
+
+        let right_is_from_left = on.right.table.as_ref().map(|t| t == left_table).unwrap_or(false);
+        let left_is_from_right = on.left.table.as_ref().map(|t| t == right_table).unwrap_or(false);
+
+        if right_is_from_left && left_is_from_right {
+            // ON right_table.id = left_table.col pattern
+            let col_name = &on.right.column;
+            if let Some(col) = left_schema.column(col_name) {
+                if matches!(&col.ty, ColumnType::Ref(target) if target == right_table) {
+                    return Ok(col_name.clone());
+                }
+            }
+        }
+
+        // Try to find any Ref column in left_schema that points to right_table
+        for col in &left_schema.columns {
+            if matches!(&col.ty, ColumnType::Ref(target) if target == right_table) {
+                return Ok(col.name.clone());
+            }
+        }
+
+        Err(DatabaseError::Parse(parser::ParseError {
+            message: format!(
+                "Could not find Ref column in '{}' pointing to '{}'",
+                left_table, right_table
+            ),
+            position: 0,
+        }))
+    }
+
+    /// Build a Predicate from SQL WHERE conditions for JOIN queries.
+    /// Handles qualified column names (table.column).
+    fn build_join_predicate(
+        &self,
+        conditions: &[parser::Condition],
+        left_schema: &TableSchema,
+        right_schema: &TableSchema,
+    ) -> Result<Predicate, DatabaseError> {
+        if conditions.is_empty() {
+            return Ok(Predicate::True);
+        }
+
+        let mut predicates = Vec::new();
+
+        for cond in conditions {
+            let column = &cond.column.column;
+
+            // Determine which schema to use for type coercion
+            let col_type = if column == "id" {
+                ColumnType::Ref("".to_string())
+            } else if let Some(table) = &cond.column.table {
+                // Qualified column - find in specific schema
+                if let Some(idx) = left_schema.column_index(column) {
+                    if left_schema.name == *table {
+                        left_schema.columns[idx].ty.clone()
+                    } else if let Some(idx) = right_schema.column_index(column) {
+                        right_schema.columns[idx].ty.clone()
+                    } else {
+                        return Err(DatabaseError::ColumnNotFound(column.clone()));
+                    }
+                } else if let Some(idx) = right_schema.column_index(column) {
+                    right_schema.columns[idx].ty.clone()
+                } else {
+                    return Err(DatabaseError::ColumnNotFound(column.clone()));
+                }
+            } else {
+                // Unqualified column - search both schemas
+                if let Some(idx) = left_schema.column_index(column) {
+                    left_schema.columns[idx].ty.clone()
+                } else if let Some(idx) = right_schema.column_index(column) {
+                    right_schema.columns[idx].ty.clone()
+                } else {
+                    return Err(DatabaseError::ColumnNotFound(column.clone()));
+                }
+            };
+
+            let value = coerce_value(cond.value.clone(), &col_type);
+            predicates.push(Predicate::eq(column, value));
+        }
+
+        // AND all conditions together
+        Ok(predicates.into_iter().reduce(|a, b| a.and(b)).unwrap_or(Predicate::True))
     }
 
     /// Build a Predicate from SQL WHERE conditions.

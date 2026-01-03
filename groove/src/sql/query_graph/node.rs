@@ -1,10 +1,11 @@
 //! Query graph nodes.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::sql::query_graph::cache::RowCache;
-use crate::sql::query_graph::delta::{DeltaBatch, RowDelta};
+use crate::sql::query_graph::delta::{DeltaBatch, JoinedRow, RowDelta};
 use crate::sql::query_graph::predicate::Predicate;
+use crate::sql::row::{Row, Value};
 use crate::sql::schema::TableSchema;
 use crate::sql::types::IndexKey;
 use crate::sql::ObjectId;
@@ -51,6 +52,30 @@ pub enum QueryNode {
         cached_ids: HashSet<ObjectId>,
     },
 
+    /// Transform: join rows from left input with rows from right table.
+    ///
+    /// This implements an inner join where:
+    /// - `left_column` is a Ref column in the left table
+    /// - The join matches `left.left_column = right.id`
+    ///
+    /// On left deltas: looks up the corresponding right row by ID
+    /// On right deltas: uses the reverse index to find all left rows
+    Join {
+        /// Left (primary) table name.
+        left_table: String,
+        /// Right (joined) table name.
+        right_table: String,
+        /// Column in left table that references right table (a Ref column).
+        left_column: String,
+        /// Schema of the right table (for building joined rows).
+        right_schema: TableSchema,
+        /// Cached joined pairs: (left_id, right_id) -> exists.
+        /// This tracks which join pairs are currently in the output.
+        cached_pairs: HashSet<(ObjectId, ObjectId)>,
+        /// Cached joined rows for output.
+        cached_joined: HashMap<(ObjectId, ObjectId), JoinedRow>,
+    },
+
     /// Terminal: marks the output of the graph.
     ///
     /// This node doesn't transform data, it just marks which node's
@@ -59,22 +84,35 @@ pub enum QueryNode {
 }
 
 impl QueryNode {
-    /// Get the table this node operates on.
+    /// Get the primary table this node operates on.
     pub fn table(&self) -> &str {
         match self {
             QueryNode::TableScan { table, .. } => table,
             QueryNode::IndexLookup { table, .. } => table,
             QueryNode::Filter { table, .. } => table,
+            QueryNode::Join { left_table, .. } => left_table,
             QueryNode::Output { table, .. } => table,
         }
     }
 
-    /// Get the cached IDs if this node caches them.
+    /// Get all tables this node depends on.
+    pub fn tables(&self) -> Vec<&str> {
+        match self {
+            QueryNode::TableScan { table, .. } => vec![table],
+            QueryNode::IndexLookup { table, .. } => vec![table],
+            QueryNode::Filter { table, .. } => vec![table],
+            QueryNode::Join { left_table, right_table, .. } => vec![left_table, right_table],
+            QueryNode::Output { table, .. } => vec![table],
+        }
+    }
+
+    /// Get the cached IDs if this node caches them (single-table nodes only).
     pub fn cached_ids(&self) -> Option<&HashSet<ObjectId>> {
         match self {
             QueryNode::TableScan { cached_ids, .. } => Some(cached_ids),
             QueryNode::IndexLookup { cached_ids, .. } => Some(cached_ids),
             QueryNode::Filter { cached_ids, .. } => Some(cached_ids),
+            QueryNode::Join { .. } => None, // Uses cached_pairs instead
             QueryNode::Output { .. } => None,
         }
     }
@@ -85,7 +123,24 @@ impl QueryNode {
             QueryNode::TableScan { cached_ids, .. } => Some(cached_ids),
             QueryNode::IndexLookup { cached_ids, .. } => Some(cached_ids),
             QueryNode::Filter { cached_ids, .. } => Some(cached_ids),
+            QueryNode::Join { .. } => None,
             QueryNode::Output { .. } => None,
+        }
+    }
+
+    /// Get the cached join pairs (for Join nodes).
+    pub fn cached_pairs(&self) -> Option<&HashSet<(ObjectId, ObjectId)>> {
+        match self {
+            QueryNode::Join { cached_pairs, .. } => Some(cached_pairs),
+            _ => None,
+        }
+    }
+
+    /// Get the cached joined rows (for Join nodes).
+    pub fn cached_joined(&self) -> Option<&HashMap<(ObjectId, ObjectId), JoinedRow>> {
+        match self {
+            QueryNode::Join { cached_joined, .. } => Some(cached_joined),
+            _ => None,
         }
     }
 
@@ -95,13 +150,20 @@ impl QueryNode {
             QueryNode::TableScan { .. } => None,
             QueryNode::IndexLookup { .. } => None,
             QueryNode::Filter { input, .. } => Some(*input),
+            QueryNode::Join { .. } => None, // Join is a source-like node
             QueryNode::Output { input, .. } => Some(*input),
         }
+    }
+
+    /// Check if this node handles a specific table.
+    pub fn handles_table(&self, table: &str) -> bool {
+        self.tables().iter().any(|&t| t == table)
     }
 
     /// Evaluate this node given input deltas.
     ///
     /// Returns output deltas (may be empty for early cutoff).
+    /// Note: Join nodes should use `evaluate_join` instead.
     pub fn evaluate(
         &mut self,
         input: DeltaBatch,
@@ -121,7 +183,299 @@ impl QueryNode {
                 ..
             } => Self::eval_filter(predicate, cached_ids, input, schema),
 
+            QueryNode::Join { .. } => {
+                // Join nodes need special handling with database access
+                // This should be called via evaluate_join instead
+                DeltaBatch::new()
+            }
+
             QueryNode::Output { .. } => input, // Passthrough
+        }
+    }
+
+    /// Evaluate a join node with the given delta and database access.
+    ///
+    /// `source_table` indicates which table the delta came from.
+    /// `left_schema` is the schema of the left (primary) table.
+    /// `lookup_row` is a function to look up a row by table and ID.
+    /// `lookup_by_ref` is a function to find rows referencing a given ID.
+    pub fn evaluate_join<F, G>(
+        &mut self,
+        delta: RowDelta,
+        source_table: &str,
+        left_schema: &TableSchema,
+        lookup_row: F,
+        lookup_by_ref: G,
+    ) -> DeltaBatch
+    where
+        F: Fn(&str, ObjectId) -> Option<Row>,
+        G: Fn(&str, &str, ObjectId) -> Vec<Row>,
+    {
+        match self {
+            QueryNode::Join {
+                left_table,
+                right_table,
+                left_column,
+                right_schema,
+                cached_pairs,
+                cached_joined,
+            } => {
+                let mut output = DeltaBatch::new();
+
+                if source_table == left_table {
+                    // Delta from left table - look up right row
+                    Self::eval_join_left_delta(
+                        &delta,
+                        left_table,
+                        right_table,
+                        left_column,
+                        left_schema,
+                        right_schema,
+                        cached_pairs,
+                        cached_joined,
+                        &mut output,
+                        &lookup_row,
+                    );
+                } else if source_table == right_table {
+                    // Delta from right table - find all left rows referencing it
+                    Self::eval_join_right_delta(
+                        &delta,
+                        left_table,
+                        right_table,
+                        left_column,
+                        left_schema,
+                        right_schema,
+                        cached_pairs,
+                        cached_joined,
+                        &mut output,
+                        &lookup_row,
+                        &lookup_by_ref,
+                    );
+                }
+
+                output
+            }
+            _ => DeltaBatch::new(),
+        }
+    }
+
+    /// Handle a delta from the left (primary) table in a join.
+    #[allow(clippy::too_many_arguments)]
+    fn eval_join_left_delta<F>(
+        delta: &RowDelta,
+        left_table: &str,
+        right_table: &str,
+        left_column: &str,
+        left_schema: &TableSchema,
+        _right_schema: &TableSchema,
+        cached_pairs: &mut HashSet<(ObjectId, ObjectId)>,
+        cached_joined: &mut HashMap<(ObjectId, ObjectId), JoinedRow>,
+        output: &mut DeltaBatch,
+        lookup_row: F,
+    ) where
+        F: Fn(&str, ObjectId) -> Option<Row>,
+    {
+        match delta {
+            RowDelta::Added(left_row) => {
+                // Look up the referenced right row
+                if let Some(right_id) = Self::get_ref_value(left_row, left_column, left_schema) {
+                    if let Some(right_row) = lookup_row(right_table, right_id) {
+                        // Create joined row
+                        let mut joined = JoinedRow::from_single(left_table, left_row.clone());
+                        joined.add_joined(right_table, right_row);
+
+                        let pair = (left_row.id, right_id);
+                        if cached_pairs.insert(pair) {
+                            let output_row = joined.to_output_row();
+                            cached_joined.insert(pair, joined);
+                            output.push(RowDelta::Added(output_row));
+                        }
+                    }
+                }
+            }
+
+            RowDelta::Removed { id: left_id, prior } => {
+                // Remove all join pairs with this left ID
+                let pairs_to_remove: Vec<_> = cached_pairs
+                    .iter()
+                    .filter(|(l, _)| *l == *left_id)
+                    .copied()
+                    .collect();
+
+                for pair in pairs_to_remove {
+                    if cached_pairs.remove(&pair) {
+                        cached_joined.remove(&pair);
+                        output.push(RowDelta::Removed {
+                            id: *left_id,
+                            prior: prior.clone(),
+                        });
+                    }
+                }
+            }
+
+            RowDelta::Updated { id: left_id, new: left_row, prior } => {
+                // First, find existing pairs for this left row
+                let old_pairs: Vec<_> = cached_pairs
+                    .iter()
+                    .filter(|(l, _)| *l == *left_id)
+                    .copied()
+                    .collect();
+
+                // Get the new right ID from the updated row
+                let new_right_id = Self::get_ref_value(left_row, left_column, left_schema);
+
+                // Remove old pairs that no longer match
+                for (_, old_right_id) in &old_pairs {
+                    if new_right_id != Some(*old_right_id) {
+                        let pair = (*left_id, *old_right_id);
+                        cached_pairs.remove(&pair);
+                        cached_joined.remove(&pair);
+                        output.push(RowDelta::Removed {
+                            id: *left_id,
+                            prior: prior.clone(),
+                        });
+                    }
+                }
+
+                // Add/update the new pair
+                if let Some(right_id) = new_right_id {
+                    if let Some(right_row) = lookup_row(right_table, right_id) {
+                        let mut joined = JoinedRow::from_single(left_table, left_row.clone());
+                        joined.add_joined(right_table, right_row);
+
+                        let pair = (*left_id, right_id);
+                        let existed = cached_pairs.contains(&pair);
+                        cached_pairs.insert(pair);
+
+                        let output_row = joined.to_output_row();
+                        cached_joined.insert(pair, joined);
+
+                        if existed {
+                            output.push(RowDelta::Updated {
+                                id: *left_id,
+                                new: output_row,
+                                prior: prior.clone(),
+                            });
+                        } else {
+                            output.push(RowDelta::Added(output_row));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Handle a delta from the right (joined) table.
+    #[allow(clippy::too_many_arguments)]
+    fn eval_join_right_delta<F, G>(
+        delta: &RowDelta,
+        left_table: &str,
+        right_table: &str,
+        left_column: &str,
+        _left_schema: &TableSchema,
+        _right_schema: &TableSchema,
+        cached_pairs: &mut HashSet<(ObjectId, ObjectId)>,
+        cached_joined: &mut HashMap<(ObjectId, ObjectId), JoinedRow>,
+        output: &mut DeltaBatch,
+        _lookup_row: F,
+        lookup_by_ref: G,
+    ) where
+        F: Fn(&str, ObjectId) -> Option<Row>,
+        G: Fn(&str, &str, ObjectId) -> Vec<Row>,
+    {
+        let right_id = delta.row_id();
+
+        match delta {
+            RowDelta::Added(right_row) => {
+                // Find all left rows that reference this right row
+                let left_rows = lookup_by_ref(left_table, left_column, right_id);
+
+                for left_row in left_rows {
+                    let pair = (left_row.id, right_id);
+                    if cached_pairs.insert(pair) {
+                        let mut joined = JoinedRow::from_single(left_table, left_row.clone());
+                        joined.add_joined(right_table, right_row.clone());
+
+                        let output_row = joined.to_output_row();
+                        cached_joined.insert(pair, joined);
+                        output.push(RowDelta::Added(output_row));
+                    }
+                }
+            }
+
+            RowDelta::Removed { prior, .. } => {
+                // Remove all join pairs with this right ID
+                let pairs_to_remove: Vec<_> = cached_pairs
+                    .iter()
+                    .filter(|(_, r)| *r == right_id)
+                    .copied()
+                    .collect();
+
+                for pair in pairs_to_remove {
+                    if cached_pairs.remove(&pair) {
+                        cached_joined.remove(&pair);
+                        output.push(RowDelta::Removed {
+                            id: pair.0, // Left ID
+                            prior: prior.clone(),
+                        });
+                    }
+                }
+            }
+
+            RowDelta::Updated { new: right_row, prior, .. } => {
+                // Find all left rows that reference this right row and update them
+                let left_rows = lookup_by_ref(left_table, left_column, right_id);
+                let left_ids: HashSet<_> = left_rows.iter().map(|r| r.id).collect();
+
+                for left_row in &left_rows {
+                    let pair = (left_row.id, right_id);
+                    let existed = cached_pairs.contains(&pair);
+
+                    let mut joined = JoinedRow::from_single(left_table, left_row.clone());
+                    joined.add_joined(right_table, right_row.clone());
+
+                    cached_pairs.insert(pair);
+                    let output_row = joined.to_output_row();
+                    cached_joined.insert(pair, joined);
+
+                    if existed {
+                        output.push(RowDelta::Updated {
+                            id: left_row.id,
+                            new: output_row,
+                            prior: prior.clone(),
+                        });
+                    } else {
+                        output.push(RowDelta::Added(output_row));
+                    }
+                }
+
+                // Also remove pairs for left rows that no longer reference this right row
+                let pairs_to_check: Vec<_> = cached_pairs
+                    .iter()
+                    .filter(|(_, r)| *r == right_id)
+                    .copied()
+                    .collect();
+
+                for pair in pairs_to_check {
+                    if !left_ids.contains(&pair.0) {
+                        cached_pairs.remove(&pair);
+                        cached_joined.remove(&pair);
+                        output.push(RowDelta::Removed {
+                            id: pair.0,
+                            prior: prior.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Extract a Ref value from a row by column name.
+    fn get_ref_value(row: &Row, column: &str, schema: &TableSchema) -> Option<ObjectId> {
+        let col_idx = schema.column_index(column)?;
+        match row.values.get(col_idx)? {
+            Value::Ref(id) => Some(*id),
+            _ => None,
         }
     }
 

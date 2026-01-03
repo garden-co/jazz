@@ -66,153 +66,6 @@ fn table_rows_updates_on_delete() {
     assert!(table_rows.is_empty());
 }
 
-// ========== Subscription Cleanup Tests ==========
-// These tests use #[cfg(test)] methods: active_query_count(), active_query_count_for_table()
-
-#[test]
-fn dropping_reactive_query_removes_from_registry() {
-    let db = Database::in_memory();
-    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
-
-    assert_eq!(db.active_query_count(), 0);
-
-    let query = db.reactive_query("SELECT * FROM users").unwrap();
-    assert_eq!(db.active_query_count(), 1);
-    assert_eq!(db.active_query_count_for_table("users"), 1);
-
-    drop(query);
-
-    assert_eq!(db.active_query_count(), 0);
-    assert_eq!(db.active_query_count_for_table("users"), 0);
-}
-
-#[test]
-fn once_consumes_and_drops_query() {
-    let db = Database::in_memory();
-    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
-    db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap();
-
-    assert_eq!(db.active_query_count(), 0);
-
-    let rows = db.reactive_query("SELECT * FROM users").unwrap().once();
-    assert_eq!(rows.len(), 1);
-
-    assert_eq!(db.active_query_count(), 0);
-}
-
-#[test]
-fn multiple_queries_tracked_independently() {
-    let db = Database::in_memory();
-    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
-    db.execute("CREATE TABLE posts (title STRING NOT NULL)").unwrap();
-
-    assert_eq!(db.active_query_count(), 0);
-
-    let query1 = db.reactive_query("SELECT * FROM users").unwrap();
-    assert_eq!(db.active_query_count(), 1);
-    assert_eq!(db.active_query_count_for_table("users"), 1);
-    assert_eq!(db.active_query_count_for_table("posts"), 0);
-
-    let query2 = db.reactive_query("SELECT * FROM users WHERE name = 'Alice'").unwrap();
-    assert_eq!(db.active_query_count(), 2);
-    assert_eq!(db.active_query_count_for_table("users"), 2);
-
-    let query3 = db.reactive_query("SELECT * FROM posts").unwrap();
-    assert_eq!(db.active_query_count(), 3);
-    assert_eq!(db.active_query_count_for_table("users"), 2);
-    assert_eq!(db.active_query_count_for_table("posts"), 1);
-
-    drop(query1);
-    assert_eq!(db.active_query_count(), 2);
-    assert_eq!(db.active_query_count_for_table("users"), 1);
-
-    drop(query2);
-    assert_eq!(db.active_query_count(), 1);
-    assert_eq!(db.active_query_count_for_table("users"), 0);
-
-    drop(query3);
-    assert_eq!(db.active_query_count(), 0);
-}
-
-#[test]
-fn unsubscribe_callback_does_not_drop_query() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    let db = Database::in_memory();
-    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
-
-    let query = db.reactive_query("SELECT * FROM users").unwrap();
-    assert_eq!(db.active_query_count(), 1);
-
-    let call_count = Arc::new(AtomicUsize::new(0));
-    let call_count_clone = call_count.clone();
-
-    let listener_id = query.subscribe(Box::new(move |_rows| {
-        call_count_clone.fetch_add(1, Ordering::SeqCst);
-    }));
-
-    assert_eq!(call_count.load(Ordering::SeqCst), 1);
-
-    assert!(query.unsubscribe(listener_id));
-
-    assert_eq!(db.active_query_count(), 1);
-
-    db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap();
-    assert_eq!(call_count.load(Ordering::SeqCst), 1);
-
-    assert_eq!(db.active_query_count(), 1);
-
-    drop(query);
-    assert_eq!(db.active_query_count(), 0);
-}
-
-#[test]
-fn dropped_query_stops_receiving_updates() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    let db = Database::in_memory();
-    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
-
-    let call_count = Arc::new(AtomicUsize::new(0));
-
-    {
-        let query = db.reactive_query("SELECT * FROM users").unwrap();
-        let call_count_clone = call_count.clone();
-
-        let _id = query.subscribe(Box::new(move |_rows| {
-            call_count_clone.fetch_add(1, Ordering::SeqCst);
-        }));
-
-        assert_eq!(call_count.load(Ordering::SeqCst), 1);
-
-        db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap();
-        assert_eq!(call_count.load(Ordering::SeqCst), 2);
-    }
-
-    assert_eq!(db.active_query_count(), 0);
-
-    db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap();
-    assert_eq!(call_count.load(Ordering::SeqCst), 2);
-}
-
-#[test]
-fn cloned_query_shares_inner_state() {
-    let db = Database::in_memory();
-    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
-
-    let query1 = db.reactive_query("SELECT * FROM users").unwrap();
-    assert_eq!(db.active_query_count(), 1);
-
-    let query2 = query1.clone();
-    assert_eq!(db.active_query_count(), 1);
-
-    drop(query1);
-    assert_eq!(db.active_query_count(), 1);
-
-    drop(query2);
-    assert_eq!(db.active_query_count(), 0);
-}
-
 // ========== Incremental Query Tests ==========
 
 #[test]
@@ -369,14 +222,89 @@ fn incremental_query_subscribe_rows() {
 }
 
 #[test]
-fn incremental_query_rejects_joins() {
+fn incremental_query_join_basic() {
     let db = Database::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
     db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)").unwrap();
 
-    // JOINs are not yet supported
-    let result = db.incremental_query("SELECT * FROM posts JOIN users ON posts.author = users.id");
-    assert!(result.is_err());
+    // Create JOIN query
+    let query = db.incremental_query("SELECT * FROM posts JOIN users ON posts.author = users.id").unwrap();
+    assert!(query.rows().is_empty());
+
+    // Insert a user
+    let user_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Still empty - no posts yet
+    assert!(query.rows().is_empty());
+
+    // Insert a post by Alice
+    db.insert("posts", &["author", "title"], vec![Value::Ref(user_id), Value::String("Hello World".to_string())]).unwrap();
+
+    // Now we should have one joined row
+    let rows = query.rows();
+    assert_eq!(rows.len(), 1);
+}
+
+#[test]
+fn incremental_query_join_left_table_change() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)").unwrap();
+
+    // Insert a user first
+    let user_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Create JOIN query
+    let query = db.incremental_query("SELECT * FROM posts JOIN users ON posts.author = users.id").unwrap();
+
+    // Insert multiple posts
+    db.insert("posts", &["author", "title"], vec![Value::Ref(user_id), Value::String("Post 1".to_string())]).unwrap();
+    db.insert("posts", &["author", "title"], vec![Value::Ref(user_id), Value::String("Post 2".to_string())]).unwrap();
+
+    let rows = query.rows();
+    assert_eq!(rows.len(), 2);
+}
+
+#[test]
+fn incremental_query_join_right_table_change() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)").unwrap();
+
+    // Insert a user
+    let user_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Insert a post
+    db.insert("posts", &["author", "title"], vec![Value::Ref(user_id), Value::String("Hello".to_string())]).unwrap();
+
+    // Create JOIN query after initial data
+    let query = db.incremental_query("SELECT * FROM posts JOIN users ON posts.author = users.id").unwrap();
+
+    // Track changes via delta subscription
+    let delta_count = Arc::new(AtomicUsize::new(0));
+    let delta_count_clone = delta_count.clone();
+
+    let _listener = query.subscribe_delta(Box::new(move |delta| {
+        delta_count_clone.fetch_add(delta.len(), Ordering::SeqCst);
+    }));
+
+    // Updating the right table (users) should trigger notification
+    // because the joined row contains data from that table
+    db.update("users", user_id, &[("name", Value::String("Alice Updated".to_string()))]).unwrap();
+
+    // The join should have been notified of the right table change
+    assert!(delta_count.load(Ordering::SeqCst) > 0);
 }
 
 #[test]
