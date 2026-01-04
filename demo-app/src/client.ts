@@ -2,6 +2,7 @@
  * Groove Database Client
  *
  * Type-safe client for subscribing to database rows with eager loading support.
+ * Uses binary encoding for efficient data transfer from WASM.
  */
 
 import {
@@ -10,197 +11,233 @@ import {
   type BaseWhereInput,
   type IncludeSpec,
   type Unsubscribe,
-} from "@jazz/schema";
+} from "@jazz/schema/runtime";
 
 import { schemaMeta } from "./meta.js";
+import {
+  decodeUserRows,
+  decodeUserDelta,
+  decodeFolderRows,
+  decodeFolderDelta,
+  decodeNoteRows,
+  decodeNoteDelta,
+  decodeTagRows,
+  decodeTagDelta,
+  type Delta,
+  DELTA_ADDED,
+  DELTA_UPDATED,
+  DELTA_REMOVED,
+} from "./decoders.js";
 import type {
   ObjectId,
   User,
-  UserDepth,
+  UserIncludes,
   UserLoaded,
-  UserWhereInput,
+  UserFilter,
   Folder,
-  FolderDepth,
+  FolderIncludes,
   FolderLoaded,
-  FolderWhereInput,
+  FolderFilter,
   Note,
-  NoteDepth,
+  NoteIncludes,
   NoteLoaded,
-  NoteWhereInput,
+  NoteFilter,
   Tag,
-  TagDepth,
+  TagIncludes,
   TagLoaded,
-  TagWhereInput,
+  TagFilter,
 } from "./types.js";
+
+// Import WASM types
+import type { WasmDatabase, WasmQueryHandleDelta } from "../pkg/groove_wasm.js";
 
 // === Client Interfaces ===
 
 interface UserClient {
-  /**
-   * Subscribe to a single user by ID
-   */
-  subscribe<D extends UserDepth = {}>(
+  subscribe<I extends UserIncludes = {}>(
     id: ObjectId,
-    options: { include?: D },
-    callback: (user: UserLoaded<D> | null) => void
+    options: { include?: I },
+    callback: (user: UserLoaded<I> | null) => void
   ): Unsubscribe;
 
-  /**
-   * Subscribe to multiple users matching criteria
-   */
-  subscribeAll<D extends UserDepth = {}>(
-    options: { where?: UserWhereInput; include?: D },
-    callback: (users: UserLoaded<D>[]) => void
+  subscribeAll<I extends UserIncludes = {}>(
+    options: { where?: UserFilter; include?: I },
+    callback: (users: UserLoaded<I>[]) => void
   ): Unsubscribe;
 }
 
 interface FolderClient {
-  /**
-   * Subscribe to a single folder by ID
-   */
-  subscribe<D extends FolderDepth = {}>(
+  subscribe<I extends FolderIncludes = {}>(
     id: ObjectId,
-    options: { include?: D },
-    callback: (folder: FolderLoaded<D> | null) => void
+    options: { include?: I },
+    callback: (folder: FolderLoaded<I> | null) => void
   ): Unsubscribe;
 
-  /**
-   * Subscribe to multiple folders matching criteria
-   */
-  subscribeAll<D extends FolderDepth = {}>(
-    options: { where?: FolderWhereInput; include?: D },
-    callback: (folders: FolderLoaded<D>[]) => void
+  subscribeAll<I extends FolderIncludes = {}>(
+    options: { where?: FolderFilter; include?: I },
+    callback: (folders: FolderLoaded<I>[]) => void
   ): Unsubscribe;
 }
 
 interface NoteClient {
-  /**
-   * Subscribe to a single note by ID
-   */
-  subscribe<D extends NoteDepth = {}>(
+  subscribe<I extends NoteIncludes = {}>(
     id: ObjectId,
-    options: { include?: D },
-    callback: (note: NoteLoaded<D> | null) => void
+    options: { include?: I },
+    callback: (note: NoteLoaded<I> | null) => void
   ): Unsubscribe;
 
-  /**
-   * Subscribe to multiple notes matching criteria
-   */
-  subscribeAll<D extends NoteDepth = {}>(
-    options: { where?: NoteWhereInput; include?: D },
-    callback: (notes: NoteLoaded<D>[]) => void
+  subscribeAll<I extends NoteIncludes = {}>(
+    options: { where?: NoteFilter; include?: I },
+    callback: (notes: NoteLoaded<I>[]) => void
   ): Unsubscribe;
 }
 
 interface TagClient {
-  /**
-   * Subscribe to a single tag by ID
-   */
-  subscribe<D extends TagDepth = {}>(
+  subscribe<I extends TagIncludes = {}>(
     id: ObjectId,
-    options: { include?: D },
-    callback: (tag: TagLoaded<D> | null) => void
+    options: { include?: I },
+    callback: (tag: TagLoaded<I> | null) => void
   ): Unsubscribe;
 
-  /**
-   * Subscribe to multiple tags matching criteria
-   */
-  subscribeAll<D extends TagDepth = {}>(
-    options: { where?: TagWhereInput; include?: D },
-    callback: (tags: TagLoaded<D>[]) => void
+  subscribeAll<I extends TagIncludes = {}>(
+    options: { where?: TagFilter; include?: I },
+    callback: (tags: TagLoaded<I>[]) => void
   ): Unsubscribe;
 }
 
 // === Database Interface ===
 
 export interface GrooveDatabase {
+  /** Raw WASM database for direct SQL execution */
+  raw: WasmDatabase;
+
   user: UserClient;
   folder: FolderClient;
   note: NoteClient;
   tag: TagClient;
 }
 
+// === Decoder Registry ===
+
+type RowDecoder<T> = (buffer: ArrayBuffer) => T[];
+type DeltaDecoder<T> = (buffer: ArrayBuffer) => Delta<T>;
+
+const decoders: Record<string, { rows: RowDecoder<any>; delta: DeltaDecoder<any> }> = {
+  User: { rows: decodeUserRows, delta: decodeUserDelta },
+  Folder: { rows: decodeFolderRows, delta: decodeFolderDelta },
+  Note: { rows: decodeNoteRows, delta: decodeNoteDelta },
+  Tag: { rows: decodeTagRows, delta: decodeTagDelta },
+};
+
 // === Implementation ===
 
 /**
  * Create a table client for a given table.
- * This is a stub implementation - the actual WASM integration is TODO.
  */
-function createTableClient(tableName: string) {
+function createTableClient<T, I extends object, F extends BaseWhereInput>(
+  db: WasmDatabase,
+  tableName: string
+) {
   const tableMeta = schemaMeta.tables[tableName];
+  const decoder = decoders[tableName];
 
   return {
     subscribe(
       id: ObjectId,
-      options: { include?: IncludeSpec },
-      callback: (row: unknown) => void
+      options: { include?: I },
+      callback: (row: T | null) => void
     ): Unsubscribe {
-      // Build the SQL query
       const sql = buildQueryById(tableMeta, schemaMeta, id, {
-        include: options.include,
+        include: options.include as IncludeSpec,
       });
 
-      console.log(`[${tableName}.subscribe] SQL:`, sql);
+      // Maintain current state
+      let currentRow: T | null = null;
 
-      // TODO: Execute query via WASM and set up reactive subscription
-      // For now, just log and return a no-op unsubscribe
+      // Use delta subscription for efficiency
+      const handle = db.subscribe_delta(sql, (deltas: Uint8Array[]) => {
+        for (const deltaBuffer of deltas) {
+          const delta = decoder.delta(deltaBuffer.buffer) as Delta<T>;
+
+          if (delta.type === 'added' || delta.type === 'updated') {
+            currentRow = delta.row;
+          } else if (delta.type === 'removed') {
+            currentRow = null;
+          }
+        }
+        callback(currentRow);
+      });
 
       return () => {
-        console.log(`[${tableName}.subscribe] Unsubscribed from ${id}`);
+        handle.unsubscribe();
+        handle.free();
       };
     },
 
     subscribeAll(
-      options: { where?: BaseWhereInput; include?: IncludeSpec },
-      callback: (rows: unknown[]) => void
+      options: { where?: F; include?: I },
+      callback: (rows: T[]) => void
     ): Unsubscribe {
-      // Build the SQL query
       const sql = buildQuery(tableMeta, schemaMeta, {
         where: options.where,
-        include: options.include,
+        include: options.include as IncludeSpec,
       });
 
-      console.log(`[${tableName}.subscribeAll] SQL:`, sql);
+      // Maintain current state as a Map for efficient updates
+      const rowsById = new Map<string, T>();
 
-      // TODO: Execute query via WASM and set up reactive subscription
-      // For now, just log and return a no-op unsubscribe
+      // Use delta subscription for efficiency
+      const handle = db.subscribe_delta(sql, (deltas: Uint8Array[]) => {
+        for (const deltaBuffer of deltas) {
+          const delta = decoder.delta(deltaBuffer.buffer) as Delta<T>;
+
+          if (delta.type === 'added' || delta.type === 'updated') {
+            rowsById.set((delta.row as any).id, delta.row);
+          } else if (delta.type === 'removed') {
+            rowsById.delete(delta.id);
+          }
+        }
+        callback(Array.from(rowsById.values()));
+      });
 
       return () => {
-        console.log(`[${tableName}.subscribeAll] Unsubscribed`);
+        handle.unsubscribe();
+        handle.free();
       };
     },
   };
 }
 
 /**
- * Create a Groove database client.
+ * Create a Groove database client connected to a WASM database instance.
  *
  * @example
  * ```typescript
- * const db = createDatabase();
+ * import init, { WasmDatabase } from './pkg/groove_wasm.js';
  *
- * // Subscribe to a single note with author loaded
- * db.note.subscribe(noteId, { include: { author: true } }, (note) => {
- *   console.log(note?.title, note?.author.name);
+ * await init();
+ * const wasmDb = new WasmDatabase();
+ * const db = createDatabase(wasmDb);
+ *
+ * // Create schema
+ * db.raw.execute(`CREATE TABLE Note (title STRING NOT NULL, content STRING NOT NULL)`);
+ *
+ * // Subscribe to all notes
+ * db.note.subscribeAll({}, (notes) => {
+ *   console.log('Notes:', notes);
  * });
  *
- * // Subscribe to all notes created today
- * db.note.subscribeAll(
- *   { where: { createdAt: { gte: todayTimestamp } }, include: { author: true } },
- *   (notes) => {
- *     notes.forEach(n => console.log(n.title));
- *   }
- * );
+ * // Insert a note - subscription will be called
+ * db.raw.execute(`INSERT INTO Note (title, content) VALUES ('Hello', 'World')`);
  * ```
  */
-export function createDatabase(): GrooveDatabase {
-  // Type assertions needed because TypeScript can't infer generic type parameters
-  // through the generic createTableClient function. The runtime behavior is correct.
+export function createDatabase(wasmDb: WasmDatabase): GrooveDatabase {
   return {
-    user: createTableClient("User") as unknown as UserClient,
-    folder: createTableClient("Folder") as unknown as FolderClient,
-    note: createTableClient("Note") as unknown as NoteClient,
-    tag: createTableClient("Tag") as unknown as TagClient,
+    raw: wasmDb,
+    user: createTableClient<User, UserIncludes, UserFilter>(wasmDb, "User") as UserClient,
+    folder: createTableClient<Folder, FolderIncludes, FolderFilter>(wasmDb, "Folder") as FolderClient,
+    note: createTableClient<Note, NoteIncludes, NoteFilter>(wasmDb, "Note") as NoteClient,
+    tag: createTableClient<Tag, TagIncludes, TagFilter>(wasmDb, "Tag") as TagClient,
   };
 }
 
@@ -208,7 +245,6 @@ export function createDatabase(): GrooveDatabase {
 
 /**
  * Preview the SQL query that would be generated for a subscription.
- * Useful for debugging and understanding what queries are being built.
  */
 export function previewQuery(
   tableName: keyof typeof schemaMeta.tables,

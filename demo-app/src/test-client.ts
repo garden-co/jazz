@@ -4,126 +4,159 @@
  * Run with: npx tsx src/test-client.ts
  */
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import init, { WasmDatabase, initSync } from "../pkg/groove_wasm.js";
 import { createDatabase, previewQuery } from "./client.js";
 
-// Create database client
-const db = createDatabase();
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
-console.log("=== Query Preview Examples (Prisma-style filters) ===\n");
+async function main() {
+  // Initialize WASM with inline bytes (for Node.js)
+  const wasmPath = join(__dirname, "../pkg/groove_wasm_bg.wasm");
+  const wasmBytes = readFileSync(wasmPath);
+  initSync(wasmBytes);
 
-// Simple query - all notes
-console.log("1. All notes:");
-console.log(previewQuery("Note"));
-console.log();
+  console.log("=== Groove Database Client Test ===\n");
 
-// Query with simple equality (shorthand)
-console.log("2. Notes with title = 'Hello' (shorthand):");
-console.log(previewQuery("Note", { where: { title: "Hello" } }));
-console.log();
+  // Create WASM database
+  const wasmDb = new WasmDatabase();
 
-// Query with equals filter
-console.log("3. Notes with title equals 'Hello' (explicit):");
-console.log(previewQuery("Note", { where: { title: { equals: "Hello" } } }));
-console.log();
+  // Create typed client
+  const db = createDatabase(wasmDb);
 
-// Query with contains filter (string)
-console.log("4. Notes with title containing 'meeting':");
-console.log(previewQuery("Note", { where: { title: { contains: "meeting" } } }));
-console.log();
+  // Create schema
+  console.log("Creating schema...");
+  db.raw.execute(`
+    CREATE TABLE User (
+      name STRING NOT NULL,
+      email STRING NOT NULL,
+      avatar STRING
+    )
+  `);
+  db.raw.execute(`
+    CREATE TABLE Folder (
+      name STRING NOT NULL,
+      owner REFERENCES User NOT NULL,
+      parent REFERENCES Folder
+    )
+  `);
+  db.raw.execute(`
+    CREATE TABLE Note (
+      title STRING NOT NULL,
+      content STRING NOT NULL,
+      author REFERENCES User NOT NULL,
+      folder REFERENCES Folder,
+      createdAt I64 NOT NULL,
+      updatedAt I64 NOT NULL
+    )
+  `);
+  db.raw.execute(`
+    CREATE TABLE Tag (
+      name STRING NOT NULL,
+      color STRING NOT NULL
+    )
+  `);
+  console.log("Schema created.\n");
 
-// Query with startsWith filter
-console.log("5. Notes with title starting with 'TODO':");
-console.log(previewQuery("Note", { where: { title: { startsWith: "TODO" } } }));
-console.log();
+  // Track callback invocations
+  let userCallbackCount = 0;
+  let noteCallbackCount = 0;
 
-// Query with numeric comparison (bigint)
-console.log("6. Notes created after timestamp:");
-console.log(previewQuery("Note", { where: { createdAt: { gte: 1700000000000n } } }));
-console.log();
+  // Test 1: Subscribe to all users
+  console.log("Test 1: subscribeAll users");
+  const unsubUsers = db.user.subscribeAll({}, (users) => {
+    userCallbackCount++;
+    console.log(`  [Callback #${userCallbackCount}] Users:`, users.map(u => u.name));
+  });
 
-// Query with OR combinator
-console.log("7. Notes with title 'A' OR title 'B':");
-console.log(previewQuery("Note", { where: { OR: [{ title: "A" }, { title: "B" }] } }));
-console.log();
+  // Insert some users
+  console.log("\nInserting users...");
+  const user1Result = db.raw.execute(`INSERT INTO User (name, email) VALUES ('Alice', 'alice@example.com')`);
+  console.log("  Inserted user 1:", user1Result);
 
-// Query with AND combinator
-console.log("8. Notes with title containing 'meeting' AND created after timestamp:");
-console.log(previewQuery("Note", {
-  where: {
-    AND: [
-      { title: { contains: "meeting" } },
-      { createdAt: { gte: 1700000000000n } }
-    ]
-  }
-}));
-console.log();
+  const user2Result = db.raw.execute(`INSERT INTO User (name, email) VALUES ('Bob', 'bob@example.com')`);
+  console.log("  Inserted user 2:", user2Result);
 
-// Query with NOT combinator
-console.log("9. Notes NOT with title 'Draft':");
-console.log(previewQuery("Note", { where: { NOT: { title: "Draft" } } }));
-console.log();
+  // Test 2: Subscribe to all notes
+  console.log("\nTest 2: subscribeAll notes");
+  const unsubNotes = db.note.subscribeAll({}, (notes) => {
+    noteCallbackCount++;
+    console.log(`  [Callback #${noteCallbackCount}] Notes:`, notes.map(n => n.title));
+  });
 
-// Query with null check
-console.log("10. Notes without a folder (folder is null):");
-console.log(previewQuery("Note", { where: { folder: null } }));
-console.log();
+  // Get user IDs from results
+  const user1Id = String(user1Result).replace("inserted:", "");
+  const user2Id = String(user2Result).replace("inserted:", "");
+  console.log(`  User IDs: ${user1Id}, ${user2Id}`);
 
-// Query with not null check
-console.log("11. Notes with a folder (folder is not null):");
-console.log(previewQuery("Note", { where: { folder: { not: null } } }));
-console.log();
+  // Insert some notes
+  console.log("\nInserting notes...");
+  const now = BigInt(Date.now());
+  const note1Result = db.raw.execute(`
+    INSERT INTO Note (title, content, author, createdAt, updatedAt)
+    VALUES ('First Note', 'Hello world!', '${user1Id}', ${now}, ${now})
+  `);
+  console.log("  Inserted note 1:", note1Result);
 
-// Query with include (forward ref)
-console.log("12. Notes with author loaded:");
-console.log(previewQuery("Note", { include: { author: true } }));
-console.log();
+  const note2Result = db.raw.execute(`
+    INSERT INTO Note (title, content, author, createdAt, updatedAt)
+    VALUES ('Second Note', 'Another note.', '${user2Id}', ${now}, ${now})
+  `);
+  console.log("  Inserted note 2:", note2Result);
 
-// Query with include (reverse ref / array subquery)
-console.log("13. Users with their notes:");
-console.log(previewQuery("User", { include: { Notes: true } }));
-console.log();
+  // Test 3: Subscribe with where clause
+  console.log("\nTest 3: subscribeAll notes with where clause (author filter)");
+  let filteredNoteCount = 0;
+  const unsubFiltered = db.note.subscribeAll(
+    { where: { author: user1Id } },
+    (notes) => {
+      filteredNoteCount++;
+      console.log(`  [Filtered callback #${filteredNoteCount}] Alice's notes:`, notes.map(n => n.title));
+    }
+  );
 
-// Complex query with where + include
-console.log("14. Notes containing 'important' with author and folder:");
-console.log(previewQuery("Note", {
-  where: { title: { contains: "important" } },
-  include: { author: true, folder: true }
-}));
-console.log();
+  // Insert another note for Alice
+  const note3Result = db.raw.execute(`
+    INSERT INTO Note (title, content, author, createdAt, updatedAt)
+    VALUES ('Third Note', 'Alice writes again.', '${user1Id}', ${now}, ${now})
+  `);
+  console.log("  Inserted note 3:", note3Result);
 
-console.log("=== Subscribe Examples ===\n");
+  // Test 4: Update a note
+  console.log("\nTest 4: Update a note");
+  const note2Id = String(note2Result).replace("inserted:", "");
+  db.raw.update_row("Note", note2Id, "title", "Updated Second Note");
+  console.log("  Updated note 2 title");
 
-// Test subscribe with typed where
-console.log("15. db.note.subscribeAll with type-safe where:");
-const unsub = db.note.subscribeAll(
-  {
-    where: {
-      OR: [
-        { title: { contains: "meeting" } },
-        { createdAt: { gte: BigInt(Date.now()) } }
-      ]
-    },
-    include: { author: true },
-  },
-  (notes) => {
-    // TypeScript knows: notes is NoteLoaded<{ author: true }>[]
-    // So notes[0].author would be User (not ObjectId)
-    console.log("Received notes:", notes);
-  }
-);
-console.log();
+  // Cleanup
+  console.log("\nCleaning up subscriptions...");
+  unsubUsers();
+  unsubNotes();
+  unsubFiltered();
 
-// Cleanup
-unsub();
+  console.log("\n=== Summary ===");
+  console.log(`User callback invocations: ${userCallbackCount}`);
+  console.log(`Note callback invocations: ${noteCallbackCount}`);
+  console.log(`Filtered note callback invocations: ${filteredNoteCount}`);
 
-console.log("=== Type Safety Demo ===\n");
+  console.log("\n=== Query Preview Examples ===\n");
 
-// These would cause TypeScript errors if uncommented:
-// db.note.subscribeAll({ where: { invalidColumn: "x" } }, () => {}); // Error: 'invalidColumn' does not exist
-// db.note.subscribeAll({ where: { title: 123 } }, () => {}); // Error: number not assignable to string | StringFilter
-// db.note.subscribeAll({ where: { createdAt: "not a bigint" } }, () => {}); // Error: string not assignable to bigint | BigIntFilter
+  // Preview some queries
+  console.log("All notes:");
+  console.log("  ", previewQuery("Note"));
 
-console.log("TypeScript provides autocomplete for:");
-console.log("- Column names (title, content, author, folder, createdAt, updatedAt)");
-console.log("- Filter operators (equals, not, contains, startsWith, endsWith, gt, gte, lt, lte, in, notIn)");
-console.log("- Combinators (AND, OR, NOT)");
+  console.log("\nNotes with author included:");
+  console.log("  ", previewQuery("Note", { include: { author: true } }));
+
+  console.log("\nUsers with their notes (reverse ref):");
+  console.log("  ", previewQuery("User", { include: { Note: true } }));
+
+  console.log("\nNotes with title filter:");
+  console.log("  ", previewQuery("Note", { where: { title: { contains: "important" } } }));
+
+  console.log("\n=== Done ===");
+}
+
+main().catch(console.error);

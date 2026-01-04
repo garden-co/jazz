@@ -15,8 +15,8 @@ export const schemaMeta: SchemaMeta = {
       refs: [
       ],
       reverseRefs: [
-        { name: "Folders", sourceTable: "Folder", sourceColumn: "owner" },
-        { name: "Notes", sourceTable: "Note", sourceColumn: "author" },
+        { name: "Folder", sourceTable: "Folder", sourceColumn: "owner" },
+        { name: "Note", sourceTable: "Note", sourceColumn: "author" },
       ],
     },
     Folder: {
@@ -31,8 +31,8 @@ export const schemaMeta: SchemaMeta = {
         { column: "parent", targetTable: "Folder", nullable: true },
       ],
       reverseRefs: [
-        { name: "Folders", sourceTable: "Folder", sourceColumn: "parent" },
-        { name: "Notes", sourceTable: "Note", sourceColumn: "folder" },
+        { name: "Folder", sourceTable: "Folder", sourceColumn: "parent" },
+        { name: "Note", sourceTable: "Note", sourceColumn: "folder" },
       ],
     },
     Note: {
