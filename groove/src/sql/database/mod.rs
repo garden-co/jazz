@@ -11,7 +11,7 @@ use crate::sql::policy::{
 };
 use crate::sql::query_graph::registry::{GraphRegistry, OutputCallback};
 use crate::sql::query_graph::{
-    GraphId, JoinGraphBuilder, Predicate, PriorState, QueryGraphBuilder, RowDelta,
+    DeltaBatch, GraphId, JoinGraphBuilder, Predicate, PriorState, QueryGraphBuilder, RowDelta,
 };
 use crate::sql::row::{Row, RowError, Value, decode_row, encode_row};
 use crate::sql::schema::{ColumnType, SchemaError, TableSchema};
@@ -254,8 +254,22 @@ impl IncrementalQuery {
     /// The callback receives a `DeltaBatch` describing which rows were
     /// added, removed, or updated since the last notification.
     ///
+    /// **Important**: The callback is immediately called with the current state
+    /// as a batch of "Added" deltas, so subscribers always see the initial data.
+    ///
     /// Returns a `ListenerId` that can be used to unsubscribe.
     pub fn subscribe_delta(&self, callback: OutputCallback) -> Option<ListenerId> {
+        // Get current state and send as initial "Added" deltas
+        let initial_rows = self.rows();
+        if !initial_rows.is_empty() {
+            let initial_deltas: DeltaBatch = initial_rows
+                .into_iter()
+                .map(RowDelta::Added)
+                .collect();
+            callback(&initial_deltas);
+        }
+
+        // Subscribe for future changes
         self.db_state
             .graph_registry
             .subscribe(self.graph_id, callback)

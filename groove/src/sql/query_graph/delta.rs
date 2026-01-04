@@ -95,6 +95,14 @@ pub struct DeltaBatch {
     deltas: Vec<RowDelta>,
 }
 
+impl FromIterator<RowDelta> for DeltaBatch {
+    fn from_iter<I: IntoIterator<Item = RowDelta>>(iter: I) -> Self {
+        Self {
+            deltas: iter.into_iter().collect(),
+        }
+    }
+}
+
 impl DeltaBatch {
     /// Create an empty batch.
     pub fn new() -> Self {
