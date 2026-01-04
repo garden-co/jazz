@@ -113,6 +113,12 @@ pub trait CommitStore: Send + Sync {
     /// Update frontier for a branch.
     async fn set_frontier(&self, object_id: u128, branch: &str, frontier: &[CommitId]);
 
+    /// Get truncation point for a branch.
+    async fn get_truncation(&self, object_id: u128, branch: &str) -> Option<CommitId>;
+
+    /// Set truncation point for a branch.
+    async fn set_truncation(&self, object_id: u128, branch: &str, truncation: Option<CommitId>);
+
     /// Stream commit IDs for an object's branch (for partial loading).
     fn list_commits(&self, object_id: u128, branch: &str) -> BoxStream<'_, CommitId>;
 }
@@ -143,6 +149,7 @@ pub struct MemoryEnvironment {
     chunks: RwLock<HashMap<ChunkHash, Bytes>>,
     commits: RwLock<HashMap<CommitId, crate::commit::Commit>>,
     frontiers: RwLock<HashMap<(u128, String), Vec<CommitId>>>,
+    truncations: RwLock<HashMap<(u128, String), CommitId>>,
 }
 
 impl MemoryEnvironment {
@@ -204,6 +211,27 @@ impl CommitStore for MemoryEnvironment {
             .write()
             .unwrap()
             .insert((object_id, branch.to_string()), frontier.to_vec());
+    }
+
+    async fn get_truncation(&self, object_id: u128, branch: &str) -> Option<CommitId> {
+        self.truncations
+            .read()
+            .unwrap()
+            .get(&(object_id, branch.to_string()))
+            .copied()
+    }
+
+    async fn set_truncation(&self, object_id: u128, branch: &str, truncation: Option<CommitId>) {
+        let mut truncations = self.truncations.write().unwrap();
+        let key = (object_id, branch.to_string());
+        match truncation {
+            Some(id) => {
+                truncations.insert(key, id);
+            }
+            None => {
+                truncations.remove(&key);
+            }
+        }
     }
 
     fn list_commits(&self, object_id: u128, branch: &str) -> BoxStream<'_, CommitId> {

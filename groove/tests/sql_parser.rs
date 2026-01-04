@@ -144,6 +144,7 @@ fn parse_delete() {
                 del.where_clause[0].right,
                 ConditionValue::Literal(Value::String(id.to_string()))
             );
+            assert!(!del.hard, "default delete should be soft");
         }
         _ => panic!("expected Delete"),
     }
@@ -158,6 +159,38 @@ fn parse_delete_all() {
         Statement::Delete(del) => {
             assert_eq!(del.table, "users");
             assert!(del.where_clause.is_empty());
+            assert!(!del.hard, "default delete should be soft");
+        }
+        _ => panic!("expected Delete"),
+    }
+}
+
+#[test]
+fn parse_delete_hard() {
+    let id = ObjectId::new(0xabc123);
+    let sql = format!("DELETE FROM users WHERE id = '{}' HARD", id);
+    let stmt = parse(&sql).unwrap();
+
+    match stmt {
+        Statement::Delete(del) => {
+            assert_eq!(del.table, "users");
+            assert_eq!(del.where_clause.len(), 1);
+            assert!(del.hard, "DELETE ... HARD should set hard=true");
+        }
+        _ => panic!("expected Delete"),
+    }
+}
+
+#[test]
+fn parse_delete_hard_all() {
+    let sql = "DELETE FROM users HARD";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::Delete(del) => {
+            assert_eq!(del.table, "users");
+            assert!(del.where_clause.is_empty());
+            assert!(del.hard, "DELETE ... HARD should set hard=true");
         }
         _ => panic!("expected Delete"),
     }

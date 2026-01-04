@@ -7,7 +7,7 @@ mod object;
 pub mod sql;
 mod storage;
 
-pub use branch::Branch;
+pub use branch::{Branch, BranchError};
 pub use commit::{Commit, CommitId};
 pub use listener::{
     compute_change_ranges, ByteDiff, DiffRange, ListenerError, ListenerId, ObjectCallback,

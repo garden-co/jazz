@@ -18,6 +18,8 @@ pub enum Statement {
 pub struct Delete {
     pub table: String,
     pub where_clause: Vec<Condition>,
+    /// If true, this is a "hard" delete that truncates history.
+    pub hard: bool,
 }
 
 /// CREATE TABLE statement.
@@ -529,6 +531,9 @@ impl<'a> Parser<'a> {
         let table = self.parse_identifier()?;
         let where_clause = self.parse_where_clause()?;
 
+        // Check for optional HARD keyword
+        let hard = self.try_keyword("HARD");
+
         // Optional semicolon
         self.skip_whitespace();
         if self.peek_char() == Some(';') {
@@ -538,6 +543,7 @@ impl<'a> Parser<'a> {
         Ok(Delete {
             table,
             where_clause,
+            hard,
         })
     }
 

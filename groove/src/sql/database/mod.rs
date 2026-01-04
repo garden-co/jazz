@@ -1739,8 +1739,23 @@ impl Database {
         Ok(true)
     }
 
-    /// Delete a row by ID (tombstone).
+    /// Delete a row by ID (soft delete).
+    /// Creates a commit with deleted=true metadata marker.
+    /// The row remains in the system but is filtered from queries.
+    /// Use `delete_hard` to also truncate history.
     pub fn delete(&self, table: &str, id: ObjectId) -> Result<bool, DatabaseError> {
+        self.delete_impl(table, id, false)
+    }
+
+    /// Delete a row by ID with history truncation (hard delete).
+    /// Creates a soft delete commit, then truncates history at that commit.
+    /// This is the closest to a true hard delete in a distributed system.
+    pub fn delete_hard(&self, table: &str, id: ObjectId) -> Result<bool, DatabaseError> {
+        self.delete_impl(table, id, true)
+    }
+
+    /// Internal delete implementation.
+    fn delete_impl(&self, table: &str, id: ObjectId, hard: bool) -> Result<bool, DatabaseError> {
         let schema = self
             .get_table(table)
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
@@ -1778,11 +1793,23 @@ impl Database {
             }
         }
 
-        // Write tombstone marker (empty content)
-        self.state
+        // Create delete metadata marker
+        let mut meta = std::collections::BTreeMap::new();
+        meta.insert("deleted".to_string(), "true".to_string());
+
+        // Write soft delete commit with metadata marker
+        let commit_id = self.state
             .node
-            .write_sync(id, "main", &[], "system", timestamp_now())
+            .write_sync_with_meta(id, "main", &[], "system", timestamp_now(), Some(meta))
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+
+        // If hard delete, truncate history at the delete commit
+        if hard {
+            self.state
+                .node
+                .truncate_at(id, "main", commit_id)
+                .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+        }
 
         // Remove from row_table (logically deleted)
         self.state.row_table.write().unwrap().remove(&id);
@@ -2228,7 +2255,11 @@ impl Database {
                 let count = rows_to_delete.len();
 
                 for row in rows_to_delete {
-                    self.delete(&del.table, row.id)?;
+                    if del.hard {
+                        self.delete_hard(&del.table, row.id)?;
+                    } else {
+                        self.delete(&del.table, row.id)?;
+                    }
                 }
 
                 Ok(ExecuteResult::Deleted(count))

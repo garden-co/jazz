@@ -210,6 +210,21 @@ impl LocalNode {
         author: &str,
         timestamp: u64,
     ) -> Result<CommitId, ListenerError> {
+        self.write_sync_with_meta(object_id, branch, content, author, timestamp, None)
+    }
+
+    /// Write content to an object's branch with optional metadata and notify all listeners.
+    /// Returns the new commit ID.
+    /// Panics if content exceeds INLINE_THRESHOLD.
+    pub fn write_sync_with_meta(
+        &self,
+        object_id: ObjectId,
+        branch: &str,
+        content: &[u8],
+        author: &str,
+        timestamp: u64,
+        meta: Option<std::collections::BTreeMap<String, String>>,
+    ) -> Result<CommitId, ListenerError> {
         let obj_lock = self
             .objects
             .read()
@@ -219,7 +234,7 @@ impl LocalNode {
             .ok_or(ListenerError::NotFound)?;
 
         let obj = obj_lock.read().unwrap();
-        let commit_id = obj.write_sync(branch, content, author, timestamp);
+        let commit_id = obj.write_sync_with_meta(branch, content, author, timestamp, meta);
 
         // Notify listeners synchronously
         self.notify_listeners(object_id, branch, &obj);
@@ -306,6 +321,37 @@ impl LocalNode {
 
         let obj = obj_lock.read().unwrap();
         Ok(obj.frontier(branch))
+    }
+
+    /// Truncate history at the given commit ID and prune older commits.
+    /// The commit must be an ancestor of all frontier commits.
+    /// After truncation:
+    /// - All commits before the truncation point are removed from memory
+    /// - Future commits with parents before the truncation point will be rejected
+    /// Returns the number of commits pruned.
+    pub fn truncate_at(
+        &self,
+        object_id: ObjectId,
+        branch: &str,
+        commit_id: CommitId,
+    ) -> Result<usize, ListenerError> {
+        let obj_lock = self
+            .objects
+            .read()
+            .unwrap()
+            .get(&object_id)
+            .cloned()
+            .ok_or(ListenerError::NotFound)?;
+
+        let obj = obj_lock.read().unwrap();
+        let branch_ref = obj
+            .branch_ref(branch)
+            .ok_or(ListenerError::NotFound)?;
+
+        let mut branch_guard = branch_ref.write().unwrap();
+        branch_guard
+            .truncate_at(commit_id)
+            .map_err(|e| ListenerError::StorageError(e.to_string()))
     }
 
     /// Internal: notify listeners for a branch update.

@@ -3,7 +3,7 @@
 ## Implementation Status
 
 **Implemented:**
-- Full SQL parser (CREATE TABLE, INSERT, UPDATE, SELECT with JOIN)
+- Full SQL parser (CREATE TABLE, INSERT, UPDATE, DELETE, SELECT with JOIN)
 - Database with CRUD operations
 - Ref columns with referential integrity validation
 - Reverse index for efficient backlink queries
@@ -11,11 +11,12 @@
 - ObjectId newtype with Crockford Base32 encoding
 - Value coercion (String→Ref) at execution time
 - WASM bindings (groove-wasm)
+- DELETE via SQL with soft delete semantics (see `deletes-and-truncation.md`)
+- DELETE ... HARD for soft delete + history truncation
 
 **Not yet implemented:**
 - Additional operators beyond `=` in WHERE clauses
 - ORDER BY, LIMIT, OFFSET
-- DELETE via SQL (only programmatic API)
 - Schema migrations
 - Composite indexes
 
@@ -520,7 +521,7 @@ pub enum ExecuteResult {
 
 ## Open Questions
 
-1. **Tombstones vs hard delete**: Currently rows are tombstoned (empty content). May need explicit tombstone marker for sync.
+1. ~~**Tombstones vs hard delete**~~: Resolved - see `deletes-and-truncation.md`. Soft delete uses metadata marker `deleted=true`, with optional history truncation via `DELETE ... HARD`.
 
 2. **Schema changes**: Future work - how to handle adding/removing/modifying columns?
 

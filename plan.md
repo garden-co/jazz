@@ -17,6 +17,9 @@
 - [x] LCA (Lowest Common Ancestor) computation
 - [x] MergeStrategy trait with LastWriterWins implementation
 - [x] Branch merging (merge_branches)
+- [x] History truncation (truncate_at with automatic pruning)
+- [x] BranchError type for truncation validation errors
+- [x] Rejection of commits with parents before truncation point
 
 **Future optimizations** (after tests are solid):
 - [ ] Delta encoding for commits
@@ -29,6 +32,7 @@
 - [x] ChunkHash type (BLAKE3)
 - [x] ContentStore trait (async get/put/has chunk)
 - [x] CommitStore trait (async commit operations, list_commits walks full history)
+- [x] CommitStore get_truncation/set_truncation for truncation point persistence
 - [x] Environment trait (combines ContentStore + CommitStore + Send + Sync + Debug)
 - [x] MemoryEnvironment (full in-memory implementation for testing)
 - [x] MemoryContentStore (legacy content-only store for backwards compatibility)
@@ -53,11 +57,13 @@
 - [x] All read/write methods on LocalNode use storage internally
 - [x] ObjectListenerRegistry for synchronous callback management
 - [x] write_sync/write/write_stream automatically notify listeners
+- [x] write_sync_with_meta for commits with custom metadata (used for soft delete marker)
+- [x] truncate_at for history truncation with automatic pruning
 - [x] No main branch convenience methods - all operations require explicit branch name
 
 **Current module structure**:
 - `commit.rs` - CommitId, Commit with ContentRef
-- `branch.rs` - Branch with LCA, frontier tracking
+- `branch.rs` - Branch with LCA, frontier tracking, history truncation
 - `merge.rs` - MergeStrategy trait, LastWriterWins
 - `object.rs` - Object with branches, sync/async/streaming read/write, ContentStream
 - `node.rs` - LocalNode (owns Environment), generate_object_id(), read/write/subscribe APIs
@@ -83,7 +89,8 @@
 - [x] `insert` - create row Object with encoded data
 - [x] `get` - fetch and decode row by ID
 - [x] `update` - create new commit on row Object
-- [x] `delete` - tombstone commit on row Object
+- [x] `delete` - soft delete commit with metadata marker
+- [x] `delete` with HARD keyword - soft delete + history truncation
 - [x] `execute()` method for SQL strings
 
 ### Step 2: References and Queries (Complete)
@@ -285,11 +292,11 @@ See `specs/rebac-policies.md` for full design.
 
 ## Test Coverage
 
-Current test count: **253 tests** passing across all modules (120 unit + 133 integration)
+Current test count: **276 tests** passing across all modules
 
 - Unit tests in `sql/row.rs`, `sql/types.rs`, `sql/database/tests.rs`
 - Integration tests in `tests/` directory:
-  - `branch.rs` - Branch operations and LCA
+  - `branch.rs` - Branch operations, LCA, and truncation
   - `commit.rs` - Commit ID determinism
   - `listener.rs` - ObjectListenerRegistry
   - `node.rs` - LocalNode operations
@@ -305,6 +312,18 @@ Current test count: **253 tests** passing across all modules (120 unit + 133 int
 ## Open Design Questions
 
 - [ ] Revisit whether primary key `id` (ObjectId/UUIDv7) column should be implicit or explicit in CREATE TABLE syntax. Currently implicit - may want to require explicit declaration for clarity.
+
+- [ ] Truncation on UPDATE: Should UPDATE support a HARD modifier like DELETE? This would allow truncating history after any mutation, not just deletes. Need to unify the semantics with DELETE HARD.
+
+- [ ] Binary files (especially larger than RAM): Should this be a column type (e.g., `BLOB` with streaming support) or a separate raw Object that rows reference? Considerations: chunked storage already exists, but column-based approach may complicate row encoding; reference-based approach keeps rows small but adds indirection.
+
+- [ ] Edit & history API via "magic columns" and "magic filters": Expose commit graph metadata through virtual columns (e.g., `_commit_id`, `_author`, `_timestamp`, `_deleted`) and special WHERE filters (e.g., `WHERE _as_of = '2024-01-01'`, `WHERE _include_deleted = true`). Would enable time-travel queries and audit trails without separate APIs.
+
+- [ ] Userland E2E encryption and signing: Allow applications to encrypt/sign content before it enters the commit graph. Considerations: key management, which columns to encrypt, searchability of encrypted data, signature verification during sync/merge.
+
+- [ ] Auto-truncate index objects: Index objects only care about current state, not history. Should we always truncate on update for indexes? This would keep index objects small and avoid unbounded growth.
+
+- [ ] Secondary index for soft-deleted rows: Maintain a separate index (or index variant) that includes soft-deleted objects. Useful for "show deleted items" UI, undelete flows, and admin queries. The primary index would exclude deleted rows for normal queries.
 
 ---
 

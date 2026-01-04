@@ -491,6 +491,20 @@ impl Object {
         author: &str,
         timestamp: u64,
     ) -> CommitId {
+        self.write_sync_with_meta(branch_name, content, author, timestamp, None)
+    }
+
+    /// Write content to a branch with optional metadata (sync).
+    /// Panics if content exceeds INLINE_THRESHOLD.
+    /// Returns the new commit ID.
+    pub fn write_sync_with_meta(
+        &self,
+        branch_name: &str,
+        content: &[u8],
+        author: &str,
+        timestamp: u64,
+        meta: Option<std::collections::BTreeMap<String, String>>,
+    ) -> CommitId {
         assert!(
             content.len() <= INLINE_THRESHOLD,
             "content exceeds INLINE_THRESHOLD ({} bytes), use write() for large content",
@@ -511,7 +525,7 @@ impl Object {
             content: ContentRef::inline(content.to_vec()),
             author: author.to_string(),
             timestamp,
-            meta: None,
+            meta,
         };
 
         branch.add_commit(commit)

@@ -1759,3 +1759,133 @@ fn test_note_with_i64_timestamps() {
     assert_eq!(rows.len(), 1);
     println!("Note: {:?}", rows[0]);
 }
+
+// ========== Soft Delete and Hard Delete Tests ==========
+
+#[test]
+fn soft_delete_removes_row_from_queries() {
+    let db = Database::in_memory();
+
+    db.create_table(TableSchema::new(
+        "users",
+        vec![ColumnDef::required("name", ColumnType::String)],
+    ))
+    .unwrap();
+
+    let id = db
+        .insert("users", &["name"], vec![Value::String("Alice".into())])
+        .unwrap();
+
+    // Row exists
+    assert!(db.get("users", id).unwrap().is_some());
+    assert_eq!(db.select_all("users").unwrap().len(), 1);
+
+    // Soft delete
+    let deleted = db.delete("users", id).unwrap();
+    assert!(deleted);
+
+    // Row no longer visible in queries
+    assert!(db.get("users", id).unwrap().is_none());
+    assert_eq!(db.select_all("users").unwrap().len(), 0);
+}
+
+#[test]
+fn hard_delete_via_sql() {
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+
+    // Insert a user
+    let result = db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap();
+    let id = match result {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
+
+    // Verify user exists
+    assert!(db.get("users", id).unwrap().is_some());
+
+    // Hard delete via SQL
+    let sql = format!("DELETE FROM users WHERE id = '{}' HARD", id);
+    let result = db.execute(&sql).unwrap();
+    match result {
+        ExecuteResult::Deleted(count) => assert_eq!(count, 1),
+        _ => panic!("Expected Deleted"),
+    }
+
+    // Row no longer visible
+    assert!(db.get("users", id).unwrap().is_none());
+}
+
+#[test]
+fn soft_delete_via_sql() {
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+
+    // Insert a user
+    let result = db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap();
+    let id = match result {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
+
+    // Soft delete via SQL (no HARD keyword)
+    let sql = format!("DELETE FROM users WHERE id = '{}'", id);
+    let result = db.execute(&sql).unwrap();
+    match result {
+        ExecuteResult::Deleted(count) => assert_eq!(count, 1),
+        _ => panic!("Expected Deleted"),
+    }
+
+    // Row no longer visible
+    assert!(db.get("users", id).unwrap().is_none());
+}
+
+#[test]
+fn delete_multiple_rows_hard() {
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)").unwrap();
+
+    // Insert multiple users
+    db.execute("INSERT INTO users (name, active) VALUES ('Alice', true)").unwrap();
+    db.execute("INSERT INTO users (name, active) VALUES ('Bob', false)").unwrap();
+    db.execute("INSERT INTO users (name, active) VALUES ('Charlie', false)").unwrap();
+
+    assert_eq!(db.select_all("users").unwrap().len(), 3);
+
+    // Hard delete all inactive users
+    let result = db.execute("DELETE FROM users WHERE active = false HARD").unwrap();
+    match result {
+        ExecuteResult::Deleted(count) => assert_eq!(count, 2),
+        _ => panic!("Expected Deleted"),
+    }
+
+    // Only Alice remains
+    let rows = db.select_all("users").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].values[0], Value::String("Alice".into()));
+}
+
+#[test]
+fn hard_delete_all_rows() {
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+
+    db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap();
+    db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap();
+    db.execute("INSERT INTO users (name) VALUES ('Charlie')").unwrap();
+
+    assert_eq!(db.select_all("users").unwrap().len(), 3);
+
+    // Hard delete all
+    let result = db.execute("DELETE FROM users HARD").unwrap();
+    match result {
+        ExecuteResult::Deleted(count) => assert_eq!(count, 3),
+        _ => panic!("Expected Deleted"),
+    }
+
+    assert_eq!(db.select_all("users").unwrap().len(), 0);
+}
