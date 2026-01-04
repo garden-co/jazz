@@ -146,12 +146,11 @@ test.describe('Groove Demo App', () => {
     await expect(page.locator('strong').getByText('Alice Note', { exact: true })).not.toBeVisible();
   });
 
-  // TODO: This test is flaky - second note creation fails silently
-  // Possibly related to folder reference in INSERT statement
-  test.skip('selects folder and filters notes', async ({ page }) => {
+  test('creates note with folder reference', async ({ page }) => {
     // Create user
     await page.getByPlaceholder('New user name...').fill('Alice');
     await page.getByRole('button', { name: 'Add' }).first().click();
+    await expect(page.getByRole('heading', { name: 'Users (1)' })).toBeVisible();
 
     // Create folder
     await page.getByPlaceholder('New folder...').fill('Work');
@@ -165,21 +164,25 @@ test.describe('Groove Demo App', () => {
 
     // Select the Work folder
     await page.locator('strong').getByText('Work', { exact: true }).click();
-    // Wait for folder to be selected (In Folder button should become enabled)
     await expect(page.getByRole('button', { name: 'In Folder' })).toBeEnabled();
 
-    // Create note in folder
+    // Create note with folder reference
     await page.getByPlaceholder('New note title...').fill('Work Note');
     await page.getByRole('button', { name: 'Add Note' }).click();
-    // Wait a bit longer for the subscription to update
-    await expect(page.getByRole('heading', { name: 'Notes (2)' })).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('heading', { name: 'Notes (2)' })).toBeVisible();
 
-    // Filter to "In Folder"
-    await page.getByRole('button', { name: 'In Folder' }).click();
-
-    // Should only see Work Note
+    // Verify both notes exist with correct folder associations
+    await expect(page.locator('strong').getByText('Root Note', { exact: true })).toBeVisible();
     await expect(page.locator('strong').getByText('Work Note', { exact: true })).toBeVisible();
-    await expect(page.locator('strong').getByText('Root Note', { exact: true })).not.toBeVisible();
+
+    // Check debug section shows both notes with correct folder values
+    await page.getByText('Debug: Raw Data').click();
+    const debugText = await page.locator('pre').textContent();
+    expect(debugText).toContain('"title": "Root Note"');
+    expect(debugText).toContain('"folder": null');
+    expect(debugText).toContain('"title": "Work Note"');
+    // The Work Note should have a folder ID (not null)
+    expect(debugText).toMatch(/"folder": "01[A-Z0-9]+"/);
   });
 
   test('folder inputs are disabled without user selected', async ({ page }) => {

@@ -100,6 +100,18 @@ export class BinaryReader {
   }
 
   /**
+   * Read a nullable ObjectId ref.
+   * Uses byte-0 detection instead of presence flag since Base32 can't contain byte 0.
+   */
+  readNullableRef(): string | null {
+    if (this.bytes[this.offset] === 0) {
+      this.offset++;
+      return null;
+    }
+    return this.readObjectId();
+  }
+
+  /**
    * Read an array of values.
    * @param readElement Function to read each element
    */
@@ -278,9 +290,9 @@ export function decodeFolderRows(buffer: ArrayBufferLike): Array<{ id: string; n
     offset += 26;
 
     // parent: ref (nullable)
-    const parentPresent = view.getUint8(offset++);
-    if (parentPresent === 0) {
+    if (bytes[offset] === 0) {
       row.parent = null;
+      offset++;
     } else {
       row.parent = decodeObjectId(bytes, offset);
       offset += 26;
@@ -320,9 +332,9 @@ export function decodeFolderRow(buffer: ArrayBufferLike, startOffset = 0): { row
   offset += 26;
 
   // parent: ref (nullable)
-  const parentPresent = view.getUint8(offset++);
-  if (parentPresent === 0) {
+  if (bytes[offset] === 0) {
     row.parent = null;
+    offset++;
   } else {
     row.parent = decodeObjectId(bytes, offset);
     offset += 26;
@@ -363,7 +375,7 @@ export function readFolder(reader: BinaryReader): { id: string; name: string; ow
   const id = reader.readObjectId();
   const name = reader.readString();
   const owner = reader.readObjectId();
-  const parent = reader.readNullable(() => reader.readObjectId());
+  const parent = reader.readNullableRef();
   return { id, name, owner, parent };
 }
 
@@ -407,9 +419,9 @@ export function decodeNoteRows(buffer: ArrayBufferLike): Array<{ id: string; tit
     offset += 26;
 
     // folder: ref (nullable)
-    const folderPresent = view.getUint8(offset++);
-    if (folderPresent === 0) {
+    if (bytes[offset] === 0) {
       row.folder = null;
+      offset++;
     } else {
       row.folder = decodeObjectId(bytes, offset);
       offset += 26;
@@ -463,9 +475,9 @@ export function decodeNoteRow(buffer: ArrayBufferLike, startOffset = 0): { row: 
   offset += 26;
 
   // folder: ref (nullable)
-  const folderPresent = view.getUint8(offset++);
-  if (folderPresent === 0) {
+  if (bytes[offset] === 0) {
     row.folder = null;
+    offset++;
   } else {
     row.folder = decodeObjectId(bytes, offset);
     offset += 26;
@@ -515,7 +527,7 @@ export function readNote(reader: BinaryReader): { id: string; title: string; con
   const title = reader.readString();
   const content = reader.readString();
   const author = reader.readObjectId();
-  const folder = reader.readNullable(() => reader.readObjectId());
+  const folder = reader.readNullableRef();
   const createdAt = reader.readI64();
   const updatedAt = reader.readI64();
   return { id, title, content, author, folder, createdAt, updatedAt };

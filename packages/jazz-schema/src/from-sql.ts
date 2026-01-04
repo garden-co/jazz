@@ -580,9 +580,26 @@ function generateTypes(
 
 /**
  * Generate binary decoder for a single column type
+ *
+ * For nullable refs, we detect null by checking if the first byte is 0.
+ * Base32 ObjectIds use characters 0-9 and A-Z (ASCII 48-90), so byte 0 can't appear.
+ * This matches Rust's encoding which writes byte 0 for null, or 26 bytes for a ref.
  */
 function generateColumnDecoder(sqlType: SqlColumnType, varName: string, nullable: boolean): string[] {
   const lines: string[] = [];
+
+  // Special case: nullable refs don't use a presence flag
+  // Instead, we detect null by checking if the first byte is 0 (which can't appear in Base32)
+  if (nullable && sqlType.kind === "ref") {
+    lines.push(`    if (bytes[offset] === 0) {`);
+    lines.push(`      row.${varName} = null;`);
+    lines.push(`      offset++;`);
+    lines.push(`    } else {`);
+    lines.push(`      row.${varName} = decodeObjectId(bytes, offset);`);
+    lines.push(`      offset += 26;`);
+    lines.push(`    }`);
+    return lines;
+  }
 
   if (nullable) {
     lines.push(`    const ${varName}Present = view.getUint8(offset++);`);
@@ -784,6 +801,18 @@ function generateDecoders(tables: ParsedTable[]): string {
     "  }",
     "",
     "  /**",
+    "   * Read a nullable ObjectId ref.",
+    "   * Uses byte-0 detection instead of presence flag since Base32 can't contain byte 0.",
+    "   */",
+    "  readNullableRef(): string | null {",
+    "    if (this.bytes[this.offset] === 0) {",
+    "      this.offset++;",
+    "      return null;",
+    "    }",
+    "    return this.readObjectId();",
+    "  }",
+    "",
+    "  /**",
     "   * Read an array of values.",
     "   * @param readElement Function to read each element",
     "   */",
@@ -908,7 +937,10 @@ function generateDecoders(tables: ParsedTable[]): string {
     lines.push(`  const id = reader.readObjectId();`);
 
     for (const col of table.columns) {
-      if (col.nullable) {
+      if (col.nullable && col.sqlType.kind === "ref") {
+        // Nullable refs use byte-0 detection instead of presence flag
+        lines.push(`  const ${col.name} = reader.readNullableRef();`);
+      } else if (col.nullable) {
         lines.push(`  const ${col.name} = reader.readNullable(() => ${generateReaderCall(col.sqlType)});`);
       } else {
         lines.push(`  const ${col.name} = ${generateReaderCall(col.sqlType)};`);
