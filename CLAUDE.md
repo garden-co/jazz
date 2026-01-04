@@ -49,6 +49,10 @@ cd demo-app && npm install && npm run dev
 
 - Always check specific properties of collection items in tests, not just the collection length. For example, after asserting `rows.len() == 2`, also verify the actual row values like names, titles, or IDs.
 
+## Code Quality Guidelines
+
+- When taking any shortcut or simplification, loudly document it in: (1) code comments at the site, (2) project-wide TODOs in plan.md, and (3) the final summary when completing a task.
+
 ## Module Overview
 
 Key modules in `groove/src/`:
