@@ -45,6 +45,10 @@ cd groove-wasm && wasm-pack build --target web
 cd demo-app && npm install && npm run dev
 ```
 
+## Testing Guidelines
+
+- Always check specific properties of collection items in tests, not just the collection length. For example, after asserting `rows.len() == 2`, also verify the actual row values like names, titles, or IDs.
+
 ## Module Overview
 
 Key modules in `groove/src/`:
