@@ -5,17 +5,22 @@
   "type": "module",
   "scripts": {
     "build:wasm": "cd ../groove-wasm && wasm-pack build --target web --out-dir ../demo-app/pkg",
-    "generate": "npx tsx -e \"import { generateFromSql } from '@jazz/schema'; generateFromSql('src/schema.sql', { output: 'src' })\"",
+    "generate": "npx tsx -e \"import { generateFromSql } from '@jazz/schema'; generateFromSql('src/schema.sql', { output: 'src/generated' })\"",
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "playwright test",
+    "test:ui": "playwright test --ui"
   },
   "dependencies": {
+    "@jazz/client": "workspace:*",
+    "@jazz/react": "workspace:*",
     "@jazz/schema": "workspace:*",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.57.0",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
     "@vitejs/plugin-react": "^4.2.0",

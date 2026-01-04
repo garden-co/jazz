@@ -1651,3 +1651,36 @@ fn array_subquery_non_correlated() {
         _ => panic!("Expected Selected"),
     }
 }
+
+#[test]
+fn test_note_with_i64_timestamps() {
+    let db = Database::in_memory();
+    
+    db.execute("CREATE TABLE User (name STRING NOT NULL, email STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE Folder (name STRING NOT NULL, owner REFERENCES User NOT NULL)").unwrap();
+    db.execute("CREATE TABLE Note (title STRING NOT NULL, content STRING NOT NULL, author REFERENCES User NOT NULL, folder REFERENCES Folder, createdAt I64 NOT NULL, updatedAt I64 NOT NULL)").unwrap();
+    
+    let user_result = db.execute("INSERT INTO User (name, email) VALUES ('Alice', 'alice@example.com')").unwrap();
+    let user_id = match user_result {
+        ExecuteResult::Inserted(id) => id.to_string(),
+        _ => panic!("Expected Inserted"),
+    };
+    
+    // Insert note with I64 timestamps (like Date.now() in JS)
+    let timestamp = 1704384000000i64;
+    let sql = format!(
+        "INSERT INTO Note (title, content, author, folder, createdAt, updatedAt) VALUES ('Test Note', 'Content', '{}', NULL, {}, {})",
+        user_id, timestamp, timestamp
+    );
+    println!("SQL: {}", sql);
+    
+    let result = db.execute(&sql);
+    println!("Result: {:?}", result);
+    
+    assert!(result.is_ok(), "Insert should succeed: {:?}", result);
+    
+    // Verify the note was inserted
+    let rows = db.select_all("Note").unwrap();
+    assert_eq!(rows.len(), 1);
+    println!("Note: {:?}", rows[0]);
+}

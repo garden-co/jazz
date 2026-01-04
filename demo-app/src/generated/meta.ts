@@ -5,8 +5,8 @@ import type { SchemaMeta } from "@jazz/schema/runtime";
 
 export const schemaMeta: SchemaMeta = {
   tables: {
-    User: {
-      name: "User",
+    Users: {
+      name: "Users",
       columns: [
         { name: "name", type: {"kind":"string"}, nullable: false },
         { name: "email", type: {"kind":"string"}, nullable: false },
@@ -15,45 +15,45 @@ export const schemaMeta: SchemaMeta = {
       refs: [
       ],
       reverseRefs: [
-        { name: "Folder", sourceTable: "Folder", sourceColumn: "owner" },
-        { name: "Note", sourceTable: "Note", sourceColumn: "author" },
+        { name: "Folders", sourceTable: "Folders", sourceColumn: "owner" },
+        { name: "Notes", sourceTable: "Notes", sourceColumn: "author" },
       ],
     },
-    Folder: {
-      name: "Folder",
+    Folders: {
+      name: "Folders",
       columns: [
         { name: "name", type: {"kind":"string"}, nullable: false },
-        { name: "owner", type: {"kind":"ref","table":"User"}, nullable: false },
-        { name: "parent", type: {"kind":"ref","table":"Folder"}, nullable: true },
+        { name: "owner", type: {"kind":"ref","table":"Users"}, nullable: false },
+        { name: "parent", type: {"kind":"ref","table":"Folders"}, nullable: true },
       ],
       refs: [
-        { column: "owner", targetTable: "User", nullable: false },
-        { column: "parent", targetTable: "Folder", nullable: true },
+        { column: "owner", targetTable: "Users", nullable: false },
+        { column: "parent", targetTable: "Folders", nullable: true },
       ],
       reverseRefs: [
-        { name: "Folder", sourceTable: "Folder", sourceColumn: "parent" },
-        { name: "Note", sourceTable: "Note", sourceColumn: "folder" },
+        { name: "Folders", sourceTable: "Folders", sourceColumn: "parent" },
+        { name: "Notes", sourceTable: "Notes", sourceColumn: "folder" },
       ],
     },
-    Note: {
-      name: "Note",
+    Notes: {
+      name: "Notes",
       columns: [
         { name: "title", type: {"kind":"string"}, nullable: false },
         { name: "content", type: {"kind":"string"}, nullable: false },
-        { name: "author", type: {"kind":"ref","table":"User"}, nullable: false },
-        { name: "folder", type: {"kind":"ref","table":"Folder"}, nullable: true },
+        { name: "author", type: {"kind":"ref","table":"Users"}, nullable: false },
+        { name: "folder", type: {"kind":"ref","table":"Folders"}, nullable: true },
         { name: "createdAt", type: {"kind":"i64"}, nullable: false },
         { name: "updatedAt", type: {"kind":"i64"}, nullable: false },
       ],
       refs: [
-        { column: "author", targetTable: "User", nullable: false },
-        { column: "folder", targetTable: "Folder", nullable: true },
+        { column: "author", targetTable: "Users", nullable: false },
+        { column: "folder", targetTable: "Folders", nullable: true },
       ],
       reverseRefs: [
       ],
     },
-    Tag: {
-      name: "Tag",
+    Tags: {
+      name: "Tags",
       columns: [
         { name: "name", type: {"kind":"string"}, nullable: false },
         { name: "color", type: {"kind":"string"}, nullable: false },
@@ -67,7 +67,7 @@ export const schemaMeta: SchemaMeta = {
 };
 
 // Individual table metadata exports
-export const userMeta = schemaMeta.tables.User;
-export const folderMeta = schemaMeta.tables.Folder;
-export const noteMeta = schemaMeta.tables.Note;
-export const tagMeta = schemaMeta.tables.Tag;
+export const userMeta = schemaMeta.tables.Users;
+export const folderMeta = schemaMeta.tables.Folders;
+export const noteMeta = schemaMeta.tables.Notes;
+export const tagMeta = schemaMeta.tables.Tags;

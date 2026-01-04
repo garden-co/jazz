@@ -39,9 +39,9 @@ export class BinaryReader {
   readonly view: DataView;
   offset: number;
 
-  constructor(buffer: ArrayBuffer, startOffset = 0) {
+  constructor(buffer: ArrayBufferLike, startOffset = 0) {
     this.bytes = new Uint8Array(buffer);
-    this.view = new DataView(buffer);
+    this.view = new DataView(buffer as ArrayBuffer);
     this.offset = startOffset;
   }
 
@@ -114,13 +114,13 @@ export class BinaryReader {
 }
 
 /**
- * Decode binary rows for User table (batch format)
+ * Decode binary rows for Users table (batch format)
  * @param buffer ArrayBuffer from WASM
  * @returns Array of User rows
  */
-export function decodeUserRows(buffer: ArrayBuffer): Array<{ id: string; name: string; email: string; avatar: string | null }> {
+export function decodeUserRows(buffer: ArrayBufferLike): Array<{ id: string; name: string; email: string; avatar: string | null }> {
   const bytes = new Uint8Array(buffer);
-  const view = new DataView(buffer);
+  const view = new DataView(buffer as ArrayBuffer);
   let offset = 0;
 
   // Read row count
@@ -171,9 +171,9 @@ export function decodeUserRows(buffer: ArrayBuffer): Array<{ id: string; name: s
  * @param startOffset Byte offset to start reading from
  * @returns Decoded row and bytes consumed
  */
-export function decodeUserRow(buffer: ArrayBuffer, startOffset = 0): { row: { id: string; name: string; email: string; avatar: string | null }; bytesRead: number } {
+export function decodeUserRow(buffer: ArrayBufferLike, startOffset = 0): { row: { id: string; name: string; email: string; avatar: string | null }; bytesRead: number } {
   const bytes = new Uint8Array(buffer);
-  const view = new DataView(buffer);
+  const view = new DataView(buffer as ArrayBuffer);
   let offset = startOffset;
 
   const row: any = {};
@@ -214,7 +214,7 @@ export function decodeUserRow(buffer: ArrayBuffer, startOffset = 0): { row: { id
  * @param buffer ArrayBuffer containing a single delta
  * @returns Decoded delta
  */
-export function decodeUserDelta(buffer: ArrayBuffer): Delta<{ id: string; name: string; email: string; avatar: string | null }> {
+export function decodeUserDelta(buffer: ArrayBufferLike): Delta<{ id: string; name: string; email: string; avatar: string | null }> {
   const bytes = new Uint8Array(buffer);
   const deltaType = bytes[0];
 
@@ -245,13 +245,13 @@ export function readUser(reader: BinaryReader): { id: string; name: string; emai
 }
 
 /**
- * Decode binary rows for Folder table (batch format)
+ * Decode binary rows for Folders table (batch format)
  * @param buffer ArrayBuffer from WASM
  * @returns Array of Folder rows
  */
-export function decodeFolderRows(buffer: ArrayBuffer): Array<{ id: string; name: string; owner: string; parent: string | null }> {
+export function decodeFolderRows(buffer: ArrayBufferLike): Array<{ id: string; name: string; owner: string; parent: string | null }> {
   const bytes = new Uint8Array(buffer);
-  const view = new DataView(buffer);
+  const view = new DataView(buffer as ArrayBuffer);
   let offset = 0;
 
   // Read row count
@@ -298,9 +298,9 @@ export function decodeFolderRows(buffer: ArrayBuffer): Array<{ id: string; name:
  * @param startOffset Byte offset to start reading from
  * @returns Decoded row and bytes consumed
  */
-export function decodeFolderRow(buffer: ArrayBuffer, startOffset = 0): { row: { id: string; name: string; owner: string; parent: string | null }; bytesRead: number } {
+export function decodeFolderRow(buffer: ArrayBufferLike, startOffset = 0): { row: { id: string; name: string; owner: string; parent: string | null }; bytesRead: number } {
   const bytes = new Uint8Array(buffer);
-  const view = new DataView(buffer);
+  const view = new DataView(buffer as ArrayBuffer);
   let offset = startOffset;
 
   const row: any = {};
@@ -337,7 +337,7 @@ export function decodeFolderRow(buffer: ArrayBuffer, startOffset = 0): { row: { 
  * @param buffer ArrayBuffer containing a single delta
  * @returns Decoded delta
  */
-export function decodeFolderDelta(buffer: ArrayBuffer): Delta<{ id: string; name: string; owner: string; parent: string | null }> {
+export function decodeFolderDelta(buffer: ArrayBufferLike): Delta<{ id: string; name: string; owner: string; parent: string | null }> {
   const bytes = new Uint8Array(buffer);
   const deltaType = bytes[0];
 
@@ -368,13 +368,13 @@ export function readFolder(reader: BinaryReader): { id: string; name: string; ow
 }
 
 /**
- * Decode binary rows for Note table (batch format)
+ * Decode binary rows for Notes table (batch format)
  * @param buffer ArrayBuffer from WASM
  * @returns Array of Note rows
  */
-export function decodeNoteRows(buffer: ArrayBuffer): Array<{ id: string; title: string; content: string; author: string; folder: string | null; createdAt: bigint; updatedAt: bigint }> {
+export function decodeNoteRows(buffer: ArrayBufferLike): Array<{ id: string; title: string; content: string; author: string; folder: string | null; createdAt: bigint; updatedAt: bigint }> {
   const bytes = new Uint8Array(buffer);
-  const view = new DataView(buffer);
+  const view = new DataView(buffer as ArrayBuffer);
   let offset = 0;
 
   // Read row count
@@ -435,9 +435,9 @@ export function decodeNoteRows(buffer: ArrayBuffer): Array<{ id: string; title: 
  * @param startOffset Byte offset to start reading from
  * @returns Decoded row and bytes consumed
  */
-export function decodeNoteRow(buffer: ArrayBuffer, startOffset = 0): { row: { id: string; title: string; content: string; author: string; folder: string | null; createdAt: bigint; updatedAt: bigint }; bytesRead: number } {
+export function decodeNoteRow(buffer: ArrayBufferLike, startOffset = 0): { row: { id: string; title: string; content: string; author: string; folder: string | null; createdAt: bigint; updatedAt: bigint }; bytesRead: number } {
   const bytes = new Uint8Array(buffer);
-  const view = new DataView(buffer);
+  const view = new DataView(buffer as ArrayBuffer);
   let offset = startOffset;
 
   const row: any = {};
@@ -488,7 +488,7 @@ export function decodeNoteRow(buffer: ArrayBuffer, startOffset = 0): { row: { id
  * @param buffer ArrayBuffer containing a single delta
  * @returns Decoded delta
  */
-export function decodeNoteDelta(buffer: ArrayBuffer): Delta<{ id: string; title: string; content: string; author: string; folder: string | null; createdAt: bigint; updatedAt: bigint }> {
+export function decodeNoteDelta(buffer: ArrayBufferLike): Delta<{ id: string; title: string; content: string; author: string; folder: string | null; createdAt: bigint; updatedAt: bigint }> {
   const bytes = new Uint8Array(buffer);
   const deltaType = bytes[0];
 
@@ -522,13 +522,13 @@ export function readNote(reader: BinaryReader): { id: string; title: string; con
 }
 
 /**
- * Decode binary rows for Tag table (batch format)
+ * Decode binary rows for Tags table (batch format)
  * @param buffer ArrayBuffer from WASM
  * @returns Array of Tag rows
  */
-export function decodeTagRows(buffer: ArrayBuffer): Array<{ id: string; name: string; color: string }> {
+export function decodeTagRows(buffer: ArrayBufferLike): Array<{ id: string; name: string; color: string }> {
   const bytes = new Uint8Array(buffer);
-  const view = new DataView(buffer);
+  const view = new DataView(buffer as ArrayBuffer);
   let offset = 0;
 
   // Read row count
@@ -568,9 +568,9 @@ export function decodeTagRows(buffer: ArrayBuffer): Array<{ id: string; name: st
  * @param startOffset Byte offset to start reading from
  * @returns Decoded row and bytes consumed
  */
-export function decodeTagRow(buffer: ArrayBuffer, startOffset = 0): { row: { id: string; name: string; color: string }; bytesRead: number } {
+export function decodeTagRow(buffer: ArrayBufferLike, startOffset = 0): { row: { id: string; name: string; color: string }; bytesRead: number } {
   const bytes = new Uint8Array(buffer);
-  const view = new DataView(buffer);
+  const view = new DataView(buffer as ArrayBuffer);
   let offset = startOffset;
 
   const row: any = {};
@@ -600,7 +600,7 @@ export function decodeTagRow(buffer: ArrayBuffer, startOffset = 0): { row: { id:
  * @param buffer ArrayBuffer containing a single delta
  * @returns Decoded delta
  */
-export function decodeTagDelta(buffer: ArrayBuffer): Delta<{ id: string; name: string; color: string }> {
+export function decodeTagDelta(buffer: ArrayBufferLike): Delta<{ id: string; name: string; color: string }> {
   const bytes = new Uint8Array(buffer);
   const deltaType = bytes[0];
 

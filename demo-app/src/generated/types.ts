@@ -14,15 +14,15 @@ export interface GrooveRow {
 // === Includes types (specify which refs to load) ===
 
 export type UserIncludes = {
-  Folder?: true | FolderIncludes;
-  Note?: true | NoteIncludes;
+  Folders?: true | FolderIncludes;
+  Notes?: true | NoteIncludes;
 };
 
 export type FolderIncludes = {
   owner?: true | UserIncludes;
   parent?: true | FolderIncludes;
-  Folder?: true | FolderIncludes;
-  Note?: true | NoteIncludes;
+  Folders?: true | FolderIncludes;
+  Notes?: true | NoteIncludes;
 };
 
 export type NoteIncludes = {
@@ -78,7 +78,7 @@ export interface TagFilter {
 
 // === Row types ===
 
-/** User row from the User table */
+/** User row from the Users table */
 export interface User extends GrooveRow {
   name: string;
   email: string;
@@ -99,23 +99,23 @@ export type UserLoaded<I extends UserIncludes = {}> = {
   email: string;
   avatar: string | null;
 }
-  & ('Folder' extends keyof I
-    ? I['Folder'] extends true
-      ? { Folder: Folder[] }
-      : I['Folder'] extends object
-        ? { Folder: FolderLoaded<I['Folder'] & FolderIncludes>[] }
+  & ('Folders' extends keyof I
+    ? I['Folders'] extends true
+      ? { Folders: Folder[] }
+      : I['Folders'] extends object
+        ? { Folders: FolderLoaded<I['Folders'] & FolderIncludes>[] }
         : {}
     : {})
-  & ('Note' extends keyof I
-    ? I['Note'] extends true
-      ? { Note: Note[] }
-      : I['Note'] extends object
-        ? { Note: NoteLoaded<I['Note'] & NoteIncludes>[] }
+  & ('Notes' extends keyof I
+    ? I['Notes'] extends true
+      ? { Notes: Note[] }
+      : I['Notes'] extends object
+        ? { Notes: NoteLoaded<I['Notes'] & NoteIncludes>[] }
         : {}
     : {})
 ;
 
-/** Folder row from the Folder table */
+/** Folder row from the Folders table */
 export interface Folder extends GrooveRow {
   name: string;
   owner: ObjectId;
@@ -148,23 +148,23 @@ export type FolderLoaded<I extends FolderIncludes = {}> = {
         : ObjectId | null
     : ObjectId | null;
 }
-  & ('Folder' extends keyof I
-    ? I['Folder'] extends true
-      ? { Folder: Folder[] }
-      : I['Folder'] extends object
-        ? { Folder: FolderLoaded<I['Folder'] & FolderIncludes>[] }
+  & ('Folders' extends keyof I
+    ? I['Folders'] extends true
+      ? { Folders: Folder[] }
+      : I['Folders'] extends object
+        ? { Folders: FolderLoaded<I['Folders'] & FolderIncludes>[] }
         : {}
     : {})
-  & ('Note' extends keyof I
-    ? I['Note'] extends true
-      ? { Note: Note[] }
-      : I['Note'] extends object
-        ? { Note: NoteLoaded<I['Note'] & NoteIncludes>[] }
+  & ('Notes' extends keyof I
+    ? I['Notes'] extends true
+      ? { Notes: Note[] }
+      : I['Notes'] extends object
+        ? { Notes: NoteLoaded<I['Notes'] & NoteIncludes>[] }
         : {}
     : {})
 ;
 
-/** Note row from the Note table */
+/** Note row from the Notes table */
 export interface Note extends GrooveRow {
   title: string;
   content: string;
@@ -208,7 +208,7 @@ export type NoteLoaded<I extends NoteIncludes = {}> = {
 }
 ;
 
-/** Tag row from the Tag table */
+/** Tag row from the Tags table */
 export interface Tag extends GrooveRow {
   name: string;
   color: string;

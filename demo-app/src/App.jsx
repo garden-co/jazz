@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { createDatabase } from './client';
-
-let grooveDb = null;
+import { JazzProvider, useJazz, useAll } from '@jazz/react';
+import { createDatabase } from './generated/client';
 
 async function initWasm() {
   const module = await import('../pkg/groove_wasm.js');
@@ -11,126 +10,95 @@ async function initWasm() {
 
 // Schema must match generated types/meta exactly
 const SCHEMA = `
-CREATE TABLE User (
+CREATE TABLE Users (
     name STRING NOT NULL,
     email STRING NOT NULL,
     avatar STRING
 );
 
-CREATE TABLE Folder (
+CREATE TABLE Folders (
     name STRING NOT NULL,
-    owner REFERENCES User NOT NULL,
-    parent REFERENCES Folder
+    owner REFERENCES Users NOT NULL,
+    parent REFERENCES Folders
 );
 
-CREATE TABLE Note (
+CREATE TABLE Notes (
     title STRING NOT NULL,
     content STRING NOT NULL,
-    author REFERENCES User NOT NULL,
-    folder REFERENCES Folder,
+    author REFERENCES Users NOT NULL,
+    folder REFERENCES Folders,
     createdAt I64 NOT NULL,
     updatedAt I64 NOT NULL
 );
 
-CREATE TABLE Tag (
+CREATE TABLE Tags (
     name STRING NOT NULL,
     color STRING NOT NULL
 );
 `;
 
 function App() {
-  const [users, setUsers] = useState([]);
-  const [folders, setFolders] = useState([]);
-  const [notes, setNotes] = useState([]);
+  const db = useJazz();
+  const { data: users, loading: usersLoading } = useAll(db.users, {});
+  const { data: folders, loading: foldersLoading } = useAll(db.folders, {});
+  const { data: notes, loading: notesLoading } = useAll(db.notes, {});
+
   const [selectedUserId, setSelectedUserId] = useState(null);
   const [selectedFolderId, setSelectedFolderId] = useState(null);
-  const [isReady, setIsReady] = useState(false);
   const [activeTab, setActiveTab] = useState('all');
-  const subscriptionsRef = useRef([]);
 
   // Form state
   const [newUserName, setNewUserName] = useState('');
   const [newFolderName, setNewFolderName] = useState('');
   const [newNoteTitle, setNewNoteTitle] = useState('');
 
+  // Auto-select first user when users load
   useEffect(() => {
-    async function init() {
-      const wasm = await initWasm();
-      const wasmDb = new wasm.WasmDatabase();
-      grooveDb = createDatabase(wasmDb);
-
-      // Create schema - each statement separately
-      for (const stmt of SCHEMA.split(';').map(s => s.trim()).filter(Boolean)) {
-        grooveDb.raw.execute(stmt);
-      }
-
-      // Subscribe to all users
-      const unsubUsers = grooveDb.user.subscribeAll({}, (newUsers) => {
-        setUsers(newUsers);
-        if (!selectedUserId && newUsers.length > 0) {
-          setSelectedUserId(newUsers[0].id);
-        }
-      });
-
-      // Subscribe to all folders
-      const unsubFolders = grooveDb.folder.subscribeAll({}, setFolders);
-
-      // Subscribe to all notes
-      const unsubNotes = grooveDb.note.subscribeAll({}, setNotes);
-
-      subscriptionsRef.current = [unsubUsers, unsubFolders, unsubNotes];
-      setIsReady(true);
+    if (users.length > 0 && !selectedUserId) {
+      setSelectedUserId(users[0].id);
     }
-    init();
-
-    return () => {
-      subscriptionsRef.current.forEach(unsub => unsub());
-    };
-  }, []);
+  }, [users, selectedUserId]);
 
   const handleAddUser = () => {
-    if (grooveDb && newUserName.trim()) {
+    if (newUserName.trim()) {
       const email = newUserName.toLowerCase().replace(/\s+/g, '.') + '@example.com';
-      grooveDb.raw.execute(
-        `INSERT INTO User (name, email) VALUES ('${newUserName}', '${email}')`
-      );
+      db.users.create({ name: newUserName, email });
       setNewUserName('');
     }
   };
 
   const handleAddFolder = () => {
-    if (grooveDb && newFolderName.trim() && selectedUserId) {
-      const parentClause = selectedFolderId ? `'${selectedFolderId}'` : 'NULL';
-      grooveDb.raw.execute(
-        `INSERT INTO Folder (name, owner, parent) VALUES ('${newFolderName}', '${selectedUserId}', ${parentClause})`
-      );
+    if (newFolderName.trim() && selectedUserId) {
+      db.folders.create({
+        name: newFolderName,
+        owner: selectedUserId,
+        parent: selectedFolderId || null,
+      });
       setNewFolderName('');
     }
   };
 
   const handleAddNote = () => {
-    if (grooveDb && newNoteTitle.trim() && selectedUserId) {
+    if (newNoteTitle.trim() && selectedUserId) {
       const now = BigInt(Date.now());
-      const folderClause = selectedFolderId ? `'${selectedFolderId}'` : 'NULL';
-      grooveDb.raw.execute(
-        `INSERT INTO Note (title, content, author, folder, createdAt, updatedAt) VALUES ('${newNoteTitle}', '', '${selectedUserId}', ${folderClause}, ${now}, ${now})`
-      );
+      db.notes.create({
+        title: newNoteTitle,
+        content: '',
+        author: selectedUserId,
+        folder: selectedFolderId || null,
+        createdAt: now,
+        updatedAt: now,
+      });
       setNewNoteTitle('');
     }
   };
 
   const handleUpdateNote = (noteId, content) => {
-    if (grooveDb) {
-      const now = BigInt(Date.now());
-      grooveDb.raw.update_row("Note", noteId, "content", content);
-      grooveDb.raw.update_row("Note", noteId, "updatedAt", now);
-    }
+    db.notes.update(noteId, { content, updatedAt: BigInt(Date.now()) });
   };
 
   const handleDeleteNote = (noteId) => {
-    if (grooveDb) {
-      grooveDb.raw.execute(`DELETE FROM Note WHERE id = '${noteId}'`);
-    }
+    db.notes.delete(noteId);
   };
 
   // Helper to find user by ID
@@ -153,7 +121,9 @@ function App() {
     return true;
   });
 
-  if (!isReady) {
+  const isLoading = usersLoading || foldersLoading || notesLoading;
+
+  if (isLoading) {
     return <div style={styles.loading}>Loading Groove Database...</div>;
   }
 
@@ -347,6 +317,7 @@ function App() {
           <li><strong>Binary Encoding:</strong> Efficient WASM-to-JS data transfer with delta updates</li>
           <li><strong>Relations:</strong> Notes reference authors, folders reference owners (foreign keys)</li>
           <li><strong>Client-side Filters:</strong> "My Notes" and "In Folder" tabs filter the view</li>
+          <li><strong>Type-safe API:</strong> Generated CRUD methods with TypeScript types</li>
         </ul>
       </div>
 
@@ -368,6 +339,55 @@ function App() {
 // JSON replacer for BigInt
 function replacer(key, value) {
   return typeof value === 'bigint' ? value.toString() : value;
+}
+
+// Root component that sets up the database and provider
+function Root() {
+  const [db, setDb] = useState(null);
+  const [error, setError] = useState(null);
+  const initRef = useRef(false);
+
+  useEffect(() => {
+    if (initRef.current) return;
+    initRef.current = true;
+
+    async function init() {
+      try {
+        const wasm = await initWasm();
+        const wasmDb = new wasm.WasmDatabase();
+
+        // Create schema
+        for (const stmt of SCHEMA.split(';').map(s => s.trim()).filter(Boolean)) {
+          try {
+            wasmDb.execute(stmt);
+          } catch (e) {
+            console.error('Schema error:', e, 'SQL:', stmt);
+          }
+        }
+
+        const database = createDatabase(wasmDb);
+        setDb(database);
+      } catch (e) {
+        console.error('Init error:', e);
+        setError(e.message);
+      }
+    }
+    init();
+  }, []);
+
+  if (error) {
+    return <div style={styles.loading}>Error: {error}</div>;
+  }
+
+  if (!db) {
+    return <div style={styles.loading}>Initializing WASM...</div>;
+  }
+
+  return (
+    <JazzProvider database={db}>
+      <App />
+    </JazzProvider>
+  );
 }
 
 const styles = {
@@ -552,4 +572,4 @@ const styles = {
   },
 };
 
-export default App;
+export default Root;

@@ -260,14 +260,13 @@ impl IncrementalQuery {
     /// Returns a `ListenerId` that can be used to unsubscribe.
     pub fn subscribe_delta(&self, callback: OutputCallback) -> Option<ListenerId> {
         // Get current state and send as initial "Added" deltas
+        // Always call the callback, even if empty, so subscribers know initial load completed
         let initial_rows = self.rows();
-        if !initial_rows.is_empty() {
-            let initial_deltas: DeltaBatch = initial_rows
-                .into_iter()
-                .map(RowDelta::Added)
-                .collect();
-            callback(&initial_deltas);
-        }
+        let initial_deltas: DeltaBatch = initial_rows
+            .into_iter()
+            .map(RowDelta::Added)
+            .collect();
+        callback(&initial_deltas);
 
         // Subscribe for future changes
         self.db_state
