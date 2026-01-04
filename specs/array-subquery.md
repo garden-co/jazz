@@ -310,9 +310,11 @@ const folders = await db.folders.findMany({
 - [x] Add incremental tests
 
 ### Phase 4: TypeScript Integration
-- [ ] Extend codegen to detect ARRAY columns
-- [ ] Generate nested types
-- [ ] Generate query builder helpers
+- [x] SQL-first schema codegen (`@jazz/schema` package)
+- [x] Generate nested types from reverse relationships
+- [x] Depth types for controlling eager loading (`FolderDepth`, `NoteDepth`, etc.)
+- [x] Conditional Loaded types with generics (`FolderLoaded<D>`)
+- [ ] Generate query builder helpers with ARRAY subquery generation
 
 ## Limitations & Future Work
 

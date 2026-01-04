@@ -5,8 +5,7 @@
   "type": "module",
   "scripts": {
     "build:wasm": "cd ../groove-wasm && wasm-pack build --target web --out-dir ../demo-app/pkg",
-    "generate": "tsx src/schema.ts",
-    "generate:watch": "tsx --watch src/schema.ts",
+    "generate": "npx tsx -e \"import { generateFromSql } from '@jazz/schema'; generateFromSql('src/schema.sql', { output: 'src' })\"",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"
@@ -14,8 +13,7 @@
   "dependencies": {
     "@jazz/schema": "workspace:*",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "zod": "^3.22.0"
+    "react-dom": "^18.2.0"
   },
   "devDependencies": {
     "@types/react": "^18.2.0",

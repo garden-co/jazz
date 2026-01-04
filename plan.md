@@ -172,6 +172,56 @@ sql/
 - [x] Panic hook for better error messages
 - [x] update_row() accepts Base32 ObjectId strings
 
+### TypeScript Schema Package (@jazz/schema)
+
+SQL-first schema codegen: SQL schema files are the source of truth, and TypeScript types are generated from them.
+
+**Why SQL-first?**
+- ReBAC policies are expressed in SQL, so SQL is already the schema language
+- SQL is universally known by developers and LLMs
+- Single source of truth (no Zod ↔ SQL ↔ TypeScript synchronization)
+
+**Implemented Features**
+- [x] `generateFromSql(sqlPath, options)` - Parse SQL and generate TypeScript
+- [x] Parse CREATE TABLE statements with column types
+- [x] Map SQL types to TypeScript (STRING→string, I64→bigint, REFERENCES→ObjectId, etc.)
+- [x] Generate base row interfaces (e.g., `User`, `Folder`, `Note`)
+- [x] Generate insert types with optional nullable fields and reference unions
+- [x] Infer reverse relationships from forward refs (e.g., `User.Folders` from `Folder.owner`)
+- [x] Generate Depth types for controlling eager loading depth
+- [x] Generate conditional Loaded types with generic depth parameter
+
+**Usage**
+```bash
+# From CLI
+npx tsx -e "import { generateFromSql } from '@jazz/schema'; generateFromSql('schema.sql')"
+
+# Or in package.json
+"generate": "npx tsx -e \"import { generateFromSql } from '@jazz/schema'; generateFromSql('src/schema.sql', { output: 'src' })\""
+```
+
+**Example Output (from schema.sql)**
+```typescript
+export type FolderLoaded<D extends FolderDepth = {}> = {
+  id: ObjectId;
+  name: string;
+  owner: 'owner' extends keyof D
+    ? D['owner'] extends true
+      ? User
+      : D['owner'] extends object
+        ? UserLoaded<D['owner'] & UserDepth>
+        : ObjectId
+    : ObjectId;
+}
+  & ('Notes' extends keyof D
+    ? D['Notes'] extends true
+      ? { Notes: Note[] }
+      : D['Notes'] extends object
+        ? { Notes: NoteLoaded<D['Notes'] & NoteDepth>[] }
+        : {}
+    : {});
+```
+
 ## Phase 2: Syncing
 - [ ] Design sync protocol for commit graph reconciliation
 - [ ] Implement client-side sync
