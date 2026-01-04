@@ -346,6 +346,81 @@ fn execute_update() {
     assert_eq!(row.values[1], Value::I64(31));
 }
 
+#[test]
+fn execute_delete() {
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)")
+        .unwrap();
+
+    let alice_id = match db
+        .execute("INSERT INTO users (name, active) VALUES ('Alice', true)")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    db.execute("INSERT INTO users (name, active) VALUES ('Bob', false)")
+        .unwrap();
+    db.execute("INSERT INTO users (name, active) VALUES ('Carol', true)")
+        .unwrap();
+
+    // Should have 3 users
+    assert_eq!(db.select_all("users").unwrap().len(), 3);
+
+    // Delete one user by ID
+    let result = db
+        .execute(&format!("DELETE FROM users WHERE id = '{}'", alice_id))
+        .unwrap();
+    match result {
+        ExecuteResult::Deleted(count) => {
+            assert_eq!(count, 1);
+        }
+        _ => panic!("expected Deleted"),
+    }
+
+    // Should have 2 users now
+    let remaining = db.select_all("users").unwrap();
+    assert_eq!(remaining.len(), 2);
+    let names: Vec<_> = remaining.iter().map(|r| &r.values[0]).collect();
+    assert!(names.contains(&&Value::String("Bob".into())));
+    assert!(names.contains(&&Value::String("Carol".into())));
+    assert!(!names.contains(&&Value::String("Alice".into())));
+}
+
+#[test]
+fn execute_delete_by_condition() {
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL, active BOOL NOT NULL)")
+        .unwrap();
+    db.execute("INSERT INTO users (name, active) VALUES ('Alice', true)")
+        .unwrap();
+    db.execute("INSERT INTO users (name, active) VALUES ('Bob', false)")
+        .unwrap();
+    db.execute("INSERT INTO users (name, active) VALUES ('Carol', true)")
+        .unwrap();
+
+    // Delete all inactive users
+    let result = db
+        .execute("DELETE FROM users WHERE active = false")
+        .unwrap();
+    match result {
+        ExecuteResult::Deleted(count) => {
+            assert_eq!(count, 1);
+        }
+        _ => panic!("expected Deleted"),
+    }
+
+    // Only active users remain
+    let remaining = db.select_all("users").unwrap();
+    assert_eq!(remaining.len(), 2);
+    let names: Vec<_> = remaining.iter().map(|r| &r.values[0]).collect();
+    assert!(names.contains(&&Value::String("Alice".into())));
+    assert!(names.contains(&&Value::String("Carol".into())));
+}
+
 // ========== References and Indexes Tests ==========
 
 #[test]

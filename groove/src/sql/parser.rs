@@ -9,7 +9,15 @@ pub enum Statement {
     CreatePolicy(Policy),
     Insert(Insert),
     Update(Update),
+    Delete(Delete),
     Select(Select),
+}
+
+/// DELETE statement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Delete {
+    pub table: String,
+    pub where_clause: Vec<Condition>,
 }
 
 /// CREATE TABLE statement.
@@ -516,6 +524,23 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn parse_delete(&mut self) -> Result<Delete, ParseError> {
+        self.expect_keyword("FROM")?;
+        let table = self.parse_identifier()?;
+        let where_clause = self.parse_where_clause()?;
+
+        // Optional semicolon
+        self.skip_whitespace();
+        if self.peek_char() == Some(';') {
+            self.consume_char();
+        }
+
+        Ok(Delete {
+            table,
+            where_clause,
+        })
+    }
+
     fn parse_select(&mut self) -> Result<Select, ParseError> {
         // Projection
         self.skip_whitespace();
@@ -799,11 +824,14 @@ impl<'a> Parser<'a> {
         if self.try_keyword("UPDATE") {
             return Ok(Statement::Update(self.parse_update()?));
         }
+        if self.try_keyword("DELETE") {
+            return Ok(Statement::Delete(self.parse_delete()?));
+        }
         if self.try_keyword("SELECT") {
             return Ok(Statement::Select(self.parse_select()?));
         }
 
-        Err(self.error("expected CREATE, INSERT, UPDATE, or SELECT"))
+        Err(self.error("expected CREATE, INSERT, UPDATE, DELETE, or SELECT"))
     }
 
     // ========== Policy Parsing ==========

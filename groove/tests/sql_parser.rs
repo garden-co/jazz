@@ -130,6 +130,40 @@ fn parse_update() {
 }
 
 #[test]
+fn parse_delete() {
+    let id = ObjectId::new(0xdef456);
+    let sql = format!("DELETE FROM users WHERE id = '{}'", id);
+    let stmt = parse(&sql).unwrap();
+
+    match stmt {
+        Statement::Delete(del) => {
+            assert_eq!(del.table, "users");
+            assert_eq!(del.where_clause.len(), 1);
+            assert_eq!(del.where_clause[0].column.column, "id");
+            assert_eq!(
+                del.where_clause[0].right,
+                ConditionValue::Literal(Value::String(id.to_string()))
+            );
+        }
+        _ => panic!("expected Delete"),
+    }
+}
+
+#[test]
+fn parse_delete_all() {
+    let sql = "DELETE FROM users";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::Delete(del) => {
+            assert_eq!(del.table, "users");
+            assert!(del.where_clause.is_empty());
+        }
+        _ => panic!("expected Delete"),
+    }
+}
+
+#[test]
 fn parse_select_star() {
     let sql = "SELECT * FROM users";
     let stmt = parse(sql).unwrap();

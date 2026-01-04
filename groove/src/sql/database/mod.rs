@@ -2187,6 +2187,52 @@ impl Database {
 
                 Ok(ExecuteResult::Updated(count))
             }
+            Statement::Delete(del) => {
+                // Find rows matching where clause
+                let rows_to_delete = if del.where_clause.is_empty() {
+                    self.select_all(&del.table)?
+                } else if del.where_clause.len() == 1 {
+                    let cond = &del.where_clause[0];
+                    let value = cond.value().ok_or_else(|| {
+                        DatabaseError::ColumnNotFound(
+                            "column references not supported in DELETE WHERE".to_string(),
+                        )
+                    })?;
+                    self.select_where(&del.table, &cond.column.column, value)?
+                } else {
+                    // Multiple conditions - start with first, then filter
+                    let cond = &del.where_clause[0];
+                    let value = cond.value().ok_or_else(|| {
+                        DatabaseError::ColumnNotFound(
+                            "column references not supported in DELETE WHERE".to_string(),
+                        )
+                    })?;
+                    let mut rows = self.select_where(&del.table, &cond.column.column, value)?;
+                    let schema = self.get_table(&del.table).unwrap();
+
+                    for cond in &del.where_clause[1..] {
+                        let col_idx =
+                            schema.column_index(&cond.column.column).ok_or_else(|| {
+                                DatabaseError::ColumnNotFound(cond.column.column.clone())
+                            })?;
+                        let value = cond.value().ok_or_else(|| {
+                            DatabaseError::ColumnNotFound(
+                                "column references not supported in DELETE WHERE".to_string(),
+                            )
+                        })?;
+                        rows.retain(|row| row.values.get(col_idx) == Some(value));
+                    }
+                    rows
+                };
+
+                let count = rows_to_delete.len();
+
+                for row in rows_to_delete {
+                    self.delete(&del.table, row.id)?;
+                }
+
+                Ok(ExecuteResult::Deleted(count))
+            }
             Statement::Select(sel) => {
                 let rows = self.state.execute_select(&sel);
                 Ok(ExecuteResult::Selected(rows))

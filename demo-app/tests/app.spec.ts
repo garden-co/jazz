@@ -110,6 +110,29 @@ test.describe('Groove Demo App', () => {
     await expect(page.locator('pre').getByText('This is my updated content')).toBeVisible();
   });
 
+  test('deletes a note', async ({ page }) => {
+    // Create user and notes
+    await page.getByPlaceholder('New user name...').fill('Alice');
+    await page.getByRole('button', { name: 'Add' }).first().click();
+    await expect(page.getByRole('heading', { name: 'Users (1)' })).toBeVisible();
+
+    await page.getByPlaceholder('New note title...').fill('Note 1');
+    await page.getByRole('button', { name: 'Add Note' }).click();
+    await expect(page.getByRole('heading', { name: 'Notes (1)' })).toBeVisible();
+
+    await page.getByPlaceholder('New note title...').fill('Note 2');
+    await page.getByRole('button', { name: 'Add Note' }).click();
+    await expect(page.getByRole('heading', { name: 'Notes (2)' })).toBeVisible();
+
+    // Delete the first note
+    const deleteButtons = page.getByRole('button', { name: 'Delete' });
+    await deleteButtons.first().click();
+
+    // Should have 1 note remaining
+    await expect(page.getByRole('heading', { name: 'Notes (1)' })).toBeVisible();
+    await expect(page.locator('strong').getByText('Note 2', { exact: true })).toBeVisible();
+  });
+
   test('filters notes by "My Notes" tab', async ({ page }) => {
     // Create two users
     await page.getByPlaceholder('New user name...').fill('Alice');
