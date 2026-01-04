@@ -127,10 +127,17 @@ See `specs/incremental-queries.md` for full design.
 - [ ] `IncrementalQuery` - user-facing handle
 - [ ] Database integration (incremental_query method, mutation hooks)
 
-**Phase 3: Future Extensions**
+**Phase 3: Recursive Queries**
+- [x] `RecursiveFilter` node type for self-referential policies
+- [x] `AccessReason` enum (Base, Inherited, Both) for removal cascading
+- [x] Fixpoint iteration for transitive closure during initialization
+- [x] Children index for efficient downward propagation
+- [x] Delta propagation with cascade to children
+- [x] Integration with policy system (detect self-referential INHERITS, build RecursiveFilter)
+
+**Phase 4: Future Extensions**
 - [ ] Batched propagation for server sync (begin_batch/flush_batch)
 - [ ] Shared subgraphs across queries
-- [ ] JOIN support in query graphs
 - [ ] Index-aware source nodes (IndexLookup)
 - [ ] ReBAC constraint merging at graph construction
 
@@ -202,8 +209,8 @@ See `specs/rebac-policies.md` for full design.
 - [x] `policy_expr_to_predicate` converts simple policies to Predicate for efficient filtering
 - [x] INHERITS flattened to JOINs for true incremental evaluation
 - [x] Optimize predicate ordering by selectivity
+- [x] Self-referential recursive INHERITS (e.g., folder→parent_folder→...→root) via RecursiveFilter
 - [ ] Recursive/nested INHERITS chains (e.g., doc→folder→workspace→owner) - currently returns error
-- [ ] Self-referential recursive INHERITS (e.g., folder→parent_folder→...→root) - requires fixpoint iteration
 
 **Phase 3.5: Testing and Debugging**
 - [ ] EXPLAIN POLICY command
@@ -223,7 +230,7 @@ See `specs/rebac-policies.md` for full design.
 
 ## Test Coverage
 
-Current test count: **235 tests** passing across all modules
+Current test count: **243 tests** passing across all modules
 
 - Unit tests in `sql/row.rs`, `sql/types.rs`, `sql/database/tests.rs`
 - Integration tests in `tests/` directory:

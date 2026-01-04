@@ -635,6 +635,10 @@ struct InheritsInfo {
     target_predicate: Option<PolicyExpr>,
     /// Any additional predicates from AND clauses in the source policy
     additional_predicates: Vec<PolicyExpr>,
+    /// Whether this is a self-referential INHERITS (target_table == source_table)
+    is_self_referential: bool,
+    /// The base predicate for self-referential INHERITS (the OR sibling of INHERITS)
+    base_predicate: Option<PolicyExpr>,
 }
 
 /// Database errors.
@@ -1707,12 +1711,17 @@ impl Database {
         let policies = self.get_policies(table);
         let select_policy = policies.as_ref().and_then(|p| p.get(PolicyAction::Select));
 
-        // Check if policy contains INHERITS - if so, we need to build a JOIN graph
+        // Check if policy contains INHERITS
         if let Some(policy) = select_policy {
             if let Some(ref where_expr) = policy.where_clause {
                 if let Some(inherits_info) = self.extract_inherits(where_expr, table, &schema)? {
-                    // Build a JOIN graph to handle INHERITS
-                    return self.build_inherits_join_graph(select, viewer, &inherits_info);
+                    if inherits_info.is_self_referential {
+                        // Self-referential INHERITS: use RecursiveFilter
+                        return self.build_recursive_filter_graph(select, viewer, &inherits_info, &schema);
+                    } else {
+                        // Non-self-referential INHERITS: use JOIN graph
+                        return self.build_inherits_join_graph(select, viewer, &inherits_info);
+                    }
                 }
             }
         }
@@ -1754,7 +1763,8 @@ impl Database {
     /// Extract INHERITS information from a policy expression.
     ///
     /// Returns Some(InheritsInfo) if the policy contains a simple INHERITS clause
-    /// that can be flattened to a JOIN. Returns None for simple predicates.
+    /// that can be flattened to a JOIN or handled with RecursiveFilter.
+    /// Returns None for simple predicates without INHERITS.
     fn extract_inherits(
         &self,
         expr: &PolicyExpr,
@@ -1781,16 +1791,24 @@ impl Database {
                     _ => return Err(DatabaseError::NotAReference(col_name.to_string())),
                 };
 
-                // Get the target table's SELECT policy
-                let target_policies = self.get_policies(&target_table);
-                let target_select = target_policies.as_ref().and_then(|p| p.get(PolicyAction::Select));
-                let target_predicate = target_select.and_then(|p| p.where_clause.clone());
+                let is_self_referential = target_table == source_table;
+
+                // Get the target table's SELECT policy (only needed for non-self-referential)
+                let target_predicate = if is_self_referential {
+                    None // Self-referential recursion - no target policy needed
+                } else {
+                    let target_policies = self.get_policies(&target_table);
+                    let target_select = target_policies.as_ref().and_then(|p| p.get(PolicyAction::Select));
+                    target_select.and_then(|p| p.where_clause.clone())
+                };
 
                 Ok(Some(InheritsInfo {
                     ref_column: col_name.to_string(),
                     target_table,
                     target_predicate,
                     additional_predicates: vec![],
+                    is_self_referential,
+                    base_predicate: None,
                 }))
             }
             PolicyExpr::And(exprs) => {
@@ -1815,6 +1833,42 @@ impl Database {
 
                 if let Some(mut info) = inherits_info {
                     info.additional_predicates = additional;
+                    Ok(Some(info))
+                } else {
+                    Ok(None)
+                }
+            }
+            PolicyExpr::Or(exprs) => {
+                // For OR expressions, look for pattern: base_predicate OR INHERITS
+                // This is the typical self-referential pattern:
+                // `owner_id = @viewer OR INHERITS SELECT FROM parent_id`
+                let mut inherits_info: Option<InheritsInfo> = None;
+                let mut base_predicates: Vec<PolicyExpr> = vec![];
+
+                for e in exprs {
+                    if let Some(info) = self.extract_inherits(e, source_table, source_schema)? {
+                        if inherits_info.is_some() {
+                            // Multiple INHERITS in OR - not yet supported
+                            return Err(DatabaseError::Parse(parser::ParseError {
+                                message: "Multiple INHERITS in OR not yet supported".to_string(),
+                                position: 0,
+                            }));
+                        }
+                        inherits_info = Some(info);
+                    } else {
+                        base_predicates.push(e.clone());
+                    }
+                }
+
+                if let Some(mut info) = inherits_info {
+                    // Combine base predicates with OR
+                    if !base_predicates.is_empty() {
+                        if base_predicates.len() == 1 {
+                            info.base_predicate = Some(base_predicates.remove(0));
+                        } else {
+                            info.base_predicate = Some(PolicyExpr::Or(base_predicates));
+                        }
+                    }
                     Ok(Some(info))
                 } else {
                     Ok(None)
@@ -1883,6 +1937,64 @@ impl Database {
         };
 
         Ok(builder.output(after_policy, GraphId(0)))
+    }
+
+    /// Build a query graph with RecursiveFilter for self-referential INHERITS.
+    ///
+    /// This handles policies like `owner_id = @viewer OR INHERITS SELECT FROM parent_id`
+    /// where `parent_id` references the same table. Uses fixpoint iteration to compute
+    /// the transitive closure of accessible rows.
+    fn build_recursive_filter_graph(
+        &self,
+        select: &Select,
+        viewer: ObjectId,
+        inherits: &InheritsInfo,
+        schema: &TableSchema,
+    ) -> Result<crate::sql::query_graph::QueryGraph, DatabaseError> {
+        let table = &select.from.table;
+
+        // Build the base predicate from the non-INHERITS part of the policy
+        let base_predicate = if let Some(ref base_expr) = inherits.base_predicate {
+            self.policy_expr_to_predicate(base_expr, viewer)?
+        } else {
+            // No base predicate means only INHERITS - pure recursive access
+            // This would mean no rows are directly accessible, only inherited
+            Predicate::False
+        };
+
+        let mut builder = QueryGraphBuilder::new(table, schema.clone());
+
+        // Start with table scan
+        let scan = builder.table_scan();
+
+        // Apply user's WHERE clause first (if any)
+        let after_user_where = if select.where_clause.is_empty() {
+            scan
+        } else {
+            let predicate = self.build_predicate(&select.where_clause, schema)?;
+            builder.filter(scan, predicate)
+        };
+
+        // Apply any additional predicates from AND clauses (non-INHERITS parts)
+        let after_additional = if inherits.additional_predicates.is_empty() {
+            after_user_where
+        } else {
+            let mut combined = Predicate::True;
+            for expr in &inherits.additional_predicates {
+                let pred = self.policy_expr_to_predicate(expr, viewer)?;
+                combined = combined.and(pred);
+            }
+            builder.filter(after_user_where, combined)
+        };
+
+        // Add RecursiveFilter node for the self-referential policy
+        let recursive = builder.recursive_filter(
+            after_additional,
+            base_predicate,
+            &inherits.ref_column,
+        );
+
+        Ok(builder.output(recursive, GraphId(0)))
     }
 
     /// Convert a PolicyExpr to a Predicate with qualified column names.

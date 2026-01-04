@@ -14,6 +14,21 @@ use crate::object::ObjectId;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct NodeId(pub u32);
 
+/// Reason why a row is accessible in a RecursiveFilter.
+///
+/// This is crucial for correctly handling removals - if a row is only
+/// accessible via inheritance and its parent loses access, the row
+/// must also lose access. But if it has its own base access, it stays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccessReason {
+    /// Row satisfies the base predicate (e.g., owner_id = @viewer)
+    Base,
+    /// Row is accessible because its parent is accessible
+    Inherited,
+    /// Row satisfies both base and inherited (redundant but safe)
+    Both,
+}
+
 /// A node in the query graph.
 #[derive(Debug)]
 pub enum QueryNode {
@@ -81,6 +96,31 @@ pub enum QueryNode {
     /// This node doesn't transform data, it just marks which node's
     /// output should be used as the query result.
     Output { table: String, input: NodeId },
+
+    /// Transform: recursive filter for self-referential policies.
+    ///
+    /// Handles policies like `owner_id = @viewer OR INHERITS SELECT FROM parent_id`
+    /// where `parent_id` references the same table. Uses fixpoint iteration
+    /// to compute the transitive closure of accessible rows.
+    ///
+    /// A row is accessible if:
+    /// - It satisfies the base_predicate (e.g., owner_id = @viewer), OR
+    /// - Its parent (via recursive_column) is accessible
+    RecursiveFilter {
+        table: String,
+        input: NodeId,
+        /// Base predicate for direct access (e.g., owner_id = @viewer)
+        base_predicate: Predicate,
+        /// Column that references parent row in same table (e.g., parent_id)
+        recursive_column: String,
+        /// Currently accessible rows with their access reason
+        accessible: HashMap<ObjectId, AccessReason>,
+        /// Reverse index: parent_id -> set of children
+        /// Used for efficient cascade propagation
+        children_index: HashMap<ObjectId, HashSet<ObjectId>>,
+        /// All rows in the table (needed for fixpoint iteration)
+        all_rows: HashMap<ObjectId, Row>,
+    },
 }
 
 impl QueryNode {
@@ -92,6 +132,7 @@ impl QueryNode {
             QueryNode::Filter { table, .. } => table,
             QueryNode::Join { left_table, .. } => left_table,
             QueryNode::Output { table, .. } => table,
+            QueryNode::RecursiveFilter { table, .. } => table,
         }
     }
 
@@ -103,6 +144,7 @@ impl QueryNode {
             QueryNode::Filter { table, .. } => vec![table],
             QueryNode::Join { left_table, right_table, .. } => vec![left_table, right_table],
             QueryNode::Output { table, .. } => vec![table],
+            QueryNode::RecursiveFilter { table, .. } => vec![table],
         }
     }
 
@@ -114,6 +156,7 @@ impl QueryNode {
             QueryNode::Filter { cached_ids, .. } => Some(cached_ids),
             QueryNode::Join { .. } => None, // Uses cached_pairs instead
             QueryNode::Output { .. } => None,
+            QueryNode::RecursiveFilter { .. } => None, // Uses accessible instead
         }
     }
 
@@ -125,6 +168,23 @@ impl QueryNode {
             QueryNode::Filter { cached_ids, .. } => Some(cached_ids),
             QueryNode::Join { .. } => None,
             QueryNode::Output { .. } => None,
+            QueryNode::RecursiveFilter { .. } => None,
+        }
+    }
+
+    /// Get the accessible rows for RecursiveFilter nodes.
+    pub fn accessible(&self) -> Option<&HashMap<ObjectId, AccessReason>> {
+        match self {
+            QueryNode::RecursiveFilter { accessible, .. } => Some(accessible),
+            _ => None,
+        }
+    }
+
+    /// Get all rows stored in a RecursiveFilter node.
+    pub fn all_rows(&self) -> Option<&HashMap<ObjectId, Row>> {
+        match self {
+            QueryNode::RecursiveFilter { all_rows, .. } => Some(all_rows),
+            _ => None,
         }
     }
 
@@ -152,6 +212,7 @@ impl QueryNode {
             QueryNode::Filter { input, .. } => Some(*input),
             QueryNode::Join { .. } => None, // Join is a source-like node
             QueryNode::Output { input, .. } => Some(*input),
+            QueryNode::RecursiveFilter { input, .. } => Some(*input),
         }
     }
 
@@ -190,6 +251,294 @@ impl QueryNode {
             }
 
             QueryNode::Output { .. } => input, // Passthrough
+
+            QueryNode::RecursiveFilter { .. } => {
+                // RecursiveFilter nodes need special handling
+                // This should be called via evaluate_recursive instead
+                DeltaBatch::new()
+            }
+        }
+    }
+
+    /// Evaluate a RecursiveFilter node with fixpoint iteration.
+    ///
+    /// This handles self-referential policies like:
+    /// `owner_id = @viewer OR INHERITS SELECT FROM parent_id`
+    pub fn evaluate_recursive(
+        &mut self,
+        input: DeltaBatch,
+        schema: &TableSchema,
+    ) -> DeltaBatch {
+        match self {
+            QueryNode::RecursiveFilter {
+                base_predicate,
+                recursive_column,
+                accessible,
+                children_index,
+                all_rows,
+                ..
+            } => {
+                let mut output = DeltaBatch::new();
+
+                for delta in input.into_iter() {
+                    match delta {
+                        RowDelta::Added(row) => {
+                            Self::recursive_handle_insert(
+                                row,
+                                schema,
+                                base_predicate,
+                                recursive_column,
+                                accessible,
+                                children_index,
+                                all_rows,
+                                &mut output,
+                            );
+                        }
+                        RowDelta::Removed { id, prior } => {
+                            Self::recursive_handle_remove(
+                                id,
+                                prior,
+                                recursive_column,
+                                schema,
+                                accessible,
+                                children_index,
+                                all_rows,
+                                &mut output,
+                            );
+                        }
+                        RowDelta::Updated { id, new, prior } => {
+                            // Handle as remove + insert for simplicity
+                            // (Could optimize for cases where parent_id doesn't change)
+                            Self::recursive_handle_remove(
+                                id,
+                                prior.clone(),
+                                recursive_column,
+                                schema,
+                                accessible,
+                                children_index,
+                                all_rows,
+                                &mut output,
+                            );
+                            Self::recursive_handle_insert(
+                                new,
+                                schema,
+                                base_predicate,
+                                recursive_column,
+                                accessible,
+                                children_index,
+                                all_rows,
+                                &mut output,
+                            );
+                        }
+                    }
+                }
+
+                output
+            }
+            _ => DeltaBatch::new(),
+        }
+    }
+
+    /// Handle inserting a row into a RecursiveFilter.
+    #[allow(clippy::too_many_arguments)]
+    fn recursive_handle_insert(
+        row: Row,
+        schema: &TableSchema,
+        base_predicate: &Predicate,
+        recursive_column: &str,
+        accessible: &mut HashMap<ObjectId, AccessReason>,
+        children_index: &mut HashMap<ObjectId, HashSet<ObjectId>>,
+        all_rows: &mut HashMap<ObjectId, Row>,
+        output: &mut DeltaBatch,
+    ) {
+        let row_id = row.id;
+
+        // Store the row
+        all_rows.insert(row_id, row.clone());
+
+        // Update children index: this row is a child of its parent
+        if let Some(parent_id) = Self::get_ref_value(&row, recursive_column, schema) {
+            children_index
+                .entry(parent_id)
+                .or_default()
+                .insert(row_id);
+        }
+
+        // Check if row is accessible
+        let base_match = base_predicate.matches(&row, schema);
+        let parent_id = Self::get_ref_value(&row, recursive_column, schema);
+        let parent_accessible = parent_id
+            .map(|pid| accessible.contains_key(&pid))
+            .unwrap_or(false);
+
+        // Null parent is treated as accessible (root node) if base matches,
+        // or if we want roots to be inherently accessible
+        let is_root = parent_id.is_none();
+
+        if base_match || parent_accessible {
+            let reason = match (base_match, parent_accessible) {
+                (true, true) => AccessReason::Both,
+                (true, false) => AccessReason::Base,
+                (false, true) => AccessReason::Inherited,
+                (false, false) => unreachable!(),
+            };
+            accessible.insert(row_id, reason);
+            output.push(RowDelta::Added(row.clone()));
+
+            // Cascade: check if any existing rows are children of this row
+            // and should now become accessible
+            Self::propagate_access_to_children(
+                row_id,
+                schema,
+                base_predicate,
+                recursive_column,
+                accessible,
+                children_index,
+                all_rows,
+                output,
+            );
+        } else if is_root {
+            // Root node without base access - not accessible
+            // (but still in all_rows for structure tracking)
+        }
+        // else: not accessible, don't add to output
+    }
+
+    /// Propagate access to children of a newly-accessible row.
+    #[allow(clippy::too_many_arguments)]
+    fn propagate_access_to_children(
+        parent_id: ObjectId,
+        schema: &TableSchema,
+        base_predicate: &Predicate,
+        recursive_column: &str,
+        accessible: &mut HashMap<ObjectId, AccessReason>,
+        children_index: &HashMap<ObjectId, HashSet<ObjectId>>,
+        all_rows: &HashMap<ObjectId, Row>,
+        output: &mut DeltaBatch,
+    ) {
+        if let Some(children) = children_index.get(&parent_id) {
+            for &child_id in children {
+                // Skip if already accessible
+                if accessible.contains_key(&child_id) {
+                    continue;
+                }
+
+                // Child becomes accessible via inheritance
+                if let Some(child_row) = all_rows.get(&child_id) {
+                    let base_match = base_predicate.matches(child_row, schema);
+                    let reason = if base_match {
+                        AccessReason::Both
+                    } else {
+                        AccessReason::Inherited
+                    };
+                    accessible.insert(child_id, reason);
+                    output.push(RowDelta::Added(child_row.clone()));
+
+                    // Recursively propagate to grandchildren
+                    Self::propagate_access_to_children(
+                        child_id,
+                        schema,
+                        base_predicate,
+                        recursive_column,
+                        accessible,
+                        children_index,
+                        all_rows,
+                        output,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Handle removing a row from a RecursiveFilter.
+    #[allow(clippy::too_many_arguments)]
+    fn recursive_handle_remove(
+        row_id: ObjectId,
+        prior: crate::sql::query_graph::delta::PriorState,
+        recursive_column: &str,
+        schema: &TableSchema,
+        accessible: &mut HashMap<ObjectId, AccessReason>,
+        children_index: &mut HashMap<ObjectId, HashSet<ObjectId>>,
+        all_rows: &mut HashMap<ObjectId, Row>,
+        output: &mut DeltaBatch,
+    ) {
+        // Remove from all_rows
+        let removed_row = all_rows.remove(&row_id);
+
+        // Remove from children_index (this row as a child of its parent)
+        if let Some(row) = &removed_row {
+            if let Some(parent_id) = Self::get_ref_value(row, recursive_column, schema) {
+                if let Some(siblings) = children_index.get_mut(&parent_id) {
+                    siblings.remove(&row_id);
+                }
+            }
+        }
+
+        // If row was accessible, remove it and cascade to children
+        if accessible.remove(&row_id).is_some() {
+            output.push(RowDelta::Removed { id: row_id, prior: prior.clone() });
+
+            // Cascade removal to children that were only accessible via this parent
+            Self::propagate_removal_to_children(
+                row_id,
+                prior,
+                schema,
+                accessible,
+                children_index,
+                all_rows,
+                output,
+            );
+        }
+
+        // Also remove this row's entry in children_index (as a parent)
+        children_index.remove(&row_id);
+    }
+
+    /// Propagate removal to children of a removed row.
+    #[allow(clippy::too_many_arguments)]
+    fn propagate_removal_to_children(
+        removed_parent_id: ObjectId,
+        prior: crate::sql::query_graph::delta::PriorState,
+        _schema: &TableSchema,
+        accessible: &mut HashMap<ObjectId, AccessReason>,
+        children_index: &HashMap<ObjectId, HashSet<ObjectId>>,
+        all_rows: &HashMap<ObjectId, Row>,
+        output: &mut DeltaBatch,
+    ) {
+        if let Some(children) = children_index.get(&removed_parent_id) {
+            for &child_id in children.clone().iter() {
+                if let Some(reason) = accessible.get(&child_id).copied() {
+                    match reason {
+                        AccessReason::Inherited => {
+                            // Only accessible via this parent - loses access
+                            accessible.remove(&child_id);
+                            output.push(RowDelta::Removed {
+                                id: child_id,
+                                prior: prior.clone(),
+                            });
+
+                            // Recursively remove grandchildren
+                            Self::propagate_removal_to_children(
+                                child_id,
+                                prior.clone(),
+                                _schema,
+                                accessible,
+                                children_index,
+                                all_rows,
+                                output,
+                            );
+                        }
+                        AccessReason::Both => {
+                            // Still accessible via base predicate - downgrade
+                            accessible.insert(child_id, AccessReason::Base);
+                            // No output delta - still visible
+                        }
+                        AccessReason::Base => {
+                            // Wasn't using parent anyway - no change
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -781,5 +1130,243 @@ mod tests {
 
         // Early cutoff - no output since row never matched
         assert!(output.is_empty());
+    }
+
+    // --- RecursiveFilter tests ---
+
+    fn folder_schema() -> TableSchema {
+        TableSchema::new(
+            "folders",
+            vec![
+                ColumnDef::required("name", ColumnType::String),
+                ColumnDef::required("owner_id", ColumnType::Ref("users".to_string())),
+                ColumnDef::optional("parent_id", ColumnType::Ref("folders".to_string())),
+            ],
+        )
+    }
+
+    fn make_folder(id: u128, name: &str, owner_id: u128, parent_id: Option<u128>) -> Row {
+        Row::new(
+            ObjectId::new(id),
+            vec![
+                Value::String(name.to_string()),
+                Value::Ref(ObjectId::new(owner_id)),
+                match parent_id {
+                    Some(p) => Value::Ref(ObjectId::new(p)),
+                    None => Value::Null,
+                },
+            ],
+        )
+    }
+
+    const ALICE: u128 = 100;
+    const BOB: u128 = 200;
+
+    #[test]
+    fn recursive_filter_base_access() {
+        // Test: root folder owned by viewer is accessible
+        let schema = folder_schema();
+        let viewer = ObjectId::new(ALICE);
+
+        let mut node = QueryNode::RecursiveFilter {
+            table: "folders".to_string(),
+            input: NodeId(0),
+            base_predicate: Predicate::eq("owner_id", Value::Ref(viewer)),
+            recursive_column: "parent_id".to_string(),
+            accessible: HashMap::new(),
+            children_index: HashMap::new(),
+            all_rows: HashMap::new(),
+        };
+
+        // Add a root folder owned by Alice
+        let root = make_folder(1, "root", ALICE, None);
+        let delta = DeltaBatch::added(root.clone());
+
+        let output = node.evaluate_recursive(delta, &schema);
+
+        assert_eq!(output.len(), 1);
+        assert!(matches!(output.iter().next(), Some(RowDelta::Added(r)) if r.id.0 == 1));
+        assert!(node.accessible().unwrap().contains_key(&ObjectId::new(1)));
+        assert_eq!(node.accessible().unwrap().get(&ObjectId::new(1)), Some(&AccessReason::Base));
+    }
+
+    #[test]
+    fn recursive_filter_no_base_access() {
+        // Test: folder owned by someone else is not accessible
+        let schema = folder_schema();
+        let viewer = ObjectId::new(ALICE);
+
+        let mut node = QueryNode::RecursiveFilter {
+            table: "folders".to_string(),
+            input: NodeId(0),
+            base_predicate: Predicate::eq("owner_id", Value::Ref(viewer)),
+            recursive_column: "parent_id".to_string(),
+            accessible: HashMap::new(),
+            children_index: HashMap::new(),
+            all_rows: HashMap::new(),
+        };
+
+        // Add a root folder owned by Bob (not Alice)
+        let root = make_folder(1, "bobs-folder", BOB, None);
+        let delta = DeltaBatch::added(root);
+
+        let output = node.evaluate_recursive(delta, &schema);
+
+        assert!(output.is_empty());
+        assert!(!node.accessible().unwrap().contains_key(&ObjectId::new(1)));
+    }
+
+    #[test]
+    fn recursive_filter_inherited_access() {
+        // Test: child folder inherits access from parent
+        let schema = folder_schema();
+        let viewer = ObjectId::new(ALICE);
+
+        let mut node = QueryNode::RecursiveFilter {
+            table: "folders".to_string(),
+            input: NodeId(0),
+            base_predicate: Predicate::eq("owner_id", Value::Ref(viewer)),
+            recursive_column: "parent_id".to_string(),
+            accessible: HashMap::new(),
+            children_index: HashMap::new(),
+            all_rows: HashMap::new(),
+        };
+
+        // Add root folder owned by Alice
+        let root = make_folder(1, "root", ALICE, None);
+        let delta = DeltaBatch::added(root);
+        node.evaluate_recursive(delta, &schema);
+
+        // Add child folder owned by Bob but parented to Alice's folder
+        let child = make_folder(2, "child", BOB, Some(1));
+        let delta = DeltaBatch::added(child);
+        let output = node.evaluate_recursive(delta, &schema);
+
+        assert_eq!(output.len(), 1);
+        assert!(node.accessible().unwrap().contains_key(&ObjectId::new(2)));
+        assert_eq!(
+            node.accessible().unwrap().get(&ObjectId::new(2)),
+            Some(&AccessReason::Inherited)
+        );
+    }
+
+    #[test]
+    fn recursive_filter_cascading_access() {
+        // Test: grandchild becomes accessible when parent is added
+        let schema = folder_schema();
+        let viewer = ObjectId::new(ALICE);
+
+        let mut node = QueryNode::RecursiveFilter {
+            table: "folders".to_string(),
+            input: NodeId(0),
+            base_predicate: Predicate::eq("owner_id", Value::Ref(viewer)),
+            recursive_column: "parent_id".to_string(),
+            accessible: HashMap::new(),
+            children_index: HashMap::new(),
+            all_rows: HashMap::new(),
+        };
+
+        // Add grandchild first (parent doesn't exist yet)
+        let grandchild = make_folder(3, "grandchild", BOB, Some(2));
+        let delta = DeltaBatch::added(grandchild);
+        let output = node.evaluate_recursive(delta, &schema);
+        assert!(output.is_empty()); // Not yet accessible
+
+        // Add child (parent doesn't exist yet)
+        let child = make_folder(2, "child", BOB, Some(1));
+        let delta = DeltaBatch::added(child);
+        let output = node.evaluate_recursive(delta, &schema);
+        assert!(output.is_empty()); // Still not accessible
+
+        // Add root owned by Alice - should cascade to child and grandchild
+        let root = make_folder(1, "root", ALICE, None);
+        let delta = DeltaBatch::added(root);
+        let output = node.evaluate_recursive(delta, &schema);
+
+        // Should have 3 added deltas: root + child + grandchild
+        assert_eq!(output.len(), 3);
+        assert!(node.accessible().unwrap().contains_key(&ObjectId::new(1)));
+        assert!(node.accessible().unwrap().contains_key(&ObjectId::new(2)));
+        assert!(node.accessible().unwrap().contains_key(&ObjectId::new(3)));
+    }
+
+    #[test]
+    fn recursive_filter_removal_cascades() {
+        // Test: removing parent cascades removal to children
+        let schema = folder_schema();
+        let viewer = ObjectId::new(ALICE);
+
+        let mut node = QueryNode::RecursiveFilter {
+            table: "folders".to_string(),
+            input: NodeId(0),
+            base_predicate: Predicate::eq("owner_id", Value::Ref(viewer)),
+            recursive_column: "parent_id".to_string(),
+            accessible: HashMap::new(),
+            children_index: HashMap::new(),
+            all_rows: HashMap::new(),
+        };
+
+        // Set up: root -> child -> grandchild
+        let root = make_folder(1, "root", ALICE, None);
+        let child = make_folder(2, "child", BOB, Some(1));
+        let grandchild = make_folder(3, "grandchild", BOB, Some(2));
+
+        node.evaluate_recursive(DeltaBatch::added(root), &schema);
+        node.evaluate_recursive(DeltaBatch::added(child), &schema);
+        node.evaluate_recursive(DeltaBatch::added(grandchild), &schema);
+
+        assert_eq!(node.accessible().unwrap().len(), 3);
+
+        // Remove root - should cascade to child and grandchild
+        let delta = DeltaBatch::removed(ObjectId::new(1), vec![]);
+        let output = node.evaluate_recursive(delta, &schema);
+
+        // Should have 3 removed deltas
+        assert_eq!(output.len(), 3);
+        assert!(node.accessible().unwrap().is_empty());
+    }
+
+    #[test]
+    fn recursive_filter_child_keeps_base_access_after_parent_removal() {
+        // Test: child with base access keeps it when parent is removed
+        let schema = folder_schema();
+        let viewer = ObjectId::new(ALICE);
+
+        let mut node = QueryNode::RecursiveFilter {
+            table: "folders".to_string(),
+            input: NodeId(0),
+            base_predicate: Predicate::eq("owner_id", Value::Ref(viewer)),
+            recursive_column: "parent_id".to_string(),
+            accessible: HashMap::new(),
+            children_index: HashMap::new(),
+            all_rows: HashMap::new(),
+        };
+
+        // Root owned by Alice
+        let root = make_folder(1, "root", ALICE, None);
+        // Child also owned by Alice (Both access)
+        let child = make_folder(2, "child", ALICE, Some(1));
+
+        node.evaluate_recursive(DeltaBatch::added(root), &schema);
+        node.evaluate_recursive(DeltaBatch::added(child), &schema);
+
+        assert_eq!(
+            node.accessible().unwrap().get(&ObjectId::new(2)),
+            Some(&AccessReason::Both)
+        );
+
+        // Remove root
+        let delta = DeltaBatch::removed(ObjectId::new(1), vec![]);
+        let output = node.evaluate_recursive(delta, &schema);
+
+        // Only root should be removed, child keeps access
+        assert_eq!(output.len(), 1);
+        assert!(!node.accessible().unwrap().contains_key(&ObjectId::new(1)));
+        assert!(node.accessible().unwrap().contains_key(&ObjectId::new(2)));
+        // Access reason should be downgraded to Base
+        assert_eq!(
+            node.accessible().unwrap().get(&ObjectId::new(2)),
+            Some(&AccessReason::Base)
+        );
     }
 }

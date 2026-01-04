@@ -1214,10 +1214,7 @@ fn incremental_query_as_self_referential_recursive_inherits() {
     // - folders: id, name, parent_id (REFERENCES folders), owner_id (REFERENCES users)
     // - Policy: owner_id = @viewer OR INHERITS SELECT FROM parent_id
     //
-    // This is the "hardest" case for incremental queries because:
-    // 1. The recursion depth is unbounded
-    // 2. A single JOIN won't work - we need recursive JOINs or CTEs
-    // 3. Changes to any folder in the ancestry chain should propagate
+    // This uses RecursiveFilter with fixpoint iteration to handle arbitrary depth.
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
@@ -1231,12 +1228,12 @@ fn incremental_query_as_self_referential_recursive_inherits() {
         ExecuteResult::Inserted(id) => id,
         _ => panic!("expected Inserted"),
     };
-    let _bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+    let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
         ExecuteResult::Inserted(id) => id,
         _ => panic!("expected Inserted"),
     };
 
-    // Create folder hierarchy:
+    // Create folder hierarchy owned by Alice:
     // root (owned by Alice) -> child -> grandchild -> great_grandchild
     let root_id = db.insert("folders", &["name", "owner_id"], vec![
         Value::String("Root".into()),
@@ -1253,7 +1250,7 @@ fn incremental_query_as_self_referential_recursive_inherits() {
         Value::Ref(child_id),
     ]).unwrap();
 
-    let _great_grandchild_id = db.insert("folders", &["name", "parent_id"], vec![
+    let great_grandchild_id = db.insert("folders", &["name", "parent_id"], vec![
         Value::String("GreatGrandchild".into()),
         Value::Ref(grandchild_id),
     ]).unwrap();
@@ -1261,35 +1258,48 @@ fn incremental_query_as_self_referential_recursive_inherits() {
     // Policy: owner OR inherit from parent (recursive!)
     db.execute("CREATE POLICY ON folders FOR SELECT WHERE owner_id = @viewer OR INHERITS SELECT FROM parent_id").unwrap();
 
-    // This should fail because OR with INHERITS cannot be converted to a predicate.
-    // The system correctly returns an error rather than silently allowing all rows.
-    //
-    // TODO: Implement proper handling of OR with INHERITS:
-    // - Option 1: Evaluate INHERITS branch recursively
-    // - Option 2: Union of (owner_id = @viewer) and (recursive parent lookup)
-    let result = db.incremental_query_as("SELECT * FROM folders", alice_id);
+    // Create incremental query - this should now work with RecursiveFilter
+    let query = db.incremental_query_as("SELECT * FROM folders", alice_id)
+        .expect("Self-referential INHERITS should work with RecursiveFilter");
 
-    assert!(
-        result.is_err(),
-        "OR with self-referential INHERITS should fail (can't be converted to predicate). Got: {:?}",
-        result
-    );
+    // Alice should see all 4 folders (root via owner_id, others via inheritance)
+    let alice_rows = query.rows();
+    assert_eq!(alice_rows.len(), 4, "Alice should see all 4 folders through recursive inheritance");
 
-    // Verify the error is about INHERITS conversion
-    if let Err(e) = result {
-        let err_msg = format!("{:?}", e);
-        assert!(
-            err_msg.contains("INHERITS") || err_msg.contains("incremental"),
-            "Error should mention INHERITS limitation: {}",
-            err_msg
-        );
-    }
+    // Verify specific folders are visible
+    let folder_ids: Vec<_> = alice_rows.iter().map(|r| r.id).collect();
+    assert!(folder_ids.contains(&root_id), "Root should be visible (owned by Alice)");
+    assert!(folder_ids.contains(&child_id), "Child should be visible (inherits from root)");
+    assert!(folder_ids.contains(&grandchild_id), "Grandchild should be visible (inherits from child)");
+    assert!(folder_ids.contains(&great_grandchild_id), "GreatGrandchild should be visible (inherits from grandchild)");
+
+    // Bob should see no folders (doesn't own any, no inheritance path)
+    let bob_query = db.incremental_query_as("SELECT * FROM folders", bob_id)
+        .expect("Query should work for Bob too");
+    let bob_rows = bob_query.rows();
+    assert_eq!(bob_rows.len(), 0, "Bob should see no folders");
+
+    // Test incremental update: create a new folder under grandchild
+    let new_folder_id = db.insert("folders", &["name", "parent_id"], vec![
+        Value::String("NewFolder".into()),
+        Value::Ref(grandchild_id),
+    ]).unwrap();
+
+    // Alice should now see 5 folders
+    let alice_rows_after = query.rows();
+    assert_eq!(alice_rows_after.len(), 5, "Alice should now see 5 folders after insert");
+    let folder_ids_after: Vec<_> = alice_rows_after.iter().map(|r| r.id).collect();
+    assert!(folder_ids_after.contains(&new_folder_id), "New folder should be visible via inheritance");
 }
 
 #[test]
-fn incremental_query_as_pure_recursive_inherits_not_yet_supported() {
-    // Test PURE recursive policy (no OR fallback) - this should fail
+fn incremental_query_as_pure_recursive_inherits_returns_nothing() {
+    // Test PURE recursive policy (no base predicate) - this returns no rows
+    // because there's no anchor for the recursion.
+    //
     // Policy: ONLY INHERITS SELECT FROM parent_id (no owner_id check)
+    // This means: "you can see a folder if you can see its parent"
+    // But with no base case (like owner_id = @viewer), the recursion never starts.
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
@@ -1303,7 +1313,7 @@ fn incremental_query_as_pure_recursive_inherits_not_yet_supported() {
         _ => panic!("expected Inserted"),
     };
 
-    // Create root folder with owner (this is the "anchor" for recursion)
+    // Create root folder with owner
     let root_id = db.insert("folders", &["name", "owner_id"], vec![
         Value::String("Root".into()),
         Value::Ref(alice_id),
@@ -1317,12 +1327,10 @@ fn incremental_query_as_pure_recursive_inherits_not_yet_supported() {
     // Pure INHERITS policy (no simple predicate fallback)
     db.execute("CREATE POLICY ON folders FOR SELECT WHERE INHERITS SELECT FROM parent_id").unwrap();
 
-    // This should fail because we can't convert self-referential INHERITS to JOINs
-    let result = db.incremental_query_as("SELECT * FROM folders", alice_id);
+    // This should work but return no rows since there's no base case
+    let query = db.incremental_query_as("SELECT * FROM folders", alice_id)
+        .expect("Pure INHERITS should create a query (but return no rows)");
 
-    assert!(
-        result.is_err(),
-        "Pure self-referential INHERITS should fail. Got: {:?}",
-        result
-    );
+    let rows = query.rows();
+    assert_eq!(rows.len(), 0, "Pure INHERITS with no base predicate should return no rows");
 }

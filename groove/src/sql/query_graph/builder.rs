@@ -89,6 +89,33 @@ impl QueryGraphBuilder {
         id
     }
 
+    /// Add a recursive filter node for self-referential policies.
+    ///
+    /// This handles policies like `owner_id = @viewer OR INHERITS SELECT FROM parent_id`
+    /// where `parent_id` references the same table. The node computes the transitive
+    /// closure of accessible rows using fixpoint iteration.
+    ///
+    /// - `base_predicate`: Condition for direct access (e.g., `owner_id = @viewer`)
+    /// - `recursive_column`: Column that references parent row (e.g., `parent_id`)
+    pub fn recursive_filter(
+        &mut self,
+        input: NodeId,
+        base_predicate: Predicate,
+        recursive_column: impl Into<String>,
+    ) -> NodeId {
+        let id = self.alloc_id();
+        self.nodes.push(QueryNode::RecursiveFilter {
+            table: self.table.clone(),
+            input,
+            base_predicate,
+            recursive_column: recursive_column.into(),
+            accessible: HashMap::new(),
+            children_index: HashMap::new(),
+            all_rows: HashMap::new(),
+        });
+        id
+    }
+
     /// Add the output node and build the graph.
     ///
     /// This consumes the builder and returns the constructed graph.

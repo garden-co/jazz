@@ -226,24 +226,34 @@ impl QueryGraph {
             // all left rows and joining them with corresponding right rows
             self.init_join_query(cache, db, skip_id, skip_table);
         } else {
-            // Single-table query: load all rows from the primary table
-            let rows = db.read_all_rows(&self.table);
+            // Check if this graph has a RecursiveFilter node
+            let has_recursive = self.nodes.iter().any(|n| {
+                matches!(n, QueryNode::RecursiveFilter { .. })
+            });
 
-            for row in rows {
-                // Skip the triggering row - it will be processed as a delta
-                if skip_table == Some(&self.table) && skip_id == Some(row.id) {
-                    continue;
-                }
+            if has_recursive {
+                // RecursiveFilter requires fixpoint iteration
+                self.init_recursive_query(cache, db, skip_id, skip_table);
+            } else {
+                // Single-table query: load all rows from the primary table
+                let rows = db.read_all_rows(&self.table);
 
-                cache.insert(&self.table, row.clone());
-
-                // Process as Added delta through all nodes
-                let mut delta = DeltaBatch::added(row);
-                for node in &mut self.nodes {
-                    if delta.is_empty() {
-                        break;
+                for row in rows {
+                    // Skip the triggering row - it will be processed as a delta
+                    if skip_table == Some(&self.table) && skip_id == Some(row.id) {
+                        continue;
                     }
-                    delta = node.evaluate(delta, &self.schema, cache);
+
+                    cache.insert(&self.table, row.clone());
+
+                    // Process as Added delta through all nodes
+                    let mut delta = DeltaBatch::added(row);
+                    for node in &mut self.nodes {
+                        if delta.is_empty() {
+                            break;
+                        }
+                        delta = node.evaluate(delta, &self.schema, cache);
+                    }
                 }
             }
         }
@@ -278,7 +288,62 @@ impl QueryGraph {
         }
     }
 
-    /// Process a delta through all nodes, handling JOIN nodes specially.
+    /// Initialize a recursive query using fixpoint iteration.
+    ///
+    /// For RecursiveFilter nodes, we need to:
+    /// 1. Load all rows and build the children_index
+    /// 2. Find all base-accessible rows
+    /// 3. Iterate until no new rows become accessible (fixpoint)
+    fn init_recursive_query(
+        &mut self,
+        cache: &mut RowCache,
+        db: &DatabaseState,
+        skip_id: Option<ObjectId>,
+        skip_table: Option<&str>,
+    ) {
+        let table = self.table.clone();
+        let schema = self.schema.clone();
+
+        // Load all rows
+        let rows = db.read_all_rows(&table);
+
+        // First pass: populate the RecursiveFilter node's all_rows and children_index
+        for row in &rows {
+            if skip_table == Some(&table) && skip_id == Some(row.id) {
+                continue;
+            }
+            cache.insert(&table, row.clone());
+        }
+
+        // Process all rows through nodes up to (but not including) RecursiveFilter
+        // Then do fixpoint iteration on the RecursiveFilter
+        for row in rows {
+            if skip_table == Some(&table) && skip_id == Some(row.id) {
+                continue;
+            }
+
+            let mut delta = DeltaBatch::added(row);
+
+            for node in &mut self.nodes {
+                if delta.is_empty() {
+                    break;
+                }
+
+                match node {
+                    QueryNode::RecursiveFilter { .. } => {
+                        // RecursiveFilter handles its own fixpoint iteration internally
+                        // via propagate_access_to_children
+                        delta = node.evaluate_recursive(delta, &schema);
+                    }
+                    _ => {
+                        delta = node.evaluate(delta, &schema, cache);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Process a delta through all nodes, handling JOIN and RecursiveFilter nodes specially.
     fn process_delta_through_nodes(
         &mut self,
         delta: RowDelta,
@@ -315,6 +380,10 @@ impl QueryGraph {
                     }
                     current = output;
                 }
+                QueryNode::RecursiveFilter { .. } => {
+                    // RecursiveFilter needs special evaluation for fixpoint iteration
+                    current = node.evaluate_recursive(current, &self.schema);
+                }
                 _ => {
                     current = node.evaluate(current, &self.schema, cache);
                 }
@@ -335,6 +404,16 @@ impl QueryGraph {
             if self.is_join {
                 if let Some(joined_rows) = self.nodes[input_idx].cached_joined() {
                     return joined_rows.values().map(|jr| jr.to_output_row()).collect();
+                }
+            }
+
+            // For RecursiveFilter queries, get rows from accessible set
+            if let Some(accessible) = self.nodes[input_idx].accessible() {
+                if let Some(all_rows) = self.nodes[input_idx].all_rows() {
+                    return accessible
+                        .keys()
+                        .filter_map(|id| all_rows.get(id).cloned())
+                        .collect();
                 }
             }
 
@@ -395,6 +474,12 @@ impl QueryGraph {
         let output_idx = self.node_indices[&self.output_node];
         if let QueryNode::Output { input, .. } = &self.nodes[output_idx] {
             let input_idx = self.node_indices[input];
+
+            // Check for RecursiveFilter first
+            if let Some(accessible) = self.nodes[input_idx].accessible() {
+                return accessible.len();
+            }
+
             self.nodes[input_idx]
                 .cached_ids()
                 .map(|ids| ids.len())

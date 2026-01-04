@@ -47,7 +47,7 @@ pub use builder::{JoinGraphBuilder, QueryGraphBuilder};
 pub use cache::RowCache;
 pub use delta::{DeltaBatch, PriorState, RowDelta};
 pub use graph::{GraphId, GraphState, QueryGraph};
-pub use node::{NodeId, QueryNode};
+pub use node::{AccessReason, NodeId, QueryNode};
 pub use predicate::Predicate;
 
 // Re-export from parent for internal use
