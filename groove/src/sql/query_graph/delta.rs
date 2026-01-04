@@ -245,7 +245,7 @@ pub struct JoinedRow {
     pub values: Vec<Value>,
     /// Map from table name to (row_id, start_column_index).
     /// This allows looking up which columns belong to which table.
-    table_offsets: HashMap<String, (ObjectId, usize)>,
+    pub table_offsets: HashMap<String, (ObjectId, usize)>,
 }
 
 impl JoinedRow {

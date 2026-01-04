@@ -219,12 +219,12 @@ impl JoinGraphBuilder {
     pub fn join(&mut self) -> NodeId {
         let id = self.alloc_id();
         self.nodes.push(QueryNode::Join {
-            left_table: self.left_table.clone(),
-            right_table: self.right_table.clone(),
-            left_column: self.left_column.clone(),
-            right_schema: self.right_schema.clone(),
-            cached_pairs: HashSet::new(),
-            cached_joined: HashMap::new(),
+            input_tables: vec![self.left_table.clone()],
+            join_table: self.right_table.clone(),
+            join_column: self.left_column.clone(),
+            join_schema: self.right_schema.clone(),
+            cached_rows: HashMap::new(),
+            reverse_index: HashMap::new(),
         });
         id
     }
@@ -244,12 +244,11 @@ impl JoinGraphBuilder {
         id
     }
 
-    /// Add a second join (chain join) to extend the current join.
+    /// Add a chain join to extend the current join.
     ///
-    /// This creates another Join node that takes the output of the first join
-    /// and joins with a third table. The second join's "left" is the combined
-    /// output of the first join, so column names must be qualified (e.g.,
-    /// "folders.workspace_id" not just "workspace_id").
+    /// This creates another Join node that takes the output of prior joins
+    /// and joins with an additional table. The join column must be qualified
+    /// (e.g., "folders.workspace_id" not just "workspace_id").
     ///
     /// - `_input`: The input node (for documentation; join chains are handled specially)
     /// - `source_table`: The table in the current join that has the ref column
@@ -270,17 +269,23 @@ impl JoinGraphBuilder {
             .expect("chain_join: target schema not added via add_schema")
             .clone();
 
-        // The left_column needs to be qualified since we're joining on combined rows
+        // The join_column needs to be qualified since we're joining on combined rows
         let qualified_column = format!("{}.{}", source, column);
+
+        // Build the list of input tables (all tables joined so far)
+        let mut input_tables: Vec<String> = vec![self.left_table.clone()];
+        for (table, _) in &self.all_right_tables {
+            input_tables.push(table.clone());
+        }
 
         let id = self.alloc_id();
         self.nodes.push(QueryNode::Join {
-            left_table: source.clone(),
-            right_table: target.clone(),
-            left_column: qualified_column,
-            right_schema: target_schema.clone(),
-            cached_pairs: HashSet::new(),
-            cached_joined: HashMap::new(),
+            input_tables,
+            join_table: target.clone(),
+            join_column: qualified_column,
+            join_schema: target_schema.clone(),
+            cached_rows: HashMap::new(),
+            reverse_index: HashMap::new(),
         });
 
         // Track this as an additional right table for delta routing

@@ -2087,70 +2087,65 @@ impl Database {
 
         let left_table = &select.from.table;
 
-        // For now, we only support 2-hop chains fully.
-        // For 3+ hops, we'll need more sophisticated graph building.
-        if chain.hops.len() > 2 {
+        // Support arbitrary chain lengths
+        if chain.hops.is_empty() {
             return Err(DatabaseError::Parse(parser::ParseError {
-                message: format!(
-                    "INHERITS chains with {} hops not yet supported (max 2). \
-                     Chain: {} → {}",
-                    chain.hops.len(),
-                    left_table,
-                    chain.hops.iter().map(|h| h.target_table.as_str()).collect::<Vec<_>>().join(" → ")
-                ),
+                message: "Empty INHERITS chain".to_string(),
                 position: 0,
             }));
         }
 
-        // 2-hop chain: source → intermediate → terminal
-        // Build as: source JOIN intermediate, with filter on intermediate checking terminal
+        // Get schema for first hop's target
         let first_hop = &chain.hops[0];
-        let second_hop = &chain.hops[1];
-
-        let intermediate_schema = self.get_table(&first_hop.target_table)
+        let first_target_schema = self.get_table(&first_hop.target_table)
             .ok_or_else(|| DatabaseError::TableNotFound(first_hop.target_table.clone()))?;
-        let terminal_schema = self.get_table(&second_hop.target_table)
-            .ok_or_else(|| DatabaseError::TableNotFound(second_hop.target_table.clone()))?;
 
-        // Build the first join: source → intermediate
+        // Build the first join: source → first target
         let mut builder = JoinGraphBuilder::new(
             left_table,
             source_schema.clone(),
             &first_hop.target_table,
-            intermediate_schema.clone(),
+            first_target_schema.clone(),
             &first_hop.ref_column,
         );
 
-        // Store terminal schema for later use
-        builder.add_schema(&second_hop.target_table, terminal_schema);
+        // Pre-add schemas for all subsequent hops
+        for hop in chain.hops.iter().skip(1) {
+            let target_schema = self.get_table(&hop.target_table)
+                .ok_or_else(|| DatabaseError::TableNotFound(hop.target_table.clone()))?;
+            builder.add_schema(&hop.target_table, target_schema);
+        }
 
-        let join_node = builder.join();
+        // Build first join
+        let mut current_node = builder.join();
 
-        // Apply user's WHERE clause
-        let after_user_where = if select.where_clause.is_empty() {
-            join_node
-        } else {
+        // Apply user's WHERE clause after first join
+        // The predicate must use qualified column names since we're in a JOIN context
+        if !select.where_clause.is_empty() {
             let predicate = self.build_predicate(&select.where_clause, source_schema)?;
-            builder.filter(join_node, predicate)
-        };
+            let qualified_pred = predicate.qualify(&left_table);
+            current_node = builder.filter(current_node, qualified_pred);
+        }
 
-        // Add second join: intermediate → terminal
-        let after_second_join = builder.chain_join(
-            after_user_where,
-            &first_hop.target_table,
-            &second_hop.ref_column,
-            &second_hop.target_table,
-        );
+        // Add chain joins for remaining hops
+        let mut prev_table = first_hop.target_table.clone();
+        for hop in chain.hops.iter().skip(1) {
+            current_node = builder.chain_join(
+                current_node,
+                &prev_table,
+                &hop.ref_column,
+                &hop.target_table,
+            );
+            prev_table = hop.target_table.clone();
+        }
 
         // Apply terminal predicate with qualified column names
-        let after_policy = if let Some(ref terminal_pred) = chain.terminal_predicate {
+        if let Some(ref terminal_pred) = chain.terminal_predicate {
             let qualified_pred = terminal_pred.qualify(&chain.terminal_table);
-            builder.filter(after_second_join, qualified_pred)
-        } else {
-            after_second_join
-        };
+            current_node = builder.filter(current_node, qualified_pred);
+        }
 
-        Ok(builder.output(after_policy, GraphId(0)))
+        Ok(builder.output(current_node, GraphId(0)))
     }
 
     /// Build a query graph with RecursiveFilter for self-referential INHERITS.

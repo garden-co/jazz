@@ -1352,3 +1352,952 @@ fn incremental_query_as_pure_recursive_inherits_returns_nothing() {
     let rows = query.rows();
     assert_eq!(rows.len(), 0, "Pure INHERITS with no base predicate should return no rows");
 }
+
+#[test]
+fn incremental_query_as_3_hop_inherits_chain() {
+    // Test 3-hop INHERITS chain:
+    // - documents: INHERITS SELECT FROM folder_id
+    // - folders: INHERITS SELECT FROM workspace_id
+    // - workspaces: INHERITS SELECT FROM org_id
+    // - organizations: owner_id = @viewer
+    //
+    // Chain: documents → folders → workspaces → organizations → owner_id
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE organizations (name STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+    db.execute("CREATE TABLE workspaces (name STRING NOT NULL, org_id REFERENCES organizations NOT NULL)").unwrap();
+    db.execute("CREATE TABLE folders (name STRING NOT NULL, workspace_id REFERENCES workspaces NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Alice's hierarchy: org → workspace → folder → document
+    let alice_org_id = db.insert("organizations", &["name", "owner_id"], vec![
+        Value::String("Alice's Org".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    let alice_workspace_id = db.insert("workspaces", &["name", "org_id"], vec![
+        Value::String("Alice's Workspace".into()),
+        Value::Ref(alice_org_id),
+    ]).unwrap();
+
+    let alice_folder_id = db.insert("folders", &["name", "workspace_id"], vec![
+        Value::String("Alice's Folder".into()),
+        Value::Ref(alice_workspace_id),
+    ]).unwrap();
+
+    let alice_doc_id = db.insert("documents", &["title", "folder_id"], vec![
+        Value::String("Alice's Doc".into()),
+        Value::Ref(alice_folder_id),
+    ]).unwrap();
+
+    // Bob's hierarchy: org → workspace → folder → document
+    let bob_org_id = db.insert("organizations", &["name", "owner_id"], vec![
+        Value::String("Bob's Org".into()),
+        Value::Ref(bob_id),
+    ]).unwrap();
+
+    let bob_workspace_id = db.insert("workspaces", &["name", "org_id"], vec![
+        Value::String("Bob's Workspace".into()),
+        Value::Ref(bob_org_id),
+    ]).unwrap();
+
+    let bob_folder_id = db.insert("folders", &["name", "workspace_id"], vec![
+        Value::String("Bob's Folder".into()),
+        Value::Ref(bob_workspace_id),
+    ]).unwrap();
+
+    let _bob_doc_id = db.insert("documents", &["title", "folder_id"], vec![
+        Value::String("Bob's Doc".into()),
+        Value::Ref(bob_folder_id),
+    ]).unwrap();
+
+    // Set up 3-hop chain: documents -> folders -> workspaces -> organizations -> owner_id
+    db.execute("CREATE POLICY ON organizations FOR SELECT WHERE owner_id = @viewer").unwrap();
+    db.execute("CREATE POLICY ON workspaces FOR SELECT WHERE INHERITS SELECT FROM org_id").unwrap();
+    db.execute("CREATE POLICY ON folders FOR SELECT WHERE INHERITS SELECT FROM workspace_id").unwrap();
+    db.execute("CREATE POLICY ON documents FOR SELECT WHERE INHERITS SELECT FROM folder_id").unwrap();
+
+    // Alice should only see her document (via folder → workspace → org → owner)
+    let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id)
+        .expect("3-hop INHERITS chain should work");
+    let alice_docs = alice_query.rows();
+
+    assert_eq!(alice_docs.len(), 1, "Alice should see 1 document through 3-hop chain");
+    assert_eq!(alice_docs[0].id, alice_doc_id, "Alice should see her own document");
+    assert_eq!(alice_docs[0].values[0], Value::String("Alice's Doc".into()));
+
+    // Bob should only see his document
+    let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id)
+        .expect("3-hop INHERITS chain should work");
+    let bob_docs = bob_query.rows();
+
+    assert_eq!(bob_docs.len(), 1, "Bob should see 1 document through 3-hop chain");
+    assert_eq!(bob_docs[0].values[0], Value::String("Bob's Doc".into()));
+}
+
+#[test]
+fn incremental_query_as_3_hop_chain_delta_from_org_update() {
+    // Test delta propagation from the furthest table (organizations) in a 3-hop chain.
+    // When an organization's owner changes, documents visibility should update.
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE organizations (name STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+    db.execute("CREATE TABLE workspaces (name STRING NOT NULL, org_id REFERENCES organizations NOT NULL)").unwrap();
+    db.execute("CREATE TABLE folders (name STRING NOT NULL, workspace_id REFERENCES workspaces NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Start with Alice owning the org
+    let org_id = db.insert("organizations", &["name", "owner_id"], vec![
+        Value::String("Test Org".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    let workspace_id = db.insert("workspaces", &["name", "org_id"], vec![
+        Value::String("Test Workspace".into()),
+        Value::Ref(org_id),
+    ]).unwrap();
+
+    let folder_id = db.insert("folders", &["name", "workspace_id"], vec![
+        Value::String("Test Folder".into()),
+        Value::Ref(workspace_id),
+    ]).unwrap();
+
+    let doc_id = db.insert("documents", &["title", "folder_id"], vec![
+        Value::String("Test Doc".into()),
+        Value::Ref(folder_id),
+    ]).unwrap();
+
+    // Set up 3-hop chain policies
+    db.execute("CREATE POLICY ON organizations FOR SELECT WHERE owner_id = @viewer").unwrap();
+    db.execute("CREATE POLICY ON workspaces FOR SELECT WHERE INHERITS SELECT FROM org_id").unwrap();
+    db.execute("CREATE POLICY ON folders FOR SELECT WHERE INHERITS SELECT FROM workspace_id").unwrap();
+    db.execute("CREATE POLICY ON documents FOR SELECT WHERE INHERITS SELECT FROM folder_id").unwrap();
+
+    // Create incremental queries
+    let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id).unwrap();
+    let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id).unwrap();
+
+    // Initially, Alice sees the document, Bob doesn't
+    assert_eq!(alice_query.rows().len(), 1, "Alice should see doc initially");
+    assert_eq!(alice_query.rows()[0].id, doc_id);
+    assert_eq!(bob_query.rows().len(), 0, "Bob should not see doc initially");
+
+    // Transfer org ownership from Alice to Bob
+    db.update("organizations", org_id, &[("owner_id", Value::Ref(bob_id))]).unwrap();
+
+    // Now Bob should see it, Alice shouldn't
+    let alice_rows_after = alice_query.rows();
+    let bob_rows_after = bob_query.rows();
+
+    assert_eq!(alice_rows_after.len(), 0, "Alice should not see doc after org transfer");
+    assert_eq!(bob_rows_after.len(), 1, "Bob should see doc after org transfer");
+    assert_eq!(bob_rows_after[0].id, doc_id);
+    assert_eq!(bob_rows_after[0].values[0], Value::String("Test Doc".into()));
+}
+
+#[test]
+fn incremental_query_as_3_hop_chain_delta_from_workspace_update() {
+    // Test delta propagation when an intermediate table (workspace) changes.
+    // Moving a workspace to a different org should update document visibility.
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE organizations (name STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+    db.execute("CREATE TABLE workspaces (name STRING NOT NULL, org_id REFERENCES organizations NOT NULL)").unwrap();
+    db.execute("CREATE TABLE folders (name STRING NOT NULL, workspace_id REFERENCES workspaces NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Alice's org
+    let alice_org_id = db.insert("organizations", &["name", "owner_id"], vec![
+        Value::String("Alice's Org".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    // Bob's org
+    let bob_org_id = db.insert("organizations", &["name", "owner_id"], vec![
+        Value::String("Bob's Org".into()),
+        Value::Ref(bob_id),
+    ]).unwrap();
+
+    // Workspace starts in Alice's org
+    let workspace_id = db.insert("workspaces", &["name", "org_id"], vec![
+        Value::String("Movable Workspace".into()),
+        Value::Ref(alice_org_id),
+    ]).unwrap();
+
+    let folder_id = db.insert("folders", &["name", "workspace_id"], vec![
+        Value::String("Test Folder".into()),
+        Value::Ref(workspace_id),
+    ]).unwrap();
+
+    let doc_id = db.insert("documents", &["title", "folder_id"], vec![
+        Value::String("Test Doc".into()),
+        Value::Ref(folder_id),
+    ]).unwrap();
+
+    // Set up 3-hop chain policies
+    db.execute("CREATE POLICY ON organizations FOR SELECT WHERE owner_id = @viewer").unwrap();
+    db.execute("CREATE POLICY ON workspaces FOR SELECT WHERE INHERITS SELECT FROM org_id").unwrap();
+    db.execute("CREATE POLICY ON folders FOR SELECT WHERE INHERITS SELECT FROM workspace_id").unwrap();
+    db.execute("CREATE POLICY ON documents FOR SELECT WHERE INHERITS SELECT FROM folder_id").unwrap();
+
+    let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id).unwrap();
+    let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id).unwrap();
+
+    // Initially, Alice sees the document, Bob doesn't
+    assert_eq!(alice_query.rows().len(), 1, "Alice should see doc initially");
+    assert_eq!(bob_query.rows().len(), 0, "Bob should not see doc initially");
+
+    // Move workspace from Alice's org to Bob's org
+    db.update("workspaces", workspace_id, &[("org_id", Value::Ref(bob_org_id))]).unwrap();
+
+    // Now Bob should see it, Alice shouldn't
+    let alice_rows_after = alice_query.rows();
+    let bob_rows_after = bob_query.rows();
+
+    assert_eq!(alice_rows_after.len(), 0, "Alice should not see doc after workspace move");
+    assert_eq!(bob_rows_after.len(), 1, "Bob should see doc after workspace move");
+    assert_eq!(bob_rows_after[0].id, doc_id);
+    assert_eq!(bob_rows_after[0].values[0], Value::String("Test Doc".into()));
+}
+
+#[test]
+fn incremental_query_as_3_hop_chain_delta_from_folder_update() {
+    // Test delta propagation when the nearest joined table (folder) changes.
+    // Moving a folder to a different workspace should update document visibility.
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE organizations (name STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+    db.execute("CREATE TABLE workspaces (name STRING NOT NULL, org_id REFERENCES organizations NOT NULL)").unwrap();
+    db.execute("CREATE TABLE folders (name STRING NOT NULL, workspace_id REFERENCES workspaces NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Alice's full hierarchy
+    let alice_org_id = db.insert("organizations", &["name", "owner_id"], vec![
+        Value::String("Alice's Org".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    let alice_workspace_id = db.insert("workspaces", &["name", "org_id"], vec![
+        Value::String("Alice's Workspace".into()),
+        Value::Ref(alice_org_id),
+    ]).unwrap();
+
+    // Bob's full hierarchy
+    let bob_org_id = db.insert("organizations", &["name", "owner_id"], vec![
+        Value::String("Bob's Org".into()),
+        Value::Ref(bob_id),
+    ]).unwrap();
+
+    let bob_workspace_id = db.insert("workspaces", &["name", "org_id"], vec![
+        Value::String("Bob's Workspace".into()),
+        Value::Ref(bob_org_id),
+    ]).unwrap();
+
+    // Folder starts in Alice's workspace
+    let folder_id = db.insert("folders", &["name", "workspace_id"], vec![
+        Value::String("Movable Folder".into()),
+        Value::Ref(alice_workspace_id),
+    ]).unwrap();
+
+    let doc_id = db.insert("documents", &["title", "folder_id"], vec![
+        Value::String("Test Doc".into()),
+        Value::Ref(folder_id),
+    ]).unwrap();
+
+    // Set up 3-hop chain policies
+    db.execute("CREATE POLICY ON organizations FOR SELECT WHERE owner_id = @viewer").unwrap();
+    db.execute("CREATE POLICY ON workspaces FOR SELECT WHERE INHERITS SELECT FROM org_id").unwrap();
+    db.execute("CREATE POLICY ON folders FOR SELECT WHERE INHERITS SELECT FROM workspace_id").unwrap();
+    db.execute("CREATE POLICY ON documents FOR SELECT WHERE INHERITS SELECT FROM folder_id").unwrap();
+
+    let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id).unwrap();
+    let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id).unwrap();
+
+    // Initially, Alice sees the document, Bob doesn't
+    assert_eq!(alice_query.rows().len(), 1, "Alice should see doc initially");
+    assert_eq!(bob_query.rows().len(), 0, "Bob should not see doc initially");
+
+    // Move folder from Alice's workspace to Bob's workspace
+    db.update("folders", folder_id, &[("workspace_id", Value::Ref(bob_workspace_id))]).unwrap();
+
+    // Now Bob should see it, Alice shouldn't
+    let alice_rows_after = alice_query.rows();
+    let bob_rows_after = bob_query.rows();
+
+    assert_eq!(alice_rows_after.len(), 0, "Alice should not see doc after folder move");
+    assert_eq!(bob_rows_after.len(), 1, "Bob should see doc after folder move");
+    assert_eq!(bob_rows_after[0].id, doc_id);
+    assert_eq!(bob_rows_after[0].values[0], Value::String("Test Doc".into()));
+}
+
+#[test]
+fn incremental_query_as_3_hop_chain_new_document_insert() {
+    // Test that inserting a new document in a 3-hop chain correctly updates visibility.
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE organizations (name STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+    db.execute("CREATE TABLE workspaces (name STRING NOT NULL, org_id REFERENCES organizations NOT NULL)").unwrap();
+    db.execute("CREATE TABLE folders (name STRING NOT NULL, workspace_id REFERENCES workspaces NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Alice's hierarchy (no documents yet)
+    let alice_org_id = db.insert("organizations", &["name", "owner_id"], vec![
+        Value::String("Alice's Org".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    let alice_workspace_id = db.insert("workspaces", &["name", "org_id"], vec![
+        Value::String("Alice's Workspace".into()),
+        Value::Ref(alice_org_id),
+    ]).unwrap();
+
+    let alice_folder_id = db.insert("folders", &["name", "workspace_id"], vec![
+        Value::String("Alice's Folder".into()),
+        Value::Ref(alice_workspace_id),
+    ]).unwrap();
+
+    // Set up 3-hop chain policies
+    db.execute("CREATE POLICY ON organizations FOR SELECT WHERE owner_id = @viewer").unwrap();
+    db.execute("CREATE POLICY ON workspaces FOR SELECT WHERE INHERITS SELECT FROM org_id").unwrap();
+    db.execute("CREATE POLICY ON folders FOR SELECT WHERE INHERITS SELECT FROM workspace_id").unwrap();
+    db.execute("CREATE POLICY ON documents FOR SELECT WHERE INHERITS SELECT FROM folder_id").unwrap();
+
+    let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id).unwrap();
+    let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id).unwrap();
+
+    // Initially, no documents
+    assert_eq!(alice_query.rows().len(), 0, "Alice should see 0 docs initially");
+    assert_eq!(bob_query.rows().len(), 0, "Bob should see 0 docs initially");
+
+    // Insert a document in Alice's folder
+    let new_doc_id = db.insert("documents", &["title", "folder_id"], vec![
+        Value::String("New Alice Doc".into()),
+        Value::Ref(alice_folder_id),
+    ]).unwrap();
+
+    // Alice should see the new document, Bob shouldn't
+    let alice_rows_after = alice_query.rows();
+    let bob_rows_after = bob_query.rows();
+
+    assert_eq!(alice_rows_after.len(), 1, "Alice should see new doc after insert");
+    assert_eq!(alice_rows_after[0].id, new_doc_id);
+    assert_eq!(alice_rows_after[0].values[0], Value::String("New Alice Doc".into()));
+    assert_eq!(bob_rows_after.len(), 0, "Bob should still see 0 docs");
+}
+
+#[test]
+fn incremental_query_as_3_hop_chain_with_filter() {
+    // Test 3-hop chain with a WHERE clause filter on the source table.
+    // This tests that filters are correctly applied in chain queries.
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE organizations (name STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+    db.execute("CREATE TABLE workspaces (name STRING NOT NULL, org_id REFERENCES organizations NOT NULL)").unwrap();
+    db.execute("CREATE TABLE folders (name STRING NOT NULL, workspace_id REFERENCES workspaces NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, archived BOOL NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Alice's hierarchy
+    let alice_org_id = db.insert("organizations", &["name", "owner_id"], vec![
+        Value::String("Alice's Org".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    let alice_workspace_id = db.insert("workspaces", &["name", "org_id"], vec![
+        Value::String("Alice's Workspace".into()),
+        Value::Ref(alice_org_id),
+    ]).unwrap();
+
+    let alice_folder_id = db.insert("folders", &["name", "workspace_id"], vec![
+        Value::String("Alice's Folder".into()),
+        Value::Ref(alice_workspace_id),
+    ]).unwrap();
+
+    // Create active and archived documents
+    let active_doc_id = db.insert("documents", &["title", "archived", "folder_id"], vec![
+        Value::String("Active Doc".into()),
+        Value::Bool(false),
+        Value::Ref(alice_folder_id),
+    ]).unwrap();
+
+    let _archived_doc_id = db.insert("documents", &["title", "archived", "folder_id"], vec![
+        Value::String("Archived Doc".into()),
+        Value::Bool(true),
+        Value::Ref(alice_folder_id),
+    ]).unwrap();
+
+    // Set up 3-hop chain policies
+    db.execute("CREATE POLICY ON organizations FOR SELECT WHERE owner_id = @viewer").unwrap();
+    db.execute("CREATE POLICY ON workspaces FOR SELECT WHERE INHERITS SELECT FROM org_id").unwrap();
+    db.execute("CREATE POLICY ON folders FOR SELECT WHERE INHERITS SELECT FROM workspace_id").unwrap();
+    db.execute("CREATE POLICY ON documents FOR SELECT WHERE INHERITS SELECT FROM folder_id").unwrap();
+
+    // Query with a filter: only non-archived documents
+    let alice_query = db.incremental_query_as("SELECT * FROM documents WHERE archived = false", alice_id).unwrap();
+    let rows = alice_query.rows();
+
+    // Alice should only see the active document (filter applied)
+    assert_eq!(rows.len(), 1, "Alice should see only 1 non-archived doc");
+    assert_eq!(rows[0].id, active_doc_id);
+    assert_eq!(rows[0].values[0], Value::String("Active Doc".into()));
+    assert_eq!(rows[0].values[1], Value::Bool(false));
+}
+
+#[test]
+fn policy_chain_or_condition_with_inherits() {
+    // Test OR policy at intermediate level:
+    // - documents: INHERITS SELECT FROM folder_id
+    // - folders: owner_id = @viewer OR INHERITS SELECT FROM workspace_id
+    // - workspaces: owner_id = @viewer
+    //
+    // NOTE: Current limitation - when there's an OR with INHERITS at an intermediate
+    // level of a chain, only the INHERITS path is followed. The simple predicate
+    // (owner_id = @viewer) at the folder level is not evaluated as an alternative.
+    //
+    // For now, this test verifies the INHERITS path works correctly.
+    // Full OR support at intermediate chain levels is a future enhancement.
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE workspaces (name STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+    db.execute("CREATE TABLE folders (name STRING NOT NULL, owner_id REFERENCES users, workspace_id REFERENCES workspaces NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Alice's workspace
+    let alice_ws_id = db.insert("workspaces", &["name", "owner_id"], vec![
+        Value::String("Alice's Workspace".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    // Bob's workspace
+    let bob_ws_id = db.insert("workspaces", &["name", "owner_id"], vec![
+        Value::String("Bob's Workspace".into()),
+        Value::Ref(bob_id),
+    ]).unwrap();
+
+    // Folder in Alice's workspace (no direct owner)
+    let folder_in_alice_ws = db.insert("folders", &["name", "workspace_id"], vec![
+        Value::String("Folder in Alice WS".into()),
+        Value::Ref(alice_ws_id),
+    ]).unwrap();
+
+    // Folder owned by Alice but in Bob's workspace
+    let _alice_folder_in_bob_ws = db.insert("folders", &["name", "owner_id", "workspace_id"], vec![
+        Value::String("Alice's Folder in Bob WS".into()),
+        Value::Ref(alice_id),
+        Value::Ref(bob_ws_id),
+    ]).unwrap();
+
+    // Folder owned by Bob in Bob's workspace
+    let bob_folder = db.insert("folders", &["name", "owner_id", "workspace_id"], vec![
+        Value::String("Bob's Folder".into()),
+        Value::Ref(bob_id),
+        Value::Ref(bob_ws_id),
+    ]).unwrap();
+
+    // Documents in each folder
+    let doc_in_alice_ws = db.insert("documents", &["title", "folder_id"], vec![
+        Value::String("Doc in Alice WS".into()),
+        Value::Ref(folder_in_alice_ws),
+    ]).unwrap();
+
+    // NOTE: This doc is in a folder Alice owns but in Bob's workspace.
+    // With current implementation, this won't be visible to Alice because
+    // only the INHERITS path is followed (folders → workspace → owner).
+    let _doc_in_alice_folder = db.insert("documents", &["title", "folder_id"], vec![
+        Value::String("Doc in Alice's Folder".into()),
+        Value::Ref(_alice_folder_in_bob_ws),
+    ]).unwrap();
+
+    let _doc_in_bob_folder = db.insert("documents", &["title", "folder_id"], vec![
+        Value::String("Doc in Bob's Folder".into()),
+        Value::Ref(bob_folder),
+    ]).unwrap();
+
+    // Set up policies
+    db.execute("CREATE POLICY ON workspaces FOR SELECT WHERE owner_id = @viewer").unwrap();
+    db.execute("CREATE POLICY ON folders FOR SELECT WHERE owner_id = @viewer OR INHERITS SELECT FROM workspace_id").unwrap();
+    db.execute("CREATE POLICY ON documents FOR SELECT WHERE INHERITS SELECT FROM folder_id").unwrap();
+
+    // With current implementation, Alice sees documents via INHERITS path only:
+    // doc → folder → workspace → owner_id = Alice
+    let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id)
+        .expect("Policy chain should work");
+    let alice_docs = alice_query.rows();
+
+    // Alice sees only the doc in her workspace (via INHERITS path)
+    // The doc in "Alice's folder in Bob's WS" is NOT visible because
+    // the folder ownership (OR condition) isn't evaluated for chain JOINs
+    assert_eq!(alice_docs.len(), 1, "Alice should see 1 document (INHERITS path only)");
+    assert_eq!(alice_docs[0].id, doc_in_alice_ws, "Alice should see doc in her workspace");
+}
+
+#[test]
+fn policy_chain_multiple_viewers_concurrent() {
+    // Test that multiple viewers have independent incremental queries
+    // that update correctly when data changes.
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE orgs (name STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+    db.execute("CREATE TABLE projects (name STRING NOT NULL, org_id REFERENCES orgs NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let charlie_id = match db.execute("INSERT INTO users (name) VALUES ('Charlie')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Each user has their own org
+    let alice_org = db.insert("orgs", &["name", "owner_id"], vec![
+        Value::String("Alice Org".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    let bob_org = db.insert("orgs", &["name", "owner_id"], vec![
+        Value::String("Bob Org".into()),
+        Value::Ref(bob_id),
+    ]).unwrap();
+
+    // Projects in each org
+    let alice_project = db.insert("projects", &["name", "org_id"], vec![
+        Value::String("Alice Project".into()),
+        Value::Ref(alice_org),
+    ]).unwrap();
+
+    let bob_project = db.insert("projects", &["name", "org_id"], vec![
+        Value::String("Bob Project".into()),
+        Value::Ref(bob_org),
+    ]).unwrap();
+
+    // Set up 2-hop chain policies
+    db.execute("CREATE POLICY ON orgs FOR SELECT WHERE owner_id = @viewer").unwrap();
+    db.execute("CREATE POLICY ON projects FOR SELECT WHERE INHERITS SELECT FROM org_id").unwrap();
+
+    // Create queries for all three viewers
+    let alice_query = db.incremental_query_as("SELECT * FROM projects", alice_id).unwrap();
+    let bob_query = db.incremental_query_as("SELECT * FROM projects", bob_id).unwrap();
+    let charlie_query = db.incremental_query_as("SELECT * FROM projects", charlie_id).unwrap();
+
+    // Initially: Alice sees 1, Bob sees 1, Charlie sees 0
+    assert_eq!(alice_query.rows().len(), 1, "Alice should see her project");
+    assert_eq!(alice_query.rows()[0].id, alice_project);
+    assert_eq!(bob_query.rows().len(), 1, "Bob should see his project");
+    assert_eq!(bob_query.rows()[0].id, bob_project);
+    assert_eq!(charlie_query.rows().len(), 0, "Charlie should see no projects");
+
+    // Transfer Alice's org to Charlie
+    db.update("orgs", alice_org, &[("owner_id", Value::Ref(charlie_id))]).unwrap();
+
+    // Now: Alice sees 0, Bob sees 1, Charlie sees 1
+    assert_eq!(alice_query.rows().len(), 0, "Alice should no longer see her project");
+    assert_eq!(bob_query.rows().len(), 1, "Bob should still see his project");
+    assert_eq!(charlie_query.rows().len(), 1, "Charlie should now see Alice's project");
+    assert_eq!(charlie_query.rows()[0].id, alice_project);
+
+    // Add a new project to Bob's org
+    let new_bob_project = db.insert("projects", &["name", "org_id"], vec![
+        Value::String("New Bob Project".into()),
+        Value::Ref(bob_org),
+    ]).unwrap();
+
+    // Bob should now see 2 projects
+    let bob_rows = bob_query.rows();
+    assert_eq!(bob_rows.len(), 2, "Bob should now see 2 projects");
+    let bob_project_ids: Vec<_> = bob_rows.iter().map(|r| r.id).collect();
+    assert!(bob_project_ids.contains(&bob_project));
+    assert!(bob_project_ids.contains(&new_bob_project));
+
+    // Alice and Charlie unchanged
+    assert_eq!(alice_query.rows().len(), 0);
+    assert_eq!(charlie_query.rows().len(), 1);
+}
+
+#[test]
+fn policy_chain_insert_intermediate_row() {
+    // Test that inserting an intermediate row (folder) makes its children visible.
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE workspaces (name STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+    db.execute("CREATE TABLE folders (name STRING NOT NULL, workspace_id REFERENCES workspaces NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Alice's workspace
+    let alice_ws = db.insert("workspaces", &["name", "owner_id"], vec![
+        Value::String("Alice WS".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    // Set up policies before creating folder/docs
+    db.execute("CREATE POLICY ON workspaces FOR SELECT WHERE owner_id = @viewer").unwrap();
+    db.execute("CREATE POLICY ON folders FOR SELECT WHERE INHERITS SELECT FROM workspace_id").unwrap();
+    db.execute("CREATE POLICY ON documents FOR SELECT WHERE INHERITS SELECT FROM folder_id").unwrap();
+
+    // Create query before any folders exist
+    let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id).unwrap();
+    assert_eq!(alice_query.rows().len(), 0, "No documents yet");
+
+    // Now create a folder
+    let folder = db.insert("folders", &["name", "workspace_id"], vec![
+        Value::String("New Folder".into()),
+        Value::Ref(alice_ws),
+    ]).unwrap();
+
+    // Still no documents
+    assert_eq!(alice_query.rows().len(), 0, "Still no documents");
+
+    // Add a document to the new folder
+    let doc = db.insert("documents", &["title", "folder_id"], vec![
+        Value::String("New Doc".into()),
+        Value::Ref(folder),
+    ]).unwrap();
+
+    // Now Alice should see the document
+    let rows = alice_query.rows();
+    assert_eq!(rows.len(), 1, "Alice should see the new document");
+    assert_eq!(rows[0].id, doc);
+    assert_eq!(rows[0].values[0], Value::String("New Doc".into()));
+}
+
+#[test]
+fn policy_chain_delete_intermediate_row() {
+    // Test that deleting an intermediate row (folder) makes its children invisible.
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE workspaces (name STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+    db.execute("CREATE TABLE folders (name STRING NOT NULL, workspace_id REFERENCES workspaces NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    let alice_ws = db.insert("workspaces", &["name", "owner_id"], vec![
+        Value::String("Alice WS".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    let folder = db.insert("folders", &["name", "workspace_id"], vec![
+        Value::String("Folder".into()),
+        Value::Ref(alice_ws),
+    ]).unwrap();
+
+    let doc = db.insert("documents", &["title", "folder_id"], vec![
+        Value::String("Doc".into()),
+        Value::Ref(folder),
+    ]).unwrap();
+
+    // Set up policies
+    db.execute("CREATE POLICY ON workspaces FOR SELECT WHERE owner_id = @viewer").unwrap();
+    db.execute("CREATE POLICY ON folders FOR SELECT WHERE INHERITS SELECT FROM workspace_id").unwrap();
+    db.execute("CREATE POLICY ON documents FOR SELECT WHERE INHERITS SELECT FROM folder_id").unwrap();
+
+    let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id).unwrap();
+
+    // Initially Alice sees the document
+    assert_eq!(alice_query.rows().len(), 1, "Alice should see doc initially");
+    assert_eq!(alice_query.rows()[0].id, doc);
+
+    // Delete the folder (this should cascade to make doc invisible)
+    db.delete("folders", folder).unwrap();
+
+    // Alice should no longer see the document
+    // Note: The document still exists but its folder reference is now dangling
+    // The join fails, so it's not visible
+    assert_eq!(alice_query.rows().len(), 0, "Alice should not see doc after folder deletion");
+}
+
+#[test]
+fn policy_chain_4_hop_deep() {
+    // Test a 4-hop INHERITS chain:
+    // files → folders → projects → orgs → owner_id
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE orgs (name STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+    db.execute("CREATE TABLE projects (name STRING NOT NULL, org_id REFERENCES orgs NOT NULL)").unwrap();
+    db.execute("CREATE TABLE folders (name STRING NOT NULL, project_id REFERENCES projects NOT NULL)").unwrap();
+    db.execute("CREATE TABLE files (name STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Alice's hierarchy
+    let alice_org = db.insert("orgs", &["name", "owner_id"], vec![
+        Value::String("Alice Org".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    let alice_project = db.insert("projects", &["name", "org_id"], vec![
+        Value::String("Alice Project".into()),
+        Value::Ref(alice_org),
+    ]).unwrap();
+
+    let alice_folder = db.insert("folders", &["name", "project_id"], vec![
+        Value::String("Alice Folder".into()),
+        Value::Ref(alice_project),
+    ]).unwrap();
+
+    let alice_file = db.insert("files", &["name", "folder_id"], vec![
+        Value::String("Alice File".into()),
+        Value::Ref(alice_folder),
+    ]).unwrap();
+
+    // Bob's hierarchy
+    let bob_org = db.insert("orgs", &["name", "owner_id"], vec![
+        Value::String("Bob Org".into()),
+        Value::Ref(bob_id),
+    ]).unwrap();
+
+    let bob_project = db.insert("projects", &["name", "org_id"], vec![
+        Value::String("Bob Project".into()),
+        Value::Ref(bob_org),
+    ]).unwrap();
+
+    let bob_folder = db.insert("folders", &["name", "project_id"], vec![
+        Value::String("Bob Folder".into()),
+        Value::Ref(bob_project),
+    ]).unwrap();
+
+    let _bob_file = db.insert("files", &["name", "folder_id"], vec![
+        Value::String("Bob File".into()),
+        Value::Ref(bob_folder),
+    ]).unwrap();
+
+    // Set up 4-hop chain policies
+    db.execute("CREATE POLICY ON orgs FOR SELECT WHERE owner_id = @viewer").unwrap();
+    db.execute("CREATE POLICY ON projects FOR SELECT WHERE INHERITS SELECT FROM org_id").unwrap();
+    db.execute("CREATE POLICY ON folders FOR SELECT WHERE INHERITS SELECT FROM project_id").unwrap();
+    db.execute("CREATE POLICY ON files FOR SELECT WHERE INHERITS SELECT FROM folder_id").unwrap();
+
+    // Alice should only see her file
+    let alice_query = db.incremental_query_as("SELECT * FROM files", alice_id)
+        .expect("4-hop chain should work");
+    let alice_files = alice_query.rows();
+
+    assert_eq!(alice_files.len(), 1, "Alice should see 1 file");
+    assert_eq!(alice_files[0].id, alice_file);
+    assert_eq!(alice_files[0].values[0], Value::String("Alice File".into()));
+
+    // Bob should only see his file
+    let bob_query = db.incremental_query_as("SELECT * FROM files", bob_id).unwrap();
+    assert_eq!(bob_query.rows().len(), 1, "Bob should see 1 file");
+
+    // Transfer org from Alice to Bob
+    db.update("orgs", alice_org, &[("owner_id", Value::Ref(bob_id))]).unwrap();
+
+    // Alice should see nothing now
+    assert_eq!(alice_query.rows().len(), 0, "Alice should see no files after org transfer");
+
+    // Bob should see both files now
+    let bob_files = bob_query.rows();
+    assert_eq!(bob_files.len(), 2, "Bob should see 2 files after org transfer");
+    let bob_file_names: Vec<_> = bob_files.iter()
+        .map(|r| r.values[0].clone())
+        .collect();
+    assert!(bob_file_names.contains(&Value::String("Alice File".into())));
+    assert!(bob_file_names.contains(&Value::String("Bob File".into())));
+}
+
+#[test]
+fn policy_chain_update_at_each_level() {
+    // Test updates at every level of a 3-hop chain trigger correct propagation.
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE orgs (name STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+    db.execute("CREATE TABLE teams (name STRING NOT NULL, org_id REFERENCES orgs NOT NULL)").unwrap();
+    db.execute("CREATE TABLE tasks (title STRING NOT NULL, team_id REFERENCES teams NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Alice's hierarchy
+    let alice_org = db.insert("orgs", &["name", "owner_id"], vec![
+        Value::String("Alice Org".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    // Bob's hierarchy
+    let bob_org = db.insert("orgs", &["name", "owner_id"], vec![
+        Value::String("Bob Org".into()),
+        Value::Ref(bob_id),
+    ]).unwrap();
+
+    // Team starts in Alice's org
+    let team = db.insert("teams", &["name", "org_id"], vec![
+        Value::String("The Team".into()),
+        Value::Ref(alice_org),
+    ]).unwrap();
+
+    // Task in the team
+    let task = db.insert("tasks", &["title", "team_id"], vec![
+        Value::String("The Task".into()),
+        Value::Ref(team),
+    ]).unwrap();
+
+    // Set up policies
+    db.execute("CREATE POLICY ON orgs FOR SELECT WHERE owner_id = @viewer").unwrap();
+    db.execute("CREATE POLICY ON teams FOR SELECT WHERE INHERITS SELECT FROM org_id").unwrap();
+    db.execute("CREATE POLICY ON tasks FOR SELECT WHERE INHERITS SELECT FROM team_id").unwrap();
+
+    let alice_query = db.incremental_query_as("SELECT * FROM tasks", alice_id).unwrap();
+    let bob_query = db.incremental_query_as("SELECT * FROM tasks", bob_id).unwrap();
+
+    // Initially Alice sees the task
+    assert_eq!(alice_query.rows().len(), 1);
+    assert_eq!(alice_query.rows()[0].id, task);
+    assert_eq!(bob_query.rows().len(), 0);
+
+    // Update 1: Move team to Bob's org
+    db.update("teams", team, &[("org_id", Value::Ref(bob_org))]).unwrap();
+
+    assert_eq!(alice_query.rows().len(), 0, "Alice should not see task after team moved");
+    assert_eq!(bob_query.rows().len(), 1, "Bob should see task after team moved");
+    assert_eq!(bob_query.rows()[0].id, task);
+
+    // Update 2: Move team back to Alice's org
+    db.update("teams", team, &[("org_id", Value::Ref(alice_org))]).unwrap();
+
+    assert_eq!(alice_query.rows().len(), 1, "Alice should see task again");
+    assert_eq!(bob_query.rows().len(), 0, "Bob should not see task anymore");
+
+    // Update 3: Transfer org ownership
+    db.update("orgs", alice_org, &[("owner_id", Value::Ref(bob_id))]).unwrap();
+
+    assert_eq!(alice_query.rows().len(), 0, "Alice should not see task after org transfer");
+    assert_eq!(bob_query.rows().len(), 1, "Bob should see task after org transfer");
+
+    // Update 4: Update the task itself (should not change visibility)
+    db.update("tasks", task, &[("title", Value::String("Updated Task".into()))]).unwrap();
+
+    assert_eq!(bob_query.rows().len(), 1);
+    assert_eq!(bob_query.rows()[0].values[0], Value::String("Updated Task".into()));
+}

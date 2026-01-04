@@ -387,39 +387,42 @@ impl QueryGraph {
             }
 
             match node {
-                QueryNode::Join { left_table, right_table, .. } => {
-                    // Join nodes need special evaluation with database access.
-                    // For chain joins, check if the delta contains data from the left table
-                    // (from a prior Join's output), not just if source_table matches.
-                    let left_table_str = left_table.clone();
-                    let right_table_str = right_table.clone();
+                QueryNode::Join { input_tables, join_table, .. } => {
+                    // Clone values we need before borrowing node mutably
+                    let input_tables_cloned = input_tables.clone();
+                    let join_table_str = join_table.clone();
 
-                    // Determine which table the delta is "from" for this Join.
-                    // For chain joins, if the current delta contains the left table's data
-                    // (from a prior join), treat it as a left delta.
-                    let effective_source = if contained_tables.iter().any(|t| t == &left_table_str) {
-                        &left_table_str
-                    } else if source_table == right_table_str {
-                        source_table
-                    } else {
-                        source_table
-                    };
+                    // Check if this delta is for this Join node
+                    let is_input_delta = input_tables_cloned.iter().any(|t| contained_tables.contains(t));
+                    let is_join_table_delta = source_table == &join_table_str && !is_input_delta;
+                    let is_for_this_node = is_input_delta || is_join_table_delta;
 
-                    // For the schema, use the combined schema for chain joins
-                    // (the left_schema lookup will find qualified columns)
-                    let left_schema = if contained_tables.len() > 1 {
-                        // We're in a chain join, use the graph's combined schema
+                    if !is_for_this_node {
+                        // Delta is for a downstream node - pass through unchanged
+                        // Don't update contained_tables since we didn't process anything
+                        continue;
+                    }
+
+                    // Check if this delta came from input (prior join output or raw input table)
+                    let is_from_input = contained_tables.len() > 1 || is_input_delta;
+
+                    // Use combined schema for chain joins (contains qualified column names)
+                    let input_schema = if contained_tables.len() > 1 || input_tables_cloned.len() > 1 {
                         self.schema.clone()
                     } else {
-                        self.all_schemas.get(&left_table_str).cloned().unwrap()
+                        // First join - use the input table's schema
+                        input_tables_cloned.first()
+                            .and_then(|t| self.all_schemas.get(t).cloned())
+                            .unwrap_or_else(|| self.schema.clone())
                     };
 
                     let mut output = DeltaBatch::new();
                     for d in current.into_iter() {
                         let batch = node.evaluate_join(
                             d,
-                            effective_source,
-                            &left_schema,
+                            source_table,
+                            &input_schema,
+                            is_from_input,
                             |table, id| db.get_row(table, id),
                             |table, column, target_id| {
                                 db.find_referencing(table, column, target_id)
@@ -429,9 +432,14 @@ impl QueryGraph {
                     }
                     current = output;
 
-                    // After a Join, the delta now contains data from both tables
-                    if !contained_tables.contains(&right_table_str) {
-                        contained_tables.push(right_table_str);
+                    // After a Join, the delta now contains data from all input tables plus join_table
+                    for table in input_tables_cloned {
+                        if !contained_tables.contains(&table) {
+                            contained_tables.push(table);
+                        }
+                    }
+                    if !contained_tables.contains(&join_table_str) {
+                        contained_tables.push(join_table_str);
                     }
                 }
                 QueryNode::RecursiveFilter { .. } => {
