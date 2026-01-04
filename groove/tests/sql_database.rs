@@ -192,6 +192,12 @@ fn select_all() {
 
     let rows = db.select_all("users").unwrap();
     assert_eq!(rows.len(), 3);
+
+    // Verify specific row properties
+    let names: Vec<_> = rows.iter().map(|r| &r.values[0]).collect();
+    assert!(names.contains(&&Value::String("Alice".into())));
+    assert!(names.contains(&&Value::String("Bob".into())));
+    assert!(names.contains(&&Value::String("Carol".into())));
 }
 
 #[test]
@@ -228,6 +234,10 @@ fn select_where() {
 
     let active = db.select_where("users", "active", &Value::Bool(true)).unwrap();
     assert_eq!(active.len(), 2);
+    // Verify active users are Alice and Carol
+    let active_names: Vec<_> = active.iter().map(|r| &r.values[0]).collect();
+    assert!(active_names.contains(&&Value::String("Alice".into())));
+    assert!(active_names.contains(&&Value::String("Carol".into())));
 
     let inactive = db
         .select_where("users", "active", &Value::Bool(false))
@@ -285,6 +295,10 @@ fn execute_select() {
     match result {
         ExecuteResult::Selected(rows) => {
             assert_eq!(rows.len(), 2);
+            // Verify both users are present
+            let names: Vec<_> = rows.iter().map(|r| &r.values[0]).collect();
+            assert!(names.contains(&&Value::String("Alice".into())));
+            assert!(names.contains(&&Value::String("Bob".into())));
         }
         _ => panic!("expected Selected"),
     }
@@ -465,10 +479,14 @@ fn find_referencing_uses_index() {
     // Find all posts by Alice
     let alice_posts = db.find_referencing("posts", "author", alice_id).unwrap();
     assert_eq!(alice_posts.len(), 2);
+    let alice_titles: Vec<_> = alice_posts.iter().map(|r| &r.values[1]).collect();
+    assert!(alice_titles.contains(&&Value::String("Post 1".into())));
+    assert!(alice_titles.contains(&&Value::String("Post 2".into())));
 
     // Find all posts by Bob
     let bob_posts = db.find_referencing("posts", "author", bob_id).unwrap();
     assert_eq!(bob_posts.len(), 1);
+    assert_eq!(bob_posts[0].values[1], Value::String("Bob's Post".into()));
 }
 
 #[test]
@@ -683,7 +701,13 @@ fn join_basic() {
             // Each row should have values from both tables (author, title, name)
             for row in &rows {
                 assert_eq!(row.values.len(), 3, "Should have 3 columns (2 from posts + 1 from users)");
+                // All rows should have Alice as the author (via join)
+                assert_eq!(row.values[2], Value::String("Alice".to_string()));
             }
+            // Verify both post titles are present
+            let titles: Vec<_> = rows.iter().map(|r| &r.values[1]).collect();
+            assert!(titles.contains(&&Value::String("First Post".into())));
+            assert!(titles.contains(&&Value::String("Second Post".into())));
         }
         _ => panic!("Expected Selected"),
     }
@@ -724,6 +748,8 @@ fn join_with_where_on_primary_table() {
     match result {
         ExecuteResult::Selected(rows) => {
             assert_eq!(rows.len(), 1, "Should return 1 row matching WHERE clause");
+            assert_eq!(rows[0].values[1], Value::String("First Post".into()));
+            assert_eq!(rows[0].values[2], Value::String("Alice".into()));
         }
         _ => panic!("Expected Selected"),
     }
@@ -779,6 +805,14 @@ fn join_with_where_on_joined_table() {
     match result {
         ExecuteResult::Selected(rows) => {
             assert_eq!(rows.len(), 2, "Should return 2 posts by Alice");
+            // All rows should have Alice as the author
+            for row in &rows {
+                assert_eq!(row.values[2], Value::String("Alice".into()));
+            }
+            // Verify both Alice's posts are present
+            let titles: Vec<_> = rows.iter().map(|r| &r.values[1]).collect();
+            assert!(titles.contains(&&Value::String("Alice Post 1".into())));
+            assert!(titles.contains(&&Value::String("Alice Post 2".into())));
         }
         _ => panic!("Expected Selected"),
     }
@@ -921,13 +955,21 @@ fn join_multiple_conditions_where() {
         _ => panic!("Expected Selected"),
     }
 
-    // Verify that without the title condition, we'd get 2 rows (Alice's posts + Charlie's)
+    // Verify that without the title condition, we'd get 3 rows (Alice's posts + Charlie's)
     let result_active_only = db
         .execute("SELECT * FROM posts JOIN users ON posts.author = users.id WHERE users.active = true")
         .unwrap();
     match result_active_only {
         ExecuteResult::Selected(rows) => {
             assert_eq!(rows.len(), 3, "Should return 3 rows for active users (2 Alice + 1 Charlie)");
+            // All rows should have active=true
+            for row in &rows {
+                assert_eq!(row.values[3], Value::Bool(true));
+            }
+            // Verify authors are Alice and Charlie
+            let names: Vec<_> = rows.iter().map(|r| &r.values[2]).collect();
+            assert!(names.contains(&&Value::String("Alice".into())));
+            assert!(names.contains(&&Value::String("Charlie".into())));
         }
         _ => panic!("Expected Selected"),
     }
@@ -939,6 +981,14 @@ fn join_multiple_conditions_where() {
     match result_title_only {
         ExecuteResult::Selected(rows) => {
             assert_eq!(rows.len(), 2, "Should return 2 rows with title='Hello' (Alice + Bob)");
+            // All rows should have title='Hello'
+            for row in &rows {
+                assert_eq!(row.values[1], Value::String("Hello".into()));
+            }
+            // Verify authors are Alice and Bob
+            let names: Vec<_> = rows.iter().map(|r| &r.values[2]).collect();
+            assert!(names.contains(&&Value::String("Alice".into())));
+            assert!(names.contains(&&Value::String("Bob".into())));
         }
         _ => panic!("Expected Selected"),
     }
@@ -962,6 +1012,9 @@ fn incremental_query_returns_current_rows() {
     // Should have the current rows
     let rows = query.rows();
     assert_eq!(rows.len(), 2);
+    let names: Vec<_> = rows.iter().map(|r| &r.values[0]).collect();
+    assert!(names.contains(&&Value::String("Alice".into())));
+    assert!(names.contains(&&Value::String("Bob".into())));
 }
 
 #[test]
@@ -983,6 +1036,11 @@ fn incremental_query_with_where_clause() {
 
     let rows = query.rows();
     assert_eq!(rows.len(), 2);
+    // Verify only active users (Alice and Carol) are returned
+    let names: Vec<_> = rows.iter().map(|r| &r.values[0]).collect();
+    assert!(names.contains(&&Value::String("Alice".into())));
+    assert!(names.contains(&&Value::String("Carol".into())));
+    assert!(!names.contains(&&Value::String("Bob".into())));
 }
 
 #[test]
@@ -997,14 +1055,20 @@ fn incremental_query_auto_updates_on_insert() {
     let query = db.incremental_query("SELECT * FROM users").unwrap();
 
     // Initially has 1 row
-    assert_eq!(query.rows().len(), 1);
+    let initial_rows = query.rows();
+    assert_eq!(initial_rows.len(), 1);
+    assert_eq!(initial_rows[0].values[0], Value::String("Alice".into()));
 
     // Insert another row - query auto-updates incrementally
     db.execute("INSERT INTO users (name) VALUES ('Bob')")
         .unwrap();
 
     // Query immediately has 2 rows
-    assert_eq!(query.rows().len(), 2);
+    let updated_rows = query.rows();
+    assert_eq!(updated_rows.len(), 2);
+    let names: Vec<_> = updated_rows.iter().map(|r| &r.values[0]).collect();
+    assert!(names.contains(&&Value::String("Alice".into())));
+    assert!(names.contains(&&Value::String("Bob".into())));
 }
 
 #[test]
@@ -1024,7 +1088,9 @@ fn incremental_query_auto_updates_on_update() {
     let query = db
         .incremental_query("SELECT * FROM users WHERE name = 'Alice'")
         .unwrap();
-    assert_eq!(query.rows().len(), 1);
+    let initial_rows = query.rows();
+    assert_eq!(initial_rows.len(), 1);
+    assert_eq!(initial_rows[0].values[0], Value::String("Alice".into()));
 
     // Update the row to have a different name
     db.update("users", id, &[("name", Value::String("Alicia".into()))])
@@ -1049,7 +1115,9 @@ fn incremental_query_auto_updates_on_delete() {
     };
 
     let query = db.incremental_query("SELECT * FROM users").unwrap();
-    assert_eq!(query.rows().len(), 1);
+    let initial_rows = query.rows();
+    assert_eq!(initial_rows.len(), 1);
+    assert_eq!(initial_rows[0].values[0], Value::String("Alice".into()));
 
     // Delete the row
     db.delete("users", id).unwrap();
@@ -1114,8 +1182,12 @@ fn incremental_query_callback_on_delete() {
     db.execute("INSERT INTO users (name) VALUES ('Bob')")
         .unwrap();
 
-    // Verify we have 2 rows
-    assert_eq!(query.rows().len(), 2);
+    // Verify we have 2 rows with correct names
+    let initial_rows = query.rows();
+    assert_eq!(initial_rows.len(), 2);
+    let names: Vec<_> = initial_rows.iter().map(|r| &r.values[0]).collect();
+    assert!(names.contains(&&Value::String("Alice".into())));
+    assert!(names.contains(&&Value::String("Bob".into())));
 
     let call_count = Arc::new(AtomicUsize::new(0));
     let row_counts = Arc::new(RwLock::new(Vec::<usize>::new()));
@@ -1166,6 +1238,9 @@ fn incremental_join_basic() {
 
     let rows = query.rows();
     assert_eq!(rows.len(), 1, "Should return 1 joined row");
+    // Verify joined row has expected values: author ref, title, name
+    assert_eq!(rows[0].values[1], Value::String("First Post".into()));
+    assert_eq!(rows[0].values[2], Value::String("Alice".into()));
 }
 
 #[test]
@@ -1287,7 +1362,10 @@ fn incremental_join_delete_post() {
         .incremental_query("SELECT * FROM posts JOIN users ON posts.author = users.id")
         .unwrap();
 
-    assert_eq!(query.rows().len(), 1);
+    let initial_rows = query.rows();
+    assert_eq!(initial_rows.len(), 1);
+    assert_eq!(initial_rows[0].values[1], Value::String("Test Post".into()));
+    assert_eq!(initial_rows[0].values[2], Value::String("Alice".into()));
 
     // Delete post
     db.delete("posts", post_id).unwrap();
@@ -1333,7 +1411,10 @@ fn incremental_join_delete_user() {
     });
 
     // Initial: 1 joined row
-    assert_eq!(query.rows().len(), 1);
+    let initial_rows = query.rows();
+    assert_eq!(initial_rows.len(), 1);
+    assert_eq!(initial_rows[0].values[1], Value::String("Test Post".into()));
+    assert_eq!(initial_rows[0].values[2], Value::String("Alice".into()));
 
     // Delete the user - join should now return 0 rows (the post still exists but can't join)
     db.delete("users", alice_id).unwrap();
@@ -1389,5 +1470,17 @@ fn incremental_join_multiple_users() {
         .unwrap();
 
     // Should have 3 joined rows
-    assert_eq!(query.rows().len(), 3);
+    let rows = query.rows();
+    assert_eq!(rows.len(), 3);
+
+    // Verify we have posts from both Alice and Bob
+    let author_names: Vec<_> = rows.iter().map(|r| &r.values[2]).collect();
+    assert_eq!(author_names.iter().filter(|n| **n == &Value::String("Alice".into())).count(), 2);
+    assert_eq!(author_names.iter().filter(|n| **n == &Value::String("Bob".into())).count(), 1);
+
+    // Verify all post titles are present
+    let titles: Vec<_> = rows.iter().map(|r| &r.values[1]).collect();
+    assert!(titles.contains(&&Value::String("Alice Post 1".into())));
+    assert!(titles.contains(&&Value::String("Alice Post 2".into())));
+    assert!(titles.contains(&&Value::String("Bob Post".into())));
 }
