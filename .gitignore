@@ -15,6 +15,7 @@ Cargo.lock
 
 # Node.js
 node_modules/
+dist/
 
 # WASM build artifacts
 pkg/

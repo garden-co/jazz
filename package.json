@@ -1,0 +1,7 @@
+{
+  "name": "jazz2",
+  "private": true,
+  "scripts": {
+    "build": "pnpm -r build"
+  }
+}
