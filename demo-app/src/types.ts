@@ -1,6 +1,8 @@
 // Generated from SQL schema by @jazz/schema
 // DO NOT EDIT MANUALLY
 
+import type { StringFilter, BigIntFilter, NumberFilter, BoolFilter } from "@jazz/schema/runtime";
+
 /** ObjectId is a 128-bit unique identifier (UUIDv7) represented as a Base32 string */
 export type ObjectId = string;
 
@@ -29,6 +31,50 @@ export type NoteDepth = {
 };
 
 export type TagDepth = {};
+
+// === WhereInput types (Prisma-style filters) ===
+
+export interface UserWhereInput {
+  AND?: UserWhereInput | UserWhereInput[];
+  OR?: UserWhereInput[];
+  NOT?: UserWhereInput | UserWhereInput[];
+  id?: string | StringFilter;
+  name?: string | StringFilter;
+  email?: string | StringFilter;
+  avatar?: string | StringFilter | null;
+}
+
+export interface FolderWhereInput {
+  AND?: FolderWhereInput | FolderWhereInput[];
+  OR?: FolderWhereInput[];
+  NOT?: FolderWhereInput | FolderWhereInput[];
+  id?: string | StringFilter;
+  name?: string | StringFilter;
+  owner?: string | StringFilter;
+  parent?: string | StringFilter | null;
+}
+
+export interface NoteWhereInput {
+  AND?: NoteWhereInput | NoteWhereInput[];
+  OR?: NoteWhereInput[];
+  NOT?: NoteWhereInput | NoteWhereInput[];
+  id?: string | StringFilter;
+  title?: string | StringFilter;
+  content?: string | StringFilter;
+  author?: string | StringFilter;
+  folder?: string | StringFilter | null;
+  createdAt?: bigint | BigIntFilter;
+  updatedAt?: bigint | BigIntFilter;
+}
+
+export interface TagWhereInput {
+  AND?: TagWhereInput | TagWhereInput[];
+  OR?: TagWhereInput[];
+  NOT?: TagWhereInput | TagWhereInput[];
+  id?: string | StringFilter;
+  name?: string | StringFilter;
+  color?: string | StringFilter;
+}
 
 // === Row types ===
 
