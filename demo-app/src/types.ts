@@ -11,11 +11,16 @@ export interface GrooveRow {
 
 // === Depth types (specify which refs to load) ===
 
-export type UserDepth = {};
+export type UserDepth = {
+  Folders?: true | FolderDepth;
+  Notes?: true | NoteDepth;
+};
 
 export type FolderDepth = {
   owner?: true | UserDepth;
   parent?: true | FolderDepth;
+  Folders?: true | FolderDepth;
+  Notes?: true | NoteDepth;
 };
 
 export type NoteDepth = {
@@ -41,8 +46,28 @@ export interface UserInsert {
   avatar?: string | null;
 }
 
-/** User has no refs, so Loaded is the same as base type */
-export type UserLoaded<D extends UserDepth = {}> = User;
+/** User with refs/reverse refs resolved based on depth parameter D */
+export type UserLoaded<D extends UserDepth = {}> = {
+  id: ObjectId;
+  name: string;
+  email: string;
+  avatar: string | null;
+}
+  & ('Folders' extends keyof D
+    ? D['Folders'] extends true
+      ? { Folders: Folder[] }
+      : D['Folders'] extends object
+        ? { Folders: FolderLoaded<D['Folders'] & FolderDepth>[] }
+        : {}
+    : {})
+  & ('Notes' extends keyof D
+    ? D['Notes'] extends true
+      ? { Notes: Note[] }
+      : D['Notes'] extends object
+        ? { Notes: NoteLoaded<D['Notes'] & NoteDepth>[] }
+        : {}
+    : {})
+;
 
 /** Folder row from the Folder table */
 export interface Folder extends GrooveRow {
@@ -58,7 +83,7 @@ export interface FolderInsert {
   parent?: ObjectId | Folder | null;
 }
 
-/** Folder with refs resolved based on depth parameter D */
+/** Folder with refs/reverse refs resolved based on depth parameter D */
 export type FolderLoaded<D extends FolderDepth = {}> = {
   id: ObjectId;
   name: string;
@@ -66,7 +91,7 @@ export type FolderLoaded<D extends FolderDepth = {}> = {
     ? D['owner'] extends true
       ? User
       : D['owner'] extends object
-        ? User
+        ? UserLoaded<D['owner'] & UserDepth>
         : ObjectId
     : ObjectId;
   parent: 'parent' extends keyof D
@@ -76,7 +101,22 @@ export type FolderLoaded<D extends FolderDepth = {}> = {
         ? FolderLoaded<D['parent'] & FolderDepth> | null
         : ObjectId | null
     : ObjectId | null;
-};
+}
+  & ('Folders' extends keyof D
+    ? D['Folders'] extends true
+      ? { Folders: Folder[] }
+      : D['Folders'] extends object
+        ? { Folders: FolderLoaded<D['Folders'] & FolderDepth>[] }
+        : {}
+    : {})
+  & ('Notes' extends keyof D
+    ? D['Notes'] extends true
+      ? { Notes: Note[] }
+      : D['Notes'] extends object
+        ? { Notes: NoteLoaded<D['Notes'] & NoteDepth>[] }
+        : {}
+    : {})
+;
 
 /** Note row from the Note table */
 export interface Note extends GrooveRow {
@@ -98,7 +138,7 @@ export interface NoteInsert {
   updatedAt: bigint;
 }
 
-/** Note with refs resolved based on depth parameter D */
+/** Note with refs/reverse refs resolved based on depth parameter D */
 export type NoteLoaded<D extends NoteDepth = {}> = {
   id: ObjectId;
   title: string;
@@ -107,7 +147,7 @@ export type NoteLoaded<D extends NoteDepth = {}> = {
     ? D['author'] extends true
       ? User
       : D['author'] extends object
-        ? User
+        ? UserLoaded<D['author'] & UserDepth>
         : ObjectId
     : ObjectId;
   folder: 'folder' extends keyof D
@@ -119,7 +159,8 @@ export type NoteLoaded<D extends NoteDepth = {}> = {
     : ObjectId | null;
   createdAt: bigint;
   updatedAt: bigint;
-};
+}
+;
 
 /** Tag row from the Tag table */
 export interface Tag extends GrooveRow {

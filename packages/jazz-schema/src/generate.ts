@@ -7,6 +7,7 @@ import {
   type ColumnDef,
   type SqlColumnType,
   type GenerateOptions,
+  type ReverseRef,
   isTableDescriptor,
 } from "./types.js";
 
@@ -182,6 +183,58 @@ function toPascalCase(str: string): string {
 }
 
 /**
+ * Simple pluralization for table names (reverse collection names).
+ * Handles common cases but not all English irregularities.
+ */
+function pluralize(str: string): string {
+  if (str.endsWith("s") || str.endsWith("x") || str.endsWith("z") ||
+      str.endsWith("ch") || str.endsWith("sh")) {
+    return str + "es";
+  }
+  if (str.endsWith("y") && !["a", "e", "i", "o", "u"].includes(str[str.length - 2])) {
+    return str.slice(0, -1) + "ies";
+  }
+  return str + "s";
+}
+
+/**
+ * Build reverse references for all tables.
+ *
+ * For each table, find all other tables that have a ref pointing to it.
+ * These become reverse relationships (one-to-many collections).
+ */
+function buildReverseRefs(
+  tables: Map<string, { descriptor: TableDescriptor; columns: ColumnDef[] }>
+): Map<string, ReverseRef[]> {
+  const reverseRefs = new Map<string, ReverseRef[]>();
+
+  // Initialize empty arrays for all tables
+  for (const tableName of tables.keys()) {
+    reverseRefs.set(tableName, []);
+  }
+
+  // Scan all tables for refs
+  for (const [sourceTable, { columns }] of tables) {
+    for (const col of columns) {
+      if (col.sqlType.kind === "ref") {
+        const targetTable = col.sqlType.table;
+        const refs = reverseRefs.get(targetTable);
+        if (refs) {
+          refs.push({
+            name: pluralize(sourceTable),
+            sourceTable,
+            sourceColumn: col.name,
+            nullable: col.nullable,
+          });
+        }
+      }
+    }
+  }
+
+  return reverseRefs;
+}
+
+/**
  * Map SQL type to TypeScript type
  */
 function sqlTypeToTs(sqlType: SqlColumnType, nullable: boolean): string {
@@ -213,13 +266,20 @@ function sqlTypeToTs(sqlType: SqlColumnType, nullable: boolean): string {
  * Generate TypeScript types
  */
 function generateTypes(
-  tables: Map<string, { descriptor: TableDescriptor; columns: ColumnDef[] }>
+  tables: Map<string, { descriptor: TableDescriptor; columns: ColumnDef[] }>,
+  reverseRefs: Map<string, ReverseRef[]>
 ): string {
-  // First pass: determine which tables have refs (need Depth/Loaded types)
+  // First pass: determine which tables have refs or reverse refs (need Depth/Loaded types)
   const tablesWithRefs = new Set<string>();
+  const tablesWithReverseRefs = new Set<string>();
   for (const [tableName, { columns }] of tables) {
     if (columns.some((c) => c.sqlType.kind === "ref")) {
       tablesWithRefs.add(tableName);
+    }
+  }
+  for (const [tableName, refs] of reverseRefs) {
+    if (refs.length > 0) {
+      tablesWithReverseRefs.add(tableName);
     }
   }
 
@@ -243,17 +303,24 @@ function generateTypes(
   for (const [tableName, { columns }] of tables) {
     const interfaceName = toPascalCase(tableName);
     const refColumns = columns.filter((c) => c.sqlType.kind === "ref");
+    const tableReverseRefs = reverseRefs.get(tableName) ?? [];
 
-    if (refColumns.length === 0) {
-      // No refs - empty depth type
+    if (refColumns.length === 0 && tableReverseRefs.length === 0) {
+      // No refs or reverse refs - empty depth type
       lines.push(`export type ${interfaceName}Depth = {};`);
     } else {
       lines.push(`export type ${interfaceName}Depth = {`);
+      // Forward refs
       for (const col of refColumns) {
         const refInterfaceName = toPascalCase(
           (col.sqlType as { kind: "ref"; table: string }).table
         );
         lines.push(`  ${col.name}?: true | ${refInterfaceName}Depth;`);
+      }
+      // Reverse refs (arrays)
+      for (const rev of tableReverseRefs) {
+        const refInterfaceName = toPascalCase(rev.sourceTable);
+        lines.push(`  ${rev.name}?: true | ${refInterfaceName}Depth;`);
       }
       lines.push("};");
     }
@@ -267,9 +334,11 @@ function generateTypes(
   for (const [tableName, { columns }] of tables) {
     const interfaceName = toPascalCase(tableName);
     const hasRefs = tablesWithRefs.has(tableName);
+    const hasReverseRefs = tablesWithReverseRefs.has(tableName);
     const refColumns = columns.filter((c) => c.sqlType.kind === "ref");
+    const tableReverseRefs = reverseRefs.get(tableName) ?? [];
 
-    // Main interface (with ObjectId for refs)
+    // Main interface (with ObjectId for refs, no reverse refs)
     lines.push(`/** ${interfaceName} row from the ${tableName} table */`);
     lines.push(`export interface ${interfaceName} extends GrooveRow {`);
     for (const col of columns) {
@@ -302,26 +371,28 @@ function generateTypes(
     lines.push("");
 
     // Loaded type with generic depth parameter
-    if (hasRefs) {
+    if (hasRefs || hasReverseRefs) {
       lines.push(
-        `/** ${interfaceName} with refs resolved based on depth parameter D */`
+        `/** ${interfaceName} with refs/reverse refs resolved based on depth parameter D */`
       );
       lines.push(
         `export type ${interfaceName}Loaded<D extends ${interfaceName}Depth = {}> = {`
       );
       lines.push("  id: ObjectId;");
 
+      // Forward refs
       for (const col of columns) {
         if (col.sqlType.kind === "ref") {
           const refInterfaceName = toPascalCase(col.sqlType.table);
           const refHasRefs = tablesWithRefs.has(col.sqlType.table);
+          const refHasReverseRefs = tablesWithReverseRefs.has(col.sqlType.table);
           const nullSuffix = col.nullable ? " | null" : "";
 
           // Generate conditional type based on depth spec
           lines.push(`  ${col.name}: '${col.name}' extends keyof D`);
           lines.push(`    ? D['${col.name}'] extends true`);
           lines.push(`      ? ${refInterfaceName}${nullSuffix}`);
-          if (refHasRefs) {
+          if (refHasRefs || refHasReverseRefs) {
             lines.push(`      : D['${col.name}'] extends object`);
             lines.push(
               `        ? ${refInterfaceName}Loaded<D['${col.name}'] & ${refInterfaceName}Depth>${nullSuffix}`
@@ -340,10 +411,39 @@ function generateTypes(
           lines.push(`  ${col.name}: ${tsType};`);
         }
       }
-      lines.push("};");
+
+      // Close the base type before adding reverse ref intersections
+      lines.push("}");
+
+      // Reverse refs (arrays) - add as intersection types
+      for (const rev of tableReverseRefs) {
+        const refInterfaceName = toPascalCase(rev.sourceTable);
+        const refHasRefs = tablesWithRefs.has(rev.sourceTable);
+        const refHasReverseRefs = tablesWithReverseRefs.has(rev.sourceTable);
+
+        // Reverse refs are only included when explicitly requested in depth
+        lines.push(`  & ('${rev.name}' extends keyof D`);
+        lines.push(`    ? D['${rev.name}'] extends true`);
+        lines.push(`      ? { ${rev.name}: ${refInterfaceName}[] }`);
+        if (refHasRefs || refHasReverseRefs) {
+          lines.push(`      : D['${rev.name}'] extends object`);
+          lines.push(
+            `        ? { ${rev.name}: ${refInterfaceName}Loaded<D['${rev.name}'] & ${refInterfaceName}Depth>[] }`
+          );
+          lines.push(`        : {}`);
+        } else {
+          lines.push(`      : D['${rev.name}'] extends object`);
+          lines.push(`        ? { ${rev.name}: ${refInterfaceName}[] }`);
+          lines.push(`        : {}`);
+        }
+        lines.push(`    : {})`);
+      }
+
+      // Final semicolon
+      lines.push(";");
       lines.push("");
     } else {
-      // No refs - Loaded is just an alias to the base type
+      // No refs or reverse refs - Loaded is just an alias to the base type
       lines.push(
         `/** ${interfaceName} has no refs, so Loaded is the same as base type */`
       );
@@ -395,9 +495,12 @@ export function generateSchema(
     analyzedTables.set(name, { descriptor, columns });
   }
 
+  // Build reverse references (one-to-many relationships)
+  const reverseRefs = buildReverseRefs(analyzedTables);
+
   // Generate outputs
   const sql = generateSql(analyzedTables);
-  const types = generateTypes(analyzedTables);
+  const types = generateTypes(analyzedTables, reverseRefs);
 
   // Ensure output directory exists
   mkdirSync(outputDir, { recursive: true });

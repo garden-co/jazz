@@ -28,6 +28,25 @@ export interface ColumnDef {
 }
 
 /**
+ * A reverse reference (one-to-many relationship).
+ *
+ * When table B has a column that references table A, table A gets a
+ * reverse reference to B. This enables ORM-style eager loading:
+ *
+ *   Folder.notes -> ARRAY(SELECT n FROM notes n WHERE n.folder = folder.id)
+ */
+export interface ReverseRef {
+  /** Name of the reverse collection (pluralized table name by default) */
+  name: string;
+  /** The table that has the forward reference to this table */
+  sourceTable: string;
+  /** The column in the source table that references this table */
+  sourceColumn: string;
+  /** Whether the forward reference is nullable */
+  nullable: boolean;
+}
+
+/**
  * A table descriptor created by table()
  */
 export interface TableDescriptor {
