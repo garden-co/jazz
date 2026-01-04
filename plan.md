@@ -202,6 +202,7 @@ See `specs/rebac-policies.md` for full design.
 - [x] `policy_expr_to_predicate` converts simple policies to Predicate for efficient filtering
 - [x] INHERITS flattened to JOINs for true incremental evaluation
 - [x] Optimize predicate ordering by selectivity
+- [ ] Recursive/nested INHERITS chains (e.g., doc→folder→workspace→owner) - currently returns error
 
 **Phase 3.5: Testing and Debugging**
 - [ ] EXPLAIN POLICY command
@@ -221,7 +222,7 @@ See `specs/rebac-policies.md` for full design.
 
 ## Test Coverage
 
-Current test count: **229 tests** passing across all modules
+Current test count: **233 tests** passing across all modules
 
 - Unit tests in `sql/row.rs`, `sql/types.rs`, `sql/database/tests.rs`
 - Integration tests in `tests/` directory:

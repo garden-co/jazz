@@ -985,3 +985,222 @@ fn incremental_query_as_inherits_incremental_updates() {
     // And we should have received a delta
     assert!(change_count.load(Ordering::SeqCst) > 0, "Should have received delta notification");
 }
+
+#[test]
+fn incremental_query_as_inherits_folder_ownership_change() {
+    // Test that changing folder ownership propagates through INHERITS policy
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE folders (name STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Create folder owned by Alice
+    let folder_id = db.insert("folders", &["name", "owner_id"], vec![
+        Value::String("Shared Folder".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    // Create document in that folder
+    db.insert("documents", &["title", "folder_id"], vec![
+        Value::String("Important Doc".into()),
+        Value::Ref(folder_id),
+    ]).unwrap();
+
+    db.execute("CREATE POLICY ON folders FOR SELECT WHERE owner_id = @viewer").unwrap();
+    db.execute("CREATE POLICY ON documents FOR SELECT WHERE INHERITS SELECT FROM folder_id").unwrap();
+
+    // Alice can see the document
+    let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id).unwrap();
+    let alice_rows = alice_query.rows();
+    assert_eq!(alice_rows.len(), 1);
+    assert_eq!(alice_rows[0].values[0], Value::String("Important Doc".into()));
+
+    // Bob cannot see the document
+    let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id).unwrap();
+    assert_eq!(bob_query.rows().len(), 0);
+
+    // Transfer folder ownership to Bob
+    db.update("folders", folder_id, &[("owner_id", Value::Ref(bob_id))]).unwrap();
+
+    // Now Alice should NOT see the document (folder no longer hers)
+    // NOTE: This tests incremental propagation through the JOIN
+    let alice_rows_after = alice_query.rows();
+    assert_eq!(alice_rows_after.len(), 0, "Alice should no longer see doc after folder transfer");
+
+    // Bob should now see the document
+    let bob_rows_after = bob_query.rows();
+    assert_eq!(bob_rows_after.len(), 1, "Bob should now see doc after folder transfer");
+    assert_eq!(bob_rows_after[0].values[0], Value::String("Important Doc".into()));
+}
+
+#[test]
+fn incremental_query_as_recursive_inherits_not_yet_supported() {
+    // Test that recursive/nested INHERITS (3+ levels) returns an error
+    // This documents the current limitation that should be fixed in the future.
+    //
+    // Desired behavior (not yet implemented):
+    // - workspaces: owner_id = @viewer
+    // - folders: INHERITS SELECT FROM workspace_id
+    // - documents: INHERITS SELECT FROM folder_id (which chains to workspace)
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE workspaces (name STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+    db.execute("CREATE TABLE folders (name STRING NOT NULL, workspace_id REFERENCES workspaces NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    let workspace_id = db.insert("workspaces", &["name", "owner_id"], vec![
+        Value::String("Alice's Workspace".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    let folder_id = db.insert("folders", &["name", "workspace_id"], vec![
+        Value::String("Project Folder".into()),
+        Value::Ref(workspace_id),
+    ]).unwrap();
+
+    db.insert("documents", &["title", "folder_id"], vec![
+        Value::String("Deep Doc".into()),
+        Value::Ref(folder_id),
+    ]).unwrap();
+
+    // Set up 3-level chain: documents -> folders -> workspaces -> owner_id
+    db.execute("CREATE POLICY ON workspaces FOR SELECT WHERE owner_id = @viewer").unwrap();
+    db.execute("CREATE POLICY ON folders FOR SELECT WHERE INHERITS SELECT FROM workspace_id").unwrap();
+    db.execute("CREATE POLICY ON documents FOR SELECT WHERE INHERITS SELECT FROM folder_id").unwrap();
+
+    // This should currently fail because nested INHERITS is not yet supported
+    // TODO: Once recursive INHERITS is implemented, this test should be updated
+    // to verify the documents are correctly filtered through the chain.
+    let result = db.incremental_query_as("SELECT * FROM documents", alice_id);
+    assert!(
+        result.is_err(),
+        "Recursive INHERITS should return error (not yet implemented). Got: {:?}",
+        result
+    );
+
+    // Verify the error message mentions nested INHERITS
+    if let Err(e) = result {
+        let err_msg = format!("{:?}", e);
+        assert!(
+            err_msg.contains("Nested INHERITS") || err_msg.contains("nested"),
+            "Error should mention nested INHERITS limitation: {}",
+            err_msg
+        );
+    }
+}
+
+#[test]
+fn incremental_query_as_inherits_multiple_docs_same_folder() {
+    // Test INHERITS with multiple documents in the same folder
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE folders (name STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    let folder_id = db.insert("folders", &["name", "owner_id"], vec![
+        Value::String("Alice's Folder".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    // Insert multiple documents
+    db.insert("documents", &["title", "folder_id"], vec![
+        Value::String("Doc 1".into()),
+        Value::Ref(folder_id),
+    ]).unwrap();
+    db.insert("documents", &["title", "folder_id"], vec![
+        Value::String("Doc 2".into()),
+        Value::Ref(folder_id),
+    ]).unwrap();
+    db.insert("documents", &["title", "folder_id"], vec![
+        Value::String("Doc 3".into()),
+        Value::Ref(folder_id),
+    ]).unwrap();
+
+    db.execute("CREATE POLICY ON folders FOR SELECT WHERE owner_id = @viewer").unwrap();
+    db.execute("CREATE POLICY ON documents FOR SELECT WHERE INHERITS SELECT FROM folder_id").unwrap();
+
+    let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id).unwrap();
+    let rows = alice_query.rows();
+
+    assert_eq!(rows.len(), 3, "Alice should see all 3 documents in her folder");
+    let titles: Vec<_> = rows.iter().map(|r| &r.values[0]).collect();
+    assert!(titles.contains(&&Value::String("Doc 1".into())));
+    assert!(titles.contains(&&Value::String("Doc 2".into())));
+    assert!(titles.contains(&&Value::String("Doc 3".into())));
+}
+
+#[test]
+fn incremental_query_as_inherits_delete_propagates() {
+    // Test that deleting a folder removes access to its documents
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE folders (name STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    let folder_id = db.insert("folders", &["name", "owner_id"], vec![
+        Value::String("Temp Folder".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    db.insert("documents", &["title", "folder_id"], vec![
+        Value::String("Orphan Doc".into()),
+        Value::Ref(folder_id),
+    ]).unwrap();
+
+    db.execute("CREATE POLICY ON folders FOR SELECT WHERE owner_id = @viewer").unwrap();
+    db.execute("CREATE POLICY ON documents FOR SELECT WHERE INHERITS SELECT FROM folder_id").unwrap();
+
+    let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id).unwrap();
+
+    // Initially Alice can see the document
+    let initial_rows = alice_query.rows();
+    assert_eq!(initial_rows.len(), 1);
+    assert_eq!(initial_rows[0].values[0], Value::String("Orphan Doc".into()));
+
+    // Delete the folder
+    db.delete("folders", folder_id).unwrap();
+
+    // Now the document should not be visible (no matching folder in JOIN)
+    let after_delete = alice_query.rows();
+    assert_eq!(after_delete.len(), 0, "Document should not be visible after folder deletion");
+}
