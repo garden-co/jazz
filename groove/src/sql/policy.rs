@@ -491,6 +491,14 @@ fn serialize_literal(buf: &mut Vec<u8>, val: &Value) {
             buf.push(6);
             buf.extend_from_slice(&id.inner().to_le_bytes());
         }
+        Value::I32(n) => {
+            buf.push(7);
+            buf.extend_from_slice(&n.to_le_bytes());
+        }
+        Value::U32(n) => {
+            buf.push(8);
+            buf.extend_from_slice(&n.to_le_bytes());
+        }
         // Row and Array are not valid in policy literals - they're only for query results
         Value::Row(_) | Value::Array(_) => {
             panic!("Row and Array values cannot be used in policy literals");
@@ -769,6 +777,24 @@ fn deserialize_literal(data: &[u8], pos: usize) -> Result<(Value, usize), Policy
             }
             let id = u128::from_le_bytes(data[pos..pos + 16].try_into().unwrap());
             Ok((Value::Ref(ObjectId::from(id)), pos + 16))
+        }
+        7 => {
+            if pos + 4 > data.len() {
+                return Err(PolicyError::DeserializationError(
+                    "unexpected end of data".into(),
+                ));
+            }
+            let n = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+            Ok((Value::I32(n), pos + 4))
+        }
+        8 => {
+            if pos + 4 > data.len() {
+                return Err(PolicyError::DeserializationError(
+                    "unexpected end of data".into(),
+                ));
+            }
+            let n = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+            Ok((Value::U32(n), pos + 4))
         }
         _ => Err(PolicyError::DeserializationError(format!(
             "invalid literal tag: {}",

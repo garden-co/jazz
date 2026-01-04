@@ -3,7 +3,11 @@
 pub enum ColumnType {
     /// Boolean: 1 byte (0x00 = false, 0x01 = true)
     Bool,
-    /// Signed 64-bit integer: 8 bytes, little-endian
+    /// Signed 32-bit integer: 4 bytes, little-endian (fits in JS number)
+    I32,
+    /// Unsigned 32-bit integer: 4 bytes, little-endian (fits in JS number)
+    U32,
+    /// Signed 64-bit integer: 8 bytes, little-endian (requires JS BigInt)
     I64,
     /// 64-bit float: 8 bytes, IEEE 754 little-endian
     F64,
@@ -18,13 +22,22 @@ pub enum ColumnType {
 impl ColumnType {
     /// Returns true if this is a fixed-size type.
     pub fn is_fixed_size(&self) -> bool {
-        matches!(self, ColumnType::Bool | ColumnType::I64 | ColumnType::F64 | ColumnType::Ref(_))
+        matches!(
+            self,
+            ColumnType::Bool
+                | ColumnType::I32
+                | ColumnType::U32
+                | ColumnType::I64
+                | ColumnType::F64
+                | ColumnType::Ref(_)
+        )
     }
 
     /// Returns the fixed size in bytes, or None for variable-size types.
     pub fn fixed_size(&self) -> Option<usize> {
         match self {
             ColumnType::Bool => Some(1),
+            ColumnType::I32 | ColumnType::U32 => Some(4),
             ColumnType::I64 => Some(8),
             ColumnType::F64 => Some(8),
             ColumnType::Ref(_) => Some(16),
@@ -168,6 +181,8 @@ impl TableSchema {
                 ColumnType::String => 3,
                 ColumnType::Bytes => 4,
                 ColumnType::Ref(_) => 5,
+                ColumnType::I32 => 6,
+                ColumnType::U32 => 7,
             };
             buf.push(type_tag);
 
@@ -260,6 +275,8 @@ impl TableSchema {
 
                     ColumnType::Ref(target)
                 }
+                6 => ColumnType::I32,
+                7 => ColumnType::U32,
                 _ => return Err(SchemaError::InvalidTypeTag(type_tag)),
             };
 

@@ -1,3 +1,4 @@
+mod binary;
 mod database;
 mod index;
 mod parser;
@@ -8,6 +9,10 @@ mod schema;
 mod table_rows;
 mod types;
 
+pub use binary::{
+    encode_delta, encode_delta_batch, encode_rows, encode_rows_with_nullability,
+    encode_single_row, DELTA_ADDED, DELTA_REMOVED, DELTA_UPDATED,
+};
 pub use database::{Database, DatabaseError, DatabaseState, ExecuteResult, IncrementalQuery};
 pub use index::RefIndex;
 pub use parser::{

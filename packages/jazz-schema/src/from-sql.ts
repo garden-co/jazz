@@ -7,6 +7,8 @@ import pc from "picocolors";
  */
 type SqlColumnType =
   | { kind: "bool" }
+  | { kind: "i32" }
+  | { kind: "u32" }
   | { kind: "i64" }
   | { kind: "f64" }
   | { kind: "string" }
@@ -49,7 +51,13 @@ function parseSqlType(typeStr: string): SqlColumnType {
   if (upper === "BOOL" || upper === "BOOLEAN") {
     return { kind: "bool" };
   }
-  if (upper === "I64" || upper === "BIGINT" || upper === "INTEGER") {
+  if (upper === "I32" || upper === "INT" || upper === "INTEGER") {
+    return { kind: "i32" };
+  }
+  if (upper === "U32") {
+    return { kind: "u32" };
+  }
+  if (upper === "I64" || upper === "BIGINT") {
     return { kind: "i64" };
   }
   if (upper === "F64" || upper === "FLOAT" || upper === "DOUBLE" || upper === "REAL") {
@@ -226,13 +234,15 @@ function getFilterType(sqlType: SqlColumnType, nullable: boolean): string {
       filterType = "BoolFilter";
       valueType = "boolean";
       break;
-    case "i64":
-      filterType = "BigIntFilter";
-      valueType = "bigint";
-      break;
+    case "i32":
+    case "u32":
     case "f64":
       filterType = "NumberFilter";
       valueType = "number";
+      break;
+    case "i64":
+      filterType = "BigIntFilter";
+      valueType = "bigint";
       break;
     case "string":
       filterType = "StringFilter";
@@ -266,11 +276,13 @@ function sqlTypeToTs(sqlType: SqlColumnType, nullable: boolean): string {
     case "bool":
       tsType = "boolean";
       break;
-    case "i64":
-      tsType = "bigint";
-      break;
+    case "i32":
+    case "u32":
     case "f64":
       tsType = "number";
+      break;
+    case "i64":
+      tsType = "bigint";
       break;
     case "string":
       tsType = "string";
@@ -567,6 +579,352 @@ function generateTypes(
 }
 
 /**
+ * Generate binary decoder for a single column type
+ */
+function generateColumnDecoder(sqlType: SqlColumnType, varName: string, nullable: boolean): string[] {
+  const lines: string[] = [];
+
+  if (nullable) {
+    lines.push(`    const ${varName}Present = view.getUint8(offset++);`);
+    lines.push(`    if (${varName}Present === 0) {`);
+    lines.push(`      row.${varName} = null;`);
+    lines.push(`    } else {`);
+  }
+
+  const indent = nullable ? "      " : "    ";
+
+  switch (sqlType.kind) {
+    case "bool":
+      lines.push(`${indent}row.${varName} = view.getUint8(offset++) === 1;`);
+      break;
+    case "i32":
+      lines.push(`${indent}row.${varName} = view.getInt32(offset, true);`);
+      lines.push(`${indent}offset += 4;`);
+      break;
+    case "u32":
+      lines.push(`${indent}row.${varName} = view.getUint32(offset, true);`);
+      lines.push(`${indent}offset += 4;`);
+      break;
+    case "i64":
+      lines.push(`${indent}row.${varName} = view.getBigInt64(offset, true);`);
+      lines.push(`${indent}offset += 8;`);
+      break;
+    case "f64":
+      lines.push(`${indent}row.${varName} = view.getFloat64(offset, true);`);
+      lines.push(`${indent}offset += 8;`);
+      break;
+    case "string":
+      lines.push(`${indent}const ${varName}Len = view.getUint32(offset, true);`);
+      lines.push(`${indent}offset += 4;`);
+      lines.push(`${indent}row.${varName} = decoder.decode(new Uint8Array(buffer, offset, ${varName}Len));`);
+      lines.push(`${indent}offset += ${varName}Len;`);
+      break;
+    case "bytes":
+      lines.push(`${indent}const ${varName}Len = view.getUint32(offset, true);`);
+      lines.push(`${indent}offset += 4;`);
+      lines.push(`${indent}row.${varName} = new Uint8Array(buffer, offset, ${varName}Len);`);
+      lines.push(`${indent}offset += ${varName}Len;`);
+      break;
+    case "ref":
+      lines.push(`${indent}row.${varName} = decodeObjectId(bytes, offset);`);
+      lines.push(`${indent}offset += 26;`);
+      break;
+  }
+
+  if (nullable) {
+    lines.push(`    }`);
+  }
+
+  return lines;
+}
+
+/**
+ * Generate a BinaryReader method call for a column type
+ */
+function generateReaderCall(sqlType: SqlColumnType): string {
+  switch (sqlType.kind) {
+    case "bool":
+      return "reader.readBool()";
+    case "i32":
+      return "reader.readI32()";
+    case "u32":
+      return "reader.readU32()";
+    case "i64":
+      return "reader.readI64()";
+    case "f64":
+      return "reader.readF64()";
+    case "string":
+      return "reader.readString()";
+    case "bytes":
+      return "reader.readBytes()";
+    case "ref":
+      return "reader.readObjectId()";
+  }
+}
+
+/**
+ * Generate the row type definition for a table
+ */
+function generateRowType(table: ParsedTable): string {
+  const typeName = singularize(toPascalCase(table.name));
+  const fields = [`id: string`];
+  for (const col of table.columns) {
+    const tsType = col.sqlType.kind === "ref"
+      ? (col.nullable ? "string | null" : "string")
+      : sqlTypeToTs(col.sqlType, col.nullable);
+    fields.push(`${col.name}: ${tsType}`);
+  }
+  return `{ ${fields.join("; ")} }`;
+}
+
+/**
+ * Generate binary decoders for all tables
+ */
+function generateDecoders(tables: ParsedTable[]): string {
+  const lines: string[] = [
+    "// Generated from SQL schema by @jazz/schema",
+    "// DO NOT EDIT MANUALLY",
+    "",
+    "// Shared decoder for UTF-8 strings (used for variable-length strings)",
+    "const decoder = new TextDecoder();",
+    "",
+    "// Delta type constants",
+    "export const DELTA_ADDED = 1;",
+    "export const DELTA_UPDATED = 2;",
+    "export const DELTA_REMOVED = 3;",
+    "",
+    "/**",
+    " * Fast ObjectId decoding using String.fromCharCode.",
+    " * Since Base32 is ASCII-only, this is faster than TextDecoder.",
+    " */",
+    "function decodeObjectId(bytes: Uint8Array, offset: number): string {",
+    "  return String.fromCharCode(",
+    "    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3], bytes[offset+4],",
+    "    bytes[offset+5], bytes[offset+6], bytes[offset+7], bytes[offset+8], bytes[offset+9],",
+    "    bytes[offset+10], bytes[offset+11], bytes[offset+12], bytes[offset+13], bytes[offset+14],",
+    "    bytes[offset+15], bytes[offset+16], bytes[offset+17], bytes[offset+18], bytes[offset+19],",
+    "    bytes[offset+20], bytes[offset+21], bytes[offset+22], bytes[offset+23], bytes[offset+24],",
+    "    bytes[offset+25]",
+    "  );",
+    "}",
+    "",
+    "/** Delta type for incremental updates */",
+    "export type Delta<T> =",
+    "  | { type: 'added'; row: T }",
+    "  | { type: 'updated'; row: T }",
+    "  | { type: 'removed'; id: string };",
+    "",
+    "/**",
+    " * Decoder state for reading from a binary buffer.",
+    " * Used for composing decoders for nested/joined rows.",
+    " */",
+    "export class BinaryReader {",
+    "  readonly bytes: Uint8Array;",
+    "  readonly view: DataView;",
+    "  offset: number;",
+    "",
+    "  constructor(buffer: ArrayBuffer, startOffset = 0) {",
+    "    this.bytes = new Uint8Array(buffer);",
+    "    this.view = new DataView(buffer);",
+    "    this.offset = startOffset;",
+    "  }",
+    "",
+    "  readObjectId(): string {",
+    "    const id = decodeObjectId(this.bytes, this.offset);",
+    "    this.offset += 26;",
+    "    return id;",
+    "  }",
+    "",
+    "  readU32(): number {",
+    "    const val = this.view.getUint32(this.offset, true);",
+    "    this.offset += 4;",
+    "    return val;",
+    "  }",
+    "",
+    "  readI32(): number {",
+    "    const val = this.view.getInt32(this.offset, true);",
+    "    this.offset += 4;",
+    "    return val;",
+    "  }",
+    "",
+    "  readI64(): bigint {",
+    "    const val = this.view.getBigInt64(this.offset, true);",
+    "    this.offset += 8;",
+    "    return val;",
+    "  }",
+    "",
+    "  readF64(): number {",
+    "    const val = this.view.getFloat64(this.offset, true);",
+    "    this.offset += 8;",
+    "    return val;",
+    "  }",
+    "",
+    "  readBool(): boolean {",
+    "    return this.bytes[this.offset++] === 1;",
+    "  }",
+    "",
+    "  readString(): string {",
+    "    const len = this.readU32();",
+    "    const str = decoder.decode(new Uint8Array(this.bytes.buffer, this.offset, len));",
+    "    this.offset += len;",
+    "    return str;",
+    "  }",
+    "",
+    "  readBytes(): Uint8Array {",
+    "    const len = this.readU32();",
+    "    const bytes = new Uint8Array(this.bytes.buffer, this.offset, len);",
+    "    this.offset += len;",
+    "    return bytes;",
+    "  }",
+    "",
+    "  /** Read nullable value. Returns null if not present. */",
+    "  readNullable<T>(readValue: () => T): T | null {",
+    "    if (this.bytes[this.offset++] === 0) return null;",
+    "    return readValue();",
+    "  }",
+    "",
+    "  /**",
+    "   * Read an array of values.",
+    "   * @param readElement Function to read each element",
+    "   */",
+    "  readArray<T>(readElement: () => T): T[] {",
+    "    const count = this.readU32();",
+    "    const arr = new Array(count);",
+    "    for (let i = 0; i < count; i++) {",
+    "      arr[i] = readElement();",
+    "    }",
+    "    return arr;",
+    "  }",
+    "}",
+    "",
+  ];
+
+  for (const table of tables) {
+    const typeName = singularize(toPascalCase(table.name));
+    const rowType = generateRowType(table);
+
+    // Generate batch decoder (with row count header)
+    lines.push(`/**`);
+    lines.push(` * Decode binary rows for ${table.name} table (batch format)`);
+    lines.push(` * @param buffer ArrayBuffer from WASM`);
+    lines.push(` * @returns Array of ${typeName} rows`);
+    lines.push(` */`);
+    lines.push(`export function decode${typeName}Rows(buffer: ArrayBuffer): Array<${rowType}> {`);
+    lines.push(`  const bytes = new Uint8Array(buffer);`);
+    lines.push(`  const view = new DataView(buffer);`);
+    lines.push(`  let offset = 0;`);
+    lines.push(``);
+    lines.push(`  // Read row count`);
+    lines.push(`  const rowCount = view.getUint32(offset, true);`);
+    lines.push(`  offset += 4;`);
+    lines.push(``);
+    lines.push(`  const rows = new Array(rowCount);`);
+    lines.push(``);
+    lines.push(`  for (let i = 0; i < rowCount; i++) {`);
+    lines.push(`    const row: any = {};`);
+    lines.push(``);
+    lines.push(`    // Read ObjectId (26 bytes Base32)`);
+    lines.push(`    row.id = decodeObjectId(bytes, offset);`);
+    lines.push(`    offset += 26;`);
+    lines.push(``);
+
+    // Generate decoder for each column
+    for (const col of table.columns) {
+      lines.push(`    // ${col.name}: ${col.sqlType.kind}${col.nullable ? " (nullable)" : ""}`);
+      lines.push(...generateColumnDecoder(col.sqlType, col.name, col.nullable));
+      lines.push(``);
+    }
+
+    lines.push(`    rows[i] = row;`);
+    lines.push(`  }`);
+    lines.push(``);
+    lines.push(`  return rows;`);
+    lines.push(`}`);
+    lines.push(``);
+
+    // Generate single row decoder (no header, for delta updates)
+    lines.push(`/**`);
+    lines.push(` * Decode a single ${typeName} row from binary (no header)`);
+    lines.push(` * @param buffer ArrayBuffer containing a single row`);
+    lines.push(` * @param startOffset Byte offset to start reading from`);
+    lines.push(` * @returns Decoded row and bytes consumed`);
+    lines.push(` */`);
+    lines.push(`export function decode${typeName}Row(buffer: ArrayBuffer, startOffset = 0): { row: ${rowType}; bytesRead: number } {`);
+    lines.push(`  const bytes = new Uint8Array(buffer);`);
+    lines.push(`  const view = new DataView(buffer);`);
+    lines.push(`  let offset = startOffset;`);
+    lines.push(``);
+    lines.push(`  const row: any = {};`);
+    lines.push(``);
+    lines.push(`  // Read ObjectId (26 bytes Base32)`);
+    lines.push(`  row.id = decodeObjectId(bytes, offset);`);
+    lines.push(`  offset += 26;`);
+    lines.push(``);
+
+    for (const col of table.columns) {
+      lines.push(`  // ${col.name}: ${col.sqlType.kind}${col.nullable ? " (nullable)" : ""}`);
+      // Adjust indentation for single-row decoder (2 spaces instead of 4)
+      const colLines = generateColumnDecoder(col.sqlType, col.name, col.nullable);
+      lines.push(...colLines.map(l => l.replace(/^    /, "  ")));
+      lines.push(``);
+    }
+
+    lines.push(`  return { row, bytesRead: offset - startOffset };`);
+    lines.push(`}`);
+    lines.push(``);
+
+    // Generate delta decoder
+    lines.push(`/**`);
+    lines.push(` * Decode a ${typeName} delta from binary`);
+    lines.push(` * Format: u8 type (1=added, 2=updated, 3=removed) + row data or id`);
+    lines.push(` * @param buffer ArrayBuffer containing a single delta`);
+    lines.push(` * @returns Decoded delta`);
+    lines.push(` */`);
+    lines.push(`export function decode${typeName}Delta(buffer: ArrayBuffer): Delta<${rowType}> {`);
+    lines.push(`  const bytes = new Uint8Array(buffer);`);
+    lines.push(`  const deltaType = bytes[0];`);
+    lines.push(``);
+    lines.push(`  if (deltaType === DELTA_REMOVED) {`);
+    lines.push(`    // Removed: just the ObjectId`);
+    lines.push(`    const id = decodeObjectId(bytes, 1);`);
+    lines.push(`    return { type: 'removed', id };`);
+    lines.push(`  }`);
+    lines.push(``);
+    lines.push(`  // Added or Updated: decode the full row`);
+    lines.push(`  const { row } = decode${typeName}Row(buffer, 1);`);
+    lines.push(`  return {`);
+    lines.push(`    type: deltaType === DELTA_ADDED ? 'added' : 'updated',`);
+    lines.push(`    row`);
+    lines.push(`  };`);
+    lines.push(`}`);
+    lines.push(``);
+
+    // Generate reader function for composing with BinaryReader (for nested rows)
+    lines.push(`/**`);
+    lines.push(` * Read a ${typeName} row using a BinaryReader.`);
+    lines.push(` * Use this for nested/joined row decoding.`);
+    lines.push(` */`);
+    lines.push(`export function read${typeName}(reader: BinaryReader): ${rowType} {`);
+    lines.push(`  const id = reader.readObjectId();`);
+
+    for (const col of table.columns) {
+      if (col.nullable) {
+        lines.push(`  const ${col.name} = reader.readNullable(() => ${generateReaderCall(col.sqlType)});`);
+      } else {
+        lines.push(`  const ${col.name} = ${generateReaderCall(col.sqlType)};`);
+      }
+    }
+
+    const fieldNames = ["id", ...table.columns.map(c => c.name)];
+    lines.push(`  return { ${fieldNames.join(", ")} };`);
+    lines.push(`}`);
+    lines.push(``);
+  }
+
+  return lines.join("\n");
+}
+
+/**
  * Options for generateFromSql
  */
 export interface GenerateFromSqlOptions {
@@ -601,9 +959,10 @@ export function generateFromSql(
   // Build reverse refs
   const reverseRefs = buildReverseRefs(tables);
 
-  // Generate types and metadata
+  // Generate types, metadata, and decoders
   const types = generateTypes(tables, reverseRefs);
   const meta = generateMeta(tables, reverseRefs);
+  const decoders = generateDecoders(tables);
 
   // Determine output path
   const outputDir = options?.output ?? dirname(sqlPath);
@@ -611,17 +970,20 @@ export function generateFromSql(
 
   const typesPath = join(outputDir, "types.ts");
   const metaPath = join(outputDir, "meta.ts");
+  const decodersPath = join(outputDir, "decoders.ts");
   writeFileSync(typesPath, types);
   writeFileSync(metaPath, meta);
+  writeFileSync(decodersPath, decoders);
 
   const elapsed = Date.now() - startTime;
 
   console.log(
     pc.green("✓") +
-      ` Generated types and metadata from ${pc.bold(tables.length)} table(s) in ${elapsed}ms`
+      ` Generated types, metadata, and decoders from ${pc.bold(tables.length)} table(s) in ${elapsed}ms`
   );
   console.log(`  ${pc.dim("→")} ${typesPath}`);
   console.log(`  ${pc.dim("→")} ${metaPath}`);
+  console.log(`  ${pc.dim("→")} ${decodersPath}`);
 }
 
 // CLI entry point

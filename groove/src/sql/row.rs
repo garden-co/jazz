@@ -6,6 +6,8 @@ use crate::sql::schema::{ColumnType, TableSchema};
 pub enum Value {
     Null,
     Bool(bool),
+    I32(i32),
+    U32(u32),
     I64(i64),
     F64(f64),
     String(String),
@@ -28,6 +30,22 @@ impl Value {
     pub fn as_bool(&self) -> Option<bool> {
         match self {
             Value::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// Try to get as i32.
+    pub fn as_i32(&self) -> Option<i32> {
+        match self {
+            Value::I32(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// Try to get as u32.
+    pub fn as_u32(&self) -> Option<u32> {
+        match self {
+            Value::U32(n) => Some(*n),
             _ => None,
         }
     }
@@ -227,6 +245,12 @@ fn encode_column_value(
         (Value::Bool(b), ColumnType::Bool) => {
             buf.push(if *b { 0x01 } else { 0x00 });
         }
+        (Value::I32(n), ColumnType::I32) => {
+            buf.extend_from_slice(&n.to_le_bytes());
+        }
+        (Value::U32(n), ColumnType::U32) => {
+            buf.extend_from_slice(&n.to_le_bytes());
+        }
         (Value::I64(n), ColumnType::I64) => {
             buf.extend_from_slice(&n.to_le_bytes());
         }
@@ -319,6 +343,20 @@ fn decode_fixed_column(data: &[u8], ty: &ColumnType, nullable: bool) -> Result<V
                 return Err(RowError::UnexpectedEof);
             }
             Ok(Value::Bool(data[pos] != 0))
+        }
+        ColumnType::I32 => {
+            if data.len() < pos + 4 {
+                return Err(RowError::UnexpectedEof);
+            }
+            let bytes: [u8; 4] = data[pos..pos + 4].try_into().unwrap();
+            Ok(Value::I32(i32::from_le_bytes(bytes)))
+        }
+        ColumnType::U32 => {
+            if data.len() < pos + 4 {
+                return Err(RowError::UnexpectedEof);
+            }
+            let bytes: [u8; 4] = data[pos..pos + 4].try_into().unwrap();
+            Ok(Value::U32(u32::from_le_bytes(bytes)))
         }
         ColumnType::I64 => {
             if data.len() < pos + 8 {

@@ -1,7 +1,8 @@
 use wasm_bindgen::prelude::*;
-use groove::sql::{Database, IncrementalQuery, Value, ExecuteResult, Row};
+use groove::sql::{Database, IncrementalQuery, Value, ExecuteResult, Row, encode_rows, encode_delta};
 use groove::ObjectId;
 use groove::ListenerId;
+use js_sys::{Array, Uint8Array};
 
 /// WASM-exposed database wrapper.
 #[wasm_bindgen]
@@ -19,7 +20,7 @@ impl WasmDatabase {
         }
     }
 
-    /// Execute a SQL statement.
+    /// Execute a SQL statement (legacy string-based results).
     #[wasm_bindgen]
     pub fn execute(&self, sql: &str) -> Result<JsValue, JsValue> {
         match self.db.execute(sql) {
@@ -54,6 +55,25 @@ impl WasmDatabase {
         }
     }
 
+    /// Execute a SELECT query and return results as binary Uint8Array.
+    ///
+    /// Binary format:
+    /// - u32: row_count
+    /// - Per row:
+    ///   - 26 bytes: ObjectId (Base32 UTF-8)
+    ///   - Column values in schema order
+    #[wasm_bindgen]
+    pub fn select_binary(&self, sql: &str) -> Result<Uint8Array, JsValue> {
+        match self.db.execute(sql) {
+            Ok(ExecuteResult::Selected(rows)) => {
+                let binary = encode_rows(&rows);
+                Ok(Uint8Array::from(binary.as_slice()))
+            }
+            Ok(_) => Err(JsValue::from_str("expected SELECT query")),
+            Err(e) => Err(JsValue::from_str(&format!("{:?}", e))),
+        }
+    }
+
     /// Update a specific row's column value.
     /// row_id should be a Base32 ObjectId string.
     #[wasm_bindgen]
@@ -65,7 +85,7 @@ impl WasmDatabase {
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))
     }
 
-    /// Create an incremental query that calls back on changes.
+    /// Create an incremental query that calls back on changes (legacy string-based).
     /// Returns a handle that must be kept alive to maintain the subscription.
     #[wasm_bindgen]
     pub fn subscribe(&self, sql: &str, callback: js_sys::Function) -> Result<WasmQueryHandle, JsValue> {
@@ -74,6 +94,31 @@ impl WasmDatabase {
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
         Ok(WasmQueryHandle::new(query, callback))
+    }
+
+    /// Create an incremental query that calls back with binary data on changes.
+    /// The callback receives a Uint8Array in the binary row format.
+    /// Returns a handle that must be kept alive to maintain the subscription.
+    #[wasm_bindgen]
+    pub fn subscribe_binary(&self, sql: &str, callback: js_sys::Function) -> Result<WasmQueryHandleBinary, JsValue> {
+        let query = self.db
+            .incremental_query(sql)
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+
+        Ok(WasmQueryHandleBinary::new(query, callback))
+    }
+
+    /// Create an incremental query that calls back with individual delta buffers.
+    /// The callback receives an Array of Uint8Array, one per delta.
+    /// Each delta is: u8 type (1=add, 2=update, 3=remove) + row data (or just id for removes).
+    /// Returns a handle that must be kept alive to maintain the subscription.
+    #[wasm_bindgen]
+    pub fn subscribe_delta(&self, sql: &str, callback: js_sys::Function) -> Result<WasmQueryHandleDelta, JsValue> {
+        let query = self.db
+            .incremental_query(sql)
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+
+        Ok(WasmQueryHandleDelta::new(query, callback))
     }
 }
 
@@ -114,6 +159,82 @@ impl WasmQueryHandle {
         let listener_id = query.subscribe(rust_callback);
 
         WasmQueryHandle {
+            _query: query,
+            listener_id,
+        }
+    }
+
+    /// Unsubscribe from updates.
+    #[wasm_bindgen]
+    pub fn unsubscribe(&mut self) {
+        if let Some(id) = self.listener_id.take() {
+            self._query.unsubscribe(id);
+        }
+    }
+}
+
+/// Handle to an incremental query subscription with binary encoding.
+/// The subscription stays active as long as this handle exists.
+#[wasm_bindgen]
+pub struct WasmQueryHandleBinary {
+    _query: IncrementalQuery,
+    listener_id: Option<ListenerId>,
+}
+
+#[wasm_bindgen]
+impl WasmQueryHandleBinary {
+    fn new(query: IncrementalQuery, callback: js_sys::Function) -> Self {
+        let rust_callback = move |rows: Vec<Row>| {
+            let binary = encode_rows(&rows);
+            let js_array = Uint8Array::from(binary.as_slice());
+            let _ = callback.call1(&JsValue::NULL, &js_array);
+        };
+
+        let listener_id = query.subscribe(rust_callback);
+
+        WasmQueryHandleBinary {
+            _query: query,
+            listener_id,
+        }
+    }
+
+    /// Unsubscribe from updates.
+    #[wasm_bindgen]
+    pub fn unsubscribe(&mut self) {
+        if let Some(id) = self.listener_id.take() {
+            self._query.unsubscribe(id);
+        }
+    }
+}
+
+/// Handle to an incremental query subscription with per-delta binary encoding.
+/// Each delta is encoded individually for efficient incremental decoding on JS side.
+#[wasm_bindgen]
+pub struct WasmQueryHandleDelta {
+    _query: IncrementalQuery,
+    listener_id: Option<ListenerId>,
+}
+
+#[wasm_bindgen]
+impl WasmQueryHandleDelta {
+    fn new(query: IncrementalQuery, callback: js_sys::Function) -> Self {
+        // Use subscribe_delta to get individual RowDeltas
+        let rust_callback = Box::new(move |delta_batch: &groove::sql::query_graph::DeltaBatch| {
+            // Create a JS array of Uint8Arrays, one per delta
+            let js_deltas = Array::new();
+
+            for delta in delta_batch.iter() {
+                let binary = encode_delta(delta);
+                let js_array = Uint8Array::from(binary.as_slice());
+                js_deltas.push(&js_array);
+            }
+
+            let _ = callback.call1(&JsValue::NULL, &js_deltas);
+        });
+
+        let listener_id = query.subscribe_delta(rust_callback);
+
+        WasmQueryHandleDelta {
             _query: query,
             listener_id,
         }

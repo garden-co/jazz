@@ -347,6 +347,12 @@ impl<'a> Parser<'a> {
         if self.try_keyword("BOOL") {
             return Ok(ColumnType::Bool);
         }
+        if self.try_keyword("I32") {
+            return Ok(ColumnType::I32);
+        }
+        if self.try_keyword("U32") {
+            return Ok(ColumnType::U32);
+        }
         if self.try_keyword("I64") {
             return Ok(ColumnType::I64);
         }
