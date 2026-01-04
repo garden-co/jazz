@@ -213,9 +213,9 @@ See `specs/rebac-policies.md` for full design.
 - [x] Nested INHERITS chains of arbitrary depth (e.g., doc→folder→workspace→org→owner) via chained JOINs
   - Supports 2+, 3+, 4+ hop chains with correct delta propagation from any table in the chain
   - Each Join node maintains a reverse_index for efficient delta routing from downstream tables
-  - NOTE: OR policies with INHERITS at intermediate chain levels only follow the INHERITS path
-    (e.g., `owner_id = @viewer OR INHERITS SELECT FROM workspace_id` on folders - only the
-    INHERITS path is evaluated when documents query through the chain)
+  - OR policies at intermediate chain levels correctly evaluate both paths
+    (e.g., `owner_id = @viewer OR INHERITS SELECT FROM workspace_id` on folders - access granted
+    if folder.owner_id matches OR workspace.owner_id matches)
 
 **Phase 3.5: Testing and Debugging**
 - [ ] EXPLAIN POLICY command

@@ -648,6 +648,9 @@ struct ChainHop {
     ref_column: String,
     /// The target table being referenced
     target_table: String,
+    /// Optional base predicate at this hop (from OR sibling of INHERITS)
+    /// When present, a row matches if it satisfies this predicate OR continues via INHERITS.
+    base_predicate: Option<Predicate>,
 }
 
 /// A resolved INHERITS chain from source to terminal table.
@@ -1937,11 +1940,6 @@ impl Database {
         let target_schema = self.get_table(&initial_inherits.target_table)
             .ok_or_else(|| DatabaseError::TableNotFound(initial_inherits.target_table.clone()))?;
 
-        let first_hop = ChainHop {
-            ref_column: initial_inherits.ref_column.clone(),
-            target_table: initial_inherits.target_table.clone(),
-        };
-
         // Check if target table has a policy
         let target_policies = self.get_policies(&initial_inherits.target_table);
         let target_select = target_policies.as_ref().and_then(|p| p.get(PolicyAction::Select));
@@ -1962,6 +1960,22 @@ impl Database {
                         }));
                     }
 
+                    // Convert the target table's base_predicate (the OR sibling at this level)
+                    let target_base = if let Some(ref base_expr) = nested_inherits.base_predicate {
+                        Some(self.policy_expr_to_predicate(base_expr, viewer)?)
+                    } else {
+                        None
+                    };
+
+                    // Create the first hop with its base predicate
+                    let first_hop = ChainHop {
+                        ref_column: initial_inherits.ref_column.clone(),
+                        target_table: initial_inherits.target_table.clone(),
+                        // The base_predicate on this hop is the target table's base predicate
+                        // (the OR sibling that allows short-circuiting at this level)
+                        base_predicate: target_base,
+                    };
+
                     // Recursively resolve the rest of the chain
                     let mut rest_of_chain = self.resolve_inherits_chain(
                         &nested_inherits,
@@ -1980,6 +1994,11 @@ impl Database {
 
                 // No INHERITS - this is the terminal table
                 let terminal_predicate = self.policy_expr_to_predicate(where_expr, viewer)?;
+                let first_hop = ChainHop {
+                    ref_column: initial_inherits.ref_column.clone(),
+                    target_table: initial_inherits.target_table.clone(),
+                    base_predicate: None, // Terminal table - no base predicate needed
+                };
                 return Ok(InheritsChain {
                     hops: vec![first_hop],
                     terminal_predicate: Some(terminal_predicate),
@@ -1989,6 +2008,11 @@ impl Database {
         }
 
         // No policy on target table = allow all (terminal with no predicate)
+        let first_hop = ChainHop {
+            ref_column: initial_inherits.ref_column.clone(),
+            target_table: initial_inherits.target_table.clone(),
+            base_predicate: None,
+        };
         Ok(InheritsChain {
             hops: vec![first_hop],
             terminal_predicate: None,
@@ -2139,10 +2163,40 @@ impl Database {
             prev_table = hop.target_table.clone();
         }
 
-        // Apply terminal predicate with qualified column names
+        // Build combined predicate: OR of all intermediate base_predicates and terminal_predicate
+        // This implements the semantics: a row matches if ANY level in the chain grants access.
+        //
+        // For example, with:
+        //   - documents: INHERITS SELECT FROM folder_id
+        //   - folders: owner_id = @viewer OR INHERITS SELECT FROM workspace_id
+        //   - workspaces: owner_id = @viewer
+        //
+        // The combined predicate is:
+        //   folders.owner_id = @viewer OR workspaces.owner_id = @viewer
+        let mut or_predicates: Vec<Predicate> = Vec::new();
+
+        // Collect base predicates from each hop (qualified with target table)
+        for hop in &chain.hops {
+            if let Some(ref base_pred) = hop.base_predicate {
+                let qualified_pred = base_pred.qualify(&hop.target_table);
+                or_predicates.push(qualified_pred);
+            }
+        }
+
+        // Add terminal predicate (qualified with terminal table)
         if let Some(ref terminal_pred) = chain.terminal_predicate {
             let qualified_pred = terminal_pred.qualify(&chain.terminal_table);
-            current_node = builder.filter(current_node, qualified_pred);
+            or_predicates.push(qualified_pred);
+        }
+
+        // Apply combined predicate
+        if !or_predicates.is_empty() {
+            let combined_pred = if or_predicates.len() == 1 {
+                or_predicates.remove(0)
+            } else {
+                Predicate::Or(or_predicates)
+            };
+            current_node = builder.filter(current_node, combined_pred);
         }
 
         Ok(builder.output(current_node, GraphId(0)))

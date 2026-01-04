@@ -1823,12 +1823,9 @@ fn policy_chain_or_condition_with_inherits() {
     // - folders: owner_id = @viewer OR INHERITS SELECT FROM workspace_id
     // - workspaces: owner_id = @viewer
     //
-    // NOTE: Current limitation - when there's an OR with INHERITS at an intermediate
-    // level of a chain, only the INHERITS path is followed. The simple predicate
-    // (owner_id = @viewer) at the folder level is not evaluated as an alternative.
-    //
-    // For now, this test verifies the INHERITS path works correctly.
-    // Full OR support at intermediate chain levels is a future enhancement.
+    // Access is granted if ANY level in the chain matches:
+    // - folders.owner_id = @viewer, OR
+    // - workspaces.owner_id = @viewer
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
@@ -1867,7 +1864,7 @@ fn policy_chain_or_condition_with_inherits() {
     ]).unwrap();
 
     // Folder owned by Alice but in Bob's workspace
-    let _alice_folder_in_bob_ws = db.insert("folders", &["name", "owner_id", "workspace_id"], vec![
+    let alice_folder_in_bob_ws = db.insert("folders", &["name", "owner_id", "workspace_id"], vec![
         Value::String("Alice's Folder in Bob WS".into()),
         Value::Ref(alice_id),
         Value::Ref(bob_ws_id),
@@ -1886,12 +1883,11 @@ fn policy_chain_or_condition_with_inherits() {
         Value::Ref(folder_in_alice_ws),
     ]).unwrap();
 
-    // NOTE: This doc is in a folder Alice owns but in Bob's workspace.
-    // With current implementation, this won't be visible to Alice because
-    // only the INHERITS path is followed (folders → workspace → owner).
-    let _doc_in_alice_folder = db.insert("documents", &["title", "folder_id"], vec![
+    // This doc is in a folder Alice owns but in Bob's workspace.
+    // Alice can see it via the OR condition: folders.owner_id = @viewer
+    let doc_in_alice_folder = db.insert("documents", &["title", "folder_id"], vec![
         Value::String("Doc in Alice's Folder".into()),
-        Value::Ref(_alice_folder_in_bob_ws),
+        Value::Ref(alice_folder_in_bob_ws),
     ]).unwrap();
 
     let _doc_in_bob_folder = db.insert("documents", &["title", "folder_id"], vec![
@@ -1904,17 +1900,20 @@ fn policy_chain_or_condition_with_inherits() {
     db.execute("CREATE POLICY ON folders FOR SELECT WHERE owner_id = @viewer OR INHERITS SELECT FROM workspace_id").unwrap();
     db.execute("CREATE POLICY ON documents FOR SELECT WHERE INHERITS SELECT FROM folder_id").unwrap();
 
-    // With current implementation, Alice sees documents via INHERITS path only:
-    // doc → folder → workspace → owner_id = Alice
+    // Alice sees documents via both paths:
+    // 1. doc → folder → workspace → owner_id = Alice (INHERITS path)
+    // 2. doc → folder → owner_id = Alice (OR path at folder level)
     let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id)
         .expect("Policy chain should work");
     let alice_docs = alice_query.rows();
 
-    // Alice sees only the doc in her workspace (via INHERITS path)
-    // The doc in "Alice's folder in Bob's WS" is NOT visible because
-    // the folder ownership (OR condition) isn't evaluated for chain JOINs
-    assert_eq!(alice_docs.len(), 1, "Alice should see 1 document (INHERITS path only)");
-    assert_eq!(alice_docs[0].id, doc_in_alice_ws, "Alice should see doc in her workspace");
+    // Alice sees 2 documents:
+    // - Doc in her workspace (via INHERITS to workspace owner)
+    // - Doc in folder she owns (via OR condition on folder owner)
+    assert_eq!(alice_docs.len(), 2, "Alice should see 2 documents");
+    let alice_doc_ids: std::collections::HashSet<_> = alice_docs.iter().map(|r| r.id).collect();
+    assert!(alice_doc_ids.contains(&doc_in_alice_ws), "Alice should see doc in her workspace");
+    assert!(alice_doc_ids.contains(&doc_in_alice_folder), "Alice should see doc in folder she owns");
 }
 
 #[test]
