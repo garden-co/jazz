@@ -860,9 +860,11 @@ impl Database {
             }
 
             // Validate that referenced tables exist (for Ref columns)
+            // Allow self-references (table referencing itself, e.g., parent_id)
             for col in &schema.columns {
                 if let ColumnType::Ref(target_table) = &col.ty {
-                    if !tables.contains_key(target_table) {
+                    // Skip validation for self-references
+                    if target_table != &schema.name && !tables.contains_key(target_table) {
                         return Err(DatabaseError::TableNotFound(target_table.clone()));
                     }
                 }
@@ -1732,7 +1734,12 @@ impl Database {
             if let Some(ref where_expr) = policy.where_clause {
                 match self.policy_expr_to_predicate(where_expr, viewer) {
                     Ok(policy_predicate) => builder.filter(after_user_where, policy_predicate),
-                    Err(_) => after_user_where, // Shouldn't happen - INHERITS handled above
+                    Err(e) => {
+                        // SECURITY: If we can't convert policy to predicate, we must fail
+                        // rather than silently allowing all rows. This can happen with
+                        // OR expressions containing INHERITS that can't be flattened to JOINs.
+                        return Err(e);
+                    }
                 }
             } else {
                 after_user_where

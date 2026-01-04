@@ -1204,3 +1204,125 @@ fn incremental_query_as_inherits_delete_propagates() {
     let after_delete = alice_query.rows();
     assert_eq!(after_delete.len(), 0, "Document should not be visible after folder deletion");
 }
+
+#[test]
+fn incremental_query_as_self_referential_recursive_inherits() {
+    // Test true recursive policies with self-referential table structure:
+    // folders can have parent folders (unlimited depth), permissions inherit up the tree.
+    //
+    // Structure:
+    // - folders: id, name, parent_id (REFERENCES folders), owner_id (REFERENCES users)
+    // - Policy: owner_id = @viewer OR INHERITS SELECT FROM parent_id
+    //
+    // This is the "hardest" case for incremental queries because:
+    // 1. The recursion depth is unbounded
+    // 2. A single JOIN won't work - we need recursive JOINs or CTEs
+    // 3. Changes to any folder in the ancestry chain should propagate
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    // Self-referential: parent_id references the same table
+    db.execute("CREATE TABLE folders (name STRING NOT NULL, parent_id REFERENCES folders, owner_id REFERENCES users)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let _bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Create folder hierarchy:
+    // root (owned by Alice) -> child -> grandchild -> great_grandchild
+    let root_id = db.insert("folders", &["name", "owner_id"], vec![
+        Value::String("Root".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    let child_id = db.insert("folders", &["name", "parent_id"], vec![
+        Value::String("Child".into()),
+        Value::Ref(root_id),
+    ]).unwrap();
+
+    let grandchild_id = db.insert("folders", &["name", "parent_id"], vec![
+        Value::String("Grandchild".into()),
+        Value::Ref(child_id),
+    ]).unwrap();
+
+    let _great_grandchild_id = db.insert("folders", &["name", "parent_id"], vec![
+        Value::String("GreatGrandchild".into()),
+        Value::Ref(grandchild_id),
+    ]).unwrap();
+
+    // Policy: owner OR inherit from parent (recursive!)
+    db.execute("CREATE POLICY ON folders FOR SELECT WHERE owner_id = @viewer OR INHERITS SELECT FROM parent_id").unwrap();
+
+    // This should fail because OR with INHERITS cannot be converted to a predicate.
+    // The system correctly returns an error rather than silently allowing all rows.
+    //
+    // TODO: Implement proper handling of OR with INHERITS:
+    // - Option 1: Evaluate INHERITS branch recursively
+    // - Option 2: Union of (owner_id = @viewer) and (recursive parent lookup)
+    let result = db.incremental_query_as("SELECT * FROM folders", alice_id);
+
+    assert!(
+        result.is_err(),
+        "OR with self-referential INHERITS should fail (can't be converted to predicate). Got: {:?}",
+        result
+    );
+
+    // Verify the error is about INHERITS conversion
+    if let Err(e) = result {
+        let err_msg = format!("{:?}", e);
+        assert!(
+            err_msg.contains("INHERITS") || err_msg.contains("incremental"),
+            "Error should mention INHERITS limitation: {}",
+            err_msg
+        );
+    }
+}
+
+#[test]
+fn incremental_query_as_pure_recursive_inherits_not_yet_supported() {
+    // Test PURE recursive policy (no OR fallback) - this should fail
+    // Policy: ONLY INHERITS SELECT FROM parent_id (no owner_id check)
+    use crate::sql::policy::clear_policy_warnings;
+    clear_policy_warnings();
+
+    let db = Database::in_memory();
+
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE folders (name STRING NOT NULL, parent_id REFERENCES folders, owner_id REFERENCES users)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Create root folder with owner (this is the "anchor" for recursion)
+    let root_id = db.insert("folders", &["name", "owner_id"], vec![
+        Value::String("Root".into()),
+        Value::Ref(alice_id),
+    ]).unwrap();
+
+    db.insert("folders", &["name", "parent_id"], vec![
+        Value::String("Child".into()),
+        Value::Ref(root_id),
+    ]).unwrap();
+
+    // Pure INHERITS policy (no simple predicate fallback)
+    db.execute("CREATE POLICY ON folders FOR SELECT WHERE INHERITS SELECT FROM parent_id").unwrap();
+
+    // This should fail because we can't convert self-referential INHERITS to JOINs
+    let result = db.incremental_query_as("SELECT * FROM folders", alice_id);
+
+    assert!(
+        result.is_err(),
+        "Pure self-referential INHERITS should fail. Got: {:?}",
+        result
+    );
+}
