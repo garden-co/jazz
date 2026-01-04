@@ -641,6 +641,25 @@ struct InheritsInfo {
     base_predicate: Option<PolicyExpr>,
 }
 
+/// A hop in an INHERITS chain.
+#[derive(Clone)]
+struct ChainHop {
+    /// The Ref column in source table
+    ref_column: String,
+    /// The target table being referenced
+    target_table: String,
+}
+
+/// A resolved INHERITS chain from source to terminal table.
+struct InheritsChain {
+    /// The hops in the chain (source→target for each)
+    hops: Vec<ChainHop>,
+    /// The terminal predicate from the last table (non-INHERITS)
+    terminal_predicate: Option<Predicate>,
+    /// The table that has the terminal predicate
+    terminal_table: String,
+}
+
 /// Database errors.
 #[derive(Debug, Clone)]
 pub enum DatabaseError {
@@ -1719,8 +1738,17 @@ impl Database {
                         // Self-referential INHERITS: use RecursiveFilter
                         return self.build_recursive_filter_graph(select, viewer, &inherits_info, &schema);
                     } else {
-                        // Non-self-referential INHERITS: use JOIN graph
-                        return self.build_inherits_join_graph(select, viewer, &inherits_info);
+                        // Non-self-referential INHERITS: resolve the full chain
+                        let mut visited = vec![table.to_string()];
+                        let chain = self.resolve_inherits_chain(&inherits_info, table, viewer, &mut visited)?;
+
+                        if chain.hops.len() == 1 {
+                            // Single hop: use existing simple JOIN graph
+                            return self.build_inherits_join_graph(select, viewer, &inherits_info);
+                        } else {
+                            // Multi-hop chain: use chain JOIN graph
+                            return self.build_chain_join_graph(select, viewer, &chain, &schema);
+                        }
                     }
                 }
             }
@@ -1879,6 +1907,95 @@ impl Database {
         }
     }
 
+    /// Resolve an INHERITS chain by following all hops until reaching a terminal predicate.
+    ///
+    /// For example, with:
+    /// - documents: INHERITS SELECT FROM folder_id
+    /// - folders: INHERITS SELECT FROM workspace_id
+    /// - workspaces: owner_id = @viewer
+    ///
+    /// Returns a chain: documents→folders, folders→workspaces, terminal: owner_id = @viewer
+    fn resolve_inherits_chain(
+        &self,
+        initial_inherits: &InheritsInfo,
+        source_table: &str,
+        viewer: ObjectId,
+        visited: &mut Vec<String>,
+    ) -> Result<InheritsChain, DatabaseError> {
+        // Prevent infinite loops (should already be caught by is_self_referential)
+        if visited.contains(&initial_inherits.target_table) {
+            return Err(DatabaseError::Parse(parser::ParseError {
+                message: format!(
+                    "Circular INHERITS chain detected: {} -> {}",
+                    source_table, initial_inherits.target_table
+                ),
+                position: 0,
+            }));
+        }
+        visited.push(initial_inherits.target_table.clone());
+
+        let target_schema = self.get_table(&initial_inherits.target_table)
+            .ok_or_else(|| DatabaseError::TableNotFound(initial_inherits.target_table.clone()))?;
+
+        let first_hop = ChainHop {
+            ref_column: initial_inherits.ref_column.clone(),
+            target_table: initial_inherits.target_table.clone(),
+        };
+
+        // Check if target table has a policy
+        let target_policies = self.get_policies(&initial_inherits.target_table);
+        let target_select = target_policies.as_ref().and_then(|p| p.get(PolicyAction::Select));
+
+        if let Some(policy) = target_select {
+            if let Some(ref where_expr) = policy.where_clause {
+                // Check if target policy also has INHERITS
+                if let Some(nested_inherits) = self.extract_inherits(
+                    where_expr,
+                    &initial_inherits.target_table,
+                    &target_schema,
+                )? {
+                    if nested_inherits.is_self_referential {
+                        // Self-referential in the chain - not supported yet
+                        return Err(DatabaseError::Parse(parser::ParseError {
+                            message: "Self-referential INHERITS in chain not yet supported".to_string(),
+                            position: 0,
+                        }));
+                    }
+
+                    // Recursively resolve the rest of the chain
+                    let mut rest_of_chain = self.resolve_inherits_chain(
+                        &nested_inherits,
+                        &initial_inherits.target_table,
+                        viewer,
+                        visited,
+                    )?;
+
+                    // Prepend our hop
+                    let mut hops = vec![first_hop];
+                    hops.extend(rest_of_chain.hops);
+                    rest_of_chain.hops = hops;
+
+                    return Ok(rest_of_chain);
+                }
+
+                // No INHERITS - this is the terminal table
+                let terminal_predicate = self.policy_expr_to_predicate(where_expr, viewer)?;
+                return Ok(InheritsChain {
+                    hops: vec![first_hop],
+                    terminal_predicate: Some(terminal_predicate),
+                    terminal_table: initial_inherits.target_table.clone(),
+                });
+            }
+        }
+
+        // No policy on target table = allow all (terminal with no predicate)
+        Ok(InheritsChain {
+            hops: vec![first_hop],
+            terminal_predicate: None,
+            terminal_table: initial_inherits.target_table.clone(),
+        })
+    }
+
     /// Build a JOIN graph to handle INHERITS policies.
     ///
     /// Transforms a query like `SELECT * FROM documents` with policy
@@ -1934,6 +2051,103 @@ impl Database {
         } else {
             // No policy on target table = allow all
             after_additional
+        };
+
+        Ok(builder.output(after_policy, GraphId(0)))
+    }
+
+    /// Build a JOIN graph for INHERITS chains with multiple hops.
+    ///
+    /// For chains like: documents → folders → workspaces (with workspaces.owner_id = @viewer)
+    ///
+    /// This builds a 2-table join for the first hop, then applies the terminal predicate
+    /// qualified to the second table. For chains with 3+ hops, we recursively build
+    /// the intermediate table's join first.
+    ///
+    /// TODO: This currently only propagates changes from the source table incrementally.
+    /// Changes to intermediate/terminal tables require re-initialization. A future
+    /// optimization would track all tables and propagate changes through the full chain.
+    fn build_chain_join_graph(
+        &self,
+        select: &Select,
+        _viewer: ObjectId, // Terminal predicate is already resolved in chain
+        chain: &InheritsChain,
+        source_schema: &TableSchema,
+    ) -> Result<crate::sql::query_graph::QueryGraph, DatabaseError> {
+        // For chains, we build from the end backwards:
+        // The terminal table has a simple predicate (e.g., owner_id = @viewer)
+        // Each intermediate table inherits from the next
+        //
+        // For documents → folders → workspaces:
+        // - documents JOIN folders ON documents.folder_id = folders.id
+        // - WHERE folders.workspace_id IN (SELECT id FROM workspaces WHERE owner_id = @viewer)
+        //
+        // We simplify by building a 2-table join (source → first hop) and
+        // applying a filter that walks the rest of the chain.
+
+        let left_table = &select.from.table;
+
+        // For now, we only support 2-hop chains fully.
+        // For 3+ hops, we'll need more sophisticated graph building.
+        if chain.hops.len() > 2 {
+            return Err(DatabaseError::Parse(parser::ParseError {
+                message: format!(
+                    "INHERITS chains with {} hops not yet supported (max 2). \
+                     Chain: {} → {}",
+                    chain.hops.len(),
+                    left_table,
+                    chain.hops.iter().map(|h| h.target_table.as_str()).collect::<Vec<_>>().join(" → ")
+                ),
+                position: 0,
+            }));
+        }
+
+        // 2-hop chain: source → intermediate → terminal
+        // Build as: source JOIN intermediate, with filter on intermediate checking terminal
+        let first_hop = &chain.hops[0];
+        let second_hop = &chain.hops[1];
+
+        let intermediate_schema = self.get_table(&first_hop.target_table)
+            .ok_or_else(|| DatabaseError::TableNotFound(first_hop.target_table.clone()))?;
+        let terminal_schema = self.get_table(&second_hop.target_table)
+            .ok_or_else(|| DatabaseError::TableNotFound(second_hop.target_table.clone()))?;
+
+        // Build the first join: source → intermediate
+        let mut builder = JoinGraphBuilder::new(
+            left_table,
+            source_schema.clone(),
+            &first_hop.target_table,
+            intermediate_schema.clone(),
+            &first_hop.ref_column,
+        );
+
+        // Store terminal schema for later use
+        builder.add_schema(&second_hop.target_table, terminal_schema);
+
+        let join_node = builder.join();
+
+        // Apply user's WHERE clause
+        let after_user_where = if select.where_clause.is_empty() {
+            join_node
+        } else {
+            let predicate = self.build_predicate(&select.where_clause, source_schema)?;
+            builder.filter(join_node, predicate)
+        };
+
+        // Add second join: intermediate → terminal
+        let after_second_join = builder.chain_join(
+            after_user_where,
+            &first_hop.target_table,
+            &second_hop.ref_column,
+            &second_hop.target_table,
+        );
+
+        // Apply terminal predicate with qualified column names
+        let after_policy = if let Some(ref terminal_pred) = chain.terminal_predicate {
+            let qualified_pred = terminal_pred.qualify(&chain.terminal_table);
+            builder.filter(after_second_join, qualified_pred)
+        } else {
+            after_second_join
         };
 
         Ok(builder.output(after_policy, GraphId(0)))

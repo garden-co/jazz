@@ -1047,14 +1047,14 @@ fn incremental_query_as_inherits_folder_ownership_change() {
 }
 
 #[test]
-fn incremental_query_as_recursive_inherits_not_yet_supported() {
-    // Test that recursive/nested INHERITS (3+ levels) returns an error
-    // This documents the current limitation that should be fixed in the future.
-    //
-    // Desired behavior (not yet implemented):
-    // - workspaces: owner_id = @viewer
+fn incremental_query_as_nested_inherits_chain() {
+    // Test nested INHERITS chain (2-hop):
+    // - documents: INHERITS SELECT FROM folder_id
     // - folders: INHERITS SELECT FROM workspace_id
-    // - documents: INHERITS SELECT FROM folder_id (which chains to workspace)
+    // - workspaces: owner_id = @viewer
+    //
+    // This creates a chain: documents → folders → workspaces
+    // Documents should be visible if they're in a folder in a workspace owned by the viewer.
     use crate::sql::policy::clear_policy_warnings;
     clear_policy_warnings();
 
@@ -1069,46 +1069,64 @@ fn incremental_query_as_recursive_inherits_not_yet_supported() {
         ExecuteResult::Inserted(id) => id,
         _ => panic!("expected Inserted"),
     };
+    let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
 
-    let workspace_id = db.insert("workspaces", &["name", "owner_id"], vec![
+    // Alice's workspace with a folder and document
+    let alice_workspace_id = db.insert("workspaces", &["name", "owner_id"], vec![
         Value::String("Alice's Workspace".into()),
         Value::Ref(alice_id),
     ]).unwrap();
 
-    let folder_id = db.insert("folders", &["name", "workspace_id"], vec![
-        Value::String("Project Folder".into()),
-        Value::Ref(workspace_id),
+    let alice_folder_id = db.insert("folders", &["name", "workspace_id"], vec![
+        Value::String("Alice's Folder".into()),
+        Value::Ref(alice_workspace_id),
     ]).unwrap();
 
-    db.insert("documents", &["title", "folder_id"], vec![
-        Value::String("Deep Doc".into()),
-        Value::Ref(folder_id),
+    let alice_doc_id = db.insert("documents", &["title", "folder_id"], vec![
+        Value::String("Alice's Doc".into()),
+        Value::Ref(alice_folder_id),
     ]).unwrap();
 
-    // Set up 3-level chain: documents -> folders -> workspaces -> owner_id
+    // Bob's workspace with a folder and document
+    let bob_workspace_id = db.insert("workspaces", &["name", "owner_id"], vec![
+        Value::String("Bob's Workspace".into()),
+        Value::Ref(bob_id),
+    ]).unwrap();
+
+    let bob_folder_id = db.insert("folders", &["name", "workspace_id"], vec![
+        Value::String("Bob's Folder".into()),
+        Value::Ref(bob_workspace_id),
+    ]).unwrap();
+
+    let _bob_doc_id = db.insert("documents", &["title", "folder_id"], vec![
+        Value::String("Bob's Doc".into()),
+        Value::Ref(bob_folder_id),
+    ]).unwrap();
+
+    // Set up 2-hop chain: documents -> folders -> workspaces -> owner_id
     db.execute("CREATE POLICY ON workspaces FOR SELECT WHERE owner_id = @viewer").unwrap();
     db.execute("CREATE POLICY ON folders FOR SELECT WHERE INHERITS SELECT FROM workspace_id").unwrap();
     db.execute("CREATE POLICY ON documents FOR SELECT WHERE INHERITS SELECT FROM folder_id").unwrap();
 
-    // This should currently fail because nested INHERITS is not yet supported
-    // TODO: Once recursive INHERITS is implemented, this test should be updated
-    // to verify the documents are correctly filtered through the chain.
-    let result = db.incremental_query_as("SELECT * FROM documents", alice_id);
-    assert!(
-        result.is_err(),
-        "Recursive INHERITS should return error (not yet implemented). Got: {:?}",
-        result
-    );
+    // Alice should only see her document (via folder → workspace → owner)
+    let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id)
+        .expect("Nested INHERITS chain should work");
+    let alice_docs = alice_query.rows();
 
-    // Verify the error message mentions nested INHERITS
-    if let Err(e) = result {
-        let err_msg = format!("{:?}", e);
-        assert!(
-            err_msg.contains("Nested INHERITS") || err_msg.contains("nested"),
-            "Error should mention nested INHERITS limitation: {}",
-            err_msg
-        );
-    }
+    assert_eq!(alice_docs.len(), 1, "Alice should see 1 document through the chain");
+    assert_eq!(alice_docs[0].id, alice_doc_id, "Alice should see her own document");
+    assert_eq!(alice_docs[0].values[0], Value::String("Alice's Doc".into()));
+
+    // Bob should only see his document
+    let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id)
+        .expect("Nested INHERITS chain should work");
+    let bob_docs = bob_query.rows();
+
+    assert_eq!(bob_docs.len(), 1, "Bob should see 1 document through the chain");
+    assert_eq!(bob_docs[0].values[0], Value::String("Bob's Doc".into()));
 }
 
 #[test]

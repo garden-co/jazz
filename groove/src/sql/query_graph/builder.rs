@@ -146,7 +146,7 @@ impl QueryGraphBuilder {
 /// Builder for constructing JOIN query graphs.
 ///
 /// This builder creates graphs that join a left (primary) table with a right
-/// table on a reference column.
+/// table on a reference column. Supports chaining multiple joins.
 pub struct JoinGraphBuilder {
     left_table: String,
     left_schema: TableSchema,
@@ -155,6 +155,12 @@ pub struct JoinGraphBuilder {
     left_column: String,
     nodes: Vec<QueryNode>,
     next_id: u32,
+    /// Additional schemas for chained joins (table_name → schema)
+    extra_schemas: HashMap<String, TableSchema>,
+    /// Combined schema after all joins (used for chained joins)
+    combined_schema: TableSchema,
+    /// All right tables in the chain (for multi-table graph creation)
+    all_right_tables: Vec<(String, TableSchema)>,
 }
 
 impl JoinGraphBuilder {
@@ -172,15 +178,32 @@ impl JoinGraphBuilder {
         right_schema: TableSchema,
         left_column: impl Into<String>,
     ) -> Self {
+        let left_table = left_table.into();
+        let right_table = right_table.into();
+
+        // Build initial combined schema for the first join
+        let combined_schema = left_schema.combine(&right_schema);
+
+        // Track right tables for multi-table joins
+        let all_right_tables = vec![(right_table.clone(), right_schema.clone())];
+
         Self {
-            left_table: left_table.into(),
+            left_table,
             left_schema,
-            right_table: right_table.into(),
+            right_table,
             right_schema,
             left_column: left_column.into(),
             nodes: Vec::new(),
             next_id: 0,
+            extra_schemas: HashMap::new(),
+            combined_schema,
+            all_right_tables,
         }
+    }
+
+    /// Add an additional schema for chained joins.
+    pub fn add_schema(&mut self, table: impl Into<String>, schema: TableSchema) {
+        self.extra_schemas.insert(table.into(), schema);
     }
 
     /// Allocate a new node ID.
@@ -221,6 +244,54 @@ impl JoinGraphBuilder {
         id
     }
 
+    /// Add a second join (chain join) to extend the current join.
+    ///
+    /// This creates another Join node that takes the output of the first join
+    /// and joins with a third table. The second join's "left" is the combined
+    /// output of the first join, so column names must be qualified (e.g.,
+    /// "folders.workspace_id" not just "workspace_id").
+    ///
+    /// - `_input`: The input node (for documentation; join chains are handled specially)
+    /// - `source_table`: The table in the current join that has the ref column
+    /// - `ref_column`: The column in source_table that references target_table
+    /// - `target_table`: The table to join with
+    pub fn chain_join(
+        &mut self,
+        _input: NodeId,
+        source_table: impl Into<String>,
+        ref_column: impl Into<String>,
+        target_table: impl Into<String>,
+    ) -> NodeId {
+        let source = source_table.into();
+        let target = target_table.into();
+        let column = ref_column.into();
+
+        let target_schema = self.extra_schemas.get(&target)
+            .expect("chain_join: target schema not added via add_schema")
+            .clone();
+
+        // The left_column needs to be qualified since we're joining on combined rows
+        let qualified_column = format!("{}.{}", source, column);
+
+        let id = self.alloc_id();
+        self.nodes.push(QueryNode::Join {
+            left_table: source.clone(),
+            right_table: target.clone(),
+            left_column: qualified_column,
+            right_schema: target_schema.clone(),
+            cached_pairs: HashSet::new(),
+            cached_joined: HashMap::new(),
+        });
+
+        // Track this as an additional right table for delta routing
+        self.all_right_tables.push((target.clone(), target_schema.clone()));
+
+        // Extend the combined schema with the new table's columns
+        self.combined_schema = self.combined_schema.combine(&target_schema);
+
+        id
+    }
+
     /// Add the output node and build the graph.
     pub fn output(mut self, input: NodeId, graph_id: GraphId) -> QueryGraph {
         let output_id = self.alloc_id();
@@ -235,12 +306,19 @@ impl JoinGraphBuilder {
             node_indices.insert(NodeId(idx as u32), idx);
         }
 
-        QueryGraph::new_join(
+        // Collect additional right tables (beyond the first one)
+        let additional_right_tables: Vec<_> = self.all_right_tables
+            .into_iter()
+            .skip(1) // Skip the first right table (it's passed separately)
+            .collect();
+
+        QueryGraph::new_chain_join(
             graph_id,
             self.left_table,
             self.left_schema,
             self.right_table,
             self.right_schema,
+            additional_right_tables,
             self.nodes,
             node_indices,
             output_id,

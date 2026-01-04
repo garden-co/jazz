@@ -211,6 +211,51 @@ impl Predicate {
             other => other,
         }
     }
+
+    /// Qualify column names with a table prefix.
+    ///
+    /// For example, `eq("owner_id", ...)` becomes `eq("workspaces.owner_id", ...)`.
+    /// This is used when predicates need to match against joined row schemas.
+    pub fn qualify(&self, table: &str) -> Predicate {
+        match self {
+            Predicate::True => Predicate::True,
+            Predicate::False => Predicate::False,
+            Predicate::Eq { column, value } => {
+                if column.contains('.') {
+                    // Already qualified
+                    Predicate::Eq {
+                        column: column.clone(),
+                        value: value.clone(),
+                    }
+                } else {
+                    Predicate::Eq {
+                        column: format!("{}.{}", table, column),
+                        value: value.clone(),
+                    }
+                }
+            }
+            Predicate::Ne { column, value } => {
+                if column.contains('.') {
+                    Predicate::Ne {
+                        column: column.clone(),
+                        value: value.clone(),
+                    }
+                } else {
+                    Predicate::Ne {
+                        column: format!("{}.{}", table, column),
+                        value: value.clone(),
+                    }
+                }
+            }
+            Predicate::And(preds) => {
+                Predicate::And(preds.iter().map(|p| p.qualify(table)).collect())
+            }
+            Predicate::Or(preds) => {
+                Predicate::Or(preds.iter().map(|p| p.qualify(table)).collect())
+            }
+            Predicate::Not(inner) => Predicate::Not(Box::new(inner.qualify(table))),
+        }
+    }
 }
 
 #[cfg(test)]

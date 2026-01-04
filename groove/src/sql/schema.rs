@@ -85,8 +85,55 @@ impl TableSchema {
     }
 
     /// Get column index by name.
+    ///
+    /// Supports both unqualified names ("title") and qualified names ("documents.title").
+    /// For qualified names in a combined schema, finds the column with that exact name.
+    /// For qualified names in a single-table schema, the table prefix must match.
     pub fn column_index(&self, name: &str) -> Option<usize> {
-        self.columns.iter().position(|c| c.name == name)
+        // First try exact match (works for combined schemas with qualified column names)
+        if let Some(idx) = self.columns.iter().position(|c| c.name == name) {
+            return Some(idx);
+        }
+
+        // For qualified names, try matching table.column against this schema
+        if let Some((table, col)) = name.split_once('.') {
+            if table == self.name {
+                return self.columns.iter().position(|c| c.name == col);
+            }
+        }
+
+        None
+    }
+
+    /// Create a combined schema by joining this schema with another.
+    ///
+    /// The resulting schema has columns from both tables, prefixed with their
+    /// table names (e.g., "documents.title", "folders.name").
+    pub fn combine(&self, other: &TableSchema) -> TableSchema {
+        let mut combined_columns = Vec::new();
+
+        // Add columns from this table with qualified names
+        for col in &self.columns {
+            combined_columns.push(ColumnDef {
+                name: format!("{}.{}", self.name, col.name),
+                ty: col.ty.clone(),
+                nullable: col.nullable,
+            });
+        }
+
+        // Add columns from other table with qualified names
+        for col in &other.columns {
+            combined_columns.push(ColumnDef {
+                name: format!("{}.{}", other.name, col.name),
+                ty: col.ty.clone(),
+                nullable: col.nullable,
+            });
+        }
+
+        TableSchema {
+            name: format!("{}+{}", self.name, other.name),
+            columns: combined_columns,
+        }
     }
 
     /// Count of variable-size columns (for header).

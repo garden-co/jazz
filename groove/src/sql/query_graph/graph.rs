@@ -103,13 +103,17 @@ impl QueryGraph {
         }
     }
 
-    /// Create a new join query graph.
-    pub(crate) fn new_join(
+    /// Create a new join query graph with optional additional right tables.
+    ///
+    /// Used for INHERITS chains like: documents → folders → workspaces
+    /// The `additional_right_tables` contains tables beyond the first join.
+    pub(crate) fn new_chain_join(
         id: GraphId,
         left_table: String,
         left_schema: TableSchema,
         right_table: String,
         right_schema: TableSchema,
+        additional_right_tables: Vec<(String, TableSchema)>,
         nodes: Vec<QueryNode>,
         node_indices: HashMap<NodeId, usize>,
         output_node: NodeId,
@@ -119,6 +123,9 @@ impl QueryGraph {
         let mut all_schemas = HashMap::new();
         all_schemas.insert(left_table.clone(), left_schema.clone());
         all_schemas.insert(right_table.clone(), right_schema.clone());
+
+        // Track all tables for delta routing
+        let mut all_tables = vec![left_table.clone(), right_table.clone()];
 
         // Build a combined schema for filter evaluation on joined rows.
         // Columns are: [left_cols..., right_cols...] with qualified names.
@@ -137,13 +144,28 @@ impl QueryGraph {
                 nullable: col.nullable,
             });
         }
+
+        // Add additional right tables (for chain joins)
+        for (table_name, table_schema) in additional_right_tables {
+            all_schemas.insert(table_name.clone(), table_schema.clone());
+            all_tables.push(table_name.clone());
+
+            for col in &table_schema.columns {
+                combined_columns.push(ColumnDef {
+                    name: format!("{}.{}", table_name, col.name),
+                    ty: col.ty.clone(),
+                    nullable: col.nullable,
+                });
+            }
+        }
+
         let combined_schema = TableSchema::new("_joined", combined_columns);
 
         Self {
             id,
             state: GraphState::Uninitialized,
-            table: left_table.clone(),
-            all_tables: vec![left_table, right_table],
+            table: left_table,
+            all_tables,
             schema: combined_schema, // Use combined schema for JOIN graphs
             all_schemas,
             is_join: true,
@@ -354,22 +376,49 @@ impl QueryGraph {
         let mut current = DeltaBatch::new();
         current.push(delta);
 
+        // Track tables that are "contained" in the current deltas.
+        // For chain joins, after the first Join, deltas contain combined rows
+        // with data from multiple tables.
+        let mut contained_tables: Vec<String> = vec![source_table.to_string()];
+
         for node in &mut self.nodes {
             if current.is_empty() {
                 break; // Early cutoff
             }
 
             match node {
-                QueryNode::Join { left_table, .. } => {
-                    // Join nodes need special evaluation with database access
-                    let left_table = left_table.clone();
-                    let left_schema = self.all_schemas.get(&left_table).cloned().unwrap();
+                QueryNode::Join { left_table, right_table, .. } => {
+                    // Join nodes need special evaluation with database access.
+                    // For chain joins, check if the delta contains data from the left table
+                    // (from a prior Join's output), not just if source_table matches.
+                    let left_table_str = left_table.clone();
+                    let right_table_str = right_table.clone();
+
+                    // Determine which table the delta is "from" for this Join.
+                    // For chain joins, if the current delta contains the left table's data
+                    // (from a prior join), treat it as a left delta.
+                    let effective_source = if contained_tables.iter().any(|t| t == &left_table_str) {
+                        &left_table_str
+                    } else if source_table == right_table_str {
+                        source_table
+                    } else {
+                        source_table
+                    };
+
+                    // For the schema, use the combined schema for chain joins
+                    // (the left_schema lookup will find qualified columns)
+                    let left_schema = if contained_tables.len() > 1 {
+                        // We're in a chain join, use the graph's combined schema
+                        self.schema.clone()
+                    } else {
+                        self.all_schemas.get(&left_table_str).cloned().unwrap()
+                    };
 
                     let mut output = DeltaBatch::new();
                     for d in current.into_iter() {
                         let batch = node.evaluate_join(
                             d,
-                            source_table,
+                            effective_source,
                             &left_schema,
                             |table, id| db.get_row(table, id),
                             |table, column, target_id| {
@@ -379,6 +428,11 @@ impl QueryGraph {
                         output.extend(batch);
                     }
                     current = output;
+
+                    // After a Join, the delta now contains data from both tables
+                    if !contained_tables.contains(&right_table_str) {
+                        contained_tables.push(right_table_str);
+                    }
                 }
                 QueryNode::RecursiveFilter { .. } => {
                     // RecursiveFilter needs special evaluation for fixpoint iteration

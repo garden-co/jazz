@@ -210,7 +210,9 @@ See `specs/rebac-policies.md` for full design.
 - [x] INHERITS flattened to JOINs for true incremental evaluation
 - [x] Optimize predicate ordering by selectivity
 - [x] Self-referential recursive INHERITS (e.g., folder→parent_folder→...→root) via RecursiveFilter
-- [ ] Recursive/nested INHERITS chains (e.g., doc→folder→workspace→owner) - currently returns error
+- [x] Nested INHERITS chains 2-hop (e.g., doc→folder→workspace→owner) via chained JOINs
+  - NOTE: 3+ hop chains not yet supported (returns error)
+  - NOTE: Incremental updates only propagate from source table; changes to intermediate/terminal tables require re-initialization
 
 **Phase 3.5: Testing and Debugging**
 - [ ] EXPLAIN POLICY command
@@ -230,7 +232,7 @@ See `specs/rebac-policies.md` for full design.
 
 ## Test Coverage
 
-Current test count: **243 tests** passing across all modules
+Current test count: **241 tests** passing across all modules
 
 - Unit tests in `sql/row.rs`, `sql/types.rs`, `sql/database/tests.rs`
 - Integration tests in `tests/` directory:
