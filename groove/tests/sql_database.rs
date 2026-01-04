@@ -1484,3 +1484,170 @@ fn incremental_join_multiple_users() {
     assert!(titles.contains(&&Value::String("Alice Post 2".into())));
     assert!(titles.contains(&&Value::String("Bob Post".into())));
 }
+
+// ========== ARRAY Subquery Execution Tests ==========
+
+#[test]
+fn array_subquery_correlated() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE folders (name STRING NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE notes (folder REFERENCES folders NOT NULL, title STRING NOT NULL)")
+        .unwrap();
+
+    // Create two folders
+    let folder1_id = match db
+        .execute("INSERT INTO folders (name) VALUES ('Work')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
+    let folder2_id = match db
+        .execute("INSERT INTO folders (name) VALUES ('Personal')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
+
+    // Create notes in each folder
+    db.execute(&format!(
+        "INSERT INTO notes (folder, title) VALUES ('{}', 'Meeting Notes')",
+        folder1_id
+    ))
+    .unwrap();
+    db.execute(&format!(
+        "INSERT INTO notes (folder, title) VALUES ('{}', 'Project Plan')",
+        folder1_id
+    ))
+    .unwrap();
+    db.execute(&format!(
+        "INSERT INTO notes (folder, title) VALUES ('{}', 'Shopping List')",
+        folder2_id
+    ))
+    .unwrap();
+
+    // Query with ARRAY subquery for correlated notes
+    let result = db
+        .execute("SELECT f.name, ARRAY(SELECT n.title FROM notes n WHERE n.folder = f.id) AS notes FROM folders f")
+        .unwrap();
+
+    match result {
+        ExecuteResult::Selected(rows) => {
+            assert_eq!(rows.len(), 2, "Should return 2 folders");
+
+            // Find the Work folder row
+            let work_row = rows.iter().find(|r| r.values[0] == Value::String("Work".into()));
+            assert!(work_row.is_some(), "Should have Work folder");
+            let work_notes = work_row.unwrap().values[1].as_array().unwrap();
+            assert_eq!(work_notes.len(), 2, "Work folder should have 2 notes");
+
+            // Find the Personal folder row
+            let personal_row = rows.iter().find(|r| r.values[0] == Value::String("Personal".into()));
+            assert!(personal_row.is_some(), "Should have Personal folder");
+            let personal_notes = personal_row.unwrap().values[1].as_array().unwrap();
+            assert_eq!(personal_notes.len(), 1, "Personal folder should have 1 note");
+        }
+        _ => panic!("Expected Selected"),
+    }
+}
+
+#[test]
+fn array_subquery_returns_whole_rows() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE folders (name STRING NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE notes (folder REFERENCES folders NOT NULL, title STRING NOT NULL)")
+        .unwrap();
+
+    let folder_id = match db
+        .execute("INSERT INTO folders (name) VALUES ('Work')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("Expected Inserted"),
+    };
+
+    db.execute(&format!(
+        "INSERT INTO notes (folder, title) VALUES ('{}', 'Meeting Notes')",
+        folder_id
+    ))
+    .unwrap();
+
+    // Query with ARRAY subquery returning whole rows via table alias
+    let result = db
+        .execute("SELECT f.name, ARRAY(SELECT n FROM notes n WHERE n.folder = f.id) AS notes FROM folders f")
+        .unwrap();
+
+    match result {
+        ExecuteResult::Selected(rows) => {
+            assert_eq!(rows.len(), 1);
+            let notes_array = rows[0].values[1].as_array().unwrap();
+            assert_eq!(notes_array.len(), 1);
+
+            // Each item should be a Row value
+            let note_row = notes_array[0].as_row().unwrap();
+            // Note row should have 2 values: folder (ref), title
+            assert_eq!(note_row.values.len(), 2);
+            assert_eq!(note_row.values[1], Value::String("Meeting Notes".into()));
+        }
+        _ => panic!("Expected Selected"),
+    }
+}
+
+#[test]
+fn array_subquery_empty_result() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE folders (name STRING NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE notes (folder REFERENCES folders NOT NULL, title STRING NOT NULL)")
+        .unwrap();
+
+    // Create a folder with no notes
+    db.execute("INSERT INTO folders (name) VALUES ('Empty Folder')")
+        .unwrap();
+
+    let result = db
+        .execute("SELECT f.name, ARRAY(SELECT n.title FROM notes n WHERE n.folder = f.id) AS notes FROM folders f")
+        .unwrap();
+
+    match result {
+        ExecuteResult::Selected(rows) => {
+            assert_eq!(rows.len(), 1);
+            let notes_array = rows[0].values[1].as_array().unwrap();
+            assert!(notes_array.is_empty(), "Should return empty array for folder with no notes");
+        }
+        _ => panic!("Expected Selected"),
+    }
+}
+
+#[test]
+fn array_subquery_non_correlated() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE folders (name STRING NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE notes (title STRING NOT NULL)")
+        .unwrap();
+
+    db.execute("INSERT INTO folders (name) VALUES ('Folder1')")
+        .unwrap();
+    db.execute("INSERT INTO notes (title) VALUES ('Note A')")
+        .unwrap();
+    db.execute("INSERT INTO notes (title) VALUES ('Note B')")
+        .unwrap();
+
+    // Non-correlated subquery - returns all notes for each folder
+    let result = db
+        .execute("SELECT f.name, ARRAY(SELECT title FROM notes) AS all_notes FROM folders f")
+        .unwrap();
+
+    match result {
+        ExecuteResult::Selected(rows) => {
+            assert_eq!(rows.len(), 1);
+            let all_notes = rows[0].values[1].as_array().unwrap();
+            assert_eq!(all_notes.len(), 2, "Should return all 2 notes");
+        }
+        _ => panic!("Expected Selected"),
+    }
+}

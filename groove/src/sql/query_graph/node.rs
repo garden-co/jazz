@@ -123,6 +123,39 @@ pub enum QueryNode {
         /// All rows in the table (needed for fixpoint iteration)
         all_rows: HashMap<ObjectId, Row>,
     },
+
+    /// Transform: aggregate inner rows into arrays per outer row.
+    ///
+    /// Used for ARRAY(SELECT ...) subqueries. Groups rows from inner_table
+    /// by their reference to outer_table, producing output rows where the
+    /// nested column contains Value::Array of matching inner rows.
+    ///
+    /// Example:
+    /// ```sql
+    /// SELECT f.*, ARRAY(SELECT n FROM notes n WHERE n.folder_id = f.id) as notes
+    /// FROM folders f
+    /// ```
+    ArrayAggregate {
+        /// The outer table (source of correlation, e.g., "folders").
+        outer_table: String,
+        /// Input node providing outer rows.
+        input: NodeId,
+        /// The inner table being aggregated (e.g., "notes").
+        inner_table: String,
+        /// Column in inner table that references outer (e.g., "folder_id").
+        inner_ref_column: String,
+        /// Schema of inner table (for building Row values).
+        inner_schema: TableSchema,
+        /// Index in output row where the array should be placed.
+        /// -1 means append at end.
+        array_column_index: i32,
+        /// Cached arrays: outer_id → Vec<Row>.
+        cached_arrays: HashMap<ObjectId, Vec<Row>>,
+        /// Reverse index: inner_id → outer_id (for propagating inner changes).
+        inner_to_outer: HashMap<ObjectId, ObjectId>,
+        /// Cached outer rows (needed to emit Updated deltas with full row data).
+        outer_rows: HashMap<ObjectId, Row>,
+    },
 }
 
 impl QueryNode {
@@ -135,6 +168,7 @@ impl QueryNode {
             QueryNode::Join { input_tables, .. } => input_tables.first().map(|s| s.as_str()).unwrap_or(""),
             QueryNode::Output { table, .. } => table,
             QueryNode::RecursiveFilter { table, .. } => table,
+            QueryNode::ArrayAggregate { outer_table, .. } => outer_table,
         }
     }
 
@@ -151,6 +185,9 @@ impl QueryNode {
             }
             QueryNode::Output { table, .. } => vec![table],
             QueryNode::RecursiveFilter { table, .. } => vec![table],
+            QueryNode::ArrayAggregate { outer_table, inner_table, .. } => {
+                vec![outer_table, inner_table]
+            }
         }
     }
 
@@ -163,6 +200,7 @@ impl QueryNode {
             QueryNode::Join { .. } => None, // Uses cached_pairs instead
             QueryNode::Output { .. } => None,
             QueryNode::RecursiveFilter { .. } => None, // Uses accessible instead
+            QueryNode::ArrayAggregate { .. } => None, // Uses outer_rows instead
         }
     }
 
@@ -175,6 +213,7 @@ impl QueryNode {
             QueryNode::Join { .. } => None,
             QueryNode::Output { .. } => None,
             QueryNode::RecursiveFilter { .. } => None,
+            QueryNode::ArrayAggregate { .. } => None,
         }
     }
 
@@ -215,6 +254,22 @@ impl QueryNode {
         self.cached_rows()
     }
 
+    /// Get the cached arrays for ArrayAggregate nodes.
+    pub fn cached_arrays(&self) -> Option<&HashMap<ObjectId, Vec<Row>>> {
+        match self {
+            QueryNode::ArrayAggregate { cached_arrays, .. } => Some(cached_arrays),
+            _ => None,
+        }
+    }
+
+    /// Get the outer rows for ArrayAggregate nodes.
+    pub fn outer_rows(&self) -> Option<&HashMap<ObjectId, Row>> {
+        match self {
+            QueryNode::ArrayAggregate { outer_rows, .. } => Some(outer_rows),
+            _ => None,
+        }
+    }
+
     /// Get the input node ID if this node has one.
     pub fn input(&self) -> Option<NodeId> {
         match self {
@@ -224,6 +279,7 @@ impl QueryNode {
             QueryNode::Join { .. } => None, // Join is a source-like node
             QueryNode::Output { input, .. } => Some(*input),
             QueryNode::RecursiveFilter { input, .. } => Some(*input),
+            QueryNode::ArrayAggregate { input, .. } => Some(*input),
         }
     }
 
@@ -266,6 +322,12 @@ impl QueryNode {
             QueryNode::RecursiveFilter { .. } => {
                 // RecursiveFilter nodes need special handling
                 // This should be called via evaluate_recursive instead
+                DeltaBatch::new()
+            }
+
+            QueryNode::ArrayAggregate { .. } => {
+                // ArrayAggregate nodes need special handling with database access
+                // This should be called via evaluate_array_aggregate instead
                 DeltaBatch::new()
             }
         }
@@ -862,6 +924,344 @@ impl QueryNode {
         match row.values.get(col_idx)? {
             Value::Ref(id) => Some(*id),
             _ => None,
+        }
+    }
+
+    /// Evaluate an ArrayAggregate node.
+    ///
+    /// Handles two types of deltas:
+    /// - Outer table deltas (from input node): Add/remove/update outer rows
+    /// - Inner table deltas: Update the arrays for affected outer rows
+    ///
+    /// `source_table` indicates which table the delta came from.
+    /// `lookup_inner_rows` is a function to find all inner rows matching an outer id.
+    pub fn evaluate_array_aggregate<F>(
+        &mut self,
+        delta: RowDelta,
+        source_table: &str,
+        outer_schema: &TableSchema,
+        lookup_inner_rows: F,
+    ) -> DeltaBatch
+    where
+        F: Fn(ObjectId) -> Vec<Row>,
+    {
+        match self {
+            QueryNode::ArrayAggregate {
+                outer_table,
+                inner_table,
+                inner_ref_column,
+                inner_schema,
+                array_column_index,
+                cached_arrays,
+                inner_to_outer,
+                outer_rows,
+                ..
+            } => {
+                let mut output = DeltaBatch::new();
+
+                let is_outer_delta = source_table == outer_table;
+                let is_inner_delta = source_table == inner_table;
+
+                if is_outer_delta {
+                    // Delta from outer table - add/remove/update outer rows
+                    Self::array_aggregate_handle_outer_delta(
+                        &delta,
+                        outer_schema,
+                        *array_column_index,
+                        cached_arrays,
+                        inner_to_outer,
+                        outer_rows,
+                        &mut output,
+                        &lookup_inner_rows,
+                    );
+                } else if is_inner_delta {
+                    // Delta from inner table - update arrays for affected outer rows
+                    Self::array_aggregate_handle_inner_delta(
+                        &delta,
+                        inner_ref_column,
+                        inner_schema,
+                        outer_schema,
+                        *array_column_index,
+                        cached_arrays,
+                        inner_to_outer,
+                        outer_rows,
+                        &mut output,
+                    );
+                }
+
+                output
+            }
+            _ => DeltaBatch::new(),
+        }
+    }
+
+    /// Handle a delta from the outer table in ArrayAggregate.
+    #[allow(clippy::too_many_arguments)]
+    fn array_aggregate_handle_outer_delta<F>(
+        delta: &RowDelta,
+        _outer_schema: &TableSchema,
+        array_column_index: i32,
+        cached_arrays: &mut HashMap<ObjectId, Vec<Row>>,
+        inner_to_outer: &mut HashMap<ObjectId, ObjectId>,
+        outer_rows: &mut HashMap<ObjectId, Row>,
+        output: &mut DeltaBatch,
+        lookup_inner_rows: F,
+    ) where
+        F: Fn(ObjectId) -> Vec<Row>,
+    {
+        match delta {
+            RowDelta::Added(outer_row) => {
+                let outer_id = outer_row.id;
+
+                // Fetch all matching inner rows
+                let inner_rows = lookup_inner_rows(outer_id);
+
+                // Update inner_to_outer index
+                for inner_row in &inner_rows {
+                    inner_to_outer.insert(inner_row.id, outer_id);
+                }
+
+                // Cache the array
+                cached_arrays.insert(outer_id, inner_rows.clone());
+
+                // Build output row with array
+                let output_row =
+                    Self::build_output_row_with_array(outer_row, &inner_rows, array_column_index);
+                outer_rows.insert(outer_id, output_row.clone());
+
+                output.push(RowDelta::Added(output_row));
+            }
+
+            RowDelta::Removed { id, prior } => {
+                let outer_id = *id;
+
+                // Clean up inner_to_outer index
+                if let Some(inner_rows) = cached_arrays.remove(&outer_id) {
+                    for inner_row in inner_rows {
+                        inner_to_outer.remove(&inner_row.id);
+                    }
+                }
+
+                outer_rows.remove(&outer_id);
+
+                output.push(RowDelta::Removed {
+                    id: outer_id,
+                    prior: prior.clone(),
+                });
+            }
+
+            RowDelta::Updated { id, new: outer_row, prior } => {
+                let outer_id = *id;
+
+                // Fetch updated inner rows (in case correlation changed)
+                let inner_rows = lookup_inner_rows(outer_id);
+
+                // Update inner_to_outer index
+                if let Some(old_inner_rows) = cached_arrays.get(&outer_id) {
+                    for old_inner in old_inner_rows {
+                        inner_to_outer.remove(&old_inner.id);
+                    }
+                }
+                for inner_row in &inner_rows {
+                    inner_to_outer.insert(inner_row.id, outer_id);
+                }
+
+                cached_arrays.insert(outer_id, inner_rows.clone());
+
+                let output_row =
+                    Self::build_output_row_with_array(outer_row, &inner_rows, array_column_index);
+                outer_rows.insert(outer_id, output_row.clone());
+
+                output.push(RowDelta::Updated {
+                    id: outer_id,
+                    new: output_row,
+                    prior: prior.clone(),
+                });
+            }
+        }
+    }
+
+    /// Handle a delta from the inner table in ArrayAggregate.
+    #[allow(clippy::too_many_arguments)]
+    fn array_aggregate_handle_inner_delta(
+        delta: &RowDelta,
+        inner_ref_column: &str,
+        inner_schema: &TableSchema,
+        _outer_schema: &TableSchema,
+        array_column_index: i32,
+        cached_arrays: &mut HashMap<ObjectId, Vec<Row>>,
+        inner_to_outer: &mut HashMap<ObjectId, ObjectId>,
+        outer_rows: &mut HashMap<ObjectId, Row>,
+        output: &mut DeltaBatch,
+    ) {
+        match delta {
+            RowDelta::Added(inner_row) => {
+                let inner_id = inner_row.id;
+
+                // Find which outer row this belongs to
+                if let Some(outer_id) = Self::get_ref_value(inner_row, inner_ref_column, inner_schema) {
+                    // Update inner_to_outer index
+                    inner_to_outer.insert(inner_id, outer_id);
+
+                    // Add to cached array
+                    let array = cached_arrays.entry(outer_id).or_default();
+                    array.push(inner_row.clone());
+
+                    // Emit updated delta for outer row
+                    if let Some(base_outer_row) = outer_rows.get(&outer_id) {
+                        // Extract original outer values (without the array)
+                        let outer_values = Self::extract_outer_values(base_outer_row, array_column_index);
+                        let base_row = Row::new(outer_id, outer_values);
+                        let output_row = Self::build_output_row_with_array(&base_row, array, array_column_index);
+                        outer_rows.insert(outer_id, output_row.clone());
+
+                        output.push(RowDelta::Updated {
+                            id: outer_id,
+                            new: output_row,
+                            prior: crate::sql::query_graph::delta::PriorState::empty(),
+                        });
+                    }
+                }
+            }
+
+            RowDelta::Removed { id: inner_id, prior } => {
+                // Find which outer row this belonged to
+                if let Some(outer_id) = inner_to_outer.remove(inner_id) {
+                    // Remove from cached array
+                    if let Some(array) = cached_arrays.get_mut(&outer_id) {
+                        array.retain(|r| r.id != *inner_id);
+
+                        // Emit updated delta for outer row
+                        if let Some(base_outer_row) = outer_rows.get(&outer_id) {
+                            let outer_values = Self::extract_outer_values(base_outer_row, array_column_index);
+                            let base_row = Row::new(outer_id, outer_values);
+                            let output_row = Self::build_output_row_with_array(&base_row, array, array_column_index);
+                            outer_rows.insert(outer_id, output_row.clone());
+
+                            output.push(RowDelta::Updated {
+                                id: outer_id,
+                                new: output_row,
+                                prior: prior.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+
+            RowDelta::Updated { id: inner_id, new: inner_row, prior } => {
+                let old_outer_id = inner_to_outer.get(inner_id).copied();
+                let new_outer_id = Self::get_ref_value(inner_row, inner_ref_column, inner_schema);
+
+                if old_outer_id != new_outer_id {
+                    // Inner row moved to different outer row
+                    // Remove from old
+                    if let Some(old_id) = old_outer_id {
+                        inner_to_outer.remove(inner_id);
+                        if let Some(array) = cached_arrays.get_mut(&old_id) {
+                            array.retain(|r| r.id != *inner_id);
+
+                            if let Some(base_outer_row) = outer_rows.get(&old_id) {
+                                let outer_values = Self::extract_outer_values(base_outer_row, array_column_index);
+                                let base_row = Row::new(old_id, outer_values);
+                                let output_row = Self::build_output_row_with_array(&base_row, array, array_column_index);
+                                outer_rows.insert(old_id, output_row.clone());
+
+                                output.push(RowDelta::Updated {
+                                    id: old_id,
+                                    new: output_row,
+                                    prior: prior.clone(),
+                                });
+                            }
+                        }
+                    }
+
+                    // Add to new
+                    if let Some(new_id) = new_outer_id {
+                        inner_to_outer.insert(*inner_id, new_id);
+                        let array = cached_arrays.entry(new_id).or_default();
+                        array.push(inner_row.clone());
+
+                        if let Some(base_outer_row) = outer_rows.get(&new_id) {
+                            let outer_values = Self::extract_outer_values(base_outer_row, array_column_index);
+                            let base_row = Row::new(new_id, outer_values);
+                            let output_row = Self::build_output_row_with_array(&base_row, array, array_column_index);
+                            outer_rows.insert(new_id, output_row.clone());
+
+                            output.push(RowDelta::Updated {
+                                id: new_id,
+                                new: output_row,
+                                prior: crate::sql::query_graph::delta::PriorState::empty(),
+                            });
+                        }
+                    }
+                } else if let Some(outer_id) = new_outer_id {
+                    // Same outer row - update in place
+                    if let Some(array) = cached_arrays.get_mut(&outer_id) {
+                        // Replace the old inner row with the new one
+                        if let Some(idx) = array.iter().position(|r| r.id == *inner_id) {
+                            array[idx] = inner_row.clone();
+                        }
+
+                        if let Some(base_outer_row) = outer_rows.get(&outer_id) {
+                            let outer_values = Self::extract_outer_values(base_outer_row, array_column_index);
+                            let base_row = Row::new(outer_id, outer_values);
+                            let output_row = Self::build_output_row_with_array(&base_row, array, array_column_index);
+                            outer_rows.insert(outer_id, output_row.clone());
+
+                            output.push(RowDelta::Updated {
+                                id: outer_id,
+                                new: output_row,
+                                prior: prior.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Build an output row with the array value appended/inserted.
+    fn build_output_row_with_array(outer_row: &Row, inner_rows: &[Row], array_column_index: i32) -> Row {
+        let array_value = Value::Array(
+            inner_rows
+                .iter()
+                .map(|r| Value::Row(Box::new(r.clone())))
+                .collect(),
+        );
+
+        let mut values = outer_row.values.clone();
+        if array_column_index < 0 {
+            // Append at end
+            values.push(array_value);
+        } else {
+            let idx = array_column_index as usize;
+            if idx < values.len() {
+                values[idx] = array_value;
+            } else {
+                values.push(array_value);
+            }
+        }
+
+        Row::new(outer_row.id, values)
+    }
+
+    /// Extract outer row values without the array column.
+    fn extract_outer_values(row: &Row, array_column_index: i32) -> Vec<Value> {
+        if array_column_index < 0 {
+            // Array is at end - remove last element
+            if row.values.is_empty() {
+                vec![]
+            } else {
+                row.values[..row.values.len() - 1].to_vec()
+            }
+        } else {
+            let idx = array_column_index as usize;
+            row.values
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != idx)
+                .map(|(_, v)| v.clone())
+                .collect()
         }
     }
 

@@ -287,7 +287,9 @@ impl TablePolicies {
 
         for _ in 0..count {
             if pos >= data.len() {
-                return Err(PolicyError::DeserializationError("unexpected end of data".into()));
+                return Err(PolicyError::DeserializationError(
+                    "unexpected end of data".into(),
+                ));
             }
 
             // Action tag
@@ -320,10 +322,7 @@ impl TablePolicies {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PolicyError {
     /// Attempted to add a duplicate policy for the same action.
-    DuplicatePolicy {
-        table: String,
-        action: PolicyAction,
-    },
+    DuplicatePolicy { table: String, action: PolicyAction },
     /// Error during deserialization.
     DeserializationError(String),
 }
@@ -492,14 +491,23 @@ fn serialize_literal(buf: &mut Vec<u8>, val: &Value) {
             buf.push(6);
             buf.extend_from_slice(&id.inner().to_le_bytes());
         }
+        // Row and Array are not valid in policy literals - they're only for query results
+        Value::Row(_) | Value::Array(_) => {
+            panic!("Row and Array values cannot be used in policy literals");
+        }
     }
 }
 
 // Deserialization helpers
 
-fn deserialize_option_expr(data: &[u8], pos: usize) -> Result<(Option<PolicyExpr>, usize), PolicyError> {
+fn deserialize_option_expr(
+    data: &[u8],
+    pos: usize,
+) -> Result<(Option<PolicyExpr>, usize), PolicyError> {
     if pos >= data.len() {
-        return Err(PolicyError::DeserializationError("unexpected end of data".into()));
+        return Err(PolicyError::DeserializationError(
+            "unexpected end of data".into(),
+        ));
     }
 
     match data[pos] {
@@ -508,13 +516,17 @@ fn deserialize_option_expr(data: &[u8], pos: usize) -> Result<(Option<PolicyExpr
             let (expr, new_pos) = deserialize_expr(data, pos + 1)?;
             Ok((Some(expr), new_pos))
         }
-        _ => Err(PolicyError::DeserializationError("invalid option tag".into())),
+        _ => Err(PolicyError::DeserializationError(
+            "invalid option tag".into(),
+        )),
     }
 }
 
 fn deserialize_expr(data: &[u8], pos: usize) -> Result<(PolicyExpr, usize), PolicyError> {
     if pos >= data.len() {
-        return Err(PolicyError::DeserializationError("unexpected end of data".into()));
+        return Err(PolicyError::DeserializationError(
+            "unexpected end of data".into(),
+        ));
     }
 
     let tag = data[pos];
@@ -549,7 +561,9 @@ fn deserialize_expr(data: &[u8], pos: usize) -> Result<(PolicyExpr, usize), Poli
         8 => {
             // And
             if pos >= data.len() {
-                return Err(PolicyError::DeserializationError("unexpected end of data".into()));
+                return Err(PolicyError::DeserializationError(
+                    "unexpected end of data".into(),
+                ));
             }
             let count = data[pos] as usize;
             pos += 1;
@@ -564,7 +578,9 @@ fn deserialize_expr(data: &[u8], pos: usize) -> Result<(PolicyExpr, usize), Poli
         9 => {
             // Or
             if pos >= data.len() {
-                return Err(PolicyError::DeserializationError("unexpected end of data".into()));
+                return Err(PolicyError::DeserializationError(
+                    "unexpected end of data".into(),
+                ));
             }
             let count = data[pos] as usize;
             pos += 1;
@@ -584,7 +600,9 @@ fn deserialize_expr(data: &[u8], pos: usize) -> Result<(PolicyExpr, usize), Poli
         11 => {
             // Inherits
             if pos >= data.len() {
-                return Err(PolicyError::DeserializationError("unexpected end of data".into()));
+                return Err(PolicyError::DeserializationError(
+                    "unexpected end of data".into(),
+                ));
             }
             let action = PolicyAction::from_tag(data[pos])
                 .ok_or_else(|| PolicyError::DeserializationError("invalid action tag".into()))?;
@@ -592,13 +610,18 @@ fn deserialize_expr(data: &[u8], pos: usize) -> Result<(PolicyExpr, usize), Poli
             let (column, new_pos) = deserialize_column_ref(data, pos)?;
             Ok((PolicyExpr::Inherits { action, column }, new_pos))
         }
-        _ => Err(PolicyError::DeserializationError(format!("invalid expr tag: {}", tag))),
+        _ => Err(PolicyError::DeserializationError(format!(
+            "invalid expr tag: {}",
+            tag
+        ))),
     }
 }
 
 fn deserialize_value(data: &[u8], pos: usize) -> Result<(PolicyValue, usize), PolicyError> {
     if pos >= data.len() {
-        return Err(PolicyError::DeserializationError("unexpected end of data".into()));
+        return Err(PolicyError::DeserializationError(
+            "unexpected end of data".into(),
+        ));
     }
 
     let tag = data[pos];
@@ -622,13 +645,21 @@ fn deserialize_value(data: &[u8], pos: usize) -> Result<(PolicyValue, usize), Po
             let (lit, new_pos) = deserialize_literal(data, pos)?;
             Ok((PolicyValue::Literal(lit), new_pos))
         }
-        _ => Err(PolicyError::DeserializationError(format!("invalid value tag: {}", tag))),
+        _ => Err(PolicyError::DeserializationError(format!(
+            "invalid value tag: {}",
+            tag
+        ))),
     }
 }
 
-fn deserialize_column_ref(data: &[u8], pos: usize) -> Result<(PolicyColumnRef, usize), PolicyError> {
+fn deserialize_column_ref(
+    data: &[u8],
+    pos: usize,
+) -> Result<(PolicyColumnRef, usize), PolicyError> {
     if pos >= data.len() {
-        return Err(PolicyError::DeserializationError("unexpected end of data".into()));
+        return Err(PolicyError::DeserializationError(
+            "unexpected end of data".into(),
+        ));
     }
 
     let tag = data[pos];
@@ -643,20 +674,27 @@ fn deserialize_column_ref(data: &[u8], pos: usize) -> Result<(PolicyColumnRef, u
             let (name, new_pos) = deserialize_string(data, pos)?;
             Ok((PolicyColumnRef::New(name), new_pos))
         }
-        _ => Err(PolicyError::DeserializationError(format!("invalid column ref tag: {}", tag))),
+        _ => Err(PolicyError::DeserializationError(format!(
+            "invalid column ref tag: {}",
+            tag
+        ))),
     }
 }
 
 fn deserialize_string(data: &[u8], pos: usize) -> Result<(String, usize), PolicyError> {
     if pos + 2 > data.len() {
-        return Err(PolicyError::DeserializationError("unexpected end of data".into()));
+        return Err(PolicyError::DeserializationError(
+            "unexpected end of data".into(),
+        ));
     }
 
     let len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
     let pos = pos + 2;
 
     if pos + len > data.len() {
-        return Err(PolicyError::DeserializationError("unexpected end of data".into()));
+        return Err(PolicyError::DeserializationError(
+            "unexpected end of data".into(),
+        ));
     }
 
     let s = std::str::from_utf8(&data[pos..pos + len])
@@ -668,7 +706,9 @@ fn deserialize_string(data: &[u8], pos: usize) -> Result<(String, usize), Policy
 
 fn deserialize_literal(data: &[u8], pos: usize) -> Result<(Value, usize), PolicyError> {
     if pos >= data.len() {
-        return Err(PolicyError::DeserializationError("unexpected end of data".into()));
+        return Err(PolicyError::DeserializationError(
+            "unexpected end of data".into(),
+        ));
     }
 
     let tag = data[pos];
@@ -678,20 +718,26 @@ fn deserialize_literal(data: &[u8], pos: usize) -> Result<(Value, usize), Policy
         0 => Ok((Value::Null, pos)),
         1 => {
             if pos >= data.len() {
-                return Err(PolicyError::DeserializationError("unexpected end of data".into()));
+                return Err(PolicyError::DeserializationError(
+                    "unexpected end of data".into(),
+                ));
             }
             Ok((Value::Bool(data[pos] != 0), pos + 1))
         }
         2 => {
             if pos + 8 > data.len() {
-                return Err(PolicyError::DeserializationError("unexpected end of data".into()));
+                return Err(PolicyError::DeserializationError(
+                    "unexpected end of data".into(),
+                ));
             }
             let n = i64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
             Ok((Value::I64(n), pos + 8))
         }
         3 => {
             if pos + 8 > data.len() {
-                return Err(PolicyError::DeserializationError("unexpected end of data".into()));
+                return Err(PolicyError::DeserializationError(
+                    "unexpected end of data".into(),
+                ));
             }
             let n = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
             Ok((Value::F64(n), pos + 8))
@@ -702,23 +748,32 @@ fn deserialize_literal(data: &[u8], pos: usize) -> Result<(Value, usize), Policy
         }
         5 => {
             if pos + 4 > data.len() {
-                return Err(PolicyError::DeserializationError("unexpected end of data".into()));
+                return Err(PolicyError::DeserializationError(
+                    "unexpected end of data".into(),
+                ));
             }
             let len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
             let pos = pos + 4;
             if pos + len > data.len() {
-                return Err(PolicyError::DeserializationError("unexpected end of data".into()));
+                return Err(PolicyError::DeserializationError(
+                    "unexpected end of data".into(),
+                ));
             }
             Ok((Value::Bytes(data[pos..pos + len].to_vec()), pos + len))
         }
         6 => {
             if pos + 16 > data.len() {
-                return Err(PolicyError::DeserializationError("unexpected end of data".into()));
+                return Err(PolicyError::DeserializationError(
+                    "unexpected end of data".into(),
+                ));
             }
             let id = u128::from_le_bytes(data[pos..pos + 16].try_into().unwrap());
             Ok((Value::Ref(ObjectId::from(id)), pos + 16))
         }
-        _ => Err(PolicyError::DeserializationError(format!("invalid literal tag: {}", tag))),
+        _ => Err(PolicyError::DeserializationError(format!(
+            "invalid literal tag: {}",
+            tag
+        ))),
     }
 }
 
@@ -894,9 +949,11 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
     pub fn check_select(&mut self, table: &str, row: &Row) -> PolicyResult {
         let schema = match self.row_lookup.get_schema(table) {
             Some(s) => s,
-            None => return PolicyResult::Denied {
-                reason: format!("table '{}' not found", table)
-            },
+            None => {
+                return PolicyResult::Denied {
+                    reason: format!("table '{}' not found", table),
+                };
+            }
         };
 
         let policies = self.policy_lookup.get_policies(table);
@@ -915,9 +972,11 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
     pub fn check_insert(&mut self, table: &str, new_row: &Row) -> PolicyResult {
         let schema = match self.row_lookup.get_schema(table) {
             Some(s) => s,
-            None => return PolicyResult::Denied {
-                reason: format!("table '{}' not found", table)
-            },
+            None => {
+                return PolicyResult::Denied {
+                    reason: format!("table '{}' not found", table),
+                };
+            }
         };
 
         let policies = self.policy_lookup.get_policies(table);
@@ -936,9 +995,11 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
     pub fn check_update(&mut self, table: &str, old_row: &Row, new_row: &Row) -> PolicyResult {
         let schema = match self.row_lookup.get_schema(table) {
             Some(s) => s,
-            None => return PolicyResult::Denied {
-                reason: format!("table '{}' not found", table)
-            },
+            None => {
+                return PolicyResult::Denied {
+                    reason: format!("table '{}' not found", table),
+                };
+            }
         };
 
         let policies = self.policy_lookup.get_policies(table);
@@ -965,16 +1026,20 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
     pub fn check_delete(&mut self, table: &str, row: &Row) -> PolicyResult {
         let schema = match self.row_lookup.get_schema(table) {
             Some(s) => s,
-            None => return PolicyResult::Denied {
-                reason: format!("table '{}' not found", table)
-            },
+            None => {
+                return PolicyResult::Denied {
+                    reason: format!("table '{}' not found", table),
+                };
+            }
         };
 
         let policies = self.policy_lookup.get_policies(table);
 
         // DELETE defaults to UPDATE policy if not specified
-        let policy = policies.as_ref()
-            .and_then(|p| p.get(PolicyAction::Delete).or_else(|| p.get(PolicyAction::Update)));
+        let policy = policies.as_ref().and_then(|p| {
+            p.get(PolicyAction::Delete)
+                .or_else(|| p.get(PolicyAction::Update))
+        });
 
         match policy {
             Some(p) => {
@@ -995,12 +1060,18 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
         match where_clause {
             Some(expr) => {
                 if self.eval_expr(expr, ctx, table) {
-                    PolicyResult::Allowed { reason: "policy WHERE matched".into() }
+                    PolicyResult::Allowed {
+                        reason: "policy WHERE matched".into(),
+                    }
                 } else {
-                    PolicyResult::Denied { reason: "policy WHERE not satisfied".into() }
+                    PolicyResult::Denied {
+                        reason: "policy WHERE not satisfied".into(),
+                    }
                 }
             }
-            None => PolicyResult::Allowed { reason: "no WHERE clause".into() },
+            None => PolicyResult::Allowed {
+                reason: "no WHERE clause".into(),
+            },
         }
     }
 
@@ -1014,12 +1085,18 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
         match check_clause {
             Some(expr) => {
                 if self.eval_expr(expr, ctx, table) {
-                    PolicyResult::Allowed { reason: "policy CHECK passed".into() }
+                    PolicyResult::Allowed {
+                        reason: "policy CHECK passed".into(),
+                    }
                 } else {
-                    PolicyResult::Denied { reason: "policy CHECK failed".into() }
+                    PolicyResult::Denied {
+                        reason: "policy CHECK failed".into(),
+                    }
                 }
             }
-            None => PolicyResult::Allowed { reason: "no CHECK clause".into() },
+            None => PolicyResult::Allowed {
+                reason: "no CHECK clause".into(),
+            },
         }
     }
 
@@ -1037,19 +1114,15 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
             }
         }
         PolicyResult::Allowed {
-            reason: format!("no {} policy defined (default allow)", action)
+            reason: format!("no {} policy defined (default allow)", action),
         }
     }
 
     /// Evaluate a policy expression.
     fn eval_expr(&mut self, expr: &PolicyExpr, ctx: &EvalContext, table: &str) -> bool {
         match expr {
-            PolicyExpr::Eq(left, right) => {
-                self.compare_values(left, right, ctx, |a, b| a == b)
-            }
-            PolicyExpr::Ne(left, right) => {
-                self.compare_values(left, right, ctx, |a, b| a != b)
-            }
+            PolicyExpr::Eq(left, right) => self.compare_values(left, right, ctx, |a, b| a == b),
+            PolicyExpr::Ne(left, right) => self.compare_values(left, right, ctx, |a, b| a != b),
             PolicyExpr::Lt(left, right) => {
                 self.compare_ordered(left, right, ctx, |ord| ord.is_lt())
             }
@@ -1062,21 +1135,17 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
             PolicyExpr::Ge(left, right) => {
                 self.compare_ordered(left, right, ctx, |ord| ord.is_ge())
             }
-            PolicyExpr::IsNull(val) => {
-                self.resolve_value(val, ctx).map(|v| v.is_null()).unwrap_or(true)
-            }
-            PolicyExpr::IsNotNull(val) => {
-                self.resolve_value(val, ctx).map(|v| !v.is_null()).unwrap_or(false)
-            }
-            PolicyExpr::And(exprs) => {
-                exprs.iter().all(|e| self.eval_expr(e, ctx, table))
-            }
-            PolicyExpr::Or(exprs) => {
-                exprs.iter().any(|e| self.eval_expr(e, ctx, table))
-            }
-            PolicyExpr::Not(inner) => {
-                !self.eval_expr(inner, ctx, table)
-            }
+            PolicyExpr::IsNull(val) => self
+                .resolve_value(val, ctx)
+                .map(|v| v.is_null())
+                .unwrap_or(true),
+            PolicyExpr::IsNotNull(val) => self
+                .resolve_value(val, ctx)
+                .map(|v| !v.is_null())
+                .unwrap_or(false),
+            PolicyExpr::And(exprs) => exprs.iter().all(|e| self.eval_expr(e, ctx, table)),
+            PolicyExpr::Or(exprs) => exprs.iter().any(|e| self.eval_expr(e, ctx, table)),
+            PolicyExpr::Not(inner) => !self.eval_expr(inner, ctx, table),
             PolicyExpr::Inherits { action, column } => {
                 self.eval_inherits(*action, column, ctx, table)
             }
@@ -1095,18 +1164,33 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
     }
 
     /// Compare two values with a predicate.
-    fn compare_values<F>(&self, left: &PolicyValue, right: &PolicyValue, ctx: &EvalContext, pred: F) -> bool
+    fn compare_values<F>(
+        &self,
+        left: &PolicyValue,
+        right: &PolicyValue,
+        ctx: &EvalContext,
+        pred: F,
+    ) -> bool
     where
         F: Fn(&Value, &Value) -> bool,
     {
-        match (self.resolve_value(left, ctx), self.resolve_value(right, ctx)) {
+        match (
+            self.resolve_value(left, ctx),
+            self.resolve_value(right, ctx),
+        ) {
             (Some(l), Some(r)) => pred(&l, &r),
             _ => false, // If either value can't be resolved, comparison fails
         }
     }
 
     /// Compare two values with ordering.
-    fn compare_ordered<F>(&self, left: &PolicyValue, right: &PolicyValue, ctx: &EvalContext, pred: F) -> bool
+    fn compare_ordered<F>(
+        &self,
+        left: &PolicyValue,
+        right: &PolicyValue,
+        ctx: &EvalContext,
+        pred: F,
+    ) -> bool
     where
         F: Fn(std::cmp::Ordering) -> bool,
     {
@@ -1142,12 +1226,8 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
 
         // Get the referenced ID from the column
         let ref_id = match column {
-            PolicyColumnRef::Current(name) => {
-                ctx.get_column(name).and_then(|v| v.as_ref())
-            }
-            PolicyColumnRef::New(name) => {
-                ctx.get_new_column(name).and_then(|v| v.as_ref())
-            }
+            PolicyColumnRef::Current(name) => ctx.get_column(name).and_then(|v| v.as_ref()),
+            PolicyColumnRef::New(name) => ctx.get_new_column(name).and_then(|v| v.as_ref()),
         };
 
         let ref_id = match ref_id {
@@ -1170,8 +1250,10 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
         if self.visited.contains(&visit_key) {
             eprintln!(
                 "WARNING: Cycle detected in policy inheritance: {}:{} -> {}:{}",
-                current_table, ctx.row.map(|r| r.id).unwrap_or_default(),
-                target_table, ref_id
+                current_table,
+                ctx.row.map(|r| r.id).unwrap_or_default(),
+                target_table,
+                ref_id
             );
             return false;
         }
@@ -1241,7 +1323,12 @@ mod tests {
 
     #[test]
     fn test_policy_action_roundtrip() {
-        for action in [PolicyAction::Select, PolicyAction::Insert, PolicyAction::Update, PolicyAction::Delete] {
+        for action in [
+            PolicyAction::Select,
+            PolicyAction::Insert,
+            PolicyAction::Update,
+            PolicyAction::Delete,
+        ] {
             assert_eq!(PolicyAction::from_tag(action.tag()), Some(action));
         }
     }
@@ -1251,11 +1338,10 @@ mod tests {
         let mut policies = TablePolicies::new();
 
         // Simple SELECT policy: WHERE owner_id = @viewer
-        let policy = Policy::new("documents", PolicyAction::Select)
-            .with_where(PolicyExpr::Eq(
-                PolicyValue::Column("owner_id".into()),
-                PolicyValue::Viewer,
-            ));
+        let policy = Policy::new("documents", PolicyAction::Select).with_where(PolicyExpr::Eq(
+            PolicyValue::Column("owner_id".into()),
+            PolicyValue::Viewer,
+        ));
 
         policies.add(policy).unwrap();
 
@@ -1270,8 +1356,8 @@ mod tests {
         let mut policies = TablePolicies::new();
 
         // SELECT policy with INHERITS: WHERE INHERITS SELECT FROM folder_id
-        let policy = Policy::new("documents", PolicyAction::Select)
-            .with_where(PolicyExpr::Inherits {
+        let policy =
+            Policy::new("documents", PolicyAction::Select).with_where(PolicyExpr::Inherits {
                 action: PolicyAction::Select,
                 column: PolicyColumnRef::Current("folder_id".into()),
             });
@@ -1289,12 +1375,9 @@ mod tests {
         let mut policies = TablePolicies::new();
 
         // SELECT: WHERE owner_id = @viewer OR INHERITS SELECT FROM folder_id
-        let select_policy = Policy::new("documents", PolicyAction::Select)
-            .with_where(PolicyExpr::Or(vec![
-                PolicyExpr::Eq(
-                    PolicyValue::Column("owner_id".into()),
-                    PolicyValue::Viewer,
-                ),
+        let select_policy =
+            Policy::new("documents", PolicyAction::Select).with_where(PolicyExpr::Or(vec![
+                PolicyExpr::Eq(PolicyValue::Column("owner_id".into()), PolicyValue::Viewer),
                 PolicyExpr::Inherits {
                     action: PolicyAction::Select,
                     column: PolicyColumnRef::Current("folder_id".into()),
@@ -1302,8 +1385,8 @@ mod tests {
             ]));
 
         // INSERT: CHECK (@new.author_id = @viewer AND INHERITS UPDATE FROM @new.folder_id)
-        let insert_policy = Policy::new("documents", PolicyAction::Insert)
-            .with_check(PolicyExpr::And(vec![
+        let insert_policy =
+            Policy::new("documents", PolicyAction::Insert).with_check(PolicyExpr::And(vec![
                 PolicyExpr::Eq(
                     PolicyValue::NewColumn("author_id".into()),
                     PolicyValue::Viewer,
@@ -1327,17 +1410,15 @@ mod tests {
     fn test_duplicate_policy_error() {
         let mut policies = TablePolicies::new();
 
-        let policy1 = Policy::new("documents", PolicyAction::Select)
-            .with_where(PolicyExpr::Eq(
-                PolicyValue::Column("owner_id".into()),
-                PolicyValue::Viewer,
-            ));
+        let policy1 = Policy::new("documents", PolicyAction::Select).with_where(PolicyExpr::Eq(
+            PolicyValue::Column("owner_id".into()),
+            PolicyValue::Viewer,
+        ));
 
-        let policy2 = Policy::new("documents", PolicyAction::Select)
-            .with_where(PolicyExpr::Eq(
-                PolicyValue::Column("author_id".into()),
-                PolicyValue::Viewer,
-            ));
+        let policy2 = Policy::new("documents", PolicyAction::Select).with_where(PolicyExpr::Eq(
+            PolicyValue::Column("author_id".into()),
+            PolicyValue::Viewer,
+        ));
 
         policies.add(policy1).unwrap();
         let result = policies.add(policy2);
@@ -1350,21 +1431,20 @@ mod tests {
         let mut policies = TablePolicies::new();
 
         // Test various literal types
-        let policy = Policy::new("test", PolicyAction::Select)
-            .with_where(PolicyExpr::And(vec![
-                PolicyExpr::Eq(
-                    PolicyValue::Column("status".into()),
-                    PolicyValue::Literal(Value::String("active".into())),
-                ),
-                PolicyExpr::Eq(
-                    PolicyValue::Column("count".into()),
-                    PolicyValue::Literal(Value::I64(42)),
-                ),
-                PolicyExpr::Eq(
-                    PolicyValue::Column("enabled".into()),
-                    PolicyValue::Literal(Value::Bool(true)),
-                ),
-            ]));
+        let policy = Policy::new("test", PolicyAction::Select).with_where(PolicyExpr::And(vec![
+            PolicyExpr::Eq(
+                PolicyValue::Column("status".into()),
+                PolicyValue::Literal(Value::String("active".into())),
+            ),
+            PolicyExpr::Eq(
+                PolicyValue::Column("count".into()),
+                PolicyValue::Literal(Value::I64(42)),
+            ),
+            PolicyExpr::Eq(
+                PolicyValue::Column("enabled".into()),
+                PolicyValue::Literal(Value::Bool(true)),
+            ),
+        ]));
 
         policies.add(policy).unwrap();
 
@@ -1399,7 +1479,8 @@ mod tests {
                 .into_iter()
                 .map(|(n, ty)| ColumnDef::new(n, ty, true))
                 .collect();
-            self.schemas.insert(name.to_string(), TableSchema::new(name.to_string(), cols));
+            self.schemas
+                .insert(name.to_string(), TableSchema::new(name.to_string(), cols));
         }
 
         fn add_row(&mut self, table: &str, row: Row) {
@@ -1439,48 +1520,67 @@ mod tests {
         let mut lookup = MockLookup::new();
 
         // Create users table
-        lookup.add_table("users", vec![
-            ("name", ColumnType::String),
-        ]);
+        lookup.add_table("users", vec![("name", ColumnType::String)]);
 
         // Create documents table with owner_id
-        lookup.add_table("documents", vec![
-            ("title", ColumnType::String),
-            ("owner_id", ColumnType::Ref("users".into())),
-        ]);
+        lookup.add_table(
+            "documents",
+            vec![
+                ("title", ColumnType::String),
+                ("owner_id", ColumnType::Ref("users".into())),
+            ],
+        );
 
         // Create a user
         let user_id = ObjectId::new(1);
         let other_user_id = ObjectId::new(2);
-        lookup.add_row("users", Row::new(user_id, vec![Value::String("Alice".into())]));
-        lookup.add_row("users", Row::new(other_user_id, vec![Value::String("Bob".into())]));
+        lookup.add_row(
+            "users",
+            Row::new(user_id, vec![Value::String("Alice".into())]),
+        );
+        lookup.add_row(
+            "users",
+            Row::new(other_user_id, vec![Value::String("Bob".into())]),
+        );
 
         // Create a document owned by user 1
         let doc_id = ObjectId::new(100);
-        lookup.add_row("documents", Row::new(doc_id, vec![
-            Value::String("My Doc".into()),
-            Value::Ref(user_id),
-        ]));
+        lookup.add_row(
+            "documents",
+            Row::new(
+                doc_id,
+                vec![Value::String("My Doc".into()), Value::Ref(user_id)],
+            ),
+        );
 
         // Add policy: owner can read
-        lookup.add_policy(Policy::new("documents", PolicyAction::Select)
-            .with_where(PolicyExpr::Eq(
-                PolicyValue::Column("owner_id".into()),
-                PolicyValue::Viewer,
-            )));
+        lookup.add_policy(Policy::new("documents", PolicyAction::Select).with_where(
+            PolicyExpr::Eq(PolicyValue::Column("owner_id".into()), PolicyValue::Viewer),
+        ));
 
         let doc = lookup.get_row("documents", doc_id).unwrap();
-        let config = PolicyConfig { warn_on_missing_policy: false, ..Default::default() };
+        let config = PolicyConfig {
+            warn_on_missing_policy: false,
+            ..Default::default()
+        };
 
         // User 1 (owner) can read
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, user_id, config.clone());
         let result = eval.check_select("documents", &doc);
-        assert!(result.is_allowed(), "owner should be able to read: {:?}", result);
+        assert!(
+            result.is_allowed(),
+            "owner should be able to read: {:?}",
+            result
+        );
 
         // User 2 (not owner) cannot read
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, other_user_id, config);
         let result = eval.check_select("documents", &doc);
-        assert!(result.is_denied(), "non-owner should not be able to read: {:?}", result);
+        assert!(
+            result.is_denied(),
+            "non-owner should not be able to read: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -1490,68 +1590,94 @@ mod tests {
         let mut lookup = MockLookup::new();
 
         // Create users table
-        lookup.add_table("users", vec![
-            ("name", ColumnType::String),
-        ]);
+        lookup.add_table("users", vec![("name", ColumnType::String)]);
 
         // Create folders table
-        lookup.add_table("folders", vec![
-            ("name", ColumnType::String),
-            ("owner_id", ColumnType::Ref("users".into())),
-        ]);
+        lookup.add_table(
+            "folders",
+            vec![
+                ("name", ColumnType::String),
+                ("owner_id", ColumnType::Ref("users".into())),
+            ],
+        );
 
         // Create documents table
-        lookup.add_table("documents", vec![
-            ("title", ColumnType::String),
-            ("folder_id", ColumnType::Ref("folders".into())),
-        ]);
+        lookup.add_table(
+            "documents",
+            vec![
+                ("title", ColumnType::String),
+                ("folder_id", ColumnType::Ref("folders".into())),
+            ],
+        );
 
         // Create users
         let alice_id = ObjectId::new(1);
         let bob_id = ObjectId::new(2);
-        lookup.add_row("users", Row::new(alice_id, vec![Value::String("Alice".into())]));
+        lookup.add_row(
+            "users",
+            Row::new(alice_id, vec![Value::String("Alice".into())]),
+        );
         lookup.add_row("users", Row::new(bob_id, vec![Value::String("Bob".into())]));
 
         // Create a folder owned by Alice
         let folder_id = ObjectId::new(10);
-        lookup.add_row("folders", Row::new(folder_id, vec![
-            Value::String("Alice's Folder".into()),
-            Value::Ref(alice_id),
-        ]));
+        lookup.add_row(
+            "folders",
+            Row::new(
+                folder_id,
+                vec![Value::String("Alice's Folder".into()), Value::Ref(alice_id)],
+            ),
+        );
 
         // Create a document in that folder
         let doc_id = ObjectId::new(100);
-        lookup.add_row("documents", Row::new(doc_id, vec![
-            Value::String("Doc in Folder".into()),
-            Value::Ref(folder_id),
-        ]));
+        lookup.add_row(
+            "documents",
+            Row::new(
+                doc_id,
+                vec![Value::String("Doc in Folder".into()), Value::Ref(folder_id)],
+            ),
+        );
 
         // Add folder policy: owner can read
-        lookup.add_policy(Policy::new("folders", PolicyAction::Select)
-            .with_where(PolicyExpr::Eq(
+        lookup.add_policy(
+            Policy::new("folders", PolicyAction::Select).with_where(PolicyExpr::Eq(
                 PolicyValue::Column("owner_id".into()),
                 PolicyValue::Viewer,
-            )));
+            )),
+        );
 
         // Add document policy: inherit from folder
-        lookup.add_policy(Policy::new("documents", PolicyAction::Select)
-            .with_where(PolicyExpr::Inherits {
+        lookup.add_policy(Policy::new("documents", PolicyAction::Select).with_where(
+            PolicyExpr::Inherits {
                 action: PolicyAction::Select,
                 column: PolicyColumnRef::Current("folder_id".into()),
-            }));
+            },
+        ));
 
         let doc = lookup.get_row("documents", doc_id).unwrap();
-        let config = PolicyConfig { warn_on_missing_policy: false, ..Default::default() };
+        let config = PolicyConfig {
+            warn_on_missing_policy: false,
+            ..Default::default()
+        };
 
         // Alice (folder owner) can read the document
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, alice_id, config.clone());
         let result = eval.check_select("documents", &doc);
-        assert!(result.is_allowed(), "folder owner should be able to read doc: {:?}", result);
+        assert!(
+            result.is_allowed(),
+            "folder owner should be able to read doc: {:?}",
+            result
+        );
 
         // Bob cannot read the document
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, bob_id, config);
         let result = eval.check_select("documents", &doc);
-        assert!(result.is_denied(), "non-owner should not be able to read doc: {:?}", result);
+        assert!(
+            result.is_denied(),
+            "non-owner should not be able to read doc: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -1561,72 +1687,103 @@ mod tests {
         let mut lookup = MockLookup::new();
 
         // Create users table
-        lookup.add_table("users", vec![
-            ("name", ColumnType::String),
-        ]);
+        lookup.add_table("users", vec![("name", ColumnType::String)]);
 
         // Create folders table with parent_id (self-referential)
-        lookup.add_table("folders", vec![
-            ("name", ColumnType::String),
-            ("parent_id", ColumnType::Ref("folders".into())),
-            ("owner_id", ColumnType::Ref("users".into())),
-        ]);
+        lookup.add_table(
+            "folders",
+            vec![
+                ("name", ColumnType::String),
+                ("parent_id", ColumnType::Ref("folders".into())),
+                ("owner_id", ColumnType::Ref("users".into())),
+            ],
+        );
 
         // Create user
         let alice_id = ObjectId::new(1);
         let bob_id = ObjectId::new(2);
-        lookup.add_row("users", Row::new(alice_id, vec![Value::String("Alice".into())]));
+        lookup.add_row(
+            "users",
+            Row::new(alice_id, vec![Value::String("Alice".into())]),
+        );
         lookup.add_row("users", Row::new(bob_id, vec![Value::String("Bob".into())]));
 
         // Create root folder owned by Alice
         let root_folder_id = ObjectId::new(10);
-        lookup.add_row("folders", Row::new(root_folder_id, vec![
-            Value::String("Root".into()),
-            Value::Null, // no parent
-            Value::Ref(alice_id),
-        ]));
+        lookup.add_row(
+            "folders",
+            Row::new(
+                root_folder_id,
+                vec![
+                    Value::String("Root".into()),
+                    Value::Null, // no parent
+                    Value::Ref(alice_id),
+                ],
+            ),
+        );
 
         // Create child folder
         let child_folder_id = ObjectId::new(11);
-        lookup.add_row("folders", Row::new(child_folder_id, vec![
-            Value::String("Child".into()),
-            Value::Ref(root_folder_id), // parent is root
-            Value::Null, // no direct owner
-        ]));
+        lookup.add_row(
+            "folders",
+            Row::new(
+                child_folder_id,
+                vec![
+                    Value::String("Child".into()),
+                    Value::Ref(root_folder_id), // parent is root
+                    Value::Null,                // no direct owner
+                ],
+            ),
+        );
 
         // Create grandchild folder
         let grandchild_folder_id = ObjectId::new(12);
-        lookup.add_row("folders", Row::new(grandchild_folder_id, vec![
-            Value::String("Grandchild".into()),
-            Value::Ref(child_folder_id), // parent is child
-            Value::Null, // no direct owner
-        ]));
+        lookup.add_row(
+            "folders",
+            Row::new(
+                grandchild_folder_id,
+                vec![
+                    Value::String("Grandchild".into()),
+                    Value::Ref(child_folder_id), // parent is child
+                    Value::Null,                 // no direct owner
+                ],
+            ),
+        );
 
         // Add folder policy: owner OR inherit from parent
-        lookup.add_policy(Policy::new("folders", PolicyAction::Select)
-            .with_where(PolicyExpr::Or(vec![
-                PolicyExpr::Eq(
-                    PolicyValue::Column("owner_id".into()),
-                    PolicyValue::Viewer,
-                ),
+        lookup.add_policy(
+            Policy::new("folders", PolicyAction::Select).with_where(PolicyExpr::Or(vec![
+                PolicyExpr::Eq(PolicyValue::Column("owner_id".into()), PolicyValue::Viewer),
                 PolicyExpr::Inherits {
                     action: PolicyAction::Select,
                     column: PolicyColumnRef::Current("parent_id".into()),
                 },
-            ])));
+            ])),
+        );
 
         let grandchild = lookup.get_row("folders", grandchild_folder_id).unwrap();
-        let config = PolicyConfig { warn_on_missing_policy: false, ..Default::default() };
+        let config = PolicyConfig {
+            warn_on_missing_policy: false,
+            ..Default::default()
+        };
 
         // Alice can read grandchild (via root -> child -> grandchild)
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, alice_id, config.clone());
         let result = eval.check_select("folders", &grandchild);
-        assert!(result.is_allowed(), "root owner should be able to read grandchild: {:?}", result);
+        assert!(
+            result.is_allowed(),
+            "root owner should be able to read grandchild: {:?}",
+            result
+        );
 
         // Bob cannot read grandchild
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, bob_id, config);
         let result = eval.check_select("folders", &grandchild);
-        assert!(result.is_denied(), "non-owner should not be able to read grandchild: {:?}", result);
+        assert!(
+            result.is_denied(),
+            "non-owner should not be able to read grandchild: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -1636,47 +1793,63 @@ mod tests {
         let mut lookup = MockLookup::new();
 
         // Create users table
-        lookup.add_table("users", vec![
-            ("name", ColumnType::String),
-        ]);
+        lookup.add_table("users", vec![("name", ColumnType::String)]);
 
         // Create documents table
-        lookup.add_table("documents", vec![
-            ("title", ColumnType::String),
-            ("author_id", ColumnType::Ref("users".into())),
-        ]);
+        lookup.add_table(
+            "documents",
+            vec![
+                ("title", ColumnType::String),
+                ("author_id", ColumnType::Ref("users".into())),
+            ],
+        );
 
         let alice_id = ObjectId::new(1);
         let bob_id = ObjectId::new(2);
-        lookup.add_row("users", Row::new(alice_id, vec![Value::String("Alice".into())]));
+        lookup.add_row(
+            "users",
+            Row::new(alice_id, vec![Value::String("Alice".into())]),
+        );
         lookup.add_row("users", Row::new(bob_id, vec![Value::String("Bob".into())]));
 
         // Add INSERT policy: author must be viewer
-        lookup.add_policy(Policy::new("documents", PolicyAction::Insert)
-            .with_check(PolicyExpr::Eq(
+        lookup.add_policy(Policy::new("documents", PolicyAction::Insert).with_check(
+            PolicyExpr::Eq(
                 PolicyValue::NewColumn("author_id".into()),
                 PolicyValue::Viewer,
-            )));
+            ),
+        ));
 
-        let config = PolicyConfig { warn_on_missing_policy: false, ..Default::default() };
+        let config = PolicyConfig {
+            warn_on_missing_policy: false,
+            ..Default::default()
+        };
 
         // Alice can insert doc with herself as author
-        let new_doc = Row::new(ObjectId::new(100), vec![
-            Value::String("Alice's Doc".into()),
-            Value::Ref(alice_id),
-        ]);
+        let new_doc = Row::new(
+            ObjectId::new(100),
+            vec![Value::String("Alice's Doc".into()), Value::Ref(alice_id)],
+        );
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, alice_id, config.clone());
         let result = eval.check_insert("documents", &new_doc);
-        assert!(result.is_allowed(), "should allow insert with self as author: {:?}", result);
+        assert!(
+            result.is_allowed(),
+            "should allow insert with self as author: {:?}",
+            result
+        );
 
         // Alice cannot insert doc with Bob as author
-        let new_doc = Row::new(ObjectId::new(101), vec![
-            Value::String("Forged Doc".into()),
-            Value::Ref(bob_id),
-        ]);
+        let new_doc = Row::new(
+            ObjectId::new(101),
+            vec![Value::String("Forged Doc".into()), Value::Ref(bob_id)],
+        );
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, alice_id, config);
         let result = eval.check_insert("documents", &new_doc);
-        assert!(result.is_denied(), "should deny insert with other as author: {:?}", result);
+        assert!(
+            result.is_denied(),
+            "should deny insert with other as author: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -1686,67 +1859,97 @@ mod tests {
         let mut lookup = MockLookup::new();
 
         // Create users table
-        lookup.add_table("users", vec![
-            ("name", ColumnType::String),
-        ]);
+        lookup.add_table("users", vec![("name", ColumnType::String)]);
 
         // Create documents table
-        lookup.add_table("documents", vec![
-            ("title", ColumnType::String),
-            ("author_id", ColumnType::Ref("users".into())),
-        ]);
+        lookup.add_table(
+            "documents",
+            vec![
+                ("title", ColumnType::String),
+                ("author_id", ColumnType::Ref("users".into())),
+            ],
+        );
 
         let alice_id = ObjectId::new(1);
         let bob_id = ObjectId::new(2);
-        lookup.add_row("users", Row::new(alice_id, vec![Value::String("Alice".into())]));
+        lookup.add_row(
+            "users",
+            Row::new(alice_id, vec![Value::String("Alice".into())]),
+        );
         lookup.add_row("users", Row::new(bob_id, vec![Value::String("Bob".into())]));
 
         let doc_id = ObjectId::new(100);
-        lookup.add_row("documents", Row::new(doc_id, vec![
-            Value::String("Original".into()),
-            Value::Ref(alice_id),
-        ]));
+        lookup.add_row(
+            "documents",
+            Row::new(
+                doc_id,
+                vec![Value::String("Original".into()), Value::Ref(alice_id)],
+            ),
+        );
 
         // Add UPDATE policy: author can update, but cannot change author
-        lookup.add_policy(Policy::new("documents", PolicyAction::Update)
-            .with_where(PolicyExpr::Eq(
-                PolicyValue::Column("author_id".into()),
-                PolicyValue::Viewer,
-            ))
-            .with_check(PolicyExpr::Eq(
-                PolicyValue::NewColumn("author_id".into()),
-                PolicyValue::OldColumn("author_id".into()),
-            )));
+        lookup.add_policy(
+            Policy::new("documents", PolicyAction::Update)
+                .with_where(PolicyExpr::Eq(
+                    PolicyValue::Column("author_id".into()),
+                    PolicyValue::Viewer,
+                ))
+                .with_check(PolicyExpr::Eq(
+                    PolicyValue::NewColumn("author_id".into()),
+                    PolicyValue::OldColumn("author_id".into()),
+                )),
+        );
 
         let old_doc = lookup.get_row("documents", doc_id).unwrap();
-        let config = PolicyConfig { warn_on_missing_policy: false, ..Default::default() };
+        let config = PolicyConfig {
+            warn_on_missing_policy: false,
+            ..Default::default()
+        };
 
         // Alice can update title
-        let new_doc = Row::new(doc_id, vec![
-            Value::String("Updated".into()),
-            Value::Ref(alice_id), // same author
-        ]);
+        let new_doc = Row::new(
+            doc_id,
+            vec![
+                Value::String("Updated".into()),
+                Value::Ref(alice_id), // same author
+            ],
+        );
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, alice_id, config.clone());
         let result = eval.check_update("documents", &old_doc, &new_doc);
-        assert!(result.is_allowed(), "author should be able to update title: {:?}", result);
+        assert!(
+            result.is_allowed(),
+            "author should be able to update title: {:?}",
+            result
+        );
 
         // Alice cannot change author to Bob
-        let new_doc = Row::new(doc_id, vec![
-            Value::String("Updated".into()),
-            Value::Ref(bob_id), // changed author!
-        ]);
+        let new_doc = Row::new(
+            doc_id,
+            vec![
+                Value::String("Updated".into()),
+                Value::Ref(bob_id), // changed author!
+            ],
+        );
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, alice_id, config.clone());
         let result = eval.check_update("documents", &old_doc, &new_doc);
-        assert!(result.is_denied(), "should deny changing author: {:?}", result);
+        assert!(
+            result.is_denied(),
+            "should deny changing author: {:?}",
+            result
+        );
 
         // Bob cannot update at all
-        let new_doc = Row::new(doc_id, vec![
-            Value::String("Hacked".into()),
-            Value::Ref(alice_id),
-        ]);
+        let new_doc = Row::new(
+            doc_id,
+            vec![Value::String("Hacked".into()), Value::Ref(alice_id)],
+        );
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, bob_id, config);
         let result = eval.check_update("documents", &old_doc, &new_doc);
-        assert!(result.is_denied(), "non-author should not be able to update: {:?}", result);
+        assert!(
+            result.is_denied(),
+            "non-author should not be able to update: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -1755,16 +1958,20 @@ mod tests {
 
         let mut lookup = MockLookup::new();
 
-        lookup.add_table("items", vec![
-            ("name", ColumnType::String),
-        ]);
+        lookup.add_table("items", vec![("name", ColumnType::String)]);
 
         let item_id = ObjectId::new(1);
-        lookup.add_row("items", Row::new(item_id, vec![Value::String("Item".into())]));
+        lookup.add_row(
+            "items",
+            Row::new(item_id, vec![Value::String("Item".into())]),
+        );
 
         // No policy defined
         let item = lookup.get_row("items", item_id).unwrap();
-        let config = PolicyConfig { warn_on_missing_policy: false, ..Default::default() };
+        let config = PolicyConfig {
+            warn_on_missing_policy: false,
+            ..Default::default()
+        };
 
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, ObjectId::new(999), config);
         let result = eval.check_select("items", &item);
@@ -1779,43 +1986,62 @@ mod tests {
 
         let mut lookup = MockLookup::new();
 
-        lookup.add_table("users", vec![
-            ("name", ColumnType::String),
-        ]);
+        lookup.add_table("users", vec![("name", ColumnType::String)]);
 
-        lookup.add_table("items", vec![
-            ("name", ColumnType::String),
-            ("owner_id", ColumnType::Ref("users".into())),
-        ]);
+        lookup.add_table(
+            "items",
+            vec![
+                ("name", ColumnType::String),
+                ("owner_id", ColumnType::Ref("users".into())),
+            ],
+        );
 
         let alice_id = ObjectId::new(1);
         let bob_id = ObjectId::new(2);
-        lookup.add_row("users", Row::new(alice_id, vec![Value::String("Alice".into())]));
+        lookup.add_row(
+            "users",
+            Row::new(alice_id, vec![Value::String("Alice".into())]),
+        );
 
         let item_id = ObjectId::new(100);
-        lookup.add_row("items", Row::new(item_id, vec![
-            Value::String("Item".into()),
-            Value::Ref(alice_id),
-        ]));
+        lookup.add_row(
+            "items",
+            Row::new(
+                item_id,
+                vec![Value::String("Item".into()), Value::Ref(alice_id)],
+            ),
+        );
 
         // Only add UPDATE policy, no DELETE policy
-        lookup.add_policy(Policy::new("items", PolicyAction::Update)
-            .with_where(PolicyExpr::Eq(
+        lookup.add_policy(
+            Policy::new("items", PolicyAction::Update).with_where(PolicyExpr::Eq(
                 PolicyValue::Column("owner_id".into()),
                 PolicyValue::Viewer,
-            )));
+            )),
+        );
 
         let item = lookup.get_row("items", item_id).unwrap();
-        let config = PolicyConfig { warn_on_missing_policy: false, ..Default::default() };
+        let config = PolicyConfig {
+            warn_on_missing_policy: false,
+            ..Default::default()
+        };
 
         // Alice can delete (falls back to UPDATE policy)
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, alice_id, config.clone());
         let result = eval.check_delete("items", &item);
-        assert!(result.is_allowed(), "owner should be able to delete via UPDATE fallback: {:?}", result);
+        assert!(
+            result.is_allowed(),
+            "owner should be able to delete via UPDATE fallback: {:?}",
+            result
+        );
 
         // Bob cannot delete
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, bob_id, config);
         let result = eval.check_delete("items", &item);
-        assert!(result.is_denied(), "non-owner should not be able to delete: {:?}", result);
+        assert!(
+            result.is_denied(),
+            "non-owner should not be able to delete: {:?}",
+            result
+        );
     }
 }

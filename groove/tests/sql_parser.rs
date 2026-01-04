@@ -1,10 +1,10 @@
 //! Integration tests for SQL parser.
 
-use groove::sql::{
-    parse, ColumnType, PolicyAction, PolicyColumnRef, PolicyExpr, PolicyValue, Projection,
-    Statement, Value,
-};
 use groove::ObjectId;
+use groove::sql::{
+    ColumnType, ConditionValue, PolicyAction, PolicyColumnRef, PolicyExpr, PolicyValue, Projection,
+    SelectExpr, Statement, Value, parse,
+};
 
 #[test]
 fn parse_create_table_simple() {
@@ -81,7 +81,10 @@ fn parse_insert_with_object_id() {
     // The parser produces Value::String; the executor coerces to Value::Ref
     // when inserting into a Ref column.
     let id = ObjectId::new(0x0192abcd12345678);
-    let sql = format!("INSERT INTO posts (author, title) VALUES ('{}', 'Hello')", id);
+    let sql = format!(
+        "INSERT INTO posts (author, title) VALUES ('{}', 'Hello')",
+        id
+    );
     let stmt = parse(&sql).unwrap();
 
     match stmt {
@@ -99,7 +102,10 @@ fn parse_update() {
     // The parser produces Value::String; the executor coerces to Value::Ref
     // when comparing against id or Ref columns.
     let id = ObjectId::new(0xabc123);
-    let sql = format!("UPDATE users SET email = 'new@example.com', age = 31 WHERE id = '{}'", id);
+    let sql = format!(
+        "UPDATE users SET email = 'new@example.com', age = 31 WHERE id = '{}'",
+        id
+    );
     let stmt = parse(&sql).unwrap();
 
     match stmt {
@@ -114,7 +120,10 @@ fn parse_update() {
             assert_eq!(upd.where_clause.len(), 1);
             assert_eq!(upd.where_clause[0].column.column, "id");
             // Parser produces String, not Ref (executor handles coercion)
-            assert_eq!(upd.where_clause[0].value, Value::String(id.to_string()));
+            assert_eq!(
+                upd.where_clause[0].right,
+                ConditionValue::Literal(Value::String(id.to_string()))
+            );
         }
         _ => panic!("expected Update"),
     }
@@ -143,12 +152,18 @@ fn parse_select_columns() {
 
     match stmt {
         Statement::Select(sel) => match sel.projection {
-            Projection::Columns(cols) => {
-                assert_eq!(cols.len(), 2);
-                assert_eq!(cols[0].column, "name");
-                assert_eq!(cols[1].column, "email");
+            Projection::Expressions(exprs) => {
+                assert_eq!(exprs.len(), 2);
+                match &exprs[0] {
+                    SelectExpr::Column(qc) => assert_eq!(qc.column, "name"),
+                    _ => panic!("expected Column"),
+                }
+                match &exprs[1] {
+                    SelectExpr::Column(qc) => assert_eq!(qc.column, "email"),
+                    _ => panic!("expected Column"),
+                }
             }
-            _ => panic!("expected Columns"),
+            _ => panic!("expected Expressions"),
         },
         _ => panic!("expected Select"),
     }
@@ -163,9 +178,9 @@ fn parse_select_with_where() {
         Statement::Select(sel) => {
             assert_eq!(sel.where_clause.len(), 2);
             assert_eq!(sel.where_clause[0].column.column, "active");
-            assert_eq!(sel.where_clause[0].value, Value::Bool(true));
+            assert_eq!(sel.where_clause[0].right, ConditionValue::Literal(Value::Bool(true)));
             assert_eq!(sel.where_clause[1].column.column, "age");
-            assert_eq!(sel.where_clause[1].value, Value::I64(30));
+            assert_eq!(sel.where_clause[1].right, ConditionValue::Literal(Value::I64(30)));
         }
         _ => panic!("expected Select"),
     }
@@ -258,8 +273,143 @@ fn case_insensitive_keywords() {
 
     match stmt {
         Statement::Select(sel) => {
-            assert_eq!(sel.where_clause[0].value, Value::Bool(true));
+            assert_eq!(sel.where_clause[0].right, ConditionValue::Literal(Value::Bool(true)));
         }
+        _ => panic!("expected Select"),
+    }
+}
+
+// ========== ARRAY Subquery Tests ==========
+
+#[test]
+fn parse_array_subquery() {
+    let sql = "SELECT f.id, ARRAY(SELECT n FROM notes n WHERE n.folder_id = f.id) AS notes FROM folders f";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::Select(sel) => {
+            // Check FROM clause has alias
+            assert_eq!(sel.from.table, "folders");
+            assert_eq!(sel.from.alias, Some("f".to_string()));
+
+            // Check projection has 2 expressions
+            match sel.projection {
+                Projection::Expressions(exprs) => {
+                    assert_eq!(exprs.len(), 2);
+
+                    // First: f.id
+                    match &exprs[0] {
+                        SelectExpr::Column(qc) => {
+                            assert_eq!(qc.table, Some("f".to_string()));
+                            assert_eq!(qc.column, "id");
+                        }
+                        _ => panic!("expected Column"),
+                    }
+
+                    // Second: ARRAY(...) AS notes
+                    match &exprs[1] {
+                        SelectExpr::Aliased { expr, alias } => {
+                            assert_eq!(alias, "notes");
+                            match expr.as_ref() {
+                                SelectExpr::ArraySubquery(subquery) => {
+                                    // Check subquery FROM
+                                    assert_eq!(subquery.from.table, "notes");
+                                    assert_eq!(subquery.from.alias, Some("n".to_string()));
+
+                                    // Check subquery projection is just "n" (table alias)
+                                    match &subquery.projection {
+                                        Projection::Expressions(sub_exprs) => {
+                                            assert_eq!(sub_exprs.len(), 1);
+                                            match &sub_exprs[0] {
+                                                SelectExpr::Column(qc) => {
+                                                    assert_eq!(qc.table, None);
+                                                    assert_eq!(qc.column, "n");
+                                                }
+                                                _ => panic!("expected Column for table alias"),
+                                            }
+                                        }
+                                        _ => panic!("expected Expressions"),
+                                    }
+
+                                    // Check subquery WHERE
+                                    assert_eq!(subquery.where_clause.len(), 1);
+                                    assert_eq!(
+                                        subquery.where_clause[0].column.table,
+                                        Some("n".to_string())
+                                    );
+                                    assert_eq!(subquery.where_clause[0].column.column, "folder_id");
+                                }
+                                _ => panic!("expected ArraySubquery"),
+                            }
+                        }
+                        _ => panic!("expected Aliased"),
+                    }
+                }
+                _ => panic!("expected Expressions"),
+            }
+        }
+        _ => panic!("expected Select"),
+    }
+}
+
+#[test]
+fn parse_table_alias() {
+    let sql = "SELECT u.name FROM users u WHERE u.active = true";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::Select(sel) => {
+            assert_eq!(sel.from.table, "users");
+            assert_eq!(sel.from.alias, Some("u".to_string()));
+
+            match sel.projection {
+                Projection::Expressions(exprs) => {
+                    assert_eq!(exprs.len(), 1);
+                    match &exprs[0] {
+                        SelectExpr::Column(qc) => {
+                            assert_eq!(qc.table, Some("u".to_string()));
+                            assert_eq!(qc.column, "name");
+                        }
+                        _ => panic!("expected Column"),
+                    }
+                }
+                _ => panic!("expected Expressions"),
+            }
+        }
+        _ => panic!("expected Select"),
+    }
+}
+
+#[test]
+fn parse_array_subquery_simple() {
+    let sql = "SELECT ARRAY(SELECT title FROM notes) FROM folders";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::Select(sel) => match sel.projection {
+            Projection::Expressions(exprs) => {
+                assert_eq!(exprs.len(), 1);
+                match &exprs[0] {
+                    SelectExpr::ArraySubquery(subquery) => {
+                        assert_eq!(subquery.from.table, "notes");
+                        match &subquery.projection {
+                            Projection::Expressions(sub_exprs) => {
+                                assert_eq!(sub_exprs.len(), 1);
+                                match &sub_exprs[0] {
+                                    SelectExpr::Column(qc) => {
+                                        assert_eq!(qc.column, "title");
+                                    }
+                                    _ => panic!("expected Column"),
+                                }
+                            }
+                            _ => panic!("expected Expressions in subquery"),
+                        }
+                    }
+                    _ => panic!("expected ArraySubquery"),
+                }
+            }
+            _ => panic!("expected Expressions"),
+        },
         _ => panic!("expected Select"),
     }
 }
@@ -316,30 +466,28 @@ fn parse_policy_with_or() {
     let stmt = parse(sql).unwrap();
 
     match stmt {
-        Statement::CreatePolicy(policy) => {
-            match policy.where_clause {
-                Some(PolicyExpr::Or(exprs)) => {
-                    assert_eq!(exprs.len(), 2);
+        Statement::CreatePolicy(policy) => match policy.where_clause {
+            Some(PolicyExpr::Or(exprs)) => {
+                assert_eq!(exprs.len(), 2);
 
-                    match &exprs[0] {
-                        PolicyExpr::Eq(left, right) => {
-                            assert_eq!(*left, PolicyValue::Column("assignee_id".into()));
-                            assert_eq!(*right, PolicyValue::Viewer);
-                        }
-                        _ => panic!("expected Eq"),
+                match &exprs[0] {
+                    PolicyExpr::Eq(left, right) => {
+                        assert_eq!(*left, PolicyValue::Column("assignee_id".into()));
+                        assert_eq!(*right, PolicyValue::Viewer);
                     }
-
-                    match &exprs[1] {
-                        PolicyExpr::Inherits { action, column } => {
-                            assert_eq!(*action, PolicyAction::Select);
-                            assert_eq!(*column, PolicyColumnRef::Current("project_id".into()));
-                        }
-                        _ => panic!("expected Inherits"),
-                    }
+                    _ => panic!("expected Eq"),
                 }
-                _ => panic!("expected Or expression"),
+
+                match &exprs[1] {
+                    PolicyExpr::Inherits { action, column } => {
+                        assert_eq!(*action, PolicyAction::Select);
+                        assert_eq!(*column, PolicyColumnRef::Current("project_id".into()));
+                    }
+                    _ => panic!("expected Inherits"),
+                }
             }
-        }
+            _ => panic!("expected Or expression"),
+        },
         _ => panic!("expected CreatePolicy"),
     }
 }
@@ -418,30 +566,28 @@ fn parse_policy_with_literal() {
     let stmt = parse(sql).unwrap();
 
     match stmt {
-        Statement::CreatePolicy(policy) => {
-            match policy.where_clause {
-                Some(PolicyExpr::And(exprs)) => {
-                    assert_eq!(exprs.len(), 2);
+        Statement::CreatePolicy(policy) => match policy.where_clause {
+            Some(PolicyExpr::And(exprs)) => {
+                assert_eq!(exprs.len(), 2);
 
-                    match &exprs[0] {
-                        PolicyExpr::Ne(left, right) => {
-                            assert_eq!(*left, PolicyValue::Column("status".into()));
-                            assert_eq!(*right, PolicyValue::Literal(Value::String("draft".into())));
-                        }
-                        _ => panic!("expected Ne"),
+                match &exprs[0] {
+                    PolicyExpr::Ne(left, right) => {
+                        assert_eq!(*left, PolicyValue::Column("status".into()));
+                        assert_eq!(*right, PolicyValue::Literal(Value::String("draft".into())));
                     }
-
-                    match &exprs[1] {
-                        PolicyExpr::Gt(left, right) => {
-                            assert_eq!(*left, PolicyValue::Column("priority".into()));
-                            assert_eq!(*right, PolicyValue::Literal(Value::I64(5)));
-                        }
-                        _ => panic!("expected Gt"),
-                    }
+                    _ => panic!("expected Ne"),
                 }
-                _ => panic!("expected And expression"),
+
+                match &exprs[1] {
+                    PolicyExpr::Gt(left, right) => {
+                        assert_eq!(*left, PolicyValue::Column("priority".into()));
+                        assert_eq!(*right, PolicyValue::Literal(Value::I64(5)));
+                    }
+                    _ => panic!("expected Gt"),
+                }
             }
-        }
+            _ => panic!("expected And expression"),
+        },
         _ => panic!("expected CreatePolicy"),
     }
 }
@@ -452,20 +598,16 @@ fn parse_policy_with_not_and_parens() {
     let stmt = parse(sql).unwrap();
 
     match stmt {
-        Statement::CreatePolicy(policy) => {
-            match policy.where_clause {
-                Some(PolicyExpr::Not(inner)) => {
-                    match *inner {
-                        PolicyExpr::Eq(left, right) => {
-                            assert_eq!(left, PolicyValue::Column("status".into()));
-                            assert_eq!(right, PolicyValue::Literal(Value::String("deleted".into())));
-                        }
-                        _ => panic!("expected Eq inside Not"),
-                    }
+        Statement::CreatePolicy(policy) => match policy.where_clause {
+            Some(PolicyExpr::Not(inner)) => match *inner {
+                PolicyExpr::Eq(left, right) => {
+                    assert_eq!(left, PolicyValue::Column("status".into()));
+                    assert_eq!(right, PolicyValue::Literal(Value::String("deleted".into())));
                 }
-                _ => panic!("expected Not expression"),
-            }
-        }
+                _ => panic!("expected Eq inside Not"),
+            },
+            _ => panic!("expected Not expression"),
+        },
         _ => panic!("expected CreatePolicy"),
     }
 }
@@ -476,21 +618,19 @@ fn parse_policy_is_null() {
     let stmt = parse(sql).unwrap();
 
     match stmt {
-        Statement::CreatePolicy(policy) => {
-            match policy.where_clause {
-                Some(PolicyExpr::Or(exprs)) => {
-                    assert_eq!(exprs.len(), 2);
+        Statement::CreatePolicy(policy) => match policy.where_clause {
+            Some(PolicyExpr::Or(exprs)) => {
+                assert_eq!(exprs.len(), 2);
 
-                    match &exprs[0] {
-                        PolicyExpr::IsNull(val) => {
-                            assert_eq!(*val, PolicyValue::Column("parent_id".into()));
-                        }
-                        _ => panic!("expected IsNull"),
+                match &exprs[0] {
+                    PolicyExpr::IsNull(val) => {
+                        assert_eq!(*val, PolicyValue::Column("parent_id".into()));
                     }
+                    _ => panic!("expected IsNull"),
                 }
-                _ => panic!("expected Or expression"),
             }
-        }
+            _ => panic!("expected Or expression"),
+        },
         _ => panic!("expected CreatePolicy"),
     }
 }

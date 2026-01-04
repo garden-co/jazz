@@ -1,5 +1,5 @@
-use crate::sql::schema::{ColumnType, TableSchema};
 use crate::object::ObjectId;
+use crate::sql::schema::{ColumnType, TableSchema};
 
 /// Runtime value representation.
 #[derive(Debug, Clone, PartialEq)]
@@ -11,6 +11,11 @@ pub enum Value {
     String(String),
     Bytes(Vec<u8>),
     Ref(ObjectId),
+    /// A composite row value (table alias in SELECT returns this).
+    /// Contains the row's ID and its column values.
+    Row(Box<Row>),
+    /// An array of values (from ARRAY subquery).
+    Array(Vec<Value>),
 }
 
 impl Value {
@@ -63,6 +68,22 @@ impl Value {
     pub fn as_ref(&self) -> Option<ObjectId> {
         match self {
             Value::Ref(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// Try to get as row.
+    pub fn as_row(&self) -> Option<&Row> {
+        match self {
+            Value::Row(row) => Some(row),
+            _ => None,
+        }
+    }
+
+    /// Try to get as array.
+    pub fn as_array(&self) -> Option<&[Value]> {
+        match self {
+            Value::Array(arr) => Some(arr),
             _ => None,
         }
     }
@@ -176,7 +197,11 @@ pub fn encode_row(values: &[Value], schema: &TableSchema) -> Result<Vec<u8>, Row
 }
 
 /// Encode a single column value.
-fn encode_column_value(value: &Value, ty: &ColumnType, nullable: bool) -> Result<Vec<u8>, RowError> {
+fn encode_column_value(
+    value: &Value,
+    ty: &ColumnType,
+    nullable: bool,
+) -> Result<Vec<u8>, RowError> {
     let mut buf = Vec::new();
 
     // Nullable prefix
@@ -258,7 +283,11 @@ pub fn decode_row(data: &[u8], schema: &TableSchema) -> Result<Vec<Value>, RowEr
         // Advance position
         if col.ty.is_fixed_size() {
             let base_size = col.ty.fixed_size().unwrap();
-            pos += if col.nullable { 1 + base_size } else { base_size };
+            pos += if col.nullable {
+                1 + base_size
+            } else {
+                base_size
+            };
         } else {
             pos += variable_lengths[var_idx - 1];
         }
@@ -339,9 +368,7 @@ fn decode_variable_column(data: &[u8], ty: &ColumnType, nullable: bool) -> Resul
             let s = std::str::from_utf8(&data[pos..]).map_err(|_| RowError::InvalidUtf8)?;
             Ok(Value::String(s.to_string()))
         }
-        ColumnType::Bytes => {
-            Ok(Value::Bytes(data[pos..].to_vec()))
-        }
+        ColumnType::Bytes => Ok(Value::Bytes(data[pos..].to_vec())),
         _ => Err(RowError::TypeMismatch {
             expected: "variable-size type".into(),
             got: format!("{:?}", ty),
@@ -367,7 +394,11 @@ impl std::fmt::Display for RowError {
             RowError::VarintOverflow => write!(f, "varint overflow"),
             RowError::InvalidUtf8 => write!(f, "invalid UTF-8 in row data"),
             RowError::ColumnCountMismatch { expected, got } => {
-                write!(f, "column count mismatch: expected {}, got {}", expected, got)
+                write!(
+                    f,
+                    "column count mismatch: expected {}, got {}",
+                    expected, got
+                )
             }
             RowError::NullInNonNullable { column } => {
                 write!(f, "null value in non-nullable column: {}", column)

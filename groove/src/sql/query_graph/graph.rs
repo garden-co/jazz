@@ -88,12 +88,23 @@ impl QueryGraph {
     ) -> Self {
         let mut all_schemas = HashMap::new();
         all_schemas.insert(table.clone(), schema.clone());
+        let mut all_tables = vec![table.clone()];
+
+        // Check for ArrayAggregate nodes and add their inner tables
+        for node in &nodes {
+            if let QueryNode::ArrayAggregate { inner_table, inner_schema, .. } = node {
+                if !all_tables.contains(inner_table) {
+                    all_tables.push(inner_table.clone());
+                    all_schemas.insert(inner_table.clone(), inner_schema.clone());
+                }
+            }
+        }
 
         Self {
             id,
             state: GraphState::Uninitialized,
             table: table.clone(),
-            all_tables: vec![table],
+            all_tables,
             schema,
             all_schemas,
             is_join: false,
@@ -446,6 +457,39 @@ impl QueryGraph {
                     // RecursiveFilter needs special evaluation for fixpoint iteration
                     current = node.evaluate_recursive(current, &self.schema);
                 }
+                QueryNode::ArrayAggregate { outer_table, inner_table, inner_ref_column, .. } => {
+                    // Clone values before borrowing node mutably
+                    let outer_tbl = outer_table.clone();
+                    let inner_tbl = inner_table.clone();
+                    let inner_ref = inner_ref_column.clone();
+
+                    // Check if this delta is for this node
+                    let is_outer_delta = source_table == outer_tbl || contained_tables.contains(&outer_tbl);
+                    let is_inner_delta = source_table == inner_tbl;
+
+                    if is_outer_delta || is_inner_delta {
+                        // Process deltas through ArrayAggregate
+                        let outer_schema = self.all_schemas.get(&outer_tbl)
+                            .cloned()
+                            .unwrap_or_else(|| self.schema.clone());
+
+                        let mut output = DeltaBatch::new();
+                        for d in current.into_iter() {
+                            let batch = node.evaluate_array_aggregate(
+                                d,
+                                source_table,
+                                &outer_schema,
+                                |outer_id| {
+                                    // Look up all inner rows that reference this outer id
+                                    db.find_referencing(&inner_tbl, &inner_ref, outer_id)
+                                },
+                            );
+                            output.extend(batch);
+                        }
+                        current = output;
+                    }
+                    // If not for this node, pass through unchanged
+                }
                 _ => {
                     current = node.evaluate(current, &self.schema, cache);
                 }
@@ -477,6 +521,11 @@ impl QueryGraph {
                         .filter_map(|id| all_rows.get(id).cloned())
                         .collect();
                 }
+            }
+
+            // For ArrayAggregate queries, get rows from outer_rows
+            if let Some(outer_rows) = self.nodes[input_idx].outer_rows() {
+                return outer_rows.values().cloned().collect();
             }
 
             // For single-table queries, use cached IDs
@@ -651,5 +700,186 @@ mod tests {
         assert!(ids.contains(&1));
         assert!(ids.contains(&3));
         assert!(!ids.contains(&2));
+    }
+
+    // Helper schemas and rows for ArrayAggregate tests
+    fn folder_schema() -> TableSchema {
+        TableSchema::new(
+            "folders",
+            vec![ColumnDef::required("name", ColumnType::String)],
+        )
+    }
+
+    fn note_schema() -> TableSchema {
+        TableSchema::new(
+            "notes",
+            vec![
+                ColumnDef::required("folder", ColumnType::Ref("folders".to_string())),
+                ColumnDef::required("title", ColumnType::String),
+            ],
+        )
+    }
+
+    fn make_folder(id: u128, name: &str) -> Row {
+        Row::new(ObjectId::new(id), vec![Value::String(name.to_string())])
+    }
+
+    fn make_note(id: u128, folder_id: u128, title: &str) -> Row {
+        Row::new(
+            ObjectId::new(id),
+            vec![
+                Value::Ref(ObjectId::new(folder_id)),
+                Value::String(title.to_string()),
+            ],
+        )
+    }
+
+    #[test]
+    fn array_aggregate_outer_added() {
+        let outer_schema = folder_schema();
+        let inner_schema = note_schema();
+
+        let mut builder = QueryGraphBuilder::new("folders", outer_schema.clone());
+        let scan = builder.table_scan();
+        let agg = builder.array_aggregate(scan, "notes", "folder", inner_schema.clone(), -1);
+        let mut graph = builder.output(agg, GraphId(1));
+
+        // Verify inner table is tracked
+        assert!(graph.handles_table("folders"));
+        assert!(graph.handles_table("notes"));
+
+        // Create mock database
+        let db = Database::in_memory();
+        db.create_table(outer_schema).unwrap();
+        db.create_table(inner_schema).unwrap();
+
+        let mut cache = RowCache::new();
+
+        // Add a folder
+        let folder = make_folder(1, "Work");
+        let delta = graph.process_change(RowDelta::Added(folder), &mut cache, &db.state());
+
+        // Should emit Added delta with empty array
+        assert_eq!(delta.len(), 1);
+        if let Some(RowDelta::Added(row)) = delta.iter().next() {
+            // Row should have name + array
+            assert_eq!(row.values.len(), 2);
+            // Last value should be empty array
+            if let Value::Array(arr) = &row.values[1] {
+                assert!(arr.is_empty());
+            } else {
+                panic!("Expected array in output row");
+            }
+        } else {
+            panic!("Expected Added delta");
+        }
+    }
+
+    #[test]
+    fn array_aggregate_inner_added_updates_outer() {
+        let outer_schema = folder_schema();
+        let inner_schema = note_schema();
+
+        let mut builder = QueryGraphBuilder::new("folders", outer_schema.clone());
+        let scan = builder.table_scan();
+        let agg = builder.array_aggregate(scan, "notes", "folder", inner_schema.clone(), -1);
+        let mut graph = builder.output(agg, GraphId(1));
+
+        let db = Database::in_memory();
+        db.create_table(outer_schema).unwrap();
+        db.create_table(inner_schema).unwrap();
+
+        let mut cache = RowCache::new();
+
+        // Add a folder first
+        let folder = make_folder(1, "Work");
+        graph.process_change(RowDelta::Added(folder.clone()), &mut cache, &db.state());
+
+        // Now add a note to that folder
+        let note = make_note(100, 1, "Meeting Notes");
+        let delta = graph.process_change_from_table(
+            RowDelta::Added(note),
+            "notes",
+            &mut cache,
+            &db.state(),
+        );
+
+        // Should emit Updated delta for the folder
+        assert_eq!(delta.len(), 1);
+        if let Some(RowDelta::Updated { id, new, .. }) = delta.iter().next() {
+            assert_eq!(id.0, 1);
+            // Row should have name + array with one note
+            assert_eq!(new.values.len(), 2);
+            if let Value::Array(arr) = &new.values[1] {
+                assert_eq!(arr.len(), 1);
+                // Check the note is a Row
+                if let Value::Row(note_row) = &arr[0] {
+                    assert_eq!(note_row.values[1], Value::String("Meeting Notes".to_string()));
+                } else {
+                    panic!("Expected Row in array");
+                }
+            } else {
+                panic!("Expected array in output row");
+            }
+        } else {
+            panic!("Expected Updated delta");
+        }
+    }
+
+    #[test]
+    fn array_aggregate_inner_removed_updates_outer() {
+        let outer_schema = folder_schema();
+        let inner_schema = note_schema();
+
+        let mut builder = QueryGraphBuilder::new("folders", outer_schema.clone());
+        let scan = builder.table_scan();
+        let agg = builder.array_aggregate(scan, "notes", "folder", inner_schema.clone(), -1);
+        let mut graph = builder.output(agg, GraphId(1));
+
+        let db = Database::in_memory();
+        db.create_table(outer_schema).unwrap();
+        db.create_table(inner_schema).unwrap();
+
+        let mut cache = RowCache::new();
+
+        // Add a folder
+        let folder = make_folder(1, "Work");
+        graph.process_change(RowDelta::Added(folder), &mut cache, &db.state());
+
+        // Add two notes
+        let note1 = make_note(100, 1, "Note 1");
+        let note2 = make_note(101, 1, "Note 2");
+        graph.process_change_from_table(RowDelta::Added(note1), "notes", &mut cache, &db.state());
+        graph.process_change_from_table(RowDelta::Added(note2), "notes", &mut cache, &db.state());
+
+        // Verify we have 2 notes
+        let output = graph.get_output(&mut cache, &db.state());
+        assert_eq!(output.len(), 1);
+        if let Value::Array(arr) = &output[0].values[1] {
+            assert_eq!(arr.len(), 2);
+        }
+
+        // Remove one note
+        let delta = graph.process_change_from_table(
+            RowDelta::Removed {
+                id: ObjectId::new(100),
+                prior: crate::sql::query_graph::delta::PriorState::empty(),
+            },
+            "notes",
+            &mut cache,
+            &db.state(),
+        );
+
+        // Should emit Updated delta with one note
+        assert_eq!(delta.len(), 1);
+        if let Some(RowDelta::Updated { new, .. }) = delta.iter().next() {
+            if let Value::Array(arr) = &new.values[1] {
+                assert_eq!(arr.len(), 1);
+            } else {
+                panic!("Expected array");
+            }
+        } else {
+            panic!("Expected Updated delta");
+        }
     }
 }

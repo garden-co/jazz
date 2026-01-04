@@ -2,14 +2,18 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::listener::ListenerId;
-use crate::node::{generate_object_id, LocalNode};
+use crate::node::{LocalNode, generate_object_id};
 use crate::object::ObjectId;
 use crate::sql::index::RefIndex;
-use crate::sql::parser::{self, Condition, Join, Projection, Select, Statement};
-use crate::sql::policy::{Policy, PolicyAction, PolicyError, PolicyExpr, PolicyValue, TablePolicies};
+use crate::sql::parser::{self, Condition, ConditionValue, Join, Projection, Select, SelectExpr, Statement};
+use crate::sql::policy::{
+    Policy, PolicyAction, PolicyError, PolicyExpr, PolicyValue, TablePolicies,
+};
 use crate::sql::query_graph::registry::{GraphRegistry, OutputCallback};
-use crate::sql::query_graph::{GraphId, JoinGraphBuilder, Predicate, PriorState, QueryGraphBuilder, RowDelta};
-use crate::sql::row::{decode_row, encode_row, Row, RowError, Value};
+use crate::sql::query_graph::{
+    GraphId, JoinGraphBuilder, Predicate, PriorState, QueryGraphBuilder, RowDelta,
+};
+use crate::sql::row::{Row, RowError, Value, decode_row, encode_row};
 use crate::sql::schema::{ColumnType, SchemaError, TableSchema};
 use crate::sql::table_rows::TableRows;
 use crate::sql::types::{IndexKey, SchemaId};
@@ -61,7 +65,8 @@ impl JoinedRow {
 
     /// Add another table's row to this joined row.
     fn add_table(&mut self, table: &str, schema: &TableSchema, row: Row) {
-        self.tables.insert(table.to_string(), (schema.clone(), row.id, row.values));
+        self.tables
+            .insert(table.to_string(), (schema.clone(), row.id, row.values));
     }
 
     /// Get a column value by optional table qualifier and column name.
@@ -99,13 +104,35 @@ impl JoinedRow {
 
     /// Check if this joined row matches a WHERE condition.
     fn matches_condition(&self, cond: &Condition) -> bool {
+        use crate::sql::parser::ConditionValue;
+
         let table = cond.column.table.as_deref();
         let column = &cond.column.column;
 
-        // Handle special "id" column
+        // Get the right-hand side value (either literal or from another column)
+        let rhs_value: Option<Value> = match &cond.right {
+            ConditionValue::Literal(v) => Some(v.clone()),
+            ConditionValue::Column(rhs_col) => {
+                // Get value from referenced column
+                if rhs_col.column == "id" {
+                    let rhs_table = rhs_col.table.as_deref().unwrap_or(&self.primary_table);
+                    self.get_row_id(rhs_table).map(Value::Ref)
+                } else {
+                    self.get_column(rhs_col.table.as_deref(), &rhs_col.column)
+                        .cloned()
+                }
+            }
+        };
+
+        let rhs_value = match rhs_value {
+            Some(v) => v,
+            None => return false,
+        };
+
+        // Handle special "id" column on left side
         if column == "id" {
             // Coerce String to Ref for id comparison
-            let coerced = coerce_value(cond.value.clone(), &ColumnType::Ref("".to_string()));
+            let coerced = coerce_value(rhs_value, &ColumnType::Ref("".to_string()));
             if let Value::Ref(target_id) = coerced {
                 if let Some(table_name) = table {
                     if let Some(row_id) = self.get_row_id(table_name) {
@@ -125,7 +152,7 @@ impl JoinedRow {
         if let Some(table_name) = table {
             if let Some((schema, _, values)) = self.tables.get(table_name) {
                 if let Some(idx) = schema.column_index(column) {
-                    let coerced = coerce_value(cond.value.clone(), &schema.columns[idx].ty);
+                    let coerced = coerce_value(rhs_value, &schema.columns[idx].ty);
                     return values.get(idx) == Some(&coerced);
                 }
             }
@@ -133,7 +160,7 @@ impl JoinedRow {
             // Unqualified column: search all tables
             for (schema, _, values) in self.tables.values() {
                 if let Some(idx) = schema.column_index(column) {
-                    let coerced = coerce_value(cond.value.clone(), &schema.columns[idx].ty);
+                    let coerced = coerce_value(rhs_value.clone(), &schema.columns[idx].ty);
                     return values.get(idx) == Some(&coerced);
                 }
             }
@@ -144,7 +171,9 @@ impl JoinedRow {
     /// Convert to output Row with combined values from all tables.
     /// Uses primary table's row ID as the output row ID.
     fn to_output_row(self, projection: &Projection) -> Row {
-        let row_id = self.tables.get(&self.primary_table)
+        let row_id = self
+            .tables
+            .get(&self.primary_table)
             .map(|(_, id, _)| *id)
             .unwrap_or(ObjectId::default());
 
@@ -175,6 +204,11 @@ impl JoinedRow {
                 cols.iter()
                     .filter_map(|qc| self.get_column(qc.table.as_deref(), &qc.column).cloned())
                     .collect()
+            }
+            Projection::Expressions(_) => {
+                // Expressions are handled in execute_select, not here
+                // This path should not be reached for JoinedRow
+                panic!("Projection::Expressions should be handled in execute_select");
             }
         };
 
@@ -222,7 +256,9 @@ impl IncrementalQuery {
     ///
     /// Returns a `ListenerId` that can be used to unsubscribe.
     pub fn subscribe_delta(&self, callback: OutputCallback) -> Option<ListenerId> {
-        self.db_state.graph_registry.subscribe(self.graph_id, callback)
+        self.db_state
+            .graph_registry
+            .subscribe(self.graph_id, callback)
     }
 
     /// Subscribe to query output changes with a full rows callback.
@@ -230,7 +266,10 @@ impl IncrementalQuery {
     /// This is a convenience wrapper that provides the full current row set
     /// on each change, rather than the delta. Less efficient but simpler.
     #[cfg(not(feature = "wasm"))]
-    pub fn subscribe(&self, callback: impl Fn(Vec<Row>) + Send + Sync + 'static) -> Option<ListenerId> {
+    pub fn subscribe(
+        &self,
+        callback: impl Fn(Vec<Row>) + Send + Sync + 'static,
+    ) -> Option<ListenerId> {
         let db_state = self.db_state.clone();
         let graph_id = self.graph_id;
 
@@ -269,7 +308,9 @@ impl IncrementalQuery {
 
     /// Unsubscribe a callback.
     pub fn unsubscribe(&self, listener_id: ListenerId) -> bool {
-        self.db_state.graph_registry.unsubscribe(self.graph_id, listener_id)
+        self.db_state
+            .graph_registry
+            .unsubscribe(self.graph_id, listener_id)
     }
 
     /// Get the graph ID (for testing/debugging).
@@ -314,7 +355,10 @@ pub struct DatabaseState {
 impl std::fmt::Debug for DatabaseState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DatabaseState")
-            .field("tables", &self.tables.read().unwrap().keys().collect::<Vec<_>>())
+            .field(
+                "tables",
+                &self.tables.read().unwrap().keys().collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -471,6 +515,7 @@ impl DatabaseState {
     /// This is the shared implementation used by both reactive queries and direct execution.
     fn execute_select(&self, select: &Select) -> Vec<Row> {
         let primary_table = &select.from.table;
+        let table_alias = select.from.alias.as_deref();
 
         // Get primary table schema
         let primary_schema = match self.get_schema(primary_table) {
@@ -483,10 +528,33 @@ impl DatabaseState {
 
         if select.from.joins.is_empty() {
             // Simple case: no JOINs
-            primary_rows
+            let filtered: Vec<Row> = primary_rows
                 .into_iter()
-                .filter(|row| Self::matches_where_simple(&select.where_clause, &row.values, &primary_schema))
-                .collect()
+                .filter(|row| {
+                    Self::matches_where_simple(&select.where_clause, &row.values, &primary_schema)
+                })
+                .collect();
+
+            // Check if we need to evaluate expressions (for ARRAY subqueries)
+            match &select.projection {
+                Projection::Expressions(exprs) => {
+                    // Evaluate each expression for each row
+                    filtered
+                        .into_iter()
+                        .map(|row| {
+                            let values = self.evaluate_projection_exprs(
+                                exprs,
+                                &row,
+                                primary_table,
+                                table_alias,
+                                &primary_schema,
+                            );
+                            Row::new(row.id, values)
+                        })
+                        .collect()
+                }
+                _ => filtered,
+            }
         } else {
             // JOIN case: build joined rows
             let mut joined_rows: Vec<JoinedRow> = primary_rows
@@ -512,6 +580,322 @@ impl DatabaseState {
         }
     }
 
+    /// Evaluate projection expressions for a single outer row.
+    fn evaluate_projection_exprs(
+        &self,
+        exprs: &[SelectExpr],
+        outer_row: &Row,
+        outer_table: &str,
+        outer_alias: Option<&str>,
+        outer_schema: &TableSchema,
+    ) -> Vec<Value> {
+        exprs
+            .iter()
+            .map(|expr| {
+                self.evaluate_select_expr(expr, outer_row, outer_table, outer_alias, outer_schema)
+            })
+            .collect()
+    }
+
+    /// Evaluate a single SELECT expression.
+    fn evaluate_select_expr(
+        &self,
+        expr: &SelectExpr,
+        outer_row: &Row,
+        outer_table: &str,
+        outer_alias: Option<&str>,
+        outer_schema: &TableSchema,
+    ) -> Value {
+        match expr {
+            SelectExpr::Column(qc) => {
+                // Check if this is a reference to the outer table alias (composite row)
+                if qc.table.is_none() {
+                    // Bare identifier - check if it matches outer table alias
+                    if let Some(alias) = outer_alias {
+                        if qc.column == alias {
+                            // Return the whole row as Value::Row
+                            return Value::Row(Box::new(outer_row.clone()));
+                        }
+                    }
+                    // Also check if it matches the table name
+                    if qc.column == outer_table {
+                        return Value::Row(Box::new(outer_row.clone()));
+                    }
+                }
+
+                // Regular column reference
+                if qc.column == "id" {
+                    Value::Ref(outer_row.id)
+                } else if let Some(idx) = outer_schema.column_index(&qc.column) {
+                    outer_row.values.get(idx).cloned().unwrap_or(Value::Null)
+                } else {
+                    Value::Null
+                }
+            }
+
+            SelectExpr::TableRow(alias) => {
+                // Direct table row reference - return the whole row
+                if outer_alias == Some(alias.as_str()) || alias == outer_table {
+                    Value::Row(Box::new(outer_row.clone()))
+                } else {
+                    Value::Null
+                }
+            }
+
+            SelectExpr::ArraySubquery(subquery) => {
+                // Execute subquery with outer row context
+                self.execute_array_subquery(subquery, outer_row, outer_table, outer_alias, outer_schema)
+            }
+
+            SelectExpr::Aliased { expr, .. } => {
+                // Alias doesn't affect the value, just evaluate the inner expression
+                self.evaluate_select_expr(expr, outer_row, outer_table, outer_alias, outer_schema)
+            }
+        }
+    }
+
+    /// Execute an ARRAY subquery with outer row context.
+    fn execute_array_subquery(
+        &self,
+        subquery: &Select,
+        outer_row: &Row,
+        outer_table: &str,
+        outer_alias: Option<&str>,
+        outer_schema: &TableSchema,
+    ) -> Value {
+        let inner_table = &subquery.from.table;
+        let inner_alias = subquery.from.alias.as_deref();
+
+        let inner_schema = match self.get_schema(inner_table) {
+            Some(s) => s,
+            None => return Value::Array(vec![]),
+        };
+
+        // Read all rows from inner table
+        let inner_rows = self.read_all_rows(inner_table);
+
+        // Filter by WHERE clause, resolving outer references
+        let filtered: Vec<Row> = inner_rows
+            .into_iter()
+            .filter(|inner_row| {
+                self.matches_where_with_outer(
+                    &subquery.where_clause,
+                    inner_row,
+                    inner_table,
+                    inner_alias,
+                    &inner_schema,
+                    outer_row,
+                    outer_table,
+                    outer_alias,
+                    outer_schema,
+                )
+            })
+            .collect();
+
+        // Apply projection to get the values
+        let array_values: Vec<Value> = match &subquery.projection {
+            Projection::All => {
+                // SELECT * - return all values as Row
+                filtered
+                    .into_iter()
+                    .map(|row| Value::Row(Box::new(row)))
+                    .collect()
+            }
+            Projection::Expressions(exprs) => {
+                // Check if it's just the table alias (returns whole row)
+                if exprs.len() == 1 {
+                    if let SelectExpr::Column(qc) = &exprs[0] {
+                        if qc.table.is_none() {
+                            let name = &qc.column;
+                            if inner_alias == Some(name.as_str()) || name == inner_table {
+                                // Table alias - return whole rows
+                                return Value::Array(
+                                    filtered
+                                        .into_iter()
+                                        .map(|row| Value::Row(Box::new(row)))
+                                        .collect(),
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Evaluate expressions for each row
+                filtered
+                    .into_iter()
+                    .map(|inner_row| {
+                        let values = self.evaluate_projection_exprs(
+                            exprs,
+                            &inner_row,
+                            inner_table,
+                            inner_alias,
+                            &inner_schema,
+                        );
+                        if values.len() == 1 {
+                            // Single column - return the value directly
+                            values.into_iter().next().unwrap_or(Value::Null)
+                        } else {
+                            // Multiple columns - wrap in Row
+                            Value::Row(Box::new(Row::new(inner_row.id, values)))
+                        }
+                    })
+                    .collect()
+            }
+            Projection::TableAll(table) => {
+                if table == inner_table || inner_alias == Some(table.as_str()) {
+                    filtered
+                        .into_iter()
+                        .map(|row| Value::Row(Box::new(row)))
+                        .collect()
+                } else {
+                    vec![]
+                }
+            }
+            Projection::Columns(cols) => {
+                filtered
+                    .into_iter()
+                    .map(|inner_row| {
+                        let values: Vec<Value> = cols
+                            .iter()
+                            .filter_map(|qc| {
+                                if qc.column == "id" {
+                                    Some(Value::Ref(inner_row.id))
+                                } else {
+                                    inner_schema
+                                        .column_index(&qc.column)
+                                        .and_then(|idx| inner_row.values.get(idx).cloned())
+                                }
+                            })
+                            .collect();
+                        if values.len() == 1 {
+                            values.into_iter().next().unwrap_or(Value::Null)
+                        } else {
+                            Value::Row(Box::new(Row::new(inner_row.id, values)))
+                        }
+                    })
+                    .collect()
+            }
+        };
+
+        Value::Array(array_values)
+    }
+
+    /// Check if a row matches WHERE conditions, resolving references to outer row.
+    #[allow(clippy::too_many_arguments)]
+    fn matches_where_with_outer(
+        &self,
+        conditions: &[Condition],
+        inner_row: &Row,
+        inner_table: &str,
+        inner_alias: Option<&str>,
+        inner_schema: &TableSchema,
+        outer_row: &Row,
+        outer_table: &str,
+        outer_alias: Option<&str>,
+        outer_schema: &TableSchema,
+    ) -> bool {
+        for cond in conditions {
+            let lhs_table = cond.column.table.as_deref();
+            let lhs_col = &cond.column.column;
+
+            // Resolve left-hand side value
+            let lhs_value = self.resolve_column_value(
+                lhs_table,
+                lhs_col,
+                inner_row,
+                inner_table,
+                inner_alias,
+                inner_schema,
+                outer_row,
+                outer_table,
+                outer_alias,
+                outer_schema,
+            );
+
+            // Resolve right-hand side value
+            let rhs_value = match &cond.right {
+                ConditionValue::Literal(v) => Some(v.clone()),
+                ConditionValue::Column(rhs_col) => self.resolve_column_value(
+                    rhs_col.table.as_deref(),
+                    &rhs_col.column,
+                    inner_row,
+                    inner_table,
+                    inner_alias,
+                    inner_schema,
+                    outer_row,
+                    outer_table,
+                    outer_alias,
+                    outer_schema,
+                ),
+            };
+
+            // Compare values
+            match (lhs_value, rhs_value) {
+                (Some(lhs), Some(rhs)) => {
+                    if lhs != rhs {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+        true
+    }
+
+    /// Resolve a column reference, looking in both inner and outer contexts.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_column_value(
+        &self,
+        table_ref: Option<&str>,
+        column: &str,
+        inner_row: &Row,
+        inner_table: &str,
+        inner_alias: Option<&str>,
+        inner_schema: &TableSchema,
+        outer_row: &Row,
+        outer_table: &str,
+        outer_alias: Option<&str>,
+        outer_schema: &TableSchema,
+    ) -> Option<Value> {
+        // Check if this references the inner table
+        let is_inner = match table_ref {
+            Some(t) => t == inner_table || inner_alias == Some(t),
+            None => {
+                // Unqualified - check inner first
+                column == "id" || inner_schema.column_index(column).is_some()
+            }
+        };
+
+        if is_inner {
+            if column == "id" {
+                return Some(Value::Ref(inner_row.id));
+            }
+            if let Some(idx) = inner_schema.column_index(column) {
+                return inner_row.values.get(idx).cloned();
+            }
+        }
+
+        // Check if this references the outer table
+        let is_outer = match table_ref {
+            Some(t) => t == outer_table || outer_alias == Some(t),
+            None => {
+                // Unqualified - check outer if not found in inner
+                column == "id" || outer_schema.column_index(column).is_some()
+            }
+        };
+
+        if is_outer {
+            if column == "id" {
+                return Some(Value::Ref(outer_row.id));
+            }
+            if let Some(idx) = outer_schema.column_index(column) {
+                return outer_row.values.get(idx).cloned();
+            }
+        }
+
+        None
+    }
+
     /// Apply a single JOIN to a set of joined rows.
     fn apply_join(&self, rows: Vec<JoinedRow>, join: &Join) -> Vec<JoinedRow> {
         let join_schema = match self.get_schema(&join.table) {
@@ -528,8 +912,9 @@ impl DatabaseState {
             let right_column = &join.on.right.column;
 
             // Determine which side references the join table
-            let (lookup_value, join_column) = if right_table == Some(join.table.as_str()) ||
-                (right_table.is_none() && join_schema.column_index(right_column).is_some()) {
+            let (lookup_value, join_column) = if right_table == Some(join.table.as_str())
+                || (right_table.is_none() && join_schema.column_index(right_column).is_some())
+            {
                 // Right side is from join table
                 let left_val = if left_column == "id" {
                     let table_name = left_table.unwrap_or(&jr.primary_table);
@@ -580,14 +965,24 @@ impl DatabaseState {
     }
 
     /// Simple WHERE matching for non-JOIN queries.
-    fn matches_where_simple(where_clause: &[Condition], values: &[Value], schema: &TableSchema) -> bool {
+    fn matches_where_simple(
+        where_clause: &[Condition],
+        values: &[Value],
+        schema: &TableSchema,
+    ) -> bool {
         for cond in where_clause {
             let col_idx = match schema.column_index(&cond.column.column) {
                 Some(idx) => idx,
                 None => return false,
             };
+            // Only handle literal values in simple WHERE matching
+            // Column references are handled in JoinedRow::matches_condition
+            let value = match cond.value() {
+                Some(v) => v.clone(),
+                None => return false, // Column references not supported in simple matches
+            };
             // Coerce the condition value to match the column type
-            let coerced = coerce_value(cond.value.clone(), &schema.columns[col_idx].ty);
+            let coerced = coerce_value(value, &schema.columns[col_idx].ty);
             if values[col_idx] != coerced {
                 return false;
             }
@@ -683,19 +1078,30 @@ pub enum DatabaseError {
     /// Column count mismatch.
     ColumnMismatch { expected: usize, got: usize },
     /// Type mismatch.
-    TypeMismatch { column: String, expected: String, got: String },
+    TypeMismatch {
+        column: String,
+        expected: String,
+        got: String,
+    },
     /// Missing required column in INSERT.
     MissingColumn(String),
     /// Storage error.
     Storage(String),
     /// Invalid reference: target row doesn't exist.
-    InvalidReference { column: String, target_table: String, target_id: ObjectId },
+    InvalidReference {
+        column: String,
+        target_table: String,
+        target_id: ObjectId,
+    },
     /// Column is not a reference type.
     NotAReference(String),
     /// Policy error.
     Policy(PolicyError),
     /// Policy denied the operation.
-    PolicyDenied { action: PolicyAction, reason: String },
+    PolicyDenied {
+        action: PolicyAction,
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for DatabaseError {
@@ -709,16 +1115,35 @@ impl std::fmt::Display for DatabaseError {
             DatabaseError::Row(e) => write!(f, "row error: {}", e),
             DatabaseError::Parse(e) => write!(f, "parse error: {}", e),
             DatabaseError::ColumnMismatch { expected, got } => {
-                write!(f, "column count mismatch: expected {}, got {}", expected, got)
+                write!(
+                    f,
+                    "column count mismatch: expected {}, got {}",
+                    expected, got
+                )
             }
-            DatabaseError::TypeMismatch { column, expected, got } => {
-                write!(f, "type mismatch for '{}': expected {}, got {}", column, expected, got)
+            DatabaseError::TypeMismatch {
+                column,
+                expected,
+                got,
+            } => {
+                write!(
+                    f,
+                    "type mismatch for '{}': expected {}, got {}",
+                    column, expected, got
+                )
             }
             DatabaseError::MissingColumn(name) => write!(f, "missing required column: {}", name),
             DatabaseError::Storage(e) => write!(f, "storage error: {}", e),
-            DatabaseError::InvalidReference { column, target_table, target_id } => {
-                write!(f, "invalid reference in '{}': row {} not found in table '{}'",
-                       column, target_id, target_table)
+            DatabaseError::InvalidReference {
+                column,
+                target_table,
+                target_id,
+            } => {
+                write!(
+                    f,
+                    "invalid reference in '{}': row {} not found in table '{}'",
+                    column, target_id, target_table
+                )
             }
             DatabaseError::NotAReference(name) => write!(f, "column '{}' is not a reference", name),
             DatabaseError::Policy(e) => write!(f, "policy error: {}", e),
@@ -806,10 +1231,14 @@ impl Database {
     /// Read an index from its object.
     fn read_index(&self, key: &IndexKey) -> Result<RefIndex, DatabaseError> {
         let index_objects = self.state.index_objects.read().unwrap();
-        let index_id = index_objects.get(key)
+        let index_id = index_objects
+            .get(key)
             .ok_or_else(|| DatabaseError::ColumnNotFound(key.source_column.clone()))?;
 
-        let data = self.state.node.read_sync(*index_id, "main")
+        let data = self
+            .state
+            .node
+            .read_sync(*index_id, "main")
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
             .unwrap_or_default();
 
@@ -824,11 +1253,19 @@ impl Database {
     /// Write an index to its object.
     fn write_index(&self, key: &IndexKey, index: &RefIndex) -> Result<(), DatabaseError> {
         let index_objects = self.state.index_objects.read().unwrap();
-        let index_id = index_objects.get(key)
+        let index_id = index_objects
+            .get(key)
             .ok_or_else(|| DatabaseError::ColumnNotFound(key.source_column.clone()))?;
 
-        self.state.node
-            .write_sync(*index_id, "main", &index.to_bytes(), "system", timestamp_now())
+        self.state
+            .node
+            .write_sync(
+                *index_id,
+                "main",
+                &index.to_bytes(),
+                "system",
+                timestamp_now(),
+            )
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         Ok(())
@@ -844,10 +1281,14 @@ impl Database {
     /// Read table rows from its object.
     fn read_table_rows(&self, table: &str) -> Result<TableRows, DatabaseError> {
         let table_rows_objects = self.state.table_rows_objects.read().unwrap();
-        let rows_id = table_rows_objects.get(table)
+        let rows_id = table_rows_objects
+            .get(table)
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
-        let data = self.state.node.read_sync(*rows_id, "main")
+        let data = self
+            .state
+            .node
+            .read_sync(*rows_id, "main")
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
             .unwrap_or_default();
 
@@ -862,11 +1303,19 @@ impl Database {
     /// Write table rows to its object.
     fn write_table_rows(&self, table: &str, rows: &TableRows) -> Result<(), DatabaseError> {
         let table_rows_objects = self.state.table_rows_objects.read().unwrap();
-        let rows_id = table_rows_objects.get(table)
+        let rows_id = table_rows_objects
+            .get(table)
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
-        self.state.node
-            .write_sync(*rows_id, "main", &rows.to_bytes(), "system", timestamp_now())
+        self.state
+            .node
+            .write_sync(
+                *rows_id,
+                "main",
+                &rows.to_bytes(),
+                "system",
+                timestamp_now(),
+            )
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         Ok(())
@@ -874,7 +1323,12 @@ impl Database {
 
     /// Get the object ID for a table's row set.
     pub fn table_rows_object_id(&self, table: &str) -> Option<ObjectId> {
-        self.state.table_rows_objects.read().unwrap().get(table).copied()
+        self.state
+            .table_rows_objects
+            .read()
+            .unwrap()
+            .get(table)
+            .copied()
     }
 
     /// Create a new table from schema.
@@ -898,41 +1352,81 @@ impl Database {
         }
 
         // Create object for schema (uses internal mutability)
-        let schema_id = self.state.node.create_object(&format!("schema:{}", schema.name));
+        let schema_id = self
+            .state
+            .node
+            .create_object(&format!("schema:{}", schema.name));
 
         // Serialize and store schema
         let schema_bytes = schema.to_bytes();
-        self.state.node
+        self.state
+            .node
             .write_sync(schema_id, "main", &schema_bytes, "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         // Create table rows object to track row membership
-        let rows_id = self.state.node.create_object(&format!("rows:{}", schema.name));
+        let rows_id = self
+            .state
+            .node
+            .create_object(&format!("rows:{}", schema.name));
         let empty_rows = TableRows::new();
-        self.state.node
-            .write_sync(rows_id, "main", &empty_rows.to_bytes(), "system", timestamp_now())
+        self.state
+            .node
+            .write_sync(
+                rows_id,
+                "main",
+                &empty_rows.to_bytes(),
+                "system",
+                timestamp_now(),
+            )
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
-        self.state.table_rows_objects.write().unwrap().insert(schema.name.clone(), rows_id);
+        self.state
+            .table_rows_objects
+            .write()
+            .unwrap()
+            .insert(schema.name.clone(), rows_id);
 
         // Create index objects for Ref columns
         for col in &schema.columns {
             if matches!(col.ty, ColumnType::Ref(_)) {
                 let key = IndexKey::new(&schema.name, &col.name);
-                let index_id = self.state.node.create_object(&format!("index:{}:{}", schema.name, col.name));
+                let index_id = self
+                    .state
+                    .node
+                    .create_object(&format!("index:{}:{}", schema.name, col.name));
 
                 // Initialize with empty index
                 let empty_index = RefIndex::new();
-                self.state.node
-                    .write_sync(index_id, "main", &empty_index.to_bytes(), "system", timestamp_now())
+                self.state
+                    .node
+                    .write_sync(
+                        index_id,
+                        "main",
+                        &empty_index.to_bytes(),
+                        "system",
+                        timestamp_now(),
+                    )
                     .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
-                self.state.index_objects.write().unwrap().insert(key, index_id);
+                self.state
+                    .index_objects
+                    .write()
+                    .unwrap()
+                    .insert(key, index_id);
             }
         }
 
         // Cache schema
-        self.state.tables.write().unwrap().insert(schema.name.clone(), schema_id);
-        self.state.schemas.write().unwrap().insert(schema_id, schema);
+        self.state
+            .tables
+            .write()
+            .unwrap()
+            .insert(schema.name.clone(), schema_id);
+        self.state
+            .schemas
+            .write()
+            .unwrap()
+            .insert(schema_id, schema);
 
         Ok(schema_id)
     }
@@ -977,8 +1471,14 @@ impl Database {
     }
 
     /// Insert a new row into a table.
-    pub fn insert(&self, table: &str, columns: &[&str], values: Vec<Value>) -> Result<ObjectId, DatabaseError> {
-        let schema = self.get_table(table)
+    pub fn insert(
+        &self,
+        table: &str,
+        columns: &[&str],
+        values: Vec<Value>,
+    ) -> Result<ObjectId, DatabaseError> {
+        let schema = self
+            .get_table(table)
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
         // Build full row values in schema order
@@ -992,7 +1492,8 @@ impl Database {
         }
 
         for (col_name, value) in columns.iter().zip(values) {
-            let idx = schema.column_index(col_name)
+            let idx = schema
+                .column_index(col_name)
                 .ok_or_else(|| DatabaseError::ColumnNotFound(col_name.to_string()))?;
             // Coerce the value to match the column type (e.g., String -> Ref)
             row_values[idx] = coerce_value(value, &schema.columns[idx].ty);
@@ -1037,15 +1538,23 @@ impl Database {
         let row_bytes = encode_row(&row_values, &schema)?;
 
         // Create object for row
-        let row_id = self.state.node.create_object(&format!("row:{}:{}", table, generate_object_id()));
+        let row_id =
+            self.state
+                .node
+                .create_object(&format!("row:{}:{}", table, generate_object_id()));
 
         // Store row data
-        self.state.node
+        self.state
+            .node
             .write_sync(row_id, "main", &row_bytes, "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         // Track row -> table mapping
-        self.state.row_table.write().unwrap().insert(row_id, table.to_string());
+        self.state
+            .row_table
+            .write()
+            .unwrap()
+            .insert(row_id, table.to_string());
 
         // Add to table rows object (for reactive queries)
         let mut table_rows = self.read_table_rows(table)?;
@@ -1068,14 +1577,17 @@ impl Database {
 
         // Notify query graphs of the change
         let row = Row::new(row_id, row_values);
-        self.state.graph_registry.notify_row_change(table, RowDelta::Added(row), &*self.state);
+        self.state
+            .graph_registry
+            .notify_row_change(table, RowDelta::Added(row), &*self.state);
 
         Ok(row_id)
     }
 
     /// Get a row by ID.
     pub fn get(&self, table: &str, id: ObjectId) -> Result<Option<Row>, DatabaseError> {
-        let schema = self.get_table(table)
+        let schema = self
+            .get_table(table)
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
         // Check if row belongs to this table
@@ -1108,7 +1620,8 @@ impl Database {
         id: ObjectId,
         assignments: &[(&str, Value)],
     ) -> Result<bool, DatabaseError> {
-        let schema = self.get_table(table)
+        let schema = self
+            .get_table(table)
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
         // Check row exists and belongs to table
@@ -1133,7 +1646,8 @@ impl Database {
 
         // Apply assignments
         for (col_name, value) in assignments {
-            let idx = schema.column_index(col_name)
+            let idx = schema
+                .column_index(col_name)
                 .ok_or_else(|| DatabaseError::ColumnNotFound(col_name.to_string()))?;
             // Coerce the value to match the column type (e.g., String -> Ref)
             new_values[idx] = coerce_value(value.clone(), &schema.columns[idx].ty);
@@ -1168,7 +1682,8 @@ impl Database {
         let row_bytes = encode_row(&new_values, &schema)?;
 
         // Write updated row
-        self.state.node
+        self.state
+            .node
             .write_sync(id, "main", &row_bytes, "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
@@ -1213,7 +1728,8 @@ impl Database {
 
     /// Delete a row by ID (tombstone).
     pub fn delete(&self, table: &str, id: ObjectId) -> Result<bool, DatabaseError> {
-        let schema = self.get_table(table)
+        let schema = self
+            .get_table(table)
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
         // Check row exists and belongs to table
@@ -1250,7 +1766,8 @@ impl Database {
         }
 
         // Write tombstone marker (empty content)
-        self.state.node
+        self.state
+            .node
             .write_sync(id, "main", &[], "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
@@ -1278,7 +1795,8 @@ impl Database {
     /// Simple select - returns all rows from a table.
     /// For now, implements only basic scans.
     pub fn select_all(&self, table: &str) -> Result<Vec<Row>, DatabaseError> {
-        let schema = self.get_table(table)
+        let schema = self
+            .get_table(table)
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
         let mut rows = Vec::new();
@@ -1313,7 +1831,8 @@ impl Database {
         column: &str,
         value: &Value,
     ) -> Result<Vec<Row>, DatabaseError> {
-        let schema = self.get_table(table)
+        let schema = self
+            .get_table(table)
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
         // Special case: id column (implicit, not in schema)
@@ -1330,7 +1849,8 @@ impl Database {
             return Ok(vec![]);
         }
 
-        let col_idx = schema.column_index(column)
+        let col_idx = schema
+            .column_index(column)
             .ok_or_else(|| DatabaseError::ColumnNotFound(column.to_string()))?;
 
         // Coerce the value to match the column type
@@ -1407,7 +1927,8 @@ impl Database {
     ) -> Result<ObjectId, DatabaseError> {
         use crate::sql::policy::{PolicyConfig, PolicyEvaluator, PolicyResult};
 
-        let schema = self.get_table(table)
+        let schema = self
+            .get_table(table)
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
         // Build the row values first (to validate and check policy)
@@ -1421,7 +1942,8 @@ impl Database {
         }
 
         for (col_name, value) in columns.iter().zip(values.clone()) {
-            let idx = schema.column_index(col_name)
+            let idx = schema
+                .column_index(col_name)
                 .ok_or_else(|| DatabaseError::ColumnNotFound(col_name.to_string()))?;
             row_values[idx] = coerce_value(value, &schema.columns[idx].ty);
         }
@@ -1465,7 +1987,8 @@ impl Database {
     ) -> Result<bool, DatabaseError> {
         use crate::sql::policy::{PolicyConfig, PolicyEvaluator, PolicyResult};
 
-        let schema = self.get_table(table)
+        let schema = self
+            .get_table(table)
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
         // Get the existing row
@@ -1477,7 +2000,8 @@ impl Database {
         // Build the new row values
         let mut new_values = old_row.values.clone();
         for (col_name, value) in assignments {
-            let idx = schema.column_index(col_name)
+            let idx = schema
+                .column_index(col_name)
                 .ok_or_else(|| DatabaseError::ColumnNotFound(col_name.to_string()))?;
             new_values[idx] = coerce_value(value.clone(), &schema.columns[idx].ty);
         }
@@ -1545,11 +2069,13 @@ impl Database {
         source_column: &str,
         target_id: ObjectId,
     ) -> Result<Vec<Row>, DatabaseError> {
-        let schema = self.get_table(source_table)
+        let schema = self
+            .get_table(source_table)
             .ok_or_else(|| DatabaseError::TableNotFound(source_table.to_string()))?;
 
         // Verify column is a Ref type
-        let col = schema.column(source_column)
+        let col = schema
+            .column(source_column)
             .ok_or_else(|| DatabaseError::ColumnNotFound(source_column.to_string()))?;
         if !matches!(col.ty, ColumnType::Ref(_)) {
             return Err(DatabaseError::NotAReference(source_column.to_string()));
@@ -1557,12 +2083,13 @@ impl Database {
 
         // Look up in index
         let key = IndexKey::new(source_table, source_column);
-        let source_ids: Vec<ObjectId> = if self.state.index_objects.read().unwrap().contains_key(&key) {
-            let index = self.read_index(&key)?;
-            index.get(target_id).collect()
-        } else {
-            return Ok(vec![]); // No index means no refs
-        };
+        let source_ids: Vec<ObjectId> =
+            if self.state.index_objects.read().unwrap().contains_key(&key) {
+                let index = self.read_index(&key)?;
+                index.get(target_id).collect()
+            } else {
+                return Ok(vec![]); // No index means no refs
+            };
 
         // Fetch the actual rows
         let mut rows = Vec::new();
@@ -1602,23 +2129,41 @@ impl Database {
                     self.select_all(&upd.table)?
                 } else if upd.where_clause.len() == 1 {
                     let cond = &upd.where_clause[0];
-                    self.select_where(&upd.table, &cond.column.column, &cond.value)?
+                    let value = cond.value().ok_or_else(|| {
+                        DatabaseError::ColumnNotFound(
+                            "column references not supported in UPDATE WHERE".to_string(),
+                        )
+                    })?;
+                    self.select_where(&upd.table, &cond.column.column, value)?
                 } else {
                     // Multiple conditions - start with first, then filter
                     let cond = &upd.where_clause[0];
-                    let mut rows = self.select_where(&upd.table, &cond.column.column, &cond.value)?;
+                    let value = cond.value().ok_or_else(|| {
+                        DatabaseError::ColumnNotFound(
+                            "column references not supported in UPDATE WHERE".to_string(),
+                        )
+                    })?;
+                    let mut rows = self.select_where(&upd.table, &cond.column.column, value)?;
                     let schema = self.get_table(&upd.table).unwrap();
 
                     for cond in &upd.where_clause[1..] {
-                        let col_idx = schema.column_index(&cond.column.column)
-                            .ok_or_else(|| DatabaseError::ColumnNotFound(cond.column.column.clone()))?;
-                        rows.retain(|row| &row.values[col_idx] == &cond.value);
+                        let col_idx =
+                            schema.column_index(&cond.column.column).ok_or_else(|| {
+                                DatabaseError::ColumnNotFound(cond.column.column.clone())
+                            })?;
+                        let value = cond.value().ok_or_else(|| {
+                            DatabaseError::ColumnNotFound(
+                                "column references not supported in UPDATE WHERE".to_string(),
+                            )
+                        })?;
+                        rows.retain(|row| row.values.get(col_idx) == Some(value));
                     }
                     rows
                 };
 
                 let count = rows_to_update.len();
-                let assignments: Vec<(&str, Value)> = upd.assignments
+                let assignments: Vec<(&str, Value)> = upd
+                    .assignments
                     .iter()
                     .map(|(k, v)| (k.as_str(), v.clone()))
                     .collect();
@@ -1650,10 +2195,12 @@ impl Database {
 
         let select = match stmt {
             Statement::Select(s) => s,
-            _ => return Err(DatabaseError::Parse(parser::ParseError {
-                message: "incremental_query only supports SELECT statements".to_string(),
-                position: 0,
-            })),
+            _ => {
+                return Err(DatabaseError::Parse(parser::ParseError {
+                    message: "incremental_query only supports SELECT statements".to_string(),
+                    position: 0,
+                }));
+            }
         };
 
         let graph = if select.from.joins.is_empty() {
@@ -1692,10 +2239,12 @@ impl Database {
 
         let select = match stmt {
             Statement::Select(s) => s,
-            _ => return Err(DatabaseError::Parse(parser::ParseError {
-                message: "incremental_query_as only supports SELECT statements".to_string(),
-                position: 0,
-            })),
+            _ => {
+                return Err(DatabaseError::Parse(parser::ParseError {
+                    message: "incremental_query_as only supports SELECT statements".to_string(),
+                    position: 0,
+                }));
+            }
         };
 
         // Only support single-table queries for now
@@ -1726,7 +2275,8 @@ impl Database {
         let table = &select.from.table;
 
         // Validate table exists and get schema
-        let schema = self.get_table(table)
+        let schema = self
+            .get_table(table)
             .ok_or_else(|| DatabaseError::TableNotFound(table.clone()))?;
 
         // Get the SELECT policy for this table (if any)
@@ -1739,11 +2289,21 @@ impl Database {
                 if let Some(inherits_info) = self.extract_inherits(where_expr, table, &schema)? {
                     if inherits_info.is_self_referential {
                         // Self-referential INHERITS: use RecursiveFilter
-                        return self.build_recursive_filter_graph(select, viewer, &inherits_info, &schema);
+                        return self.build_recursive_filter_graph(
+                            select,
+                            viewer,
+                            &inherits_info,
+                            &schema,
+                        );
                     } else {
                         // Non-self-referential INHERITS: resolve the full chain
                         let mut visited = vec![table.to_string()];
-                        let chain = self.resolve_inherits_chain(&inherits_info, table, viewer, &mut visited)?;
+                        let chain = self.resolve_inherits_chain(
+                            &inherits_info,
+                            table,
+                            viewer,
+                            &mut visited,
+                        )?;
 
                         if chain.hops.len() == 1 {
                             // Single hop: use existing simple JOIN graph
@@ -1806,7 +2366,10 @@ impl Database {
             PolicyExpr::Inherits { action, column } => {
                 if *action != PolicyAction::Select {
                     return Err(DatabaseError::Parse(parser::ParseError {
-                        message: format!("INHERITS {} not supported in incremental queries, only INHERITS SELECT", action),
+                        message: format!(
+                            "INHERITS {} not supported in incremental queries, only INHERITS SELECT",
+                            action
+                        ),
                         position: 0,
                     }));
                 }
@@ -1814,7 +2377,8 @@ impl Database {
                 let col_name = column.column_name();
 
                 // Find the target table from the Ref column
-                let col_def = source_schema.column(col_name)
+                let col_def = source_schema
+                    .column(col_name)
                     .ok_or_else(|| DatabaseError::ColumnNotFound(col_name.to_string()))?;
 
                 let target_table = match &col_def.ty {
@@ -1829,7 +2393,9 @@ impl Database {
                     None // Self-referential recursion - no target policy needed
                 } else {
                     let target_policies = self.get_policies(&target_table);
-                    let target_select = target_policies.as_ref().and_then(|p| p.get(PolicyAction::Select));
+                    let target_select = target_policies
+                        .as_ref()
+                        .and_then(|p| p.get(PolicyAction::Select));
                     target_select.and_then(|p| p.where_clause.clone())
                 };
 
@@ -1937,12 +2503,15 @@ impl Database {
         }
         visited.push(initial_inherits.target_table.clone());
 
-        let target_schema = self.get_table(&initial_inherits.target_table)
+        let target_schema = self
+            .get_table(&initial_inherits.target_table)
             .ok_or_else(|| DatabaseError::TableNotFound(initial_inherits.target_table.clone()))?;
 
         // Check if target table has a policy
         let target_policies = self.get_policies(&initial_inherits.target_table);
-        let target_select = target_policies.as_ref().and_then(|p| p.get(PolicyAction::Select));
+        let target_select = target_policies
+            .as_ref()
+            .and_then(|p| p.get(PolicyAction::Select));
 
         if let Some(policy) = target_select {
             if let Some(ref where_expr) = policy.where_clause {
@@ -1955,7 +2524,8 @@ impl Database {
                     if nested_inherits.is_self_referential {
                         // Self-referential in the chain - not supported yet
                         return Err(DatabaseError::Parse(parser::ParseError {
-                            message: "Self-referential INHERITS in chain not yet supported".to_string(),
+                            message: "Self-referential INHERITS in chain not yet supported"
+                                .to_string(),
                             position: 0,
                         }));
                     }
@@ -2031,9 +2601,11 @@ impl Database {
         inherits: &InheritsInfo,
     ) -> Result<crate::sql::query_graph::QueryGraph, DatabaseError> {
         let left_table = &select.from.table;
-        let left_schema = self.get_table(left_table)
+        let left_schema = self
+            .get_table(left_table)
             .ok_or_else(|| DatabaseError::TableNotFound(left_table.clone()))?;
-        let right_schema = self.get_table(&inherits.target_table)
+        let right_schema = self
+            .get_table(&inherits.target_table)
             .ok_or_else(|| DatabaseError::TableNotFound(inherits.target_table.clone()))?;
 
         // Build a JOIN graph
@@ -2070,7 +2642,11 @@ impl Database {
         // Apply the target table's policy predicate (the flattened INHERITS)
         let after_policy = if let Some(ref target_expr) = inherits.target_predicate {
             // Convert target policy to predicate, but with column names qualified to right table
-            let predicate = self.policy_expr_to_predicate_qualified(target_expr, viewer, &inherits.target_table)?;
+            let predicate = self.policy_expr_to_predicate_qualified(
+                target_expr,
+                viewer,
+                &inherits.target_table,
+            )?;
             builder.filter(after_additional, predicate)
         } else {
             // No policy on target table = allow all
@@ -2121,7 +2697,8 @@ impl Database {
 
         // Get schema for first hop's target
         let first_hop = &chain.hops[0];
-        let first_target_schema = self.get_table(&first_hop.target_table)
+        let first_target_schema = self
+            .get_table(&first_hop.target_table)
             .ok_or_else(|| DatabaseError::TableNotFound(first_hop.target_table.clone()))?;
 
         // Build the first join: source → first target
@@ -2135,7 +2712,8 @@ impl Database {
 
         // Pre-add schemas for all subsequent hops
         for hop in chain.hops.iter().skip(1) {
-            let target_schema = self.get_table(&hop.target_table)
+            let target_schema = self
+                .get_table(&hop.target_table)
                 .ok_or_else(|| DatabaseError::TableNotFound(hop.target_table.clone()))?;
             builder.add_schema(&hop.target_table, target_schema);
         }
@@ -2251,11 +2829,8 @@ impl Database {
         };
 
         // Add RecursiveFilter node for the self-referential policy
-        let recursive = builder.recursive_filter(
-            after_additional,
-            base_predicate,
-            &inherits.ref_column,
-        );
+        let recursive =
+            builder.recursive_filter(after_additional, base_predicate, &inherits.ref_column);
 
         Ok(builder.output(recursive, GraphId(0)))
     }
@@ -2272,11 +2847,13 @@ impl Database {
     ) -> Result<Predicate, DatabaseError> {
         match expr {
             PolicyExpr::Eq(left, right) => {
-                let (column, value) = self.resolve_policy_comparison_qualified(left, right, viewer, table_prefix)?;
+                let (column, value) =
+                    self.resolve_policy_comparison_qualified(left, right, viewer, table_prefix)?;
                 Ok(Predicate::eq(column, value))
             }
             PolicyExpr::Ne(left, right) => {
-                let (column, value) = self.resolve_policy_comparison_qualified(left, right, viewer, table_prefix)?;
+                let (column, value) =
+                    self.resolve_policy_comparison_qualified(left, right, viewer, table_prefix)?;
                 Ok(Predicate::ne(column, value))
             }
             PolicyExpr::And(exprs) => {
@@ -2284,18 +2861,22 @@ impl Database {
                     .iter()
                     .map(|e| self.policy_expr_to_predicate_qualified(e, viewer, table_prefix))
                     .collect();
-                Ok(predicates?.into_iter().fold(Predicate::True, |acc, p| acc.and(p)))
+                Ok(predicates?
+                    .into_iter()
+                    .fold(Predicate::True, |acc, p| acc.and(p)))
             }
             PolicyExpr::Or(exprs) => {
                 let predicates: Result<Vec<_>, _> = exprs
                     .iter()
                     .map(|e| self.policy_expr_to_predicate_qualified(e, viewer, table_prefix))
                     .collect();
-                Ok(predicates?.into_iter().fold(Predicate::False, |acc, p| acc.or(p)))
+                Ok(predicates?
+                    .into_iter()
+                    .fold(Predicate::False, |acc, p| acc.or(p)))
             }
-            PolicyExpr::Not(inner) => {
-                Ok(self.policy_expr_to_predicate_qualified(inner, viewer, table_prefix)?.not())
-            }
+            PolicyExpr::Not(inner) => Ok(self
+                .policy_expr_to_predicate_qualified(inner, viewer, table_prefix)?
+                .not()),
             PolicyExpr::Inherits { .. } => {
                 // Nested INHERITS - would need recursive flattening
                 Err(DatabaseError::Parse(parser::ParseError {
@@ -2362,7 +2943,9 @@ impl Database {
                     .map(|e| self.policy_expr_to_predicate(e, viewer))
                     .collect();
                 let predicates = predicates?;
-                Ok(predicates.into_iter().fold(Predicate::True, |acc, p| acc.and(p)))
+                Ok(predicates
+                    .into_iter()
+                    .fold(Predicate::True, |acc, p| acc.and(p)))
             }
             PolicyExpr::Or(exprs) => {
                 let predicates: Result<Vec<_>, _> = exprs
@@ -2370,27 +2953,28 @@ impl Database {
                     .map(|e| self.policy_expr_to_predicate(e, viewer))
                     .collect();
                 let predicates = predicates?;
-                Ok(predicates.into_iter().fold(Predicate::False, |acc, p| acc.or(p)))
+                Ok(predicates
+                    .into_iter()
+                    .fold(Predicate::False, |acc, p| acc.or(p)))
             }
             PolicyExpr::Not(inner) => {
                 let pred = self.policy_expr_to_predicate(inner, viewer)?;
                 Ok(pred.not())
             }
             // These require runtime evaluation
-            PolicyExpr::Inherits { .. } => {
-                Err(DatabaseError::Parse(parser::ParseError {
-                    message: "INHERITS cannot be converted to static predicate".to_string(),
-                    position: 0,
-                }))
-            }
+            PolicyExpr::Inherits { .. } => Err(DatabaseError::Parse(parser::ParseError {
+                message: "INHERITS cannot be converted to static predicate".to_string(),
+                position: 0,
+            })),
             // Comparison operators not yet supported in Predicate
-            PolicyExpr::Lt(_, _) | PolicyExpr::Le(_, _) |
-            PolicyExpr::Gt(_, _) | PolicyExpr::Ge(_, _) => {
-                Err(DatabaseError::Parse(parser::ParseError {
-                    message: "Comparison operators not yet supported in incremental queries".to_string(),
-                    position: 0,
-                }))
-            }
+            PolicyExpr::Lt(_, _)
+            | PolicyExpr::Le(_, _)
+            | PolicyExpr::Gt(_, _)
+            | PolicyExpr::Ge(_, _) => Err(DatabaseError::Parse(parser::ParseError {
+                message: "Comparison operators not yet supported in incremental queries"
+                    .to_string(),
+                position: 0,
+            })),
             PolicyExpr::IsNull(_) | PolicyExpr::IsNotNull(_) => {
                 Err(DatabaseError::Parse(parser::ParseError {
                     message: "NULL checks not yet supported in incremental queries".to_string(),
@@ -2422,16 +3006,12 @@ impl Database {
                 Ok((col.clone(), Value::Ref(viewer)))
             }
             // column = literal
-            (PolicyValue::Column(col), PolicyValue::Literal(val)) => {
-                Ok((col.clone(), val.clone()))
-            }
+            (PolicyValue::Column(col), PolicyValue::Literal(val)) => Ok((col.clone(), val.clone())),
             // literal = column
-            (PolicyValue::Literal(val), PolicyValue::Column(col)) => {
-                Ok((col.clone(), val.clone()))
-            }
+            (PolicyValue::Literal(val), PolicyValue::Column(col)) => Ok((col.clone(), val.clone())),
             // @new.column = @viewer (for INSERT CHECK, but in WHERE context treat as column)
-            (PolicyValue::NewColumn(col), PolicyValue::Viewer) |
-            (PolicyValue::Viewer, PolicyValue::NewColumn(col)) => {
+            (PolicyValue::NewColumn(col), PolicyValue::Viewer)
+            | (PolicyValue::Viewer, PolicyValue::NewColumn(col)) => {
                 // In SELECT context, @new doesn't apply - this is a misconfigured policy
                 Err(DatabaseError::Parse(parser::ParseError {
                     message: format!("@new.{} not valid in SELECT policy WHERE clause", col),
@@ -2461,7 +3041,8 @@ impl Database {
         let table = &select.from.table;
 
         // Validate table exists and get schema
-        let schema = self.get_table(table)
+        let schema = self
+            .get_table(table)
             .ok_or_else(|| DatabaseError::TableNotFound(table.clone()))?;
 
         // Build the query graph
@@ -2501,9 +3082,11 @@ impl Database {
         let right_table = &join.table;
 
         // Get schemas for both tables
-        let left_schema = self.get_table(left_table)
+        let left_schema = self
+            .get_table(left_table)
             .ok_or_else(|| DatabaseError::TableNotFound(left_table.clone()))?;
-        let right_schema = self.get_table(right_table)
+        let right_schema = self
+            .get_table(right_table)
             .ok_or_else(|| DatabaseError::TableNotFound(right_table.clone()))?;
 
         // Determine the join column (the Ref column in the left table pointing to right table)
@@ -2528,7 +3111,8 @@ impl Database {
             join_node
         } else {
             // For JOIN queries, we need to handle qualified column names
-            let predicate = self.build_join_predicate(&select.where_clause, &left_schema, &right_schema)?;
+            let predicate =
+                self.build_join_predicate(&select.where_clause, &left_schema, &right_schema)?;
             builder.filter(join_node, predicate)
         };
 
@@ -2545,8 +3129,18 @@ impl Database {
         left_schema: &TableSchema,
     ) -> Result<String, DatabaseError> {
         // Check if the left side of the ON clause references the left table
-        let left_is_from_left = on.left.table.as_ref().map(|t| t == left_table).unwrap_or(true);
-        let right_is_from_right = on.right.table.as_ref().map(|t| t == right_table).unwrap_or(true);
+        let left_is_from_left = on
+            .left
+            .table
+            .as_ref()
+            .map(|t| t == left_table)
+            .unwrap_or(true);
+        let right_is_from_right = on
+            .right
+            .table
+            .as_ref()
+            .map(|t| t == right_table)
+            .unwrap_or(true);
 
         if left_is_from_left && right_is_from_right {
             // ON left_table.col = right_table.id pattern
@@ -2559,8 +3153,18 @@ impl Database {
             }
         }
 
-        let right_is_from_left = on.right.table.as_ref().map(|t| t == left_table).unwrap_or(false);
-        let left_is_from_right = on.left.table.as_ref().map(|t| t == right_table).unwrap_or(false);
+        let right_is_from_left = on
+            .right
+            .table
+            .as_ref()
+            .map(|t| t == left_table)
+            .unwrap_or(false);
+        let left_is_from_right = on
+            .left
+            .table
+            .as_ref()
+            .map(|t| t == right_table)
+            .unwrap_or(false);
 
         if right_is_from_left && left_is_from_right {
             // ON right_table.id = left_table.col pattern
@@ -2634,12 +3238,25 @@ impl Database {
                 }
             };
 
-            let value = coerce_value(cond.value.clone(), &col_type);
+            // Only handle literal values in predicates for now
+            let literal_value = match cond.value() {
+                Some(v) => v.clone(),
+                None => {
+                    // Column references not yet supported in predicate building
+                    return Err(DatabaseError::ColumnNotFound(
+                        "column references not supported in join predicate building".to_string(),
+                    ));
+                }
+            };
+            let value = coerce_value(literal_value, &col_type);
             predicates.push(Predicate::eq(column, value));
         }
 
         // AND all conditions together and optimize
-        let combined = predicates.into_iter().reduce(|a, b| a.and(b)).unwrap_or(Predicate::True);
+        let combined = predicates
+            .into_iter()
+            .reduce(|a, b| a.and(b))
+            .unwrap_or(Predicate::True);
         Ok(combined.optimize())
     }
 
@@ -2663,19 +3280,33 @@ impl Database {
                 return Err(DatabaseError::ColumnNotFound(column.clone()));
             }
 
+            // Only handle literal values in predicates for now
+            let literal_value = match cond.value() {
+                Some(v) => v.clone(),
+                None => {
+                    // Column references not yet supported in predicate building
+                    return Err(DatabaseError::ColumnNotFound(
+                        "column references not supported in predicate building".to_string(),
+                    ));
+                }
+            };
+
             // Coerce value if needed
             let value = if column == "id" {
-                coerce_value(cond.value.clone(), &ColumnType::Ref("".to_string()))
+                coerce_value(literal_value, &ColumnType::Ref("".to_string()))
             } else {
                 let col_idx = schema.column_index(column).unwrap();
-                coerce_value(cond.value.clone(), &schema.columns[col_idx].ty)
+                coerce_value(literal_value, &schema.columns[col_idx].ty)
             };
 
             predicates.push(Predicate::eq(column, value));
         }
 
         // AND all conditions together and optimize
-        let combined = predicates.into_iter().reduce(|a, b| a.and(b)).unwrap_or(Predicate::True);
+        let combined = predicates
+            .into_iter()
+            .reduce(|a, b| a.and(b))
+            .unwrap_or(Predicate::True);
         Ok(combined.optimize())
     }
 }

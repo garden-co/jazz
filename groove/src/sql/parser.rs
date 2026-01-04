@@ -50,8 +50,27 @@ pub enum Projection {
     All,
     /// SELECT table.*
     TableAll(String),
-    /// SELECT col1, col2, ...
+    /// SELECT col1, col2, ... (simple columns only, legacy)
     Columns(Vec<QualifiedColumn>),
+    /// SELECT expr1, expr2, ... (expressions including ARRAY subqueries)
+    Expressions(Vec<SelectExpr>),
+}
+
+/// An expression in a SELECT projection.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SelectExpr {
+    /// A column reference: `name` or `t.name`
+    Column(QualifiedColumn),
+    /// A table alias as composite type: `t` (returns full row)
+    /// Distinct from Column because it references the whole row, not a column
+    TableRow(String),
+    /// An ARRAY subquery: `ARRAY(SELECT ...)`
+    ArraySubquery(Box<Select>),
+    /// An aliased expression: `expr AS alias`
+    Aliased {
+        expr: Box<SelectExpr>,
+        alias: String,
+    },
 }
 
 /// Qualified column name (optional table prefix).
@@ -65,6 +84,8 @@ pub struct QualifiedColumn {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FromClause {
     pub table: String,
+    /// Optional table alias (e.g., FROM notes n)
+    pub alias: Option<String>,
     pub joins: Vec<Join>,
 }
 
@@ -82,11 +103,30 @@ pub struct JoinCondition {
     pub right: QualifiedColumn,
 }
 
-/// WHERE condition (column = value).
+/// WHERE condition (column = value or column = column).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Condition {
     pub column: QualifiedColumn,
-    pub value: Value,
+    pub right: ConditionValue,
+}
+
+/// Right-hand side of a condition.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConditionValue {
+    /// A literal value
+    Literal(Value),
+    /// A column reference (for correlated subqueries)
+    Column(QualifiedColumn),
+}
+
+impl Condition {
+    /// Get the value if this condition has a literal right-hand side.
+    pub fn value(&self) -> Option<&Value> {
+        match &self.right {
+            ConditionValue::Literal(v) => Some(v),
+            ConditionValue::Column(_) => None,
+        }
+    }
 }
 
 /// Parse error.
@@ -98,7 +138,11 @@ pub struct ParseError {
 
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "parse error at position {}: {}", self.position, self.message)
+        write!(
+            f,
+            "parse error at position {}: {}",
+            self.position, self.message
+        )
     }
 }
 
@@ -167,7 +211,10 @@ impl<'a> Parser<'a> {
         if remaining.starts_with(&keyword.to_uppercase()) {
             let after = remaining.as_bytes().get(keyword.len());
             // Ensure it's a full word match
-            if after.map(|&c| c.is_ascii_alphanumeric() || c == b'_').unwrap_or(false) {
+            if after
+                .map(|&c| c.is_ascii_alphanumeric() || c == b'_')
+                .unwrap_or(false)
+            {
                 return false;
             }
             self.pos += keyword.len();
@@ -283,7 +330,11 @@ impl<'a> Parser<'a> {
         }
 
         // Number
-        if self.peek_char().map(|c| c.is_ascii_digit() || c == '-').unwrap_or(false) {
+        if self
+            .peek_char()
+            .map(|c| c.is_ascii_digit() || c == '-')
+            .unwrap_or(false)
+        {
             return self.parse_number();
         }
 
@@ -418,7 +469,11 @@ impl<'a> Parser<'a> {
             self.consume_char();
         }
 
-        Ok(Insert { table, columns, values })
+        Ok(Insert {
+            table,
+            columns,
+            values,
+        })
     }
 
     fn parse_update(&mut self) -> Result<Update, ParseError> {
@@ -462,77 +517,43 @@ impl<'a> Parser<'a> {
             self.consume_char();
             Projection::All
         } else {
-            // Check for table.* pattern first
-            let first_ident = self.parse_identifier()?;
-            self.skip_whitespace();
+            // Parse projection expressions
+            let mut exprs = Vec::new();
 
-            if self.peek_char() == Some('.') {
-                self.consume_char();
+            loop {
+                let expr = self.parse_select_expr()?;
+                exprs.push(expr);
+
                 self.skip_whitespace();
-                if self.peek_char() == Some('*') {
+                if self.peek_char() == Some(',') {
                     self.consume_char();
-                    // This is table.* projection
-                    let from = self.parse_from_clause()?;
-                    let where_clause = self.parse_where_clause()?;
-
-                    // Optional semicolon
-                    self.skip_whitespace();
-                    if self.peek_char() == Some(';') {
-                        self.consume_char();
-                    }
-
-                    return Ok(Select {
-                        projection: Projection::TableAll(first_ident),
-                        from,
-                        where_clause,
-                    });
                 } else {
-                    // It's table.column, parse the column name
-                    let col_name = self.parse_identifier()?;
-                    let mut cols = vec![QualifiedColumn {
-                        table: Some(first_ident),
-                        column: col_name,
-                    }];
-
-                    // Continue parsing more columns
-                    self.skip_whitespace();
-                    while self.peek_char() == Some(',') {
-                        self.consume_char();
-                        cols.push(self.parse_qualified_column()?);
-                        self.skip_whitespace();
-                    }
-
-                    Projection::Columns(cols)
-                }
-            } else if self.peek_char() == Some(',') {
-                // Multiple columns starting with simple identifier
-                let mut cols = vec![QualifiedColumn {
-                    table: None,
-                    column: first_ident,
-                }];
-
-                while self.peek_char() == Some(',') {
-                    self.consume_char();
-                    cols.push(self.parse_qualified_column()?);
-                    self.skip_whitespace();
-                }
-
-                Projection::Columns(cols)
-            } else {
-                // Single column or keyword (like FROM)
-                // Check if next is FROM
-                if self.remaining().to_uppercase().starts_with("FROM") {
-                    Projection::Columns(vec![QualifiedColumn {
-                        table: None,
-                        column: first_ident,
-                    }])
-                } else {
-                    Projection::Columns(vec![QualifiedColumn {
-                        table: None,
-                        column: first_ident,
-                    }])
+                    break;
                 }
             }
+
+            // Check if this is a simple table.* projection
+            if exprs.len() == 1 {
+                if let SelectExpr::Column(qc) = &exprs[0] {
+                    if qc.column == "*" {
+                        if let Some(table) = &qc.table {
+                            let from = self.parse_from_clause()?;
+                            let where_clause = self.parse_where_clause()?;
+                            self.skip_whitespace();
+                            if self.peek_char() == Some(';') {
+                                self.consume_char();
+                            }
+                            return Ok(Select {
+                                projection: Projection::TableAll(table.clone()),
+                                from,
+                                where_clause,
+                            });
+                        }
+                    }
+                }
+            }
+
+            Projection::Expressions(exprs)
         };
 
         let from = self.parse_from_clause()?;
@@ -551,9 +572,116 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Parse a single SELECT expression (column, table row, ARRAY subquery, or aliased expression).
+    fn parse_select_expr(&mut self) -> Result<SelectExpr, ParseError> {
+        self.skip_whitespace();
+
+        // Check for ARRAY(SELECT ...)
+        if self.try_keyword("ARRAY") {
+            self.expect_char('(')?;
+            self.expect_keyword("SELECT")?;
+            let subquery = self.parse_select()?;
+            self.expect_char(')')?;
+
+            // Check for optional AS alias
+            let expr = SelectExpr::ArraySubquery(Box::new(subquery));
+            return self.maybe_parse_alias(expr);
+        }
+
+        // Parse identifier (could be column, table.column, or table alias for row)
+        let first_ident = self.parse_identifier()?;
+        self.skip_whitespace();
+
+        if self.peek_char() == Some('.') {
+            self.consume_char();
+            self.skip_whitespace();
+
+            if self.peek_char() == Some('*') {
+                self.consume_char();
+                // table.* - represented as Column with "*" as column name
+                let expr = SelectExpr::Column(QualifiedColumn {
+                    table: Some(first_ident),
+                    column: "*".to_string(),
+                });
+                return self.maybe_parse_alias(expr);
+            } else {
+                // table.column
+                let col_name = self.parse_identifier()?;
+                let expr = SelectExpr::Column(QualifiedColumn {
+                    table: Some(first_ident),
+                    column: col_name,
+                });
+                return self.maybe_parse_alias(expr);
+            }
+        }
+
+        // Just an identifier - could be:
+        // 1. A table alias (returns whole row) if it matches FROM alias
+        // 2. A column name
+        // We'll distinguish at execution time based on FROM clause
+        // For now, if it's followed by FROM/WHERE/,/)/; treat as potential table row
+        // Actually, we can't know here - we'll use TableRow for bare identifiers
+        // and resolve at execution time
+
+        // Check if this looks like a table alias (bare identifier before FROM, comma, or end)
+        self.skip_whitespace();
+        let next = self.peek_char();
+        let is_keyword = self.is_keyword_next(&["FROM", "WHERE", "AND", "AS"]);
+
+        let expr = if next == Some(',')
+            || next == Some(')')
+            || next == Some(';')
+            || next.is_none()
+            || is_keyword
+        {
+            // Bare identifier - could be column or table alias for row
+            // We'll mark it as Column and let execution decide based on FROM
+            SelectExpr::Column(QualifiedColumn {
+                table: None,
+                column: first_ident,
+            })
+        } else {
+            SelectExpr::Column(QualifiedColumn {
+                table: None,
+                column: first_ident,
+            })
+        };
+
+        self.maybe_parse_alias(expr)
+    }
+
+    /// Parse optional AS alias after an expression.
+    fn maybe_parse_alias(&mut self, expr: SelectExpr) -> Result<SelectExpr, ParseError> {
+        self.skip_whitespace();
+        if self.try_keyword("AS") {
+            let alias = self.parse_identifier()?;
+            Ok(SelectExpr::Aliased {
+                expr: Box::new(expr),
+                alias,
+            })
+        } else {
+            Ok(expr)
+        }
+    }
+
     fn parse_from_clause(&mut self) -> Result<FromClause, ParseError> {
         self.expect_keyword("FROM")?;
         let table = self.parse_identifier()?;
+
+        // Check for optional table alias (e.g., FROM notes n)
+        // Must not be a keyword like JOIN, WHERE, etc.
+        self.skip_whitespace();
+        let alias = if !self.is_keyword_next(&[
+            "JOIN", "WHERE", "AND", "OR", "ON", "ORDER", "LIMIT", "GROUP", "HAVING",
+        ]) && self
+            .peek_char()
+            .map(|c| c.is_ascii_alphabetic())
+            .unwrap_or(false)
+        {
+            Some(self.parse_identifier()?)
+        } else {
+            None
+        };
 
         let mut joins = Vec::new();
         while self.try_keyword("JOIN") {
@@ -570,7 +698,28 @@ impl<'a> Parser<'a> {
             });
         }
 
-        Ok(FromClause { table, joins })
+        Ok(FromClause {
+            table,
+            alias,
+            joins,
+        })
+    }
+
+    /// Check if the next token is one of the given keywords (without consuming).
+    fn is_keyword_next(&self, keywords: &[&str]) -> bool {
+        let remaining = self.remaining().to_uppercase();
+        for kw in keywords {
+            if remaining.starts_with(&kw.to_uppercase()) {
+                let after = remaining.as_bytes().get(kw.len());
+                if after
+                    .map(|&c| !c.is_ascii_alphanumeric() && c != b'_')
+                    .unwrap_or(true)
+                {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn parse_where_clause(&mut self) -> Result<Vec<Condition>, ParseError> {
@@ -583,9 +732,9 @@ impl<'a> Parser<'a> {
         loop {
             let column = self.parse_qualified_column()?;
             self.expect_char('=')?;
-            let value = self.parse_value()?;
+            let right = self.parse_condition_value()?;
 
-            conditions.push(Condition { column, value });
+            conditions.push(Condition { column, right });
 
             if !self.try_keyword("AND") {
                 break;
@@ -593,6 +742,39 @@ impl<'a> Parser<'a> {
         }
 
         Ok(conditions)
+    }
+
+    /// Parse the right-hand side of a WHERE condition (value or column reference).
+    fn parse_condition_value(&mut self) -> Result<ConditionValue, ParseError> {
+        self.skip_whitespace();
+
+        // Try to parse as a literal value first
+        // Check for NULL, true, false, string literal, or number
+        if self.try_keyword("NULL") {
+            return Ok(ConditionValue::Literal(Value::Null));
+        }
+        if self.try_keyword("true") {
+            return Ok(ConditionValue::Literal(Value::Bool(true)));
+        }
+        if self.try_keyword("false") {
+            return Ok(ConditionValue::Literal(Value::Bool(false)));
+        }
+        if self.peek_char() == Some('\'') {
+            let s = self.parse_string_literal()?;
+            return Ok(ConditionValue::Literal(Value::String(s)));
+        }
+        if self
+            .peek_char()
+            .map(|c| c.is_ascii_digit() || c == '-')
+            .unwrap_or(false)
+        {
+            let val = self.parse_number()?;
+            return Ok(ConditionValue::Literal(val));
+        }
+
+        // Otherwise, it must be a column reference
+        let col = self.parse_qualified_column()?;
+        Ok(ConditionValue::Column(col))
     }
 
     fn parse_statement(&mut self) -> Result<Statement, ParseError> {
@@ -849,7 +1031,11 @@ impl<'a> Parser<'a> {
         }
 
         // Number
-        if self.peek_char().map(|c| c.is_ascii_digit() || c == '-').unwrap_or(false) {
+        if self
+            .peek_char()
+            .map(|c| c.is_ascii_digit() || c == '-')
+            .unwrap_or(false)
+        {
             let val = self.parse_number()?;
             return Ok(PolicyValue::Literal(val));
         }
@@ -868,7 +1054,9 @@ impl<'a> Parser<'a> {
             let ident = self.parse_identifier()?;
 
             if ident.to_lowercase() != "new" {
-                return Err(self.error("INHERITS FROM only supports @new.column or column references"));
+                return Err(
+                    self.error("INHERITS FROM only supports @new.column or column references")
+                );
             }
 
             self.expect_char('.')?;

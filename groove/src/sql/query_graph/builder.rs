@@ -116,6 +116,43 @@ impl QueryGraphBuilder {
         id
     }
 
+    /// Add an array aggregate node for ARRAY subqueries.
+    ///
+    /// This aggregates rows from an inner table into arrays per outer row.
+    /// Used for queries like:
+    /// ```sql
+    /// SELECT f.*, ARRAY(SELECT n FROM notes n WHERE n.folder_id = f.id) as notes
+    /// FROM folders f
+    /// ```
+    ///
+    /// - `input`: Input node providing outer rows
+    /// - `inner_table`: Table being aggregated (e.g., "notes")
+    /// - `inner_ref_column`: Column in inner table referencing outer (e.g., "folder_id")
+    /// - `inner_schema`: Schema of the inner table
+    /// - `array_column_index`: Index where array should be placed (-1 for append)
+    pub fn array_aggregate(
+        &mut self,
+        input: NodeId,
+        inner_table: impl Into<String>,
+        inner_ref_column: impl Into<String>,
+        inner_schema: TableSchema,
+        array_column_index: i32,
+    ) -> NodeId {
+        let id = self.alloc_id();
+        self.nodes.push(QueryNode::ArrayAggregate {
+            outer_table: self.table.clone(),
+            input,
+            inner_table: inner_table.into(),
+            inner_ref_column: inner_ref_column.into(),
+            inner_schema,
+            array_column_index,
+            cached_arrays: HashMap::new(),
+            inner_to_outer: HashMap::new(),
+            outer_rows: HashMap::new(),
+        });
+        id
+    }
+
     /// Add the output node and build the graph.
     ///
     /// This consumes the builder and returns the constructed graph.
