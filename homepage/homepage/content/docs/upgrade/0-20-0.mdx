@@ -160,3 +160,19 @@ export function MyJazzProvider({ children }: { children: React.ReactNode }) {
 ```
 </CodeGroup>
 
+### unique validation
+
+The `unique` value is now strict to only accept specific values instead of any `JsonValue`.
+The allowed types are now: `string`, `boolean`, `null`, `undefined`, or an object with string values.
+If you were using numbers, we suggest you to use a string instead or ignore the type check.
+
+<CodeGroup>
+```ts
+import { CoMap } from "jazz-tools/tools/coValues";
+
+const comap = CoMap.create({}, {
+  // @ts-ignore
+  unique: 123,
+});
+```
+</CodeGroup>
