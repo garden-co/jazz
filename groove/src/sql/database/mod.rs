@@ -3250,6 +3250,7 @@ impl Database {
         let join_direction = self.find_join_column(
             &join.on,
             sql_left_table,
+            select.from.alias.as_deref(), // Pass FROM alias for matching
             sql_right_table,
             &sql_left_schema,
             &sql_right_schema,
@@ -3323,22 +3324,27 @@ impl Database {
         &self,
         on: &parser::JoinCondition,
         left_table: &str,
+        left_alias: Option<&str>, // FROM clause alias (e.g., "i" for "Issues i")
         right_table: &str,
         left_schema: &TableSchema,
         right_schema: &TableSchema,
     ) -> Result<JoinDirection, DatabaseError> {
+        // Helper to check if a table reference matches (by name or alias)
+        let matches_left = |t: &str| t == left_table || left_alias == Some(t);
+        let matches_right = |t: &str| t == right_table;
+
         // Check if the left side of the ON clause references the left table
         let left_is_from_left = on
             .left
             .table
             .as_ref()
-            .map(|t| t == left_table)
+            .map(|t| matches_left(t))
             .unwrap_or(true);
         let right_is_from_right = on
             .right
             .table
             .as_ref()
-            .map(|t| t == right_table)
+            .map(|t| matches_right(t))
             .unwrap_or(true);
 
         if left_is_from_left && right_is_from_right {
@@ -3356,13 +3362,13 @@ impl Database {
             .right
             .table
             .as_ref()
-            .map(|t| t == left_table)
+            .map(|t| matches_left(t))
             .unwrap_or(false);
         let left_is_from_right = on
             .left
             .table
             .as_ref()
-            .map(|t| t == right_table)
+            .map(|t| matches_right(t))
             .unwrap_or(false);
 
         if right_is_from_left && left_is_from_right {
@@ -3383,18 +3389,18 @@ impl Database {
         }
 
         // Check for reverse join: right table has Ref to left table
-        // Pattern: ON right_table.col = left_table.id
+        // Pattern: ON right_table.col = left_table.id (or with alias)
         let left_is_from_right_2 = on
             .left
             .table
             .as_ref()
-            .map(|t| t == right_table)
+            .map(|t| matches_right(t))
             .unwrap_or(false);
         let right_is_from_left_2 = on
             .right
             .table
             .as_ref()
-            .map(|t| t == left_table)
+            .map(|t| matches_left(t))
             .unwrap_or(false);
 
         if left_is_from_right_2 && right_is_from_left_2 {

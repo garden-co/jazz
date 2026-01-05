@@ -2471,3 +2471,85 @@ fn incremental_query_reverse_join_combined_filters() {
     assert_eq!(rows.len(), 1, "Should find 1 low priority issue assigned to Alice");
     assert_eq!(rows[0].values[0], Value::String("Bug 2".to_string()));
 }
+
+#[test]
+fn incremental_query_reverse_join_with_alias() {
+    // Test that table aliases work in reverse JOINs
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE Issues (title STRING NOT NULL, priority STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE Users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE IssueAssignees (issue REFERENCES Issues NOT NULL, user REFERENCES Users NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO Users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    let issue1_id = match db.execute("INSERT INTO Issues (title, priority) VALUES ('Bug 1', 'high')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Assign Alice to issue1
+    db.insert("IssueAssignees", &["issue", "user"], vec![Value::Ref(issue1_id), Value::Ref(alice_id)]).unwrap();
+
+    // Query with alias "i" for Issues table (matches app pattern)
+    let query = db.incremental_query(
+        &format!(
+            "SELECT i.* FROM Issues i JOIN IssueAssignees ON IssueAssignees.issue = i.id WHERE IssueAssignees.user = '{}'",
+            alice_id
+        )
+    ).unwrap();
+
+    let rows = query.rows();
+    assert_eq!(rows.len(), 1, "Should find 1 issue assigned to Alice");
+    assert_eq!(rows[0].values[0], Value::String("Bug 1".to_string()));
+    assert_eq!(rows[0].values[1], Value::String("high".to_string()));
+}
+
+#[test]
+fn incremental_query_reverse_join_subscribe_delta() {
+    // Test that subscribe_delta works for reverse JOINs - this mirrors what the WASM layer does
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE Issues (title STRING NOT NULL, priority STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE Users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE IssueAssignees (issue REFERENCES Issues NOT NULL, user REFERENCES Users NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO Users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    let issue1_id = match db.execute("INSERT INTO Issues (title, priority) VALUES ('Bug 1', 'high')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Assign Alice to issue1
+    db.insert("IssueAssignees", &["issue", "user"], vec![Value::Ref(issue1_id), Value::Ref(alice_id)]).unwrap();
+
+    // Create query with alias
+    let query = db.incremental_query(
+        &format!(
+            "SELECT i.* FROM Issues i JOIN IssueAssignees ON IssueAssignees.issue = i.id WHERE IssueAssignees.user = '{}'",
+            alice_id
+        )
+    ).unwrap();
+
+    // Subscribe with delta callback (like WASM does)
+    let callback_count = Arc::new(AtomicUsize::new(0));
+    let callback_count_clone = callback_count.clone();
+    let initial_count = Arc::new(AtomicUsize::new(0));
+    let initial_count_clone = initial_count.clone();
+
+    let _listener = query.subscribe_delta(Box::new(move |delta| {
+        callback_count_clone.fetch_add(1, Ordering::SeqCst);
+        initial_count_clone.fetch_add(delta.len(), Ordering::SeqCst);
+    }));
+
+    // Callback should have been called immediately with initial data
+    assert_eq!(callback_count.load(Ordering::SeqCst), 1, "Callback should be called once on subscribe");
+    assert_eq!(initial_count.load(Ordering::SeqCst), 1, "Initial delta should contain 1 row");
+}
