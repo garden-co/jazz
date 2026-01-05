@@ -2300,3 +2300,174 @@ fn policy_chain_update_at_each_level() {
     assert_eq!(bob_query.rows().len(), 1);
     assert_eq!(bob_query.rows()[0].values[0], Value::String("Updated Task".into()));
 }
+
+// ========== Reverse JOIN Tests ==========
+// These test JOINs where the JOIN table has the Ref column pointing to the FROM table
+// (opposite of the normal case where FROM table has the Ref)
+
+#[test]
+fn incremental_query_reverse_join_basic() {
+    // Schema: Issues and IssueAssignees (junction table)
+    // IssueAssignees.issue references Issues
+    // Query: SELECT Issues.* FROM Issues JOIN IssueAssignees ON IssueAssignees.issue = Issues.id
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE Issues (title STRING NOT NULL, priority STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE Users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE IssueAssignees (issue REFERENCES Issues NOT NULL, user REFERENCES Users NOT NULL)").unwrap();
+
+    // Create user
+    let alice_id = match db.execute("INSERT INTO Users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Create issues
+    let issue1_id = match db.execute("INSERT INTO Issues (title, priority) VALUES ('Bug 1', 'high')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    // issue2 is created but unassigned - we don't need its ID
+    let _issue2_id = match db.execute("INSERT INTO Issues (title, priority) VALUES ('Bug 2', 'low')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Assign Alice to issue1 only (issue2 is unassigned)
+    db.insert("IssueAssignees", &["issue", "user"], vec![Value::Ref(issue1_id), Value::Ref(alice_id)]).unwrap();
+
+    // Create reverse JOIN query: find issues assigned to Alice
+    let query = db.incremental_query(
+        "SELECT Issues.* FROM Issues JOIN IssueAssignees ON IssueAssignees.issue = Issues.id WHERE IssueAssignees.user = ?"
+            .replace("?", &format!("'{}'", alice_id))
+            .as_str()
+    ).unwrap();
+
+    // Should return issue1 only (assigned to Alice)
+    let rows = query.rows();
+    assert_eq!(rows.len(), 1, "Should find 1 issue assigned to Alice");
+    // The output should be Issues columns: title, priority
+    assert_eq!(rows[0].values.len(), 2, "Should have 2 columns from Issues");
+    assert_eq!(rows[0].values[0], Value::String("Bug 1".to_string()));
+    assert_eq!(rows[0].values[1], Value::String("high".to_string()));
+}
+
+#[test]
+fn incremental_query_reverse_join_no_filter() {
+    // Same schema but no WHERE filter - just the JOIN
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE Issues (title STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE Users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE IssueAssignees (issue REFERENCES Issues NOT NULL, user REFERENCES Users NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO Users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    let issue1_id = match db.execute("INSERT INTO Issues (title) VALUES ('Bug 1')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let _issue2_id = match db.execute("INSERT INTO Issues (title) VALUES ('Bug 2')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Assign Alice to issue1
+    db.insert("IssueAssignees", &["issue", "user"], vec![Value::Ref(issue1_id), Value::Ref(alice_id)]).unwrap();
+
+    // Query without WHERE - should return all issues that have ANY assignee
+    let query = db.incremental_query(
+        "SELECT Issues.* FROM Issues JOIN IssueAssignees ON IssueAssignees.issue = Issues.id"
+    ).unwrap();
+
+    let rows = query.rows();
+    assert_eq!(rows.len(), 1, "Should find 1 issue (the one with an assignee)");
+    assert_eq!(rows[0].values[0], Value::String("Bug 1".to_string()));
+}
+
+#[test]
+fn incremental_query_reverse_join_with_from_table_filter() {
+    // Filter on the FROM table (Issues) in a reverse join
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE Issues (title STRING NOT NULL, priority STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE Users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE IssueAssignees (issue REFERENCES Issues NOT NULL, user REFERENCES Users NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO Users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    let issue1_id = match db.execute("INSERT INTO Issues (title, priority) VALUES ('Bug 1', 'high')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let issue2_id = match db.execute("INSERT INTO Issues (title, priority) VALUES ('Bug 2', 'low')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Assign Alice to both issues
+    db.insert("IssueAssignees", &["issue", "user"], vec![Value::Ref(issue1_id), Value::Ref(alice_id)]).unwrap();
+    db.insert("IssueAssignees", &["issue", "user"], vec![Value::Ref(issue2_id), Value::Ref(alice_id)]).unwrap();
+
+    // Filter by priority on Issues table
+    let query = db.incremental_query(
+        "SELECT Issues.* FROM Issues JOIN IssueAssignees ON IssueAssignees.issue = Issues.id WHERE Issues.priority = 'low'"
+    ).unwrap();
+
+    let rows = query.rows();
+    assert_eq!(rows.len(), 1, "Should find 1 low priority issue");
+    assert_eq!(rows[0].values[0], Value::String("Bug 2".to_string()));
+    assert_eq!(rows[0].values[1], Value::String("low".to_string()));
+}
+
+#[test]
+fn incremental_query_reverse_join_combined_filters() {
+    // Filter on both FROM table and JOIN table
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE Issues (title STRING NOT NULL, priority STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE Users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE IssueAssignees (issue REFERENCES Issues NOT NULL, user REFERENCES Users NOT NULL)").unwrap();
+
+    let alice_id = match db.execute("INSERT INTO Users (name) VALUES ('Alice')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let bob_id = match db.execute("INSERT INTO Users (name) VALUES ('Bob')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    let issue1_id = match db.execute("INSERT INTO Issues (title, priority) VALUES ('Bug 1', 'high')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let issue2_id = match db.execute("INSERT INTO Issues (title, priority) VALUES ('Bug 2', 'low')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+    let issue3_id = match db.execute("INSERT INTO Issues (title, priority) VALUES ('Bug 3', 'low')").unwrap() {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Alice assigned to issue1 (high) and issue2 (low)
+    db.insert("IssueAssignees", &["issue", "user"], vec![Value::Ref(issue1_id), Value::Ref(alice_id)]).unwrap();
+    db.insert("IssueAssignees", &["issue", "user"], vec![Value::Ref(issue2_id), Value::Ref(alice_id)]).unwrap();
+    // Bob assigned to issue3 (low)
+    db.insert("IssueAssignees", &["issue", "user"], vec![Value::Ref(issue3_id), Value::Ref(bob_id)]).unwrap();
+
+    // Find low priority issues assigned to Alice
+    let query = db.incremental_query(
+        &format!(
+            "SELECT Issues.* FROM Issues JOIN IssueAssignees ON IssueAssignees.issue = Issues.id WHERE Issues.priority = 'low' AND IssueAssignees.user = '{}'",
+            alice_id
+        )
+    ).unwrap();
+
+    let rows = query.rows();
+    assert_eq!(rows.len(), 1, "Should find 1 low priority issue assigned to Alice");
+    assert_eq!(rows[0].values[0], Value::String("Bug 2".to_string()));
+}

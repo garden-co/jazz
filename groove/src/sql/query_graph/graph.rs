@@ -53,6 +53,10 @@ pub struct QueryGraph {
     /// Whether this is a join query.
     is_join: bool,
 
+    /// For JOIN queries, which table to project in output (e.g., "Issues" for SELECT Issues.*).
+    /// If None, all columns from all joined tables are returned.
+    projection_table: Option<String>,
+
     /// Nodes in topological order.
     nodes: Vec<QueryNode>,
 
@@ -108,6 +112,7 @@ impl QueryGraph {
             schema,
             all_schemas,
             is_join: false,
+            projection_table: None,
             nodes,
             node_indices,
             output_node,
@@ -118,6 +123,9 @@ impl QueryGraph {
     ///
     /// Used for INHERITS chains like: documents → folders → workspaces
     /// The `additional_right_tables` contains tables beyond the first join.
+    ///
+    /// `projection_table` specifies which table's columns to output (for reverse JOINs
+    /// where we SELECT Table.* but swapped the tables for the graph builder).
     pub(crate) fn new_chain_join(
         id: GraphId,
         left_table: String,
@@ -125,6 +133,7 @@ impl QueryGraph {
         right_table: String,
         right_schema: TableSchema,
         additional_right_tables: Vec<(String, TableSchema)>,
+        projection_table: Option<String>,
         nodes: Vec<QueryNode>,
         node_indices: HashMap<NodeId, usize>,
         output_node: NodeId,
@@ -180,6 +189,7 @@ impl QueryGraph {
             schema: combined_schema, // Use combined schema for JOIN graphs
             all_schemas,
             is_join: true,
+            projection_table,
             nodes,
             node_indices,
             output_node,
@@ -523,10 +533,38 @@ impl QueryGraph {
         if let QueryNode::Output { input, .. } = &self.nodes[output_idx] {
             let input_idx = self.node_indices[input];
 
-            // For join queries, get the joined rows from the join node
+            // For join queries, we need to find the Join node and apply filters
             if self.is_join {
-                if let Some(joined_rows) = self.nodes[input_idx].cached_joined() {
-                    return joined_rows.values().map(|jr| jr.to_output_row()).collect();
+                // Find the Join node (it has cached_rows with JoinedRow data)
+                let join_node = self.nodes.iter().find(|n| n.cached_joined().is_some());
+
+                if let Some(join_node) = join_node {
+                    if let Some(joined_rows) = join_node.cached_joined() {
+                        // Get IDs to filter by from downstream Filter node (if any)
+                        let filter_ids = self.nodes[input_idx].cached_ids();
+
+                        // Apply the filter and projection
+                        let rows: Vec<Row> = joined_rows
+                            .iter()
+                            .filter(|(id, _)| {
+                                // If there's a filter, only include matching IDs
+                                filter_ids.map_or(true, |ids| ids.contains(id))
+                            })
+                            .filter_map(|(_, jr)| {
+                                // Apply projection if set
+                                if let Some(proj_table) = &self.projection_table {
+                                    if let Some(proj_schema) = self.all_schemas.get(proj_table) {
+                                        let col_count = proj_schema.columns.len();
+                                        return jr.to_projected_row(proj_table, col_count);
+                                    }
+                                }
+                                // Default: return all joined columns
+                                Some(jr.to_output_row())
+                            })
+                            .collect();
+
+                        return rows;
+                    }
                 }
             }
 

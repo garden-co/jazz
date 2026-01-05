@@ -300,6 +300,20 @@ impl JoinedRow {
         Row::new(self.primary_id, self.values.clone())
     }
 
+    /// Convert to an output Row containing only values from a specific table.
+    ///
+    /// Used for reverse JOINs where we want `SELECT Table.*` but the graph
+    /// had to swap tables for the join logic.
+    pub fn to_projected_row(&self, table: &str, column_count: usize) -> Option<Row> {
+        let (row_id, start_idx) = self.table_offsets.get(table)?;
+        let end_idx = start_idx + column_count;
+        if end_idx > self.values.len() {
+            return None;
+        }
+        let projected_values = self.values[*start_idx..end_idx].to_vec();
+        Some(Row::new(*row_id, projected_values))
+    }
+
     /// Check if this joined row contains a specific table.
     pub fn has_table(&self, table: &str) -> bool {
         self.table_offsets.contains_key(table)

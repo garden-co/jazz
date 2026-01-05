@@ -3284,6 +3284,14 @@ impl Database {
             &ref_column,
         );
 
+        // For reverse JOINs, set projection to output only the SQL FROM table's columns.
+        // The SQL is `SELECT Issues.* FROM Issues JOIN IssueAssignees`, but we swapped the
+        // tables for the graph builder (because IssueAssignees has the Ref). We need to
+        // project back to Issues (the original SQL left table, now graph_right_table).
+        if matches!(join_direction, JoinDirection::RightToLeft(_)) {
+            builder.set_projection(graph_right_table);
+        }
+
         // Start with join node
         let join_node = builder.join();
 
@@ -3446,7 +3454,7 @@ impl Database {
             let (qualified_column, col_type) = if column == "id" {
                 // Special case: id exists in both tables
                 // Use the table qualifier to determine which one
-                if let Some(table) = &cond.column.table {
+                if let Some(_table) = &cond.column.table {
                     // Try to match the qualifier (might be alias) to a schema
                     if left_schema.column_index(column).is_some() {
                         (format!("{}.id", left_schema.name), ColumnType::Ref("".to_string()))

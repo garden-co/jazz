@@ -223,6 +223,8 @@ pub struct JoinGraphBuilder {
     combined_schema: TableSchema,
     /// All right tables in the chain (for multi-table graph creation)
     all_right_tables: Vec<(String, TableSchema)>,
+    /// For reverse JOINs, which table's columns to output (SELECT Table.*)
+    projection_table: Option<String>,
 }
 
 impl JoinGraphBuilder {
@@ -260,12 +262,21 @@ impl JoinGraphBuilder {
             extra_schemas: HashMap::new(),
             combined_schema,
             all_right_tables,
+            projection_table: None,
         }
     }
 
     /// Add an additional schema for chained joins.
     pub fn add_schema(&mut self, table: impl Into<String>, schema: TableSchema) {
         self.extra_schemas.insert(table.into(), schema);
+    }
+
+    /// Set the projection table for reverse JOINs.
+    ///
+    /// When tables are swapped for the graph (because the JOIN table has the Ref),
+    /// this specifies which table's columns should appear in the output.
+    pub fn set_projection(&mut self, table: impl Into<String>) {
+        self.projection_table = Some(table.into());
     }
 
     /// Allocate a new node ID.
@@ -411,6 +422,7 @@ impl JoinGraphBuilder {
             self.right_table,
             self.right_schema,
             additional_right_tables,
+            self.projection_table,
             self.nodes,
             node_indices,
             output_id,
