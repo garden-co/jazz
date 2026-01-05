@@ -950,10 +950,16 @@ impl QueryNode {
     }
 
     /// Extract a Ref value from a row by column name.
+    /// Handles both plain Ref values and NullableSome wrapped Ref values.
     fn get_ref_value(row: &Row, column: &str, schema: &TableSchema) -> Option<ObjectId> {
         let col_idx = schema.column_index(column)?;
         match row.values.get(col_idx)? {
             Value::Ref(id) => Some(*id),
+            Value::NullableSome(inner) => match inner.as_ref() {
+                Value::Ref(id) => Some(*id),
+                _ => None,
+            },
+            Value::NullableNone => None,
             _ => None,
         }
     }
@@ -1811,8 +1817,8 @@ mod tests {
                 Value::String(name.to_string()),
                 Value::Ref(ObjectId::new(owner_id)),
                 match parent_id {
-                    Some(p) => Value::Ref(ObjectId::new(p)),
-                    None => Value::Null,
+                    Some(p) => Value::NullableSome(Box::new(Value::Ref(ObjectId::new(p)))),
+                    None => Value::NullableNone,
                 },
             ],
         )

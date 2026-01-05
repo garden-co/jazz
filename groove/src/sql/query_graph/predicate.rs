@@ -4,6 +4,26 @@ use crate::sql::row::{Row, Value};
 use crate::sql::schema::TableSchema;
 use crate::object::ObjectId;
 
+/// Compare two values, unwrapping NullableSome wrappers as needed.
+/// Returns true if the inner values are equal.
+fn values_equal(row_value: &Value, pred_value: &Value) -> bool {
+    // Unwrap NullableSome from the row value
+    let row_inner = match row_value {
+        Value::NullableSome(inner) => inner.as_ref(),
+        Value::NullableNone => return pred_value.is_null(),
+        other => other,
+    };
+
+    // Unwrap NullableSome from the predicate value (in case it's wrapped too)
+    let pred_inner = match pred_value {
+        Value::NullableSome(inner) => inner.as_ref(),
+        Value::NullableNone => return row_value.is_null(),
+        other => other,
+    };
+
+    row_inner == pred_inner
+}
+
 /// A predicate for filtering rows.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Predicate {
@@ -62,7 +82,7 @@ impl Predicate {
                         _ => false,
                     }
                 } else if let Some(idx) = schema.column_index(column) {
-                    &row.values[idx] == value
+                    values_equal(&row.values[idx], value)
                 } else {
                     false // Unknown column
                 }
@@ -82,7 +102,7 @@ impl Predicate {
                         _ => true,
                     }
                 } else if let Some(idx) = schema.column_index(column) {
-                    &row.values[idx] != value
+                    !values_equal(&row.values[idx], value)
                 } else {
                     false // Unknown column - can't evaluate
                 }
@@ -280,7 +300,7 @@ mod tests {
             vec![
                 Value::String(name.to_string()),
                 Value::Bool(active),
-                age.map(Value::I64).unwrap_or(Value::Null),
+                age.map(|a| Value::NullableSome(Box::new(Value::I64(a)))).unwrap_or(Value::NullableNone),
             ],
         )
     }

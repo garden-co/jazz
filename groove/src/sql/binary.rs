@@ -126,14 +126,19 @@ fn encode_row_to_buf(buf: &mut Vec<u8>, row: &Row) {
 
 /// Encode a single value to the buffer.
 ///
-/// Note: This doesn't handle nullability - that's the caller's responsibility
-/// when encoding column values with schema information. For query results,
-/// we encode values directly since the schema context is known on the JS side.
+/// Nullability is self-describing via Value::NullableSome and Value::NullableNone.
+/// NullableSome writes presence byte 1 + inner value.
+/// NullableNone writes presence byte 0.
 fn encode_value(buf: &mut Vec<u8>, value: &Value) {
     match value {
-        Value::Null => {
-            // Null is encoded as a flag byte (0) - actual handling depends on context
+        Value::NullableNone => {
+            // Null: write presence byte 0
             buf.push(0);
+        }
+        Value::NullableSome(inner) => {
+            // Present: write presence byte 1 + inner value
+            buf.push(1);
+            encode_value(buf, inner);
         }
         Value::Bool(b) => {
             buf.push(if *b { 1 } else { 0 });
@@ -178,76 +183,6 @@ fn encode_value(buf: &mut Vec<u8>, value: &Value) {
     }
 }
 
-/// Encode rows with nullable column handling based on schema hints.
-///
-/// This variant writes null flags for nullable columns.
-/// `nullable_mask` is a bitmask where bit i is set if column i is nullable.
-pub fn encode_rows_with_nullability(rows: &[Row], nullable_mask: u64) -> Vec<u8> {
-    let mut buf = Vec::new();
-
-    // Header: row count
-    buf.extend_from_slice(&(rows.len() as u32).to_le_bytes());
-
-    // Encode each row
-    for row in rows {
-        encode_row_to_buf_with_nullability(&mut buf, row, nullable_mask);
-    }
-
-    buf
-}
-
-/// Encode a single row (id + values) to the buffer with nullability handling.
-fn encode_row_to_buf_with_nullability(buf: &mut Vec<u8>, row: &Row, nullable_mask: u64) {
-    // ObjectId as 26-byte Base32 string
-    let id_str = row.id.to_string();
-    debug_assert_eq!(id_str.len(), 26, "ObjectId string should be 26 chars");
-    buf.extend_from_slice(id_str.as_bytes());
-
-    // Encode each value with nullability
-    for (i, value) in row.values.iter().enumerate() {
-        let is_nullable = (nullable_mask >> i) & 1 == 1;
-
-        if is_nullable {
-            if value.is_null() {
-                buf.push(0); // null flag
-                continue;
-            } else {
-                buf.push(1); // present flag
-            }
-        }
-
-        encode_value(buf, value);
-    }
-}
-
-/// Encode a single delta to binary format with nullable column handling.
-/// Format: u8 type + row data (or just id for removes)
-pub fn encode_delta_with_nullability(delta: &RowDelta, nullable_mask: u64) -> Vec<u8> {
-    let mut buf = Vec::new();
-
-    match delta {
-        RowDelta::Added(row) => {
-            buf.push(DELTA_ADDED);
-            encode_row_to_buf_with_nullability(&mut buf, row, nullable_mask);
-        }
-        RowDelta::Updated { new, .. } => {
-            buf.push(DELTA_UPDATED);
-            encode_row_to_buf_with_nullability(&mut buf, new, nullable_mask);
-        }
-        RowDelta::Removed { id, .. } => {
-            buf.push(DELTA_REMOVED);
-            encode_object_id(&mut buf, *id);
-        }
-    }
-
-    buf
-}
-
-/// Encode a batch of deltas with nullable column handling.
-/// Returns individual buffers for each delta.
-pub fn encode_delta_batch_with_nullability(batch: &DeltaBatch, nullable_mask: u64) -> Vec<Vec<u8>> {
-    batch.iter().map(|d| encode_delta_with_nullability(d, nullable_mask)).collect()
-}
 
 #[cfg(test)]
 mod tests {

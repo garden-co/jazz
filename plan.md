@@ -329,7 +329,7 @@ Current test count: **276 tests** passing across all modules
 
 - [ ] Secondary index for soft-deleted rows: Maintain a separate index (or index variant) that includes soft-deleted objects. Useful for "show deleted items" UI, undelete flows, and admin queries. The primary index would exclude deleted rows for normal queries.
 
-- [ ] **Nullable column representation**: Currently using a `nullable_mask: u64` bitmask to tell the binary encoder which columns need presence flags. This is awkward - the encoder needs schema info passed separately. Better approach: change `Row.values` from `Vec<Value>` to store `Option<Value>` for nullable columns (e.g., `Some(Value::String(...))` vs `Value::String(...)`). Then nullability is inline and the encoder can handle it without external schema hints.
+- [x] **Nullable column representation**: Replaced `nullable_mask: u64` bitmask with self-describing `Value::NullableSome(Box<Value>)` and `Value::NullableNone` variants. The binary encoder now writes presence bytes based on the Value variant itself, not external schema hints. This fixed projection issues where nullable_mask was computed from the wrong schema in JOIN queries.
 
 ---
 

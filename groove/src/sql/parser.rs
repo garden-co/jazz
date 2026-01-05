@@ -347,7 +347,7 @@ impl<'a> Parser<'a> {
 
         // NULL
         if self.try_keyword("NULL") {
-            return Ok(Value::Null);
+            return Ok(Value::NullableNone);
         }
 
         // Boolean
@@ -837,7 +837,7 @@ impl<'a> Parser<'a> {
         // Try to parse as a literal value first
         // Check for NULL, true, false, string literal, or number
         if self.try_keyword("NULL") {
-            return Ok(ConditionValue::Literal(Value::Null));
+            return Ok(ConditionValue::Literal(Value::NullableNone));
         }
         if self.try_keyword("true") {
             return Ok(ConditionValue::Literal(Value::Bool(true)));
@@ -1104,7 +1104,7 @@ impl<'a> Parser<'a> {
 
         // Literal values
         if self.try_keyword("NULL") {
-            return Ok(PolicyValue::Literal(Value::Null));
+            return Ok(PolicyValue::Literal(Value::NullableNone));
         }
         if self.try_keyword("true") {
             return Ok(PolicyValue::Literal(Value::Bool(true)));

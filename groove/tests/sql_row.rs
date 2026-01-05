@@ -39,8 +39,8 @@ fn encode_decode_with_nulls() {
 
     let values = vec![
         Value::String("Bob".into()),
-        Value::Null,
-        Value::I64(25),
+        Value::NullableNone,
+        Value::NullableSome(Box::new(Value::I64(25))),
     ];
 
     let encoded = encode_row(&values, &schema).unwrap();
@@ -60,7 +60,7 @@ fn encode_decode_all_nulls() {
         ],
     );
 
-    let values = vec![Value::Null, Value::Null, Value::Null];
+    let values = vec![Value::NullableNone, Value::NullableNone, Value::NullableNone];
 
     let encoded = encode_row(&values, &schema).unwrap();
     let decoded = decode_row(&encoded, &schema).unwrap();
@@ -127,7 +127,7 @@ fn null_in_non_nullable_fails() {
         vec![ColumnDef::required("name", ColumnType::String)],
     );
 
-    let values = vec![Value::Null];
+    let values = vec![Value::NullableNone];
 
     let result = encode_row(&values, &schema);
     assert!(result.is_err());

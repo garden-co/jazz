@@ -330,16 +330,6 @@ impl IncrementalQuery {
     pub fn graph_id(&self) -> GraphId {
         self.graph_id
     }
-
-    /// Get a bitmask indicating which columns are nullable in the output schema.
-    ///
-    /// Bit i is set if column i is nullable. Used for binary encoding.
-    pub fn nullable_mask(&self) -> u64 {
-        self.db_state
-            .graph_registry
-            .get_nullable_mask(self.graph_id)
-            .unwrap_or(0)
-    }
 }
 
 impl Drop for IncrementalQuery {
@@ -663,9 +653,9 @@ impl DatabaseState {
                 if qc.column == "id" {
                     Value::Ref(outer_row.id)
                 } else if let Some(idx) = outer_schema.column_index(&qc.column) {
-                    outer_row.values.get(idx).cloned().unwrap_or(Value::Null)
+                    outer_row.values.get(idx).cloned().unwrap_or(Value::NullableNone)
                 } else {
-                    Value::Null
+                    Value::NullableNone
                 }
             }
 
@@ -674,7 +664,7 @@ impl DatabaseState {
                 if outer_alias == Some(alias.as_str()) || alias == outer_table {
                     Value::Row(Box::new(outer_row.clone()))
                 } else {
-                    Value::Null
+                    Value::NullableNone
                 }
             }
 
@@ -769,7 +759,7 @@ impl DatabaseState {
                         );
                         if values.len() == 1 {
                             // Single column - return the value directly
-                            values.into_iter().next().unwrap_or(Value::Null)
+                            values.into_iter().next().unwrap_or(Value::NullableNone)
                         } else {
                             // Multiple columns - wrap in Row
                             Value::Row(Box::new(Row::new(inner_row.id, values)))
@@ -804,7 +794,7 @@ impl DatabaseState {
                             })
                             .collect();
                         if values.len() == 1 {
-                            values.into_iter().next().unwrap_or(Value::Null)
+                            values.into_iter().next().unwrap_or(Value::NullableNone)
                         } else {
                             Value::Row(Box::new(Row::new(inner_row.id, values)))
                         }
@@ -1526,7 +1516,7 @@ impl Database {
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
         // Build full row values in schema order
-        let mut row_values = vec![Value::Null; schema.columns.len()];
+        let mut row_values = vec![Value::NullableNone; schema.columns.len()];
 
         if columns.len() != values.len() {
             return Err(DatabaseError::ColumnMismatch {
@@ -2003,7 +1993,7 @@ impl Database {
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
         // Build the row values first (to validate and check policy)
-        let mut row_values = vec![Value::Null; schema.columns.len()];
+        let mut row_values = vec![Value::NullableNone; schema.columns.len()];
 
         if columns.len() != values.len() {
             return Err(DatabaseError::ColumnMismatch {

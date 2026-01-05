@@ -10,9 +10,8 @@ mod table_rows;
 mod types;
 
 pub use binary::{
-    encode_delta, encode_delta_batch, encode_delta_batch_with_nullability,
-    encode_delta_with_nullability, encode_rows, encode_rows_with_nullability,
-    encode_single_row, DELTA_ADDED, DELTA_REMOVED, DELTA_UPDATED,
+    encode_delta, encode_delta_batch, encode_rows, encode_single_row, DELTA_ADDED, DELTA_REMOVED,
+    DELTA_UPDATED,
 };
 pub use database::{Database, DatabaseError, DatabaseState, ExecuteResult, IncrementalQuery};
 pub use index::RefIndex;

@@ -69,7 +69,7 @@ fn parse_insert_with_null() {
 
     match stmt {
         Statement::Insert(ins) => {
-            assert_eq!(ins.values, vec![Value::String("Bob".into()), Value::Null,]);
+            assert_eq!(ins.values, vec![Value::String("Bob".into()), Value::NullableNone,]);
         }
         _ => panic!("expected Insert"),
     }

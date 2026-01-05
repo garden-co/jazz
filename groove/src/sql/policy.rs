@@ -465,7 +465,7 @@ fn serialize_string(buf: &mut Vec<u8>, s: &str) {
 
 fn serialize_literal(buf: &mut Vec<u8>, val: &Value) {
     match val {
-        Value::Null => buf.push(0),
+        Value::NullableNone => buf.push(0),
         Value::Bool(b) => {
             buf.push(1);
             buf.push(if *b { 1 } else { 0 });
@@ -499,6 +499,8 @@ fn serialize_literal(buf: &mut Vec<u8>, val: &Value) {
             buf.push(8);
             buf.extend_from_slice(&n.to_le_bytes());
         }
+        // NullableSome: serialize the inner value
+        Value::NullableSome(inner) => serialize_literal(buf, inner),
         // Row and Array are not valid in policy literals - they're only for query results
         Value::Row(_) | Value::Array(_) => {
             panic!("Row and Array values cannot be used in policy literals");
@@ -723,7 +725,7 @@ fn deserialize_literal(data: &[u8], pos: usize) -> Result<(Value, usize), Policy
     let pos = pos + 1;
 
     match tag {
-        0 => Ok((Value::Null, pos)),
+        0 => Ok((Value::NullableNone, pos)),
         1 => {
             if pos >= data.len() {
                 return Err(PolicyError::DeserializationError(
@@ -1742,7 +1744,7 @@ mod tests {
                 root_folder_id,
                 vec![
                     Value::String("Root".into()),
-                    Value::Null, // no parent
+                    Value::NullableNone, // no parent
                     Value::Ref(alice_id),
                 ],
             ),
@@ -1757,7 +1759,7 @@ mod tests {
                 vec![
                     Value::String("Child".into()),
                     Value::Ref(root_folder_id), // parent is root
-                    Value::Null,                // no direct owner
+                    Value::NullableNone,                // no direct owner
                 ],
             ),
         );
@@ -1771,7 +1773,7 @@ mod tests {
                 vec![
                     Value::String("Grandchild".into()),
                     Value::Ref(child_folder_id), // parent is child
-                    Value::Null,                 // no direct owner
+                    Value::NullableNone,                 // no direct owner
                 ],
             ),
         );

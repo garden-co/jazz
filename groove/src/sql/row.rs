@@ -4,7 +4,6 @@ use crate::sql::schema::{ColumnType, TableSchema};
 /// Runtime value representation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
-    Null,
     Bool(bool),
     I32(i32),
     U32(u32),
@@ -18,18 +17,46 @@ pub enum Value {
     Row(Box<Row>),
     /// An array of values (from ARRAY subquery).
     Array(Vec<Value>),
+    /// A nullable column with a present value.
+    /// The encoder writes presence byte 1, then encodes the inner value.
+    // TODO: Consider optimizing away the Box using a custom enum layout
+    NullableSome(Box<Value>),
+    /// A nullable column that is null.
+    /// The encoder writes presence byte 0.
+    NullableNone,
 }
 
 impl Value {
-    /// Check if value is null.
+    /// Check if value is null (NullableNone).
     pub fn is_null(&self) -> bool {
-        matches!(self, Value::Null)
+        matches!(self, Value::NullableNone)
+    }
+
+    /// Check if value is a nullable variant (NullableSome or NullableNone).
+    pub fn is_nullable(&self) -> bool {
+        matches!(self, Value::NullableSome(_) | Value::NullableNone)
+    }
+
+    /// Wrap a value as nullable (present).
+    pub fn nullable_some(value: Value) -> Value {
+        Value::NullableSome(Box::new(value))
+    }
+
+    /// Unwrap a nullable value, returning the inner value.
+    /// Returns self if not a nullable variant.
+    pub fn unwrap_nullable(&self) -> Option<&Value> {
+        match self {
+            Value::NullableSome(v) => Some(v),
+            Value::NullableNone => None,
+            other => Some(other),
+        }
     }
 
     /// Try to get as bool.
     pub fn as_bool(&self) -> Option<bool> {
         match self {
             Value::Bool(b) => Some(*b),
+            Value::NullableSome(v) => v.as_bool(),
             _ => None,
         }
     }
@@ -240,8 +267,14 @@ fn encode_column_value(
         });
     }
 
+    // Unwrap NullableSome to get the inner value
+    let inner_value = match value {
+        Value::NullableSome(inner) => inner.as_ref(),
+        other => other,
+    };
+
     // Encode the actual value
-    match (value, ty) {
+    match (inner_value, ty) {
         (Value::Bool(b), ColumnType::Bool) => {
             buf.push(if *b { 0x01 } else { 0x00 });
         }
@@ -326,92 +359,110 @@ pub fn decode_row(data: &[u8], schema: &TableSchema) -> Result<Vec<Value>, RowEr
 fn decode_fixed_column(data: &[u8], ty: &ColumnType, nullable: bool) -> Result<Value, RowError> {
     let mut pos = 0;
 
-    // Check null flag
+    // Check null flag for nullable columns
     if nullable {
         if data.is_empty() {
             return Err(RowError::UnexpectedEof);
         }
         if data[0] == 0x00 {
-            return Ok(Value::Null);
+            return Ok(Value::NullableNone);
         }
         pos = 1;
     }
 
-    match ty {
+    let value = match ty {
         ColumnType::Bool => {
             if data.len() < pos + 1 {
                 return Err(RowError::UnexpectedEof);
             }
-            Ok(Value::Bool(data[pos] != 0))
+            Value::Bool(data[pos] != 0)
         }
         ColumnType::I32 => {
             if data.len() < pos + 4 {
                 return Err(RowError::UnexpectedEof);
             }
             let bytes: [u8; 4] = data[pos..pos + 4].try_into().unwrap();
-            Ok(Value::I32(i32::from_le_bytes(bytes)))
+            Value::I32(i32::from_le_bytes(bytes))
         }
         ColumnType::U32 => {
             if data.len() < pos + 4 {
                 return Err(RowError::UnexpectedEof);
             }
             let bytes: [u8; 4] = data[pos..pos + 4].try_into().unwrap();
-            Ok(Value::U32(u32::from_le_bytes(bytes)))
+            Value::U32(u32::from_le_bytes(bytes))
         }
         ColumnType::I64 => {
             if data.len() < pos + 8 {
                 return Err(RowError::UnexpectedEof);
             }
             let bytes: [u8; 8] = data[pos..pos + 8].try_into().unwrap();
-            Ok(Value::I64(i64::from_le_bytes(bytes)))
+            Value::I64(i64::from_le_bytes(bytes))
         }
         ColumnType::F64 => {
             if data.len() < pos + 8 {
                 return Err(RowError::UnexpectedEof);
             }
             let bytes: [u8; 8] = data[pos..pos + 8].try_into().unwrap();
-            Ok(Value::F64(f64::from_le_bytes(bytes)))
+            Value::F64(f64::from_le_bytes(bytes))
         }
         ColumnType::Ref(_) => {
             if data.len() < pos + 16 {
                 return Err(RowError::UnexpectedEof);
             }
             let bytes: [u8; 16] = data[pos..pos + 16].try_into().unwrap();
-            Ok(Value::Ref(ObjectId::from_le_bytes(bytes)))
+            Value::Ref(ObjectId::from_le_bytes(bytes))
         }
-        _ => Err(RowError::TypeMismatch {
-            expected: "fixed-size type".into(),
-            got: format!("{:?}", ty),
-        }),
-    }
+        _ => {
+            return Err(RowError::TypeMismatch {
+                expected: "fixed-size type".into(),
+                got: format!("{:?}", ty),
+            })
+        }
+    };
+
+    // Wrap in NullableSome for nullable columns with present values
+    Ok(if nullable {
+        Value::NullableSome(Box::new(value))
+    } else {
+        value
+    })
 }
 
 /// Decode a variable-size column value.
 fn decode_variable_column(data: &[u8], ty: &ColumnType, nullable: bool) -> Result<Value, RowError> {
     let mut pos = 0;
 
-    // Check null flag
+    // Check null flag for nullable columns
     if nullable {
         if data.is_empty() {
             return Err(RowError::UnexpectedEof);
         }
         if data[0] == 0x00 {
-            return Ok(Value::Null);
+            return Ok(Value::NullableNone);
         }
         pos = 1;
     }
 
-    match ty {
+    let value = match ty {
         ColumnType::String => {
             let s = std::str::from_utf8(&data[pos..]).map_err(|_| RowError::InvalidUtf8)?;
-            Ok(Value::String(s.to_string()))
+            Value::String(s.to_string())
         }
-        ColumnType::Bytes => Ok(Value::Bytes(data[pos..].to_vec())),
-        _ => Err(RowError::TypeMismatch {
-            expected: "variable-size type".into(),
-            got: format!("{:?}", ty),
-        }),
-    }
+        ColumnType::Bytes => Value::Bytes(data[pos..].to_vec()),
+        _ => {
+            return Err(RowError::TypeMismatch {
+                expected: "variable-size type".into(),
+                got: format!("{:?}", ty),
+            })
+        }
+    };
+
+    // Wrap in NullableSome for nullable columns with present values
+    Ok(if nullable {
+        Value::NullableSome(Box::new(value))
+    } else {
+        value
+    })
 }
 
 /// Errors during row encoding/decoding.

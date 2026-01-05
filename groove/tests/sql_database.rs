@@ -63,7 +63,8 @@ fn insert_and_get() {
     let row = db.get("users", id).unwrap().unwrap();
     assert_eq!(row.id, id);
     assert_eq!(row.values[0], Value::String("Alice".into()));
-    assert_eq!(row.values[1], Value::I64(30));
+    // age is optional, so it's wrapped in NullableSome
+    assert_eq!(row.values[1], Value::NullableSome(Box::new(Value::I64(30))));
 }
 
 #[test]
@@ -84,7 +85,7 @@ fn insert_with_null() {
         .unwrap();
 
     let row = db.get("users", id).unwrap().unwrap();
-    assert_eq!(row.values[1], Value::Null);
+    assert_eq!(row.values[1], Value::NullableNone);
 }
 
 #[test]
@@ -128,7 +129,8 @@ fn update_row() {
     assert!(updated);
 
     let row = db.get("users", id).unwrap().unwrap();
-    assert_eq!(row.values[1], Value::I64(31));
+    // age is optional, so it's wrapped in NullableSome
+    assert_eq!(row.values[1], Value::NullableSome(Box::new(Value::I64(31))));
 }
 
 // ========== Delete Tests ==========
@@ -274,7 +276,8 @@ fn execute_insert() {
         ExecuteResult::Inserted(id) => {
             let row = db.get("users", id).unwrap().unwrap();
             assert_eq!(row.values[0], Value::String("Alice".into()));
-            assert_eq!(row.values[1], Value::I64(30));
+            // age is optional (no NOT NULL), so it's wrapped in NullableSome
+            assert_eq!(row.values[1], Value::NullableSome(Box::new(Value::I64(30))));
         }
         _ => panic!("expected Inserted"),
     }
@@ -343,7 +346,8 @@ fn execute_update() {
     }
 
     let row = db.get("users", id).unwrap().unwrap();
-    assert_eq!(row.values[1], Value::I64(31));
+    // age is optional (no NOT NULL), so it's wrapped in NullableSome
+    assert_eq!(row.values[1], Value::NullableSome(Box::new(Value::I64(31))));
 }
 
 #[test]
@@ -714,7 +718,7 @@ fn nullable_ref_column() {
         .insert("posts", &["title"], vec![Value::String("Anonymous".into())])
         .unwrap();
     let post = db.get("posts", post_id).unwrap().unwrap();
-    assert_eq!(post.values[0], Value::Null);
+    assert_eq!(post.values[0], Value::NullableNone);
 
     // Insert post with author
     let user_id = db
