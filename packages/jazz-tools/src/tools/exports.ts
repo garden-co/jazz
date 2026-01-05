@@ -143,3 +143,8 @@ export * from "./ssr/index.js";
 export { captureStack } from "./subscribe/errorReporting.js";
 
 export * as jazzConfig from "./config.js";
+
+export {
+  JazzMessageChannel,
+  type JazzMessageChannelExposeOptions,
+} from "../worker/JazzMessageChannel.js";
