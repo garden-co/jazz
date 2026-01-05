@@ -51,6 +51,10 @@ pub struct Select {
     pub projection: Projection,
     pub from: FromClause,
     pub where_clause: Vec<Condition>,
+    /// Maximum number of rows to return.
+    pub limit: Option<u64>,
+    /// Number of rows to skip from the start.
+    pub offset: Option<u64>,
 }
 
 /// SELECT projection.
@@ -316,6 +320,28 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parse an unsigned 64-bit integer (for LIMIT/OFFSET values).
+    fn parse_u64(&mut self) -> Result<u64, ParseError> {
+        self.skip_whitespace();
+        let start = self.pos;
+
+        while self.pos < self.input.len() {
+            let c = self.input.as_bytes()[self.pos];
+            if c.is_ascii_digit() {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+
+        if self.pos == start {
+            return Err(self.error("expected number"));
+        }
+
+        let num_str = &self.input[start..self.pos];
+        num_str.parse().map_err(|_| self.error("invalid number"))
+    }
+
     fn parse_value(&mut self) -> Result<Value, ParseError> {
         self.skip_whitespace();
 
@@ -576,6 +602,7 @@ impl<'a> Parser<'a> {
                         if let Some(table) = &qc.table {
                             let from = self.parse_from_clause()?;
                             let where_clause = self.parse_where_clause()?;
+                            let (limit, offset) = self.parse_limit_offset()?;
                             self.skip_whitespace();
                             if self.peek_char() == Some(';') {
                                 self.consume_char();
@@ -584,6 +611,8 @@ impl<'a> Parser<'a> {
                                 projection: Projection::TableAll(table.clone()),
                                 from,
                                 where_clause,
+                                limit,
+                                offset,
                             });
                         }
                     }
@@ -595,6 +624,7 @@ impl<'a> Parser<'a> {
 
         let from = self.parse_from_clause()?;
         let where_clause = self.parse_where_clause()?;
+        let (limit, offset) = self.parse_limit_offset()?;
 
         // Optional semicolon
         self.skip_whitespace();
@@ -606,7 +636,26 @@ impl<'a> Parser<'a> {
             projection,
             from,
             where_clause,
+            limit,
+            offset,
         })
+    }
+
+    /// Parse optional LIMIT and OFFSET clauses.
+    fn parse_limit_offset(&mut self) -> Result<(Option<u64>, Option<u64>), ParseError> {
+        let limit = if self.try_keyword("LIMIT") {
+            Some(self.parse_u64()?)
+        } else {
+            None
+        };
+
+        let offset = if self.try_keyword("OFFSET") {
+            Some(self.parse_u64()?)
+        } else {
+            None
+        };
+
+        Ok((limit, offset))
     }
 
     /// Parse a single SELECT expression (column, table row, ARRAY subquery, or aliased expression).
@@ -709,7 +758,7 @@ impl<'a> Parser<'a> {
         // Must not be a keyword like JOIN, WHERE, etc.
         self.skip_whitespace();
         let alias = if !self.is_keyword_next(&[
-            "JOIN", "WHERE", "AND", "OR", "ON", "ORDER", "LIMIT", "GROUP", "HAVING",
+            "JOIN", "WHERE", "AND", "OR", "ON", "ORDER", "LIMIT", "OFFSET", "GROUP", "HAVING",
         ]) && self
             .peek_char()
             .map(|c| c.is_ascii_alphabetic())

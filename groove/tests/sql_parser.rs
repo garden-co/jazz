@@ -736,3 +736,75 @@ fn parse_policy_cross_action_inherits() {
         _ => panic!("expected CreatePolicy"),
     }
 }
+
+#[test]
+fn parse_select_limit() {
+    let sql = "SELECT * FROM users LIMIT 10";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::Select(s) => {
+            assert_eq!(s.limit, Some(10));
+            assert_eq!(s.offset, None);
+        }
+        _ => panic!("expected Select"),
+    }
+}
+
+#[test]
+fn parse_select_offset() {
+    let sql = "SELECT * FROM users OFFSET 5";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::Select(s) => {
+            assert_eq!(s.limit, None);
+            assert_eq!(s.offset, Some(5));
+        }
+        _ => panic!("expected Select"),
+    }
+}
+
+#[test]
+fn parse_select_limit_offset() {
+    let sql = "SELECT * FROM users LIMIT 10 OFFSET 5";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::Select(s) => {
+            assert_eq!(s.limit, Some(10));
+            assert_eq!(s.offset, Some(5));
+        }
+        _ => panic!("expected Select"),
+    }
+}
+
+#[test]
+fn parse_select_limit_with_where() {
+    let sql = "SELECT * FROM users WHERE active = true LIMIT 5";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::Select(s) => {
+            assert_eq!(s.where_clause.len(), 1);
+            assert_eq!(s.limit, Some(5));
+            assert_eq!(s.offset, None);
+        }
+        _ => panic!("expected Select"),
+    }
+}
+
+#[test]
+fn parse_select_limit_offset_with_where() {
+    let sql = "SELECT * FROM users WHERE active = true LIMIT 3 OFFSET 2";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::Select(s) => {
+            assert_eq!(s.where_clause.len(), 1);
+            assert_eq!(s.limit, Some(3));
+            assert_eq!(s.offset, Some(2));
+        }
+        _ => panic!("expected Select"),
+    }
+}

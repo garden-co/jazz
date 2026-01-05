@@ -490,6 +490,10 @@ impl QueryGraph {
                     }
                     // If not for this node, pass through unchanged
                 }
+                QueryNode::LimitOffset { .. } => {
+                    // LimitOffset needs special evaluation with cache access
+                    current = node.evaluate_limit_offset(current, cache);
+                }
                 _ => {
                     current = node.evaluate(current, &self.schema, cache);
                 }
@@ -526,6 +530,16 @@ impl QueryGraph {
             // For ArrayAggregate queries, get rows from outer_rows
             if let Some(outer_rows) = self.nodes[input_idx].outer_rows() {
                 return outer_rows.values().cloned().collect();
+            }
+
+            // For LimitOffset queries, get rows from all_rows filtered by visible_ids
+            if let QueryNode::LimitOffset { all_rows, visible_ids, .. } = &self.nodes[input_idx] {
+                // Return rows in sorted order (BTreeMap maintains order)
+                return all_rows
+                    .iter()
+                    .filter(|(id, _)| visible_ids.contains(id))
+                    .map(|(_, row)| row.clone())
+                    .collect();
             }
 
             // For single-table queries, use cached IDs

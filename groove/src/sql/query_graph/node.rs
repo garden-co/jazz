@@ -156,6 +156,26 @@ pub enum QueryNode {
         /// Cached outer rows (needed to emit Updated deltas with full row data).
         outer_rows: HashMap<ObjectId, Row>,
     },
+
+    /// Transform: apply LIMIT and OFFSET to input rows.
+    ///
+    /// Maintains all qualifying rows from input and tracks which subset is
+    /// "visible" (within the offset+limit window). Emits deltas when the
+    /// visible window changes.
+    ///
+    /// Without ORDER BY, uses ObjectId ordering (UUIDv7 = insertion order).
+    LimitOffset {
+        table: String,
+        input: NodeId,
+        /// Maximum number of rows to return (None = unlimited).
+        limit: Option<u64>,
+        /// Number of rows to skip from the start.
+        offset: u64,
+        /// All rows that passed upstream filters, sorted by ObjectId.
+        all_rows: std::collections::BTreeMap<ObjectId, Row>,
+        /// Currently visible row IDs (in the window [offset, offset+limit)).
+        visible_ids: HashSet<ObjectId>,
+    },
 }
 
 impl QueryNode {
@@ -169,6 +189,7 @@ impl QueryNode {
             QueryNode::Output { table, .. } => table,
             QueryNode::RecursiveFilter { table, .. } => table,
             QueryNode::ArrayAggregate { outer_table, .. } => outer_table,
+            QueryNode::LimitOffset { table, .. } => table,
         }
     }
 
@@ -188,6 +209,7 @@ impl QueryNode {
             QueryNode::ArrayAggregate { outer_table, inner_table, .. } => {
                 vec![outer_table, inner_table]
             }
+            QueryNode::LimitOffset { table, .. } => vec![table],
         }
     }
 
@@ -201,6 +223,7 @@ impl QueryNode {
             QueryNode::Output { .. } => None,
             QueryNode::RecursiveFilter { .. } => None, // Uses accessible instead
             QueryNode::ArrayAggregate { .. } => None, // Uses outer_rows instead
+            QueryNode::LimitOffset { visible_ids, .. } => Some(visible_ids),
         }
     }
 
@@ -214,6 +237,7 @@ impl QueryNode {
             QueryNode::Output { .. } => None,
             QueryNode::RecursiveFilter { .. } => None,
             QueryNode::ArrayAggregate { .. } => None,
+            QueryNode::LimitOffset { visible_ids, .. } => Some(visible_ids),
         }
     }
 
@@ -280,6 +304,7 @@ impl QueryNode {
             QueryNode::Output { input, .. } => Some(*input),
             QueryNode::RecursiveFilter { input, .. } => Some(*input),
             QueryNode::ArrayAggregate { input, .. } => Some(*input),
+            QueryNode::LimitOffset { input, .. } => Some(*input),
         }
     }
 
@@ -328,6 +353,12 @@ impl QueryNode {
             QueryNode::ArrayAggregate { .. } => {
                 // ArrayAggregate nodes need special handling with database access
                 // This should be called via evaluate_array_aggregate instead
+                DeltaBatch::new()
+            }
+
+            QueryNode::LimitOffset { .. } => {
+                // LimitOffset nodes need special handling
+                // This should be called via evaluate_limit_offset instead
                 DeltaBatch::new()
             }
         }
@@ -1346,6 +1377,197 @@ impl QueryNode {
 
         output
     }
+
+    /// Evaluate a LimitOffset node.
+    ///
+    /// Maintains the full set of qualifying rows and emits deltas
+    /// when the visible window changes.
+    pub fn evaluate_limit_offset(
+        &mut self,
+        input: DeltaBatch,
+        cache: &RowCache,
+    ) -> DeltaBatch {
+        match self {
+            QueryNode::LimitOffset {
+                table,
+                limit,
+                offset,
+                all_rows,
+                visible_ids,
+                ..
+            } => {
+                let mut output = DeltaBatch::new();
+
+                for delta in input.into_iter() {
+                    match delta {
+                        RowDelta::Added(row) => {
+                            Self::limit_offset_handle_add(
+                                row,
+                                *limit,
+                                *offset,
+                                all_rows,
+                                visible_ids,
+                                &mut output,
+                            );
+                        }
+                        RowDelta::Removed { id, prior } => {
+                            Self::limit_offset_handle_remove(
+                                id,
+                                prior,
+                                *limit,
+                                *offset,
+                                all_rows,
+                                visible_ids,
+                                table,
+                                cache,
+                                &mut output,
+                            );
+                        }
+                        RowDelta::Updated { id, new, prior } => {
+                            // Update the stored row if it exists
+                            if let Some(row) = all_rows.get_mut(&id) {
+                                *row = new.clone();
+                                // If the row is visible, emit the update
+                                if visible_ids.contains(&id) {
+                                    output.push(RowDelta::Updated { id, new, prior });
+                                }
+                            }
+                        }
+                    }
+                }
+
+                output
+            }
+            _ => DeltaBatch::new(),
+        }
+    }
+
+    /// Handle a row being added to the LimitOffset node.
+    fn limit_offset_handle_add(
+        row: Row,
+        limit: Option<u64>,
+        offset: u64,
+        all_rows: &mut std::collections::BTreeMap<ObjectId, Row>,
+        visible_ids: &mut HashSet<ObjectId>,
+        output: &mut DeltaBatch,
+    ) {
+        let row_id = row.id;
+        all_rows.insert(row_id, row.clone());
+
+        // Compute the new visible window and changes
+        let (new_visible, changes) = Self::compute_window_changes(all_rows, visible_ids, limit, offset);
+
+        // Emit deltas for changes
+        for (id, change_type) in changes {
+            match change_type {
+                WindowChange::Added => {
+                    if let Some(r) = all_rows.get(&id) {
+                        output.push(RowDelta::Added(r.clone()));
+                    }
+                }
+                WindowChange::Removed => {
+                    output.push(RowDelta::Removed {
+                        id,
+                        prior: crate::sql::query_graph::delta::PriorState::empty(),
+                    });
+                }
+            }
+        }
+
+        *visible_ids = new_visible;
+    }
+
+    /// Handle a row being removed from the LimitOffset node.
+    fn limit_offset_handle_remove(
+        id: ObjectId,
+        prior: crate::sql::query_graph::delta::PriorState,
+        limit: Option<u64>,
+        offset: u64,
+        all_rows: &mut std::collections::BTreeMap<ObjectId, Row>,
+        visible_ids: &mut HashSet<ObjectId>,
+        table: &str,
+        cache: &RowCache,
+        output: &mut DeltaBatch,
+    ) {
+        let was_visible = visible_ids.contains(&id);
+        all_rows.remove(&id);
+        visible_ids.remove(&id);
+
+        if was_visible {
+            // Row was in visible window - emit removal
+            output.push(RowDelta::Removed { id, prior });
+        }
+
+        // Recompute window - a row might be promoted or demoted
+        let (new_visible, changes) = Self::compute_window_changes(all_rows, visible_ids, limit, offset);
+
+        for (changed_id, change_type) in changes {
+            match change_type {
+                WindowChange::Added => {
+                    // Try to get the row from all_rows first, then cache
+                    if let Some(r) = all_rows.get(&changed_id) {
+                        output.push(RowDelta::Added(r.clone()));
+                    } else if let Some(Some(r)) = cache.get(table, changed_id) {
+                        output.push(RowDelta::Added(r.clone()));
+                    }
+                }
+                WindowChange::Removed => {
+                    if changed_id != id {
+                        // Only emit if not already removed above
+                        output.push(RowDelta::Removed {
+                            id: changed_id,
+                            prior: crate::sql::query_graph::delta::PriorState::empty(),
+                        });
+                    }
+                }
+            }
+        }
+
+        *visible_ids = new_visible;
+    }
+
+    /// Compute the new visible window and return changes from the current state.
+    fn compute_window_changes(
+        all_rows: &std::collections::BTreeMap<ObjectId, Row>,
+        current_visible: &HashSet<ObjectId>,
+        limit: Option<u64>,
+        offset: u64,
+    ) -> (HashSet<ObjectId>, Vec<(ObjectId, WindowChange)>) {
+        let offset = offset as usize;
+        let limit = limit.map(|l| l as usize);
+
+        // Compute new visible set using BTreeMap's sorted iteration
+        let new_visible: HashSet<ObjectId> = all_rows
+            .keys()
+            .skip(offset)
+            .take(limit.unwrap_or(usize::MAX))
+            .copied()
+            .collect();
+
+        let mut changes = Vec::new();
+
+        // Find removed (was visible, now not)
+        for id in current_visible {
+            if !new_visible.contains(id) {
+                changes.push((*id, WindowChange::Removed));
+            }
+        }
+
+        // Find added (was not visible, now is)
+        for id in &new_visible {
+            if !current_visible.contains(id) {
+                changes.push((*id, WindowChange::Added));
+            }
+        }
+
+        (new_visible, changes)
+    }
+}
+
+/// Represents a change to the visible window in a LimitOffset node.
+enum WindowChange {
+    Added,
+    Removed,
 }
 
 #[cfg(test)]

@@ -153,6 +153,31 @@ impl QueryGraphBuilder {
         id
     }
 
+    /// Add a limit/offset node.
+    ///
+    /// Applies pagination to the result set:
+    /// - `limit`: Maximum number of rows to return (None = unlimited)
+    /// - `offset`: Number of rows to skip from the start
+    ///
+    /// Without ORDER BY, uses ObjectId ordering (UUIDv7 = insertion order).
+    pub fn limit_offset(&mut self, input: NodeId, limit: Option<u64>, offset: u64) -> NodeId {
+        // Skip if no actual limiting (no limit and offset=0)
+        if limit.is_none() && offset == 0 {
+            return input;
+        }
+
+        let id = self.alloc_id();
+        self.nodes.push(QueryNode::LimitOffset {
+            table: self.table.clone(),
+            input,
+            limit,
+            offset,
+            all_rows: std::collections::BTreeMap::new(),
+            visible_ids: HashSet::new(),
+        });
+        id
+    }
+
     /// Add the output node and build the graph.
     ///
     /// This consumes the builder and returns the constructed graph.
@@ -331,6 +356,31 @@ impl JoinGraphBuilder {
         // Extend the combined schema with the new table's columns
         self.combined_schema = self.combined_schema.combine(&target_schema);
 
+        id
+    }
+
+    /// Add a limit/offset node.
+    ///
+    /// Applies pagination to the result set:
+    /// - `limit`: Maximum number of rows to return (None = unlimited)
+    /// - `offset`: Number of rows to skip from the start
+    ///
+    /// Without ORDER BY, uses ObjectId ordering (UUIDv7 = insertion order).
+    pub fn limit_offset(&mut self, input: NodeId, limit: Option<u64>, offset: u64) -> NodeId {
+        // Skip if no actual limiting (no limit and offset=0)
+        if limit.is_none() && offset == 0 {
+            return input;
+        }
+
+        let id = self.alloc_id();
+        self.nodes.push(QueryNode::LimitOffset {
+            table: self.left_table.clone(),
+            input,
+            limit,
+            offset,
+            all_rows: std::collections::BTreeMap::new(),
+            visible_ids: HashSet::new(),
+        });
         id
     }
 

@@ -1889,3 +1889,171 @@ fn hard_delete_all_rows() {
 
     assert_eq!(db.select_all("users").unwrap().len(), 0);
 }
+
+// ========== LIMIT and OFFSET Tests ==========
+
+#[test]
+fn select_limit() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+
+    // Insert 5 users
+    for name in &["Alice", "Bob", "Charlie", "David", "Eve"] {
+        db.execute(&format!("INSERT INTO users (name) VALUES ('{}')", name)).unwrap();
+    }
+
+    // Select with limit
+    let result = db.execute("SELECT * FROM users LIMIT 3").unwrap();
+    match result {
+        ExecuteResult::Selected(rows) => {
+            assert_eq!(rows.len(), 3);
+        }
+        _ => panic!("Expected Selected"),
+    }
+}
+
+#[test]
+fn select_offset() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+
+    // Insert 5 users
+    for name in &["Alice", "Bob", "Charlie", "David", "Eve"] {
+        db.execute(&format!("INSERT INTO users (name) VALUES ('{}')", name)).unwrap();
+    }
+
+    // Select with offset (skip first 2)
+    let result = db.execute("SELECT * FROM users OFFSET 2").unwrap();
+    match result {
+        ExecuteResult::Selected(rows) => {
+            assert_eq!(rows.len(), 3); // 5 - 2 = 3
+        }
+        _ => panic!("Expected Selected"),
+    }
+}
+
+#[test]
+fn select_limit_offset() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+
+    // Insert 5 users
+    for name in &["Alice", "Bob", "Charlie", "David", "Eve"] {
+        db.execute(&format!("INSERT INTO users (name) VALUES ('{}')", name)).unwrap();
+    }
+
+    // Select with limit and offset
+    let result = db.execute("SELECT * FROM users LIMIT 2 OFFSET 1").unwrap();
+    match result {
+        ExecuteResult::Selected(rows) => {
+            assert_eq!(rows.len(), 2);
+        }
+        _ => panic!("Expected Selected"),
+    }
+}
+
+#[test]
+fn select_limit_exceeds_rows() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+
+    // Insert 3 users
+    for name in &["Alice", "Bob", "Charlie"] {
+        db.execute(&format!("INSERT INTO users (name) VALUES ('{}')", name)).unwrap();
+    }
+
+    // Limit larger than available rows
+    let result = db.execute("SELECT * FROM users LIMIT 100").unwrap();
+    match result {
+        ExecuteResult::Selected(rows) => {
+            assert_eq!(rows.len(), 3); // Should return all available
+        }
+        _ => panic!("Expected Selected"),
+    }
+}
+
+#[test]
+fn select_offset_exceeds_rows() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+
+    // Insert 3 users
+    for name in &["Alice", "Bob", "Charlie"] {
+        db.execute(&format!("INSERT INTO users (name) VALUES ('{}')", name)).unwrap();
+    }
+
+    // Offset larger than available rows
+    let result = db.execute("SELECT * FROM users OFFSET 100").unwrap();
+    match result {
+        ExecuteResult::Selected(rows) => {
+            assert_eq!(rows.len(), 0); // Should return empty
+        }
+        _ => panic!("Expected Selected"),
+    }
+}
+
+#[test]
+fn incremental_query_limit() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+
+    // Create incremental query with limit
+    let query = db.incremental_query("SELECT * FROM users LIMIT 2").unwrap();
+
+    // Initially empty
+    assert_eq!(query.rows().len(), 0);
+
+    // Insert first row - should appear
+    db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap();
+    assert_eq!(query.rows().len(), 1);
+
+    // Insert second row - should appear
+    db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap();
+    assert_eq!(query.rows().len(), 2);
+
+    // Insert third row - should NOT appear (limit is 2)
+    db.execute("INSERT INTO users (name) VALUES ('Charlie')").unwrap();
+    assert_eq!(query.rows().len(), 2);
+}
+
+#[test]
+fn incremental_query_offset() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+
+    // Create incremental query with offset
+    let query = db.incremental_query("SELECT * FROM users OFFSET 1").unwrap();
+
+    // Initially empty
+    assert_eq!(query.rows().len(), 0);
+
+    // Insert first row - should NOT appear (it's in the offset region)
+    db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap();
+    assert_eq!(query.rows().len(), 0);
+
+    // Insert second row - should appear
+    db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap();
+    assert_eq!(query.rows().len(), 1);
+
+    // Insert third row - should appear
+    db.execute("INSERT INTO users (name) VALUES ('Charlie')").unwrap();
+    assert_eq!(query.rows().len(), 2);
+}
+
+#[test]
+fn incremental_query_limit_offset() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+
+    // Create incremental query: skip 1, take 2
+    let query = db.incremental_query("SELECT * FROM users LIMIT 2 OFFSET 1").unwrap();
+
+    // Insert 4 rows
+    for name in &["Alice", "Bob", "Charlie", "David"] {
+        db.execute(&format!("INSERT INTO users (name) VALUES ('{}')", name)).unwrap();
+    }
+
+    // Should have exactly 2 rows (skipped Alice, took Bob and Charlie, skipped David)
+    let rows = query.rows();
+    assert_eq!(rows.len(), 2);
+}

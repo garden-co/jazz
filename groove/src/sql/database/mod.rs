@@ -539,7 +539,7 @@ impl DatabaseState {
         // Read all rows from primary table
         let primary_rows = self.read_all_rows(primary_table);
 
-        if select.from.joins.is_empty() {
+        let result = if select.from.joins.is_empty() {
             // Simple case: no JOINs
             let filtered: Vec<Row> = primary_rows
                 .into_iter()
@@ -590,6 +590,19 @@ impl DatabaseState {
                 .into_iter()
                 .map(|jr| jr.to_output_row(&select.projection))
                 .collect()
+        };
+
+        // Apply LIMIT and OFFSET
+        Self::apply_limit_offset(result, select.limit, select.offset)
+    }
+
+    /// Apply LIMIT and OFFSET to a result set.
+    fn apply_limit_offset(rows: Vec<Row>, limit: Option<u64>, offset: Option<u64>) -> Vec<Row> {
+        let offset = offset.unwrap_or(0) as usize;
+        let rows: Vec<Row> = rows.into_iter().skip(offset).collect();
+        match limit {
+            Some(n) => rows.into_iter().take(n as usize).collect(),
+            None => rows,
         }
     }
 
@@ -2438,7 +2451,14 @@ impl Database {
             after_user_where
         };
 
-        Ok(builder.output(after_policy, GraphId(0)))
+        // Apply LIMIT/OFFSET if specified
+        let limited = builder.limit_offset(
+            after_policy,
+            select.limit,
+            select.offset.unwrap_or(0),
+        );
+
+        Ok(builder.output(limited, GraphId(0)))
     }
 
     /// Extract INHERITS information from a policy expression.
@@ -2743,7 +2763,14 @@ impl Database {
             after_additional
         };
 
-        Ok(builder.output(after_policy, GraphId(0)))
+        // Apply LIMIT/OFFSET if specified
+        let limited = builder.limit_offset(
+            after_policy,
+            select.limit,
+            select.offset.unwrap_or(0),
+        );
+
+        Ok(builder.output(limited, GraphId(0)))
     }
 
     /// Build a JOIN graph for INHERITS chains with multiple hops.
@@ -2867,7 +2894,14 @@ impl Database {
             current_node = builder.filter(current_node, combined_pred);
         }
 
-        Ok(builder.output(current_node, GraphId(0)))
+        // Apply LIMIT/OFFSET if specified
+        let limited = builder.limit_offset(
+            current_node,
+            select.limit,
+            select.offset.unwrap_or(0),
+        );
+
+        Ok(builder.output(limited, GraphId(0)))
     }
 
     /// Build a query graph with RecursiveFilter for self-referential INHERITS.
@@ -2922,7 +2956,14 @@ impl Database {
         let recursive =
             builder.recursive_filter(after_additional, base_predicate, &inherits.ref_column);
 
-        Ok(builder.output(recursive, GraphId(0)))
+        // Apply LIMIT/OFFSET if specified
+        let limited = builder.limit_offset(
+            recursive,
+            select.limit,
+            select.offset.unwrap_or(0),
+        );
+
+        Ok(builder.output(limited, GraphId(0)))
     }
 
     /// Convert a PolicyExpr to a Predicate with qualified column names.
@@ -3150,8 +3191,15 @@ impl Database {
             builder.filter(scan, predicate)
         };
 
+        // Apply LIMIT/OFFSET if specified
+        let limited = builder.limit_offset(
+            filtered,
+            select.limit,
+            select.offset.unwrap_or(0),
+        );
+
         // Create output node
-        Ok(builder.output(filtered, GraphId(0))) // ID will be assigned by registry
+        Ok(builder.output(limited, GraphId(0))) // ID will be assigned by registry
     }
 
     /// Build a query graph for a JOIN SELECT.
@@ -3206,8 +3254,15 @@ impl Database {
             builder.filter(join_node, predicate)
         };
 
+        // Apply LIMIT/OFFSET if specified
+        let limited = builder.limit_offset(
+            filtered,
+            select.limit,
+            select.offset.unwrap_or(0),
+        );
+
         // Create output node
-        Ok(builder.output(filtered, GraphId(0))) // ID will be assigned by registry
+        Ok(builder.output(limited, GraphId(0))) // ID will be assigned by registry
     }
 
     /// Find the Ref column in the left table that joins to the right table.
