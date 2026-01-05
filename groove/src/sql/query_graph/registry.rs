@@ -232,6 +232,15 @@ impl GraphRegistry {
         self.cache.write().unwrap().invalidate(table, id);
     }
 
+    /// Get a text diagram of a query graph.
+    pub fn get_diagram(&self, graph_id: GraphId) -> Option<String> {
+        self.queries
+            .read()
+            .unwrap()
+            .get(&graph_id)
+            .map(|q| q.graph.to_diagram())
+    }
+
     /// Get the number of registered graphs (for testing).
     #[cfg(test)]
     pub fn graph_count(&self) -> usize {

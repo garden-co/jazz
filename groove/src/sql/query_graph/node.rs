@@ -313,6 +313,95 @@ impl QueryNode {
         self.tables().iter().any(|&t| t == table)
     }
 
+    /// Get diagram information for this node.
+    ///
+    /// Returns (node_type_name, details_lines) for rendering in a text diagram.
+    pub fn diagram_info(&self) -> (String, Vec<String>) {
+        match self {
+            QueryNode::TableScan { table, cached_ids } => {
+                (
+                    format!("TableScan [{}]", table),
+                    vec![format!("cached: {} rows", cached_ids.len())],
+                )
+            }
+
+            QueryNode::IndexLookup { table, index_key, target_id, cached_ids } => {
+                (
+                    format!("IndexLookup [{}]", table),
+                    vec![
+                        format!("index: {:?}", index_key),
+                        format!("target: {}", target_id),
+                        format!("cached: {} rows", cached_ids.len()),
+                    ],
+                )
+            }
+
+            QueryNode::Filter { table, predicate, cached_ids, .. } => {
+                (
+                    format!("Filter [{}]", table),
+                    vec![
+                        format!("predicate: {}", predicate.to_display_string()),
+                        format!("cached: {} rows", cached_ids.len()),
+                    ],
+                )
+            }
+
+            QueryNode::Join { input_tables, join_table, join_column, cached_rows, reverse_index, .. } => {
+                (
+                    "Join".to_string(),
+                    vec![
+                        format!("inputs: [{}]", input_tables.join(", ")),
+                        format!("join: {} ON {}", join_table, join_column),
+                        format!("cached: {} joined rows", cached_rows.len()),
+                        format!("reverse_index: {} entries", reverse_index.len()),
+                    ],
+                )
+            }
+
+            QueryNode::Output { table, input } => {
+                (
+                    format!("Output [{}]", table),
+                    vec![format!("← from node {}", input.0)],
+                )
+            }
+
+            QueryNode::RecursiveFilter { table, base_predicate, recursive_column, accessible, children_index, all_rows, .. } => {
+                (
+                    format!("RecursiveFilter [{}]", table),
+                    vec![
+                        format!("base: {}", base_predicate.to_display_string()),
+                        format!("recursive on: {}", recursive_column),
+                        format!("accessible: {} rows", accessible.len()),
+                        format!("children_index: {} parents", children_index.len()),
+                        format!("all_rows: {} total", all_rows.len()),
+                    ],
+                )
+            }
+
+            QueryNode::ArrayAggregate { outer_table, inner_table, inner_ref_column, cached_arrays, outer_rows, .. } => {
+                (
+                    format!("ArrayAggregate [{}]", outer_table),
+                    vec![
+                        format!("inner: {} via {}", inner_table, inner_ref_column),
+                        format!("cached: {} arrays", cached_arrays.len()),
+                        format!("outer_rows: {} rows", outer_rows.len()),
+                    ],
+                )
+            }
+
+            QueryNode::LimitOffset { table, limit, offset, all_rows, visible_ids, .. } => {
+                let limit_str = limit.map(|l| l.to_string()).unwrap_or_else(|| "∞".to_string());
+                (
+                    format!("LimitOffset [{}]", table),
+                    vec![
+                        format!("LIMIT {} OFFSET {}", limit_str, offset),
+                        format!("all_rows: {}, visible: {}", all_rows.len(), visible_ids.len()),
+                    ],
+                )
+            }
+        }
+    }
+
     /// Evaluate this node given input deltas.
     ///
     /// Returns output deltas (may be empty for early cutoff).

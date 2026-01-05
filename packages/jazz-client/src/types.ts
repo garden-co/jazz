@@ -81,4 +81,6 @@ export interface WasmDatabaseLike {
 export interface WasmQueryHandleLike {
   unsubscribe(): void;
   free(): void;
+  /** Get a text diagram of the query graph */
+  diagram(): string;
 }

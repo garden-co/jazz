@@ -35,7 +35,7 @@ export function Header({ currentUser, onCreateIssue }: HeaderProps) {
     .toUpperCase() || "?";
 
   return (
-    <header className="flex h-14 items-center justify-between border-b px-4">
+    <header className="flex items-center justify-between border-b px-4 py-3">
       <div className="flex items-center gap-4">
         <Button onClick={onCreateIssue} size="sm">
           <Plus className="mr-2 h-4 w-4" />

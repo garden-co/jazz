@@ -261,6 +261,15 @@ impl WasmQueryHandleDelta {
             self._query.unsubscribe(id);
         }
     }
+
+    /// Get a text diagram of the query graph.
+    ///
+    /// Returns a human-readable representation of the computation DAG
+    /// showing node types, predicates, and current cache states.
+    #[wasm_bindgen]
+    pub fn diagram(&self) -> String {
+        self._query.diagram()
+    }
 }
 
 /// Initialize panic hook for better error messages.

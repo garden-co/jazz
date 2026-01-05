@@ -11,6 +11,17 @@ use crate::object::ObjectId;
 
 use super::DatabaseState;
 
+/// Truncate a string to a maximum length, adding "..." if truncated.
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else if max_len > 3 {
+        format!("{}...", &s[..max_len - 3])
+    } else {
+        s[..max_len].to_string()
+    }
+}
+
 /// Unique identifier for a query graph.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct GraphId(pub u64);
@@ -651,6 +662,57 @@ impl QueryGraph {
             0
         }
     }
+
+    /// Generate a text diagram of the query graph.
+    ///
+    /// Returns a string representation showing the DAG structure with
+    /// node types, tables, and predicates for easy debugging and demos.
+    pub fn to_diagram(&self) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+
+        // Header
+        writeln!(out, "┌─────────────────────────────────────────────────────────────┐").unwrap();
+        writeln!(out, "│  Query Graph (id: {})                                       │", self.id.0).unwrap();
+        writeln!(out, "│  Primary table: {:42} │", self.table).unwrap();
+        if self.is_join {
+            let tables = self.all_tables.join(", ");
+            writeln!(out, "│  Join tables: {:44} │", truncate_str(&tables, 44)).unwrap();
+        }
+        writeln!(out, "└─────────────────────────────────────────────────────────────┘").unwrap();
+        writeln!(out).unwrap();
+
+        // Nodes in topological order (reverse for visual flow: sources at top)
+        for (idx, node) in self.nodes.iter().enumerate() {
+            let node_id = self.node_indices.iter()
+                .find(|&(_, i)| *i == idx)
+                .map(|(id, _)| id.0)
+                .unwrap_or(0);
+
+            let is_last = idx == self.nodes.len() - 1;
+            let connector = if is_last { "└" } else { "├" };
+            let continuation = if is_last { " " } else { "│" };
+
+            // Node header
+            let (node_type, details) = node.diagram_info();
+            writeln!(out, "{}── [{:2}] {}", connector, node_id, node_type).unwrap();
+
+            // Node details
+            for line in details {
+                writeln!(out, "{}       {}", continuation, line).unwrap();
+            }
+
+            // Connection to next node (if not output)
+            if !is_last {
+                if let Some(input) = node.input() {
+                    writeln!(out, "{}       ↑ from node {}", continuation, input.0).unwrap();
+                }
+                writeln!(out, "{}", continuation).unwrap();
+            }
+        }
+
+        out
+    }
 }
 
 #[cfg(test)]
@@ -933,5 +995,26 @@ mod tests {
         } else {
             panic!("Expected Updated delta");
         }
+    }
+
+    #[test]
+    fn graph_to_diagram() {
+        let schema = test_schema();
+        let mut builder = QueryGraphBuilder::new("users", schema);
+        let scan = builder.table_scan();
+        let filter = builder.filter(scan, Predicate::eq("active", Value::Bool(true)));
+        let graph = builder.output(filter, GraphId(42));
+
+        let diagram = graph.to_diagram();
+        println!("{}", diagram);
+
+        // Check that diagram contains expected elements
+        assert!(diagram.contains("Query Graph"));
+        assert!(diagram.contains("42")); // graph id
+        assert!(diagram.contains("users")); // table name
+        assert!(diagram.contains("TableScan")); // node type
+        assert!(diagram.contains("Filter")); // node type
+        assert!(diagram.contains("Output")); // node type
+        assert!(diagram.contains("active = TRUE")); // predicate
     }
 }

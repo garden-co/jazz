@@ -38,7 +38,7 @@ export function Sidebar({
   return (
     <div className="flex h-full w-64 flex-col border-r bg-muted/30">
       <div className="p-4">
-        <h1 className="text-xl font-bold">Issue Tracker</h1>
+        <h1 className="text-xl font-bold text-foreground">Issue Tracker</h1>
       </div>
 
       <Separator />

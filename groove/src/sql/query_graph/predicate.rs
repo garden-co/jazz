@@ -4,6 +4,24 @@ use crate::sql::row::{Row, Value};
 use crate::sql::schema::TableSchema;
 use crate::object::ObjectId;
 
+/// Convert a Value to a display string for predicates.
+fn value_to_display(value: &Value) -> String {
+    match value {
+        Value::Bool(b) => b.to_string().to_uppercase(),
+        Value::I32(n) => n.to_string(),
+        Value::U32(n) => n.to_string(),
+        Value::I64(n) => n.to_string(),
+        Value::F64(n) => n.to_string(),
+        Value::String(s) => format!("'{}'", s),
+        Value::Bytes(b) => format!("<{} bytes>", b.len()),
+        Value::Ref(id) => format!("@{}", id),
+        Value::NullableNone => "NULL".to_string(),
+        Value::NullableSome(inner) => value_to_display(inner),
+        Value::Array(arr) => format!("[{} items]", arr.len()),
+        Value::Row(row) => format!("<Row {}>", row.id),
+    }
+}
+
 /// Compare two values, unwrapping NullableSome wrappers as needed.
 /// Returns true if the inner values are equal.
 fn values_equal(row_value: &Value, pred_value: &Value) -> bool {
@@ -229,6 +247,45 @@ impl Predicate {
             }
             Predicate::Not(inner) => Predicate::Not(Box::new(inner.optimize())),
             other => other,
+        }
+    }
+
+    /// Convert the predicate to a human-readable display string.
+    ///
+    /// Used for diagram rendering and debugging output.
+    pub fn to_display_string(&self) -> String {
+        match self {
+            Predicate::True => "TRUE".to_string(),
+            Predicate::False => "FALSE".to_string(),
+            Predicate::Eq { column, value } => {
+                format!("{} = {}", column, value_to_display(value))
+            }
+            Predicate::Ne { column, value } => {
+                format!("{} != {}", column, value_to_display(value))
+            }
+            Predicate::And(preds) => {
+                if preds.is_empty() {
+                    "TRUE".to_string()
+                } else {
+                    preds.iter()
+                        .map(|p| p.to_display_string())
+                        .collect::<Vec<_>>()
+                        .join(" AND ")
+                }
+            }
+            Predicate::Or(preds) => {
+                if preds.is_empty() {
+                    "FALSE".to_string()
+                } else {
+                    format!("({})", preds.iter()
+                        .map(|p| p.to_display_string())
+                        .collect::<Vec<_>>()
+                        .join(" OR "))
+                }
+            }
+            Predicate::Not(inner) => {
+                format!("NOT ({})", inner.to_display_string())
+            }
         }
     }
 

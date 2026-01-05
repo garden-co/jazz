@@ -101,6 +101,9 @@ export abstract class TableClient<T extends { id: string }> {
       callback(Array.from(rowsById.values()));
     });
 
+    // Debug: log the query graph diagram (after initial subscription sets up the graph)
+    console.log(`[${this.tableName}] Query Graph:\n${handle.diagram()}`);
+
     return () => {
       handle.unsubscribe();
       handle.free();

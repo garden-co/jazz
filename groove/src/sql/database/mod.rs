@@ -330,6 +330,17 @@ impl IncrementalQuery {
     pub fn graph_id(&self) -> GraphId {
         self.graph_id
     }
+
+    /// Get a text diagram of the query graph.
+    ///
+    /// Returns a human-readable representation of the computation DAG
+    /// showing node types, predicates, and cache states.
+    pub fn diagram(&self) -> String {
+        self.db_state
+            .graph_registry
+            .get_diagram(self.graph_id)
+            .unwrap_or_else(|| "Graph not found".to_string())
+    }
 }
 
 impl Drop for IncrementalQuery {
