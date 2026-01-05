@@ -1,41 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { JazzProvider, useJazz, useAll } from '@jazz/react';
 import { createDatabase } from './generated/client';
+import schema from './schema.sql?raw';
 
 async function initWasm() {
   const module = await import('../pkg/groove_wasm.js');
   await module.default();
   return module;
 }
-
-// Schema must match generated types/meta exactly
-const SCHEMA = `
-CREATE TABLE Users (
-    name STRING NOT NULL,
-    email STRING NOT NULL,
-    avatar STRING
-);
-
-CREATE TABLE Folders (
-    name STRING NOT NULL,
-    owner REFERENCES Users NOT NULL,
-    parent REFERENCES Folders
-);
-
-CREATE TABLE Notes (
-    title STRING NOT NULL,
-    content STRING NOT NULL,
-    author REFERENCES Users NOT NULL,
-    folder REFERENCES Folders,
-    createdAt I64 NOT NULL,
-    updatedAt I64 NOT NULL
-);
-
-CREATE TABLE Tags (
-    name STRING NOT NULL,
-    color STRING NOT NULL
-);
-`;
 
 function App() {
   const db = useJazz();
@@ -356,14 +328,8 @@ function Root() {
         const wasm = await initWasm();
         const wasmDb = new wasm.WasmDatabase();
 
-        // Create schema
-        for (const stmt of SCHEMA.split(';').map(s => s.trim()).filter(Boolean)) {
-          try {
-            wasmDb.execute(stmt);
-          } catch (e) {
-            console.error('Schema error:', e, 'SQL:', stmt);
-          }
-        }
+        // Initialize schema from imported SQL file
+        wasmDb.init_schema(schema);
 
         const database = createDatabase(wasmDb);
         setDb(database);

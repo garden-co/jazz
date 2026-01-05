@@ -85,6 +85,17 @@ impl WasmDatabase {
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))
     }
 
+    /// Initialize the database schema from a SQL string containing CREATE TABLE statements.
+    /// Statements are separated by semicolons.
+    #[wasm_bindgen]
+    pub fn init_schema(&self, schema: &str) -> Result<(), JsValue> {
+        for stmt in schema.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            self.db.execute(stmt)
+                .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+        }
+        Ok(())
+    }
+
     /// Create an incremental query that calls back on changes (legacy string-based).
     /// Returns a handle that must be kept alive to maintain the subscription.
     #[wasm_bindgen]
