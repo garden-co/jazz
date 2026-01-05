@@ -278,14 +278,37 @@ function buildIncludeProjection(
     const innerAlias = reverseRef.sourceTable.toLowerCase()[0] + "_inner";
 
     // Build nested includes for the array subquery if needed
-    let innerProjection = innerAlias;
+    let innerProjection = `${innerAlias}.*`;
+    const innerJoins: string[] = [];
+
     if (typeof includeValue === "object") {
-      // For now, just use the alias - nested includes in array subqueries
-      // would require recursive query building
-      innerProjection = innerAlias;
+      // Build nested projections and JOINs for forward refs in the nested include
+      const nestedProjections: string[] = [];
+
+      for (const [nestedKey, nestedValue] of Object.entries(includeValue)) {
+        const nestedForwardRef = sourceTable.refs.find((r) => r.column === nestedKey);
+        if (nestedForwardRef) {
+          const nestedTargetTable = schema.tables[nestedForwardRef.targetTable];
+          if (nestedTargetTable) {
+            const nestedAlias = nestedKey.toLowerCase();
+            const cols = nestedTargetTable.columns.map((c) => `${nestedAlias}.${c.name}`);
+            nestedProjections.push(`ROW(${nestedAlias}.id, ${cols.join(", ")}) as ${nestedKey}`);
+
+            const joinType = nestedForwardRef.nullable ? "LEFT JOIN" : "JOIN";
+            innerJoins.push(
+              `${joinType} ${nestedForwardRef.targetTable} ${nestedAlias} ON ${innerAlias}.${nestedKey} = ${nestedAlias}.id`
+            );
+          }
+        }
+      }
+
+      if (nestedProjections.length > 0) {
+        innerProjection = `${innerAlias}.*, ${nestedProjections.join(", ")}`;
+      }
     }
 
-    return `ARRAY(SELECT ${innerProjection} FROM ${reverseRef.sourceTable} ${innerAlias} WHERE ${innerAlias}.${reverseRef.sourceColumn} = ${alias}.id) as ${key}`;
+    const joinClause = innerJoins.length > 0 ? ` ${innerJoins.join(" ")}` : "";
+    return `ARRAY(SELECT ${innerProjection} FROM ${reverseRef.sourceTable} ${innerAlias}${joinClause} WHERE ${innerAlias}.${reverseRef.sourceColumn} = ${alias}.id) as ${key}`;
   }
 
   return null;

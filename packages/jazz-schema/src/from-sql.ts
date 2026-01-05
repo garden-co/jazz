@@ -967,7 +967,7 @@ function generateClient(
     "// Generated from SQL schema by @jazz/schema",
     "// DO NOT EDIT MANUALLY",
     "",
-    'import { TableClient, type WasmDatabaseLike, type Unsubscribe, type TableDecoder } from "@jazz/client";',
+    'import { TableClient, type WasmDatabaseLike, type Unsubscribe, type TableDecoder, type BaseWhereInput, type IncludeSpec } from "@jazz/client";',
     'import { schemaMeta } from "./meta.js";',
   ];
 
@@ -1073,14 +1073,14 @@ function generateClient(
       lines.push(`   * Subscribe to all ${table.name} matching a filter`);
       lines.push(`   */`);
       lines.push(`  subscribeAll<I extends ${typeName}Includes = {}>(options: { where?: ${typeName}Filter; include?: I }, callback: (rows: ${typeName}Loaded<I>[]) => void): Unsubscribe {`);
-      lines.push(`    return this._subscribeAll(options, callback as (rows: ${typeName}[]) => void);`);
+      lines.push(`    return this._subscribeAll(options as { where?: BaseWhereInput; include?: IncludeSpec }, callback as (rows: ${typeName}[]) => void);`);
       lines.push(`  }`);
     } else {
       lines.push(`  /**`);
       lines.push(`   * Subscribe to all ${table.name} matching a filter`);
       lines.push(`   */`);
       lines.push(`  subscribeAll(options: { where?: ${typeName}Filter; include?: ${typeName}Includes }, callback: (rows: ${typeName}[]) => void): Unsubscribe {`);
-      lines.push(`    return this._subscribeAll(options, callback);`);
+      lines.push(`    return this._subscribeAll(options as { where?: BaseWhereInput; include?: IncludeSpec }, callback);`);
       lines.push(`  }`);
     }
 

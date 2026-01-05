@@ -11,7 +11,9 @@
     "jsx": "react-jsx",
     "resolveJsonModule": true,
     "isolatedModules": true,
+    "baseUrl": ".",
     "paths": {
+      "@/*": ["./src/*"],
       "@jazz/schema": ["../packages/jazz-schema/dist/index.d.ts"],
       "@jazz/schema/runtime": ["../packages/jazz-schema/dist/runtime.d.ts"]
     }

@@ -10,55 +10,80 @@ export const schemaMeta: SchemaMeta = {
       columns: [
         { name: "name", type: {"kind":"string"}, nullable: false },
         { name: "email", type: {"kind":"string"}, nullable: false },
-        { name: "avatar", type: {"kind":"string"}, nullable: true },
+        { name: "avatarColor", type: {"kind":"string"}, nullable: false },
       ],
       refs: [
       ],
       reverseRefs: [
-        { name: "Folders", sourceTable: "Folders", sourceColumn: "owner" },
-        { name: "Notes", sourceTable: "Notes", sourceColumn: "author" },
+        { name: "IssueAssignees", sourceTable: "IssueAssignees", sourceColumn: "user" },
       ],
     },
-    Folders: {
-      name: "Folders",
+    Projects: {
+      name: "Projects",
       columns: [
         { name: "name", type: {"kind":"string"}, nullable: false },
-        { name: "owner", type: {"kind":"ref","table":"Users"}, nullable: false },
-        { name: "parent", type: {"kind":"ref","table":"Folders"}, nullable: true },
+        { name: "color", type: {"kind":"string"}, nullable: false },
+        { name: "description", type: {"kind":"string"}, nullable: true },
       ],
       refs: [
-        { column: "owner", targetTable: "Users", nullable: false },
-        { column: "parent", targetTable: "Folders", nullable: true },
       ],
       reverseRefs: [
-        { name: "Folders", sourceTable: "Folders", sourceColumn: "parent" },
-        { name: "Notes", sourceTable: "Notes", sourceColumn: "folder" },
+        { name: "Issues", sourceTable: "Issues", sourceColumn: "project" },
       ],
     },
-    Notes: {
-      name: "Notes",
+    Issues: {
+      name: "Issues",
       columns: [
         { name: "title", type: {"kind":"string"}, nullable: false },
-        { name: "content", type: {"kind":"string"}, nullable: false },
-        { name: "author", type: {"kind":"ref","table":"Users"}, nullable: false },
-        { name: "folder", type: {"kind":"ref","table":"Folders"}, nullable: true },
+        { name: "description", type: {"kind":"string"}, nullable: true },
+        { name: "status", type: {"kind":"string"}, nullable: false },
+        { name: "priority", type: {"kind":"string"}, nullable: false },
+        { name: "project", type: {"kind":"ref","table":"Projects"}, nullable: false },
         { name: "createdAt", type: {"kind":"i64"}, nullable: false },
         { name: "updatedAt", type: {"kind":"i64"}, nullable: false },
       ],
       refs: [
-        { column: "author", targetTable: "Users", nullable: false },
-        { column: "folder", targetTable: "Folders", nullable: true },
+        { column: "project", targetTable: "Projects", nullable: false },
       ],
       reverseRefs: [
+        { name: "IssueLabels", sourceTable: "IssueLabels", sourceColumn: "issue" },
+        { name: "IssueAssignees", sourceTable: "IssueAssignees", sourceColumn: "issue" },
       ],
     },
-    Tags: {
-      name: "Tags",
+    Labels: {
+      name: "Labels",
       columns: [
         { name: "name", type: {"kind":"string"}, nullable: false },
         { name: "color", type: {"kind":"string"}, nullable: false },
       ],
       refs: [
+      ],
+      reverseRefs: [
+        { name: "IssueLabels", sourceTable: "IssueLabels", sourceColumn: "label" },
+      ],
+    },
+    IssueLabels: {
+      name: "IssueLabels",
+      columns: [
+        { name: "issue", type: {"kind":"ref","table":"Issues"}, nullable: false },
+        { name: "label", type: {"kind":"ref","table":"Labels"}, nullable: false },
+      ],
+      refs: [
+        { column: "issue", targetTable: "Issues", nullable: false },
+        { column: "label", targetTable: "Labels", nullable: false },
+      ],
+      reverseRefs: [
+      ],
+    },
+    IssueAssignees: {
+      name: "IssueAssignees",
+      columns: [
+        { name: "issue", type: {"kind":"ref","table":"Issues"}, nullable: false },
+        { name: "user", type: {"kind":"ref","table":"Users"}, nullable: false },
+      ],
+      refs: [
+        { column: "issue", targetTable: "Issues", nullable: false },
+        { column: "user", targetTable: "Users", nullable: false },
       ],
       reverseRefs: [
       ],
@@ -68,6 +93,8 @@ export const schemaMeta: SchemaMeta = {
 
 // Individual table metadata exports
 export const userMeta = schemaMeta.tables.Users;
-export const folderMeta = schemaMeta.tables.Folders;
-export const noteMeta = schemaMeta.tables.Notes;
-export const tagMeta = schemaMeta.tables.Tags;
+export const projectMeta = schemaMeta.tables.Projects;
+export const issueMeta = schemaMeta.tables.Issues;
+export const labelMeta = schemaMeta.tables.Labels;
+export const issuelabelMeta = schemaMeta.tables.IssueLabels;
+export const issueassigneeMeta = schemaMeta.tables.IssueAssignees;

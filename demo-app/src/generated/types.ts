@@ -14,23 +14,32 @@ export interface GrooveRow {
 // === Includes types (specify which refs to load) ===
 
 export type UserIncludes = {
-  Folders?: true | FolderIncludes;
-  Notes?: true | NoteIncludes;
+  IssueAssignees?: true | IssueAssigneeIncludes;
 };
 
-export type FolderIncludes = {
-  owner?: true | UserIncludes;
-  parent?: true | FolderIncludes;
-  Folders?: true | FolderIncludes;
-  Notes?: true | NoteIncludes;
+export type ProjectIncludes = {
+  Issues?: true | IssueIncludes;
 };
 
-export type NoteIncludes = {
-  author?: true | UserIncludes;
-  folder?: true | FolderIncludes;
+export type IssueIncludes = {
+  project?: true | ProjectIncludes;
+  IssueLabels?: true | IssueLabelIncludes;
+  IssueAssignees?: true | IssueAssigneeIncludes;
 };
 
-export type TagIncludes = {};
+export type LabelIncludes = {
+  IssueLabels?: true | IssueLabelIncludes;
+};
+
+export type IssueLabelIncludes = {
+  issue?: true | IssueIncludes;
+  label?: true | LabelIncludes;
+};
+
+export type IssueAssigneeIncludes = {
+  issue?: true | IssueIncludes;
+  user?: true | UserIncludes;
+};
 
 // === Filter types (Prisma-style filters) ===
 
@@ -41,39 +50,58 @@ export interface UserFilter {
   id?: string | StringFilter;
   name?: string | StringFilter;
   email?: string | StringFilter;
-  avatar?: string | StringFilter | null;
+  avatarColor?: string | StringFilter;
 }
 
-export interface FolderFilter {
-  AND?: FolderFilter | FolderFilter[];
-  OR?: FolderFilter[];
-  NOT?: FolderFilter | FolderFilter[];
+export interface ProjectFilter {
+  AND?: ProjectFilter | ProjectFilter[];
+  OR?: ProjectFilter[];
+  NOT?: ProjectFilter | ProjectFilter[];
   id?: string | StringFilter;
   name?: string | StringFilter;
-  owner?: string | StringFilter;
-  parent?: string | StringFilter | null;
+  color?: string | StringFilter;
+  description?: string | StringFilter | null;
 }
 
-export interface NoteFilter {
-  AND?: NoteFilter | NoteFilter[];
-  OR?: NoteFilter[];
-  NOT?: NoteFilter | NoteFilter[];
+export interface IssueFilter {
+  AND?: IssueFilter | IssueFilter[];
+  OR?: IssueFilter[];
+  NOT?: IssueFilter | IssueFilter[];
   id?: string | StringFilter;
   title?: string | StringFilter;
-  content?: string | StringFilter;
-  author?: string | StringFilter;
-  folder?: string | StringFilter | null;
+  description?: string | StringFilter | null;
+  status?: string | StringFilter;
+  priority?: string | StringFilter;
+  project?: string | StringFilter;
   createdAt?: bigint | BigIntFilter;
   updatedAt?: bigint | BigIntFilter;
 }
 
-export interface TagFilter {
-  AND?: TagFilter | TagFilter[];
-  OR?: TagFilter[];
-  NOT?: TagFilter | TagFilter[];
+export interface LabelFilter {
+  AND?: LabelFilter | LabelFilter[];
+  OR?: LabelFilter[];
+  NOT?: LabelFilter | LabelFilter[];
   id?: string | StringFilter;
   name?: string | StringFilter;
   color?: string | StringFilter;
+}
+
+export interface IssueLabelFilter {
+  AND?: IssueLabelFilter | IssueLabelFilter[];
+  OR?: IssueLabelFilter[];
+  NOT?: IssueLabelFilter | IssueLabelFilter[];
+  id?: string | StringFilter;
+  issue?: string | StringFilter;
+  label?: string | StringFilter;
+}
+
+export interface IssueAssigneeFilter {
+  AND?: IssueAssigneeFilter | IssueAssigneeFilter[];
+  OR?: IssueAssigneeFilter[];
+  NOT?: IssueAssigneeFilter | IssueAssigneeFilter[];
+  id?: string | StringFilter;
+  issue?: string | StringFilter;
+  user?: string | StringFilter;
 }
 
 // === Row types ===
@@ -82,14 +110,14 @@ export interface TagFilter {
 export interface User extends GrooveRow {
   name: string;
   email: string;
-  avatar: string | null;
+  avatarColor: string;
 }
 
 /** Data for inserting a new User */
 export interface UserInsert {
   name: string;
   email: string;
-  avatar?: string | null;
+  avatarColor: string;
 }
 
 /** User with refs/reverse refs resolved based on includes parameter I */
@@ -97,128 +125,189 @@ export type UserLoaded<I extends UserIncludes = {}> = {
   id: ObjectId;
   name: string;
   email: string;
-  avatar: string | null;
+  avatarColor: string;
 }
-  & ('Folders' extends keyof I
-    ? I['Folders'] extends true
-      ? { Folders: Folder[] }
-      : I['Folders'] extends object
-        ? { Folders: FolderLoaded<I['Folders'] & FolderIncludes>[] }
-        : {}
-    : {})
-  & ('Notes' extends keyof I
-    ? I['Notes'] extends true
-      ? { Notes: Note[] }
-      : I['Notes'] extends object
-        ? { Notes: NoteLoaded<I['Notes'] & NoteIncludes>[] }
+  & ('IssueAssignees' extends keyof I
+    ? I['IssueAssignees'] extends true
+      ? { IssueAssignees: IssueAssignee[] }
+      : I['IssueAssignees'] extends object
+        ? { IssueAssignees: IssueAssigneeLoaded<I['IssueAssignees'] & IssueAssigneeIncludes>[] }
         : {}
     : {})
 ;
 
-/** Folder row from the Folders table */
-export interface Folder extends GrooveRow {
+/** Project row from the Projects table */
+export interface Project extends GrooveRow {
   name: string;
-  owner: ObjectId;
-  parent: ObjectId | null;
+  color: string;
+  description: string | null;
 }
 
-/** Data for inserting a new Folder */
-export interface FolderInsert {
+/** Data for inserting a new Project */
+export interface ProjectInsert {
   name: string;
-  owner: ObjectId | User;
-  parent?: ObjectId | Folder | null;
+  color: string;
+  description?: string | null;
 }
 
-/** Folder with refs/reverse refs resolved based on includes parameter I */
-export type FolderLoaded<I extends FolderIncludes = {}> = {
+/** Project with refs/reverse refs resolved based on includes parameter I */
+export type ProjectLoaded<I extends ProjectIncludes = {}> = {
   id: ObjectId;
   name: string;
-  owner: 'owner' extends keyof I
-    ? I['owner'] extends true
-      ? User
-      : I['owner'] extends object
-        ? UserLoaded<I['owner'] & UserIncludes>
-        : ObjectId
-    : ObjectId;
-  parent: 'parent' extends keyof I
-    ? I['parent'] extends true
-      ? Folder | null
-      : I['parent'] extends object
-        ? FolderLoaded<I['parent'] & FolderIncludes> | null
-        : ObjectId | null
-    : ObjectId | null;
+  color: string;
+  description: string | null;
 }
-  & ('Folders' extends keyof I
-    ? I['Folders'] extends true
-      ? { Folders: Folder[] }
-      : I['Folders'] extends object
-        ? { Folders: FolderLoaded<I['Folders'] & FolderIncludes>[] }
-        : {}
-    : {})
-  & ('Notes' extends keyof I
-    ? I['Notes'] extends true
-      ? { Notes: Note[] }
-      : I['Notes'] extends object
-        ? { Notes: NoteLoaded<I['Notes'] & NoteIncludes>[] }
+  & ('Issues' extends keyof I
+    ? I['Issues'] extends true
+      ? { Issues: Issue[] }
+      : I['Issues'] extends object
+        ? { Issues: IssueLoaded<I['Issues'] & IssueIncludes>[] }
         : {}
     : {})
 ;
 
-/** Note row from the Notes table */
-export interface Note extends GrooveRow {
+/** Issue row from the Issues table */
+export interface Issue extends GrooveRow {
   title: string;
-  content: string;
-  author: ObjectId;
-  folder: ObjectId | null;
+  description: string | null;
+  status: string;
+  priority: string;
+  project: ObjectId;
   createdAt: bigint;
   updatedAt: bigint;
 }
 
-/** Data for inserting a new Note */
-export interface NoteInsert {
+/** Data for inserting a new Issue */
+export interface IssueInsert {
   title: string;
-  content: string;
-  author: ObjectId | User;
-  folder?: ObjectId | Folder | null;
+  description?: string | null;
+  status: string;
+  priority: string;
+  project: ObjectId | Project;
   createdAt: bigint;
   updatedAt: bigint;
 }
 
-/** Note with refs/reverse refs resolved based on includes parameter I */
-export type NoteLoaded<I extends NoteIncludes = {}> = {
+/** Issue with refs/reverse refs resolved based on includes parameter I */
+export type IssueLoaded<I extends IssueIncludes = {}> = {
   id: ObjectId;
   title: string;
-  content: string;
-  author: 'author' extends keyof I
-    ? I['author'] extends true
-      ? User
-      : I['author'] extends object
-        ? UserLoaded<I['author'] & UserIncludes>
+  description: string | null;
+  status: string;
+  priority: string;
+  project: 'project' extends keyof I
+    ? I['project'] extends true
+      ? Project
+      : I['project'] extends object
+        ? ProjectLoaded<I['project'] & ProjectIncludes>
         : ObjectId
     : ObjectId;
-  folder: 'folder' extends keyof I
-    ? I['folder'] extends true
-      ? Folder | null
-      : I['folder'] extends object
-        ? FolderLoaded<I['folder'] & FolderIncludes> | null
-        : ObjectId | null
-    : ObjectId | null;
   createdAt: bigint;
   updatedAt: bigint;
 }
+  & ('IssueLabels' extends keyof I
+    ? I['IssueLabels'] extends true
+      ? { IssueLabels: IssueLabel[] }
+      : I['IssueLabels'] extends object
+        ? { IssueLabels: IssueLabelLoaded<I['IssueLabels'] & IssueLabelIncludes>[] }
+        : {}
+    : {})
+  & ('IssueAssignees' extends keyof I
+    ? I['IssueAssignees'] extends true
+      ? { IssueAssignees: IssueAssignee[] }
+      : I['IssueAssignees'] extends object
+        ? { IssueAssignees: IssueAssigneeLoaded<I['IssueAssignees'] & IssueAssigneeIncludes>[] }
+        : {}
+    : {})
 ;
 
-/** Tag row from the Tags table */
-export interface Tag extends GrooveRow {
+/** Label row from the Labels table */
+export interface Label extends GrooveRow {
   name: string;
   color: string;
 }
 
-/** Data for inserting a new Tag */
-export interface TagInsert {
+/** Data for inserting a new Label */
+export interface LabelInsert {
   name: string;
   color: string;
 }
 
-/** Tag has no refs, so Loaded is the same as base type */
-export type TagLoaded<I extends TagIncludes = {}> = Tag;
+/** Label with refs/reverse refs resolved based on includes parameter I */
+export type LabelLoaded<I extends LabelIncludes = {}> = {
+  id: ObjectId;
+  name: string;
+  color: string;
+}
+  & ('IssueLabels' extends keyof I
+    ? I['IssueLabels'] extends true
+      ? { IssueLabels: IssueLabel[] }
+      : I['IssueLabels'] extends object
+        ? { IssueLabels: IssueLabelLoaded<I['IssueLabels'] & IssueLabelIncludes>[] }
+        : {}
+    : {})
+;
+
+/** IssueLabel row from the IssueLabels table */
+export interface IssueLabel extends GrooveRow {
+  issue: ObjectId;
+  label: ObjectId;
+}
+
+/** Data for inserting a new IssueLabel */
+export interface IssueLabelInsert {
+  issue: ObjectId | Issue;
+  label: ObjectId | Label;
+}
+
+/** IssueLabel with refs/reverse refs resolved based on includes parameter I */
+export type IssueLabelLoaded<I extends IssueLabelIncludes = {}> = {
+  id: ObjectId;
+  issue: 'issue' extends keyof I
+    ? I['issue'] extends true
+      ? Issue
+      : I['issue'] extends object
+        ? IssueLoaded<I['issue'] & IssueIncludes>
+        : ObjectId
+    : ObjectId;
+  label: 'label' extends keyof I
+    ? I['label'] extends true
+      ? Label
+      : I['label'] extends object
+        ? LabelLoaded<I['label'] & LabelIncludes>
+        : ObjectId
+    : ObjectId;
+}
+;
+
+/** IssueAssignee row from the IssueAssignees table */
+export interface IssueAssignee extends GrooveRow {
+  issue: ObjectId;
+  user: ObjectId;
+}
+
+/** Data for inserting a new IssueAssignee */
+export interface IssueAssigneeInsert {
+  issue: ObjectId | Issue;
+  user: ObjectId | User;
+}
+
+/** IssueAssignee with refs/reverse refs resolved based on includes parameter I */
+export type IssueAssigneeLoaded<I extends IssueAssigneeIncludes = {}> = {
+  id: ObjectId;
+  issue: 'issue' extends keyof I
+    ? I['issue'] extends true
+      ? Issue
+      : I['issue'] extends object
+        ? IssueLoaded<I['issue'] & IssueIncludes>
+        : ObjectId
+    : ObjectId;
+  user: 'user' extends keyof I
+    ? I['user'] extends true
+      ? User
+      : I['user'] extends object
+        ? UserLoaded<I['user'] & UserIncludes>
+        : ObjectId
+    : ObjectId;
+}
+;
