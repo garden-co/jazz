@@ -221,6 +221,19 @@ impl QueryGraph {
         self.all_schemas.get(table)
     }
 
+    /// Get a bitmask indicating which columns are nullable.
+    ///
+    /// Bit i is set if column i is nullable. Used for binary encoding.
+    pub fn nullable_mask(&self) -> u64 {
+        let mut mask = 0u64;
+        for (i, col) in self.schema.columns.iter().enumerate() {
+            if col.nullable && i < 64 {
+                mask |= 1 << i;
+            }
+        }
+        mask
+    }
+
     /// Check if this is a join query.
     pub fn is_join(&self) -> bool {
         self.is_join

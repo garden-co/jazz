@@ -178,6 +178,17 @@ impl GraphRegistry {
             .map(|q| q.graph.get_output(&mut cache, db))
     }
 
+    /// Get the nullable mask for a query's output schema.
+    ///
+    /// Returns None if the graph doesn't exist.
+    pub fn get_nullable_mask(&self, graph_id: GraphId) -> Option<u64> {
+        self.queries
+            .read()
+            .unwrap()
+            .get(&graph_id)
+            .map(|q| q.graph.nullable_mask())
+    }
+
     /// Notify all relevant graphs of a row change.
     ///
     /// This is called by the database after insert/update/delete operations.

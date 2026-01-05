@@ -83,6 +83,9 @@ export abstract class TableClient<T extends { id: string }> {
       include: options.include,
     });
 
+    // Debug: log the SQL query
+    console.log(`[${this.tableName}] SQL:`, sql);
+
     const rowsById = new Map<string, T>();
 
     const handle = this.db.subscribe_delta(sql, (deltas: Uint8Array[]) => {

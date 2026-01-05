@@ -330,6 +330,16 @@ impl IncrementalQuery {
     pub fn graph_id(&self) -> GraphId {
         self.graph_id
     }
+
+    /// Get a bitmask indicating which columns are nullable in the output schema.
+    ///
+    /// Bit i is set if column i is nullable. Used for binary encoding.
+    pub fn nullable_mask(&self) -> u64 {
+        self.db_state
+            .graph_registry
+            .get_nullable_mask(self.graph_id)
+            .unwrap_or(0)
+    }
 }
 
 impl Drop for IncrementalQuery {
@@ -1225,6 +1235,14 @@ impl PolicyLookup for Database {
         let policies = self.state.policies.read().unwrap();
         policies.get(table).cloned()
     }
+}
+
+/// Result of finding a join column - indicates which table has the Ref
+enum JoinDirection {
+    /// Left table has Ref column pointing to right table (normal case)
+    LeftToRight(String),
+    /// Right table has Ref column pointing to left table (reverse join)
+    RightToLeft(String),
 }
 
 impl Database {
@@ -3216,29 +3234,54 @@ impl Database {
         }
 
         let join = &select.from.joins[0];
-        let left_table = &select.from.table;
-        let right_table = &join.table;
+        let sql_left_table = &select.from.table;
+        let sql_right_table = &join.table;
 
         // Get schemas for both tables
-        let left_schema = self
-            .get_table(left_table)
-            .ok_or_else(|| DatabaseError::TableNotFound(left_table.clone()))?;
-        let right_schema = self
-            .get_table(right_table)
-            .ok_or_else(|| DatabaseError::TableNotFound(right_table.clone()))?;
+        let sql_left_schema = self
+            .get_table(sql_left_table)
+            .ok_or_else(|| DatabaseError::TableNotFound(sql_left_table.clone()))?;
+        let sql_right_schema = self
+            .get_table(sql_right_table)
+            .ok_or_else(|| DatabaseError::TableNotFound(sql_right_table.clone()))?;
 
-        // Determine the join column (the Ref column in the left table pointing to right table)
-        // The ON clause is: left.column = right.column
-        // We need to find which side has the Ref column pointing to the other table
-        let left_column = self.find_join_column(&join.on, left_table, right_table, &left_schema)?;
+        // Determine the join column and direction
+        // The JoinGraphBuilder expects the "left" table to have the Ref column
+        let join_direction = self.find_join_column(
+            &join.on,
+            sql_left_table,
+            sql_right_table,
+            &sql_left_schema,
+            &sql_right_schema,
+        )?;
+
+        // For the graph builder, we need the table with the Ref to be "left"
+        // If it's a reverse join (right table has Ref), we swap the roles
+        let (graph_left_table, graph_left_schema, graph_right_table, graph_right_schema, ref_column) =
+            match &join_direction {
+                JoinDirection::LeftToRight(col) => (
+                    sql_left_table.as_str(),
+                    sql_left_schema.clone(),
+                    sql_right_table.as_str(),
+                    sql_right_schema.clone(),
+                    col.clone(),
+                ),
+                JoinDirection::RightToLeft(col) => (
+                    sql_right_table.as_str(),
+                    sql_right_schema.clone(),
+                    sql_left_table.as_str(),
+                    sql_left_schema.clone(),
+                    col.clone(),
+                ),
+            };
 
         // Build the JOIN query graph
         let mut builder = JoinGraphBuilder::new(
-            left_table,
-            left_schema.clone(),
-            right_table,
-            right_schema.clone(),
-            &left_column,
+            graph_left_table,
+            graph_left_schema.clone(),
+            graph_right_table,
+            graph_right_schema.clone(),
+            &ref_column,
         );
 
         // Start with join node
@@ -3249,8 +3292,9 @@ impl Database {
             join_node
         } else {
             // For JOIN queries, we need to handle qualified column names
+            // Note: we pass schemas in SQL order, not graph order
             let predicate =
-                self.build_join_predicate(&select.where_clause, &left_schema, &right_schema)?;
+                self.build_join_predicate(&select.where_clause, &sql_left_schema, &sql_right_schema)?;
             builder.filter(join_node, predicate)
         };
 
@@ -3265,14 +3309,16 @@ impl Database {
         Ok(builder.output(limited, GraphId(0))) // ID will be assigned by registry
     }
 
-    /// Find the Ref column in the left table that joins to the right table.
+    /// Find the Ref column that connects the two tables in a JOIN.
+    /// Returns the column name and which direction the reference goes.
     fn find_join_column(
         &self,
         on: &parser::JoinCondition,
         left_table: &str,
         right_table: &str,
         left_schema: &TableSchema,
-    ) -> Result<String, DatabaseError> {
+        right_schema: &TableSchema,
+    ) -> Result<JoinDirection, DatabaseError> {
         // Check if the left side of the ON clause references the left table
         let left_is_from_left = on
             .left
@@ -3289,11 +3335,11 @@ impl Database {
 
         if left_is_from_left && right_is_from_right {
             // ON left_table.col = right_table.id pattern
-            // The left column should be a Ref column
+            // Check if left column is a Ref to right table
             let col_name = &on.left.column;
             if let Some(col) = left_schema.column(col_name) {
                 if matches!(&col.ty, ColumnType::Ref(target) if target == right_table) {
-                    return Ok(col_name.clone());
+                    return Ok(JoinDirection::LeftToRight(col_name.clone()));
                 }
             }
         }
@@ -3316,7 +3362,7 @@ impl Database {
             let col_name = &on.right.column;
             if let Some(col) = left_schema.column(col_name) {
                 if matches!(&col.ty, ColumnType::Ref(target) if target == right_table) {
-                    return Ok(col_name.clone());
+                    return Ok(JoinDirection::LeftToRight(col_name.clone()));
                 }
             }
         }
@@ -3324,13 +3370,54 @@ impl Database {
         // Try to find any Ref column in left_schema that points to right_table
         for col in &left_schema.columns {
             if matches!(&col.ty, ColumnType::Ref(target) if target == right_table) {
-                return Ok(col.name.clone());
+                return Ok(JoinDirection::LeftToRight(col.name.clone()));
+            }
+        }
+
+        // Check for reverse join: right table has Ref to left table
+        // Pattern: ON right_table.col = left_table.id
+        let left_is_from_right_2 = on
+            .left
+            .table
+            .as_ref()
+            .map(|t| t == right_table)
+            .unwrap_or(false);
+        let right_is_from_left_2 = on
+            .right
+            .table
+            .as_ref()
+            .map(|t| t == left_table)
+            .unwrap_or(false);
+
+        if left_is_from_right_2 && right_is_from_left_2 {
+            let col_name = &on.left.column;
+            if let Some(col) = right_schema.column(col_name) {
+                if matches!(&col.ty, ColumnType::Ref(target) if target == left_table) {
+                    return Ok(JoinDirection::RightToLeft(col_name.clone()));
+                }
+            }
+        }
+
+        // Also check: ON left_table.id = right_table.col
+        if left_is_from_left && right_is_from_right {
+            let col_name = &on.right.column;
+            if let Some(col) = right_schema.column(col_name) {
+                if matches!(&col.ty, ColumnType::Ref(target) if target == left_table) {
+                    return Ok(JoinDirection::RightToLeft(col_name.clone()));
+                }
+            }
+        }
+
+        // Try to find any Ref column in right_schema that points to left_table
+        for col in &right_schema.columns {
+            if matches!(&col.ty, ColumnType::Ref(target) if target == left_table) {
+                return Ok(JoinDirection::RightToLeft(col.name.clone()));
             }
         }
 
         Err(DatabaseError::Parse(parser::ParseError {
             message: format!(
-                "Could not find Ref column in '{}' pointing to '{}'",
+                "Could not find Ref column connecting '{}' and '{}'",
                 left_table, right_table
             ),
             position: 0,
@@ -3338,7 +3425,7 @@ impl Database {
     }
 
     /// Build a Predicate from SQL WHERE conditions for JOIN queries.
-    /// Handles qualified column names (table.column).
+    /// Handles qualified column names (table.column) and resolves aliases.
     fn build_join_predicate(
         &self,
         conditions: &[parser::Condition],
@@ -3354,33 +3441,32 @@ impl Database {
         for cond in conditions {
             let column = &cond.column.column;
 
-            // Determine which schema to use for type coercion
-            let col_type = if column == "id" {
-                ColumnType::Ref("".to_string())
-            } else if let Some(table) = &cond.column.table {
-                // Qualified column - find in specific schema
-                if let Some(idx) = left_schema.column_index(column) {
-                    if left_schema.name == *table {
-                        left_schema.columns[idx].ty.clone()
-                    } else if let Some(idx) = right_schema.column_index(column) {
-                        right_schema.columns[idx].ty.clone()
+            // Determine which schema has the column and get the qualified name
+            // The combined schema uses qualified names like "Issues.priority"
+            let (qualified_column, col_type) = if column == "id" {
+                // Special case: id exists in both tables
+                // Use the table qualifier to determine which one
+                if let Some(table) = &cond.column.table {
+                    // Try to match the qualifier (might be alias) to a schema
+                    if left_schema.column_index(column).is_some() {
+                        (format!("{}.id", left_schema.name), ColumnType::Ref("".to_string()))
                     } else {
-                        return Err(DatabaseError::ColumnNotFound(column.clone()));
+                        (format!("{}.id", right_schema.name), ColumnType::Ref("".to_string()))
                     }
-                } else if let Some(idx) = right_schema.column_index(column) {
-                    right_schema.columns[idx].ty.clone()
                 } else {
-                    return Err(DatabaseError::ColumnNotFound(column.clone()));
+                    // Default to left schema for unqualified id
+                    (format!("{}.id", left_schema.name), ColumnType::Ref("".to_string()))
                 }
+            } else if let Some(idx) = left_schema.column_index(column) {
+                // Column found in left schema - use qualified name
+                let qualified = format!("{}.{}", left_schema.name, column);
+                (qualified, left_schema.columns[idx].ty.clone())
+            } else if let Some(idx) = right_schema.column_index(column) {
+                // Column found in right schema - use qualified name
+                let qualified = format!("{}.{}", right_schema.name, column);
+                (qualified, right_schema.columns[idx].ty.clone())
             } else {
-                // Unqualified column - search both schemas
-                if let Some(idx) = left_schema.column_index(column) {
-                    left_schema.columns[idx].ty.clone()
-                } else if let Some(idx) = right_schema.column_index(column) {
-                    right_schema.columns[idx].ty.clone()
-                } else {
-                    return Err(DatabaseError::ColumnNotFound(column.clone()));
-                }
+                return Err(DatabaseError::ColumnNotFound(column.clone()));
             };
 
             // Only handle literal values in predicates for now
@@ -3394,7 +3480,7 @@ impl Database {
                 }
             };
             let value = coerce_value(literal_value, &col_type);
-            predicates.push(Predicate::eq(column, value));
+            predicates.push(Predicate::eq(qualified_column, value));
         }
 
         // AND all conditions together and optimize

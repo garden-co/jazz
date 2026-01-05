@@ -389,7 +389,7 @@ function generateTypes(
     "// Generated from SQL schema by @jazz/schema",
     "// DO NOT EDIT MANUALLY",
     "",
-    'import type { StringFilter, BigIntFilter, NumberFilter, BoolFilter } from "@jazz/schema/runtime";',
+    'import type { StringFilter, BigIntFilter, NumberFilter, BoolFilter, RelationFilter, BaseWhereInput } from "@jazz/schema/runtime";',
     "",
     "/** ObjectId is a 128-bit unique identifier (UUIDv7) represented as a Base32 string */",
     "export type ObjectId = string;",
@@ -437,7 +437,9 @@ function generateTypes(
 
   for (const table of tables) {
     const typeName = singularize(toPascalCase(table.name));
-    lines.push(`export interface ${typeName}Filter {`);
+    const tableReverseRefs = reverseRefs.get(table.name) ?? [];
+
+    lines.push(`export interface ${typeName}Filter extends BaseWhereInput {`);
     lines.push(`  AND?: ${typeName}Filter | ${typeName}Filter[];`);
     lines.push(`  OR?: ${typeName}Filter[];`);
     lines.push(`  NOT?: ${typeName}Filter | ${typeName}Filter[];`);
@@ -450,6 +452,14 @@ function generateTypes(
       const filterType = getFilterType(col.sqlType, col.nullable);
       lines.push(`  ${col.name}?: ${filterType};`);
     }
+
+    // Relation filters for reverse refs (e.g., IssueAssignees on Issue)
+    for (const rr of tableReverseRefs) {
+      const relatedTypeName = singularize(toPascalCase(rr.sourceTable));
+      lines.push(`  /** Filter by related ${rr.sourceTable} */`);
+      lines.push(`  ${rr.sourceTable}?: RelationFilter<${relatedTypeName}Filter>;`);
+    }
+
     lines.push("}");
     lines.push("");
   }

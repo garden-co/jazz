@@ -127,6 +127,19 @@ export interface BoolFilter {
 export type Nullable<T> = T | null;
 
 /**
+ * Relation filter for "has related records matching condition"
+ * Used for filtering via junction tables (many-to-many) or reverse refs (one-to-many)
+ */
+export interface RelationFilter<T = BaseWhereInput> {
+  /** At least one related record matches */
+  some?: T;
+  /** All related records match (or no related records exist) */
+  every?: T;
+  /** No related records match */
+  none?: T;
+}
+
+/**
  * Base where input interface - extended by generated per-table types.
  * The index signature allows arbitrary column filters at runtime.
  */
@@ -191,6 +204,7 @@ export function buildQuery(
 ): string {
   const alias = table.name.toLowerCase()[0];
   const parts: string[] = [];
+  const allJoins: string[] = [];
 
   // Build projection
   const projections: string[] = [`${alias}.*`];
@@ -210,26 +224,104 @@ export function buildQuery(
     }
   }
 
-  parts.push(`SELECT ${projections.join(", ")}`);
-  parts.push(`FROM ${table.name} ${alias}`);
-
   // Build JOINs for forward refs that are included
   if (options.include) {
     const joins = buildJoins(table, schema, alias, options.include);
-    if (joins.length > 0) {
-      parts.push(joins.join(" "));
+    allJoins.push(...joins);
+  }
+
+  // Extract relation filters and build JOINs for them
+  const relationJoinInfo: Map<string, { tableName: string; conditions: string[] }> = new Map();
+
+  if (options.where) {
+    extractRelationFilters(table, schema, alias, options.where, allJoins, relationJoinInfo);
+  }
+
+  parts.push(`SELECT ${projections.join(", ")}`);
+  parts.push(`FROM ${table.name} ${alias}`);
+
+  if (allJoins.length > 0) {
+    parts.push(allJoins.join(" "));
+  }
+
+  // Build WHERE clause (including relation filter conditions)
+  const whereConditions: string[] = [];
+
+  if (options.where && Object.keys(options.where).length > 0) {
+    const whereClause = buildWhereClause(alias, options.where, table, schema);
+    if (whereClause) {
+      whereConditions.push(whereClause);
     }
   }
 
-  // Build WHERE clause
-  if (options.where && Object.keys(options.where).length > 0) {
-    const whereClause = buildWhereClause(alias, options.where);
-    if (whereClause) {
-      parts.push(`WHERE ${whereClause}`);
-    }
+  // Add relation filter conditions
+  for (const [, info] of relationJoinInfo) {
+    whereConditions.push(...info.conditions);
+  }
+
+  if (whereConditions.length > 0) {
+    parts.push(`WHERE ${whereConditions.join(" AND ")}`);
   }
 
   return parts.join(" ");
+}
+
+/**
+ * Extract relation filters from where clause and build JOINs
+ */
+function extractRelationFilters(
+  table: TableMeta,
+  schema: SchemaMeta,
+  tableAlias: string,
+  where: BaseWhereInput,
+  joins: string[],
+  joinInfo: Map<string, { tableName: string; conditions: string[] }>
+): void {
+  for (const [key, value] of Object.entries(where)) {
+    if (value === undefined) continue;
+    if (key === "AND" || key === "OR" || key === "NOT") continue;
+
+    // Check if this is a reverse ref (relation filter)
+    const reverseRef = table.reverseRefs.find((r) => r.name === key);
+    if (reverseRef && isRelationFilter(value)) {
+      const sourceTable = schema.tables[reverseRef.sourceTable];
+      if (!sourceTable) continue;
+
+      // Groove parser doesn't support aliases on joined tables, use table name directly
+      const joinTableName = reverseRef.sourceTable;
+
+      // Only add join once per relation
+      // Groove now handles detecting which side has the Ref column
+      if (!joinInfo.has(key)) {
+        joins.push(
+          `JOIN ${joinTableName} ON ${joinTableName}.${reverseRef.sourceColumn} = ${tableAlias}.id`
+        );
+        joinInfo.set(key, { tableName: joinTableName, conditions: [] });
+      }
+
+      const info = joinInfo.get(key)!;
+      const relationFilter = value as RelationFilter;
+
+      // Handle 'some' - at least one related record matches
+      if (relationFilter.some) {
+        const condition = buildWhereClause(joinTableName, relationFilter.some, sourceTable, schema);
+        if (condition) {
+          info.conditions.push(condition);
+        }
+      }
+
+      // TODO: Handle 'every' and 'none' (requires subqueries)
+    }
+  }
+}
+
+/**
+ * Check if a value is a relation filter (has some/every/none)
+ */
+function isRelationFilter(value: unknown): value is RelationFilter {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return "some" in v || "every" in v || "none" in v;
 }
 
 /**
@@ -344,18 +436,26 @@ function buildJoins(
  */
 function buildWhereClause(
   alias: string,
-  where: BaseWhereInput
+  where: BaseWhereInput,
+  table?: TableMeta,
+  schema?: SchemaMeta
 ): string | null {
   const conditions: string[] = [];
 
   for (const [key, value] of Object.entries(where)) {
     if (value === undefined) continue;
 
+    // Skip relation filters (handled separately by extractRelationFilters)
+    if (table && isRelationFilter(value)) {
+      const isReverseRef = table.reverseRefs.some((r) => r.name === key);
+      if (isReverseRef) continue;
+    }
+
     // Handle combinators
     if (key === "AND") {
       const andConditions = Array.isArray(value) ? value : [value];
       const parts = andConditions
-        .map((w) => buildWhereClause(alias, w as BaseWhereInput))
+        .map((w) => buildWhereClause(alias, w as BaseWhereInput, table, schema))
         .filter((c): c is string => c !== null);
       if (parts.length > 0) {
         conditions.push(parts.length === 1 ? parts[0] : `(${parts.join(" AND ")})`);
@@ -363,7 +463,7 @@ function buildWhereClause(
     } else if (key === "OR") {
       const orConditions = value as BaseWhereInput[];
       const parts = orConditions
-        .map((w) => buildWhereClause(alias, w))
+        .map((w) => buildWhereClause(alias, w, table, schema))
         .filter((c): c is string => c !== null);
       if (parts.length > 0) {
         conditions.push(`(${parts.join(" OR ")})`);
@@ -371,7 +471,7 @@ function buildWhereClause(
     } else if (key === "NOT") {
       const notConditions = Array.isArray(value) ? value : [value];
       const parts = notConditions
-        .map((w) => buildWhereClause(alias, w as BaseWhereInput))
+        .map((w) => buildWhereClause(alias, w as BaseWhereInput, table, schema))
         .filter((c): c is string => c !== null);
       if (parts.length > 0) {
         conditions.push(`NOT (${parts.join(" AND ")})`);

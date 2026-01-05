@@ -7,7 +7,8 @@ use crate::commit::CommitId;
 /// Threshold for inline content storage (bytes).
 /// Content at or below this size is stored directly in the commit.
 /// Content above this size is chunked and stored separately.
-pub const INLINE_THRESHOLD: usize = 1024; // 1KB
+/// TODO: Reduce back to 1KB once sorted chunk indices are implemented (see specs/sorted-chunk-indices.md)
+pub const INLINE_THRESHOLD: usize = 1024 * 1024; // 1MB (temporary)
 
 /// A chunk hash is the BLAKE3 hash of a content chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

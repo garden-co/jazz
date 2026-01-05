@@ -323,7 +323,13 @@ Current test count: **276 tests** passing across all modules
 
 - [ ] Auto-truncate index objects: Index objects only care about current state, not history. Should we always truncate on update for indexes? This would keep index objects small and avoid unbounded growth.
 
+- [ ] **Sorted Chunk Indices** (see `specs/sorted-chunk-indices.md`): Redesign RefIndex to use sorted, chunked storage with binary search. Enables indices larger than memory, efficient lookups via O(log N) chunk selection, and future range queries (ORDER BY, WHERE col > X). Query graph integration via two-phase evaluation: (1) analyze needed chunks, (2) async load, (3) sync evaluate with cache.
+
+- [ ] **Index updates in transactions**: When multi-row transactions are implemented, index chunk updates should be buffered during the transaction and applied atomically on commit. This ensures index consistency with table data.
+
 - [ ] Secondary index for soft-deleted rows: Maintain a separate index (or index variant) that includes soft-deleted objects. Useful for "show deleted items" UI, undelete flows, and admin queries. The primary index would exclude deleted rows for normal queries.
+
+- [ ] **Nullable column representation**: Currently using a `nullable_mask: u64` bitmask to tell the binary encoder which columns need presence flags. This is awkward - the encoder needs schema info passed separately. Better approach: change `Row.values` from `Vec<Value>` to store `Option<Value>` for nullable columns (e.g., `Some(Value::String(...))` vs `Value::String(...)`). Then nullability is inline and the encoder can handle it without external schema hints.
 
 ---
 

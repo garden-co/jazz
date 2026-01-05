@@ -1,7 +1,7 @@
 // Generated from SQL schema by @jazz/schema
 // DO NOT EDIT MANUALLY
 
-import type { StringFilter, BigIntFilter, NumberFilter, BoolFilter } from "@jazz/schema/runtime";
+import type { StringFilter, BigIntFilter, NumberFilter, BoolFilter, RelationFilter, BaseWhereInput } from "@jazz/schema/runtime";
 
 /** ObjectId is a 128-bit unique identifier (UUIDv7) represented as a Base32 string */
 export type ObjectId = string;
@@ -43,7 +43,7 @@ export type IssueAssigneeIncludes = {
 
 // === Filter types (Prisma-style filters) ===
 
-export interface UserFilter {
+export interface UserFilter extends BaseWhereInput {
   AND?: UserFilter | UserFilter[];
   OR?: UserFilter[];
   NOT?: UserFilter | UserFilter[];
@@ -51,9 +51,11 @@ export interface UserFilter {
   name?: string | StringFilter;
   email?: string | StringFilter;
   avatarColor?: string | StringFilter;
+  /** Filter by related IssueAssignees */
+  IssueAssignees?: RelationFilter<IssueAssigneeFilter>;
 }
 
-export interface ProjectFilter {
+export interface ProjectFilter extends BaseWhereInput {
   AND?: ProjectFilter | ProjectFilter[];
   OR?: ProjectFilter[];
   NOT?: ProjectFilter | ProjectFilter[];
@@ -61,9 +63,11 @@ export interface ProjectFilter {
   name?: string | StringFilter;
   color?: string | StringFilter;
   description?: string | StringFilter | null;
+  /** Filter by related Issues */
+  Issues?: RelationFilter<IssueFilter>;
 }
 
-export interface IssueFilter {
+export interface IssueFilter extends BaseWhereInput {
   AND?: IssueFilter | IssueFilter[];
   OR?: IssueFilter[];
   NOT?: IssueFilter | IssueFilter[];
@@ -75,18 +79,24 @@ export interface IssueFilter {
   project?: string | StringFilter;
   createdAt?: bigint | BigIntFilter;
   updatedAt?: bigint | BigIntFilter;
+  /** Filter by related IssueLabels */
+  IssueLabels?: RelationFilter<IssueLabelFilter>;
+  /** Filter by related IssueAssignees */
+  IssueAssignees?: RelationFilter<IssueAssigneeFilter>;
 }
 
-export interface LabelFilter {
+export interface LabelFilter extends BaseWhereInput {
   AND?: LabelFilter | LabelFilter[];
   OR?: LabelFilter[];
   NOT?: LabelFilter | LabelFilter[];
   id?: string | StringFilter;
   name?: string | StringFilter;
   color?: string | StringFilter;
+  /** Filter by related IssueLabels */
+  IssueLabels?: RelationFilter<IssueLabelFilter>;
 }
 
-export interface IssueLabelFilter {
+export interface IssueLabelFilter extends BaseWhereInput {
   AND?: IssueLabelFilter | IssueLabelFilter[];
   OR?: IssueLabelFilter[];
   NOT?: IssueLabelFilter | IssueLabelFilter[];
@@ -95,7 +105,7 @@ export interface IssueLabelFilter {
   label?: string | StringFilter;
 }
 
-export interface IssueAssigneeFilter {
+export interface IssueAssigneeFilter extends BaseWhereInput {
   AND?: IssueAssigneeFilter | IssueAssigneeFilter[];
   OR?: IssueAssigneeFilter[];
   NOT?: IssueAssigneeFilter | IssueAssigneeFilter[];

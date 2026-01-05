@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { JazzProvider, useJazz, useAll } from "@jazz/react";
 import { createDatabase, type Database } from "./generated/client";
-import type { Issue } from "./generated/types";
+import type { Issue, IssueFilter } from "./generated/types";
 
 // @ts-ignore - vite handles ?raw imports
 import schema from "./schema.sql?raw";
@@ -24,14 +24,6 @@ async function initWasm() {
 function App() {
   const db = useJazz() as unknown as Database;
 
-  // Subscribe to all data
-  const { data: users, loading: usersLoading } = useAll(db.users, {});
-  const { data: projects, loading: projectsLoading } = useAll(db.projects, {});
-  const { data: issues, loading: issuesLoading } = useAll(db.issues, {});
-  const { data: labels, loading: labelsLoading } = useAll(db.labels, {});
-  const { data: issueLabels } = useAll(db.issuelabels, {});
-  const { data: issueAssignees } = useAll(db.issueassignees, {});
-
   // UI state
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [showMyIssues, setShowMyIssues] = useState(false);
@@ -49,77 +41,72 @@ function App() {
   // Current user (from fake data generation)
   const { initialized, currentUserId } = useFakeData(db);
 
+  // Build issues filter from UI state (SQL-based filtering with relation filters)
+  const issuesFilter = useMemo((): IssueFilter | undefined => {
+    const filter: IssueFilter = {};
+
+    // Direct column filters
+    if (selectedProjectId) {
+      filter.project = selectedProjectId;
+    }
+    if (statusFilter) {
+      filter.status = statusFilter;
+    }
+    if (priorityFilter) {
+      filter.priority = priorityFilter;
+    }
+
+    // Relation filter: assignee (via IssueAssignees junction table)
+    const userToFilter = assigneeFilter || (showMyIssues ? currentUserId : null);
+    if (userToFilter) {
+      filter.IssueAssignees = { some: { user: userToFilter } };
+    }
+
+    // Relation filter: label (via IssueLabels junction table)
+    if (labelFilter) {
+      filter.IssueLabels = { some: { label: labelFilter } };
+    }
+
+    // Return undefined if no filters
+    if (Object.keys(filter).length === 0) return undefined;
+    return filter;
+  }, [selectedProjectId, statusFilter, priorityFilter, assigneeFilter, showMyIssues, currentUserId, labelFilter]);
+
+  // Subscribe to reference data (no filters)
+  const { data: users, loading: usersLoading } = useAll(db.users, {});
+  const { data: projects, loading: projectsLoading } = useAll(db.projects, {});
+  const { data: labels, loading: labelsLoading } = useAll(db.labels, {});
+
+  // Subscribe to all issues for sidebar counts
+  const { data: allIssues } = useAll(db.issues, {});
+
+  // Subscribe to filtered issues based on UI state (all filtering via SQL JOINs!)
+  const { data: filteredIssues, loading: issuesLoading } = useAll(db.issues, { where: issuesFilter });
+
+  // Subscribe to all junction tables for UI display (showing labels/assignees on issues)
+  const { data: allIssueLabels } = useAll(db.issuelabels, {});
+  const { data: allIssueAssignees } = useAll(db.issueassignees, {});
+
   const currentUser = useMemo(() => {
     return users.find((u) => u.id === currentUserId) || null;
   }, [users, currentUserId]);
 
-  // Filter issues
-  const filteredIssues = useMemo(() => {
-    let filtered = [...issues];
-
-    // Filter by project
-    if (selectedProjectId) {
-      filtered = filtered.filter((i) => i.project === selectedProjectId);
-    }
-
-    // Filter by "my issues" (issues assigned to current user)
-    if (showMyIssues && currentUserId) {
-      const myIssueIds = new Set(
-        issueAssignees.filter((ia) => ia.user === currentUserId).map((ia) => ia.issue)
-      );
-      filtered = filtered.filter((i) => myIssueIds.has(i.id));
-    }
-
-    // Apply additional filters
-    if (statusFilter) {
-      filtered = filtered.filter((i) => i.status === statusFilter);
-    }
-    if (priorityFilter) {
-      filtered = filtered.filter((i) => i.priority === priorityFilter);
-    }
-    if (assigneeFilter) {
-      const assignedIssueIds = new Set(
-        issueAssignees.filter((ia) => ia.user === assigneeFilter).map((ia) => ia.issue)
-      );
-      filtered = filtered.filter((i) => assignedIssueIds.has(i.id));
-    }
-    if (labelFilter) {
-      const labeledIssueIds = new Set(
-        issueLabels.filter((il) => il.label === labelFilter).map((il) => il.issue)
-      );
-      filtered = filtered.filter((i) => labeledIssueIds.has(i.id));
-    }
-
-    return filtered;
-  }, [
-    issues,
-    selectedProjectId,
-    showMyIssues,
-    currentUserId,
-    statusFilter,
-    priorityFilter,
-    assigneeFilter,
-    labelFilter,
-    issueAssignees,
-    issueLabels,
-  ]);
-
-  // Get data for selected issue
+  // Get data for selected issue (use allIssueAssignees/allIssueLabels for complete data)
   const selectedIssueData = useMemo(() => {
     if (!selectedIssue) return { project: undefined, assignees: [], labels: [] };
 
     const project = projects.find((p) => p.id === selectedIssue.project);
-    const assigneeIds = issueAssignees
+    const assigneeIds = allIssueAssignees
       .filter((ia) => ia.issue === selectedIssue.id)
       .map((ia) => ia.user);
     const assignees = users.filter((u) => assigneeIds.includes(u.id));
-    const labelIds = issueLabels
+    const labelIds = allIssueLabels
       .filter((il) => il.issue === selectedIssue.id)
       .map((il) => il.label);
     const issueLabelsData = labels.filter((l) => labelIds.includes(l.id));
 
     return { project, assignees, labels: issueLabelsData };
-  }, [selectedIssue, projects, users, labels, issueAssignees, issueLabels]);
+  }, [selectedIssue, projects, users, labels, allIssueAssignees, allIssueLabels]);
 
   // Reset page when filters change
   useEffect(() => {
@@ -140,7 +127,7 @@ function App() {
     <div className="flex h-screen">
       <Sidebar
         projects={projects}
-        issues={issues}
+        issues={allIssues}
         selectedProjectId={selectedProjectId}
         onSelectProject={setSelectedProjectId}
         showMyIssues={showMyIssues}
@@ -172,8 +159,8 @@ function App() {
           projects={projects}
           users={users}
           labels={labels}
-          issueLabels={issueLabels}
-          issueAssignees={issueAssignees}
+          issueLabels={allIssueLabels}
+          issueAssignees={allIssueAssignees}
           onSelectIssue={setSelectedIssue}
           currentPage={currentPage}
           pageSize={pageSize}

@@ -1,4 +1,5 @@
-import { Plus } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Plus, Sun, Moon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import type { User } from "@/generated/types";
@@ -9,6 +10,24 @@ interface HeaderProps {
 }
 
 export function Header({ currentUser, onCreateIssue }: HeaderProps) {
+  const [isDark, setIsDark] = useState(() => {
+    if (typeof window !== "undefined") {
+      return localStorage.getItem("theme") === "dark" ||
+        (!localStorage.getItem("theme") && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    }
+    return false;
+  });
+
+  useEffect(() => {
+    if (isDark) {
+      document.documentElement.classList.add("dark");
+      localStorage.setItem("theme", "dark");
+    } else {
+      document.documentElement.classList.remove("dark");
+      localStorage.setItem("theme", "light");
+    }
+  }, [isDark]);
+
   const initials = currentUser?.name
     .split(" ")
     .map((n) => n[0])
@@ -25,6 +44,14 @@ export function Header({ currentUser, onCreateIssue }: HeaderProps) {
       </div>
 
       <div className="flex items-center gap-3">
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => setIsDark(!isDark)}
+          className="h-8 w-8"
+        >
+          {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+        </Button>
         {currentUser && (
           <>
             <span className="text-sm text-muted-foreground">

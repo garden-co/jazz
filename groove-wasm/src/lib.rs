@@ -1,5 +1,8 @@
 use wasm_bindgen::prelude::*;
-use groove::sql::{Database, IncrementalQuery, Value, ExecuteResult, Row, encode_rows, encode_delta};
+use groove::sql::{
+    Database, IncrementalQuery, Value, ExecuteResult, Row,
+    encode_rows, encode_rows_with_nullability, encode_delta_with_nullability,
+};
 use groove::ObjectId;
 use groove::ListenerId;
 use js_sys::{Array, Uint8Array};
@@ -195,8 +198,11 @@ pub struct WasmQueryHandleBinary {
 #[wasm_bindgen]
 impl WasmQueryHandleBinary {
     fn new(query: IncrementalQuery, callback: js_sys::Function) -> Self {
+        // Get nullable mask before setting up the callback
+        let nullable_mask = query.nullable_mask();
+
         let rust_callback = move |rows: Vec<Row>| {
-            let binary = encode_rows(&rows);
+            let binary = encode_rows_with_nullability(&rows, nullable_mask);
             let js_array = Uint8Array::from(binary.as_slice());
             let _ = callback.call1(&JsValue::NULL, &js_array);
         };
@@ -229,13 +235,16 @@ pub struct WasmQueryHandleDelta {
 #[wasm_bindgen]
 impl WasmQueryHandleDelta {
     fn new(query: IncrementalQuery, callback: js_sys::Function) -> Self {
+        // Get nullable mask before setting up the callback
+        let nullable_mask = query.nullable_mask();
+
         // Use subscribe_delta to get individual RowDeltas
         let rust_callback = Box::new(move |delta_batch: &groove::sql::query_graph::DeltaBatch| {
             // Create a JS array of Uint8Arrays, one per delta
             let js_deltas = Array::new();
 
             for delta in delta_batch.iter() {
-                let binary = encode_delta(delta);
+                let binary = encode_delta_with_nullability(delta, nullable_mask);
                 let js_array = Uint8Array::from(binary.as_slice());
                 js_deltas.push(&js_array);
             }
