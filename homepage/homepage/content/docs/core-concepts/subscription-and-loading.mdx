@@ -78,6 +78,23 @@ You can use the `$isLoaded` field to check whether a CoValue is loaded. For more
 
 See the examples above for practical demonstrations of how to handle these three states in your application.
 
+<ContentByFramework framework={["react", "react-native", "react-native-expo"]}>
+### Suspense Hooks [!framework=react,react-native,react-native-expo]
+
+`useSuspenseCoState` and `useSuspenseAccount` are the suspense-enabled counterparts for `useCoState` and `useAccount`. They integrate with React's Suspense API by suspending component rendering while the requested value loads. 
+
+Once the component renders successfully, all of the data requested is guaranteed to be loaded and accessible. In case the requested data **can't** be loaded, the hook will throw an error during rendering.
+
+To handle the various loading states, instead of checking `$isLoaded` or `$jazz.loadingState`, these hooks should be combined with `<Suspense>` and error boundaries.
+
+<CodeGroup preferWrap>
+```tsx ProjectView.tsx#Suspense 
+```
+</CodeGroup>
+
+[Check out an example error boundary here](https://github.com/garden-co/jazz/blob/main/examples/music-player/src/components/ErrorBoundary.tsx).
+</ContentByFramework>
+
 ## Deep Loading
 
 When you're working with related CoValues (like tasks in a project), you often need to load nested references as well as the top-level CoValue.

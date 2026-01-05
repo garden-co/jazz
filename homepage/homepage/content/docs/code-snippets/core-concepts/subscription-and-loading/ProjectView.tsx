@@ -160,3 +160,42 @@ function ProfileName() {
   return <div>{profileName}</div>;
 }
 // #endregion
+
+// #region Suspense
+import { useSuspenseCoState } from "jazz-tools/react";
+
+function ProjectViewSuspense({ projectId }: { projectId: string }) {
+  // Subscribe to a project and resolve its tasks
+  const project = useSuspenseCoState(Project, projectId, {
+    resolve: { tasks: { $each: true } }, // Tell Jazz to load each task in the list
+  });
+
+  // [!code --:12]
+  // We don't need this block any more: 
+  // useSuspenseCoState cannot return anything other than a loaded CoValue.
+  if (!project.$isLoaded) {
+    switch (project.$jazz.loadingState) {
+      // @ts-expect-error Code is showing diffed out
+      case "unauthorized":
+        return "Project not accessible";
+      // @ts-expect-error Code is showing diffed out
+      case "unavailable":
+        return "Project not found";
+      // @ts-expect-error Code is showing diffed out
+      case "loading":
+        return "Loading project...";
+    }
+  }
+
+  return (
+    <div>
+      <h1>{project.name}</h1>
+      <ul>
+        {project.tasks.map((task) => (
+          <li key={task.$jazz.id}>{task.title}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+// #endregion
