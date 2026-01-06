@@ -137,19 +137,10 @@ impl ObjectState {
         &self.env
     }
 
-    /// Compute merged content using a merge strategy (sync, inline content only).
+    /// Compute merged content using a merge strategy.
     pub fn merge(&self, strategy: &dyn crate::merge::MergeStrategy) -> Result<Bytes, ListenerError> {
         let branch = self.branch.read().unwrap();
         merge_commit_ids(&self.tips, strategy, &branch)
-    }
-
-    /// Compute merged content using a merge strategy (async, supports chunked content).
-    pub async fn merge_async(
-        &self,
-        strategy: &dyn crate::merge::MergeStrategy,
-    ) -> Result<Bytes, ListenerError> {
-        let branch = self.branch.read().unwrap();
-        merge_commit_ids_async(&self.tips, strategy, &branch, self.env.as_ref()).await
     }
 
     /// Compute byte-level diff between previous and current merged content.
@@ -221,12 +212,6 @@ impl ObjectState {
             .map(|c| Bytes::copy_from_slice(&c.content))
     }
 
-    /// Get the content of a specific tip by commit ID (async).
-    /// Note: Now equivalent to get_tip_content since commits store content directly.
-    pub async fn get_tip_content_async(&self, commit_id: &CommitId) -> Option<Bytes> {
-        self.get_tip_content(commit_id)
-    }
-
     /// Get author of a specific tip.
     pub fn get_tip_author(&self, commit_id: &CommitId) -> Option<String> {
         let branch = self.branch.read().unwrap();
@@ -239,15 +224,11 @@ impl ObjectState {
         branch.get_commit(commit_id).map(|c| c.timestamp)
     }
 
-    /// Load content for all current tips (async, supports chunked).
-    pub async fn load_all_tips(&self) -> Vec<(CommitId, Bytes)> {
-        let mut results = Vec::new();
-        for tip in &self.tips {
-            if let Some(content) = self.get_tip_content_async(tip).await {
-                results.push((*tip, content));
-            }
-        }
-        results
+    /// Load content for all current tips.
+    pub fn load_all_tips(&self) -> Vec<(CommitId, Bytes)> {
+        self.tips.iter()
+            .filter_map(|tip| self.get_tip_content(tip).map(|content| (*tip, content)))
+            .collect()
     }
 
     /// Read the current content (merged if multiple tips, or single tip content).
@@ -561,18 +542,6 @@ pub fn merge_commit_ids(
         .merge(base.as_deref(), &tip_refs)
         .map(Bytes::from)
         .map_err(|e| ListenerError::MergeError(e.to_string()))
-}
-
-/// Helper to compute merged content from commit IDs (async).
-/// Note: Now equivalent to merge_commit_ids since commits store content directly.
-#[allow(unused_variables)]
-pub async fn merge_commit_ids_async(
-    tips: &[CommitId],
-    strategy: &dyn crate::merge::MergeStrategy,
-    branch: &Branch,
-    env: &dyn Environment,
-) -> Result<Bytes, ListenerError> {
-    merge_commit_ids(tips, strategy, branch)
 }
 
 // Tests have been moved to tests/listener.rs

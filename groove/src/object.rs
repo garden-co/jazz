@@ -1,13 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
-use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
-use std::task::{Context, Poll};
-
-use bytes::Bytes;
-use futures::io::AsyncRead;
-use futures::stream::Stream;
 
 use crate::branch::Branch;
 use crate::commit::{Commit, CommitId};
@@ -517,101 +511,10 @@ impl Object {
         branch.add_commit(commit)
     }
 
-    // ========== Async Read/Write Methods ==========
-
-    /// Read content from the frontier of a branch (async).
-    /// Returns None if the branch is empty or has multiple tips.
-    ///
-    /// Note: This method is now equivalent to read_sync() since commits
-    /// store content directly. Kept for API compatibility.
-    pub async fn read(&self, branch_name: &str) -> Option<Vec<u8>> {
-        self.read_sync(branch_name)
-    }
-
-    /// Write content to a branch (async).
-    ///
-    /// Note: This method is now equivalent to write_sync() since commits
-    /// store content directly. Kept for API compatibility.
-    pub async fn write(
-        &self,
-        branch_name: &str,
-        content: &[u8],
-        author: &str,
-        timestamp: u64,
-    ) -> CommitId {
-        self.write_sync(branch_name, content, author, timestamp)
-    }
-
-    // ========== Streaming Read/Write Methods ==========
-
-    /// Write content from an async reader to a branch.
-    /// Reads all content into memory and stores it directly in the commit.
-    pub async fn write_stream<R: AsyncRead + Unpin>(
-        &self,
-        branch_name: &str,
-        mut reader: R,
-        author: &str,
-        timestamp: u64,
-    ) -> std::io::Result<CommitId> {
-        use futures::io::AsyncReadExt;
-
-        // Read all content into memory
-        let mut content = Vec::new();
-        reader.read_to_end(&mut content).await?;
-
-        Ok(self.write_sync(branch_name, &content, author, timestamp))
-    }
-
-    /// Stream content from the frontier of a branch.
-    /// Returns a stream that yields a single chunk, or None if branch is empty or has multiple tips.
-    pub fn read_stream(&self, branch_name: &str) -> Option<ContentStream> {
-        let branch = self.branches.get(branch_name)?.read().unwrap();
-        let frontier = branch.frontier();
-
-        // Only return content if there's exactly one tip
-        if frontier.len() != 1 {
-            return None;
-        }
-
-        let commit = branch.get_commit(&frontier[0])?;
-        let content = commit.content.clone();
-        drop(branch); // Release lock before returning stream
-
-        Some(ContentStream::new(content))
-    }
-
     /// Get the frontier commit IDs for a branch.
     pub fn frontier(&self, branch_name: &str) -> Option<Vec<CommitId>> {
         let branch = self.branches.get(branch_name)?.read().unwrap();
         Some(branch.frontier().to_vec())
-    }
-}
-
-/// A stream that yields content as a single chunk.
-///
-/// Since commits store content directly, this always yields once then completes.
-pub struct ContentStream {
-    content: Option<Bytes>,
-}
-
-impl ContentStream {
-    fn new(content: Box<[u8]>) -> Self {
-        ContentStream {
-            content: Some(Bytes::copy_from_slice(&content)),
-        }
-    }
-
-    /// Collect the content into a Vec<u8>.
-    pub async fn collect_bytes(self) -> Vec<u8> {
-        self.content.map(|b| b.to_vec()).unwrap_or_default()
-    }
-}
-
-impl Stream for ContentStream {
-    type Item = Bytes;
-
-    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Ready(self.content.take())
     }
 }
 

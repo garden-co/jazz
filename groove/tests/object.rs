@@ -1,11 +1,6 @@
 //! Integration tests for Object.
 
-use bytes::Bytes;
-use futures::executor::block_on;
-use futures::io::AllowStdIo;
-use futures::stream::StreamExt;
 use groove::{Commit, CommitId, LastWriterWins, Object, ObjectId};
-use std::io::Cursor;
 
 fn make_commit(content: &[u8], parents: Vec<CommitId>) -> Commit {
     Commit {
@@ -116,7 +111,7 @@ fn merge_branches_simple() {
 }
 
 #[test]
-fn sync_write_and_read() {
+fn write_and_read() {
     let obj = Object::new(ObjectId::new(1), "test");
 
     // Write some content
@@ -142,161 +137,22 @@ fn sync_write_and_read() {
 }
 
 #[test]
-fn read_sync_empty_branch_returns_none() {
+fn read_empty_branch_returns_none() {
     let obj = Object::new(ObjectId::new(1), "test");
     assert!(obj.read_sync("main").is_none());
 }
 
 #[test]
-fn sync_write_large_content() {
+fn write_large_content() {
     let obj = Object::new(ObjectId::new(1), "test");
 
-    // Large content is now stored directly (no chunking at commit level)
+    // Large content is stored directly (no chunking at commit level)
     let large_content: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
     obj.write_sync("main", &large_content, "alice", 1000);
 
     // Should be readable
     let content = obj.read_sync("main").unwrap();
     assert_eq!(content, large_content);
-}
-
-#[test]
-fn async_write_content() {
-    let obj = Object::new(ObjectId::new(1), "test");
-
-    // Write content
-    block_on(async {
-        obj.write("main", b"hello", "alice", 1000).await;
-    });
-
-    // Read back
-    let content = obj.read_sync("main").unwrap();
-    assert_eq!(content, b"hello");
-}
-
-#[test]
-fn async_write_large_content() {
-    let obj = Object::new(ObjectId::new(1), "test");
-
-    // Large content stored directly
-    let large_content: Vec<u8> = (0..1024 * 1024 * 3).map(|i| (i % 256) as u8).collect();
-
-    block_on(async {
-        obj.write("main", &large_content, "alice", 1000).await;
-    });
-
-    // Should be readable via sync (no chunking anymore)
-    let content = obj.read_sync("main").unwrap();
-    assert_eq!(content, large_content);
-
-    // Async read should also work
-    let content = block_on(async { obj.read("main").await });
-    assert_eq!(content.unwrap(), large_content);
-}
-
-#[test]
-fn async_read_content() {
-    let obj = Object::new(ObjectId::new(1), "test");
-
-    // Write using sync
-    obj.write_sync("main", b"hello", "alice", 1000);
-
-    // Read using async should also work
-    let content = block_on(async { obj.read("main").await });
-    assert_eq!(content.unwrap(), b"hello");
-}
-
-#[test]
-fn stream_write_content() {
-    let obj = Object::new(ObjectId::new(1), "test");
-
-    let data = b"hello streaming world";
-    let cursor = AllowStdIo::new(Cursor::new(data.to_vec()));
-
-    block_on(async {
-        obj.write_stream("main", cursor, "alice", 1000)
-            .await
-            .unwrap();
-    });
-
-    let content = obj.read_sync("main").unwrap();
-    assert_eq!(content, data);
-}
-
-#[test]
-fn stream_write_large_content() {
-    let obj = Object::new(ObjectId::new(1), "test");
-
-    let large_content: Vec<u8> = (0..1024 * 1024 * 5).map(|i| (i % 256) as u8).collect();
-    let cursor = AllowStdIo::new(Cursor::new(large_content.clone()));
-
-    block_on(async {
-        obj.write_stream("main", cursor, "alice", 1000)
-            .await
-            .unwrap();
-    });
-
-    // Should be readable (content stored directly, no chunking)
-    let content = obj.read_sync("main").unwrap();
-    assert_eq!(content, large_content);
-}
-
-#[test]
-fn stream_write_empty_content() {
-    let obj = Object::new(ObjectId::new(1), "test");
-
-    let cursor = AllowStdIo::new(Cursor::new(Vec::<u8>::new()));
-
-    block_on(async {
-        obj.write_stream("main", cursor, "alice", 1000)
-            .await
-            .unwrap();
-    });
-
-    let content = obj.read_sync("main").unwrap();
-    assert_eq!(content, b"");
-}
-
-#[test]
-fn stream_read_content() {
-    let obj = Object::new(ObjectId::new(1), "test");
-
-    // Write content
-    obj.write_sync("main", b"hello", "alice", 1000);
-
-    // Stream read should work (returns single chunk now)
-    let chunks: Vec<Bytes> = block_on(async {
-        let stream = obj.read_stream("main").unwrap();
-        stream.collect().await
-    });
-
-    assert_eq!(chunks.len(), 1);
-    assert_eq!(&chunks[0][..], b"hello");
-}
-
-#[test]
-fn stream_read_large_content() {
-    let obj = Object::new(ObjectId::new(1), "test");
-
-    // Write large content
-    let large_content: Vec<u8> = (0..1024 * 1024 * 3).map(|i| (i % 256) as u8).collect();
-    obj.write_sync("main", &large_content, "alice", 1000);
-
-    // Stream read yields single chunk (no chunking at commit level)
-    let chunks: Vec<Bytes> = block_on(async {
-        let stream = obj.read_stream("main").unwrap();
-        stream.collect().await
-    });
-
-    // Single chunk containing all content
-    assert_eq!(chunks.len(), 1);
-    assert_eq!(&chunks[0][..], &large_content[..]);
-}
-
-#[test]
-fn stream_read_empty_branch_returns_none() {
-    let obj = Object::new(ObjectId::new(1), "test");
-    assert!(obj.read_stream("main").is_none());
 }
 
 #[test]

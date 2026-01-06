@@ -86,7 +86,7 @@ fn subscribe_nonexistent_branch_errors() {
 }
 
 #[test]
-fn write_sync_notifies_listener() {
+fn write_notifies_listener() {
     let node = LocalNode::in_memory();
     let id = node.create_object("test");
 
@@ -111,7 +111,7 @@ fn write_sync_notifies_listener() {
     assert_eq!(*tip_counts.read().unwrap(), vec![0]); // empty initially
 
     // Write through node (auto-notifies)
-    node.write_sync(id, "main", b"hello", "alice", 1000)
+    node.write(id, "main", b"hello", "alice", 1000)
         .unwrap();
 
     // Callback should be called synchronously
@@ -119,7 +119,7 @@ fn write_sync_notifies_listener() {
     assert_eq!(*tip_counts.read().unwrap(), vec![0, 1]); // now has 1 tip
 
     // Write again
-    node.write_sync(id, "main", b"world", "alice", 2000)
+    node.write(id, "main", b"world", "alice", 2000)
         .unwrap();
 
     assert_eq!(call_count.load(Ordering::SeqCst), 3);
@@ -133,7 +133,7 @@ fn write_without_subscriber() {
 
     // Write without subscribing - should not error
     let commit_id = node
-        .write_sync(id, "main", b"hello", "alice", 1000)
+        .write(id, "main", b"hello", "alice", 1000)
         .unwrap();
 
     // Now subscribe and verify content in callback
@@ -229,7 +229,7 @@ fn multiple_subscribers_all_notified() {
     assert_eq!(count2.load(Ordering::SeqCst), 1);
 
     // Write
-    node.write_sync(id, "main", b"hello", "alice", 1000)
+    node.write(id, "main", b"hello", "alice", 1000)
         .unwrap();
 
     // Both should be notified
@@ -242,10 +242,10 @@ fn read_write_roundtrip() {
     let node = LocalNode::in_memory();
     let id = node.create_object("test");
 
-    node.write_sync(id, "main", b"hello world", "alice", 1000)
+    node.write(id, "main", b"hello world", "alice", 1000)
         .unwrap();
 
-    let content = node.read_sync(id, "main").unwrap().unwrap();
+    let content = node.read(id, "main").unwrap().unwrap();
     assert_eq!(content, b"hello world");
 }
 
@@ -269,7 +269,7 @@ fn unsubscribe_stops_notifications() {
 
     assert_eq!(call_count.load(Ordering::SeqCst), 1); // initial
 
-    node.write_sync(id, "main", b"hello", "alice", 1000)
+    node.write(id, "main", b"hello", "alice", 1000)
         .unwrap();
     assert_eq!(call_count.load(Ordering::SeqCst), 2);
 
@@ -277,7 +277,7 @@ fn unsubscribe_stops_notifications() {
     assert!(node.unsubscribe(id, "main", listener_id));
 
     // Write again - should not notify
-    node.write_sync(id, "main", b"world", "alice", 2000)
+    node.write(id, "main", b"world", "alice", 2000)
         .unwrap();
     assert_eq!(call_count.load(Ordering::SeqCst), 2); // still 2
 }
@@ -304,10 +304,10 @@ fn callback_called_synchronously() {
 
     was_called.store(false, Ordering::SeqCst);
 
-    // Write - callback should be called SYNCHRONOUSLY (before write_sync returns)
-    node.write_sync(id, "main", b"test", "alice", 1000).unwrap();
+    // Write - callback should be called SYNCHRONOUSLY (before write returns)
+    node.write(id, "main", b"test", "alice", 1000).unwrap();
 
-    // This assertion happens IMMEDIATELY after write_sync returns
+    // This assertion happens IMMEDIATELY after write returns
     // If callback was async, this would fail
     assert!(
         was_called.load(Ordering::SeqCst),

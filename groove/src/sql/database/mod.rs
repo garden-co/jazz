@@ -432,7 +432,7 @@ impl DatabaseState {
         let row_ids: Vec<ObjectId> = {
             let table_rows_objects = self.table_rows_objects.read().unwrap();
             if let Some(rows_id) = table_rows_objects.get(table) {
-                if let Ok(Some(data)) = self.node.read_sync(*rows_id, "main") {
+                if let Ok(Some(data)) = self.node.read(*rows_id, "main") {
                     if !data.is_empty() {
                         if let Ok(table_rows) = TableRows::from_bytes(&data) {
                             table_rows.into_vec()
@@ -452,7 +452,7 @@ impl DatabaseState {
 
         let mut rows = Vec::new();
         for row_id in row_ids {
-            let data = match self.node.read_sync(row_id, "main") {
+            let data = match self.node.read(row_id, "main") {
                 Ok(Some(data)) if !data.is_empty() => data,
                 _ => continue,
             };
@@ -481,7 +481,7 @@ impl DatabaseState {
             }
         }
 
-        let data = match self.node.read_sync(id, "main") {
+        let data = match self.node.read(id, "main") {
             Ok(Some(data)) if !data.is_empty() => data,
             _ => return None,
         };
@@ -1299,7 +1299,7 @@ impl Database {
         let data = self
             .state
             .node
-            .read_sync(*index_id, "main")
+            .read(*index_id, "main")
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
             .unwrap_or_default();
 
@@ -1320,7 +1320,7 @@ impl Database {
 
         self.state
             .node
-            .write_sync(
+            .write(
                 *index_id,
                 "main",
                 &index.to_bytes(),
@@ -1349,7 +1349,7 @@ impl Database {
         let data = self
             .state
             .node
-            .read_sync(*rows_id, "main")
+            .read(*rows_id, "main")
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
             .unwrap_or_default();
 
@@ -1370,7 +1370,7 @@ impl Database {
 
         self.state
             .node
-            .write_sync(
+            .write(
                 *rows_id,
                 "main",
                 &rows.to_bytes(),
@@ -1422,7 +1422,7 @@ impl Database {
         let schema_bytes = schema.to_bytes();
         self.state
             .node
-            .write_sync(schema_id, "main", &schema_bytes, "system", timestamp_now())
+            .write(schema_id, "main", &schema_bytes, "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         // Create table rows object to track row membership
@@ -1433,7 +1433,7 @@ impl Database {
         let empty_rows = TableRows::new();
         self.state
             .node
-            .write_sync(
+            .write(
                 rows_id,
                 "main",
                 &empty_rows.to_bytes(),
@@ -1460,7 +1460,7 @@ impl Database {
                 let empty_index = RefIndex::new();
                 self.state
                     .node
-                    .write_sync(
+                    .write(
                         index_id,
                         "main",
                         &empty_index.to_bytes(),
@@ -1607,7 +1607,7 @@ impl Database {
         // Store row data
         self.state
             .node
-            .write_sync(row_id, "main", &row_bytes, "system", timestamp_now())
+            .write(row_id, "main", &row_bytes, "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         // Track row -> table mapping
@@ -1662,7 +1662,7 @@ impl Database {
         }
 
         // Read row data
-        let data = match self.state.node.read_sync(id, "main") {
+        let data = match self.state.node.read(id, "main") {
             Ok(Some(data)) => data,
             Ok(None) => return Ok(None),
             Err(e) => return Err(DatabaseError::Storage(format!("{:?}", e))),
@@ -1695,7 +1695,7 @@ impl Database {
         }
 
         // Read current row data
-        let data = match self.state.node.read_sync(id, "main") {
+        let data = match self.state.node.read(id, "main") {
             Ok(Some(data)) => data,
             Ok(None) => return Ok(false),
             Err(e) => return Err(DatabaseError::Storage(format!("{:?}", e))),
@@ -1745,7 +1745,7 @@ impl Database {
         // Write updated row
         self.state
             .node
-            .write_sync(id, "main", &row_bytes, "system", timestamp_now())
+            .write(id, "main", &row_bytes, "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         // Update indexes for changed Ref columns
@@ -1818,7 +1818,7 @@ impl Database {
         }
 
         // Read current row data to get ref values for index cleanup
-        let data = match self.state.node.read_sync(id, "main") {
+        let data = match self.state.node.read(id, "main") {
             Ok(Some(data)) if !data.is_empty() => Some(data),
             _ => None,
         };
@@ -1848,7 +1848,7 @@ impl Database {
         // Write soft delete commit with metadata marker
         let commit_id = self.state
             .node
-            .write_sync_with_meta(id, "main", &[], "system", timestamp_now(), Some(meta))
+            .write_with_meta(id, "main", &[], "system", timestamp_now(), Some(meta))
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         // If hard delete, truncate history at the delete commit
@@ -1897,7 +1897,7 @@ impl Database {
             }
 
             // Read row data
-            let data = match self.state.node.read_sync(row_id, "main") {
+            let data = match self.state.node.read(row_id, "main") {
                 Ok(Some(data)) if !data.is_empty() => data,
                 _ => continue, // Skip deleted or missing rows
             };
@@ -1953,7 +1953,7 @@ impl Database {
                 continue;
             }
 
-            let data = match self.state.node.read_sync(row_id, "main") {
+            let data = match self.state.node.read(row_id, "main") {
                 Ok(Some(data)) if !data.is_empty() => data,
                 _ => continue,
             };

@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
-use futures::io::AsyncRead;
 
 use crate::commit::CommitId;
 use crate::listener::{ListenerId, ListenerError, ObjectCallback, ObjectKey, ObjectListenerRegistry, ObjectState};
@@ -152,9 +151,9 @@ impl LocalNode {
 
     // ========== Read API ==========
 
-    /// Read content from the frontier of an object's branch (sync).
-    /// Returns None if the branch is empty, has multiple tips, or content is chunked.
-    pub fn read_sync(
+    /// Read content from the frontier of an object's branch.
+    /// Returns None if the branch is empty or has multiple tips.
+    pub fn read(
         &self,
         object_id: ObjectId,
         branch: &str,
@@ -171,37 +170,11 @@ impl LocalNode {
         Ok(obj.read_sync(branch))
     }
 
-    /// Read content from the frontier of an object's branch (async).
-    /// Loads chunked content from storage if needed.
-    pub async fn read(
-        &self,
-        object_id: ObjectId,
-        branch: &str,
-    ) -> Result<Option<Vec<u8>>, ListenerError> {
-        let obj_lock = self
-            .objects
-            .read()
-            .unwrap()
-            .get(&object_id)
-            .cloned()
-            .ok_or(ListenerError::NotFound)?;
-
-        let obj = obj_lock.read().unwrap();
-        Ok(obj.read(branch).await)
-    }
-
-    // Note: Streaming read methods are available directly on Object.
-    // Due to lifetime constraints with Arc<RwLock<Object>>, streaming
-    // must be done by obtaining the object reference directly:
-    //   let obj = node.get_object(id)?;
-    //   let guard = obj.read().unwrap();
-    //   let stream = guard.read_stream(branch);
-
     // ========== Write API with Auto-Notify ==========
 
     /// Write content to an object's branch and notify all listeners.
     /// Returns the new commit ID.
-    pub fn write_sync(
+    pub fn write(
         &self,
         object_id: ObjectId,
         branch: &str,
@@ -209,12 +182,12 @@ impl LocalNode {
         author: &str,
         timestamp: u64,
     ) -> Result<CommitId, ListenerError> {
-        self.write_sync_with_meta(object_id, branch, content, author, timestamp, None)
+        self.write_with_meta(object_id, branch, content, author, timestamp, None)
     }
 
     /// Write content to an object's branch with optional metadata and notify all listeners.
     /// Returns the new commit ID.
-    pub fn write_sync_with_meta(
+    pub fn write_with_meta(
         &self,
         object_id: ObjectId,
         branch: &str,
@@ -236,72 +209,6 @@ impl LocalNode {
 
         // Notify listeners synchronously
         self.notify_listeners(object_id, branch, &obj);
-
-        Ok(commit_id)
-    }
-
-    /// Write content to an object's branch (async) and notify all listeners.
-    pub async fn write(
-        &self,
-        object_id: ObjectId,
-        branch: &str,
-        content: &[u8],
-        author: &str,
-        timestamp: u64,
-    ) -> Result<CommitId, ListenerError> {
-        let obj_lock = self
-            .objects
-            .read()
-            .unwrap()
-            .get(&object_id)
-            .cloned()
-            .ok_or(ListenerError::NotFound)?;
-
-        let commit_id = {
-            let obj = obj_lock.read().unwrap();
-            obj.write(branch, content, author, timestamp)
-                .await
-        };
-
-        // Notify listeners synchronously
-        {
-            let obj = obj_lock.read().unwrap();
-            self.notify_listeners(object_id, branch, &obj);
-        }
-
-        Ok(commit_id)
-    }
-
-    /// Write content from an async reader to an object's branch.
-    /// Chunks the content as it streams in.
-    pub async fn write_stream<R: AsyncRead + Unpin>(
-        &self,
-        object_id: ObjectId,
-        branch: &str,
-        reader: R,
-        author: &str,
-        timestamp: u64,
-    ) -> Result<CommitId, ListenerError> {
-        let obj_lock = self
-            .objects
-            .read()
-            .unwrap()
-            .get(&object_id)
-            .cloned()
-            .ok_or(ListenerError::NotFound)?;
-
-        let commit_id = {
-            let obj = obj_lock.read().unwrap();
-            obj.write_stream(branch, reader, author, timestamp)
-                .await
-                .map_err(|e| ListenerError::StorageError(e.to_string()))?
-        };
-
-        // Notify listeners synchronously
-        {
-            let obj = obj_lock.read().unwrap();
-            self.notify_listeners(object_id, branch, &obj);
-        }
 
         Ok(commit_id)
     }
