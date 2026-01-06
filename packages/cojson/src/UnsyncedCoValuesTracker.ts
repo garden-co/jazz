@@ -9,8 +9,8 @@ import type { StorageAPI } from "./storage/types.js";
  */
 const ANY_PEER_ID: PeerID = "any";
 
-// Flush pending updates to storage after 1 second
-let BATCH_DELAY_MS = 1000;
+// Flush pending updates to storage after 200ms
+let BATCH_DELAY_MS = 200;
 
 /**
  * Set the delay for flushing pending sync state updates to storage.
