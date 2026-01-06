@@ -5,7 +5,6 @@ export default defineConfig({
   root: "./",
   test: {
     projects: [
-      "bench",
       "packages/*",
       "tests/browser-integration",
       "tests/cloudflare-workers",
@@ -13,6 +12,6 @@ export default defineConfig({
       "crates/cojson-core-napi",
       "crates/cojson-core-wasm",
     ],
-    maxConcurrency: 5,
+    maxWorkers: 5,
   },
 });

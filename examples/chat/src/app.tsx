@@ -1,14 +1,18 @@
 import { apiKey } from "@/apiKey.ts";
 import { getRandomUsername, inIframe, onChatLoad } from "@/util.ts";
 import { useIframeHashRouter } from "hash-slash";
-import { co, getLoadedOrUndefined, Group } from "jazz-tools";
+import { co } from "jazz-tools";
 import { JazzInspector } from "jazz-tools/inspector";
-import { JazzReactProvider, useAccount, useLogOut } from "jazz-tools/react";
-import { StrictMode, useId, useMemo, useState, useEffect, useRef } from "react";
+import {
+  JazzReactProvider,
+  useLogOut,
+  useSuspenseAccount,
+} from "jazz-tools/react";
+import { StrictMode, useId, useMemo } from "react";
 import { createRoot } from "react-dom/client";
 import Jazzicon from "react-jazzicon";
 import { ChatScreen } from "./chatScreen.tsx";
-import { Chat, Message } from "./schema.ts";
+import { Chat } from "./schema.ts";
 import { ThemeProvider } from "./themeProvider.tsx";
 import { AppContainer, TopBar } from "./ui.tsx";
 
@@ -27,44 +31,27 @@ const AccountWithProfile = co.account().resolved({
 });
 
 export function App() {
-  const me = useAccount(AccountWithProfile);
+  const me = useSuspenseAccount(AccountWithProfile);
   const logOut = useLogOut();
   const router = useIframeHashRouter();
-  const inputId = useId();
-  const [localValue, setLocalValue] = useState("");
-  const [inputWidth, setInputWidth] = useState(120);
-  const spanRef = useRef<HTMLSpanElement>(null);
 
-  const profile = getLoadedOrUndefined(me)?.profile;
+  const inputId = useId();
 
   const avatarSeed = useMemo(() => {
-    if (!me?.$jazz?.id) return 0;
     return stringToSeed(me.$jazz.id);
-  }, [me?.$jazz?.id]);
-
-  useEffect(() => {
-    setLocalValue(profile?.name ?? "");
-  }, [profile?.name]);
-
-  useEffect(() => {
-    if (spanRef.current) {
-      const width = spanRef.current.offsetWidth;
-      setInputWidth(Math.max(width + 4, 20));
-    }
-  }, [localValue]);
+  }, [me.$jazz.id]);
 
   const createChat = () => {
-    if (!me) return;
-    const group = Group.create();
-    group.makePublic("writer");
-    const chat = Chat.create([], group);
+    const chat = Chat.create([]);
 
-    chat.$jazz.push(Message.create({ text: "Hello world" }, group));
+    chat.$jazz.push({ text: "Hello world" });
 
     router.navigate("/#/chat/" + chat.$jazz.id);
 
     // for https://jazz.tools marketing site demo only
     onChatLoad(chat);
+
+    return null;
   };
 
   const usernamePlaceholder = "Set username";
@@ -78,22 +65,19 @@ export function App() {
         </label>
         <div className="relative">
           <span
-            ref={spanRef}
             className="absolute invisible whitespace-pre text-lg"
             aria-hidden="true"
           >
-            {localValue || usernamePlaceholder}
+            {usernamePlaceholder}
           </span>
           <input
             type="text"
             id={inputId}
-            value={localValue}
-            style={{ width: `${inputWidth}px` }}
+            value={me.profile.name}
+            style={{ width: `${me.profile.name.length}ch` }}
             className="bg-transparent text-lg outline-none min-w-0 max-w-full"
             onChange={(e) => {
-              setLocalValue(e.target.value);
-              if (!profile) return;
-              profile.$jazz.set("name", e.target.value);
+              me.profile.$jazz.set("name", e.target.value);
             }}
             placeholder={usernamePlaceholder}
           />
@@ -109,7 +93,7 @@ export function App() {
         )}
       </TopBar>
       {router.route({
-        "/": () => createChat() as never,
+        "/": () => createChat(),
         "/chat/:id": (id) => <ChatScreen chatID={id} />,
       })}
     </AppContainer>

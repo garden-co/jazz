@@ -62,10 +62,10 @@ export function getTransactionChanges(
     const firstChange = tx.changes[0]!;
 
     if (
-      TransactionChanges.isItemAppend(firstChange) &&
+      TransactionChanges.isItemAppend(coValue, firstChange) &&
       tx.changes.every(
         (c) =>
-          TransactionChanges.isItemAppend(c) &&
+          TransactionChanges.isItemAppend(coValue, c) &&
           areSameOpIds(c.after, firstChange.after),
       )
     ) {
@@ -84,10 +84,10 @@ export function getTransactionChanges(
     }
 
     if (
-      TransactionChanges.isItemPrepend(firstChange) &&
+      TransactionChanges.isItemPrepend(coValue, firstChange) &&
       tx.changes.every(
         (c) =>
-          TransactionChanges.isItemPrepend(c) &&
+          TransactionChanges.isItemPrepend(coValue, c) &&
           areSameOpIds(c.before, firstChange.before),
       )
     ) {
@@ -106,8 +106,8 @@ export function getTransactionChanges(
     }
 
     if (
-      TransactionChanges.isItemDeletion(firstChange) &&
-      tx.changes.every((c) => TransactionChanges.isItemDeletion(c))
+      TransactionChanges.isItemDeletion(coValue, firstChange) &&
+      tx.changes.every((c) => TransactionChanges.isItemDeletion(coValue, c))
     ) {
       const coValueBeforeDeletions = coValue.atTime(tx.madeAt - 1);
 

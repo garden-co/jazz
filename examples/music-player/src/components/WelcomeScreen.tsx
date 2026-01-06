@@ -1,25 +1,21 @@
-import { usePasskeyAuth } from "jazz-tools/react";
+import { usePasskeyAuth, useSuspenseAccount } from "jazz-tools/react";
 import { ProfileForm } from "./ProfileForm";
 import { Button } from "./ui/button";
-import { useAccountSelector } from "@/components/AccountProvider.tsx";
+import { MusicaAccount } from "@/1_schema";
 
 export function WelcomeScreen() {
   const auth = usePasskeyAuth({
     appName: "Jazz Music Player",
   });
 
-  const { handleCompleteSetup } = useAccountSelector({
+  const { handleCompleteSetup } = useSuspenseAccount(MusicaAccount, {
     select: (me) => ({
       id: me.root.$jazz.id,
       handleCompleteSetup: () => {
         me.root.$jazz.set("accountSetupCompleted", true);
       },
     }),
-    equalityFn: (a, b) => a.id === b.id,
-  });
-
-  const initialUsername = useAccountSelector({
-    select: (me) => me.profile.name,
+    equalityFn: (a, b) => a.id === b.id, // Update only on account change
   });
 
   if (!handleCompleteSetup) return null;
@@ -39,7 +35,6 @@ export function WelcomeScreen() {
             showHeader={true}
             headerTitle="Welcome to Music Player! 🎵"
             headerDescription="Let's set up your profile to get started"
-            initialUsername={initialUsername}
           />
         </div>
         <div className="lg:hidden pt-4 flex justify-end items-center w-full gap-2">

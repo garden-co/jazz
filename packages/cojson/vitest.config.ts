@@ -2,6 +2,7 @@ import { defineProject } from "vitest/config";
 
 export default defineProject({
   test: {
-    name: "bench",
+    name: "cojson",
+    include: ["src/**/*.test.ts"],
   },
 });

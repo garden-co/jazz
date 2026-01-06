@@ -1,4 +1,4 @@
-import { useIframeHashRouter } from "hash-slash";
+import { useHashRouter } from "hash-slash";
 import { Account, Group } from "jazz-tools";
 import { useAccount, useLogOut } from "jazz-tools/react";
 import { ReactionsScreen } from "./ReactionsScreen.tsx";
@@ -11,7 +11,7 @@ function App() {
     },
   });
   const logOut = useLogOut();
-  const router = useIframeHashRouter();
+  const router = useHashRouter();
 
   const createReactions = () => {
     const group = Group.create();

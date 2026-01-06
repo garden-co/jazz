@@ -1,25 +1,22 @@
 import NetInfo from "@react-native-community/netinfo";
-import { LocalNode, Peer, RawAccountID, getSqliteStorageAsync } from "cojson";
+import { LocalNode, Peer, getSqliteStorageAsync } from "cojson";
 import { PureJSCrypto } from "cojson/dist/crypto/PureJSCrypto"; // Importing from dist to not rely on the exports field
 import {
   Account,
   AccountClass,
-  AgentID,
   AnyAccountSchema,
   AuthCredentials,
   AuthSecretStorage,
   CoValue,
   CoValueFromRaw,
-  CryptoProvider,
-  ID,
   NewAccountProps,
-  SessionID,
   SyncConfig,
   createInviteLink as baseCreateInviteLink,
   createAnonymousJazzContext,
   createJazzContext,
 } from "jazz-tools";
 import { KvStore, KvStoreContext } from "./storage/kv-store-context.js";
+import { ReactNativeSessionProvider } from "./ReactNativeSessionProvider.js";
 
 import { SQLiteDatabaseDriverAsync } from "cojson";
 import { WebSocketPeerWithReconnection } from "cojson-transport-ws";
@@ -200,6 +197,8 @@ export async function createJazzReactNativeContext<
     handleAuthUpdate(authSecretStorage.isAuthenticated);
   }
 
+  const sessionProvider = new ReactNativeSessionProvider();
+
   const context = await createJazzContext({
     credentials: options.credentials,
     newAccountProps: options.newAccountProps,
@@ -207,7 +206,7 @@ export async function createJazzReactNativeContext<
     crypto,
     defaultProfileName: options.defaultProfileName,
     AccountSchema: options.AccountSchema,
-    sessionProvider: provideLockSession,
+    sessionProvider,
     authSecretStorage: options.authSecretStorage,
     storage,
   });
@@ -231,30 +230,6 @@ export async function createJazzReactNativeContext<
     addConnectionListener,
     connected,
   };
-}
-
-/** @category Auth Providers */
-export type SessionProvider = (
-  accountID: ID<Account> | AgentID,
-) => Promise<SessionID>;
-
-export async function provideLockSession(
-  accountID: ID<Account> | AgentID,
-  crypto: CryptoProvider,
-) {
-  const sessionDone = () => {};
-
-  const kvStore = KvStoreContext.getInstance().getStorage();
-
-  const sessionID =
-    ((await kvStore.get(accountID)) as SessionID) ||
-    crypto.newRandomSessionID(accountID as RawAccountID | AgentID);
-  await kvStore.set(accountID, sessionID);
-
-  return Promise.resolve({
-    sessionID,
-    sessionDone,
-  });
 }
 
 /** @category Invite Links */

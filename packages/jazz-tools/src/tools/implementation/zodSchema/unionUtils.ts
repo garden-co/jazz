@@ -1,3 +1,4 @@
+import { JsonValue, RawCoMap } from "cojson";
 import {
   AnyZodOrCoValueSchema,
   CoDiscriminatedUnionSchema,
@@ -37,25 +38,7 @@ export function schemaUnionDiscriminatorFor(
       }
     }
 
-    const availableOptions: DiscriminableCoreCoValueSchema[] = [];
-
-    for (const option of options) {
-      if (option.builtin === "CoMap") {
-        availableOptions.push(option);
-      } else if (option.builtin === "CoDiscriminatedUnion") {
-        for (const subOption of (
-          option as CoDiscriminatedUnionSchema<any>
-        ).getDefinition().options) {
-          if (!options.includes(subOption)) {
-            options.push(subOption);
-          }
-        }
-      } else {
-        throw new Error(
-          "Unsupported zod type in co.discriminatedUnion() of collaborative types",
-        );
-      }
-    }
+    const availableOptions = getFlattenedUnionOptions(schema);
 
     const determineSchema: SchemaUnionDiscriminator<CoMap> = (
       discriminable,
@@ -77,7 +60,10 @@ export function schemaUnionDiscriminatorFor(
 
         for (const key of Object.keys(discriminatorMap)) {
           const discriminatorDef = optionDef.shape[key];
-          const discriminatorValue = discriminable.get(key);
+          const discriminatorValue = resolveDiscriminantValue(
+            discriminable,
+            key,
+          );
 
           if (discriminatorValue && typeof discriminatorValue === "object") {
             throw new Error("Discriminator must be a primitive value");
@@ -174,4 +160,70 @@ function isCoDiscriminatedUnion(
   def: any,
 ): def is CoreCoDiscriminatedUnionSchema<any> {
   return def.builtin === "CoDiscriminatedUnion";
+}
+
+/**
+ * Flattens all options from a discriminated union schema, including nested unions.
+ * Returns all options in a flat array.
+ */
+export function getFlattenedUnionOptions(
+  schema: CoreCoDiscriminatedUnionSchema<DiscriminableCoValueSchemas>,
+): DiscriminableCoreCoValueSchema[] {
+  const definition = schema.getDefinition();
+  const options = definition.options;
+  const availableOptions: DiscriminableCoreCoValueSchema[] = [];
+
+  for (const option of options) {
+    if (option.builtin === "CoMap") {
+      availableOptions.push(option);
+    } else if (option.builtin === "CoDiscriminatedUnion") {
+      const nestedOptions = getFlattenedUnionOptions(
+        option as CoreCoDiscriminatedUnionSchema<DiscriminableCoValueSchemas>,
+      );
+      for (const subOption of nestedOptions) {
+        if (!availableOptions.includes(subOption)) {
+          availableOptions.push(subOption);
+        }
+      }
+    } else {
+      throw new Error(
+        "Unsupported zod type in co.discriminatedUnion() of collaborative types",
+      );
+    }
+  }
+
+  return availableOptions;
+}
+
+/**
+ * Gets the discriminator values for a given option and discriminator key
+ */
+export function getDiscriminatorValuesForOption(
+  option: DiscriminableCoreCoValueSchema,
+  discriminatorKey: string,
+): Set<unknown> | undefined {
+  const optionDefinition = option.getDefinition();
+  return optionDefinition.discriminatorMap?.[discriminatorKey];
+}
+
+export function resolveDiscriminantValue(
+  init: unknown,
+  discriminatorKey: string,
+): JsonValue | undefined {
+  if (init == null) {
+    return undefined;
+  }
+
+  if (init instanceof Map || init instanceof RawCoMap) {
+    return init.get(discriminatorKey);
+  }
+
+  if (typeof init === "object") {
+    const record = init as Record<string, JsonValue>;
+    if (discriminatorKey in record) {
+      return record[discriminatorKey];
+    }
+  }
+
+  return undefined;
 }

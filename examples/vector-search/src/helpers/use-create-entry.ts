@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { Embedding, JournalEntry, JournalEntryList } from "../schema";
+import { JournalEntryList } from "../schema";
 
 export function useCreateEntry({
   createEmbedding,
@@ -23,20 +23,13 @@ export function useCreateEntry({
       setIsCreating(true);
       const embedding = await createEmbedding(text);
 
-      const journalEntry = JournalEntry.create(
-        {
+      if (journalEntries) {
+        journalEntries.$jazz.unshift({
           text,
           feelings: [],
           topics: [],
-          embedding: Embedding.create(embedding, {
-            owner: journalEntries?.$jazz.owner,
-          }),
-        },
-        { owner: journalEntries?.$jazz.owner },
-      );
-
-      if (journalEntries) {
-        journalEntries.$jazz.unshift(journalEntry);
+          embedding,
+        });
       }
     } catch (error) {
       console.error(error);

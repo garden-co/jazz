@@ -205,7 +205,7 @@
   },
   "type": "module",
   "license": "MIT",
-  "version": "0.19.11",
+  "version": "0.19.18",
   "dependencies": {
     "@manuscripts/prosemirror-recreate-steps": "^0.1.4",
     "@scure/base": "1.2.1",
@@ -249,7 +249,6 @@
     "@types/react": "19.1.0",
     "@types/react-dom": "19.1.0",
     "@types/use-sync-external-store": "^1.5.0",
-    "@vitest/browser": "^3.2.4",
     "libsql": "^0.5.13",
     "msw": "^2.10.3",
     "oauth2-mock-server": "^8.1.0",

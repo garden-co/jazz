@@ -1,4 +1,8 @@
-import { co, Group, z } from "jazz-tools";
+import { co, z, setDefaultSchemaPermissions } from "jazz-tools";
+
+setDefaultSchemaPermissions({
+  onInlineCreate: "sameAsContainer",
+});
 
 /** Walkthrough: Defining the data model with CoJSON
  *
@@ -53,34 +57,40 @@ export type PlaylistWithTracks = co.loaded<typeof PlaylistWithTracks>;
 
 /** The account root is an app-specific per-user private `CoMap`
  *  where you can store top-level objects for that user */
-export const MusicaAccountRoot = co.map({
-  // The root playlist works as container for the tracks that
-  // the user has uploaded
-  rootPlaylist: Playlist,
-  // Here we store the list of playlists that the user has created
-  // or that has been invited to
-  playlists: co.list(Playlist),
-  // We store the active track and playlist as coValue here
-  // so when the user reloads the page can see the last played
-  // track and playlist
-  // You can also add the position in time if you want make it possible
-  // to resume the song
-  activeTrack: co.optional(MusicTrack),
-  activePlaylist: Playlist,
+export const MusicaAccountRoot = co
+  .map({
+    // The root playlist works as container for the tracks that
+    // the user has uploaded
+    rootPlaylist: Playlist,
+    // Here we store the list of playlists that the user has created
+    // or that has been invited to
+    playlists: co.list(Playlist),
+    // We store the active track and playlist as coValue here
+    // so when the user reloads the page can see the last played
+    // track and playlist
+    // You can also add the position in time if you want make it possible
+    // to resume the song
+    activeTrack: co.optional(MusicTrack),
+    activePlaylist: Playlist,
 
-  exampleDataLoaded: z.optional(z.boolean()),
-  accountSetupCompleted: z.optional(z.boolean()),
-});
+    exampleDataLoaded: z.optional(z.boolean()),
+    accountSetupCompleted: z.optional(z.boolean()),
+  })
+  .withPermissions({ onInlineCreate: "newGroup" })
+  .resolved({
+    activeTrack: { $onError: "catch" },
+    activePlaylist: { $onError: "catch" },
+  });
 export type MusicaAccountRoot = co.loaded<typeof MusicaAccountRoot>;
 
 export const MusicaAccountProfile = co
   .profile({
     avatar: co.optional(co.image()),
   })
-  .withMigration((profile) => {
-    if (profile.$jazz.owner.getRoleOf("everyone") !== "reader") {
-      profile.$jazz.owner.addMember("everyone", "reader");
-    }
+  .withPermissions({
+    onCreate(group) {
+      group.addMember("everyone", "reader");
+    },
   });
 export type MusicaAccountProfile = co.loaded<typeof MusicaAccountProfile>;
 
@@ -111,16 +121,14 @@ export const MusicaAccount = co
     }
 
     if (!account.$jazz.has("profile")) {
-      account.$jazz.set(
-        "profile",
-        MusicaAccountProfile.create(
-          {
-            name: "",
-          },
-          Group.create().makePublic(),
-        ),
-      );
+      account.$jazz.set("profile", {
+        name: "",
+      });
     }
+  })
+  .resolved({
+    profile: true,
+    root: MusicaAccountRoot.resolveQuery,
   });
 export type MusicaAccount = co.loaded<typeof MusicaAccount>;
 
@@ -131,5 +139,7 @@ export const MusicaAccountWithPlaylists = MusicaAccount.resolved({
     },
   },
 });
-
+export type MusicaAccountWithPlaylists = co.loaded<
+  typeof MusicaAccountWithPlaylists
+>;
 /** Walkthrough: Continue with ./2_main.tsx */

@@ -1,4 +1,5 @@
 import { Alert, CodeGroup, ContentByFramework, JazzLogo } from "@/components/forMdx";
+import { DemoToDo } from '@/components/DemoToDo.tsx'
 
 export const metadata = {
   title: "Documentation",
@@ -16,10 +17,20 @@ It also provides auth, orgs & teams, real-time multiplayer, edit histories, perm
 
 ## Quickstart
 
-**Want to learn the basics?** Check out our [quickstart guide](/docs/quickstart) for a step-by-step guide to building a simple app with Jazz.
+<div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+<div>
+### Show me
+[Check out our tiny To Do list example](/docs#a-minimal-jazz-app) to see what Jazz can do in a nutshell.
+</div>
 
-**Just want to get started?** You can use [`create-jazz-app`](/docs/tooling-and-resources/create-jazz-app) to create a new Jazz project from one of our starter templates or example apps:
+<div>
+### Help me understand
+Follow our [quickstart guide](/docs/quickstart) for a more detailed guide on building a simple app with Jazz.
+</div>
+</div>
 
+### Just want to get started?
+You can use [`create-jazz-app`](/docs/tooling-and-resources/create-jazz-app) to create a new Jazz project from one of our starter templates or example apps:
 <CodeGroup>
   ```sh
     npx create-jazz-app@latest --api-key you@example.com
@@ -52,25 +63,90 @@ It also provides auth, orgs & teams, real-time multiplayer, edit histories, perm
 
 1. **Define your data** with CoValues schemas
 2. **Connect to storage infrastructure** (Jazz Cloud or self-hosted)
-3. **Create and edit CoValues** like normal objects
+3. **Create and edit CoValues** locally
 4. **Get automatic sync and persistence** across all devices and users
 
 Your UI updates instantly on every change, everywhere. It's like having reactive local state that happens to be shared with the world.
 
-## Ready to see Jazz in action?
+## A Minimal Jazz App
+Here, we'll scratch the surface of what you can do with Jazz. We'll build a quick and easy To Do list app&hairsp;—&hairsp;easy to use, easy to build, and easy to make comparisons with!
 
-Have a look at our [example apps](/examples) for inspiration and to see what's possible with Jazz. From real-time chat and collaborative editors to file sharing and social features — these are just the beginning of what you can build.
+This is the end result: we're showing it here running in two iframes, updating in real-time through the Jazz Cloud.
 
-## Core concepts
+Try adding items on the left and watch them appear instantly on the right!
 
-Learn how to structure your data using [collaborative values](/docs/core-concepts/covalues/overview) — the building blocks that make Jazz apps work.
+<DemoToDo />
+<Alert variant="info" title="Using Jazz Cloud">
+  These two iframes are syncing through the Jazz Cloud. You can use the toggle in the top right to switch between 'online' and 'offline' on each client, and see how with Jazz, you can keep working even when you're offline.
+</Alert>
 
-## Sync and storage
+### Imports
+Start by importing Jazz into your app.
 
-Sync and persist your data by setting up [sync and storage infrastructure](/docs/core-concepts/sync-and-storage) using Jazz Cloud, or host it yourself.
+<CodeGroup>
+```ts index.ts#Imports
+```
+</CodeGroup>
 
-## Going deeper
+### Schema
+Then, define what your data looks like using [Collaborative Values](/docs/core-concepts/covalues/overview)&hairsp;—&hairsp;the building blocks that make Jazz apps work.
+<CodeGroup>
+```ts index.ts#InlineSchema
+```
+</CodeGroup>
 
-Get better results with AI by [importing the Jazz docs](/docs/tooling-and-resources/ai-tools) into your context window.
+### Context
+Next, [give your app some context](/docs/project-setup#give-your-app-context) and tell Jazz your sync strategy&hairsp;—&hairsp;use the Jazz Cloud to get started quickly. We'll also create our to do list and get its ID here to use later. 
+<CodeGroup>
+```ts routing.ts#Context
+```
+</CodeGroup>
+
+### Build your UI
+Now, build a basic UI skeleton for your app.
+<CodeGroup>
+```ts index.ts#BuildUI
+```
+</CodeGroup>
+
+### Display Items
+Display your items and add logic to mark them as done...
+<CodeGroup>
+```ts index.ts#toDoItemElement
+```
+</CodeGroup>
+
+### Add New Items
+...and add new items to the list using an input and a button.
+<CodeGroup>
+```ts index.ts#newToDoFormElement
+```
+</CodeGroup>
+
+### Subscribe to Changes
+Now for the magic: listen to changes coming from [**anyone, anywhere**](/docs/permissions-and-sharing/overview), and update your UI in real time.
+<CodeGroup>
+```ts index.ts#SubscribeToChanges
+```
+</CodeGroup>
+
+### Simple Routing
+Lastly, we'll add a tiny bit of routing logic to be able to share the list by URL: if there's an `id` search parameter, that'll be the list we'll subscribe to later. If we don't have an `id`, we'll [create a new ToDo list](/docs/core-concepts/covalues/colists#creating-colists). We'll replace the section where we created the `ToDoList` above.
+
+<CodeGroup>
+```ts routing.ts#SimpleRouting
+```
+</CodeGroup>
+
+### All Together
+Put it all together for a simple Jazz app in less than 100 lines of code.
+<CodeGroup preferWrap>
+```ts index.ts
+```
+</CodeGroup>
+
+## Want to see more?
+
+Have a look at our [example apps](/examples) for inspiration and to see what's possible with Jazz. From real-time chat and collaborative editors to file sharing and social features&hairsp;—&hairsp;these are just the beginning of what you can build.
 
 If you have any questions or need assistance, please don't hesitate to reach out to us on [Discord](https://discord.gg/utDMjHYg42). We'd love to help you get started.

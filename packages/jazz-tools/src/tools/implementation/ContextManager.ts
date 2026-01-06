@@ -188,24 +188,45 @@ export class JazzContextManager<
     return this.subscriptionCache;
   }
 
+  /**
+   * Flag to indicate if a logout operation is currently in progress.
+   * Used to prevent concurrent logout attempts or double-logout issues.
+   * Set to true when logout starts, reset to false once all logout logic runs.
+   */
+  loggingOut = false;
+
+  /**
+   * Handles the logout process.
+   * Uses the loggingOut flag to ensure only one logout can happen at a time.
+   */
   logOut = async () => {
-    if (!this.context || !this.props) {
+    if (!this.context || !this.props || this.loggingOut) {
       return;
     }
+
+    // Mark as logging out to prevent reentry
+    this.loggingOut = true;
 
     this.authenticatingAccountID = null;
 
     // Clear cache on logout to prevent subscription leaks across authentication boundaries
     this.subscriptionCache.clear();
 
-    await this.props.onLogOut?.();
+    try {
+      await this.props.onLogOut?.();
 
-    if (this.props.logOutReplacement) {
-      await this.props.logOutReplacement();
-    } else {
-      await this.context.logOut();
-      return this.createContext(this.props);
+      if (this.props.logOutReplacement) {
+        await this.props.logOutReplacement();
+      } else {
+        await this.context.logOut();
+        await this.createContext(this.props);
+      }
+    } catch (error) {
+      console.error("Error during logout", error);
     }
+
+    // Reset flag after standard logout finishes
+    this.loggingOut = false;
   };
 
   done = () => {
@@ -350,6 +371,16 @@ export class JazzContextManager<
       // Closing storage on the prevContext to avoid conflicting transactions and getting stuck on waitForAllCoValuesSync
       // The storage is reachable through currentContext using the connectedPeers
       prevContext.node.removeStorage();
+
+      // Ensure that the new context is the only peer connected to the previous context
+      // This way all the changes made in the previous context are synced only to the new context
+      for (const peer of Object.values(prevContext.node.syncManager.peers)) {
+        if (!peer.closed) {
+          peer.gracefulShutdown();
+        }
+      }
+
+      prevContext.node.syncManager.peers = {};
 
       currentContext.node.syncManager.addPeer(prevAccountAsPeer);
       prevContext.node.syncManager.addPeer(currentAccountAsPeer);

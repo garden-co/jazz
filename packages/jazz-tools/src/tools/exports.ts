@@ -66,6 +66,7 @@ export {
   createUnloadedCoValue,
   unstable_loadUnique,
   getUnloadedCoValueWithoutId,
+  setDefaultSchemaPermissions,
 } from "./internal.js";
 
 export {
@@ -100,7 +101,8 @@ export {
   createJazzContextFromExistingCredentials,
   createJazzContextForNewAccount,
   createJazzContext,
-  randomSessionProvider,
+  SessionProvider,
+  MockSessionProvider,
   type AuthResult,
   type Credentials,
   type JazzContextWithAccount,

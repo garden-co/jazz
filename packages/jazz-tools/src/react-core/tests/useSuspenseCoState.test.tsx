@@ -370,6 +370,53 @@ describe("useSuspenseCoState", () => {
     });
   });
 
+  it("should throw error when CoValue becomes unauthorized", async () => {
+    const TestMap = co.map({
+      value: z.string(),
+    });
+
+    const group = Group.create();
+    group.addMember("everyone", "reader");
+
+    // Create CoValue owned by another account without sharing
+    const map = TestMap.create(
+      {
+        value: "123",
+      },
+      group,
+    );
+
+    await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const TestComponent = () => {
+      const value = useSuspenseCoState(TestMap, map.$jazz.id);
+      return <div>{value.value}</div>;
+    };
+
+    const { container } = await act(async () => {
+      return render(
+        <ErrorBoundary fallback={<div>Error!</div>}>
+          <Suspense fallback={<div>Loading...</div>}>
+            <TestComponent />
+          </Suspense>
+        </ErrorBoundary>,
+      );
+    });
+    await waitFor(() => {
+      expect(container.textContent).toContain("123");
+      expect(container.textContent).not.toContain("Loading...");
+    });
+
+    group.removeMember("everyone");
+
+    // Wait for error to be thrown (unauthorized access)
+    await waitFor(() => {
+      expect(container.textContent).toContain("Error!");
+    });
+  });
+
   it("should update value when CoValue changes", async () => {
     const TestMap = co.map({
       value: z.string(),

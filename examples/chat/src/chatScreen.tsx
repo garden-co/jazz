@@ -1,6 +1,6 @@
 import { Account, getLoadedOrUndefined } from "jazz-tools";
 import { createImage } from "jazz-tools/media";
-import { useAccount, useCoState } from "jazz-tools/react";
+import { useSuspenseAccount, useSuspenseCoState } from "jazz-tools/react";
 import { useEffect, useState } from "react";
 import { Chat, Message } from "./schema.ts";
 import {
@@ -23,17 +23,13 @@ const ChatWithMessages = Chat.resolved({
 });
 
 export function ChatScreen(props: { chatID: string }) {
-  const chat = useCoState(ChatWithMessages, props.chatID);
-  const me = useAccount();
+  useMessagesPreload(props.chatID);
+
+  const chat = useSuspenseCoState(ChatWithMessages, props.chatID);
+  const me = useSuspenseAccount();
   const [showNLastMessages, setShowNLastMessages] = useState(
     INITIAL_MESSAGES_TO_SHOW,
   );
-  const isLoading = useMessagesPreload(props.chatID);
-
-  if (!me.$isLoaded || !chat.$isLoaded || isLoading)
-    return (
-      <div className="flex-1 flex justify-center items-center">Loading...</div>
-    );
 
   const sendImage = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.currentTarget.files?.[0];
@@ -50,21 +46,12 @@ export function ChatScreen(props: { chatID: string }) {
       progressive: true,
       placeholder: "blur",
     }).then((image) => {
-      chat.$jazz.push(
-        Message.create(
-          {
-            text: file.name,
-            image: image,
-          },
-          chat.$jazz.owner,
-        ),
-      );
+      chat.$jazz.push({
+        text: file.name,
+        image: image,
+      });
     });
   };
-
-  if (!me) {
-    return <div>Loading...</div>;
-  }
 
   return (
     <>
@@ -98,7 +85,7 @@ export function ChatScreen(props: { chatID: string }) {
 
         <TextInput
           onSubmit={(text) => {
-            chat.$jazz.push(Message.create({ text }, chat.$jazz.owner));
+            chat.$jazz.push({ text });
           }}
         />
       </InputBar>

@@ -1,7 +1,7 @@
 {
 	"name": "jazz-sveltekit",
 	"private": true,
-	"version": "0.0.31",
+	"version": "0.0.38",
 	"type": "module",
 	"packageManager": "pnpm@10.16.1",
 	"scripts": {
@@ -24,6 +24,7 @@
 	},
 	"dependencies": {
 		"jazz-sveltekit": "link:",
-		"jazz-tools": "workspace:*"
+		"jazz-tools": "workspace:*",
+		"zod": "^4.1.13"
 	}
 }

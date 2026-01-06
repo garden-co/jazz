@@ -19,7 +19,7 @@ import {
 } from "../implementation/ContextManager";
 import {
   createJazzContext,
-  randomSessionProvider,
+  MockSessionProvider,
 } from "../implementation/createContext";
 import {
   CoValueFromRaw,
@@ -37,6 +37,7 @@ import { SubscriptionCache } from "../subscribe/SubscriptionCache";
 import { createAsyncStorage, getDbPath } from "./testStorage";
 
 const Crypto = await WasmCrypto.create();
+const randomSessionProvider = new MockSessionProvider();
 
 class TestJazzContextManager<Acc extends Account> extends JazzContextManager<
   Acc,
@@ -601,6 +602,22 @@ describe("ContextManager", () => {
 
       // onAnonymousAccountDiscarded should only be called once
       expect(onAnonymousAccountDiscarded).toHaveBeenCalledTimes(1);
+    });
+
+    test("prevents concurrent logout attempts", async () => {
+      const onLogOut = vi.fn();
+      await manager.createContext({ onLogOut });
+
+      // Start multiple concurrent logout attempts
+      const promises = [];
+      for (let i = 0; i < 5; i++) {
+        promises.push(manager.logOut());
+      }
+
+      await Promise.all(promises);
+
+      // onLogOut should only be called once despite multiple logOut calls
+      expect(onLogOut).toHaveBeenCalledTimes(1);
     });
 
     test("allows authentication after logout", async () => {

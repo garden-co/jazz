@@ -1,5 +1,5 @@
 import { Account, Group, type ID } from "jazz-tools";
-import { CursorContainer, CursorFeed } from "../schema";
+import { CursorContainer } from "../schema";
 
 /**
  * Creates a new group to own the cursor container.
@@ -16,7 +16,7 @@ function createGroup(me: Account) {
   return group;
 }
 
-export async function loadGroup(me: Account, groupID: ID<Group>) {
+async function loadGroup(me: Account, groupID: ID<Group>) {
   if (groupID === undefined) {
     console.log("No group ID found in .env, creating group...");
     return createGroup(me);
@@ -60,7 +60,7 @@ export async function loadCursorContainer(
     console.log("Global cursors does not exist, creating...");
     const cursorContainer = await CursorContainer.upsertUnique({
       value: {
-        cursorFeed: CursorFeed.create([], group),
+        cursorFeed: [],
       },
       resolve: {
         cursorFeed: true,

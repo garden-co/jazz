@@ -1,0 +1,101 @@
+Released Jazz 0.19.17:
+- Bugfix: fixed an issue where calling logOut multiple times concurrently could trigger duplicate logout operations
+
+Released Jazz 0.19.16:
+- Improved sync timeout error messages to include known state, peer state, and any error information when waiting for sync times out
+- Bugfix: fixed a race condition in Clerk auth where the signup flow could trigger a duplicate login attempt
+
+Released Jazz 0.19.15:
+- Added a locking system for session IDs in React Native to make mounting multiple JazzProviders safer (still not advised as duplicate the data loading effort)
+- Added a value.$jazz.createdBy getter to CoValues
+- Bugfix: fixed coMap.getEdits() to also return deleted keys
+- Bugfix: fixed an issue where spreading the uniqueness object when creating CoValues could introduce unexpected properties into the header
+
+Released Jazz 0.19.14:
+- Introduced support for 16KB page sizes to Android builds. This update ensures our Native Core remains compatible with upcoming Android hardware and Google Play standards.
+- Upgraded Node-API Rust crate to 3.7.1 to mitigate potential memory leaks.
+
+Released Jazz 0.19.13:
+- Introduced a new API to define the permissions at Schema level. Docs [here](https://jazz.tools/docs/react/permissions-and-sharing/overview#defining-permissions-at-the-schema-level)!
+- Bugfix: improved the session lock system for web apps. Before the first session of an account wasn't locked, and there was some race conditions in the lock algorithm that would cause a slow initialization or load failures when opening multiple tabs
+
+Released Jazz  0.19.12:
+- Bugfix: fixed the transactions detection on the inspector to not mark CoMap transactions as Group transactions
+- Bugfix: fixed React warning when using `useCoState` about the promise not being cached
+- Bugfix: we now close server peers before triggering the onAnonymousAccountDiscarded, to avoid having two websocket connections active at the same time
+- Bugfix: on React onAnonymousAccountDiscarded is now triggered only if the related prop is provided (thanks @wizzel for the bug report)
+- Updated better-sqlite3 on jazz-run to v12.5.0, to make it work with versions of Node.js higher than v22 (thanks to [antoncuranz](https://github.com/antoncuranz) for the contribution)
+
+Released Jazz  0.19.11:
+- Bugfix(breaking): changed the return type of `Account.createAs` to return also the new account credentials
+
+Released Jazz 0.19.10:
+- Added useSuspenseCoState and useSuspenseAccount hooks, to use Jazz with Suspense :saxophone: 
+- Implemented a Subscription de-duplication system, now if two components request the same query we give them the same subscription
+  - individual covalues subscriptions were already de-duplicated, this logic applies to the resolve queries
+- Released our [native crypto adapter for React Native](https://github.com/garden-co/jazz/tree/main/crates/cojson-core-rn#readme)
+  - With this one React Native apps go full native, becoming blazing fast!
+  - Instructions on how to do the switch [here](https://jazz.tools/docs/react-native-expo/project-setup/providers#rncrypto)
+  - After validating that the installation process works for everyone this is going to become the default
+
+Released Jazz 0.19.8:
+- improved the transaction revalidation system, now group updates should have a way smaller impact on performance
+- improved error logging in subscriptions and added stacktraces on errors coming from React hooks (thanks @booorad for the contribution!)
+- added `jazzConfig.setCustomErrorReporter` API to intercept subscription errors and send them to an error tracker (thanks @gabrola for the help!)
+- narrowed down .load return type to not include the loading state
+- Added polyfills helper to React Native and Expo exports (see https://jazz.tools/docs/react-native-expo/project-setup#add-polyfills)
+
+Released Jazz 0.19.7:
+- Bugfix: avoid migrating unauthorized CoValues
+
+Released Jazz 0.19.6:
+- Added `value.$jazz.export()` API and preloaded option in React hooks
+  - This makes possible to pass CoValues from a server component to a client component, example here ([live](https://jazz-jazz-nextjs.vercel.app/) - [source](https://github.com/garden-co/jazz/tree/main/examples/jazz-nextjs/src/app)), docs are coming
+- Added blake3 to the native APIs in RNQuickCrypto  (thanks @booorad for adding blake3 to eact-native-quick-crypto!)
+  - This should improve performance a bit, but the result may vary depending on the app
+  -  **Breaking:** Requires react-native-quick-crypto to be updated to ^1.0.0-beta.21 :exclamation:
+- Changed the implementation of Account.createAs and added an onCreate hook to make it easier to setup the account root. 
+  - This API should make it easier to create accounts via worker, docs are coming but until then [this test](https://github.com/garden-co/jazz/blob/0d3d4d9f4abaea3a52ac0ebfdc6943b4584a7d72/packages/jazz-tools/src/tools/tests/account.test.ts#L447) can be used as reference
+  - **Breaking:** Now the API returns a loaded account instead of a controlled one to avoid memory leaks:exclamation:
+
+Released Jazz 0.19.5:
+- Improved the permission checks performance by incrementally building the parent groups info (gain will vary depending on the permissions structure)
+
+Released Jazz 0.19.4:
+- Improved the performance of CoValue creation by caching schema->coField transformations (around 7% speedup on a small schema, probably more with more complex schemas)
+- Improved readability for CoPlainText's history in inspector
+- Added edit support for CoPlainText in the inspector
+- Bugfix: fixed "unable to add key to index 'uniqueSessions'" when using a Jazz app in multiple tabs (thanks @tobiaslins for the bug report)
+- Bugfix: now ensureLoaded properly handles $onError in resolve queries (thanks @wrangelvid for the bug report)
+- Bugfix: In the inspector, accounts are now identified by header's meta type
+
+Released Jazz 0.19.3:
+- Bugfix: fixed co.discriminatedUnion load for React Native
+- Bugfix: Show invalid transactions in the inspector even if they are not decryptable
+
+Released Jazz 0.19.2:
+- Added editing and history rollback for co maps in our inspector :sparkles: 
+- Added inline creation for CoVector
+- Bugfix: prevent CoValues adding themselves as dependencies
+
+Released Jazz 0.19.1:
+- co.discriminatedUnion schemas now support resolve queries! (thanks @gabrola for this amazing contribution :rocket:)
+
+**Jazz 0.19.0 released - Explicit CoValue loading states
+This release introduces explicit loading states when loading CoValues, as well as a new way to define how CoValues are loaded.**
+
+Changes:
+- Added a new  $isLoaded field to discriminate between loaded and unloaded CoValues
+- Added $jazz.loadingState to provide additional info about the loading state
+- All methods and functions that load CoValues now return a MaybeLoaded<CoValue> instead of CoValue | null | undefined
+- Resolve queries can now be defined at the schema level. Those queries will be used when loading CoValues, if no other resolve query is provided.
+- Renamed $onError: null to $onError: "catch"
+- Split the useAccount hook into three separate hooks:
+- useAccount: now only returns an Account
+- useLogOut: returns a function for logging out of the current account
+- useAgent: returns the current agent
+- Added a select option (and an optional equalityFn) to useAccount and useCoState, and removed useAccountWithSelector and useCoStateWithSelector.
+
+You can learn more and see some usage examples of the new APIs in our [upgrade guide](https://jazz.tools/docs/react/upgrade/0-19-0)
+
+For older release notes take a look at the #releases channel on [our Discord server](https://discord.com/invite/utDMjHYg42)

@@ -395,10 +395,6 @@ export class LocalNode {
     return coValue;
   }
 
-  hasLoadingSources(id: RawCoID) {
-    return this.storage || this.syncManager.getServerPeers(id).length > 0;
-  }
-
   /** @internal */
   async loadCoValueCore(
     id: RawCoID,
@@ -742,7 +738,10 @@ export class LocalNode {
       type: "comap",
       ruleset: { type: "group", initialAdmin: account.id },
       meta: null,
-      ...uniqueness,
+      ...(uniqueness.createdAt !== undefined
+        ? { createdAt: uniqueness.createdAt }
+        : {}),
+      uniqueness: uniqueness.uniqueness,
     });
 
     const group = expectGroup(groupCoValue.getCurrentContent());

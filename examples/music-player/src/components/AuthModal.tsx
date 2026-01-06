@@ -6,9 +6,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { usePasskeyAuth } from "jazz-tools/react";
+import { usePasskeyAuth, useSuspenseAccount } from "jazz-tools/react";
 import { useState } from "react";
-import { useAccountSelector } from "@/components/AccountProvider.tsx";
+import { MusicaAccount, PlaylistWithTracks } from "@/1_schema";
 
 interface AuthModalProps {
   open: boolean;
@@ -18,7 +18,7 @@ interface AuthModalProps {
 export function AuthModal({ open, onOpenChange }: AuthModalProps) {
   const [isSignUp, setIsSignUp] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const profileName = useAccountSelector({
+  const profileName = useSuspenseAccount(MusicaAccount, {
     select: (me) => me.profile.name,
   });
 
@@ -56,7 +56,12 @@ export function AuthModal({ open, onOpenChange }: AuthModalProps) {
     }
   };
 
-  const shouldShowTransferRootPlaylist = useAccountSelector({
+  const shouldShowTransferRootPlaylist = useSuspenseAccount(MusicaAccount, {
+    resolve: {
+      root: {
+        rootPlaylist: PlaylistWithTracks.resolveQuery,
+      },
+    },
     select: (me) =>
       !isSignUp &&
       me.root.rootPlaylist.tracks.some((track) => !track.isExampleTrack),

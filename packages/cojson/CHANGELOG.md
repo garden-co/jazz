@@ -1,5 +1,65 @@
 # cojson
 
+## 0.19.18
+
+### Patch Changes
+
+- cojson-core-wasm@0.19.18
+- cojson-core-rn@0.19.18
+- cojson-core-napi@0.19.18
+
+## 0.19.17
+
+### Patch Changes
+
+- cojson-core-wasm@0.19.17
+- cojson-core-rn@0.19.17
+- cojson-core-napi@0.19.17
+
+## 0.19.16
+
+### Patch Changes
+
+- 265d0e9: Improved sync timeout error messages to include known state, peer state, and any error information when waiting for sync times out
+  - cojson-core-wasm@0.19.16
+  - cojson-core-rn@0.19.16
+  - cojson-core-napi@0.19.16
+
+## 0.19.15
+
+### Patch Changes
+
+- 71ed9d6: Fixed an issue where spreading the uniqueness object when creating CoValues could introduce unexpected properties into the header
+  - cojson-core-wasm@0.19.15
+  - cojson-core-rn@0.19.15
+  - cojson-core-napi@0.19.15
+
+## 0.19.14
+
+### Patch Changes
+
+- Updated dependencies [41d4c52]
+- Updated dependencies [241123b]
+  - cojson-core-rn@0.19.14
+  - cojson-core-napi@0.19.14
+  - cojson-core-wasm@0.19.14
+
+## 0.19.13
+
+### Patch Changes
+
+- cojson-core-wasm@0.19.13
+- cojson-core-rn@0.19.13
+- cojson-core-napi@0.19.13
+
+## 0.19.12
+
+### Patch Changes
+
+- cojson-core-wasm@0.19.12
+- cojson-core-rn@0.19.12
+- cojson-core-napi@0.19.12
+
 ## 0.19.11
 
 ### Patch Changes

@@ -42,6 +42,7 @@ export const docNavigationItems = [
   {
     name: "Upgrade guides",
     collapse: true,
+    startClosed: true,
     prefix: "/docs/upgrade",
     items: [
       {
@@ -59,21 +60,21 @@ export const docNavigationItems = [
         href: "/docs/upgrade/0-17-0",
         done: 100,
       },
-      {
-        name: "0.16.0 - Cleaner separation between Zod and CoValue schemas",
-        href: "/docs/upgrade/0-16-0",
-        done: 100,
-      },
-      {
-        name: "0.15.0 - Everything inside `jazz-tools`",
-        href: "/docs/upgrade/0-15-0",
-        done: 100,
-      },
-      {
-        name: "0.14.0 - Zod-based schemas",
-        href: "/docs/upgrade/0-14-0",
-        done: 100,
-      },
+      // {
+      //  name: "0.16.0 - Cleaner separation between Zod and CoValue schemas",
+      //  href: "/docs/upgrade/0-16-0",
+      //  done: 100,
+      // },
+      // {
+      //  name: "0.15.0 - Everything inside `jazz-tools`",
+      //  href: "/docs/upgrade/0-15-0",
+      //  done: 100,
+      // },
+      // {
+      //  name: "0.14.0 - Zod-based schemas",
+      //  href: "/docs/upgrade/0-14-0",
+      //  done: 100,
+      // },
       // {
       //   name: "0.13.0 - React Native Split",
       //   href: "/docs/upgrade/0-13-0",

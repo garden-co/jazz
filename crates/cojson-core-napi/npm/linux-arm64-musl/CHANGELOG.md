@@ -1,5 +1,23 @@
 # cojson-core-napi-linux-arm64-musl
 
+## 0.19.18
+
+## 0.19.17
+
+## 0.19.16
+
+## 0.19.15
+
+## 0.19.14
+
+### Patch Changes
+
+- 241123b: Upgraded NAPI bindings from 3.3.x to 3.7.1 to mitigate potential memory leaks.
+
+## 0.19.13
+
+## 0.19.12
+
 ## 0.19.11
 
 ## 0.19.10

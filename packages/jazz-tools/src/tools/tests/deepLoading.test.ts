@@ -23,7 +23,7 @@ import {
   MaybeLoaded,
   Settled,
   co,
-  randomSessionProvider,
+  MockSessionProvider,
   CoValueLoadingState,
   CoValueErrorState,
 } from "../internal.js";
@@ -33,7 +33,7 @@ import { setCustomErrorReporter } from "../config.js";
 
 const Crypto = await WasmCrypto.create();
 const { connectedPeers } = cojsonInternals;
-
+const randomSessionProvider = new MockSessionProvider();
 const InnermostMap = co.map({
   value: z.string(),
 });
@@ -1189,6 +1189,29 @@ test("should not throw when calling ensureLoaded a record with a non-existent ke
     },
   });
 
+  expect(loadedPerson.pet1).toBeUndefined();
+});
+
+test("should load a record with a non-existent key if there's a catch block", async () => {
+  const Person = co.record(
+    z.string(),
+    co.map({
+      name: z.string(),
+      breed: z.string(),
+    }),
+  );
+
+  const person = Person.create({});
+
+  const loadedPerson = await Person.load(person.$jazz.id, {
+    resolve: {
+      pet1: {
+        $onError: "catch",
+      },
+    },
+  });
+
+  assertLoaded(loadedPerson);
   expect(loadedPerson.pet1).toBeUndefined();
 });
 

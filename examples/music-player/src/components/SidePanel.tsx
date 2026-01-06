@@ -13,7 +13,7 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
 import { useAccount } from "jazz-tools/react";
-import { Home, Music, Plus, Trash2 } from "lucide-react";
+import { Home, Music, Plus, Settings, Trash2 } from "lucide-react";
 import { useNavigate, useParams } from "react-router";
 import { useState } from "react";
 import { AuthButton } from "./AuthButton";
@@ -30,6 +30,10 @@ export function SidePanel() {
 
   function handleAllTracksClick() {
     navigate(`/`);
+  }
+
+  function handleProfileSettingsClick() {
+    navigate(`/settings`);
   }
 
   function handlePlaylistClick(playlistId: string) {
@@ -92,6 +96,12 @@ export function SidePanel() {
                   <SidebarMenuButton onClick={handleAllTracksClick}>
                     <Home className="size-4" />
                     <span>Go to all tracks</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+                <SidebarMenuItem>
+                  <SidebarMenuButton onClick={handleProfileSettingsClick}>
+                    <Settings className="size-4" />
+                    <span>Profile settings</span>
                   </SidebarMenuButton>
                 </SidebarMenuItem>
               </SidebarMenu>

@@ -128,7 +128,7 @@ function mapTransactionToAction(
   coValue: RawCoValue,
 ): string {
   // Group changes
-  if (TransactionChanges.isUserPromotion(change)) {
+  if (TransactionChanges.isUserPromotion(coValue, change)) {
     if (change.value === "revoked") {
       return `${change.key} has been revoked`;
     }
@@ -136,28 +136,28 @@ function mapTransactionToAction(
     return `${change.key} has been promoted to ${change.value}`;
   }
 
-  if (TransactionChanges.isGroupExtension(change)) {
+  if (TransactionChanges.isGroupExtension(coValue, change)) {
     const child = change.key.slice(6);
     return `Group became a member of ${child}`;
   }
 
-  if (TransactionChanges.isGroupExtendRevocation(change)) {
+  if (TransactionChanges.isGroupExtendRevocation(coValue, change)) {
     const child = change.key.slice(6);
     return `Group's membership of ${child} has been revoked.`;
   }
 
-  if (TransactionChanges.isGroupPromotion(change)) {
+  if (TransactionChanges.isGroupPromotion(coValue, change)) {
     const parent = change.key.slice(7);
     return `Group ${parent} has been promoted to ${change.value}`;
   }
 
-  if (TransactionChanges.isKeyRevelation(change)) {
+  if (TransactionChanges.isKeyRevelation(coValue, change)) {
     const [key, target] = change.key.split("_for_");
     return `Key "${key}" has been revealed to "${target}"`;
   }
 
   // coList changes
-  if (TransactionChanges.isItemAppend(change)) {
+  if (TransactionChanges.isItemAppend(coValue, change)) {
     if (change.after === "start") {
       return `"${change.value}" has been appended`;
     }
@@ -171,7 +171,7 @@ function mapTransactionToAction(
     return `"${change.value}" has been inserted after "${(after as any).value}"`;
   }
 
-  if (TransactionChanges.isItemPrepend(change)) {
+  if (TransactionChanges.isItemPrepend(coValue, change)) {
     if (change.before === "end") {
       return `"${change.value}" has been prepended`;
     }
@@ -185,7 +185,7 @@ function mapTransactionToAction(
     return `"${change.value}" has been inserted before "${(before as any).value}"`;
   }
 
-  if (TransactionChanges.isItemDeletion(change)) {
+  if (TransactionChanges.isItemDeletion(coValue, change)) {
     const insertion = findListChange(change.insertion, coValue);
     if (insertion === undefined) {
       return `An undefined item has been deleted`;
@@ -195,24 +195,24 @@ function mapTransactionToAction(
   }
 
   // coStream changes
-  if (TransactionChanges.isStreamStart(change)) {
+  if (TransactionChanges.isStreamStart(coValue, change)) {
     return `Stream started with mime type "${change.mimeType}" and file name "${change.fileName}"`;
   }
 
-  if (TransactionChanges.isStreamChunk(change)) {
+  if (TransactionChanges.isStreamChunk(coValue, change)) {
     return `Stream chunk added`;
   }
 
-  if (TransactionChanges.isStreamEnd(change)) {
+  if (TransactionChanges.isStreamEnd(coValue, change)) {
     return `Stream ended`;
   }
 
   // coMap changes
-  if (TransactionChanges.isPropertySet(change)) {
+  if (TransactionChanges.isPropertySet(coValue, change)) {
     return `Property "${change.key}" has been set to ${JSON.stringify(change.value)}`;
   }
 
-  if (TransactionChanges.isPropertyDeletion(change)) {
+  if (TransactionChanges.isPropertyDeletion(coValue, change)) {
     return `Property "${change.key}" has been deleted`;
   }
 

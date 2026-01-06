@@ -15,7 +15,7 @@ import {
   useState,
 } from "react";
 
-function StatusBar() {
+export function StatusBar() {
   const currentTime = new Date().toLocaleTimeString("en-US", {
     hour: "2-digit",
     minute: "2-digit",
@@ -89,7 +89,9 @@ export function ChatDemoSection() {
   const [server1, setServer1] = useState<string | undefined>();
   const [server2, setServer2] = useState<string | undefined>();
   const [shareUrl, setShareUrl] = useState<string>("");
-  const [qrCode, setQrCode] = useState<string>("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=");
+  const [qrCode, setQrCode] = useState<string>(
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=",
+  );
 
   let [copyCount, setCopyCount] = useState(0);
   let copied = copyCount > 0;
@@ -112,7 +114,7 @@ export function ChatDemoSection() {
       const shareServer = isLocal
         ? "http://localhost:5173"
         : "https://chat.jazz.tools";
-      const url = `${shareServer}/${chatId}`;
+      const url = `${shareServer}/#${chatId}`;
       setShareUrl(url);
 
       QRCode.toDataURL(url, {
@@ -139,9 +141,10 @@ export function ChatDemoSection() {
 
     const listener = (e: MessageEvent) => {
       const isValidOrigin = e.origin === server1Url.origin;
+      console.log(e.data);
 
-      if (e.data.type === "navigate" && isValidOrigin) {
-        setChatId(new URL(e.data.url).hash);
+      if (e.data.type === "chat-load" && isValidOrigin) {
+        setChatId(e.data.id);
       }
     };
     window.addEventListener("message", listener);
@@ -169,7 +172,7 @@ export function ChatDemoSection() {
   };
 
   return (
-    <div className="container grid items-start md:grid-cols-12 pt-6">
+    <div className="container grid items-start pt-6 md:grid-cols-12">
       <div className="md:col-span-7">
         <div className="grid items-start gap-4 sm:grid-cols-2 sm:gap-0">
           <Iframe
@@ -203,58 +206,57 @@ export function ChatDemoSection() {
         </Prose>
       </div>
 
-        <div className="mt-6 flex flex-col justify-between gap-6 text-center md:col-span-4 md:col-start-9 md:mt-0">
-          <div>
-            <h2 className="mb-2 hidden font-display text-xl font-semibold tracking-tight text-stone-950 dark:text-white md:block md:text-2xl">
-              Scan the QR code
-            </h2>
-            <p className="text-balance">
-              Add your device to the live demo. Messages update everywhere
-              instantly.
-            </p>
-          </div>
-
-            <img
-              src={qrCode}
-              className="mx-auto hidden size-48 rounded-lg border md:block bg-white"
-              alt="Scan this QR code to join the chat"
-            />
-
-          <div className="hidden items-center gap-2 md:flex">
-            <div className="h-px w-full border-t" />
-            <p className="whitespace-nowrap">or copy the URL</p>
-            <div className="h-px w-full border-t" />
-          </div>
-          <div className="relative w-full sm:mx-auto sm:max-w-xl">
-            <Label
-              label="To join the chat, copy the URL"
-              htmlFor="shareUrl"
-              className="sr-only"
-            />
-            <input
-              id="shareUrl"
-              className="h-10 w-full rounded-md border bg-transparent pl-3 pr-10"
-              type="text"
-              value={shareUrl}
-              onClick={(e) => e.currentTarget.select()}
-              onBlur={(e) => e.currentTarget.setSelectionRange(0, 0)}
-              readOnly
-            />
-            <button
-              type="button"
-              className="absolute right-0 top-0 p-3 text-primary dark:text-blue-400"
-              onClick={copyUrl}
-            >
-              {copied ? (
-                <Icon name="check" size="xs" />
-              ) : (
-                <Icon name="copy" size="xs" />
-              )}
-              <span className="sr-only">Copy URL</span>
-            </button>
-          </div>
+      <div className="mt-6 flex flex-col justify-between gap-6 text-center md:col-span-4 md:col-start-9 md:mt-0">
+        <div>
+          <h2 className="mb-2 hidden font-display text-xl font-semibold tracking-tight text-stone-950 dark:text-white md:block md:text-2xl">
+            Scan the QR code
+          </h2>
+          <p className="text-balance">
+            Add your device to the live demo. Messages update everywhere
+            instantly.
+          </p>
         </div>
 
+        <img
+          src={qrCode}
+          className="mx-auto hidden size-48 rounded-lg border bg-white md:block"
+          alt="Scan this QR code to join the chat"
+        />
+
+        <div className="hidden items-center gap-2 md:flex">
+          <div className="h-px w-full border-t" />
+          <p className="whitespace-nowrap">or copy the URL</p>
+          <div className="h-px w-full border-t" />
+        </div>
+        <div className="relative w-full sm:mx-auto sm:max-w-xl">
+          <Label
+            label="To join the chat, copy the URL"
+            htmlFor="shareUrl"
+            className="sr-only"
+          />
+          <input
+            id="shareUrl"
+            className="h-10 w-full rounded-md border bg-transparent pl-3 pr-10"
+            type="text"
+            value={shareUrl}
+            onClick={(e) => e.currentTarget.select()}
+            onBlur={(e) => e.currentTarget.setSelectionRange(0, 0)}
+            readOnly
+          />
+          <button
+            type="button"
+            className="absolute right-0 top-0 p-3 text-primary dark:text-blue-400"
+            onClick={copyUrl}
+          >
+            {copied ? (
+              <Icon name="check" size="xs" />
+            ) : (
+              <Icon name="copy" size="xs" />
+            )}
+            <span className="sr-only">Copy URL</span>
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
