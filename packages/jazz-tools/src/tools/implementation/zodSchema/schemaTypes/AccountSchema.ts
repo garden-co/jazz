@@ -165,7 +165,7 @@ export class AccountSchema<
     migration: (
       account: Loaded<AccountSchema<Shape>>,
       creationProps?: { name: string },
-    ) => void,
+    ) => void | Promise<void>,
   ): AccountSchema<Shape, DefaultResolveQuery> {
     (this.coValueClass.prototype as Account).migrate = async function (
       this,

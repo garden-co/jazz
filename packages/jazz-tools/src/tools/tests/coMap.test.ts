@@ -2088,23 +2088,31 @@ describe("CoMap migration", () => {
     expect(loadedPersonFromAnotherAccount.name).toEqual("Bob");
   });
 
-  test("should throw an error if a migration is async", async () => {
+  test("should support async migrations", async () => {
+    const migrationSpy = vi.fn();
     const Person = co
       .map({
         name: z.string(),
         version: z.number(),
       })
-      // @ts-expect-error async function
-      .withMigration(async () => {});
+      .withMigration(async (person) => {
+        migrationSpy(person);
+        if (person.version === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          person.$jazz.set("version", 2);
+          person.$jazz.set("name", "Charlie");
+        }
+      });
 
     const person = Person.create({
       name: "Bob",
       version: 1,
     });
 
-    await expect(Person.load(person.$jazz.id)).rejects.toThrow(
-      "Migration function cannot be async",
-    );
+    const loaded = await Person.load(person.$jazz.id);
+    expect(migrationSpy).toHaveBeenCalledTimes(1);
+    assertLoaded(loaded);
+    expect(loaded.name).toBe("Charlie");
   });
 
   test("should run only once", async () => {

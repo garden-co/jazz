@@ -1,6 +1,8 @@
 import { TypeSym, type CoValue } from "../internal.js";
 
-export function applyCoValueMigrations(instance: CoValue) {
+export function applyCoValueMigrations(
+  instance: CoValue,
+): void | Promise<void> {
   const node = instance.$jazz.raw.core.node;
 
   // @ts-expect-error _migratedCoValues is a custom expando property
@@ -10,14 +12,12 @@ export function applyCoValueMigrations(instance: CoValue) {
     "migrate" in instance &&
     typeof instance.migrate === "function" &&
     instance[TypeSym] !== "Account" &&
+    // TODO shouldn't skip, because the covalue might not be migrated yet
     !migratedCoValues.has(instance.$jazz.id)
   ) {
     // We flag this before the migration to avoid that internal loads trigger the migration again
     migratedCoValues.add(instance.$jazz.id);
 
-    const result = instance.migrate?.(instance);
-    if (result && "then" in result) {
-      throw new Error("Migration function cannot be async");
-    }
+    return instance.migrate?.(instance);
   }
 }

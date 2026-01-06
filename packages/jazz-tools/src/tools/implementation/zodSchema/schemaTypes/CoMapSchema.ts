@@ -268,7 +268,7 @@ export class CoMapSchema<
         Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
         true
       >,
-    ) => undefined,
+    ) => void | Promise<void>,
   ): this {
     // @ts-expect-error avoid exposing 'migrate' at the type level
     this.coValueClass.prototype.migrate = migration;

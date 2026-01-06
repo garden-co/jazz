@@ -122,11 +122,23 @@ export class SubscriptionScope<D extends CoValue> {
           }
 
           this.migrating = true;
-          applyCoValueMigrations(
-            instantiateRefEncodedFromRaw(this.schema, value),
-          );
-          this.migrated = true;
-          this.handleUpdate(lastUpdate);
+          const instance = instantiateRefEncodedFromRaw(this.schema, value);
+          const result = applyCoValueMigrations(instance);
+          if (result && "then" in result) {
+            result
+              .catch((error) => {
+                console.error(`Migration failed for ${this.id}:`, error);
+              })
+              .then(() => {
+                this.migrated = true;
+                this.migrating = false;
+                this.handleUpdate(lastUpdate!);
+              });
+          } else {
+            this.migrated = true;
+            this.migrating = false;
+            this.handleUpdate(lastUpdate!);
+          }
           return;
         }
 
