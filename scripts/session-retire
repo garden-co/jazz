@@ -66,4 +66,10 @@ cd "$REPO_ROOT"
 echo "Removing worktree..."
 git worktree remove "$WORKTREE_PATH" --force
 
+# Delete the branch (user already confirmed if there were unpushed commits)
+if [ -n "$BRANCH" ] && [ "$BRANCH" != "main" ]; then
+    echo "Deleting branch '$BRANCH'..."
+    git branch -D "$BRANCH"
+fi
+
 echo "Session '$SESSION_NAME' retired successfully."

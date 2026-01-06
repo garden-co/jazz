@@ -35,9 +35,17 @@ if [ -d "$NEW_PATH" ]; then
     exit 1
 fi
 
-# Move the worktree using git worktree move
+# Get the current branch name for this worktree
+cd "$OLD_PATH"
+OLD_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 cd "$REPO_ROOT"
+
+# Move the worktree using git worktree move
 git worktree move "$OLD_PATH" "$NEW_PATH"
 
+# Rename the branch to match (works even while checked out in worktree)
+git branch -m "$OLD_BRANCH" "$NEW_NAME"
+
 echo "Session renamed: $OLD_NAME -> $NEW_NAME"
+echo "Branch renamed: $OLD_BRANCH -> $NEW_NAME"
 echo "Path: $NEW_PATH"
