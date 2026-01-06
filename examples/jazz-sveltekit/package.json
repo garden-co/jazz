@@ -20,11 +20,10 @@
 		"svelte-check": "^4.0.0",
 		"typescript": "^5.0.0",
 		"vite": "^7.0.4",
-		"zod": "4.1.11"
+		"zod": "^4.1.13"
 	},
 	"dependencies": {
 		"jazz-sveltekit": "link:",
-		"jazz-tools": "workspace:*",
-		"zod": "^4.1.13"
+		"jazz-tools": "workspace:*"
 	}
 }
