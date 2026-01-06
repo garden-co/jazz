@@ -164,6 +164,44 @@ This state is reconstructed from context rather than explicitly passed.
 
 Forward and reverse JOINs have almost entirely separate implementations despite similar structure. This leads to bugs being fixed in one path but not the other.
 
+### 9. No Filter Pushdown / Query Optimization
+
+**Problem**: The graph builder constructs nodes in a fixed order (JOINs first, then Filter), regardless of which would be more efficient.
+
+**Example**: A query filtering Issues by `priority = 'urgent'` AND junction table conditions:
+
+```
+├── [ 0] Join: Issues + Projects         → 50 joined rows
+├── [ 1] Join: + IssueAssignees           → 13 joined rows
+├── [ 2] Join: + IssueLabels              → 5 joined rows
+├── [ 3] Filter: Issues.priority = 'urgent' → 1 row
+├── [ 4] ArrayAggregate: IssueLabels
+├── [ 5] ArrayAggregate: IssueAssignees
+└── [ 6] Output
+```
+
+The Filter on `Issues.priority` happens AFTER all the JOINs, so we're joining 50 rows only to filter down to 1 at the end. It would be far more efficient to filter Issues FIRST:
+
+```
+├── [ 0] Filter: Issues.priority = 'urgent' → ~1 row (early!)
+├── [ 1] Join: Issues + Projects           → 1 joined row
+├── [ 2] Join: + IssueAssignees            → 1 joined row
+├── [ 3] Join: + IssueLabels               → 1 joined row
+├── [ 4] ArrayAggregate: IssueLabels
+├── [ 5] ArrayAggregate: IssueAssignees
+└── [ 6] Output
+```
+
+**Current State**: No query optimization. Nodes are created in the order they appear in the SQL/builder calls.
+
+**Pain Point**: For large datasets, this creates significant unnecessary work. A query that should touch 1 row instead processes 50+ through multiple JOIN nodes.
+
+**Future Redesign Should**:
+- Implement predicate pushdown (move filters before JOINs when possible)
+- Analyze which predicates can be pushed to which tables
+- Consider filter selectivity when ordering operations
+- Potentially reorder JOINs based on estimated cardinality
+
 ## Ideas for Redesign
 
 1. **Explicit Join Direction Type**: Instead of string encoding, have `JoinNode::Forward { ... }` and `JoinNode::Reverse { ... }` variants.
@@ -179,6 +217,8 @@ Forward and reverse JOINs have almost entirely separate implementations despite 
 6. **Separate EXISTS from ARRAY**: Make "filter by existence" and "include as array" explicitly different operations, not implicit in join direction.
 
 7. **Graph Construction DSL**: Instead of ad-hoc builder methods, a declarative specification of the query structure that gets compiled to the graph.
+
+8. **Query Optimizer / Predicate Pushdown**: Add an optimization pass between AST parsing and graph construction that reorders operations for efficiency. Push filters on single tables before JOINs, estimate cardinalities, choose optimal JOIN order.
 
 ## Related Commits
 
