@@ -528,7 +528,12 @@ export function setupTestNode(
     addAsyncStorage,
     restart: () => {
       node.gracefulShutdown();
-      ctx.node = node = new LocalNode(admin.agentSecret, session, Crypto);
+      ctx.node = node = new LocalNode(
+        admin.agentSecret,
+        session,
+        Crypto,
+        opts.syncWhen,
+      );
 
       if (opts.isSyncServer) {
         syncServer.current = node;

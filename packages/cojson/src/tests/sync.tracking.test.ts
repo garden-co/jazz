@@ -150,6 +150,35 @@ describe("coValue sync state tracking", () => {
     client.syncManager.trackSyncState(map.id);
     expect(unsyncedTracker.has(map.id)).toBe(false);
   });
+
+  test("imported coValue content is tracked as unsynced", async () => {
+    const { node: client } = setupTestNode({ connected: true });
+    const { node: client2 } = setupTestNode({ connected: false });
+
+    const group = client2.createGroup();
+    const map = group.createMap();
+    map.set("key", "value");
+
+    // Export the content from client2 to client
+    const groupContent = group.core.newContentSince()![0]!;
+    const mapContent = map.core.newContentSince()![0]!;
+    client.syncManager.handleNewContent(groupContent, "import");
+    client.syncManager.handleNewContent(mapContent, "import");
+
+    const unsyncedTracker = client.syncManager.unsyncedTracker;
+
+    // The imported coValue should be tracked as unsynced since it hasn't been synced to the server yet
+    expect(unsyncedTracker.has(group.id)).toBe(true);
+    expect(unsyncedTracker.has(map.id)).toBe(true);
+
+    // Wait for the map to sync
+    const serverPeer =
+      client.syncManager.peers[jazzCloud.node.currentSessionID]!;
+    await waitFor(() =>
+      client.syncManager.syncState.isSynced(serverPeer, map.id),
+    );
+    expect(unsyncedTracker.has(map.id)).toBe(false);
+  });
 });
 
 describe("sync state persistence", () => {

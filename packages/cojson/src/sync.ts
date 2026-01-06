@@ -830,6 +830,9 @@ export class SyncManager {
 
     if (from !== "storage" && hasNewContent) {
       this.storeContent(validNewContent);
+      if (from === "import") {
+        this.trackSyncState(coValue.id);
+      }
     }
 
     for (const peer of this.getPeers(coValue.id)) {
