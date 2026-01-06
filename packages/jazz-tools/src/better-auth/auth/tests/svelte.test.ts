@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { render as renderSvelte } from "@testing-library/svelte";
 import { describe, expect, it } from "vitest";
-import AuthProvider from "../index.svelte";
+import AuthProvider from "../svelte.svelte";
 import { createAuthClient } from "better-auth/client";
 import { jazzPluginClient } from "../client";
 import TestAuthProviderWrapper from "./TestAuthProviderWrapper.svelte";
