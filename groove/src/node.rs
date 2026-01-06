@@ -187,7 +187,7 @@ impl LocalNode {
             .ok_or(ListenerError::NotFound)?;
 
         let obj = obj_lock.read().unwrap();
-        Ok(obj.read(branch, self.env.as_ref()).await)
+        Ok(obj.read(branch).await)
     }
 
     // Note: Streaming read methods are available directly on Object.
@@ -195,13 +195,12 @@ impl LocalNode {
     // must be done by obtaining the object reference directly:
     //   let obj = node.get_object(id)?;
     //   let guard = obj.read().unwrap();
-    //   let stream = guard.read_stream(branch, env);
+    //   let stream = guard.read_stream(branch);
 
     // ========== Write API with Auto-Notify ==========
 
     /// Write content to an object's branch and notify all listeners.
     /// Returns the new commit ID.
-    /// Panics if content exceeds INLINE_THRESHOLD.
     pub fn write_sync(
         &self,
         object_id: ObjectId,
@@ -215,7 +214,6 @@ impl LocalNode {
 
     /// Write content to an object's branch with optional metadata and notify all listeners.
     /// Returns the new commit ID.
-    /// Panics if content exceeds INLINE_THRESHOLD.
     pub fn write_sync_with_meta(
         &self,
         object_id: ObjectId,
@@ -243,7 +241,6 @@ impl LocalNode {
     }
 
     /// Write content to an object's branch (async) and notify all listeners.
-    /// Automatically chunks content that exceeds INLINE_THRESHOLD.
     pub async fn write(
         &self,
         object_id: ObjectId,
@@ -262,7 +259,7 @@ impl LocalNode {
 
         let commit_id = {
             let obj = obj_lock.read().unwrap();
-            obj.write(branch, content, author, timestamp, self.env.as_ref())
+            obj.write(branch, content, author, timestamp)
                 .await
         };
 
@@ -295,7 +292,7 @@ impl LocalNode {
 
         let commit_id = {
             let obj = obj_lock.read().unwrap();
-            obj.write_stream(branch, reader, author, timestamp, self.env.as_ref())
+            obj.write_stream(branch, reader, author, timestamp)
                 .await
                 .map_err(|e| ListenerError::StorageError(e.to_string()))?
         };
@@ -393,28 +390,13 @@ impl LocalNode {
 
     // ========== Helper: Load content for a commit ==========
 
-    /// Load content for a commit (handles both inline and chunked).
-    pub async fn load_content(&self, object_id: ObjectId, branch: &str, commit_id: &CommitId) -> Option<Bytes> {
+    /// Load content for a commit.
+    pub fn load_content(&self, object_id: ObjectId, branch: &str, commit_id: &CommitId) -> Option<Bytes> {
         let obj_lock = self.objects.read().unwrap().get(&object_id).cloned()?;
         let obj = obj_lock.read().unwrap();
         let branch = obj.branch(branch)?;
         let commit = branch.get_commit(commit_id)?;
-
-        match &commit.content {
-            crate::storage::ContentRef::Inline(data) => Some(Bytes::copy_from_slice(&data)),
-            crate::storage::ContentRef::Chunked(hashes) => {
-                let hashes = hashes.clone();
-                drop(branch);
-                drop(obj);
-
-                let mut result = Vec::new();
-                for hash in hashes {
-                    let chunk = self.env.get_chunk(&hash).await?;
-                    result.extend_from_slice(&chunk);
-                }
-                Some(Bytes::from(result))
-            }
-        }
+        Some(Bytes::copy_from_slice(&commit.content))
     }
 }
 

@@ -12,7 +12,6 @@ use futures::stream::Stream;
 use crate::branch::Branch;
 use crate::commit::{Commit, CommitId};
 use crate::merge::MergeStrategy;
-use crate::storage::{ChunkHash, ContentRef, ContentStore, INLINE_THRESHOLD};
 
 // ========== ObjectId Type ==========
 
@@ -418,22 +417,17 @@ impl Object {
         }
 
         // Get base content (from first LCA if exists)
-        // Note: This only works with inline content. Chunked content would need async loading.
         let base_content: Option<Vec<u8>> = lca_commits
             .first()
             .and_then(|id| target.commits.get(id))
-            .and_then(|c| c.content.as_inline().map(|b| b.to_vec()));
+            .map(|c| c.content.to_vec());
 
-        // Collect tip contents (only inline supported for sync merge)
+        // Collect tip contents
         let tip_contents: Vec<Vec<u8>> = all_tips
             .iter()
             .filter_map(|id| target.commits.get(id))
-            .filter_map(|c| c.content.as_inline().map(|b| b.to_vec()))
+            .map(|c| c.content.to_vec())
             .collect();
-
-        if tip_contents.len() != all_tips.len() {
-            return Err("cannot merge: some commits have chunked content (use async merge)");
-        }
 
         let tip_refs: Vec<&[u8]> = tip_contents.iter().map(|v| v.as_slice()).collect();
 
@@ -443,7 +437,7 @@ impl Object {
         // Create merge commit
         let merge_commit = Commit {
             parents: all_tips,
-            content: ContentRef::inline(merged_content),
+            content: merged_content,
             author: author.to_string(),
             timestamp,
             meta: None,
@@ -467,7 +461,7 @@ impl Object {
     // ========== Sync Read/Write Methods ==========
 
     /// Read content from the frontier of a branch (sync).
-    /// Returns None if the branch is empty, has multiple tips, or content is not inline.
+    /// Returns None if the branch is empty or has multiple tips.
     pub fn read_sync(&self, branch_name: &str) -> Option<Vec<u8>> {
         let branch = self.branches.get(branch_name)?.read().unwrap();
         let frontier = branch.frontier();
@@ -478,11 +472,10 @@ impl Object {
         }
 
         let commit = branch.get_commit(&frontier[0])?;
-        commit.content.as_inline().map(|b| b.to_vec())
+        Some(commit.content.to_vec())
     }
 
     /// Write content to a branch (sync).
-    /// Panics if content exceeds INLINE_THRESHOLD.
     /// Returns the new commit ID.
     pub fn write_sync(
         &self,
@@ -495,7 +488,6 @@ impl Object {
     }
 
     /// Write content to a branch with optional metadata (sync).
-    /// Panics if content exceeds INLINE_THRESHOLD.
     /// Returns the new commit ID.
     pub fn write_sync_with_meta(
         &self,
@@ -505,12 +497,6 @@ impl Object {
         timestamp: u64,
         meta: Option<std::collections::BTreeMap<String, String>>,
     ) -> CommitId {
-        assert!(
-            content.len() <= INLINE_THRESHOLD,
-            "content exceeds INLINE_THRESHOLD ({} bytes), use write() for large content",
-            INLINE_THRESHOLD
-        );
-
         let mut branch = self
             .branches
             .get(branch_name)
@@ -522,7 +508,7 @@ impl Object {
 
         let commit = Commit {
             parents,
-            content: ContentRef::inline(content.to_vec()),
+            content: content.to_vec().into_boxed_slice(),
             author: author.to_string(),
             timestamp,
             meta,
@@ -534,180 +520,51 @@ impl Object {
     // ========== Async Read/Write Methods ==========
 
     /// Read content from the frontier of a branch (async).
-    /// Loads chunked content from storage if needed.
-    pub async fn read(&self, branch_name: &str, store: &dyn ContentStore) -> Option<Vec<u8>> {
-        let branch = self.branches.get(branch_name)?.read().unwrap();
-        let frontier = branch.frontier();
-
-        // Only return content if there's exactly one tip
-        if frontier.len() != 1 {
-            return None;
-        }
-
-        let commit = branch.get_commit(&frontier[0])?;
-
-        match &commit.content {
-            ContentRef::Inline(data) => Some(data.to_vec()),
-            ContentRef::Chunked(hashes) => {
-                // Load all chunks and concatenate
-                let hashes = hashes.clone();
-                drop(branch); // Release lock before async ops
-
-                let mut result = Vec::new();
-                for hash in hashes {
-                    let chunk = store.get_chunk(&hash).await?;
-                    result.extend_from_slice(&chunk);
-                }
-                Some(result)
-            }
-        }
+    /// Returns None if the branch is empty or has multiple tips.
+    ///
+    /// Note: This method is now equivalent to read_sync() since commits
+    /// store content directly. Kept for API compatibility.
+    pub async fn read(&self, branch_name: &str) -> Option<Vec<u8>> {
+        self.read_sync(branch_name)
     }
 
     /// Write content to a branch (async).
-    /// Automatically chunks content that exceeds INLINE_THRESHOLD.
+    ///
+    /// Note: This method is now equivalent to write_sync() since commits
+    /// store content directly. Kept for API compatibility.
     pub async fn write(
         &self,
         branch_name: &str,
         content: &[u8],
         author: &str,
         timestamp: u64,
-        store: &dyn ContentStore,
     ) -> CommitId {
-        let content_ref = if content.len() <= INLINE_THRESHOLD {
-            ContentRef::inline(content.to_vec())
-        } else {
-            // For now, simple fixed-size chunking
-            // TODO: Use FastCDC for content-defined chunking
-            let mut hashes = Vec::new();
-            for chunk in content.chunks(INLINE_THRESHOLD) {
-                let hash = store.put_chunk(chunk.to_vec().into()).await;
-                hashes.push(hash);
-            }
-            ContentRef::chunked(hashes)
-        };
-
-        let mut branch = self
-            .branches
-            .get(branch_name)
-            .expect("branch not found")
-            .write()
-            .unwrap();
-
-        let parents = branch.frontier().to_vec();
-
-        let commit = Commit {
-            parents,
-            content: content_ref,
-            author: author.to_string(),
-            timestamp,
-            meta: None,
-        };
-
-        branch.add_commit(commit)
+        self.write_sync(branch_name, content, author, timestamp)
     }
 
     // ========== Streaming Read/Write Methods ==========
 
     /// Write content from an async reader to a branch.
-    /// Chunks the content as it streams in using fixed-size chunks.
+    /// Reads all content into memory and stores it directly in the commit.
     pub async fn write_stream<R: AsyncRead + Unpin>(
         &self,
         branch_name: &str,
         mut reader: R,
         author: &str,
         timestamp: u64,
-        store: &dyn ContentStore,
     ) -> std::io::Result<CommitId> {
         use futures::io::AsyncReadExt;
 
-        let mut hashes = Vec::new();
-        let mut buffer = vec![0u8; INLINE_THRESHOLD];
-        let mut first_chunk: Option<Vec<u8>> = None;
+        // Read all content into memory
+        let mut content = Vec::new();
+        reader.read_to_end(&mut content).await?;
 
-        loop {
-            let mut chunk_data = Vec::new();
-            let mut remaining = INLINE_THRESHOLD;
-
-            // Fill the buffer up to INLINE_THRESHOLD
-            while remaining > 0 {
-                let to_read = remaining.min(buffer.len());
-                let n = reader.read(&mut buffer[..to_read]).await?;
-                if n == 0 {
-                    break;
-                }
-                chunk_data.extend_from_slice(&buffer[..n]);
-                remaining -= n;
-            }
-
-            if chunk_data.is_empty() {
-                break;
-            }
-
-            // If this is the first chunk and it's the only one, we might inline it
-            if first_chunk.is_none() && remaining > 0 {
-                // This is the first and last chunk (didn't fill the buffer)
-                first_chunk = Some(chunk_data);
-                break;
-            } else if first_chunk.is_none() {
-                // First chunk but more data coming - store it
-                first_chunk = Some(chunk_data);
-            } else {
-                // Store the previous first_chunk if we haven't yet
-                if let Some(fc) = first_chunk.take() {
-                    let hash = store.put_chunk(fc.into()).await;
-                    hashes.push(hash);
-                }
-                // Store current chunk
-                let hash = store.put_chunk(chunk_data.into()).await;
-                hashes.push(hash);
-            }
-        }
-
-        // Determine content ref based on what we collected
-        let content_ref = if let Some(fc) = first_chunk {
-            if hashes.is_empty() && fc.len() <= INLINE_THRESHOLD {
-                // Small enough to inline
-                ContentRef::inline(fc)
-            } else {
-                // Need to store first chunk too
-                let hash = store.put_chunk(fc.into()).await;
-                hashes.insert(0, hash);
-                ContentRef::chunked(hashes)
-            }
-        } else if hashes.is_empty() {
-            // Empty content
-            ContentRef::inline(Vec::new())
-        } else {
-            ContentRef::chunked(hashes)
-        };
-
-        let mut branch = self
-            .branches
-            .get(branch_name)
-            .expect("branch not found")
-            .write()
-            .unwrap();
-
-        let parents = branch.frontier().to_vec();
-
-        let commit = Commit {
-            parents,
-            content: content_ref,
-            author: author.to_string(),
-            timestamp,
-            meta: None,
-        };
-
-        Ok(branch.add_commit(commit))
+        Ok(self.write_sync(branch_name, &content, author, timestamp))
     }
 
     /// Stream content from the frontier of a branch.
-    /// Returns a stream of chunks, or None if branch is empty or has multiple tips.
-    pub fn read_stream<'a>(
-        &'a self,
-        branch_name: &str,
-        store: &'a dyn ContentStore,
-    ) -> Option<ContentStream<'a>> {
+    /// Returns a stream that yields a single chunk, or None if branch is empty or has multiple tips.
+    pub fn read_stream(&self, branch_name: &str) -> Option<ContentStream> {
         let branch = self.branches.get(branch_name)?.read().unwrap();
         let frontier = branch.frontier();
 
@@ -720,7 +577,7 @@ impl Object {
         let content = commit.content.clone();
         drop(branch); // Release lock before returning stream
 
-        Some(ContentStream::new(content, store))
+        Some(ContentStream::new(content))
     }
 
     /// Get the frontier commit IDs for a branch.
@@ -730,94 +587,31 @@ impl Object {
     }
 }
 
-/// A stream that yields chunks of content.
+/// A stream that yields content as a single chunk.
 ///
-/// For inline content, yields a single chunk containing all data.
-/// For chunked content, yields each chunk as it's loaded from the store.
-pub struct ContentStream<'a> {
-    inner: ContentStreamInner<'a>,
+/// Since commits store content directly, this always yields once then completes.
+pub struct ContentStream {
+    content: Option<Bytes>,
 }
 
-enum ContentStreamInner<'a> {
-    /// Inline content - yields once then done
-    Inline(Option<Bytes>),
-    /// Chunked content - yields each chunk
-    Chunked {
-        hashes: Vec<ChunkHash>,
-        index: usize,
-        store: &'a dyn ContentStore,
-    },
-    /// Stream exhausted
-    Done,
-}
-
-impl<'a> ContentStream<'a> {
-    fn new(content: ContentRef, store: &'a dyn ContentStore) -> Self {
-        let inner = match content {
-            ContentRef::Inline(data) => {
-                ContentStreamInner::Inline(Some(Bytes::copy_from_slice(&data)))
-            }
-            ContentRef::Chunked(hashes) => ContentStreamInner::Chunked {
-                hashes,
-                index: 0,
-                store,
-            },
-        };
-        ContentStream { inner }
+impl ContentStream {
+    fn new(content: Box<[u8]>) -> Self {
+        ContentStream {
+            content: Some(Bytes::copy_from_slice(&content)),
+        }
     }
 
-    /// Collect all chunks into a single Vec<u8>.
+    /// Collect the content into a Vec<u8>.
     pub async fn collect_bytes(self) -> Vec<u8> {
-        use futures::stream::StreamExt;
-        let chunks: Vec<Bytes> = self.collect().await;
-        chunks.iter().flat_map(|c| c.iter().copied()).collect()
+        self.content.map(|b| b.to_vec()).unwrap_or_default()
     }
 }
 
-impl<'a> Stream for ContentStream<'a> {
+impl Stream for ContentStream {
     type Item = Bytes;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match &mut self.inner {
-            ContentStreamInner::Inline(data) => match data.take() {
-                Some(d) => Poll::Ready(Some(d)),
-                None => {
-                    self.inner = ContentStreamInner::Done;
-                    Poll::Ready(None)
-                }
-            },
-            ContentStreamInner::Chunked {
-                hashes,
-                index,
-                store,
-            } => {
-                if *index >= hashes.len() {
-                    self.inner = ContentStreamInner::Done;
-                    return Poll::Ready(None);
-                }
-
-                let hash = hashes[*index];
-                let store_ref = *store;
-
-                // Create and poll a future to fetch the chunk
-                let fut = async move { store_ref.get_chunk(&hash).await };
-                let mut pinned = Box::pin(fut);
-
-                match pinned.as_mut().poll(cx) {
-                    Poll::Ready(Some(bytes)) => {
-                        *index += 1;
-                        Poll::Ready(Some(bytes))
-                    }
-                    Poll::Ready(None) => {
-                        // Chunk not found
-                        self.inner = ContentStreamInner::Done;
-                        Poll::Ready(None)
-                    }
-                    Poll::Pending => Poll::Pending,
-                }
-            }
-            ContentStreamInner::Done => Poll::Ready(None),
-        }
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(self.content.take())
     }
 }
 

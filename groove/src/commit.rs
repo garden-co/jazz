@@ -1,7 +1,5 @@
 use std::collections::BTreeMap;
 
-use crate::storage::ContentRef;
-
 /// A commit ID is the BLAKE3 hash of the commit's canonical representation.
 /// Using full 256-bit hash for now (naive implementation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -18,13 +16,16 @@ impl CommitId {
 }
 
 /// A commit in the object's history.
-/// Contains a full snapshot of the object state.
+/// Contains a full snapshot of the object state as encoded row bytes.
+///
+/// Note: Commits store row data directly. Large binary data should use
+/// BLOB columns which handle their own chunking via ContentRef.
 #[derive(Debug, Clone)]
 pub struct Commit {
     /// Parent commit IDs (empty for root commits, multiple for merge commits)
     pub parents: Vec<CommitId>,
-    /// Snapshot of the object state (inline for small, chunked for large)
-    pub content: ContentRef,
+    /// Snapshot of the object state as encoded row bytes
+    pub content: Box<[u8]>,
     /// Author identifier (account/device ID)
     pub author: String,
     /// Timestamp (milliseconds since epoch)
@@ -44,21 +45,9 @@ impl Commit {
             hasher.update(parent.as_bytes());
         }
 
-        // Hash content ref
-        match &self.content {
-            ContentRef::Inline(data) => {
-                hasher.update(&[0u8]); // Tag for inline
-                hasher.update(&(data.len() as u64).to_le_bytes());
-                hasher.update(data);
-            }
-            ContentRef::Chunked(hashes) => {
-                hasher.update(&[1u8]); // Tag for chunked
-                hasher.update(&(hashes.len() as u64).to_le_bytes());
-                for hash in hashes {
-                    hasher.update(hash.as_bytes());
-                }
-            }
-        }
+        // Hash content directly
+        hasher.update(&(self.content.len() as u64).to_le_bytes());
+        hasher.update(&self.content);
 
         // Hash author
         hasher.update(&(self.author.len() as u64).to_le_bytes());

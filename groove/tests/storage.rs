@@ -48,7 +48,7 @@ fn list_commits_returns_all_commits_not_just_frontier() {
     // Create a chain of 3 commits: c1 <- c2 <- c3
     let c1 = Commit {
         parents: vec![],
-        content: ContentRef::inline(b"first".to_vec()),
+        content: b"first".to_vec().into_boxed_slice(),
         author: "alice".to_string(),
         timestamp: 1000,
         meta: None,
@@ -57,7 +57,7 @@ fn list_commits_returns_all_commits_not_just_frontier() {
 
     let c2 = Commit {
         parents: vec![id1],
-        content: ContentRef::inline(b"second".to_vec()),
+        content: b"second".to_vec().into_boxed_slice(),
         author: "alice".to_string(),
         timestamp: 2000,
         meta: None,
@@ -66,7 +66,7 @@ fn list_commits_returns_all_commits_not_just_frontier() {
 
     let c3 = Commit {
         parents: vec![id2],
-        content: ContentRef::inline(b"third".to_vec()),
+        content: b"third".to_vec().into_boxed_slice(),
         author: "alice".to_string(),
         timestamp: 3000,
         meta: None,

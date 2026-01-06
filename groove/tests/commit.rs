@@ -1,11 +1,11 @@
 //! Integration tests for Commit.
 
-use groove::{ChunkHash, Commit, CommitId, ContentRef};
+use groove::{Commit, CommitId};
 
 fn make_commit(content: &[u8], parents: Vec<CommitId>) -> Commit {
     Commit {
         parents,
-        content: ContentRef::inline(content.to_vec()),
+        content: content.to_vec().into_boxed_slice(),
         author: "test-author".to_string(),
         timestamp: 1000,
         meta: None,
@@ -29,26 +29,43 @@ fn different_content_different_id() {
 }
 
 #[test]
-fn inline_vs_chunked_different_id() {
-    let data = b"hello";
-    let commit_inline = Commit {
+fn different_author_different_id() {
+    let commit1 = Commit {
         parents: vec![],
-        content: ContentRef::inline(data.to_vec()),
+        content: b"hello".to_vec().into_boxed_slice(),
+        author: "alice".to_string(),
+        timestamp: 1000,
+        meta: None,
+    };
+
+    let commit2 = Commit {
+        parents: vec![],
+        content: b"hello".to_vec().into_boxed_slice(),
+        author: "bob".to_string(),
+        timestamp: 1000,
+        meta: None,
+    };
+
+    assert_ne!(commit1.compute_id(), commit2.compute_id());
+}
+
+#[test]
+fn different_timestamp_different_id() {
+    let commit1 = Commit {
+        parents: vec![],
+        content: b"hello".to_vec().into_boxed_slice(),
         author: "test".to_string(),
         timestamp: 1000,
         meta: None,
     };
 
-    // Same content but as a single "chunk"
-    let chunk_hash = ChunkHash::compute(data);
-    let commit_chunked = Commit {
+    let commit2 = Commit {
         parents: vec![],
-        content: ContentRef::chunked(vec![chunk_hash]),
+        content: b"hello".to_vec().into_boxed_slice(),
         author: "test".to_string(),
-        timestamp: 1000,
+        timestamp: 2000,
         meta: None,
     };
 
-    // These should have different IDs because the storage format differs
-    assert_ne!(commit_inline.compute_id(), commit_chunked.compute_id());
+    assert_ne!(commit1.compute_id(), commit2.compute_id());
 }

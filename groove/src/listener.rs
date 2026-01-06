@@ -187,8 +187,7 @@ impl ObjectState {
 
         let current = self.tips.first()
             .and_then(|id| branch.get_commit(id))
-            .and_then(|c| c.content.as_inline())
-            .map(|b| Bytes::copy_from_slice(b))
+            .map(|c| Bytes::copy_from_slice(&c.content))
             .unwrap_or_else(Bytes::new);
 
         match &self.previous_tips {
@@ -199,8 +198,7 @@ impl ObjectState {
                 }
                 let previous = prev_tips.first()
                     .and_then(|id| branch.get_commit(id))
-                    .and_then(|c| c.content.as_inline())
-                    .map(|b| Bytes::copy_from_slice(b))
+                    .map(|c| Bytes::copy_from_slice(&c.content))
                     .unwrap_or_else(Bytes::new);
 
                 if previous == current {
@@ -216,32 +214,17 @@ impl ObjectState {
         }
     }
 
-    /// Get the content of a specific tip by commit ID (sync, inline only).
+    /// Get the content of a specific tip by commit ID.
     pub fn get_tip_content(&self, commit_id: &CommitId) -> Option<Bytes> {
         let branch = self.branch.read().unwrap();
         branch.get_commit(commit_id)
-            .and_then(|c| c.content.as_inline())
-            .map(|b| Bytes::copy_from_slice(b))
+            .map(|c| Bytes::copy_from_slice(&c.content))
     }
 
-    /// Get the content of a specific tip by commit ID (async, supports chunked).
+    /// Get the content of a specific tip by commit ID (async).
+    /// Note: Now equivalent to get_tip_content since commits store content directly.
     pub async fn get_tip_content_async(&self, commit_id: &CommitId) -> Option<Bytes> {
-        let content_ref = {
-            let branch = self.branch.read().unwrap();
-            branch.get_commit(commit_id).map(|c| c.content.clone())
-        }?;
-
-        match content_ref {
-            crate::storage::ContentRef::Inline(data) => Some(Bytes::copy_from_slice(&data)),
-            crate::storage::ContentRef::Chunked(hashes) => {
-                let mut result = Vec::new();
-                for hash in hashes {
-                    let chunk = self.env.get_chunk(&hash).await?;
-                    result.extend_from_slice(&chunk);
-                }
-                Some(Bytes::from(result))
-            }
-        }
+        self.get_tip_content(commit_id)
     }
 
     /// Get author of a specific tip.
@@ -537,7 +520,7 @@ impl ObjectListenerRegistry {
 
 // ========== Helper functions ==========
 
-/// Helper to compute merged content from commit IDs using a merge strategy (sync, inline only).
+/// Helper to compute merged content from commit IDs using a merge strategy.
 pub fn merge_commit_ids(
     tips: &[CommitId],
     strategy: &dyn crate::merge::MergeStrategy,
@@ -550,13 +533,11 @@ pub fn merge_commit_ids(
     let tip_contents: Vec<Vec<u8>> = tips
         .iter()
         .filter_map(|id| branch.get_commit(id))
-        .filter_map(|c| c.content.as_inline().map(|b| b.to_vec()))
+        .map(|c| c.content.to_vec())
         .collect();
 
     if tip_contents.len() != tips.len() {
-        return Err(ListenerError::StorageError(
-            "Some commits have chunked content".to_string(),
-        ));
+        return Err(ListenerError::NotFound);
     }
 
     if tip_contents.len() == 1 {
@@ -569,56 +550,10 @@ pub fn merge_commit_ids(
         vec![]
     };
 
-    let base: Option<&[u8]> = lca
+    let base: Option<Vec<u8>> = lca
         .first()
         .and_then(|id| branch.get_commit(id))
-        .and_then(|c| c.content.as_inline());
-
-    let tip_refs: Vec<&[u8]> = tip_contents.iter().map(|v| v.as_slice()).collect();
-
-    strategy
-        .merge(base, &tip_refs)
-        .map(Bytes::from)
-        .map_err(|e| ListenerError::MergeError(e.to_string()))
-}
-
-/// Helper to compute merged content from commit IDs (async, supports chunked).
-pub async fn merge_commit_ids_async(
-    tips: &[CommitId],
-    strategy: &dyn crate::merge::MergeStrategy,
-    branch: &Branch,
-    env: &dyn Environment,
-) -> Result<Bytes, ListenerError> {
-    if tips.is_empty() {
-        return Err(ListenerError::BranchNotFound);
-    }
-
-    let mut tip_contents: Vec<Vec<u8>> = Vec::new();
-    for id in tips {
-        let commit = branch.get_commit(id).ok_or(ListenerError::NotFound)?;
-        let content = load_content_ref(&commit.content, env).await?;
-        tip_contents.push(content);
-    }
-
-    if tip_contents.len() == 1 {
-        return Ok(Bytes::from(tip_contents.into_iter().next().unwrap()));
-    }
-
-    let lca = if tips.len() >= 2 {
-        branch.find_lca(&tips[0], &tips[1])
-    } else {
-        vec![]
-    };
-
-    let base: Option<Vec<u8>> = if let Some(lca_id) = lca.first() {
-        if let Some(commit) = branch.get_commit(lca_id) {
-            Some(load_content_ref(&commit.content, env).await?)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+        .map(|c| c.content.to_vec());
 
     let tip_refs: Vec<&[u8]> = tip_contents.iter().map(|v| v.as_slice()).collect();
 
@@ -628,25 +563,16 @@ pub async fn merge_commit_ids_async(
         .map_err(|e| ListenerError::MergeError(e.to_string()))
 }
 
-/// Load content from a ContentRef.
-async fn load_content_ref(
-    content: &crate::storage::ContentRef,
+/// Helper to compute merged content from commit IDs (async).
+/// Note: Now equivalent to merge_commit_ids since commits store content directly.
+#[allow(unused_variables)]
+pub async fn merge_commit_ids_async(
+    tips: &[CommitId],
+    strategy: &dyn crate::merge::MergeStrategy,
+    branch: &Branch,
     env: &dyn Environment,
-) -> Result<Vec<u8>, ListenerError> {
-    match content {
-        crate::storage::ContentRef::Inline(data) => Ok(data.to_vec()),
-        crate::storage::ContentRef::Chunked(hashes) => {
-            let mut result = Vec::new();
-            for hash in hashes {
-                let chunk = env
-                    .get_chunk(hash)
-                    .await
-                    .ok_or_else(|| ListenerError::StorageError("Chunk not found".to_string()))?;
-                result.extend_from_slice(&chunk);
-            }
-            Ok(result)
-        }
-    }
+) -> Result<Bytes, ListenerError> {
+    merge_commit_ids(tips, strategy, branch)
 }
 
 // Tests have been moved to tests/listener.rs

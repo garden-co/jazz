@@ -1,6 +1,6 @@
 //! Integration tests for ObjectListenerRegistry.
 
-use groove::{Branch, Commit, ContentRef, Environment, MemoryEnvironment, ObjectKey, ObjectListenerRegistry, ObjectState, ObjectId};
+use groove::{Branch, Commit, Environment, MemoryEnvironment, ObjectKey, ObjectListenerRegistry, ObjectState, ObjectId};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -12,7 +12,7 @@ fn make_branch_with_commit(content: &[u8]) -> (Arc<RwLock<Branch>>, groove::Comm
     let mut branch = Branch::new("main");
     let commit = Commit {
         parents: vec![],
-        content: ContentRef::inline(content.to_vec()),
+        content: content.to_vec().into_boxed_slice(),
         author: "alice".to_string(),
         timestamp: 1000,
         meta: None,
@@ -117,7 +117,7 @@ fn state_tracks_previous_tips() {
         let mut b = branch.write().unwrap();
         let commit = Commit {
             parents: vec![id1],
-            content: ContentRef::inline(b"second".to_vec()),
+            content: b"second".to_vec().into_boxed_slice(),
             author: "alice".to_string(),
             timestamp: 2000,
             meta: None,
@@ -177,7 +177,7 @@ fn unsubscribe_removes_listener() {
         let mut b = branch.write().unwrap();
         b.add_commit(Commit {
             parents: vec![],
-            content: ContentRef::inline(b"world".to_vec()),
+            content: b"world".to_vec().into_boxed_slice(),
             author: "alice".to_string(),
             timestamp: 2000,
             meta: None,
@@ -203,7 +203,7 @@ fn diff_raw_detects_changes() {
         let mut b = branch.write().unwrap();
         b.add_commit(Commit {
             parents: vec![id1],
-            content: ContentRef::inline(b"hello".to_vec()),
+            content: b"hello".to_vec().into_boxed_slice(),
             author: "alice".to_string(),
             timestamp: 2000,
             meta: None,
@@ -219,7 +219,7 @@ fn diff_raw_detects_changes() {
         let mut b = branch.write().unwrap();
         b.add_commit(Commit {
             parents: vec![id2],
-            content: ContentRef::inline(b"world".to_vec()),
+            content: b"world".to_vec().into_boxed_slice(),
             author: "alice".to_string(),
             timestamp: 3000,
             meta: None,

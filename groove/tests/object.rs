@@ -4,15 +4,13 @@ use bytes::Bytes;
 use futures::executor::block_on;
 use futures::io::AllowStdIo;
 use futures::stream::StreamExt;
-use groove::{
-    Commit, CommitId, ContentRef, LastWriterWins, MemoryContentStore, Object, ObjectId, INLINE_THRESHOLD,
-};
+use groove::{Commit, CommitId, LastWriterWins, Object, ObjectId};
 use std::io::Cursor;
 
 fn make_commit(content: &[u8], parents: Vec<CommitId>) -> Commit {
     Commit {
         parents,
-        content: ContentRef::inline(content.to_vec()),
+        content: content.to_vec().into_boxed_slice(),
         author: "test-author".to_string(),
         timestamp: 1000,
         meta: None,
@@ -84,7 +82,7 @@ fn merge_branches_simple() {
     // Add commit to main
     let c2 = Commit {
         parents: vec![id1],
-        content: ContentRef::inline(b"main-change".to_vec()),
+        content: b"main-change".to_vec().into_boxed_slice(),
         author: "alice".to_string(),
         timestamp: 2000,
         meta: None,
@@ -94,7 +92,7 @@ fn merge_branches_simple() {
     // Add commit to feature
     let c3 = Commit {
         parents: vec![id1],
-        content: ContentRef::inline(b"feature-change".to_vec()),
+        content: b"feature-change".to_vec().into_boxed_slice(),
         author: "bob".to_string(),
         timestamp: 2001,
         meta: None,
@@ -150,21 +148,25 @@ fn read_sync_empty_branch_returns_none() {
 }
 
 #[test]
-#[should_panic(expected = "content exceeds INLINE_THRESHOLD")]
-fn write_sync_panics_on_large_content() {
+fn sync_write_large_content() {
     let obj = Object::new(ObjectId::new(1), "test");
-    let large_content = vec![0u8; INLINE_THRESHOLD + 1];
+
+    // Large content is now stored directly (no chunking at commit level)
+    let large_content: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
     obj.write_sync("main", &large_content, "alice", 1000);
+
+    // Should be readable
+    let content = obj.read_sync("main").unwrap();
+    assert_eq!(content, large_content);
 }
 
 #[test]
-fn async_write_small_content() {
+fn async_write_content() {
     let obj = Object::new(ObjectId::new(1), "test");
-    let store = MemoryContentStore::new();
 
-    // Write small content (should be inline)
+    // Write content
     block_on(async {
-        obj.write("main", b"hello", "alice", 1000, &store).await;
+        obj.write("main", b"hello", "alice", 1000).await;
     });
 
     // Read back
@@ -175,53 +177,48 @@ fn async_write_small_content() {
 #[test]
 fn async_write_large_content() {
     let obj = Object::new(ObjectId::new(1), "test");
-    let store = MemoryContentStore::new();
 
-    // Write large content (should be chunked)
-    let large_content: Vec<u8> = (0..INLINE_THRESHOLD * 3).map(|i| (i % 256) as u8).collect();
+    // Large content stored directly
+    let large_content: Vec<u8> = (0..1024 * 1024 * 3).map(|i| (i % 256) as u8).collect();
 
     block_on(async {
-        obj.write("main", &large_content, "alice", 1000, &store)
-            .await;
+        obj.write("main", &large_content, "alice", 1000).await;
     });
 
-    // Read sync should return None (content is chunked)
-    assert!(obj.read_sync("main").is_none());
+    // Should be readable via sync (no chunking anymore)
+    let content = obj.read_sync("main").unwrap();
+    assert_eq!(content, large_content);
 
-    // Read async should work
-    let content = block_on(async { obj.read("main", &store).await });
+    // Async read should also work
+    let content = block_on(async { obj.read("main").await });
     assert_eq!(content.unwrap(), large_content);
 }
 
 #[test]
-fn async_read_inline_content() {
+fn async_read_content() {
     let obj = Object::new(ObjectId::new(1), "test");
-    let store = MemoryContentStore::new();
 
-    // Write using sync (inline)
+    // Write using sync
     obj.write_sync("main", b"hello", "alice", 1000);
 
     // Read using async should also work
-    let content = block_on(async { obj.read("main", &store).await });
+    let content = block_on(async { obj.read("main").await });
     assert_eq!(content.unwrap(), b"hello");
 }
 
 #[test]
-fn stream_write_small_content() {
+fn stream_write_content() {
     let obj = Object::new(ObjectId::new(1), "test");
-    let store = MemoryContentStore::new();
 
-    // Small content should be inlined
     let data = b"hello streaming world";
     let cursor = AllowStdIo::new(Cursor::new(data.to_vec()));
 
     block_on(async {
-        obj.write_stream("main", cursor, "alice", 1000, &store)
+        obj.write_stream("main", cursor, "alice", 1000)
             .await
             .unwrap();
     });
 
-    // Should be readable via sync (inline)
     let content = obj.read_sync("main").unwrap();
     assert_eq!(content, data);
 }
@@ -229,55 +226,47 @@ fn stream_write_small_content() {
 #[test]
 fn stream_write_large_content() {
     let obj = Object::new(ObjectId::new(1), "test");
-    let store = MemoryContentStore::new();
 
-    // Large content should be chunked
-    let large_content: Vec<u8> = (0..INLINE_THRESHOLD * 5).map(|i| (i % 256) as u8).collect();
+    let large_content: Vec<u8> = (0..1024 * 1024 * 5).map(|i| (i % 256) as u8).collect();
     let cursor = AllowStdIo::new(Cursor::new(large_content.clone()));
 
     block_on(async {
-        obj.write_stream("main", cursor, "alice", 1000, &store)
+        obj.write_stream("main", cursor, "alice", 1000)
             .await
             .unwrap();
     });
 
-    // Should NOT be readable via sync (chunked)
-    assert!(obj.read_sync("main").is_none());
-
-    // But should be readable via async
-    let content = block_on(async { obj.read("main", &store).await });
-    assert_eq!(content.unwrap(), large_content);
+    // Should be readable (content stored directly, no chunking)
+    let content = obj.read_sync("main").unwrap();
+    assert_eq!(content, large_content);
 }
 
 #[test]
 fn stream_write_empty_content() {
     let obj = Object::new(ObjectId::new(1), "test");
-    let store = MemoryContentStore::new();
 
     let cursor = AllowStdIo::new(Cursor::new(Vec::<u8>::new()));
 
     block_on(async {
-        obj.write_stream("main", cursor, "alice", 1000, &store)
+        obj.write_stream("main", cursor, "alice", 1000)
             .await
             .unwrap();
     });
 
-    // Empty content should be inline
     let content = obj.read_sync("main").unwrap();
     assert_eq!(content, b"");
 }
 
 #[test]
-fn stream_read_inline_content() {
+fn stream_read_content() {
     let obj = Object::new(ObjectId::new(1), "test");
-    let store = MemoryContentStore::new();
 
-    // Write inline content
+    // Write content
     obj.write_sync("main", b"hello", "alice", 1000);
 
-    // Stream read should work
+    // Stream read should work (returns single chunk now)
     let chunks: Vec<Bytes> = block_on(async {
-        let stream = obj.read_stream("main", &store).unwrap();
+        let stream = obj.read_stream("main").unwrap();
         stream.collect().await
     });
 
@@ -286,86 +275,28 @@ fn stream_read_inline_content() {
 }
 
 #[test]
-fn stream_read_chunked_content() {
+fn stream_read_large_content() {
     let obj = Object::new(ObjectId::new(1), "test");
-    let store = MemoryContentStore::new();
 
-    // Write chunked content
-    let large_content: Vec<u8> = (0..INLINE_THRESHOLD * 3).map(|i| (i % 256) as u8).collect();
+    // Write large content
+    let large_content: Vec<u8> = (0..1024 * 1024 * 3).map(|i| (i % 256) as u8).collect();
+    obj.write_sync("main", &large_content, "alice", 1000);
 
-    block_on(async {
-        obj.write("main", &large_content, "alice", 1000, &store)
-            .await;
-    });
-
-    // Stream read should yield multiple chunks
+    // Stream read yields single chunk (no chunking at commit level)
     let chunks: Vec<Bytes> = block_on(async {
-        let stream = obj.read_stream("main", &store).unwrap();
+        let stream = obj.read_stream("main").unwrap();
         stream.collect().await
     });
 
-    // Should have 3 chunks
-    assert_eq!(chunks.len(), 3);
-
-    // Concatenated should equal original
-    let reassembled: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
-    assert_eq!(reassembled, large_content);
+    // Single chunk containing all content
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(&chunks[0][..], &large_content[..]);
 }
 
 #[test]
 fn stream_read_empty_branch_returns_none() {
     let obj = Object::new(ObjectId::new(1), "test");
-    let store = MemoryContentStore::new();
-
-    assert!(obj.read_stream("main", &store).is_none());
-}
-
-#[test]
-fn stream_roundtrip_exact_threshold() {
-    let obj = Object::new(ObjectId::new(1), "test");
-    let store = MemoryContentStore::new();
-
-    // Content exactly at threshold should be inline
-    let data: Vec<u8> = (0..INLINE_THRESHOLD).map(|i| (i % 256) as u8).collect();
-    let cursor = AllowStdIo::new(Cursor::new(data.clone()));
-
-    block_on(async {
-        obj.write_stream("main", cursor, "alice", 1000, &store)
-            .await
-            .unwrap();
-    });
-
-    // Should be inline
-    let content = obj.read_sync("main").unwrap();
-    assert_eq!(content, data);
-}
-
-#[test]
-fn stream_roundtrip_just_over_threshold() {
-    let obj = Object::new(ObjectId::new(1), "test");
-    let store = MemoryContentStore::new();
-
-    // Content just over threshold should be chunked
-    let data: Vec<u8> = (0..INLINE_THRESHOLD + 1).map(|i| (i % 256) as u8).collect();
-    let cursor = AllowStdIo::new(Cursor::new(data.clone()));
-
-    block_on(async {
-        obj.write_stream("main", cursor, "alice", 1000, &store)
-            .await
-            .unwrap();
-    });
-
-    // Should be chunked (not readable via sync)
-    assert!(obj.read_sync("main").is_none());
-
-    // But readable via stream
-    let chunks: Vec<Bytes> = block_on(async {
-        let stream = obj.read_stream("main", &store).unwrap();
-        stream.collect().await
-    });
-
-    let reassembled: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
-    assert_eq!(reassembled, data);
+    assert!(obj.read_stream("main").is_none());
 }
 
 #[test]

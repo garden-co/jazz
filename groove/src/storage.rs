@@ -197,15 +197,15 @@ fn decode_varint(data: &[u8]) -> Result<(usize, usize), ContentRefError> {
     Err(ContentRefError::UnexpectedEof)
 }
 
-/// Metadata about a commit (without content).
+/// Metadata about a commit (without full content bytes).
 #[derive(Debug, Clone)]
 pub struct CommitMeta {
     pub id: CommitId,
     pub parents: Vec<CommitId>,
     pub author: String,
     pub timestamp: u64,
-    /// Whether content is inline or chunked.
-    pub content_ref: ContentRef,
+    /// Size of the commit content in bytes.
+    pub content_size: usize,
 }
 
 /// Storage interface for content chunks.
@@ -309,7 +309,7 @@ impl CommitStore for MemoryEnvironment {
             parents: c.parents.clone(),
             author: c.author.clone(),
             timestamp: c.timestamp,
-            content_ref: c.content.clone(),
+            content_size: c.content.len(),
         })
     }
 
