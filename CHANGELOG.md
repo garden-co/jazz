@@ -1,3 +1,6 @@
+Released Jazz 0.19.18:
+- Bugfix: fixed Clerk metadata schema to correctly parse the Jazz credentials. Bug introduced in 0.19.17
+
 Released Jazz 0.19.17:
 - Bugfix: fixed an issue where calling logOut multiple times concurrently could trigger duplicate logout operations
 
