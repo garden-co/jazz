@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { Plus, Sun, Moon } from "lucide-react";
-import { useJazz, useOne } from "@jazz/react";
+import { useOne } from "@jazz/react";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import type { Database } from "@/generated/client";
+import { app } from "@/generated/client";
 
 interface HeaderProps {
   currentUserId: string | null;
@@ -11,10 +11,8 @@ interface HeaderProps {
 }
 
 export function Header({ currentUserId, onCreateIssue }: HeaderProps) {
-  const db = useJazz() as unknown as Database;
-
   // Fetch current user internally
-  const [currentUser] = useOne(db.users, currentUserId);
+  const [currentUser] = useOne(app.users, currentUserId);
 
   const [isDark, setIsDark] = useState(() => {
     if (typeof window !== "undefined") {

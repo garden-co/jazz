@@ -977,7 +977,17 @@ function generateClient(
     "// Generated from SQL schema by @jazz/schema",
     "// DO NOT EDIT MANUALLY",
     "",
-    'import { TableClient, type WasmDatabaseLike, type Unsubscribe, type TableDecoder, type BaseWhereInput, type IncludeSpec } from "@jazz/client";',
+    'import {',
+    '  TableClient,',
+    '  type WasmDatabaseLike,',
+    '  type Unsubscribe,',
+    '  type TableDecoder,',
+    '  type BaseWhereInput,',
+    '  type IncludeSpec,',
+    '  type SubscribableAllWithDb,',
+    '  type SubscribableOneWithDb,',
+    '  type MutableWithDb,',
+    '} from "@jazz/client";',
     'import { schemaMeta } from "./meta.js";',
   ];
 
@@ -1003,91 +1013,121 @@ function generateClient(
   lines.push(`import type { ObjectId, ${typeImports.join(", ")} } from "./types.js";`);
   lines.push("");
 
-  // Generate query builder classes for tables with refs
+  // Generate query builder classes for all tables
   for (const table of tables) {
     const typeName = singularize(toPascalCase(table.name));
-    const clientName = `${table.name}Client`;
+    const descriptorName = `${table.name}Descriptor`;
     const builderName = `${table.name}QueryBuilder`;
-    const tableReverseRefs = reverseRefs.get(table.name) ?? [];
-    const hasRefs = table.columns.some(c => c.sqlType.kind === "ref");
-    const hasReverseRefs = tableReverseRefs.length > 0;
-
-    if (hasRefs || hasReverseRefs) {
-      lines.push(`/**`);
-      lines.push(` * Query builder for ${table.name} with chainable where/with methods`);
-      lines.push(` */`);
-      lines.push(`export class ${builderName}<I extends ${typeName}Includes = {}> {`);
-      lines.push(`  private _client: ${clientName};`);
-      lines.push(`  private _where?: ${typeName}Filter;`);
-      lines.push(`  private _include?: I;`);
-      lines.push(``);
-      lines.push(`  constructor(client: ${clientName}, where?: ${typeName}Filter, include?: I) {`);
-      lines.push(`    this._client = client;`);
-      lines.push(`    this._where = where;`);
-      lines.push(`    this._include = include;`);
-      lines.push(`  }`);
-      lines.push(``);
-      lines.push(`  /**`);
-      lines.push(`   * Get a stable key representing this query's options (for React hook deduplication)`);
-      lines.push(`   */`);
-      lines.push(`  get _queryKey(): string {`);
-      lines.push(`    return JSON.stringify({ t: "${table.name}", w: this._where, i: this._include });`);
-      lines.push(`  }`);
-      lines.push(``);
-      lines.push(`  /**`);
-      lines.push(`   * Add a filter condition`);
-      lines.push(`   */`);
-      lines.push(`  where(filter: ${typeName}Filter): ${builderName}<I> {`);
-      lines.push(`    return new ${builderName}(this._client, filter, this._include);`);
-      lines.push(`  }`);
-      lines.push(``);
-      lines.push(`  /**`);
-      lines.push(`   * Specify which refs to include`);
-      lines.push(`   */`);
-      lines.push(`  with<NewI extends ${typeName}Includes>(include: NewI): ${builderName}<NewI> {`);
-      lines.push(`    return new ${builderName}(this._client, this._where, include);`);
-      lines.push(`  }`);
-      lines.push(``);
-      lines.push(`  /**`);
-      lines.push(`   * Subscribe to all matching ${table.name}`);
-      lines.push(`   */`);
-      lines.push(`  subscribeAll(callback: (rows: ${typeName}With<I>[]) => void): Unsubscribe {`);
-      lines.push(`    return this._client._subscribeAllInternal(`);
-      lines.push(`      { where: this._where as BaseWhereInput | undefined, include: this._include as IncludeSpec | undefined },`);
-      lines.push(`      callback as (rows: ${typeName}[]) => void`);
-      lines.push(`    );`);
-      lines.push(`  }`);
-      lines.push(``);
-      lines.push(`  /**`);
-      lines.push(`   * Subscribe to a single ${typeName} by ID`);
-      lines.push(`   */`);
-      lines.push(`  subscribe(id: ObjectId, callback: (row: ${typeName}With<I> | null) => void): Unsubscribe {`);
-      lines.push(`    return this._client._subscribeInternal(`);
-      lines.push(`      id,`);
-      lines.push(`      { include: this._include as IncludeSpec | undefined },`);
-      lines.push(`      callback as (row: ${typeName} | null) => void`);
-      lines.push(`    );`);
-      lines.push(`  }`);
-      lines.push(`}`);
-      lines.push(``);
-    }
-  }
-
-  // Generate table client classes
-  for (const table of tables) {
-    const typeName = singularize(toPascalCase(table.name));
-    const clientName = `${table.name}Client`;
-    const builderName = `${table.name}QueryBuilder`;
-    const tableReverseRefs = reverseRefs.get(table.name) ?? [];
-    const hasRefs = table.columns.some(c => c.sqlType.kind === "ref");
-    const hasReverseRefs = tableReverseRefs.length > 0;
 
     lines.push(`/**`);
-    lines.push(` * Client for the ${table.name} table`);
+    lines.push(` * Query builder for ${table.name} with chainable where/with methods`);
+    lines.push(` * @generated from schema table: ${table.name}`);
     lines.push(` */`);
-    lines.push(`export class ${clientName} extends TableClient<${typeName}> {`);
-    lines.push(`  constructor(db: WasmDatabaseLike) {`);
-    lines.push(`    super(db, schemaMeta.tables.${table.name}, schemaMeta, {`);
+    lines.push(`export class ${builderName}<I extends ${typeName}Includes = {}>`);
+    lines.push(`  implements SubscribableAllWithDb<${typeName}With<I>, ${typeName}Insert, Partial<${typeName}Insert>>,`);
+    lines.push(`             SubscribableOneWithDb<${typeName}With<I>, Partial<${typeName}Insert>> {`);
+    lines.push(`  private _descriptor: ${descriptorName};`);
+    lines.push(`  private _where?: ${typeName}Filter;`);
+    lines.push(`  private _include?: I;`);
+    lines.push(``);
+    lines.push(`  constructor(descriptor: ${descriptorName}, where?: ${typeName}Filter, include?: I) {`);
+    lines.push(`    this._descriptor = descriptor;`);
+    lines.push(`    this._where = where;`);
+    lines.push(`    this._include = include;`);
+    lines.push(`  }`);
+    lines.push(``);
+    lines.push(`  /**`);
+    lines.push(`   * Get a stable key representing this query's options (for React hook deduplication)`);
+    lines.push(`   * @generated from schema table: ${table.name}`);
+    lines.push(`   */`);
+    lines.push(`  get _queryKey(): string {`);
+    lines.push(`    return JSON.stringify({ t: "${table.name}", w: this._where, i: this._include });`);
+    lines.push(`  }`);
+    lines.push(``);
+    lines.push(`  /**`);
+    lines.push(`   * Add a filter condition`);
+    lines.push(`   * @generated from schema table: ${table.name}`);
+    lines.push(`   */`);
+    lines.push(`  where(filter: ${typeName}Filter): ${builderName}<I> {`);
+    lines.push(`    return new ${builderName}(this._descriptor, filter, this._include);`);
+    lines.push(`  }`);
+    lines.push(``);
+    lines.push(`  /**`);
+    lines.push(`   * Specify which refs to include`);
+    lines.push(`   * @generated from schema table: ${table.name}`);
+    lines.push(`   */`);
+    lines.push(`  with<NewI extends ${typeName}Includes>(include: NewI): ${builderName}<NewI> {`);
+    lines.push(`    return new ${builderName}(this._descriptor, this._where, include);`);
+    lines.push(`  }`);
+    lines.push(``);
+    lines.push(`  /**`);
+    lines.push(`   * Subscribe to all matching ${table.name}`);
+    lines.push(`   * @generated from schema table: ${table.name}`);
+    lines.push(`   */`);
+    lines.push(`  subscribeAll(db: WasmDatabaseLike, callback: (rows: ${typeName}With<I>[]) => void): Unsubscribe {`);
+    lines.push(`    return this._descriptor._subscribeAllInternal(`);
+    lines.push(`      db,`);
+    lines.push(`      { where: this._where as BaseWhereInput | undefined, include: this._include as IncludeSpec | undefined },`);
+    lines.push(`      callback as (rows: ${typeName}[]) => void`);
+    lines.push(`    );`);
+    lines.push(`  }`);
+    lines.push(``);
+    lines.push(`  /**`);
+    lines.push(`   * Subscribe to a single ${typeName} by ID`);
+    lines.push(`   * @generated from schema table: ${table.name}`);
+    lines.push(`   */`);
+    lines.push(`  subscribe(db: WasmDatabaseLike, id: ObjectId, callback: (row: ${typeName}With<I> | null) => void): Unsubscribe {`);
+    lines.push(`    return this._descriptor._subscribeInternal(`);
+    lines.push(`      db,`);
+    lines.push(`      id,`);
+    lines.push(`      { include: this._include as IncludeSpec | undefined },`);
+    lines.push(`      callback as (row: ${typeName} | null) => void`);
+    lines.push(`    );`);
+    lines.push(`  }`);
+    lines.push(``);
+    lines.push(`  /**`);
+    lines.push(`   * Create a new ${typeName}`);
+    lines.push(`   * @generated from schema table: ${table.name}`);
+    lines.push(`   */`);
+    lines.push(`  create(db: WasmDatabaseLike, data: ${typeName}Insert): ObjectId {`);
+    lines.push(`    return this._descriptor.create(db, data);`);
+    lines.push(`  }`);
+    lines.push(``);
+    lines.push(`  /**`);
+    lines.push(`   * Update a ${typeName}`);
+    lines.push(`   * @generated from schema table: ${table.name}`);
+    lines.push(`   */`);
+    lines.push(`  update(db: WasmDatabaseLike, id: ObjectId, data: Partial<${typeName}Insert>): void {`);
+    lines.push(`    return this._descriptor.update(db, id, data);`);
+    lines.push(`  }`);
+    lines.push(``);
+    lines.push(`  /**`);
+    lines.push(`   * Delete a ${typeName}`);
+    lines.push(`   * @generated from schema table: ${table.name}`);
+    lines.push(`   */`);
+    lines.push(`  delete(db: WasmDatabaseLike, id: ObjectId): void {`);
+    lines.push(`    return this._descriptor.delete(db, id);`);
+    lines.push(`  }`);
+    lines.push(`}`);
+    lines.push(``);
+  }
+
+  // Generate table descriptor classes
+  for (const table of tables) {
+    const typeName = singularize(toPascalCase(table.name));
+    const descriptorName = `${table.name}Descriptor`;
+    const builderName = `${table.name}QueryBuilder`;
+
+    lines.push(`/**`);
+    lines.push(` * Descriptor for the ${table.name} table (no db instance, db passed at method call time)`);
+    lines.push(` * @generated from schema table: ${table.name}`);
+    lines.push(` */`);
+    lines.push(`export class ${descriptorName} extends TableClient<${typeName}>`);
+    lines.push(`  implements SubscribableAllWithDb<${typeName}, ${typeName}Insert, Partial<${typeName}Insert>>,`);
+    lines.push(`             SubscribableOneWithDb<${typeName}, Partial<${typeName}Insert>>,`);
+    lines.push(`             MutableWithDb<${typeName}Insert, Partial<${typeName}Insert>> {`);
+    lines.push(`  constructor() {`);
+    lines.push(`    super(schemaMeta.tables.${table.name}, schemaMeta, {`);
     lines.push(`      rows: decode${typeName}Rows,`);
     lines.push(`      delta: decode${typeName}Delta,`);
     lines.push(`    });`);
@@ -1098,8 +1138,9 @@ function generateClient(
     lines.push(`  /**`);
     lines.push(`   * Create a new ${typeName}`);
     lines.push(`   * @returns The ObjectId of the created row`);
+    lines.push(`   * @generated from schema table: ${table.name}`);
     lines.push(`   */`);
-    lines.push(`  create(data: ${typeName}Insert): ObjectId {`);
+    lines.push(`  create(db: WasmDatabaseLike, data: ${typeName}Insert): ObjectId {`);
     lines.push(`    const values: Record<string, unknown> = {};`);
     for (const col of table.columns) {
       if (col.nullable) {
@@ -1108,153 +1149,117 @@ function generateClient(
         lines.push(`    values.${col.name} = data.${col.name};`);
       }
     }
-    lines.push(`    return this._create(values);`);
+    lines.push(`    return this._create(db, values);`);
     lines.push(`  }`);
     lines.push("");
 
     // update method
     lines.push(`  /**`);
     lines.push(`   * Update an existing ${typeName}`);
+    lines.push(`   * @generated from schema table: ${table.name}`);
     lines.push(`   */`);
-    lines.push(`  update(id: ObjectId, data: Partial<${typeName}Insert>): void {`);
-    lines.push(`    this._update(id, data as Record<string, unknown>);`);
+    lines.push(`  update(db: WasmDatabaseLike, id: ObjectId, data: Partial<${typeName}Insert>): void {`);
+    lines.push(`    this._update(db, id, data as Record<string, unknown>);`);
     lines.push(`  }`);
     lines.push("");
 
     // delete method
     lines.push(`  /**`);
     lines.push(`   * Delete a ${typeName}`);
+    lines.push(`   * @generated from schema table: ${table.name}`);
     lines.push(`   */`);
-    lines.push(`  delete(id: ObjectId): void {`);
-    lines.push(`    this._delete(id);`);
+    lines.push(`  delete(db: WasmDatabaseLike, id: ObjectId): void {`);
+    lines.push(`    this._delete(db, id);`);
     lines.push(`  }`);
     lines.push("");
 
-    if (hasRefs || hasReverseRefs) {
-      // Builder entry point: where()
-      lines.push(`  /**`);
-      lines.push(`   * Start a query with a filter condition`);
-      lines.push(`   */`);
-      lines.push(`  where(filter: ${typeName}Filter): ${builderName}<{}> {`);
-      lines.push(`    return new ${builderName}(this, filter, undefined);`);
-      lines.push(`  }`);
-      lines.push("");
+    // Builder entry point: where()
+    lines.push(`  /**`);
+    lines.push(`   * Start a query with a filter condition`);
+    lines.push(`   * @generated from schema table: ${table.name}`);
+    lines.push(`   */`);
+    lines.push(`  where(filter: ${typeName}Filter): ${builderName}<{}> {`);
+    lines.push(`    return new ${builderName}(this, filter, undefined);`);
+    lines.push(`  }`);
+    lines.push("");
 
-      // Builder entry point: with()
-      lines.push(`  /**`);
-      lines.push(`   * Start a query with includes`);
-      lines.push(`   */`);
-      lines.push(`  with<I extends ${typeName}Includes>(include: I): ${builderName}<I> {`);
-      lines.push(`    return new ${builderName}(this, undefined, include);`);
-      lines.push(`  }`);
-      lines.push("");
+    // Builder entry point: with()
+    lines.push(`  /**`);
+    lines.push(`   * Start a query with includes`);
+    lines.push(`   * @generated from schema table: ${table.name}`);
+    lines.push(`   */`);
+    lines.push(`  with<I extends ${typeName}Includes>(include: I): ${builderName}<I> {`);
+    lines.push(`    return new ${builderName}(this, undefined, include);`);
+    lines.push(`  }`);
+    lines.push("");
 
-      // subscribe method (direct, no includes)
-      lines.push(`  /**`);
-      lines.push(`   * Subscribe to a single ${typeName} by ID`);
-      lines.push(`   */`);
-      lines.push(`  subscribe(id: ObjectId, callback: (row: ${typeName} | null) => void): Unsubscribe {`);
-      lines.push(`    return this._subscribe(id, {}, callback);`);
-      lines.push(`  }`);
-      lines.push("");
+    // subscribeAll method (direct, no filters/includes)
+    lines.push(`  /**`);
+    lines.push(`   * Subscribe to all ${table.name}`);
+    lines.push(`   * @generated from schema table: ${table.name}`);
+    lines.push(`   */`);
+    lines.push(`  subscribeAll(db: WasmDatabaseLike, callback: (rows: ${typeName}[]) => void): Unsubscribe {`);
+    lines.push(`    return this._subscribeAll(db, {}, callback);`);
+    lines.push(`  }`);
+    lines.push("");
 
-      // subscribeAll method (direct, no filters/includes)
-      lines.push(`  /**`);
-      lines.push(`   * Subscribe to all ${table.name}`);
-      lines.push(`   */`);
-      lines.push(`  subscribeAll(callback: (rows: ${typeName}[]) => void): Unsubscribe {`);
-      lines.push(`    return this._subscribeAll({}, callback);`);
-      lines.push(`  }`);
-      lines.push("");
+    // subscribe method (direct, no includes)
+    lines.push(`  /**`);
+    lines.push(`   * Subscribe to a single ${typeName} by ID`);
+    lines.push(`   * @generated from schema table: ${table.name}`);
+    lines.push(`   */`);
+    lines.push(`  subscribe(db: WasmDatabaseLike, id: ObjectId, callback: (row: ${typeName} | null) => void): Unsubscribe {`);
+    lines.push(`    return this._subscribe(db, id, {}, callback);`);
+    lines.push(`  }`);
+    lines.push("");
 
-      // Internal methods for query builder to call
-      lines.push(`  /** @internal Used by query builder */`);
-      lines.push(`  _subscribeAllInternal(options: { where?: BaseWhereInput; include?: IncludeSpec }, callback: (rows: ${typeName}[]) => void): Unsubscribe {`);
-      lines.push(`    return this._subscribeAll(options, callback);`);
-      lines.push(`  }`);
-      lines.push("");
+    // Internal methods for query builder to call
+    lines.push(`  /** @internal Used by query builder */`);
+    lines.push(`  _subscribeAllInternal(db: WasmDatabaseLike, options: { where?: BaseWhereInput; include?: IncludeSpec }, callback: (rows: ${typeName}[]) => void): Unsubscribe {`);
+    lines.push(`    return this._subscribeAll(db, options, callback);`);
+    lines.push(`  }`);
+    lines.push("");
 
-      lines.push(`  /** @internal Used by query builder */`);
-      lines.push(`  _subscribeInternal(id: ObjectId, options: { include?: IncludeSpec }, callback: (row: ${typeName} | null) => void): Unsubscribe {`);
-      lines.push(`    return this._subscribe(id, options, callback);`);
-      lines.push(`  }`);
-    } else {
-      // No refs - simpler methods without builder
-      lines.push(`  /**`);
-      lines.push(`   * Subscribe to a single ${typeName} by ID`);
-      lines.push(`   */`);
-      lines.push(`  subscribe(id: ObjectId, callback: (row: ${typeName} | null) => void): Unsubscribe {`);
-      lines.push(`    return this._subscribe(id, {}, callback);`);
-      lines.push(`  }`);
-      lines.push("");
-
-      lines.push(`  /**`);
-      lines.push(`   * Subscribe to all ${table.name}`);
-      lines.push(`   */`);
-      lines.push(`  subscribeAll(callback: (rows: ${typeName}[]) => void): Unsubscribe {`);
-      lines.push(`    return this._subscribeAll({}, callback);`);
-      lines.push(`  }`);
-      lines.push("");
-
-      // For simple tables, add where method that returns a simple query object
-      lines.push(`  /**`);
-      lines.push(`   * Subscribe to ${table.name} matching a filter`);
-      lines.push(`   */`);
-      lines.push(`  where(filter: ${typeName}Filter): { subscribeAll(callback: (rows: ${typeName}[]) => void): Unsubscribe } {`);
-      lines.push(`    return {`);
-      lines.push(`      subscribeAll: (callback) => this._subscribeAll({ where: filter as BaseWhereInput }, callback)`);
-      lines.push(`    };`);
-      lines.push(`  }`);
-    }
+    lines.push(`  /** @internal Used by query builder */`);
+    lines.push(`  _subscribeInternal(db: WasmDatabaseLike, id: ObjectId, options: { include?: IncludeSpec }, callback: (row: ${typeName} | null) => void): Unsubscribe {`);
+    lines.push(`    return this._subscribe(db, id, options, callback);`);
+    lines.push(`  }`);
 
     lines.push(`}`);
     lines.push("");
   }
 
-  // Generate Database interface
+  // Generate app object (typed schema descriptor)
   lines.push(`/**`);
-  lines.push(` * Typed database interface`);
-  lines.push(` */`);
-  lines.push(`export interface Database {`);
-  lines.push(`  /** Raw WASM database for direct SQL access */`);
-  lines.push(`  raw: WasmDatabaseLike;`);
-  for (const table of tables) {
-    const clientName = `${table.name}Client`;
-    const propName = table.name.toLowerCase();
-    lines.push(`  ${propName}: ${clientName};`);
-  }
-  lines.push(`}`);
-  lines.push("");
-
-  // Generate createDatabase function
-  lines.push(`/**`);
-  lines.push(` * Create a typed database client from a WASM database instance.`);
+  lines.push(` * Typed schema descriptor for use with React hooks.`);
+  lines.push(` * Pass queries to useAll/useOne, which inject the db from context.`);
   lines.push(` *`);
   lines.push(` * @example`);
   lines.push(` * \`\`\`typescript`);
-  lines.push(` * import init, { WasmDatabase } from './pkg/groove_wasm.js';`);
+  lines.push(` * import { app } from './generated/client';`);
+  lines.push(` * import { useAll, useOne, useMutate } from '@jazz/react';`);
   lines.push(` *`);
-  lines.push(` * await init();`);
-  lines.push(` * const wasmDb = new WasmDatabase();`);
-  lines.push(` * const db = createDatabase(wasmDb);`);
+  lines.push(` * function UserList() {`);
+  lines.push(` *   const [users, loading, mutate] = useAll(app.users);`);
+  lines.push(` *   return users.map(u => <li key={u.id}>{u.name}</li>);`);
+  lines.push(` * }`);
   lines.push(` *`);
-  lines.push(` * // Create a user`);
-  lines.push(` * const userId = db.users.create({ name: 'Alice', email: 'alice@example.com' });`);
-  lines.push(` *`);
-  lines.push(` * // Subscribe to all users`);
-  lines.push(` * db.users.subscribeAll({}, (users) => console.log(users));`);
+  lines.push(` * function UserProfile({ userId }) {`);
+  lines.push(` *   const [user, loading, mutate] = useOne(app.users, userId);`);
+  lines.push(` *   return <div>{user?.name}</div>;`);
+  lines.push(` * }`);
   lines.push(` * \`\`\``);
   lines.push(` */`);
-  lines.push(`export function createDatabase(wasmDb: WasmDatabaseLike): Database {`);
-  lines.push(`  return {`);
-  lines.push(`    raw: wasmDb,`);
+  lines.push(`export const app = {`);
   for (const table of tables) {
-    const clientName = `${table.name}Client`;
+    const descriptorName = `${table.name}Descriptor`;
     const propName = table.name.toLowerCase();
-    lines.push(`    ${propName}: new ${clientName}(wasmDb),`);
+    lines.push(`  ${propName}: new ${descriptorName}(),`);
   }
-  lines.push(`  };`);
-  lines.push(`}`);
+  lines.push(`};`);
+  lines.push("");
+
+  lines.push(`export type App = typeof app;`);
   lines.push("");
 
   return lines.join("\n");

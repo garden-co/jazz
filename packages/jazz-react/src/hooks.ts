@@ -2,12 +2,22 @@
  * React hooks for subscribing to Jazz database tables
  */
 
-import { useState, useEffect, useRef } from "react";
-import type { Unsubscribe } from "@jazz/client";
+import { useState, useEffect, useRef, useMemo } from "react";
+import type {
+  Unsubscribe,
+  WasmDatabaseLike,
+  SubscribableAllWithDb,
+  SubscribableOneWithDb,
+  MutableWithDb,
+  MutateAll,
+  MutateOne,
+} from "@jazz/client";
+import { useJazz } from "./context.js";
 
 /**
  * Interface for objects that can subscribe to a single row by ID.
  * Both table clients and query builders implement this.
+ * @deprecated Use SubscribableOneWithDb instead - the new pattern passes db at subscription time
  */
 export interface SubscribableOne<T> {
   subscribe(id: string, callback: (row: T | null) => void): Unsubscribe;
@@ -18,6 +28,7 @@ export interface SubscribableOne<T> {
 /**
  * Interface for objects that can subscribe to all matching rows.
  * Both table clients and query builders implement this.
+ * @deprecated Use SubscribableAllWithDb instead - the new pattern passes db at subscription time
  */
 export interface SubscribableAll<T> {
   subscribeAll(callback: (rows: T[]) => void): Unsubscribe;
@@ -36,35 +47,44 @@ function getSubscribableKey(subscribable: { _queryKey?: string }): string | obje
 /**
  * Hook to subscribe to a single row by ID.
  *
- * @param subscribable - A table client or query builder (e.g., db.users or db.users.with({ notes: true }))
+ * Returns [data, loading, mutate] where:
+ * - data: The row or null if not found/loading
+ * - loading: Boolean flag (true while fetching initial data)
+ * - mutate: Object with update() and delete() methods (id is captured)
+ *
+ * @param subscribable - A table descriptor or query builder (e.g., app.users or app.users.with({ notes: true }))
  * @param id - The row's ObjectId
- * @returns Tuple of [data, loading] - data is null if not found or loading
+ * @returns Tuple of [data, loading, mutate]
  *
  * @example
  * ```tsx
+ * import { app } from './generated/client';
+ *
  * function UserProfile({ userId }: { userId: string }) {
- *   const db = useJazz();
- *
- *   // Without includes - returns plain User
- *   const [user, loading] = useOne(db.users, userId);
- *
- *   // With includes - returns UserWith<{ notes: true }>
- *   const [userWithNotes] = useOne(
- *     db.users.with({ notes: true }),
- *     userId
- *   );
+ *   const [user, loading, mutate] = useOne(app.users, userId);
  *
  *   if (loading) return <div>Loading...</div>;
  *   if (!user) return <div>User not found</div>;
  *
- *   return <div>{user.name}</div>;
+ *   return (
+ *     <div>
+ *       <h1>{user.name}</h1>
+ *       <button onClick={() => mutate.update({ name: "New Name" })}>
+ *         Rename
+ *       </button>
+ *       <button onClick={() => mutate.delete()}>
+ *         Delete
+ *       </button>
+ *     </div>
+ *   );
  * }
  * ```
  */
-export function useOne<T>(
-  subscribable: SubscribableOne<T>,
+export function useOne<T, U>(
+  subscribable: SubscribableOneWithDb<T, U>,
   id: string | null | undefined
-): [T | null, boolean] {
+): [T | null, boolean, MutateOne<U>] {
+  const db = useJazz();
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -72,7 +92,7 @@ export function useOne<T>(
   const isFirstCallback = useRef(true);
 
   // Track the previous subscribable to avoid unnecessary re-subscriptions
-  const prevSubscribableRef = useRef<SubscribableOne<T> | null>(null);
+  const prevSubscribableRef = useRef<SubscribableOneWithDb<T, U> | null>(null);
   const prevKeyRef = useRef<string | object | null>(null);
 
   // Get stable key for structural comparison
@@ -104,7 +124,7 @@ export function useOne<T>(
     }
 
     console.log("[useOne] Subscribing with id:", id);
-    const unsubscribe = stableSubscribable.subscribe(id, (row) => {
+    const unsubscribe = stableSubscribable.subscribe(db, id, (row) => {
       console.log("[useOne] Callback received:", row);
       setData(row);
       if (isFirstCallback.current) {
@@ -114,48 +134,77 @@ export function useOne<T>(
     });
 
     return unsubscribe;
-  }, [stableSubscribable, id]);
+  }, [db, stableSubscribable, id]);
 
-  return [data, loading];
+  // Create mutate object with captured id
+  const mutate = useMemo<MutateOne<U>>(
+    () => ({
+      update: (values: U) => {
+        if (id) {
+          stableSubscribable.update(db, id, values);
+        }
+      },
+      delete: () => {
+        if (id) {
+          stableSubscribable.delete(db, id);
+        }
+      },
+    }),
+    [db, stableSubscribable, id]
+  );
+
+  return [data, loading, mutate];
 }
 
 /**
  * Hook to subscribe to all rows matching a query.
  *
- * @param subscribable - A table client or query builder (e.g., db.notes or db.notes.where({ author: id }).with({ folder: true }))
- * @returns Tuple of [data, loading] - data is empty array while loading
+ * Returns [data, loading, mutate] where:
+ * - data: Array of rows (empty array while loading)
+ * - loading: Boolean flag (true while fetching initial data)
+ * - mutate: Object with create(), update(), and delete() methods
+ *
+ * @param subscribable - A table descriptor or query builder (e.g., app.notes or app.notes.where({ author: id }))
+ * @returns Tuple of [data, loading, mutate]
  *
  * @example
  * ```tsx
+ * import { app } from './generated/client';
+ *
  * function NotesList({ authorId }: { authorId: string }) {
- *   const db = useJazz();
- *
- *   // Without filter/includes - returns plain Note[]
- *   const [allNotes, loading] = useAll(db.notes);
- *
- *   // With filter - returns Note[]
- *   const [authorNotes] = useAll(
- *     db.notes.where({ author: authorId })
- *   );
- *
- *   // With filter and includes - returns NoteWith<{ folder: true }>[]
- *   const [notesWithFolders] = useAll(
- *     db.notes.where({ author: authorId }).with({ folder: true })
+ *   const [notes, loading, mutate] = useAll(
+ *     app.notes.where({ author: authorId }).with({ folder: true })
  *   );
  *
  *   if (loading) return <div>Loading...</div>;
  *
  *   return (
- *     <ul>
- *       {notesWithFolders.map(note => (
- *         <li key={note.id}>{note.title} - {note.folder.name}</li>
- *       ))}
- *     </ul>
+ *     <div>
+ *       <button onClick={() => mutate.create({ title: "New Note", author: authorId })}>
+ *         Add Note
+ *       </button>
+ *       <ul>
+ *         {notes.map(note => (
+ *           <li key={note.id}>
+ *             {note.title}
+ *             <button onClick={() => mutate.update(note.id, { title: "Updated" })}>
+ *               Edit
+ *             </button>
+ *             <button onClick={() => mutate.delete(note.id)}>
+ *               Delete
+ *             </button>
+ *           </li>
+ *         ))}
+ *       </ul>
+ *     </div>
  *   );
  * }
  * ```
  */
-export function useAll<T>(subscribable: SubscribableAll<T>): [T[], boolean] {
+export function useAll<T, C, U>(
+  subscribable: SubscribableAllWithDb<T, C, U>
+): [T[], boolean, MutateAll<C, U>] {
+  const db = useJazz();
   const [data, setData] = useState<T[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -163,7 +212,7 @@ export function useAll<T>(subscribable: SubscribableAll<T>): [T[], boolean] {
   const isFirstCallback = useRef(true);
 
   // Track the previous subscribable to avoid unnecessary re-subscriptions
-  const prevSubscribableRef = useRef<SubscribableAll<T> | null>(null);
+  const prevSubscribableRef = useRef<SubscribableAllWithDb<T, C, U> | null>(null);
   const prevKeyRef = useRef<string | object | null>(null);
 
   // Get stable key for structural comparison
@@ -187,7 +236,7 @@ export function useAll<T>(subscribable: SubscribableAll<T>): [T[], boolean] {
     setData([]);
     isFirstCallback.current = true;
 
-    const unsubscribe = stableSubscribable.subscribeAll((rows) => {
+    const unsubscribe = stableSubscribable.subscribeAll(db, (rows) => {
       setData(rows);
       if (isFirstCallback.current) {
         setLoading(false);
@@ -196,7 +245,63 @@ export function useAll<T>(subscribable: SubscribableAll<T>): [T[], boolean] {
     });
 
     return unsubscribe;
-  }, [stableSubscribable]);
+  }, [db, stableSubscribable]);
 
-  return [data, loading];
+  // Create mutate object
+  const mutate = useMemo<MutateAll<C, U>>(
+    () => ({
+      create: (values: C) => stableSubscribable.create(db, values),
+      update: (id: string, values: U) => stableSubscribable.update(db, id, values),
+      delete: (id: string) => stableSubscribable.delete(db, id),
+    }),
+    [db, stableSubscribable]
+  );
+
+  return [data, loading, mutate];
 }
+
+/**
+ * Hook to get mutation helpers for a table without subscribing to data.
+ *
+ * Useful when you need to create/update/delete rows but don't need to display them.
+ *
+ * @param table - A table descriptor (e.g., app.users)
+ * @returns A mutate object with create(), update(), and delete() methods
+ *
+ * @example
+ * ```tsx
+ * import { app } from './generated/client';
+ *
+ * function CreateUserButton() {
+ *   const mutate = useMutate(app.users);
+ *
+ *   return (
+ *     <button onClick={() => {
+ *       const id = mutate.create({ name: "New User", email: "user@example.com" });
+ *       console.log("Created user with id:", id);
+ *     }}>
+ *       Create User
+ *     </button>
+ *   );
+ * }
+ * ```
+ */
+export function useMutate<C, U>(
+  table: MutableWithDb<C, U>
+): MutateAll<C, U> {
+  const db = useJazz();
+
+  return useMemo<MutateAll<C, U>>(
+    () => ({
+      create: (values: C) => table.create(db, values),
+      update: (id: string, values: U) => table.update(db, id, values),
+      delete: (id: string) => table.delete(db, id),
+    }),
+    [db, table]
+  );
+}
+
+/**
+ * @deprecated Use useMutate instead
+ */
+export const useCreate = useMutate;

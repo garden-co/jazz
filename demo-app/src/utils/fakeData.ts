@@ -1,4 +1,5 @@
-import type { Database } from "@/generated/client";
+import type { WasmDatabaseLike } from "@jazz/react";
+import { app } from "@/generated/client";
 import type { ObjectId } from "@/generated/types";
 import {
   USER_NAMES,
@@ -11,14 +12,14 @@ import {
 } from "./constants";
 
 export async function generateFakeData(
-  db: Database,
+  db: WasmDatabaseLike,
   issueCount: number
 ): Promise<ObjectId> {
   // 1. Create Users
   const userIds: ObjectId[] = [];
   for (let i = 0; i < USER_NAMES.length; i++) {
     const name = USER_NAMES[i];
-    const id = db.users.create({
+    const id = app.users.create(db, {
       name,
       email: name.toLowerCase().replace(" ", ".") + "@example.com",
       avatarColor: USER_COLORS[i],
@@ -29,14 +30,14 @@ export async function generateFakeData(
   // 2. Create Projects
   const projectIds: ObjectId[] = [];
   for (const proj of PROJECT_DATA) {
-    const id = db.projects.create(proj);
+    const id = app.projects.create(db, proj);
     projectIds.push(id);
   }
 
   // 3. Create Labels
   const labelIds: ObjectId[] = [];
   for (const label of LABEL_DATA) {
-    const id = db.labels.create(label);
+    const id = app.labels.create(db, label);
     labelIds.push(id);
   }
 
@@ -46,7 +47,7 @@ export async function generateFakeData(
     const now = BigInt(
       Date.now() - Math.floor(Math.random() * 7 * 24 * 60 * 60 * 1000)
     );
-    const id = db.issues.create({
+    const id = app.issues.create(db, {
       title: ISSUE_TITLES[i % ISSUE_TITLES.length] + (i >= ISSUE_TITLES.length ? ` (#${i + 1})` : ""),
       description: `Description for issue ${i + 1}. This is a sample issue created for testing purposes.`,
       status: STATUSES[Math.floor(Math.random() * STATUSES.length)],
@@ -64,7 +65,7 @@ export async function generateFakeData(
     const shuffledLabels = [...labelIds].sort(() => Math.random() - 0.5);
 
     for (let i = 0; i < labelCount && i < shuffledLabels.length; i++) {
-      db.issuelabels.create({
+      app.issuelabels.create(db, {
         issue: issueId,
         label: shuffledLabels[i],
       });
@@ -77,7 +78,7 @@ export async function generateFakeData(
     const shuffledUsers = [...userIds].sort(() => Math.random() - 0.5);
 
     for (let i = 0; i < assigneeCount && i < shuffledUsers.length; i++) {
-      db.issueassignees.create({
+      app.issueassignees.create(db, {
         issue: issueId,
         user: shuffledUsers[i],
       });

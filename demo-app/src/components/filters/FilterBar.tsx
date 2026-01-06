@@ -1,4 +1,4 @@
-import { useJazz, useAll } from "@jazz/react";
+import { useAll } from "@jazz/react";
 import {
   Select,
   SelectContent,
@@ -9,7 +9,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { X } from "lucide-react";
 import { STATUSES, STATUS_LABELS, PRIORITIES, PRIORITY_LABELS } from "@/utils/constants";
-import type { Database } from "@/generated/client";
+import { app } from "@/generated/client";
 
 interface FilterBarProps {
   statusFilter: string | undefined;
@@ -32,11 +32,9 @@ export function FilterBar({
   labelFilter,
   onLabelFilterChange,
 }: FilterBarProps) {
-  const db = useJazz() as unknown as Database;
-
   // Fetch users and labels internally
-  const [users] = useAll(db.users);
-  const [labels] = useAll(db.labels);
+  const [users] = useAll(app.users);
+  const [labels] = useAll(app.labels);
   const hasFilters = statusFilter || priorityFilter || assigneeFilter || labelFilter;
 
   const clearFilters = () => {

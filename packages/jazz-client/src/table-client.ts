@@ -17,14 +17,16 @@ import {
 import { decodeDeltaWithIncludes } from "./decoder.js";
 
 /**
- * Base class for type-safe table clients.
+ * Base class for type-safe table descriptors.
  *
  * Generated code extends this class to provide type-safe CRUD and subscription methods.
  * The base class handles the common logic for SQL generation, binary decoding, and state management.
+ *
+ * Note: This class does NOT hold a database instance. The db is passed at method call time,
+ * allowing the same descriptor to be used with different database instances.
  */
 export abstract class TableClient<T extends { id: string }> {
   constructor(
-    protected readonly db: WasmDatabaseLike,
     protected readonly tableMeta: TableMeta,
     protected readonly schemaMeta: SchemaMeta,
     protected readonly decoder: TableDecoder<T>
@@ -40,8 +42,14 @@ export abstract class TableClient<T extends { id: string }> {
   /**
    * Subscribe to a single row by ID.
    * Called by generated typed method.
+   *
+   * @param db - The database instance to subscribe through
+   * @param id - The row ID to subscribe to
+   * @param options - Subscribe options (includes)
+   * @param callback - Callback invoked when row changes
    */
   protected _subscribe(
+    db: WasmDatabaseLike,
     id: string,
     options: { include?: IncludeSpec },
     callback: (row: T | null) => void
@@ -61,7 +69,7 @@ export abstract class TableClient<T extends { id: string }> {
 
     let currentRow: T | null = null;
 
-    const handle = this.db.subscribe_delta(sql, (deltas: Uint8Array[]) => {
+    const handle = db.subscribe_delta(sql, (deltas: Uint8Array[]) => {
       // Debug: log when callback is invoked
       console.log(`[${this.tableName}] useOne callback invoked with ${deltas.length} deltas`);
       for (const deltaBuffer of deltas) {
@@ -91,8 +99,13 @@ export abstract class TableClient<T extends { id: string }> {
   /**
    * Subscribe to all rows matching a filter.
    * Called by generated typed method.
+   *
+   * @param db - The database instance to subscribe through
+   * @param options - Subscribe options (where filter, includes)
+   * @param callback - Callback invoked when rows change
    */
   protected _subscribeAll(
+    db: WasmDatabaseLike,
     options: { where?: BaseWhereInput; include?: IncludeSpec },
     callback: (rows: T[]) => void
   ): Unsubscribe {
@@ -112,7 +125,7 @@ export abstract class TableClient<T extends { id: string }> {
 
     const rowsById = new Map<string, T>();
 
-    const handle = this.db.subscribe_delta(sql, (deltas: Uint8Array[]) => {
+    const handle = db.subscribe_delta(sql, (deltas: Uint8Array[]) => {
       // Debug: log when callback is invoked
       console.log(`[${this.tableName}] useAll callback invoked with ${deltas.length} deltas`);
 
@@ -153,15 +166,16 @@ export abstract class TableClient<T extends { id: string }> {
    * Create a new row.
    * Called by generated typed method.
    *
+   * @param db - The database instance to execute on
    * @param values - Column name to value mapping
    * @returns The generated ObjectId of the new row
    */
-  protected _create(values: Record<string, unknown>): string {
+  protected _create(db: WasmDatabaseLike, values: Record<string, unknown>): string {
     const columns = Object.keys(values);
     const sqlValues = columns.map((col) => formatSqlValue(values[col]));
 
     const sql = `INSERT INTO ${this.tableName} (${columns.join(", ")}) VALUES (${sqlValues.join(", ")})`;
-    const result = this.db.execute(sql);
+    const result = db.execute(sql);
 
     // Result should be "inserted:<id>"
     const resultStr = String(result);
@@ -176,29 +190,30 @@ export abstract class TableClient<T extends { id: string }> {
    * Update an existing row.
    * Called by generated typed method.
    *
+   * @param db - The database instance to execute on
    * @param id - The row's ObjectId
    * @param values - Column name to value mapping (partial)
    */
-  protected _update(id: string, values: Record<string, unknown>): void {
+  protected _update(db: WasmDatabaseLike, id: string, values: Record<string, unknown>): void {
     for (const [column, value] of Object.entries(values)) {
       if (value === undefined) continue;
 
       // Use typed update methods based on value type
       if (typeof value === "string") {
-        this.db.update_row(this.tableName, id, column, value);
+        db.update_row(this.tableName, id, column, value);
       } else if (typeof value === "bigint") {
-        this.db.update_row_i64(this.tableName, id, column, value);
+        db.update_row_i64(this.tableName, id, column, value);
       } else if (typeof value === "number") {
         // Convert numbers to bigint for i64 columns
-        this.db.update_row_i64(this.tableName, id, column, BigInt(value));
+        db.update_row_i64(this.tableName, id, column, BigInt(value));
       } else if (value === null) {
         // Handle null values via SQL UPDATE
-        this.db.execute(
+        db.execute(
           `UPDATE ${this.tableName} SET ${column} = NULL WHERE id = '${id}'`
         );
       } else {
         // Fallback to SQL for other types
-        this.db.execute(
+        db.execute(
           `UPDATE ${this.tableName} SET ${column} = ${formatSqlValue(value)} WHERE id = '${id}'`
         );
       }
@@ -209,10 +224,11 @@ export abstract class TableClient<T extends { id: string }> {
    * Delete a row.
    * Called by generated typed method.
    *
+   * @param db - The database instance to execute on
    * @param id - The row's ObjectId
    */
-  protected _delete(id: string): void {
-    this.db.execute(`DELETE FROM ${this.tableName} WHERE id = '${id}'`);
+  protected _delete(db: WasmDatabaseLike, id: string): void {
+    db.execute(`DELETE FROM ${this.tableName} WHERE id = '${id}'`);
   }
 }
 

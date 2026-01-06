@@ -41,6 +41,12 @@ export {
   type TableDecoder,
   type WasmDatabaseLike,
   type WasmQueryHandleLike,
+  // New interfaces for db-at-subscription-time pattern
+  type SubscribableAllWithDb,
+  type SubscribableOneWithDb,
+  type MutableWithDb,
+  type MutateAll,
+  type MutateOne,
   // Constants
   DELTA_ADDED,
   DELTA_UPDATED,

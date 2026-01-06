@@ -3,23 +3,16 @@
  */
 
 import { createContext, useContext, type ReactNode } from "react";
+import type { WasmDatabaseLike } from "@jazz/client";
 
-/**
- * Generic database type - the actual type is defined by generated code
- */
-export interface JazzDatabaseLike {
-  raw: unknown;
-  [tableName: string]: unknown;
-}
-
-const JazzContext = createContext<JazzDatabaseLike | null>(null);
+const JazzContext = createContext<WasmDatabaseLike | null>(null);
 
 /**
  * Props for JazzProvider
  */
 export interface JazzProviderProps {
-  /** The Jazz database instance */
-  database: JazzDatabaseLike;
+  /** The raw WASM database instance */
+  database: WasmDatabaseLike;
   /** Child components */
   children: ReactNode;
 }
@@ -27,16 +20,27 @@ export interface JazzProviderProps {
 /**
  * Provider component that makes the Jazz database available to child components.
  *
+ * The provider stores the raw WASM database instance. Type-safe table access
+ * is provided through the `app` schema descriptor (imported from generated code).
+ *
  * @example
  * ```tsx
- * const db = createDatabase(wasmDb);
+ * import { app } from './generated/client';
+ *
+ * const wasmDb = new WasmDatabase();
+ * wasmDb.init_schema(schema);
  *
  * function Root() {
  *   return (
- *     <JazzProvider database={db}>
+ *     <JazzProvider database={wasmDb}>
  *       <App />
  *     </JazzProvider>
  *   );
+ * }
+ *
+ * function MyComponent() {
+ *   // useAll gets db from context, app provides typed schema
+ *   const [issues, loading, updateIssue, createIssue] = useAll(app.issues);
  * }
  * ```
  */
@@ -47,20 +51,26 @@ export function JazzProvider({ database, children }: JazzProviderProps) {
 }
 
 /**
- * Hook to get the Jazz database from context.
+ * Hook to get the raw WASM database from context.
+ *
+ * This returns the untyped WASM database instance. For type-safe table access,
+ * use the `app` schema descriptor with hooks like `useAll` and `useOne`.
  *
  * @example
  * ```tsx
  * function MyComponent() {
+ *   // For direct db access (rare - prefer useAll/useOne with app)
  *   const db = useJazz();
- *   // Use db.users, db.notes, etc.
+ *
+ *   // Type-safe access via app + hooks
+ *   const [users] = useAll(app.users);
  * }
  * ```
  */
-export function useJazz<T extends JazzDatabaseLike = JazzDatabaseLike>(): T {
+export function useJazz(): WasmDatabaseLike {
   const db = useContext(JazzContext);
   if (!db) {
     throw new Error("useJazz must be used within a JazzProvider");
   }
-  return db as T;
+  return db;
 }

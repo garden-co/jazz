@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
-import { JazzProvider, useJazz, useAll } from "@jazz/react";
-import { createDatabase, type Database } from "./generated/client";
+import { JazzProvider, useJazz, useAll, type WasmDatabaseLike } from "@jazz/react";
+import { app } from "./generated/client";
 import type { IssueWith } from "./generated/types";
 
 // Type for an issue with all includes loaded
@@ -29,7 +29,7 @@ async function initWasm() {
 }
 
 function App() {
-  const db = useJazz() as unknown as Database;
+  const db = useJazz();
 
   // UI state
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
@@ -54,7 +54,7 @@ function App() {
   // Subscribe to filtered issues - no useMemo needed, hook handles structural equality
   // undefined values are automatically ignored by the where clause builder
   const [filteredIssues, issuesLoading] = useAll(
-    db.issues
+    app.issues
       .where({
         project: selectedProjectId ?? undefined,
         status: statusFilter,
@@ -134,7 +134,7 @@ function App() {
 
 // Root component that sets up the database and provider
 function Root() {
-  const [db, setDb] = useState<Database | null>(null);
+  const [wasmDb, setWasmDb] = useState<WasmDatabaseLike | null>(null);
   const [error, setError] = useState<string | null>(null);
   const initRef = useRef(false);
 
@@ -145,13 +145,12 @@ function Root() {
     async function init() {
       try {
         const wasm = await initWasm();
-        const wasmDb = new wasm.WasmDatabase();
+        const db = new wasm.WasmDatabase();
 
         // Initialize schema from imported SQL file
-        wasmDb.init_schema(schema);
+        db.init_schema(schema);
 
-        const database = createDatabase(wasmDb);
-        setDb(database);
+        setWasmDb(db as unknown as WasmDatabaseLike);
       } catch (e) {
         console.error("Init error:", e);
         setError(e instanceof Error ? e.message : String(e));
@@ -168,7 +167,7 @@ function Root() {
     );
   }
 
-  if (!db) {
+  if (!wasmDb) {
     return (
       <div className="flex h-screen items-center justify-center text-muted-foreground">
         Initializing WASM...
@@ -177,7 +176,7 @@ function Root() {
   }
 
   return (
-    <JazzProvider database={db as unknown as Parameters<typeof JazzProvider>[0]['database']}>
+    <JazzProvider database={wasmDb}>
       <App />
     </JazzProvider>
   );

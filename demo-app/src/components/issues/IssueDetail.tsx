@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useJazz, useAll, useOne } from "@jazz/react";
+import { useAll, useOne, useMutate } from "@jazz/react";
 import {
   Sheet,
   SheetContent,
@@ -20,7 +20,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Separator } from "@/components/ui/separator";
 import { LabelBadge } from "./LabelBadge";
 import { STATUSES, STATUS_LABELS, PRIORITIES, PRIORITY_LABELS } from "@/utils/constants";
-import type { Database } from "@/generated/client";
+import { app } from "@/generated/client";
 
 interface IssueDetailProps {
   issueId: string | null;
@@ -33,11 +33,9 @@ export function IssueDetail({
   open,
   onOpenChange,
 }: IssueDetailProps) {
-  const db = useJazz() as unknown as Database;
-
   // Fetch the issue with all related data
-  const [issue] = useOne(
-    db.issues.with({
+  const [issue, , mutate] = useOne(
+    app.issues.with({
       project: true,
       IssueLabels: { label: true },
       IssueAssignees: { user: true },
@@ -46,9 +44,13 @@ export function IssueDetail({
   );
 
   // Fetch reference data internally
-  const [allUsers] = useAll(db.users);
-  const [allLabels] = useAll(db.labels);
-  const [allProjects] = useAll(db.projects);
+  const [allUsers] = useAll(app.users);
+  const [allLabels] = useAll(app.labels);
+  const [allProjects] = useAll(app.projects);
+
+  // Mutation helpers for join tables
+  const issueAssignees = useMutate(app.issueassignees);
+  const issueLabels = useMutate(app.issuelabels);
   const [editingTitle, setEditingTitle] = useState(false);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -59,23 +61,23 @@ export function IssueDetail({
 
   const handleStatusChange = (status: string) => {
     if (!issue) return;
-    db.issues.update(issue.id, { status, updatedAt: BigInt(Date.now()) });
+    mutate.update({ status, updatedAt: BigInt(Date.now()) });
   };
 
   const handlePriorityChange = (priority: string) => {
     if (!issue) return;
-    db.issues.update(issue.id, { priority, updatedAt: BigInt(Date.now()) });
+    mutate.update({ priority, updatedAt: BigInt(Date.now()) });
   };
 
   const handleProjectChange = (projectId: string) => {
     if (!issue) return;
-    db.issues.update(issue.id, { project: projectId, updatedAt: BigInt(Date.now()) });
+    mutate.update({ project: projectId, updatedAt: BigInt(Date.now()) });
   };
 
   const handleTitleSave = () => {
     if (!issue) return;
     if (title.trim() && title !== issue.title) {
-      db.issues.update(issue.id, { title: title.trim(), updatedAt: BigInt(Date.now()) });
+      mutate.update({ title: title.trim(), updatedAt: BigInt(Date.now()) });
     }
     setEditingTitle(false);
   };
@@ -83,21 +85,21 @@ export function IssueDetail({
   const handleDescriptionChange = (value: string) => {
     if (!issue) return;
     setDescription(value);
-    db.issues.update(issue.id, { description: value, updatedAt: BigInt(Date.now()) });
+    mutate.update({ description: value, updatedAt: BigInt(Date.now()) });
   };
 
   const handleAddAssignee = (userId: string) => {
     if (!issue) return;
     // Check if already assigned
     if (!assignees.find((a) => a.id === userId)) {
-      db.issueassignees.create({ issue: issue.id, user: userId });
+      issueAssignees.create({ issue: issue.id, user: userId });
     }
   };
 
   const handleAddLabel = (labelId: string) => {
     if (!issue) return;
     if (!labels.find((l) => l.id === labelId)) {
-      db.issuelabels.create({ issue: issue.id, label: labelId });
+      issueLabels.create({ issue: issue.id, label: labelId });
     }
   };
 
@@ -304,7 +306,7 @@ export function IssueDetail({
             variant="destructive"
             size="sm"
             onClick={() => {
-              db.issues.delete(issue.id);
+              mutate.delete();
               onOpenChange(false);
             }}
           >

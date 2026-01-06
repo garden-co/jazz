@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useJazz, useAll } from "@jazz/react";
+import { useAll, useMutate } from "@jazz/react";
 import {
   Sheet,
   SheetContent,
@@ -18,7 +18,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { STATUSES, STATUS_LABELS, PRIORITIES, PRIORITY_LABELS } from "@/utils/constants";
-import type { Database } from "@/generated/client";
+import { app } from "@/generated/client";
 
 interface IssueFormProps {
   open: boolean;
@@ -29,10 +29,9 @@ export function IssueForm({
   open,
   onOpenChange,
 }: IssueFormProps) {
-  const db = useJazz() as unknown as Database;
-
   // Fetch projects internally
-  const [allProjects] = useAll(db.projects);
+  const [allProjects] = useAll(app.projects);
+  const issues = useMutate(app.issues);
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -51,7 +50,7 @@ export function IssueForm({
     if (!title.trim() || !projectId) return;
 
     const now = BigInt(Date.now());
-    db.issues.create({
+    issues.create({
       title: title.trim(),
       description: description.trim() || null,
       status,

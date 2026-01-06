@@ -2,6 +2,9 @@
  * Shared types for @jazz/client
  */
 
+// Import Unsubscribe for internal use
+import type { Unsubscribe as UnsubscribeType } from "@jazz/schema/runtime";
+
 // Re-export schema runtime types for convenience
 export {
   type TableMeta,
@@ -89,4 +92,85 @@ export interface WasmQueryHandleLike {
   free(): void;
   /** Get a text diagram of the query graph */
   diagram(): string;
+}
+
+/**
+ * Interface for subscribing to all rows with db passed at subscription time.
+ * Used by TableDescriptor and QueryBuilder classes.
+ *
+ * @typeParam T - The row type returned by subscriptions
+ * @typeParam CreateInput - The input type for creating new rows
+ * @typeParam UpdateInput - The input type for updating existing rows
+ */
+export interface SubscribableAllWithDb<T, CreateInput, UpdateInput> {
+  /** Subscribe to all matching rows */
+  subscribeAll(
+    db: WasmDatabaseLike,
+    callback: (rows: T[]) => void
+  ): UnsubscribeType;
+  /** Create a new row */
+  create(db: WasmDatabaseLike, values: CreateInput): string;
+  /** Update an existing row */
+  update(db: WasmDatabaseLike, id: string, values: UpdateInput): void;
+  /** Delete a row */
+  delete(db: WasmDatabaseLike, id: string): void;
+  /** Optional query key for structural equality comparison in React hooks */
+  _queryKey?: string;
+}
+
+/**
+ * Interface for subscribing to a single row with db passed at subscription time.
+ * Used by TableDescriptor and QueryBuilder classes.
+ *
+ * @typeParam T - The row type returned by subscriptions
+ * @typeParam UpdateInput - The input type for updating existing rows
+ */
+export interface SubscribableOneWithDb<T, UpdateInput> {
+  /** Subscribe to a single row by ID */
+  subscribe(
+    db: WasmDatabaseLike,
+    id: string,
+    callback: (row: T | null) => void
+  ): UnsubscribeType;
+  /** Update an existing row */
+  update(db: WasmDatabaseLike, id: string, values: UpdateInput): void;
+  /** Delete a row */
+  delete(db: WasmDatabaseLike, id: string): void;
+  /** Optional query key for structural equality comparison in React hooks */
+  _queryKey?: string;
+}
+
+/**
+ * Interface for mutating rows with db passed at call time.
+ * Used by useMutate hook.
+ */
+export interface MutableWithDb<CreateInput, UpdateInput> {
+  /** Create a new row */
+  create(db: WasmDatabaseLike, values: CreateInput): string;
+  /** Update an existing row */
+  update(db: WasmDatabaseLike, id: string, values: UpdateInput): void;
+  /** Delete a row */
+  delete(db: WasmDatabaseLike, id: string): void;
+}
+
+/**
+ * Mutation helpers returned by useAll hook
+ */
+export interface MutateAll<CreateInput, UpdateInput> {
+  /** Create a new row */
+  create(values: CreateInput): string;
+  /** Update a row by id */
+  update(id: string, values: UpdateInput): void;
+  /** Delete a row by id */
+  delete(id: string): void;
+}
+
+/**
+ * Mutation helpers returned by useOne hook (id is captured)
+ */
+export interface MutateOne<UpdateInput> {
+  /** Update the subscribed row */
+  update(values: UpdateInput): void;
+  /** Delete the subscribed row */
+  delete(): void;
 }
