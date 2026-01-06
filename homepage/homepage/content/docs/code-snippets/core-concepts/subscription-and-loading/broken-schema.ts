@@ -12,7 +12,7 @@ export const Project = co
   .map({
     name: z.string(),
     tasks: co.list(Task),
-    get createdBy() {
+    get projectManager() {
       // As MyAppAccount refers back to Project, this creates a circular reference that TypeScript cannot resolve.
       return MyAppAccount;
     },

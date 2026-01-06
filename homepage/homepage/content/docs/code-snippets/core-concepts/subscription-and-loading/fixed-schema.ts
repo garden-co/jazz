@@ -11,14 +11,14 @@ export const Task = co.map({
 const ShallowProject = co.map({
   name: z.string(),
   tasks: co.list(Task),
-  get createdBy() {
+  get projectManager() {
     return MyAppAccount;
   },
 });
 
 // Do it separately here
 export const Project = ShallowProject.resolved({
-  createdBy: true,
+  projectManager: true,
 });
 
 export const MyAppAccount = co.account({
