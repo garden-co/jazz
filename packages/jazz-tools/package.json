@@ -242,7 +242,7 @@
     "test:watch": "vitest --watch --root ../../ --project jazz-tools",
     "types": "tsc --outDir dist",
     "build:svelte": "rm -rf dist/svelte && svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json",
-    "build:better-auth-svelte": "mkdir -p dist/better-auth/auth && cp src/better-auth/auth/svelte.svelte dist/better-auth/auth/svelte.svelte",
+    "build:better-auth-svelte": "mkdir -p dist/better-auth/auth && svelte-package -i src/better-auth/auth -o dist/better-auth/auth-temp --tsconfig tsconfig.svelte.json && cp dist/better-auth/auth-temp/svelte.svelte dist/better-auth/auth/svelte.svelte && cp dist/better-auth/auth-temp/svelte.svelte.d.ts dist/better-auth/auth/svelte.d.ts && rm -rf dist/better-auth/auth-temp",
     "build": "tsup && pnpm types && pnpm build:svelte && pnpm build:better-auth-svelte"
   },
   "devDependencies": {
@@ -271,7 +271,7 @@
     "@bam.tech/react-native-image-resizer": "*",
     "@op-engineering/op-sqlite": "*",
     "@react-native-community/netinfo": "*",
-    "better-auth": "^1.3.2",
+    "better-auth": "^1.4.7",
     "expo-file-system": "*",
     "expo-image-manipulator": "*",
     "expo-secure-store": "*",

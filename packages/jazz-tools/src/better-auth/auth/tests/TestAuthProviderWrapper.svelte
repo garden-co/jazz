@@ -1,6 +1,6 @@
 <script lang="ts">
 import { JazzSvelteProvider } from "jazz-tools/svelte";
-import AuthProvider from "../index.svelte";
+import AuthProvider from "../svelte.svelte";
 import { createAuthClient } from "better-auth/client";
 import { jazzPluginClient } from "../client";
 

@@ -1,5 +1,5 @@
 {
-  "name": "test-ba-svelte",
+  "name": "betterauth-svelte",
   "private": true,
   "version": "0.0.32",
   "type": "module",
@@ -31,7 +31,7 @@
     "vite": "^7.0.4"
   },
   "dependencies": {
-    "better-auth": "^1.3.4",
+    "better-auth": "^1.4.7",
     "clsx": "^2.1.1",
     "jazz-tools": "workspace:*",
     "lucide-svelte": "^0.463.0",

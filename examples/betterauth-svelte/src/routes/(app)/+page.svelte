@@ -34,78 +34,73 @@
       </p>
 
       <div class="flex gap-4 items-center flex-row">
-        <Button asChild size="lg">
-          <a
-            href="https://jazz.tools/docs"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="flex gap-1 items-center"
-          >
-            <img src={jazzIcon} alt="" width={20} height={20} />
-            Start building
-          </a>
+        <Button
+          size="lg"
+          href="https://jazz.tools/docs"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="flex gap-1 items-center"
+        >
+          <img src={jazzIcon} alt="" width={20} height={20} />
+          Start building
         </Button>
 
-        <Button asChild variant="secondary" size="lg">
-          <a
-            href="https://jazz.tools/docs"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="flex gap-1 items-center"
-          >
-            <FileTextIcon class="size-4" />
-            Read the docs
-          </a>
-        </Button>
-      </div>
-    </main>
-
-    <footer class="flex gap-4 py-8">
-      <Button asChild variant="ghost">
-        <a
+        <Button
+          variant="secondary"
+          size="lg"
           href="https://jazz.tools/docs"
           target="_blank"
           rel="noopener noreferrer"
           class="flex gap-1 items-center"
         >
           <FileTextIcon class="size-4" />
-          Docs
-        </a>
+          Read the docs
+        </Button>
+      </div>
+    </main>
+
+    <footer class="flex gap-4 py-8">
+      <Button
+        variant="ghost"
+        href="https://jazz.tools/docs"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="flex gap-1 items-center"
+      >
+        <FileTextIcon class="size-4" />
+        Docs
       </Button>
-      <Button asChild variant="ghost">
-        <a
-          href="https://jazz.tools/examples"
-          target="_blank"
-          rel="noopener noreferrer"
-          class="flex gap-1 items-center"
-        >
-          <AppWindowMacIcon class="size-4" />
-          Examples
-        </a>
+      <Button
+        variant="ghost"
+        href="https://jazz.tools/examples"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="flex gap-1 items-center"
+      >
+        <AppWindowMacIcon class="size-4" />
+        Examples
       </Button>
 
-      <Button asChild variant="ghost">
-        <a
-          href="https://jazz.tools/status"
-          target="_blank"
-          rel="noopener noreferrer"
-          class="flex gap-1 items-center"
-        >
-          <GlobeIcon class="size-4" />
-          Status
-        </a>
+      <Button
+        variant="ghost"
+        href="https://jazz.tools/status"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="flex gap-1 items-center"
+      >
+        <GlobeIcon class="size-4" />
+        Status
       </Button>
 
-      <Button asChild variant="ghost">
-        <a
-          href="https://jazz.tools/showcase"
-          target="_blank"
-          rel="noopener noreferrer"
-          class="flex gap-1 items-center"
-        >
-          <WrenchIcon class="size-4" />
-          Built with Jazz
-        </a>
+      <Button
+        variant="ghost"
+        href="https://jazz.tools/showcase"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="flex gap-1 items-center"
+      >
+        <WrenchIcon class="size-4" />
+        Built with Jazz
       </Button>
     </footer>
   </div>
