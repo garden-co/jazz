@@ -120,6 +120,7 @@
 ### Step 4: Incremental Query System (In Progress)
 
 See `specs/incremental-queries.md` for full design.
+See `specs/clean-up-sql-layer.md` for lessons learned and future refactoring ideas.
 
 **Phase 1: Core Types**
 - [ ] `RowDelta`, `PriorState`, `DeltaBatch` - change representation
@@ -330,6 +331,8 @@ Current test count: **276 tests** passing across all modules
 - [ ] Secondary index for soft-deleted rows: Maintain a separate index (or index variant) that includes soft-deleted objects. Useful for "show deleted items" UI, undelete flows, and admin queries. The primary index would exclude deleted rows for normal queries.
 
 - [x] **Nullable column representation**: Replaced `nullable_mask: u64` bitmask with self-describing `Value::NullableSome(Box<Value>)` and `Value::NullableNone` variants. The binary encoder now writes presence bytes based on the Value variant itself, not external schema hints. This fixed projection issues where nullable_mask was computed from the wrong schema in JOIN queries.
+
+- [ ] **SQL → Query Graph architecture refactoring**: The current SQL-to-incremental-graph translation has grown organically and accumulated complexity. Key pain points documented in `specs/clean-up-sql-layer.md` include: forward/reverse JOIN asymmetry, ad-hoc table alias handling across multiple functions, string-encoded metadata (qualified columns, join direction), implicit state during node evaluation, and separate code paths for similar operations. Future redesign should consider: explicit join direction types, schema-aware nodes, centralized table/alias resolution, typed column references, and separating EXISTS-style filtering from ARRAY inclusion.
 
 ---
 
