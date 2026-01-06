@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
-use futures::io::AsyncRead;
 
 use crate::commit::CommitId;
 use crate::listener::{ListenerId, ListenerError, ObjectCallback, ObjectKey, ObjectListenerRegistry, ObjectState};
@@ -73,6 +72,57 @@ impl LocalNode {
     /// Get the environment.
     pub fn env(&self) -> &Arc<dyn Environment> {
         &self.env
+    }
+
+    /// Load an object from the Environment by reading its commits and frontier.
+    /// Returns the object ID if the object was found and loaded successfully.
+    pub fn load_object(&self, id: ObjectId, prefix: impl Into<String>, branch: &str) -> Option<ObjectId> {
+        use futures::executor::block_on;
+
+        // Get frontier from Environment
+        let frontier = block_on(self.env.get_frontier(id.into(), branch));
+        if frontier.is_empty() {
+            return None;
+        }
+
+        // Create a new Object
+        let object = Object::new(id, prefix);
+
+        // Load all commits from the Environment and add them to the Object
+        let branch_ref = object.branch_ref(branch)?;
+        {
+            let mut branch_guard = branch_ref.write().unwrap();
+
+            // Walk the commit graph starting from frontier
+            let mut to_load = frontier.clone();
+            let mut loaded = std::collections::HashSet::new();
+
+            while let Some(commit_id) = to_load.pop() {
+                if loaded.contains(&commit_id) {
+                    continue;
+                }
+                loaded.insert(commit_id);
+
+                if let Some(commit) = block_on(self.env.get_commit(&commit_id)) {
+                    // Add parent commits to load queue
+                    for parent_id in &commit.parents {
+                        if !loaded.contains(parent_id) {
+                            to_load.push(*parent_id);
+                        }
+                    }
+                    // Restore commit without updating frontier
+                    branch_guard.restore_commit(commit);
+                }
+            }
+
+            // Set frontier explicitly from Environment
+            branch_guard.set_frontier(frontier);
+        }
+
+        // Register the object
+        self.objects.write().unwrap().insert(id, Arc::new(RwLock::new(object)));
+
+        Some(id)
     }
 
     /// Create a new object with the given prefix. Returns the object ID.
@@ -152,9 +202,9 @@ impl LocalNode {
 
     // ========== Read API ==========
 
-    /// Read content from the frontier of an object's branch (sync).
-    /// Returns None if the branch is empty, has multiple tips, or content is chunked.
-    pub fn read_sync(
+    /// Read content from the frontier of an object's branch.
+    /// Returns None if the branch is empty or has multiple tips.
+    pub fn read(
         &self,
         object_id: ObjectId,
         branch: &str,
@@ -171,38 +221,11 @@ impl LocalNode {
         Ok(obj.read_sync(branch))
     }
 
-    /// Read content from the frontier of an object's branch (async).
-    /// Loads chunked content from storage if needed.
-    pub async fn read(
-        &self,
-        object_id: ObjectId,
-        branch: &str,
-    ) -> Result<Option<Vec<u8>>, ListenerError> {
-        let obj_lock = self
-            .objects
-            .read()
-            .unwrap()
-            .get(&object_id)
-            .cloned()
-            .ok_or(ListenerError::NotFound)?;
-
-        let obj = obj_lock.read().unwrap();
-        Ok(obj.read(branch, self.env.as_ref()).await)
-    }
-
-    // Note: Streaming read methods are available directly on Object.
-    // Due to lifetime constraints with Arc<RwLock<Object>>, streaming
-    // must be done by obtaining the object reference directly:
-    //   let obj = node.get_object(id)?;
-    //   let guard = obj.read().unwrap();
-    //   let stream = guard.read_stream(branch, env);
-
     // ========== Write API with Auto-Notify ==========
 
     /// Write content to an object's branch and notify all listeners.
     /// Returns the new commit ID.
-    /// Panics if content exceeds INLINE_THRESHOLD.
-    pub fn write_sync(
+    pub fn write(
         &self,
         object_id: ObjectId,
         branch: &str,
@@ -210,13 +233,12 @@ impl LocalNode {
         author: &str,
         timestamp: u64,
     ) -> Result<CommitId, ListenerError> {
-        self.write_sync_with_meta(object_id, branch, content, author, timestamp, None)
+        self.write_with_meta(object_id, branch, content, author, timestamp, None)
     }
 
     /// Write content to an object's branch with optional metadata and notify all listeners.
     /// Returns the new commit ID.
-    /// Panics if content exceeds INLINE_THRESHOLD.
-    pub fn write_sync_with_meta(
+    pub fn write_with_meta(
         &self,
         object_id: ObjectId,
         branch: &str,
@@ -236,75 +258,23 @@ impl LocalNode {
         let obj = obj_lock.read().unwrap();
         let commit_id = obj.write_sync_with_meta(branch, content, author, timestamp, meta);
 
+        // Persist commit and frontier to Environment
+        if let Some(branch_ref) = obj.branch_ref(branch) {
+            let branch_guard = branch_ref.read().unwrap();
+            if let Some(commit) = branch_guard.get_commit(&commit_id) {
+                use futures::executor::block_on;
+
+                // Persist commit
+                block_on(self.env.put_commit(commit));
+
+                // Persist frontier
+                let frontier = branch_guard.frontier();
+                block_on(self.env.set_frontier(object_id.into(), branch, frontier));
+            }
+        }
+
         // Notify listeners synchronously
         self.notify_listeners(object_id, branch, &obj);
-
-        Ok(commit_id)
-    }
-
-    /// Write content to an object's branch (async) and notify all listeners.
-    /// Automatically chunks content that exceeds INLINE_THRESHOLD.
-    pub async fn write(
-        &self,
-        object_id: ObjectId,
-        branch: &str,
-        content: &[u8],
-        author: &str,
-        timestamp: u64,
-    ) -> Result<CommitId, ListenerError> {
-        let obj_lock = self
-            .objects
-            .read()
-            .unwrap()
-            .get(&object_id)
-            .cloned()
-            .ok_or(ListenerError::NotFound)?;
-
-        let commit_id = {
-            let obj = obj_lock.read().unwrap();
-            obj.write(branch, content, author, timestamp, self.env.as_ref())
-                .await
-        };
-
-        // Notify listeners synchronously
-        {
-            let obj = obj_lock.read().unwrap();
-            self.notify_listeners(object_id, branch, &obj);
-        }
-
-        Ok(commit_id)
-    }
-
-    /// Write content from an async reader to an object's branch.
-    /// Chunks the content as it streams in.
-    pub async fn write_stream<R: AsyncRead + Unpin>(
-        &self,
-        object_id: ObjectId,
-        branch: &str,
-        reader: R,
-        author: &str,
-        timestamp: u64,
-    ) -> Result<CommitId, ListenerError> {
-        let obj_lock = self
-            .objects
-            .read()
-            .unwrap()
-            .get(&object_id)
-            .cloned()
-            .ok_or(ListenerError::NotFound)?;
-
-        let commit_id = {
-            let obj = obj_lock.read().unwrap();
-            obj.write_stream(branch, reader, author, timestamp, self.env.as_ref())
-                .await
-                .map_err(|e| ListenerError::StorageError(e.to_string()))?
-        };
-
-        // Notify listeners synchronously
-        {
-            let obj = obj_lock.read().unwrap();
-            self.notify_listeners(object_id, branch, &obj);
-        }
 
         Ok(commit_id)
     }
@@ -393,28 +363,13 @@ impl LocalNode {
 
     // ========== Helper: Load content for a commit ==========
 
-    /// Load content for a commit (handles both inline and chunked).
-    pub async fn load_content(&self, object_id: ObjectId, branch: &str, commit_id: &CommitId) -> Option<Bytes> {
+    /// Load content for a commit.
+    pub fn load_content(&self, object_id: ObjectId, branch: &str, commit_id: &CommitId) -> Option<Bytes> {
         let obj_lock = self.objects.read().unwrap().get(&object_id).cloned()?;
         let obj = obj_lock.read().unwrap();
         let branch = obj.branch(branch)?;
         let commit = branch.get_commit(commit_id)?;
-
-        match &commit.content {
-            crate::storage::ContentRef::Inline(data) => Some(Bytes::copy_from_slice(&data)),
-            crate::storage::ContentRef::Chunked(hashes) => {
-                let hashes = hashes.clone();
-                drop(branch);
-                drop(obj);
-
-                let mut result = Vec::new();
-                for hash in hashes {
-                    let chunk = self.env.get_chunk(&hash).await?;
-                    result.extend_from_slice(&chunk);
-                }
-                Some(Bytes::from(result))
-            }
-        }
+        Some(Bytes::copy_from_slice(&commit.content))
     }
 }
 

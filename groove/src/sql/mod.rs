@@ -1,4 +1,5 @@
 mod binary;
+mod catalog;
 mod database;
 mod index;
 mod parser;
@@ -13,6 +14,7 @@ pub use binary::{
     encode_delta, encode_delta_batch, encode_rows, encode_single_row, DELTA_ADDED, DELTA_REMOVED,
     DELTA_UPDATED,
 };
+pub use catalog::{Catalog, CatalogError, TableDescriptor};
 pub use database::{Database, DatabaseError, DatabaseState, ExecuteResult, IncrementalQuery};
 pub use index::RefIndex;
 pub use parser::{

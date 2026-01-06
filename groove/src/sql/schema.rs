@@ -17,6 +17,12 @@ pub enum ColumnType {
     Bytes,
     /// Reference to another table: 16 bytes (u128 object ID)
     Ref(String),
+    /// Large binary data, potentially chunked via ContentRef.
+    /// Unlike Bytes (always inline), Blob can be large and is stored as
+    /// either inline bytes or a list of chunk hashes.
+    Blob,
+    /// Array of blobs.
+    BlobArray,
 }
 
 impl ColumnType {
@@ -41,7 +47,9 @@ impl ColumnType {
             ColumnType::I64 => Some(8),
             ColumnType::F64 => Some(8),
             ColumnType::Ref(_) => Some(16),
-            ColumnType::String | ColumnType::Bytes => None,
+            ColumnType::String | ColumnType::Bytes | ColumnType::Blob | ColumnType::BlobArray => {
+                None
+            }
         }
     }
 }
@@ -183,6 +191,8 @@ impl TableSchema {
                 ColumnType::Ref(_) => 5,
                 ColumnType::I32 => 6,
                 ColumnType::U32 => 7,
+                ColumnType::Blob => 8,
+                ColumnType::BlobArray => 9,
             };
             buf.push(type_tag);
 
@@ -277,6 +287,8 @@ impl TableSchema {
                 }
                 6 => ColumnType::I32,
                 7 => ColumnType::U32,
+                8 => ColumnType::Blob,
+                9 => ColumnType::BlobArray,
                 _ => return Err(SchemaError::InvalidTypeTag(type_tag)),
             };
 

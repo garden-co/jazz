@@ -1,5 +1,6 @@
 use crate::object::ObjectId;
 use crate::sql::schema::{ColumnType, TableSchema};
+use crate::storage::ContentRef;
 
 /// Runtime value representation.
 #[derive(Debug, Clone, PartialEq)]
@@ -24,6 +25,12 @@ pub enum Value {
     /// A nullable column that is null.
     /// The encoder writes presence byte 0.
     NullableNone,
+    /// Large binary data, potentially chunked via ContentRef.
+    /// Unlike Bytes (always inline), Blob can be large and is stored as
+    /// either inline bytes or a list of chunk hashes.
+    Blob(ContentRef),
+    /// Array of blobs.
+    BlobArray(Vec<ContentRef>),
 }
 
 impl Value {
@@ -129,6 +136,22 @@ impl Value {
     pub fn as_array(&self) -> Option<&[Value]> {
         match self {
             Value::Array(arr) => Some(arr),
+            _ => None,
+        }
+    }
+
+    /// Try to get as blob.
+    pub fn as_blob(&self) -> Option<&ContentRef> {
+        match self {
+            Value::Blob(content_ref) => Some(content_ref),
+            _ => None,
+        }
+    }
+
+    /// Try to get as blob array.
+    pub fn as_blob_array(&self) -> Option<&[ContentRef]> {
+        match self {
+            Value::BlobArray(refs) => Some(refs),
             _ => None,
         }
     }
@@ -299,6 +322,18 @@ fn encode_column_value(
         (Value::Ref(id), ColumnType::Ref(_)) => {
             buf.extend_from_slice(&id.0.to_le_bytes());
         }
+        (Value::Blob(content_ref), ColumnType::Blob) => {
+            buf.extend_from_slice(&content_ref.to_row_bytes());
+        }
+        (Value::BlobArray(refs), ColumnType::BlobArray) => {
+            // Count of blobs
+            encode_varint(refs.len(), &mut buf);
+            // Each blob's serialized ContentRef
+            for content_ref in refs {
+                let blob_bytes = content_ref.to_row_bytes();
+                buf.extend_from_slice(&blob_bytes);
+            }
+        }
         _ => {
             return Err(RowError::TypeMismatch {
                 expected: format!("{:?}", ty),
@@ -449,6 +484,26 @@ fn decode_variable_column(data: &[u8], ty: &ColumnType, nullable: bool) -> Resul
             Value::String(s.to_string())
         }
         ColumnType::Bytes => Value::Bytes(data[pos..].to_vec()),
+        ColumnType::Blob => {
+            let (content_ref, _consumed) = ContentRef::from_row_bytes(&data[pos..])
+                .map_err(|e| RowError::BlobDecodeError(e.to_string()))?;
+            Value::Blob(content_ref)
+        }
+        ColumnType::BlobArray => {
+            // Decode count
+            let (count, consumed) = decode_varint(&data[pos..])?;
+            pos += consumed;
+
+            // Decode each blob
+            let mut refs = Vec::with_capacity(count);
+            for _ in 0..count {
+                let (content_ref, consumed) = ContentRef::from_row_bytes(&data[pos..])
+                    .map_err(|e| RowError::BlobDecodeError(e.to_string()))?;
+                refs.push(content_ref);
+                pos += consumed;
+            }
+            Value::BlobArray(refs)
+        }
         _ => {
             return Err(RowError::TypeMismatch {
                 expected: "variable-size type".into(),
@@ -474,6 +529,7 @@ pub enum RowError {
     ColumnCountMismatch { expected: usize, got: usize },
     NullInNonNullable { column: String },
     TypeMismatch { expected: String, got: String },
+    BlobDecodeError(String),
 }
 
 impl std::fmt::Display for RowError {
@@ -494,6 +550,9 @@ impl std::fmt::Display for RowError {
             }
             RowError::TypeMismatch { expected, got } => {
                 write!(f, "type mismatch: expected {}, got {}", expected, got)
+            }
+            RowError::BlobDecodeError(msg) => {
+                write!(f, "blob decode error: {}", msg)
             }
         }
     }

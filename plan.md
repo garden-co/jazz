@@ -316,7 +316,7 @@ Current test count: **276 tests** passing across all modules
 
 - [ ] Truncation on UPDATE: Should UPDATE support a HARD modifier like DELETE? This would allow truncating history after any mutation, not just deletes. Need to unify the semantics with DELETE HARD.
 
-- [ ] Binary files (especially larger than RAM): Should this be a column type (e.g., `BLOB` with streaming support) or a separate raw Object that rows reference? See `specs/binary-data-and-blobs.md` for the proposed row-first design with blob columns.
+- [x] Binary files (especially larger than RAM): Implemented as `BLOB` and `BLOB[]` column types with streaming support. Uses existing `ContentRef` for inline/chunked storage. See `specs/binary-data-and-blobs.md` for design. WASM handle-based streaming API is pending.
 
 - [ ] Edit & history API via "magic columns" and "magic filters": Expose commit graph metadata through virtual columns (e.g., `_commit_id`, `_author`, `_timestamp`, `_deleted`) and special WHERE filters (e.g., `WHERE _as_of = '2024-01-01'`, `WHERE _include_deleted = true`). Would enable time-travel queries and audit trails without separate APIs.
 

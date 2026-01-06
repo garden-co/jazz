@@ -1,11 +1,11 @@
 //! Integration tests for Branch.
 
-use groove::{Branch, BranchError, Commit, CommitId, ContentRef};
+use groove::{Branch, BranchError, Commit, CommitId};
 
 fn make_commit(content: &[u8], parents: Vec<CommitId>) -> Commit {
     Commit {
         parents,
-        content: ContentRef::inline(content.to_vec()),
+        content: content.to_vec().into_boxed_slice(),
         author: "test-author".to_string(),
         timestamp: 1000,
         meta: None,
@@ -57,7 +57,7 @@ fn branch_concurrent_commits_need_merge() {
     // Two concurrent commits from root
     let c1 = Commit {
         parents: vec![root_id],
-        content: ContentRef::inline(b"branch-a".to_vec()),
+        content: b"branch-a".to_vec().into_boxed_slice(),
         author: "alice".to_string(),
         timestamp: 2000,
         meta: None,
@@ -66,7 +66,7 @@ fn branch_concurrent_commits_need_merge() {
 
     let c2 = Commit {
         parents: vec![root_id],
-        content: ContentRef::inline(b"branch-b".to_vec()),
+        content: b"branch-b".to_vec().into_boxed_slice(),
         author: "bob".to_string(),
         timestamp: 2001,
         meta: None,
@@ -90,7 +90,7 @@ fn branch_merge_commit() {
     // Two concurrent branches
     let c1 = Commit {
         parents: vec![root_id],
-        content: ContentRef::inline(b"a".to_vec()),
+        content: b"a".to_vec().into_boxed_slice(),
         author: "alice".to_string(),
         timestamp: 2000,
         meta: None,
@@ -99,7 +99,7 @@ fn branch_merge_commit() {
 
     let c2 = Commit {
         parents: vec![root_id],
-        content: ContentRef::inline(b"b".to_vec()),
+        content: b"b".to_vec().into_boxed_slice(),
         author: "bob".to_string(),
         timestamp: 2001,
         meta: None,
@@ -111,7 +111,7 @@ fn branch_merge_commit() {
     // Merge commit
     let merge = Commit {
         parents: vec![id1, id2],
-        content: ContentRef::inline(b"merged".to_vec()),
+        content: b"merged".to_vec().into_boxed_slice(),
         author: "alice".to_string(),
         timestamp: 3000,
         meta: None,
@@ -169,7 +169,7 @@ fn find_lca_diamond() {
 
     let c2 = Commit {
         parents: vec![id1],
-        content: ContentRef::inline(b"left".to_vec()),
+        content: b"left".to_vec().into_boxed_slice(),
         author: "alice".to_string(),
         timestamp: 2000,
         meta: None,
@@ -178,7 +178,7 @@ fn find_lca_diamond() {
 
     let c3 = Commit {
         parents: vec![id1],
-        content: ContentRef::inline(b"right".to_vec()),
+        content: b"right".to_vec().into_boxed_slice(),
         author: "bob".to_string(),
         timestamp: 2001,
         meta: None,
@@ -192,7 +192,7 @@ fn find_lca_diamond() {
     // Now merge them
     let c4 = Commit {
         parents: vec![id2, id3],
-        content: ContentRef::inline(b"merged".to_vec()),
+        content: b"merged".to_vec().into_boxed_slice(),
         author: "alice".to_string(),
         timestamp: 3000,
         meta: None,
@@ -271,7 +271,7 @@ fn truncate_rejects_non_ancestor_of_frontier() {
 
     let c1 = Commit {
         parents: vec![root_id],
-        content: ContentRef::inline(b"branch-a".to_vec()),
+        content: b"branch-a".to_vec().into_boxed_slice(),
         author: "alice".to_string(),
         timestamp: 2000,
         meta: None,
@@ -280,7 +280,7 @@ fn truncate_rejects_non_ancestor_of_frontier() {
 
     let c2 = Commit {
         parents: vec![root_id],
-        content: ContentRef::inline(b"branch-b".to_vec()),
+        content: b"branch-b".to_vec().into_boxed_slice(),
         author: "bob".to_string(),
         timestamp: 2001,
         meta: None,
@@ -437,7 +437,7 @@ fn find_frontier_lca() {
     // Two divergent branches: LCA is the common ancestor
     let c2 = Commit {
         parents: vec![id1],
-        content: ContentRef::inline(b"branch-a".to_vec()),
+        content: b"branch-a".to_vec().into_boxed_slice(),
         author: "alice".to_string(),
         timestamp: 2000,
         meta: None,
@@ -446,7 +446,7 @@ fn find_frontier_lca() {
 
     let c3 = Commit {
         parents: vec![id1],
-        content: ContentRef::inline(b"branch-b".to_vec()),
+        content: b"branch-b".to_vec().into_boxed_slice(),
         author: "bob".to_string(),
         timestamp: 2001,
         meta: None,
