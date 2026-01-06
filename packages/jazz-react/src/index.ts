@@ -25,7 +25,7 @@
  *
  * function UserList() {
  *   const db = useJazz();
- *   const { data: users, loading } = useAll(db.users, {});
+ *   const [users, loading] = useAll(db.users);
  *
  *   if (loading) return <div>Loading...</div>;
  *
@@ -45,8 +45,6 @@ export { JazzProvider, useJazz, type JazzProviderProps } from "./context.js";
 export {
   useOne,
   useAll,
-  type UseOneResult,
-  type UseAllResult,
   type SubscribableOne,
   type SubscribableAll,
 } from "./hooks.js";

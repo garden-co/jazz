@@ -34,31 +34,11 @@ function getSubscribableKey(subscribable: { _queryKey?: string }): string | obje
 }
 
 /**
- * Result of useOne hook
- */
-export interface UseOneResult<T> {
-  /** The row data, or null if not found */
-  data: T | null;
-  /** True while waiting for initial data */
-  loading: boolean;
-}
-
-/**
- * Result of useAll hook
- */
-export interface UseAllResult<T> {
-  /** Array of matching rows */
-  data: T[];
-  /** True while waiting for initial data */
-  loading: boolean;
-}
-
-/**
  * Hook to subscribe to a single row by ID.
  *
  * @param subscribable - A table client or query builder (e.g., db.users or db.users.with({ notes: true }))
  * @param id - The row's ObjectId
- * @returns Object with data and loading state
+ * @returns Tuple of [data, loading] - data is null if not found or loading
  *
  * @example
  * ```tsx
@@ -66,10 +46,10 @@ export interface UseAllResult<T> {
  *   const db = useJazz();
  *
  *   // Without includes - returns plain User
- *   const { data: user, loading } = useOne(db.users, userId);
+ *   const [user, loading] = useOne(db.users, userId);
  *
- *   // With includes - returns UserLoaded<{ notes: true }>
- *   const { data: userWithNotes } = useOne(
+ *   // With includes - returns UserWith<{ notes: true }>
+ *   const [userWithNotes] = useOne(
  *     db.users.with({ notes: true }),
  *     userId
  *   );
@@ -84,7 +64,7 @@ export interface UseAllResult<T> {
 export function useOne<T>(
   subscribable: SubscribableOne<T>,
   id: string | null | undefined
-): UseOneResult<T> {
+): [T | null, boolean] {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -118,11 +98,14 @@ export function useOne<T>(
 
     // Don't subscribe if id is null/undefined
     if (!id) {
+      console.log("[useOne] No id provided, skipping subscription");
       setLoading(false);
       return;
     }
 
+    console.log("[useOne] Subscribing with id:", id);
     const unsubscribe = stableSubscribable.subscribe(id, (row) => {
+      console.log("[useOne] Callback received:", row);
       setData(row);
       if (isFirstCallback.current) {
         setLoading(false);
@@ -133,14 +116,14 @@ export function useOne<T>(
     return unsubscribe;
   }, [stableSubscribable, id]);
 
-  return { data, loading };
+  return [data, loading];
 }
 
 /**
  * Hook to subscribe to all rows matching a query.
  *
  * @param subscribable - A table client or query builder (e.g., db.notes or db.notes.where({ author: id }).with({ folder: true }))
- * @returns Object with data array and loading state
+ * @returns Tuple of [data, loading] - data is empty array while loading
  *
  * @example
  * ```tsx
@@ -148,15 +131,15 @@ export function useOne<T>(
  *   const db = useJazz();
  *
  *   // Without filter/includes - returns plain Note[]
- *   const { data: allNotes, loading } = useAll(db.notes);
+ *   const [allNotes, loading] = useAll(db.notes);
  *
  *   // With filter - returns Note[]
- *   const { data: authorNotes } = useAll(
+ *   const [authorNotes] = useAll(
  *     db.notes.where({ author: authorId })
  *   );
  *
- *   // With filter and includes - returns NoteLoaded<{ folder: true }>[]
- *   const { data: notesWithFolders } = useAll(
+ *   // With filter and includes - returns NoteWith<{ folder: true }>[]
+ *   const [notesWithFolders] = useAll(
  *     db.notes.where({ author: authorId }).with({ folder: true })
  *   );
  *
@@ -172,7 +155,7 @@ export function useOne<T>(
  * }
  * ```
  */
-export function useAll<T>(subscribable: SubscribableAll<T>): UseAllResult<T> {
+export function useAll<T>(subscribable: SubscribableAll<T>): [T[], boolean] {
   const [data, setData] = useState<T[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -215,5 +198,5 @@ export function useAll<T>(subscribable: SubscribableAll<T>): UseAllResult<T> {
     return unsubscribe;
   }, [stableSubscribable]);
 
-  return { data, loading };
+  return [data, loading];
 }

@@ -77,7 +77,7 @@ impl WasmDatabase {
         }
     }
 
-    /// Update a specific row's column value.
+    /// Update a specific row's column with a string value.
     /// row_id should be a Base32 ObjectId string.
     #[wasm_bindgen]
     pub fn update_row(&self, table: &str, row_id: &str, column: &str, value: &str) -> Result<bool, JsValue> {
@@ -85,6 +85,17 @@ impl WasmDatabase {
             .map_err(|e| JsValue::from_str(&format!("invalid row_id: {:?}", e)))?;
         self.db
             .update(table, id, &[(column, Value::String(value.to_string()))])
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))
+    }
+
+    /// Update a specific row's column with an i64 value.
+    /// row_id should be a Base32 ObjectId string.
+    #[wasm_bindgen]
+    pub fn update_row_i64(&self, table: &str, row_id: &str, column: &str, value: i64) -> Result<bool, JsValue> {
+        let id: ObjectId = row_id.parse()
+            .map_err(|e| JsValue::from_str(&format!("invalid row_id: {:?}", e)))?;
+        self.db
+            .update(table, id, &[(column, Value::I64(value))])
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))
     }
 

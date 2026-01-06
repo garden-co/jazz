@@ -14,7 +14,7 @@ export function Header({ currentUserId, onCreateIssue }: HeaderProps) {
   const db = useJazz() as unknown as Database;
 
   // Fetch current user internally
-  const { data: currentUser } = useOne(db.users, currentUserId);
+  const [currentUser] = useOne(db.users, currentUserId);
 
   const [isDark, setIsDark] = useState(() => {
     if (typeof window !== "undefined") {

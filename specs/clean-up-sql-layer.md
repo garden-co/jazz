@@ -164,7 +164,41 @@ This state is reconstructed from context rather than explicitly passed.
 
 Forward and reverse JOINs have almost entirely separate implementations despite similar structure. This leads to bugs being fixed in one path but not the other.
 
-### 9. No Filter Pushdown / Query Optimization
+### 9. Implicit `id` Column Not in Schema
+
+**Problem**: Every table has an implicit `id` column (the ObjectId primary key), but it's NOT included in the schema's `columns` list. Code that looks up columns must handle `id` as a special case everywhere.
+
+**What Went Wrong**:
+1. `schema.column("id")` returns `None` - predicate building in `build_multi_join_predicate` failed with "Column id not found in table Issues"
+2. After fixing predicate building, predicates used qualified names like `Issues.id` but the predicate matcher only checked `column == "id"` (unqualified)
+3. The Filter node showed `predicate: Issues.id = '...'` with `cached: 0 rows` even though 50 joined rows existed
+
+**Current Fix**:
+- Predicate building checks `if col_name == "id"` before looking up column metadata, treats it as `ColumnType::String`
+- Predicate matching checks `column == "id" || column.ends_with(".id")` to handle both qualified and unqualified references
+
+**Pain Point**: The `id` special case is scattered across multiple files:
+- `database/mod.rs`: `build_multi_join_predicate`, `build_multi_join_predicate_with_aliases`, `extract_table_conditions`
+- `query_graph/predicate.rs`: `Predicate::matches()` for both `Eq` and `Ne` variants
+
+**Future Redesign Should**: Consider adding `id` explicitly to the schema columns list during table creation to eliminate all special cases.
+
+### 10. WASM Type Boundaries
+
+**Problem**: WASM bindings expose functions like `update_row(table, id, column, value: &str)` where `value` is always a string. This fails silently for non-string types.
+
+**What Went Wrong**:
+1. TypeScript client passed `bigint` (for timestamp columns) directly to `update_row`
+2. `passStringToWasm0` crashed with "memory access out of bounds" trying to convert bigint to string
+3. After converting to string, Rust returned error "TypeMismatch { expected: I64, got: String(...) }"
+
+**Current Fix**: Added separate `update_row_i64(table, id, column, value: i64)` method. TypeScript client checks `typeof value` and calls the appropriate method.
+
+**Pain Point**: The WASM boundary requires knowing column types at call time. Each type needs its own method, leading to API proliferation.
+
+**Future Redesign Should**: Consider a unified `update_row` that accepts JSON-encoded value with type tag, or use `JsValue` with runtime type checking in Rust.
+
+### 11. No Filter Pushdown / Query Optimization
 
 **Problem**: The graph builder constructs nodes in a fixed order (JOINs first, then Filter), regardless of which would be more efficient.
 

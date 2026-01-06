@@ -85,7 +85,9 @@ impl Predicate {
             Predicate::False => false,
 
             Predicate::Eq { column, value } => {
-                if column == "id" {
+                // Check for id column (unqualified "id" or qualified "Table.id")
+                let is_id_column = column == "id" || column.ends_with(".id");
+                if is_id_column {
                     // Special case: implicit id column
                     match value {
                         Value::Ref(id) => row.id == *id,
@@ -107,7 +109,9 @@ impl Predicate {
             }
 
             Predicate::Ne { column, value } => {
-                if column == "id" {
+                // Check for id column (unqualified "id" or qualified "Table.id")
+                let is_id_column = column == "id" || column.ends_with(".id");
+                if is_id_column {
                     match value {
                         Value::Ref(id) => row.id != *id,
                         Value::String(s) => {

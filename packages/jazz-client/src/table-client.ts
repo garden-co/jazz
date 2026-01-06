@@ -46,15 +46,29 @@ export abstract class TableClient<T extends { id: string }> {
     options: { include?: IncludeSpec },
     callback: (row: T | null) => void
   ): Unsubscribe {
+    // Debug: log the query options
+    console.log(`[${this.tableName}] useOne options:`, {
+      id,
+      include: options.include,
+    });
+
     const sql = buildQueryById(this.tableMeta, this.schemaMeta, id, {
       include: options.include,
     });
 
+    // Debug: log the SQL query
+    console.log(`[${this.tableName}] useOne SQL:`, sql);
+
     let currentRow: T | null = null;
 
     const handle = this.db.subscribe_delta(sql, (deltas: Uint8Array[]) => {
+      // Debug: log when callback is invoked
+      console.log(`[${this.tableName}] useOne callback invoked with ${deltas.length} deltas`);
       for (const deltaBuffer of deltas) {
-        const delta = this.decoder.delta(deltaBuffer.buffer) as Delta<T>;
+        // Use dynamic decoder when includes are specified, otherwise use generated decoder
+        const delta = options.include
+          ? decodeDeltaWithIncludes<T>(deltaBuffer.buffer, this.tableMeta, this.schemaMeta, options.include)
+          : this.decoder.delta(deltaBuffer.buffer) as Delta<T>;
 
         if (delta.type === "added" || delta.type === "updated") {
           currentRow = delta.row;
@@ -64,6 +78,9 @@ export abstract class TableClient<T extends { id: string }> {
       }
       callback(currentRow);
     });
+
+    // Debug: log the query graph diagram
+    console.log(`[${this.tableName}] useOne Query Graph:\n${handle.diagram()}`);
 
     return () => {
       handle.unsubscribe();
@@ -80,7 +97,7 @@ export abstract class TableClient<T extends { id: string }> {
     callback: (rows: T[]) => void
   ): Unsubscribe {
     // Debug: log the JS query options
-    console.log(`[${this.tableName}] Query options:`, {
+    console.log(`[${this.tableName}] useAll options:`, {
       where: options.where,
       include: options.include,
     });
@@ -91,13 +108,13 @@ export abstract class TableClient<T extends { id: string }> {
     });
 
     // Debug: log the SQL query
-    console.log(`[${this.tableName}] SQL:`, sql);
+    console.log(`[${this.tableName}] useAll SQL:`, sql);
 
     const rowsById = new Map<string, T>();
 
     const handle = this.db.subscribe_delta(sql, (deltas: Uint8Array[]) => {
       // Debug: log when callback is invoked
-      console.log(`[${this.tableName}] Callback invoked with ${deltas.length} deltas`);
+      console.log(`[${this.tableName}] useAll callback invoked with ${deltas.length} deltas`);
 
       for (const deltaBuffer of deltas) {
         try {
@@ -107,7 +124,7 @@ export abstract class TableClient<T extends { id: string }> {
             : this.decoder.delta(deltaBuffer.buffer) as Delta<T>;
 
           // Debug: log decoded delta
-          console.log(`[${this.tableName}] Delta:`, delta);
+          console.log(`[${this.tableName}] useAll delta:`, delta);
 
           if (delta.type === "added" || delta.type === "updated") {
             rowsById.set(delta.row.id, delta.row);
@@ -166,12 +183,14 @@ export abstract class TableClient<T extends { id: string }> {
     for (const [column, value] of Object.entries(values)) {
       if (value === undefined) continue;
 
-      // Use update_row for string and bigint values
-      if (typeof value === "string" || typeof value === "bigint") {
+      // Use typed update methods based on value type
+      if (typeof value === "string") {
         this.db.update_row(this.tableName, id, column, value);
+      } else if (typeof value === "bigint") {
+        this.db.update_row_i64(this.tableName, id, column, value);
       } else if (typeof value === "number") {
-        // Convert numbers to bigint for i64 columns or string for others
-        this.db.update_row(this.tableName, id, column, String(value));
+        // Convert numbers to bigint for i64 columns
+        this.db.update_row_i64(this.tableName, id, column, BigInt(value));
       } else if (value === null) {
         // Handle null values via SQL UPDATE
         this.db.execute(

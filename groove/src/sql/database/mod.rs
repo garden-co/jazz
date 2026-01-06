@@ -3770,21 +3770,35 @@ impl Database {
                     }))?
             } else {
                 // Unqualified column - search all schemas
-                all_schemas
-                    .iter()
-                    .find(|(_, s)| s.column(col_name).is_some())
-                    .ok_or_else(|| DatabaseError::Parse(parser::ParseError {
-                        message: format!("Unknown column {} in WHERE clause", col_name),
+                // "id" is a special column that exists on every table
+                if col_name == "id" {
+                    all_schemas.first().ok_or_else(|| DatabaseError::Parse(parser::ParseError {
+                        message: "No tables in query".to_string(),
                         position: 0,
                     }))?
+                } else {
+                    all_schemas
+                        .iter()
+                        .find(|(_, s)| s.column(col_name).is_some())
+                        .ok_or_else(|| DatabaseError::Parse(parser::ParseError {
+                            message: format!("Unknown column {} in WHERE clause", col_name),
+                            position: 0,
+                        }))?
+                }
             };
 
-            let column = schema.column(col_name).ok_or_else(|| {
-                DatabaseError::Parse(parser::ParseError {
-                    message: format!("Column {} not found in table {}", col_name, table_name),
-                    position: 0,
-                })
-            })?;
+            // "id" is a special column (ObjectId/String type) that exists on every table
+            let column_type = if col_name == "id" {
+                ColumnType::String
+            } else {
+                let column = schema.column(col_name).ok_or_else(|| {
+                    DatabaseError::Parse(parser::ParseError {
+                        message: format!("Column {} not found in table {}", col_name, table_name),
+                        position: 0,
+                    })
+                })?;
+                column.ty.clone()
+            };
 
             // Only handle literal values in predicates for now
             let literal_value = match cond.value() {
@@ -3795,7 +3809,7 @@ impl Database {
                 }
             };
 
-            let value = coerce_value(literal_value, &column.ty);
+            let value = coerce_value(literal_value, &column_type);
 
             // Use qualified column name for multi-table queries
             let qualified_col = format!("{}.{}", table_name, col_name);
@@ -3827,7 +3841,7 @@ impl Database {
             let col_name = &cond.column.column;
 
             // Find the schema for this column (check both table name and alias)
-            let (table_name, schema) = if let Some(t) = table_ref {
+            let (table_name, _schema) = if let Some(t) = table_ref {
                 all_tables
                     .iter()
                     .find(|(name, alias, _)| {
@@ -3840,22 +3854,38 @@ impl Database {
                     }))?
             } else {
                 // Unqualified column - search all schemas
-                all_tables
-                    .iter()
-                    .find(|(_, _, s)| s.column(col_name).is_some())
-                    .map(|(name, _, schema)| (*name, schema))
-                    .ok_or_else(|| DatabaseError::Parse(parser::ParseError {
-                        message: format!("Unknown column {} in WHERE clause", col_name),
-                        position: 0,
-                    }))?
+                // "id" is a special column that exists on every table
+                if col_name == "id" {
+                    all_tables.first()
+                        .map(|(name, _, schema)| (*name, schema))
+                        .ok_or_else(|| DatabaseError::Parse(parser::ParseError {
+                            message: "No tables in query".to_string(),
+                            position: 0,
+                        }))?
+                } else {
+                    all_tables
+                        .iter()
+                        .find(|(_, _, s)| s.column(col_name).is_some())
+                        .map(|(name, _, schema)| (*name, schema))
+                        .ok_or_else(|| DatabaseError::Parse(parser::ParseError {
+                            message: format!("Unknown column {} in WHERE clause", col_name),
+                            position: 0,
+                        }))?
+                }
             };
 
-            let column = schema.column(col_name).ok_or_else(|| {
-                DatabaseError::Parse(parser::ParseError {
-                    message: format!("Column {} not found in table {}", col_name, table_name),
-                    position: 0,
-                })
-            })?;
+            // "id" is a special column (ObjectId/String type) that exists on every table
+            let column_type = if col_name == "id" {
+                ColumnType::String
+            } else {
+                let column = _schema.column(col_name).ok_or_else(|| {
+                    DatabaseError::Parse(parser::ParseError {
+                        message: format!("Column {} not found in table {}", col_name, table_name),
+                        position: 0,
+                    })
+                })?;
+                column.ty.clone()
+            };
 
             // Only handle literal values in predicates for now
             let literal_value = match cond.value() {
@@ -3866,7 +3896,7 @@ impl Database {
                 }
             };
 
-            let value = coerce_value(literal_value, &column.ty);
+            let value = coerce_value(literal_value, &column_type);
 
             // Use actual table name (not alias) for qualified column
             let qualified_col = format!("{}.{}", table_name, col_name);
@@ -3899,11 +3929,12 @@ impl Database {
             let col_name = &cond.column.column;
 
             // Check if this condition applies to the target table
+            // "id" is a special column that exists on every table
             let applies = match table {
                 Some(t) => t == target_table,
                 None => {
                     // Unqualified column - check if it's in target schema
-                    target_schema.column(col_name).is_some()
+                    col_name == "id" || target_schema.column(col_name).is_some()
                 }
             };
 
@@ -3911,12 +3942,18 @@ impl Database {
                 continue;
             }
 
-            let column = target_schema.column(col_name).ok_or_else(|| {
-                DatabaseError::Parse(parser::ParseError {
-                    message: format!("Column {} not found in table {}", col_name, target_table),
-                    position: 0,
-                })
-            })?;
+            // "id" is a special column (ObjectId/String type) that exists on every table
+            let column_type = if col_name == "id" {
+                ColumnType::String
+            } else {
+                let column = target_schema.column(col_name).ok_or_else(|| {
+                    DatabaseError::Parse(parser::ParseError {
+                        message: format!("Column {} not found in table {}", col_name, target_table),
+                        position: 0,
+                    })
+                })?;
+                column.ty.clone()
+            };
 
             // Only handle literal values for now
             let literal_value = match cond.value() {
@@ -3924,7 +3961,7 @@ impl Database {
                 None => continue,
             };
 
-            let value = coerce_value(literal_value, &column.ty);
+            let value = coerce_value(literal_value, &column_type);
 
             // Use unqualified column name (the join table's schema doesn't have qualified names)
             predicates.push(Predicate::eq(col_name, value));

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useJazz, useAll } from "@jazz/react";
+import { useJazz, useAll, useOne } from "@jazz/react";
 import {
   Sheet,
   SheetContent,
@@ -21,48 +21,59 @@ import { Separator } from "@/components/ui/separator";
 import { LabelBadge } from "./LabelBadge";
 import { STATUSES, STATUS_LABELS, PRIORITIES, PRIORITY_LABELS } from "@/utils/constants";
 import type { Database } from "@/generated/client";
-import type { LoadedIssue } from "@/App";
 
 interface IssueDetailProps {
-  issue: LoadedIssue | null;
+  issueId: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
 export function IssueDetail({
-  issue,
+  issueId,
   open,
   onOpenChange,
 }: IssueDetailProps) {
   const db = useJazz() as unknown as Database;
 
+  // Fetch the issue with all related data
+  const [issue] = useOne(
+    db.issues.with({
+      project: true,
+      IssueLabels: { label: true },
+      IssueAssignees: { user: true },
+    }),
+    issueId
+  );
+
   // Fetch reference data internally
-  const { data: allUsers } = useAll(db.users);
-  const { data: allLabels } = useAll(db.labels);
-  const { data: allProjects } = useAll(db.projects);
+  const [allUsers] = useAll(db.users);
+  const [allLabels] = useAll(db.labels);
+  const [allProjects] = useAll(db.projects);
   const [editingTitle, setEditingTitle] = useState(false);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
 
-  if (!issue) return null;
-
   // Extract labels and assignees from the included data
-  const labels = issue.IssueLabels.map((il) => il.label);
-  const assignees = issue.IssueAssignees.map((ia) => ia.user);
+  const labels = issue?.IssueLabels.map((il) => il.label) ?? [];
+  const assignees = issue?.IssueAssignees.map((ia) => ia.user) ?? [];
 
   const handleStatusChange = (status: string) => {
+    if (!issue) return;
     db.issues.update(issue.id, { status, updatedAt: BigInt(Date.now()) });
   };
 
   const handlePriorityChange = (priority: string) => {
+    if (!issue) return;
     db.issues.update(issue.id, { priority, updatedAt: BigInt(Date.now()) });
   };
 
   const handleProjectChange = (projectId: string) => {
+    if (!issue) return;
     db.issues.update(issue.id, { project: projectId, updatedAt: BigInt(Date.now()) });
   };
 
   const handleTitleSave = () => {
+    if (!issue) return;
     if (title.trim() && title !== issue.title) {
       db.issues.update(issue.id, { title: title.trim(), updatedAt: BigInt(Date.now()) });
     }
@@ -70,35 +81,38 @@ export function IssueDetail({
   };
 
   const handleDescriptionChange = (value: string) => {
+    if (!issue) return;
     setDescription(value);
     db.issues.update(issue.id, { description: value, updatedAt: BigInt(Date.now()) });
   };
 
   const handleAddAssignee = (userId: string) => {
+    if (!issue) return;
     // Check if already assigned
     if (!assignees.find((a) => a.id === userId)) {
       db.issueassignees.create({ issue: issue.id, user: userId });
     }
   };
 
-  const handleRemoveAssignee = (userId: string) => {
-    // Find the IssueAssignee record - for now we'll use a workaround
-    // In a real app, we'd have the issueAssignee ID
-    // For simplicity, we'll just not implement removal here
-  };
-
   const handleAddLabel = (labelId: string) => {
+    if (!issue) return;
     if (!labels.find((l) => l.id === labelId)) {
       db.issuelabels.create({ issue: issue.id, label: labelId });
     }
   };
 
-  const createdDate = new Date(Number(issue.createdAt)).toLocaleDateString();
-  const updatedDate = new Date(Number(issue.updatedAt)).toLocaleDateString();
+  const createdDate = issue ? new Date(Number(issue.createdAt)).toLocaleDateString() : "";
+  const updatedDate = issue ? new Date(Number(issue.updatedAt)).toLocaleDateString() : "";
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-[500px] sm:max-w-[500px] overflow-y-auto">
+        {!issue ? (
+          <div className="flex items-center justify-center h-32">
+            <div className="text-muted-foreground">Loading...</div>
+          </div>
+        ) : (
+          <>
         <SheetHeader>
           <SheetTitle className="text-left">
             {editingTitle ? (
@@ -297,6 +311,8 @@ export function IssueDetail({
             Delete Issue
           </Button>
         </div>
+          </>
+        )}
       </SheetContent>
     </Sheet>
   );

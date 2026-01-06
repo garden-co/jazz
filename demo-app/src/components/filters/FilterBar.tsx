@@ -35,8 +35,8 @@ export function FilterBar({
   const db = useJazz() as unknown as Database;
 
   // Fetch users and labels internally
-  const { data: users } = useAll(db.users);
-  const { data: labels } = useAll(db.labels);
+  const [users] = useAll(db.users);
+  const [labels] = useAll(db.labels);
   const hasFilters = statusFilter || priorityFilter || assigneeFilter || labelFilter;
 
   const clearFilters = () => {

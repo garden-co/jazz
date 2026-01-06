@@ -32,7 +32,7 @@ export function IssueForm({
   const db = useJazz() as unknown as Database;
 
   // Fetch projects internally
-  const { data: allProjects } = useAll(db.projects);
+  const [allProjects] = useAll(db.projects);
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");

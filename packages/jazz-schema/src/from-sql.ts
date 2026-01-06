@@ -507,13 +507,13 @@ function generateTypes(
     lines.push("}");
     lines.push("");
 
-    // Loaded type
+    // With type
     if (hasRefs || hasReverseRefs) {
       lines.push(
         `/** ${typeName} with refs/reverse refs resolved based on includes parameter I */`
       );
       lines.push(
-        `export type ${typeName}Loaded<I extends ${typeName}Includes = {}> = {`
+        `export type ${typeName}With<I extends ${typeName}Includes = {}> = {`
       );
       lines.push("  id: ObjectId;");
 
@@ -531,7 +531,7 @@ function generateTypes(
           if (refHasRefs || refHasReverseRefs) {
             lines.push(`      : I['${col.name}'] extends object`);
             lines.push(
-              `        ? ${refTypeName}Loaded<I['${col.name}'] & ${refTypeName}Includes>${nullSuffix}`
+              `        ? ${refTypeName}With<I['${col.name}'] & ${refTypeName}Includes>${nullSuffix}`
             );
             lines.push(`        : ObjectId${nullSuffix}`);
           } else {
@@ -561,7 +561,7 @@ function generateTypes(
         if (refHasRefs || refHasReverseRefs) {
           lines.push(`      : I['${rev.name}'] extends object`);
           lines.push(
-            `        ? { ${rev.name}: ${refTypeName}Loaded<I['${rev.name}'] & ${refTypeName}Includes>[] }`
+            `        ? { ${rev.name}: ${refTypeName}With<I['${rev.name}'] & ${refTypeName}Includes>[] }`
           );
           lines.push(`        : {}`);
         } else {
@@ -576,10 +576,10 @@ function generateTypes(
       lines.push("");
     } else {
       lines.push(
-        `/** ${typeName} has no refs, so Loaded is the same as base type */`
+        `/** ${typeName} has no refs, so With is the same as base type */`
       );
       lines.push(
-        `export type ${typeName}Loaded<I extends ${typeName}Includes = {}> = ${typeName};`
+        `export type ${typeName}With<I extends ${typeName}Includes = {}> = ${typeName};`
       );
       lines.push("");
     }
@@ -997,7 +997,7 @@ function generateClient(
     typeImports.push(typeName);
     typeImports.push(`${typeName}Insert`);
     typeImports.push(`${typeName}Includes`);
-    typeImports.push(`${typeName}Loaded`);
+    typeImports.push(`${typeName}With`);
     typeImports.push(`${typeName}Filter`);
   }
   lines.push(`import type { ObjectId, ${typeImports.join(", ")} } from "./types.js";`);
@@ -1051,7 +1051,7 @@ function generateClient(
       lines.push(`  /**`);
       lines.push(`   * Subscribe to all matching ${table.name}`);
       lines.push(`   */`);
-      lines.push(`  subscribeAll(callback: (rows: ${typeName}Loaded<I>[]) => void): Unsubscribe {`);
+      lines.push(`  subscribeAll(callback: (rows: ${typeName}With<I>[]) => void): Unsubscribe {`);
       lines.push(`    return this._client._subscribeAllInternal(`);
       lines.push(`      { where: this._where as BaseWhereInput | undefined, include: this._include as IncludeSpec | undefined },`);
       lines.push(`      callback as (rows: ${typeName}[]) => void`);
@@ -1061,7 +1061,7 @@ function generateClient(
       lines.push(`  /**`);
       lines.push(`   * Subscribe to a single ${typeName} by ID`);
       lines.push(`   */`);
-      lines.push(`  subscribe(id: ObjectId, callback: (row: ${typeName}Loaded<I> | null) => void): Unsubscribe {`);
+      lines.push(`  subscribe(id: ObjectId, callback: (row: ${typeName}With<I> | null) => void): Unsubscribe {`);
       lines.push(`    return this._client._subscribeInternal(`);
       lines.push(`      id,`);
       lines.push(`      { include: this._include as IncludeSpec | undefined },`);

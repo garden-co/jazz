@@ -71,7 +71,13 @@ export interface WasmDatabaseLike {
     table: string,
     rowId: string,
     column: string,
-    value: string | bigint
+    value: string
+  ): boolean;
+  update_row_i64(
+    table: string,
+    rowId: string,
+    column: string,
+    value: bigint
   ): boolean;
 }
 

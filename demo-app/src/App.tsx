@@ -1,10 +1,10 @@
 import { useState, useEffect, useRef } from "react";
 import { JazzProvider, useJazz, useAll } from "@jazz/react";
 import { createDatabase, type Database } from "./generated/client";
-import type { IssueLoaded } from "./generated/types";
+import type { IssueWith } from "./generated/types";
 
 // Type for an issue with all includes loaded
-export type LoadedIssue = IssueLoaded<{
+export type LoadedIssue = IssueWith<{
   project: true;
   IssueLabels: { label: true };
   IssueAssignees: { user: true };
@@ -34,7 +34,7 @@ function App() {
   // UI state
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [showMyIssues, setShowMyIssues] = useState(false);
-  const [selectedIssue, setSelectedIssue] = useState<LoadedIssue | null>(null);
+  const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
   const [showIssueForm, setShowIssueForm] = useState(false);
   const [currentPage, setCurrentPage] = useState(0);
   const pageSize = 20;
@@ -53,7 +53,7 @@ function App() {
 
   // Subscribe to filtered issues - no useMemo needed, hook handles structural equality
   // undefined values are automatically ignored by the where clause builder
-  const { data: filteredIssues, loading: issuesLoading } = useAll(
+  const [filteredIssues, issuesLoading] = useAll(
     db.issues
       .where({
         project: selectedProjectId ?? undefined,
@@ -110,7 +110,7 @@ function App() {
 
         <IssueList
           issues={filteredIssues}
-          onSelectIssue={setSelectedIssue}
+          onSelectIssue={(issue) => setSelectedIssueId(issue.id)}
           currentPage={currentPage}
           pageSize={pageSize}
           onNextPage={() => setCurrentPage((p) => p + 1)}
@@ -119,9 +119,9 @@ function App() {
       </div>
 
       <IssueDetail
-        issue={selectedIssue}
-        open={!!selectedIssue}
-        onOpenChange={(open) => !open && setSelectedIssue(null)}
+        issueId={selectedIssueId}
+        open={!!selectedIssueId}
+        onOpenChange={(open) => !open && setSelectedIssueId(null)}
       />
 
       <IssueForm

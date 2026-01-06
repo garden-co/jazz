@@ -4,7 +4,7 @@
 import { TableClient, type WasmDatabaseLike, type Unsubscribe, type TableDecoder, type BaseWhereInput, type IncludeSpec } from "@jazz/client";
 import { schemaMeta } from "./meta.js";
 import { decodeUserRows, decodeUserDelta, decodeProjectRows, decodeProjectDelta, decodeIssueRows, decodeIssueDelta, decodeLabelRows, decodeLabelDelta, decodeIssueLabelRows, decodeIssueLabelDelta, decodeIssueAssigneeRows, decodeIssueAssigneeDelta } from "./decoders.js";
-import type { ObjectId, User, UserInsert, UserIncludes, UserLoaded, UserFilter, Project, ProjectInsert, ProjectIncludes, ProjectLoaded, ProjectFilter, Issue, IssueInsert, IssueIncludes, IssueLoaded, IssueFilter, Label, LabelInsert, LabelIncludes, LabelLoaded, LabelFilter, IssueLabel, IssueLabelInsert, IssueLabelIncludes, IssueLabelLoaded, IssueLabelFilter, IssueAssignee, IssueAssigneeInsert, IssueAssigneeIncludes, IssueAssigneeLoaded, IssueAssigneeFilter } from "./types.js";
+import type { ObjectId, User, UserInsert, UserIncludes, UserWith, UserFilter, Project, ProjectInsert, ProjectIncludes, ProjectWith, ProjectFilter, Issue, IssueInsert, IssueIncludes, IssueWith, IssueFilter, Label, LabelInsert, LabelIncludes, LabelWith, LabelFilter, IssueLabel, IssueLabelInsert, IssueLabelIncludes, IssueLabelWith, IssueLabelFilter, IssueAssignee, IssueAssigneeInsert, IssueAssigneeIncludes, IssueAssigneeWith, IssueAssigneeFilter } from "./types.js";
 
 /**
  * Query builder for Users with chainable where/with methods
@@ -44,7 +44,7 @@ export class UsersQueryBuilder<I extends UserIncludes = {}> {
   /**
    * Subscribe to all matching Users
    */
-  subscribeAll(callback: (rows: UserLoaded<I>[]) => void): Unsubscribe {
+  subscribeAll(callback: (rows: UserWith<I>[]) => void): Unsubscribe {
     return this._client._subscribeAllInternal(
       { where: this._where as BaseWhereInput | undefined, include: this._include as IncludeSpec | undefined },
       callback as (rows: User[]) => void
@@ -54,7 +54,7 @@ export class UsersQueryBuilder<I extends UserIncludes = {}> {
   /**
    * Subscribe to a single User by ID
    */
-  subscribe(id: ObjectId, callback: (row: UserLoaded<I> | null) => void): Unsubscribe {
+  subscribe(id: ObjectId, callback: (row: UserWith<I> | null) => void): Unsubscribe {
     return this._client._subscribeInternal(
       id,
       { include: this._include as IncludeSpec | undefined },
@@ -101,7 +101,7 @@ export class ProjectsQueryBuilder<I extends ProjectIncludes = {}> {
   /**
    * Subscribe to all matching Projects
    */
-  subscribeAll(callback: (rows: ProjectLoaded<I>[]) => void): Unsubscribe {
+  subscribeAll(callback: (rows: ProjectWith<I>[]) => void): Unsubscribe {
     return this._client._subscribeAllInternal(
       { where: this._where as BaseWhereInput | undefined, include: this._include as IncludeSpec | undefined },
       callback as (rows: Project[]) => void
@@ -111,7 +111,7 @@ export class ProjectsQueryBuilder<I extends ProjectIncludes = {}> {
   /**
    * Subscribe to a single Project by ID
    */
-  subscribe(id: ObjectId, callback: (row: ProjectLoaded<I> | null) => void): Unsubscribe {
+  subscribe(id: ObjectId, callback: (row: ProjectWith<I> | null) => void): Unsubscribe {
     return this._client._subscribeInternal(
       id,
       { include: this._include as IncludeSpec | undefined },
@@ -158,7 +158,7 @@ export class IssuesQueryBuilder<I extends IssueIncludes = {}> {
   /**
    * Subscribe to all matching Issues
    */
-  subscribeAll(callback: (rows: IssueLoaded<I>[]) => void): Unsubscribe {
+  subscribeAll(callback: (rows: IssueWith<I>[]) => void): Unsubscribe {
     return this._client._subscribeAllInternal(
       { where: this._where as BaseWhereInput | undefined, include: this._include as IncludeSpec | undefined },
       callback as (rows: Issue[]) => void
@@ -168,7 +168,7 @@ export class IssuesQueryBuilder<I extends IssueIncludes = {}> {
   /**
    * Subscribe to a single Issue by ID
    */
-  subscribe(id: ObjectId, callback: (row: IssueLoaded<I> | null) => void): Unsubscribe {
+  subscribe(id: ObjectId, callback: (row: IssueWith<I> | null) => void): Unsubscribe {
     return this._client._subscribeInternal(
       id,
       { include: this._include as IncludeSpec | undefined },
@@ -215,7 +215,7 @@ export class LabelsQueryBuilder<I extends LabelIncludes = {}> {
   /**
    * Subscribe to all matching Labels
    */
-  subscribeAll(callback: (rows: LabelLoaded<I>[]) => void): Unsubscribe {
+  subscribeAll(callback: (rows: LabelWith<I>[]) => void): Unsubscribe {
     return this._client._subscribeAllInternal(
       { where: this._where as BaseWhereInput | undefined, include: this._include as IncludeSpec | undefined },
       callback as (rows: Label[]) => void
@@ -225,7 +225,7 @@ export class LabelsQueryBuilder<I extends LabelIncludes = {}> {
   /**
    * Subscribe to a single Label by ID
    */
-  subscribe(id: ObjectId, callback: (row: LabelLoaded<I> | null) => void): Unsubscribe {
+  subscribe(id: ObjectId, callback: (row: LabelWith<I> | null) => void): Unsubscribe {
     return this._client._subscribeInternal(
       id,
       { include: this._include as IncludeSpec | undefined },
@@ -272,7 +272,7 @@ export class IssueLabelsQueryBuilder<I extends IssueLabelIncludes = {}> {
   /**
    * Subscribe to all matching IssueLabels
    */
-  subscribeAll(callback: (rows: IssueLabelLoaded<I>[]) => void): Unsubscribe {
+  subscribeAll(callback: (rows: IssueLabelWith<I>[]) => void): Unsubscribe {
     return this._client._subscribeAllInternal(
       { where: this._where as BaseWhereInput | undefined, include: this._include as IncludeSpec | undefined },
       callback as (rows: IssueLabel[]) => void
@@ -282,7 +282,7 @@ export class IssueLabelsQueryBuilder<I extends IssueLabelIncludes = {}> {
   /**
    * Subscribe to a single IssueLabel by ID
    */
-  subscribe(id: ObjectId, callback: (row: IssueLabelLoaded<I> | null) => void): Unsubscribe {
+  subscribe(id: ObjectId, callback: (row: IssueLabelWith<I> | null) => void): Unsubscribe {
     return this._client._subscribeInternal(
       id,
       { include: this._include as IncludeSpec | undefined },
@@ -329,7 +329,7 @@ export class IssueAssigneesQueryBuilder<I extends IssueAssigneeIncludes = {}> {
   /**
    * Subscribe to all matching IssueAssignees
    */
-  subscribeAll(callback: (rows: IssueAssigneeLoaded<I>[]) => void): Unsubscribe {
+  subscribeAll(callback: (rows: IssueAssigneeWith<I>[]) => void): Unsubscribe {
     return this._client._subscribeAllInternal(
       { where: this._where as BaseWhereInput | undefined, include: this._include as IncludeSpec | undefined },
       callback as (rows: IssueAssignee[]) => void
@@ -339,7 +339,7 @@ export class IssueAssigneesQueryBuilder<I extends IssueAssigneeIncludes = {}> {
   /**
    * Subscribe to a single IssueAssignee by ID
    */
-  subscribe(id: ObjectId, callback: (row: IssueAssigneeLoaded<I> | null) => void): Unsubscribe {
+  subscribe(id: ObjectId, callback: (row: IssueAssigneeWith<I> | null) => void): Unsubscribe {
     return this._client._subscribeInternal(
       id,
       { include: this._include as IncludeSpec | undefined },

@@ -22,8 +22,8 @@ export function Sidebar({
   const db = useJazz() as unknown as Database;
 
   // Fetch projects and issues internally
-  const { data: projects } = useAll(db.projects);
-  const { data: issues } = useAll(db.issues);
+  const [projects] = useAll(db.projects);
+  const [issues] = useAll(db.issues);
 
   // Count issues per project
   const countsByProject = useMemo(() => {

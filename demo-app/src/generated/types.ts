@@ -131,7 +131,7 @@ export interface UserInsert {
 }
 
 /** User with refs/reverse refs resolved based on includes parameter I */
-export type UserLoaded<I extends UserIncludes = {}> = {
+export type UserWith<I extends UserIncludes = {}> = {
   id: ObjectId;
   name: string;
   email: string;
@@ -141,7 +141,7 @@ export type UserLoaded<I extends UserIncludes = {}> = {
     ? I['IssueAssignees'] extends true
       ? { IssueAssignees: IssueAssignee[] }
       : I['IssueAssignees'] extends object
-        ? { IssueAssignees: IssueAssigneeLoaded<I['IssueAssignees'] & IssueAssigneeIncludes>[] }
+        ? { IssueAssignees: IssueAssigneeWith<I['IssueAssignees'] & IssueAssigneeIncludes>[] }
         : {}
     : {})
 ;
@@ -161,7 +161,7 @@ export interface ProjectInsert {
 }
 
 /** Project with refs/reverse refs resolved based on includes parameter I */
-export type ProjectLoaded<I extends ProjectIncludes = {}> = {
+export type ProjectWith<I extends ProjectIncludes = {}> = {
   id: ObjectId;
   name: string;
   color: string;
@@ -171,7 +171,7 @@ export type ProjectLoaded<I extends ProjectIncludes = {}> = {
     ? I['Issues'] extends true
       ? { Issues: Issue[] }
       : I['Issues'] extends object
-        ? { Issues: IssueLoaded<I['Issues'] & IssueIncludes>[] }
+        ? { Issues: IssueWith<I['Issues'] & IssueIncludes>[] }
         : {}
     : {})
 ;
@@ -199,7 +199,7 @@ export interface IssueInsert {
 }
 
 /** Issue with refs/reverse refs resolved based on includes parameter I */
-export type IssueLoaded<I extends IssueIncludes = {}> = {
+export type IssueWith<I extends IssueIncludes = {}> = {
   id: ObjectId;
   title: string;
   description: string | null;
@@ -209,7 +209,7 @@ export type IssueLoaded<I extends IssueIncludes = {}> = {
     ? I['project'] extends true
       ? Project
       : I['project'] extends object
-        ? ProjectLoaded<I['project'] & ProjectIncludes>
+        ? ProjectWith<I['project'] & ProjectIncludes>
         : ObjectId
     : ObjectId;
   createdAt: bigint;
@@ -219,14 +219,14 @@ export type IssueLoaded<I extends IssueIncludes = {}> = {
     ? I['IssueLabels'] extends true
       ? { IssueLabels: IssueLabel[] }
       : I['IssueLabels'] extends object
-        ? { IssueLabels: IssueLabelLoaded<I['IssueLabels'] & IssueLabelIncludes>[] }
+        ? { IssueLabels: IssueLabelWith<I['IssueLabels'] & IssueLabelIncludes>[] }
         : {}
     : {})
   & ('IssueAssignees' extends keyof I
     ? I['IssueAssignees'] extends true
       ? { IssueAssignees: IssueAssignee[] }
       : I['IssueAssignees'] extends object
-        ? { IssueAssignees: IssueAssigneeLoaded<I['IssueAssignees'] & IssueAssigneeIncludes>[] }
+        ? { IssueAssignees: IssueAssigneeWith<I['IssueAssignees'] & IssueAssigneeIncludes>[] }
         : {}
     : {})
 ;
@@ -244,7 +244,7 @@ export interface LabelInsert {
 }
 
 /** Label with refs/reverse refs resolved based on includes parameter I */
-export type LabelLoaded<I extends LabelIncludes = {}> = {
+export type LabelWith<I extends LabelIncludes = {}> = {
   id: ObjectId;
   name: string;
   color: string;
@@ -253,7 +253,7 @@ export type LabelLoaded<I extends LabelIncludes = {}> = {
     ? I['IssueLabels'] extends true
       ? { IssueLabels: IssueLabel[] }
       : I['IssueLabels'] extends object
-        ? { IssueLabels: IssueLabelLoaded<I['IssueLabels'] & IssueLabelIncludes>[] }
+        ? { IssueLabels: IssueLabelWith<I['IssueLabels'] & IssueLabelIncludes>[] }
         : {}
     : {})
 ;
@@ -271,20 +271,20 @@ export interface IssueLabelInsert {
 }
 
 /** IssueLabel with refs/reverse refs resolved based on includes parameter I */
-export type IssueLabelLoaded<I extends IssueLabelIncludes = {}> = {
+export type IssueLabelWith<I extends IssueLabelIncludes = {}> = {
   id: ObjectId;
   issue: 'issue' extends keyof I
     ? I['issue'] extends true
       ? Issue
       : I['issue'] extends object
-        ? IssueLoaded<I['issue'] & IssueIncludes>
+        ? IssueWith<I['issue'] & IssueIncludes>
         : ObjectId
     : ObjectId;
   label: 'label' extends keyof I
     ? I['label'] extends true
       ? Label
       : I['label'] extends object
-        ? LabelLoaded<I['label'] & LabelIncludes>
+        ? LabelWith<I['label'] & LabelIncludes>
         : ObjectId
     : ObjectId;
 }
@@ -303,20 +303,20 @@ export interface IssueAssigneeInsert {
 }
 
 /** IssueAssignee with refs/reverse refs resolved based on includes parameter I */
-export type IssueAssigneeLoaded<I extends IssueAssigneeIncludes = {}> = {
+export type IssueAssigneeWith<I extends IssueAssigneeIncludes = {}> = {
   id: ObjectId;
   issue: 'issue' extends keyof I
     ? I['issue'] extends true
       ? Issue
       : I['issue'] extends object
-        ? IssueLoaded<I['issue'] & IssueIncludes>
+        ? IssueWith<I['issue'] & IssueIncludes>
         : ObjectId
     : ObjectId;
   user: 'user' extends keyof I
     ? I['user'] extends true
       ? User
       : I['user'] extends object
-        ? UserLoaded<I['user'] & UserIncludes>
+        ? UserWith<I['user'] & UserIncludes>
         : ObjectId
     : ObjectId;
 }
