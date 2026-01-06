@@ -56,9 +56,9 @@ export class CoDiscriminatedUnionSchema<
   readonly getDefinition: () => CoDiscriminatedUnionSchemaDefinition<Options>;
 
   getValidationSchema = () => {
-    // @ts-expect-error we can't statically enforce the schema's discriminator is a valid discriminator, but in practice it is
     return z.discriminatedUnion(
       this.getDefinition().discriminator,
+      // @ts-expect-error we can't statically enforce the schema's discriminator is a valid discriminator, but in practice it is
       this.getDefinition().options.map((option) =>
         option.getValidationSchema(),
       ),
