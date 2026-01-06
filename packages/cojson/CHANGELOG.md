@@ -1,5 +1,13 @@
 # cojson
 
+## 0.19.18
+
+### Patch Changes
+
+- cojson-core-wasm@0.19.18
+- cojson-core-rn@0.19.18
+- cojson-core-napi@0.19.18
+
 ## 0.19.17
 
 ### Patch Changes
