@@ -6,10 +6,21 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SESSIONS_DIR="$(cd "$REPO_ROOT/.." && pwd)/jazz2-sessions"
 ZED_CLI="/Applications/Zed.app/Contents/MacOS/cli"
 
-# Generate timestamp-based session name
-TIMESTAMP=$(date +"%Y%m%d-%H%M%S")
-SESSION_NAME="session-${TIMESTAMP}"
+# Require session name as argument
+if [ -z "$1" ]; then
+    echo "Usage: session-new <name>"
+    echo "Example: session-new blob-impl"
+    exit 1
+fi
+
+SESSION_NAME="$1"
 WORKTREE_PATH="${SESSIONS_DIR}/${SESSION_NAME}"
+
+# Check if session already exists
+if [ -d "$WORKTREE_PATH" ]; then
+    echo "Error: Session '$SESSION_NAME' already exists at $WORKTREE_PATH"
+    exit 1
+fi
 
 # Ensure sessions directory exists
 mkdir -p "$SESSIONS_DIR"
@@ -42,6 +53,3 @@ fi
 echo ""
 echo "Session created: $SESSION_NAME"
 echo "Path: $WORKTREE_PATH"
-echo ""
-echo "Tip: Once the scope of your session is clear, rename it with:"
-echo "  scripts/session-rename $SESSION_NAME your-descriptive-name"

@@ -69,11 +69,9 @@ Key modules in `groove/src/`:
 This project uses git worktrees to manage parallel development sessions. Each session is a separate working directory with its own branch.
 
 **Scripts** (in `scripts/`):
-- `session-new` - Create a new worktree session, install deps, open Zed
+- `session-new <name>` - Create a new session with the given name, install deps, open Zed
 - `session-list` - List active sessions
-- `session-rename <old> <new>` - Rename a session
+- `session-rename <old> <new>` - Rename a session (if needed)
 - `session-retire <name>` - Clean up a completed/abandoned session
 
 Sessions are stored in `../jazz2-sessions/` (sibling to this repo).
-
-**For Claude**: When starting work in a session named `session-YYYYMMDD-HHMMSS`, rename it as soon as the scope of work becomes clear. Use a descriptive name like `implement-delete-feature-YYYYMMDD` or `fix-join-bug-YYYYMMDD`. Run: `../jazz2/scripts/session-rename session-YYYYMMDD-HHMMSS descriptive-name-YYYYMMDD`
