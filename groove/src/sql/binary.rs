@@ -180,6 +180,22 @@ fn encode_value(buf: &mut Vec<u8>, value: &Value) {
                 encode_value(buf, elem);
             }
         }
+        Value::Blob(content_ref) => {
+            // Blob: serialize ContentRef bytes with length prefix
+            // Format: u32 length + ContentRef bytes
+            let blob_bytes = content_ref.to_row_bytes();
+            buf.extend_from_slice(&(blob_bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&blob_bytes);
+        }
+        Value::BlobArray(refs) => {
+            // BlobArray: count + each blob's serialized ContentRef
+            buf.extend_from_slice(&(refs.len() as u32).to_le_bytes());
+            for content_ref in refs {
+                let blob_bytes = content_ref.to_row_bytes();
+                buf.extend_from_slice(&(blob_bytes.len() as u32).to_le_bytes());
+                buf.extend_from_slice(&blob_bytes);
+            }
+        }
     }
 }
 

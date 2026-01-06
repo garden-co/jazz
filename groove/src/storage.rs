@@ -30,7 +30,7 @@ impl ChunkHash {
 }
 
 /// Reference to commit content - either inline or chunked.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ContentRef {
     /// Small content stored directly in the commit.
     Inline(Box<[u8]>),
@@ -70,6 +70,131 @@ impl ContentRef {
             ContentRef::Chunked(hashes) => Some(hashes),
         }
     }
+
+    /// Serialize ContentRef for embedding in row data.
+    ///
+    /// Format:
+    /// - Inline:  0x00 + varint(length) + bytes
+    /// - Chunked: 0x01 + varint(chunk_count) + [32-byte ChunkHash]*count
+    pub fn to_row_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        match self {
+            ContentRef::Inline(data) => {
+                buf.push(0x00); // Tag: inline
+                encode_varint(data.len(), &mut buf);
+                buf.extend_from_slice(data);
+            }
+            ContentRef::Chunked(hashes) => {
+                buf.push(0x01); // Tag: chunked
+                encode_varint(hashes.len(), &mut buf);
+                for hash in hashes {
+                    buf.extend_from_slice(hash.as_bytes());
+                }
+            }
+        }
+        buf
+    }
+
+    /// Deserialize ContentRef from row data.
+    ///
+    /// Returns the ContentRef and the number of bytes consumed.
+    pub fn from_row_bytes(data: &[u8]) -> Result<(Self, usize), ContentRefError> {
+        if data.is_empty() {
+            return Err(ContentRefError::UnexpectedEof);
+        }
+
+        let tag = data[0];
+        let mut pos = 1;
+
+        match tag {
+            0x00 => {
+                // Inline
+                let (len, consumed) = decode_varint(&data[pos..])?;
+                pos += consumed;
+
+                if data.len() < pos + len {
+                    return Err(ContentRefError::UnexpectedEof);
+                }
+                let content = data[pos..pos + len].to_vec().into_boxed_slice();
+                pos += len;
+
+                Ok((ContentRef::Inline(content), pos))
+            }
+            0x01 => {
+                // Chunked
+                let (count, consumed) = decode_varint(&data[pos..])?;
+                pos += consumed;
+
+                let mut hashes = Vec::with_capacity(count);
+                for _ in 0..count {
+                    if data.len() < pos + 32 {
+                        return Err(ContentRefError::UnexpectedEof);
+                    }
+                    let mut hash_bytes = [0u8; 32];
+                    hash_bytes.copy_from_slice(&data[pos..pos + 32]);
+                    hashes.push(ChunkHash::from_bytes(hash_bytes));
+                    pos += 32;
+                }
+
+                Ok((ContentRef::Chunked(hashes), pos))
+            }
+            _ => Err(ContentRefError::InvalidTag(tag)),
+        }
+    }
+}
+
+/// Errors during ContentRef deserialization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContentRefError {
+    UnexpectedEof,
+    VarintOverflow,
+    InvalidTag(u8),
+}
+
+impl std::fmt::Display for ContentRefError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ContentRefError::UnexpectedEof => write!(f, "unexpected end of ContentRef data"),
+            ContentRefError::VarintOverflow => write!(f, "varint overflow"),
+            ContentRefError::InvalidTag(tag) => write!(f, "invalid ContentRef tag: {}", tag),
+        }
+    }
+}
+
+impl std::error::Error for ContentRefError {}
+
+/// Encode a varint (LEB128 unsigned).
+fn encode_varint(mut value: usize, buf: &mut Vec<u8>) {
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        buf.push(byte);
+        if value == 0 {
+            break;
+        }
+    }
+}
+
+/// Decode a varint (LEB128 unsigned). Returns (value, bytes_consumed).
+fn decode_varint(data: &[u8]) -> Result<(usize, usize), ContentRefError> {
+    let mut result: usize = 0;
+    let mut shift = 0;
+
+    for (i, &byte) in data.iter().enumerate() {
+        result |= ((byte & 0x7f) as usize) << shift;
+        if byte & 0x80 == 0 {
+            return Ok((result, i + 1));
+        }
+        shift += 7;
+        if shift >= 64 {
+            return Err(ContentRefError::VarintOverflow);
+        }
+    }
+
+    Err(ContentRefError::UnexpectedEof)
 }
 
 /// Metadata about a commit (without content).

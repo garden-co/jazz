@@ -401,6 +401,20 @@ impl<'a> Parser<'a> {
         if self.try_keyword("BYTES") {
             return Ok(ColumnType::Bytes);
         }
+        if self.try_keyword("BLOB") {
+            // Check for array suffix []
+            self.skip_whitespace();
+            if self.peek_char() == Some('[') {
+                self.consume_char();
+                self.skip_whitespace();
+                if self.peek_char() != Some(']') {
+                    return Err(self.error("expected ']' after '[' in BLOB[]"));
+                }
+                self.consume_char();
+                return Ok(ColumnType::BlobArray);
+            }
+            return Ok(ColumnType::Blob);
+        }
         if self.try_keyword("REFERENCES") {
             let target = self.parse_identifier()?;
             return Ok(ColumnType::Ref(target));

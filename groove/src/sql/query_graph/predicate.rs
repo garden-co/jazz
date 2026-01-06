@@ -19,6 +19,14 @@ fn value_to_display(value: &Value) -> String {
         Value::NullableSome(inner) => value_to_display(inner),
         Value::Array(arr) => format!("[{} items]", arr.len()),
         Value::Row(row) => format!("<Row {}>", row.id),
+        Value::Blob(content_ref) => {
+            if content_ref.is_inline() {
+                format!("<Blob inline>")
+            } else {
+                format!("<Blob chunked>")
+            }
+        }
+        Value::BlobArray(refs) => format!("<{} blobs>", refs.len()),
     }
 }
 

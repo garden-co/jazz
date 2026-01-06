@@ -2,7 +2,35 @@
 
 ## Implementation Status
 
-**Not yet implemented** - This is a design proposal.
+**Implementation complete.** The following are implemented:
+
+**Core Types:**
+- [x] `BLOB` and `BLOB[]` column types in schema
+- [x] `Value::Blob(ContentRef)` and `Value::BlobArray(Vec<ContentRef>)` variants
+- [x] Row encoding/decoding for blob columns
+- [x] SQL parser recognizes `BLOB` and `BLOB[]` keywords
+- [x] Binary WASM encoding for blob values (sends serialized ContentRef)
+
+**WASM Handle-based API:**
+- [x] `BlobRegistry` for tracking blob handles across WASM boundary
+- [x] `create_blob(data)` - Create blob from raw bytes
+- [x] `create_blob_writer()` - Streaming blob creation
+- [x] `read_blob(handle)` - Read entire blob (small blobs)
+- [x] `read_blob_chunk(handle, idx)` - Stream chunks (large blobs)
+- [x] `get_blob_info(handle)` - Get blob metadata
+- [x] `release_blob(handle)` - Free blob handle
+- [x] `insert_with_blobs()` - Insert row with blob columns
+- [x] `update_row_blob()` - Update blob column
+
+**JavaScript Helpers (`groove-wasm/blob-helpers.ts`):**
+- [x] `blobToReadableStream()` - Convert blob handle to ReadableStream
+- [x] `readableStreamToBlob()` - Create blob from ReadableStream
+- [x] `GrooveBlob` - Wrapper class for convenient blob access
+- [x] `GrooveBlobWriter` - Wrapper for streaming blob creation with WritableStream
+
+**Pending (can defer):**
+- [ ] Blob chunk garbage collection when rows deleted
+- [ ] Persistent chunk storage (currently in-memory only per session)
 
 ## Problem Statement
 

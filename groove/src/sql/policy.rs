@@ -501,9 +501,9 @@ fn serialize_literal(buf: &mut Vec<u8>, val: &Value) {
         }
         // NullableSome: serialize the inner value
         Value::NullableSome(inner) => serialize_literal(buf, inner),
-        // Row and Array are not valid in policy literals - they're only for query results
-        Value::Row(_) | Value::Array(_) => {
-            panic!("Row and Array values cannot be used in policy literals");
+        // Row, Array, Blob, BlobArray are not valid in policy literals - they're only for query results
+        Value::Row(_) | Value::Array(_) | Value::Blob(_) | Value::BlobArray(_) => {
+            panic!("Row, Array, Blob, and BlobArray values cannot be used in policy literals");
         }
     }
 }

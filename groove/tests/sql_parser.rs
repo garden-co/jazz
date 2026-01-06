@@ -843,3 +843,26 @@ fn parse_select_limit_offset_with_where() {
         _ => panic!("expected Select"),
     }
 }
+
+#[test]
+fn parse_create_table_with_blob() {
+    let sql = "CREATE TABLE documents (title STRING NOT NULL, content BLOB, attachments BLOB[])";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::CreateTable(ct) => {
+            assert_eq!(ct.name, "documents");
+            assert_eq!(ct.columns.len(), 3);
+            assert_eq!(ct.columns[0].name, "title");
+            assert_eq!(ct.columns[0].ty, ColumnType::String);
+            assert!(!ct.columns[0].nullable);
+            assert_eq!(ct.columns[1].name, "content");
+            assert_eq!(ct.columns[1].ty, ColumnType::Blob);
+            assert!(ct.columns[1].nullable);
+            assert_eq!(ct.columns[2].name, "attachments");
+            assert_eq!(ct.columns[2].ty, ColumnType::BlobArray);
+            assert!(ct.columns[2].nullable);
+        }
+        _ => panic!("expected CreateTable"),
+    }
+}
