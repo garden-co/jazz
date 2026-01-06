@@ -22,7 +22,7 @@ const ClerkUserSchema = z.object({
   update: z.function({
     input: [
       z.object({
-        unsafeMetadata: ClerkJazzCredentialsSchema.or(z.object({})),
+        unsafeMetadata: ClerkJazzCredentialsSchema,
       }),
     ],
     output: z.promise(z.unknown()),
