@@ -316,7 +316,7 @@ Current test count: **276 tests** passing across all modules
 
 - [ ] Truncation on UPDATE: Should UPDATE support a HARD modifier like DELETE? This would allow truncating history after any mutation, not just deletes. Need to unify the semantics with DELETE HARD.
 
-- [ ] Binary files (especially larger than RAM): Should this be a column type (e.g., `BLOB` with streaming support) or a separate raw Object that rows reference? Considerations: chunked storage already exists, but column-based approach may complicate row encoding; reference-based approach keeps rows small but adds indirection.
+- [ ] Binary files (especially larger than RAM): Should this be a column type (e.g., `BLOB` with streaming support) or a separate raw Object that rows reference? See `specs/binary-data-and-blobs.md` for the proposed row-first design with blob columns.
 
 - [ ] Edit & history API via "magic columns" and "magic filters": Expose commit graph metadata through virtual columns (e.g., `_commit_id`, `_author`, `_timestamp`, `_deleted`) and special WHERE filters (e.g., `WHERE _as_of = '2024-01-01'`, `WHERE _include_deleted = true`). Would enable time-travel queries and audit trails without separate APIs.
 
@@ -333,6 +333,8 @@ Current test count: **276 tests** passing across all modules
 - [x] **Nullable column representation**: Replaced `nullable_mask: u64` bitmask with self-describing `Value::NullableSome(Box<Value>)` and `Value::NullableNone` variants. The binary encoder now writes presence bytes based on the Value variant itself, not external schema hints. This fixed projection issues where nullable_mask was computed from the wrong schema in JOIN queries.
 
 - [ ] **SQL → Query Graph architecture refactoring**: The current SQL-to-incremental-graph translation has grown organically and accumulated complexity. Key pain points documented in `specs/clean-up-sql-layer.md` include: forward/reverse JOIN asymmetry, ad-hoc table alias handling across multiple functions, string-encoded metadata (qualified columns, join direction), implicit state during node evaluation, and separate code paths for similar operations. Future redesign should consider: explicit join direction types, schema-aware nodes, centralized table/alias resolution, typed column references, and separating EXISTS-style filtering from ARRAY inclusion.
+
+- [ ] **External data migrations**: Allow migrations to pull data from external URL endpoints, enabling easy one-off imports from legacy databases or external systems. See `specs/external-data-migrations.md` for the proposed IMPORT statement and EXTERNAL function designs.
 
 ---
 
