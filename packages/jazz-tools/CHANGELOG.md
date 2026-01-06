@@ -1,5 +1,14 @@
 # jazz-tools
 
+## 0.19.18
+
+### Patch Changes
+
+- 729d46c: Fixed Clerk types schema to use `.or()` method consistently for union types
+  - cojson@0.19.18
+  - cojson-storage-indexeddb@0.19.18
+  - cojson-transport-ws@0.19.18
+
 ## 0.19.17
 
 ### Patch Changes
