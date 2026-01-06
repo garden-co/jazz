@@ -336,6 +336,12 @@ Current test count: **276 tests** passing across all modules
 
 - [ ] **External data migrations**: Allow migrations to pull data from external URL endpoints, enabling easy one-off imports from legacy databases or external systems. See `specs/external-data-migrations.md` for the proposed IMPORT statement and EXTERNAL function designs.
 
+- [ ] **Enum support in schemas**: Add enum column types that aren't as cursed as Postgres enums (which require ALTER TYPE to add values and can't be dropped while in use). Consider: inline enum definitions in CREATE TABLE, or separate CREATE TYPE with easier mutation semantics.
+
+- [ ] **Migrate to Linear for project management**: Replace plan.md with Linear for better issue tracking, prioritization, and progress visibility. Open question: how to make Linear issue state easily available to LLMs without blowing up context (a single file is easy to include, but a full Linear export would be too large).
+
+- [ ] **Zed + Claude Code + worktrees workflow**: Document and set up a development workflow using Zed editor, Claude Code for AI assistance, and git worktrees for parallel feature development.
+
 ---
 
 ## Clarifications
