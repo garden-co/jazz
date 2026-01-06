@@ -1,17 +1,14 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef } from "react";
 import { JazzProvider, useJazz, useAll } from "@jazz/react";
 import { createDatabase, type Database } from "./generated/client";
-import type { IssueFilter, IssueLoaded, IssueIncludes } from "./generated/types";
-
-// Define the include spec for issues with all related data
-const issueIncludes = {
-  project: true,
-  IssueLabels: { label: true },
-  IssueAssignees: { user: true },
-} as const satisfies IssueIncludes;
+import type { IssueLoaded } from "./generated/types";
 
 // Type for an issue with all includes loaded
-export type LoadedIssue = IssueLoaded<typeof issueIncludes>;
+export type LoadedIssue = IssueLoaded<{
+  project: true;
+  IssueLabels: { label: true };
+  IssueAssignees: { user: true };
+}>;
 
 // @ts-ignore - vite handles ?raw imports
 import schema from "./schema.sql?raw";
@@ -43,55 +40,34 @@ function App() {
   const pageSize = 20;
 
   // Filters
-  const [statusFilter, setStatusFilter] = useState<string | null>(null);
-  const [priorityFilter, setPriorityFilter] = useState<string | null>(null);
-  const [assigneeFilter, setAssigneeFilter] = useState<string | null>(null);
-  const [labelFilter, setLabelFilter] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<string | undefined>();
+  const [priorityFilter, setPriorityFilter] = useState<string | undefined>();
+  const [assigneeFilter, setAssigneeFilter] = useState<string | undefined>();
+  const [labelFilter, setLabelFilter] = useState<string | undefined>();
 
   // Current user (from fake data generation)
   const { initialized, currentUserId } = useFakeData(db);
 
-  // Build issues filter from UI state (SQL-based filtering with relation filters)
-  const issuesFilter = useMemo((): IssueFilter | undefined => {
-    const filter: IssueFilter = {};
+  // Compute effective assignee filter (explicit filter takes precedence over "My Issues")
+  const effectiveAssignee = assigneeFilter || (showMyIssues ? currentUserId : undefined);
 
-    // Direct column filters
-    if (selectedProjectId) {
-      filter.project = selectedProjectId;
-    }
-    if (statusFilter) {
-      filter.status = statusFilter;
-    }
-    if (priorityFilter) {
-      filter.priority = priorityFilter;
-    }
-
-    // Relation filter: assignee (via IssueAssignees junction table)
-    const userToFilter = assigneeFilter || (showMyIssues ? currentUserId : null);
-    if (userToFilter) {
-      filter.IssueAssignees = { some: { user: userToFilter } };
-    }
-
-    // Relation filter: label (via IssueLabels junction table)
-    if (labelFilter) {
-      filter.IssueLabels = { some: { label: labelFilter } };
-    }
-
-    // Return undefined if no filters
-    if (Object.keys(filter).length === 0) return undefined;
-    return filter;
-  }, [selectedProjectId, statusFilter, priorityFilter, assigneeFilter, showMyIssues, currentUserId, labelFilter]);
-
-  // Build the query with filters and includes
-  const issuesQuery = useMemo(() => {
-    if (issuesFilter) {
-      return db.issues.where(issuesFilter).with(issueIncludes);
-    }
-    return db.issues.with(issueIncludes);
-  }, [db.issues, issuesFilter]);
-
-  // Subscribe to filtered issues with all related data included
-  const { data: filteredIssues, loading: issuesLoading } = useAll(issuesQuery);
+  // Subscribe to filtered issues - no useMemo needed, hook handles structural equality
+  // undefined values are automatically ignored by the where clause builder
+  const { data: filteredIssues, loading: issuesLoading } = useAll(
+    db.issues
+      .where({
+        project: selectedProjectId ?? undefined,
+        status: statusFilter,
+        priority: priorityFilter,
+        IssueAssignees: effectiveAssignee ? { some: { user: effectiveAssignee } } : undefined,
+        IssueLabels: labelFilter ? { some: { label: labelFilter } } : undefined,
+      })
+      .with({
+        project: true,
+        IssueLabels: { label: true },
+        IssueAssignees: { user: true },
+      })
+  );
 
   // Reset page when filters change
   useEffect(() => {

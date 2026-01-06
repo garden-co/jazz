@@ -21,6 +21,13 @@ export class UsersQueryBuilder<I extends UserIncludes = {}> {
   }
 
   /**
+   * Get a stable key representing this query's options (for React hook deduplication)
+   */
+  get _queryKey(): string {
+    return JSON.stringify({ t: "Users", w: this._where, i: this._include });
+  }
+
+  /**
    * Add a filter condition
    */
   where(filter: UserFilter): UsersQueryBuilder<I> {
@@ -68,6 +75,13 @@ export class ProjectsQueryBuilder<I extends ProjectIncludes = {}> {
     this._client = client;
     this._where = where;
     this._include = include;
+  }
+
+  /**
+   * Get a stable key representing this query's options (for React hook deduplication)
+   */
+  get _queryKey(): string {
+    return JSON.stringify({ t: "Projects", w: this._where, i: this._include });
   }
 
   /**
@@ -121,6 +135,13 @@ export class IssuesQueryBuilder<I extends IssueIncludes = {}> {
   }
 
   /**
+   * Get a stable key representing this query's options (for React hook deduplication)
+   */
+  get _queryKey(): string {
+    return JSON.stringify({ t: "Issues", w: this._where, i: this._include });
+  }
+
+  /**
    * Add a filter condition
    */
   where(filter: IssueFilter): IssuesQueryBuilder<I> {
@@ -168,6 +189,13 @@ export class LabelsQueryBuilder<I extends LabelIncludes = {}> {
     this._client = client;
     this._where = where;
     this._include = include;
+  }
+
+  /**
+   * Get a stable key representing this query's options (for React hook deduplication)
+   */
+  get _queryKey(): string {
+    return JSON.stringify({ t: "Labels", w: this._where, i: this._include });
   }
 
   /**
@@ -221,6 +249,13 @@ export class IssueLabelsQueryBuilder<I extends IssueLabelIncludes = {}> {
   }
 
   /**
+   * Get a stable key representing this query's options (for React hook deduplication)
+   */
+  get _queryKey(): string {
+    return JSON.stringify({ t: "IssueLabels", w: this._where, i: this._include });
+  }
+
+  /**
    * Add a filter condition
    */
   where(filter: IssueLabelFilter): IssueLabelsQueryBuilder<I> {
@@ -268,6 +303,13 @@ export class IssueAssigneesQueryBuilder<I extends IssueAssigneeIncludes = {}> {
     this._client = client;
     this._where = where;
     this._include = include;
+  }
+
+  /**
+   * Get a stable key representing this query's options (for React hook deduplication)
+   */
+  get _queryKey(): string {
+    return JSON.stringify({ t: "IssueAssignees", w: this._where, i: this._include });
   }
 
   /**

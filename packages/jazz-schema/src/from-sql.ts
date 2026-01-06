@@ -1028,6 +1028,13 @@ function generateClient(
       lines.push(`  }`);
       lines.push(``);
       lines.push(`  /**`);
+      lines.push(`   * Get a stable key representing this query's options (for React hook deduplication)`);
+      lines.push(`   */`);
+      lines.push(`  get _queryKey(): string {`);
+      lines.push(`    return JSON.stringify({ t: "${table.name}", w: this._where, i: this._include });`);
+      lines.push(`  }`);
+      lines.push(``);
+      lines.push(`  /**`);
       lines.push(`   * Add a filter condition`);
       lines.push(`   */`);
       lines.push(`  where(filter: ${typeName}Filter): ${builderName}<I> {`);

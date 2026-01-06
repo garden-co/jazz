@@ -11,6 +11,8 @@ import type { Unsubscribe } from "@jazz/client";
  */
 export interface SubscribableOne<T> {
   subscribe(id: string, callback: (row: T | null) => void): Unsubscribe;
+  /** Optional query key for structural equality comparison */
+  _queryKey?: string;
 }
 
 /**
@@ -19,6 +21,16 @@ export interface SubscribableOne<T> {
  */
 export interface SubscribableAll<T> {
   subscribeAll(callback: (rows: T[]) => void): Unsubscribe;
+  /** Optional query key for structural equality comparison */
+  _queryKey?: string;
+}
+
+/**
+ * Get a stable key for a subscribable object.
+ * QueryBuilders have _queryKey, table clients use object identity.
+ */
+function getSubscribableKey(subscribable: { _queryKey?: string }): string | object {
+  return subscribable._queryKey ?? subscribable;
 }
 
 /**
@@ -79,6 +91,25 @@ export function useOne<T>(
   // Track if this is the first callback
   const isFirstCallback = useRef(true);
 
+  // Track the previous subscribable to avoid unnecessary re-subscriptions
+  const prevSubscribableRef = useRef<SubscribableOne<T> | null>(null);
+  const prevKeyRef = useRef<string | object | null>(null);
+
+  // Get stable key for structural comparison
+  const currentKey = getSubscribableKey(subscribable);
+
+  // Use the previous subscribable if the key matches (structural equality)
+  const stableSubscribable =
+    prevKeyRef.current === currentKey && prevSubscribableRef.current
+      ? prevSubscribableRef.current
+      : subscribable;
+
+  // Update refs for next render
+  if (prevKeyRef.current !== currentKey) {
+    prevKeyRef.current = currentKey;
+    prevSubscribableRef.current = subscribable;
+  }
+
   useEffect(() => {
     // Reset state on id change
     setLoading(true);
@@ -91,7 +122,7 @@ export function useOne<T>(
       return;
     }
 
-    const unsubscribe = subscribable.subscribe(id, (row) => {
+    const unsubscribe = stableSubscribable.subscribe(id, (row) => {
       setData(row);
       if (isFirstCallback.current) {
         setLoading(false);
@@ -100,7 +131,7 @@ export function useOne<T>(
     });
 
     return unsubscribe;
-  }, [subscribable, id]);
+  }, [stableSubscribable, id]);
 
   return { data, loading };
 }
@@ -148,13 +179,32 @@ export function useAll<T>(subscribable: SubscribableAll<T>): UseAllResult<T> {
   // Track if this is the first callback
   const isFirstCallback = useRef(true);
 
+  // Track the previous subscribable to avoid unnecessary re-subscriptions
+  const prevSubscribableRef = useRef<SubscribableAll<T> | null>(null);
+  const prevKeyRef = useRef<string | object | null>(null);
+
+  // Get stable key for structural comparison
+  const currentKey = getSubscribableKey(subscribable);
+
+  // Use the previous subscribable if the key matches (structural equality)
+  const stableSubscribable =
+    prevKeyRef.current === currentKey && prevSubscribableRef.current
+      ? prevSubscribableRef.current
+      : subscribable;
+
+  // Update refs for next render
+  if (prevKeyRef.current !== currentKey) {
+    prevKeyRef.current = currentKey;
+    prevSubscribableRef.current = subscribable;
+  }
+
   useEffect(() => {
     // Reset state on subscribable change
     setLoading(true);
     setData([]);
     isFirstCallback.current = true;
 
-    const unsubscribe = subscribable.subscribeAll((rows) => {
+    const unsubscribe = stableSubscribable.subscribeAll((rows) => {
       setData(rows);
       if (isFirstCallback.current) {
         setLoading(false);
@@ -163,7 +213,7 @@ export function useAll<T>(subscribable: SubscribableAll<T>): UseAllResult<T> {
     });
 
     return unsubscribe;
-  }, [subscribable]);
+  }, [stableSubscribable]);
 
   return { data, loading };
 }

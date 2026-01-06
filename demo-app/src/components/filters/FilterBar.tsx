@@ -12,14 +12,14 @@ import { STATUSES, STATUS_LABELS, PRIORITIES, PRIORITY_LABELS } from "@/utils/co
 import type { Database } from "@/generated/client";
 
 interface FilterBarProps {
-  statusFilter: string | null;
-  onStatusFilterChange: (status: string | null) => void;
-  priorityFilter: string | null;
-  onPriorityFilterChange: (priority: string | null) => void;
-  assigneeFilter: string | null;
-  onAssigneeFilterChange: (userId: string | null) => void;
-  labelFilter: string | null;
-  onLabelFilterChange: (labelId: string | null) => void;
+  statusFilter: string | undefined;
+  onStatusFilterChange: (status: string | undefined) => void;
+  priorityFilter: string | undefined;
+  onPriorityFilterChange: (priority: string | undefined) => void;
+  assigneeFilter: string | undefined;
+  onAssigneeFilterChange: (userId: string | undefined) => void;
+  labelFilter: string | undefined;
+  onLabelFilterChange: (labelId: string | undefined) => void;
 }
 
 export function FilterBar({
@@ -40,10 +40,10 @@ export function FilterBar({
   const hasFilters = statusFilter || priorityFilter || assigneeFilter || labelFilter;
 
   const clearFilters = () => {
-    onStatusFilterChange(null);
-    onPriorityFilterChange(null);
-    onAssigneeFilterChange(null);
-    onLabelFilterChange(null);
+    onStatusFilterChange(undefined);
+    onPriorityFilterChange(undefined);
+    onAssigneeFilterChange(undefined);
+    onLabelFilterChange(undefined);
   };
 
   return (
@@ -52,7 +52,7 @@ export function FilterBar({
 
       <Select
         value={statusFilter || "all"}
-        onValueChange={(v) => onStatusFilterChange(v === "all" ? null : v)}
+        onValueChange={(v) => onStatusFilterChange(v === "all" ? undefined : v)}
       >
         <SelectTrigger className="w-[140px] h-8">
           <SelectValue placeholder="Status" />
@@ -69,7 +69,7 @@ export function FilterBar({
 
       <Select
         value={priorityFilter || "all"}
-        onValueChange={(v) => onPriorityFilterChange(v === "all" ? null : v)}
+        onValueChange={(v) => onPriorityFilterChange(v === "all" ? undefined : v)}
       >
         <SelectTrigger className="w-[140px] h-8">
           <SelectValue placeholder="Priority" />
@@ -86,7 +86,7 @@ export function FilterBar({
 
       <Select
         value={assigneeFilter || "all"}
-        onValueChange={(v) => onAssigneeFilterChange(v === "all" ? null : v)}
+        onValueChange={(v) => onAssigneeFilterChange(v === "all" ? undefined : v)}
       >
         <SelectTrigger className="w-[160px] h-8">
           <SelectValue placeholder="Assignee" />
@@ -103,7 +103,7 @@ export function FilterBar({
 
       <Select
         value={labelFilter || "all"}
-        onValueChange={(v) => onLabelFilterChange(v === "all" ? null : v)}
+        onValueChange={(v) => onLabelFilterChange(v === "all" ? undefined : v)}
       >
         <SelectTrigger className="w-[140px] h-8">
           <SelectValue placeholder="Label" />
