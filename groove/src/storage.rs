@@ -210,7 +210,7 @@ pub struct CommitMeta {
 
 /// Storage interface for content chunks.
 #[async_trait]
-pub trait ContentStore: Send + Sync {
+pub trait ChunkStore: Send + Sync {
     /// Get chunk by hash, returns None if not found.
     async fn get_chunk(&self, hash: &ChunkHash) -> Option<Bytes>;
 
@@ -247,35 +247,43 @@ pub trait CommitStore: Send + Sync {
 
     /// Stream commit IDs for an object's branch (for partial loading).
     fn list_commits(&self, object_id: u128, branch: &str) -> BoxStream<'_, CommitId>;
+
+    /// List all object IDs that have data in this store.
+    fn list_objects(&self) -> BoxStream<'_, u128>;
+
+    /// List all branch names for an object.
+    async fn list_branches(&self, object_id: u128) -> Vec<String>;
 }
 
 /// Combined storage interface (legacy alias).
 #[async_trait]
-pub trait Storage: ContentStore + CommitStore {}
+pub trait Storage: ChunkStore + CommitStore {}
 
 // Blanket impl
-impl<T: ContentStore + CommitStore> Storage for T {}
+impl<T: ChunkStore + CommitStore> Storage for T {}
 
 /// Environment trait - combines all storage capabilities.
 /// This is the main trait that LocalNode uses for storage.
-pub trait Environment: ContentStore + CommitStore + Send + Sync + std::fmt::Debug {}
+pub trait Environment: ChunkStore + CommitStore + Send + Sync + std::fmt::Debug {}
 
 // Blanket impl for Environment
-impl<T: ContentStore + CommitStore + Send + Sync + std::fmt::Debug> Environment for T {}
+impl<T: ChunkStore + CommitStore + Send + Sync + std::fmt::Debug> Environment for T {}
 
 // ========== In-Memory Environment for Testing ==========
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
 /// In-memory environment for testing.
-/// Implements both ContentStore and CommitStore.
+/// Implements both ChunkStore and CommitStore.
 #[derive(Debug, Default)]
 pub struct MemoryEnvironment {
     chunks: RwLock<HashMap<ChunkHash, Bytes>>,
     commits: RwLock<HashMap<CommitId, crate::commit::Commit>>,
     frontiers: RwLock<HashMap<(u128, String), Vec<CommitId>>>,
     truncations: RwLock<HashMap<(u128, String), CommitId>>,
+    /// Track which objects exist (object IDs that have at least one branch).
+    objects: RwLock<HashSet<u128>>,
 }
 
 impl MemoryEnvironment {
@@ -285,7 +293,7 @@ impl MemoryEnvironment {
 }
 
 #[async_trait]
-impl ContentStore for MemoryEnvironment {
+impl ChunkStore for MemoryEnvironment {
     async fn get_chunk(&self, hash: &ChunkHash) -> Option<Bytes> {
         self.chunks.read().unwrap().get(hash).cloned()
     }
@@ -337,6 +345,8 @@ impl CommitStore for MemoryEnvironment {
             .write()
             .unwrap()
             .insert((object_id, branch.to_string()), frontier.to_vec());
+        // Track that this object exists
+        self.objects.write().unwrap().insert(object_id);
     }
 
     async fn get_truncation(&self, object_id: u128, branch: &str) -> Option<CommitId> {
@@ -393,6 +403,26 @@ impl CommitStore for MemoryEnvironment {
 
         Box::pin(futures::stream::iter(all_commits))
     }
+
+    fn list_objects(&self) -> BoxStream<'_, u128> {
+        let objects: Vec<u128> = self.objects.read().unwrap().iter().copied().collect();
+        Box::pin(futures::stream::iter(objects))
+    }
+
+    async fn list_branches(&self, object_id: u128) -> Vec<String> {
+        self.frontiers
+            .read()
+            .unwrap()
+            .keys()
+            .filter_map(|(oid, branch)| {
+                if *oid == object_id {
+                    Some(branch.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 }
 
 /// Simple in-memory content store (legacy, for backwards compatibility).
@@ -408,7 +438,7 @@ impl MemoryContentStore {
 }
 
 #[async_trait]
-impl ContentStore for MemoryContentStore {
+impl ChunkStore for MemoryContentStore {
     async fn get_chunk(&self, hash: &ChunkHash) -> Option<Bytes> {
         self.chunks.read().unwrap().get(hash).cloned()
     }

@@ -4,6 +4,7 @@ use std::sync::{Arc, RwLock};
 use crate::listener::ListenerId;
 use crate::node::{LocalNode, generate_object_id};
 use crate::object::ObjectId;
+use crate::sql::catalog::{Catalog, TableDescriptor};
 use crate::sql::index::RefIndex;
 use crate::sql::parser::{self, Condition, ConditionValue, Join, Projection, Select, SelectExpr, Statement};
 use crate::sql::policy::{
@@ -360,12 +361,16 @@ impl Drop for IncrementalQuery {
 /// This is the core data that queries need access to.
 pub struct DatabaseState {
     node: LocalNode,
+    /// Object ID for the database catalog.
+    catalog_object_id: ObjectId,
     /// Map from table name to schema object ID.
     tables: RwLock<HashMap<String, SchemaId>>,
     /// Cached schemas by ID.
     schemas: RwLock<HashMap<SchemaId, TableSchema>>,
     /// Map from table name to table rows object ID.
     table_rows_objects: RwLock<HashMap<String, ObjectId>>,
+    /// Map from table name to table descriptor object ID.
+    descriptor_objects: RwLock<HashMap<String, ObjectId>>,
     /// Map from row object ID to its table name.
     row_table: RwLock<HashMap<ObjectId, String>>,
     /// Reference index objects: (source_table, source_column) -> object ID.
@@ -389,11 +394,29 @@ impl std::fmt::Debug for DatabaseState {
 
 impl DatabaseState {
     fn new(env: Arc<dyn Environment>) -> Self {
+        let node = LocalNode::new(env);
+
+        // Create catalog object
+        let catalog_object_id = node.create_object("catalog");
+
+        // Initialize empty catalog
+        let empty_catalog = Catalog::new();
+        node.write(
+            catalog_object_id,
+            "main",
+            &empty_catalog.to_bytes(),
+            "system",
+            timestamp_now(),
+        )
+        .expect("failed to initialize catalog");
+
         DatabaseState {
-            node: LocalNode::new(env),
+            node,
+            catalog_object_id,
             tables: RwLock::new(HashMap::new()),
             schemas: RwLock::new(HashMap::new()),
             table_rows_objects: RwLock::new(HashMap::new()),
+            descriptor_objects: RwLock::new(HashMap::new()),
             row_table: RwLock::new(HashMap::new()),
             index_objects: RwLock::new(HashMap::new()),
             policies: RwLock::new(HashMap::new()),
@@ -402,11 +425,29 @@ impl DatabaseState {
     }
 
     fn in_memory() -> Self {
+        let node = LocalNode::in_memory();
+
+        // Create catalog object
+        let catalog_object_id = node.create_object("catalog");
+
+        // Initialize empty catalog
+        let empty_catalog = Catalog::new();
+        node.write(
+            catalog_object_id,
+            "main",
+            &empty_catalog.to_bytes(),
+            "system",
+            timestamp_now(),
+        )
+        .expect("failed to initialize catalog");
+
         DatabaseState {
-            node: LocalNode::in_memory(),
+            node,
+            catalog_object_id,
             tables: RwLock::new(HashMap::new()),
             schemas: RwLock::new(HashMap::new()),
             table_rows_objects: RwLock::new(HashMap::new()),
+            descriptor_objects: RwLock::new(HashMap::new()),
             row_table: RwLock::new(HashMap::new()),
             index_objects: RwLock::new(HashMap::new()),
             policies: RwLock::new(HashMap::new()),
@@ -1277,6 +1318,117 @@ impl Database {
         }
     }
 
+    /// Restore database from an existing environment with a known catalog object ID.
+    ///
+    /// This method loads the catalog and all table descriptors from the environment,
+    /// restoring the database to its previous state.
+    pub fn from_env(env: Arc<dyn Environment>, catalog_object_id: ObjectId) -> Result<Self, DatabaseError> {
+        let node = LocalNode::new(env);
+
+        // Load catalog object from Environment
+        node.load_object(catalog_object_id, "catalog", "main")
+            .ok_or_else(|| DatabaseError::Storage("catalog not found in environment".to_string()))?;
+
+        // Read catalog content
+        let catalog_bytes = node
+            .read(catalog_object_id, "main")
+            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
+            .ok_or_else(|| DatabaseError::Storage("catalog content not found".to_string()))?;
+
+        let catalog = Catalog::from_bytes(&catalog_bytes)
+            .map_err(|e| DatabaseError::Storage(format!("catalog parse error: {}", e)))?;
+
+        // Initialize state maps
+        let mut tables = HashMap::new();
+        let mut schemas = HashMap::new();
+        let mut table_rows_objects = HashMap::new();
+        let mut descriptor_objects = HashMap::new();
+        let mut row_table = HashMap::new();
+        let mut index_objects = HashMap::new();
+        let mut policies = HashMap::new();
+
+        // Restore each table from its descriptor
+        for (table_name, descriptor_id) in &catalog.tables {
+            // Load descriptor object from Environment
+            node.load_object(*descriptor_id, format!("descriptor:{}", table_name), "main")
+                .ok_or_else(|| {
+                    DatabaseError::Storage(format!("descriptor for {} not found in env", table_name))
+                })?;
+
+            // Read descriptor content
+            let descriptor_bytes = node
+                .read(*descriptor_id, "main")
+                .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
+                .ok_or_else(|| {
+                    DatabaseError::Storage(format!("descriptor for {} not found", table_name))
+                })?;
+
+            let descriptor = TableDescriptor::from_bytes(&descriptor_bytes)
+                .map_err(|e| DatabaseError::Storage(format!("descriptor parse error: {}", e)))?;
+
+            // Load schema object
+            node.load_object(descriptor.schema_object_id, format!("schema:{}", table_name), "main");
+
+            // Load rows object
+            node.load_object(descriptor.rows_object_id, format!("rows:{}", table_name), "main");
+
+            // Load index objects
+            for (col_name, index_id) in &descriptor.index_object_ids {
+                node.load_object(*index_id, format!("index:{}:{}", table_name, col_name), "main");
+                let key = IndexKey::new(table_name, col_name);
+                index_objects.insert(key, *index_id);
+            }
+
+            // Restore table metadata
+            tables.insert(table_name.clone(), descriptor.schema_object_id);
+            schemas.insert(descriptor.schema_object_id, descriptor.schema.clone());
+            table_rows_objects.insert(table_name.clone(), descriptor.rows_object_id);
+            descriptor_objects.insert(table_name.clone(), *descriptor_id);
+
+            // Restore policies
+            if !descriptor.policies.is_empty() {
+                policies.insert(table_name.clone(), descriptor.policies.clone());
+            }
+
+            // Restore row_table mapping by reading table_rows
+            let rows_bytes = node
+                .read(descriptor.rows_object_id, "main")
+                .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+
+            if let Some(bytes) = rows_bytes {
+                let table_rows = TableRows::from_bytes(&bytes)
+                    .map_err(|e| DatabaseError::Storage(format!("table_rows parse error: {}", e)))?;
+                for row_id in table_rows.iter() {
+                    // Load row object
+                    node.load_object(row_id, format!("row:{}:{}", table_name, row_id), "main");
+                    row_table.insert(row_id, table_name.clone());
+                }
+            }
+        }
+
+        let state = DatabaseState {
+            node,
+            catalog_object_id,
+            tables: RwLock::new(tables),
+            schemas: RwLock::new(schemas),
+            table_rows_objects: RwLock::new(table_rows_objects),
+            descriptor_objects: RwLock::new(descriptor_objects),
+            row_table: RwLock::new(row_table),
+            index_objects: RwLock::new(index_objects),
+            policies: RwLock::new(policies),
+            graph_registry: GraphRegistry::new(),
+        };
+
+        Ok(Database {
+            state: Arc::new(state),
+        })
+    }
+
+    /// Get the catalog object ID (for use with from_env).
+    pub fn catalog_object_id(&self) -> ObjectId {
+        self.state.catalog_object_id
+    }
+
     /// Get the underlying LocalNode.
     pub fn node(&self) -> &LocalNode {
         &self.state.node
@@ -1448,6 +1600,7 @@ impl Database {
             .insert(schema.name.clone(), rows_id);
 
         // Create index objects for Ref columns
+        let mut index_object_ids: HashMap<String, ObjectId> = HashMap::new();
         for col in &schema.columns {
             if matches!(col.ty, ColumnType::Ref(_)) {
                 let key = IndexKey::new(&schema.name, &col.name);
@@ -1469,6 +1622,8 @@ impl Database {
                     )
                     .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
+                index_object_ids.insert(col.name.clone(), index_id);
+
                 self.state
                     .index_objects
                     .write()
@@ -1476,6 +1631,39 @@ impl Database {
                     .insert(key, index_id);
             }
         }
+
+        // Create table descriptor object
+        let descriptor_id = self
+            .state
+            .node
+            .create_object(&format!("descriptor:{}", schema.name));
+
+        let descriptor = TableDescriptor {
+            schema: schema.clone(),
+            policies: TablePolicies::default(),
+            rows_object_id: rows_id,
+            schema_object_id: schema_id,
+            index_object_ids,
+        };
+        self.state
+            .node
+            .write(
+                descriptor_id,
+                "main",
+                &descriptor.to_bytes(),
+                "system",
+                timestamp_now(),
+            )
+            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+
+        self.state
+            .descriptor_objects
+            .write()
+            .unwrap()
+            .insert(schema.name.clone(), descriptor_id);
+
+        // Update catalog with the new table
+        self.update_catalog_add_table(&schema.name, descriptor_id)?;
 
         // Cache schema
         self.state
@@ -1490,6 +1678,41 @@ impl Database {
             .insert(schema_id, schema);
 
         Ok(schema_id)
+    }
+
+    /// Update the catalog to add a new table.
+    fn update_catalog_add_table(
+        &self,
+        table_name: &str,
+        descriptor_id: ObjectId,
+    ) -> Result<(), DatabaseError> {
+        // Read current catalog
+        let catalog_bytes = self
+            .state
+            .node
+            .read(self.state.catalog_object_id, "main")
+            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
+            .ok_or_else(|| DatabaseError::Storage("catalog not found".to_string()))?;
+
+        let mut catalog = Catalog::from_bytes(&catalog_bytes)
+            .map_err(|e| DatabaseError::Storage(format!("catalog parse error: {}", e)))?;
+
+        // Add the new table
+        catalog.tables.insert(table_name.to_string(), descriptor_id);
+
+        // Write updated catalog
+        self.state
+            .node
+            .write(
+                self.state.catalog_object_id,
+                "main",
+                &catalog.to_bytes(),
+                "system",
+                timestamp_now(),
+            )
+            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+
+        Ok(())
     }
 
     /// Get table schema by name.
@@ -1507,21 +1730,74 @@ impl Database {
 
     /// Create a policy for a table.
     pub fn create_policy(&self, policy: Policy) -> Result<(), DatabaseError> {
+        let table_name = policy.table.clone();
+
         // Verify table exists
         {
             let tables = self.state.tables.read().unwrap();
-            if !tables.contains_key(&policy.table) {
-                return Err(DatabaseError::TableNotFound(policy.table.clone()));
+            if !tables.contains_key(&table_name) {
+                return Err(DatabaseError::TableNotFound(table_name.clone()));
             }
         }
 
         // Add policy to table's policy collection
-        let mut policies = self.state.policies.write().unwrap();
-        let table_policies = policies
-            .entry(policy.table.clone())
-            .or_insert_with(TablePolicies::new);
+        {
+            let mut policies = self.state.policies.write().unwrap();
+            let table_policies = policies
+                .entry(table_name.clone())
+                .or_insert_with(TablePolicies::new);
 
-        table_policies.add(policy)?;
+            table_policies.add(policy)?;
+        }
+
+        // Update the table descriptor to persist the policy
+        self.update_table_descriptor_policies(&table_name)?;
+
+        Ok(())
+    }
+
+    /// Update the table descriptor with current policies.
+    fn update_table_descriptor_policies(&self, table_name: &str) -> Result<(), DatabaseError> {
+        // Get descriptor object ID
+        let descriptor_id = self
+            .state
+            .descriptor_objects
+            .read()
+            .unwrap()
+            .get(table_name)
+            .copied()
+            .ok_or_else(|| DatabaseError::TableNotFound(table_name.to_string()))?;
+
+        // Read current descriptor
+        let descriptor_bytes = self
+            .state
+            .node
+            .read(descriptor_id, "main")
+            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
+            .ok_or_else(|| DatabaseError::Storage("descriptor not found".to_string()))?;
+
+        let mut descriptor = TableDescriptor::from_bytes(&descriptor_bytes)
+            .map_err(|e| DatabaseError::Storage(format!("descriptor parse error: {}", e)))?;
+
+        // Update policies from current in-memory state
+        let policies = self.state.policies.read().unwrap();
+        descriptor.policies = policies
+            .get(table_name)
+            .cloned()
+            .unwrap_or_default();
+
+        // Write updated descriptor
+        self.state
+            .node
+            .write(
+                descriptor_id,
+                "main",
+                &descriptor.to_bytes(),
+                "system",
+                timestamp_now(),
+            )
+            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+
         Ok(())
     }
 

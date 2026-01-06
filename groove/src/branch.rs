@@ -68,6 +68,28 @@ impl Branch {
             .expect("commit has parents before truncation point")
     }
 
+    /// Restore a commit to this branch without updating frontier.
+    /// Used for loading commits from storage where frontier will be set separately.
+    pub fn restore_commit(&mut self, commit: Commit) -> CommitId {
+        let id = commit.compute_id();
+
+        // Update parent->child relationships
+        for parent_id in &commit.parents {
+            self.children
+                .entry(*parent_id)
+                .or_default()
+                .push(id);
+        }
+
+        self.commits.insert(id, commit);
+        id
+    }
+
+    /// Set the frontier explicitly. Used for restoring from storage.
+    pub fn set_frontier(&mut self, frontier: Vec<CommitId>) {
+        self.frontier = frontier;
+    }
+
     /// Try to add a commit to this branch. Returns the commit ID or an error.
     /// Updates frontier: removes parents from frontier, adds new commit if it has no children.
     ///

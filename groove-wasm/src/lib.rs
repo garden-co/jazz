@@ -9,18 +9,16 @@ use js_sys::{Array, Uint8Array};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use bytes::Bytes;
 
 // ==================== Blob Registry ====================
 
-/// Registry for tracking blob handles and chunk data.
-/// Blobs returned from queries are registered here so JS can stream their contents.
+/// Registry for tracking blob handles.
+/// Maps handle IDs to ContentRefs. Actual chunk data is stored in the Environment's ChunkStore.
 #[derive(Default)]
 struct BlobRegistry {
     next_id: u64,
     blobs: HashMap<u64, ContentRef>,
-    /// Chunk storage: maps ChunkHash -> chunk data
-    /// This stores the actual bytes for chunked blobs created in this session.
-    chunks: HashMap<ChunkHash, Vec<u8>>,
 }
 
 impl BlobRegistry {
@@ -35,28 +33,11 @@ impl BlobRegistry {
         id
     }
 
-    /// Register a blob and store its chunk data.
-    fn register_with_chunks(&mut self, content_ref: ContentRef, chunk_data: Vec<Vec<u8>>) -> u64 {
-        // Store chunk data by hash
-        if let ContentRef::Chunked(hashes) = &content_ref {
-            for (hash, data) in hashes.iter().zip(chunk_data.into_iter()) {
-                self.chunks.insert(hash.clone(), data);
-            }
-        }
-        self.register(content_ref)
-    }
-
     fn get(&self, id: u64) -> Option<&ContentRef> {
         self.blobs.get(&id)
     }
 
-    fn get_chunk(&self, hash: &ChunkHash) -> Option<&Vec<u8>> {
-        self.chunks.get(hash)
-    }
-
     fn remove(&mut self, id: u64) -> Option<ContentRef> {
-        // Note: We don't remove chunks here since they might be shared.
-        // In a real implementation, we'd need reference counting.
         self.blobs.remove(&id)
     }
 }
@@ -251,23 +232,26 @@ impl WasmDatabase {
 
     /// Create a blob from raw bytes.
     /// Returns a blob handle ID that can be used in insert/update operations.
+    /// Chunks are stored in the Environment's ChunkStore for persistence.
     #[wasm_bindgen]
     pub fn create_blob(&self, data: &[u8]) -> u64 {
+        use futures::executor::block_on;
+
         if data.len() <= INLINE_THRESHOLD {
             let content_ref = ContentRef::inline(data.to_vec());
             self.blob_registry.borrow_mut().register(content_ref)
         } else {
-            // For large data, chunk it and store both hashes and data
-            let chunk_data: Vec<Vec<u8>> = data
+            // For large data, chunk it and store in Environment
+            let env = self.db.node().env();
+            let hashes: Vec<ChunkHash> = data
                 .chunks(INLINE_THRESHOLD)
-                .map(|chunk| chunk.to_vec())
-                .collect();
-            let hashes: Vec<ChunkHash> = chunk_data
-                .iter()
-                .map(|chunk| ChunkHash::compute(chunk))
+                .map(|chunk| {
+                    // Store each chunk in Environment's ChunkStore
+                    block_on(env.put_chunk(Bytes::copy_from_slice(chunk)))
+                })
                 .collect();
             let content_ref = ContentRef::chunked(hashes);
-            self.blob_registry.borrow_mut().register_with_chunks(content_ref, chunk_data)
+            self.blob_registry.borrow_mut().register(content_ref)
         }
     }
 
@@ -275,15 +259,17 @@ impl WasmDatabase {
     /// Call write_blob_chunk() to add data, then finish_blob() to get the handle.
     #[wasm_bindgen]
     pub fn create_blob_writer(&self) -> WasmBlobWriter {
-        WasmBlobWriter::new(Rc::clone(&self.blob_registry))
+        WasmBlobWriter::new(Rc::clone(&self.blob_registry), self.db.node().env().clone())
     }
 
     /// Read all bytes from a blob handle.
     /// For small blobs this returns the inline data directly.
-    /// For large chunked blobs, this reads and concatenates all chunks.
+    /// For large chunked blobs, this reads and concatenates all chunks from Environment.
     /// Use read_blob_chunk() for streaming reads of large blobs.
     #[wasm_bindgen]
     pub fn read_blob(&self, handle_id: u64) -> Result<Uint8Array, JsValue> {
+        use futures::executor::block_on;
+
         let registry = self.blob_registry.borrow();
         let content_ref = registry.get(handle_id)
             .ok_or_else(|| JsValue::from_str("invalid blob handle"))?;
@@ -291,12 +277,13 @@ impl WasmDatabase {
         match content_ref {
             ContentRef::Inline(data) => Ok(Uint8Array::from(data.as_ref())),
             ContentRef::Chunked(hashes) => {
-                // Concatenate all chunks
+                // Concatenate all chunks from Environment
+                let env = self.db.node().env();
                 let mut result = Vec::new();
                 for hash in hashes {
-                    let chunk = registry.get_chunk(hash)
-                        .ok_or_else(|| JsValue::from_str("chunk not found in registry"))?;
-                    result.extend_from_slice(chunk);
+                    let chunk = block_on(env.get_chunk(hash))
+                        .ok_or_else(|| JsValue::from_str("chunk not found in environment"))?;
+                    result.extend_from_slice(&chunk);
                 }
                 Ok(Uint8Array::from(result.as_slice()))
             }
@@ -334,9 +321,11 @@ impl WasmDatabase {
 
     /// Read a specific chunk of a blob by index.
     /// For inline blobs, index 0 returns all data.
-    /// For chunked blobs, returns the chunk at the given index.
+    /// For chunked blobs, returns the chunk at the given index from Environment.
     #[wasm_bindgen]
     pub fn read_blob_chunk(&self, handle_id: u64, chunk_index: u32) -> Result<Uint8Array, JsValue> {
+        use futures::executor::block_on;
+
         let registry = self.blob_registry.borrow();
         let content_ref = registry.get(handle_id)
             .ok_or_else(|| JsValue::from_str("invalid blob handle"))?;
@@ -353,9 +342,10 @@ impl WasmDatabase {
                 let idx = chunk_index as usize;
                 if idx < hashes.len() {
                     let hash = &hashes[idx];
-                    let chunk = registry.get_chunk(hash)
-                        .ok_or_else(|| JsValue::from_str("chunk not found in registry"))?;
-                    Ok(Uint8Array::from(chunk.as_slice()))
+                    let env = self.db.node().env();
+                    let chunk = block_on(env.get_chunk(hash))
+                        .ok_or_else(|| JsValue::from_str("chunk not found in environment"))?;
+                    Ok(Uint8Array::from(chunk.as_ref()))
                 } else {
                     Err(JsValue::from_str("chunk index out of bounds"))
                 }
@@ -368,12 +358,6 @@ impl WasmDatabase {
     #[wasm_bindgen]
     pub fn release_blob(&self, handle_id: u64) {
         self.blob_registry.borrow_mut().remove(handle_id);
-    }
-
-    /// Register an existing ContentRef as a blob handle.
-    /// Used internally when extracting blobs from query results.
-    fn register_blob(&self, content_ref: ContentRef) -> u64 {
-        self.blob_registry.borrow_mut().register(content_ref)
     }
 
     /// Insert a row with blob values.
@@ -600,14 +584,16 @@ struct BlobInfo {
 pub struct WasmBlobWriter {
     state: Option<BlobWriterState>,
     registry: Rc<RefCell<BlobRegistry>>,
+    env: std::sync::Arc<dyn groove::Environment>,
 }
 
 #[wasm_bindgen]
 impl WasmBlobWriter {
-    fn new(registry: Rc<RefCell<BlobRegistry>>) -> Self {
+    fn new(registry: Rc<RefCell<BlobRegistry>>, env: std::sync::Arc<dyn groove::Environment>) -> Self {
         Self {
             state: Some(BlobWriterState::new()),
             registry,
+            env,
         }
     }
 
@@ -630,13 +616,26 @@ impl WasmBlobWriter {
     }
 
     /// Finish writing and get a blob handle.
+    /// Stores chunks in the Environment's ChunkStore for persistence.
     /// The writer cannot be used after this.
     #[wasm_bindgen]
     pub fn finish(&mut self) -> Result<u64, JsValue> {
+        use futures::executor::block_on;
+
         let state = self.state.take()
             .ok_or_else(|| JsValue::from_str("blob writer already finished"))?;
         let (content_ref, chunk_data) = state.finish();
-        let handle = self.registry.borrow_mut().register_with_chunks(content_ref, chunk_data);
+
+        // Store chunks in Environment if this is a chunked blob
+        if let ContentRef::Chunked(hashes) = &content_ref {
+            for (hash, data) in hashes.iter().zip(chunk_data.into_iter()) {
+                // Verify hash matches (put_chunk returns the computed hash)
+                let stored_hash = block_on(self.env.put_chunk(Bytes::copy_from_slice(&data)));
+                debug_assert_eq!(hash, &stored_hash, "chunk hash mismatch");
+            }
+        }
+
+        let handle = self.registry.borrow_mut().register(content_ref);
         Ok(handle)
     }
 

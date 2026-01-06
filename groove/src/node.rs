@@ -74,6 +74,57 @@ impl LocalNode {
         &self.env
     }
 
+    /// Load an object from the Environment by reading its commits and frontier.
+    /// Returns the object ID if the object was found and loaded successfully.
+    pub fn load_object(&self, id: ObjectId, prefix: impl Into<String>, branch: &str) -> Option<ObjectId> {
+        use futures::executor::block_on;
+
+        // Get frontier from Environment
+        let frontier = block_on(self.env.get_frontier(id.into(), branch));
+        if frontier.is_empty() {
+            return None;
+        }
+
+        // Create a new Object
+        let object = Object::new(id, prefix);
+
+        // Load all commits from the Environment and add them to the Object
+        let branch_ref = object.branch_ref(branch)?;
+        {
+            let mut branch_guard = branch_ref.write().unwrap();
+
+            // Walk the commit graph starting from frontier
+            let mut to_load = frontier.clone();
+            let mut loaded = std::collections::HashSet::new();
+
+            while let Some(commit_id) = to_load.pop() {
+                if loaded.contains(&commit_id) {
+                    continue;
+                }
+                loaded.insert(commit_id);
+
+                if let Some(commit) = block_on(self.env.get_commit(&commit_id)) {
+                    // Add parent commits to load queue
+                    for parent_id in &commit.parents {
+                        if !loaded.contains(parent_id) {
+                            to_load.push(*parent_id);
+                        }
+                    }
+                    // Restore commit without updating frontier
+                    branch_guard.restore_commit(commit);
+                }
+            }
+
+            // Set frontier explicitly from Environment
+            branch_guard.set_frontier(frontier);
+        }
+
+        // Register the object
+        self.objects.write().unwrap().insert(id, Arc::new(RwLock::new(object)));
+
+        Some(id)
+    }
+
     /// Create a new object with the given prefix. Returns the object ID.
     /// Uses internal mutability so it can be called with just &self.
     pub fn create_object(&self, prefix: impl Into<String>) -> ObjectId {
@@ -206,6 +257,21 @@ impl LocalNode {
 
         let obj = obj_lock.read().unwrap();
         let commit_id = obj.write_sync_with_meta(branch, content, author, timestamp, meta);
+
+        // Persist commit and frontier to Environment
+        if let Some(branch_ref) = obj.branch_ref(branch) {
+            let branch_guard = branch_ref.read().unwrap();
+            if let Some(commit) = branch_guard.get_commit(&commit_id) {
+                use futures::executor::block_on;
+
+                // Persist commit
+                block_on(self.env.put_commit(commit));
+
+                // Persist frontier
+                let frontier = branch_guard.frontier();
+                block_on(self.env.set_frontier(object_id.into(), branch, frontier));
+            }
+        }
 
         // Notify listeners synchronously
         self.notify_listeners(object_id, branch, &obj);
