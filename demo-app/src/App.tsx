@@ -82,16 +82,7 @@ function App() {
     return filter;
   }, [selectedProjectId, statusFilter, priorityFilter, assigneeFilter, showMyIssues, currentUserId, labelFilter]);
 
-  // Subscribe to reference data (no filters)
-  const { data: users, loading: usersLoading } = useAll(db.users);
-  const { data: projects, loading: projectsLoading } = useAll(db.projects);
-  const { data: labels, loading: labelsLoading } = useAll(db.labels);
-
-  // Subscribe to all issues for sidebar counts
-  const { data: allIssues } = useAll(db.issues);
-
   // Build the query with filters and includes
-  // The type is correctly inferred as IssueLoaded<typeof issueIncludes>[]
   const issuesQuery = useMemo(() => {
     if (issuesFilter) {
       return db.issues.where(issuesFilter).with(issueIncludes);
@@ -99,21 +90,15 @@ function App() {
     return db.issues.with(issueIncludes);
   }, [db.issues, issuesFilter]);
 
-  // Subscribe to filtered issues with all related data included (project, labels, assignees)
+  // Subscribe to filtered issues with all related data included
   const { data: filteredIssues, loading: issuesLoading } = useAll(issuesQuery);
-
-  const currentUser = useMemo(() => {
-    return users.find((u) => u.id === currentUserId) || null;
-  }, [users, currentUserId]);
 
   // Reset page when filters change
   useEffect(() => {
     setCurrentPage(0);
   }, [selectedProjectId, showMyIssues, statusFilter, priorityFilter, assigneeFilter, labelFilter]);
 
-  const isLoading = usersLoading || projectsLoading || issuesLoading || labelsLoading || !initialized;
-
-  if (isLoading) {
+  if (!initialized || issuesLoading) {
     return (
       <div className="flex h-screen items-center justify-center">
         <div className="text-muted-foreground">Loading...</div>
@@ -124,18 +109,15 @@ function App() {
   return (
     <div className="flex h-screen">
       <Sidebar
-        projects={projects}
-        issues={allIssues}
         selectedProjectId={selectedProjectId}
         onSelectProject={setSelectedProjectId}
         showMyIssues={showMyIssues}
         onToggleMyIssues={setShowMyIssues}
-        currentUserId={currentUserId}
       />
 
       <div className="flex flex-1 flex-col">
         <Header
-          currentUser={currentUser}
+          currentUserId={currentUserId}
           onCreateIssue={() => setShowIssueForm(true)}
         />
 
@@ -148,8 +130,6 @@ function App() {
           onAssigneeFilterChange={setAssigneeFilter}
           labelFilter={labelFilter}
           onLabelFilterChange={setLabelFilter}
-          users={users}
-          labels={labels}
         />
 
         <IssueList
@@ -164,19 +144,11 @@ function App() {
 
       <IssueDetail
         issue={selectedIssue}
-        allUsers={users}
-        allLabels={labels}
-        allProjects={projects}
-        db={db}
         open={!!selectedIssue}
         onOpenChange={(open) => !open && setSelectedIssue(null)}
       />
 
       <IssueForm
-        allUsers={users}
-        allLabels={labels}
-        allProjects={projects}
-        db={db}
         open={showIssueForm}
         onOpenChange={setShowIssueForm}
       />

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useJazz, useAll } from "@jazz/react";
 import {
   Sheet,
   SheetContent,
@@ -19,29 +20,26 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Separator } from "@/components/ui/separator";
 import { LabelBadge } from "./LabelBadge";
 import { STATUSES, STATUS_LABELS, PRIORITIES, PRIORITY_LABELS } from "@/utils/constants";
-import type { User, Label, Project } from "@/generated/types";
 import type { Database } from "@/generated/client";
 import type { LoadedIssue } from "@/App";
 
 interface IssueDetailProps {
   issue: LoadedIssue | null;
-  allUsers: User[];
-  allLabels: Label[];
-  allProjects: Project[];
-  db: Database;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
 export function IssueDetail({
   issue,
-  allUsers,
-  allLabels,
-  allProjects,
-  db,
   open,
   onOpenChange,
 }: IssueDetailProps) {
+  const db = useJazz() as unknown as Database;
+
+  // Fetch reference data internally
+  const { data: allUsers } = useAll(db.users);
+  const { data: allLabels } = useAll(db.labels);
+  const { data: allProjects } = useAll(db.projects);
   const [editingTitle, setEditingTitle] = useState(false);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");

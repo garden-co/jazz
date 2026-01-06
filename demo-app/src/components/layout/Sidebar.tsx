@@ -1,29 +1,30 @@
 import { useMemo } from "react";
 import { Layers, User, Users } from "lucide-react";
+import { useJazz, useAll } from "@jazz/react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
-import { cn } from "@/lib/utils";
-import type { Project, Issue } from "@/generated/types";
+import type { Database } from "@/generated/client";
 
 interface SidebarProps {
-  projects: Project[];
-  issues: Issue[];
   selectedProjectId: string | null;
   onSelectProject: (id: string | null) => void;
   showMyIssues: boolean;
   onToggleMyIssues: (show: boolean) => void;
-  currentUserId: string | null;
 }
 
 export function Sidebar({
-  projects,
-  issues,
   selectedProjectId,
   onSelectProject,
   showMyIssues,
   onToggleMyIssues,
 }: SidebarProps) {
+  const db = useJazz() as unknown as Database;
+
+  // Fetch projects and issues internally
+  const { data: projects } = useAll(db.projects);
+  const { data: issues } = useAll(db.issues);
+
   // Count issues per project
   const countsByProject = useMemo(() => {
     const counts: Record<string, number> = {};

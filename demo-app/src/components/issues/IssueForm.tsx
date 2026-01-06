@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useJazz, useAll } from "@jazz/react";
 import {
   Sheet,
   SheetContent,
@@ -17,29 +18,34 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { STATUSES, STATUS_LABELS, PRIORITIES, PRIORITY_LABELS } from "@/utils/constants";
-import type { User, Label, Project } from "@/generated/types";
 import type { Database } from "@/generated/client";
 
 interface IssueFormProps {
-  allUsers: User[];
-  allLabels: Label[];
-  allProjects: Project[];
-  db: Database;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
 export function IssueForm({
-  allProjects,
-  db,
   open,
   onOpenChange,
 }: IssueFormProps) {
+  const db = useJazz() as unknown as Database;
+
+  // Fetch projects internally
+  const { data: allProjects } = useAll(db.projects);
+
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [status, setStatus] = useState("todo");
   const [priority, setPriority] = useState("medium");
-  const [projectId, setProjectId] = useState(allProjects[0]?.id || "");
+  const [projectId, setProjectId] = useState("");
+
+  // Set default project when projects load
+  useEffect(() => {
+    if (allProjects.length > 0 && !projectId) {
+      setProjectId(allProjects[0].id);
+    }
+  }, [allProjects, projectId]);
 
   const handleSubmit = () => {
     if (!title.trim() || !projectId) return;
