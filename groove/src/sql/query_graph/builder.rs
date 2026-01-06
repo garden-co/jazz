@@ -129,6 +129,7 @@ impl QueryGraphBuilder {
     /// - `inner_table`: Table being aggregated (e.g., "notes")
     /// - `inner_ref_column`: Column in inner table referencing outer (e.g., "folder_id")
     /// - `inner_schema`: Schema of the inner table
+    /// - `inner_joins`: JOINs within the subquery: Vec<(ref_column, target_table, target_schema)>
     /// - `array_column_index`: Index where array should be placed (-1 for append)
     pub fn array_aggregate(
         &mut self,
@@ -136,6 +137,7 @@ impl QueryGraphBuilder {
         inner_table: impl Into<String>,
         inner_ref_column: impl Into<String>,
         inner_schema: TableSchema,
+        inner_joins: Vec<(String, String, TableSchema)>,
         array_column_index: i32,
     ) -> NodeId {
         let id = self.alloc_id();
@@ -145,6 +147,7 @@ impl QueryGraphBuilder {
             inner_table: inner_table.into(),
             inner_ref_column: inner_ref_column.into(),
             inner_schema,
+            inner_joins,
             array_column_index,
             cached_arrays: HashMap::new(),
             inner_to_outer: HashMap::new(),
@@ -391,6 +394,48 @@ impl JoinGraphBuilder {
             offset,
             all_rows: std::collections::BTreeMap::new(),
             visible_ids: HashSet::new(),
+        });
+        id
+    }
+
+    /// Add an array aggregate node for correlated subqueries.
+    ///
+    /// For each outer row, collects all inner rows that reference it
+    /// (via `inner_ref_column`). Returns the outer row with an appended
+    /// Array column containing all matching inner rows.
+    ///
+    /// Note: For JOIN graphs, the outer table is the primary (left) table.
+    pub fn array_aggregate(
+        &mut self,
+        input: NodeId,
+        inner_table: impl Into<String>,
+        inner_ref_column: impl Into<String>,
+        inner_schema: TableSchema,
+        inner_joins: Vec<(String, String, TableSchema)>,
+        array_column_index: i32,
+    ) -> NodeId {
+        let inner_table = inner_table.into();
+
+        // Track this inner table schema for the graph
+        self.extra_schemas.insert(inner_table.clone(), inner_schema.clone());
+
+        // Track join target schemas too
+        for (_, target_table, target_schema) in &inner_joins {
+            self.extra_schemas.insert(target_table.clone(), target_schema.clone());
+        }
+
+        let id = self.alloc_id();
+        self.nodes.push(QueryNode::ArrayAggregate {
+            outer_table: self.left_table.clone(),
+            input,
+            inner_table,
+            inner_ref_column: inner_ref_column.into(),
+            inner_schema,
+            inner_joins,
+            array_column_index,
+            cached_arrays: HashMap::new(),
+            inner_to_outer: HashMap::new(),
+            outer_rows: HashMap::new(),
         });
         id
     }

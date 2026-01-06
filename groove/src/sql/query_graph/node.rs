@@ -146,6 +146,10 @@ pub enum QueryNode {
         inner_ref_column: String,
         /// Schema of inner table (for building Row values).
         inner_schema: TableSchema,
+        /// JOINs within the ARRAY subquery (e.g., JOIN Labels ON il.label = Labels.id).
+        /// Each tuple: (ref_column_in_inner, target_table, target_schema)
+        /// The ref column will be replaced by the joined table's columns.
+        inner_joins: Vec<(String, String, TableSchema)>,
         /// Index in output row where the array should be placed.
         /// -1 means append at end.
         array_column_index: i32,
@@ -1061,15 +1065,18 @@ impl QueryNode {
     ///
     /// `source_table` indicates which table the delta came from.
     /// `lookup_inner_rows` is a function to find all inner rows matching an outer id.
-    pub fn evaluate_array_aggregate<F>(
+    /// `lookup_row_by_id` is a function to look up a row from any table by (table_name, id).
+    pub fn evaluate_array_aggregate<F, G>(
         &mut self,
         delta: RowDelta,
         source_table: &str,
         outer_schema: &TableSchema,
         lookup_inner_rows: F,
+        lookup_row_by_id: G,
     ) -> DeltaBatch
     where
         F: Fn(ObjectId) -> Vec<Row>,
+        G: Fn(&str, ObjectId) -> Option<Row>,
     {
         match self {
             QueryNode::ArrayAggregate {
@@ -1077,6 +1084,7 @@ impl QueryNode {
                 inner_table,
                 inner_ref_column,
                 inner_schema,
+                inner_joins,
                 array_column_index,
                 cached_arrays,
                 inner_to_outer,
@@ -1094,11 +1102,14 @@ impl QueryNode {
                         &delta,
                         outer_schema,
                         *array_column_index,
+                        inner_joins,
+                        inner_schema,
                         cached_arrays,
                         inner_to_outer,
                         outer_rows,
                         &mut output,
                         &lookup_inner_rows,
+                        &lookup_row_by_id,
                     );
                 } else if is_inner_delta {
                     // Delta from inner table - update arrays for affected outer rows
@@ -1106,12 +1117,14 @@ impl QueryNode {
                         &delta,
                         inner_ref_column,
                         inner_schema,
+                        inner_joins,
                         outer_schema,
                         *array_column_index,
                         cached_arrays,
                         inner_to_outer,
                         outer_rows,
                         &mut output,
+                        &lookup_row_by_id,
                     );
                 }
 
@@ -1123,31 +1136,43 @@ impl QueryNode {
 
     /// Handle a delta from the outer table in ArrayAggregate.
     #[allow(clippy::too_many_arguments)]
-    fn array_aggregate_handle_outer_delta<F>(
+    fn array_aggregate_handle_outer_delta<F, G>(
         delta: &RowDelta,
         _outer_schema: &TableSchema,
         array_column_index: i32,
+        inner_joins: &[(String, String, TableSchema)],
+        inner_schema: &TableSchema,
         cached_arrays: &mut HashMap<ObjectId, Vec<Row>>,
         inner_to_outer: &mut HashMap<ObjectId, ObjectId>,
         outer_rows: &mut HashMap<ObjectId, Row>,
         output: &mut DeltaBatch,
         lookup_inner_rows: F,
+        lookup_row_by_id: G,
     ) where
         F: Fn(ObjectId) -> Vec<Row>,
+        G: Fn(&str, ObjectId) -> Option<Row>,
     {
         match delta {
             RowDelta::Added(outer_row) => {
                 let outer_id = outer_row.id;
 
                 // Fetch all matching inner rows
-                let inner_rows = lookup_inner_rows(outer_id);
+                let raw_inner_rows = lookup_inner_rows(outer_id);
 
-                // Update inner_to_outer index
-                for inner_row in &inner_rows {
+                // Resolve inner joins (e.g., replace label ref with full Labels row)
+                let inner_rows = Self::resolve_inner_joins(
+                    &raw_inner_rows,
+                    inner_joins,
+                    inner_schema,
+                    &lookup_row_by_id,
+                );
+
+                // Update inner_to_outer index (use raw rows for ID tracking)
+                for inner_row in &raw_inner_rows {
                     inner_to_outer.insert(inner_row.id, outer_id);
                 }
 
-                // Cache the array
+                // Cache the resolved array
                 cached_arrays.insert(outer_id, inner_rows.clone());
 
                 // Build output row with array
@@ -1180,7 +1205,15 @@ impl QueryNode {
                 let outer_id = *id;
 
                 // Fetch updated inner rows (in case correlation changed)
-                let inner_rows = lookup_inner_rows(outer_id);
+                let raw_inner_rows = lookup_inner_rows(outer_id);
+
+                // Resolve inner joins
+                let inner_rows = Self::resolve_inner_joins(
+                    &raw_inner_rows,
+                    inner_joins,
+                    inner_schema,
+                    &lookup_row_by_id,
+                );
 
                 // Update inner_to_outer index
                 if let Some(old_inner_rows) = cached_arrays.get(&outer_id) {
@@ -1188,7 +1221,7 @@ impl QueryNode {
                         inner_to_outer.remove(&old_inner.id);
                     }
                 }
-                for inner_row in &inner_rows {
+                for inner_row in &raw_inner_rows {
                     inner_to_outer.insert(inner_row.id, outer_id);
                 }
 
@@ -1207,19 +1240,70 @@ impl QueryNode {
         }
     }
 
+    /// Resolve inner joins for array rows.
+    /// For each inner row, replace ref columns with their resolved row values.
+    fn resolve_inner_joins<G>(
+        inner_rows: &[Row],
+        inner_joins: &[(String, String, TableSchema)],
+        inner_schema: &TableSchema,
+        lookup_row_by_id: G,
+    ) -> Vec<Row>
+    where
+        G: Fn(&str, ObjectId) -> Option<Row>,
+    {
+        if inner_joins.is_empty() {
+            return inner_rows.to_vec();
+        }
+
+        inner_rows
+            .iter()
+            .map(|row| {
+                let mut resolved_values = row.values.clone();
+
+                for (ref_column, target_table, _target_schema) in inner_joins {
+                    // Find the column index for this ref column
+                    if let Some(col_idx) = inner_schema.column_index(ref_column) {
+                        // Get the ref value from the row
+                        if let Some(Value::Ref(target_id)) = resolved_values.get(col_idx) {
+                            // Look up the target row
+                            if let Some(target_row) = lookup_row_by_id(target_table, *target_id) {
+                                // Replace the ref with a nested Row value
+                                // Build the nested row with id and values from target
+                                let nested = Row {
+                                    id: target_row.id,
+                                    values: target_row.values.clone(),
+                                };
+                                resolved_values[col_idx] = Value::Row(Box::new(nested));
+                            }
+                        }
+                    }
+                }
+
+                Row {
+                    id: row.id,
+                    values: resolved_values,
+                }
+            })
+            .collect()
+    }
+
     /// Handle a delta from the inner table in ArrayAggregate.
     #[allow(clippy::too_many_arguments)]
-    fn array_aggregate_handle_inner_delta(
+    fn array_aggregate_handle_inner_delta<G>(
         delta: &RowDelta,
         inner_ref_column: &str,
         inner_schema: &TableSchema,
+        inner_joins: &[(String, String, TableSchema)],
         _outer_schema: &TableSchema,
         array_column_index: i32,
         cached_arrays: &mut HashMap<ObjectId, Vec<Row>>,
         inner_to_outer: &mut HashMap<ObjectId, ObjectId>,
         outer_rows: &mut HashMap<ObjectId, Row>,
         output: &mut DeltaBatch,
-    ) {
+        lookup_row_by_id: G,
+    ) where
+        G: Fn(&str, ObjectId) -> Option<Row>,
+    {
         match delta {
             RowDelta::Added(inner_row) => {
                 let inner_id = inner_row.id;
@@ -1229,9 +1313,18 @@ impl QueryNode {
                     // Update inner_to_outer index
                     inner_to_outer.insert(inner_id, outer_id);
 
+                    // Resolve inner joins for this row
+                    let resolved_rows = Self::resolve_inner_joins(
+                        &[inner_row.clone()],
+                        inner_joins,
+                        inner_schema,
+                        &lookup_row_by_id,
+                    );
+                    let resolved_row = resolved_rows.into_iter().next().unwrap_or_else(|| inner_row.clone());
+
                     // Add to cached array
                     let array = cached_arrays.entry(outer_id).or_default();
-                    array.push(inner_row.clone());
+                    array.push(resolved_row);
 
                     // Emit updated delta for outer row
                     if let Some(base_outer_row) = outer_rows.get(&outer_id) {
@@ -1278,6 +1371,15 @@ impl QueryNode {
                 let old_outer_id = inner_to_outer.get(inner_id).copied();
                 let new_outer_id = Self::get_ref_value(inner_row, inner_ref_column, inner_schema);
 
+                // Resolve inner joins for this row
+                let resolved_rows = Self::resolve_inner_joins(
+                    &[inner_row.clone()],
+                    inner_joins,
+                    inner_schema,
+                    &lookup_row_by_id,
+                );
+                let resolved_row = resolved_rows.into_iter().next().unwrap_or_else(|| inner_row.clone());
+
                 if old_outer_id != new_outer_id {
                     // Inner row moved to different outer row
                     // Remove from old
@@ -1305,7 +1407,7 @@ impl QueryNode {
                     if let Some(new_id) = new_outer_id {
                         inner_to_outer.insert(*inner_id, new_id);
                         let array = cached_arrays.entry(new_id).or_default();
-                        array.push(inner_row.clone());
+                        array.push(resolved_row);
 
                         if let Some(base_outer_row) = outer_rows.get(&new_id) {
                             let outer_values = Self::extract_outer_values(base_outer_row, array_column_index);
@@ -1323,9 +1425,9 @@ impl QueryNode {
                 } else if let Some(outer_id) = new_outer_id {
                     // Same outer row - update in place
                     if let Some(array) = cached_arrays.get_mut(&outer_id) {
-                        // Replace the old inner row with the new one
+                        // Replace the old inner row with the resolved new one
                         if let Some(idx) = array.iter().position(|r| r.id == *inner_id) {
-                            array[idx] = inner_row.clone();
+                            array[idx] = resolved_row;
                         }
 
                         if let Some(base_outer_row) = outer_rows.get(&outer_id) {

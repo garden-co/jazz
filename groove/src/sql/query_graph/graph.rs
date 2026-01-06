@@ -285,9 +285,17 @@ impl QueryGraph {
                 matches!(n, QueryNode::RecursiveFilter { .. })
             });
 
+            // Check if this graph has ArrayAggregate nodes
+            let has_array_aggregate = self.nodes.iter().any(|n| {
+                matches!(n, QueryNode::ArrayAggregate { .. })
+            });
+
             if has_recursive {
                 // RecursiveFilter requires fixpoint iteration
                 self.init_recursive_query(cache, db, skip_id, skip_table);
+            } else if has_array_aggregate {
+                // ArrayAggregate needs database access to look up inner rows
+                self.init_array_aggregate_query(cache, db, skip_id, skip_table);
             } else {
                 // Single-table query: load all rows from the primary table
                 let rows = db.read_all_rows(&self.table);
@@ -391,6 +399,77 @@ impl QueryGraph {
                     }
                     _ => {
                         delta = node.evaluate(delta, &schema, cache);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Initialize a query with ArrayAggregate nodes.
+    ///
+    /// ArrayAggregate needs database access to look up inner rows for each outer row.
+    fn init_array_aggregate_query(
+        &mut self,
+        cache: &mut RowCache,
+        db: &DatabaseState,
+        skip_id: Option<ObjectId>,
+        skip_table: Option<&str>,
+    ) {
+        let table = self.table.clone();
+
+        // Load all rows from the outer (primary) table
+        let rows = db.read_all_rows(&table);
+
+        for row in rows {
+            // Skip the triggering row - it will be processed as a delta
+            if skip_table == Some(&table) && skip_id == Some(row.id) {
+                continue;
+            }
+
+            cache.insert(&table, row.clone());
+
+            // Process as Added delta through all nodes, with special handling for ArrayAggregate
+            let mut delta = DeltaBatch::added(row);
+
+            for node in &mut self.nodes {
+                if delta.is_empty() {
+                    break;
+                }
+
+                match node {
+                    QueryNode::ArrayAggregate { outer_table, inner_table, inner_ref_column, .. } => {
+                        // Clone values before borrowing node mutably
+                        let inner_tbl = inner_table.clone();
+                        let inner_ref = inner_ref_column.clone();
+
+                        let outer_schema = self.all_schemas.get(outer_table)
+                            .cloned()
+                            .unwrap_or_else(|| self.schema.clone());
+
+                        let mut output = DeltaBatch::new();
+                        for d in delta.into_iter() {
+                            let batch = node.evaluate_array_aggregate(
+                                d,
+                                &table, // source is outer table
+                                &outer_schema,
+                                |outer_id| {
+                                    // Look up all inner rows that reference this outer id
+                                    db.find_referencing(&inner_tbl, &inner_ref, outer_id)
+                                },
+                                |table_name, id| {
+                                    // Look up a row by table and id (for resolving inner joins)
+                                    db.get_row(table_name, id)
+                                },
+                            );
+                            output.extend(batch);
+                        }
+                        delta = output;
+                    }
+                    QueryNode::LimitOffset { .. } => {
+                        delta = node.evaluate_limit_offset(delta, cache);
+                    }
+                    _ => {
+                        delta = node.evaluate(delta, &self.schema, cache);
                     }
                 }
             }
@@ -504,6 +583,10 @@ impl QueryGraph {
                                     // Look up all inner rows that reference this outer id
                                     db.find_referencing(&inner_tbl, &inner_ref, outer_id)
                                 },
+                                |table_name, id| {
+                                    // Look up a row by table and id (for resolving inner joins)
+                                    db.get_row(table_name, id)
+                                },
                             );
                             output.extend(batch);
                         }
@@ -530,6 +613,12 @@ impl QueryGraph {
         let output_idx = self.node_indices[&self.output_node];
         if let QueryNode::Output { input, .. } = &self.nodes[output_idx] {
             let input_idx = self.node_indices[input];
+
+            // Check if the input to Output is an ArrayAggregate node (even for JOIN queries)
+            // This handles JOIN + ARRAY subquery cases
+            if let Some(outer_rows) = self.nodes[input_idx].outer_rows() {
+                return outer_rows.values().cloned().collect();
+            }
 
             // For join queries, we need to find the Join node and apply filters
             if self.is_join {
@@ -855,7 +944,7 @@ mod tests {
 
         let mut builder = QueryGraphBuilder::new("folders", outer_schema.clone());
         let scan = builder.table_scan();
-        let agg = builder.array_aggregate(scan, "notes", "folder", inner_schema.clone(), -1);
+        let agg = builder.array_aggregate(scan, "notes", "folder", inner_schema.clone(), vec![], -1);
         let mut graph = builder.output(agg, GraphId(1));
 
         // Verify inner table is tracked
@@ -896,7 +985,7 @@ mod tests {
 
         let mut builder = QueryGraphBuilder::new("folders", outer_schema.clone());
         let scan = builder.table_scan();
-        let agg = builder.array_aggregate(scan, "notes", "folder", inner_schema.clone(), -1);
+        let agg = builder.array_aggregate(scan, "notes", "folder", inner_schema.clone(), vec![], -1);
         let mut graph = builder.output(agg, GraphId(1));
 
         let db = Database::in_memory();
@@ -947,7 +1036,7 @@ mod tests {
 
         let mut builder = QueryGraphBuilder::new("folders", outer_schema.clone());
         let scan = builder.table_scan();
-        let agg = builder.array_aggregate(scan, "notes", "folder", inner_schema.clone(), -1);
+        let agg = builder.array_aggregate(scan, "notes", "folder", inner_schema.clone(), vec![], -1);
         let mut graph = builder.output(agg, GraphId(1));
 
         let db = Database::in_memory();

@@ -3189,6 +3189,7 @@ impl Database {
         select: &Select,
     ) -> Result<crate::sql::query_graph::QueryGraph, DatabaseError> {
         let table = &select.from.table;
+        let outer_alias = select.from.alias.as_deref();
 
         // Validate table exists and get schema
         let schema = self
@@ -3217,8 +3218,248 @@ impl Database {
             select.offset.unwrap_or(0),
         );
 
+        // Process ARRAY subqueries in projection
+        let with_arrays = if let Projection::Expressions(exprs) = &select.projection {
+            self.add_array_aggregates(&mut builder, limited, exprs, table, outer_alias)?
+        } else {
+            limited
+        };
+
         // Create output node
-        Ok(builder.output(limited, GraphId(0))) // ID will be assigned by registry
+        Ok(builder.output(with_arrays, GraphId(0))) // ID will be assigned by registry
+    }
+
+    /// Add ArrayAggregate nodes for ARRAY subqueries in the projection.
+    fn add_array_aggregates(
+        &self,
+        builder: &mut QueryGraphBuilder,
+        input: crate::sql::query_graph::NodeId,
+        exprs: &[SelectExpr],
+        outer_table: &str,
+        outer_alias: Option<&str>,
+    ) -> Result<crate::sql::query_graph::NodeId, DatabaseError> {
+        let mut current = input;
+
+        for expr in exprs.iter() {
+            // Always append arrays at the end (-1), not at the expression index.
+            // The expression index doesn't correspond to the actual column position
+            // because star expressions expand to multiple columns.
+            current = self.add_array_aggregate_for_expr(
+                builder, current, expr, outer_table, outer_alias, -1,
+            )?;
+        }
+
+        Ok(current)
+    }
+
+    /// Add ArrayAggregate node for a single expression if it's an ARRAY subquery.
+    fn add_array_aggregate_for_expr(
+        &self,
+        builder: &mut QueryGraphBuilder,
+        input: crate::sql::query_graph::NodeId,
+        expr: &SelectExpr,
+        outer_table: &str,
+        outer_alias: Option<&str>,
+        column_index: i32,
+    ) -> Result<crate::sql::query_graph::NodeId, DatabaseError> {
+        match expr {
+            SelectExpr::ArraySubquery(subquery) => {
+                let inner_table = &subquery.from.table;
+                let inner_schema = self
+                    .get_table(inner_table)
+                    .ok_or_else(|| DatabaseError::TableNotFound(inner_table.clone()))?;
+
+                // Find the ref column from WHERE clause
+                // e.g., WHERE n.issue = i.id → ref_column is "issue"
+                let ref_column = self.find_array_subquery_ref_column(
+                    &subquery.where_clause,
+                    inner_table,
+                    subquery.from.alias.as_deref(),
+                    outer_table,
+                    outer_alias,
+                )?;
+
+                // Extract inner joins from the ARRAY subquery
+                // e.g., ARRAY(SELECT ... FROM IssueLabels il JOIN Labels ON il.label = Labels.id ...)
+                let inner_joins = self.extract_inner_joins(
+                    &subquery.from.joins,
+                    inner_table,
+                    subquery.from.alias.as_deref(),
+                    &inner_schema,
+                )?;
+
+                Ok(builder.array_aggregate(
+                    input,
+                    inner_table.clone(),
+                    ref_column,
+                    inner_schema.clone(),
+                    inner_joins,
+                    column_index,
+                ))
+            }
+            SelectExpr::Aliased { expr: inner, .. } => {
+                // Recurse into aliased expressions
+                self.add_array_aggregate_for_expr(
+                    builder, input, inner, outer_table, outer_alias, column_index,
+                )
+            }
+            // Non-ARRAY expressions don't add nodes
+            _ => Ok(input),
+        }
+    }
+
+    /// Find the reference column in an ARRAY subquery WHERE clause.
+    /// Expects a condition like: inner.ref_col = outer.id
+    fn find_array_subquery_ref_column(
+        &self,
+        where_clause: &[Condition],
+        inner_table: &str,
+        inner_alias: Option<&str>,
+        outer_table: &str,
+        outer_alias: Option<&str>,
+    ) -> Result<String, DatabaseError> {
+        for cond in where_clause {
+            // Condition is a struct with `column` and `right` fields
+            // column = the left-hand side column
+            // right = ConditionValue (could be a Literal or Column)
+            let left_col = &cond.column;
+
+            // Check if right side is a column reference
+            if let ConditionValue::Column(right_col) = &cond.right {
+                // Check for: inner.ref_col = outer.id
+                let left_is_inner = left_col.table.as_deref() == Some(inner_table)
+                    || left_col.table.as_deref() == inner_alias;
+                let right_is_outer = right_col.table.as_deref() == Some(outer_table)
+                    || right_col.table.as_deref() == outer_alias;
+
+                if left_is_inner && right_is_outer && right_col.column == "id" {
+                    return Ok(left_col.column.clone());
+                }
+
+                // Check reverse: outer.id = inner.ref_col
+                let left_is_outer = left_col.table.as_deref() == Some(outer_table)
+                    || left_col.table.as_deref() == outer_alias;
+                let right_is_inner = right_col.table.as_deref() == Some(inner_table)
+                    || right_col.table.as_deref() == inner_alias;
+
+                if left_is_outer && right_is_inner && left_col.column == "id" {
+                    return Ok(right_col.column.clone());
+                }
+            }
+        }
+
+        Err(DatabaseError::Parse(parser::ParseError {
+            message: format!(
+                "ARRAY subquery must have WHERE clause referencing outer table.id (inner: {}, outer: {})",
+                inner_table, outer_table
+            ),
+            position: 0,
+        }))
+    }
+
+    /// Extract inner JOINs from an ARRAY subquery.
+    /// For each JOIN, returns (ref_column, target_table, target_schema).
+    /// e.g., JOIN Labels ON il.label = Labels.id → ("label", "Labels", Labels schema)
+    fn extract_inner_joins(
+        &self,
+        joins: &[parser::Join],
+        inner_table: &str,
+        inner_alias: Option<&str>,
+        inner_schema: &TableSchema,
+    ) -> Result<Vec<(String, String, TableSchema)>, DatabaseError> {
+        let mut result = Vec::new();
+
+        for join in joins {
+            let target_table = &join.table;
+            let target_schema = self
+                .get_table(target_table)
+                .ok_or_else(|| DatabaseError::TableNotFound(target_table.clone()))?;
+
+            // Find which column in the inner table references the join target
+            // Check ON clause: inner.col = target.id or target.id = inner.col
+            let ref_column = self.find_join_ref_column(
+                &join.on,
+                inner_table,
+                inner_alias,
+                target_table,
+                inner_schema,
+            )?;
+
+            result.push((ref_column, target_table.clone(), target_schema.clone()));
+        }
+
+        Ok(result)
+    }
+
+    /// Find the ref column in a JOIN ON clause.
+    /// Expects: inner.ref_col = target.id or target.id = inner.ref_col
+    fn find_join_ref_column(
+        &self,
+        on: &parser::JoinCondition,
+        inner_table: &str,
+        inner_alias: Option<&str>,
+        target_table: &str,
+        inner_schema: &TableSchema,
+    ) -> Result<String, DatabaseError> {
+        // Helper to check if a table reference matches inner table (by name or alias)
+        let matches_inner =
+            |t: &str| t == inner_table || inner_alias.map(|a| a == t).unwrap_or(false);
+        let matches_target = |t: &str| t == target_table;
+
+        // Check: inner.col = target.id
+        let left_is_inner = on
+            .left
+            .table
+            .as_ref()
+            .map(|t| matches_inner(t))
+            .unwrap_or(false);
+        let right_is_target = on
+            .right
+            .table
+            .as_ref()
+            .map(|t| matches_target(t))
+            .unwrap_or(false);
+
+        if left_is_inner && right_is_target && on.right.column == "id" {
+            // Verify it's actually a Ref column to the target
+            let col_name = &on.left.column;
+            if let Some(col) = inner_schema.column(col_name) {
+                if matches!(&col.ty, ColumnType::Ref(t) if t == target_table) {
+                    return Ok(col_name.clone());
+                }
+            }
+        }
+
+        // Check reverse: target.id = inner.col
+        let left_is_target = on
+            .left
+            .table
+            .as_ref()
+            .map(|t| matches_target(t))
+            .unwrap_or(false);
+        let right_is_inner = on
+            .right
+            .table
+            .as_ref()
+            .map(|t| matches_inner(t))
+            .unwrap_or(false);
+
+        if left_is_target && right_is_inner && on.left.column == "id" {
+            let col_name = &on.right.column;
+            if let Some(col) = inner_schema.column(col_name) {
+                if matches!(&col.ty, ColumnType::Ref(t) if t == target_table) {
+                    return Ok(col_name.clone());
+                }
+            }
+        }
+
+        Err(DatabaseError::Parse(parser::ParseError {
+            message: format!(
+                "Could not find ref column for JOIN {} in inner table {}",
+                target_table, inner_table
+            ),
+            position: 0,
+        }))
     }
 
     /// Build a query graph for a JOIN SELECT.
@@ -3315,8 +3556,94 @@ impl Database {
             select.offset.unwrap_or(0),
         );
 
+        // Process ARRAY subqueries in projection (for reverse refs with includes)
+        let outer_table = sql_left_table;
+        let outer_alias = select.from.alias.as_deref();
+        let with_arrays = if let Projection::Expressions(exprs) = &select.projection {
+            self.add_join_array_aggregates(&mut builder, limited, exprs, outer_table, outer_alias)?
+        } else {
+            limited
+        };
+
         // Create output node
-        Ok(builder.output(limited, GraphId(0))) // ID will be assigned by registry
+        Ok(builder.output(with_arrays, GraphId(0))) // ID will be assigned by registry
+    }
+
+    /// Add ArrayAggregate nodes to a JOIN graph for ARRAY subqueries in projection.
+    fn add_join_array_aggregates(
+        &self,
+        builder: &mut JoinGraphBuilder,
+        input: crate::sql::query_graph::NodeId,
+        exprs: &[SelectExpr],
+        outer_table: &str,
+        outer_alias: Option<&str>,
+    ) -> Result<crate::sql::query_graph::NodeId, DatabaseError> {
+        let mut current = input;
+
+        for expr in exprs.iter() {
+            // Always append arrays at the end (-1), not at the expression index.
+            // The expression index doesn't correspond to the actual column position
+            // because star expressions expand to multiple columns and joins add more columns.
+            current = self.add_join_array_aggregate_for_expr(
+                builder, current, expr, outer_table, outer_alias, -1,
+            )?;
+        }
+
+        Ok(current)
+    }
+
+    /// Add ArrayAggregate node to a JOIN graph for a single expression.
+    fn add_join_array_aggregate_for_expr(
+        &self,
+        builder: &mut JoinGraphBuilder,
+        input: crate::sql::query_graph::NodeId,
+        expr: &SelectExpr,
+        outer_table: &str,
+        outer_alias: Option<&str>,
+        column_index: i32,
+    ) -> Result<crate::sql::query_graph::NodeId, DatabaseError> {
+        match expr {
+            SelectExpr::ArraySubquery(subquery) => {
+                let inner_table = &subquery.from.table;
+                let inner_schema = self
+                    .get_table(inner_table)
+                    .ok_or_else(|| DatabaseError::TableNotFound(inner_table.clone()))?;
+
+                // Find the ref column from WHERE clause
+                let ref_column = self.find_array_subquery_ref_column(
+                    &subquery.where_clause,
+                    inner_table,
+                    subquery.from.alias.as_deref(),
+                    outer_table,
+                    outer_alias,
+                )?;
+
+                // Extract inner joins from the ARRAY subquery
+                let inner_joins = self.extract_inner_joins(
+                    &subquery.from.joins,
+                    inner_table,
+                    subquery.from.alias.as_deref(),
+                    &inner_schema,
+                )?;
+
+                Ok(builder.array_aggregate(
+                    input,
+                    inner_table.clone(),
+                    ref_column,
+                    inner_schema.clone(),
+                    inner_joins,
+                    column_index,
+                ))
+            }
+            SelectExpr::Aliased { expr: inner, .. } => {
+                // Recurse into aliased expressions
+                self.add_join_array_aggregate_for_expr(
+                    builder, input, inner, outer_table, outer_alias, column_index,
+                )
+            }
+            // Non-ARRAY expressions don't add nodes
+            _ => Ok(input),
+        }
     }
 
     /// Find the Ref column that connects the two tables in a JOIN.

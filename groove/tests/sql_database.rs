@@ -2061,3 +2061,665 @@ fn incremental_query_limit_offset() {
     let rows = query.rows();
     assert_eq!(rows.len(), 2);
 }
+
+#[test]
+fn incremental_query_with_array_subquery() {
+    let db = Database::in_memory();
+
+    // Create parent table (Issues)
+    db.execute("CREATE TABLE Issues (title STRING NOT NULL)")
+        .unwrap();
+
+    // Create child table (IssueLabels) with ref to Issues
+    db.execute("CREATE TABLE IssueLabels (issue REFERENCES Issues NOT NULL, name STRING NOT NULL)")
+        .unwrap();
+
+    // Insert a parent row
+    let issue_id = match db
+        .execute("INSERT INTO Issues (title) VALUES ('Test Issue')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted(id) => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Insert child rows
+    db.execute(&format!(
+        "INSERT INTO IssueLabels (issue, name) VALUES ('{}', 'Bug')",
+        issue_id
+    ))
+    .unwrap();
+    db.execute(&format!(
+        "INSERT INTO IssueLabels (issue, name) VALUES ('{}', 'Priority')",
+        issue_id
+    ))
+    .unwrap();
+
+    // Create incremental query with ARRAY subquery
+    let sql = format!(
+        "SELECT i.id, i.title, ARRAY(SELECT il.id, il.issue, il.name FROM IssueLabels il WHERE il.issue = i.id) AS labels FROM Issues i"
+    );
+    eprintln!("SQL: {}", sql);
+
+    let query = db.incremental_query(&sql).unwrap();
+
+    // Get the diagram to verify ArrayAggregate node exists
+    let diagram = query.diagram();
+    eprintln!("Query Graph:\n{}", diagram);
+
+    // Should contain ArrayAggregate node
+    assert!(diagram.contains("ArrayAggregate"), "Query graph should have ArrayAggregate node");
+
+    let rows = query.rows();
+    eprintln!("Rows: {:?}", rows);
+
+    assert_eq!(rows.len(), 1, "Should return 1 issue");
+
+    // Verify the row has an array with 2 labels
+    // The row has: values[0]=title, values[1]=Array (id is stored separately in Row)
+    assert_eq!(rows[0].values.len(), 2, "Row should have 2 values (title, array)");
+    assert_eq!(rows[0].values[0], Value::String("Test Issue".into()));
+
+    match &rows[0].values[1] {
+        Value::Array(arr) => {
+            assert_eq!(arr.len(), 2, "Should have 2 labels");
+        }
+        other => panic!("Expected Array, got {:?}", other),
+    }
+}
+
+/// Test that JOIN + ArrayAggregate preserves nullable columns from joined tables.
+/// This directly tests the query graph without SQL parsing to isolate the issue.
+#[test]
+fn incremental_query_join_plus_array_aggregate_preserves_nullable_columns() {
+    use groove::sql::query_graph::{JoinGraphBuilder, GraphId};
+
+    let db = Database::in_memory();
+
+    // Use FULL schema matching demo-app to reproduce the issue exactly
+
+    // Projects: name, color, description (nullable)
+    let projects_schema = TableSchema::new(
+        "Projects",
+        vec![
+            ColumnDef::required("name", ColumnType::String),
+            ColumnDef::required("color", ColumnType::String),
+            ColumnDef::optional("description", ColumnType::String),
+        ],
+    );
+    db.create_table(projects_schema.clone()).unwrap();
+
+    // Issues: title, description (nullable), status, priority, project, createdAt, updatedAt
+    let issues_schema = TableSchema::new(
+        "Issues",
+        vec![
+            ColumnDef::required("title", ColumnType::String),
+            ColumnDef::optional("description", ColumnType::String),
+            ColumnDef::required("status", ColumnType::String),
+            ColumnDef::required("priority", ColumnType::String),
+            ColumnDef::required("project", ColumnType::Ref("Projects".into())),
+            ColumnDef::required("createdAt", ColumnType::I64),
+            ColumnDef::required("updatedAt", ColumnType::I64),
+        ],
+    );
+    db.create_table(issues_schema.clone()).unwrap();
+
+    // Labels (needed for foreign key)
+    let labels_table_schema = TableSchema::new(
+        "Labels",
+        vec![
+            ColumnDef::required("name", ColumnType::String),
+        ],
+    );
+    db.create_table(labels_table_schema).unwrap();
+
+    // Users (needed for foreign key)
+    let users_table_schema = TableSchema::new(
+        "Users",
+        vec![
+            ColumnDef::required("name", ColumnType::String),
+        ],
+    );
+    db.create_table(users_table_schema).unwrap();
+
+    // IssueLabels: issue, label
+    let labels_schema = TableSchema::new(
+        "IssueLabels",
+        vec![
+            ColumnDef::required("issue", ColumnType::Ref("Issues".into())),
+            ColumnDef::required("label", ColumnType::Ref("Labels".into())),
+        ],
+    );
+    db.create_table(labels_schema.clone()).unwrap();
+
+    // IssueAssignees: issue, user
+    let assignees_schema = TableSchema::new(
+        "IssueAssignees",
+        vec![
+            ColumnDef::required("issue", ColumnType::Ref("Issues".into())),
+            ColumnDef::required("user", ColumnType::Ref("Users".into())),
+        ],
+    );
+    db.create_table(assignees_schema.clone()).unwrap();
+
+    // Insert project with description (nullable column with value)
+    let project_id = db
+        .insert(
+            "Projects",
+            &["name", "color", "description"],
+            vec![
+                Value::String("Test Project".into()),
+                Value::String("#00ff00".into()),
+                Value::String("A test project".into()),
+            ],
+        )
+        .unwrap();
+
+    // Insert issue referencing the project
+    let issue_id = db
+        .insert(
+            "Issues",
+            &["title", "description", "status", "priority", "project", "createdAt", "updatedAt"],
+            vec![
+                Value::String("Test Issue".into()),
+                Value::String("Test description".into()),
+                Value::String("open".into()),
+                Value::String("high".into()),
+                Value::Ref(project_id),
+                Value::I64(1234567890),
+                Value::I64(1234567890),
+            ],
+        )
+        .unwrap();
+
+    // Insert actual Label row
+    let label_id = db.insert("Labels", &["name"], vec![Value::String("Bug".into())]).unwrap();
+
+    // Insert actual User row
+    let user_id = db.insert("Users", &["name"], vec![Value::String("Alice".into())]).unwrap();
+
+    // Insert IssueLabel row
+    db.insert(
+        "IssueLabels",
+        &["issue", "label"],
+        vec![Value::Ref(issue_id), Value::Ref(label_id)],
+    )
+    .unwrap();
+
+    // Insert IssueAssignee row
+    db.insert(
+        "IssueAssignees",
+        &["issue", "user"],
+        vec![Value::Ref(issue_id), Value::Ref(user_id)],
+    )
+    .unwrap();
+
+    // Build query graph manually:
+    // Issues JOIN Projects + ArrayAggregate(IssueLabels) + ArrayAggregate(IssueAssignees)
+    let mut builder = JoinGraphBuilder::new(
+        "Issues",
+        issues_schema.clone(),
+        "Projects",
+        projects_schema.clone(),
+        "project",
+    );
+    builder.add_schema("IssueLabels", labels_schema.clone());
+    builder.add_schema("IssueAssignees", assignees_schema.clone());
+
+    // Add Join node for Issues -> Projects
+    let join = builder.join();
+
+    // Add ArrayAggregate for IssueLabels -> Issues
+    let agg1 = builder.array_aggregate(
+        join,
+        "IssueLabels".to_string(),
+        "issue",
+        labels_schema.clone(),
+        vec![], // No inner joins
+        -1, // Append at end
+    );
+
+    // Add ArrayAggregate for IssueAssignees -> Issues
+    let agg2 = builder.array_aggregate(
+        agg1,
+        "IssueAssignees".to_string(),
+        "issue",
+        assignees_schema.clone(),
+        vec![], // No inner joins
+        -1, // Append at end
+    );
+
+    let mut graph = builder.output(agg2, GraphId(1));
+
+    // Get the diagram
+    let diagram = graph.to_diagram();
+    eprintln!("Query Graph:\n{}", diagram);
+
+    // Initialize and get output
+    let mut cache = groove::sql::query_graph::RowCache::new();
+    let rows = graph.get_output(&mut cache, &db.state());
+
+    eprintln!("Rows count: {}", rows.len());
+    assert_eq!(rows.len(), 1, "Should return 1 issue");
+
+    // Expected columns:
+    // Issues: title, description (nullable), status, priority, project, createdAt, updatedAt = 7
+    // Projects: name, color, description (nullable) = 3
+    // IssueLabels array = 1
+    // IssueAssignees array = 1
+    // Total = 12
+
+    eprintln!("Row values (len={}, expected 12):", rows[0].values.len());
+    for (i, v) in rows[0].values.iter().enumerate() {
+        eprintln!("  [{}]: {:?}", i, v);
+    }
+
+    assert_eq!(rows[0].values.len(), 12, "Should have 12 values (7 Issues + 3 Projects + 2 arrays)");
+
+    // Find Projects.description - it should be at index 9 (after 7 Issues + 2 Projects columns)
+    // Index: 0=title, 1=description*, 2=status, 3=priority, 4=project, 5=createdAt, 6=updatedAt
+    //        7=name, 8=color, 9=description*
+    //        10=IssueLabels[], 11=IssueAssignees[]
+
+    let proj_desc = &rows[0].values[9];
+    eprintln!("\nProjects.description (index 9): {:?}", proj_desc);
+
+    assert!(
+        matches!(proj_desc, Value::NullableSome(_)),
+        "Projects.description should be NullableSome, got: {:?}",
+        proj_desc
+    );
+
+    if let Value::NullableSome(inner) = proj_desc {
+        assert_eq!(**inner, Value::String("A test project".into()));
+    }
+
+    // Now test the binary encoding
+    use groove::sql::encode_single_row;
+    let binary = encode_single_row(&rows[0]);
+    eprintln!("\nBinary output ({} bytes):", binary.len());
+    eprintln!("{:02x?}", &binary);
+
+    // The binary should contain "A test project" for Projects.description
+    let description_bytes = b"A test project";
+    let found = binary.windows(description_bytes.len()).any(|w| w == description_bytes);
+    assert!(found, "Binary should contain 'A test project' for Projects.description");
+}
+
+/// Test that the SQL path also preserves nullable columns from joined tables.
+/// This tests the `build_join_graph` SQL parsing path rather than the direct API.
+#[test]
+fn incremental_query_sql_join_preserves_nullable_columns() {
+    let db = Database::in_memory();
+
+    // Projects: name, color, description (nullable)
+    let projects_schema = TableSchema::new(
+        "Projects",
+        vec![
+            ColumnDef::required("name", ColumnType::String),
+            ColumnDef::required("color", ColumnType::String),
+            ColumnDef::optional("description", ColumnType::String),
+        ],
+    );
+    db.create_table(projects_schema.clone()).unwrap();
+
+    // Issues: title, description (nullable), status, priority, project, createdAt, updatedAt
+    let issues_schema = TableSchema::new(
+        "Issues",
+        vec![
+            ColumnDef::required("title", ColumnType::String),
+            ColumnDef::optional("description", ColumnType::String),
+            ColumnDef::required("status", ColumnType::String),
+            ColumnDef::required("priority", ColumnType::String),
+            ColumnDef::required("project", ColumnType::Ref("Projects".into())),
+            ColumnDef::required("createdAt", ColumnType::I64),
+            ColumnDef::required("updatedAt", ColumnType::I64),
+        ],
+    );
+    db.create_table(issues_schema.clone()).unwrap();
+
+    // Insert project with description
+    let project_id = db
+        .insert(
+            "Projects",
+            &["name", "color", "description"],
+            vec![
+                Value::String("Test Project".into()),
+                Value::String("#00ff00".into()),
+                Value::String("A test project".into()),
+            ],
+        )
+        .unwrap();
+
+    // Insert issue referencing the project
+    db.insert(
+        "Issues",
+        &["title", "description", "status", "priority", "project", "createdAt", "updatedAt"],
+        vec![
+            Value::String("Test Issue".into()),
+            Value::String("Test description".into()),
+            Value::String("open".into()),
+            Value::String("high".into()),
+            Value::Ref(project_id),
+            Value::I64(1234567890),
+            Value::I64(1234567890),
+        ],
+    )
+    .unwrap();
+
+    // Use incremental_query via SQL - this is the path TypeScript uses
+    let sql = "SELECT i.* FROM Issues i JOIN Projects ON i.project = Projects.id";
+    let query = db.incremental_query(sql).expect("should create incremental query");
+    let rows = query.rows();
+
+    eprintln!("SQL query rows: {:?}", rows.len());
+    assert_eq!(rows.len(), 1, "Should return 1 issue");
+
+    eprintln!("Row values (len={}):", rows[0].values.len());
+    for (i, v) in rows[0].values.iter().enumerate() {
+        eprintln!("  [{}]: {:?}", i, v);
+    }
+
+    // In a JOIN query, the row should contain:
+    // Issues: title, description, status, priority, project, createdAt, updatedAt = 7 columns
+    // Projects: name, color, description = 3 columns
+    // Total: 10 columns
+    assert_eq!(rows[0].values.len(), 10, "Should have 10 values (7 Issues + 3 Projects)");
+
+    // Projects.description should be at index 9
+    let proj_desc = &rows[0].values[9];
+    eprintln!("\nProjects.description (index 9): {:?}", proj_desc);
+
+    assert!(
+        matches!(proj_desc, Value::NullableSome(_)),
+        "Projects.description should be NullableSome, got: {:?}",
+        proj_desc
+    );
+
+    if let Value::NullableSome(inner) = proj_desc {
+        assert_eq!(**inner, Value::String("A test project".into()));
+    }
+}
+
+/// Test that SQL JOIN + ARRAY subquery preserves nullable columns from joined tables.
+/// This tests the exact flow used by TypeScript: build_join_graph + add_join_array_aggregates.
+#[test]
+fn incremental_query_sql_join_with_array_preserves_nullable_columns() {
+    let db = Database::in_memory();
+
+    // Projects: name, color, description (nullable)
+    let projects_schema = TableSchema::new(
+        "Projects",
+        vec![
+            ColumnDef::required("name", ColumnType::String),
+            ColumnDef::required("color", ColumnType::String),
+            ColumnDef::optional("description", ColumnType::String),
+        ],
+    );
+    db.create_table(projects_schema.clone()).unwrap();
+
+    // Issues: title, description (nullable), status, priority, project, createdAt, updatedAt
+    let issues_schema = TableSchema::new(
+        "Issues",
+        vec![
+            ColumnDef::required("title", ColumnType::String),
+            ColumnDef::optional("description", ColumnType::String),
+            ColumnDef::required("status", ColumnType::String),
+            ColumnDef::required("priority", ColumnType::String),
+            ColumnDef::required("project", ColumnType::Ref("Projects".into())),
+            ColumnDef::required("createdAt", ColumnType::I64),
+            ColumnDef::required("updatedAt", ColumnType::I64),
+        ],
+    );
+    db.create_table(issues_schema.clone()).unwrap();
+
+    // Labels (needed for IssueLabels foreign key)
+    let labels_table_schema = TableSchema::new(
+        "Labels",
+        vec![ColumnDef::required("name", ColumnType::String)],
+    );
+    db.create_table(labels_table_schema).unwrap();
+
+    // IssueLabels: issue, label
+    let issue_labels_schema = TableSchema::new(
+        "IssueLabels",
+        vec![
+            ColumnDef::required("issue", ColumnType::Ref("Issues".into())),
+            ColumnDef::required("label", ColumnType::Ref("Labels".into())),
+        ],
+    );
+    db.create_table(issue_labels_schema.clone()).unwrap();
+
+    // Insert project with description
+    let project_id = db
+        .insert(
+            "Projects",
+            &["name", "color", "description"],
+            vec![
+                Value::String("Test Project".into()),
+                Value::String("#00ff00".into()),
+                Value::String("A test project".into()),
+            ],
+        )
+        .unwrap();
+
+    // Insert issue referencing the project
+    let issue_id = db
+        .insert(
+            "Issues",
+            &["title", "description", "status", "priority", "project", "createdAt", "updatedAt"],
+            vec![
+                Value::String("Test Issue".into()),
+                Value::String("Test description".into()),
+                Value::String("open".into()),
+                Value::String("high".into()),
+                Value::Ref(project_id),
+                Value::I64(1234567890),
+                Value::I64(1234567890),
+            ],
+        )
+        .unwrap();
+
+    // Insert label
+    let label_id = db.insert("Labels", &["name"], vec![Value::String("Bug".into())]).unwrap();
+
+    // Insert IssueLabel linking issue to label
+    db.insert(
+        "IssueLabels",
+        &["issue", "label"],
+        vec![Value::Ref(issue_id), Value::Ref(label_id)],
+    )
+    .unwrap();
+
+    // Use incremental_query with JOIN + ARRAY subquery - this is what TypeScript generates
+    let sql = "SELECT i.*, ARRAY(SELECT il.* FROM IssueLabels il WHERE il.issue = i.id) as labels FROM Issues i JOIN Projects ON i.project = Projects.id";
+    let query = db.incremental_query(sql).expect("should create incremental query");
+    let rows = query.rows();
+
+    eprintln!("SQL JOIN+ARRAY query rows: {:?}", rows.len());
+    assert_eq!(rows.len(), 1, "Should return 1 issue");
+
+    eprintln!("Row values (len={}):", rows[0].values.len());
+    for (i, v) in rows[0].values.iter().enumerate() {
+        eprintln!("  [{}]: {:?}", i, v);
+    }
+
+    // Expected columns:
+    // Issues: title, description, status, priority, project, createdAt, updatedAt = 7
+    // Projects: name, color, description = 3
+    // IssueLabels array = 1
+    // Total: 11
+    assert_eq!(rows[0].values.len(), 11, "Should have 11 values (7 Issues + 3 Projects + 1 array)");
+
+    // Projects.description should be at index 9 (after 7 Issues + 2 Projects columns)
+    let proj_desc = &rows[0].values[9];
+    eprintln!("\nProjects.description (index 9): {:?}", proj_desc);
+
+    assert!(
+        matches!(proj_desc, Value::NullableSome(_)),
+        "Projects.description should be NullableSome, got: {:?}",
+        proj_desc
+    );
+
+    if let Value::NullableSome(inner) = proj_desc {
+        assert_eq!(**inner, Value::String("A test project".into()));
+    }
+
+    // Test binary encoding includes the description
+    use groove::sql::encode_single_row;
+    let binary = encode_single_row(&rows[0]);
+    eprintln!("\nBinary output ({} bytes):", binary.len());
+
+    let description_bytes = b"A test project";
+    let found = binary.windows(description_bytes.len()).any(|w| w == description_bytes);
+    assert!(found, "Binary should contain 'A test project' for Projects.description");
+}
+
+/// Test that SQL ARRAY subqueries with nested JOINs work correctly.
+/// This tests the case where:
+///   ARRAY(SELECT il.*, Labels as label FROM IssueLabels il JOIN Labels ON il.label = Labels.id WHERE il.issue = i.id)
+/// The ARRAY elements should include the resolved Labels row, not just the FK.
+#[test]
+fn incremental_query_array_with_nested_join() {
+    let db = Database::in_memory();
+
+    // Labels: name, color
+    let labels_schema = TableSchema::new(
+        "Labels",
+        vec![
+            ColumnDef::required("name", ColumnType::String),
+            ColumnDef::required("color", ColumnType::String),
+        ],
+    );
+    db.create_table(labels_schema.clone()).unwrap();
+
+    // Issues: title
+    let issues_schema = TableSchema::new(
+        "Issues",
+        vec![
+            ColumnDef::required("title", ColumnType::String),
+        ],
+    );
+    db.create_table(issues_schema.clone()).unwrap();
+
+    // IssueLabels: issue, label
+    let issue_labels_schema = TableSchema::new(
+        "IssueLabels",
+        vec![
+            ColumnDef::required("issue", ColumnType::Ref("Issues".into())),
+            ColumnDef::required("label", ColumnType::Ref("Labels".into())),
+        ],
+    );
+    db.create_table(issue_labels_schema.clone()).unwrap();
+
+    // Insert label
+    let label_id = db
+        .insert("Labels", &["name", "color"], vec![
+            Value::String("Bug".into()),
+            Value::String("#ff0000".into()),
+        ])
+        .unwrap();
+
+    // Insert issue
+    let issue_id = db
+        .insert("Issues", &["title"], vec![Value::String("Test Issue".into())])
+        .unwrap();
+
+    // Insert IssueLabel linking issue to label
+    db.insert(
+        "IssueLabels",
+        &["issue", "label"],
+        vec![Value::Ref(issue_id), Value::Ref(label_id)],
+    )
+    .unwrap();
+
+    // Query with ARRAY subquery that has a nested JOIN
+    // This is what TypeScript generates for: { IssueLabels: { label: true } }
+    let sql = "SELECT i.id, i.title, ARRAY(SELECT il.id, il.issue, Labels as label FROM IssueLabels il JOIN Labels ON il.label = Labels.id WHERE il.issue = i.id) as IssueLabels FROM Issues i";
+    let query = db.incremental_query(sql).expect("should create incremental query");
+    let rows = query.rows();
+
+    eprintln!("ARRAY with nested JOIN query rows: {:?}", rows.len());
+    assert_eq!(rows.len(), 1, "Should return 1 issue");
+
+    eprintln!("Row values (len={}):", rows[0].values.len());
+    for (i, v) in rows[0].values.iter().enumerate() {
+        eprintln!("  [{}]: {:?}", i, v);
+    }
+
+    // Expected columns:
+    // Issues: title = 1
+    // IssueLabels array = 1
+    // Total: 2
+    assert_eq!(rows[0].values.len(), 2, "Should have 2 values (1 Issue column + 1 array)");
+
+    // The array should contain IssueLabel rows with resolved label
+    let array = &rows[0].values[1];
+    eprintln!("\nIssueLabels array: {:?}", array);
+
+    if let Value::Array(arr) = array {
+        assert_eq!(arr.len(), 1, "Should have 1 IssueLabel");
+        if let Value::Row(issue_label_row) = &arr[0] {
+            // IssueLabel row should have: id (implicit), issue (Ref), label (resolved Row)
+            // With nested JOIN, the values should be:
+            // [0] = issue (Ref to Issues)
+            // [1] = label (resolved Labels Row with id, name, color)
+            eprintln!("IssueLabel row values (len={}):", issue_label_row.values.len());
+            for (i, v) in issue_label_row.values.iter().enumerate() {
+                eprintln!("  [{}]: {:?}", i, v);
+            }
+
+            // The label should be a nested Row, not a Ref
+            // Expected: [Ref(issue_id), Row(Labels row)]
+            assert_eq!(
+                issue_label_row.values.len(),
+                2,
+                "IssueLabel row should have 2 values (issue + label), got {}",
+                issue_label_row.values.len()
+            );
+
+            // Check that values[0] is a Ref to the Issue
+            assert!(
+                matches!(&issue_label_row.values[0], Value::Ref(_)),
+                "values[0] should be a Ref to Issue, got: {:?}",
+                issue_label_row.values[0]
+            );
+
+            // Check that values[1] is a nested Row (resolved Labels)
+            if let Value::Row(label_row) = &issue_label_row.values[1] {
+                eprintln!("Label row values (len={}):", label_row.values.len());
+                for (i, v) in label_row.values.iter().enumerate() {
+                    eprintln!("  [{}]: {:?}", i, v);
+                }
+
+                // Labels row should have 2 values: name, color
+                assert_eq!(
+                    label_row.values.len(),
+                    2,
+                    "Label row should have 2 values (name + color), got {}",
+                    label_row.values.len()
+                );
+
+                // Check label name
+                assert!(
+                    matches!(&label_row.values[0], Value::String(s) if s == "Bug"),
+                    "Labels.name should be 'Bug', got: {:?}",
+                    label_row.values[0]
+                );
+
+                // Check label color
+                assert!(
+                    matches!(&label_row.values[1], Value::String(s) if s == "#ff0000"),
+                    "Labels.color should be '#ff0000', got: {:?}",
+                    label_row.values[1]
+                );
+            } else {
+                panic!("values[1] should be a Row (resolved Labels), got: {:?}", issue_label_row.values[1]);
+            }
+        } else {
+            panic!("Array element should be a Row, got: {:?}", arr[0]);
+        }
+    } else {
+        panic!("values[1] should be an Array, got: {:?}", array);
+    }
+}
