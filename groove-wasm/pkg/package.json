@@ -1,0 +1,15 @@
+{
+  "name": "groove-wasm",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "groove_wasm_bg.wasm",
+    "groove_wasm.js",
+    "groove_wasm.d.ts"
+  ],
+  "main": "groove_wasm.js",
+  "types": "groove_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

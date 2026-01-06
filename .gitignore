@@ -17,9 +17,7 @@ Cargo.lock
 node_modules/
 dist/
 
-# WASM build artifacts
-pkg/
-*.wasm
+# WASM build artifacts (groove-wasm/pkg is committed for easier onboarding)
 
 # macOS
 .DS_Store
