@@ -112,6 +112,39 @@ describe("JazzClerkAuth", () => {
       });
     });
 
+    it("should preserve credentials when logging in", async () => {
+      // Set up local auth with different credentials
+      await authSecretStorage.set({
+        accountID: "local-account" as ID<Account>,
+        secretSeed: new Uint8Array([9, 9, 9]),
+        accountSecret: "local-secret" as AgentSecret,
+        provider: "anonymous",
+      });
+
+      const mockClerk = {
+        user: {
+          fullName: "Guido",
+          unsafeMetadata: {
+            jazzAccountID: "clerk-account-123",
+            jazzAccountSecret: "clerk-secret-456",
+            jazzAccountSeed: [4, 5, 6],
+          },
+          update: vi.fn(),
+        } as ClerkUser,
+      };
+
+      await auth.onClerkUserChange(mockClerk.user);
+
+      // Verify credentials from Clerk are preserved in storage
+      const storedCredentials = await authSecretStorage.get();
+      expect(storedCredentials).toEqual({
+        accountID: "clerk-account-123",
+        accountSecret: "clerk-secret-456",
+        secretSeed: new Uint8Array([4, 5, 6]),
+        provider: "clerk",
+      });
+    });
+
     it("should call LogOut", async () => {
       // Set up local auth
       await authSecretStorage.set({
