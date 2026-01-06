@@ -55,6 +55,16 @@ export class CoDiscriminatedUnionSchema<
   readonly builtin = "CoDiscriminatedUnion" as const;
   readonly getDefinition: () => CoDiscriminatedUnionSchemaDefinition<Options>;
 
+  getValidationSchema = () => {
+    // @ts-expect-error we can't statically enforce the schema's discriminator is a valid discriminator, but in practice it is
+    return z.discriminatedUnion(
+      this.getDefinition().discriminator,
+      this.getDefinition().options.map((option) =>
+        option.getValidationSchema(),
+      ),
+    );
+  };
+
   /**
    * Default resolve query to be used when loading instances of this schema.
    * This resolve query will be used when no resolve query is provided to the load method.
@@ -224,6 +234,12 @@ export function createCoreCoDiscriminatedUnionSchema<
   return {
     collaborative: true as const,
     builtin: "CoDiscriminatedUnion" as const,
+    getValidationSchema: () => {
+      return z.discriminatedUnion(
+        discriminator,
+        schemas.map((option) => option.getValidationSchema()) as any,
+      );
+    },
     getDefinition: () => ({
       discriminator,
       get discriminatorMap() {

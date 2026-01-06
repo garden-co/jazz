@@ -19,6 +19,8 @@ import {
   isAnyCoValueSchema,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
+  TypeSym,
+  CoList,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { removeGetters, withSchemaResolveQuery } from "../../schemaUtils.js";
@@ -51,6 +53,47 @@ export class CoMapSchema<
   shape: Shape;
   catchAll?: CatchAll;
   getDefinition: () => CoMapSchemaDefinition;
+
+  getValidationSchema = () => {
+    const plainShape: Record<string, AnyZodSchema> = {};
+
+    for (const key in this.shape) {
+      const item = this.shape[key];
+      // item is a Group
+      if (item?.prototype?.[TypeSym] === "Group") {
+        plainShape[key] = z.instanceof(Group);
+      } else if (item?.prototype?.[TypeSym] === "Account") {
+        plainShape[key] = z.instanceof(Account);
+      } else if (item.builtin === "CoMap") {
+        // Inject as getter to avoid circularity issues
+        Object.defineProperty(plainShape, key, {
+          get: () => z.instanceof(CoMap).or(item.getValidationSchema()),
+          enumerable: true,
+          configurable: true,
+        });
+      } else if (item.builtin === "CoList") {
+        // Inject as getter to avoid circularity issues
+        Object.defineProperty(plainShape, key, {
+          get: () => z.instanceof(CoList).or(item.getValidationSchema()),
+          enumerable: true,
+          configurable: true,
+        });
+      } else if (item?.getValidationSchema) {
+        // Inject as getter to avoid circularity issues
+        Object.defineProperty(plainShape, key, {
+          get: () => item.getValidationSchema(),
+          enumerable: true,
+          configurable: true,
+        });
+      } else if ((item as any) instanceof z.core.$ZodType) {
+        plainShape[key] = item;
+      } else {
+        throw new Error(`Unsupported schema type: ${item}`);
+      }
+    }
+
+    return z.object(plainShape);
+  };
 
   /**
    * Default resolve query to be used when loading instances of this schema.
@@ -101,6 +144,9 @@ export class CoMapSchema<
       options,
       this.permissions,
     );
+
+    this.getValidationSchema().parse(init);
+
     return this.coValueClass.create(init, optionsWithPermissions);
   }
 
@@ -449,6 +495,7 @@ export function createCoreCoMapSchema<
       },
     }),
     resolveQuery: true as const,
+    getValidationSchema: () => z.object(shape),
   };
 }
 

@@ -1,5 +1,7 @@
 import { CoValueSchemaFromCoreSchema } from "../zodSchema.js";
 import { CoreCoValueSchema } from "./CoValueSchema.js";
+import { z } from "../zodReExport.js";
+import { CoList, CoMap } from "../../../internal.js";
 
 type CoOptionalSchemaDefinition<
   Shape extends CoreCoValueSchema = CoreCoValueSchema,
@@ -27,6 +29,20 @@ export class CoOptionalSchema<
   readonly resolveQuery = true as const;
 
   constructor(public readonly innerType: Shape) {}
+
+  getValidationSchema = () => {
+    if (this.innerType.builtin === "CoMap") {
+      return z.optional(
+        z.instanceof(CoMap).or(this.innerType.getValidationSchema()),
+      );
+    } else if (this.innerType.builtin === "CoList") {
+      return z.optional(
+        z.instanceof(CoList).or(this.innerType.getValidationSchema()),
+      );
+    }
+
+    return z.optional(this.innerType.getValidationSchema());
+  };
 
   getCoValueClass(): ReturnType<
     CoValueSchemaFromCoreSchema<Shape>["getCoValueClass"]

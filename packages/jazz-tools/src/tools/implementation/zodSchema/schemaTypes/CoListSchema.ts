@@ -28,6 +28,7 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
+import { z } from "../../../exports.js";
 
 export class CoListSchema<
   T extends AnyZodOrCoValueSchema,
@@ -52,6 +53,14 @@ export class CoListSchema<
   get permissions(): SchemaPermissions {
     return this.#permissions ?? DEFAULT_SCHEMA_PERMISSIONS;
   }
+
+  getValidationSchema = () => {
+    return z.array(
+      this.element instanceof z.z.core.$ZodType
+        ? this.element
+        : this.element.getValidationSchema(),
+    );
+  };
 
   constructor(
     public element: T,
@@ -79,6 +88,8 @@ export class CoListSchema<
       | Account
       | Group,
   ): CoListInstance<T> {
+    this.getValidationSchema().parse(items);
+
     const optionsWithPermissions = withSchemaPermissions(
       options,
       this.permissions,
@@ -278,6 +289,12 @@ export function createCoreCoListSchema<T extends AnyZodOrCoValueSchema>(
     builtin: "CoList" as const,
     element,
     resolveQuery: true as const,
+    getValidationSchema: () =>
+      z.array(
+        element instanceof z.z.core.$ZodType
+          ? element
+          : element.getValidationSchema(),
+      ),
   };
 }
 

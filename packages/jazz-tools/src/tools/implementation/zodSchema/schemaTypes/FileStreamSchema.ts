@@ -14,6 +14,7 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
+import { z } from "../zodReExport.js";
 
 export interface CoreFileStreamSchema extends CoreCoValueSchema {
   builtin: "FileStream";
@@ -24,6 +25,9 @@ export function createCoreFileStreamSchema(): CoreFileStreamSchema {
     collaborative: true as const,
     builtin: "FileStream" as const,
     resolveQuery: true as const,
+    getValidationSchema: () => {
+      return z.instanceof(FileStream);
+    },
   };
 }
 
@@ -33,6 +37,10 @@ export class FileStreamSchema implements CoreFileStreamSchema {
   readonly resolveQuery = true as const;
 
   #permissions: SchemaPermissions | null = null;
+  getValidationSchema = () => {
+    return z.instanceof(FileStream);
+  };
+
   /**
    * Permissions to be used when creating or composing CoValues
    * @internal

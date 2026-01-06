@@ -53,6 +53,13 @@ export class AccountSchema<
   shape: Shape;
   getDefinition: () => CoMapSchemaDefinition;
 
+  getValidationSchema = () => {
+    return z.object({
+      profile: this.shape.profile.getValidationSchema(),
+      root: z.optional(this.shape.root.getValidationSchema()),
+    });
+  };
+
   /**
    * Default resolve query to be used when loading instances of this schema.
    * This resolve query will be used when no resolve query is provided to the load method.

@@ -15,6 +15,7 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
+import { z } from "../zodReExport.js";
 
 export interface CoreRichTextSchema extends CoreCoValueSchema {
   builtin: "CoRichText";
@@ -25,6 +26,7 @@ export function createCoreCoRichTextSchema(): CoreRichTextSchema {
     collaborative: true as const,
     builtin: "CoRichText" as const,
     resolveQuery: true as const,
+    getValidationSchema: () => z.string().or(z.instanceof(CoRichText)),
   };
 }
 
@@ -43,6 +45,8 @@ export class RichTextSchema implements CoreRichTextSchema {
   }
 
   constructor(private coValueClass: typeof CoRichText) {}
+
+  getValidationSchema = () => z.string().or(z.instanceof(CoRichText));
 
   create(text: string, options?: { owner: Group } | Group): CoRichText;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */

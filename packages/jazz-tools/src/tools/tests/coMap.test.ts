@@ -515,6 +515,16 @@ describe("CoMap", async () => {
 
       expect(personB.friend?.pet.name).toEqual("Rex");
     });
+
+    it("should throw when creating with invalid properties", () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number(),
+      });
+
+      // @ts-expect-error - age should be a number
+      expect(() => Person.create({ name: "John", age: "20" })).toThrow();
+    });
   });
 
   describe("Mutation", () => {
