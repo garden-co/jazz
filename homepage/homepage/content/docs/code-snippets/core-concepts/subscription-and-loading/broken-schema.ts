@@ -18,7 +18,7 @@ export const Project = co
     },
   })
   .resolved({
-    createdBy: true,
+    projectManager: true,
   });
 
 export const MyAppAccount = co.account({
