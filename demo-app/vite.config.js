@@ -20,4 +20,14 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  test: {
+    // Use browser environment for WASM support
+    browser: {
+      enabled: true,
+      name: 'chromium',
+      provider: 'playwright',
+      headless: true,
+    },
+    include: ['test/**/*.test.ts'],
+  },
 });

@@ -1003,10 +1003,74 @@ function generateClient(
   lines.push(`import type { ObjectId, ${typeImports.join(", ")} } from "./types.js";`);
   lines.push("");
 
+  // Generate query builder classes for tables with refs
+  for (const table of tables) {
+    const typeName = singularize(toPascalCase(table.name));
+    const clientName = `${table.name}Client`;
+    const builderName = `${table.name}QueryBuilder`;
+    const tableReverseRefs = reverseRefs.get(table.name) ?? [];
+    const hasRefs = table.columns.some(c => c.sqlType.kind === "ref");
+    const hasReverseRefs = tableReverseRefs.length > 0;
+
+    if (hasRefs || hasReverseRefs) {
+      lines.push(`/**`);
+      lines.push(` * Query builder for ${table.name} with chainable where/with methods`);
+      lines.push(` */`);
+      lines.push(`export class ${builderName}<I extends ${typeName}Includes = {}> {`);
+      lines.push(`  private _client: ${clientName};`);
+      lines.push(`  private _where?: ${typeName}Filter;`);
+      lines.push(`  private _include?: I;`);
+      lines.push(``);
+      lines.push(`  constructor(client: ${clientName}, where?: ${typeName}Filter, include?: I) {`);
+      lines.push(`    this._client = client;`);
+      lines.push(`    this._where = where;`);
+      lines.push(`    this._include = include;`);
+      lines.push(`  }`);
+      lines.push(``);
+      lines.push(`  /**`);
+      lines.push(`   * Add a filter condition`);
+      lines.push(`   */`);
+      lines.push(`  where(filter: ${typeName}Filter): ${builderName}<I> {`);
+      lines.push(`    return new ${builderName}(this._client, filter, this._include);`);
+      lines.push(`  }`);
+      lines.push(``);
+      lines.push(`  /**`);
+      lines.push(`   * Specify which refs to include`);
+      lines.push(`   */`);
+      lines.push(`  with<NewI extends ${typeName}Includes>(include: NewI): ${builderName}<NewI> {`);
+      lines.push(`    return new ${builderName}(this._client, this._where, include);`);
+      lines.push(`  }`);
+      lines.push(``);
+      lines.push(`  /**`);
+      lines.push(`   * Subscribe to all matching ${table.name}`);
+      lines.push(`   */`);
+      lines.push(`  subscribeAll(callback: (rows: ${typeName}Loaded<I>[]) => void): Unsubscribe {`);
+      lines.push(`    return this._client._subscribeAllInternal(`);
+      lines.push(`      { where: this._where as BaseWhereInput | undefined, include: this._include as IncludeSpec | undefined },`);
+      lines.push(`      callback as (rows: ${typeName}[]) => void`);
+      lines.push(`    );`);
+      lines.push(`  }`);
+      lines.push(``);
+      lines.push(`  /**`);
+      lines.push(`   * Subscribe to a single ${typeName} by ID`);
+      lines.push(`   */`);
+      lines.push(`  subscribe(id: ObjectId, callback: (row: ${typeName}Loaded<I> | null) => void): Unsubscribe {`);
+      lines.push(`    return this._client._subscribeInternal(`);
+      lines.push(`      id,`);
+      lines.push(`      { include: this._include as IncludeSpec | undefined },`);
+      lines.push(`      callback as (row: ${typeName} | null) => void`);
+      lines.push(`    );`);
+      lines.push(`  }`);
+      lines.push(`}`);
+      lines.push(``);
+    }
+  }
+
   // Generate table client classes
   for (const table of tables) {
     const typeName = singularize(toPascalCase(table.name));
     const clientName = `${table.name}Client`;
+    const builderName = `${table.name}QueryBuilder`;
     const tableReverseRefs = reverseRefs.get(table.name) ?? [];
     const hasRefs = table.columns.some(c => c.sqlType.kind === "ref");
     const hasReverseRefs = tableReverseRefs.length > 0;
@@ -1059,38 +1123,80 @@ function generateClient(
     lines.push(`  }`);
     lines.push("");
 
-    // subscribe method
     if (hasRefs || hasReverseRefs) {
+      // Builder entry point: where()
       lines.push(`  /**`);
-      lines.push(`   * Subscribe to a single ${typeName} by ID`);
+      lines.push(`   * Start a query with a filter condition`);
       lines.push(`   */`);
-      lines.push(`  subscribe<I extends ${typeName}Includes = {}>(id: ObjectId, options: { include?: I }, callback: (row: ${typeName}Loaded<I> | null) => void): Unsubscribe {`);
-      lines.push(`    return this._subscribe(id, options, callback as (row: ${typeName} | null) => void);`);
+      lines.push(`  where(filter: ${typeName}Filter): ${builderName}<{}> {`);
+      lines.push(`    return new ${builderName}(this, filter, undefined);`);
       lines.push(`  }`);
-    } else {
+      lines.push("");
+
+      // Builder entry point: with()
+      lines.push(`  /**`);
+      lines.push(`   * Start a query with includes`);
+      lines.push(`   */`);
+      lines.push(`  with<I extends ${typeName}Includes>(include: I): ${builderName}<I> {`);
+      lines.push(`    return new ${builderName}(this, undefined, include);`);
+      lines.push(`  }`);
+      lines.push("");
+
+      // subscribe method (direct, no includes)
       lines.push(`  /**`);
       lines.push(`   * Subscribe to a single ${typeName} by ID`);
       lines.push(`   */`);
-      lines.push(`  subscribe(id: ObjectId, options: { include?: ${typeName}Includes }, callback: (row: ${typeName} | null) => void): Unsubscribe {`);
+      lines.push(`  subscribe(id: ObjectId, callback: (row: ${typeName} | null) => void): Unsubscribe {`);
+      lines.push(`    return this._subscribe(id, {}, callback);`);
+      lines.push(`  }`);
+      lines.push("");
+
+      // subscribeAll method (direct, no filters/includes)
+      lines.push(`  /**`);
+      lines.push(`   * Subscribe to all ${table.name}`);
+      lines.push(`   */`);
+      lines.push(`  subscribeAll(callback: (rows: ${typeName}[]) => void): Unsubscribe {`);
+      lines.push(`    return this._subscribeAll({}, callback);`);
+      lines.push(`  }`);
+      lines.push("");
+
+      // Internal methods for query builder to call
+      lines.push(`  /** @internal Used by query builder */`);
+      lines.push(`  _subscribeAllInternal(options: { where?: BaseWhereInput; include?: IncludeSpec }, callback: (rows: ${typeName}[]) => void): Unsubscribe {`);
+      lines.push(`    return this._subscribeAll(options, callback);`);
+      lines.push(`  }`);
+      lines.push("");
+
+      lines.push(`  /** @internal Used by query builder */`);
+      lines.push(`  _subscribeInternal(id: ObjectId, options: { include?: IncludeSpec }, callback: (row: ${typeName} | null) => void): Unsubscribe {`);
       lines.push(`    return this._subscribe(id, options, callback);`);
       lines.push(`  }`);
-    }
-    lines.push("");
-
-    // subscribeAll method
-    if (hasRefs || hasReverseRefs) {
-      lines.push(`  /**`);
-      lines.push(`   * Subscribe to all ${table.name} matching a filter`);
-      lines.push(`   */`);
-      lines.push(`  subscribeAll<I extends ${typeName}Includes = {}>(options: { where?: ${typeName}Filter; include?: I }, callback: (rows: ${typeName}Loaded<I>[]) => void): Unsubscribe {`);
-      lines.push(`    return this._subscribeAll(options as { where?: BaseWhereInput; include?: IncludeSpec }, callback as (rows: ${typeName}[]) => void);`);
-      lines.push(`  }`);
     } else {
+      // No refs - simpler methods without builder
       lines.push(`  /**`);
-      lines.push(`   * Subscribe to all ${table.name} matching a filter`);
+      lines.push(`   * Subscribe to a single ${typeName} by ID`);
       lines.push(`   */`);
-      lines.push(`  subscribeAll(options: { where?: ${typeName}Filter; include?: ${typeName}Includes }, callback: (rows: ${typeName}[]) => void): Unsubscribe {`);
-      lines.push(`    return this._subscribeAll(options as { where?: BaseWhereInput; include?: IncludeSpec }, callback);`);
+      lines.push(`  subscribe(id: ObjectId, callback: (row: ${typeName} | null) => void): Unsubscribe {`);
+      lines.push(`    return this._subscribe(id, {}, callback);`);
+      lines.push(`  }`);
+      lines.push("");
+
+      lines.push(`  /**`);
+      lines.push(`   * Subscribe to all ${table.name}`);
+      lines.push(`   */`);
+      lines.push(`  subscribeAll(callback: (rows: ${typeName}[]) => void): Unsubscribe {`);
+      lines.push(`    return this._subscribeAll({}, callback);`);
+      lines.push(`  }`);
+      lines.push("");
+
+      // For simple tables, add where method that returns a simple query object
+      lines.push(`  /**`);
+      lines.push(`   * Subscribe to ${table.name} matching a filter`);
+      lines.push(`   */`);
+      lines.push(`  where(filter: ${typeName}Filter): { subscribeAll(callback: (rows: ${typeName}[]) => void): Unsubscribe } {`);
+      lines.push(`    return {`);
+      lines.push(`      subscribeAll: (callback) => this._subscribeAll({ where: filter as BaseWhereInput }, callback)`);
+      lines.push(`    };`);
       lines.push(`  }`);
     }
 

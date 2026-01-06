@@ -3,27 +3,22 @@
  */
 
 import { useState, useEffect, useRef } from "react";
-import type { Unsubscribe, BaseWhereInput, IncludeSpec } from "@jazz/client";
+import type { Unsubscribe } from "@jazz/client";
 
 /**
- * Interface that table clients must implement for useOne
+ * Interface for objects that can subscribe to a single row by ID.
+ * Both table clients and query builders implement this.
  */
-export interface SubscribableOne<T, I> {
-  subscribe(
-    id: string,
-    options: { include?: I },
-    callback: (row: T | null) => void
-  ): Unsubscribe;
+export interface SubscribableOne<T> {
+  subscribe(id: string, callback: (row: T | null) => void): Unsubscribe;
 }
 
 /**
- * Interface that table clients must implement for useAll
+ * Interface for objects that can subscribe to all matching rows.
+ * Both table clients and query builders implement this.
  */
-export interface SubscribableAll<T, W, I> {
-  subscribeAll(
-    options: { where?: W; include?: I },
-    callback: (rows: T[]) => void
-  ): Unsubscribe;
+export interface SubscribableAll<T> {
+  subscribeAll(callback: (rows: T[]) => void): Unsubscribe;
 }
 
 /**
@@ -49,18 +44,23 @@ export interface UseAllResult<T> {
 /**
  * Hook to subscribe to a single row by ID.
  *
- * @param tableClient - The table client from the database (e.g., db.users)
+ * @param subscribable - A table client or query builder (e.g., db.users or db.users.with({ notes: true }))
  * @param id - The row's ObjectId
- * @param options - Optional include spec for eager loading
  * @returns Object with data and loading state
  *
  * @example
  * ```tsx
  * function UserProfile({ userId }: { userId: string }) {
  *   const db = useJazz();
- *   const { data: user, loading } = useOne(db.users, userId, {
- *     include: { notes: true }
- *   });
+ *
+ *   // Without includes - returns plain User
+ *   const { data: user, loading } = useOne(db.users, userId);
+ *
+ *   // With includes - returns UserLoaded<{ notes: true }>
+ *   const { data: userWithNotes } = useOne(
+ *     db.users.with({ notes: true }),
+ *     userId
+ *   );
  *
  *   if (loading) return <div>Loading...</div>;
  *   if (!user) return <div>User not found</div>;
@@ -69,20 +69,15 @@ export interface UseAllResult<T> {
  * }
  * ```
  */
-export function useOne<T, I extends IncludeSpec = Record<string, never>>(
-  tableClient: SubscribableOne<T, I>,
-  id: string | null | undefined,
-  options: { include?: I } = {}
+export function useOne<T>(
+  subscribable: SubscribableOne<T>,
+  id: string | null | undefined
 ): UseOneResult<T> {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
 
   // Track if this is the first callback
   const isFirstCallback = useRef(true);
-
-  // Stable reference for options to avoid re-subscribing on every render
-  const optionsRef = useRef(options);
-  optionsRef.current = options;
 
   useEffect(() => {
     // Reset state on id change
@@ -96,98 +91,79 @@ export function useOne<T, I extends IncludeSpec = Record<string, never>>(
       return;
     }
 
-    const unsubscribe = tableClient.subscribe(
-      id,
-      { include: optionsRef.current.include },
-      (row) => {
-        setData(row);
-        if (isFirstCallback.current) {
-          setLoading(false);
-          isFirstCallback.current = false;
-        }
+    const unsubscribe = subscribable.subscribe(id, (row) => {
+      setData(row);
+      if (isFirstCallback.current) {
+        setLoading(false);
+        isFirstCallback.current = false;
       }
-    );
+    });
 
     return unsubscribe;
-  }, [tableClient, id]);
+  }, [subscribable, id]);
 
   return { data, loading };
 }
 
 /**
- * Hook to subscribe to all rows matching a filter.
+ * Hook to subscribe to all rows matching a query.
  *
- * @param tableClient - The table client from the database (e.g., db.notes)
- * @param options - Optional where filter and include spec
+ * @param subscribable - A table client or query builder (e.g., db.notes or db.notes.where({ author: id }).with({ folder: true }))
  * @returns Object with data array and loading state
  *
  * @example
  * ```tsx
  * function NotesList({ authorId }: { authorId: string }) {
  *   const db = useJazz();
- *   const { data: notes, loading } = useAll(db.notes, {
- *     where: { author: authorId },
- *     include: { folder: true }
- *   });
+ *
+ *   // Without filter/includes - returns plain Note[]
+ *   const { data: allNotes, loading } = useAll(db.notes);
+ *
+ *   // With filter - returns Note[]
+ *   const { data: authorNotes } = useAll(
+ *     db.notes.where({ author: authorId })
+ *   );
+ *
+ *   // With filter and includes - returns NoteLoaded<{ folder: true }>[]
+ *   const { data: notesWithFolders } = useAll(
+ *     db.notes.where({ author: authorId }).with({ folder: true })
+ *   );
  *
  *   if (loading) return <div>Loading...</div>;
  *
  *   return (
  *     <ul>
- *       {notes.map(note => (
- *         <li key={note.id}>{note.title}</li>
+ *       {notesWithFolders.map(note => (
+ *         <li key={note.id}>{note.title} - {note.folder.name}</li>
  *       ))}
  *     </ul>
  *   );
  * }
  * ```
  */
-export function useAll<
-  T,
-  W extends BaseWhereInput = BaseWhereInput,
-  I extends IncludeSpec = Record<string, never>,
->(
-  tableClient: SubscribableAll<T, W, I>,
-  options: { where?: W; include?: I } = {}
-): UseAllResult<T> {
+export function useAll<T>(subscribable: SubscribableAll<T>): UseAllResult<T> {
   const [data, setData] = useState<T[]>([]);
   const [loading, setLoading] = useState(true);
 
   // Track if this is the first callback
   const isFirstCallback = useRef(true);
 
-  // Stable reference for options
-  const optionsRef = useRef(options);
-  optionsRef.current = options;
-
-  // Create a stable key for the options to detect changes
-  const optionsKey = JSON.stringify({
-    where: options.where,
-    include: options.include,
-  });
-
   useEffect(() => {
-    // Reset state on options change
+    // Reset state on subscribable change
     setLoading(true);
     setData([]);
     isFirstCallback.current = true;
 
-    const unsubscribe = tableClient.subscribeAll(
-      {
-        where: optionsRef.current.where,
-        include: optionsRef.current.include,
-      },
-      (rows) => {
-        setData(rows);
-        if (isFirstCallback.current) {
-          setLoading(false);
-          isFirstCallback.current = false;
-        }
+    const unsubscribe = subscribable.subscribeAll((rows) => {
+      setData(rows);
+      if (isFirstCallback.current) {
+        setLoading(false);
+        isFirstCallback.current = false;
       }
-    );
+    });
 
     return unsubscribe;
-  }, [tableClient, optionsKey]);
+  }, [subscribable]);
 
   return { data, loading };
 }

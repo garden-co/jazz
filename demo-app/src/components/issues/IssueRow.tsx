@@ -2,23 +2,20 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { StatusBadge } from "./StatusBadge";
 import { PriorityIcon } from "./PriorityIcon";
 import { LabelBadge } from "./LabelBadge";
-import type { Issue, User, Label, Project } from "@/generated/types";
+import type { LoadedIssue } from "@/App";
 
 interface IssueRowProps {
-  issue: Issue;
-  project?: Project;
-  assignees: User[];
-  labels: Label[];
+  issue: LoadedIssue;
   onClick: () => void;
 }
 
-export function IssueRow({
-  issue,
-  project,
-  assignees,
-  labels,
-  onClick,
-}: IssueRowProps) {
+export function IssueRow({ issue, onClick }: IssueRowProps) {
+  // Extract labels from the included IssueLabels
+  const labels = issue.IssueLabels.map((il) => il.label);
+
+  // Extract assignees from the included IssueAssignees
+  const assignees = issue.IssueAssignees.map((ia) => ia.user);
+
   return (
     <div
       className="flex items-center gap-4 border-b px-4 py-3 hover:bg-muted/50 cursor-pointer transition-colors"
@@ -31,15 +28,13 @@ export function IssueRow({
           <span className="font-medium truncate">{issue.title}</span>
         </div>
         <div className="flex items-center gap-2 mt-1">
-          {project && (
-            <div className="flex items-center gap-1 text-xs text-muted-foreground">
-              <div
-                className="h-2 w-2 rounded-full"
-                style={{ backgroundColor: project.color }}
-              />
-              {project.name}
-            </div>
-          )}
+          <div className="flex items-center gap-1 text-xs text-muted-foreground">
+            <div
+              className="h-2 w-2 rounded-full"
+              style={{ backgroundColor: issue.project.color }}
+            />
+            {issue.project.name}
+          </div>
           {labels.length > 0 && (
             <div className="flex items-center gap-1">
               {labels.slice(0, 3).map((label) => (

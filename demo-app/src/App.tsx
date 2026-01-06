@@ -1,7 +1,17 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { JazzProvider, useJazz, useAll } from "@jazz/react";
 import { createDatabase, type Database } from "./generated/client";
-import type { Issue, IssueFilter } from "./generated/types";
+import type { IssueFilter, IssueLoaded, IssueIncludes } from "./generated/types";
+
+// Define the include spec for issues with all related data
+const issueIncludes = {
+  project: true,
+  IssueLabels: { label: true },
+  IssueAssignees: { user: true },
+} as const satisfies IssueIncludes;
+
+// Type for an issue with all includes loaded
+export type LoadedIssue = IssueLoaded<typeof issueIncludes>;
 
 // @ts-ignore - vite handles ?raw imports
 import schema from "./schema.sql?raw";
@@ -27,7 +37,7 @@ function App() {
   // UI state
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [showMyIssues, setShowMyIssues] = useState(false);
-  const [selectedIssue, setSelectedIssue] = useState<Issue | null>(null);
+  const [selectedIssue, setSelectedIssue] = useState<LoadedIssue | null>(null);
   const [showIssueForm, setShowIssueForm] = useState(false);
   const [currentPage, setCurrentPage] = useState(0);
   const pageSize = 20;
@@ -73,40 +83,28 @@ function App() {
   }, [selectedProjectId, statusFilter, priorityFilter, assigneeFilter, showMyIssues, currentUserId, labelFilter]);
 
   // Subscribe to reference data (no filters)
-  const { data: users, loading: usersLoading } = useAll(db.users, {});
-  const { data: projects, loading: projectsLoading } = useAll(db.projects, {});
-  const { data: labels, loading: labelsLoading } = useAll(db.labels, {});
+  const { data: users, loading: usersLoading } = useAll(db.users);
+  const { data: projects, loading: projectsLoading } = useAll(db.projects);
+  const { data: labels, loading: labelsLoading } = useAll(db.labels);
 
   // Subscribe to all issues for sidebar counts
-  const { data: allIssues } = useAll(db.issues, {});
+  const { data: allIssues } = useAll(db.issues);
 
-  // Subscribe to filtered issues based on UI state (all filtering via SQL JOINs!)
-  const { data: filteredIssues, loading: issuesLoading } = useAll(db.issues, { where: issuesFilter });
+  // Build the query with filters and includes
+  // The type is correctly inferred as IssueLoaded<typeof issueIncludes>[]
+  const issuesQuery = useMemo(() => {
+    if (issuesFilter) {
+      return db.issues.where(issuesFilter).with(issueIncludes);
+    }
+    return db.issues.with(issueIncludes);
+  }, [db.issues, issuesFilter]);
 
-  // Subscribe to all junction tables for UI display (showing labels/assignees on issues)
-  const { data: allIssueLabels } = useAll(db.issuelabels, {});
-  const { data: allIssueAssignees } = useAll(db.issueassignees, {});
+  // Subscribe to filtered issues with all related data included (project, labels, assignees)
+  const { data: filteredIssues, loading: issuesLoading } = useAll(issuesQuery);
 
   const currentUser = useMemo(() => {
     return users.find((u) => u.id === currentUserId) || null;
   }, [users, currentUserId]);
-
-  // Get data for selected issue (use allIssueAssignees/allIssueLabels for complete data)
-  const selectedIssueData = useMemo(() => {
-    if (!selectedIssue) return { project: undefined, assignees: [], labels: [] };
-
-    const project = projects.find((p) => p.id === selectedIssue.project);
-    const assigneeIds = allIssueAssignees
-      .filter((ia) => ia.issue === selectedIssue.id)
-      .map((ia) => ia.user);
-    const assignees = users.filter((u) => assigneeIds.includes(u.id));
-    const labelIds = allIssueLabels
-      .filter((il) => il.issue === selectedIssue.id)
-      .map((il) => il.label);
-    const issueLabelsData = labels.filter((l) => labelIds.includes(l.id));
-
-    return { project, assignees, labels: issueLabelsData };
-  }, [selectedIssue, projects, users, labels, allIssueAssignees, allIssueLabels]);
 
   // Reset page when filters change
   useEffect(() => {
@@ -156,11 +154,6 @@ function App() {
 
         <IssueList
           issues={filteredIssues}
-          projects={projects}
-          users={users}
-          labels={labels}
-          issueLabels={allIssueLabels}
-          issueAssignees={allIssueAssignees}
           onSelectIssue={setSelectedIssue}
           currentPage={currentPage}
           pageSize={pageSize}
@@ -171,9 +164,6 @@ function App() {
 
       <IssueDetail
         issue={selectedIssue}
-        project={selectedIssueData.project}
-        assignees={selectedIssueData.assignees}
-        labels={selectedIssueData.labels}
         allUsers={users}
         allLabels={labels}
         allProjects={projects}

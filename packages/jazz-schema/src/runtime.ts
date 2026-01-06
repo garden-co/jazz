@@ -206,8 +206,15 @@ export function buildQuery(
   const parts: string[] = [];
   const allJoins: string[] = [];
 
-  // Build projection
-  const projections: string[] = [`${alias}.*`];
+  // Build projection - expand to explicit columns (Groove doesn't support .*)
+  // NOTE: We include ALL columns including FK columns, because JoinedRow outputs
+  // all columns flat. The decoder reads FK columns and uses them as the nested
+  // object's id.
+  const baseColumns = [
+    `${alias}.id`,
+    ...table.columns.map(c => `${alias}.${c.name}`)
+  ];
+  const projections: string[] = baseColumns;
 
   if (options.include) {
     for (const [key, includeValue] of Object.entries(options.include)) {
@@ -356,9 +363,9 @@ function buildIncludeProjection(
     const targetTable = schema.tables[forwardRef.targetTable];
     if (!targetTable) return null;
 
-    const targetAlias = key.toLowerCase();
-    const cols = targetTable.columns.map((c) => `${targetAlias}.${c.name}`);
-    return `ROW(${targetAlias}.id, ${cols.join(", ")}) as ${key}`;
+    // Use table name directly - Groove's JOIN doesn't support aliases
+    // The table row will be returned as composite type, aliased to the column name
+    return `${forwardRef.targetTable} as ${key}`;
   }
 
   // Check if it's a reverse ref
@@ -369,33 +376,43 @@ function buildIncludeProjection(
 
     const innerAlias = reverseRef.sourceTable.toLowerCase()[0] + "_inner";
 
-    // Build nested includes for the array subquery if needed
-    let innerProjection = `${innerAlias}.*`;
+    // Build base columns for inner query (Groove doesn't support .*)
+    const innerBaseColumns = [`${innerAlias}.id`, ...sourceTable.columns.map(c => `${innerAlias}.${c.name}`)];
+    let innerProjection = innerBaseColumns.join(", ");
     const innerJoins: string[] = [];
 
     if (typeof includeValue === "object") {
       // Build nested projections and JOINs for forward refs in the nested include
       const nestedProjections: string[] = [];
+      // Track which columns are resolved as refs (to skip from base columns)
+      const nestedResolvedRefs = new Set<string>();
 
       for (const [nestedKey, nestedValue] of Object.entries(includeValue)) {
         const nestedForwardRef = sourceTable.refs.find((r) => r.column === nestedKey);
         if (nestedForwardRef) {
           const nestedTargetTable = schema.tables[nestedForwardRef.targetTable];
           if (nestedTargetTable) {
-            const nestedAlias = nestedKey.toLowerCase();
-            const cols = nestedTargetTable.columns.map((c) => `${nestedAlias}.${c.name}`);
-            nestedProjections.push(`ROW(${nestedAlias}.id, ${cols.join(", ")}) as ${nestedKey}`);
+            nestedResolvedRefs.add(nestedKey);
+            // Groove's JOIN doesn't support aliases, use table name directly
+            nestedProjections.push(`${nestedForwardRef.targetTable} as ${nestedKey}`);
 
-            const joinType = nestedForwardRef.nullable ? "LEFT JOIN" : "JOIN";
+            // TODO: Groove parser doesn't support LEFT JOIN yet, using JOIN for now
             innerJoins.push(
-              `${joinType} ${nestedForwardRef.targetTable} ${nestedAlias} ON ${innerAlias}.${nestedKey} = ${nestedAlias}.id`
+              `JOIN ${nestedForwardRef.targetTable} ON ${innerAlias}.${nestedKey} = ${nestedForwardRef.targetTable}.id`
             );
           }
         }
       }
 
       if (nestedProjections.length > 0) {
-        innerProjection = `${innerAlias}.*, ${nestedProjections.join(", ")}`;
+        // Rebuild base columns excluding resolved refs
+        const filteredBaseColumns = [
+          `${innerAlias}.id`,
+          ...sourceTable.columns
+            .filter(c => !nestedResolvedRefs.has(c.name))
+            .map(c => `${innerAlias}.${c.name}`)
+        ];
+        innerProjection = `${filteredBaseColumns.join(", ")}, ${nestedProjections.join(", ")}`;
       }
     }
 
@@ -420,10 +437,11 @@ function buildJoins(
   for (const key of Object.keys(include)) {
     const forwardRef = table.refs.find((r) => r.column === key);
     if (forwardRef) {
-      const targetAlias = key.toLowerCase();
-      const joinType = forwardRef.nullable ? "LEFT JOIN" : "JOIN";
+      // Groove's JOIN doesn't support aliases or LEFT JOIN, use table name directly
+      const targetTable = forwardRef.targetTable;
+      // TODO: Groove parser doesn't support LEFT JOIN yet, using JOIN for now
       joins.push(
-        `${joinType} ${forwardRef.targetTable} ${targetAlias} ON ${alias}.${key} = ${targetAlias}.id`
+        `JOIN ${targetTable} ON ${alias}.${key} = ${targetTable}.id`
       );
     }
   }

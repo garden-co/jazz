@@ -7,6 +7,306 @@ import { decodeUserRows, decodeUserDelta, decodeProjectRows, decodeProjectDelta,
 import type { ObjectId, User, UserInsert, UserIncludes, UserLoaded, UserFilter, Project, ProjectInsert, ProjectIncludes, ProjectLoaded, ProjectFilter, Issue, IssueInsert, IssueIncludes, IssueLoaded, IssueFilter, Label, LabelInsert, LabelIncludes, LabelLoaded, LabelFilter, IssueLabel, IssueLabelInsert, IssueLabelIncludes, IssueLabelLoaded, IssueLabelFilter, IssueAssignee, IssueAssigneeInsert, IssueAssigneeIncludes, IssueAssigneeLoaded, IssueAssigneeFilter } from "./types.js";
 
 /**
+ * Query builder for Users with chainable where/with methods
+ */
+export class UsersQueryBuilder<I extends UserIncludes = {}> {
+  private _client: UsersClient;
+  private _where?: UserFilter;
+  private _include?: I;
+
+  constructor(client: UsersClient, where?: UserFilter, include?: I) {
+    this._client = client;
+    this._where = where;
+    this._include = include;
+  }
+
+  /**
+   * Add a filter condition
+   */
+  where(filter: UserFilter): UsersQueryBuilder<I> {
+    return new UsersQueryBuilder(this._client, filter, this._include);
+  }
+
+  /**
+   * Specify which refs to include
+   */
+  with<NewI extends UserIncludes>(include: NewI): UsersQueryBuilder<NewI> {
+    return new UsersQueryBuilder(this._client, this._where, include);
+  }
+
+  /**
+   * Subscribe to all matching Users
+   */
+  subscribeAll(callback: (rows: UserLoaded<I>[]) => void): Unsubscribe {
+    return this._client._subscribeAllInternal(
+      { where: this._where as BaseWhereInput | undefined, include: this._include as IncludeSpec | undefined },
+      callback as (rows: User[]) => void
+    );
+  }
+
+  /**
+   * Subscribe to a single User by ID
+   */
+  subscribe(id: ObjectId, callback: (row: UserLoaded<I> | null) => void): Unsubscribe {
+    return this._client._subscribeInternal(
+      id,
+      { include: this._include as IncludeSpec | undefined },
+      callback as (row: User | null) => void
+    );
+  }
+}
+
+/**
+ * Query builder for Projects with chainable where/with methods
+ */
+export class ProjectsQueryBuilder<I extends ProjectIncludes = {}> {
+  private _client: ProjectsClient;
+  private _where?: ProjectFilter;
+  private _include?: I;
+
+  constructor(client: ProjectsClient, where?: ProjectFilter, include?: I) {
+    this._client = client;
+    this._where = where;
+    this._include = include;
+  }
+
+  /**
+   * Add a filter condition
+   */
+  where(filter: ProjectFilter): ProjectsQueryBuilder<I> {
+    return new ProjectsQueryBuilder(this._client, filter, this._include);
+  }
+
+  /**
+   * Specify which refs to include
+   */
+  with<NewI extends ProjectIncludes>(include: NewI): ProjectsQueryBuilder<NewI> {
+    return new ProjectsQueryBuilder(this._client, this._where, include);
+  }
+
+  /**
+   * Subscribe to all matching Projects
+   */
+  subscribeAll(callback: (rows: ProjectLoaded<I>[]) => void): Unsubscribe {
+    return this._client._subscribeAllInternal(
+      { where: this._where as BaseWhereInput | undefined, include: this._include as IncludeSpec | undefined },
+      callback as (rows: Project[]) => void
+    );
+  }
+
+  /**
+   * Subscribe to a single Project by ID
+   */
+  subscribe(id: ObjectId, callback: (row: ProjectLoaded<I> | null) => void): Unsubscribe {
+    return this._client._subscribeInternal(
+      id,
+      { include: this._include as IncludeSpec | undefined },
+      callback as (row: Project | null) => void
+    );
+  }
+}
+
+/**
+ * Query builder for Issues with chainable where/with methods
+ */
+export class IssuesQueryBuilder<I extends IssueIncludes = {}> {
+  private _client: IssuesClient;
+  private _where?: IssueFilter;
+  private _include?: I;
+
+  constructor(client: IssuesClient, where?: IssueFilter, include?: I) {
+    this._client = client;
+    this._where = where;
+    this._include = include;
+  }
+
+  /**
+   * Add a filter condition
+   */
+  where(filter: IssueFilter): IssuesQueryBuilder<I> {
+    return new IssuesQueryBuilder(this._client, filter, this._include);
+  }
+
+  /**
+   * Specify which refs to include
+   */
+  with<NewI extends IssueIncludes>(include: NewI): IssuesQueryBuilder<NewI> {
+    return new IssuesQueryBuilder(this._client, this._where, include);
+  }
+
+  /**
+   * Subscribe to all matching Issues
+   */
+  subscribeAll(callback: (rows: IssueLoaded<I>[]) => void): Unsubscribe {
+    return this._client._subscribeAllInternal(
+      { where: this._where as BaseWhereInput | undefined, include: this._include as IncludeSpec | undefined },
+      callback as (rows: Issue[]) => void
+    );
+  }
+
+  /**
+   * Subscribe to a single Issue by ID
+   */
+  subscribe(id: ObjectId, callback: (row: IssueLoaded<I> | null) => void): Unsubscribe {
+    return this._client._subscribeInternal(
+      id,
+      { include: this._include as IncludeSpec | undefined },
+      callback as (row: Issue | null) => void
+    );
+  }
+}
+
+/**
+ * Query builder for Labels with chainable where/with methods
+ */
+export class LabelsQueryBuilder<I extends LabelIncludes = {}> {
+  private _client: LabelsClient;
+  private _where?: LabelFilter;
+  private _include?: I;
+
+  constructor(client: LabelsClient, where?: LabelFilter, include?: I) {
+    this._client = client;
+    this._where = where;
+    this._include = include;
+  }
+
+  /**
+   * Add a filter condition
+   */
+  where(filter: LabelFilter): LabelsQueryBuilder<I> {
+    return new LabelsQueryBuilder(this._client, filter, this._include);
+  }
+
+  /**
+   * Specify which refs to include
+   */
+  with<NewI extends LabelIncludes>(include: NewI): LabelsQueryBuilder<NewI> {
+    return new LabelsQueryBuilder(this._client, this._where, include);
+  }
+
+  /**
+   * Subscribe to all matching Labels
+   */
+  subscribeAll(callback: (rows: LabelLoaded<I>[]) => void): Unsubscribe {
+    return this._client._subscribeAllInternal(
+      { where: this._where as BaseWhereInput | undefined, include: this._include as IncludeSpec | undefined },
+      callback as (rows: Label[]) => void
+    );
+  }
+
+  /**
+   * Subscribe to a single Label by ID
+   */
+  subscribe(id: ObjectId, callback: (row: LabelLoaded<I> | null) => void): Unsubscribe {
+    return this._client._subscribeInternal(
+      id,
+      { include: this._include as IncludeSpec | undefined },
+      callback as (row: Label | null) => void
+    );
+  }
+}
+
+/**
+ * Query builder for IssueLabels with chainable where/with methods
+ */
+export class IssueLabelsQueryBuilder<I extends IssueLabelIncludes = {}> {
+  private _client: IssueLabelsClient;
+  private _where?: IssueLabelFilter;
+  private _include?: I;
+
+  constructor(client: IssueLabelsClient, where?: IssueLabelFilter, include?: I) {
+    this._client = client;
+    this._where = where;
+    this._include = include;
+  }
+
+  /**
+   * Add a filter condition
+   */
+  where(filter: IssueLabelFilter): IssueLabelsQueryBuilder<I> {
+    return new IssueLabelsQueryBuilder(this._client, filter, this._include);
+  }
+
+  /**
+   * Specify which refs to include
+   */
+  with<NewI extends IssueLabelIncludes>(include: NewI): IssueLabelsQueryBuilder<NewI> {
+    return new IssueLabelsQueryBuilder(this._client, this._where, include);
+  }
+
+  /**
+   * Subscribe to all matching IssueLabels
+   */
+  subscribeAll(callback: (rows: IssueLabelLoaded<I>[]) => void): Unsubscribe {
+    return this._client._subscribeAllInternal(
+      { where: this._where as BaseWhereInput | undefined, include: this._include as IncludeSpec | undefined },
+      callback as (rows: IssueLabel[]) => void
+    );
+  }
+
+  /**
+   * Subscribe to a single IssueLabel by ID
+   */
+  subscribe(id: ObjectId, callback: (row: IssueLabelLoaded<I> | null) => void): Unsubscribe {
+    return this._client._subscribeInternal(
+      id,
+      { include: this._include as IncludeSpec | undefined },
+      callback as (row: IssueLabel | null) => void
+    );
+  }
+}
+
+/**
+ * Query builder for IssueAssignees with chainable where/with methods
+ */
+export class IssueAssigneesQueryBuilder<I extends IssueAssigneeIncludes = {}> {
+  private _client: IssueAssigneesClient;
+  private _where?: IssueAssigneeFilter;
+  private _include?: I;
+
+  constructor(client: IssueAssigneesClient, where?: IssueAssigneeFilter, include?: I) {
+    this._client = client;
+    this._where = where;
+    this._include = include;
+  }
+
+  /**
+   * Add a filter condition
+   */
+  where(filter: IssueAssigneeFilter): IssueAssigneesQueryBuilder<I> {
+    return new IssueAssigneesQueryBuilder(this._client, filter, this._include);
+  }
+
+  /**
+   * Specify which refs to include
+   */
+  with<NewI extends IssueAssigneeIncludes>(include: NewI): IssueAssigneesQueryBuilder<NewI> {
+    return new IssueAssigneesQueryBuilder(this._client, this._where, include);
+  }
+
+  /**
+   * Subscribe to all matching IssueAssignees
+   */
+  subscribeAll(callback: (rows: IssueAssigneeLoaded<I>[]) => void): Unsubscribe {
+    return this._client._subscribeAllInternal(
+      { where: this._where as BaseWhereInput | undefined, include: this._include as IncludeSpec | undefined },
+      callback as (rows: IssueAssignee[]) => void
+    );
+  }
+
+  /**
+   * Subscribe to a single IssueAssignee by ID
+   */
+  subscribe(id: ObjectId, callback: (row: IssueAssigneeLoaded<I> | null) => void): Unsubscribe {
+    return this._client._subscribeInternal(
+      id,
+      { include: this._include as IncludeSpec | undefined },
+      callback as (row: IssueAssignee | null) => void
+    );
+  }
+}
+
+/**
  * Client for the Users table
  */
 export class UsersClient extends TableClient<User> {
@@ -44,17 +344,41 @@ export class UsersClient extends TableClient<User> {
   }
 
   /**
-   * Subscribe to a single User by ID
+   * Start a query with a filter condition
    */
-  subscribe<I extends UserIncludes = {}>(id: ObjectId, options: { include?: I }, callback: (row: UserLoaded<I> | null) => void): Unsubscribe {
-    return this._subscribe(id, options, callback as (row: User | null) => void);
+  where(filter: UserFilter): UsersQueryBuilder<{}> {
+    return new UsersQueryBuilder(this, filter, undefined);
   }
 
   /**
-   * Subscribe to all Users matching a filter
+   * Start a query with includes
    */
-  subscribeAll<I extends UserIncludes = {}>(options: { where?: UserFilter; include?: I }, callback: (rows: UserLoaded<I>[]) => void): Unsubscribe {
-    return this._subscribeAll(options as { where?: BaseWhereInput; include?: IncludeSpec }, callback as (rows: User[]) => void);
+  with<I extends UserIncludes>(include: I): UsersQueryBuilder<I> {
+    return new UsersQueryBuilder(this, undefined, include);
+  }
+
+  /**
+   * Subscribe to a single User by ID
+   */
+  subscribe(id: ObjectId, callback: (row: User | null) => void): Unsubscribe {
+    return this._subscribe(id, {}, callback);
+  }
+
+  /**
+   * Subscribe to all Users
+   */
+  subscribeAll(callback: (rows: User[]) => void): Unsubscribe {
+    return this._subscribeAll({}, callback);
+  }
+
+  /** @internal Used by query builder */
+  _subscribeAllInternal(options: { where?: BaseWhereInput; include?: IncludeSpec }, callback: (rows: User[]) => void): Unsubscribe {
+    return this._subscribeAll(options, callback);
+  }
+
+  /** @internal Used by query builder */
+  _subscribeInternal(id: ObjectId, options: { include?: IncludeSpec }, callback: (row: User | null) => void): Unsubscribe {
+    return this._subscribe(id, options, callback);
   }
 }
 
@@ -96,17 +420,41 @@ export class ProjectsClient extends TableClient<Project> {
   }
 
   /**
-   * Subscribe to a single Project by ID
+   * Start a query with a filter condition
    */
-  subscribe<I extends ProjectIncludes = {}>(id: ObjectId, options: { include?: I }, callback: (row: ProjectLoaded<I> | null) => void): Unsubscribe {
-    return this._subscribe(id, options, callback as (row: Project | null) => void);
+  where(filter: ProjectFilter): ProjectsQueryBuilder<{}> {
+    return new ProjectsQueryBuilder(this, filter, undefined);
   }
 
   /**
-   * Subscribe to all Projects matching a filter
+   * Start a query with includes
    */
-  subscribeAll<I extends ProjectIncludes = {}>(options: { where?: ProjectFilter; include?: I }, callback: (rows: ProjectLoaded<I>[]) => void): Unsubscribe {
-    return this._subscribeAll(options as { where?: BaseWhereInput; include?: IncludeSpec }, callback as (rows: Project[]) => void);
+  with<I extends ProjectIncludes>(include: I): ProjectsQueryBuilder<I> {
+    return new ProjectsQueryBuilder(this, undefined, include);
+  }
+
+  /**
+   * Subscribe to a single Project by ID
+   */
+  subscribe(id: ObjectId, callback: (row: Project | null) => void): Unsubscribe {
+    return this._subscribe(id, {}, callback);
+  }
+
+  /**
+   * Subscribe to all Projects
+   */
+  subscribeAll(callback: (rows: Project[]) => void): Unsubscribe {
+    return this._subscribeAll({}, callback);
+  }
+
+  /** @internal Used by query builder */
+  _subscribeAllInternal(options: { where?: BaseWhereInput; include?: IncludeSpec }, callback: (rows: Project[]) => void): Unsubscribe {
+    return this._subscribeAll(options, callback);
+  }
+
+  /** @internal Used by query builder */
+  _subscribeInternal(id: ObjectId, options: { include?: IncludeSpec }, callback: (row: Project | null) => void): Unsubscribe {
+    return this._subscribe(id, options, callback);
   }
 }
 
@@ -152,17 +500,41 @@ export class IssuesClient extends TableClient<Issue> {
   }
 
   /**
-   * Subscribe to a single Issue by ID
+   * Start a query with a filter condition
    */
-  subscribe<I extends IssueIncludes = {}>(id: ObjectId, options: { include?: I }, callback: (row: IssueLoaded<I> | null) => void): Unsubscribe {
-    return this._subscribe(id, options, callback as (row: Issue | null) => void);
+  where(filter: IssueFilter): IssuesQueryBuilder<{}> {
+    return new IssuesQueryBuilder(this, filter, undefined);
   }
 
   /**
-   * Subscribe to all Issues matching a filter
+   * Start a query with includes
    */
-  subscribeAll<I extends IssueIncludes = {}>(options: { where?: IssueFilter; include?: I }, callback: (rows: IssueLoaded<I>[]) => void): Unsubscribe {
-    return this._subscribeAll(options as { where?: BaseWhereInput; include?: IncludeSpec }, callback as (rows: Issue[]) => void);
+  with<I extends IssueIncludes>(include: I): IssuesQueryBuilder<I> {
+    return new IssuesQueryBuilder(this, undefined, include);
+  }
+
+  /**
+   * Subscribe to a single Issue by ID
+   */
+  subscribe(id: ObjectId, callback: (row: Issue | null) => void): Unsubscribe {
+    return this._subscribe(id, {}, callback);
+  }
+
+  /**
+   * Subscribe to all Issues
+   */
+  subscribeAll(callback: (rows: Issue[]) => void): Unsubscribe {
+    return this._subscribeAll({}, callback);
+  }
+
+  /** @internal Used by query builder */
+  _subscribeAllInternal(options: { where?: BaseWhereInput; include?: IncludeSpec }, callback: (rows: Issue[]) => void): Unsubscribe {
+    return this._subscribeAll(options, callback);
+  }
+
+  /** @internal Used by query builder */
+  _subscribeInternal(id: ObjectId, options: { include?: IncludeSpec }, callback: (row: Issue | null) => void): Unsubscribe {
+    return this._subscribe(id, options, callback);
   }
 }
 
@@ -203,17 +575,41 @@ export class LabelsClient extends TableClient<Label> {
   }
 
   /**
-   * Subscribe to a single Label by ID
+   * Start a query with a filter condition
    */
-  subscribe<I extends LabelIncludes = {}>(id: ObjectId, options: { include?: I }, callback: (row: LabelLoaded<I> | null) => void): Unsubscribe {
-    return this._subscribe(id, options, callback as (row: Label | null) => void);
+  where(filter: LabelFilter): LabelsQueryBuilder<{}> {
+    return new LabelsQueryBuilder(this, filter, undefined);
   }
 
   /**
-   * Subscribe to all Labels matching a filter
+   * Start a query with includes
    */
-  subscribeAll<I extends LabelIncludes = {}>(options: { where?: LabelFilter; include?: I }, callback: (rows: LabelLoaded<I>[]) => void): Unsubscribe {
-    return this._subscribeAll(options as { where?: BaseWhereInput; include?: IncludeSpec }, callback as (rows: Label[]) => void);
+  with<I extends LabelIncludes>(include: I): LabelsQueryBuilder<I> {
+    return new LabelsQueryBuilder(this, undefined, include);
+  }
+
+  /**
+   * Subscribe to a single Label by ID
+   */
+  subscribe(id: ObjectId, callback: (row: Label | null) => void): Unsubscribe {
+    return this._subscribe(id, {}, callback);
+  }
+
+  /**
+   * Subscribe to all Labels
+   */
+  subscribeAll(callback: (rows: Label[]) => void): Unsubscribe {
+    return this._subscribeAll({}, callback);
+  }
+
+  /** @internal Used by query builder */
+  _subscribeAllInternal(options: { where?: BaseWhereInput; include?: IncludeSpec }, callback: (rows: Label[]) => void): Unsubscribe {
+    return this._subscribeAll(options, callback);
+  }
+
+  /** @internal Used by query builder */
+  _subscribeInternal(id: ObjectId, options: { include?: IncludeSpec }, callback: (row: Label | null) => void): Unsubscribe {
+    return this._subscribe(id, options, callback);
   }
 }
 
@@ -254,17 +650,41 @@ export class IssueLabelsClient extends TableClient<IssueLabel> {
   }
 
   /**
-   * Subscribe to a single IssueLabel by ID
+   * Start a query with a filter condition
    */
-  subscribe<I extends IssueLabelIncludes = {}>(id: ObjectId, options: { include?: I }, callback: (row: IssueLabelLoaded<I> | null) => void): Unsubscribe {
-    return this._subscribe(id, options, callback as (row: IssueLabel | null) => void);
+  where(filter: IssueLabelFilter): IssueLabelsQueryBuilder<{}> {
+    return new IssueLabelsQueryBuilder(this, filter, undefined);
   }
 
   /**
-   * Subscribe to all IssueLabels matching a filter
+   * Start a query with includes
    */
-  subscribeAll<I extends IssueLabelIncludes = {}>(options: { where?: IssueLabelFilter; include?: I }, callback: (rows: IssueLabelLoaded<I>[]) => void): Unsubscribe {
-    return this._subscribeAll(options as { where?: BaseWhereInput; include?: IncludeSpec }, callback as (rows: IssueLabel[]) => void);
+  with<I extends IssueLabelIncludes>(include: I): IssueLabelsQueryBuilder<I> {
+    return new IssueLabelsQueryBuilder(this, undefined, include);
+  }
+
+  /**
+   * Subscribe to a single IssueLabel by ID
+   */
+  subscribe(id: ObjectId, callback: (row: IssueLabel | null) => void): Unsubscribe {
+    return this._subscribe(id, {}, callback);
+  }
+
+  /**
+   * Subscribe to all IssueLabels
+   */
+  subscribeAll(callback: (rows: IssueLabel[]) => void): Unsubscribe {
+    return this._subscribeAll({}, callback);
+  }
+
+  /** @internal Used by query builder */
+  _subscribeAllInternal(options: { where?: BaseWhereInput; include?: IncludeSpec }, callback: (rows: IssueLabel[]) => void): Unsubscribe {
+    return this._subscribeAll(options, callback);
+  }
+
+  /** @internal Used by query builder */
+  _subscribeInternal(id: ObjectId, options: { include?: IncludeSpec }, callback: (row: IssueLabel | null) => void): Unsubscribe {
+    return this._subscribe(id, options, callback);
   }
 }
 
@@ -305,17 +725,41 @@ export class IssueAssigneesClient extends TableClient<IssueAssignee> {
   }
 
   /**
-   * Subscribe to a single IssueAssignee by ID
+   * Start a query with a filter condition
    */
-  subscribe<I extends IssueAssigneeIncludes = {}>(id: ObjectId, options: { include?: I }, callback: (row: IssueAssigneeLoaded<I> | null) => void): Unsubscribe {
-    return this._subscribe(id, options, callback as (row: IssueAssignee | null) => void);
+  where(filter: IssueAssigneeFilter): IssueAssigneesQueryBuilder<{}> {
+    return new IssueAssigneesQueryBuilder(this, filter, undefined);
   }
 
   /**
-   * Subscribe to all IssueAssignees matching a filter
+   * Start a query with includes
    */
-  subscribeAll<I extends IssueAssigneeIncludes = {}>(options: { where?: IssueAssigneeFilter; include?: I }, callback: (rows: IssueAssigneeLoaded<I>[]) => void): Unsubscribe {
-    return this._subscribeAll(options as { where?: BaseWhereInput; include?: IncludeSpec }, callback as (rows: IssueAssignee[]) => void);
+  with<I extends IssueAssigneeIncludes>(include: I): IssueAssigneesQueryBuilder<I> {
+    return new IssueAssigneesQueryBuilder(this, undefined, include);
+  }
+
+  /**
+   * Subscribe to a single IssueAssignee by ID
+   */
+  subscribe(id: ObjectId, callback: (row: IssueAssignee | null) => void): Unsubscribe {
+    return this._subscribe(id, {}, callback);
+  }
+
+  /**
+   * Subscribe to all IssueAssignees
+   */
+  subscribeAll(callback: (rows: IssueAssignee[]) => void): Unsubscribe {
+    return this._subscribeAll({}, callback);
+  }
+
+  /** @internal Used by query builder */
+  _subscribeAllInternal(options: { where?: BaseWhereInput; include?: IncludeSpec }, callback: (rows: IssueAssignee[]) => void): Unsubscribe {
+    return this._subscribeAll(options, callback);
+  }
+
+  /** @internal Used by query builder */
+  _subscribeInternal(id: ObjectId, options: { include?: IncludeSpec }, callback: (row: IssueAssignee | null) => void): Unsubscribe {
+    return this._subscribe(id, options, callback);
   }
 }
 

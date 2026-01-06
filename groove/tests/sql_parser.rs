@@ -481,6 +481,41 @@ fn parse_array_subquery_simple() {
     }
 }
 
+#[test]
+fn parse_array_subquery_with_multiple_columns() {
+    // This is the SQL generated for Issues with IssueLabels include
+    let sql = "SELECT i.id, i.title, i.description, i.status, i.priority, i.project, i.createdAt, i.updatedAt, ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.label FROM IssueLabels i_inner WHERE i_inner.issue = i.id) as IssueLabels FROM Issues i";
+    let stmt = parse(sql).unwrap();
+
+    match stmt {
+        Statement::Select(sel) => {
+            // Should be Expressions projection with 9 items (8 columns + 1 ARRAY)
+            match &sel.projection {
+                Projection::Expressions(exprs) => {
+                    assert_eq!(exprs.len(), 9, "Expected 9 expressions in projection");
+
+                    // Last expression should be ARRAY subquery with alias
+                    match &exprs[8] {
+                        SelectExpr::Aliased { expr, alias } => {
+                            assert_eq!(alias, "IssueLabels");
+                            match expr.as_ref() {
+                                SelectExpr::ArraySubquery(subquery) => {
+                                    assert_eq!(subquery.from.table, "IssueLabels");
+                                    assert_eq!(subquery.where_clause.len(), 1);
+                                }
+                                _ => panic!("expected ArraySubquery, got {:?}", expr),
+                            }
+                        }
+                        _ => panic!("expected Aliased, got {:?}", exprs[8]),
+                    }
+                }
+                _ => panic!("expected Expressions, got {:?}", sel.projection),
+            }
+        }
+        _ => panic!("expected Select"),
+    }
+}
+
 // ========== Policy Parsing Tests ==========
 
 #[test]

@@ -19,14 +19,12 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Separator } from "@/components/ui/separator";
 import { LabelBadge } from "./LabelBadge";
 import { STATUSES, STATUS_LABELS, PRIORITIES, PRIORITY_LABELS } from "@/utils/constants";
-import type { Issue, User, Label, Project } from "@/generated/types";
+import type { User, Label, Project } from "@/generated/types";
 import type { Database } from "@/generated/client";
+import type { LoadedIssue } from "@/App";
 
 interface IssueDetailProps {
-  issue: Issue | null;
-  project?: Project;
-  assignees: User[];
-  labels: Label[];
+  issue: LoadedIssue | null;
   allUsers: User[];
   allLabels: Label[];
   allProjects: Project[];
@@ -37,9 +35,6 @@ interface IssueDetailProps {
 
 export function IssueDetail({
   issue,
-  project,
-  assignees,
-  labels,
   allUsers,
   allLabels,
   allProjects,
@@ -52,6 +47,10 @@ export function IssueDetail({
   const [description, setDescription] = useState("");
 
   if (!issue) return null;
+
+  // Extract labels and assignees from the included data
+  const labels = issue.IssueLabels.map((il) => il.label);
+  const assignees = issue.IssueAssignees.map((ia) => ia.user);
 
   const handleStatusChange = (status: string) => {
     db.issues.update(issue.id, { status, updatedAt: BigInt(Date.now()) });
@@ -169,7 +168,7 @@ export function IssueDetail({
             <label className="text-sm font-medium text-muted-foreground">
               Project
             </label>
-            <Select value={issue.project} onValueChange={handleProjectChange}>
+            <Select value={issue.project.id} onValueChange={handleProjectChange}>
               <SelectTrigger className="mt-1">
                 <SelectValue />
               </SelectTrigger>
