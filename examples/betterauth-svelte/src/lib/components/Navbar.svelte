@@ -21,12 +21,8 @@
     {#if isAuthenticated.current}
       <Button onclick={signOut}>Sign out</Button>
     {:else}
-      <Button asChild variant="secondary">
-        <a href="/auth/sign-in">Sign in</a>
-      </Button>
-      <Button asChild>
-        <a href="/auth/sign-up">Sign up</a>
-      </Button>
+      <Button variant="secondary" href="/auth/sign-in">Sign in</Button>
+      <Button href="/auth/sign-up">Sign up</Button>
     {/if}
   </nav>
 </header>
