@@ -62,11 +62,15 @@ These have conflicting requirements:
 
 **Problem**: SQL allows aliases (`FROM Issues i`), and ON clauses use aliases (`i.project = Projects.id`), but the graph builder expects table names.
 
-**What Went Wrong**: `find_join_column` compared ON clause references against table names, missing alias matches. Queries with aliases silently failed (callback never invoked, loading stuck).
+**What Went Wrong**:
+1. `find_join_column` compared ON clause references against table names, missing alias matches. Queries with aliases silently failed (callback never invoked, loading stuck).
+2. `build_multi_join_predicate` only checked table names, not aliases. WHERE clause `i.priority = 'low'` failed with "Unknown table i".
 
-**Current Fix**: Pass aliases through and check both table name AND alias in all comparisons.
+**Current Fix**:
+- Pass aliases through and check both table name AND alias in all comparisons.
+- Added `build_multi_join_predicate_with_aliases` for predicate building.
 
-**Pain Point**: Alias handling is ad-hoc, added to each function that needs it. No centralized "table reference resolution" layer.
+**Pain Point**: Alias handling is ad-hoc, added to each function that needs it. No centralized "table reference resolution" layer. We now have TWO predicate building functions (`build_multi_join_predicate` and `build_multi_join_predicate_with_aliases`).
 
 ### 4. Multi-JOIN Chain Complexity
 
@@ -178,6 +182,8 @@ Forward and reverse JOINs have almost entirely separate implementations despite 
 
 ## Related Commits
 
+- `982e89a` - Fix table alias handling in WHERE clause for multi-JOIN queries
+- `70821ef` - Add multi-JOIN support for filtered queries with reverse relations
 - `fd0f81a` - Add nested JOIN support for ARRAY subqueries
 - `9617965` - Fix table alias handling in reverse JOIN queries
 - `f0f3bf9` - Add projection support for reverse JOIN queries

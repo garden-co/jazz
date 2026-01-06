@@ -265,4 +265,53 @@ describe("subscribeAll with filter and includes", () => {
     expect(issues[0].IssueLabels[0].label.name).toBe("Bug");
     expect(issues[0].IssueAssignees[0].user.name).toBe("Alice");
   });
+
+  it("should filter by primary table AND junction tables combined", async () => {
+    // Get the label and user IDs
+    const labels = await new Promise<any[]>((resolve) => {
+      let unsubscribe: (() => void) | undefined;
+      unsubscribe = db.labels.subscribeAll((rows) => {
+        setTimeout(() => unsubscribe?.(), 0);
+        resolve(rows);
+      });
+    });
+    const bugLabel = labels.find(l => l.name === "Bug");
+    expect(bugLabel).toBeDefined();
+
+    const users = await new Promise<any[]>((resolve) => {
+      let unsubscribe: (() => void) | undefined;
+      unsubscribe = db.users.subscribeAll((rows) => {
+        setTimeout(() => unsubscribe?.(), 0);
+        resolve(rows);
+      });
+    });
+    const alice = users.find(u => u.name === "Alice");
+    expect(alice).toBeDefined();
+
+    // Filter by primary table field + junction tables
+    const issues = await new Promise<any[]>((resolve) => {
+      let unsubscribe: (() => void) | undefined;
+      unsubscribe = db.issues.with({
+        project: true,
+        IssueLabels: { label: true },
+        IssueAssignees: { user: true }
+      }).where({
+        priority: "high", // Filter on primary table (Issues)
+        IssueLabels: { some: { label: bugLabel.id } },
+        IssueAssignees: { some: { user: alice.id } }
+      }).subscribeAll((rows) => {
+        setTimeout(() => unsubscribe?.(), 0);
+        resolve(rows);
+      });
+    });
+
+    console.log("Issues with combined filters:", JSON.stringify(issues, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2));
+
+    expect(issues.length).toBe(1);
+    expect(issues[0].title).toBe("Test Issue");
+    expect(issues[0].priority).toBe("high");
+    expect(issues[0].project.name).toBe("Test Project");
+    expect(issues[0].IssueLabels[0].label.name).toBe("Bug");
+    expect(issues[0].IssueAssignees[0].user.name).toBe("Alice");
+  });
 });

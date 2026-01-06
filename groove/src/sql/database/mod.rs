@@ -3616,12 +3616,6 @@ impl Database {
             all_tables.push((target_table.as_str(), None, target_schema.clone()));
         }
 
-        // Build schema list for predicate building (without aliases)
-        let all_schemas: Vec<(&str, TableSchema)> = all_tables
-            .iter()
-            .map(|(name, _, schema)| (*name, schema.clone()))
-            .collect();
-
         // Apply WHERE filters (if any), excluding conditions already handled by reverse joins
         let filtered = if select.where_clause.is_empty() {
             current_node
@@ -3635,8 +3629,8 @@ impl Database {
             if remaining_conditions.is_empty() {
                 current_node
             } else {
-                // Build predicate for remaining conditions only
-                let predicate = self.build_multi_join_predicate(&remaining_conditions, &all_schemas)?;
+                // Build predicate for remaining conditions only (with alias support)
+                let predicate = self.build_multi_join_predicate_with_aliases(&remaining_conditions, &all_tables)?;
                 builder.filter(current_node, predicate)
             }
         };
@@ -3804,6 +3798,77 @@ impl Database {
             let value = coerce_value(literal_value, &column.ty);
 
             // Use qualified column name for multi-table queries
+            let qualified_col = format!("{}.{}", table_name, col_name);
+            predicates.push(Predicate::eq(qualified_col, value));
+        }
+
+        if predicates.is_empty() {
+            Ok(Predicate::True)
+        } else if predicates.len() == 1 {
+            Ok(predicates.pop().unwrap())
+        } else {
+            Ok(Predicate::And(predicates))
+        }
+    }
+
+    /// Build predicate for multi-join queries with alias support.
+    ///
+    /// This version takes the full table info including aliases, allowing
+    /// WHERE clauses like `i.priority = 'low'` where `i` is an alias for `Issues`.
+    fn build_multi_join_predicate_with_aliases(
+        &self,
+        conditions: &[Condition],
+        all_tables: &[(&str, Option<&str>, TableSchema)],
+    ) -> Result<Predicate, DatabaseError> {
+        let mut predicates = Vec::new();
+
+        for cond in conditions {
+            let table_ref = cond.column.table.as_deref();
+            let col_name = &cond.column.column;
+
+            // Find the schema for this column (check both table name and alias)
+            let (table_name, schema) = if let Some(t) = table_ref {
+                all_tables
+                    .iter()
+                    .find(|(name, alias, _)| {
+                        *name == t || alias.map_or(false, |a| a == t)
+                    })
+                    .map(|(name, _, schema)| (*name, schema))
+                    .ok_or_else(|| DatabaseError::Parse(parser::ParseError {
+                        message: format!("Unknown table {} in WHERE clause", t),
+                        position: 0,
+                    }))?
+            } else {
+                // Unqualified column - search all schemas
+                all_tables
+                    .iter()
+                    .find(|(_, _, s)| s.column(col_name).is_some())
+                    .map(|(name, _, schema)| (*name, schema))
+                    .ok_or_else(|| DatabaseError::Parse(parser::ParseError {
+                        message: format!("Unknown column {} in WHERE clause", col_name),
+                        position: 0,
+                    }))?
+            };
+
+            let column = schema.column(col_name).ok_or_else(|| {
+                DatabaseError::Parse(parser::ParseError {
+                    message: format!("Column {} not found in table {}", col_name, table_name),
+                    position: 0,
+                })
+            })?;
+
+            // Only handle literal values in predicates for now
+            let literal_value = match cond.value() {
+                Some(v) => v.clone(),
+                None => {
+                    // Column references not yet supported in predicate building
+                    continue;
+                }
+            };
+
+            let value = coerce_value(literal_value, &column.ty);
+
+            // Use actual table name (not alias) for qualified column
             let qualified_col = format!("{}.{}", table_name, col_name);
             predicates.push(Predicate::eq(qualified_col, value));
         }
