@@ -1,0 +1,47 @@
+#!/bin/bash
+set -e
+
+# Configuration
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SESSIONS_DIR="$(cd "$REPO_ROOT/.." && pwd)/jazz2-sessions"
+ZED_CLI="/Applications/Zed.app/Contents/MacOS/cli"
+
+# Generate timestamp-based session name
+TIMESTAMP=$(date +"%Y%m%d-%H%M%S")
+SESSION_NAME="session-${TIMESTAMP}"
+WORKTREE_PATH="${SESSIONS_DIR}/${SESSION_NAME}"
+
+# Ensure sessions directory exists
+mkdir -p "$SESSIONS_DIR"
+
+# Create the worktree with a new branch based on main
+cd "$REPO_ROOT"
+git worktree add -b "$SESSION_NAME" "$WORKTREE_PATH" main
+
+echo "Created worktree at: $WORKTREE_PATH"
+
+# Install dependencies
+cd "$WORKTREE_PATH"
+if [ -f "pnpm-lock.yaml" ]; then
+    echo "Installing dependencies with pnpm..."
+    pnpm install
+elif [ -f "package-lock.json" ]; then
+    echo "Installing dependencies with npm..."
+    npm install
+fi
+
+# Open Zed in the worktree
+if [ -x "$ZED_CLI" ]; then
+    echo "Opening Zed..."
+    "$ZED_CLI" "$WORKTREE_PATH"
+else
+    echo "Zed CLI not found at $ZED_CLI"
+    echo "Please open manually: $WORKTREE_PATH"
+fi
+
+echo ""
+echo "Session created: $SESSION_NAME"
+echo "Path: $WORKTREE_PATH"
+echo ""
+echo "Tip: Once the scope of your session is clear, rename it with:"
+echo "  scripts/session-rename $SESSION_NAME your-descriptive-name"

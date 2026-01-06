@@ -1,0 +1,69 @@
+#!/bin/bash
+set -e
+
+# Configuration
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SESSIONS_DIR="$(cd "$REPO_ROOT/.." && pwd)/jazz2-sessions"
+
+# Check arguments
+if [ -z "$1" ]; then
+    echo "Usage: session-retire <session-name>"
+    echo ""
+    echo "Available sessions:"
+    if [ -d "$SESSIONS_DIR" ]; then
+        ls -1 "$SESSIONS_DIR" 2>/dev/null || echo "  (none)"
+    else
+        echo "  (none)"
+    fi
+    exit 1
+fi
+
+SESSION_NAME="$1"
+WORKTREE_PATH="${SESSIONS_DIR}/${SESSION_NAME}"
+
+# Verify the worktree exists
+if [ ! -d "$WORKTREE_PATH" ]; then
+    echo "Error: Session '$SESSION_NAME' not found at $WORKTREE_PATH"
+    exit 1
+fi
+
+# Check for uncommitted changes
+cd "$WORKTREE_PATH"
+if ! git diff --quiet || ! git diff --cached --quiet; then
+    echo "Warning: Session has uncommitted changes:"
+    git status --short
+    echo ""
+    read -p "Are you sure you want to retire this session? (y/N) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "Aborted."
+        exit 1
+    fi
+fi
+
+# Check for unpushed commits
+BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+if [ -n "$BRANCH" ] && [ "$BRANCH" != "main" ]; then
+    UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null || echo "")
+    if [ -z "$UPSTREAM" ]; then
+        LOCAL_COMMITS=$(git log main..HEAD --oneline 2>/dev/null | wc -l | tr -d ' ')
+        if [ "$LOCAL_COMMITS" -gt 0 ]; then
+            echo "Warning: Branch '$BRANCH' has $LOCAL_COMMITS unpushed commit(s):"
+            git log main..HEAD --oneline
+            echo ""
+            read -p "Are you sure you want to retire this session? (y/N) " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                echo "Aborted."
+                exit 1
+            fi
+        fi
+    fi
+fi
+
+# Remove the worktree
+cd "$REPO_ROOT"
+echo "Removing worktree..."
+git worktree remove "$WORKTREE_PATH" --force
+
+echo "Session '$SESSION_NAME' retired successfully."
