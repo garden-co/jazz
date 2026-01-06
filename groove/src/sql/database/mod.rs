@@ -1246,6 +1246,22 @@ enum JoinDirection {
     RightToLeft(String),
 }
 
+/// Information about how to chain join a new table.
+enum ChainJoinInfo {
+    /// Forward join: existing table has ref column pointing to new table.
+    /// chain_join(source_table.ref_column = target_table.id)
+    Forward {
+        source_table: String,
+        ref_column: String,
+    },
+    /// Reverse join: new table has ref column pointing to existing table.
+    /// reverse_chain_join(target_table.ref_column = existing_table.id)
+    Reverse {
+        existing_table: String,
+        ref_column: String,
+    },
+}
+
 impl Database {
     /// Create a new database with the given environment.
     pub fn new(env: Arc<dyn Environment>) -> Self {
@@ -3467,51 +3483,50 @@ impl Database {
         &self,
         select: &Select,
     ) -> Result<crate::sql::query_graph::QueryGraph, DatabaseError> {
-        // Currently only support single JOIN
-        if select.from.joins.len() != 1 {
+        if select.from.joins.is_empty() {
             return Err(DatabaseError::Parse(parser::ParseError {
-                message: "incremental_query only supports single JOINs".to_string(),
+                message: "build_join_graph called without JOINs".to_string(),
                 position: 0,
             }));
         }
 
-        let join = &select.from.joins[0];
+        let first_join = &select.from.joins[0];
         let sql_left_table = &select.from.table;
-        let sql_right_table = &join.table;
+        let sql_first_right_table = &first_join.table;
 
-        // Get schemas for both tables
+        // Get schemas for the first two tables
         let sql_left_schema = self
             .get_table(sql_left_table)
             .ok_or_else(|| DatabaseError::TableNotFound(sql_left_table.clone()))?;
-        let sql_right_schema = self
-            .get_table(sql_right_table)
-            .ok_or_else(|| DatabaseError::TableNotFound(sql_right_table.clone()))?;
+        let sql_first_right_schema = self
+            .get_table(sql_first_right_table)
+            .ok_or_else(|| DatabaseError::TableNotFound(sql_first_right_table.clone()))?;
 
-        // Determine the join column and direction
+        // Determine the join column and direction for first join
         // The JoinGraphBuilder expects the "left" table to have the Ref column
-        let join_direction = self.find_join_column(
-            &join.on,
+        let first_join_direction = self.find_join_column(
+            &first_join.on,
             sql_left_table,
             select.from.alias.as_deref(), // Pass FROM alias for matching
-            sql_right_table,
+            sql_first_right_table,
             &sql_left_schema,
-            &sql_right_schema,
+            &sql_first_right_schema,
         )?;
 
         // For the graph builder, we need the table with the Ref to be "left"
         // If it's a reverse join (right table has Ref), we swap the roles
         let (graph_left_table, graph_left_schema, graph_right_table, graph_right_schema, ref_column) =
-            match &join_direction {
+            match &first_join_direction {
                 JoinDirection::LeftToRight(col) => (
                     sql_left_table.as_str(),
                     sql_left_schema.clone(),
-                    sql_right_table.as_str(),
-                    sql_right_schema.clone(),
+                    sql_first_right_table.as_str(),
+                    sql_first_right_schema.clone(),
                     col.clone(),
                 ),
                 JoinDirection::RightToLeft(col) => (
-                    sql_right_table.as_str(),
-                    sql_right_schema.clone(),
+                    sql_first_right_table.as_str(),
+                    sql_first_right_schema.clone(),
                     sql_left_table.as_str(),
                     sql_left_schema.clone(),
                     col.clone(),
@@ -3531,22 +3546,99 @@ impl Database {
         // The SQL is `SELECT Issues.* FROM Issues JOIN IssueAssignees`, but we swapped the
         // tables for the graph builder (because IssueAssignees has the Ref). We need to
         // project back to Issues (the original SQL left table, now graph_right_table).
-        if matches!(join_direction, JoinDirection::RightToLeft(_)) {
+        if matches!(first_join_direction, JoinDirection::RightToLeft(_)) {
             builder.set_projection(graph_right_table);
         }
 
-        // Start with join node
-        let join_node = builder.join();
+        // Start with first join node
+        let mut current_node = builder.join();
 
-        // Apply WHERE filters (if any)
+        // Track all tables involved for predicate building
+        // Store (table_name, alias, schema)
+        let from_alias = select.from.alias.as_deref();
+        let mut all_tables: Vec<(&str, Option<&str>, TableSchema)> = vec![
+            (sql_left_table.as_str(), from_alias, sql_left_schema.clone()),
+            (sql_first_right_table.as_str(), None, sql_first_right_schema.clone()),
+        ];
+
+        // Track reverse-joined tables to handle their WHERE conditions specially
+        let mut reverse_joined_tables: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Process additional JOINs (chain joins)
+        for join in select.from.joins.iter().skip(1) {
+            let target_table = &join.table;
+            let target_schema = self
+                .get_table(target_table)
+                .ok_or_else(|| DatabaseError::TableNotFound(target_table.clone()))?;
+
+            // Add schema so chain_join can find it
+            builder.add_schema(target_table.clone(), target_schema.clone());
+
+            // Determine which table in the chain has the ref column
+            let join_info = self.find_chain_join_info(
+                &join.on,
+                &all_tables,
+                target_table,
+                &target_schema,
+            )?;
+
+            current_node = match join_info {
+                ChainJoinInfo::Forward { source_table, ref_column } => {
+                    builder.chain_join(
+                        current_node,
+                        source_table,
+                        ref_column,
+                        target_table.clone(),
+                    )
+                }
+                ChainJoinInfo::Reverse { existing_table, ref_column } => {
+                    // For reverse chain joins, the target table has the ref column
+                    // pointing to an existing table.
+                    reverse_joined_tables.insert(target_table.clone());
+
+                    // Extract WHERE conditions that apply to this reverse-joined table
+                    let reverse_filter = self.extract_table_conditions(
+                        &select.where_clause,
+                        target_table,
+                        &target_schema,
+                    )?;
+
+                    builder.reverse_chain_join_with_filter(
+                        current_node,
+                        existing_table,
+                        ref_column,
+                        target_table.clone(),
+                        reverse_filter,
+                    )
+                }
+            };
+
+            all_tables.push((target_table.as_str(), None, target_schema.clone()));
+        }
+
+        // Build schema list for predicate building (without aliases)
+        let all_schemas: Vec<(&str, TableSchema)> = all_tables
+            .iter()
+            .map(|(name, _, schema)| (*name, schema.clone()))
+            .collect();
+
+        // Apply WHERE filters (if any), excluding conditions already handled by reverse joins
         let filtered = if select.where_clause.is_empty() {
-            join_node
+            current_node
         } else {
-            // For JOIN queries, we need to handle qualified column names
-            // Note: we pass schemas in SQL order, not graph order
-            let predicate =
-                self.build_join_predicate(&select.where_clause, &sql_left_schema, &sql_right_schema)?;
-            builder.filter(join_node, predicate)
+            // Filter out conditions on reverse-joined tables (already handled)
+            let remaining_conditions: Vec<_> = select.where_clause.iter()
+                .filter(|cond| !self.condition_on_table(cond, &reverse_joined_tables))
+                .cloned()
+                .collect();
+
+            if remaining_conditions.is_empty() {
+                current_node
+            } else {
+                // Build predicate for remaining conditions only
+                let predicate = self.build_multi_join_predicate(&remaining_conditions, &all_schemas)?;
+                builder.filter(current_node, predicate)
+            }
         };
 
         // Apply LIMIT/OFFSET if specified
@@ -3567,6 +3659,231 @@ impl Database {
 
         // Create output node
         Ok(builder.output(with_arrays, GraphId(0))) // ID will be assigned by registry
+    }
+
+    /// Find chain join information: which table has the ref column and what direction.
+    fn find_chain_join_info(
+        &self,
+        on: &parser::JoinCondition,
+        existing_tables: &[(&str, Option<&str>, TableSchema)],
+        target_table: &str,
+        target_schema: &TableSchema,
+    ) -> Result<ChainJoinInfo, DatabaseError> {
+        // Helper to check if a reference matches a table (by name or alias)
+        let matches_table = |ref_name: Option<&str>, table_name: &str, alias: Option<&str>| {
+            ref_name == Some(table_name) || (alias.is_some() && ref_name == alias)
+        };
+
+        // Check ON clause: existing.col = target.id (forward ref)
+        for (table_name, alias, schema) in existing_tables {
+            let left_is_existing = matches_table(on.left.table.as_deref(), table_name, *alias);
+            let right_is_target = on.right.table.as_deref() == Some(target_table);
+
+            if left_is_existing && right_is_target && on.right.column == "id" {
+                let col_name = &on.left.column;
+                if let Some(col) = schema.column(col_name) {
+                    if matches!(&col.ty, ColumnType::Ref(t) if t == target_table) {
+                        return Ok(ChainJoinInfo::Forward {
+                            source_table: table_name.to_string(),
+                            ref_column: col_name.clone(),
+                        });
+                    }
+                }
+            }
+
+            // Check reverse: target.id = existing.col (forward ref, swapped)
+            let left_is_target = on.left.table.as_deref() == Some(target_table);
+            let right_is_existing = matches_table(on.right.table.as_deref(), table_name, *alias);
+
+            if left_is_target && right_is_existing && on.left.column == "id" {
+                let col_name = &on.right.column;
+                if let Some(col) = schema.column(col_name) {
+                    if matches!(&col.ty, ColumnType::Ref(t) if t == target_table) {
+                        return Ok(ChainJoinInfo::Forward {
+                            source_table: table_name.to_string(),
+                            ref_column: col_name.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Check for reverse ref: target.col = existing.id (target has ref to existing)
+        for (table_name, alias, _schema) in existing_tables {
+            let left_is_target = on.left.table.as_deref() == Some(target_table);
+            let right_is_existing = matches_table(on.right.table.as_deref(), table_name, *alias);
+
+            if left_is_target && right_is_existing && on.right.column == "id" {
+                let col_name = &on.left.column;
+                if let Some(col) = target_schema.column(col_name) {
+                    if matches!(&col.ty, ColumnType::Ref(t) if t == *table_name) {
+                        // This is a reverse join - the target table has the ref
+                        return Ok(ChainJoinInfo::Reverse {
+                            existing_table: table_name.to_string(),
+                            ref_column: col_name.clone(),
+                        });
+                    }
+                }
+            }
+
+            // Also check: existing.id = target.col (swapped)
+            let left_is_existing = matches_table(on.left.table.as_deref(), table_name, *alias);
+            let right_is_target = on.right.table.as_deref() == Some(target_table);
+
+            if left_is_existing && right_is_target && on.left.column == "id" {
+                let col_name = &on.right.column;
+                if let Some(col) = target_schema.column(col_name) {
+                    if matches!(&col.ty, ColumnType::Ref(t) if t == *table_name) {
+                        // This is a reverse join - the target table has the ref
+                        return Ok(ChainJoinInfo::Reverse {
+                            existing_table: table_name.to_string(),
+                            ref_column: col_name.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        Err(DatabaseError::Parse(parser::ParseError {
+            message: format!(
+                "Could not find ref column for chain JOIN with {}",
+                target_table
+            ),
+            position: 0,
+        }))
+    }
+
+    /// Build predicate for multi-join queries.
+    fn build_multi_join_predicate(
+        &self,
+        conditions: &[Condition],
+        all_schemas: &[(&str, TableSchema)],
+    ) -> Result<Predicate, DatabaseError> {
+        let mut predicates = Vec::new();
+
+        for cond in conditions {
+            let table = cond.column.table.as_deref();
+            let col_name = &cond.column.column;
+
+            // Find the schema for this column
+            let (table_name, schema) = if let Some(t) = table {
+                all_schemas
+                    .iter()
+                    .find(|(name, _)| *name == t)
+                    .ok_or_else(|| DatabaseError::Parse(parser::ParseError {
+                        message: format!("Unknown table {} in WHERE clause", t),
+                        position: 0,
+                    }))?
+            } else {
+                // Unqualified column - search all schemas
+                all_schemas
+                    .iter()
+                    .find(|(_, s)| s.column(col_name).is_some())
+                    .ok_or_else(|| DatabaseError::Parse(parser::ParseError {
+                        message: format!("Unknown column {} in WHERE clause", col_name),
+                        position: 0,
+                    }))?
+            };
+
+            let column = schema.column(col_name).ok_or_else(|| {
+                DatabaseError::Parse(parser::ParseError {
+                    message: format!("Column {} not found in table {}", col_name, table_name),
+                    position: 0,
+                })
+            })?;
+
+            // Only handle literal values in predicates for now
+            let literal_value = match cond.value() {
+                Some(v) => v.clone(),
+                None => {
+                    // Column references not yet supported in predicate building
+                    continue;
+                }
+            };
+
+            let value = coerce_value(literal_value, &column.ty);
+
+            // Use qualified column name for multi-table queries
+            let qualified_col = format!("{}.{}", table_name, col_name);
+            predicates.push(Predicate::eq(qualified_col, value));
+        }
+
+        if predicates.is_empty() {
+            Ok(Predicate::True)
+        } else if predicates.len() == 1 {
+            Ok(predicates.pop().unwrap())
+        } else {
+            Ok(Predicate::And(predicates))
+        }
+    }
+
+    /// Extract WHERE conditions that apply to a specific table.
+    ///
+    /// Returns a Predicate if any conditions apply to the table, None otherwise.
+    /// Used to pass filter conditions to reverse joins for EXISTS-style filtering.
+    fn extract_table_conditions(
+        &self,
+        conditions: &[Condition],
+        target_table: &str,
+        target_schema: &TableSchema,
+    ) -> Result<Option<Predicate>, DatabaseError> {
+        let mut predicates = Vec::new();
+
+        for cond in conditions {
+            let table = cond.column.table.as_deref();
+            let col_name = &cond.column.column;
+
+            // Check if this condition applies to the target table
+            let applies = match table {
+                Some(t) => t == target_table,
+                None => {
+                    // Unqualified column - check if it's in target schema
+                    target_schema.column(col_name).is_some()
+                }
+            };
+
+            if !applies {
+                continue;
+            }
+
+            let column = target_schema.column(col_name).ok_or_else(|| {
+                DatabaseError::Parse(parser::ParseError {
+                    message: format!("Column {} not found in table {}", col_name, target_table),
+                    position: 0,
+                })
+            })?;
+
+            // Only handle literal values for now
+            let literal_value = match cond.value() {
+                Some(v) => v.clone(),
+                None => continue,
+            };
+
+            let value = coerce_value(literal_value, &column.ty);
+
+            // Use unqualified column name (the join table's schema doesn't have qualified names)
+            predicates.push(Predicate::eq(col_name, value));
+        }
+
+        if predicates.is_empty() {
+            Ok(None)
+        } else if predicates.len() == 1 {
+            Ok(Some(predicates.pop().unwrap()))
+        } else {
+            Ok(Some(Predicate::And(predicates)))
+        }
+    }
+
+    /// Check if a condition applies to any of the specified tables.
+    fn condition_on_table(
+        &self,
+        cond: &Condition,
+        tables: &std::collections::HashSet<String>,
+    ) -> bool {
+        match cond.column.table.as_deref() {
+            Some(t) => tables.contains(t),
+            None => false, // Unqualified columns are ambiguous, keep them
+        }
     }
 
     /// Add ArrayAggregate nodes to a JOIN graph for ARRAY subqueries in projection.

@@ -14,6 +14,7 @@ import {
   buildQuery,
   buildQueryById,
 } from "./types.js";
+import { decodeDeltaWithIncludes } from "./decoder.js";
 
 /**
  * Base class for type-safe table clients.
@@ -78,6 +79,12 @@ export abstract class TableClient<T extends { id: string }> {
     options: { where?: BaseWhereInput; include?: IncludeSpec },
     callback: (rows: T[]) => void
   ): Unsubscribe {
+    // Debug: log the JS query options
+    console.log(`[${this.tableName}] Query options:`, {
+      where: options.where,
+      include: options.include,
+    });
+
     const sql = buildQuery(this.tableMeta, this.schemaMeta, {
       where: options.where,
       include: options.include,
@@ -89,13 +96,28 @@ export abstract class TableClient<T extends { id: string }> {
     const rowsById = new Map<string, T>();
 
     const handle = this.db.subscribe_delta(sql, (deltas: Uint8Array[]) => {
-      for (const deltaBuffer of deltas) {
-        const delta = this.decoder.delta(deltaBuffer.buffer) as Delta<T>;
+      // Debug: log when callback is invoked
+      console.log(`[${this.tableName}] Callback invoked with ${deltas.length} deltas`);
 
-        if (delta.type === "added" || delta.type === "updated") {
-          rowsById.set(delta.row.id, delta.row);
-        } else if (delta.type === "removed") {
-          rowsById.delete(delta.id);
+      for (const deltaBuffer of deltas) {
+        try {
+          // Use dynamic decoder when includes are specified, otherwise use generated decoder
+          const delta = options.include
+            ? decodeDeltaWithIncludes<T>(deltaBuffer.buffer, this.tableMeta, this.schemaMeta, options.include)
+            : this.decoder.delta(deltaBuffer.buffer) as Delta<T>;
+
+          // Debug: log decoded delta
+          console.log(`[${this.tableName}] Delta:`, delta);
+
+          if (delta.type === "added" || delta.type === "updated") {
+            rowsById.set(delta.row.id, delta.row);
+          } else if (delta.type === "removed") {
+            rowsById.delete(delta.id);
+          }
+        } catch (error) {
+          console.error(`[${this.tableName}] Error decoding delta:`, error);
+          console.error(`[${this.tableName}] Delta buffer length:`, deltaBuffer.length);
+          console.error(`[${this.tableName}] Delta buffer (hex):`, Array.from(deltaBuffer).map(b => b.toString(16).padStart(2, '0')).join(' '));
         }
       }
       callback(Array.from(rowsById.values()));

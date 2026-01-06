@@ -301,6 +301,7 @@ impl JoinGraphBuilder {
             join_schema: self.right_schema.clone(),
             cached_rows: HashMap::new(),
             reverse_index: HashMap::new(),
+            reverse_filter: None,
         });
         id
     }
@@ -362,6 +363,7 @@ impl JoinGraphBuilder {
             join_schema: target_schema.clone(),
             cached_rows: HashMap::new(),
             reverse_index: HashMap::new(),
+            reverse_filter: None,
         });
 
         // Track this as an additional right table for delta routing
@@ -369,6 +371,79 @@ impl JoinGraphBuilder {
 
         // Extend the combined schema with the new table's columns
         self.combined_schema = self.combined_schema.combine(&target_schema);
+
+        id
+    }
+
+    /// Add a reverse chain join to extend the current join.
+    ///
+    /// This handles the case where the new table has a ref column pointing to an
+    /// existing table (1:N relationship). The join column is in the target table,
+    /// not in the input.
+    ///
+    /// - `_input`: The input node (for documentation)
+    /// - `existing_table`: The table in the current join that is referenced
+    /// - `ref_column`: The column in target_table that references existing_table
+    /// - `target_table`: The table to join with (has the ref column)
+    /// - `filter`: Optional predicate to filter join rows (for EXISTS-style filtering)
+    pub fn reverse_chain_join(
+        &mut self,
+        _input: NodeId,
+        existing_table: impl Into<String>,
+        ref_column: impl Into<String>,
+        target_table: impl Into<String>,
+    ) -> NodeId {
+        self.reverse_chain_join_with_filter(_input, existing_table, ref_column, target_table, None)
+    }
+
+    /// Add a reverse chain join with an optional filter predicate.
+    ///
+    /// When a filter is provided, only join rows matching the filter are considered.
+    /// This is used for EXISTS-style queries like "find Issues where any IssueLabel has label = X".
+    pub fn reverse_chain_join_with_filter(
+        &mut self,
+        _input: NodeId,
+        existing_table: impl Into<String>,
+        ref_column: impl Into<String>,
+        target_table: impl Into<String>,
+        filter: Option<Predicate>,
+    ) -> NodeId {
+        let existing = existing_table.into();
+        let target = target_table.into();
+        let column = ref_column.into();
+
+        let target_schema = self.extra_schemas.get(&target)
+            .expect("reverse_chain_join: target schema not added via add_schema")
+            .clone();
+
+        // For reverse joins, the join_column is in the target table
+        // We use a special format to indicate this: "target@existing.column"
+        // This tells the evaluator to look up target rows where target.column = existing.id
+        let qualified_column = format!("{}@{}.{}", target, existing, column);
+
+        // Build the list of input tables (all tables joined so far)
+        let mut input_tables: Vec<String> = vec![self.left_table.clone()];
+        for (table, _) in &self.all_right_tables {
+            input_tables.push(table.clone());
+        }
+
+        let id = self.alloc_id();
+        self.nodes.push(QueryNode::Join {
+            input_tables,
+            join_table: target.clone(),
+            join_column: qualified_column,
+            join_schema: target_schema.clone(),
+            cached_rows: HashMap::new(),
+            reverse_index: HashMap::new(),
+            reverse_filter: filter,
+        });
+
+        // Track this as an additional right table for delta routing
+        self.all_right_tables.push((target.clone(), target_schema.clone()));
+
+        // Note: For reverse joins, we DON'T extend the combined schema because
+        // the reverse join table's columns are NOT added to the output row.
+        // The ArrayAggregate will later re-fetch and add them as arrays.
 
         id
     }

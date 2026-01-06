@@ -227,3 +227,42 @@ describe("subscribeAll with mixed includes", () => {
     expect(issues[0].IssueAssignees[0].user.name).toBe("Alice");
   });
 });
+
+describe("subscribeAll with filter and includes", () => {
+  it("should filter by junction table while including nested refs", async () => {
+    // First get the label ID
+    const labels = await new Promise<any[]>((resolve) => {
+      let unsubscribe: (() => void) | undefined;
+      unsubscribe = db.labels.subscribeAll((rows) => {
+        setTimeout(() => unsubscribe?.(), 0);
+        resolve(rows);
+      });
+    });
+    const bugLabel = labels.find(l => l.name === "Bug");
+    expect(bugLabel).toBeDefined();
+
+    // Now filter issues by that label
+    const issues = await new Promise<any[]>((resolve) => {
+      let unsubscribe: (() => void) | undefined;
+      unsubscribe = db.issues.with({
+        project: true,
+        IssueLabels: { label: true },
+        IssueAssignees: { user: true }
+      }).where({
+        IssueLabels: { some: { label: bugLabel.id } }
+      }).subscribeAll((rows) => {
+        setTimeout(() => unsubscribe?.(), 0);
+        resolve(rows);
+      });
+    });
+
+    console.log("Issues filtered by label:", JSON.stringify(issues, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2));
+
+    expect(issues.length).toBe(1);
+    expect(issues[0].title).toBe("Test Issue");
+    // All includes should still work
+    expect(issues[0].project.name).toBe("Test Project");
+    expect(issues[0].IssueLabels[0].label.name).toBe("Bug");
+    expect(issues[0].IssueAssignees[0].user.name).toBe("Alice");
+  });
+});
