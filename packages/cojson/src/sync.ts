@@ -921,6 +921,9 @@ export class SyncManager {
     }
 
     for (const peer of peers) {
+      if (this.syncState.isSynced(peer, coValueId)) {
+        continue;
+      }
       const alreadyTracked = this.unsyncedTracker.add(coValueId, peer.id);
       if (alreadyTracked) {
         continue;

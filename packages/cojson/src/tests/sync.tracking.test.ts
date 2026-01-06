@@ -126,6 +126,30 @@ describe("coValue sync state tracking", () => {
     const unsyncedTracker = client.syncManager.unsyncedTracker;
     expect(unsyncedTracker.has(map.id)).toBe(false);
   });
+
+  test("already synced coValues are not tracked as unsynced when trackSyncState is called", async () => {
+    const { node: client } = setupTestNode({ connected: true });
+
+    const group = client.createGroup();
+    const map = group.createMap();
+    map.set("key", "value");
+
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    const unsyncedTracker = client.syncManager.unsyncedTracker;
+    expect(unsyncedTracker.has(map.id)).toBe(true);
+
+    const serverPeer =
+      client.syncManager.peers[jazzCloud.node.currentSessionID]!;
+    await waitFor(() =>
+      client.syncManager.syncState.isSynced(serverPeer, map.id),
+    );
+    expect(unsyncedTracker.has(map.id)).toBe(false);
+
+    // @ts-expect-error trackSyncState is private
+    client.syncManager.trackSyncState(map.id);
+    expect(unsyncedTracker.has(map.id)).toBe(false);
+  });
 });
 
 describe("sync state persistence", () => {
