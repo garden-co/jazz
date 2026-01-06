@@ -1,22 +1,28 @@
-import { MusicaAccount } from "../1_schema";
+import { MusicaAccount, PlaylistWithTracks } from "../1_schema";
 
-export async function getNextTrack() {
-  const me = await MusicaAccount.getMe().$jazz.ensureLoaded({
+async function getCurrentIndexAndTracks() {
+  const { root } = await MusicaAccount.getMe().$jazz.ensureLoaded({
     resolve: {
       root: {
-        activePlaylist: {
-          tracks: true,
-        },
+        activeTrack: { $onError: "catch" },
+        activePlaylist: PlaylistWithTracks.resolveQuery,
       },
     },
   });
 
-  const tracks = me.root.activePlaylist.tracks;
-  const activeTrack = me.root.$jazz.refs.activeTrack;
+  const tracks = root.activePlaylist.tracks;
+  const activeTrack = root.activeTrack;
 
-  const currentIndex = tracks.findIndex(
-    (item) => item?.$jazz.id === activeTrack?.id,
-  );
+  return {
+    currentIndex: tracks.findIndex(
+      (item) => item.$jazz.id === activeTrack?.$jazz.id,
+    ),
+    tracks: root.activePlaylist.tracks,
+  };
+}
+
+export async function getNextTrack() {
+  const { currentIndex, tracks } = await getCurrentIndexAndTracks();
 
   const nextIndex = (currentIndex + 1) % tracks.length;
 
@@ -24,22 +30,7 @@ export async function getNextTrack() {
 }
 
 export async function getPrevTrack() {
-  const me = await MusicaAccount.getMe().$jazz.ensureLoaded({
-    resolve: {
-      root: {
-        activePlaylist: {
-          tracks: true,
-        },
-      },
-    },
-  });
-
-  const tracks = me.root.activePlaylist.tracks;
-  const activeTrack = me.root.$jazz.refs.activeTrack;
-
-  const currentIndex = tracks.findIndex(
-    (item) => item?.$jazz.id === activeTrack?.id,
-  );
+  const { currentIndex, tracks } = await getCurrentIndexAndTracks();
 
   const previousIndex = (currentIndex - 1 + tracks.length) % tracks.length;
   return tracks[previousIndex];

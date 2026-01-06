@@ -266,6 +266,14 @@ You can also subscribe to an existing CoValue instance using the `$jazz.subscrib
 ```
 </CodeGroup>
 
+### Error handling for manual subscriptions
+You can also pass `onUnauthorized` and `onUnavailable` handlers as options to your subscription which will run reactively whenever the CoValue you're subscribing to is unavailable, or you do not have the appropriate permissions to read it.
+
+<CodeGroup preferWrap>
+```ts error-handling-in-manual.ts#ErrorHandling
+```
+</CodeGroup>
+
 <ContentByFramework framework={["react", "react-native", "react-native-expo"]}>
 
 ## Selectors [!framework=react,react-native,react-native-expo]

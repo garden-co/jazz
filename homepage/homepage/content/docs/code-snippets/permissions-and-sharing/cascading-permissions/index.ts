@@ -95,7 +95,7 @@ addedGroup.removeMember(bob);
   // #endregion
 }
 
-// #region ImplicitOwnership
+// #region InlineCoValueCreation
 const Task = co.plainText();
 const Column = co.list(Task);
 const Board = co.map({

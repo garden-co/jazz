@@ -1,11 +1,13 @@
-import { CoMapEdit } from "jazz-tools";
+import { CoMapEdit, CoPlainText, MaybeLoaded } from "jazz-tools";
 import { useCoState } from "jazz-tools/react";
 import { useEffect, useState } from "react";
 import { Issue } from "./schema.ts";
 
+type DescriptionEdit = CoMapEdit<MaybeLoaded<CoPlainText>>;
+
 function DescriptionVersionHistory({ id }: { id: string }) {
   const issue = useCoState(Issue, id);
-  const [version, setVersion] = useState<any | undefined>();
+  const [version, setVersion] = useState<DescriptionEdit | undefined>();
   const [isVersionLatest, setIsVersionLatest] = useState(true);
   const edits = issue.$isLoaded
     ? (issue.$jazz.getEdits().description?.all.reverse() ?? [])
@@ -20,7 +22,7 @@ function DescriptionVersionHistory({ id }: { id: string }) {
 
   if (!issue.$isLoaded) return <div>Loading...</div>;
 
-  const selectVersion = (version: any, isLatest: boolean) => {
+  const selectVersion = (version: DescriptionEdit, isLatest: boolean) => {
     setVersion(version);
     setIsVersionLatest(isLatest);
   };
@@ -31,12 +33,16 @@ function DescriptionVersionHistory({ id }: { id: string }) {
       <div className="grid grid-cols-3 border">
         {version && (
           <div className="col-span-2 border-r p-3 flex flex-col justify-between">
-            <p>{version.value}</p>
+            <p>{version.value?.$isLoaded ? version.value.toString() : ""}</p>
 
             {!isVersionLatest && (
               <button
                 className="bg-black text-white py-1 px-2 rounded"
-                onClick={() => issue.$jazz.set("description", version.value)}
+                onClick={() => {
+                  if (version.value?.$isLoaded) {
+                    issue.$jazz.set("description", version.value);
+                  }
+                }}
               >
                 Restore
               </button>

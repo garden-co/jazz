@@ -1,10 +1,14 @@
 // @vitest-environment happy-dom
 import { FileStream, ImageDefinition } from "jazz-tools";
 import { createJazzTestAccount } from "jazz-tools/testing";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import Image from "../../media/image.svelte";
 import type { ImageProps } from "../../media/image.types.js";
 import { render, screen, waitFor } from "../testUtils";
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 describe("Image", async () => {
   const account = await createJazzTestAccount({

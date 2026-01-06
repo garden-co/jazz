@@ -10,6 +10,7 @@ import { Sharing } from "./pages/Sharing";
 import { TestInput } from "./pages/TestInput";
 import { WriteOnlyRole } from "./pages/WriteOnly";
 import { SessionLockTest } from "./pages/SessionLock";
+import { ConcurrentMigration } from "./pages/ConcurrentMigration";
 
 function Index() {
   return (
@@ -31,6 +32,9 @@ function Index() {
       </li>
       <li>
         <Link to="/concurrent-changes">Concurrent Changes</Link>
+      </li>
+      <li>
+        <Link to="/concurrent-migration">Concurrent Migration</Link>
       </li>
       <li>
         <Link to="/inbox">Inbox</Link>
@@ -71,6 +75,10 @@ const router = createBrowserRouter(
     {
       path: "/concurrent-changes",
       element: <ConcurrentChanges />,
+    },
+    {
+      path: "/concurrent-migration",
+      element: <ConcurrentMigration />,
     },
     {
       path: "/session-lock",

@@ -1,5 +1,66 @@
 # jazz-tools
 
+## 0.19.18
+
+### Patch Changes
+
+- 729d46c: Fixed Clerk types schema to use `.or()` method consistently for union types
+  - cojson@0.19.18
+  - cojson-storage-indexeddb@0.19.18
+  - cojson-transport-ws@0.19.18
+
+## 0.19.17
+
+### Patch Changes
+
+- d46cffd: Bugfix: fixed an issue where calling logOut multiple times concurrently could trigger duplicate logout operations
+  - cojson@0.19.17
+  - cojson-storage-indexeddb@0.19.17
+  - cojson-transport-ws@0.19.17
+
+## 0.19.16
+
+### Patch Changes
+
+- 25268bf: Bugfix: fixed a race condition in Clerk auth where the signup flow could trigger a duplicate login attempt
+- Updated dependencies [265d0e9]
+  - cojson@0.19.16
+  - cojson-storage-indexeddb@0.19.16
+  - cojson-transport-ws@0.19.16
+
+## 0.19.15
+
+### Patch Changes
+
+- 94012a1: Added a locking system for session IDs in React Native
+
+  Now it should be safer to mount multiple JazzProviders, but still not advised as it is really expensive
+
+- 86f9676: Adds a createdBy getter
+- b27dbc2: Fix Object.keys(coMap.getEdits()) to return also deleted keys
+- Updated dependencies [71ed9d6]
+  - cojson@0.19.15
+  - cojson-storage-indexeddb@0.19.15
+  - cojson-transport-ws@0.19.15
+
+## 0.19.14
+
+### Patch Changes
+
+- cojson@0.19.14
+- cojson-storage-indexeddb@0.19.14
+- cojson-transport-ws@0.19.14
+
+## 0.19.13
+
+### Patch Changes
+
+- bef1cc6: Bugfix: rewrittern the session provider to prevent race conditions and reuse also the new accounts sessions
+- b839147: Add schema-level permissions to centralize permission configuration
+  - cojson@0.19.13
+  - cojson-storage-indexeddb@0.19.13
+  - cojson-transport-ws@0.19.13
+
 ## 0.19.12
 
 ### Patch Changes

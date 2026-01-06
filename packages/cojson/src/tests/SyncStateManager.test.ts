@@ -7,6 +7,7 @@ import { connectedPeers } from "../streamUtils.js";
 import { emptyKnownState } from "../exports.js";
 import {
   SyncMessagesLog,
+  blockMessageTypeOnOutgoingPeer,
   loadCoValueOrFail,
   setupTestNode,
   waitFor,
@@ -308,5 +309,45 @@ describe("SyncStateManager", () => {
         "client -> server | KNOWN Map sessions: header/1",
       ]
     `);
+  });
+
+  test("should throw if the timeout is reached", async () => {
+    const client = setupTestNode();
+
+    const { peer } = client.connectToSyncServer();
+
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    map.set("key1", "value1", "trusting");
+
+    blockMessageTypeOnOutgoingPeer(peer, "content", {
+      id: map.core.id,
+    });
+
+    await expect(map.core.waitForSync({ timeout: 1 })).rejects.toThrow(
+      new RegExp(
+        `Timeout on waiting for sync with peer ${peer.id} for coValue ${map.core.id}:`,
+      ),
+    );
+  });
+
+  test("should throw if the timeout is reached, reporting the errorInPeer if any", async () => {
+    const client = setupTestNode();
+
+    const { peer } = client.connectToSyncServer();
+
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    map.set("key1", "value1", "trusting");
+
+    map.core.markErrored(peer.id, new Error("test error"));
+
+    blockMessageTypeOnOutgoingPeer(peer, "content", {
+      id: map.core.id,
+    });
+
+    await expect(map.core.waitForSync({ timeout: 1 })).rejects.toThrow(
+      new RegExp(`Marked as errored: "Error: test error"`),
+    );
   });
 });

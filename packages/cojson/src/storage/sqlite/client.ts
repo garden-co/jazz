@@ -5,7 +5,6 @@ import type {
 import type { Signature } from "../../crypto/crypto.js";
 import type { RawCoID, SessionID } from "../../exports.js";
 import { logger } from "../../logger.js";
-import type { NewContentMessage } from "../../sync.js";
 import type {
   DBClientInterfaceSync,
   DBTransactionInterfaceSync,

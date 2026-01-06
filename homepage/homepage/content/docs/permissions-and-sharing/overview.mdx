@@ -166,3 +166,47 @@ To check the permissions of another account, you need to load it first:
 ```ts index.ts#CheckPermissionsAlice
 ```
 </CodeGroup>
+
+## Defining permissions at the schema level
+
+You can define permissions at the schema level by using the `withPermissions` method on any CoValue schema. Whenever you create a new CoValue using the schema (i.e., with the `.create()` method), the permissions will be applied automatically.
+
+<CodeGroup>
+```ts index.ts#DefinePermissionsAtSchemaLevel
+```
+</CodeGroup>
+
+`withPermissions` supports several options that let you customize how permissions are applied when creating or composing CoValues.
+
+#### `default`
+
+`default` defines a group to be used when calling `.create()` without an explicit owner. 
+
+#### `onInlineCreate`
+
+`onInlineCreate` allows you to choose the behaviour when a CoValue is [created inline](/docs/permissions-and-sharing/cascading-permissions#ownership-on-inline-covalue-creation)
+
+This configuration **is not applied** when using `.create()` for nested CoValues. In that case, `default` is used.
+
+`onInlineCreate` supports the following options:
+- `"extendsContainer"` - create a new group that includes the container CoValue's owner as a member, inheriting all permissions from the container. This is the default if no `onInlineCreate` option is provided.
+- `"sameAsContainer"` - reuse the same owner as the container CoValue
+- `"newGroup"` - create a new group for inline CoValues, with the active account as admin
+- `{ extendsContainer: "reader" }` - similar to `“extendsContainer”`, but allows overriding the role of the container’s owner in the new group
+- `groupConfigurationCallback` - create a new group and configure it as needed
+
+#### `onCreate`
+
+`onCreate` is a callback that runs every time a CoValue is created. It can be used to configure the CoValue's owner.
+It runs both when creating CoValues with `.create()` and when creating inline CoValues.
+
+### Configuring permissions globally
+
+You can configure the default permissions for all CoValue schemas by using `setDefaultSchemaPermissions`.
+
+This is useful if you want to modify inline CoValue creation to [always re-use the container CoValue's owner](/docs/reference/performance#minimise-group-extensions).
+
+<CodeGroup>
+```ts index.ts#SetDefaultSchemaPermissions
+```
+</CodeGroup>

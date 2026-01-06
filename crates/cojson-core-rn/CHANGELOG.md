@@ -1,5 +1,21 @@
 # cojson-core-rn
 
+## 0.19.18
+
+## 0.19.17
+
+## 0.19.16
+
+## 0.19.15
+
+## 0.19.14
+
+### Patch Changes
+
+- 41d4c52: Enabled flexible page-size support for Android builds, enabling support for 16KB page sizes to ensure compatibility with upcoming Android hardware and Google Play requirements for cojson-core-rn.
+
+## 0.19.13
+
 ## 0.19.12
 
 ## 0.19.11

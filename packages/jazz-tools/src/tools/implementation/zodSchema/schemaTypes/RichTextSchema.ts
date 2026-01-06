@@ -6,10 +6,15 @@ import {
   Settled,
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
+  withSchemaPermissions,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreCoValueSchema } from "./CoValueSchema.js";
+import {
+  DEFAULT_SCHEMA_PERMISSIONS,
+  SchemaPermissions,
+} from "../schemaPermissions.js";
 
 export interface CoreRichTextSchema extends CoreCoValueSchema {
   builtin: "CoRichText";
@@ -28,6 +33,8 @@ export class RichTextSchema implements CoreRichTextSchema {
   readonly builtin = "CoRichText" as const;
   readonly resolveQuery = true as const;
 
+  permissions: SchemaPermissions = DEFAULT_SCHEMA_PERMISSIONS;
+
   constructor(private coValueClass: typeof CoRichText) {}
 
   create(text: string, options?: { owner: Group } | Group): CoRichText;
@@ -40,7 +47,11 @@ export class RichTextSchema implements CoreRichTextSchema {
     text: string,
     options?: { owner: Account | Group } | Account | Group,
   ): CoRichText {
-    return this.coValueClass.create(text, options);
+    const optionsWithPermissions = withSchemaPermissions(
+      options,
+      this.permissions,
+    );
+    return this.coValueClass.create(text, optionsWithPermissions);
   }
 
   load(
@@ -84,5 +95,14 @@ export class RichTextSchema implements CoreRichTextSchema {
 
   optional(): CoOptionalSchema<this> {
     return coOptionalDefiner(this);
+  }
+
+  /**
+   * Configure permissions to be used when creating or composing CoValues
+   */
+  withPermissions(permissions: SchemaPermissions): RichTextSchema {
+    const copy = new RichTextSchema(this.coValueClass);
+    copy.permissions = permissions;
+    return copy;
   }
 }

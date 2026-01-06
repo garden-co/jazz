@@ -46,15 +46,10 @@ export function ChatScreen(props: { chatID: string }) {
       progressive: true,
       placeholder: "blur",
     }).then((image) => {
-      chat.$jazz.push(
-        Message.create(
-          {
-            text: file.name,
-            image: image,
-          },
-          chat.$jazz.owner,
-        ),
-      );
+      chat.$jazz.push({
+        text: file.name,
+        image: image,
+      });
     });
   };
 
@@ -90,7 +85,7 @@ export function ChatScreen(props: { chatID: string }) {
 
         <TextInput
           onSubmit={(text) => {
-            chat.$jazz.push(Message.create({ text }, chat.$jazz.owner));
+            chat.$jazz.push({ text });
           }}
         />
       </InputBar>

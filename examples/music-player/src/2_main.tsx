@@ -7,20 +7,18 @@ import { RouterProvider, createHashRouter } from "react-router-dom";
 import { HomePage } from "./3_HomePage";
 import { useMediaPlayer } from "./5_useMediaPlayer";
 import { InvitePage } from "./6_InvitePage";
+import { SettingsPage } from "./7_SettingsPage";
 import { WelcomeScreen } from "./components/WelcomeScreen";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import "./index.css";
 
 import { MusicaAccount } from "@/1_schema";
 import { apiKey } from "@/apiKey.ts";
 import { SidebarProvider } from "@/components/ui/sidebar";
-import { JazzReactProvider } from "jazz-tools/react";
+import { JazzReactProvider, useSuspenseAccount } from "jazz-tools/react";
 import { onAnonymousAccountDiscarded } from "./4_actions";
 import { KeyboardListener } from "./components/PlayerControls";
-import { usePrepareAppState } from "./lib/usePrepareAppState";
-import {
-  AccountProvider,
-  useAccountSelector,
-} from "@/components/AccountProvider.tsx";
+import { useSetupAppState } from "./lib/useSetupAppState";
 
 /**
  * Walkthrough: The top-level provider `<JazzReactProvider/>`
@@ -37,11 +35,11 @@ function AppContent({
 }: {
   mediaPlayer: ReturnType<typeof useMediaPlayer>;
 }) {
-  const showWelcomeScreen = useAccountSelector({
-    select: (me) => !me.$isLoaded || !me.root.accountSetupCompleted,
+  const showWelcomeScreen = useSuspenseAccount(MusicaAccount, {
+    select: (me) => !me.root.accountSetupCompleted,
   });
 
-  const isReady = usePrepareAppState(mediaPlayer);
+  const isReady = useSetupAppState(mediaPlayer);
 
   // Show welcome screen if account setup is not completed
   if (showWelcomeScreen) {
@@ -51,11 +49,27 @@ function AppContent({
   const router = createHashRouter([
     {
       path: "/",
-      element: <HomePage mediaPlayer={mediaPlayer} />,
+      element: (
+        <ErrorBoundary>
+          <HomePage mediaPlayer={mediaPlayer} />
+        </ErrorBoundary>
+      ),
     },
     {
       path: "/playlist/:playlistId",
-      element: <HomePage mediaPlayer={mediaPlayer} />,
+      element: (
+        <ErrorBoundary>
+          <HomePage mediaPlayer={mediaPlayer} />
+        </ErrorBoundary>
+      ),
+    },
+    {
+      path: "/settings",
+      element: (
+        <ErrorBoundary>
+          <SettingsPage mediaPlayer={mediaPlayer} />
+        </ErrorBoundary>
+      ),
     },
     {
       path: "/invite/*",
@@ -103,9 +117,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       onAnonymousAccountDiscarded={onAnonymousAccountDiscarded}
     >
       <SidebarProvider>
-        <AccountProvider>
-          <Main />
-        </AccountProvider>
+        <Main />
         <JazzInspector />
       </SidebarProvider>
     </JazzReactProvider>

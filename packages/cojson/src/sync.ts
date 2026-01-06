@@ -358,7 +358,7 @@ export class SyncManager {
       });
 
     if (!skipReconciliation && peerState.role === "server") {
-      void this.startPeerReconciliation(peerState);
+      this.startPeerReconciliation(peerState);
     }
 
     peerState.incoming.onMessage((msg) => {
@@ -870,7 +870,20 @@ export class SyncManager {
       );
 
       const timeoutId = setTimeout(() => {
-        reject(new Error(`Timeout waiting for sync on ${peerId}/${id}`));
+        const coValue = this.local.getCoValue(id);
+        const erroredInPeer = coValue.getErroredInPeerError(peerId);
+        const knownState = coValue.knownState().sessions;
+        const peerKnownState = peerState.getKnownState(id)?.sessions ?? {};
+        let errorMessage = `Timeout on waiting for sync with peer ${peerId} for coValue ${id}:
+  Known state: ${JSON.stringify(knownState)}
+  Peer state: ${JSON.stringify(peerKnownState)}
+`;
+
+        if (erroredInPeer) {
+          errorMessage += `\nMarked as errored: "${erroredInPeer}"`;
+        }
+
+        reject(new Error(errorMessage));
         unsubscribe?.();
       }, timeout);
     });
