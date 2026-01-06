@@ -171,7 +171,7 @@ function ProjectViewSuspense({ projectId }: { projectId: string }) {
   });
 
   // [!code --:12]
-  // We don't need this block any more: 
+  // We don't need to validate the loading state any more
   // useSuspenseCoState cannot return anything other than a loaded CoValue.
   if (!project.$isLoaded) {
     switch (project.$jazz.loadingState) {
