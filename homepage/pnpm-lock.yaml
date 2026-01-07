@@ -97,6 +97,9 @@ importers:
       '@csstools/postcss-oklab-function':
         specifier: ^3.0.6
         version: 3.0.19(postcss@8.5.6)
+      '@playwright/test':
+        specifier: ^1.52.0
+        version: 1.55.0
       '@types/node':
         specifier: ^20
         version: 20.19.13
