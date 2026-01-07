@@ -64,14 +64,3 @@ Key modules in `groove/src/`:
 - `node.rs` - LocalNode for managing objects
 - `listener.rs` - Synchronous callback subscriptions
 
-## Session Workflow
-
-This project uses git worktrees to manage parallel development sessions. Each session is a separate working directory with its own branch.
-
-**Scripts** (in `scripts/`):
-- `session-new <name>` - Create a new session with the given name, install deps, open Zed
-- `session-list` - List active sessions
-- `session-rename <old> <new>` - Rename a session (if needed)
-- `session-retire <name>` - Clean up a completed/abandoned session
-
-Sessions are stored in `../jazz2-sessions/` (sibling to this repo).
