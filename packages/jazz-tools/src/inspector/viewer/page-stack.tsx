@@ -5,6 +5,7 @@ import { ErrorBoundary } from "../ui/error-boundary.js";
 import { useRouter } from "../router/context.js";
 import { useNode } from "../contexts/node.js";
 import { HomePage } from "../pages/home.js";
+import Perf from "./perf.js";
 
 const PageStackContainer = styled("article")`
   position: relative;
@@ -28,6 +29,14 @@ export function PageStack({ homePage }: PageStackProps) {
 
   if (path.length <= 0) {
     return <PageStackContainer>{homePage ?? <HomePage />}</PageStackContainer>;
+  }
+
+  if ((page?.coId as any) === "performance") {
+    return (
+      <PageStackContainer>
+        <Perf />
+      </PageStackContainer>
+    );
   }
 
   return (

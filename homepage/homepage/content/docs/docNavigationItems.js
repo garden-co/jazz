@@ -410,6 +410,11 @@ export const docNavigationItems = [
             done: 100,
           },
           {
+            name: "Observability",
+            href: "/docs/tooling-and-resources/observability",
+            done: 100,
+          },
+          {
             name: "AI tools (llms.txt)",
             href: "/docs/tooling-and-resources/ai-tools",
             done: 100,
