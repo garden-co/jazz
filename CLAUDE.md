@@ -19,7 +19,6 @@ Read these to understand the architecture:
 
 - [new-jazz-no-context.md](new-jazz-no-context.md) - Overview of the new Jazz design principles
 - [from-legacy-to-new-jazz.md](from-legacy-to-new-jazz.md) - Why we're redesigning and what's changing
-- [plan.md](plan.md) - Implementation checklist with completed/pending items
 - [specs/sql-layer.md](specs/sql-layer.md) - SQL interface design and status
 - [specs/incremental-queries.md](specs/incremental-queries.md) - Incremental query computation graphs
 - [specs/streaming-and-persistence.md](specs/streaming-and-persistence.md) - Content storage and streaming
@@ -51,7 +50,7 @@ cd demo-app && npm install && npm run dev
 
 ## Code Quality Guidelines
 
-- When taking any shortcut or simplification, loudly document it in: (1) code comments at the site, (2) project-wide TODOs in plan.md, and (3) the final summary when completing a task.
+- When taking any shortcut or simplification, loudly document it in: (1) code comments at the site, (2) a Linear issue for tracking, and (3) the final summary when completing a task.
 
 ## Module Overview
 
@@ -63,4 +62,27 @@ Key modules in `groove/src/`:
 - `storage.rs` - Content and commit storage traits
 - `node.rs` - LocalNode for managing objects
 - `listener.rs` - Synchronous callback subscriptions
+
+## Linear Integration
+
+**IMPORTANT**: All task tracking happens in Linear. When working on this project:
+- **Create issues** for new tasks, bugs, and ideas
+- **Update issue status** as you make progress
+- **Log design decisions** and blockers in issue comments
+- **Check existing issues** before starting work to avoid duplicates
+
+Project: [Jazz2 prototype](https://linear.app/garden-co/project/jazz2-prototype-ad7779f29620)
+
+### Setup
+
+To interact with Linear via the GraphQL API, set the `LINEAR_API_KEY` environment variable:
+
+```bash
+# Add to ~/.zshrc or ~/.bashrc
+export LINEAR_API_KEY="lin_api_..."
+```
+
+Get your API key from https://linear.app/settings/api
+
+If a team member tries to interact with Linear but doesn't have this set up, walk them through creating an API key and adding it to their shell profile.
 
