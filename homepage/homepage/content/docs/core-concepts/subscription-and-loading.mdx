@@ -1,4 +1,4 @@
-import { Alert, CodeGroup, ContentByFramework, FileName, ReactLogo, SvelteLogo, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
+import { Alert, CodeGroup, ContentByFramework, FileName, ReactLogo, SvelteLogo, TabbedCodeGroup, TabbedCodeGroupItem, VanillaLogo } from "@/components/forMdx";
 
 export const metadata = {
   description: "Learn how to subscribe to CoValues, specify loading depths, and handle loading states and inaccessible data."
@@ -24,7 +24,7 @@ You can load and subscribe to CoValues in one of two ways:
 On your front-end, using a subscription hook is the easiest way to manage your subscriptions. The subscription and related clean-up is handled automatically, and you can use your data like any other piece of state in your app.
 
 ### Subscribe to CoValues
-<ContentByFramework framework="react">
+<ContentByFramework framework={["react", "react-native", "react-native-expo"]}>
 The `useCoState` hook allows you to reactively subscribe to CoValues in your React components. It will subscribe to updates when the component mounts and unsubscribe when it unmounts, ensuring your UI stays in sync and avoiding memory leaks.
 </ContentByFramework>
 <ContentByFramework framework="svelte">
@@ -253,6 +253,10 @@ You can tell your application how deeply your data is loaded by using the `co.lo
 The `co.loaded` type is especially useful when passing data between components, because it allows TypeScript to check at compile time whether data your application depends is properly loaded. The second argument lets you pass a `resolve` query to specify how deeply your data is loaded.
 
 <TabbedCodeGroup id="coloaded" default="react" savedPreferenceKey="framework">
+<TabbedCodeGroupItem label="Vanilla" value="vanilla" icon={<VanillaLogo />} preferWrap>
+```ts core-concepts/subscription-and-loading/vanilla.ts
+```
+</TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
 ```tsx TaskList.tsx
 ```
