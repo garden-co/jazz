@@ -37,7 +37,7 @@ Use `<JazzExpoProviderWithClerk />` to wrap your app.
 </ContentByFramework>
 
 <ContentByFramework framework="svelte">
-Use `<JazzSvelteProviderWithClerk />` to wrap your app:
+Wrap your app with `ClerkProvider` and a wrapper component that uses `<JazzSvelteProviderWithClerk />`:
 </ContentByFramework>
 
 <ContentByFramework framework="react">
@@ -62,10 +62,17 @@ Use `<JazzSvelteProviderWithClerk />` to wrap your app:
 <TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
 ```svelte svelte.svelte
 ```
-```svelte JazzClerkWrapper.svelte
-```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
+
+<ContentByFramework framework="svelte">
+  <FileName>src/lib/components/JazzClerkWrapper.svelte</FileName>
+</ContentByFramework>
+
+<ContentByFramework framework="svelte">
+```svelte JazzClerkWrapper.svelte
+```
+</ContentByFramework>
 
 <ContentByFramework framework="react">
   <FileName>AuthButton.tsx</FileName>

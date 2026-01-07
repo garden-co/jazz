@@ -2,7 +2,7 @@
   import { ClerkProvider } from "svelte-clerk";
   // @ts-expect-error This is available in a real app.
   import { PUBLIC_CLERK_PUBLISHABLE_KEY } from "$env/static/public";
-  import JazzClerkWrapper from "./JazzClerkWrapper.svelte";
+  import JazzClerkWrapper from "$lib/components/JazzClerkWrapper.svelte";
 
   let { children } = $props();
 </script>
