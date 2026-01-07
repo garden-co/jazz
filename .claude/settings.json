@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pnpm install",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
+  }
+}

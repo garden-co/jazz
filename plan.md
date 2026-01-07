@@ -344,8 +344,6 @@ Current test count: **276 tests** passing across all modules
 
 - [ ] **Migrate to Linear for project management**: Replace plan.md with Linear for better issue tracking, prioritization, and progress visibility. Open question: how to make Linear issue state easily available to LLMs without blowing up context (a single file is easy to include, but a full Linear export would be too large).
 
-- [x] **Zed + Claude Code + worktrees workflow**: Document and set up a development workflow using Zed editor, Claude Code for AI assistance, and git worktrees for parallel feature development. Scripts in `scripts/`: `session-new`, `session-list`, `session-rename`, `session-retire`.
-
 ---
 
 ## Clarifications
