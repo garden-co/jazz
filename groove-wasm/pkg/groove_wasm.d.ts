@@ -243,10 +243,10 @@ export interface InitOutput {
   readonly wasmblobwriter_abort: (a: number) => void;
   readonly create_blob_readable_stream: (a: number, b: bigint) => [number, number, number];
   readonly init: () => void;
-  readonly wasm_bindgen__convert__closures_____invoke__h1dcff5ec13377df8: (a: number, b: number, c: any) => void;
-  readonly wasm_bindgen__closure__destroy__h04ee08a7339e081a: (a: number, b: number) => void;
   readonly wasm_bindgen__convert__closures_____invoke__h5d5fcffed857b58c: (a: number, b: number, c: any) => void;
   readonly wasm_bindgen__closure__destroy__h04a9bc17558f661f: (a: number, b: number) => void;
+  readonly wasm_bindgen__convert__closures_____invoke__h1dcff5ec13377df8: (a: number, b: number, c: any) => void;
+  readonly wasm_bindgen__closure__destroy__h04ee08a7339e081a: (a: number, b: number) => void;
   readonly wasm_bindgen__convert__closures_____invoke__h057c7a511bd56d49: (a: number, b: number, c: any, d: any) => void;
   readonly __wbindgen_malloc: (a: number, b: number) => number;
   readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
