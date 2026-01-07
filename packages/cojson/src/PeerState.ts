@@ -181,7 +181,7 @@ export class PeerState {
     this.closeListeners.clear();
   }
 
-  gracefulShutdown() {
+  gracefulShutdown(): void {
     if (this.closed) {
       return;
     }

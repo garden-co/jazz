@@ -218,6 +218,27 @@ describe("sync state persistence", () => {
     expect(unsyncedCoValueIDs).toHaveLength(0);
     expect(client.syncManager.unsyncedTracker.has(map.id)).toBe(false);
   });
+
+  test("unsynced coValues are persisted to storage when the node is shutdown", async () => {
+    const { node: client, addStorage } = setupTestNode({ connected: false });
+    addStorage();
+
+    const group = client.createGroup();
+    const map = group.createMap();
+    map.set("key", "value");
+
+    // Wait for local transaction to trigger sync
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    await client.gracefulShutdown();
+
+    const unsyncedCoValueIDs = await new Promise((resolve) =>
+      client.storage?.getUnsyncedCoValueIDs(resolve),
+    );
+    expect(unsyncedCoValueIDs).toHaveLength(2);
+    expect(unsyncedCoValueIDs).toContain(map.id);
+    expect(unsyncedCoValueIDs).toContain(group.id);
+  });
 });
 
 describe("sync resumption", () => {

@@ -37,6 +37,7 @@ export interface StorageAPI {
    */
   trackCoValuesSyncState(
     updates: { id: RawCoID; peerId: PeerID; synced: boolean }[],
+    done?: () => void,
   ): void;
 
   /**

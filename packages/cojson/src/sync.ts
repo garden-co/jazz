@@ -1059,10 +1059,15 @@ export class SyncManager {
     this.unsyncedTracker.removeStorage();
   }
 
-  gracefulShutdown() {
+  /**
+   * Closes all the peer connections and ensures the list of unsynced coValues is persisted to storage.
+   * @returns Promise of the current pending store operation, if any.
+   */
+  gracefulShutdown(): Promise<void> | undefined {
     for (const peer of Object.values(this.peers)) {
       peer.gracefulShutdown();
     }
+    return this.unsyncedTracker.forcePersist();
   }
 }
 

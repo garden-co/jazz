@@ -394,8 +394,9 @@ export class StorageApiAsync implements StorageAPI {
 
   trackCoValuesSyncState(
     updates: { id: RawCoID; peerId: PeerID; synced: boolean }[],
+    done?: () => void,
   ): void {
-    this.dbClient.trackCoValuesSyncState(updates);
+    this.dbClient.trackCoValuesSyncState(updates).then(() => done?.());
   }
 
   getUnsyncedCoValueIDs(

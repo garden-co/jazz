@@ -92,6 +92,10 @@ export class UnsyncedCoValuesTracker {
     this.notifyGlobalListeners(this.isAllSynced());
   }
 
+  forcePersist(): Promise<void> | undefined {
+    return this.flush();
+  }
+
   private schedulePersist(id: RawCoID, peerId: PeerID, synced: boolean): void {
     const storage = this.storage;
     if (!storage) {
@@ -109,7 +113,7 @@ export class UnsyncedCoValuesTracker {
   /**
    * Flush all pending persistence updates in a batch
    */
-  private flush(): void {
+  private flush(): Promise<void> | undefined {
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
       this.flushTimer = undefined;
@@ -127,17 +131,16 @@ export class UnsyncedCoValuesTracker {
     const filteredUpdates = this.simplifyPendingUpdates(this.pendingUpdates);
     this.pendingUpdates = [];
 
-    if (filteredUpdates.length === 0) {
-      return;
-    }
-
-    try {
-      storage.trackCoValuesSyncState(filteredUpdates);
-    } catch (error) {
-      logger.warn("Failed to persist batched unsynced CoValue tracking", {
-        err: error,
-      });
-    }
+    return new Promise((resolve) => {
+      try {
+        storage.trackCoValuesSyncState(filteredUpdates, () => resolve());
+      } catch (error) {
+        logger.warn("Failed to persist batched unsynced CoValue tracking", {
+          err: error,
+        });
+        resolve();
+      }
+    });
   }
 
   /**
