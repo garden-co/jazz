@@ -92,6 +92,23 @@ export class UnsyncedCoValuesTracker {
     this.notifyGlobalListeners(this.isAllSynced());
   }
 
+  /**
+   * Remove all tracking for a CoValue (all peers).
+   * Triggers persistence if storage is available.
+   */
+  removeAll(id: RawCoID): void {
+    const peerSet = this.unsynced.get(id);
+    if (!peerSet) {
+      return;
+    }
+
+    // Remove all peers for this CoValue
+    const peersToRemove = Array.from(peerSet);
+    for (const peerId of peersToRemove) {
+      this.remove(id, peerId);
+    }
+  }
+
   forcePersist(): Promise<void> | undefined {
     return this.flush();
   }

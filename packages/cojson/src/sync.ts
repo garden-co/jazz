@@ -316,7 +316,7 @@ export class SyncManager {
                     coValue.loadFromStorage((found) => {
                       if (!found) {
                         // CoValue could not be loaded from storage, stop tracking
-                        this.local.storage?.stopTrackingSyncState(coValueId);
+                        this.unsyncedTracker.removeAll(coValueId);
                       }
                       resolve();
                     });
@@ -329,7 +329,7 @@ export class SyncManager {
                         coValueId,
                       },
                     );
-                    this.local.storage?.stopTrackingSyncState(coValueId);
+                    this.unsyncedTracker.removeAll(coValueId);
                     resolve();
                   }
                 }),
