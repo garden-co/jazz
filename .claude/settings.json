@@ -1,4 +1,10 @@
 {
+  "permissions": {
+    "allow": [
+      "mcp__linear__create_issue",
+      "Bash(curl -s -X POST https://api.linear.app/graphql *)"
+    ]
+  },
   "hooks": {
     "SessionStart": [
       {
