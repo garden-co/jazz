@@ -6,13 +6,14 @@ mod parser;
 mod policy;
 pub mod query_graph;
 mod row;
+pub mod row_buffer;
 mod schema;
 mod table_rows;
 mod types;
 
 pub use binary::{
-    encode_delta, encode_delta_batch, encode_rows, encode_single_row, DELTA_ADDED, DELTA_REMOVED,
-    DELTA_UPDATED,
+    encode_delta, encode_delta_batch, encode_owned_rows, encode_rows, encode_single_owned_row,
+    encode_single_row, DELTA_ADDED, DELTA_REMOVED, DELTA_UPDATED,
 };
 pub use catalog::{Catalog, CatalogError, TableDescriptor};
 pub use database::{Database, DatabaseError, DatabaseState, ExecuteResult, IncrementalQuery};
@@ -28,6 +29,10 @@ pub use policy::{
     clear_policy_warnings,
 };
 pub use row::{Row, RowError, Value, decode_row, encode_row};
+pub use row_buffer::{
+    ColDescriptor, ColType, OwnedRow, RowBuilder, RowDescriptor, RowRef, RowValue, join_rows,
+    project_row,
+};
 pub use schema::{ColumnDef, ColumnType, SchemaError, TableSchema};
 pub use table_rows::TableRows;
 pub use types::{IndexKey, ObjectIdParseError, QueryState, SchemaId};
