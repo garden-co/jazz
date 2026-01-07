@@ -58,7 +58,11 @@ interface PasskeyGetResult {
   };
 }
 
-interface PasskeyModule {
+/**
+ * Interface for the react-native-passkey module.
+ * @internal
+ */
+export interface PasskeyModule {
   create: (request: PasskeyCreateRequest) => Promise<unknown>;
   get: (request: PasskeyGetRequest) => Promise<PasskeyGetResult>;
   isSupported: () => Promise<boolean>;
@@ -69,8 +73,9 @@ let cachedPasskeyModule: PasskeyModule | null = null;
 /**
  * Lazily loads the react-native-passkey module.
  * This allows the module to be an optional peer dependency.
+ * @internal
  */
-function getPasskeyModule(): PasskeyModule {
+export function getPasskeyModule(): PasskeyModule {
   if (cachedPasskeyModule) {
     return cachedPasskeyModule;
   }
@@ -87,6 +92,14 @@ function getPasskeyModule(): PasskeyModule {
       "react-native-passkey is not installed. Please install it to use passkey authentication: npm install react-native-passkey",
     );
   }
+}
+
+/**
+ * Sets a custom passkey module (for testing purposes).
+ * @internal
+ */
+export function setPasskeyModule(module: PasskeyModule | null): void {
+  cachedPasskeyModule = module;
 }
 
 /**
