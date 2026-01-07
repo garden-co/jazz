@@ -2,6 +2,7 @@ import { assert, describe, expect, it } from "vitest";
 import { WasmCrypto } from "../crypto/WasmCrypto";
 import { LocalNode } from "../exports";
 import { agentAndSessionIDFromSecret } from "./testUtils";
+import { Transaction } from "../coValueCore/verifiedState";
 
 const wasmCrypto = await WasmCrypto.create();
 
@@ -132,5 +133,59 @@ describe("SessionLog WASM", () => {
       .decryptNextTransactionChangesJson(0, fixtures.key.secret);
 
     expect(decrypted).toEqual(fixtures.decrypted);
+  });
+
+  it("Signature is still valid after shuffling the transaction keys", () => {
+    const { agent, session, node } = createTestNode();
+
+    const group = node.createGroup();
+    const sessionContent =
+      group.core.newContentSince(undefined)?.[0]?.new[session];
+    assert(sessionContent);
+
+    let log = wasmCrypto.createSessionLog(
+      group.id,
+      session,
+      agent.currentSignerID(),
+    );
+    let log2 = wasmCrypto.createSessionLog(
+      group.id,
+      session,
+      agent.currentSignerID(),
+    );
+
+    function shuffleArray(array: Array<string | undefined>) {
+      for (var i = array.length - 1; i > 0; i--) {
+        var j = Math.floor(Math.random() * (i + 1));
+        var temp = array[i];
+        array[i] = array[j];
+        array[j] = temp;
+      }
+    }
+
+    const shuffledKeysTransactions = sessionContent.newTransactions.map((t) => {
+      const shuffledKeys = Array.from(Object.keys(t));
+      shuffleArray(shuffledKeys);
+      const obj = {} as any;
+      for (const key of shuffledKeys) {
+        obj[key] = (t as any)[key];
+      }
+      return obj as Transaction;
+    });
+
+    expect(() =>
+      log2.tryAdd(
+        shuffledKeysTransactions,
+        sessionContent.lastSignature,
+        false,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      log.tryAdd(
+        sessionContent.newTransactions,
+        sessionContent.lastSignature,
+        false,
+      ),
+    ).not.toThrow();
   });
 });
