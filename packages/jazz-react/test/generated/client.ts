@@ -13,8 +13,8 @@ import {
   type MutableWithDb,
 } from "@jazz/client";
 import { schemaMeta } from "./meta.js";
-import { decodeUserRows, decodeUserDelta, decodeProjectRows, decodeProjectDelta, decodeIssueRows, decodeIssueDelta, decodeLabelRows, decodeLabelDelta, decodeIssueLabelRows, decodeIssueLabelDelta, decodeIssueAssigneeRows, decodeIssueAssigneeDelta } from "./decoders.js";
-import type { ObjectId, User, UserInsert, UserIncludes, UserWith, UserFilter, Project, ProjectInsert, ProjectIncludes, ProjectWith, ProjectFilter, Issue, IssueInsert, IssueIncludes, IssueWith, IssueFilter, Label, LabelInsert, LabelIncludes, LabelWith, LabelFilter, IssueLabel, IssueLabelInsert, IssueLabelIncludes, IssueLabelWith, IssueLabelFilter, IssueAssignee, IssueAssigneeInsert, IssueAssigneeIncludes, IssueAssigneeWith, IssueAssigneeFilter } from "./types.js";
+import { decodeUserRows, decodeUserDelta, decodeProjectRows, decodeProjectDelta, decodeTaskRows, decodeTaskDelta, decodeTagRows, decodeTagDelta, decodeTaskTagRows, decodeTaskTagDelta } from "./decoders.js";
+import type { ObjectId, User, UserInsert, UserIncludes, UserWith, UserFilter, Project, ProjectInsert, ProjectIncludes, ProjectWith, ProjectFilter, Task, TaskInsert, TaskIncludes, TaskWith, TaskFilter, Tag, TagInsert, TagIncludes, TagWith, TagFilter, TaskTag, TaskTagInsert, TaskTagIncludes, TaskTagWith, TaskTagFilter } from "./types.js";
 
 /**
  * Query builder for Users with chainable where/with methods
@@ -199,17 +199,17 @@ export class ProjectsQueryBuilder<I extends ProjectIncludes = {}>
 }
 
 /**
- * Query builder for Issues with chainable where/with methods
- * @generated from schema table: Issues
+ * Query builder for Tasks with chainable where/with methods
+ * @generated from schema table: Tasks
  */
-export class IssuesQueryBuilder<I extends IssueIncludes = {}>
-  implements SubscribableAllWithDb<IssueWith<I>, IssueInsert, Partial<IssueInsert>>,
-             SubscribableOneWithDb<IssueWith<I>, Partial<IssueInsert>> {
-  private _descriptor: IssuesDescriptor;
-  private _where?: IssueFilter;
+export class TasksQueryBuilder<I extends TaskIncludes = {}>
+  implements SubscribableAllWithDb<TaskWith<I>, TaskInsert, Partial<TaskInsert>>,
+             SubscribableOneWithDb<TaskWith<I>, Partial<TaskInsert>> {
+  private _descriptor: TasksDescriptor;
+  private _where?: TaskFilter;
   private _include?: I;
 
-  constructor(descriptor: IssuesDescriptor, where?: IssueFilter, include?: I) {
+  constructor(descriptor: TasksDescriptor, where?: TaskFilter, include?: I) {
     this._descriptor = descriptor;
     this._where = where;
     this._include = include;
@@ -217,72 +217,72 @@ export class IssuesQueryBuilder<I extends IssueIncludes = {}>
 
   /**
    * Get a stable key representing this query's options (for React hook deduplication)
-   * @generated from schema table: Issues
+   * @generated from schema table: Tasks
    */
   get _queryKey(): string {
-    return JSON.stringify({ t: "Issues", w: this._where, i: this._include });
+    return JSON.stringify({ t: "Tasks", w: this._where, i: this._include });
   }
 
   /**
    * Add a filter condition
-   * @generated from schema table: Issues
+   * @generated from schema table: Tasks
    */
-  where(filter: IssueFilter): IssuesQueryBuilder<I> {
-    return new IssuesQueryBuilder(this._descriptor, filter, this._include);
+  where(filter: TaskFilter): TasksQueryBuilder<I> {
+    return new TasksQueryBuilder(this._descriptor, filter, this._include);
   }
 
   /**
    * Specify which refs to include
-   * @generated from schema table: Issues
+   * @generated from schema table: Tasks
    */
-  with<NewI extends IssueIncludes>(include: NewI): IssuesQueryBuilder<NewI> {
-    return new IssuesQueryBuilder(this._descriptor, this._where, include);
+  with<NewI extends TaskIncludes>(include: NewI): TasksQueryBuilder<NewI> {
+    return new TasksQueryBuilder(this._descriptor, this._where, include);
   }
 
   /**
-   * Subscribe to all matching Issues
-   * @generated from schema table: Issues
+   * Subscribe to all matching Tasks
+   * @generated from schema table: Tasks
    */
-  subscribeAll(db: WasmDatabaseLike, callback: (rows: IssueWith<I>[]) => void): Unsubscribe {
+  subscribeAll(db: WasmDatabaseLike, callback: (rows: TaskWith<I>[]) => void): Unsubscribe {
     return this._descriptor._subscribeAllInternal(
       db,
       { where: this._where as BaseWhereInput | undefined, include: this._include as IncludeSpec | undefined },
-      callback as (rows: Issue[]) => void
+      callback as (rows: Task[]) => void
     );
   }
 
   /**
-   * Subscribe to a single Issue by ID
-   * @generated from schema table: Issues
+   * Subscribe to a single Task by ID
+   * @generated from schema table: Tasks
    */
-  subscribe(db: WasmDatabaseLike, id: ObjectId, callback: (row: IssueWith<I> | null) => void): Unsubscribe {
+  subscribe(db: WasmDatabaseLike, id: ObjectId, callback: (row: TaskWith<I> | null) => void): Unsubscribe {
     return this._descriptor._subscribeInternal(
       db,
       id,
       { include: this._include as IncludeSpec | undefined },
-      callback as (row: Issue | null) => void
+      callback as (row: Task | null) => void
     );
   }
 
   /**
-   * Create a new Issue
-   * @generated from schema table: Issues
+   * Create a new Task
+   * @generated from schema table: Tasks
    */
-  create(db: WasmDatabaseLike, data: IssueInsert): ObjectId {
+  create(db: WasmDatabaseLike, data: TaskInsert): ObjectId {
     return this._descriptor.create(db, data);
   }
 
   /**
-   * Update a Issue
-   * @generated from schema table: Issues
+   * Update a Task
+   * @generated from schema table: Tasks
    */
-  update(db: WasmDatabaseLike, id: ObjectId, data: Partial<IssueInsert>): void {
+  update(db: WasmDatabaseLike, id: ObjectId, data: Partial<TaskInsert>): void {
     return this._descriptor.update(db, id, data);
   }
 
   /**
-   * Delete a Issue
-   * @generated from schema table: Issues
+   * Delete a Task
+   * @generated from schema table: Tasks
    */
   delete(db: WasmDatabaseLike, id: ObjectId): void {
     return this._descriptor.delete(db, id);
@@ -290,17 +290,17 @@ export class IssuesQueryBuilder<I extends IssueIncludes = {}>
 }
 
 /**
- * Query builder for Labels with chainable where/with methods
- * @generated from schema table: Labels
+ * Query builder for Tags with chainable where/with methods
+ * @generated from schema table: Tags
  */
-export class LabelsQueryBuilder<I extends LabelIncludes = {}>
-  implements SubscribableAllWithDb<LabelWith<I>, LabelInsert, Partial<LabelInsert>>,
-             SubscribableOneWithDb<LabelWith<I>, Partial<LabelInsert>> {
-  private _descriptor: LabelsDescriptor;
-  private _where?: LabelFilter;
+export class TagsQueryBuilder<I extends TagIncludes = {}>
+  implements SubscribableAllWithDb<TagWith<I>, TagInsert, Partial<TagInsert>>,
+             SubscribableOneWithDb<TagWith<I>, Partial<TagInsert>> {
+  private _descriptor: TagsDescriptor;
+  private _where?: TagFilter;
   private _include?: I;
 
-  constructor(descriptor: LabelsDescriptor, where?: LabelFilter, include?: I) {
+  constructor(descriptor: TagsDescriptor, where?: TagFilter, include?: I) {
     this._descriptor = descriptor;
     this._where = where;
     this._include = include;
@@ -308,72 +308,72 @@ export class LabelsQueryBuilder<I extends LabelIncludes = {}>
 
   /**
    * Get a stable key representing this query's options (for React hook deduplication)
-   * @generated from schema table: Labels
+   * @generated from schema table: Tags
    */
   get _queryKey(): string {
-    return JSON.stringify({ t: "Labels", w: this._where, i: this._include });
+    return JSON.stringify({ t: "Tags", w: this._where, i: this._include });
   }
 
   /**
    * Add a filter condition
-   * @generated from schema table: Labels
+   * @generated from schema table: Tags
    */
-  where(filter: LabelFilter): LabelsQueryBuilder<I> {
-    return new LabelsQueryBuilder(this._descriptor, filter, this._include);
+  where(filter: TagFilter): TagsQueryBuilder<I> {
+    return new TagsQueryBuilder(this._descriptor, filter, this._include);
   }
 
   /**
    * Specify which refs to include
-   * @generated from schema table: Labels
+   * @generated from schema table: Tags
    */
-  with<NewI extends LabelIncludes>(include: NewI): LabelsQueryBuilder<NewI> {
-    return new LabelsQueryBuilder(this._descriptor, this._where, include);
+  with<NewI extends TagIncludes>(include: NewI): TagsQueryBuilder<NewI> {
+    return new TagsQueryBuilder(this._descriptor, this._where, include);
   }
 
   /**
-   * Subscribe to all matching Labels
-   * @generated from schema table: Labels
+   * Subscribe to all matching Tags
+   * @generated from schema table: Tags
    */
-  subscribeAll(db: WasmDatabaseLike, callback: (rows: LabelWith<I>[]) => void): Unsubscribe {
+  subscribeAll(db: WasmDatabaseLike, callback: (rows: TagWith<I>[]) => void): Unsubscribe {
     return this._descriptor._subscribeAllInternal(
       db,
       { where: this._where as BaseWhereInput | undefined, include: this._include as IncludeSpec | undefined },
-      callback as (rows: Label[]) => void
+      callback as (rows: Tag[]) => void
     );
   }
 
   /**
-   * Subscribe to a single Label by ID
-   * @generated from schema table: Labels
+   * Subscribe to a single Tag by ID
+   * @generated from schema table: Tags
    */
-  subscribe(db: WasmDatabaseLike, id: ObjectId, callback: (row: LabelWith<I> | null) => void): Unsubscribe {
+  subscribe(db: WasmDatabaseLike, id: ObjectId, callback: (row: TagWith<I> | null) => void): Unsubscribe {
     return this._descriptor._subscribeInternal(
       db,
       id,
       { include: this._include as IncludeSpec | undefined },
-      callback as (row: Label | null) => void
+      callback as (row: Tag | null) => void
     );
   }
 
   /**
-   * Create a new Label
-   * @generated from schema table: Labels
+   * Create a new Tag
+   * @generated from schema table: Tags
    */
-  create(db: WasmDatabaseLike, data: LabelInsert): ObjectId {
+  create(db: WasmDatabaseLike, data: TagInsert): ObjectId {
     return this._descriptor.create(db, data);
   }
 
   /**
-   * Update a Label
-   * @generated from schema table: Labels
+   * Update a Tag
+   * @generated from schema table: Tags
    */
-  update(db: WasmDatabaseLike, id: ObjectId, data: Partial<LabelInsert>): void {
+  update(db: WasmDatabaseLike, id: ObjectId, data: Partial<TagInsert>): void {
     return this._descriptor.update(db, id, data);
   }
 
   /**
-   * Delete a Label
-   * @generated from schema table: Labels
+   * Delete a Tag
+   * @generated from schema table: Tags
    */
   delete(db: WasmDatabaseLike, id: ObjectId): void {
     return this._descriptor.delete(db, id);
@@ -381,17 +381,17 @@ export class LabelsQueryBuilder<I extends LabelIncludes = {}>
 }
 
 /**
- * Query builder for IssueLabels with chainable where/with methods
- * @generated from schema table: IssueLabels
+ * Query builder for TaskTags with chainable where/with methods
+ * @generated from schema table: TaskTags
  */
-export class IssueLabelsQueryBuilder<I extends IssueLabelIncludes = {}>
-  implements SubscribableAllWithDb<IssueLabelWith<I>, IssueLabelInsert, Partial<IssueLabelInsert>>,
-             SubscribableOneWithDb<IssueLabelWith<I>, Partial<IssueLabelInsert>> {
-  private _descriptor: IssueLabelsDescriptor;
-  private _where?: IssueLabelFilter;
+export class TaskTagsQueryBuilder<I extends TaskTagIncludes = {}>
+  implements SubscribableAllWithDb<TaskTagWith<I>, TaskTagInsert, Partial<TaskTagInsert>>,
+             SubscribableOneWithDb<TaskTagWith<I>, Partial<TaskTagInsert>> {
+  private _descriptor: TaskTagsDescriptor;
+  private _where?: TaskTagFilter;
   private _include?: I;
 
-  constructor(descriptor: IssueLabelsDescriptor, where?: IssueLabelFilter, include?: I) {
+  constructor(descriptor: TaskTagsDescriptor, where?: TaskTagFilter, include?: I) {
     this._descriptor = descriptor;
     this._where = where;
     this._include = include;
@@ -399,163 +399,72 @@ export class IssueLabelsQueryBuilder<I extends IssueLabelIncludes = {}>
 
   /**
    * Get a stable key representing this query's options (for React hook deduplication)
-   * @generated from schema table: IssueLabels
+   * @generated from schema table: TaskTags
    */
   get _queryKey(): string {
-    return JSON.stringify({ t: "IssueLabels", w: this._where, i: this._include });
+    return JSON.stringify({ t: "TaskTags", w: this._where, i: this._include });
   }
 
   /**
    * Add a filter condition
-   * @generated from schema table: IssueLabels
+   * @generated from schema table: TaskTags
    */
-  where(filter: IssueLabelFilter): IssueLabelsQueryBuilder<I> {
-    return new IssueLabelsQueryBuilder(this._descriptor, filter, this._include);
+  where(filter: TaskTagFilter): TaskTagsQueryBuilder<I> {
+    return new TaskTagsQueryBuilder(this._descriptor, filter, this._include);
   }
 
   /**
    * Specify which refs to include
-   * @generated from schema table: IssueLabels
+   * @generated from schema table: TaskTags
    */
-  with<NewI extends IssueLabelIncludes>(include: NewI): IssueLabelsQueryBuilder<NewI> {
-    return new IssueLabelsQueryBuilder(this._descriptor, this._where, include);
+  with<NewI extends TaskTagIncludes>(include: NewI): TaskTagsQueryBuilder<NewI> {
+    return new TaskTagsQueryBuilder(this._descriptor, this._where, include);
   }
 
   /**
-   * Subscribe to all matching IssueLabels
-   * @generated from schema table: IssueLabels
+   * Subscribe to all matching TaskTags
+   * @generated from schema table: TaskTags
    */
-  subscribeAll(db: WasmDatabaseLike, callback: (rows: IssueLabelWith<I>[]) => void): Unsubscribe {
+  subscribeAll(db: WasmDatabaseLike, callback: (rows: TaskTagWith<I>[]) => void): Unsubscribe {
     return this._descriptor._subscribeAllInternal(
       db,
       { where: this._where as BaseWhereInput | undefined, include: this._include as IncludeSpec | undefined },
-      callback as (rows: IssueLabel[]) => void
+      callback as (rows: TaskTag[]) => void
     );
   }
 
   /**
-   * Subscribe to a single IssueLabel by ID
-   * @generated from schema table: IssueLabels
+   * Subscribe to a single TaskTag by ID
+   * @generated from schema table: TaskTags
    */
-  subscribe(db: WasmDatabaseLike, id: ObjectId, callback: (row: IssueLabelWith<I> | null) => void): Unsubscribe {
+  subscribe(db: WasmDatabaseLike, id: ObjectId, callback: (row: TaskTagWith<I> | null) => void): Unsubscribe {
     return this._descriptor._subscribeInternal(
       db,
       id,
       { include: this._include as IncludeSpec | undefined },
-      callback as (row: IssueLabel | null) => void
+      callback as (row: TaskTag | null) => void
     );
   }
 
   /**
-   * Create a new IssueLabel
-   * @generated from schema table: IssueLabels
+   * Create a new TaskTag
+   * @generated from schema table: TaskTags
    */
-  create(db: WasmDatabaseLike, data: IssueLabelInsert): ObjectId {
+  create(db: WasmDatabaseLike, data: TaskTagInsert): ObjectId {
     return this._descriptor.create(db, data);
   }
 
   /**
-   * Update a IssueLabel
-   * @generated from schema table: IssueLabels
+   * Update a TaskTag
+   * @generated from schema table: TaskTags
    */
-  update(db: WasmDatabaseLike, id: ObjectId, data: Partial<IssueLabelInsert>): void {
+  update(db: WasmDatabaseLike, id: ObjectId, data: Partial<TaskTagInsert>): void {
     return this._descriptor.update(db, id, data);
   }
 
   /**
-   * Delete a IssueLabel
-   * @generated from schema table: IssueLabels
-   */
-  delete(db: WasmDatabaseLike, id: ObjectId): void {
-    return this._descriptor.delete(db, id);
-  }
-}
-
-/**
- * Query builder for IssueAssignees with chainable where/with methods
- * @generated from schema table: IssueAssignees
- */
-export class IssueAssigneesQueryBuilder<I extends IssueAssigneeIncludes = {}>
-  implements SubscribableAllWithDb<IssueAssigneeWith<I>, IssueAssigneeInsert, Partial<IssueAssigneeInsert>>,
-             SubscribableOneWithDb<IssueAssigneeWith<I>, Partial<IssueAssigneeInsert>> {
-  private _descriptor: IssueAssigneesDescriptor;
-  private _where?: IssueAssigneeFilter;
-  private _include?: I;
-
-  constructor(descriptor: IssueAssigneesDescriptor, where?: IssueAssigneeFilter, include?: I) {
-    this._descriptor = descriptor;
-    this._where = where;
-    this._include = include;
-  }
-
-  /**
-   * Get a stable key representing this query's options (for React hook deduplication)
-   * @generated from schema table: IssueAssignees
-   */
-  get _queryKey(): string {
-    return JSON.stringify({ t: "IssueAssignees", w: this._where, i: this._include });
-  }
-
-  /**
-   * Add a filter condition
-   * @generated from schema table: IssueAssignees
-   */
-  where(filter: IssueAssigneeFilter): IssueAssigneesQueryBuilder<I> {
-    return new IssueAssigneesQueryBuilder(this._descriptor, filter, this._include);
-  }
-
-  /**
-   * Specify which refs to include
-   * @generated from schema table: IssueAssignees
-   */
-  with<NewI extends IssueAssigneeIncludes>(include: NewI): IssueAssigneesQueryBuilder<NewI> {
-    return new IssueAssigneesQueryBuilder(this._descriptor, this._where, include);
-  }
-
-  /**
-   * Subscribe to all matching IssueAssignees
-   * @generated from schema table: IssueAssignees
-   */
-  subscribeAll(db: WasmDatabaseLike, callback: (rows: IssueAssigneeWith<I>[]) => void): Unsubscribe {
-    return this._descriptor._subscribeAllInternal(
-      db,
-      { where: this._where as BaseWhereInput | undefined, include: this._include as IncludeSpec | undefined },
-      callback as (rows: IssueAssignee[]) => void
-    );
-  }
-
-  /**
-   * Subscribe to a single IssueAssignee by ID
-   * @generated from schema table: IssueAssignees
-   */
-  subscribe(db: WasmDatabaseLike, id: ObjectId, callback: (row: IssueAssigneeWith<I> | null) => void): Unsubscribe {
-    return this._descriptor._subscribeInternal(
-      db,
-      id,
-      { include: this._include as IncludeSpec | undefined },
-      callback as (row: IssueAssignee | null) => void
-    );
-  }
-
-  /**
-   * Create a new IssueAssignee
-   * @generated from schema table: IssueAssignees
-   */
-  create(db: WasmDatabaseLike, data: IssueAssigneeInsert): ObjectId {
-    return this._descriptor.create(db, data);
-  }
-
-  /**
-   * Update a IssueAssignee
-   * @generated from schema table: IssueAssignees
-   */
-  update(db: WasmDatabaseLike, id: ObjectId, data: Partial<IssueAssigneeInsert>): void {
-    return this._descriptor.update(db, id, data);
-  }
-
-  /**
-   * Delete a IssueAssignee
-   * @generated from schema table: IssueAssignees
+   * Delete a TaskTag
+   * @generated from schema table: TaskTags
    */
   delete(db: WasmDatabaseLike, id: ObjectId): void {
     return this._descriptor.delete(db, id);
@@ -586,7 +495,10 @@ export class UsersDescriptor extends TableClient<User>
     const values: Record<string, unknown> = {};
     values.name = data.name;
     values.email = data.email;
-    values.avatarColor = data.avatarColor;
+    if (data.avatar !== undefined) values.avatar = data.avatar;
+    values.age = data.age;
+    values.score = data.score;
+    values.isAdmin = data.isAdmin;
     return this._create(db, values);
   }
 
@@ -672,8 +584,9 @@ export class ProjectsDescriptor extends TableClient<Project>
   create(db: WasmDatabaseLike, data: ProjectInsert): ObjectId {
     const values: Record<string, unknown> = {};
     values.name = data.name;
-    values.color = data.color;
     if (data.description !== undefined) values.description = data.description;
+    values.owner = data.owner;
+    values.color = data.color;
     return this._create(db, values);
   }
 
@@ -737,48 +650,50 @@ export class ProjectsDescriptor extends TableClient<Project>
 }
 
 /**
- * Descriptor for the Issues table (no db instance, db passed at method call time)
- * @generated from schema table: Issues
+ * Descriptor for the Tasks table (no db instance, db passed at method call time)
+ * @generated from schema table: Tasks
  */
-export class IssuesDescriptor extends TableClient<Issue>
-  implements SubscribableAllWithDb<Issue, IssueInsert, Partial<IssueInsert>>,
-             SubscribableOneWithDb<Issue, Partial<IssueInsert>>,
-             MutableWithDb<IssueInsert, Partial<IssueInsert>> {
+export class TasksDescriptor extends TableClient<Task>
+  implements SubscribableAllWithDb<Task, TaskInsert, Partial<TaskInsert>>,
+             SubscribableOneWithDb<Task, Partial<TaskInsert>>,
+             MutableWithDb<TaskInsert, Partial<TaskInsert>> {
   constructor() {
-    super(schemaMeta.tables.Issues, schemaMeta, {
-      rows: decodeIssueRows,
-      delta: decodeIssueDelta,
+    super(schemaMeta.tables.Tasks, schemaMeta, {
+      rows: decodeTaskRows,
+      delta: decodeTaskDelta,
     });
   }
 
   /**
-   * Create a new Issue
+   * Create a new Task
    * @returns The ObjectId of the created row
-   * @generated from schema table: Issues
+   * @generated from schema table: Tasks
    */
-  create(db: WasmDatabaseLike, data: IssueInsert): ObjectId {
+  create(db: WasmDatabaseLike, data: TaskInsert): ObjectId {
     const values: Record<string, unknown> = {};
     values.title = data.title;
     if (data.description !== undefined) values.description = data.description;
     values.status = data.status;
     values.priority = data.priority;
     values.project = data.project;
+    if (data.assignee !== undefined) values.assignee = data.assignee;
     values.createdAt = data.createdAt;
     values.updatedAt = data.updatedAt;
+    values.isCompleted = data.isCompleted;
     return this._create(db, values);
   }
 
   /**
-   * Update an existing Issue
-   * @generated from schema table: Issues
+   * Update an existing Task
+   * @generated from schema table: Tasks
    */
-  update(db: WasmDatabaseLike, id: ObjectId, data: Partial<IssueInsert>): void {
+  update(db: WasmDatabaseLike, id: ObjectId, data: Partial<TaskInsert>): void {
     this._update(db, id, data as Record<string, unknown>);
   }
 
   /**
-   * Delete a Issue
-   * @generated from schema table: Issues
+   * Delete a Task
+   * @generated from schema table: Tasks
    */
   delete(db: WasmDatabaseLike, id: ObjectId): void {
     this._delete(db, id);
@@ -786,68 +701,68 @@ export class IssuesDescriptor extends TableClient<Issue>
 
   /**
    * Start a query with a filter condition
-   * @generated from schema table: Issues
+   * @generated from schema table: Tasks
    */
-  where(filter: IssueFilter): IssuesQueryBuilder<{}> {
-    return new IssuesQueryBuilder(this, filter, undefined);
+  where(filter: TaskFilter): TasksQueryBuilder<{}> {
+    return new TasksQueryBuilder(this, filter, undefined);
   }
 
   /**
    * Start a query with includes
-   * @generated from schema table: Issues
+   * @generated from schema table: Tasks
    */
-  with<I extends IssueIncludes>(include: I): IssuesQueryBuilder<I> {
-    return new IssuesQueryBuilder(this, undefined, include);
+  with<I extends TaskIncludes>(include: I): TasksQueryBuilder<I> {
+    return new TasksQueryBuilder(this, undefined, include);
   }
 
   /**
-   * Subscribe to all Issues
-   * @generated from schema table: Issues
+   * Subscribe to all Tasks
+   * @generated from schema table: Tasks
    */
-  subscribeAll(db: WasmDatabaseLike, callback: (rows: Issue[]) => void): Unsubscribe {
+  subscribeAll(db: WasmDatabaseLike, callback: (rows: Task[]) => void): Unsubscribe {
     return this._subscribeAll(db, {}, callback);
   }
 
   /**
-   * Subscribe to a single Issue by ID
-   * @generated from schema table: Issues
+   * Subscribe to a single Task by ID
+   * @generated from schema table: Tasks
    */
-  subscribe(db: WasmDatabaseLike, id: ObjectId, callback: (row: Issue | null) => void): Unsubscribe {
+  subscribe(db: WasmDatabaseLike, id: ObjectId, callback: (row: Task | null) => void): Unsubscribe {
     return this._subscribe(db, id, {}, callback);
   }
 
   /** @internal Used by query builder */
-  _subscribeAllInternal(db: WasmDatabaseLike, options: { where?: BaseWhereInput; include?: IncludeSpec }, callback: (rows: Issue[]) => void): Unsubscribe {
+  _subscribeAllInternal(db: WasmDatabaseLike, options: { where?: BaseWhereInput; include?: IncludeSpec }, callback: (rows: Task[]) => void): Unsubscribe {
     return this._subscribeAll(db, options, callback);
   }
 
   /** @internal Used by query builder */
-  _subscribeInternal(db: WasmDatabaseLike, id: ObjectId, options: { include?: IncludeSpec }, callback: (row: Issue | null) => void): Unsubscribe {
+  _subscribeInternal(db: WasmDatabaseLike, id: ObjectId, options: { include?: IncludeSpec }, callback: (row: Task | null) => void): Unsubscribe {
     return this._subscribe(db, id, options, callback);
   }
 }
 
 /**
- * Descriptor for the Labels table (no db instance, db passed at method call time)
- * @generated from schema table: Labels
+ * Descriptor for the Tags table (no db instance, db passed at method call time)
+ * @generated from schema table: Tags
  */
-export class LabelsDescriptor extends TableClient<Label>
-  implements SubscribableAllWithDb<Label, LabelInsert, Partial<LabelInsert>>,
-             SubscribableOneWithDb<Label, Partial<LabelInsert>>,
-             MutableWithDb<LabelInsert, Partial<LabelInsert>> {
+export class TagsDescriptor extends TableClient<Tag>
+  implements SubscribableAllWithDb<Tag, TagInsert, Partial<TagInsert>>,
+             SubscribableOneWithDb<Tag, Partial<TagInsert>>,
+             MutableWithDb<TagInsert, Partial<TagInsert>> {
   constructor() {
-    super(schemaMeta.tables.Labels, schemaMeta, {
-      rows: decodeLabelRows,
-      delta: decodeLabelDelta,
+    super(schemaMeta.tables.Tags, schemaMeta, {
+      rows: decodeTagRows,
+      delta: decodeTagDelta,
     });
   }
 
   /**
-   * Create a new Label
+   * Create a new Tag
    * @returns The ObjectId of the created row
-   * @generated from schema table: Labels
+   * @generated from schema table: Tags
    */
-  create(db: WasmDatabaseLike, data: LabelInsert): ObjectId {
+  create(db: WasmDatabaseLike, data: TagInsert): ObjectId {
     const values: Record<string, unknown> = {};
     values.name = data.name;
     values.color = data.color;
@@ -855,16 +770,16 @@ export class LabelsDescriptor extends TableClient<Label>
   }
 
   /**
-   * Update an existing Label
-   * @generated from schema table: Labels
+   * Update an existing Tag
+   * @generated from schema table: Tags
    */
-  update(db: WasmDatabaseLike, id: ObjectId, data: Partial<LabelInsert>): void {
+  update(db: WasmDatabaseLike, id: ObjectId, data: Partial<TagInsert>): void {
     this._update(db, id, data as Record<string, unknown>);
   }
 
   /**
-   * Delete a Label
-   * @generated from schema table: Labels
+   * Delete a Tag
+   * @generated from schema table: Tags
    */
   delete(db: WasmDatabaseLike, id: ObjectId): void {
     this._delete(db, id);
@@ -872,85 +787,85 @@ export class LabelsDescriptor extends TableClient<Label>
 
   /**
    * Start a query with a filter condition
-   * @generated from schema table: Labels
+   * @generated from schema table: Tags
    */
-  where(filter: LabelFilter): LabelsQueryBuilder<{}> {
-    return new LabelsQueryBuilder(this, filter, undefined);
+  where(filter: TagFilter): TagsQueryBuilder<{}> {
+    return new TagsQueryBuilder(this, filter, undefined);
   }
 
   /**
    * Start a query with includes
-   * @generated from schema table: Labels
+   * @generated from schema table: Tags
    */
-  with<I extends LabelIncludes>(include: I): LabelsQueryBuilder<I> {
-    return new LabelsQueryBuilder(this, undefined, include);
+  with<I extends TagIncludes>(include: I): TagsQueryBuilder<I> {
+    return new TagsQueryBuilder(this, undefined, include);
   }
 
   /**
-   * Subscribe to all Labels
-   * @generated from schema table: Labels
+   * Subscribe to all Tags
+   * @generated from schema table: Tags
    */
-  subscribeAll(db: WasmDatabaseLike, callback: (rows: Label[]) => void): Unsubscribe {
+  subscribeAll(db: WasmDatabaseLike, callback: (rows: Tag[]) => void): Unsubscribe {
     return this._subscribeAll(db, {}, callback);
   }
 
   /**
-   * Subscribe to a single Label by ID
-   * @generated from schema table: Labels
+   * Subscribe to a single Tag by ID
+   * @generated from schema table: Tags
    */
-  subscribe(db: WasmDatabaseLike, id: ObjectId, callback: (row: Label | null) => void): Unsubscribe {
+  subscribe(db: WasmDatabaseLike, id: ObjectId, callback: (row: Tag | null) => void): Unsubscribe {
     return this._subscribe(db, id, {}, callback);
   }
 
   /** @internal Used by query builder */
-  _subscribeAllInternal(db: WasmDatabaseLike, options: { where?: BaseWhereInput; include?: IncludeSpec }, callback: (rows: Label[]) => void): Unsubscribe {
+  _subscribeAllInternal(db: WasmDatabaseLike, options: { where?: BaseWhereInput; include?: IncludeSpec }, callback: (rows: Tag[]) => void): Unsubscribe {
     return this._subscribeAll(db, options, callback);
   }
 
   /** @internal Used by query builder */
-  _subscribeInternal(db: WasmDatabaseLike, id: ObjectId, options: { include?: IncludeSpec }, callback: (row: Label | null) => void): Unsubscribe {
+  _subscribeInternal(db: WasmDatabaseLike, id: ObjectId, options: { include?: IncludeSpec }, callback: (row: Tag | null) => void): Unsubscribe {
     return this._subscribe(db, id, options, callback);
   }
 }
 
 /**
- * Descriptor for the IssueLabels table (no db instance, db passed at method call time)
- * @generated from schema table: IssueLabels
+ * Descriptor for the TaskTags table (no db instance, db passed at method call time)
+ * @generated from schema table: TaskTags
  */
-export class IssueLabelsDescriptor extends TableClient<IssueLabel>
-  implements SubscribableAllWithDb<IssueLabel, IssueLabelInsert, Partial<IssueLabelInsert>>,
-             SubscribableOneWithDb<IssueLabel, Partial<IssueLabelInsert>>,
-             MutableWithDb<IssueLabelInsert, Partial<IssueLabelInsert>> {
+export class TaskTagsDescriptor extends TableClient<TaskTag>
+  implements SubscribableAllWithDb<TaskTag, TaskTagInsert, Partial<TaskTagInsert>>,
+             SubscribableOneWithDb<TaskTag, Partial<TaskTagInsert>>,
+             MutableWithDb<TaskTagInsert, Partial<TaskTagInsert>> {
   constructor() {
-    super(schemaMeta.tables.IssueLabels, schemaMeta, {
-      rows: decodeIssueLabelRows,
-      delta: decodeIssueLabelDelta,
+    super(schemaMeta.tables.TaskTags, schemaMeta, {
+      rows: decodeTaskTagRows,
+      delta: decodeTaskTagDelta,
     });
   }
 
   /**
-   * Create a new IssueLabel
+   * Create a new TaskTag
    * @returns The ObjectId of the created row
-   * @generated from schema table: IssueLabels
+   * @generated from schema table: TaskTags
    */
-  create(db: WasmDatabaseLike, data: IssueLabelInsert): ObjectId {
+  create(db: WasmDatabaseLike, data: TaskTagInsert): ObjectId {
     const values: Record<string, unknown> = {};
-    values.issue = data.issue;
-    values.label = data.label;
+    values.task = data.task;
+    values.tag = data.tag;
     return this._create(db, values);
   }
 
   /**
-   * Update an existing IssueLabel
-   * @generated from schema table: IssueLabels
+   * Update an existing TaskTag
+   * @generated from schema table: TaskTags
    */
-  update(db: WasmDatabaseLike, id: ObjectId, data: Partial<IssueLabelInsert>): void {
+  update(db: WasmDatabaseLike, id: ObjectId, data: Partial<TaskTagInsert>): void {
     this._update(db, id, data as Record<string, unknown>);
   }
 
   /**
-   * Delete a IssueLabel
-   * @generated from schema table: IssueLabels
+   * Delete a TaskTag
+   * @generated from schema table: TaskTags
    */
   delete(db: WasmDatabaseLike, id: ObjectId): void {
     this._delete(db, id);
@@ -958,129 +873,43 @@ export class IssueLabelsDescriptor extends TableClient<IssueLabel>
 
   /**
    * Start a query with a filter condition
-   * @generated from schema table: IssueLabels
+   * @generated from schema table: TaskTags
    */
-  where(filter: IssueLabelFilter): IssueLabelsQueryBuilder<{}> {
-    return new IssueLabelsQueryBuilder(this, filter, undefined);
+  where(filter: TaskTagFilter): TaskTagsQueryBuilder<{}> {
+    return new TaskTagsQueryBuilder(this, filter, undefined);
   }
 
   /**
    * Start a query with includes
-   * @generated from schema table: IssueLabels
+   * @generated from schema table: TaskTags
    */
-  with<I extends IssueLabelIncludes>(include: I): IssueLabelsQueryBuilder<I> {
-    return new IssueLabelsQueryBuilder(this, undefined, include);
+  with<I extends TaskTagIncludes>(include: I): TaskTagsQueryBuilder<I> {
+    return new TaskTagsQueryBuilder(this, undefined, include);
   }
 
   /**
-   * Subscribe to all IssueLabels
-   * @generated from schema table: IssueLabels
+   * Subscribe to all TaskTags
+   * @generated from schema table: TaskTags
    */
-  subscribeAll(db: WasmDatabaseLike, callback: (rows: IssueLabel[]) => void): Unsubscribe {
+  subscribeAll(db: WasmDatabaseLike, callback: (rows: TaskTag[]) => void): Unsubscribe {
     return this._subscribeAll(db, {}, callback);
   }
 
   /**
-   * Subscribe to a single IssueLabel by ID
-   * @generated from schema table: IssueLabels
+   * Subscribe to a single TaskTag by ID
+   * @generated from schema table: TaskTags
    */
-  subscribe(db: WasmDatabaseLike, id: ObjectId, callback: (row: IssueLabel | null) => void): Unsubscribe {
+  subscribe(db: WasmDatabaseLike, id: ObjectId, callback: (row: TaskTag | null) => void): Unsubscribe {
     return this._subscribe(db, id, {}, callback);
   }
 
   /** @internal Used by query builder */
-  _subscribeAllInternal(db: WasmDatabaseLike, options: { where?: BaseWhereInput; include?: IncludeSpec }, callback: (rows: IssueLabel[]) => void): Unsubscribe {
+  _subscribeAllInternal(db: WasmDatabaseLike, options: { where?: BaseWhereInput; include?: IncludeSpec }, callback: (rows: TaskTag[]) => void): Unsubscribe {
     return this._subscribeAll(db, options, callback);
   }
 
   /** @internal Used by query builder */
-  _subscribeInternal(db: WasmDatabaseLike, id: ObjectId, options: { include?: IncludeSpec }, callback: (row: IssueLabel | null) => void): Unsubscribe {
-    return this._subscribe(db, id, options, callback);
-  }
-}
-
-/**
- * Descriptor for the IssueAssignees table (no db instance, db passed at method call time)
- * @generated from schema table: IssueAssignees
- */
-export class IssueAssigneesDescriptor extends TableClient<IssueAssignee>
-  implements SubscribableAllWithDb<IssueAssignee, IssueAssigneeInsert, Partial<IssueAssigneeInsert>>,
-             SubscribableOneWithDb<IssueAssignee, Partial<IssueAssigneeInsert>>,
-             MutableWithDb<IssueAssigneeInsert, Partial<IssueAssigneeInsert>> {
-  constructor() {
-    super(schemaMeta.tables.IssueAssignees, schemaMeta, {
-      rows: decodeIssueAssigneeRows,
-      delta: decodeIssueAssigneeDelta,
-    });
-  }
-
-  /**
-   * Create a new IssueAssignee
-   * @returns The ObjectId of the created row
-   * @generated from schema table: IssueAssignees
-   */
-  create(db: WasmDatabaseLike, data: IssueAssigneeInsert): ObjectId {
-    const values: Record<string, unknown> = {};
-    values.issue = data.issue;
-    values.user = data.user;
-    return this._create(db, values);
-  }
-
-  /**
-   * Update an existing IssueAssignee
-   * @generated from schema table: IssueAssignees
-   */
-  update(db: WasmDatabaseLike, id: ObjectId, data: Partial<IssueAssigneeInsert>): void {
-    this._update(db, id, data as Record<string, unknown>);
-  }
-
-  /**
-   * Delete a IssueAssignee
-   * @generated from schema table: IssueAssignees
-   */
-  delete(db: WasmDatabaseLike, id: ObjectId): void {
-    this._delete(db, id);
-  }
-
-  /**
-   * Start a query with a filter condition
-   * @generated from schema table: IssueAssignees
-   */
-  where(filter: IssueAssigneeFilter): IssueAssigneesQueryBuilder<{}> {
-    return new IssueAssigneesQueryBuilder(this, filter, undefined);
-  }
-
-  /**
-   * Start a query with includes
-   * @generated from schema table: IssueAssignees
-   */
-  with<I extends IssueAssigneeIncludes>(include: I): IssueAssigneesQueryBuilder<I> {
-    return new IssueAssigneesQueryBuilder(this, undefined, include);
-  }
-
-  /**
-   * Subscribe to all IssueAssignees
-   * @generated from schema table: IssueAssignees
-   */
-  subscribeAll(db: WasmDatabaseLike, callback: (rows: IssueAssignee[]) => void): Unsubscribe {
-    return this._subscribeAll(db, {}, callback);
-  }
-
-  /**
-   * Subscribe to a single IssueAssignee by ID
-   * @generated from schema table: IssueAssignees
-   */
-  subscribe(db: WasmDatabaseLike, id: ObjectId, callback: (row: IssueAssignee | null) => void): Unsubscribe {
-    return this._subscribe(db, id, {}, callback);
-  }
-
-  /** @internal Used by query builder */
-  _subscribeAllInternal(db: WasmDatabaseLike, options: { where?: BaseWhereInput; include?: IncludeSpec }, callback: (rows: IssueAssignee[]) => void): Unsubscribe {
-    return this._subscribeAll(db, options, callback);
-  }
-
-  /** @internal Used by query builder */
-  _subscribeInternal(db: WasmDatabaseLike, id: ObjectId, options: { include?: IncludeSpec }, callback: (row: IssueAssignee | null) => void): Unsubscribe {
+  _subscribeInternal(db: WasmDatabaseLike, id: ObjectId, options: { include?: IncludeSpec }, callback: (row: TaskTag | null) => void): Unsubscribe {
     return this._subscribe(db, id, options, callback);
   }
 }
@@ -1108,10 +937,9 @@ export class IssueAssigneesDescriptor extends TableClient<IssueAssignee>
 export const app = {
   users: new UsersDescriptor(),
   projects: new ProjectsDescriptor(),
-  issues: new IssuesDescriptor(),
-  labels: new LabelsDescriptor(),
-  issuelabels: new IssueLabelsDescriptor(),
-  issueassignees: new IssueAssigneesDescriptor(),
+  tasks: new TasksDescriptor(),
+  tags: new TagsDescriptor(),
+  tasktags: new TaskTagsDescriptor(),
 };
 
 export type App = typeof app;
@@ -1123,10 +951,9 @@ export type App = typeof app;
 export interface Database {
   users: BoundTableClient<User, UserInsert, UserIncludes>;
   projects: BoundTableClient<Project, ProjectInsert, ProjectIncludes>;
-  issues: BoundTableClient<Issue, IssueInsert, IssueIncludes>;
-  labels: BoundTableClient<Label, LabelInsert, LabelIncludes>;
-  issuelabels: BoundTableClient<IssueLabel, IssueLabelInsert, IssueLabelIncludes>;
-  issueassignees: BoundTableClient<IssueAssignee, IssueAssigneeInsert, IssueAssigneeIncludes>;
+  tasks: BoundTableClient<Task, TaskInsert, TaskIncludes>;
+  tags: BoundTableClient<Tag, TagInsert, TagIncludes>;
+  tasktags: BoundTableClient<TaskTag, TaskTagInsert, TaskTagIncludes>;
 }
 
 /**
@@ -1194,9 +1021,8 @@ export function createDatabase(wasmDb: WasmDatabaseLike): Database {
   return {
     users: bindTableClient(app.users),
     projects: bindTableClient(app.projects),
-    issues: bindTableClient(app.issues),
-    labels: bindTableClient(app.labels),
-    issuelabels: bindTableClient(app.issuelabels),
-    issueassignees: bindTableClient(app.issueassignees),
+    tasks: bindTableClient(app.tasks),
+    tags: bindTableClient(app.tags),
+    tasktags: bindTableClient(app.tasktags),
   };
 }

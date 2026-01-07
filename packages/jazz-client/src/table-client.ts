@@ -204,8 +204,20 @@ export abstract class TableClient<T extends { id: string }> {
       } else if (typeof value === "bigint") {
         db.update_row_i64(this.tableName, id, column, value);
       } else if (typeof value === "number") {
-        // Convert numbers to bigint for i64 columns
-        db.update_row_i64(this.tableName, id, column, BigInt(value));
+        // For integers, use i64 update. For floats, use SQL.
+        if (Number.isInteger(value)) {
+          db.update_row_i64(this.tableName, id, column, BigInt(value));
+        } else {
+          // F64 values need SQL update
+          db.execute(
+            `UPDATE ${this.tableName} SET ${column} = ${value} WHERE id = '${id}'`
+          );
+        }
+      } else if (typeof value === "boolean") {
+        // Boolean values need SQL update
+        db.execute(
+          `UPDATE ${this.tableName} SET ${column} = ${value ? 'TRUE' : 'FALSE'} WHERE id = '${id}'`
+        );
       } else if (value === null) {
         // Handle null values via SQL UPDATE
         db.execute(

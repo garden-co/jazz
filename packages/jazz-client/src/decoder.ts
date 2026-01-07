@@ -80,11 +80,25 @@ class BinaryReader {
   }
 
   readNullableRef(): string | null {
-    if (this.bytes[this.offset] === 0) {
+    // Binary format differs between non-JOINed and JOINed queries:
+    // Non-JOINed: byte-0 detection (0x00 = null, ObjectId starts directly otherwise)
+    // JOINed: presence byte (0x00 = null, 0x01 = present followed by ObjectId)
+    // We detect which format based on the first byte:
+    // - 0x00 = null in both formats
+    // - 0x01 = presence marker (JOINed format), skip and read ObjectId
+    // - >= 0x30 = start of ObjectId (non-JOINed format), read directly
+    const firstByte = this.bytes[this.offset];
+    if (firstByte === 0) {
       this.offset++;
       return null;
+    } else if (firstByte === 1) {
+      // Presence marker used in JOINed queries
+      this.offset++;
+      return this.readObjectId();
+    } else {
+      // Direct ObjectId (Base32 chars start at 0x30)
+      return this.readObjectId();
     }
-    return this.readObjectId();
   }
 
   /**
