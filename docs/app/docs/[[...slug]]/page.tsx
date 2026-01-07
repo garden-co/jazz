@@ -1,3 +1,4 @@
+import type { ComponentType } from 'react';
 import { source } from '@/lib/source';
 import {
   DocsPage,
@@ -8,6 +9,7 @@ import {
 import { notFound } from 'next/navigation';
 import defaultMdxComponents from 'fumadocs-ui/mdx';
 import type { Metadata } from 'next';
+import type { TOCItemType } from 'fumadocs-core/toc';
 
 export default async function Page(props: {
   params: Promise<{ slug?: string[] }>;
@@ -16,12 +18,15 @@ export default async function Page(props: {
   const page = source.getPage(params.slug);
   if (!page) notFound();
 
-  const MDX = page.data.body;
+  // Access body and toc directly from page.data (cast to work around type issues)
+  const data = page.data as { body: ComponentType<{ components: Record<string, unknown> }>; toc: TOCItemType[]; title: string; description: string };
+  const MDX = data.body;
+  const toc = data.toc;
 
   return (
-    <DocsPage>
-      <DocsTitle>{page.data.title}</DocsTitle>
-      <DocsDescription>{page.data.description}</DocsDescription>
+    <DocsPage toc={toc}>
+      <DocsTitle>{data.title}</DocsTitle>
+      <DocsDescription>{data.description}</DocsDescription>
       <DocsBody>
         <MDX components={{ ...defaultMdxComponents }} />
       </DocsBody>
