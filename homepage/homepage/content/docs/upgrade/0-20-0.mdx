@@ -40,7 +40,7 @@ Providing any other type will throw an error, with the following distinction for
 - Integers (e.g., `1`) are accepted and will not throw an error, though their usage is deprecated and not supported in the type system anymore.
 
 We expect that this change **does not affect any real usages of Jazz** based on our data from SaaS-hosted projects.
-However, since we do **not have visibility into self-hosted sync server deployments**, there is a very small possibility that your code may rely on the previously allowed unique value types.
+However, since we do **not have visibility into self-hosted sync server deployments**, we cannot rule out the possibility that your code may rely on the previously allowed unique value types.
 
 If you are migrating from an earlier version and your project passes type-checks, you are almost certainly unaffected.  
 If you do encounter issues (for example, errors about unsupported `unique` value types), 
