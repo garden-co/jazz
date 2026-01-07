@@ -1,0 +1,4 @@
+{
+  "title": "JavaScript API",
+  "pages": ["index", "client", "queries", "mutations"]
+}

@@ -1,0 +1,99 @@
+---
+title: Subscriptions
+description: How React components subscribe to data changes
+---
+
+Jazz hooks automatically manage subscriptions to keep your UI in sync with data.
+
+## How Subscriptions Work
+
+When you use `useQuery` or `useRow`:
+
+1. The hook registers a subscription with the Jazz client
+2. Initial data is fetched and returned
+3. When relevant data changes, the hook re-renders with new data
+4. On unmount, the subscription is cleaned up
+
+## Subscription Lifecycle
+
+```tsx
+function TaskList() {
+  // Subscription created on mount
+  const { data: tasks } = useQuery('SELECT * FROM tasks');
+
+  // Component re-renders when tasks change
+  return <ul>{tasks.map(t => <li key={t.id}>{t.title}</li>)}</ul>;
+
+  // Subscription cleaned up on unmount
+}
+```
+
+## Performance Considerations
+
+### Automatic Deduplication
+
+Multiple components subscribing to the same query share a single subscription:
+
+```tsx
+// These share one subscription
+<TaskCount />    // SELECT COUNT(*) FROM tasks
+<TaskCount />    // Same query = same subscription
+```
+
+### Incremental Updates
+
+Subscriptions use incremental query computation—only changed parts of the result are recalculated, making updates efficient even for complex queries.
+
+## Manual Subscription Control
+
+For advanced cases, you can control subscription behavior:
+
+```typescript title="useTaskSubscription.ts"
+import { useEffect, useState } from 'react';
+import { useJazzClient } from '@jazz/react';
+import type { Task } from '../generated/types';
+
+export function useTaskSubscription(enabled: boolean) {
+  const client = useJazzClient();
+  const [tasks, setTasks] = useState<Task[]>([]);
+
+  useEffect(() => {
+    if (!enabled) {
+      return;
+    }
+
+    // Manually create subscription
+    const unsubscribe = client.subscribe<Task>(
+      'SELECT * FROM tasks ORDER BY created_at DESC',
+      [],
+      (newTasks) => {
+        setTasks(newTasks);
+      }
+    );
+
+    // Cleanup on unmount or when disabled
+    return () => {
+      unsubscribe();
+    };
+  }, [client, enabled]);
+
+  return tasks;
+}
+
+// Usage
+function ConditionalTaskList({ showTasks }: { showTasks: boolean }) {
+  const tasks = useTaskSubscription(showTasks);
+
+  if (!showTasks) {
+    return <div>Tasks hidden</div>;
+  }
+
+  return (
+    <ul>
+      {tasks.map(task => (
+        <li key={task.id}>{task.title}</li>
+      ))}
+    </ul>
+  );
+}
+```

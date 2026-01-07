@@ -1,0 +1,69 @@
+---
+title: Rust API Overview
+description: Using the Groove core library directly
+---
+
+The core of Jazz is written in Rust as the `groove` library. You can use it directly for server-side applications or custom integrations.
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+groove = { path = "../groove" }
+```
+
+## Quick Start
+
+```rust title="main.rs"
+use groove::sql::{Database, params};
+use groove::object::ObjectId;
+use groove::storage::MemoryStorage;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Create database with in-memory storage
+    let mut db = Database::new(MemoryStorage::new());
+
+    // Define schema
+    db.execute("CREATE TABLE tasks (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        completed BOOLEAN DEFAULT false
+    )", &[])?;
+
+    // Insert data
+    let task_id = ObjectId::new();
+    db.execute(
+        "INSERT INTO tasks (id, title, completed) VALUES (?, ?, ?)",
+        params![task_id.to_string(), "Learn Groove", false]
+    )?;
+
+    // Query data
+    let tasks = db.query("SELECT * FROM tasks", &[])?;
+    for task in tasks {
+        println!("Task: {:?}", task);
+    }
+
+    // Subscribe to changes
+    db.subscribe(
+        "SELECT * FROM tasks WHERE completed = ?",
+        params![false],
+        |tasks| {
+            println!("Active tasks updated: {} tasks", tasks.len());
+        }
+    )?;
+
+    Ok(())
+}
+```
+
+## Module Overview
+
+| Module | Purpose |
+|--------|---------|
+| `groove::sql` | SQL parser and database |
+| `groove::object` | ObjectId and object primitives |
+| `groove::node` | LocalNode for managing objects |
+| `groove::commit` | Commit graph operations |
+| `groove::merge` | CRDT merge strategies |

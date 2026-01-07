@@ -1,0 +1,106 @@
+---
+title: Database
+description: Creating and managing Groove databases
+---
+
+The `Database` struct is the main entry point for SQL operations in Groove.
+
+## Creating a Database
+
+```rust title="database.rs"
+use groove::sql::{Database, params};
+use groove::storage::{MemoryStorage, SqliteStorage};
+use groove::object::ObjectId;
+
+// Create a database with in-memory storage
+pub fn create_memory_db() -> Result<Database, Box<dyn std::error::Error>> {
+    let storage = MemoryStorage::new();
+    let mut db = Database::new(storage);
+
+    // Initialize schema
+    db.execute("CREATE TABLE tasks (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT,
+        completed BOOLEAN DEFAULT false,
+        created_at INTEGER DEFAULT (strftime('%s', 'now'))
+    )", &[])?;
+
+    Ok(db)
+}
+
+// Create a database with persistent SQLite storage
+pub fn create_persistent_db(path: &str) -> Result<Database, Box<dyn std::error::Error>> {
+    let storage = SqliteStorage::open(path)?;
+    let mut db = Database::new(storage);
+
+    // Schema is persisted, only create if not exists
+    db.execute("CREATE TABLE IF NOT EXISTS tasks (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT,
+        completed BOOLEAN DEFAULT false,
+        created_at INTEGER DEFAULT (strftime('%s', 'now'))
+    )", &[])?;
+
+    Ok(db)
+}
+
+// Example usage
+pub fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = create_memory_db()?;
+
+    // Insert a task
+    let task_id = ObjectId::new();
+    db.execute(
+        "INSERT INTO tasks (id, title, description) VALUES (?, ?, ?)",
+        params![
+            task_id.to_string(),
+            "Build feature X",
+            "Implement the new feature with tests"
+        ]
+    )?;
+
+    // Query tasks
+    let tasks = db.query("SELECT * FROM tasks", &[])?;
+    println!("Found {} tasks", tasks.len());
+
+    Ok(())
+}
+```
+
+## Schema Definition
+
+Define tables using SQL DDL:
+
+```rust
+db.execute("CREATE TABLE tasks (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    completed BOOLEAN DEFAULT false
+)")?;
+```
+
+## Executing Statements
+
+```rust
+// Insert
+db.execute("INSERT INTO tasks (id, title) VALUES (?, ?)",
+    params!["task1", "Buy groceries"])?;
+
+// Update
+db.execute("UPDATE tasks SET completed = ? WHERE id = ?",
+    params![true, "task1"])?;
+
+// Delete
+db.execute("DELETE FROM tasks WHERE id = ?", params!["task1"])?;
+```
+
+## Querying
+
+```rust
+let tasks: Vec<Task> = db.query(
+    "SELECT * FROM tasks WHERE completed = ?",
+    params![false]
+)?;
+```

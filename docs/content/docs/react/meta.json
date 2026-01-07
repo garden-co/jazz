@@ -1,0 +1,4 @@
+{
+  "title": "React API",
+  "pages": ["index", "provider", "hooks", "subscriptions"]
+}

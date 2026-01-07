@@ -1,0 +1,4 @@
+{
+  "title": "Comparisons",
+  "pages": ["index", "vs-firebase", "vs-supabase", "vs-electric-sql"]
+}

@@ -1,0 +1,82 @@
+---
+title: JazzClient
+description: The core client for interacting with Jazz
+---
+
+`JazzClient` is the main entry point for the Jazz JavaScript API.
+
+## Creating a Client
+
+```typescript title="client.ts"
+import { JazzClient } from '@jazz/client';
+import { schema } from './generated/schema';
+
+export async function createClient() {
+  // Load WASM module
+  const wasmResponse = await fetch('/groove_wasm_bg.wasm');
+  const wasmBuffer = await wasmResponse.arrayBuffer();
+  const wasm = await WebAssembly.compile(wasmBuffer);
+
+  // Create client with configuration
+  const client = new JazzClient({
+    wasm,
+    schema,
+    storage: {
+      type: 'indexeddb',
+      name: 'jazz-db',
+      version: 1,
+    },
+    sync: {
+      server: 'wss://sync.jazz.tools',
+      reconnect: true,
+      reconnectDelay: 1000,
+    },
+  });
+
+  // Initialize database with schema
+  await client.loadSchema();
+
+  return client;
+}
+
+// Usage
+const client = await createClient();
+```
+
+## Client Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `wasm` | `WebAssembly.Module` | The Groove WASM module |
+| `schema` | `Schema` | Generated schema metadata |
+| `storage` | `Storage` | Optional persistent storage |
+
+## Client Methods
+
+### execute
+
+Execute a SQL statement:
+
+```typescript
+await client.execute('INSERT INTO tasks (title) VALUES (?)', ['New task']);
+```
+
+### query
+
+Execute a SELECT query and get results:
+
+```typescript
+const tasks = await client.query('SELECT * FROM tasks');
+```
+
+### subscribe
+
+Subscribe to a query for live updates:
+
+```typescript
+const unsubscribe = client.subscribe(
+  'SELECT * FROM tasks WHERE completed = ?',
+  [false],
+  (tasks) => console.log('Active tasks:', tasks)
+);
+```

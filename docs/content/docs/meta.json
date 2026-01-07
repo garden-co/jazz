@@ -1,0 +1,15 @@
+{
+  "title": "Jazz",
+  "pages": [
+    "index",
+    "---Guides---",
+    "...concepts",
+    "---API Reference---",
+    "...react",
+    "...javascript",
+    "...rust",
+    "---Deep Dives---",
+    "...internals",
+    "...comparisons"
+  ]
+}

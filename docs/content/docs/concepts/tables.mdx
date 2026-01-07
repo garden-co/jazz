@@ -1,0 +1,67 @@
+---
+title: Tables and Rows
+description: SQL-like tables with row-level versioning
+---
+
+Jazz provides a SQL interface for defining and querying data, but with an important twist: each row is an Object with its own commit history.
+
+## Defining Tables
+
+Tables are defined using standard SQL DDL:
+
+```sql title="schema.sql"
+CREATE TABLE users (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    email TEXT UNIQUE NOT NULL,
+    created_at INTEGER DEFAULT (strftime('%s', 'now'))
+);
+
+CREATE TABLE tasks (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT,
+    completed BOOLEAN DEFAULT false,
+    user_id TEXT NOT NULL,
+    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+```
+
+## Row-Level Versioning
+
+Unlike traditional databases where the entire table is a single unit, in Jazz:
+
+- Each row has its own ObjectId
+- Rows can be synced independently
+- Conflicts are resolved per-row, not per-table
+- Permissions can be set per-row
+
+## Working with Tables
+
+After defining your schema, Jazz generates type-safe client code:
+
+```typescript title="generated/types.ts"
+// Auto-generated from schema.sql
+
+export interface User {
+  id: string;
+  name: string;
+  email: string;
+  created_at: number;
+}
+
+export interface Task {
+  id: string;
+  title: string;
+  description: string | null;
+  completed: boolean;
+  user_id: string;
+  created_at: number;
+}
+
+export interface Tables {
+  users: Table<User>;
+  tasks: Table<Task>;
+}
+```

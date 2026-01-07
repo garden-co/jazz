@@ -1,0 +1,54 @@
+---
+title: Architecture
+description: How Jazz is structured internally
+---
+
+Jazz is built in layers, with Rust at the core compiled to WebAssembly for browser use.
+
+## Layer Overview
+
+### Groove (Rust Core)
+
+The `groove` crate contains:
+
+- **SQL parser and executor**: Full SQL support with query planning
+- **Object system**: ObjectId generation, commit graphs, branching/merging
+- **Query graph**: Incremental query computation
+- **Storage traits**: Abstract storage for different backends
+
+### groove-wasm
+
+WebAssembly bindings exposing Groove to JavaScript:
+
+- Compiles Groove to WASM
+- Provides JS-friendly API
+- Handles serialization between Rust and JS
+
+### @jazz/client
+
+TypeScript client library:
+
+- Wraps groove-wasm with ergonomic API
+- Manages subscriptions and callbacks
+- Provides type-safe query interface
+
+### @jazz/react
+
+React integration:
+
+- React context for Jazz client
+- Hooks for queries and mutations
+- Automatic subscription management
+
+## Why Rust + WASM?
+
+1. **Performance**: SQL execution and query computation in native-speed WASM
+2. **Shared code**: Same logic runs in browser and on server
+3. **Memory safety**: Rust prevents entire classes of bugs
+4. **Size**: WASM compresses well (~200KB gzipped)
+
+## Trade-offs
+
+- **Build complexity**: Requires wasm-pack toolchain
+- **Debugging**: WASM stack traces less readable than JS
+- **Bundle size**: Adds to initial page load

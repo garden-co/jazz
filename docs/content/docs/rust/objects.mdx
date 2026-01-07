@@ -1,0 +1,144 @@
+---
+title: Objects
+description: Working with Objects and ObjectIds in Rust
+---
+
+Every piece of data in Groove is an Object with a unique ObjectId.
+
+## ObjectId
+
+```rust title="objects.rs"
+use groove::object::ObjectId;
+use groove::node::LocalNode;
+use groove::storage::MemoryStorage;
+use groove::commit::{Commit, CommitGraph};
+
+pub fn object_examples() -> Result<(), Box<dyn std::error::Error>> {
+    // Generate new ObjectIds (UUIDv7 with Crockford Base32 encoding)
+    let obj_id = ObjectId::new();
+    println!("Generated ObjectId: {}", obj_id);
+
+    // Parse from string
+    let parsed_id: ObjectId = "01HXY2Z3456789ABCDEFGHJ".parse()?;
+    println!("Parsed ObjectId: {}", parsed_id);
+
+    // ObjectIds are sortable by creation time (UUIDv7)
+    let id1 = ObjectId::new();
+    std::thread::sleep(std::time::Duration::from_millis(1));
+    let id2 = ObjectId::new();
+    assert!(id1 < id2, "Later IDs sort after earlier IDs");
+
+    // Work with LocalNode to manage objects
+    let storage = MemoryStorage::new();
+    let mut node = LocalNode::new(storage);
+
+    // Create a new object
+    let object = node.create_object()?;
+    println!("Created object: {}", object.id);
+
+    // Make changes to the object (creates commits)
+    node.update(&object.id, |obj| {
+        obj.set("title", "My first object")?;
+        obj.set("counter", 0)?;
+        Ok(())
+    })?;
+
+    // Get current commit
+    let head = node.head(&object.id)?;
+    println!("Current commit: {}", head);
+
+    // Get commit history
+    let commits = node.commits(&object.id)?;
+    println!("Object has {} commits", commits.len());
+
+    Ok(())
+}
+
+pub fn commit_graph_example() -> Result<(), Box<dyn std::error::Error>> {
+    let storage = MemoryStorage::new();
+    let mut node = LocalNode::new(storage);
+
+    // Create object
+    let object = node.create_object()?;
+
+    // Make initial commit
+    node.update(&object.id, |obj| {
+        obj.set("value", 1)?;
+        Ok(())
+    })?;
+
+    // Create a branch
+    let branch_id = node.branch(&object.id)?;
+
+    // Make changes on main branch
+    node.update(&object.id, |obj| {
+        obj.set("value", 2)?;
+        Ok(())
+    })?;
+
+    // Make changes on branch
+    node.update(&branch_id, |obj| {
+        obj.set("value", 3)?;
+        Ok(())
+    })?;
+
+    // Merge branches (CRDT merge)
+    let merged = node.merge(&object.id, &branch_id)?;
+    println!("Merged to: {}", merged);
+
+    // The merge resolves conflicts using CRDT rules
+    let value = node.get(&object.id, "value")?;
+    println!("Merged value: {:?}", value);
+
+    Ok(())
+}
+```
+
+## Creating Objects
+
+```rust
+use groove::object::ObjectId;
+
+// Generate a new ObjectId (UUIDv7)
+let id = ObjectId::new();
+
+// Parse from string
+let id: ObjectId = "01HXYZ...".parse()?;
+
+// Display as Crockford Base32
+println!("Object ID: {}", id);
+```
+
+## LocalNode
+
+The `LocalNode` manages objects and their commit history:
+
+```rust
+use groove::node::LocalNode;
+
+let mut node = LocalNode::new();
+
+// Create a new object
+let obj = node.create_object();
+
+// Make changes (creates commits)
+node.update(&obj.id, /* ... */)?;
+
+// Get commit history
+let commits = node.commits(&obj.id);
+```
+
+## Commit Graph
+
+Each object maintains a git-like commit graph:
+
+```rust
+// Get current commit
+let head = node.head(&obj.id)?;
+
+// Branch from current state
+let branch = node.branch(&obj.id)?;
+
+// Merge branches
+node.merge(&obj.id, &branch.id)?;
+```

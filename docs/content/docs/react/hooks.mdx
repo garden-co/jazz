@@ -1,0 +1,147 @@
+---
+title: React Hooks
+description: Hooks for querying and mutating Jazz data
+---
+
+Jazz provides React hooks for interacting with your data.
+
+## useQuery
+
+Subscribe to a SQL query with automatic updates:
+
+```tsx title="TaskList.tsx"
+import { useQuery } from '@jazz/react';
+import type { Task } from '../generated/types';
+
+export function TaskList() {
+  const { data: tasks, loading, error } = useQuery<Task>(
+    'SELECT * FROM tasks WHERE completed = ? ORDER BY created_at DESC',
+    [false]
+  );
+
+  if (loading) {
+    return <div>Loading tasks...</div>;
+  }
+
+  if (error) {
+    return <div>Error: {error.message}</div>;
+  }
+
+  return (
+    <ul>
+      {tasks.map(task => (
+        <li key={task.id}>
+          <h3>{task.title}</h3>
+          {task.description && <p>{task.description}</p>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+```
+
+### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `query` | `string` | SQL SELECT query |
+| `params` | `unknown[]` | Query parameters (optional) |
+
+### Returns
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `data` | `T[]` | Query results |
+| `loading` | `boolean` | Initial loading state |
+| `error` | `Error \| null` | Query error, if any |
+
+## useRow
+
+Subscribe to a single row by its ID:
+
+```tsx title="TaskDetail.tsx"
+import { useRow } from '@jazz/react';
+import type { Task } from '../generated/types';
+
+interface TaskDetailProps {
+  taskId: string;
+}
+
+export function TaskDetail({ taskId }: TaskDetailProps) {
+  const { data: task, loading, error } = useRow<Task>('tasks', taskId);
+
+  if (loading) {
+    return <div>Loading task...</div>;
+  }
+
+  if (error || !task) {
+    return <div>Task not found</div>;
+  }
+
+  return (
+    <article>
+      <h2>{task.title}</h2>
+      {task.description && <p>{task.description}</p>}
+      <div>
+        Status: {task.completed ? 'Completed' : 'Active'}
+      </div>
+      <div>
+        Created: {new Date(task.created_at * 1000).toLocaleDateString()}
+      </div>
+    </article>
+  );
+}
+```
+
+## useMutation
+
+Get typed mutation functions:
+
+```tsx title="TaskForm.tsx"
+import { useState } from 'react';
+import { useMutation } from '@jazz/react';
+
+export function TaskForm() {
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const { insert } = useMutation('tasks');
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    await insert({
+      title,
+      description: description || null,
+      completed: false,
+    });
+
+    // Reset form
+    setTitle('');
+    setDescription('');
+  };
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <div>
+        <label htmlFor="title">Title</label>
+        <input
+          id="title"
+          type="text"
+          value={title}
+          onChange={e => setTitle(e.target.value)}
+          required
+        />
+      </div>
+      <div>
+        <label htmlFor="description">Description</label>
+        <textarea
+          id="description"
+          value={description}
+          onChange={e => setDescription(e.target.value)}
+        />
+      </div>
+      <button type="submit">Create Task</button>
+    </form>
+  );
+}
+```

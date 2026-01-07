@@ -1,0 +1,31 @@
+---
+title: Key Concepts
+description: Understanding the core concepts behind Jazz
+---
+
+Jazz is built on a few fundamental concepts that enable real-time sync and collaboration.
+
+## Objects
+
+The fundamental unit in Jazz is an **Object**, identified by an `ObjectId` (UUIDv7 with Crockford Base32 encoding). Each object has its own commit graph—like a miniature git repository—enabling fine-grained sync and conflict resolution.
+
+## Tables and Rows
+
+Jazz provides a SQL-like interface where each table row is an Object with its own commit history. This enables:
+
+- Per-row conflict resolution
+- Fine-grained sync (only changed rows propagate)
+- Row-level permissions
+
+## Incremental Queries
+
+Queries in Jazz are not just one-time operations—they're computation graphs that propagate changes efficiently. When underlying data changes, only affected parts of the query result are recomputed.
+
+## Local-First Architecture
+
+Data lives on the client first:
+
+1. Mutations apply instantly to local state
+2. UI updates immediately (no loading spinners)
+3. Changes sync to other clients and servers in the background
+4. Conflicts are resolved automatically using CRDTs

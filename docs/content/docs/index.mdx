@@ -1,0 +1,50 @@
+---
+title: Introduction
+description: Jazz is a distributed database that syncs across frontend, backend, and cloud
+---
+
+Jazz is a distributed database designed for building real-time, collaborative applications. It syncs data seamlessly across frontend, backend, and cloud environments.
+
+## What is Jazz?
+
+Jazz provides:
+
+- **Local-first architecture**: Data lives on the client first, enabling instant UI updates
+- **Automatic sync**: Changes propagate across all connected clients and servers
+- **SQL interface**: Familiar query language with incremental computation
+- **Fine-grained permissions**: Row-level access control with ReBAC policies
+
+## Quick Example
+
+Here's a simple React app using Jazz:
+
+```tsx title="App.tsx"
+import { JazzProvider } from '@jazz/react';
+import { TaskList } from './components/TaskList';
+import { TaskForm } from './components/TaskForm';
+import { useJazzClient } from './client';
+
+export default function App() {
+  const client = useJazzClient();
+
+  if (!client) {
+    return <div>Loading Jazz...</div>;
+  }
+
+  return (
+    <JazzProvider value={client}>
+      <main className="container mx-auto p-4">
+        <h1 className="text-2xl font-bold mb-4">Task Manager</h1>
+        <TaskForm />
+        <TaskList />
+      </main>
+    </JazzProvider>
+  );
+}
+```
+
+## Next Steps
+
+- [Key Concepts](/docs/concepts) - Understand the core ideas behind Jazz
+- [React API](/docs/react) - Build React apps with Jazz
+- [JavaScript API](/docs/javascript) - Use Jazz in any JavaScript environment
