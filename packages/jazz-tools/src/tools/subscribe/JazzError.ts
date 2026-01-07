@@ -70,7 +70,10 @@ export function fillErrorWithJazzErrorInfo(
   }
 
   errorBase.message = jazzError.toString();
-  errorBase.name = `jazz-error-${jazzError.type}`;
+
+  Object.defineProperty(errorBase, "@jazzErrorType", {
+    value: jazzError.type,
+  });
 
   return errorBase;
 }
@@ -78,8 +81,12 @@ export function fillErrorWithJazzErrorInfo(
 export function getJazzErrorType(
   error: unknown,
 ): CoValueErrorState | "unknown" {
-  if (error instanceof Error && error.name.startsWith("jazz-error-")) {
-    return error.name.replace("jazz-error-", "") as CoValueErrorState;
+  if (
+    error instanceof Error &&
+    "@jazzErrorType" in error &&
+    typeof error["@jazzErrorType"] === "string"
+  ) {
+    return error["@jazzErrorType"] as CoValueErrorState;
   }
 
   return "unknown";
