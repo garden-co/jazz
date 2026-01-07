@@ -11,6 +11,7 @@ Jazz can be integrated with [Clerk](https://clerk.com/) to authenticate users. T
 ## How it works
 
 When using Clerk authentication:
+
 1. Users sign up or sign in through Clerk's authentication system
 2. Jazz securely stores the user's account keys with Clerk
 3. When logging in, Jazz retrieves these keys from Clerk
@@ -29,15 +30,31 @@ This authentication method is not fully local-first, as login and signup need to
 ## Implementation
 
 <ContentByFramework framework="react">
-Use `<JazzReactProviderWithClerk />` to wrap your app:
+  Use `<JazzReactProviderWithClerk />` to wrap your app:
 </ContentByFramework>
 
 <ContentByFramework framework="react-native-expo">
-Use `<JazzExpoProviderWithClerk />` to wrap your app.
+  Use `<JazzExpoProviderWithClerk />` to wrap your app.
 </ContentByFramework>
 
 <ContentByFramework framework="svelte">
-Wrap your app with `ClerkProvider` and a wrapper component that uses `<JazzSvelteProviderWithClerk />`:
+The Clerk provider for Svelte depends on the community package `svelte-clerk`. Install it first:
+
+<TabbedCodeGroup
+  id="install-svelte-clerk"
+  default="pnpm"
+  savedPreferenceKey="package-manager"
+>
+  <TabbedCodeGroupItem label="npm">
+    ```sh npm install svelte-clerk ```
+  </TabbedCodeGroupItem>
+  <TabbedCodeGroupItem label="pnpm">
+    ```sh pnpm add svelte-clerk ```
+  </TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+Then wrap your app with `ClerkProvider` and a wrapper component that uses `<JazzSvelteProviderWithClerk />`:
+
 </ContentByFramework>
 
 <ContentByFramework framework="react">
