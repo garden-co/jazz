@@ -8,56 +8,39 @@ The `Database` struct is the main entry point for SQL operations in Groove.
 ## Creating a Database
 
 ```rust title="database.rs"
-use groove::sql::{Database, params};
-use groove::storage::{MemoryStorage, SqliteStorage};
+use groove::sql::Database;
 use groove::object::ObjectId;
 
-// Create a database with in-memory storage
-pub fn create_memory_db() -> Result<Database, Box<dyn std::error::Error>> {
-    let storage = MemoryStorage::new();
-    let mut db = Database::new(storage);
+// Create an in-memory database
+pub fn create_memory_db() -> Database {
+    let db = Database::in_memory();
 
     // Initialize schema
-    db.execute("CREATE TABLE tasks (
-        id TEXT PRIMARY KEY,
-        title TEXT NOT NULL,
-        description TEXT,
-        completed BOOLEAN DEFAULT false,
-        created_at INTEGER DEFAULT (strftime('%s', 'now'))
-    )", &[])?;
+    db.init_schema("
+        CREATE TABLE tasks (
+            id STRING NOT NULL,
+            title STRING NOT NULL,
+            description STRING,
+            completed BOOL NOT NULL
+        )
+    ");
 
-    Ok(db)
-}
-
-// Create a database with persistent SQLite storage
-pub fn create_persistent_db(path: &str) -> Result<Database, Box<dyn std::error::Error>> {
-    let storage = SqliteStorage::open(path)?;
-    let mut db = Database::new(storage);
-
-    // Schema is persisted, only create if not exists
-    db.execute("CREATE TABLE IF NOT EXISTS tasks (
-        id TEXT PRIMARY KEY,
-        title TEXT NOT NULL,
-        description TEXT,
-        completed BOOLEAN DEFAULT false,
-        created_at INTEGER DEFAULT (strftime('%s', 'now'))
-    )", &[])?;
-
-    Ok(db)
+    db
 }
 
 // Example usage
 pub fn example() -> Result<(), Box<dyn std::error::Error>> {
-    let mut db = create_memory_db()?;
+    let db = create_memory_db();
 
     // Insert a task
-    let task_id = ObjectId::new();
+    let task_id = ObjectId::new_random();
     db.execute(
-        "INSERT INTO tasks (id, title, description) VALUES (?, ?, ?)",
-        params![
-            task_id.to_string(),
-            "Build feature X",
-            "Implement the new feature with tests"
+        "INSERT INTO tasks (id, title, description, completed) VALUES (?, ?, ?, ?)",
+        &[
+            task_id.to_string().into(),
+            "Build feature X".into(),
+            "Implement the new feature with tests".into(),
+            false.into()
         ]
     )?;
 
@@ -71,36 +54,82 @@ pub fn example() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Schema Definition
 
-Define tables using SQL DDL:
+Define tables using Groove's SQL DDL:
 
 ```rust
-db.execute("CREATE TABLE tasks (
-    id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    completed BOOLEAN DEFAULT false
-)")?;
+db.init_schema("
+    CREATE TABLE tasks (
+        id STRING NOT NULL,
+        title STRING NOT NULL,
+        completed BOOL NOT NULL,
+        user REFERENCES users
+    )
+");
 ```
+
+### Supported Column Types
+
+| Type | Description |
+|------|-------------|
+| `BOOL` | Boolean value |
+| `I32` | 32-bit signed integer |
+| `U32` | 32-bit unsigned integer |
+| `I64` | 64-bit signed integer |
+| `F64` | 64-bit float |
+| `STRING` | UTF-8 text |
+| `BYTES` | Binary data |
+| `BLOB` | Large binary data |
+| `REFERENCES TableName` | Foreign key |
 
 ## Executing Statements
 
 ```rust
 // Insert
-db.execute("INSERT INTO tasks (id, title) VALUES (?, ?)",
-    params!["task1", "Buy groceries"])?;
+db.execute(
+    "INSERT INTO tasks (id, title, completed) VALUES (?, ?, ?)",
+    &["task1".into(), "Buy groceries".into(), false.into()]
+)?;
 
 // Update
-db.execute("UPDATE tasks SET completed = ? WHERE id = ?",
-    params![true, "task1"])?;
+db.execute(
+    "UPDATE tasks SET completed = ? WHERE id = ?",
+    &[true.into(), "task1".into()]
+)?;
 
 // Delete
-db.execute("DELETE FROM tasks WHERE id = ?", params!["task1"])?;
+db.execute(
+    "DELETE FROM tasks WHERE id = ?",
+    &["task1".into()]
+)?;
 ```
 
 ## Querying
 
 ```rust
-let tasks: Vec<Task> = db.query(
-    "SELECT * FROM tasks WHERE completed = ?",
-    params![false]
+// Simple query
+let tasks = db.query("SELECT * FROM tasks WHERE completed = ?", &[false.into()])?;
+
+// With JOIN
+let tasks_with_users = db.query(
+    "SELECT tasks.*, users.name FROM tasks JOIN users ON tasks.user = users.id",
+    &[]
 )?;
+
+// With LIMIT and OFFSET
+let page = db.query("SELECT * FROM tasks LIMIT 10 OFFSET 0", &[])?;
+```
+
+## Working with Results
+
+Query results are returned as rows that can be accessed by column name:
+
+```rust
+let rows = db.query("SELECT * FROM tasks", &[])?;
+
+for row in rows {
+    let id: String = row.get("id")?;
+    let title: String = row.get("title")?;
+    let completed: bool = row.get("completed")?;
+    println!("{}: {} (completed: {})", id, title, completed);
+}
 ```

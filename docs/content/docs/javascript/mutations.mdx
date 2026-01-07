@@ -3,123 +3,141 @@ title: Mutations
 description: Inserting, updating, and deleting data
 ---
 
-Jazz provides type-safe mutations generated from your schema.
+Jazz provides type-safe mutations through the generated client API.
 
-## Using Generated Mutations
+## Using the Generated Client
 
 ```typescript title="mutations/using-client.ts"
-import { client } from '../client';
+import { app } from '../generated/client';
+import { createDatabase } from '../generated/client';
 
-// Insert a new task
-const newTask = await client.tables.tasks.insert({
+// Get a bound database instance
+const db = createDatabase(wasmDb);
+
+// Or use the app directly with db parameter
+// Create a new task
+const taskId = app.tasks.create(db, {
   title: 'Complete project documentation',
   description: 'Write comprehensive docs for all modules',
   completed: false,
-  user_id: 'user-123',
 });
 
-console.log('Created task with ID:', newTask.id);
+console.log('Created task with ID:', taskId);
 
 // Update an existing task
-await client.tables.tasks.update(newTask.id, {
+app.tasks.update(db, taskId, {
   completed: true,
 });
 
 // Partial update (only specified fields)
-await client.tables.tasks.update(newTask.id, {
+app.tasks.update(db, taskId, {
   description: 'Updated description',
 });
 
 // Delete a task
-await client.tables.tasks.delete(newTask.id);
-
-// Bulk insert
-const taskIds = await Promise.all([
-  client.tables.tasks.insert({ title: 'Task 1', completed: false }),
-  client.tables.tasks.insert({ title: 'Task 2', completed: false }),
-  client.tables.tasks.insert({ title: 'Task 3', completed: false }),
-]);
+app.tasks.delete(db, taskId);
 ```
 
-## Insert
+## Create
+
+Returns the ObjectId of the new row:
 
 ```typescript
-const task = await client.tables.tasks.insert({
+const id = app.tasks.create(db, {
   title: 'New task',
   completed: false,
 });
-console.log('Created task:', task.id);
+console.log('Created task:', id);
 ```
 
 ## Update
 
+Update one or more fields:
+
 ```typescript
-await client.tables.tasks.update(taskId, {
+app.tasks.update(db, taskId, {
+  completed: true,
+});
+
+// Update multiple fields
+app.tasks.update(db, taskId, {
+  title: 'Updated title',
+  description: 'Updated description',
   completed: true,
 });
 ```
 
 ## Delete
 
-```typescript
-await client.tables.tasks.delete(taskId);
-```
-
-## Raw SQL Mutations
-
-For complex mutations, you can use raw SQL:
+Remove a row by ID:
 
 ```typescript
-await client.execute(`
-  UPDATE tasks
-  SET completed = true
-  WHERE due_date < date('now')
-`);
+app.tasks.delete(db, taskId);
 ```
 
-## Transactions
+## With React Hooks
 
-Jazz automatically wraps each mutation in a transaction. For multiple operations:
+Use `useJazz()` to get the database instance:
 
-```typescript title="mutations/transactions.ts"
-import { client } from '../client';
+```tsx title="CreateTask.tsx"
+import { useJazz } from '@jazz/react';
+import { app } from '../generated/client';
 
-// Execute multiple operations in a transaction
-await client.transaction(async (tx) => {
-  // Create a user
-  const user = await tx.tables.users.insert({
-    name: 'Alice Johnson',
-    email: 'alice@example.com',
-  });
+function CreateTaskButton() {
+  const db = useJazz();
 
-  // Create tasks for the user
-  await tx.tables.tasks.insert({
-    title: 'Setup development environment',
-    completed: false,
-    user_id: user.id,
-  });
+  const handleCreate = () => {
+    const id = app.tasks.create(db, {
+      title: 'New task',
+      completed: false,
+    });
+    console.log('Created:', id);
+  };
 
-  await tx.tables.tasks.insert({
-    title: 'Review architecture',
-    completed: false,
-    user_id: user.id,
-  });
+  return <button onClick={handleCreate}>Create Task</button>;
+}
+```
 
-  // If any operation fails, the entire transaction is rolled back
+## Creating Related Data
+
+When creating rows with foreign key references, pass the ObjectId:
+
+```typescript
+// Create a project first
+const projectId = app.projects.create(db, {
+  name: 'My Project',
+  color: 'blue',
 });
 
-// Using raw SQL in a transaction
-await client.transaction(async (tx) => {
-  // Mark all tasks as completed for a user
-  await tx.execute(
-    'UPDATE tasks SET completed = ? WHERE user_id = ?',
-    [true, 'user-123']
-  );
-
-  // Update user's last activity timestamp
-  await tx.execute(
-    'UPDATE users SET last_active = ? WHERE id = ?',
-    [Date.now(), 'user-123']
-  );
+// Create an issue referencing the project
+const issueId = app.issues.create(db, {
+  title: 'New issue',
+  status: 'open',
+  priority: 'medium',
+  project: projectId,  // Reference the project
 });
+
+// Create a label for the issue (many-to-many via join table)
+const labelId = app.labels.create(db, {
+  name: 'bug',
+  color: 'red',
+});
+
+app.issuelabels.create(db, {
+  issue: issueId,
+  label: labelId,
+});
+```
+
+## Mutations and Subscriptions
+
+When you mutate data, all active subscriptions are automatically notified:
+
+```typescript
+// Subscription set up elsewhere
+const [tasks, loading] = useAll(app.tasks.where({ completed: false }));
+
+// When you create a task, the subscription updates
+app.tasks.create(db, { title: 'New', completed: false });
+// tasks array now includes the new task
 ```

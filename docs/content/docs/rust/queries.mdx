@@ -17,7 +17,6 @@ struct Task {
     title: String,
     description: Option<String>,
     completed: bool,
-    created_at: i64,
 }
 
 pub fn query_examples(db: &Database) -> Result<(), Box<dyn std::error::Error>> {
@@ -31,43 +30,23 @@ pub fn query_examples(db: &Database) -> Result<(), Box<dyn std::error::Error>> {
         params![false]
     )?;
 
-    // Deserialize to structs
-    let tasks: Vec<Task> = active_tasks
-        .into_iter()
-        .map(|row| row.deserialize())
-        .collect::<Result<Vec<_>, _>>()?;
-
-    for task in tasks {
-        println!("Task: {} - {}", task.id, task.title);
-    }
-
     // Query with JOIN
     let task_users = db.query(
         "SELECT
             tasks.id,
             tasks.title,
-            users.name as user_name
+            users.name
          FROM tasks
          JOIN users ON tasks.user_id = users.id
          WHERE tasks.completed = ?",
         params![false]
     )?;
 
-    // Aggregate query
-    let counts = db.query(
-        "SELECT
-            completed,
-            COUNT(*) as count
-         FROM tasks
-         GROUP BY completed",
+    // With LIMIT and OFFSET
+    let paginated = db.query(
+        "SELECT * FROM tasks LIMIT 10 OFFSET 0",
         &[]
     )?;
-
-    for row in counts {
-        let completed: bool = row.get("completed")?;
-        let count: i64 = row.get("count")?;
-        println!("Completed={}: {} tasks", completed, count);
-    }
 
     Ok(())
 }
@@ -75,92 +54,41 @@ pub fn query_examples(db: &Database) -> Result<(), Box<dyn std::error::Error>> {
 
 ## Incremental Queries
 
-For live-updating queries, use the query graph system:
+For live-updating queries, use the `IncrementalQuery` system:
 
 ```rust title="incremental.rs"
-use groove::sql::{Database, params};
-use groove::sql::query_graph::{QueryGraph, QueryNode};
-use std::sync::{Arc, Mutex};
+use groove::sql::{Database, IncrementalQuery};
 
 pub fn incremental_query_example(
     db: &mut Database
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Create a query graph for incremental computation
-    let mut graph = QueryGraph::new();
-
-    // Parse and build query graph
-    let query = "SELECT * FROM tasks WHERE completed = ? ORDER BY created_at DESC";
-    let root = graph.build_from_sql(query)?;
-
-    // Subscribe to incremental updates
-    let results = Arc::new(Mutex::new(Vec::new()));
-    let results_clone = results.clone();
-
-    db.subscribe_incremental(
-        &graph,
-        root,
-        params![false],
-        move |delta| {
-            let mut results = results_clone.lock().unwrap();
-
-            // Apply delta to results
-            for addition in &delta.additions {
-                results.push(addition.clone());
-            }
-
-            for removal in &delta.removals {
-                results.retain(|r| r != removal);
-            }
-
-            println!("Results updated: {} total rows", results.len());
-        }
+    // Create an incremental query
+    let query = IncrementalQuery::new(
+        "SELECT * FROM tasks WHERE completed = ?",
+        &[false.into()]
     )?;
 
-    // Now when data changes, only affected parts are recomputed
+    // Subscribe to updates
+    let listener_id = db.subscribe(&query, |rows, delta| {
+        println!("Results updated: {} total rows", rows.len());
+
+        // Delta contains what changed
+        for added in &delta.added {
+            println!("  Added: {:?}", added);
+        }
+        for removed in &delta.removed {
+            println!("  Removed: {:?}", removed);
+        }
+    });
+
+    // Changes automatically propagate to subscribers
     db.execute(
         "INSERT INTO tasks (id, title, completed) VALUES (?, ?, ?)",
         params!["task-1", "New task", false]
     )?;
-    // Subscription callback is called with delta
 
-    db.execute(
-        "UPDATE tasks SET completed = ? WHERE id = ?",
-        params![true, "task-1"]
-    )?;
-    // Subscription callback is called again with delta
-
-    Ok(())
-}
-
-// Example with complex query graph
-pub fn complex_incremental_example(
-    db: &mut Database
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut graph = QueryGraph::new();
-
-    // Build query graph with joins and aggregates
-    let query = "
-        SELECT
-            users.name,
-            COUNT(tasks.id) as task_count,
-            SUM(CASE WHEN tasks.completed THEN 1 ELSE 0 END) as completed_count
-        FROM users
-        LEFT JOIN tasks ON users.id = tasks.user_id
-        GROUP BY users.id, users.name
-    ";
-
-    let root = graph.build_from_sql(query)?;
-
-    db.subscribe_incremental(&graph, root, &[], |delta| {
-        println!("User task counts updated:");
-        for row in &delta.additions {
-            println!("  {}: {} tasks ({} completed)",
-                row.get::<String>("name").unwrap(),
-                row.get::<i64>("task_count").unwrap(),
-                row.get::<i64>("completed_count").unwrap()
-            );
-        }
-    })?;
+    // Unsubscribe when done
+    db.unsubscribe(listener_id);
 
     Ok(())
 }
@@ -168,15 +96,37 @@ pub fn complex_incremental_example(
 
 ## Query Graph Nodes
 
-The incremental query system builds a computation graph:
+The incremental query system builds a computation graph with these node types:
 
 | Node Type | Purpose |
 |-----------|---------|
-| `ScanNode` | Reads from a table |
-| `FilterNode` | Applies WHERE conditions |
-| `ProjectNode` | Selects columns |
-| `JoinNode` | Combines tables |
-| `AggregateNode` | GROUP BY operations |
+| `TableScan` | Reads all row IDs from a table |
+| `IndexLookup` | Uses reverse index for efficient lookups |
+| `Filter` | Applies WHERE conditions |
+| `Join` | Combines tables (INNER JOIN) |
+| `ArrayAggregate` | Aggregates rows for ARRAY subqueries |
+| `LimitOffset` | Applies LIMIT and OFFSET |
+| `RecursiveFilter` | Handles self-referential policies |
+| `Output` | Marks the query output |
+
+## Supported SQL Features
+
+Currently implemented:
+
+- SELECT with column projections
+- FROM with optional table aliases
+- JOIN (INNER only)
+- WHERE with equality conditions (AND)
+- LIMIT and OFFSET
+- ARRAY subqueries: `ARRAY(SELECT ...)`
+
+### Not Yet Implemented
+
+- ORDER BY (results ordered by ObjectId/insertion time)
+- GROUP BY and HAVING
+- Aggregate functions (COUNT, SUM, AVG, MIN, MAX)
+- LEFT/RIGHT/OUTER JOINs
+- Complex subqueries
 
 ## Performance
 

@@ -3,28 +3,23 @@ title: React Hooks
 description: Hooks for querying and mutating Jazz data
 ---
 
-Jazz provides React hooks for interacting with your data.
+Jazz provides React hooks for interacting with your data using the generated type-safe client.
 
-## useQuery
+## useAll
 
-Subscribe to a SQL query with automatic updates:
+Subscribe to multiple rows with automatic updates:
 
 ```tsx title="TaskList.tsx"
-import { useQuery } from '@jazz/react';
-import type { Task } from '../generated/types';
+import { useAll } from '@jazz/react';
+import { app } from '../generated/client';
 
 export function TaskList() {
-  const { data: tasks, loading, error } = useQuery<Task>(
-    'SELECT * FROM tasks WHERE completed = ? ORDER BY created_at DESC',
-    [false]
+  const [tasks, loading] = useAll(
+    app.tasks.where({ completed: false })
   );
 
   if (loading) {
     return <div>Loading tasks...</div>;
-  }
-
-  if (error) {
-    return <div>Error: {error.message}</div>;
   }
 
   return (
@@ -40,41 +35,74 @@ export function TaskList() {
 }
 ```
 
+### With Related Data
+
+Include referenced data using `with()`:
+
+```tsx title="IssueList.tsx"
+import { useAll } from '@jazz/react';
+import { app } from '../generated/client';
+
+export function IssueList() {
+  const [issues, loading] = useAll(
+    app.issues
+      .where({ status: 'open' })
+      .with({
+        project: true,
+        IssueLabels: { label: true },
+        IssueAssignees: { user: true }
+      })
+  );
+
+  if (loading) return <div>Loading...</div>;
+
+  return (
+    <ul>
+      {issues.map(issue => (
+        <li key={issue.id}>
+          <h3>{issue.title}</h3>
+          <span>Project: {issue.project?.name}</span>
+          <span>Labels: {issue.IssueLabels?.map(il => il.label?.name).join(', ')}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+```
+
 ### Parameters
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `query` | `string` | SQL SELECT query |
-| `params` | `unknown[]` | Query parameters (optional) |
+| `query` | `QueryBuilder` | A query builder from the generated client |
 
 ### Returns
 
-| Property | Type | Description |
-|----------|------|-------------|
-| `data` | `T[]` | Query results |
-| `loading` | `boolean` | Initial loading state |
-| `error` | `Error \| null` | Query error, if any |
+| Index | Type | Description |
+|-------|------|-------------|
+| `[0]` | `T[]` | Query results |
+| `[1]` | `boolean` | Loading state |
 
-## useRow
+## useOne
 
 Subscribe to a single row by its ID:
 
 ```tsx title="TaskDetail.tsx"
-import { useRow } from '@jazz/react';
-import type { Task } from '../generated/types';
+import { useOne } from '@jazz/react';
+import { app } from '../generated/client';
 
 interface TaskDetailProps {
   taskId: string;
 }
 
 export function TaskDetail({ taskId }: TaskDetailProps) {
-  const { data: task, loading, error } = useRow<Task>('tasks', taskId);
+  const [task, loading] = useOne(app.tasks, taskId);
 
   if (loading) {
     return <div>Loading task...</div>;
   }
 
-  if (error || !task) {
+  if (!task) {
     return <div>Task not found</div>;
   }
 
@@ -85,31 +113,29 @@ export function TaskDetail({ taskId }: TaskDetailProps) {
       <div>
         Status: {task.completed ? 'Completed' : 'Active'}
       </div>
-      <div>
-        Created: {new Date(task.created_at * 1000).toLocaleDateString()}
-      </div>
     </article>
   );
 }
 ```
 
-## useMutation
+## useMutate
 
 Get typed mutation functions:
 
 ```tsx title="TaskForm.tsx"
 import { useState } from 'react';
-import { useMutation } from '@jazz/react';
+import { useMutate } from '@jazz/react';
+import { app } from '../generated/client';
 
 export function TaskForm() {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const { insert } = useMutation('tasks');
+  const mutate = useMutate();
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
 
-    await insert({
+    app.tasks.create(mutate.db, {
       title,
       description: description || null,
       completed: false,
@@ -142,6 +168,54 @@ export function TaskForm() {
       </div>
       <button type="submit">Create Task</button>
     </form>
+  );
+}
+```
+
+## useJazz
+
+Access the database instance directly:
+
+```tsx title="DirectAccess.tsx"
+import { useJazz } from '@jazz/react';
+import { app } from '../generated/client';
+
+export function DirectAccess() {
+  const db = useJazz();
+
+  const createTask = () => {
+    const id = app.tasks.create(db, {
+      title: 'New task',
+      completed: false
+    });
+    console.log('Created task:', id);
+  };
+
+  return <button onClick={createTask}>Create Task</button>;
+}
+```
+
+## JazzProvider
+
+Wrap your app with `JazzProvider` to make the database available to hooks:
+
+```tsx title="App.tsx"
+import { JazzProvider } from '@jazz/react';
+
+function App() {
+  const [db, setDb] = useState(null);
+
+  useEffect(() => {
+    // Initialize WASM database
+    initDatabase().then(setDb);
+  }, []);
+
+  if (!db) return <div>Loading...</div>;
+
+  return (
+    <JazzProvider database={db}>
+      <YourApp />
+    </JazzProvider>
   );
 }
 ```
