@@ -829,11 +829,10 @@ export class LocalNode {
    *
    * @returns Promise of the current pending store operation, if any.
    */
-  gracefulShutdown(): Promise<unknown> | undefined {
+  async gracefulShutdown(): Promise<unknown> {
     this.garbageCollector?.stop();
-    return this.syncManager
-      .gracefulShutdown()
-      ?.then(() => this.storage?.close());
+    await this.syncManager.gracefulShutdown();
+    return this.storage?.close();
   }
 }
 
