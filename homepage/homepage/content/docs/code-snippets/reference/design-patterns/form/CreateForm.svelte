@@ -15,7 +15,7 @@
 
   const newOrder = new CoState(PartialBubbleTeaOrder, id);
 
-  const handleSave = async (data: any) => {
+  const handleSave = async () => {
     if (me.current.$isLoaded && newOrder.current.$isLoaded) me.current.root.orders.$jazz.push(newOrder.current as co.loaded<typeof BubbleTeaOrder>);
   };
 
