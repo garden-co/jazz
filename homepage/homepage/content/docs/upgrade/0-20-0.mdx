@@ -39,7 +39,7 @@ Providing any other type will throw an error, with the following distinction for
 - Floating-point numbers (e.g., `1.5`) are strictly forbidden and will throw an error.
 - Integers (e.g., `1`) are accepted and will not throw an error, though their usage is deprecated and not supported in the type system anymore.
 
-We expect that this change **does not affect any real usages of Jazz** based on our data from SaaS-hosted projects.
+We expect that this change **will not impact** any projects in our hosted Cloud based on our analysis.
 However, since we do **not have visibility into self-hosted sync server deployments**, we cannot rule out the possibility that your code may rely on the previously allowed unique value types.
 
 If you are migrating from an earlier version and your project passes type-checks, you are almost certainly unaffected.  
