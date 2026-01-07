@@ -598,12 +598,11 @@ function generateTypes(
 function generateColumnDecoder(sqlType: SqlColumnType, varName: string, nullable: boolean): string[] {
   const lines: string[] = [];
 
-  // Special case: nullable refs don't use a presence flag
-  // Instead, we detect null by checking if the first byte is 0 (which can't appear in Base32)
+  // Nullable refs use a presence flag (0x00 = null, 0x01 = present followed by 26-byte ObjectId)
   if (nullable && sqlType.kind === "ref") {
-    lines.push(`    if (bytes[offset] === 0) {`);
+    lines.push(`    const ${varName}Present = bytes[offset++];`);
+    lines.push(`    if (${varName}Present === 0) {`);
     lines.push(`      row.${varName} = null;`);
-    lines.push(`      offset++;`);
     lines.push(`    } else {`);
     lines.push(`      row.${varName} = decodeObjectId(bytes, offset);`);
     lines.push(`      offset += 26;`);
@@ -812,11 +811,11 @@ function generateDecoders(tables: ParsedTable[]): string {
     "",
     "  /**",
     "   * Read a nullable ObjectId ref.",
-    "   * Uses byte-0 detection instead of presence flag since Base32 can't contain byte 0.",
+    "   * Uses presence flag: 0x00 = null, 0x01 = present followed by 26-byte ObjectId.",
     "   */",
     "  readNullableRef(): string | null {",
-    "    if (this.bytes[this.offset] === 0) {",
-    "      this.offset++;",
+    "    const present = this.bytes[this.offset++];",
+    "    if (present === 0) {",
     "      return null;",
     "    }",
     "    return this.readObjectId();",
@@ -1260,6 +1259,96 @@ function generateClient(
   lines.push("");
 
   lines.push(`export type App = typeof app;`);
+  lines.push("");
+
+  // Generate Database interface and createDatabase function
+  lines.push(`/**`);
+  lines.push(` * Database interface with bound WASM instance.`);
+  lines.push(` * Created by calling createDatabase(wasmDb).`);
+  lines.push(` */`);
+  lines.push(`export interface Database {`);
+  for (const table of tables) {
+    const typeName = singularize(toPascalCase(table.name));
+    const propName = table.name.toLowerCase();
+    lines.push(`  ${propName}: BoundTableClient<${typeName}, ${typeName}Insert, ${typeName}Includes>;`);
+  }
+  lines.push(`}`);
+  lines.push("");
+
+  // Generate BoundTableClient interface
+  lines.push(`/**`);
+  lines.push(` * A table client with the WASM database bound, allowing direct method calls.`);
+  lines.push(` */`);
+  lines.push(`export interface BoundTableClient<T, TInsert, TIncludes> {`);
+  lines.push(`  create(data: TInsert): ObjectId;`);
+  lines.push(`  update(id: ObjectId, data: Partial<TInsert>): void;`);
+  lines.push(`  delete(id: ObjectId): void;`);
+  lines.push(`  subscribeAll(callback: (rows: T[]) => void): Unsubscribe;`);
+  lines.push(`  subscribe(id: ObjectId, callback: (row: T | null) => void): Unsubscribe;`);
+  lines.push(`  where(filter: any): BoundQueryBuilder<T, TInsert, TIncludes>;`);
+  lines.push(`  with<I extends TIncludes>(include: I): BoundQueryBuilder<any, TInsert, TIncludes>;`);
+  lines.push(`}`);
+  lines.push("");
+
+  // Generate BoundQueryBuilder interface
+  lines.push(`/**`);
+  lines.push(` * A query builder with the WASM database bound.`);
+  lines.push(` */`);
+  lines.push(`export interface BoundQueryBuilder<T, TInsert, TIncludes> {`);
+  lines.push(`  subscribeAll(callback: (rows: T[]) => void): Unsubscribe;`);
+  lines.push(`  subscribe(id: ObjectId, callback: (row: T | null) => void): Unsubscribe;`);
+  lines.push(`  where(filter: any): BoundQueryBuilder<T, TInsert, TIncludes>;`);
+  lines.push(`  with<I extends TIncludes>(include: I): BoundQueryBuilder<any, TInsert, TIncludes>;`);
+  lines.push(`  create(data: TInsert): ObjectId;`);
+  lines.push(`  update(id: ObjectId, data: Partial<TInsert>): void;`);
+  lines.push(`  delete(id: ObjectId): void;`);
+  lines.push(`}`);
+  lines.push("");
+
+  // Generate createDatabase function
+  lines.push(`/**`);
+  lines.push(` * Create a database client with the WASM database bound.`);
+  lines.push(` * This allows calling methods directly without passing the db instance.`);
+  lines.push(` *`);
+  lines.push(` * @example`);
+  lines.push(` * \`\`\`typescript`);
+  lines.push(` * const db = createDatabase(wasmDb);`);
+  lines.push(` * const userId = db.users.create({ name: "Alice", ... });`);
+  lines.push(` * db.users.subscribeAll((users) => console.log(users));`);
+  lines.push(` * \`\`\``);
+  lines.push(` */`);
+  lines.push(`export function createDatabase(wasmDb: WasmDatabaseLike): Database {`);
+  lines.push(`  function bindQueryBuilder<T, TInsert, TIncludes>(builder: any): BoundQueryBuilder<T, TInsert, TIncludes> {`);
+  lines.push(`    return {`);
+  lines.push(`      subscribeAll: (cb) => builder.subscribeAll(wasmDb, cb),`);
+  lines.push(`      subscribe: (id, cb) => builder.subscribe(wasmDb, id, cb),`);
+  lines.push(`      where: (filter) => bindQueryBuilder(builder.where(filter)),`);
+  lines.push(`      with: (include) => bindQueryBuilder(builder.with(include)),`);
+  lines.push(`      create: (data) => builder.create(wasmDb, data),`);
+  lines.push(`      update: (id, data) => builder.update(wasmDb, id, data),`);
+  lines.push(`      delete: (id) => builder.delete(wasmDb, id),`);
+  lines.push(`    };`);
+  lines.push(`  }`);
+  lines.push("");
+  lines.push(`  function bindTableClient<T, TInsert, TIncludes>(client: any): BoundTableClient<T, TInsert, TIncludes> {`);
+  lines.push(`    return {`);
+  lines.push(`      create: (data) => client.create(wasmDb, data),`);
+  lines.push(`      update: (id, data) => client.update(wasmDb, id, data),`);
+  lines.push(`      delete: (id) => client.delete(wasmDb, id),`);
+  lines.push(`      subscribeAll: (cb) => client.subscribeAll(wasmDb, cb),`);
+  lines.push(`      subscribe: (id, cb) => client.subscribe(wasmDb, id, cb),`);
+  lines.push(`      where: (filter) => bindQueryBuilder(client.where(filter)),`);
+  lines.push(`      with: (include) => bindQueryBuilder(client.with(include)),`);
+  lines.push(`    };`);
+  lines.push(`  }`);
+  lines.push("");
+  lines.push(`  return {`);
+  for (const table of tables) {
+    const propName = table.name.toLowerCase();
+    lines.push(`    ${propName}: bindTableClient(app.${propName}),`);
+  }
+  lines.push(`  };`);
+  lines.push(`}`);
   lines.push("");
 
   return lines.join("\n");

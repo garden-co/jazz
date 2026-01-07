@@ -8,8 +8,14 @@ import {
   decodeUserRow,
   decodeUserDelta,
   decodeNoteRows,
+  decodeNoteRow,
+  decodeNoteDelta,
+  decodeFolderRows,
+  decodeFolderRow,
   BinaryReader,
   readUser,
+  readNote,
+  readFolder,
   DELTA_ADDED,
   DELTA_UPDATED,
   DELTA_REMOVED,
@@ -313,6 +319,130 @@ describe("Binary Decoders", () => {
     });
   });
 
+  describe("decodeNoteRows (with refs)", () => {
+    it("decodes a note with non-nullable author ref", () => {
+      const noteId = makeObjectId(100);
+      const authorId = makeObjectId(101);
+
+      const noteBytes = concat(
+        encodeObjectId(noteId),
+        encodeString("My Note"),
+        encodeString("Note content"),
+        encodeObjectId(authorId), // author is non-nullable ref
+        new Uint8Array([0]), // folder is null (nullable ref)
+        encodeI64(1000000n),
+        encodeI64(1000001n),
+        encodeBool(true)
+      );
+
+      const buffer = concat(encodeU32(1), noteBytes).buffer;
+      const notes = decodeNoteRows(buffer);
+
+      expect(notes).toHaveLength(1);
+      expect(notes[0].id).toBe(noteId);
+      expect(notes[0].title).toBe("My Note");
+      expect(notes[0].author).toBe(authorId);
+      expect(notes[0].folder).toBeNull();
+      expect(notes[0].isPublic).toBe(true);
+    });
+
+    it("decodes a note with non-null folder ref", () => {
+      const noteId = makeObjectId(102);
+      const authorId = makeObjectId(103);
+      const folderId = makeObjectId(104);
+
+      const noteBytes = concat(
+        encodeObjectId(noteId),
+        encodeString("Note in folder"),
+        encodeString("Content"),
+        encodeObjectId(authorId),
+        new Uint8Array([1]), // Presence byte for non-null folder
+        encodeObjectId(folderId),
+        encodeI64(2000000n),
+        encodeI64(2000001n),
+        encodeBool(false)
+      );
+
+      const buffer = concat(encodeU32(1), noteBytes).buffer;
+      const notes = decodeNoteRows(buffer);
+
+      expect(notes).toHaveLength(1);
+      expect(notes[0].author).toBe(authorId);
+      expect(notes[0].folder).toBe(folderId);
+    });
+  });
+
+  describe("decodeFolderRows (with self-ref)", () => {
+    it("decodes folder with null parent", () => {
+      const folderId = makeObjectId(200);
+      const ownerId = makeObjectId(201);
+
+      const folderBytes = concat(
+        encodeObjectId(folderId),
+        encodeString("Root Folder"),
+        encodeObjectId(ownerId), // owner is non-nullable
+        new Uint8Array([0]) // parent is null
+      );
+
+      const buffer = concat(encodeU32(1), folderBytes).buffer;
+      const folders = decodeFolderRows(buffer);
+
+      expect(folders).toHaveLength(1);
+      expect(folders[0].name).toBe("Root Folder");
+      expect(folders[0].owner).toBe(ownerId);
+      expect(folders[0].parent).toBeNull();
+    });
+
+    it("decodes folder with non-null parent (self-reference)", () => {
+      const folderId = makeObjectId(202);
+      const ownerId = makeObjectId(203);
+      const parentId = makeObjectId(204);
+
+      const folderBytes = concat(
+        encodeObjectId(folderId),
+        encodeString("Subfolder"),
+        encodeObjectId(ownerId),
+        new Uint8Array([1]), // Presence byte for non-null parent
+        encodeObjectId(parentId)
+      );
+
+      const buffer = concat(encodeU32(1), folderBytes).buffer;
+      const folders = decodeFolderRows(buffer);
+
+      expect(folders).toHaveLength(1);
+      expect(folders[0].name).toBe("Subfolder");
+      expect(folders[0].parent).toBe(parentId);
+    });
+  });
+
+  describe("decodeNoteDelta", () => {
+    it("decodes added note with refs", () => {
+      const noteId = makeObjectId(300);
+      const authorId = makeObjectId(301);
+
+      const noteBytes = concat(
+        encodeObjectId(noteId),
+        encodeString("Delta Note"),
+        encodeString("Delta Content"),
+        encodeObjectId(authorId),
+        new Uint8Array([0]), // null folder
+        encodeI64(3000000n),
+        encodeI64(3000001n),
+        encodeBool(true)
+      );
+
+      const buffer = concat(new Uint8Array([DELTA_ADDED]), noteBytes).buffer;
+      const delta = decodeNoteDelta(buffer);
+
+      expect(delta.type).toBe("added");
+      if (delta.type === "added") {
+        expect(delta.row.title).toBe("Delta Note");
+        expect(delta.row.author).toBe(authorId);
+        expect(delta.row.folder).toBeNull();
+      }
+    });
+  });
+
   describe("readUser (composable reader)", () => {
     it("reads a user using BinaryReader", () => {
       const id = makeObjectId(10);
@@ -376,6 +506,115 @@ describe("Binary Decoders", () => {
       expect(users).toHaveLength(2);
       expect(users[0].name).toBe("User1");
       expect(users[1].name).toBe("User2");
+    });
+  });
+
+  describe("readNullableRef", () => {
+    it("reads null ref (byte 0)", () => {
+      const data = new Uint8Array([0]); // null indicator
+      const reader = new BinaryReader(data.buffer);
+      expect(reader.readNullableRef()).toBeNull();
+      expect(reader.offset).toBe(1);
+    });
+
+    it("reads non-null ref (presence byte + 26 bytes)", () => {
+      const refId = makeObjectId(500);
+      const data = concat(
+        new Uint8Array([1]), // Presence byte
+        encodeObjectId(refId)
+      );
+      const reader = new BinaryReader(data.buffer);
+      expect(reader.readNullableRef()).toBe(refId);
+      expect(reader.offset).toBe(27); // 1 (presence) + 26 (ObjectId)
+    });
+  });
+
+  describe("readNote (with refs)", () => {
+    it("reads note with null folder", () => {
+      const noteId = makeObjectId(600);
+      const authorId = makeObjectId(601);
+
+      const noteBytes = concat(
+        encodeObjectId(noteId),
+        encodeString("Reader Note"),
+        encodeString("Content via reader"),
+        encodeObjectId(authorId),
+        new Uint8Array([0]), // null folder
+        encodeI64(6000000n),
+        encodeI64(6000001n),
+        encodeBool(false)
+      );
+
+      const reader = new BinaryReader(noteBytes.buffer);
+      const note = readNote(reader);
+
+      expect(note.id).toBe(noteId);
+      expect(note.title).toBe("Reader Note");
+      expect(note.author).toBe(authorId);
+      expect(note.folder).toBeNull();
+    });
+
+    it("reads note with non-null folder", () => {
+      const noteId = makeObjectId(602);
+      const authorId = makeObjectId(603);
+      const folderId = makeObjectId(604);
+
+      const noteBytes = concat(
+        encodeObjectId(noteId),
+        encodeString("Folder Note"),
+        encodeString("Content"),
+        encodeObjectId(authorId),
+        new Uint8Array([1]), // Presence byte for non-null folder
+        encodeObjectId(folderId),
+        encodeI64(6000002n),
+        encodeI64(6000003n),
+        encodeBool(true)
+      );
+
+      const reader = new BinaryReader(noteBytes.buffer);
+      const note = readNote(reader);
+
+      expect(note.folder).toBe(folderId);
+    });
+  });
+
+  describe("readFolder (with self-ref)", () => {
+    it("reads folder with null parent", () => {
+      const folderId = makeObjectId(700);
+      const ownerId = makeObjectId(701);
+
+      const folderBytes = concat(
+        encodeObjectId(folderId),
+        encodeString("Top Level"),
+        encodeObjectId(ownerId),
+        new Uint8Array([0])
+      );
+
+      const reader = new BinaryReader(folderBytes.buffer);
+      const folder = readFolder(reader);
+
+      expect(folder.name).toBe("Top Level");
+      expect(folder.owner).toBe(ownerId);
+      expect(folder.parent).toBeNull();
+    });
+
+    it("reads folder with parent", () => {
+      const folderId = makeObjectId(702);
+      const ownerId = makeObjectId(703);
+      const parentId = makeObjectId(704);
+
+      const folderBytes = concat(
+        encodeObjectId(folderId),
+        encodeString("Child"),
+        encodeObjectId(ownerId),
+        new Uint8Array([1]), // Presence byte for non-null parent
+        encodeObjectId(parentId)
+      );
+
+      const reader = new BinaryReader(folderBytes.buffer);
+      const folder = readFolder(reader);
+
+      expect(folder.parent).toBe(parentId);
     });
   });
 });

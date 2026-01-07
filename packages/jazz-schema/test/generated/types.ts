@@ -1,7 +1,7 @@
 // Generated from SQL schema by @jazz/schema
 // DO NOT EDIT MANUALLY
 
-import type { StringFilter, BigIntFilter, NumberFilter, BoolFilter } from "@jazz/schema/runtime";
+import type { StringFilter, BigIntFilter, NumberFilter, BoolFilter, RelationFilter, BaseWhereInput } from "@jazz/schema/runtime";
 
 /** ObjectId is a 128-bit unique identifier (UUIDv7) represented as a Base32 string */
 export type ObjectId = string;
@@ -34,7 +34,7 @@ export type TagIncludes = {};
 
 // === Filter types (Prisma-style filters) ===
 
-export interface UserFilter {
+export interface UserFilter extends BaseWhereInput {
   AND?: UserFilter | UserFilter[];
   OR?: UserFilter[];
   NOT?: UserFilter | UserFilter[];
@@ -45,9 +45,13 @@ export interface UserFilter {
   age?: bigint | BigIntFilter;
   score?: number | NumberFilter;
   isAdmin?: boolean | BoolFilter;
+  /** Filter by related Folders */
+  Folders?: RelationFilter<FolderFilter>;
+  /** Filter by related Notes */
+  Notes?: RelationFilter<NoteFilter>;
 }
 
-export interface FolderFilter {
+export interface FolderFilter extends BaseWhereInput {
   AND?: FolderFilter | FolderFilter[];
   OR?: FolderFilter[];
   NOT?: FolderFilter | FolderFilter[];
@@ -55,9 +59,13 @@ export interface FolderFilter {
   name?: string | StringFilter;
   owner?: string | StringFilter;
   parent?: string | StringFilter | null;
+  /** Filter by related Folders */
+  Folders?: RelationFilter<FolderFilter>;
+  /** Filter by related Notes */
+  Notes?: RelationFilter<NoteFilter>;
 }
 
-export interface NoteFilter {
+export interface NoteFilter extends BaseWhereInput {
   AND?: NoteFilter | NoteFilter[];
   OR?: NoteFilter[];
   NOT?: NoteFilter | NoteFilter[];
@@ -71,7 +79,7 @@ export interface NoteFilter {
   isPublic?: boolean | BoolFilter;
 }
 
-export interface TagFilter {
+export interface TagFilter extends BaseWhereInput {
   AND?: TagFilter | TagFilter[];
   OR?: TagFilter[];
   NOT?: TagFilter | TagFilter[];
@@ -103,7 +111,7 @@ export interface UserInsert {
 }
 
 /** User with refs/reverse refs resolved based on includes parameter I */
-export type UserLoaded<I extends UserIncludes = {}> = {
+export type UserWith<I extends UserIncludes = {}> = {
   id: ObjectId;
   name: string;
   email: string;
@@ -116,14 +124,14 @@ export type UserLoaded<I extends UserIncludes = {}> = {
     ? I['Folders'] extends true
       ? { Folders: Folder[] }
       : I['Folders'] extends object
-        ? { Folders: FolderLoaded<I['Folders'] & FolderIncludes>[] }
+        ? { Folders: FolderWith<I['Folders'] & FolderIncludes>[] }
         : {}
     : {})
   & ('Notes' extends keyof I
     ? I['Notes'] extends true
       ? { Notes: Note[] }
       : I['Notes'] extends object
-        ? { Notes: NoteLoaded<I['Notes'] & NoteIncludes>[] }
+        ? { Notes: NoteWith<I['Notes'] & NoteIncludes>[] }
         : {}
     : {})
 ;
@@ -143,21 +151,21 @@ export interface FolderInsert {
 }
 
 /** Folder with refs/reverse refs resolved based on includes parameter I */
-export type FolderLoaded<I extends FolderIncludes = {}> = {
+export type FolderWith<I extends FolderIncludes = {}> = {
   id: ObjectId;
   name: string;
   owner: 'owner' extends keyof I
     ? I['owner'] extends true
       ? User
       : I['owner'] extends object
-        ? UserLoaded<I['owner'] & UserIncludes>
+        ? UserWith<I['owner'] & UserIncludes>
         : ObjectId
     : ObjectId;
   parent: 'parent' extends keyof I
     ? I['parent'] extends true
       ? Folder | null
       : I['parent'] extends object
-        ? FolderLoaded<I['parent'] & FolderIncludes> | null
+        ? FolderWith<I['parent'] & FolderIncludes> | null
         : ObjectId | null
     : ObjectId | null;
 }
@@ -165,14 +173,14 @@ export type FolderLoaded<I extends FolderIncludes = {}> = {
     ? I['Folders'] extends true
       ? { Folders: Folder[] }
       : I['Folders'] extends object
-        ? { Folders: FolderLoaded<I['Folders'] & FolderIncludes>[] }
+        ? { Folders: FolderWith<I['Folders'] & FolderIncludes>[] }
         : {}
     : {})
   & ('Notes' extends keyof I
     ? I['Notes'] extends true
       ? { Notes: Note[] }
       : I['Notes'] extends object
-        ? { Notes: NoteLoaded<I['Notes'] & NoteIncludes>[] }
+        ? { Notes: NoteWith<I['Notes'] & NoteIncludes>[] }
         : {}
     : {})
 ;
@@ -200,7 +208,7 @@ export interface NoteInsert {
 }
 
 /** Note with refs/reverse refs resolved based on includes parameter I */
-export type NoteLoaded<I extends NoteIncludes = {}> = {
+export type NoteWith<I extends NoteIncludes = {}> = {
   id: ObjectId;
   title: string;
   content: string;
@@ -208,14 +216,14 @@ export type NoteLoaded<I extends NoteIncludes = {}> = {
     ? I['author'] extends true
       ? User
       : I['author'] extends object
-        ? UserLoaded<I['author'] & UserIncludes>
+        ? UserWith<I['author'] & UserIncludes>
         : ObjectId
     : ObjectId;
   folder: 'folder' extends keyof I
     ? I['folder'] extends true
       ? Folder | null
       : I['folder'] extends object
-        ? FolderLoaded<I['folder'] & FolderIncludes> | null
+        ? FolderWith<I['folder'] & FolderIncludes> | null
         : ObjectId | null
     : ObjectId | null;
   createdAt: bigint;
@@ -236,5 +244,5 @@ export interface TagInsert {
   color: string;
 }
 
-/** Tag has no refs, so Loaded is the same as base type */
-export type TagLoaded<I extends TagIncludes = {}> = Tag;
+/** Tag has no refs, so With is the same as base type */
+export type TagWith<I extends TagIncludes = {}> = Tag;
