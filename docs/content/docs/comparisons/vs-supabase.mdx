@@ -1,0 +1,58 @@
+---
+title: Jazz vs Supabase
+description: Comparing Jazz to Supabase for real-time applications
+---
+
+Supabase provides a Postgres database with real-time subscriptions. Here's how it compares to Jazz.
+
+## Architecture
+
+| Aspect | Jazz | Supabase |
+|--------|------|----------|
+| Database location | Client + Server | Server only |
+| Real-time | Local mutations + sync | Server push |
+| Offline | Full offline support | No offline support |
+| Query execution | Client-side | Server-side |
+
+## Real-Time Behavior
+
+**Jazz**:
+```typescript
+// Mutation is instant - no network round-trip
+await client.tables.tasks.insert({ title: 'New task' });
+// UI updates immediately, syncs in background
+```
+
+**Supabase**:
+```typescript
+// Mutation requires network
+await supabase.from('tasks').insert({ title: 'New task' });
+// Wait for server response, then update UI
+// Other clients receive update via subscription
+```
+
+## Offline Support
+
+**Jazz**: Full CRUD operations work offline. Changes sync when reconnected.
+
+**Supabase**: Reads from cache only. Writes fail without network.
+
+## Query Subscriptions
+
+**Jazz**: Incremental updates - only changed data recomputes.
+
+**Supabase**: Full query re-execution on each change notification.
+
+## When to Choose Supabase
+
+- You need server-side logic (stored procedures, triggers)
+- Your data is too large to fit on clients
+- You're already using Postgres
+- You don't need offline support
+
+## When to Choose Jazz
+
+- You need instant UI updates
+- Offline support is required
+- You want fine-grained sync
+- Complex queries need to be reactive

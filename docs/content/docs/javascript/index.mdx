@@ -1,0 +1,61 @@
+---
+title: JavaScript API Overview
+description: Using Jazz in any JavaScript environment
+---
+
+The `@jazz/client` package provides the core JavaScript API for Jazz, usable in any JavaScript environment (browser, Node.js, etc.).
+
+## Installation
+
+```bash
+pnpm add @jazz/client @jazz/schema
+```
+
+## Quick Start
+
+```typescript title="index.ts"
+import { JazzClient } from '@jazz/client';
+import { schema } from './generated/schema';
+
+// Initialize Jazz client
+const wasm = await WebAssembly.compile(
+  await fetch('/groove_wasm_bg.wasm').then(r => r.arrayBuffer())
+);
+
+const client = new JazzClient({
+  wasm,
+  schema,
+  storage: { type: 'memory' }, // or 'indexeddb' for persistence
+});
+
+// Load schema
+await client.loadSchema();
+
+// Insert data
+await client.execute(
+  'INSERT INTO tasks (title, completed) VALUES (?, ?)',
+  ['Learn Jazz', false]
+);
+
+// Query data
+const tasks = await client.query('SELECT * FROM tasks');
+console.log('Tasks:', tasks);
+
+// Subscribe to changes
+client.subscribe(
+  'SELECT * FROM tasks WHERE completed = ?',
+  [false],
+  (activeTasks) => {
+    console.log('Active tasks updated:', activeTasks);
+  }
+);
+```
+
+## Core Concepts
+
+The JavaScript API provides:
+
+- **JazzClient**: The main client for interacting with Jazz
+- **Query subscriptions**: Live queries that update when data changes
+- **Mutations**: Type-safe insert, update, delete operations
+- **Schema generation**: Generate types from SQL schemas

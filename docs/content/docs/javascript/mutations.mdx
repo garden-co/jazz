@@ -1,0 +1,125 @@
+---
+title: Mutations
+description: Inserting, updating, and deleting data
+---
+
+Jazz provides type-safe mutations generated from your schema.
+
+## Using Generated Mutations
+
+```typescript title="mutations/using-client.ts"
+import { client } from '../client';
+
+// Insert a new task
+const newTask = await client.tables.tasks.insert({
+  title: 'Complete project documentation',
+  description: 'Write comprehensive docs for all modules',
+  completed: false,
+  user_id: 'user-123',
+});
+
+console.log('Created task with ID:', newTask.id);
+
+// Update an existing task
+await client.tables.tasks.update(newTask.id, {
+  completed: true,
+});
+
+// Partial update (only specified fields)
+await client.tables.tasks.update(newTask.id, {
+  description: 'Updated description',
+});
+
+// Delete a task
+await client.tables.tasks.delete(newTask.id);
+
+// Bulk insert
+const taskIds = await Promise.all([
+  client.tables.tasks.insert({ title: 'Task 1', completed: false }),
+  client.tables.tasks.insert({ title: 'Task 2', completed: false }),
+  client.tables.tasks.insert({ title: 'Task 3', completed: false }),
+]);
+```
+
+## Insert
+
+```typescript
+const task = await client.tables.tasks.insert({
+  title: 'New task',
+  completed: false,
+});
+console.log('Created task:', task.id);
+```
+
+## Update
+
+```typescript
+await client.tables.tasks.update(taskId, {
+  completed: true,
+});
+```
+
+## Delete
+
+```typescript
+await client.tables.tasks.delete(taskId);
+```
+
+## Raw SQL Mutations
+
+For complex mutations, you can use raw SQL:
+
+```typescript
+await client.execute(`
+  UPDATE tasks
+  SET completed = true
+  WHERE due_date < date('now')
+`);
+```
+
+## Transactions
+
+Jazz automatically wraps each mutation in a transaction. For multiple operations:
+
+```typescript title="mutations/transactions.ts"
+import { client } from '../client';
+
+// Execute multiple operations in a transaction
+await client.transaction(async (tx) => {
+  // Create a user
+  const user = await tx.tables.users.insert({
+    name: 'Alice Johnson',
+    email: 'alice@example.com',
+  });
+
+  // Create tasks for the user
+  await tx.tables.tasks.insert({
+    title: 'Setup development environment',
+    completed: false,
+    user_id: user.id,
+  });
+
+  await tx.tables.tasks.insert({
+    title: 'Review architecture',
+    completed: false,
+    user_id: user.id,
+  });
+
+  // If any operation fails, the entire transaction is rolled back
+});
+
+// Using raw SQL in a transaction
+await client.transaction(async (tx) => {
+  // Mark all tasks as completed for a user
+  await tx.execute(
+    'UPDATE tasks SET completed = ? WHERE user_id = ?',
+    [true, 'user-123']
+  );
+
+  // Update user's last activity timestamp
+  await tx.execute(
+    'UPDATE users SET last_active = ? WHERE id = ?',
+    [Date.now(), 'user-123']
+  );
+});
+```

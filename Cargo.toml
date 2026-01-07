@@ -2,6 +2,7 @@
 members = [
     "groove",
     "groove-wasm",
+    "docs/examples/rust-basic",
 ]
 # Only build groove by default (groove-wasm is WASM-only)
 default-members = ["groove"]

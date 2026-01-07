@@ -1,0 +1,30 @@
+---
+title: Objects
+description: The fundamental unit of data in Jazz
+---
+
+Every piece of data in Jazz is an **Object**. Objects are identified by `ObjectId`s and have their own commit history.
+
+## ObjectId
+
+An ObjectId is a UUIDv7 encoded in Crockford Base32. This encoding is:
+
+- **Sortable**: Objects created later have lexicographically greater IDs
+- **URL-safe**: No special characters that need escaping
+- **Compact**: 26 characters vs 36 for standard UUID string
+
+## Commit Graph
+
+Each object maintains a commit graph (similar to git) that tracks all changes:
+
+```
+     A --- B --- C (main)
+            \
+             D --- E (branch)
+```
+
+This enables:
+
+- **Branching**: Create experimental changes without affecting the main state
+- **Merging**: Combine changes from different sources
+- **Conflict Resolution**: Automatically merge concurrent edits

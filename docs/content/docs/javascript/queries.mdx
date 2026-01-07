@@ -1,0 +1,124 @@
+---
+title: Queries
+description: Querying data with the JavaScript client
+---
+
+Jazz supports SQL queries with automatic type inference from your schema.
+
+## Basic Queries
+
+```typescript title="queries/basic.ts"
+import { client } from '../client';
+import type { Task } from '../generated/types';
+
+// Simple SELECT
+const allTasks = await client.query<Task>('SELECT * FROM tasks');
+console.log('All tasks:', allTasks);
+
+// With WHERE clause
+const activeTasks = await client.query<Task>(
+  'SELECT * FROM tasks WHERE completed = ?',
+  [false]
+);
+
+// With JOIN
+const tasksWithUsers = await client.query(`
+  SELECT
+    tasks.id,
+    tasks.title,
+    users.name as user_name
+  FROM tasks
+  JOIN users ON tasks.user_id = users.id
+`);
+
+// Aggregate queries
+const taskCounts = await client.query(`
+  SELECT
+    user_id,
+    COUNT(*) as task_count,
+    SUM(CASE WHEN completed THEN 1 ELSE 0 END) as completed_count
+  FROM tasks
+  GROUP BY user_id
+`);
+
+// Ordered results
+const recentTasks = await client.query<Task>(
+  'SELECT * FROM tasks ORDER BY created_at DESC LIMIT 10'
+);
+```
+
+## Query Subscriptions
+
+Subscribe to queries for real-time updates:
+
+```typescript title="queries/subscriptions.ts"
+import { client } from '../client';
+import type { Task } from '../generated/types';
+
+// Subscribe to query results
+const unsubscribe = client.subscribe<Task>(
+  'SELECT * FROM tasks WHERE completed = ?',
+  [false],
+  (tasks) => {
+    console.log('Active tasks:', tasks);
+    // Update UI, trigger actions, etc.
+  }
+);
+
+// Subscribe to aggregates
+const unsubscribeCount = client.subscribe<{ count: number }>(
+  'SELECT COUNT(*) as count FROM tasks WHERE completed = ?',
+  [false],
+  (result) => {
+    console.log('Active task count:', result[0].count);
+  }
+);
+
+// Subscribe to complex query
+const unsubscribeJoin = client.subscribe(
+  `SELECT
+    tasks.id,
+    tasks.title,
+    users.name as user_name
+  FROM tasks
+  JOIN users ON tasks.user_id = users.id
+  WHERE tasks.completed = ?
+  ORDER BY tasks.created_at DESC`,
+  [false],
+  (tasksWithUsers) => {
+    console.log('Tasks with user names:', tasksWithUsers);
+  }
+);
+
+// Clean up subscriptions when no longer needed
+function cleanup() {
+  unsubscribe();
+  unsubscribeCount();
+  unsubscribeJoin();
+}
+```
+
+## Parameterized Queries
+
+Always use parameters for user input to prevent SQL injection:
+
+```typescript
+// Good - parameterized
+const tasks = await client.query(
+  'SELECT * FROM tasks WHERE user_id = ?',
+  [userId]
+);
+
+// Bad - string concatenation (SQL injection risk!)
+const tasks = await client.query(
+  `SELECT * FROM tasks WHERE user_id = '${userId}'`
+);
+```
+
+## Supported SQL Features
+
+- SELECT with WHERE, ORDER BY, LIMIT, OFFSET
+- JOIN (INNER, LEFT, RIGHT)
+- Aggregate functions (COUNT, SUM, AVG, MIN, MAX)
+- Subqueries
+- GROUP BY and HAVING

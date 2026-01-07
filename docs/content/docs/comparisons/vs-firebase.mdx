@@ -1,0 +1,57 @@
+---
+title: Jazz vs Firebase
+description: Comparing Jazz to Firebase Realtime Database and Firestore
+---
+
+Firebase is a popular backend-as-a-service with real-time capabilities. Here's how it compares to Jazz.
+
+## Architecture
+
+| Aspect | Jazz | Firebase |
+|--------|------|----------|
+| Data location | Local-first | Cloud-first |
+| Data model | Relational (SQL) | Document (NoSQL) |
+| Offline | Full offline DB | Cached reads only |
+| Sync granularity | Row-level | Document-level |
+
+## Query Capabilities
+
+**Jazz**:
+```sql
+SELECT u.name, COUNT(o.id) as order_count
+FROM users u
+LEFT JOIN orders o ON u.id = o.user_id
+WHERE o.created_at > date('now', '-30 days')
+GROUP BY u.id
+```
+
+**Firebase**:
+```javascript
+// Can't do JOINs - must denormalize or make multiple queries
+const users = await db.collection('users').get();
+const orders = await db.collection('orders')
+  .where('createdAt', '>', thirtyDaysAgo)
+  .get();
+// Manual aggregation in client code...
+```
+
+## Conflict Resolution
+
+**Jazz**: CRDT-based automatic merge with configurable strategies per field.
+
+**Firebase**: Last-writer-wins at document level. Transactions for atomic updates but require network.
+
+## Pricing Model
+
+**Jazz**: Self-hosted or pay for sync infrastructure. No per-read/write charges.
+
+**Firebase**: Pay per read, write, and delete operation. Can get expensive at scale.
+
+## Migration Path
+
+If migrating from Firebase:
+
+1. Map documents to SQL tables
+2. Flatten nested data into related tables
+3. Replace listeners with Jazz subscriptions
+4. Convert security rules to Jazz policies

@@ -1,0 +1,76 @@
+---
+title: Incremental Query System
+description: How Jazz efficiently updates query results
+---
+
+Jazz's incremental query system is one of its key innovations. Instead of re-running queries from scratch, it propagates changes through a computation graph.
+
+## The Problem
+
+Traditional query execution:
+
+```
+User changes one row
+      ↓
+Re-scan entire table
+      ↓
+Re-join with other tables
+      ↓
+Re-filter all rows
+      ↓
+Return complete result
+```
+
+This is wasteful—we're doing O(n) work for O(1) changes.
+
+## The Solution: Query Graphs
+
+Jazz builds a directed acyclic graph (DAG) of query operators:
+
+```
+  ┌─────────────┐
+  │ ScanNode    │  ← Reads from tasks table
+  │ (tasks)     │
+  └──────┬──────┘
+         │
+  ┌──────▼──────┐
+  │ FilterNode  │  ← WHERE completed = false
+  │ (completed) │
+  └──────┬──────┘
+         │
+  ┌──────▼──────┐
+  │ ProjectNode │  ← SELECT id, title
+  │ (id, title) │
+  └─────────────┘
+```
+
+## Delta Propagation
+
+When a row changes:
+
+1. **Identify affected nodes**: Which scan nodes read this row?
+2. **Compute delta**: What changed? (insert, delete, update)
+3. **Propagate**: Push delta through downstream nodes
+4. **Apply**: Update cached results incrementally
+
+## Example
+
+```sql
+SELECT * FROM tasks WHERE completed = false
+```
+
+When task "abc" changes from `completed=false` to `completed=true`:
+
+1. ScanNode emits: `Delete(abc)`
+2. FilterNode passes through (matches old condition)
+3. Result: Remove "abc" from cached results
+
+No table scan needed!
+
+## Implementation Details
+
+See the source code:
+
+- `groove/src/sql/query_graph/mod.rs` - Query graph structure
+- `groove/src/sql/query_graph/delta.rs` - Delta types and propagation
+- `groove/src/sql/query_graph/node.rs` - Node implementations

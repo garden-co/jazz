@@ -1,0 +1,57 @@
+---
+title: Jazz vs ElectricSQL
+description: Comparing Jazz to ElectricSQL for local-first applications
+---
+
+ElectricSQL is another local-first sync solution. Both share the goal of bringing SQL to the client, but take different approaches.
+
+## Architecture
+
+| Aspect | Jazz | ElectricSQL |
+|--------|------|-------------|
+| Server DB | Custom | Postgres |
+| Client DB | Custom (WASM) | SQLite |
+| Sync unit | Object (row) | Shape (table subset) |
+| Query system | Incremental graphs | Standard SQL |
+
+## Sync Model
+
+**Jazz**: Each row is an Object with its own commit history. Sync is row-level.
+
+**ElectricSQL**: Sync "shapes" which are subsets of tables. Changes propagate at row level but subscriptions are shape-based.
+
+## Incremental Queries
+
+**Jazz**: Built-in incremental query system. Query results update efficiently without re-execution.
+
+**ElectricSQL**: Standard SQLite queries. Re-run query to get updated results.
+
+## Server Requirements
+
+**Jazz**: Flexible - can use any storage backend.
+
+**ElectricSQL**: Requires Postgres with specific extensions.
+
+## Conflict Resolution
+
+**Jazz**: CRDT-based with multiple strategies. Per-field conflict resolution.
+
+**ElectricSQL**: Rich-CRDTs for automatic merge. Similar capabilities.
+
+## Maturity
+
+**Jazz**: Newer, under active development.
+
+**ElectricSQL**: More mature, production-ready.
+
+## When to Choose ElectricSQL
+
+- You have existing Postgres infrastructure
+- You want SQLite compatibility
+- Maturity and stability are priorities
+
+## When to Choose Jazz
+
+- You need incremental query updates
+- You want more control over sync granularity
+- You're building from scratch (no existing Postgres)

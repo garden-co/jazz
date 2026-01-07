@@ -1,0 +1,40 @@
+---
+title: Internal Design
+description: Deep dive into Jazz's architecture and design decisions
+---
+
+This section covers the internal design decisions and architecture of Jazz. It's intended for contributors and those who want to understand how Jazz works under the hood.
+
+## Design Principles
+
+1. **Local-first**: Data lives on the client first, server is a peer
+2. **SQL interface**: Familiar query language, not a new API to learn
+3. **Incremental**: Queries update efficiently, not from scratch
+4. **Fine-grained**: Sync, permissions, and versioning at row level
+
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Application Layer                     │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
+│  │ @jazz/react  │  │ @jazz/client │  │   groove     │   │
+│  └──────────────┘  └──────────────┘  └──────────────┘   │
+├─────────────────────────────────────────────────────────┤
+│                      Core (Rust/WASM)                    │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
+│  │  SQL Layer   │  │ Query Graph  │  │ Object Store │   │
+│  └──────────────┘  └──────────────┘  └──────────────┘   │
+├─────────────────────────────────────────────────────────┤
+│                      Storage Layer                       │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
+│  │  IndexedDB   │  │    SQLite    │  │     S3       │   │
+│  └──────────────┘  └──────────────┘  └──────────────┘   │
+└─────────────────────────────────────────────────────────┘
+```
+
+## Key Design Documents
+
+- [SQL Layer Design](/docs/internals/architecture)
+- [Incremental Query System](/docs/internals/incremental-queries)
+- [Sync Protocol](/docs/internals/sync-protocol)

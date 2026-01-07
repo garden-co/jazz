@@ -1,0 +1,38 @@
+---
+title: Comparisons
+description: How Jazz compares to other databases and sync engines
+---
+
+Jazz takes a different approach than most databases and sync solutions. This section compares Jazz to popular alternatives.
+
+## Quick Comparison
+
+| Feature | Jazz | Firebase | Supabase | ElectricSQL |
+|---------|------|----------|----------|-------------|
+| Local-first | Yes | No | No | Yes |
+| SQL interface | Yes | No | Yes | Yes |
+| Incremental queries | Yes | No | No | No |
+| Row-level sync | Yes | Document | Row | Row |
+| Offline support | Full | Limited | None | Full |
+| Conflict resolution | CRDT | LWW | Manual | CRDT |
+
+## When to Use Jazz
+
+Jazz is ideal for:
+
+- **Collaborative apps**: Real-time editing, shared workspaces
+- **Offline-first apps**: Full functionality without network
+- **Complex queries**: JOINs, aggregations with live updates
+- **Fine-grained sync**: Only sync what's needed
+
+## When to Consider Alternatives
+
+- **Simple CRUD**: If you don't need offline or real-time, Supabase is simpler
+- **Document-oriented**: If your data is hierarchical, Firebase might fit better
+- **Existing Postgres**: ElectricSQL adds sync to existing databases
+
+## Detailed Comparisons
+
+- [Jazz vs Firebase](/docs/comparisons/vs-firebase)
+- [Jazz vs Supabase](/docs/comparisons/vs-supabase)
+- [Jazz vs ElectricSQL](/docs/comparisons/vs-electric-sql)

@@ -1,0 +1,35 @@
+---
+title: Sync
+description: How Jazz synchronizes data across clients and servers
+---
+
+Jazz synchronizes data automatically across all connected clients and servers. This page explains how sync works.
+
+## Sync Architecture
+
+```
+┌─────────┐     ┌─────────┐     ┌─────────┐
+│ Client  │ ←─→ │  Sync   │ ←─→ │ Client  │
+│    A    │     │ Server  │     │    B    │
+└─────────┘     └─────────┘     └─────────┘
+                     ↑
+                     ↓
+               ┌─────────┐
+               │ Storage │
+               └─────────┘
+```
+
+## How It Works
+
+1. **Local mutations** are applied immediately to local state
+2. **Commits** are created for each mutation
+3. **Sync server** receives commits and broadcasts to other clients
+4. **Merge** occurs automatically when concurrent commits are received
+
+## Conflict Resolution
+
+When two clients edit the same data concurrently, Jazz uses CRDT-based merge strategies:
+
+- **Last-writer-wins** for simple scalar values
+- **Set union** for collection additions
+- **Custom resolvers** for complex merge logic

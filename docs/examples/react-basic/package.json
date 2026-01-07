@@ -1,0 +1,26 @@
+{
+  "name": "@jazz/example-react-basic",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate": "npx tsx -e \"import { generateFromSql } from '@jazz/schema'; generateFromSql('src/schema.sql', { output: 'src/generated' })\"",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@jazz/client": "workspace:*",
+    "@jazz/react": "workspace:*",
+    "@jazz/schema": "workspace:*",
+    "groove-wasm": "workspace:*",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^2.1.9"
+  }
+}
