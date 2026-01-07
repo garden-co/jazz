@@ -45,7 +45,7 @@ fn database_roundtrip_simple() {
     };
 
     // Database dropped here - restore from same environment
-    let db = Database::from_env(env.clone(), catalog_id).unwrap();
+    let db = futures::executor::block_on(Database::from_env(env.clone(), catalog_id)).unwrap();
 
     // Verify table exists
     let tables = db.list_tables();
@@ -112,7 +112,7 @@ fn database_roundtrip_multiple_tables() {
     };
 
     // Restore database
-    let db = Database::from_env(env.clone(), catalog_id).unwrap();
+    let db = futures::executor::block_on(Database::from_env(env.clone(), catalog_id)).unwrap();
 
     // Verify both tables exist
     let tables = db.list_tables();
@@ -179,7 +179,7 @@ fn database_roundtrip_with_policies() {
     };
 
     // Restore database
-    let db = Database::from_env(env.clone(), catalog_id).unwrap();
+    let db = futures::executor::block_on(Database::from_env(env.clone(), catalog_id)).unwrap();
 
     // Verify policies are restored
     let policies = db.get_policies("documents").unwrap();
@@ -240,7 +240,7 @@ fn database_roundtrip_after_delete() {
     };
 
     // Restore and verify delete was persisted
-    let db = Database::from_env(env.clone(), catalog_id).unwrap();
+    let db = futures::executor::block_on(Database::from_env(env.clone(), catalog_id)).unwrap();
 
     let items = get_rows(db.execute("SELECT * FROM items").unwrap());
     assert_eq!(items.len(), 2, "delete should be persisted");
@@ -287,7 +287,7 @@ fn database_roundtrip_after_update() {
     };
 
     // Restore and verify update was persisted
-    let db = Database::from_env(env.clone(), catalog_id).unwrap();
+    let db = futures::executor::block_on(Database::from_env(env.clone(), catalog_id)).unwrap();
 
     let settings = get_rows(db.execute("SELECT * FROM settings").unwrap());
     assert_eq!(settings.len(), 1);
@@ -318,7 +318,7 @@ fn database_roundtrip_with_nullable() {
     };
 
     // Restore and verify nulls are preserved
-    let db = Database::from_env(env.clone(), catalog_id).unwrap();
+    let db = futures::executor::block_on(Database::from_env(env.clone(), catalog_id)).unwrap();
 
     let contacts = get_rows(db.execute("SELECT * FROM contacts").unwrap());
     assert_eq!(contacts.len(), 2);
@@ -378,7 +378,7 @@ fn database_roundtrip_with_inline_blob() {
     };
 
     // Restore database
-    let db = Database::from_env(env.clone(), catalog_id).unwrap();
+    let db = futures::executor::block_on(Database::from_env(env.clone(), catalog_id)).unwrap();
 
     // Verify blob data
     let rows = get_rows(db.execute("SELECT * FROM files").unwrap());
@@ -437,7 +437,7 @@ fn database_roundtrip_with_chunked_blob() {
     };
 
     // Restore database
-    let db = Database::from_env(env.clone(), catalog_id).unwrap();
+    let db = futures::executor::block_on(Database::from_env(env.clone(), catalog_id)).unwrap();
 
     // Verify blob data
     let rows = get_rows(db.execute("SELECT * FROM files").unwrap());

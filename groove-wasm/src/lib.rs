@@ -1,15 +1,20 @@
 use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::future_to_promise;
 use groove::sql::{
     Database, IncrementalQuery, Value, ExecuteResult, Row,
     encode_rows, encode_delta,
 };
 use groove::{ObjectId, ContentRef, ChunkHash, INLINE_THRESHOLD};
 use groove::ListenerId;
-use js_sys::{Array, Uint8Array};
+use js_sys::{Array, Promise, Uint8Array};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 use bytes::Bytes;
+
+pub mod indexeddb;
+pub use indexeddb::IndexedDbEnvironment;
 
 // ==================== Blob Registry ====================
 
@@ -105,6 +110,109 @@ impl WasmDatabase {
         }
     }
 
+    /// Create or open a persistent IndexedDB-backed database.
+    ///
+    /// If a database already exists in IndexedDB, it will be loaded.
+    /// Otherwise, a new database will be created.
+    ///
+    /// @param db_name - Optional database name (defaults to "groove")
+    /// @returns Promise that resolves to WasmDatabase
+    #[wasm_bindgen(js_name = "withIndexedDb")]
+    pub fn with_indexeddb(db_name: Option<String>) -> Promise {
+        future_to_promise(async move {
+            let name = db_name.as_deref().unwrap_or("groove");
+            let env = IndexedDbEnvironment::with_name(name).await?;
+            let env = Arc::new(env);
+
+            // Check if database already exists
+            let db = if let Some(catalog_id_str) = env.get_catalog_id().await {
+                // Load existing database
+                let catalog_id: ObjectId = catalog_id_str.parse()
+                    .map_err(|e| JsValue::from_str(&format!("invalid catalog_id: {:?}", e)))?;
+
+                Database::from_env(env.clone(), catalog_id).await
+                    .map_err(|e| JsValue::from_str(&format!("failed to load database: {:?}", e)))?
+            } else {
+                // Create new database
+                let db = Database::new(env.clone());
+                let catalog_id = db.catalog_object_id();
+
+                // Store catalog ID for future sessions
+                env.set_catalog_id(&catalog_id.to_string()).await?;
+
+                db
+            };
+
+            Ok(JsValue::from(WasmDatabase {
+                db,
+                blob_registry: Rc::new(RefCell::new(BlobRegistry::new())),
+            }))
+        })
+    }
+
+    /// Check if a persistent database exists in IndexedDB.
+    ///
+    /// @param db_name - Optional database name (defaults to "groove")
+    /// @returns Promise that resolves to boolean
+    #[wasm_bindgen(js_name = "hasPersistedDatabase")]
+    pub fn has_persisted_database(db_name: Option<String>) -> Promise {
+        future_to_promise(async move {
+            let name = db_name.as_deref().unwrap_or("groove");
+            let env = IndexedDbEnvironment::with_name(name).await?;
+            let has_db = env.has_database().await;
+            Ok(JsValue::from(has_db))
+        })
+    }
+
+    /// Delete a persistent database from IndexedDB.
+    ///
+    /// @param db_name - Optional database name (defaults to "groove")
+    /// @returns Promise that resolves when deleted
+    #[wasm_bindgen(js_name = "deletePersistedDatabase")]
+    pub fn delete_persisted_database(db_name: Option<String>) -> Promise {
+        future_to_promise(async move {
+            let name = db_name.as_deref().unwrap_or("groove");
+
+            let window = web_sys::window()
+                .ok_or_else(|| JsValue::from_str("no window"))?;
+            let idb = window
+                .indexed_db()?
+                .ok_or_else(|| JsValue::from_str("IndexedDB not available"))?;
+
+            let delete_request = idb.delete_database(name)?;
+
+            // Await the delete request
+            let (tx, rx) = futures::channel::oneshot::channel::<Result<(), JsValue>>();
+            let tx = Rc::new(RefCell::new(Some(tx)));
+
+            let tx_success = tx.clone();
+            let on_success = Closure::once(Box::new(move |_event: web_sys::Event| {
+                if let Some(tx) = tx_success.borrow_mut().take() {
+                    let _ = tx.send(Ok(()));
+                }
+            }) as Box<dyn FnOnce(_)>);
+
+            let tx_error = tx;
+            let on_error = Closure::once(Box::new(move |_event: web_sys::Event| {
+                if let Some(tx) = tx_error.borrow_mut().take() {
+                    let _ = tx.send(Err(JsValue::from_str("failed to delete database")));
+                }
+            }) as Box<dyn FnOnce(_)>);
+
+            delete_request.set_onsuccess(Some(on_success.as_ref().unchecked_ref()));
+            delete_request.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+
+            on_success.forget();
+            on_error.forget();
+
+            rx.await
+                .map_err(|_| JsValue::from_str("channel closed"))?
+                .map_err(|e| e)?;
+
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
     /// Execute a SQL statement (legacy string-based results).
     #[wasm_bindgen]
     pub fn execute(&self, sql: &str) -> Result<JsValue, JsValue> {
@@ -190,6 +298,14 @@ impl WasmDatabase {
                 .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
         }
         Ok(())
+    }
+
+    /// List all tables in the database.
+    /// Returns an array of table names.
+    #[wasm_bindgen]
+    pub fn list_tables(&self) -> JsValue {
+        let tables = self.db.list_tables();
+        serde_wasm_bindgen::to_value(&tables).unwrap_or(JsValue::NULL)
     }
 
     /// Create an incremental query that calls back on changes (legacy string-based).

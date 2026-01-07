@@ -569,10 +569,16 @@ impl DatabaseState {
 
         // Coerce the value to match the column type
         let coerced = coerce_value(value.clone(), &schema.columns[col_idx].ty);
+        // Wrap in NullableSome if column is nullable for proper comparison
+        let expected = if schema.columns[col_idx].nullable {
+            Value::NullableSome(Box::new(coerced))
+        } else {
+            coerced
+        };
 
         self.read_all_rows(table)
             .into_iter()
-            .filter(|row| row.values.get(col_idx) == Some(&coerced))
+            .filter(|row| row.values.get(col_idx) == Some(&expected))
             .collect()
     }
 
@@ -1322,11 +1328,14 @@ impl Database {
     ///
     /// This method loads the catalog and all table descriptors from the environment,
     /// restoring the database to its previous state.
-    pub fn from_env(env: Arc<dyn Environment>, catalog_object_id: ObjectId) -> Result<Self, DatabaseError> {
+    ///
+    /// This is async because loading objects from Environment may involve reading from
+    /// IndexedDB or other async storage backends.
+    pub async fn from_env(env: Arc<dyn Environment>, catalog_object_id: ObjectId) -> Result<Self, DatabaseError> {
         let node = LocalNode::new(env);
 
         // Load catalog object from Environment
-        node.load_object(catalog_object_id, "catalog", "main")
+        node.load_object(catalog_object_id, "catalog", "main").await
             .ok_or_else(|| DatabaseError::Storage("catalog not found in environment".to_string()))?;
 
         // Read catalog content
@@ -1350,7 +1359,7 @@ impl Database {
         // Restore each table from its descriptor
         for (table_name, descriptor_id) in &catalog.tables {
             // Load descriptor object from Environment
-            node.load_object(*descriptor_id, format!("descriptor:{}", table_name), "main")
+            node.load_object(*descriptor_id, format!("descriptor:{}", table_name), "main").await
                 .ok_or_else(|| {
                     DatabaseError::Storage(format!("descriptor for {} not found in env", table_name))
                 })?;
@@ -1367,14 +1376,14 @@ impl Database {
                 .map_err(|e| DatabaseError::Storage(format!("descriptor parse error: {}", e)))?;
 
             // Load schema object
-            node.load_object(descriptor.schema_object_id, format!("schema:{}", table_name), "main");
+            node.load_object(descriptor.schema_object_id, format!("schema:{}", table_name), "main").await;
 
             // Load rows object
-            node.load_object(descriptor.rows_object_id, format!("rows:{}", table_name), "main");
+            node.load_object(descriptor.rows_object_id, format!("rows:{}", table_name), "main").await;
 
             // Load index objects
             for (col_name, index_id) in &descriptor.index_object_ids {
-                node.load_object(*index_id, format!("index:{}:{}", table_name, col_name), "main");
+                node.load_object(*index_id, format!("index:{}:{}", table_name, col_name), "main").await;
                 let key = IndexKey::new(table_name, col_name);
                 index_objects.insert(key, *index_id);
             }
@@ -1400,7 +1409,7 @@ impl Database {
                     .map_err(|e| DatabaseError::Storage(format!("table_rows parse error: {}", e)))?;
                 for row_id in table_rows.iter() {
                     // Load row object
-                    node.load_object(row_id, format!("row:{}:{}", table_name, row_id), "main");
+                    node.load_object(row_id, format!("row:{}:{}", table_name, row_id), "main").await;
                     row_table.insert(row_id, table_name.clone());
                 }
             }
@@ -1833,7 +1842,18 @@ impl Database {
                 .column_index(col_name)
                 .ok_or_else(|| DatabaseError::ColumnNotFound(col_name.to_string()))?;
             // Coerce the value to match the column type (e.g., String -> Ref)
-            row_values[idx] = coerce_value(value, &schema.columns[idx].ty);
+            let coerced = coerce_value(value, &schema.columns[idx].ty);
+            // Wrap in NullableSome if column is nullable (binary encoder expects this)
+            // But don't double-wrap already-nullable values or wrap NullableNone
+            row_values[idx] = if schema.columns[idx].nullable {
+                match coerced {
+                    Value::NullableNone => Value::NullableNone,
+                    Value::NullableSome(_) => coerced, // Already wrapped
+                    other => Value::NullableSome(Box::new(other)),
+                }
+            } else {
+                coerced
+            };
         }
 
         // Check for missing non-nullable columns
@@ -1901,11 +1921,12 @@ impl Database {
         // Update indexes for Ref columns
         for (i, col) in schema.columns.iter().enumerate() {
             if matches!(col.ty, ColumnType::Ref(_)) {
-                if let Value::Ref(target_id) = &row_values[i] {
+                // Use as_ref() to handle both Ref and NullableSome(Ref) values
+                if let Some(target_id) = row_values[i].as_ref() {
                     let key = IndexKey::new(table, &col.name);
                     if self.state.index_objects.read().unwrap().contains_key(&key) {
                         let mut index = self.read_index(&key)?;
-                        index.add(*target_id, row_id);
+                        index.add(target_id, row_id);
                         self.write_index(&key, &index)?;
                     }
                 }
@@ -1987,7 +2008,18 @@ impl Database {
                 .column_index(col_name)
                 .ok_or_else(|| DatabaseError::ColumnNotFound(col_name.to_string()))?;
             // Coerce the value to match the column type (e.g., String -> Ref)
-            new_values[idx] = coerce_value(value.clone(), &schema.columns[idx].ty);
+            let coerced = coerce_value(value.clone(), &schema.columns[idx].ty);
+            // Wrap in NullableSome if column is nullable (binary encoder expects this)
+            // But don't double-wrap already-nullable values or wrap NullableNone
+            new_values[idx] = if schema.columns[idx].nullable {
+                match coerced {
+                    Value::NullableNone => Value::NullableNone,
+                    Value::NullableSome(_) => coerced, // Already wrapped
+                    other => Value::NullableSome(Box::new(other)),
+                }
+            } else {
+                coerced
+            };
         }
 
         // Validate new references

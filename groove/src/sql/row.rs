@@ -120,6 +120,7 @@ impl Value {
     pub fn as_ref(&self) -> Option<ObjectId> {
         match self {
             Value::Ref(id) => Some(*id),
+            Value::NullableSome(inner) => Value::as_ref(inner),
             _ => None,
         }
     }

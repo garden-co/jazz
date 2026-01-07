@@ -3,10 +3,31 @@ use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
 
-use crate::commit::CommitId;
+use crate::commit::{Commit, CommitId};
 use crate::listener::{ListenerId, ListenerError, ObjectCallback, ObjectKey, ObjectListenerRegistry, ObjectState};
 use crate::object::{Object, ObjectId};
 use crate::storage::{Environment, MemoryEnvironment};
+
+/// Spawn an async task for background persistence.
+/// In WASM, uses spawn_local. In native, uses block_on (for now).
+#[cfg(target_arch = "wasm32")]
+fn spawn_persist<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    wasm_bindgen_futures::spawn_local(future);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_persist<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    // For native, we run synchronously since MemoryEnvironment is instant.
+    // This ensures tests can verify persistence immediately.
+    // Real async backends (RocksDB, SQLite) would use a proper async runtime.
+    futures::executor::block_on(future);
+}
 
 /// Generate a new UUIDv7 as ObjectId.
 #[cfg(not(feature = "wasm"))]
@@ -76,11 +97,12 @@ impl LocalNode {
 
     /// Load an object from the Environment by reading its commits and frontier.
     /// Returns the object ID if the object was found and loaded successfully.
-    pub fn load_object(&self, id: ObjectId, prefix: impl Into<String>, branch: &str) -> Option<ObjectId> {
-        use futures::executor::block_on;
-
+    ///
+    /// This is async because it reads from the Environment, which may be backed
+    /// by IndexedDB or other async storage.
+    pub async fn load_object(&self, id: ObjectId, prefix: impl Into<String>, branch: &str) -> Option<ObjectId> {
         // Get frontier from Environment
-        let frontier = block_on(self.env.get_frontier(id.into(), branch));
+        let frontier = self.env.get_frontier(id.into(), branch).await;
         if frontier.is_empty() {
             return None;
         }
@@ -103,7 +125,7 @@ impl LocalNode {
                 }
                 loaded.insert(commit_id);
 
-                if let Some(commit) = block_on(self.env.get_commit(&commit_id)) {
+                if let Some(commit) = self.env.get_commit(&commit_id).await {
                     // Add parent commits to load queue
                     for parent_id in &commit.parents {
                         if !loaded.contains(parent_id) {
@@ -238,6 +260,9 @@ impl LocalNode {
 
     /// Write content to an object's branch with optional metadata and notify all listeners.
     /// Returns the new commit ID.
+    ///
+    /// The write is synchronous to in-memory state (and listeners are notified immediately),
+    /// but persistence to the Environment happens asynchronously in the background.
     pub fn write_with_meta(
         &self,
         object_id: ObjectId,
@@ -258,23 +283,29 @@ impl LocalNode {
         let obj = obj_lock.read().unwrap();
         let commit_id = obj.write_sync_with_meta(branch, content, author, timestamp, meta);
 
-        // Persist commit and frontier to Environment
-        if let Some(branch_ref) = obj.branch_ref(branch) {
+        // Collect data for async persist
+        let persist_data = if let Some(branch_ref) = obj.branch_ref(branch) {
             let branch_guard = branch_ref.read().unwrap();
-            if let Some(commit) = branch_guard.get_commit(&commit_id) {
-                use futures::executor::block_on;
+            branch_guard.get_commit(&commit_id).map(|commit| {
+                let frontier = branch_guard.frontier().to_vec();
+                (commit.clone(), frontier)
+            })
+        } else {
+            None
+        };
 
-                // Persist commit
-                block_on(self.env.put_commit(commit));
-
-                // Persist frontier
-                let frontier = branch_guard.frontier();
-                block_on(self.env.set_frontier(object_id.into(), branch, frontier));
-            }
-        }
-
-        // Notify listeners synchronously
+        // Notify listeners synchronously (before persist, so UI updates immediately)
         self.notify_listeners(object_id, branch, &obj);
+
+        // Persist asynchronously in background
+        if let Some((commit, frontier)) = persist_data {
+            let env = self.env.clone();
+            let branch = branch.to_string();
+            spawn_persist(async move {
+                env.put_commit(&commit).await;
+                env.set_frontier(object_id.into(), &branch, &frontier).await;
+            });
+        }
 
         Ok(commit_id)
     }

@@ -9,12 +9,32 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 groove = { path = "../groove", features = ["wasm"] }
 wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "DomStringList",
+    "Event",
+    "IdbFactory",
+    "IdbDatabase",
+    "IdbTransaction",
+    "IdbTransactionMode",
+    "IdbObjectStore",
+    "IdbObjectStoreParameters",
+    "IdbRequest",
+    "IdbOpenDbRequest",
+    "IdbVersionChangeEvent",
+    "IdbCursor",
+    "IdbCursorWithValue",
+    "IdbKeyRange",
+    "DomException",
+    "Window",
+] }
 serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 console_error_panic_hook = "0.1"
 bytes = "1"
 futures = "0.3"
+async-trait = "0.1"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
