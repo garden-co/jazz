@@ -74,8 +74,12 @@
 ### Persistence Backends
 - [ ] Implement RocksDB backend
 - [ ] Implement SQLite fallback
-- [ ] Implement IndexedDB for browser
-- [ ] Tests for persistence roundtrip
+- [x] Implement IndexedDB Environment (groove-wasm/src/indexeddb.rs)
+- [x] IndexedDB WASM tests (10 tests passing)
+- [ ] **BLOCKED**: IndexedDB integration with Database - requires async groove core
+  - Issue: LocalNode uses `block_on()` for storage calls, which causes infinite loops in WASM
+  - Solution needed: Make groove core fully async, or use sync-memory + async-persist pattern
+- [x] Tests for persistence roundtrip (groove/tests/persistence.rs - 8 tests with MemoryEnvironment)
 
 ## Phase 1.5: SQL Layer
 

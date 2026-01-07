@@ -28,6 +28,16 @@ async function initWasm() {
   return module;
 }
 
+// Check for persistence preference in URL params or localStorage
+function shouldUsePersistence(): boolean {
+  const urlParams = new URLSearchParams(window.location.search);
+  if (urlParams.has('persist')) {
+    return urlParams.get('persist') === 'true';
+  }
+  // Default to true for persistence
+  return localStorage.getItem('groove_persist') !== 'false';
+}
+
 function App() {
   const db = useJazz();
 
@@ -136,6 +146,7 @@ function App() {
 function Root() {
   const [wasmDb, setWasmDb] = useState<WasmDatabaseLike | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isPersistent, setIsPersistent] = useState<boolean | null>(null);
   const initRef = useRef(false);
 
   useEffect(() => {
@@ -145,10 +156,31 @@ function Root() {
     async function init() {
       try {
         const wasm = await initWasm();
-        const db = new wasm.WasmDatabase();
+        const usePersistence = shouldUsePersistence();
+        setIsPersistent(usePersistence);
 
-        // Initialize schema from imported SQL file
-        db.init_schema(schema);
+        let db;
+        if (usePersistence) {
+          // Use IndexedDB for persistence
+          console.log("Using IndexedDB persistence...");
+          db = await wasm.WasmDatabase.withIndexedDb(undefined);
+
+          // Check if this is a fresh database (no tables)
+          const tables = db.list_tables() as string[];
+          const needsSchema = !tables || tables.length === 0;
+
+          if (needsSchema) {
+            console.log("Initializing schema...");
+            db.init_schema(schema);
+          } else {
+            console.log("Loaded existing database from IndexedDB with tables:", tables);
+          }
+        } else {
+          // Use in-memory database
+          console.log("Using in-memory database (no persistence)");
+          db = new wasm.WasmDatabase();
+          db.init_schema(schema);
+        }
 
         setWasmDb(db as unknown as WasmDatabaseLike);
       } catch (e) {
@@ -169,8 +201,13 @@ function Root() {
 
   if (!wasmDb) {
     return (
-      <div className="flex h-screen items-center justify-center text-muted-foreground">
-        Initializing WASM...
+      <div className="flex h-screen flex-col items-center justify-center gap-2">
+        <div className="text-muted-foreground">Initializing WASM...</div>
+        {isPersistent !== null && (
+          <div className="text-xs text-muted-foreground">
+            Storage: {isPersistent ? "IndexedDB (persistent)" : "Memory (not persistent)"}
+          </div>
+        )}
       </div>
     );
   }

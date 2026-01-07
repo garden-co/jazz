@@ -209,7 +209,12 @@ pub struct CommitMeta {
 }
 
 /// Storage interface for content chunks.
-#[async_trait]
+///
+/// On native targets, implementations must be Send + Sync.
+/// On WASM, these bounds are relaxed since it's single-threaded.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg(not(target_arch = "wasm32"))]
 pub trait ChunkStore: Send + Sync {
     /// Get chunk by hash, returns None if not found.
     async fn get_chunk(&self, hash: &ChunkHash) -> Option<Bytes>;
@@ -221,7 +226,25 @@ pub trait ChunkStore: Send + Sync {
     async fn has_chunk(&self, hash: &ChunkHash) -> bool;
 }
 
+/// Storage interface for content chunks (WASM version without Send + Sync).
+#[cfg(target_arch = "wasm32")]
+#[async_trait(?Send)]
+pub trait ChunkStore {
+    /// Get chunk by hash, returns None if not found.
+    async fn get_chunk(&self, hash: &ChunkHash) -> Option<Bytes>;
+
+    /// Store chunk, returns its hash.
+    async fn put_chunk(&self, data: Bytes) -> ChunkHash;
+
+    /// Check if chunk exists.
+    async fn has_chunk(&self, hash: &ChunkHash) -> bool;
+}
+
 /// Storage interface for commits.
+///
+/// On native targets, implementations must be Send + Sync.
+/// On WASM, these bounds are relaxed since it's single-threaded.
+#[cfg(not(target_arch = "wasm32"))]
 #[async_trait]
 pub trait CommitStore: Send + Sync {
     /// Get commit metadata (without loading chunked content).
@@ -255,8 +278,48 @@ pub trait CommitStore: Send + Sync {
     async fn list_branches(&self, object_id: u128) -> Vec<String>;
 }
 
+/// Storage interface for commits (WASM version without Send + Sync).
+#[cfg(target_arch = "wasm32")]
+#[async_trait(?Send)]
+pub trait CommitStore {
+    /// Get commit metadata (without loading chunked content).
+    async fn get_commit_meta(&self, id: &CommitId) -> Option<CommitMeta>;
+
+    /// Get full commit (loads inline content, but not chunked).
+    async fn get_commit(&self, id: &CommitId) -> Option<crate::commit::Commit>;
+
+    /// Store commit.
+    async fn put_commit(&self, commit: &crate::commit::Commit) -> CommitId;
+
+    /// Get frontier commit IDs for a branch.
+    async fn get_frontier(&self, object_id: u128, branch: &str) -> Vec<CommitId>;
+
+    /// Update frontier for a branch.
+    async fn set_frontier(&self, object_id: u128, branch: &str, frontier: &[CommitId]);
+
+    /// Get truncation point for a branch.
+    async fn get_truncation(&self, object_id: u128, branch: &str) -> Option<CommitId>;
+
+    /// Set truncation point for a branch.
+    async fn set_truncation(&self, object_id: u128, branch: &str, truncation: Option<CommitId>);
+
+    /// Stream commit IDs for an object's branch (for partial loading).
+    fn list_commits(&self, object_id: u128, branch: &str) -> BoxStream<'_, CommitId>;
+
+    /// List all object IDs that have data in this store.
+    fn list_objects(&self) -> BoxStream<'_, u128>;
+
+    /// List all branch names for an object.
+    async fn list_branches(&self, object_id: u128) -> Vec<String>;
+}
+
 /// Combined storage interface (legacy alias).
+#[cfg(not(target_arch = "wasm32"))]
 #[async_trait]
+pub trait Storage: ChunkStore + CommitStore {}
+
+#[cfg(target_arch = "wasm32")]
+#[async_trait(?Send)]
 pub trait Storage: ChunkStore + CommitStore {}
 
 // Blanket impl
@@ -264,10 +327,18 @@ impl<T: ChunkStore + CommitStore> Storage for T {}
 
 /// Environment trait - combines all storage capabilities.
 /// This is the main trait that LocalNode uses for storage.
+#[cfg(not(target_arch = "wasm32"))]
 pub trait Environment: ChunkStore + CommitStore + Send + Sync + std::fmt::Debug {}
 
+#[cfg(target_arch = "wasm32")]
+pub trait Environment: ChunkStore + CommitStore + std::fmt::Debug {}
+
 // Blanket impl for Environment
+#[cfg(not(target_arch = "wasm32"))]
 impl<T: ChunkStore + CommitStore + Send + Sync + std::fmt::Debug> Environment for T {}
+
+#[cfg(target_arch = "wasm32")]
+impl<T: ChunkStore + CommitStore + std::fmt::Debug> Environment for T {}
 
 // ========== In-Memory Environment for Testing ==========
 
@@ -292,7 +363,8 @@ impl MemoryEnvironment {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl ChunkStore for MemoryEnvironment {
     async fn get_chunk(&self, hash: &ChunkHash) -> Option<Bytes> {
         self.chunks.read().unwrap().get(hash).cloned()
@@ -309,7 +381,8 @@ impl ChunkStore for MemoryEnvironment {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl CommitStore for MemoryEnvironment {
     async fn get_commit_meta(&self, id: &CommitId) -> Option<CommitMeta> {
         self.commits.read().unwrap().get(id).map(|c| CommitMeta {
@@ -437,7 +510,8 @@ impl MemoryContentStore {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl ChunkStore for MemoryContentStore {
     async fn get_chunk(&self, hash: &ChunkHash) -> Option<Bytes> {
         self.chunks.read().unwrap().get(hash).cloned()
