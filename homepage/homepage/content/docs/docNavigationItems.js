@@ -231,6 +231,11 @@ export const docNavigationItems = [
         href: "/docs/core-concepts/sync-and-storage",
         done: 100,
       },
+      {
+        name: "Deleting CoValues",
+        href: "/docs/core-concepts/deleting",
+        done: 100,
+      },
     ],
   },
   {

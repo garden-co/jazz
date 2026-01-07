@@ -943,6 +943,11 @@ function validateDeletePermissions(
 
   const core = rootNode.value.value.$jazz.raw.core;
 
+  // Account and Group coValues are not deletable, we skip them to make it easier to delete all coValues owned by an account
+  if (core.isGroupOrAccount()) {
+    return errors;
+  }
+
   const result = core.validateDeletePermissions();
   if (!result.ok) {
     errors.push(
@@ -973,6 +978,11 @@ function deleteCoValueFromSubscription(
   }
 
   const core = rootNode.value.value.$jazz.raw.core;
+
+  // Account and Group coValues are not deletable, we skip them to make it easier to delete all coValues owned by an account
+  if (core.isGroupOrAccount()) {
+    return values;
+  }
 
   try {
     core.deleteCoValue();

@@ -211,22 +211,21 @@ describe("deleteCoValues", () => {
     expect(child.$jazz.raw.core.isDeleted).toBe(false);
   });
 
-  test("hard rejects Account and Group CoValues", async () => {
+  test("skips Account and Group CoValues", async () => {
     const me = Account.getMe();
 
-    await expect(
-      deleteCoValues(Account, me.$jazz.id, {
-        loadAs: me,
-      }),
-    ).rejects.toThrow(/Cannot delete Group or Account coValues/);
+    await deleteCoValues(Account, me.$jazz.id, {
+      loadAs: me,
+    });
+
+    expect(me.$jazz.raw.core.isDeleted).toBe(false);
 
     const group = Group.create(me).makePublic("reader");
-    await group.$jazz.raw.core.waitForSync();
 
-    await expect(
-      deleteCoValues(Group, group.$jazz.id, {
-        loadAs: me,
-      }),
-    ).rejects.toThrow(/Cannot delete Group or Account coValues/);
+    await deleteCoValues(Group, group.$jazz.id, {
+      loadAs: me,
+    });
+
+    expect(group.$jazz.raw.core.isDeleted).toBe(false);
   });
 });
