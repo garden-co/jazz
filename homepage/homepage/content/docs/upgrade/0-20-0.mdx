@@ -22,8 +22,47 @@ This also helps us speed up the migration of Jazz Core to Rust which will help u
 - We dropped support for `RNQuickCrypto`. RNCrypto is now the default crypto provider on React Native.
 - There is no more fallback to Javascript crypto. If the crypto fails to initialize, it will throw an error. 
 **NB**: if you use WASM crypto on Edge runtimes, you need to ensure that WASM is available and initialized. See more details at [WASM on Edge runtimes](/docs/react/server-side/setup#wasm-on-edge-runtimes).
+- You can now only use strings or records of strings as [`unique` parameters](/docs/react/core-concepts/covalues/comaps#uniqueness). This ensures that serialisation is deterministic.
 
 ## Breaking changes
+
+### A more strict `unique` param
+
+Jazz uses [uniqueness](/docs/react/core-concepts/covalues/comaps#uniqueness) to help identify CoValues. 
+
+Occasionally, you may wish to produce a deterministic ID for the CoValue. To do so, you can manually define the uniqueness using the [`unique`](/docs/react/core-concepts/covalues/comaps#uniqueness) parameter.
+Before 0.20.0, you could pass any `JsonValue` as unique param. This was not stable across languages and could lead to unexpected behavior.
+
+The `unique` property now enforces strict type validation, limiting inputs to specific primitives rather than generic `JsonValue` types.
+Accepted types are `string`, `boolean`, `null`, `undefined`, or objects containing `string` values.
+
+Providing any other type will throw an error, with the following distinction for numbers:
+- Floating-point numbers (e.g., `1.5`) will throw an error.
+- Integers (e.g., `1`) are accepted and will not throw an error, though their usage is deprecated and not supported in the type system anymore.
+
+We expect that this change **will not impact** any projects in our hosted Cloud based on our analysis.
+However, since we do **not have visibility into self-hosted sync server deployments**, we cannot rule out the possibility that your code may rely on the previously allowed unique value types.
+
+If you are migrating from an earlier version and your project passes type-checks, you are almost certainly unaffected.  
+If you do encounter issues (for example, errors about unsupported `unique` value types), 
+the recommended upgrade path is to convert your uniqueness constraint to a string (as shown below), or, if necessary, to an object containing only string properties.
+
+**If you are affected by this change and cannot migrate to a supported unique type, please [reach us on Discord](https://discord.gg/ANm5jY6Y) for help or guidance.**
+
+Below is an example showing a correct migration:
+<CodeGroup>
+```ts
+// Before (integers cause TypeScript errors but still work at runtime)
+Task.create({ text: "X" }, { unique: 123 }); // TYPE ERROR (deprecated)
+
+// After - Recommended: convert to string or object with string values
+Task.create({ text: "X" }, { unique: "123" }); // SUPPORTED (RECOMMENDED)
+
+// Alternative: bypass type check (integers still work at runtime, but deprecated)
+// @ts-expect-error - We are bypassing the type check
+Task.create({ text: "X" }, { unique: 123 }); // SUPPORTED (but use string instead)
+```
+</CodeGroup>
 
 ### Edge runtimes
 
@@ -157,22 +196,5 @@ export function MyJazzProvider({ children }: { children: React.ReactNode }) {
     </JazzReactNativeProvider>
   );
 }
-```
-</CodeGroup>
-
-### unique validation
-
-The `unique` value is now strict to only accept specific values instead of any `JsonValue`.
-The allowed types are now: `string`, `boolean`, `null`, `undefined`, or an object with string values.
-If you were using numbers, we suggest you to use a string instead or ignore the type check.
-
-<CodeGroup>
-```ts
-import { CoMap } from "jazz-tools/tools/coValues";
-
-const comap = CoMap.create({}, {
-  // @ts-ignore
-  unique: 123,
-});
 ```
 </CodeGroup>
