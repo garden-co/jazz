@@ -24,6 +24,12 @@ type DeletedCoValueQueueEntry = {
   status?: "pending" | "done";
 };
 
+/**
+ * Contains operations that should run as part of a readwrite transaction.
+ *
+ * Everything in this class is meant to be executed sequentially and never
+ * concurrently, across all the data stores and tabs.
+ */
 export class IDBTransaction implements DBTransactionInterfaceAsync {
   constructor(private tx: CoJsonIDBTransaction) {}
 
