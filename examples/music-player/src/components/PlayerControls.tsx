@@ -4,13 +4,15 @@ import { useMediaEndListener } from "@/lib/audio/useMediaEndListener";
 import { usePlayState } from "@/lib/audio/usePlayState";
 import { useKeyboardListener } from "@/lib/useKeyboardListener";
 import { useCoState, useSuspenseAccount } from "jazz-tools/react";
-import { Pause, Play, SkipBack, SkipForward } from "lucide-react";
+import { Loader2, Pause, Play, SkipBack, SkipForward } from "lucide-react";
 import WaveformCanvas from "./WaveformCanvas";
 import { Button } from "./ui/button";
+import { useStreamingState } from "@/lib/audio/usePlayMedia";
 
 export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
   const playState = usePlayState();
   const isPlaying = playState.value === "play";
+  const streamingState = useStreamingState(mediaPlayer.source);
 
   const activePlaylistTitle = useSuspenseAccount(MusicaAccount, {
     select: (me) =>
@@ -24,6 +26,7 @@ export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
   if (!activeTrack.$isLoaded) return null;
 
   const activeTrackTitle = activeTrack.title;
+  const isLoading = mediaPlayer.loading === activeTrack.$jazz.id;
 
   return (
     <footer className="flex flex-wrap sm:flex-nowrap items-center justify-between pt-4 p-2 sm:p-4 gap-4 sm:gap-4 bg-white border-t border-gray-200 absolute bottom-0 left-0 right-0 w-full z-50">
@@ -35,6 +38,7 @@ export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
             size="icon"
             onClick={mediaPlayer.playPrevTrack}
             aria-label="Previous track"
+            disabled={isLoading}
           >
             <SkipBack className="h-5 w-5" fill="currentColor" />
           </Button>
@@ -43,8 +47,11 @@ export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
             onClick={playState.toggle}
             className="bg-blue-600 text-white hover:bg-blue-700"
             aria-label={isPlaying ? "Pause active track" : "Play active track"}
+            disabled={!streamingState.readyToPlay}
           >
-            {isPlaying ? (
+            {!streamingState.readyToPlay ? (
+              <Loader2 className="h-5 w-5 animate-spin" />
+            ) : isPlaying ? (
               <Pause className="h-5 w-5" fill="currentColor" />
             ) : (
               <Play className="h-5 w-5" fill="currentColor" />
@@ -55,6 +62,7 @@ export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
             size="icon"
             onClick={mediaPlayer.playNextTrack}
             aria-label="Next track"
+            disabled={isLoading}
           >
             <SkipForward className="h-5 w-5" fill="currentColor" />
           </Button>
@@ -73,9 +81,17 @@ export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
         <h4 className="font-medium text-blue-800 text-base sm:text-base truncate max-w-80 sm:max-w-80">
           {activeTrackTitle}
         </h4>
-        <p className="hidden sm:block text-xs sm:text-sm text-gray-600 truncate sm:max-w-80">
-          {activePlaylistTitle || "All tracks"}
-        </p>
+        <div className="flex items-center gap-2">
+          {!streamingState.isComplete && (
+            <span className="text-xs text-blue-500 flex items-center gap-1">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              {Math.round(streamingState.progress * 100)}%
+            </span>
+          )}
+          <p className="hidden sm:block text-xs sm:text-sm text-gray-600 truncate sm:max-w-80">
+            {activePlaylistTitle || "All tracks"}
+          </p>
+        </div>
       </div>
     </footer>
   );

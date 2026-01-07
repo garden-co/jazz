@@ -235,6 +235,8 @@ export default function WaveformCanvas({
     if (!canvas) return;
     if (!waveformId) return;
 
+    let cleanup: (() => void) | undefined;
+
     renderWaveform({
       audioManager,
       canvas,
@@ -243,7 +245,13 @@ export default function WaveformCanvas({
       barColor,
       progressColor,
       backgroundColor,
+    }).then((cleanupFn) => {
+      cleanup = cleanupFn;
     });
+
+    return () => {
+      cleanup?.();
+    };
   }, [audioManager, canvasRef, waveformId, duration]);
 
   const onPointer = (e: React.PointerEvent<HTMLCanvasElement>) => {

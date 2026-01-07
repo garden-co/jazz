@@ -1,7 +1,7 @@
 import { MusicaAccount, MusicTrack, Playlist } from "@/1_schema";
-import { usePlayMedia } from "@/lib/audio/usePlayMedia";
 import { usePlayState } from "@/lib/audio/usePlayState";
-import { useRef, useState } from "react";
+import { usePlayMedia } from "@/lib/audio/usePlayMedia";
+import { useState } from "react";
 import { updateActivePlaylist, updateActiveTrack } from "./4_actions";
 import { useAudioManager } from "./lib/audio/AudioManager";
 import { getNextTrack, getPrevTrack } from "./lib/getters";
@@ -10,39 +10,25 @@ import { useSuspenseAccount } from "jazz-tools/react-core";
 export function useMediaPlayer() {
   const audioManager = useAudioManager();
   const playState = usePlayState();
-  const playMedia = usePlayMedia();
+  const { source, playMedia } = usePlayMedia();
 
   const [loading, setLoading] = useState<string | null>(null);
 
   const activeTrackId = useSuspenseAccount(MusicaAccount, {
     select: (me) => me.root.activeTrack?.$jazz.id,
   });
-  // Reference used to avoid out-of-order track loads
-  const lastLoadedTrackId = useRef<string | null>(null);
 
   async function loadTrack(track: MusicTrack, autoPlay = true) {
-    lastLoadedTrackId.current = track.$jazz.id;
     audioManager.unloadCurrentAudio();
 
     setLoading(track.$jazz.id);
     updateActiveTrack(track);
 
-    const file = await MusicTrack.shape.file.loadAsBlob(
-      track.$jazz.refs.file.id,
-    );
-
-    if (!file) {
-      setLoading(null);
-      return;
+    try {
+      await playMedia(track, autoPlay);
+    } catch (error) {
+      console.error("Failed to load track:", error);
     }
-
-    // Check if another track has been loaded during
-    // the file download
-    if (lastLoadedTrackId.current !== track.$jazz.id) {
-      return;
-    }
-
-    await playMedia(file, autoPlay);
 
     setLoading(null);
   }
@@ -65,10 +51,7 @@ export function useMediaPlayer() {
   }
 
   async function setActiveTrack(track: MusicTrack, playlist?: Playlist) {
-    if (
-      activeTrackId === track.$jazz.id &&
-      lastLoadedTrackId.current !== null
-    ) {
+    if (activeTrackId === track.$jazz.id) {
       playState.toggle();
       return;
     }
@@ -89,6 +72,7 @@ export function useMediaPlayer() {
     playPrevTrack,
     loading,
     loadTrack,
+    source,
   };
 }
 

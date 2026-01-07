@@ -12,10 +12,11 @@ export function usePlayerCurrentTime() {
   }, [audioManager]);
 
   function setCurrentTime(time: number) {
-    if (audioManager.mediaElement.paused) audioManager.play();
-
-    // eslint-disable-next-line react-compiler/react-compiler
-    audioManager.mediaElement.currentTime = time;
+    // Seek to the new time (and start playing if paused)
+    if (!audioManager.isPlaying()) {
+      audioManager.play();
+    }
+    audioManager.seek(time);
   }
 
   return {
@@ -25,24 +26,16 @@ export function usePlayerCurrentTime() {
 }
 
 export function setPlayerCurrentTime(audioManager: AudioManager, time: number) {
-  audioManager.mediaElement.currentTime = time;
+  audioManager.seek(time);
 }
 
 export function getPlayerCurrentTime(audioManager: AudioManager): number {
-  return audioManager.mediaElement.currentTime;
+  return audioManager.getCurrentTime();
 }
 
 export function subscribeToPlayerCurrentTime(
   audioManager: AudioManager,
   callback: (time: number) => void,
-) {
-  const onTimeUpdate = () => {
-    callback(audioManager.mediaElement.currentTime);
-  };
-
-  audioManager.mediaElement.addEventListener("timeupdate", onTimeUpdate);
-
-  return () => {
-    audioManager.mediaElement.removeEventListener("timeupdate", onTimeUpdate);
-  };
+): () => void {
+  return audioManager.on("timeupdate", (e) => callback(e.detail));
 }
