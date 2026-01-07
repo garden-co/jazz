@@ -28,8 +28,9 @@ This also helps us speed up the migration of Jazz Core to Rust which will help u
 
 ### A more strict `unique` param
 
-The [unique](/docs/react/core-concepts/covalues/comaps#uniqueness) param is a attribute that is used to identify a CoValue uniquely with a human readable identifier. 
-It is used to create a deterministic ID for the CoValue.
+Jazz uses [uniqueness](/docs/react/core-concepts/covalues/comaps#uniqueness) to help identify CoValues. 
+
+Occasionally, you may wish to produce a deterministic ID for the CoValue. To do so, you can manually define the uniqueness using the [`unique`](/docs/react/core-concepts/covalues/comaps#uniqueness) parameter.
 Before 0.20.0, you could pass any `JsonValue` as unique param. This was not stable across languages and could lead to unexpected behavior.
 
 The `unique` property now enforces strict type validation, limiting inputs to specific primitives rather than generic `JsonValue` types.
