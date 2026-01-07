@@ -254,6 +254,65 @@ The Filter on `Issues.priority` happens AFTER all the JOINs, so we're joining 50
 
 8. **Query Optimizer / Predicate Pushdown**: Add an optimization pass between AST parsing and graph construction that reorders operations for efficiency. Push filters on single tables before JOINs, estimate cardinalities, choose optimal JOIN order.
 
+## GCO-1068: Unified Row Buffer Format Migration
+
+**Goal**: Replace the legacy `Row`/`Value` types with a unified buffer format (`OwnedRow`/`RowRef`/`RowValue`) for zero-copy reads and efficient WASM transfer.
+
+### Completed
+
+1. **Buffer Format Types** (`groove/src/sql/row_buffer.rs`):
+   - `RowDescriptor`: Schema metadata with pre-computed offsets
+   - `OwnedRow`: Owned buffer with `Arc<RowDescriptor>`
+   - `RowRef<'a>`: Zero-copy borrowed view
+   - `RowValue<'a>`: Borrowed enum for type-safe access
+   - `RowBuilder`: Fluent API for buffer construction
+   - Conversion methods: `from_legacy_row()`, `to_legacy_row_with_schema()`
+
+2. **Buffer-Compatible Predicate Matching** (`predicate.rs`):
+   - `Predicate::matches_buffer()` for filtering with buffer rows
+   - `buffer_value_equals_pred()` helper for type comparisons
+
+3. **Buffer Delta Types** (`delta.rs`):
+   - `BufferRowDelta`, `BufferDeltaBatch` for buffer-based deltas
+   - `BufferJoinedRow` for JOIN operations with buffer types
+
+4. **Node Migrations**:
+   - `LimitOffset` node: `all_rows: BTreeMap<ObjectId, OwnedRow>`
+   - `RecursiveFilter` node: `all_rows: HashMap<ObjectId, OwnedRow>`
+   - Both convert at boundaries (incoming `Row` → buffer, buffer → output `Row`)
+
+### Remaining Work
+
+1. **Join Node**: Uses `cached_rows: HashMap<ObjectId, JoinedRow>`. Migration requires:
+   - Use `BufferJoinedRow` for internal storage
+   - Handle complex table offset tracking
+   - Update `eval_join_input_delta` and related helpers
+
+2. **ArrayAggregate Node**: Uses `cached_arrays: HashMap<ObjectId, Vec<Row>>` and `outer_rows: HashMap<ObjectId, Row>`. Migration requires:
+   - Nested row storage for `Value::Array` construction
+   - May need `Value::Array` format redesign
+
+3. **Database Module**: 177 occurrences of `Row`/`Value` usage:
+   - Query building
+   - Result collection
+   - May need gradual migration with adapter layer
+
+4. **Remove Legacy Types**: After full migration:
+   - Remove `Row`/`Value` from `row.rs`
+   - Update all consumers to use buffer types
+
+### Architecture Notes
+
+The buffer format uses a fixed-then-variable layout:
+- Fixed-size columns (Bool, I32, I64, F64, Ref) have direct byte offsets
+- Variable-size columns (String, Bytes) use varint length prefixes
+- Nullable types have presence byte before value
+
+This enables:
+- O(1) access for fixed-size columns
+- Zero-copy string/bytes reads via borrowed slices
+- Efficient WASM transfer (single memcpy)
+
 ## Related Commits
 
 - `982e89a` - Fix table alias handling in WHERE clause for multi-JOIN queries
@@ -265,3 +324,4 @@ The Filter on `Issues.priority` happens AFTER all the JOINs, so we're joining 50
 - `8995a33` - Fix binary encoding mismatch for nullable refs
 - `ec1b25b` - Replace nullable_mask with self-describing Value variants
 - `e7314c2` - Support arbitrary-length join chains with correct delta propagation
+- `987c362` - Migrate LimitOffset and RecursiveFilter nodes to buffer format (GCO-1068)
