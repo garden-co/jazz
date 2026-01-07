@@ -171,7 +171,7 @@ export async function createJazzContextFromExistingCredentials<
       sessionDone();
     },
     logOut: async () => {
-      node.gracefulShutdown();
+      await node.gracefulShutdown();
       sessionDone();
       await onLogOut?.();
     },
@@ -240,7 +240,7 @@ export async function createJazzContextForNewAccount<
       sessionDone();
     },
     logOut: async () => {
-      node.gracefulShutdown();
+      await node.gracefulShutdown();
       await onLogOut?.();
     },
   };
