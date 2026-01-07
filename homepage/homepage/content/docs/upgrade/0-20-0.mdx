@@ -52,14 +52,15 @@ the recommended upgrade path is to convert your uniqueness constraint to a strin
 Below is an example showing a correct migration:
 <CodeGroup>
 ```ts
-// Before (may throw an error in 0.20.0 if a non-string/object-of-string unique is used)
-Task.create({ text: "X" }, { unique: 123 }); // NOT SUPPORTED
+// Before (integers cause TypeScript errors but still work at runtime)
+Task.create({ text: "X" }, { unique: 123 }); // TYPE ERROR (deprecated)
 
-// After (convert to string or object with string values)
-Task.create({ text: "X" }, { unique: "123" }); // SUPPORTED
-// OR
+// After - Recommended: convert to string or object with string values
+Task.create({ text: "X" }, { unique: "123" }); // SUPPORTED (RECOMMENDED)
+
+// Alternative: bypass type check (integers still work at runtime, but deprecated)
 // @ts-expect-error - We are bypassing the type check
-Task.create({ text: "X" }, { unique: 123 }); // SUPPORTED
+Task.create({ text: "X" }, { unique: 123 }); // SUPPORTED (but use string instead)
 ```
 </CodeGroup>
 
