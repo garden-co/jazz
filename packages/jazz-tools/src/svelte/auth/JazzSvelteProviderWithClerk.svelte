@@ -11,7 +11,7 @@
   @example
   ```svelte
   <JazzSvelteProviderWithClerk
-    clerk={$clerk}
+    {clerk}
     sync={{ peer: "wss://cloud.jazz.tools/?key=your-key" }}
     AccountSchema={MyAccountSchema}
   >
