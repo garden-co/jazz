@@ -46,8 +46,8 @@
   import RegisterClerkAuth from "./RegisterClerkAuth.svelte";
 
   type Props = {
-    /** The Clerk client instance for authentication */
-    clerk: MinimalClerkClient;
+    /** The Clerk client instance for authentication (can be null while Clerk is initializing) */
+    clerk: MinimalClerkClient | null;
     /** Content to render when provider is initialized */
     children?: Snippet;
     /** Content to render while Clerk auth is loading */
@@ -106,6 +106,8 @@
   $effect(() => {
     setupKvStore();
 
+    if (!clerk) return;
+
     let cancelled = false;
 
     JazzClerkAuth.initializeAuth(clerk)
@@ -143,7 +145,7 @@
       later.
     </div>
   {/if}
-{:else if isLoaded}
+{:else if isLoaded && clerk}
   <JazzSvelteProvider {...providerProps} onLogOut={clerk.signOut}>
     <RegisterClerkAuth {clerk}>
       {@render children?.()}
