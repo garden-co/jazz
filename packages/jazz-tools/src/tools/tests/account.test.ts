@@ -506,4 +506,23 @@ describe("createAs", () => {
     // Verify execution order
     expect(executionOrder).toEqual(["migration", "onCreate"]);
   });
+  test("createdBy returns undefined", async () => {
+    const CustomAccount = co.account({
+      profile: co.profile({
+        name: z.string(),
+      }),
+      root: co.map({}),
+    });
+
+    const worker = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const createdAccount = await CustomAccount.createAs(worker, {
+      creationProps: { name: "Test Account" },
+    });
+
+    assertLoaded(createdAccount.account);
+    expect(createdAccount.account.$jazz.createdBy).toBe(undefined);
+  });
 });

@@ -16,6 +16,7 @@ import {
   createTestMetricReader,
   createTestNode,
   createTwoConnectedNodes,
+  createUnloadedCoValue,
   loadCoValueOrFail,
   nodeWithRandomAgentAndSessionID,
   randomAgentAndSessionID,
@@ -905,4 +906,42 @@ test("knownState should return the same object until the CoValue is modified", (
   const knownState6 = map.core.knownState();
   expect(knownState6).not.toBe(knownState4);
   expect(knownState6).not.toBe(knownState1);
+});
+
+describe("provideHeader uniqueness validation", () => {
+  test("should reject number uniqueness", () => {
+    const node = createTestNode();
+    const { coValue, header } = createUnloadedCoValue(node);
+
+    const invalidHeader = {
+      ...header,
+      uniqueness: 1.5 as any, // non-integer
+    };
+
+    expect(coValue.provideHeader(invalidHeader)).toBe(false);
+  });
+
+  test("should reject array uniqueness", () => {
+    const node = createTestNode();
+    const { coValue, header } = createUnloadedCoValue(node);
+
+    const invalidHeader = {
+      ...header,
+      uniqueness: [1, 2, 3] as any,
+    };
+
+    expect(coValue.provideHeader(invalidHeader)).toBe(false);
+  });
+
+  test("should reject object uniqueness with non-string values", () => {
+    const node = createTestNode();
+    const { coValue, header } = createUnloadedCoValue(node);
+
+    const invalidHeader = {
+      ...header,
+      uniqueness: { key: 123 } as any,
+    };
+
+    expect(coValue.provideHeader(invalidHeader)).toBe(false);
+  });
 });

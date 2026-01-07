@@ -39,9 +39,18 @@ export type CoValueHeader = {
 } & CoValueUniqueness;
 
 export type CoValueUniqueness = {
-  uniqueness: JsonValue;
+  uniqueness: Uniqueness;
   createdAt?: `2${string}` | null;
 };
+
+export type Uniqueness =
+  | string
+  | boolean
+  | null
+  | undefined
+  | {
+      [key: string]: string;
+    };
 
 export type PrivateTransaction = {
   privacy: "private";

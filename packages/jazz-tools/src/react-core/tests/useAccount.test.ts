@@ -3,12 +3,7 @@
 import { CoValueLoadingState, Group, RefsToResolve, co, z } from "jazz-tools";
 import { assertLoaded } from "jazz-tools/testing";
 import { assert, beforeEach, describe, expect, it } from "vitest";
-import {
-  useAccount,
-  useAgent,
-  useJazzContextManager,
-  useLogOut,
-} from "../hooks.js";
+import { useAccount, useAgent, useJazzContext, useLogOut } from "../hooks.js";
 import { useIsAuthenticated } from "../index.js";
 import {
   createJazzTestAccount,
@@ -195,7 +190,7 @@ describe("useAccount", () => {
       () => {
         const isAuthenticated = useIsAuthenticated();
         const account = useAccount();
-        const contextManager = useJazzContextManager();
+        const contextManager = useJazzContext();
 
         if (account) {
           if (!accounts.includes(account.$jazz.id)) {

@@ -1203,12 +1203,11 @@ export class RawGroup<
 
     this.set(memberKey, "revoked", "trusting");
 
-    // TODO: removeMember fails silently. Uncomment this will be a breaking change
-    // if (this.get(memberKey) !== "revoked") {
-    //   throw new Error(
-    //     `Failed to revoke role to ${memberKey} (role of current account is ${this.myRole()})`,
-    //   );
-    // }
+    if (this.get(memberKey) !== "revoked") {
+      throw new Error(
+        `Failed to revoke role to ${memberKey} (role of current account is ${this.myRole()})`,
+      );
+    }
   }
 
   /**
@@ -1249,7 +1248,10 @@ export class RawGroup<
           group: this.id,
         },
         meta: meta || null,
-        ...uniqueness,
+        ...(uniqueness.createdAt !== undefined
+          ? { createdAt: uniqueness.createdAt }
+          : {}),
+        uniqueness: uniqueness.uniqueness,
       })
       .getCurrentContent() as M;
 
@@ -1283,7 +1285,10 @@ export class RawGroup<
           group: this.id,
         },
         meta: meta || null,
-        ...uniqueness,
+        ...(uniqueness.createdAt !== undefined
+          ? { createdAt: uniqueness.createdAt }
+          : {}),
+        uniqueness: uniqueness.uniqueness,
       })
       .getCurrentContent() as L;
 
@@ -1340,7 +1345,10 @@ export class RawGroup<
           group: this.id,
         },
         meta: meta || null,
-        ...uniqueness,
+        ...(uniqueness.createdAt !== undefined
+          ? { createdAt: uniqueness.createdAt }
+          : {}),
+        uniqueness: uniqueness.uniqueness,
       })
       .getCurrentContent() as C;
 
@@ -1365,7 +1373,10 @@ export class RawGroup<
           group: this.id,
         },
         meta: meta,
-        ...uniqueness,
+        ...(uniqueness.createdAt !== undefined
+          ? { createdAt: uniqueness.createdAt }
+          : {}),
+        uniqueness: uniqueness.uniqueness,
       })
       .getCurrentContent() as C;
   }
