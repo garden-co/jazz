@@ -30,12 +30,13 @@
 ### Storage Abstraction
 - [x] ContentRef enum (Inline ≤1KB, Chunked >1KB)
 - [x] ChunkHash type (BLAKE3)
-- [x] ContentStore trait (async get/put/has chunk)
+- [x] ChunkStore trait (async get/put/has chunk) - renamed from ContentStore
 - [x] CommitStore trait (async commit operations, list_commits walks full history)
 - [x] CommitStore get_truncation/set_truncation for truncation point persistence
-- [x] Environment trait (combines ContentStore + CommitStore + Send + Sync + Debug)
+- [x] CommitStore list_objects/list_branches for persistence restoration
+- [x] Environment trait (combines ChunkStore + CommitStore + Send + Sync + Debug)
 - [x] MemoryEnvironment (full in-memory implementation for testing)
-- [x] MemoryContentStore (legacy content-only store for backwards compatibility)
+- [x] MemoryChunkStore (legacy chunk-only store for backwards compatibility)
 - [x] Sync read/write methods (write_sync, read_sync) - require explicit branch
 - [x] Async read/write methods (write, read) - require explicit branch
 - [x] Streaming read/write methods (write_stream, read_stream) - require explicit branch
@@ -67,7 +68,7 @@
 - `merge.rs` - MergeStrategy trait, LastWriterWins
 - `object.rs` - Object with branches, sync/async/streaming read/write, ContentStream
 - `node.rs` - LocalNode (owns Environment), generate_object_id(), read/write/subscribe APIs
-- `storage.rs` - ContentRef, ChunkHash, ContentStore, CommitStore, Environment, MemoryEnvironment
+- `storage.rs` - ContentRef, ChunkHash, ChunkStore, CommitStore, Environment, MemoryEnvironment
 - `listener.rs` - ObjectListenerRegistry, ObjectCallback, ObjectState, ListenerId, ByteDiff
 - `sql/` - SQL layer module (see below)
 
@@ -76,15 +77,21 @@
 - [ ] Implement SQLite fallback
 - [x] Implement IndexedDB Environment (groove-wasm/src/indexeddb.rs)
 - [x] IndexedDB WASM tests (10 tests passing)
-- [ ] **BLOCKED**: IndexedDB integration with Database - requires async groove core
-  - Issue: LocalNode uses `block_on()` for storage calls, which causes infinite loops in WASM
-  - Solution needed: Make groove core fully async, or use sync-memory + async-persist pattern
-- [x] Tests for persistence roundtrip (groove/tests/persistence.rs - 8 tests with MemoryEnvironment)
+- [x] IndexedDB integration with Database via async load/sync write pattern
+  - Async initial load from IndexedDB on startup (`Database::from_env()`)
+  - Sync in-memory operations for fast UI
+  - Async background persistence via `spawn_persist` (WASM uses `spawn_local`, native uses `block_on`)
+- [x] Database persistence with catalog system
+  - Catalog: maps table names to descriptor object IDs
+  - TableDescriptor: stores schema, policies, rows/index object IDs
+  - `Database::from_env()` to restore from Environment
+  - `LocalNode.load_object()` for restoring objects from Environment
+- [x] Tests for persistence roundtrip (groove/tests/persistence.rs - comprehensive roundtrip tests)
 
 ## Phase 1.5: SQL Layer
 
 ### Step 1: Basic Storage (Complete)
-- [x] `ColumnType` and `ColumnDef` types
+- [x] `ColumnType` and `ColumnDef` types (including BLOB and BLOB[])
 - [x] `TableSchema` type with serialization
 - [x] Row binary encoding/decoding (length-prefix header + column values)
 - [x] Nullable column handling (1-byte presence flag in content)
@@ -183,6 +190,16 @@ sql/
 - [x] JavaScript callback integration
 - [x] Panic hook for better error messages
 - [x] update_row() accepts Base32 ObjectId strings
+- [x] BLOB streaming API
+  - BlobRegistry for tracking blob handles across WASM boundary
+  - create_blob(data) / create_blob_writer() for blob creation
+  - read_blob(handle) / read_blob_chunk(handle, idx) for reading
+  - get_blob_info(handle) / release_blob(handle) for management
+  - insert_with_blobs() / update_row_blob() for database operations
+- [x] JavaScript blob helpers (blob-helpers.ts)
+  - blobToReadableStream() / readableStreamToBlob()
+  - GrooveBlob class with arrayBuffer()/stream()
+  - GrooveBlobWriter class with WritableStream support
 
 ### TypeScript Schema Package (@jazz/schema)
 
@@ -233,6 +250,24 @@ export type FolderLoaded<D extends FolderDepth = {}> = {
         : {}
     : {});
 ```
+
+### TypeScript Client Packages
+
+**@jazz/client** - Low-level typed database client
+- [x] TableClient class with typed CRUD operations
+- [x] QueryBuilder with chainable .where() / .with() API
+- [x] BinaryReader class for efficient row decoding
+- [x] Auto-generated client.ts from SQL schema
+- [x] E2E test suite (44 tests, 25 passing, 19 skipped for unsupported SQL features)
+
+**@jazz/react** - React hooks for database access
+- [x] `useAll(query)` - subscribe to multiple rows with mutate helpers (create/update/delete)
+- [x] `useOne(query)` - subscribe to single row with mutate helpers (update/delete)
+- [x] `useMutate(table)` - standalone mutations without subscription
+- [x] JazzProvider context for database instance
+- [x] Typed schema descriptor separate from db instance
+- [x] Structural equality for efficient re-renders
+- [x] E2E test suite (18 tests, 14 passing, 4 skipped)
 
 ## Phase 2: Syncing
 - [ ] Design sync protocol for commit graph reconciliation
@@ -297,7 +332,7 @@ See `specs/rebac-policies.md` for full design.
 
 ## Test Coverage
 
-Current test count: **276 tests** passing across all modules
+Current test count: **320 tests** passing in Rust (groove crate), plus TypeScript E2E test suites
 
 - Unit tests in `sql/row.rs`, `sql/types.rs`, `sql/database/tests.rs`
 - Integration tests in `tests/` directory:
@@ -306,11 +341,15 @@ Current test count: **276 tests** passing across all modules
   - `listener.rs` - ObjectListenerRegistry
   - `node.rs` - LocalNode operations
   - `object.rs` - Object read/write/streaming
+  - `persistence.rs` - Database roundtrip persistence with catalog system
   - `sql_database.rs` - Full SQL layer tests
   - `sql_parser.rs` - SQL parsing tests
   - `sql_row.rs` - Row encoding/decoding
   - `sql_schema.rs` - Schema serialization
   - `storage.rs` - Storage abstractions
+- TypeScript E2E tests:
+  - `packages/jazz-client/src/__tests__/` - @jazz/client tests
+  - `packages/jazz-react/src/__tests__/` - @jazz/react hook tests
 
 ---
 
@@ -320,7 +359,7 @@ Current test count: **276 tests** passing across all modules
 
 - [ ] Truncation on UPDATE: Should UPDATE support a HARD modifier like DELETE? This would allow truncating history after any mutation, not just deletes. Need to unify the semantics with DELETE HARD.
 
-- [x] Binary files (especially larger than RAM): Implemented as `BLOB` and `BLOB[]` column types with streaming support. Uses existing `ContentRef` for inline/chunked storage. See `specs/binary-data-and-blobs.md` for design. WASM handle-based streaming API is pending.
+- [x] Binary files (especially larger than RAM): Implemented as `BLOB` and `BLOB[]` column types with streaming support. Uses existing `ContentRef` for inline/chunked storage. See `specs/binary-data-and-blobs.md` for design. WASM handle-based streaming API is complete.
 
 - [ ] Edit & history API via "magic columns" and "magic filters": Expose commit graph metadata through virtual columns (e.g., `_commit_id`, `_author`, `_timestamp`, `_deleted`) and special WHERE filters (e.g., `WHERE _as_of = '2024-01-01'`, `WHERE _include_deleted = true`). Would enable time-travel queries and audit trails without separate APIs.
 
