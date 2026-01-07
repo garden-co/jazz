@@ -36,7 +36,7 @@ The `unique` property now enforces strict type validation, limiting inputs to sp
 Accepted types are `string`, `boolean`, `null`, `undefined`, or objects containing `string` values.
 
 Providing any other type will throw an error, with the following distinction for numbers:
-- Floating-point numbers (e.g., `1.5`) are strictly forbidden and will throw an error.
+- Floating-point numbers (e.g., `1.5`) will throw an error.
 - Integers (e.g., `1`) are accepted and will not throw an error, though their usage is deprecated and not supported in the type system anymore.
 
 We expect that this change **will not impact** any projects in our hosted Cloud based on our analysis.
