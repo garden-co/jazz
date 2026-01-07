@@ -102,7 +102,9 @@ export class AccountSchema<
       onCreate?: (
         account: AccountInstance<Shape>,
         worker: Account,
+        credentials: { accountID: string; accountSecret: AgentSecret },
       ) => Promise<void>;
+      waitForSyncTimeout?: number;
     },
   ): Promise<{
     credentials: {
