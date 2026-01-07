@@ -3,6 +3,8 @@ members = [
     "groove",
     "groove-wasm",
 ]
+# Only build groove by default (groove-wasm is WASM-only)
+default-members = ["groove"]
 resolver = "2"
 
 # Dev profile with debug symbols for better WASM stack traces
