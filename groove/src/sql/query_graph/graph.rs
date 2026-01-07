@@ -466,7 +466,7 @@ impl QueryGraph {
                         delta = output;
                     }
                     QueryNode::LimitOffset { .. } => {
-                        delta = node.evaluate_limit_offset(delta, cache);
+                        delta = node.evaluate_limit_offset(delta, &self.schema, cache);
                     }
                     _ => {
                         delta = node.evaluate(delta, &self.schema, cache);
@@ -596,7 +596,7 @@ impl QueryGraph {
                 }
                 QueryNode::LimitOffset { .. } => {
                     // LimitOffset needs special evaluation with cache access
-                    current = node.evaluate_limit_offset(current, cache);
+                    current = node.evaluate_limit_offset(current, &self.schema, cache);
                 }
                 _ => {
                     current = node.evaluate(current, &self.schema, cache);
@@ -656,11 +656,16 @@ impl QueryGraph {
             }
 
             // For RecursiveFilter queries, get rows from accessible set
+            // Convert OwnedRow to legacy Row for output
             if let Some(accessible) = self.nodes[input_idx].accessible() {
                 if let Some(all_rows) = self.nodes[input_idx].all_rows() {
                     return accessible
                         .keys()
-                        .filter_map(|id| all_rows.get(id).cloned())
+                        .filter_map(|id| {
+                            all_rows.get(id).map(|owned_row| {
+                                owned_row.to_legacy_row_with_schema(*id, &self.schema)
+                            })
+                        })
                         .collect();
                 }
             }
@@ -673,10 +678,11 @@ impl QueryGraph {
             // For LimitOffset queries, get rows from all_rows filtered by visible_ids
             if let QueryNode::LimitOffset { all_rows, visible_ids, .. } = &self.nodes[input_idx] {
                 // Return rows in sorted order (BTreeMap maintains order)
+                // Convert OwnedRow to legacy Row for output
                 return all_rows
                     .iter()
                     .filter(|(id, _)| visible_ids.contains(id))
-                    .map(|(_, row)| row.clone())
+                    .map(|(id, owned_row)| owned_row.to_legacy_row_with_schema(*id, &self.schema))
                     .collect();
             }
 

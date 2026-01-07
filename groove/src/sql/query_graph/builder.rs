@@ -1,10 +1,12 @@
 //! Builder for constructing query graphs programmatically.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::sql::query_graph::graph::{GraphId, QueryGraph};
 use crate::sql::query_graph::node::{NodeId, QueryNode};
 use crate::sql::query_graph::predicate::Predicate;
+use crate::sql::row_buffer::RowDescriptor;
 use crate::sql::schema::TableSchema;
 use crate::sql::types::IndexKey;
 use crate::object::ObjectId;
@@ -104,11 +106,13 @@ impl QueryGraphBuilder {
         recursive_column: impl Into<String>,
     ) -> NodeId {
         let id = self.alloc_id();
+        let descriptor = Arc::new(RowDescriptor::from_table_schema(&self.schema));
         self.nodes.push(QueryNode::RecursiveFilter {
             table: self.table.clone(),
             input,
             base_predicate,
             recursive_column: recursive_column.into(),
+            descriptor,
             accessible: HashMap::new(),
             children_index: HashMap::new(),
             all_rows: HashMap::new(),
@@ -170,12 +174,14 @@ impl QueryGraphBuilder {
         }
 
         let id = self.alloc_id();
+        let descriptor = Arc::new(RowDescriptor::from_table_schema(&self.schema));
         self.nodes.push(QueryNode::LimitOffset {
             table: self.table.clone(),
             input,
             limit,
             offset,
-            all_rows: std::collections::BTreeMap::new(),
+            descriptor,
+            all_rows: BTreeMap::new(),
             visible_ids: HashSet::new(),
         });
         id
@@ -462,12 +468,15 @@ impl JoinGraphBuilder {
         }
 
         let id = self.alloc_id();
+        // For JOIN graphs, use combined schema for the descriptor
+        let descriptor = Arc::new(RowDescriptor::from_table_schema(&self.combined_schema));
         self.nodes.push(QueryNode::LimitOffset {
             table: self.left_table.clone(),
             input,
             limit,
             offset,
-            all_rows: std::collections::BTreeMap::new(),
+            descriptor,
+            all_rows: BTreeMap::new(),
             visible_ids: HashSet::new(),
         });
         id

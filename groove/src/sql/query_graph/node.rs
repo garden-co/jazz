@@ -1,14 +1,16 @@
 //! Query graph nodes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
+use crate::object::ObjectId;
 use crate::sql::query_graph::cache::RowCache;
-use crate::sql::query_graph::delta::{DeltaBatch, JoinedRow, RowDelta};
+use crate::sql::query_graph::delta::{BufferJoinedRow, DeltaBatch, JoinedRow, PriorState, RowDelta};
 use crate::sql::query_graph::predicate::Predicate;
 use crate::sql::row::{Row, Value};
+use crate::sql::row_buffer::{OwnedRow, RowDescriptor};
 use crate::sql::schema::TableSchema;
 use crate::sql::types::IndexKey;
-use crate::object::ObjectId;
 
 /// Unique identifier for a node within a query graph.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -118,13 +120,16 @@ pub enum QueryNode {
         base_predicate: Predicate,
         /// Column that references parent row in same table (e.g., parent_id)
         recursive_column: String,
+        /// Row descriptor for buffer format rows.
+        descriptor: Arc<RowDescriptor>,
         /// Currently accessible rows with their access reason
         accessible: HashMap<ObjectId, AccessReason>,
         /// Reverse index: parent_id -> set of children
         /// Used for efficient cascade propagation
         children_index: HashMap<ObjectId, HashSet<ObjectId>>,
-        /// All rows in the table (needed for fixpoint iteration)
-        all_rows: HashMap<ObjectId, Row>,
+        /// All rows in the table (needed for fixpoint iteration).
+        /// Uses buffer format (OwnedRow) for efficient storage.
+        all_rows: HashMap<ObjectId, OwnedRow>,
     },
 
     /// Transform: aggregate inner rows into arrays per outer row.
@@ -178,8 +183,11 @@ pub enum QueryNode {
         limit: Option<u64>,
         /// Number of rows to skip from the start.
         offset: u64,
+        /// Row descriptor for buffer format rows.
+        descriptor: Arc<RowDescriptor>,
         /// All rows that passed upstream filters, sorted by ObjectId.
-        all_rows: std::collections::BTreeMap<ObjectId, Row>,
+        /// Uses buffer format (OwnedRow) for efficient storage.
+        all_rows: BTreeMap<ObjectId, OwnedRow>,
         /// Currently visible row IDs (in the window [offset, offset+limit)).
         visible_ids: HashSet<ObjectId>,
     },
@@ -256,8 +264,8 @@ impl QueryNode {
         }
     }
 
-    /// Get all rows stored in a RecursiveFilter node.
-    pub fn all_rows(&self) -> Option<&HashMap<ObjectId, Row>> {
+    /// Get all rows stored in a RecursiveFilter node (buffer format).
+    pub fn all_rows(&self) -> Option<&HashMap<ObjectId, OwnedRow>> {
         match self {
             QueryNode::RecursiveFilter { all_rows, .. } => Some(all_rows),
             _ => None,
@@ -464,6 +472,9 @@ impl QueryNode {
     ///
     /// This handles self-referential policies like:
     /// `owner_id = @viewer OR INHERITS SELECT FROM parent_id`
+    ///
+    /// Internally stores rows in buffer format (OwnedRow) for efficiency,
+    /// converting at boundaries.
     pub fn evaluate_recursive(
         &mut self,
         input: DeltaBatch,
@@ -473,6 +484,7 @@ impl QueryNode {
             QueryNode::RecursiveFilter {
                 base_predicate,
                 recursive_column,
+                descriptor,
                 accessible,
                 children_index,
                 all_rows,
@@ -486,6 +498,7 @@ impl QueryNode {
                             Self::recursive_handle_insert(
                                 row,
                                 schema,
+                                descriptor.clone(),
                                 base_predicate,
                                 recursive_column,
                                 accessible,
@@ -522,6 +535,7 @@ impl QueryNode {
                             Self::recursive_handle_insert(
                                 new,
                                 schema,
+                                descriptor.clone(),
                                 base_predicate,
                                 recursive_column,
                                 accessible,
@@ -544,29 +558,31 @@ impl QueryNode {
     fn recursive_handle_insert(
         row: Row,
         schema: &TableSchema,
+        descriptor: Arc<RowDescriptor>,
         base_predicate: &Predicate,
         recursive_column: &str,
         accessible: &mut HashMap<ObjectId, AccessReason>,
         children_index: &mut HashMap<ObjectId, HashSet<ObjectId>>,
-        all_rows: &mut HashMap<ObjectId, Row>,
+        all_rows: &mut HashMap<ObjectId, OwnedRow>,
         output: &mut DeltaBatch,
     ) {
         let row_id = row.id;
 
-        // Store the row
-        all_rows.insert(row_id, row.clone());
+        // Convert to buffer format for storage
+        let owned_row = OwnedRow::from_legacy_row(&row, schema, descriptor.clone());
+        all_rows.insert(row_id, owned_row.clone());
 
         // Update children index: this row is a child of its parent
-        if let Some(parent_id) = Self::get_ref_value(&row, recursive_column, schema) {
+        if let Some(parent_id) = Self::get_ref_value_buffer(&owned_row, recursive_column) {
             children_index
                 .entry(parent_id)
                 .or_default()
                 .insert(row_id);
         }
 
-        // Check if row is accessible
-        let base_match = base_predicate.matches(&row, schema);
-        let parent_id = Self::get_ref_value(&row, recursive_column, schema);
+        // Check if row is accessible (use buffer-based predicate matching)
+        let base_match = base_predicate.matches_buffer(row_id, owned_row.as_ref(), &descriptor);
+        let parent_id = Self::get_ref_value_buffer(&owned_row, recursive_column);
         let parent_accessible = parent_id
             .map(|pid| accessible.contains_key(&pid))
             .unwrap_or(false);
@@ -583,6 +599,7 @@ impl QueryNode {
                 (false, false) => unreachable!(),
             };
             accessible.insert(row_id, reason);
+            // Output legacy Row for compatibility
             output.push(RowDelta::Added(row.clone()));
 
             // Cascade: check if any existing rows are children of this row
@@ -590,6 +607,7 @@ impl QueryNode {
             Self::propagate_access_to_children(
                 row_id,
                 schema,
+                &descriptor,
                 base_predicate,
                 recursive_column,
                 accessible,
@@ -609,11 +627,12 @@ impl QueryNode {
     fn propagate_access_to_children(
         parent_id: ObjectId,
         schema: &TableSchema,
+        descriptor: &Arc<RowDescriptor>,
         base_predicate: &Predicate,
         recursive_column: &str,
         accessible: &mut HashMap<ObjectId, AccessReason>,
         children_index: &HashMap<ObjectId, HashSet<ObjectId>>,
-        all_rows: &HashMap<ObjectId, Row>,
+        all_rows: &HashMap<ObjectId, OwnedRow>,
         output: &mut DeltaBatch,
     ) {
         if let Some(children) = children_index.get(&parent_id) {
@@ -624,20 +643,23 @@ impl QueryNode {
                 }
 
                 // Child becomes accessible via inheritance
-                if let Some(child_row) = all_rows.get(&child_id) {
-                    let base_match = base_predicate.matches(child_row, schema);
+                if let Some(owned_row) = all_rows.get(&child_id) {
+                    let base_match = base_predicate.matches_buffer(child_id, owned_row.as_ref(), descriptor);
                     let reason = if base_match {
                         AccessReason::Both
                     } else {
                         AccessReason::Inherited
                     };
                     accessible.insert(child_id, reason);
-                    output.push(RowDelta::Added(child_row.clone()));
+                    // Convert to legacy Row for output
+                    let legacy_row = owned_row.to_legacy_row_with_schema(child_id, schema);
+                    output.push(RowDelta::Added(legacy_row));
 
                     // Recursively propagate to grandchildren
                     Self::propagate_access_to_children(
                         child_id,
                         schema,
+                        descriptor,
                         base_predicate,
                         recursive_column,
                         accessible,
@@ -654,20 +676,20 @@ impl QueryNode {
     #[allow(clippy::too_many_arguments)]
     fn recursive_handle_remove(
         row_id: ObjectId,
-        prior: crate::sql::query_graph::delta::PriorState,
+        prior: PriorState,
         recursive_column: &str,
-        schema: &TableSchema,
+        _schema: &TableSchema,
         accessible: &mut HashMap<ObjectId, AccessReason>,
         children_index: &mut HashMap<ObjectId, HashSet<ObjectId>>,
-        all_rows: &mut HashMap<ObjectId, Row>,
+        all_rows: &mut HashMap<ObjectId, OwnedRow>,
         output: &mut DeltaBatch,
     ) {
         // Remove from all_rows
         let removed_row = all_rows.remove(&row_id);
 
         // Remove from children_index (this row as a child of its parent)
-        if let Some(row) = &removed_row {
-            if let Some(parent_id) = Self::get_ref_value(row, recursive_column, schema) {
+        if let Some(owned_row) = &removed_row {
+            if let Some(parent_id) = Self::get_ref_value_buffer(owned_row, recursive_column) {
                 if let Some(siblings) = children_index.get_mut(&parent_id) {
                     siblings.remove(&row_id);
                 }
@@ -682,7 +704,6 @@ impl QueryNode {
             Self::propagate_removal_to_children(
                 row_id,
                 prior,
-                schema,
                 accessible,
                 children_index,
                 all_rows,
@@ -698,11 +719,10 @@ impl QueryNode {
     #[allow(clippy::too_many_arguments)]
     fn propagate_removal_to_children(
         removed_parent_id: ObjectId,
-        prior: crate::sql::query_graph::delta::PriorState,
-        _schema: &TableSchema,
+        prior: PriorState,
         accessible: &mut HashMap<ObjectId, AccessReason>,
         children_index: &HashMap<ObjectId, HashSet<ObjectId>>,
-        all_rows: &HashMap<ObjectId, Row>,
+        _all_rows: &HashMap<ObjectId, OwnedRow>,
         output: &mut DeltaBatch,
     ) {
         if let Some(children) = children_index.get(&removed_parent_id) {
@@ -721,10 +741,9 @@ impl QueryNode {
                             Self::propagate_removal_to_children(
                                 child_id,
                                 prior.clone(),
-                                _schema,
                                 accessible,
                                 children_index,
-                                all_rows,
+                                _all_rows,
                                 output,
                             );
                         }
@@ -1193,6 +1212,17 @@ impl QueryNode {
                 _ => None,
             },
             Value::NullableNone => None,
+            _ => None,
+        }
+    }
+
+    /// Extract a Ref value from a buffer row by column name.
+    /// Handles both plain Ref values and nullable Ref values.
+    fn get_ref_value_buffer(row: &OwnedRow, column: &str) -> Option<ObjectId> {
+        use crate::sql::row_buffer::RowValue;
+        match row.get_by_name(column)? {
+            RowValue::Ref(id) => Some(id),
+            RowValue::Null => None,
             _ => None,
         }
     }
@@ -1719,16 +1749,20 @@ impl QueryNode {
     ///
     /// Maintains the full set of qualifying rows and emits deltas
     /// when the visible window changes.
+    ///
+    /// Internally stores rows in buffer format (OwnedRow) for efficiency,
+    /// converting at boundaries.
     pub fn evaluate_limit_offset(
         &mut self,
         input: DeltaBatch,
-        cache: &RowCache,
+        schema: &TableSchema,
+        _cache: &RowCache,
     ) -> DeltaBatch {
         match self {
             QueryNode::LimitOffset {
-                table,
                 limit,
                 offset,
+                descriptor,
                 all_rows,
                 visible_ids,
                 ..
@@ -1742,6 +1776,8 @@ impl QueryNode {
                                 row,
                                 *limit,
                                 *offset,
+                                descriptor.clone(),
+                                schema,
                                 all_rows,
                                 visible_ids,
                                 &mut output,
@@ -1753,17 +1789,17 @@ impl QueryNode {
                                 prior,
                                 *limit,
                                 *offset,
+                                schema,
                                 all_rows,
                                 visible_ids,
-                                table,
-                                cache,
                                 &mut output,
                             );
                         }
                         RowDelta::Updated { id, new, prior } => {
                             // Update the stored row if it exists
-                            if let Some(row) = all_rows.get_mut(&id) {
-                                *row = new.clone();
+                            if all_rows.contains_key(&id) {
+                                let owned = OwnedRow::from_legacy_row(&new, schema, descriptor.clone());
+                                all_rows.insert(id, owned);
                                 // If the row is visible, emit the update
                                 if visible_ids.contains(&id) {
                                     output.push(RowDelta::Updated { id, new, prior });
@@ -1780,16 +1816,21 @@ impl QueryNode {
     }
 
     /// Handle a row being added to the LimitOffset node.
+    #[allow(clippy::too_many_arguments)]
     fn limit_offset_handle_add(
         row: Row,
         limit: Option<u64>,
         offset: u64,
-        all_rows: &mut std::collections::BTreeMap<ObjectId, Row>,
+        descriptor: Arc<RowDescriptor>,
+        schema: &TableSchema,
+        all_rows: &mut BTreeMap<ObjectId, OwnedRow>,
         visible_ids: &mut HashSet<ObjectId>,
         output: &mut DeltaBatch,
     ) {
         let row_id = row.id;
-        all_rows.insert(row_id, row.clone());
+        // Convert to buffer format for storage
+        let owned = OwnedRow::from_legacy_row(&row, schema, descriptor);
+        all_rows.insert(row_id, owned);
 
         // Compute the new visible window and changes
         let (new_visible, changes) = Self::compute_window_changes(all_rows, visible_ids, limit, offset);
@@ -1798,14 +1839,16 @@ impl QueryNode {
         for (id, change_type) in changes {
             match change_type {
                 WindowChange::Added => {
-                    if let Some(r) = all_rows.get(&id) {
-                        output.push(RowDelta::Added(r.clone()));
+                    if let Some(owned_row) = all_rows.get(&id) {
+                        // Convert back to legacy Row for output
+                        let legacy = owned_row.to_legacy_row_with_schema(id, schema);
+                        output.push(RowDelta::Added(legacy));
                     }
                 }
                 WindowChange::Removed => {
                     output.push(RowDelta::Removed {
                         id,
-                        prior: crate::sql::query_graph::delta::PriorState::empty(),
+                        prior: PriorState::empty(),
                     });
                 }
             }
@@ -1815,15 +1858,15 @@ impl QueryNode {
     }
 
     /// Handle a row being removed from the LimitOffset node.
+    #[allow(clippy::too_many_arguments)]
     fn limit_offset_handle_remove(
         id: ObjectId,
-        prior: crate::sql::query_graph::delta::PriorState,
+        prior: PriorState,
         limit: Option<u64>,
         offset: u64,
-        all_rows: &mut std::collections::BTreeMap<ObjectId, Row>,
+        schema: &TableSchema,
+        all_rows: &mut BTreeMap<ObjectId, OwnedRow>,
         visible_ids: &mut HashSet<ObjectId>,
-        table: &str,
-        cache: &RowCache,
         output: &mut DeltaBatch,
     ) {
         let was_visible = visible_ids.contains(&id);
@@ -1841,11 +1884,11 @@ impl QueryNode {
         for (changed_id, change_type) in changes {
             match change_type {
                 WindowChange::Added => {
-                    // Try to get the row from all_rows first, then cache
-                    if let Some(r) = all_rows.get(&changed_id) {
-                        output.push(RowDelta::Added(r.clone()));
-                    } else if let Some(Some(r)) = cache.get(table, changed_id) {
-                        output.push(RowDelta::Added(r.clone()));
+                    // Get the row from all_rows (we no longer fall back to cache since
+                    // LimitOffset maintains all qualifying rows internally)
+                    if let Some(owned_row) = all_rows.get(&changed_id) {
+                        let legacy = owned_row.to_legacy_row_with_schema(changed_id, schema);
+                        output.push(RowDelta::Added(legacy));
                     }
                 }
                 WindowChange::Removed => {
@@ -1853,7 +1896,7 @@ impl QueryNode {
                         // Only emit if not already removed above
                         output.push(RowDelta::Removed {
                             id: changed_id,
-                            prior: crate::sql::query_graph::delta::PriorState::empty(),
+                            prior: PriorState::empty(),
                         });
                     }
                 }
@@ -1865,7 +1908,7 @@ impl QueryNode {
 
     /// Compute the new visible window and return changes from the current state.
     fn compute_window_changes(
-        all_rows: &std::collections::BTreeMap<ObjectId, Row>,
+        all_rows: &BTreeMap<ObjectId, OwnedRow>,
         current_visible: &HashSet<ObjectId>,
         limit: Option<u64>,
         offset: u64,
@@ -2158,6 +2201,10 @@ mod tests {
     const ALICE: u128 = 100;
     const BOB: u128 = 200;
 
+    fn folder_descriptor() -> Arc<RowDescriptor> {
+        Arc::new(RowDescriptor::from_table_schema(&folder_schema()))
+    }
+
     #[test]
     fn recursive_filter_base_access() {
         // Test: root folder owned by viewer is accessible
@@ -2169,6 +2216,7 @@ mod tests {
             input: NodeId(0),
             base_predicate: Predicate::eq("owner_id", Value::Ref(viewer)),
             recursive_column: "parent_id".to_string(),
+            descriptor: folder_descriptor(),
             accessible: HashMap::new(),
             children_index: HashMap::new(),
             all_rows: HashMap::new(),
@@ -2197,6 +2245,7 @@ mod tests {
             input: NodeId(0),
             base_predicate: Predicate::eq("owner_id", Value::Ref(viewer)),
             recursive_column: "parent_id".to_string(),
+            descriptor: folder_descriptor(),
             accessible: HashMap::new(),
             children_index: HashMap::new(),
             all_rows: HashMap::new(),
@@ -2223,6 +2272,7 @@ mod tests {
             input: NodeId(0),
             base_predicate: Predicate::eq("owner_id", Value::Ref(viewer)),
             recursive_column: "parent_id".to_string(),
+            descriptor: folder_descriptor(),
             accessible: HashMap::new(),
             children_index: HashMap::new(),
             all_rows: HashMap::new(),
@@ -2257,6 +2307,7 @@ mod tests {
             input: NodeId(0),
             base_predicate: Predicate::eq("owner_id", Value::Ref(viewer)),
             recursive_column: "parent_id".to_string(),
+            descriptor: folder_descriptor(),
             accessible: HashMap::new(),
             children_index: HashMap::new(),
             all_rows: HashMap::new(),
@@ -2297,6 +2348,7 @@ mod tests {
             input: NodeId(0),
             base_predicate: Predicate::eq("owner_id", Value::Ref(viewer)),
             recursive_column: "parent_id".to_string(),
+            descriptor: folder_descriptor(),
             accessible: HashMap::new(),
             children_index: HashMap::new(),
             all_rows: HashMap::new(),
@@ -2333,6 +2385,7 @@ mod tests {
             input: NodeId(0),
             base_predicate: Predicate::eq("owner_id", Value::Ref(viewer)),
             recursive_column: "parent_id".to_string(),
+            descriptor: folder_descriptor(),
             accessible: HashMap::new(),
             children_index: HashMap::new(),
             all_rows: HashMap::new(),
