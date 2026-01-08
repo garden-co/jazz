@@ -45,6 +45,11 @@ export class AudioManager extends EventTarget {
   private totalDuration = 0;
   private timeUpdateInterval: ReturnType<typeof setInterval> | null = null;
 
+  /** Promise tracking the currently executing loadAudio call */
+  private loadAudioPromise: Promise<void> | null = null;
+  /** AbortController for the waiting loadAudio call (if any) */
+  private pendingLoadAudioAbort: AbortController | null = null;
+
   on<K extends keyof AudioManagerEventMap>(
     event: K,
     callback: (e: AudioManagerEventMap[K]) => void,
@@ -103,6 +108,42 @@ export class AudioManager extends EventTarget {
   }
 
   async loadAudio(source: FileStreamSource | BlobSource): Promise<void> {
+    // Cancel any pending waiting call
+    if (this.pendingLoadAudioAbort) {
+      this.pendingLoadAudioAbort.abort();
+    }
+
+    // If there's an execution in progress, wait for it
+    if (this.loadAudioPromise) {
+      const abortController = new AbortController();
+      this.pendingLoadAudioAbort = abortController;
+
+      try {
+        await this.loadAudioPromise;
+      } catch {
+        // Ignore errors from previous call
+      }
+
+      // Check if we were aborted while waiting
+      if (abortController.signal.aborted) {
+        return;
+      }
+
+      this.pendingLoadAudioAbort = null;
+    }
+
+    // Execute the actual load
+    this.loadAudioPromise = this.doLoadAudio(source);
+    try {
+      await this.loadAudioPromise;
+    } finally {
+      this.loadAudioPromise = null;
+    }
+  }
+
+  private async doLoadAudio(
+    source: FileStreamSource | BlobSource,
+  ): Promise<void> {
     await this.unloadCurrentAudio();
     this.iteratorAborted = false;
 
