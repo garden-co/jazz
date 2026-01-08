@@ -541,6 +541,79 @@ impl RowDescriptor {
             .collect();
         RowDescriptor::new_ordered(cols)
     }
+
+    /// Create a combined descriptor for multiple rows (for multi-table JOIN).
+    /// Uses new_ordered which groups fixed-size columns first.
+    pub fn join_all(descriptors: &[&RowDescriptor]) -> RowDescriptor {
+        let cols: Vec<_> = descriptors
+            .iter()
+            .flat_map(|d| d.columns.iter())
+            .map(|c| (c.name.clone(), c.col_type.clone()))
+            .collect();
+        RowDescriptor::new_ordered(cols)
+    }
+
+    /// Create a combined descriptor preserving exact buffer order from sources.
+    ///
+    /// This is used when concatenating row buffers - the order must match exactly.
+    /// Each source row's columns appear in their buffer order (fixed-size section
+    /// first, then variable-size section).
+    ///
+    /// The schema_index is computed to reflect logical column order (the order
+    /// columns would appear in schema order across all tables). This allows
+    /// `get_column(schema_idx)` to return columns in the expected logical order.
+    pub fn concat_preserving_buffer_order(descriptors: &[&RowDescriptor]) -> RowDescriptor {
+        // First, compute the logical schema order for each source descriptor.
+        // For each descriptor, we need to know the schema indices in order.
+        let mut logical_order: Vec<(usize, usize, &ColDescriptor)> = Vec::new(); // (desc_idx, original_schema_idx, col)
+
+        let mut logical_idx = 0;
+        for (desc_idx, desc) in descriptors.iter().enumerate() {
+            // Get columns sorted by their original schema_index
+            let mut cols_by_schema: Vec<_> = desc.columns.iter().enumerate().collect();
+            cols_by_schema.sort_by_key(|(_, c)| c.schema_index);
+
+            for (buf_idx, col) in cols_by_schema {
+                logical_order.push((desc_idx, logical_idx, col));
+                logical_idx += 1;
+            }
+        }
+
+        // Now build the merged descriptor in buffer order but with correct schema_indices
+        let mut columns = Vec::new();
+        let mut fixed_offset = 0;
+        let mut var_idx = 0;
+
+        for (desc_idx, desc) in descriptors.iter().enumerate() {
+            for col in &desc.columns {
+                let mut new_col = col.clone();
+
+                // Find this column's logical index
+                let logical_schema_idx = logical_order.iter()
+                    .find(|(d, _, c)| *d == desc_idx && c.name == col.name)
+                    .map(|(_, idx, _)| *idx)
+                    .unwrap_or(columns.len());
+
+                new_col.schema_index = logical_schema_idx;
+
+                if col.col_type.is_fixed_size() {
+                    new_col.offset = fixed_offset;
+                    fixed_offset += col.col_type.fixed_size().unwrap();
+                } else {
+                    new_col.offset = var_idx;
+                    var_idx += 1;
+                }
+
+                columns.push(new_col);
+            }
+        }
+
+        RowDescriptor {
+            columns,
+            fixed_size: fixed_offset,
+            variable_count: var_idx,
+        }
+    }
 }
 
 /// A borrowed view into a row buffer. Zero-copy reads.
@@ -1045,6 +1118,44 @@ impl OwnedRow {
             // TODO: Handle Blob, BlobArray
             _ => builder,
         }
+    }
+
+    /// Merge multiple rows into a single combined row.
+    ///
+    /// This is used for JOIN operations. The rows are merged in order,
+    /// with columns from each row appearing in sequence. Values are copied
+    /// in buffer order (not schema order) for efficiency.
+    ///
+    /// The output descriptor preserves the exact buffer order from the source rows.
+    pub fn merge_rows(rows: &[&OwnedRow]) -> OwnedRow {
+        if rows.is_empty() {
+            // Return an empty row with empty descriptor
+            return OwnedRow::new(Arc::new(RowDescriptor::new(std::iter::empty())), vec![]);
+        }
+
+        if rows.len() == 1 {
+            return rows[0].clone();
+        }
+
+        // Build combined descriptor preserving buffer order from sources
+        let descriptors: Vec<&RowDescriptor> = rows.iter().map(|r| r.descriptor.as_ref()).collect();
+        let combined_descriptor = Arc::new(RowDescriptor::concat_preserving_buffer_order(&descriptors));
+
+        // Build the combined row using RowBuilder
+        let mut builder = RowBuilder::new(combined_descriptor.clone());
+        let mut output_col_idx = 0;
+
+        // Copy values from each source row in buffer order
+        for row in rows {
+            for buf_idx in 0..row.descriptor.columns.len() {
+                if let Some(value) = row.get(buf_idx) {
+                    builder = Self::set_from_row_value(builder, output_col_idx, value);
+                }
+                output_col_idx += 1;
+            }
+        }
+
+        builder.build()
     }
 }
 

@@ -163,55 +163,52 @@ impl JoinedRow {
 
     /// Convert to output (ObjectId, OwnedRow) with combined values from all tables.
     /// Uses primary table's row ID as the output row ID.
-    fn to_output_row(self, projection: &Projection, output_descriptor: Arc<RowDescriptor>) -> (ObjectId, OwnedRow) {
+    fn to_output_row(self, projection: &Projection) -> (ObjectId, OwnedRow) {
         let row_id = self
             .tables
             .get(&self.primary_table)
             .map(|(id, _)| *id)
             .unwrap_or(ObjectId::default());
 
-        let values: Vec<Value> = match projection {
+        let owned = match projection {
             Projection::All => {
-                // Combine all values from all tables (primary first, then joins in insertion order)
-                let mut all_values = Vec::new();
+                // Merge all rows: primary first, then joined tables in insertion order
+                let mut rows_to_merge: Vec<&OwnedRow> = Vec::new();
                 if let Some((_, row)) = self.tables.get(&self.primary_table) {
-                    // Extract all values from the OwnedRow
-                    for i in 0..row.descriptor.columns.len() {
-                        if let Some(v) = row.get(i) {
-                            all_values.push(v.to_value());
-                        }
-                    }
+                    rows_to_merge.push(row);
                 }
                 for (table_name, (_, row)) in &self.tables {
                     if table_name != &self.primary_table {
-                        for i in 0..row.descriptor.columns.len() {
-                            if let Some(v) = row.get(i) {
-                                all_values.push(v.to_value());
-                            }
-                        }
+                        rows_to_merge.push(row);
                     }
                 }
-                all_values
+                OwnedRow::merge_rows(&rows_to_merge)
             }
             Projection::TableAll(table_name) => {
-                // Only values from specified table
+                // Only the specified table's row
                 if let Some((_, row)) = self.tables.get(table_name) {
-                    let mut values = Vec::new();
-                    for i in 0..row.descriptor.columns.len() {
-                        if let Some(v) = row.get(i) {
-                            values.push(v.to_value());
-                        }
-                    }
-                    values
+                    row.clone()
                 } else {
-                    vec![]
+                    OwnedRow::new(Arc::new(RowDescriptor::new(std::iter::empty())), vec![])
                 }
             }
             Projection::Columns(cols) => {
-                // Specific columns
-                cols.iter()
+                // Specific columns - need to build a new row with just those columns
+                let values: Vec<Value> = cols.iter()
                     .filter_map(|qc| self.get_column(qc.table.as_deref(), &qc.column))
-                    .collect()
+                    .collect();
+                // Build descriptor from the column names
+                let col_defs: Vec<(String, ColType)> = cols.iter()
+                    .filter_map(|qc| {
+                        // Find the column in the appropriate table
+                        let table_name = qc.table.as_deref().unwrap_or(&self.primary_table);
+                        self.tables.get(table_name).and_then(|(_, row)| {
+                            row.descriptor.column(&qc.column).map(|c| (qc.column.clone(), c.col_type.clone()))
+                        })
+                    })
+                    .collect();
+                let descriptor = Arc::new(RowDescriptor::new_ordered(col_defs));
+                OwnedRow::from_values(&values, descriptor)
             }
             Projection::Expressions(_) => {
                 // Expressions are handled in execute_select, not here
@@ -220,7 +217,6 @@ impl JoinedRow {
             }
         };
 
-        let owned = OwnedRow::from_values(&values, output_descriptor);
         (row_id, owned)
     }
 }
@@ -616,10 +612,10 @@ impl DatabaseState {
             }
 
             // Apply projection and convert to output
-            // TODO: build proper output descriptor from projection
+            // The to_output_row method handles building the combined descriptor
             joined_rows
                 .into_iter()
-                .map(|jr| jr.to_output_row(&select.projection, primary_descriptor.clone()))
+                .map(|jr| jr.to_output_row(&select.projection))
                 .collect()
         };
 
