@@ -15,6 +15,7 @@ use crate::sql::query_graph::{
     DeltaBatch, GraphId, JoinGraphBuilder, Predicate, PriorState, QueryGraphBuilder, RowDelta,
 };
 use crate::sql::row::{Row, RowError, Value, decode_row, encode_row};
+use crate::sql::row_buffer::{ColType, OwnedRow, RowDescriptor};
 use crate::sql::schema::{ColumnType, SchemaError, TableSchema};
 use crate::sql::table_rows::TableRows;
 use crate::sql::types::{IndexKey, SchemaId};
@@ -242,12 +243,30 @@ impl std::fmt::Debug for IncrementalQuery {
 }
 
 impl IncrementalQuery {
-    /// Get the current query output rows.
-    pub fn rows(&self) -> Vec<Row> {
+    /// Get the current query output rows in buffer format.
+    pub fn rows_buffer(&self) -> Vec<(ObjectId, OwnedRow)> {
         self.db_state
             .graph_registry
             .get_output(self.graph_id, &self.db_state)
             .unwrap_or_default()
+    }
+
+    /// Get the current query output rows as legacy Row format.
+    ///
+    /// Note: This converts from buffer format. Use `rows_buffer()` for better performance.
+    pub fn rows(&self) -> Vec<Row> {
+        let (schema, _) = self
+            .db_state
+            .graph_registry
+            .get_output_schema(self.graph_id)
+            .unwrap_or_else(|| {
+                (TableSchema::new("_output", vec![]), Arc::new(RowDescriptor::new(std::iter::empty::<(String, ColType)>())))
+            });
+
+        self.rows_buffer()
+            .into_iter()
+            .map(|(id, owned)| owned.to_legacy_row_with_schema(id, &schema))
+            .collect()
     }
 
     /// Subscribe to query output changes with a delta callback.
@@ -261,11 +280,12 @@ impl IncrementalQuery {
     /// Returns a `ListenerId` that can be used to unsubscribe.
     pub fn subscribe_delta(&self, callback: OutputCallback) -> Option<ListenerId> {
         // Get current state and send as initial "Added" deltas
-        // Always call the callback, even if empty, so subscribers know initial load completed
-        let initial_rows = self.rows();
+        // Already in buffer format - no conversion needed!
+        let initial_rows = self.rows_buffer();
+
         let initial_deltas: DeltaBatch = initial_rows
             .into_iter()
-            .map(RowDelta::Added)
+            .map(|(id, row)| RowDelta::Added { id, row })
             .collect();
         callback(&initial_deltas);
 
@@ -290,10 +310,25 @@ impl IncrementalQuery {
         self.db_state.graph_registry.subscribe(
             self.graph_id,
             Box::new(move |_delta| {
-                let rows = db_state
+                // Get schema for conversion
+                let (schema, _) = db_state
+                    .graph_registry
+                    .get_output_schema(graph_id)
+                    .unwrap_or_else(|| {
+                        (TableSchema::new("_output", vec![]), Arc::new(RowDescriptor::new(std::iter::empty::<(String, ColType)>())))
+                    });
+
+                // Get buffer output and convert to legacy Row
+                let buffer_rows = db_state
                     .graph_registry
                     .get_output(graph_id, &db_state)
                     .unwrap_or_default();
+
+                let rows: Vec<Row> = buffer_rows
+                    .into_iter()
+                    .map(|(id, owned)| owned.to_legacy_row_with_schema(id, &schema))
+                    .collect();
+
                 callback(rows);
             }),
         )
@@ -311,10 +346,25 @@ impl IncrementalQuery {
         self.db_state.graph_registry.subscribe(
             self.graph_id,
             Box::new(move |_delta| {
-                let rows = db_state
+                // Get schema for conversion
+                let (schema, _) = db_state
+                    .graph_registry
+                    .get_output_schema(graph_id)
+                    .unwrap_or_else(|| {
+                        (TableSchema::new("_output", vec![]), Arc::new(RowDescriptor::new(std::iter::empty::<(String, ColType)>())))
+                    });
+
+                // Get buffer output and convert to legacy Row
+                let buffer_rows = db_state
                     .graph_registry
                     .get_output(graph_id, &db_state)
                     .unwrap_or_default();
+
+                let rows: Vec<Row> = buffer_rows
+                    .into_iter()
+                    .map(|(id, owned)| owned.to_legacy_row_with_schema(id, &schema))
+                    .collect();
+
                 callback(rows);
             }),
         )
@@ -1934,10 +1984,13 @@ impl Database {
         }
 
         // Notify query graphs of the change
+        // Convert to buffer format for the delta
         let row = Row::new(row_id, row_values);
+        let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
+        let owned = OwnedRow::from_legacy_row(&row, &schema, descriptor);
         self.state
             .graph_registry
-            .notify_row_change(table, RowDelta::Added(row), &*self.state);
+            .notify_row_change(table, RowDelta::Added { id: row_id, row: owned }, &*self.state);
 
         Ok(row_id)
     }
@@ -2081,12 +2134,15 @@ impl Database {
         }
 
         // Notify query graphs of the change
+        // Convert to buffer format for the delta
         let new_row = Row::new(id, new_values);
+        let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
+        let owned = OwnedRow::from_legacy_row(&new_row, &schema, descriptor);
         self.state.graph_registry.notify_row_change(
             table,
             RowDelta::Updated {
                 id,
-                new: new_row,
+                row: owned,
                 prior: PriorState::empty(), // TODO: Get prior commit tips
             },
             &*self.state,
@@ -3070,6 +3126,10 @@ impl Database {
             &inherits.ref_column,
         );
 
+        // For INHERITS join, we want to output only the source table's columns
+        // (SELECT * FROM documents with INHERITS should return documents.*, not joined columns)
+        builder.set_projection(left_table);
+
         let join_node = builder.join();
 
         // Apply user's WHERE clause (needs qualified column handling)
@@ -3169,6 +3229,9 @@ impl Database {
             first_target_schema.clone(),
             &first_hop.ref_column,
         );
+
+        // For INHERITS chain, output only the source table's columns
+        builder.set_projection(left_table);
 
         // Pre-add schemas for all subsequent hops
         for hop in chain.hops.iter().skip(1) {

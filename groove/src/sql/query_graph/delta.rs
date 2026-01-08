@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::commit::CommitId;
 use crate::object::ObjectId;
-use crate::sql::row::{Row, Value};
+use crate::sql::row::{Row, Value};  // Row/Value still used by JoinedRow (legacy) and BufferJoinedRow conversion
 use crate::sql::row_buffer::{OwnedRow, RowDescriptor};
 use crate::sql::schema::TableSchema;
 
@@ -37,11 +37,16 @@ impl PriorState {
     }
 }
 
-/// A change to a single row.
+/// A change to a single row using the unified buffer format.
 #[derive(Clone, Debug)]
 pub enum RowDelta {
     /// Row was inserted (no prior state).
-    Added(Row),
+    Added {
+        /// The ID of the added row.
+        id: ObjectId,
+        /// The new row data in buffer format.
+        row: OwnedRow,
+    },
 
     /// Row was deleted.
     Removed {
@@ -55,8 +60,8 @@ pub enum RowDelta {
     Updated {
         /// The ID of the updated row.
         id: ObjectId,
-        /// The new row values.
-        new: Row,
+        /// The new row data in buffer format.
+        row: OwnedRow,
         /// Prior tips for looking up old values on-demand.
         prior: PriorState,
     },
@@ -66,17 +71,26 @@ impl RowDelta {
     /// Get the row ID affected by this delta.
     pub fn row_id(&self) -> ObjectId {
         match self {
-            RowDelta::Added(row) => row.id,
+            RowDelta::Added { id, .. } => *id,
             RowDelta::Removed { id, .. } => *id,
             RowDelta::Updated { id, .. } => *id,
         }
     }
 
     /// Get the new row data if this delta has it.
-    pub fn new_row(&self) -> Option<&Row> {
+    pub fn new_row(&self) -> Option<&OwnedRow> {
         match self {
-            RowDelta::Added(row) => Some(row),
-            RowDelta::Updated { new, .. } => Some(new),
+            RowDelta::Added { row, .. } => Some(row),
+            RowDelta::Updated { row, .. } => Some(row),
+            RowDelta::Removed { .. } => None,
+        }
+    }
+
+    /// Get the row descriptor if available.
+    pub fn descriptor(&self) -> Option<&Arc<RowDescriptor>> {
+        match self {
+            RowDelta::Added { row, .. } => Some(&row.descriptor),
+            RowDelta::Updated { row, .. } => Some(&row.descriptor),
             RowDelta::Removed { .. } => None,
         }
     }
@@ -84,9 +98,30 @@ impl RowDelta {
     /// Returns true if this delta has prior state that can be looked up.
     pub fn has_prior(&self) -> bool {
         match self {
-            RowDelta::Added(_) => false,
+            RowDelta::Added { .. } => false,
             RowDelta::Removed { prior, .. } => !prior.is_new(),
             RowDelta::Updated { prior, .. } => !prior.is_new(),
+        }
+    }
+
+    /// Create a new delta with qualified column names.
+    ///
+    /// Converts column names from `column` to `table.column` format.
+    /// This is needed for JOIN queries where predicates use qualified names.
+    pub fn qualify_columns(self, table: &str, schema: &TableSchema) -> Self {
+        match self {
+            RowDelta::Added { id, row } => {
+                let qualified_row = row.qualify_columns(table, schema);
+                RowDelta::Added { id, row: qualified_row }
+            }
+            RowDelta::Updated { id, row, prior } => {
+                let qualified_row = row.qualify_columns(table, schema);
+                RowDelta::Updated { id, row: qualified_row, prior }
+            }
+            RowDelta::Removed { id, prior } => {
+                // Removed deltas don't have row data to qualify
+                RowDelta::Removed { id, prior }
+            }
         }
     }
 }
@@ -112,18 +147,18 @@ impl DeltaBatch {
     }
 
     /// Create a batch with a single Added delta.
-    pub fn added(row: Row) -> Self {
+    pub fn added(id: ObjectId, row: OwnedRow) -> Self {
         Self {
-            deltas: vec![RowDelta::Added(row)],
+            deltas: vec![RowDelta::Added { id, row }],
         }
     }
 
     /// Create a batch with a single Updated delta.
-    pub fn updated(id: ObjectId, new: Row, prior_tips: Vec<CommitId>) -> Self {
+    pub fn updated(id: ObjectId, row: OwnedRow, prior_tips: Vec<CommitId>) -> Self {
         Self {
             deltas: vec![RowDelta::Updated {
                 id,
-                new,
+                row,
                 prior: PriorState::new(prior_tips),
             }],
         }
@@ -180,7 +215,7 @@ impl DeltaBatch {
         }
 
         // Track final state per row: None = removed/not present, Some = added/updated
-        let mut final_state: HashMap<ObjectId, Option<(Row, PriorState)>> = HashMap::new();
+        let mut final_state: HashMap<ObjectId, Option<(OwnedRow, PriorState)>> = HashMap::new();
         // Track which rows existed before this batch (had prior state on first delta)
         let mut existed_before: HashMap<ObjectId, bool> = HashMap::new();
 
@@ -191,7 +226,7 @@ impl DeltaBatch {
             existed_before.entry(id).or_insert_with(|| delta.has_prior());
 
             match delta {
-                RowDelta::Added(row) => {
+                RowDelta::Added { row, .. } => {
                     final_state.insert(id, Some((row, PriorState::empty())));
                 }
                 RowDelta::Removed {  .. } => {
@@ -202,7 +237,7 @@ impl DeltaBatch {
                         final_state.remove(&id);
                     }
                 }
-                RowDelta::Updated { new, prior, .. } => {
+                RowDelta::Updated { row, prior, .. } => {
                     // Keep prior from first delta for this row
                     let prior_to_use = if let Some(Some((_, existing_prior))) = final_state.get(&id)
                     {
@@ -210,7 +245,7 @@ impl DeltaBatch {
                     } else {
                         prior
                     };
-                    final_state.insert(id, Some((new, prior_to_use)));
+                    final_state.insert(id, Some((row, prior_to_use)));
                 }
             }
         }
@@ -221,9 +256,9 @@ impl DeltaBatch {
             match state {
                 Some((row, prior)) => {
                     if existed {
-                        self.deltas.push(RowDelta::Updated { id, new: row, prior });
+                        self.deltas.push(RowDelta::Updated { id, row, prior });
                     } else {
-                        self.deltas.push(RowDelta::Added(row));
+                        self.deltas.push(RowDelta::Added { id, row });
                     }
                 }
                 None => {
@@ -327,246 +362,8 @@ impl JoinedRow {
     }
 }
 
-// ============================================================================
-// Buffer-based Delta Types (new unified row format)
-// ============================================================================
-
-/// A change to a single row using the unified buffer format.
-#[derive(Clone, Debug)]
-pub enum BufferRowDelta {
-    /// Row was inserted (no prior state).
-    Added {
-        /// The ID of the added row.
-        id: ObjectId,
-        /// The new row data.
-        row: OwnedRow,
-    },
-
-    /// Row was deleted.
-    Removed {
-        /// The ID of the deleted row.
-        id: ObjectId,
-        /// Prior tips for looking up deleted row data if needed.
-        prior: PriorState,
-    },
-
-    /// Row was updated.
-    Updated {
-        /// The ID of the updated row.
-        id: ObjectId,
-        /// The new row data.
-        row: OwnedRow,
-        /// Prior tips for looking up old values on-demand.
-        prior: PriorState,
-    },
-}
-
-impl BufferRowDelta {
-    /// Get the row ID affected by this delta.
-    pub fn row_id(&self) -> ObjectId {
-        match self {
-            BufferRowDelta::Added { id, .. } => *id,
-            BufferRowDelta::Removed { id, .. } => *id,
-            BufferRowDelta::Updated { id, .. } => *id,
-        }
-    }
-
-    /// Get the new row data if this delta has it.
-    pub fn new_row(&self) -> Option<&OwnedRow> {
-        match self {
-            BufferRowDelta::Added { row, .. } => Some(row),
-            BufferRowDelta::Updated { row, .. } => Some(row),
-            BufferRowDelta::Removed { .. } => None,
-        }
-    }
-
-    /// Get the row descriptor if available.
-    pub fn descriptor(&self) -> Option<&Arc<RowDescriptor>> {
-        match self {
-            BufferRowDelta::Added { row, .. } => Some(&row.descriptor),
-            BufferRowDelta::Updated { row, .. } => Some(&row.descriptor),
-            BufferRowDelta::Removed { .. } => None,
-        }
-    }
-
-    /// Returns true if this delta has prior state that can be looked up.
-    pub fn has_prior(&self) -> bool {
-        match self {
-            BufferRowDelta::Added { .. } => false,
-            BufferRowDelta::Removed { prior, .. } => !prior.is_new(),
-            BufferRowDelta::Updated { prior, .. } => !prior.is_new(),
-        }
-    }
-
-    /// Convert from legacy RowDelta using a schema and descriptor.
-    ///
-    /// Note: This allocates a new buffer for the row data.
-    pub fn from_legacy(
-        delta: &RowDelta,
-        schema: &TableSchema,
-        descriptor: Arc<RowDescriptor>,
-    ) -> Self {
-        match delta {
-            RowDelta::Added(row) => BufferRowDelta::Added {
-                id: row.id,
-                row: OwnedRow::from_legacy_row(row, schema, descriptor),
-            },
-            RowDelta::Removed { id, prior } => BufferRowDelta::Removed {
-                id: *id,
-                prior: prior.clone(),
-            },
-            RowDelta::Updated { id, new, prior } => BufferRowDelta::Updated {
-                id: *id,
-                row: OwnedRow::from_legacy_row(new, schema, descriptor),
-                prior: prior.clone(),
-            },
-        }
-    }
-
-    /// Convert to legacy RowDelta.
-    ///
-    /// Note: This allocates for string/bytes values.
-    pub fn to_legacy(&self, schema: &TableSchema) -> RowDelta {
-        match self {
-            BufferRowDelta::Added { id, row } => {
-                RowDelta::Added(row.to_legacy_row_with_schema(*id, schema))
-            }
-            BufferRowDelta::Removed { id, prior } => RowDelta::Removed {
-                id: *id,
-                prior: prior.clone(),
-            },
-            BufferRowDelta::Updated { id, row, prior } => RowDelta::Updated {
-                id: *id,
-                new: row.to_legacy_row_with_schema(*id, schema),
-                prior: prior.clone(),
-            },
-        }
-    }
-}
-
-/// A batch of buffer-based row changes.
-#[derive(Clone, Debug, Default)]
-pub struct BufferDeltaBatch {
-    /// The row descriptor for all rows in this batch.
-    descriptor: Option<Arc<RowDescriptor>>,
-    /// The deltas in this batch.
-    deltas: Vec<BufferRowDelta>,
-}
-
-impl BufferDeltaBatch {
-    /// Create an empty batch.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Create a batch with an explicit descriptor.
-    pub fn with_descriptor(descriptor: Arc<RowDescriptor>) -> Self {
-        Self {
-            descriptor: Some(descriptor),
-            deltas: Vec::new(),
-        }
-    }
-
-    /// Create a batch with a single Added delta.
-    pub fn added(id: ObjectId, row: OwnedRow) -> Self {
-        let descriptor = row.descriptor.clone();
-        Self {
-            descriptor: Some(descriptor),
-            deltas: vec![BufferRowDelta::Added { id, row }],
-        }
-    }
-
-    /// Create a batch with a single Updated delta.
-    pub fn updated(id: ObjectId, row: OwnedRow, prior_tips: Vec<CommitId>) -> Self {
-        let descriptor = row.descriptor.clone();
-        Self {
-            descriptor: Some(descriptor),
-            deltas: vec![BufferRowDelta::Updated {
-                id,
-                row,
-                prior: PriorState::new(prior_tips),
-            }],
-        }
-    }
-
-    /// Create a batch with a single Removed delta.
-    pub fn removed(id: ObjectId, prior_tips: Vec<CommitId>) -> Self {
-        Self {
-            descriptor: None,
-            deltas: vec![BufferRowDelta::Removed {
-                id,
-                prior: PriorState::new(prior_tips),
-            }],
-        }
-    }
-
-    /// Get the row descriptor for this batch (if available).
-    pub fn descriptor(&self) -> Option<&Arc<RowDescriptor>> {
-        self.descriptor.as_ref()
-    }
-
-    /// Add a delta to the batch.
-    pub fn push(&mut self, delta: BufferRowDelta) {
-        // Capture descriptor from first delta with a row
-        if self.descriptor.is_none() {
-            if let Some(desc) = delta.descriptor() {
-                self.descriptor = Some(desc.clone());
-            }
-        }
-        self.deltas.push(delta);
-    }
-
-    /// Extend this batch with deltas from another batch.
-    pub fn extend(&mut self, other: BufferDeltaBatch) {
-        if self.descriptor.is_none() {
-            self.descriptor = other.descriptor;
-        }
-        self.deltas.extend(other.deltas);
-    }
-
-    /// Returns true if the batch is empty.
-    pub fn is_empty(&self) -> bool {
-        self.deltas.is_empty()
-    }
-
-    /// Returns the number of deltas in the batch.
-    pub fn len(&self) -> usize {
-        self.deltas.len()
-    }
-
-    /// Iterate over deltas by reference.
-    pub fn iter(&self) -> impl Iterator<Item = &BufferRowDelta> {
-        self.deltas.iter()
-    }
-
-    /// Consume the batch and iterate over deltas.
-    pub fn into_iter(self) -> impl Iterator<Item = BufferRowDelta> {
-        self.deltas.into_iter()
-    }
-
-    /// Convert from legacy DeltaBatch.
-    pub fn from_legacy(
-        batch: &DeltaBatch,
-        schema: &TableSchema,
-        descriptor: Arc<RowDescriptor>,
-    ) -> Self {
-        let deltas = batch
-            .iter()
-            .map(|d| BufferRowDelta::from_legacy(d, schema, descriptor.clone()))
-            .collect();
-        Self {
-            descriptor: Some(descriptor),
-            deltas,
-        }
-    }
-
-    /// Convert to legacy DeltaBatch.
-    pub fn to_legacy(&self, schema: &TableSchema) -> DeltaBatch {
-        DeltaBatch {
-            deltas: self.deltas.iter().map(|d| d.to_legacy(schema)).collect(),
-        }
-    }
-}
+// BufferRowDelta and BufferDeltaBatch have been removed - RowDelta/DeltaBatch
+// now directly use the unified buffer format (OwnedRow).
 
 // ============================================================================
 // Buffer-based JoinedRow
@@ -589,6 +386,15 @@ pub struct BufferJoinedRow {
 }
 
 impl BufferJoinedRow {
+    /// Create an empty BufferJoinedRow with just a primary table designation.
+    pub fn new(primary_table: &str, primary_id: ObjectId) -> Self {
+        Self {
+            primary_table: primary_table.to_string(),
+            primary_id,
+            table_rows: HashMap::new(),
+        }
+    }
+
     /// Create a BufferJoinedRow from a single table's row.
     pub fn from_single(table: &str, row_id: ObjectId, row: OwnedRow) -> Self {
         let mut table_rows = HashMap::new();
@@ -740,128 +546,63 @@ impl BufferJoinedRow {
             table_rows,
         }
     }
+
+    /// Convert to a legacy Row with values in schema order.
+    ///
+    /// The combined schema specifies the expected output column order.
+    /// Values are looked up by qualified column name to ensure correct ordering.
+    pub fn to_legacy_row_with_schema(&self, primary_id: ObjectId, combined_schema: &TableSchema) -> Row {
+        use crate::sql::row_buffer::RowValue;
+
+        let mut values = Vec::with_capacity(combined_schema.columns.len());
+
+        for col_def in &combined_schema.columns {
+            let value = if let Some((table, _col_name)) = col_def.name.split_once('.') {
+                if let Some((_, owned_row)) = self.table_rows.get(table) {
+                    owned_row.get_by_name(&col_def.name)
+                        .map(|rv| if col_def.nullable { rv.to_nullable_value() } else { rv.to_value() })
+                        .unwrap_or(Value::NullableNone)
+                } else {
+                    Value::NullableNone
+                }
+            } else {
+                Value::NullableNone
+            };
+            values.push(value);
+        }
+
+        Row::new(primary_id, values)
+    }
+
+    /// Convert to an output Row containing only values from a specific table.
+    pub fn to_projected_row(&self, table: &str, schema: &TableSchema) -> Option<Row> {
+        use crate::sql::row_buffer::RowValue;
+
+        let (row_id, owned_row) = self.table_rows.get(table)?;
+
+        let values: Vec<Value> = schema
+            .columns
+            .iter()
+            .map(|col_def| {
+                let qualified_name = format!("{}.{}", table, col_def.name);
+                let value = owned_row.get_by_name(&qualified_name).unwrap_or(RowValue::Null);
+                if col_def.nullable {
+                    value.to_nullable_value()
+                } else {
+                    value.to_value()
+                }
+            })
+            .collect();
+
+        Some(Row::new(*row_id, values))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn make_row(id: u128, name: &str) -> Row {
-        Row::new(ObjectId::new(id), vec![Value::String(name.to_string())])
-    }
-
-    #[test]
-    fn delta_batch_empty() {
-        let batch = DeltaBatch::new();
-        assert!(batch.is_empty());
-        assert_eq!(batch.len(), 0);
-    }
-
-    #[test]
-    fn delta_batch_added() {
-        let row = make_row(1, "Alice");
-        let batch = DeltaBatch::added(row.clone());
-
-        assert!(!batch.is_empty());
-        assert_eq!(batch.len(), 1);
-
-        let delta = batch.iter().next().unwrap();
-        assert_eq!(delta.row_id(), ObjectId::new(1));
-        assert!(matches!(delta, RowDelta::Added(_)));
-    }
-
-    #[test]
-    fn delta_batch_compact_add_remove() {
-        let row = make_row(1, "Alice");
-        let mut batch = DeltaBatch::new();
-
-        batch.push(RowDelta::Added(row));
-        batch.push(RowDelta::Removed {
-            id: ObjectId::new(1),
-            prior: PriorState::empty(),
-        });
-
-        batch.compact();
-
-        // Add followed by remove with no prior state = nothing
-        assert!(batch.is_empty());
-    }
-
-    #[test]
-    fn delta_batch_compact_multiple_updates() {
-        let row1 = make_row(1, "Alice");
-        let row2 = make_row(1, "Alicia");
-        let row3 = make_row(1, "Alex");
-
-        let mut batch = DeltaBatch::new();
-        batch.push(RowDelta::Updated {
-            id: ObjectId::new(1),
-            new: row1,
-            prior: PriorState::new(vec![CommitId::from_bytes([1; 32])]), // Existed before
-        });
-        batch.push(RowDelta::Updated {
-            id: ObjectId::new(1),
-            new: row2,
-            prior: PriorState::empty(),
-        });
-        batch.push(RowDelta::Updated {
-            id: ObjectId::new(1),
-            new: row3.clone(),
-            prior: PriorState::empty(),
-        });
-
-        batch.compact();
-
-        // Should have single update to final state
-        assert_eq!(batch.len(), 1);
-        let delta = batch.iter().next().unwrap();
-        assert!(matches!(delta, RowDelta::Updated { new, .. } if new.values[0] == Value::String("Alex".to_string())));
-    }
-
-    #[test]
-    fn row_delta_accessors() {
-        let row = make_row(1, "Alice");
-
-        let added = RowDelta::Added(row.clone());
-        assert_eq!(added.row_id(), ObjectId::new(1));
-        assert!(added.new_row().is_some());
-        assert!(!added.has_prior());
-
-        let removed = RowDelta::Removed {
-            id: ObjectId::new(2),
-            prior: PriorState::new(vec![CommitId::from_bytes([1; 32])]),
-        };
-        assert_eq!(removed.row_id(), ObjectId::new(2));
-        assert!(removed.new_row().is_none());
-        assert!(removed.has_prior());
-
-        let updated = RowDelta::Updated {
-            id: ObjectId::new(1),
-            new: row,
-            prior: PriorState::empty(),
-        };
-        assert_eq!(updated.row_id(), ObjectId::new(1));
-        assert!(updated.new_row().is_some());
-        assert!(!updated.has_prior());
-    }
-
-    // ========================================================================
-    // BufferRowDelta tests
-    // ========================================================================
-
-    use crate::sql::row_buffer::{ColType, RowBuilder, RowDescriptor};
+    use crate::sql::row_buffer::{ColType, RowBuilder, RowDescriptor, RowValue};
     use crate::sql::schema::{ColumnDef, ColumnType};
-
-    fn make_test_schema() -> TableSchema {
-        TableSchema {
-            name: "users".to_string(),
-            columns: vec![ColumnDef {
-                name: "name".to_string(),
-                ty: ColumnType::String,
-                nullable: false,
-            }],
-        }
-    }
 
     fn make_test_descriptor() -> Arc<RowDescriptor> {
         Arc::new(RowDescriptor::new([("name".to_string(), ColType::String)]))
@@ -875,121 +616,118 @@ mod tests {
     }
 
     #[test]
-    fn buffer_delta_batch_empty() {
-        let batch = BufferDeltaBatch::new();
+    fn delta_batch_empty() {
+        let batch = DeltaBatch::new();
         assert!(batch.is_empty());
         assert_eq!(batch.len(), 0);
-        assert!(batch.descriptor().is_none());
     }
 
     #[test]
-    fn buffer_delta_batch_added() {
+    fn delta_batch_added() {
         let descriptor = make_test_descriptor();
         let row = make_buffer_row(&descriptor, "Alice");
         let id = ObjectId::new(1);
-        let batch = BufferDeltaBatch::added(id, row);
+        let batch = DeltaBatch::added(id, row);
 
         assert!(!batch.is_empty());
         assert_eq!(batch.len(), 1);
-        assert!(batch.descriptor().is_some());
 
         let delta = batch.iter().next().unwrap();
         assert_eq!(delta.row_id(), id);
-        assert!(matches!(delta, BufferRowDelta::Added { .. }));
+        assert!(matches!(delta, RowDelta::Added { .. }));
     }
 
     #[test]
-    fn buffer_row_delta_accessors() {
+    fn delta_batch_compact_add_remove() {
         let descriptor = make_test_descriptor();
         let row = make_buffer_row(&descriptor, "Alice");
         let id = ObjectId::new(1);
 
-        let added = BufferRowDelta::Added {
+        let mut batch = DeltaBatch::new();
+        batch.push(RowDelta::Added { id, row });
+        batch.push(RowDelta::Removed {
             id,
-            row: row.clone(),
-        };
+            prior: PriorState::empty(),
+        });
+
+        batch.compact();
+
+        // Add followed by remove with no prior state = nothing
+        assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn delta_batch_compact_multiple_updates() {
+        let descriptor = make_test_descriptor();
+        let id = ObjectId::new(1);
+        let row1 = make_buffer_row(&descriptor, "Alice");
+        let row2 = make_buffer_row(&descriptor, "Alicia");
+        let row3 = make_buffer_row(&descriptor, "Alex");
+
+        let mut batch = DeltaBatch::new();
+        batch.push(RowDelta::Updated {
+            id,
+            row: row1,
+            prior: PriorState::new(vec![CommitId::from_bytes([1; 32])]), // Existed before
+        });
+        batch.push(RowDelta::Updated {
+            id,
+            row: row2,
+            prior: PriorState::empty(),
+        });
+        batch.push(RowDelta::Updated {
+            id,
+            row: row3,
+            prior: PriorState::empty(),
+        });
+
+        batch.compact();
+
+        // Should have single update to final state
+        assert_eq!(batch.len(), 1);
+        let delta = batch.iter().next().unwrap();
+        if let RowDelta::Updated { row, .. } = delta {
+            assert_eq!(row.get_by_name("name"), Some(RowValue::String("Alex")));
+        } else {
+            panic!("Expected Updated delta");
+        }
+    }
+
+    #[test]
+    fn row_delta_accessors() {
+        let descriptor = make_test_descriptor();
+        let row = make_buffer_row(&descriptor, "Alice");
+        let id = ObjectId::new(1);
+
+        let added = RowDelta::Added { id, row: row.clone() };
         assert_eq!(added.row_id(), id);
         assert!(added.new_row().is_some());
-        assert!(!added.has_prior());
         assert!(added.descriptor().is_some());
+        assert!(!added.has_prior());
 
-        let removed = BufferRowDelta::Removed {
+        let removed = RowDelta::Removed {
             id: ObjectId::new(2),
             prior: PriorState::new(vec![CommitId::from_bytes([1; 32])]),
         };
         assert_eq!(removed.row_id(), ObjectId::new(2));
         assert!(removed.new_row().is_none());
-        assert!(removed.has_prior());
         assert!(removed.descriptor().is_none());
+        assert!(removed.has_prior());
 
-        let updated = BufferRowDelta::Updated {
+        let updated = RowDelta::Updated {
             id,
             row,
             prior: PriorState::empty(),
         };
         assert_eq!(updated.row_id(), id);
         assert!(updated.new_row().is_some());
+        assert!(updated.descriptor().is_some());
         assert!(!updated.has_prior());
-    }
-
-    #[test]
-    fn buffer_delta_legacy_roundtrip() {
-        let schema = make_test_schema();
-        let descriptor = make_test_descriptor();
-
-        // Create a legacy delta
-        let legacy_row = make_row(1, "Alice");
-        let legacy_delta = RowDelta::Added(legacy_row);
-
-        // Convert to buffer delta
-        let buffer_delta = BufferRowDelta::from_legacy(&legacy_delta, &schema, descriptor.clone());
-
-        // Verify it's correct
-        assert_eq!(buffer_delta.row_id(), ObjectId::new(1));
-        assert!(matches!(buffer_delta, BufferRowDelta::Added { .. }));
-
-        // Convert back to legacy
-        let roundtrip = buffer_delta.to_legacy(&schema);
-        assert_eq!(roundtrip.row_id(), ObjectId::new(1));
-
-        // Verify the row value
-        if let RowDelta::Added(row) = roundtrip {
-            assert_eq!(row.values[0], Value::String("Alice".to_string()));
-        } else {
-            panic!("Expected Added delta");
-        }
-    }
-
-    #[test]
-    fn buffer_delta_batch_legacy_roundtrip() {
-        let schema = make_test_schema();
-        let descriptor = make_test_descriptor();
-
-        // Create a legacy batch with multiple deltas
-        let mut legacy_batch = DeltaBatch::new();
-        legacy_batch.push(RowDelta::Added(make_row(1, "Alice")));
-        legacy_batch.push(RowDelta::Updated {
-            id: ObjectId::new(2),
-            new: make_row(2, "Bob"),
-            prior: PriorState::new(vec![CommitId::from_bytes([1; 32])]),
-        });
-
-        // Convert to buffer batch
-        let buffer_batch = BufferDeltaBatch::from_legacy(&legacy_batch, &schema, descriptor);
-
-        assert_eq!(buffer_batch.len(), 2);
-        assert!(buffer_batch.descriptor().is_some());
-
-        // Convert back
-        let roundtrip = buffer_batch.to_legacy(&schema);
-        assert_eq!(roundtrip.len(), 2);
     }
 
     // ========================================================================
     // BufferJoinedRow tests
     // ========================================================================
-
-    use crate::sql::row_buffer::RowValue;
 
     fn make_users_descriptor() -> Arc<RowDescriptor> {
         Arc::new(RowDescriptor::new([

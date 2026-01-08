@@ -86,6 +86,7 @@ impl QueryGraphBuilder {
             table: self.table.clone(),
             input,
             predicate,
+            descriptor: Arc::new(RowDescriptor::from_table_schema(&self.schema)),
             cached_ids: HashSet::new(),
         });
         id
@@ -300,11 +301,24 @@ impl JoinGraphBuilder {
     /// This is the first node in a JOIN graph - it handles the join logic.
     pub fn join(&mut self) -> NodeId {
         let id = self.alloc_id();
+        // Build table descriptors for buffer format with qualified column names
+        // This is needed because downstream Filter nodes use qualified column names
+        // in predicates (e.g., "folders.owner_id = @viewer")
+        let mut table_descriptors = HashMap::new();
+        table_descriptors.insert(
+            self.left_table.clone(),
+            Arc::new(RowDescriptor::from_table_schema_qualified(&self.left_schema, &self.left_table)),
+        );
+        table_descriptors.insert(
+            self.right_table.clone(),
+            Arc::new(RowDescriptor::from_table_schema_qualified(&self.right_schema, &self.right_table)),
+        );
         self.nodes.push(QueryNode::Join {
             input_tables: vec![self.left_table.clone()],
             join_table: self.right_table.clone(),
             join_column: self.left_column.clone(),
             join_schema: self.right_schema.clone(),
+            table_descriptors,
             cached_rows: HashMap::new(),
             reverse_index: HashMap::new(),
             reverse_filter: None,
@@ -322,6 +336,7 @@ impl JoinGraphBuilder {
             table: self.left_table.clone(), // Primary table for identification
             input,
             predicate,
+            descriptor: Arc::new(RowDescriptor::from_table_schema(&self.combined_schema)),
             cached_ids: HashSet::new(),
         });
         id
@@ -361,12 +376,27 @@ impl JoinGraphBuilder {
             input_tables.push(table.clone());
         }
 
+        // Build table descriptors for all tables with qualified column names
+        let mut table_descriptors = HashMap::new();
+        table_descriptors.insert(
+            self.left_table.clone(),
+            Arc::new(RowDescriptor::from_table_schema_qualified(&self.left_schema, &self.left_table)),
+        );
+        for (t, schema) in &self.all_right_tables {
+            table_descriptors.insert(t.clone(), Arc::new(RowDescriptor::from_table_schema_qualified(schema, t)));
+        }
+        table_descriptors.insert(
+            target.clone(),
+            Arc::new(RowDescriptor::from_table_schema_qualified(&target_schema, &target)),
+        );
+
         let id = self.alloc_id();
         self.nodes.push(QueryNode::Join {
             input_tables,
             join_table: target.clone(),
             join_column: qualified_column,
             join_schema: target_schema.clone(),
+            table_descriptors,
             cached_rows: HashMap::new(),
             reverse_index: HashMap::new(),
             reverse_filter: None,
@@ -433,12 +463,27 @@ impl JoinGraphBuilder {
             input_tables.push(table.clone());
         }
 
+        // Build table descriptors for all tables with qualified column names
+        let mut table_descriptors = HashMap::new();
+        table_descriptors.insert(
+            self.left_table.clone(),
+            Arc::new(RowDescriptor::from_table_schema_qualified(&self.left_schema, &self.left_table)),
+        );
+        for (t, schema) in &self.all_right_tables {
+            table_descriptors.insert(t.clone(), Arc::new(RowDescriptor::from_table_schema_qualified(schema, t)));
+        }
+        table_descriptors.insert(
+            target.clone(),
+            Arc::new(RowDescriptor::from_table_schema_qualified(&target_schema, &target)),
+        );
+
         let id = self.alloc_id();
         self.nodes.push(QueryNode::Join {
             input_tables,
             join_table: target.clone(),
             join_column: qualified_column,
             join_schema: target_schema.clone(),
+            table_descriptors,
             cached_rows: HashMap::new(),
             reverse_index: HashMap::new(),
             reverse_filter: filter,

@@ -82,13 +82,13 @@ pub fn encode_delta(delta: &RowDelta) -> Vec<u8> {
     let mut buf = Vec::new();
 
     match delta {
-        RowDelta::Added(row) => {
+        RowDelta::Added { id, row } => {
             buf.push(DELTA_ADDED);
-            encode_row_to_buf(&mut buf, row);
+            encode_owned_row_to_buf(&mut buf, *id, row.as_ref());
         }
-        RowDelta::Updated { new, .. } => {
+        RowDelta::Updated { id, row, .. } => {
             buf.push(DELTA_UPDATED);
-            encode_row_to_buf(&mut buf, new);
+            encode_owned_row_to_buf(&mut buf, *id, row.as_ref());
         }
         RowDelta::Removed { id, .. } => {
             buf.push(DELTA_REMOVED);

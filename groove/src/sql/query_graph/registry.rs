@@ -4,13 +4,15 @@
 //! to relevant graphs, and manages subscriptions.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use crate::listener::ListenerId;
+use crate::object::ObjectId;
 use crate::sql::query_graph::cache::RowCache;
 use crate::sql::query_graph::delta::{DeltaBatch, RowDelta};
 use crate::sql::query_graph::graph::{GraphId, QueryGraph};
-use crate::sql::row::Row;
+use crate::sql::row_buffer::{OwnedRow, RowDescriptor};
+use crate::sql::schema::TableSchema;
 use crate::sql::DatabaseState;
 
 /// Callback type for query output changes.
@@ -168,14 +170,29 @@ impl GraphRegistry {
             .unwrap_or(false)
     }
 
-    /// Get current output for a query (initializes lazily).
-    pub fn get_output(&self, graph_id: GraphId, db: &DatabaseState) -> Option<Vec<Row>> {
+    /// Get current output for a query in buffer format (initializes lazily).
+    pub fn get_output(&self, graph_id: GraphId, db: &DatabaseState) -> Option<Vec<(ObjectId, OwnedRow)>> {
         let mut cache = self.cache.write().unwrap();
         self.queries
             .write()
             .unwrap()
             .get_mut(&graph_id)
             .map(|q| q.graph.get_output(&mut cache, db))
+    }
+
+    /// Get the output schema and descriptor for a query.
+    pub fn get_output_schema(&self, graph_id: GraphId) -> Option<(TableSchema, Arc<RowDescriptor>)> {
+        self.queries
+            .read()
+            .unwrap()
+            .get(&graph_id)
+            .map(|q| {
+                let schema = q.graph.output_schema().unwrap_or_else(|| {
+                    TableSchema::new("_output", vec![])
+                });
+                let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
+                (schema, descriptor)
+            })
     }
 
     /// Notify all relevant graphs of a row change.
@@ -267,6 +284,7 @@ mod tests {
     use crate::sql::query_graph::builder::QueryGraphBuilder;
     use crate::sql::query_graph::predicate::Predicate;
     use crate::sql::row::Value;
+    use crate::sql::row_buffer::{RowBuilder, RowDescriptor};
     use crate::sql::schema::{ColumnDef, ColumnType};
     use crate::sql::{Database, TableSchema};
 
@@ -280,11 +298,17 @@ mod tests {
         )
     }
 
-    fn make_row(id: u128, name: &str, active: bool) -> Row {
-        Row::new(
-            crate::object::ObjectId::new(id),
-            vec![Value::String(name.to_string()), Value::Bool(active)],
-        )
+    fn test_descriptor() -> Arc<RowDescriptor> {
+        Arc::new(RowDescriptor::from_table_schema(&test_schema()))
+    }
+
+    fn make_owned_row(id: u128, name: &str, active: bool) -> (ObjectId, OwnedRow) {
+        let descriptor = test_descriptor();
+        let row = RowBuilder::new(descriptor)
+            .set_string_by_name("name", name)
+            .set_bool_by_name("active", active)
+            .build();
+        (ObjectId::new(id), row)
     }
 
     #[test]
@@ -334,14 +358,14 @@ mod tests {
         }));
 
         // Notify of an active user - should trigger callback
-        let row1 = make_row(1, "Alice", true);
-        registry.notify_row_change("users", RowDelta::Added(row1), db.state());
+        let (id, row) = make_owned_row(1, "Alice", true);
+        registry.notify_row_change("users", RowDelta::Added { id, row }, db.state());
 
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
 
         // Notify of an inactive user - should NOT trigger callback (filtered out)
-        let row2 = make_row(2, "Bob", false);
-        registry.notify_row_change("users", RowDelta::Added(row2), db.state());
+        let (id, row) = make_owned_row(2, "Bob", false);
+        registry.notify_row_change("users", RowDelta::Added { id, row }, db.state());
 
         assert_eq!(call_count.load(Ordering::SeqCst), 1); // Still 1
     }
@@ -362,13 +386,13 @@ mod tests {
         let graph_id = registry.register(graph);
 
         // Add some rows
-        let row1 = make_row(1, "Alice", true);
-        let row2 = make_row(2, "Bob", false);
-        let row3 = make_row(3, "Carol", true);
+        let (id1, row1) = make_owned_row(1, "Alice", true);
+        let (id2, row2) = make_owned_row(2, "Bob", false);
+        let (id3, row3) = make_owned_row(3, "Carol", true);
 
-        registry.notify_row_change("users", RowDelta::Added(row1), db.state());
-        registry.notify_row_change("users", RowDelta::Added(row2), db.state());
-        registry.notify_row_change("users", RowDelta::Added(row3), db.state());
+        registry.notify_row_change("users", RowDelta::Added { id: id1, row: row1 }, db.state());
+        registry.notify_row_change("users", RowDelta::Added { id: id2, row: row2 }, db.state());
+        registry.notify_row_change("users", RowDelta::Added { id: id3, row: row3 }, db.state());
 
         // Get output
         let output = registry.get_output(graph_id, db.state()).unwrap();

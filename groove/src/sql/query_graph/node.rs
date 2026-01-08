@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::object::ObjectId;
 use crate::sql::query_graph::cache::RowCache;
-use crate::sql::query_graph::delta::{BufferJoinedRow, DeltaBatch, JoinedRow, PriorState, RowDelta};
+use crate::sql::query_graph::delta::{BufferJoinedRow, DeltaBatch, PriorState, RowDelta};
 use crate::sql::query_graph::predicate::Predicate;
 use crate::sql::row::{Row, Value};
 use crate::sql::row_buffer::{OwnedRow, RowDescriptor};
@@ -65,6 +65,8 @@ pub enum QueryNode {
         table: String,
         input: NodeId,
         predicate: Predicate,
+        /// Row descriptor for buffer format operations.
+        descriptor: Arc<RowDescriptor>,
         /// Cached set of row IDs that pass the filter.
         cached_ids: HashSet<ObjectId>,
     },
@@ -87,9 +89,13 @@ pub enum QueryNode {
         join_column: String,
         /// Schema of the join table (for building joined rows).
         join_schema: TableSchema,
-        /// Cached rows: primary_id → JoinedRow.
+        /// Descriptors for each table (input tables + join table).
+        /// Used for buffer format conversion.
+        table_descriptors: HashMap<String, Arc<RowDescriptor>>,
+        /// Cached rows: primary_id → BufferJoinedRow.
         /// primary_id is always the leftmost table's row ID.
-        cached_rows: HashMap<ObjectId, JoinedRow>,
+        /// Uses buffer format for efficient storage.
+        cached_rows: HashMap<ObjectId, BufferJoinedRow>,
         /// Reverse index: join_table_id → set of primary_ids.
         /// Used for handling deltas from join_table.
         reverse_index: HashMap<ObjectId, HashSet<ObjectId>>,
@@ -273,7 +279,8 @@ impl QueryNode {
     }
 
     /// Get the cached joined rows keyed by primary_id (for Join nodes).
-    pub fn cached_rows(&self) -> Option<&HashMap<ObjectId, JoinedRow>> {
+    /// Returns buffer-format joined rows.
+    pub fn cached_rows(&self) -> Option<&HashMap<ObjectId, BufferJoinedRow>> {
         match self {
             QueryNode::Join { cached_rows, .. } => Some(cached_rows),
             _ => None,
@@ -289,7 +296,7 @@ impl QueryNode {
     }
 
     /// Compatibility wrapper - returns cached_rows.
-    pub fn cached_joined(&self) -> Option<&HashMap<ObjectId, JoinedRow>> {
+    pub fn cached_joined(&self) -> Option<&HashMap<ObjectId, BufferJoinedRow>> {
         self.cached_rows()
     }
 
@@ -436,9 +443,10 @@ impl QueryNode {
 
             QueryNode::Filter {
                 predicate,
+                descriptor,
                 cached_ids,
                 ..
-            } => Self::eval_filter(predicate, cached_ids, input, schema),
+            } => Self::eval_filter(predicate, descriptor, cached_ids, input),
 
             QueryNode::Join { .. } => {
                 // Join nodes need special handling with database access
@@ -494,10 +502,10 @@ impl QueryNode {
 
                 for delta in input.into_iter() {
                     match delta {
-                        RowDelta::Added(row) => {
+                        RowDelta::Added { id, row } => {
                             Self::recursive_handle_insert(
+                                id,
                                 row,
-                                schema,
                                 descriptor.clone(),
                                 base_predicate,
                                 recursive_column,
@@ -512,29 +520,27 @@ impl QueryNode {
                                 id,
                                 prior,
                                 recursive_column,
-                                schema,
                                 accessible,
                                 children_index,
                                 all_rows,
                                 &mut output,
                             );
                         }
-                        RowDelta::Updated { id, new, prior } => {
+                        RowDelta::Updated { id, row, prior } => {
                             // Handle as remove + insert for simplicity
                             // (Could optimize for cases where parent_id doesn't change)
                             Self::recursive_handle_remove(
                                 id,
                                 prior.clone(),
                                 recursive_column,
-                                schema,
                                 accessible,
                                 children_index,
                                 all_rows,
                                 &mut output,
                             );
                             Self::recursive_handle_insert(
-                                new,
-                                schema,
+                                id,
+                                row,
                                 descriptor.clone(),
                                 base_predicate,
                                 recursive_column,
@@ -556,8 +562,8 @@ impl QueryNode {
     /// Handle inserting a row into a RecursiveFilter.
     #[allow(clippy::too_many_arguments)]
     fn recursive_handle_insert(
-        row: Row,
-        schema: &TableSchema,
+        row_id: ObjectId,
+        owned_row: OwnedRow,
         descriptor: Arc<RowDescriptor>,
         base_predicate: &Predicate,
         recursive_column: &str,
@@ -566,14 +572,11 @@ impl QueryNode {
         all_rows: &mut HashMap<ObjectId, OwnedRow>,
         output: &mut DeltaBatch,
     ) {
-        let row_id = row.id;
-
-        // Convert to buffer format for storage
-        let owned_row = OwnedRow::from_legacy_row(&row, schema, descriptor.clone());
+        // Store in buffer format
         all_rows.insert(row_id, owned_row.clone());
 
         // Update children index: this row is a child of its parent
-        if let Some(parent_id) = Self::get_ref_value_buffer(&owned_row, recursive_column) {
+        if let Some(parent_id) = Self::get_ref_value_buffer(&owned_row, recursive_column, None) {
             children_index
                 .entry(parent_id)
                 .or_default()
@@ -582,7 +585,7 @@ impl QueryNode {
 
         // Check if row is accessible (use buffer-based predicate matching)
         let base_match = base_predicate.matches_buffer(row_id, owned_row.as_ref(), &descriptor);
-        let parent_id = Self::get_ref_value_buffer(&owned_row, recursive_column);
+        let parent_id = Self::get_ref_value_buffer(&owned_row, recursive_column, None);
         let parent_accessible = parent_id
             .map(|pid| accessible.contains_key(&pid))
             .unwrap_or(false);
@@ -599,14 +602,13 @@ impl QueryNode {
                 (false, false) => unreachable!(),
             };
             accessible.insert(row_id, reason);
-            // Output legacy Row for compatibility
-            output.push(RowDelta::Added(row.clone()));
+            // Output in buffer format
+            output.push(RowDelta::Added { id: row_id, row: owned_row.clone() });
 
             // Cascade: check if any existing rows are children of this row
             // and should now become accessible
             Self::propagate_access_to_children(
                 row_id,
-                schema,
                 &descriptor,
                 base_predicate,
                 recursive_column,
@@ -626,7 +628,6 @@ impl QueryNode {
     #[allow(clippy::too_many_arguments)]
     fn propagate_access_to_children(
         parent_id: ObjectId,
-        schema: &TableSchema,
         descriptor: &Arc<RowDescriptor>,
         base_predicate: &Predicate,
         recursive_column: &str,
@@ -651,14 +652,12 @@ impl QueryNode {
                         AccessReason::Inherited
                     };
                     accessible.insert(child_id, reason);
-                    // Convert to legacy Row for output
-                    let legacy_row = owned_row.to_legacy_row_with_schema(child_id, schema);
-                    output.push(RowDelta::Added(legacy_row));
+                    // Output in buffer format
+                    output.push(RowDelta::Added { id: child_id, row: owned_row.clone() });
 
                     // Recursively propagate to grandchildren
                     Self::propagate_access_to_children(
                         child_id,
-                        schema,
                         descriptor,
                         base_predicate,
                         recursive_column,
@@ -678,7 +677,6 @@ impl QueryNode {
         row_id: ObjectId,
         prior: PriorState,
         recursive_column: &str,
-        _schema: &TableSchema,
         accessible: &mut HashMap<ObjectId, AccessReason>,
         children_index: &mut HashMap<ObjectId, HashSet<ObjectId>>,
         all_rows: &mut HashMap<ObjectId, OwnedRow>,
@@ -689,7 +687,7 @@ impl QueryNode {
 
         // Remove from children_index (this row as a child of its parent)
         if let Some(owned_row) = &removed_row {
-            if let Some(parent_id) = Self::get_ref_value_buffer(owned_row, recursive_column) {
+            if let Some(parent_id) = Self::get_ref_value_buffer(owned_row, recursive_column, None) {
                 if let Some(siblings) = children_index.get_mut(&parent_id) {
                     siblings.remove(&row_id);
                 }
@@ -791,6 +789,7 @@ impl QueryNode {
                 join_table,
                 join_column,
                 join_schema,
+                table_descriptors,
                 cached_rows,
                 reverse_index,
                 reverse_filter,
@@ -801,6 +800,18 @@ impl QueryNode {
                 let is_join_table_delta = source_table == join_table && !is_from_input;
                 let is_input_delta = is_from_input || input_tables.iter().any(|t| t == source_table);
 
+                // Build combined schema for output conversion
+                // The combined schema has qualified column names in order
+                // For chain joins (input already combined), use extend_with to preserve
+                // existing column names and only qualify the new join table's columns.
+                // For first joins (single table input), use combine to qualify both.
+                let is_chain_join = input_tables.len() > 1 || input_schema.name.contains('+');
+                let combined_schema = if is_chain_join {
+                    input_schema.extend_with(join_schema)
+                } else {
+                    input_schema.combine(join_schema)
+                };
+
                 if is_input_delta && !is_join_table_delta {
                     // Delta from input (either raw table or combined row from prior join)
                     Self::eval_join_input_delta(
@@ -810,6 +821,8 @@ impl QueryNode {
                         join_column,
                         input_schema,
                         join_schema,
+                        &combined_schema,
+                        table_descriptors,
                         cached_rows,
                         reverse_index,
                         reverse_filter.as_ref(),
@@ -823,6 +836,8 @@ impl QueryNode {
                         &delta,
                         join_table,
                         join_schema,
+                        &combined_schema,
+                        table_descriptors,
                         cached_rows,
                         reverse_index,
                         &mut output,
@@ -845,9 +860,11 @@ impl QueryNode {
         input_tables: &[String],
         join_table: &str,
         join_column: &str,
-        input_schema: &TableSchema,
+        _input_schema: &TableSchema,
         join_schema: &TableSchema,
-        cached_rows: &mut HashMap<ObjectId, JoinedRow>,
+        _combined_schema: &TableSchema,
+        table_descriptors: &HashMap<String, Arc<RowDescriptor>>,
+        cached_rows: &mut HashMap<ObjectId, BufferJoinedRow>,
         reverse_index: &mut HashMap<ObjectId, HashSet<ObjectId>>,
         reverse_filter: Option<&Predicate>,
         output: &mut DeltaBatch,
@@ -863,16 +880,14 @@ impl QueryNode {
         let is_reverse = join_column.contains('@');
 
         match delta {
-            RowDelta::Added(input_row) => {
-                let primary_id = input_row.id;
-
+            RowDelta::Added { id: primary_id, row: input_row } => {
                 if is_reverse {
                     // Reverse join: find join_table rows where ref_column = primary_id
                     // Format: "target@existing.column"
                     // NOTE: Reverse joins are for filtering only - we DON'T add the join table's
                     // columns to the output. The ArrayAggregate will later re-fetch and build arrays.
                     if let Some(ref_col) = join_column.split('@').nth(1).and_then(|s| s.split('.').nth(1)) {
-                        let all_join_rows = find_referencing(join_table, ref_col, primary_id);
+                        let all_join_rows = find_referencing(join_table, ref_col, *primary_id);
 
                         // Filter join rows if a reverse_filter predicate is provided
                         let join_rows: Vec<_> = if let Some(filter) = reverse_filter {
@@ -888,71 +903,62 @@ impl QueryNode {
                         // row should not be output. If there are matches, output the input row once
                         // (not once per match) with its original columns (no join table columns).
                         if !join_rows.is_empty() {
-                            // Create a JoinedRow without the reverse join table's columns
-                            let joined = if input_tables.len() == 1 {
-                                JoinedRow::from_single(primary_table, input_row.clone())
-                            } else {
-                                let mut jr = JoinedRow::from_single(primary_table, Row::new(primary_id, vec![]));
-                                jr.values = input_row.values.clone();
-                                let mut offset = 0;
-                                for (i, table) in input_tables.iter().enumerate() {
-                                    if i == 0 {
-                                        jr.table_offsets.insert(table.clone(), (primary_id, 0));
-                                    } else {
-                                        jr.table_offsets.insert(table.clone(), (primary_id, offset));
-                                    }
-                                    offset = jr.values.len();
-                                }
-                                jr
-                            };
+                            // Input row is already in buffer format, just use it directly
+                            let joined = BufferJoinedRow::from_single(primary_table, *primary_id, input_row.clone());
 
                             // Cache the joined row (without reverse join columns) keyed by primary_id
-                            cached_rows.insert(primary_id, joined.clone());
+                            cached_rows.insert(*primary_id, joined.clone());
 
                             // Track all reverse join row IDs for this primary row
                             for join_row in &join_rows {
-                                reverse_index.entry(primary_id).or_default().insert(join_row.id);
+                                reverse_index.entry(*primary_id).or_default().insert(join_row.id);
                             }
 
-                            output.push(RowDelta::Added(joined.to_output_row()));
+                            // Output the joined row
+                            output.push(RowDelta::Added {
+                                id: *primary_id,
+                                row: joined.to_output_row(),
+                            });
                         }
                         // If no join rows match, don't output anything (filtered out)
                     }
                 } else {
                     // Forward join: look up join_table row by ref value
-                    if let Some(join_id) = Self::get_ref_value(input_row, join_column, input_schema) {
+                    if let Some(join_id) = Self::get_ref_value_buffer(input_row, join_column, Some(primary_table)) {
                         if let Some(join_row) = lookup_row(join_table, join_id) {
-                            // Create or extend joined row
-                            let mut joined = if input_tables.len() == 1 {
-                                // First join: start with single table row
-                                JoinedRow::from_single(primary_table, input_row.clone())
-                            } else {
-                                // Chain join: input_row is already combined, convert back to JoinedRow
-                                // The input_row.values contains all columns from prior joins
-                                let mut jr = JoinedRow::from_single(primary_table, Row::new(primary_id, vec![]));
-                                jr.values = input_row.values.clone();
-                                // Reconstruct table_offsets from input_tables
-                                let mut offset = 0;
-                                for (i, table) in input_tables.iter().enumerate() {
-                                    if i == 0 {
-                                        jr.table_offsets.insert(table.clone(), (primary_id, 0));
-                                    } else {
-                                        // For chain joins, we don't have the intermediate IDs in the Row
-                                        // This is a simplification - we use primary_id as placeholder
-                                        jr.table_offsets.insert(table.clone(), (primary_id, offset));
-                                    }
-                                    // Count columns from this table (would need schema info for accuracy)
-                                    offset = jr.values.len(); // Approximate
-                                }
+                            // Check if this is a chain join (input contains multiple tables)
+                            let is_chain_join = input_tables.len() > 1;
+
+                            let mut joined = if is_chain_join {
+                                // Chain join: input row contains combined data from all input_tables
+                                // The input OwnedRow already has all the data, create BufferJoinedRow from it
+                                let mut jr = BufferJoinedRow::new(primary_table, *primary_id);
+
+                                // For chain joins, we need to split the combined input_row back into per-table rows
+                                // This is complex - for now, use a single entry with the combined data
+                                // TODO: Properly track per-table rows in chain joins
+                                jr.add_joined(primary_table, *primary_id, input_row.clone());
                                 jr
+                            } else {
+                                // Single table input: simple case - input_row is already in buffer format
+                                BufferJoinedRow::from_single(primary_table, *primary_id, input_row.clone())
                             };
-                            joined.add_joined(join_table, join_row);
+
+                            // Convert join row to buffer format and add it
+                            let join_descriptor = table_descriptors.get(join_table)
+                                .cloned()
+                                .unwrap_or_else(|| Arc::new(RowDescriptor::from_table_schema_qualified(join_schema, join_table)));
+                            let owned_join = OwnedRow::from_legacy_row_qualified(&join_row, join_schema, join_descriptor, Some(join_table));
+                            joined.add_joined(join_table, join_id, owned_join);
 
                             // Update caches
-                            cached_rows.insert(primary_id, joined.clone());
-                            reverse_index.entry(join_id).or_default().insert(primary_id);
+                            cached_rows.insert(*primary_id, joined.clone());
+                            reverse_index.entry(join_id).or_default().insert(*primary_id);
 
-                            output.push(RowDelta::Added(joined.to_output_row()));
+                            output.push(RowDelta::Added {
+                                id: *primary_id,
+                                row: joined.to_output_row(),
+                            });
                         }
                     }
                 }
@@ -989,7 +995,7 @@ impl QueryNode {
                 }
             }
 
-            RowDelta::Updated { id: primary_id, new: input_row, prior } => {
+            RowDelta::Updated { id: primary_id, row: input_row, prior } => {
                 if is_reverse {
                     // Reverse join: check if updated row still has matching join rows
                     if let Some(ref_col) = join_column.split('@').nth(1).and_then(|s| s.split('.').nth(1)) {
@@ -1009,22 +1015,8 @@ impl QueryNode {
 
                         if !join_rows.is_empty() {
                             // Still has matching rows - update or add
-                            let joined = if input_tables.len() == 1 {
-                                JoinedRow::from_single(primary_table, input_row.clone())
-                            } else {
-                                let mut jr = JoinedRow::from_single(primary_table, Row::new(*primary_id, vec![]));
-                                jr.values = input_row.values.clone();
-                                let mut offset = 0;
-                                for (i, table) in input_tables.iter().enumerate() {
-                                    if i == 0 {
-                                        jr.table_offsets.insert(table.clone(), (*primary_id, 0));
-                                    } else {
-                                        jr.table_offsets.insert(table.clone(), (*primary_id, offset));
-                                    }
-                                    offset = jr.values.len();
-                                }
-                                jr
-                            };
+                            // Input row is already in buffer format
+                            let joined = BufferJoinedRow::from_single(primary_table, *primary_id, input_row.clone());
 
                             cached_rows.insert(*primary_id, joined.clone());
                             for join_row in &join_rows {
@@ -1035,11 +1027,14 @@ impl QueryNode {
                             if existed {
                                 output.push(RowDelta::Updated {
                                     id: *primary_id,
-                                    new: output_row,
+                                    row: output_row,
                                     prior: prior.clone(),
                                 });
                             } else {
-                                output.push(RowDelta::Added(output_row));
+                                output.push(RowDelta::Added {
+                                    id: *primary_id,
+                                    row: output_row,
+                                });
                             }
                         } else if existed {
                             // No more matching rows - remove from output
@@ -1055,8 +1050,8 @@ impl QueryNode {
                     let old_join_id = cached_rows.get(primary_id)
                         .and_then(|jr| jr.get_row_id(join_table));
 
-                    // Get new join_id
-                    let new_join_id = Self::get_ref_value(input_row, join_column, input_schema);
+                    // Get new join_id from buffer row
+                    let new_join_id = Self::get_ref_value_buffer(input_row, join_column, Some(primary_table));
 
                     // Update reverse_index if join_id changed
                     if old_join_id != new_join_id {
@@ -1076,14 +1071,14 @@ impl QueryNode {
                     // Add new entry if join succeeds
                     if let Some(join_id) = new_join_id {
                         if let Some(join_row) = lookup_row(join_table, join_id) {
-                            let mut joined = if input_tables.len() == 1 {
-                                JoinedRow::from_single(primary_table, input_row.clone())
-                            } else {
-                                let mut jr = JoinedRow::from_single(primary_table, Row::new(*primary_id, vec![]));
-                                jr.values = input_row.values.clone();
-                                jr
-                            };
-                            joined.add_joined(join_table, join_row);
+                            // Input row is already in buffer format
+                            let mut joined = BufferJoinedRow::from_single(primary_table, *primary_id, input_row.clone());
+
+                            let join_descriptor = table_descriptors.get(join_table)
+                                .cloned()
+                                .unwrap_or_else(|| Arc::new(RowDescriptor::from_table_schema_qualified(join_schema, join_table)));
+                            let owned_join = OwnedRow::from_legacy_row_qualified(&join_row, join_schema, join_descriptor, Some(join_table));
+                            joined.add_joined(join_table, join_id, owned_join);
 
                             cached_rows.insert(*primary_id, joined.clone());
                             reverse_index.entry(join_id).or_default().insert(*primary_id);
@@ -1092,11 +1087,14 @@ impl QueryNode {
                             if existed {
                                 output.push(RowDelta::Updated {
                                     id: *primary_id,
-                                    new: output_row,
+                                    row: output_row,
                                     prior: prior.clone(),
                                 });
                             } else {
-                                output.push(RowDelta::Added(output_row));
+                                output.push(RowDelta::Added {
+                                    id: *primary_id,
+                                    row: output_row,
+                                });
                             }
                         } else if existed {
                             // Join failed but row existed before
@@ -1122,8 +1120,10 @@ impl QueryNode {
     fn eval_join_table_delta<F>(
         delta: &RowDelta,
         join_table: &str,
-        _join_schema: &TableSchema,
-        cached_rows: &mut HashMap<ObjectId, JoinedRow>,
+        join_schema: &TableSchema,
+        _combined_schema: &TableSchema,
+        table_descriptors: &HashMap<String, Arc<RowDescriptor>>,
+        cached_rows: &mut HashMap<ObjectId, BufferJoinedRow>,
         reverse_index: &mut HashMap<ObjectId, HashSet<ObjectId>>,
         output: &mut DeltaBatch,
         lookup_row: F,
@@ -1133,7 +1133,7 @@ impl QueryNode {
         let join_id = delta.row_id();
 
         match delta {
-            RowDelta::Added(join_row) => {
+            RowDelta::Added { row: _join_row, .. } => {
                 // Find all cached rows that reference this join_id
                 // (They wouldn't have joined before if the row didn't exist)
                 // Actually, for Added, the reverse_index wouldn't have entries yet
@@ -1147,7 +1147,6 @@ impl QueryNode {
                 // For simplicity, we rely on the fact that initialization processes
                 // join_table rows before input rows. For true incrementality, we'd
                 // need more sophisticated handling.
-                let _ = join_row; // Suppress unused warning
             }
 
             RowDelta::Removed { prior, .. } => {
@@ -1164,33 +1163,29 @@ impl QueryNode {
                 }
             }
 
-            RowDelta::Updated { new: join_row, prior, .. } => {
+            RowDelta::Updated { id: delta_join_id, row: _join_row, prior } => {
                 // Find all primary_ids joined with this join_id and update them
                 if let Some(affected_ids) = reverse_index.get(&join_id) {
                     for &primary_id in affected_ids.clone().iter() {
                         if let Some(old_joined) = cached_rows.get(&primary_id) {
                             // Rebuild the joined row with updated join_table data
                             let mut new_joined = old_joined.clone();
-                            // Update the join_table portion
-                            // This is tricky because we need to replace the join_table values
-                            // For now, we look up the row again and rebuild
+
+                            // Look up the fresh row data and update
                             if let Some(fresh_join_row) = lookup_row(join_table, join_id) {
-                                // Find where join_table columns start
-                                if let Some((_, offset)) = new_joined.table_offsets.get(join_table) {
-                                    let offset = *offset;
-                                    // Replace values from offset onwards with new join_row values
-                                    let end = offset + fresh_join_row.values.len();
-                                    if end <= new_joined.values.len() {
-                                        new_joined.values.splice(offset..end, fresh_join_row.values.iter().cloned());
-                                    }
-                                }
-                                // Also update the row ID in table_offsets
-                                new_joined.table_offsets.insert(join_table.to_string(), (join_row.id, new_joined.table_offsets.get(join_table).map(|(_, o)| *o).unwrap_or(0)));
+                                // Convert to buffer format and replace with qualified column names
+                                let join_descriptor = table_descriptors.get(join_table)
+                                    .cloned()
+                                    .unwrap_or_else(|| Arc::new(RowDescriptor::from_table_schema_qualified(join_schema, join_table)));
+                                let owned_join = OwnedRow::from_legacy_row_qualified(&fresh_join_row, join_schema, join_descriptor, Some(join_table));
+
+                                // Update the join_table row in the BufferJoinedRow
+                                new_joined.add_joined(join_table, *delta_join_id, owned_join);
 
                                 cached_rows.insert(primary_id, new_joined.clone());
                                 output.push(RowDelta::Updated {
                                     id: primary_id,
-                                    new: new_joined.to_output_row(),
+                                    row: new_joined.to_output_row(),
                                     prior: prior.clone(),
                                 });
                             }
@@ -1218,9 +1213,19 @@ impl QueryNode {
 
     /// Extract a Ref value from a buffer row by column name.
     /// Handles both plain Ref values and nullable Ref values.
-    fn get_ref_value_buffer(row: &OwnedRow, column: &str) -> Option<ObjectId> {
+    /// If `table` is provided, tries looking up "table.column" first, then falls back to just "column".
+    fn get_ref_value_buffer(row: &OwnedRow, column: &str, table: Option<&str>) -> Option<ObjectId> {
         use crate::sql::row_buffer::RowValue;
-        match row.get_by_name(column)? {
+
+        // Try qualified name first if table is provided
+        let value = if let Some(tbl) = table {
+            let qualified = format!("{}.{}", tbl, column);
+            row.get_by_name(&qualified).or_else(|| row.get_by_name(column))
+        } else {
+            row.get_by_name(column)
+        };
+
+        match value? {
             RowValue::Ref(id) => Some(id),
             RowValue::Null => None,
             _ => None,
@@ -1323,11 +1328,13 @@ impl QueryNode {
         G: Fn(&str, ObjectId) -> Option<Row>,
     {
         match delta {
-            RowDelta::Added(outer_row) => {
-                let outer_id = outer_row.id;
+            RowDelta::Added { id: outer_id, row: owned_row } => {
+                // Convert OwnedRow to legacy Row for ArrayAggregate (still uses legacy format internally)
+                // TODO: Migrate ArrayAggregate to buffer format
+                let outer_row = owned_row.to_legacy_row(*outer_id);
 
                 // Fetch all matching inner rows
-                let raw_inner_rows = lookup_inner_rows(outer_id);
+                let raw_inner_rows = lookup_inner_rows(*outer_id);
 
                 // Resolve inner joins (e.g., replace label ref with full Labels row)
                 let inner_rows = Self::resolve_inner_joins(
@@ -1339,18 +1346,23 @@ impl QueryNode {
 
                 // Update inner_to_outer index (use raw rows for ID tracking)
                 for inner_row in &raw_inner_rows {
-                    inner_to_outer.insert(inner_row.id, outer_id);
+                    inner_to_outer.insert(inner_row.id, *outer_id);
                 }
 
                 // Cache the resolved array
-                cached_arrays.insert(outer_id, inner_rows.clone());
+                cached_arrays.insert(*outer_id, inner_rows.clone());
 
-                // Build output row with array
+                // Build output row with array (legacy format)
                 let output_row =
-                    Self::build_output_row_with_array(outer_row, &inner_rows, array_column_index);
-                outer_rows.insert(outer_id, output_row.clone());
+                    Self::build_output_row_with_array(&outer_row, &inner_rows, array_column_index);
+                outer_rows.insert(*outer_id, output_row.clone());
 
-                output.push(RowDelta::Added(output_row));
+                // Convert back to buffer format for output delta
+                // Note: ArrayAggregate output has arrays which need special handling
+                // For now, store as-is since outer_rows still uses Row
+                let output_descriptor = Arc::new(RowDescriptor::from_table_schema(_outer_schema));
+                let output_owned = OwnedRow::from_legacy_row(&output_row, _outer_schema, output_descriptor);
+                output.push(RowDelta::Added { id: *outer_id, row: output_owned });
             }
 
             RowDelta::Removed { id, prior } => {
@@ -1371,8 +1383,10 @@ impl QueryNode {
                 });
             }
 
-            RowDelta::Updated { id, new: outer_row, prior } => {
+            RowDelta::Updated { id, row: owned_row, prior } => {
                 let outer_id = *id;
+                // Convert OwnedRow to legacy Row for ArrayAggregate
+                let outer_row = owned_row.to_legacy_row(outer_id);
 
                 // Fetch updated inner rows (in case correlation changed)
                 let raw_inner_rows = lookup_inner_rows(outer_id);
@@ -1398,12 +1412,15 @@ impl QueryNode {
                 cached_arrays.insert(outer_id, inner_rows.clone());
 
                 let output_row =
-                    Self::build_output_row_with_array(outer_row, &inner_rows, array_column_index);
+                    Self::build_output_row_with_array(&outer_row, &inner_rows, array_column_index);
                 outer_rows.insert(outer_id, output_row.clone());
 
+                // Convert back to buffer format for output delta
+                let output_descriptor = Arc::new(RowDescriptor::from_table_schema(_outer_schema));
+                let output_owned = OwnedRow::from_legacy_row(&output_row, _outer_schema, output_descriptor);
                 output.push(RowDelta::Updated {
                     id: outer_id,
-                    new: output_row,
+                    row: output_owned,
                     prior: prior.clone(),
                 });
             }
@@ -1474,14 +1491,22 @@ impl QueryNode {
     ) where
         G: Fn(&str, ObjectId) -> Option<Row>,
     {
+        // Helper to create output delta with OwnedRow
+        let make_updated_delta = |id: ObjectId, row: &Row| -> RowDelta {
+            let descriptor = Arc::new(RowDescriptor::from_table_schema(_outer_schema));
+            let owned = OwnedRow::from_legacy_row(row, _outer_schema, descriptor);
+            RowDelta::Updated { id, row: owned, prior: PriorState::empty() }
+        };
+
         match delta {
-            RowDelta::Added(inner_row) => {
-                let inner_id = inner_row.id;
+            RowDelta::Added { id: inner_id, row: owned_inner } => {
+                // Convert to legacy Row for internal processing
+                let inner_row = owned_inner.to_legacy_row(*inner_id);
 
                 // Find which outer row this belongs to
-                if let Some(outer_id) = Self::get_ref_value(inner_row, inner_ref_column, inner_schema) {
+                if let Some(outer_id) = Self::get_ref_value(&inner_row, inner_ref_column, inner_schema) {
                     // Update inner_to_outer index
-                    inner_to_outer.insert(inner_id, outer_id);
+                    inner_to_outer.insert(*inner_id, outer_id);
 
                     // Resolve inner joins for this row
                     let resolved_rows = Self::resolve_inner_joins(
@@ -1490,7 +1515,7 @@ impl QueryNode {
                         inner_schema,
                         &lookup_row_by_id,
                     );
-                    let resolved_row = resolved_rows.into_iter().next().unwrap_or_else(|| inner_row.clone());
+                    let resolved_row = resolved_rows.into_iter().next().unwrap_or(inner_row);
 
                     // Add to cached array
                     let array = cached_arrays.entry(outer_id).or_default();
@@ -1504,11 +1529,7 @@ impl QueryNode {
                         let output_row = Self::build_output_row_with_array(&base_row, array, array_column_index);
                         outer_rows.insert(outer_id, output_row.clone());
 
-                        output.push(RowDelta::Updated {
-                            id: outer_id,
-                            new: output_row,
-                            prior: crate::sql::query_graph::delta::PriorState::empty(),
-                        });
+                        output.push(make_updated_delta(outer_id, &output_row));
                     }
                 }
             }
@@ -1527,9 +1548,11 @@ impl QueryNode {
                             let output_row = Self::build_output_row_with_array(&base_row, array, array_column_index);
                             outer_rows.insert(outer_id, output_row.clone());
 
+                            let descriptor = Arc::new(RowDescriptor::from_table_schema(_outer_schema));
+                            let owned = OwnedRow::from_legacy_row(&output_row, _outer_schema, descriptor);
                             output.push(RowDelta::Updated {
                                 id: outer_id,
-                                new: output_row,
+                                row: owned,
                                 prior: prior.clone(),
                             });
                         }
@@ -1537,9 +1560,12 @@ impl QueryNode {
                 }
             }
 
-            RowDelta::Updated { id: inner_id, new: inner_row, prior } => {
+            RowDelta::Updated { id: inner_id, row: owned_inner, prior } => {
+                // Convert to legacy Row for internal processing
+                let inner_row = owned_inner.to_legacy_row(*inner_id);
+
                 let old_outer_id = inner_to_outer.get(inner_id).copied();
-                let new_outer_id = Self::get_ref_value(inner_row, inner_ref_column, inner_schema);
+                let new_outer_id = Self::get_ref_value(&inner_row, inner_ref_column, inner_schema);
 
                 // Resolve inner joins for this row
                 let resolved_rows = Self::resolve_inner_joins(
@@ -1548,7 +1574,7 @@ impl QueryNode {
                     inner_schema,
                     &lookup_row_by_id,
                 );
-                let resolved_row = resolved_rows.into_iter().next().unwrap_or_else(|| inner_row.clone());
+                let resolved_row = resolved_rows.into_iter().next().unwrap_or(inner_row);
 
                 if old_outer_id != new_outer_id {
                     // Inner row moved to different outer row
@@ -1564,9 +1590,11 @@ impl QueryNode {
                                 let output_row = Self::build_output_row_with_array(&base_row, array, array_column_index);
                                 outer_rows.insert(old_id, output_row.clone());
 
+                                let descriptor = Arc::new(RowDescriptor::from_table_schema(_outer_schema));
+                                let owned = OwnedRow::from_legacy_row(&output_row, _outer_schema, descriptor);
                                 output.push(RowDelta::Updated {
                                     id: old_id,
-                                    new: output_row,
+                                    row: owned,
                                     prior: prior.clone(),
                                 });
                             }
@@ -1585,11 +1613,7 @@ impl QueryNode {
                             let output_row = Self::build_output_row_with_array(&base_row, array, array_column_index);
                             outer_rows.insert(new_id, output_row.clone());
 
-                            output.push(RowDelta::Updated {
-                                id: new_id,
-                                new: output_row,
-                                prior: crate::sql::query_graph::delta::PriorState::empty(),
-                            });
+                            output.push(make_updated_delta(new_id, &output_row));
                         }
                     }
                 } else if let Some(outer_id) = new_outer_id {
@@ -1606,9 +1630,11 @@ impl QueryNode {
                             let output_row = Self::build_output_row_with_array(&base_row, array, array_column_index);
                             outer_rows.insert(outer_id, output_row.clone());
 
+                            let descriptor = Arc::new(RowDescriptor::from_table_schema(_outer_schema));
+                            let owned = OwnedRow::from_legacy_row(&output_row, _outer_schema, descriptor);
                             output.push(RowDelta::Updated {
                                 id: outer_id,
-                                new: output_row,
+                                row: owned,
                                 prior: prior.clone(),
                             });
                         }
@@ -1669,8 +1695,8 @@ impl QueryNode {
 
         for delta in input.into_iter() {
             match &delta {
-                RowDelta::Added(row) => {
-                    if cached_ids.insert(row.id) {
+                RowDelta::Added { id, .. } => {
+                    if cached_ids.insert(*id) {
                         output.push(delta);
                     }
                 }
@@ -1690,21 +1716,21 @@ impl QueryNode {
         output
     }
 
-    /// Evaluate a filter node.
+    /// Evaluate a filter node using buffer format directly.
     fn eval_filter(
         predicate: &Predicate,
+        descriptor: &Arc<RowDescriptor>,
         cached_ids: &mut HashSet<ObjectId>,
         input: DeltaBatch,
-        schema: &TableSchema,
     ) -> DeltaBatch {
         let mut output = DeltaBatch::new();
 
         for delta in input.into_iter() {
             match delta {
-                RowDelta::Added(row) => {
-                    if predicate.matches(&row, schema) {
-                        cached_ids.insert(row.id);
-                        output.push(RowDelta::Added(row));
+                RowDelta::Added { id, row } => {
+                    if predicate.matches_buffer(id, row.as_ref(), descriptor) {
+                        cached_ids.insert(id);
+                        output.push(RowDelta::Added { id, row });
                     }
                 }
 
@@ -1715,15 +1741,15 @@ impl QueryNode {
                     }
                 }
 
-                RowDelta::Updated { id, new, prior } => {
+                RowDelta::Updated { id, row, prior } => {
                     let was_in_set = cached_ids.contains(&id);
-                    let is_match = predicate.matches(&new, schema);
+                    let is_match = predicate.matches_buffer(id, row.as_ref(), descriptor);
 
                     match (was_in_set, is_match) {
                         (false, true) => {
                             // Row now matches the filter - enters the set
                             cached_ids.insert(id);
-                            output.push(RowDelta::Added(new));
+                            output.push(RowDelta::Added { id, row });
                         }
                         (true, false) => {
                             // Row no longer matches - leaves the set
@@ -1732,7 +1758,7 @@ impl QueryNode {
                         }
                         (true, true) => {
                             // Row still matches - propagate update
-                            output.push(RowDelta::Updated { id, new, prior });
+                            output.push(RowDelta::Updated { id, row, prior });
                         }
                         (false, false) => {
                             // Row still doesn't match - no output (early cutoff)
@@ -1748,21 +1774,17 @@ impl QueryNode {
     /// Evaluate a LimitOffset node.
     ///
     /// Maintains the full set of qualifying rows and emits deltas
-    /// when the visible window changes.
-    ///
-    /// Internally stores rows in buffer format (OwnedRow) for efficiency,
-    /// converting at boundaries.
+    /// when the visible window changes. Uses buffer format (OwnedRow) throughout.
     pub fn evaluate_limit_offset(
         &mut self,
         input: DeltaBatch,
-        schema: &TableSchema,
+        _schema: &TableSchema,
         _cache: &RowCache,
     ) -> DeltaBatch {
         match self {
             QueryNode::LimitOffset {
                 limit,
                 offset,
-                descriptor,
                 all_rows,
                 visible_ids,
                 ..
@@ -1771,13 +1793,12 @@ impl QueryNode {
 
                 for delta in input.into_iter() {
                     match delta {
-                        RowDelta::Added(row) => {
+                        RowDelta::Added { id, row } => {
                             Self::limit_offset_handle_add(
+                                id,
                                 row,
                                 *limit,
                                 *offset,
-                                descriptor.clone(),
-                                schema,
                                 all_rows,
                                 visible_ids,
                                 &mut output,
@@ -1789,20 +1810,18 @@ impl QueryNode {
                                 prior,
                                 *limit,
                                 *offset,
-                                schema,
                                 all_rows,
                                 visible_ids,
                                 &mut output,
                             );
                         }
-                        RowDelta::Updated { id, new, prior } => {
+                        RowDelta::Updated { id, row, prior } => {
                             // Update the stored row if it exists
                             if all_rows.contains_key(&id) {
-                                let owned = OwnedRow::from_legacy_row(&new, schema, descriptor.clone());
-                                all_rows.insert(id, owned);
+                                all_rows.insert(id, row.clone());
                                 // If the row is visible, emit the update
                                 if visible_ids.contains(&id) {
-                                    output.push(RowDelta::Updated { id, new, prior });
+                                    output.push(RowDelta::Updated { id, row, prior });
                                 }
                             }
                         }
@@ -1818,19 +1837,15 @@ impl QueryNode {
     /// Handle a row being added to the LimitOffset node.
     #[allow(clippy::too_many_arguments)]
     fn limit_offset_handle_add(
-        row: Row,
+        row_id: ObjectId,
+        row: OwnedRow,
         limit: Option<u64>,
         offset: u64,
-        descriptor: Arc<RowDescriptor>,
-        schema: &TableSchema,
         all_rows: &mut BTreeMap<ObjectId, OwnedRow>,
         visible_ids: &mut HashSet<ObjectId>,
         output: &mut DeltaBatch,
     ) {
-        let row_id = row.id;
-        // Convert to buffer format for storage
-        let owned = OwnedRow::from_legacy_row(&row, schema, descriptor);
-        all_rows.insert(row_id, owned);
+        all_rows.insert(row_id, row);
 
         // Compute the new visible window and changes
         let (new_visible, changes) = Self::compute_window_changes(all_rows, visible_ids, limit, offset);
@@ -1840,9 +1855,7 @@ impl QueryNode {
             match change_type {
                 WindowChange::Added => {
                     if let Some(owned_row) = all_rows.get(&id) {
-                        // Convert back to legacy Row for output
-                        let legacy = owned_row.to_legacy_row_with_schema(id, schema);
-                        output.push(RowDelta::Added(legacy));
+                        output.push(RowDelta::Added { id, row: owned_row.clone() });
                     }
                 }
                 WindowChange::Removed => {
@@ -1864,7 +1877,6 @@ impl QueryNode {
         prior: PriorState,
         limit: Option<u64>,
         offset: u64,
-        schema: &TableSchema,
         all_rows: &mut BTreeMap<ObjectId, OwnedRow>,
         visible_ids: &mut HashSet<ObjectId>,
         output: &mut DeltaBatch,
@@ -1884,11 +1896,8 @@ impl QueryNode {
         for (changed_id, change_type) in changes {
             match change_type {
                 WindowChange::Added => {
-                    // Get the row from all_rows (we no longer fall back to cache since
-                    // LimitOffset maintains all qualifying rows internally)
                     if let Some(owned_row) = all_rows.get(&changed_id) {
-                        let legacy = owned_row.to_legacy_row_with_schema(changed_id, schema);
-                        output.push(RowDelta::Added(legacy));
+                        output.push(RowDelta::Added { id: changed_id, row: owned_row.clone() });
                     }
                 }
                 WindowChange::Removed => {
@@ -1953,7 +1962,8 @@ enum WindowChange {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sql::row::{Row, Value};
+    use crate::sql::row::Value;
+    use crate::sql::row_buffer::RowBuilder;
     use crate::sql::schema::{ColumnDef, ColumnType};
     use crate::object::ObjectId;
 
@@ -1967,11 +1977,17 @@ mod tests {
         )
     }
 
-    fn make_row(id: u128, name: &str, active: bool) -> Row {
-        Row::new(
-            ObjectId::new(id),
-            vec![Value::String(name.to_string()), Value::Bool(active)],
-        )
+    fn test_descriptor() -> Arc<RowDescriptor> {
+        Arc::new(RowDescriptor::from_table_schema(&test_schema()))
+    }
+
+    fn make_owned_row(id: u128, name: &str, active: bool) -> (ObjectId, OwnedRow) {
+        let descriptor = test_descriptor();
+        let row = RowBuilder::new(descriptor)
+            .set_string_by_name("name", name)
+            .set_bool_by_name("active", active)
+            .build();
+        (ObjectId::new(id), row)
     }
 
     #[test]
@@ -1984,8 +2000,8 @@ mod tests {
         let schema = test_schema();
         let cache = RowCache::new();
 
-        let row = make_row(1, "Alice", true);
-        let delta = DeltaBatch::added(row.clone());
+        let (id, row) = make_owned_row(1, "Alice", true);
+        let delta = DeltaBatch::added(id, row);
 
         let output = node.evaluate(delta, &schema, &cache);
 
@@ -2035,14 +2051,15 @@ mod tests {
             table: "users".to_string(),
             input: NodeId(0),
             predicate: Predicate::eq("active", Value::Bool(true)),
+            descriptor: test_descriptor(),
             cached_ids: HashSet::new(),
         };
 
         let schema = test_schema();
         let cache = RowCache::new();
 
-        let row = make_row(1, "Alice", true);
-        let delta = DeltaBatch::added(row);
+        let (id, row) = make_owned_row(1, "Alice", true);
+        let delta = DeltaBatch::added(id, row);
 
         let output = node.evaluate(delta, &schema, &cache);
 
@@ -2056,14 +2073,15 @@ mod tests {
             table: "users".to_string(),
             input: NodeId(0),
             predicate: Predicate::eq("active", Value::Bool(true)),
+            descriptor: test_descriptor(),
             cached_ids: HashSet::new(),
         };
 
         let schema = test_schema();
         let cache = RowCache::new();
 
-        let row = make_row(1, "Alice", false); // active = false
-        let delta = DeltaBatch::added(row);
+        let (id, row) = make_owned_row(1, "Alice", false); // active = false
+        let delta = DeltaBatch::added(id, row);
 
         let output = node.evaluate(delta, &schema, &cache);
 
@@ -2078,6 +2096,7 @@ mod tests {
             table: "users".to_string(),
             input: NodeId(0),
             predicate: Predicate::eq("active", Value::Bool(true)),
+            descriptor: test_descriptor(),
             cached_ids: HashSet::new(), // Not in set initially
         };
 
@@ -2085,14 +2104,14 @@ mod tests {
         let cache = RowCache::new();
 
         // Update: was inactive, now active
-        let new_row = make_row(1, "Alice", true);
+        let (_, new_row) = make_owned_row(1, "Alice", true);
         let delta = DeltaBatch::updated(ObjectId::new(1), new_row, vec![]);
 
         let output = node.evaluate(delta, &schema, &cache);
 
         assert_eq!(output.len(), 1);
         // Should be Added since it entered the filtered set
-        assert!(matches!(output.iter().next(), Some(RowDelta::Added(_))));
+        assert!(matches!(output.iter().next(), Some(RowDelta::Added { .. })));
         assert!(node.cached_ids().unwrap().contains(&ObjectId::new(1)));
     }
 
@@ -2102,6 +2121,7 @@ mod tests {
             table: "users".to_string(),
             input: NodeId(0),
             predicate: Predicate::eq("active", Value::Bool(true)),
+            descriptor: test_descriptor(),
             cached_ids: HashSet::from([ObjectId::new(1)]), // In set initially
         };
 
@@ -2109,7 +2129,7 @@ mod tests {
         let cache = RowCache::new();
 
         // Update: was active, now inactive
-        let new_row = make_row(1, "Alice", false);
+        let (_, new_row) = make_owned_row(1, "Alice", false);
         let delta = DeltaBatch::updated(ObjectId::new(1), new_row, vec![]);
 
         let output = node.evaluate(delta, &schema, &cache);
@@ -2129,6 +2149,7 @@ mod tests {
             table: "users".to_string(),
             input: NodeId(0),
             predicate: Predicate::eq("active", Value::Bool(true)),
+            descriptor: test_descriptor(),
             cached_ids: HashSet::from([ObjectId::new(1)]),
         };
 
@@ -2136,7 +2157,7 @@ mod tests {
         let cache = RowCache::new();
 
         // Update: still active, just name change
-        let new_row = make_row(1, "Alicia", true);
+        let (_, new_row) = make_owned_row(1, "Alicia", true);
         let delta = DeltaBatch::updated(ObjectId::new(1), new_row, vec![]);
 
         let output = node.evaluate(delta, &schema, &cache);
@@ -2155,6 +2176,7 @@ mod tests {
             table: "users".to_string(),
             input: NodeId(0),
             predicate: Predicate::eq("active", Value::Bool(true)),
+            descriptor: test_descriptor(),
             cached_ids: HashSet::new(),
         };
 
@@ -2162,7 +2184,7 @@ mod tests {
         let cache = RowCache::new();
 
         // Update: still inactive
-        let new_row = make_row(1, "Alicia", false);
+        let (_, new_row) = make_owned_row(1, "Alicia", false);
         let delta = DeltaBatch::updated(ObjectId::new(1), new_row, vec![]);
 
         let output = node.evaluate(delta, &schema, &cache);
@@ -2184,25 +2206,23 @@ mod tests {
         )
     }
 
-    fn make_folder(id: u128, name: &str, owner_id: u128, parent_id: Option<u128>) -> Row {
-        Row::new(
-            ObjectId::new(id),
-            vec![
-                Value::String(name.to_string()),
-                Value::Ref(ObjectId::new(owner_id)),
-                match parent_id {
-                    Some(p) => Value::NullableSome(Box::new(Value::Ref(ObjectId::new(p)))),
-                    None => Value::NullableNone,
-                },
-            ],
-        )
-    }
-
     const ALICE: u128 = 100;
     const BOB: u128 = 200;
 
     fn folder_descriptor() -> Arc<RowDescriptor> {
         Arc::new(RowDescriptor::from_table_schema(&folder_schema()))
+    }
+
+    fn make_owned_folder(id: u128, name: &str, owner_id: u128, parent_id: Option<u128>) -> (ObjectId, OwnedRow) {
+        let descriptor = folder_descriptor();
+        let builder = RowBuilder::new(descriptor)
+            .set_string_by_name("name", name)
+            .set_ref_by_name("owner_id", ObjectId::new(owner_id));
+        let row = match parent_id {
+            Some(p) => builder.set_ref_by_name("parent_id", ObjectId::new(p)),
+            None => builder.set_null_by_name("parent_id"),
+        }.build();
+        (ObjectId::new(id), row)
     }
 
     #[test]
@@ -2223,13 +2243,13 @@ mod tests {
         };
 
         // Add a root folder owned by Alice
-        let root = make_folder(1, "root", ALICE, None);
-        let delta = DeltaBatch::added(root.clone());
+        let (id, row) = make_owned_folder(1, "root", ALICE, None);
+        let delta = DeltaBatch::added(id, row);
 
         let output = node.evaluate_recursive(delta, &schema);
 
         assert_eq!(output.len(), 1);
-        assert!(matches!(output.iter().next(), Some(RowDelta::Added(r)) if r.id.0 == 1));
+        assert!(matches!(output.iter().next(), Some(RowDelta::Added { id, .. }) if id.0 == 1));
         assert!(node.accessible().unwrap().contains_key(&ObjectId::new(1)));
         assert_eq!(node.accessible().unwrap().get(&ObjectId::new(1)), Some(&AccessReason::Base));
     }
@@ -2252,8 +2272,8 @@ mod tests {
         };
 
         // Add a root folder owned by Bob (not Alice)
-        let root = make_folder(1, "bobs-folder", BOB, None);
-        let delta = DeltaBatch::added(root);
+        let (id, row) = make_owned_folder(1, "bobs-folder", BOB, None);
+        let delta = DeltaBatch::added(id, row);
 
         let output = node.evaluate_recursive(delta, &schema);
 
@@ -2279,13 +2299,13 @@ mod tests {
         };
 
         // Add root folder owned by Alice
-        let root = make_folder(1, "root", ALICE, None);
-        let delta = DeltaBatch::added(root);
+        let (id, row) = make_owned_folder(1, "root", ALICE, None);
+        let delta = DeltaBatch::added(id, row);
         node.evaluate_recursive(delta, &schema);
 
         // Add child folder owned by Bob but parented to Alice's folder
-        let child = make_folder(2, "child", BOB, Some(1));
-        let delta = DeltaBatch::added(child);
+        let (id, row) = make_owned_folder(2, "child", BOB, Some(1));
+        let delta = DeltaBatch::added(id, row);
         let output = node.evaluate_recursive(delta, &schema);
 
         assert_eq!(output.len(), 1);
@@ -2314,20 +2334,20 @@ mod tests {
         };
 
         // Add grandchild first (parent doesn't exist yet)
-        let grandchild = make_folder(3, "grandchild", BOB, Some(2));
-        let delta = DeltaBatch::added(grandchild);
+        let (id, row) = make_owned_folder(3, "grandchild", BOB, Some(2));
+        let delta = DeltaBatch::added(id, row);
         let output = node.evaluate_recursive(delta, &schema);
         assert!(output.is_empty()); // Not yet accessible
 
         // Add child (parent doesn't exist yet)
-        let child = make_folder(2, "child", BOB, Some(1));
-        let delta = DeltaBatch::added(child);
+        let (id, row) = make_owned_folder(2, "child", BOB, Some(1));
+        let delta = DeltaBatch::added(id, row);
         let output = node.evaluate_recursive(delta, &schema);
         assert!(output.is_empty()); // Still not accessible
 
         // Add root owned by Alice - should cascade to child and grandchild
-        let root = make_folder(1, "root", ALICE, None);
-        let delta = DeltaBatch::added(root);
+        let (id, row) = make_owned_folder(1, "root", ALICE, None);
+        let delta = DeltaBatch::added(id, row);
         let output = node.evaluate_recursive(delta, &schema);
 
         // Should have 3 added deltas: root + child + grandchild
@@ -2355,13 +2375,12 @@ mod tests {
         };
 
         // Set up: root -> child -> grandchild
-        let root = make_folder(1, "root", ALICE, None);
-        let child = make_folder(2, "child", BOB, Some(1));
-        let grandchild = make_folder(3, "grandchild", BOB, Some(2));
-
-        node.evaluate_recursive(DeltaBatch::added(root), &schema);
-        node.evaluate_recursive(DeltaBatch::added(child), &schema);
-        node.evaluate_recursive(DeltaBatch::added(grandchild), &schema);
+        let (id, row) = make_owned_folder(1, "root", ALICE, None);
+        node.evaluate_recursive(DeltaBatch::added(id, row), &schema);
+        let (id, row) = make_owned_folder(2, "child", BOB, Some(1));
+        node.evaluate_recursive(DeltaBatch::added(id, row), &schema);
+        let (id, row) = make_owned_folder(3, "grandchild", BOB, Some(2));
+        node.evaluate_recursive(DeltaBatch::added(id, row), &schema);
 
         assert_eq!(node.accessible().unwrap().len(), 3);
 
@@ -2392,12 +2411,11 @@ mod tests {
         };
 
         // Root owned by Alice
-        let root = make_folder(1, "root", ALICE, None);
+        let (id, row) = make_owned_folder(1, "root", ALICE, None);
+        node.evaluate_recursive(DeltaBatch::added(id, row), &schema);
         // Child also owned by Alice (Both access)
-        let child = make_folder(2, "child", ALICE, Some(1));
-
-        node.evaluate_recursive(DeltaBatch::added(root), &schema);
-        node.evaluate_recursive(DeltaBatch::added(child), &schema);
+        let (id, row) = make_owned_folder(2, "child", ALICE, Some(1));
+        node.evaluate_recursive(DeltaBatch::added(id, row), &schema);
 
         assert_eq!(
             node.accessible().unwrap().get(&ObjectId::new(2)),

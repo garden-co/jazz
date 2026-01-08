@@ -221,6 +221,17 @@ impl RowDescriptor {
         Self::new(columns)
     }
 
+    /// Create a RowDescriptor with qualified column names (table.column).
+    ///
+    /// This is used for JOIN operations where predicates use qualified names.
+    pub fn from_table_schema_qualified(schema: &TableSchema, table_name: &str) -> Self {
+        let columns = schema.columns.iter().map(|col| {
+            let col_type = ColType::from_column_type(&col.ty, col.nullable);
+            (format!("{}.{}", table_name, col.name), col_type)
+        });
+        Self::new(columns)
+    }
+
     /// Create a new RowDescriptor from column definitions.
     ///
     /// Columns are reordered: fixed-size columns first, then variable-size.
@@ -669,15 +680,65 @@ impl OwnedRow {
     /// This is provided for compatibility during migration. The schema is
     /// needed to map value indices to column names.
     pub fn from_legacy_row(row: &Row, schema: &TableSchema, descriptor: Arc<RowDescriptor>) -> Self {
+        Self::from_legacy_row_qualified(row, schema, descriptor, None)
+    }
+
+    /// Create an OwnedRow from a legacy Row with optional table name qualification.
+    ///
+    /// When `table_name` is provided, column names are qualified as `table.column`
+    /// when looking up the descriptor index. This is needed for JOIN operations
+    /// where descriptors use qualified names.
+    pub fn from_legacy_row_qualified(
+        row: &Row,
+        schema: &TableSchema,
+        descriptor: Arc<RowDescriptor>,
+        table_name: Option<&str>,
+    ) -> Self {
         let mut builder = RowBuilder::new(descriptor.clone());
 
         // Legacy rows have values in schema column order
         for (schema_idx, value) in row.values.iter().enumerate() {
             // Find the column name from the schema
             if let Some(col_def) = schema.columns.get(schema_idx) {
+                // Build the lookup name (optionally qualified)
+                let lookup_name = if let Some(table) = table_name {
+                    format!("{}.{}", table, col_def.name)
+                } else {
+                    col_def.name.clone()
+                };
                 // Find the corresponding descriptor column index
-                if let Some(desc_idx) = descriptor.column_index(&col_def.name) {
+                if let Some(desc_idx) = descriptor.column_index(&lookup_name) {
                     builder = Self::set_from_value(builder, desc_idx, value);
+                }
+            }
+        }
+
+        builder.build()
+    }
+
+    /// Create an OwnedRow for a single table from a combined legacy Row.
+    ///
+    /// Used for chain joins where the input row contains data from multiple tables.
+    /// The combined_schema has qualified column names like "table.column".
+    /// We extract only the columns belonging to `table_name`.
+    pub fn from_legacy_row_combined(
+        row: &Row,
+        combined_schema: &TableSchema,
+        descriptor: Arc<RowDescriptor>,
+        table_name: &str,
+    ) -> Self {
+        let mut builder = RowBuilder::new(descriptor.clone());
+        let prefix = format!("{}.", table_name);
+
+        // Iterate through combined schema and extract values for this table
+        for (schema_idx, col_def) in combined_schema.columns.iter().enumerate() {
+            if col_def.name.starts_with(&prefix) {
+                // This column belongs to our table
+                if let Some(value) = row.values.get(schema_idx) {
+                    // Find the descriptor column by qualified name
+                    if let Some(desc_idx) = descriptor.column_index(&col_def.name) {
+                        builder = Self::set_from_value(builder, desc_idx, value);
+                    }
                 }
             }
         }
@@ -699,6 +760,51 @@ impl OwnedRow {
             Value::NullableNone => builder.set_null(idx),
             Value::NullableSome(inner) => Self::set_from_value(builder, idx, inner),
             // TODO: Handle Row, Array, Blob, BlobArray
+            _ => builder,
+        }
+    }
+
+    /// Create a new OwnedRow with qualified column names.
+    ///
+    /// Converts column names from `column` to `table.column` format.
+    /// This is needed for JOIN queries where predicates use qualified names.
+    pub fn qualify_columns(&self, table: &str, schema: &TableSchema) -> Self {
+        // Create a new descriptor with qualified column names
+        let qualified_descriptor = Arc::new(RowDescriptor::from_table_schema_qualified(schema, table));
+
+        // Build the new row with qualified column names
+        let mut builder = RowBuilder::new(qualified_descriptor.clone());
+
+        // Copy values from current row to qualified row
+        for col_def in schema.columns.iter() {
+            let unqualified_name = &col_def.name;
+            let qualified_name = format!("{}.{}", table, unqualified_name);
+
+            // Try to get value by unqualified name from current row
+            if let Some(value) = self.get_by_name(unqualified_name) {
+                // Find the index in the qualified descriptor
+                if let Some(qualified_idx) = qualified_descriptor.column_index(&qualified_name) {
+                    builder = Self::set_from_row_value(builder, qualified_idx, value);
+                }
+            }
+        }
+
+        builder.build()
+    }
+
+    /// Helper to set a builder value from a RowValue.
+    fn set_from_row_value(builder: RowBuilder, idx: usize, value: RowValue<'_>) -> RowBuilder {
+        match value {
+            RowValue::Bool(v) => builder.set_bool(idx, v),
+            RowValue::I32(v) => builder.set_i32(idx, v),
+            RowValue::U32(v) => builder.set_u32(idx, v),
+            RowValue::I64(v) => builder.set_i64(idx, v),
+            RowValue::F64(v) => builder.set_f64(idx, v),
+            RowValue::String(v) => builder.set_string(idx, v),
+            RowValue::Bytes(v) => builder.set_bytes(idx, v),
+            RowValue::Ref(v) => builder.set_ref(idx, v),
+            RowValue::Null => builder.set_null(idx),
+            // TODO: Handle Blob, BlobArray
             _ => builder,
         }
     }
@@ -910,6 +1016,89 @@ impl RowBuilder {
             }
         }
         self
+    }
+
+    // --- By-name variants for ergonomic usage ---
+
+    /// Set a boolean column by name.
+    pub fn set_bool_by_name(self, name: &str, value: bool) -> Self {
+        if let Some(idx) = self.descriptor.column_index(name) {
+            self.set_bool(idx, value)
+        } else {
+            self
+        }
+    }
+
+    /// Set an i32 column by name.
+    pub fn set_i32_by_name(self, name: &str, value: i32) -> Self {
+        if let Some(idx) = self.descriptor.column_index(name) {
+            self.set_i32(idx, value)
+        } else {
+            self
+        }
+    }
+
+    /// Set a u32 column by name.
+    pub fn set_u32_by_name(self, name: &str, value: u32) -> Self {
+        if let Some(idx) = self.descriptor.column_index(name) {
+            self.set_u32(idx, value)
+        } else {
+            self
+        }
+    }
+
+    /// Set an i64 column by name.
+    pub fn set_i64_by_name(self, name: &str, value: i64) -> Self {
+        if let Some(idx) = self.descriptor.column_index(name) {
+            self.set_i64(idx, value)
+        } else {
+            self
+        }
+    }
+
+    /// Set an f64 column by name.
+    pub fn set_f64_by_name(self, name: &str, value: f64) -> Self {
+        if let Some(idx) = self.descriptor.column_index(name) {
+            self.set_f64(idx, value)
+        } else {
+            self
+        }
+    }
+
+    /// Set a Ref (ObjectId) column by name.
+    pub fn set_ref_by_name(self, name: &str, value: ObjectId) -> Self {
+        if let Some(idx) = self.descriptor.column_index(name) {
+            self.set_ref(idx, value)
+        } else {
+            self
+        }
+    }
+
+    /// Set a string column by name.
+    pub fn set_string_by_name(self, name: &str, value: &str) -> Self {
+        if let Some(idx) = self.descriptor.column_index(name) {
+            self.set_string(idx, value)
+        } else {
+            self
+        }
+    }
+
+    /// Set a bytes column by name.
+    pub fn set_bytes_by_name(self, name: &str, value: &[u8]) -> Self {
+        if let Some(idx) = self.descriptor.column_index(name) {
+            self.set_bytes(idx, value)
+        } else {
+            self
+        }
+    }
+
+    /// Set a nullable column to null by name.
+    pub fn set_null_by_name(self, name: &str) -> Self {
+        if let Some(idx) = self.descriptor.column_index(name) {
+            self.set_null(idx)
+        } else {
+            self
+        }
     }
 
     /// Build the final row buffer.
