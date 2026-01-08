@@ -14,72 +14,31 @@ pnpm add @jazz/react @jazz/client @jazz/schema
 ## Quick Start
 
 1. Define your schema in SQL
-2. Generate type-safe client code
+2. Generate type-safe client code with `@jazz/schema`
 3. Wrap your app with `JazzProvider`
 4. Use hooks to query and mutate data
 
 ## Example App
 
-```tsx title="App.tsx"
-import { useQuery, useMutation } from '@jazz/react';
-import type { Task } from './generated/types';
+<include>../../../examples/react/src/App.tsx#jazz-provider-setup</include>
 
-function App() {
-  // Subscribe to all tasks
-  const { data: tasks, loading } = useQuery<Task>(
-    'SELECT * FROM tasks ORDER BY created_at DESC'
-  );
+And a component using the hooks:
 
-  // Get mutation functions
-  const { insert, update } = useMutation('tasks');
-
-  const addTask = async (title: string) => {
-    await insert({ title, completed: false });
-  };
-
-  const toggleTask = async (id: string, completed: boolean) => {
-    await update(id, { completed: !completed });
-  };
-
-  if (loading) return <div>Loading...</div>;
-
-  return (
-    <div>
-      <h1>My Tasks</h1>
-      <ul>
-        {tasks.map(task => (
-          <li key={task.id}>
-            <input
-              type="checkbox"
-              checked={task.completed}
-              onChange={() => toggleTask(task.id, task.completed)}
-            />
-            {task.title}
-          </li>
-        ))}
-      </ul>
-      <button onClick={() => addTask('New Task')}>
-        Add Task
-      </button>
-    </div>
-  );
-}
-
-export default App;
-```
+<include>../../../examples/react/src/components/TaskList.tsx#task-list-with-mutations</include>
 
 ## Available Hooks
 
 | Hook | Purpose |
 |------|---------|
-| `useQuery` | Subscribe to a SQL query |
-| `useRow` | Subscribe to a single row by ID |
-| `useMutation` | Get mutation functions for a table |
+| `useAll` | Subscribe to multiple rows matching a query |
+| `useOne` | Subscribe to a single row by ID |
+| `useMutate` | Get mutation functions for a table |
+| `useJazz` | Access the database instance directly |
 
 ## Type Safety
 
 All hooks are fully typed based on your schema. The generated types ensure:
 
-- Query results match your SELECT columns
+- Query results match your table definitions
 - Mutations validate against column types
-- Row subscriptions return the correct shape
+- Related data is typed through the `with()` includes

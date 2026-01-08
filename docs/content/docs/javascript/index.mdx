@@ -13,49 +13,27 @@ pnpm add @jazz/client @jazz/schema
 
 ## Quick Start
 
-```typescript title="index.ts"
-import { JazzClient } from '@jazz/client';
-import { schema } from './generated/schema';
+The generated client provides a type-safe API for your schema:
 
-// Initialize Jazz client
-const wasm = await WebAssembly.compile(
-  await fetch('/groove_wasm_bg.wasm').then(r => r.arrayBuffer())
-);
+<include>../../../examples/react/src/queries.ts#query-builder-basic</include>
 
-const client = new JazzClient({
-  wasm,
-  schema,
-  storage: { type: 'memory' }, // or 'indexeddb' for persistence
-});
+## Mutations
 
-// Load schema
-await client.loadSchema();
+Create, update, and delete data:
 
-// Insert data
-await client.execute(
-  'INSERT INTO tasks (title, completed) VALUES (?, ?)',
-  ['Learn Jazz', false]
-);
+<include>../../../examples/react/src/mutations.ts#create-task</include>
 
-// Query data
-const tasks = await client.query('SELECT * FROM tasks');
-console.log('Tasks:', tasks);
+## Subscriptions
 
-// Subscribe to changes
-client.subscribe(
-  'SELECT * FROM tasks WHERE completed = ?',
-  [false],
-  (activeTasks) => {
-    console.log('Active tasks updated:', activeTasks);
-  }
-);
-```
+Subscribe to changes in your data:
+
+<include>../../../examples/react/src/queries.ts#subscribe-all</include>
 
 ## Core Concepts
 
 The JavaScript API provides:
 
-- **JazzClient**: The main client for interacting with Jazz
-- **Query subscriptions**: Live queries that update when data changes
-- **Mutations**: Type-safe insert, update, delete operations
-- **Schema generation**: Generate types from SQL schemas
+- **Generated client**: Type-safe table descriptors from your SQL schema
+- **Query builder**: Fluent API with `where()` and `with()` methods
+- **Live subscriptions**: Callbacks that fire when data changes
+- **Mutations**: Type-safe `create()`, `update()`, `delete()` methods

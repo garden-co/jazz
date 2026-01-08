@@ -17,9 +17,6 @@ export async function initDatabase() {
   // Create an in-memory database
   const db = new WasmDatabase();
 
-  // Or create a persistent IndexedDB-backed database
-  // const db = await WasmDatabase.withIndexedDb('my-app');
-
   // Initialize your schema
   db.init_schema(schemaSQL);
 
@@ -27,24 +24,13 @@ export async function initDatabase() {
 }
 ```
 
-## Schema Initialization
+## Schema Definition
 
-Pass your SQL schema to `init_schema`:
+Define your schema in SQL:
 
-```typescript title="schema.sql"
-CREATE TABLE Users (
-  id STRING NOT NULL,
-  name STRING NOT NULL,
-  email STRING NOT NULL
-);
+<include>../../../examples/react/src/schema.sql</include>
 
-CREATE TABLE Tasks (
-  id STRING NOT NULL,
-  title STRING NOT NULL,
-  completed BOOL NOT NULL,
-  user REFERENCES Users NOT NULL
-);
-```
+Then import and initialize:
 
 ```typescript
 import schema from './schema.sql?raw';  // Vite raw import
@@ -68,100 +54,21 @@ Get all table names:
 
 ```typescript
 const tables = db.list_tables();
-console.log('Tables:', tables);  // ['Users', 'Tasks']
+console.log('Tables:', tables);  // ['Users', 'Projects', 'Tasks', ...]
 ```
 
-### execute
+## Using with the Generated Client
 
-Execute a SQL statement (INSERT, UPDATE, DELETE):
+The generated client from `@jazz/schema` provides the type-safe API for mutations and queries. Pass the database to the client methods:
 
-```typescript
-db.execute(
-  'INSERT INTO tasks (id, title, completed) VALUES (?, ?, ?)',
-  ['task-1', 'New task', false]
-);
-```
-
-### query
-
-Execute a SELECT query:
-
-```typescript
-const tasks = db.query('SELECT * FROM tasks WHERE completed = ?', [false]);
-```
-
-## Persistence Options
-
-### In-Memory (Default)
-
-Data is lost when the page reloads:
-
-```typescript
-const db = new WasmDatabase();
-```
-
-### IndexedDB Persistence
-
-Data persists across sessions:
-
-```typescript
-const db = await WasmDatabase.withIndexedDb('my-app-name');
-```
-
-### Check for Existing Database
-
-```typescript
-const exists = await WasmDatabase.hasPersistedDatabase('my-app-name');
-if (exists) {
-  console.log('Loading existing database...');
-}
-```
-
-### Delete Persisted Database
-
-```typescript
-await WasmDatabase.deletePersistedDatabase('my-app-name');
-```
+<include>../../../examples/react/src/mutations.ts#create-task</include>
 
 ## Using with React
 
 Wrap your app with `JazzProvider`:
 
-```tsx title="App.tsx"
-import { JazzProvider } from '@jazz/react';
-import { app } from './generated/client';
-
-function App() {
-  const [db, setDb] = useState(null);
-
-  useEffect(() => {
-    initDatabase().then(setDb);
-  }, []);
-
-  if (!db) return <div>Loading...</div>;
-
-  return (
-    <JazzProvider database={db}>
-      <YourApp />
-    </JazzProvider>
-  );
-}
-```
+<include>../../../examples/react/src/App.tsx#jazz-provider-setup</include>
 
 Then use hooks to interact with data:
 
-```tsx
-import { useAll, useJazz } from '@jazz/react';
-import { app } from './generated/client';
-
-function TaskList() {
-  const [tasks, loading] = useAll(app.tasks);
-  const db = useJazz();
-
-  const createTask = () => {
-    app.tasks.create(db, { title: 'New', completed: false });
-  };
-
-  // ...
-}
-```
+<include>../../../examples/react/src/components/TaskList.tsx#task-list-basic</include>
