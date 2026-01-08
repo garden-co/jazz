@@ -8,21 +8,22 @@ export function usePlayState() {
   const [value, setValue] = useState<PlayState>("pause");
 
   useLayoutEffect(() => {
-    // Initialize state from AudioManager
-    setValue(audioManager.isPlaying() ? "play" : "pause");
+    setValue(audioManager.mediaElement.paused ? "pause" : "play");
 
-    const onPlay = () => setValue("play");
-    const onPause = () => setValue("pause");
-    const onEnded = () => setValue("pause");
+    const onPlay = () => {
+      setValue("play");
+    };
 
-    const unsubPlay = audioManager.on("play", onPlay);
-    const unsubPause = audioManager.on("pause", onPause);
-    const unsubEnded = audioManager.on("ended", onEnded);
+    const onPause = () => {
+      setValue("pause");
+    };
+
+    audioManager.mediaElement.addEventListener("play", onPlay);
+    audioManager.mediaElement.addEventListener("pause", onPause);
 
     return () => {
-      unsubPlay();
-      unsubPause();
-      unsubEnded();
+      audioManager.mediaElement.removeEventListener("play", onPlay);
+      audioManager.mediaElement.removeEventListener("pause", onPause);
     };
   }, [audioManager]);
 

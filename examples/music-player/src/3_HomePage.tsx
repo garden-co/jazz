@@ -19,6 +19,24 @@ import { useIsMobile } from "./hooks/use-mobile";
 import { Pencil } from "lucide-react";
 
 export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
+  const playState = usePlayState();
+  const isPlaying = playState.value === "play";
+  const [isEditPlaylistDialogOpen, setIsEditPlaylistDialogOpen] =
+    useState(false);
+  const [
+    editPlaylistDialogDefaultSection,
+    setEditPlaylistDialogDefaultSection,
+  ] = useState<"details" | "members">("members");
+  const [isAddTracksModalOpen, setIsAddTracksModalOpen] = useState(false);
+
+  async function handleFileLoad(files: FileList) {
+    /**
+     * Follow this function definition to see how we update
+     * values in Jazz and manage files!
+     */
+    await uploadMusicTracks(playlist, files);
+  }
+
   const params = useParams<{ playlistId: string }>();
   const playlistId = useSuspenseAccount(MusicaAccount, {
     select: (me) => params.playlistId ?? me.root.$jazz.refs.rootPlaylist.id,
@@ -41,20 +59,15 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
     select: (me) => playlistId === me.root.activePlaylist?.$jazz.id,
   });
 
-  const isPlaying = usePlayState().value === "play";
-  const [currentDialog, setCurrentDialog] = useState<
-    | { name: "playlist"; section: "details" | "members" }
-    | { name: "add-tracks" }
-    | null
-  >(null);
+  const handlePlaylistShareClick = () => {
+    setEditPlaylistDialogDefaultSection("members");
+    setIsEditPlaylistDialogOpen(true);
+  };
 
-  async function handleFileLoad(files: FileList) {
-    /**
-     * Follow this function definition to see how we update
-     * values in Jazz and manage files!
-     */
-    await uploadMusicTracks(playlist, files);
-  }
+  const handleEditClick = () => {
+    setEditPlaylistDialogDefaultSection("details");
+    setIsEditPlaylistDialogOpen(true);
+  };
 
   return (
     <SidebarInset className="flex flex-col h-screen text-gray-800">
@@ -73,12 +86,7 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
                     {canEdit ? (
                       <button
                         type="button"
-                        onClick={() =>
-                          setCurrentDialog({
-                            name: "playlist",
-                            section: "details",
-                          })
-                        }
+                        onClick={handleEditClick}
                         className="text-left hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-sm"
                         aria-label="Edit playlist title"
                       >
@@ -94,13 +102,8 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
                       variant="ghost"
                       size="icon"
                       aria-label="Edit playlist"
-                      onClick={() =>
-                        setCurrentDialog({
-                          name: "playlist",
-                          section: "details",
-                        })
-                      }
-                      className="text-blue-800"
+                      onClick={handleEditClick}
+                      className={`text-blue-800`}
                     >
                       <Pencil className="w-4 h-4" />
                     </Button>
@@ -108,9 +111,7 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
                 </div>
                 <PlaylistMembers
                   memberIds={membersIds}
-                  onClick={() =>
-                    setCurrentDialog({ name: "playlist", section: "members" })
-                  }
+                  onClick={handlePlaylistShareClick}
                 />
               </div>
             )}
@@ -122,28 +123,21 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
                   </FileUploadButton>
                 </>
               ) : (
-                <>
-                  {canEdit && (
-                    <Button
-                      onClick={() => setCurrentDialog({ name: "add-tracks" })}
-                      variant="outline"
-                    >
-                      {isMobile ? "Add tracks" : "Add tracks from library"}
-                    </Button>
-                  )}
-                  {canManage && (
-                    <Button
-                      onClick={() =>
-                        setCurrentDialog({
-                          name: "playlist",
-                          section: "members",
-                        })
-                      }
-                    >
-                      Share
-                    </Button>
-                  )}
-                </>
+                canEdit && (
+                  <>
+                    {canEdit && (
+                      <Button
+                        onClick={() => setIsAddTracksModalOpen(true)}
+                        variant="outline"
+                      >
+                        {isMobile ? "Add tracks" : "Add tracks from library"}
+                      </Button>
+                    )}
+                    {canManage && (
+                      <Button onClick={handlePlaylistShareClick}>Share</Button>
+                    )}
+                  </>
+                )
               )}
             </div>
           </div>
@@ -161,7 +155,6 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
                         isActivePlaylist &&
                         isPlaying
                       }
-                      isLoading={mediaPlayer.loading === track.$jazz.id}
                       onClick={() => {
                         mediaPlayer.setActiveTrack(track, playlist);
                       }}
@@ -173,7 +166,7 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
             !isRootPlaylist && (
               <PlaylistEmptyState
                 canEdit={canEdit}
-                onAddTracks={() => setCurrentDialog({ name: "add-tracks" })}
+                onAddTracks={() => setIsAddTracksModalOpen(true)}
               />
             )
           )}
@@ -182,18 +175,18 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
       </div>
 
       {/* Playlist Edit / Members Dialog */}
-      {currentDialog?.name === "playlist" && (
+      {isEditPlaylistDialogOpen && (
         <EditPlaylistDialog
-          isOpen={true}
-          onOpenChange={(open) => !open && setCurrentDialog(null)}
+          isOpen={isEditPlaylistDialogOpen}
+          onOpenChange={setIsEditPlaylistDialogOpen}
           playlistId={playlistId}
-          defaultSection={currentDialog.section}
+          defaultSection={editPlaylistDialogDefaultSection}
         />
       )}
       {/* Add Tracks from Root Modal */}
       <AddTracksDialog
-        isOpen={currentDialog?.name === "add-tracks"}
-        onOpenChange={(open) => !open && setCurrentDialog(null)}
+        isOpen={isAddTracksModalOpen}
+        onOpenChange={setIsAddTracksModalOpen}
         playlist={playlist}
       />
     </SidebarInset>
