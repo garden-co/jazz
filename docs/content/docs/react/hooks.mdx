@@ -9,66 +9,19 @@ Jazz provides React hooks for interacting with your data using the generated typ
 
 Subscribe to multiple rows with automatic updates:
 
-```tsx title="TaskList.tsx"
-import { useAll } from '@jazz/react';
-import { app } from '../generated/client';
-
-export function TaskList() {
-  const [tasks, loading] = useAll(
-    app.tasks.where({ completed: false })
-  );
-
-  if (loading) {
-    return <div>Loading tasks...</div>;
-  }
-
-  return (
-    <ul>
-      {tasks.map(task => (
-        <li key={task.id}>
-          <h3>{task.title}</h3>
-          {task.description && <p>{task.description}</p>}
-        </li>
-      ))}
-    </ul>
-  );
-}
-```
+<include>../../../examples/react/src/components/TaskList.tsx#task-list-basic</include>
 
 ### With Related Data
 
 Include referenced data using `with()`:
 
-```tsx title="IssueList.tsx"
-import { useAll } from '@jazz/react';
-import { app } from '../generated/client';
+<include>../../../examples/react/src/components/TaskList.tsx#task-list-with-includes</include>
 
-export function IssueList() {
-  const [issues, loading] = useAll(
-    app.issues
-      .where({ status: 'open' })
-      .with({
-        project: true,
-        IssueLabels: { label: true },
-        IssueAssignees: { user: true }
-      })
-  );
+### With Mutations
 
-  if (loading) return <div>Loading...</div>;
+The third element of the returned tuple provides mutation helpers:
 
-  return (
-    <ul>
-      {issues.map(issue => (
-        <li key={issue.id}>
-          <h3>{issue.title}</h3>
-          <span>Project: {issue.project?.name}</span>
-          <span>Labels: {issue.IssueLabels?.map(il => il.label?.name).join(', ')}</span>
-        </li>
-      ))}
-    </ul>
-  );
-}
-```
+<include>../../../examples/react/src/components/TaskList.tsx#task-list-with-mutations</include>
 
 ### Parameters
 
@@ -82,140 +35,55 @@ export function IssueList() {
 |-------|------|-------------|
 | `[0]` | `T[]` | Query results |
 | `[1]` | `boolean` | Loading state |
+| `[2]` | `MutateAll` | Object with `create()`, `update()`, and `delete()` methods |
 
 ## useOne
 
 Subscribe to a single row by its ID:
 
-```tsx title="TaskDetail.tsx"
-import { useOne } from '@jazz/react';
-import { app } from '../generated/client';
+<include>../../../examples/react/src/components/TaskDetail.tsx#task-detail</include>
 
-interface TaskDetailProps {
-  taskId: string;
-}
+### With Related Data
 
-export function TaskDetail({ taskId }: TaskDetailProps) {
-  const [task, loading] = useOne(app.tasks, taskId);
+<include>../../../examples/react/src/components/TaskDetail.tsx#task-detail-with-includes</include>
 
-  if (loading) {
-    return <div>Loading task...</div>;
-  }
+### Parameters
 
-  if (!task) {
-    return <div>Task not found</div>;
-  }
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `subscribable` | `SubscribableOneWithDb` | A table descriptor or query builder |
+| `id` | `string \| null` | The row's ObjectId |
 
-  return (
-    <article>
-      <h2>{task.title}</h2>
-      {task.description && <p>{task.description}</p>}
-      <div>
-        Status: {task.completed ? 'Completed' : 'Active'}
-      </div>
-    </article>
-  );
-}
-```
+### Returns
+
+| Index | Type | Description |
+|-------|------|-------------|
+| `[0]` | `T \| null` | The row or null if not found |
+| `[1]` | `boolean` | Loading state |
+| `[2]` | `MutateOne` | Object with `update()` and `delete()` methods |
 
 ## useMutate
 
-Get typed mutation functions:
+Get typed mutation functions without subscribing to data:
 
-```tsx title="TaskForm.tsx"
-import { useState } from 'react';
-import { useMutate } from '@jazz/react';
-import { app } from '../generated/client';
+<include>../../../examples/react/src/components/UserProfile.tsx#create-user-button</include>
 
-export function TaskForm() {
-  const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
-  const mutate = useMutate();
+### Parameters
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `table` | `MutableWithDb` | A table descriptor from the generated client |
 
-    app.tasks.create(mutate.db, {
-      title,
-      description: description || null,
-      completed: false,
-    });
+### Returns
 
-    // Reset form
-    setTitle('');
-    setDescription('');
-  };
-
-  return (
-    <form onSubmit={handleSubmit}>
-      <div>
-        <label htmlFor="title">Title</label>
-        <input
-          id="title"
-          type="text"
-          value={title}
-          onChange={e => setTitle(e.target.value)}
-          required
-        />
-      </div>
-      <div>
-        <label htmlFor="description">Description</label>
-        <textarea
-          id="description"
-          value={description}
-          onChange={e => setDescription(e.target.value)}
-        />
-      </div>
-      <button type="submit">Create Task</button>
-    </form>
-  );
-}
-```
-
-## useJazz
-
-Access the database instance directly:
-
-```tsx title="DirectAccess.tsx"
-import { useJazz } from '@jazz/react';
-import { app } from '../generated/client';
-
-export function DirectAccess() {
-  const db = useJazz();
-
-  const createTask = () => {
-    const id = app.tasks.create(db, {
-      title: 'New task',
-      completed: false
-    });
-    console.log('Created task:', id);
-  };
-
-  return <button onClick={createTask}>Create Task</button>;
-}
-```
+| Property | Type | Description |
+|----------|------|-------------|
+| `create` | `(data: T) => ObjectId` | Create a new row |
+| `update` | `(id: string, data: Partial<T>) => void` | Update a row |
+| `delete` | `(id: string) => void` | Delete a row |
 
 ## JazzProvider
 
 Wrap your app with `JazzProvider` to make the database available to hooks:
 
-```tsx title="App.tsx"
-import { JazzProvider } from '@jazz/react';
-
-function App() {
-  const [db, setDb] = useState(null);
-
-  useEffect(() => {
-    // Initialize WASM database
-    initDatabase().then(setDb);
-  }, []);
-
-  if (!db) return <div>Loading...</div>;
-
-  return (
-    <JazzProvider database={db}>
-      <YourApp />
-    </JazzProvider>
-  );
-}
-```
+<include>../../../examples/react/src/App.tsx#jazz-provider-setup</include>

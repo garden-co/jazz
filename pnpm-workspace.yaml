@@ -3,3 +3,4 @@ packages:
   - "demo-app"
   - "groove-wasm/pkg"
   - "docs"
+  - "docs/examples/react"

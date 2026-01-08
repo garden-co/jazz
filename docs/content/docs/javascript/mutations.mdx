@@ -5,139 +5,40 @@ description: Inserting, updating, and deleting data
 
 Jazz provides type-safe mutations through the generated client API.
 
-## Using the Generated Client
-
-```typescript title="mutations/using-client.ts"
-import { app } from '../generated/client';
-import { createDatabase } from '../generated/client';
-
-// Get a bound database instance
-const db = createDatabase(wasmDb);
-
-// Or use the app directly with db parameter
-// Create a new task
-const taskId = app.tasks.create(db, {
-  title: 'Complete project documentation',
-  description: 'Write comprehensive docs for all modules',
-  completed: false,
-});
-
-console.log('Created task with ID:', taskId);
-
-// Update an existing task
-app.tasks.update(db, taskId, {
-  completed: true,
-});
-
-// Partial update (only specified fields)
-app.tasks.update(db, taskId, {
-  description: 'Updated description',
-});
-
-// Delete a task
-app.tasks.delete(db, taskId);
-```
-
 ## Create
 
-Returns the ObjectId of the new row:
+Create a new row and get its ObjectId:
 
-```typescript
-const id = app.tasks.create(db, {
-  title: 'New task',
-  completed: false,
-});
-console.log('Created task:', id);
-```
+<include>../../../examples/react/src/mutations.ts#create-task</include>
 
 ## Update
 
-Update one or more fields:
+Update one or more fields on an existing row:
 
-```typescript
-app.tasks.update(db, taskId, {
-  completed: true,
-});
-
-// Update multiple fields
-app.tasks.update(db, taskId, {
-  title: 'Updated title',
-  description: 'Updated description',
-  completed: true,
-});
-```
+<include>../../../examples/react/src/mutations.ts#update-task</include>
 
 ## Delete
 
 Remove a row by ID:
 
-```typescript
-app.tasks.delete(db, taskId);
-```
-
-## With React Hooks
-
-Use `useJazz()` to get the database instance:
-
-```tsx title="CreateTask.tsx"
-import { useJazz } from '@jazz/react';
-import { app } from '../generated/client';
-
-function CreateTaskButton() {
-  const db = useJazz();
-
-  const handleCreate = () => {
-    const id = app.tasks.create(db, {
-      title: 'New task',
-      completed: false,
-    });
-    console.log('Created:', id);
-  };
-
-  return <button onClick={handleCreate}>Create Task</button>;
-}
-```
+<include>../../../examples/react/src/mutations.ts#delete-task</include>
 
 ## Creating Related Data
 
 When creating rows with foreign key references, pass the ObjectId:
 
-```typescript
-// Create a project first
-const projectId = app.projects.create(db, {
-  name: 'My Project',
-  color: 'blue',
-});
+<include>../../../examples/react/src/mutations.ts#create-related-data</include>
 
-// Create an issue referencing the project
-const issueId = app.issues.create(db, {
-  title: 'New issue',
-  status: 'open',
-  priority: 'medium',
-  project: projectId,  // Reference the project
-});
+## With React Hooks
 
-// Create a label for the issue (many-to-many via join table)
-const labelId = app.labels.create(db, {
-  name: 'bug',
-  color: 'red',
-});
+Use `useMutate()` to get mutation helpers in React components:
 
-app.issuelabels.create(db, {
-  issue: issueId,
-  label: labelId,
-});
-```
+<include>../../../examples/react/src/components/UserProfile.tsx#create-user-button</include>
+
+Or use the mutations returned from `useAll()` and `useOne()`:
+
+<include>../../../examples/react/src/components/TaskForm.tsx#task-form</include>
 
 ## Mutations and Subscriptions
 
-When you mutate data, all active subscriptions are automatically notified:
-
-```typescript
-// Subscription set up elsewhere
-const [tasks, loading] = useAll(app.tasks.where({ completed: false }));
-
-// When you create a task, the subscription updates
-app.tasks.create(db, { title: 'New', completed: false });
-// tasks array now includes the new task
-```
+When you mutate data, all active subscriptions are automatically notified. There's no need to manually refresh queries—the reactive system handles updates automatically.

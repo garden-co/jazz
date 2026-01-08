@@ -9,82 +9,29 @@ Jazz provides a type-safe query builder for filtering and subscribing to data. T
 
 Jazz uses a fluent query builder pattern rather than raw SQL strings:
 
-```typescript title="queries/basic.ts"
-import { app } from '../generated/client';
-import { useAll } from '@jazz/react';
-
-// Subscribe to all tasks
-const [tasks, loading] = useAll(app.tasks);
-
-// With filtering
-const [activeTasks, loading] = useAll(
-  app.tasks.where({ completed: false })
-);
-
-// With related data
-const [tasksWithUsers, loading] = useAll(
-  app.tasks
-    .where({ completed: false })
-    .with({ user: true })
-);
-```
+<include>../../../examples/react/src/queries.ts#query-builder-basic</include>
 
 ## Filtering with where()
 
 The `where()` method accepts an object with field conditions:
 
-```typescript
-// Simple equality
-app.tasks.where({ status: 'open' })
-
-// Multiple conditions (AND)
-app.tasks.where({
-  status: 'open',
-  priority: 'high'
-})
-
-// Filter by reference
-app.tasks.where({ project: projectId })
-
-// Filter by related data existence
-app.issues.where({
-  IssueAssignees: { some: { user: userId } }
-})
-```
+<include>../../../examples/react/src/queries.ts#filtering-examples</include>
 
 ## Including Related Data with with()
 
 Use `with()` to include referenced data in results:
 
-```typescript
-// Include single reference
-app.tasks.with({ project: true })
-
-// Include nested references
-app.issues.with({
-  project: true,
-  IssueLabels: { label: true },
-  IssueAssignees: { user: true }
-})
-```
+<include>../../../examples/react/src/queries.ts#includes-examples</include>
 
 ## Direct Subscriptions
 
 For vanilla JavaScript (outside React), use `subscribeAll`:
 
-```typescript title="queries/subscriptions.ts"
-import { app } from '../generated/client';
+<include>../../../examples/react/src/queries.ts#subscribe-all</include>
 
-// Subscribe to query results
-const unsubscribe = app.tasks
-  .where({ completed: false })
-  .subscribeAll(db, (tasks) => {
-    console.log('Active tasks:', tasks);
-  });
+Subscribe to a single row by ID:
 
-// Clean up when done
-unsubscribe();
-```
+<include>../../../examples/react/src/queries.ts#subscribe-one</include>
 
 ## Supported Query Features
 
