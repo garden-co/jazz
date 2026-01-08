@@ -48,6 +48,13 @@ cd demo-app && npm install && npm run dev
 
 - Always check specific properties of collection items in tests, not just the collection length. For example, after asserting `rows.len() == 2`, also verify the actual row values like names, titles, or IDs.
 
+## Documentation Guidelines
+
+- **All code examples in docs must come from typechecked example apps whenever possible.** Use the `<include>` directive to pull code from `docs/examples/` rather than writing inline code snippets. This ensures examples are always valid and up-to-date with the actual API.
+  - Example: `<include>../../../examples/react/src/components/TaskList.tsx#task-list-basic</include>`
+  - Mark regions in example files with `// #region <name>` and `// #endregion <name>` comments
+  - Exceptions: SQL schema examples, ASCII diagrams, and comparison snippets showing other products' APIs may be inline
+
 ## Code Quality Guidelines
 
 - When taking any shortcut or simplification, loudly document it in: (1) code comments at the site, (2) a Linear issue for tracking, and (3) the final summary when completing a task.
