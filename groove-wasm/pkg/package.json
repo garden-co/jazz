@@ -2,9 +2,6 @@
   "name": "groove-wasm",
   "type": "module",
   "version": "0.1.0",
-  "scripts": {
-    "build": "cd .. && (which wasm-pack || cargo install wasm-pack) && wasm-pack build --target web --out-dir pkg"
-  },
   "files": [
     "groove_wasm_bg.wasm",
     "groove_wasm.js",
