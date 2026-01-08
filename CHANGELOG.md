@@ -1,3 +1,9 @@
+Released Jazz 0.19.19:
+- Added Svelte Better Auth support and upgraded Better Auth compatibility to version 1.4.7
+- Added `getJazzErrorType` helper function to identify the type of Jazz error from an Error object thrown by suspense hooks. This enables error boundaries to display appropriate UI based on whether the error is "unauthorized", "unavailable", or "unknown"
+- Resume interrupted CoValue sync on app restart (without requiring CoValues to be manually reloaded)
+- Bugfix: Context.authenticate now doesn't replace the context if the same AccountID is already logged in
+
 Released Jazz 0.19.18:
 - Bugfix: fixed Clerk metadata schema to correctly parse the Jazz credentials. Bug introduced in 0.19.17
 
