@@ -1,26 +1,35 @@
-import { useRef } from "react";
+import { useState, useRef } from "react";
 import { useAudioManager } from "./AudioManager";
+import { MusicTrack } from "@/1_schema";
+import { FileStreamSource } from "./FileStreamSource";
 
 export function usePlayMedia() {
   const audioManager = useAudioManager();
+  const [source, setSource] = useState<FileStreamSource | null>(null);
+  const currentSourceRef = useRef<FileStreamSource | null>(null);
 
-  const previousMediaLoad = useRef<Promise<unknown> | undefined>(undefined);
+  async function playMedia(track: MusicTrack, autoPlay: boolean) {
+    const newSource = new FileStreamSource(track.$jazz.refs.file.id);
 
-  async function playMedia(file: Blob, autoPlay = true) {
-    // Wait for the previous load to finish
-    // to avoid to incur into concurrency issues
-    await previousMediaLoad.current;
+    // Dispose previous source and track current
+    currentSourceRef.current?._dispose();
+    currentSourceRef.current = newSource;
+    setSource(newSource);
 
-    const promise = audioManager.loadAudio(file);
+    await newSource.waitForReady();
 
-    previousMediaLoad.current = promise;
+    // Bail if a newer source was requested
+    if (currentSourceRef.current !== newSource) {
+      newSource._dispose();
+      return;
+    }
 
-    await promise;
+    await audioManager.loadAudio(newSource);
 
-    if (autoPlay) {
+    if (autoPlay && currentSourceRef.current === newSource) {
       audioManager.play();
     }
   }
 
-  return playMedia;
+  return { playMedia, source };
 }
