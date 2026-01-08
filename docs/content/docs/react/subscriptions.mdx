@@ -26,11 +26,7 @@ When the component mounts, `useAll` creates a subscription. The component re-ren
 
 Multiple components subscribing to the same query share a single subscription. The `_queryKey` on query builders enables structural equality comparison:
 
-```tsx
-// These components can share subscriptions if they use the same query
-<TaskList />  // app.tasks.where({ isCompleted: false })
-<TaskList />  // Same query = same subscription
-```
+<include>../../../examples/react/src/components/SubscriptionSharing.tsx#subscription-sharing</include>
 
 ### Incremental Updates
 

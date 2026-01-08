@@ -28,41 +28,18 @@ When you subscribe to a query, Jazz:
 
 ## Example
 
-```typescript title="TaskList.tsx"
-import { useAll } from '@jazz/react';
-import { app } from '../generated/client';
+<include>../../../examples/react/src/components/IncrementalQuery.tsx#incremental-query-hook</include>
 
-export function useFilteredTasks(completed: boolean) {
-  // Subscribe to query - automatically updates when tasks change
-  const [tasks, loading] = useAll(
-    app.tasks.where({ completed })
-  );
+Usage in a component:
 
-  return { tasks, loading };
-}
-
-// Usage in component
-function ActiveTasks() {
-  const { tasks, loading } = useFilteredTasks(false);
-
-  if (loading) return <div>Loading...</div>;
-
-  return (
-    <ul>
-      {tasks.map(task => (
-        <li key={task.id}>{task.title}</li>
-      ))}
-    </ul>
-  );
-}
-```
+<include>../../../examples/react/src/components/IncrementalQuery.tsx#incremental-query-component</include>
 
 ## Query Graph
 
 Jazz builds a computation graph for each query:
 
 ```
-TableScan(tasks) → Filter(completed=false) → Output
+TableScan(tasks) → Filter(isCompleted=false) → Output
 ```
 
 When a task row changes:

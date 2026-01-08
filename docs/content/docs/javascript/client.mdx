@@ -7,22 +7,7 @@ Jazz uses a WASM-compiled Rust database that runs in the browser. Here's how to 
 
 ## Initializing the Database
 
-```typescript title="database.ts"
-import init, { WasmDatabase } from 'groove-wasm';
-
-export async function initDatabase() {
-  // Initialize the WASM module
-  await init();
-
-  // Create an in-memory database
-  const db = new WasmDatabase();
-
-  // Initialize your schema
-  db.init_schema(schemaSQL);
-
-  return db;
-}
-```
+<include>../../../examples/react/src/setup/database.ts#init-wasm-database</include>
 
 ## Schema Definition
 
@@ -32,11 +17,7 @@ Define your schema in SQL:
 
 Then import and initialize:
 
-```typescript
-import schema from './schema.sql?raw';  // Vite raw import
-
-db.init_schema(schema);
-```
+<include>../../../examples/react/src/setup/database.ts#schema-raw-import</include>
 
 ## Database Methods
 
@@ -44,18 +25,13 @@ db.init_schema(schema);
 
 Initialize the database schema:
 
-```typescript
-db.init_schema(schemaSQL);
-```
+<include>../../../examples/react/src/setup/database.ts#db-init-schema</include>
 
 ### list_tables
 
 Get all table names:
 
-```typescript
-const tables = db.list_tables();
-console.log('Tables:', tables);  // ['Users', 'Projects', 'Tasks', ...]
-```
+<include>../../../examples/react/src/setup/database.ts#db-list-tables</include>
 
 ## Using with the Generated Client
 

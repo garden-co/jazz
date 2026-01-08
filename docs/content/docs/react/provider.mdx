@@ -7,61 +7,21 @@ The `JazzProvider` component initializes Jazz and provides context to all child 
 
 ## Basic Setup
 
-```tsx title="main.tsx"
-import React from 'react';
-import ReactDOM from 'react-dom/client';
-import { JazzProvider } from '@jazz/react';
-import { createJazzClient } from './client';
-import App from './App';
-
-const client = await createJazzClient();
-
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <JazzProvider client={client}>
-      <App />
-    </JazzProvider>
-  </React.StrictMode>
-);
-```
+<include>../../../examples/react/src/setup/main.tsx#main-setup</include>
 
 ## Props
 
 | Prop | Type | Description |
 |------|------|-------------|
-| `client` | `JazzClient` | The Jazz client instance |
+| `database` | `WasmDatabaseLike` | The WASM database instance |
 | `children` | `ReactNode` | Child components |
 
-## Creating a Client
+## Creating a Database
 
-The Jazz client manages the local database and sync connection:
+Initialize the WASM module and create a database instance:
 
-```typescript title="client.ts"
-import { JazzClient } from '@jazz/client';
-import { schema } from './generated/schema';
-import wasmUrl from '@jazz/wasm/groove_wasm_bg.wasm?url';
+<include>../../../examples/react/src/setup/client.ts#init-database</include>
 
-export async function createJazzClient() {
-  // Load WASM module
-  const wasm = await WebAssembly.compileStreaming(fetch(wasmUrl));
-
-  // Create client with schema and storage
-  const client = new JazzClient({
-    wasm,
-    schema,
-    storage: {
-      type: 'indexeddb',
-      name: 'my-app-db',
-    },
-  });
-
-  // Load schema into database
-  await client.loadSchema();
-
-  return client;
-}
-```
-
-## Multiple Clients
+## Multiple Providers
 
 In rare cases, you might need multiple Jazz instances (e.g., for multi-tenant apps). Each `JazzProvider` creates an isolated context.

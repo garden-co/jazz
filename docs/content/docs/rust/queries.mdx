@@ -5,94 +5,19 @@ description: SQL queries and incremental computation in Rust
 
 Groove provides both one-shot queries and incremental query subscriptions.
 
-## One-Shot Queries
+## Basic Queries
 
-```rust title="queries.rs"
-use groove::sql::{Database, params, Row};
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Task {
-    id: String,
-    title: String,
-    description: Option<String>,
-    completed: bool,
-}
-
-pub fn query_examples(db: &Database) -> Result<(), Box<dyn std::error::Error>> {
-    // Simple SELECT
-    let rows = db.query("SELECT * FROM tasks", &[])?;
-    println!("All tasks: {} rows", rows.len());
-
-    // Parameterized query
-    let active_tasks = db.query(
-        "SELECT * FROM tasks WHERE completed = ?",
-        params![false]
-    )?;
-
-    // Query with JOIN
-    let task_users = db.query(
-        "SELECT
-            tasks.id,
-            tasks.title,
-            users.name
-         FROM tasks
-         JOIN users ON tasks.user_id = users.id
-         WHERE tasks.completed = ?",
-        params![false]
-    )?;
-
-    // With LIMIT and OFFSET
-    let paginated = db.query(
-        "SELECT * FROM tasks LIMIT 10 OFFSET 0",
-        &[]
-    )?;
-
-    Ok(())
-}
-```
+<include>../../../examples/rust-basic/src/queries.rs#basic-query</include>
 
 ## Incremental Queries
 
-For live-updating queries, use the `IncrementalQuery` system:
+For live-updating queries, use `incremental_query`:
 
-```rust title="incremental.rs"
-use groove::sql::{Database, IncrementalQuery};
+<include>../../../examples/rust-basic/src/queries.rs#incremental-query</include>
 
-pub fn incremental_query_example(
-    db: &mut Database
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Create an incremental query
-    let query = IncrementalQuery::new(
-        "SELECT * FROM tasks WHERE completed = ?",
-        &[false.into()]
-    )?;
+## Queries with JOINs
 
-    // Subscribe to updates
-    let listener_id = db.subscribe(&query, |rows, delta| {
-        println!("Results updated: {} total rows", rows.len());
-
-        // Delta contains what changed
-        for added in &delta.added {
-            println!("  Added: {:?}", added);
-        }
-        for removed in &delta.removed {
-            println!("  Removed: {:?}", removed);
-        }
-    });
-
-    // Changes automatically propagate to subscribers
-    db.execute(
-        "INSERT INTO tasks (id, title, completed) VALUES (?, ?, ?)",
-        params!["task-1", "New task", false]
-    )?;
-
-    // Unsubscribe when done
-    db.unsubscribe(listener_id);
-
-    Ok(())
-}
-```
+<include>../../../examples/rust-basic/src/queries.rs#query-with-join</include>
 
 ## Query Graph Nodes
 

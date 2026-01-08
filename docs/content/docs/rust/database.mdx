@@ -7,65 +7,17 @@ The `Database` struct is the main entry point for SQL operations in Groove.
 
 ## Creating a Database
 
-```rust title="database.rs"
-use groove::sql::Database;
-use groove::object::ObjectId;
+<include>../../../examples/rust-basic/src/database.rs#create-database</include>
 
-// Create an in-memory database
-pub fn create_memory_db() -> Database {
-    let db = Database::in_memory();
+## Executing Statements
 
-    // Initialize schema
-    db.init_schema("
-        CREATE TABLE tasks (
-            id STRING NOT NULL,
-            title STRING NOT NULL,
-            description STRING,
-            completed BOOL NOT NULL
-        )
-    ");
-
-    db
-}
-
-// Example usage
-pub fn example() -> Result<(), Box<dyn std::error::Error>> {
-    let db = create_memory_db();
-
-    // Insert a task
-    let task_id = ObjectId::new_random();
-    db.execute(
-        "INSERT INTO tasks (id, title, description, completed) VALUES (?, ?, ?, ?)",
-        &[
-            task_id.to_string().into(),
-            "Build feature X".into(),
-            "Implement the new feature with tests".into(),
-            false.into()
-        ]
-    )?;
-
-    // Query tasks
-    let tasks = db.query("SELECT * FROM tasks", &[])?;
-    println!("Found {} tasks", tasks.len());
-
-    Ok(())
-}
-```
+<include>../../../examples/rust-basic/src/database.rs#execute-statements</include>
 
 ## Schema Definition
 
 Define tables using Groove's SQL DDL:
 
-```rust
-db.init_schema("
-    CREATE TABLE tasks (
-        id STRING NOT NULL,
-        title STRING NOT NULL,
-        completed BOOL NOT NULL,
-        user REFERENCES users
-    )
-");
-```
+<include>../../../examples/rust-basic/src/database.rs#schema-definition</include>
 
 ### Supported Column Types
 
@@ -80,56 +32,3 @@ db.init_schema("
 | `BYTES` | Binary data |
 | `BLOB` | Large binary data |
 | `REFERENCES TableName` | Foreign key |
-
-## Executing Statements
-
-```rust
-// Insert
-db.execute(
-    "INSERT INTO tasks (id, title, completed) VALUES (?, ?, ?)",
-    &["task1".into(), "Buy groceries".into(), false.into()]
-)?;
-
-// Update
-db.execute(
-    "UPDATE tasks SET completed = ? WHERE id = ?",
-    &[true.into(), "task1".into()]
-)?;
-
-// Delete
-db.execute(
-    "DELETE FROM tasks WHERE id = ?",
-    &["task1".into()]
-)?;
-```
-
-## Querying
-
-```rust
-// Simple query
-let tasks = db.query("SELECT * FROM tasks WHERE completed = ?", &[false.into()])?;
-
-// With JOIN
-let tasks_with_users = db.query(
-    "SELECT tasks.*, users.name FROM tasks JOIN users ON tasks.user = users.id",
-    &[]
-)?;
-
-// With LIMIT and OFFSET
-let page = db.query("SELECT * FROM tasks LIMIT 10 OFFSET 0", &[])?;
-```
-
-## Working with Results
-
-Query results are returned as rows that can be accessed by column name:
-
-```rust
-let rows = db.query("SELECT * FROM tasks", &[])?;
-
-for row in rows {
-    let id: String = row.get("id")?;
-    let title: String = row.get("title")?;
-    let completed: bool = row.get("completed")?;
-    println!("{}: {} (completed: {})", id, title, completed);
-}
-```

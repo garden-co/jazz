@@ -16,54 +16,14 @@ groove = { path = "../groove" }
 
 ## Quick Start
 
-```rust title="main.rs"
-use groove::sql::{Database, params};
-use groove::object::ObjectId;
-use groove::storage::MemoryStorage;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create database with in-memory storage
-    let mut db = Database::new(MemoryStorage::new());
-
-    // Define schema
-    db.execute("CREATE TABLE tasks (
-        id TEXT PRIMARY KEY,
-        title TEXT NOT NULL,
-        completed BOOLEAN DEFAULT false
-    )", &[])?;
-
-    // Insert data
-    let task_id = ObjectId::new();
-    db.execute(
-        "INSERT INTO tasks (id, title, completed) VALUES (?, ?, ?)",
-        params![task_id.to_string(), "Learn Groove", false]
-    )?;
-
-    // Query data
-    let tasks = db.query("SELECT * FROM tasks", &[])?;
-    for task in tasks {
-        println!("Task: {:?}", task);
-    }
-
-    // Subscribe to changes
-    db.subscribe(
-        "SELECT * FROM tasks WHERE completed = ?",
-        params![false],
-        |tasks| {
-            println!("Active tasks updated: {} tasks", tasks.len());
-        }
-    )?;
-
-    Ok(())
-}
-```
+<include>../../../examples/rust-basic/src/database.rs#create-database</include>
 
 ## Module Overview
 
 | Module | Purpose |
 |--------|---------|
 | `groove::sql` | SQL parser and database |
-| `groove::object` | ObjectId and object primitives |
-| `groove::node` | LocalNode for managing objects |
-| `groove::commit` | Commit graph operations |
-| `groove::merge` | CRDT merge strategies |
+| `groove::ObjectId` | ObjectId type for row identifiers |
+| `groove::LocalNode` | LocalNode for managing objects |
+| `groove::Commit` | Commit graph operations |
+| `groove::MergeStrategy` | CRDT merge strategies |
