@@ -94,7 +94,31 @@ export class AccountSchema<
     );
   }
 
-  // Create an account via worker, useful to generate controlled accounts from the server
+  /**
+   * Creates a new account as a worker account, useful for generating controlled accounts from a server environment.
+   * This method initializes a new account, applies migrations, invokes the `onCreate` callback, and then shuts down the temporary node to avoid memory leaks.
+   * Returns the created account (loaded on the worker) and its credentials.
+   *
+   * The method internally calls `waitForAllCoValuesSync` on the new account. If many CoValues are created during `onCreate`,
+   * consider adjusting the timeout using the `waitForSyncTimeout` option.
+   *
+   * @param worker - The worker account to create the new account from
+   * @param options.creationProps - The creation properties for the new account
+   * @param options.onCreate - The callback to use to initialize the account after it is created
+   * @param options.waitForSyncTimeout - The timeout for the sync to complete
+   * @returns The credentials and the created account
+   *
+   *
+   * @example
+   * ```ts
+   * const { credentials, account } = await AccountSchema.createAs(worker, {
+   *   creationProps: { name: "My Account" },
+   *   onCreate: async (account, worker, credentials) => {
+   *     account.root.$jazz.owner.addMember(worker, "writer");
+   *   },
+   * });
+   * ```
+   */
   createAs(
     worker: Account,
     options: {
