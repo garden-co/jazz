@@ -48,10 +48,7 @@ describe("useSuspenseMultiCoState", () => {
       },
     );
 
-    await waitFor(() => {
-      expect(result.current).not.toBeNull();
-      expect(result.current.length).toBe(2);
-    });
+    await waitFor(() => result.current?.length === 2);
 
     const [loadedProject1, loadedProject2] = result.current;
 
@@ -79,12 +76,10 @@ describe("useSuspenseMultiCoState", () => {
       <Suspense fallback={<div>Loading...</div>}>{children}</Suspense>
     );
 
+    const ids = [project1.$jazz.id, project2.$jazz.id] as const;
+
     const { result } = renderHook(
-      () =>
-        useSuspenseMultiCoState(ProjectSchema, [
-          project1.$jazz.id,
-          project2.$jazz.id,
-        ]),
+      () => useSuspenseMultiCoState(ProjectSchema, ids),
       {
         wrapper,
       },
@@ -98,11 +93,9 @@ describe("useSuspenseMultiCoState", () => {
     const [loadedProject1, loadedProject2] = result.current;
 
     // Verify types are correctly inferred
-    expectTypeOf(loadedProject1).toEqualTypeOf<
-      Loaded<typeof ProjectSchema> | null | undefined
-    >();
-    expectTypeOf(loadedProject2).toEqualTypeOf<
-      Loaded<typeof ProjectSchema> | null | undefined
+    // When all IDs are strings, result should be tuple of Loaded<S, R> without null
+    expectTypeOf(result.current).toEqualTypeOf<
+      [Loaded<typeof ProjectSchema>, Loaded<typeof ProjectSchema>]
     >();
   });
 

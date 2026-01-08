@@ -20,6 +20,76 @@ import { useJazzContextManager, useAgent } from "./hooks.js";
 import { use } from "./use.js";
 
 /**
+ * Check if a type is null or undefined.
+ */
+type IsNullish<T> = null extends T ? true : undefined extends T ? true : false;
+
+/**
+ * Helper type to map an ID type to the corresponding result type.
+ * Returns Loaded<S, R> for string IDs, null for null/undefined IDs.
+ */
+type IdToResult<
+  S extends CoValueClassOrSchema,
+  R extends ResolveQuery<S>,
+  Id,
+> = Id extends string
+  ? Loaded<S, R>
+  : Id extends null | undefined
+    ? null
+    : never;
+
+/**
+ * Helper type to map an ID type to the corresponding MaybeLoaded result type.
+ */
+type IdToMaybeResult<
+  S extends CoValueClassOrSchema,
+  R extends ResolveQuery<S>,
+  Id,
+> = Id extends string
+  ? MaybeLoaded<Loaded<S, R>>
+  : Id extends null | undefined
+    ? null
+    : never;
+
+/**
+ * Maps an array/tuple of IDs to the corresponding result type.
+ * If the IDs array is a tuple, preserves tuple structure.
+ * If all IDs are strings (no null/undefined), excludes null from the result type.
+ */
+type MapIdsToResult<
+  S extends CoValueClassOrSchema,
+  R extends ResolveQuery<S>,
+  TIds extends readonly (string | undefined | null)[],
+> = TIds extends readonly [infer First, ...infer Rest]
+  ? Rest extends readonly (string | undefined | null)[]
+    ? [IdToResult<S, R, First>, ...MapIdsToResult<S, R, Rest>]
+    : [IdToResult<S, R, First>]
+  : TIds extends readonly []
+    ? []
+    : // For non-tuple arrays, check if any element could be null/undefined
+      IsNullish<TIds[number]> extends true
+      ? Array<Loaded<S, R> | null>
+      : Array<Loaded<S, R>>;
+
+/**
+ * Maps an array/tuple of IDs to the corresponding MaybeLoaded result type.
+ */
+type MapIdsToMaybeResult<
+  S extends CoValueClassOrSchema,
+  R extends ResolveQuery<S>,
+  TIds extends readonly (string | undefined | null)[],
+> = TIds extends readonly [infer First, ...infer Rest]
+  ? Rest extends readonly (string | undefined | null)[]
+    ? [IdToMaybeResult<S, R, First>, ...MapIdsToMaybeResult<S, R, Rest>]
+    : [IdToMaybeResult<S, R, First>]
+  : TIds extends readonly []
+    ? []
+    : // For non-tuple arrays, check if any element could be null/undefined
+      IsNullish<TIds[number]> extends true
+      ? Array<MaybeLoaded<Loaded<S, R>> | null>
+      : Array<MaybeLoaded<Loaded<S, R>>>;
+
+/**
  * Gets the resolve query from a schema, falling back to the schema's default or `true`.
  */
 function getResolveQuery(
@@ -281,14 +351,19 @@ export function useSuspenseMultiCoState<
   S extends CoValueClassOrSchema,
   // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
   const R extends ResolveQuery<S> = SchemaResolveQuery<S>,
+  TIds extends readonly (string | undefined | null)[] = readonly (
+    | string
+    | undefined
+    | null
+  )[],
 >(
   Schema: S,
-  ids: readonly (string | undefined | null)[],
+  ids: TIds,
   options?: {
     /** Resolve query to specify which nested CoValues to load (same for all IDs) */
     resolve?: ResolveQueryStrict<S, R>;
   },
-): Array<Loaded<S, R> | null> {
+): MapIdsToResult<S, R, TIds> {
   const resolve = getResolveQuery(Schema, options?.resolve);
 
   // Step 1: Create/get subscriptions for each ID
@@ -300,7 +375,7 @@ export function useSuspenseMultiCoState<
   // Step 3: Get current values via useSyncExternalStore
   const values = useMultiCoStateStore(subscriptionScopes);
 
-  return values as Array<Loaded<S, R> | null>;
+  return values as MapIdsToResult<S, R, TIds>;
 }
 
 /**
@@ -398,14 +473,19 @@ export function useMultiCoState<
   S extends CoValueClassOrSchema,
   // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
   const R extends ResolveQuery<S> = SchemaResolveQuery<S>,
+  TIds extends readonly (string | undefined | null)[] = readonly (
+    | string
+    | undefined
+    | null
+  )[],
 >(
   Schema: S,
-  ids: readonly (string | undefined | null)[],
+  ids: TIds,
   options?: {
     /** Resolve query to specify which nested CoValues to load (same for all IDs) */
     resolve?: ResolveQueryStrict<S, R>;
   },
-): Array<MaybeLoaded<Loaded<S, R>> | null> {
+): MapIdsToMaybeResult<S, R, TIds> {
   const resolve = getResolveQuery(Schema, options?.resolve);
 
   // Step 1: Create/get subscriptions for each ID
@@ -414,5 +494,5 @@ export function useMultiCoState<
   // Step 2: Get current values via useSyncExternalStore (no suspending)
   const values = useMultiCoStateStoreMaybeLoaded(subscriptionScopes);
 
-  return values as Array<MaybeLoaded<Loaded<S, R>> | null>;
+  return values as MapIdsToMaybeResult<S, R, TIds>;
 }

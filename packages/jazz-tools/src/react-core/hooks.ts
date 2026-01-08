@@ -887,4 +887,4 @@ function getResolveQuery(
 export {
   useMultiCoState,
   useSuspenseMultiCoState,
-} from "./useSuspenseMultiCoState.js";
+} from "./useMultiCoState.js";
