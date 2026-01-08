@@ -160,10 +160,6 @@ export class ReactNativePasskeyAuth {
 
     const webAuthNCredential = await this.getPasskeyCredentials();
 
-    if (!webAuthNCredential) {
-      return;
-    }
-
     const webAuthNCredentialPayload = base64UrlToUint8Array(
       webAuthNCredential.response.userHandle,
     );
@@ -288,7 +284,7 @@ export class ReactNativePasskeyAuth {
     }
   }
 
-  private async getPasskeyCredentials(): Promise<PasskeyGetResult | null> {
+  private async getPasskeyCredentials(): Promise<PasskeyGetResult> {
     const challenge = uint8ArrayToBase64Url(
       new Uint8Array(this.crypto.randomBytes(32)),
     );
