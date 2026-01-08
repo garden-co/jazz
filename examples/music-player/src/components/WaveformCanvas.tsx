@@ -2,6 +2,7 @@
 
 import { MusicTrack, MusicTrackWaveform } from "@/1_schema";
 import { AudioManager, useAudioManager } from "@/lib/audio/AudioManager";
+import { FileStreamSource } from "@/lib/audio/FileStreamSource";
 import {
   getPlayerCurrentTime,
   setPlayerCurrentTime,
@@ -14,6 +15,7 @@ import type React from "react";
 import { useEffect, useRef } from "react";
 
 type Props = {
+  source: FileStreamSource | null;
   track: MusicTrack;
   height?: number;
   barColor?: string;
@@ -65,6 +67,8 @@ type DrawWaveformCanvasProps = {
   isAnimating: boolean;
   animationProgress: number;
   progress: number;
+  loadingProgress: number;
+  isLoadingComplete: boolean;
 };
 
 function drawWaveform(props: DrawWaveformCanvasProps) {
@@ -77,6 +81,8 @@ function drawWaveform(props: DrawWaveformCanvasProps) {
     progressColor = "hsl(142, 71%, 45%)",
     backgroundColor = "transparent",
     progress,
+    loadingProgress,
+    isLoadingComplete,
   } = props;
 
   const ctx = canvas.getContext("2d");
@@ -110,6 +116,11 @@ function drawWaveform(props: DrawWaveformCanvasProps) {
   const totalBars = Math.floor(cssWidth / (barWidth + gap));
   const ds = buildPeaks(waveformData, totalBars);
 
+  // Calculate loading boundary
+  const loadedBars = isLoadingComplete
+    ? totalBars
+    : Math.floor(totalBars * Math.max(0, Math.min(1, loadingProgress)));
+
   const draw = (color: string, untilBar: number, start = 0) => {
     ctx.fillStyle = color;
     for (let i = start; i < untilBar; i++) {
@@ -117,17 +128,23 @@ function drawWaveform(props: DrawWaveformCanvasProps) {
       const h = Math.max(2, v * (cssHeight - 8)); // margin
       const x = i * (barWidth + gap);
 
+      // Lower alpha for unloaded bars
+      const isLoaded = i < loadedBars;
+      const loadingAlpha = isLoaded ? 1 : 0.3;
+
       // Apply staggered animation
       if (isAnimating) {
         const barProgress = Math.max(0, Math.min(1, animationProgress / 0.2));
         const animatedHeight = h * barProgress;
 
-        ctx.globalAlpha = barProgress;
+        ctx.globalAlpha = barProgress * loadingAlpha;
         ctx.fillRect(x, midY - animatedHeight / 2, barWidth, animatedHeight);
       } else {
+        ctx.globalAlpha = loadingAlpha;
         ctx.fillRect(x, midY - h / 2, barWidth, h);
       }
     }
+    ctx.globalAlpha = 1;
   };
 
   // Progress overlay
@@ -141,6 +158,7 @@ function drawWaveform(props: DrawWaveformCanvasProps) {
 
 type WaveformCanvasProps = {
   audioManager: AudioManager;
+  source: FileStreamSource;
   canvas: HTMLCanvasElement;
   waveformId: string;
   duration: number;
@@ -150,7 +168,7 @@ type WaveformCanvasProps = {
 };
 
 async function renderWaveform(props: WaveformCanvasProps) {
-  const { audioManager, canvas, waveformId, duration } = props;
+  const { audioManager, canvas, waveformId, duration, source } = props;
 
   let mounted = true;
   let currentTime = getPlayerCurrentTime(audioManager);
@@ -159,6 +177,12 @@ async function renderWaveform(props: WaveformCanvasProps) {
   const startTime = performance.now();
   let animationProgress = 0;
   const animationDuration = 800;
+
+  // Streaming state with animated progress
+  let streamingState = source.getStreamingState();
+  let animatedLoadingProgress = streamingState.progress;
+  let targetLoadingProgress = streamingState.progress;
+  let loadingAnimationId: number | null = null;
 
   function draw() {
     const progress = currentTime / duration;
@@ -171,7 +195,33 @@ async function renderWaveform(props: WaveformCanvasProps) {
       isAnimating,
       animationProgress,
       progress,
+      loadingProgress: animatedLoadingProgress,
+      isLoadingComplete: streamingState.isComplete,
     });
+  }
+
+  function animateLoadingProgress() {
+    if (!mounted) return;
+
+    const diff = targetLoadingProgress - animatedLoadingProgress;
+    if (Math.abs(diff) < 0.001) {
+      animatedLoadingProgress = targetLoadingProgress;
+      loadingAnimationId = null;
+      draw();
+      return;
+    }
+
+    // Lerp with easing - move 10% of the remaining distance each frame
+    animatedLoadingProgress += diff * 0.1;
+    draw();
+
+    loadingAnimationId = requestAnimationFrame(animateLoadingProgress);
+  }
+
+  function startLoadingAnimation() {
+    if (loadingAnimationId === null) {
+      loadingAnimationId = requestAnimationFrame(animateLoadingProgress);
+    }
   }
 
   const animate = (currentTime: number) => {
@@ -208,14 +258,25 @@ async function renderWaveform(props: WaveformCanvasProps) {
     },
   );
 
+  const unsubscribeFromStreamingState = source.subscribeToStreamingState(() => {
+    streamingState = source.getStreamingState();
+    targetLoadingProgress = streamingState.progress;
+    startLoadingAnimation();
+  });
+
   return () => {
     mounted = false;
+    if (loadingAnimationId !== null) {
+      cancelAnimationFrame(loadingAnimationId);
+    }
     unsubscribeFromCurrentTime();
     unsubscribeFromWaveform();
+    unsubscribeFromStreamingState();
   };
 }
 
 export default function WaveformCanvas({
+  source,
   track,
   height = DEFAULT_HEIGHT,
   barColor, // muted-foreground-ish
@@ -233,7 +294,7 @@ export default function WaveformCanvas({
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    if (!waveformId) return;
+    if (!waveformId || !source) return;
 
     let cleanup: (() => void) | undefined;
 
@@ -245,6 +306,7 @@ export default function WaveformCanvas({
       barColor,
       progressColor,
       backgroundColor,
+      source,
     }).then((cleanupFn) => {
       cleanup = cleanupFn;
     });
@@ -252,7 +314,7 @@ export default function WaveformCanvas({
     return () => {
       cleanup?.();
     };
-  }, [audioManager, canvasRef, waveformId, duration]);
+  }, [audioManager, canvasRef, waveformId, duration, source]);
 
   const onPointer = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();

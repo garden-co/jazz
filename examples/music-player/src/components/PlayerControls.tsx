@@ -7,12 +7,17 @@ import { useCoState, useSuspenseAccount } from "jazz-tools/react";
 import { Loader2, Pause, Play, SkipBack, SkipForward } from "lucide-react";
 import WaveformCanvas from "./WaveformCanvas";
 import { Button } from "./ui/button";
-import { useStreamingState } from "@/lib/audio/usePlayMedia";
+import { useSyncExternalStore } from "react";
+
+const noopSubscribe = () => () => {};
 
 export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
   const playState = usePlayState();
   const isPlaying = playState.value === "play";
-  const streamingState = useStreamingState(mediaPlayer.source);
+  const readyToPlay = useSyncExternalStore(
+    mediaPlayer.source?.subscribeToStreamingState ?? noopSubscribe,
+    () => mediaPlayer.source?.getStreamingState().readyToPlay,
+  );
 
   const activePlaylistTitle = useSuspenseAccount(MusicaAccount, {
     select: (me) =>
@@ -26,19 +31,16 @@ export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
   if (!activeTrack.$isLoaded) return null;
 
   const activeTrackTitle = activeTrack.title;
-  const isLoading = mediaPlayer.loading === activeTrack.$jazz.id;
 
   return (
-    <footer className="flex flex-wrap sm:flex-nowrap items-center justify-between pt-4 p-2 sm:p-4 gap-4 sm:gap-4 bg-white border-t border-gray-200 absolute bottom-0 left-0 right-0 w-full z-50">
-      {/* Player Controls - Always on top */}
-      <div className="flex justify-center items-center space-x-1 sm:space-x-2 flex-shrink-0 w-full sm:w-auto order-1 sm:order-none">
+    <footer className="flex flex-nowrap items-center justify-between p-4 gap-4 bg-white border-t border-gray-200 absolute bottom-0 left-0 right-0 w-full z-50">
+      <div className="flex justify-center items-center space-x-1 sm:space-x-2 flex-shrink-0 w-auto order-none">
         <div className="flex items-center space-x-2">
           <Button
             variant="ghost"
             size="icon"
             onClick={mediaPlayer.playPrevTrack}
             aria-label="Previous track"
-            disabled={isLoading}
           >
             <SkipBack className="h-5 w-5" fill="currentColor" />
           </Button>
@@ -47,9 +49,9 @@ export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
             onClick={playState.toggle}
             className="bg-blue-600 text-white hover:bg-blue-700"
             aria-label={isPlaying ? "Pause active track" : "Play active track"}
-            disabled={!streamingState.readyToPlay}
+            disabled={!readyToPlay}
           >
-            {!streamingState.readyToPlay ? (
+            {!readyToPlay ? (
               <Loader2 className="h-5 w-5 animate-spin" />
             ) : isPlaying ? (
               <Pause className="h-5 w-5" fill="currentColor" />
@@ -62,33 +64,25 @@ export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
             size="icon"
             onClick={mediaPlayer.playNextTrack}
             aria-label="Next track"
-            disabled={isLoading}
           >
             <SkipForward className="h-5 w-5" fill="currentColor" />
           </Button>
         </div>
       </div>
 
-      {/* Waveform - Below controls on mobile, between controls and info on desktop */}
       <WaveformCanvas
-        className="order-1 sm:order-none"
+        className="order-1 sm:order-none hidden sm:block"
+        source={mediaPlayer.source}
         track={activeTrack}
         height={50}
       />
 
-      {/* Track Info - Below waveform on mobile, on the right on desktop */}
-      <div className="flex flex-col gap-1 min-w-fit sm:flex-shrink-0 text-center w-full sm:text-right items-center sm:items-end sm:w-auto order-0 sm:order-none">
+      <div className="flex flex-col gap-1 min-w-fit sm:flex-shrink-0 text-center w-full sm:text-right items-end sm:w-auto order-0 sm:order-none">
         <h4 className="font-medium text-blue-800 text-base sm:text-base truncate max-w-80 sm:max-w-80">
           {activeTrackTitle}
         </h4>
         <div className="flex items-center gap-2">
-          {!streamingState.isComplete && (
-            <span className="text-xs text-blue-500 flex items-center gap-1">
-              <Loader2 className="h-3 w-3 animate-spin" />
-              {Math.round(streamingState.progress * 100)}%
-            </span>
-          )}
-          <p className="hidden sm:block text-xs sm:text-sm text-gray-600 truncate sm:max-w-80">
+          <p className="text-xs sm:text-sm text-gray-600 truncate sm:max-w-80">
             {activePlaylistTitle || "All tracks"}
           </p>
         </div>

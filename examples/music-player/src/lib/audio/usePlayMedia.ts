@@ -1,7 +1,7 @@
-import { useState, useRef, useSyncExternalStore } from "react";
+import { useState, useRef } from "react";
 import { useAudioManager } from "./AudioManager";
 import { MusicTrack } from "@/1_schema";
-import { FileStreamSource, type StreamingState } from "./FileStreamSource";
+import { FileStreamSource } from "./FileStreamSource";
 
 export function usePlayMedia() {
   const audioManager = useAudioManager();
@@ -32,19 +32,4 @@ export function usePlayMedia() {
   }
 
   return { playMedia, source };
-}
-
-const defaultStreamingState: StreamingState = {
-  progress: 0,
-  readyToPlay: false,
-  isComplete: false,
-};
-const noopSubscribe = () => () => {};
-const getDefaultState = () => defaultStreamingState;
-
-export function useStreamingState(source: FileStreamSource | null) {
-  return useSyncExternalStore(
-    source?.subscribeToStreamingState ?? noopSubscribe,
-    source?.getStreamingState ?? getDefaultState,
-  );
 }
