@@ -522,9 +522,6 @@ describe("SyncManager.processQueues", () => {
     storage.streamingQueue.push(callback, CO_VALUE_PRIORITY.MEDIUM);
     storage.streamingQueue.emit();
     
-    // Wait for processing
-    await new Promise(resolve => setTimeout(resolve, 0));
-    
     // Both should be processed
     expect(callback).toHaveBeenCalled();
   });
@@ -538,7 +535,6 @@ describe("SyncManager.processQueues", () => {
     expect(callback).not.toHaveBeenCalled();
     
     storage.streamingQueue.emit();
-    await new Promise(resolve => setTimeout(resolve, 0));
     
     expect(callback).toHaveBeenCalledTimes(1);
   });

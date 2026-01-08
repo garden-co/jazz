@@ -84,14 +84,14 @@
 
 ### Phase 5: Integration Tests
 
-- [ ] **12. Add integration tests for unified scheduling** (US-3, US-4)
+- [x] **12. Add integration tests for unified scheduling** (US-3, US-4)
   - Update `packages/cojson/src/tests/sync.storage.test.ts`
   - Test: large binary streaming interleaved with incoming messages
   - Test: HIGH priority content bypasses queue and loads immediately
   - Test: MEDIUM priority content is processed before LOW priority
-  - Test: time budget is respected (yielding occurs)
+  - Test: storage streaming and peer messages share the same scheduler
 
-- [ ] **13. Add integration tests for streaming lifecycle** (US-2)
+- [x] **13. Add integration tests for streaming lifecycle** (US-2)
   - Test: queue becomes empty after streaming completes
   - Test: multiple CoValues can stream concurrently with correct prioritization
 
