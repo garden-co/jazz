@@ -28,15 +28,14 @@ When you subscribe to a query, Jazz:
 
 ## Example
 
-```typescript title="useFilteredTasks.ts"
-import { useQuery } from '@jazz/react';
-import type { Task } from '../generated/types';
+```typescript title="TaskList.tsx"
+import { useAll } from '@jazz/react';
+import { app } from '../generated/client';
 
 export function useFilteredTasks(completed: boolean) {
   // Subscribe to query - automatically updates when tasks change
-  const { data: tasks, loading } = useQuery<Task>(
-    'SELECT * FROM tasks WHERE completed = ? ORDER BY created_at DESC',
-    [completed]
+  const [tasks, loading] = useAll(
+    app.tasks.where({ completed })
   );
 
   return { tasks, loading };
@@ -58,11 +57,44 @@ function ActiveTasks() {
 }
 ```
 
+## Query Graph
+
+Jazz builds a computation graph for each query:
+
+```
+TableScan(tasks) → Filter(completed=false) → Output
+```
+
+When a task row changes:
+- If it now matches the filter → add to results
+- If it no longer matches → remove from results
+- If other fields changed → update in place
+
 ## Performance Benefits
 
-For a query joining 1000 users with 10000 orders:
+For a query joining 1000 users with 10000 tasks:
 
 | Approach | Time on single row update |
 |----------|--------------------------|
 | Re-run full query | ~100ms |
 | Incremental update | ~0.1ms |
+
+The incremental approach scales to large datasets because it only processes the changed row(s), not the entire result set.
+
+## Supported Query Operations
+
+The query graph currently supports:
+
+- **Filtering**: Equality conditions on columns
+- **Joins**: Inner joins via foreign key references
+- **Includes**: Loading related data with `with()`
+- **Pagination**: LIMIT and OFFSET
+
+### Not Yet Implemented
+
+The following SQL features are not yet available:
+
+- ORDER BY (results are ordered by ObjectId/insertion time)
+- Aggregate functions (COUNT, SUM, AVG, MIN, MAX)
+- GROUP BY and HAVING
+- LEFT/RIGHT/OUTER JOINs

@@ -1,82 +1,74 @@
 ---
-title: JazzClient
-description: The core client for interacting with Jazz
+title: Database Setup
+description: Setting up the WASM database for JavaScript
 ---
 
-`JazzClient` is the main entry point for the Jazz JavaScript API.
+Jazz uses a WASM-compiled Rust database that runs in the browser. Here's how to set it up.
 
-## Creating a Client
+## Initializing the Database
 
-```typescript title="client.ts"
-import { JazzClient } from '@jazz/client';
-import { schema } from './generated/schema';
+```typescript title="database.ts"
+import init, { WasmDatabase } from 'groove-wasm';
 
-export async function createClient() {
-  // Load WASM module
-  const wasmResponse = await fetch('/groove_wasm_bg.wasm');
-  const wasmBuffer = await wasmResponse.arrayBuffer();
-  const wasm = await WebAssembly.compile(wasmBuffer);
+export async function initDatabase() {
+  // Initialize the WASM module
+  await init();
 
-  // Create client with configuration
-  const client = new JazzClient({
-    wasm,
-    schema,
-    storage: {
-      type: 'indexeddb',
-      name: 'jazz-db',
-      version: 1,
-    },
-    sync: {
-      server: 'wss://sync.jazz.tools',
-      reconnect: true,
-      reconnectDelay: 1000,
-    },
-  });
+  // Create an in-memory database
+  const db = new WasmDatabase();
 
-  // Initialize database with schema
-  await client.loadSchema();
+  // Initialize your schema
+  db.init_schema(schemaSQL);
 
-  return client;
+  return db;
 }
-
-// Usage
-const client = await createClient();
 ```
 
-## Client Options
+## Schema Definition
 
-| Option | Type | Description |
-|--------|------|-------------|
-| `wasm` | `WebAssembly.Module` | The Groove WASM module |
-| `schema` | `Schema` | Generated schema metadata |
-| `storage` | `Storage` | Optional persistent storage |
+Define your schema in SQL:
 
-## Client Methods
+<include>../../../examples/react/src/schema.sql</include>
 
-### execute
-
-Execute a SQL statement:
+Then import and initialize:
 
 ```typescript
-await client.execute('INSERT INTO tasks (title) VALUES (?)', ['New task']);
+import schema from './schema.sql?raw';  // Vite raw import
+
+db.init_schema(schema);
 ```
 
-### query
+## Database Methods
 
-Execute a SELECT query and get results:
+### init_schema
+
+Initialize the database schema:
 
 ```typescript
-const tasks = await client.query('SELECT * FROM tasks');
+db.init_schema(schemaSQL);
 ```
 
-### subscribe
+### list_tables
 
-Subscribe to a query for live updates:
+Get all table names:
 
 ```typescript
-const unsubscribe = client.subscribe(
-  'SELECT * FROM tasks WHERE completed = ?',
-  [false],
-  (tasks) => console.log('Active tasks:', tasks)
-);
+const tables = db.list_tables();
+console.log('Tables:', tables);  // ['Users', 'Projects', 'Tasks', ...]
 ```
+
+## Using with the Generated Client
+
+The generated client from `@jazz/schema` provides the type-safe API for mutations and queries. Pass the database to the client methods:
+
+<include>../../../examples/react/src/mutations.ts#create-task</include>
+
+## Using with React
+
+Wrap your app with `JazzProvider`:
+
+<include>../../../examples/react/src/App.tsx#jazz-provider-setup</include>
+
+Then use hooks to interact with data:
+
+<include>../../../examples/react/src/components/TaskList.tsx#task-list-basic</include>

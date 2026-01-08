@@ -1,18 +1,22 @@
-import { defineDocs, defineConfig } from 'fumadocs-mdx/config';
-// import { remarkDocGen, fileGenerator } from 'fumadocs-docgen';
+import { defineConfig, defineDocs, frontmatterSchema, metaSchema } from 'fumadocs-mdx/config';
 
+// You can customise Zod schemas for frontmatter and `meta.json` here
+// see https://fumadocs.dev/docs/mdx/collections
 export const docs = defineDocs({
   dir: 'content/docs',
+  docs: {
+    schema: frontmatterSchema,
+    postprocess: {
+      includeProcessedMarkdown: true,
+    },
+  },
+  meta: {
+    schema: metaSchema,
+  },
 });
 
 export default defineConfig({
-  // mdxOptions: {
-  //   remarkPlugins: [
-  //     // Enable including code snippets from external files
-  //     // Usage: ```json doc-gen:file
-  //     // { "file": "../../examples/react-app/src/App.tsx", "codeblock": { "lang": "tsx" } }
-  //     // ```
-  //     [remarkDocGen, { generators: [fileGenerator()] }],
-  //   ],
-  // },
+  mdxOptions: {
+    // MDX options
+  },
 });

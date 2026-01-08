@@ -1,32 +1,33 @@
 {
-  "name": "@jazz/docs",
-  "version": "0.1.0",
+  "name": "docs",
+  "version": "0.0.0",
   "private": true,
-  "type": "module",
   "scripts": {
+    "build": "fumadocs-mdx && next build",
     "dev": "next dev",
-    "build": "next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit",
-    "typecheck:examples": "pnpm --filter @jazz/example-* typecheck",
-    "lint": "next lint"
+    "types:check": "fumadocs-mdx && next typegen && tsc --noEmit",
+    "lint": "eslint"
   },
   "dependencies": {
-    "fumadocs-core": "15.8.5",
+    "fumadocs-core": "16.4.4",
     "fumadocs-mdx": "14.2.4",
-    "fumadocs-ui": "15.8.5",
-    "fumadocs-docgen": "^2.0.1",
-    "next": "^15.3.4",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "fumadocs-ui": "16.4.4",
+    "lucide-react": "^0.562.0",
+    "next": "16.1.1",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.1.8",
-    "@types/node": "^22.15.29",
-    "@types/react": "^18.2.0",
-    "@types/react-dom": "^18.2.0",
-    "postcss": "^8.5.4",
-    "tailwindcss": "^4.1.8",
-    "typescript": "^5.9.3"
+    "@tailwindcss/postcss": "^4.1.18",
+    "@types/mdx": "^2.0.13",
+    "@types/node": "^24.10.2",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^4.1.18",
+    "typescript": "^5.9.3",
+    "eslint-config-next": "16.1.1",
+    "eslint": "^9.39.2"
   }
 }

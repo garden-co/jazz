@@ -7,39 +7,60 @@ Jazz provides a SQL interface for defining and querying data, but with an import
 
 ## Defining Tables
 
-Tables are defined using standard SQL DDL:
+Tables are defined using Groove's SQL DDL syntax:
 
 ```sql title="schema.sql"
-CREATE TABLE users (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    email TEXT UNIQUE NOT NULL,
-    created_at INTEGER DEFAULT (strftime('%s', 'now'))
+CREATE TABLE Users (
+    id STRING NOT NULL,
+    name STRING NOT NULL,
+    email STRING NOT NULL
 );
 
-CREATE TABLE tasks (
-    id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    description TEXT,
-    completed BOOLEAN DEFAULT false,
-    user_id TEXT NOT NULL,
-    created_at INTEGER DEFAULT (strftime('%s', 'now')),
-    FOREIGN KEY (user_id) REFERENCES users(id)
+CREATE TABLE Tasks (
+    id STRING NOT NULL,
+    title STRING NOT NULL,
+    description STRING,
+    completed BOOL NOT NULL,
+    user REFERENCES Users NOT NULL
 );
+```
+
+### Supported Column Types
+
+| Type | Description |
+|------|-------------|
+| `BOOL` | Boolean value |
+| `I32` | 32-bit signed integer |
+| `U32` | 32-bit unsigned integer |
+| `I64` | 64-bit signed integer |
+| `F64` | 64-bit float |
+| `STRING` | UTF-8 text |
+| `BYTES` | Binary data |
+| `BLOB` | Large binary data (content-addressed) |
+| `BLOB[]` | Array of blobs |
+| `REFERENCES TableName` | Foreign key to another table |
+
+### Nullability
+
+Columns are nullable by default. Use `NOT NULL` to require a value:
+
+```sql
+name STRING NOT NULL,    -- Required
+description STRING,      -- Optional (nullable)
 ```
 
 ## Row-Level Versioning
 
 Unlike traditional databases where the entire table is a single unit, in Jazz:
 
-- Each row has its own ObjectId
+- Each row has its own ObjectId (auto-generated UUIDv7)
 - Rows can be synced independently
 - Conflicts are resolved per-row, not per-table
-- Permissions can be set per-row
+- Permissions can be set per-row via policies
 
-## Working with Tables
+## Generated Client Code
 
-After defining your schema, Jazz generates type-safe client code:
+After defining your schema, run the code generator to create type-safe client code:
 
 ```typescript title="generated/types.ts"
 // Auto-generated from schema.sql
@@ -48,7 +69,6 @@ export interface User {
   id: string;
   name: string;
   email: string;
-  created_at: number;
 }
 
 export interface Task {
@@ -56,12 +76,34 @@ export interface Task {
   title: string;
   description: string | null;
   completed: boolean;
-  user_id: string;
-  created_at: number;
+  user: string;  // ObjectId reference
 }
+```
 
-export interface Tables {
-  users: Table<User>;
-  tasks: Table<Task>;
+## Working with Tables
+
+Use the generated client to query and mutate data:
+
+```typescript
+import { app } from './generated/client';
+import { useAll, useJazz } from '@jazz/react';
+
+function TaskList() {
+  // Subscribe to all incomplete tasks
+  const [tasks, loading] = useAll(
+    app.tasks.where({ completed: false })
+  );
+
+  const db = useJazz();
+
+  const createTask = () => {
+    app.tasks.create(db, {
+      title: 'New task',
+      completed: false,
+      user: currentUserId,
+    });
+  };
+
+  // ...
 }
 ```

@@ -1,124 +1,55 @@
 ---
 title: Queries
-description: Querying data with the JavaScript client
+description: Querying data with the type-safe query builder
 ---
 
-Jazz supports SQL queries with automatic type inference from your schema.
+Jazz provides a type-safe query builder for filtering and subscribing to data. The API is generated from your SQL schema.
 
-## Basic Queries
+## Query Builder Pattern
 
-```typescript title="queries/basic.ts"
-import { client } from '../client';
-import type { Task } from '../generated/types';
+Jazz uses a fluent query builder pattern rather than raw SQL strings:
 
-// Simple SELECT
-const allTasks = await client.query<Task>('SELECT * FROM tasks');
-console.log('All tasks:', allTasks);
+<include>../../../examples/react/src/queries.ts#query-builder-basic</include>
 
-// With WHERE clause
-const activeTasks = await client.query<Task>(
-  'SELECT * FROM tasks WHERE completed = ?',
-  [false]
-);
+## Filtering with where()
 
-// With JOIN
-const tasksWithUsers = await client.query(`
-  SELECT
-    tasks.id,
-    tasks.title,
-    users.name as user_name
-  FROM tasks
-  JOIN users ON tasks.user_id = users.id
-`);
+The `where()` method accepts an object with field conditions:
 
-// Aggregate queries
-const taskCounts = await client.query(`
-  SELECT
-    user_id,
-    COUNT(*) as task_count,
-    SUM(CASE WHEN completed THEN 1 ELSE 0 END) as completed_count
-  FROM tasks
-  GROUP BY user_id
-`);
+<include>../../../examples/react/src/queries.ts#filtering-examples</include>
 
-// Ordered results
-const recentTasks = await client.query<Task>(
-  'SELECT * FROM tasks ORDER BY created_at DESC LIMIT 10'
-);
-```
+## Including Related Data with with()
 
-## Query Subscriptions
+Use `with()` to include referenced data in results:
 
-Subscribe to queries for real-time updates:
+<include>../../../examples/react/src/queries.ts#includes-examples</include>
 
-```typescript title="queries/subscriptions.ts"
-import { client } from '../client';
-import type { Task } from '../generated/types';
+## Direct Subscriptions
 
-// Subscribe to query results
-const unsubscribe = client.subscribe<Task>(
-  'SELECT * FROM tasks WHERE completed = ?',
-  [false],
-  (tasks) => {
-    console.log('Active tasks:', tasks);
-    // Update UI, trigger actions, etc.
-  }
-);
+For vanilla JavaScript (outside React), use `subscribeAll`:
 
-// Subscribe to aggregates
-const unsubscribeCount = client.subscribe<{ count: number }>(
-  'SELECT COUNT(*) as count FROM tasks WHERE completed = ?',
-  [false],
-  (result) => {
-    console.log('Active task count:', result[0].count);
-  }
-);
+<include>../../../examples/react/src/queries.ts#subscribe-all</include>
 
-// Subscribe to complex query
-const unsubscribeJoin = client.subscribe(
-  `SELECT
-    tasks.id,
-    tasks.title,
-    users.name as user_name
-  FROM tasks
-  JOIN users ON tasks.user_id = users.id
-  WHERE tasks.completed = ?
-  ORDER BY tasks.created_at DESC`,
-  [false],
-  (tasksWithUsers) => {
-    console.log('Tasks with user names:', tasksWithUsers);
-  }
-);
+Subscribe to a single row by ID:
 
-// Clean up subscriptions when no longer needed
-function cleanup() {
-  unsubscribe();
-  unsubscribeCount();
-  unsubscribeJoin();
-}
-```
+<include>../../../examples/react/src/queries.ts#subscribe-one</include>
 
-## Parameterized Queries
+## Supported Query Features
 
-Always use parameters for user input to prevent SQL injection:
+The current implementation supports:
 
-```typescript
-// Good - parameterized
-const tasks = await client.query(
-  'SELECT * FROM tasks WHERE user_id = ?',
-  [userId]
-);
+- Filtering with equality conditions (AND logic)
+- Loading related data through foreign key references
+- Real-time subscriptions with automatic updates
+- LIMIT and OFFSET for pagination
+- Full TypeScript type inference from schema
 
-// Bad - string concatenation (SQL injection risk!)
-const tasks = await client.query(
-  `SELECT * FROM tasks WHERE user_id = '${userId}'`
-);
-```
+### Not Yet Implemented
 
-## Supported SQL Features
+The following SQL features are planned but not yet available:
 
-- SELECT with WHERE, ORDER BY, LIMIT, OFFSET
-- JOIN (INNER, LEFT, RIGHT)
-- Aggregate functions (COUNT, SUM, AVG, MIN, MAX)
-- Subqueries
+- ORDER BY (results currently ordered by ObjectId/insertion time)
 - GROUP BY and HAVING
+- Aggregate functions (COUNT, SUM, AVG, MIN, MAX)
+- LEFT/RIGHT/OUTER JOINs (only INNER JOIN)
+- Complex subqueries
+- Raw SQL queries from JavaScript

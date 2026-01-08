@@ -3,123 +3,42 @@ title: Mutations
 description: Inserting, updating, and deleting data
 ---
 
-Jazz provides type-safe mutations generated from your schema.
+Jazz provides type-safe mutations through the generated client API.
 
-## Using Generated Mutations
+## Create
 
-```typescript title="mutations/using-client.ts"
-import { client } from '../client';
+Create a new row and get its ObjectId:
 
-// Insert a new task
-const newTask = await client.tables.tasks.insert({
-  title: 'Complete project documentation',
-  description: 'Write comprehensive docs for all modules',
-  completed: false,
-  user_id: 'user-123',
-});
-
-console.log('Created task with ID:', newTask.id);
-
-// Update an existing task
-await client.tables.tasks.update(newTask.id, {
-  completed: true,
-});
-
-// Partial update (only specified fields)
-await client.tables.tasks.update(newTask.id, {
-  description: 'Updated description',
-});
-
-// Delete a task
-await client.tables.tasks.delete(newTask.id);
-
-// Bulk insert
-const taskIds = await Promise.all([
-  client.tables.tasks.insert({ title: 'Task 1', completed: false }),
-  client.tables.tasks.insert({ title: 'Task 2', completed: false }),
-  client.tables.tasks.insert({ title: 'Task 3', completed: false }),
-]);
-```
-
-## Insert
-
-```typescript
-const task = await client.tables.tasks.insert({
-  title: 'New task',
-  completed: false,
-});
-console.log('Created task:', task.id);
-```
+<include>../../../examples/react/src/mutations.ts#create-task</include>
 
 ## Update
 
-```typescript
-await client.tables.tasks.update(taskId, {
-  completed: true,
-});
-```
+Update one or more fields on an existing row:
+
+<include>../../../examples/react/src/mutations.ts#update-task</include>
 
 ## Delete
 
-```typescript
-await client.tables.tasks.delete(taskId);
-```
+Remove a row by ID:
 
-## Raw SQL Mutations
+<include>../../../examples/react/src/mutations.ts#delete-task</include>
 
-For complex mutations, you can use raw SQL:
+## Creating Related Data
 
-```typescript
-await client.execute(`
-  UPDATE tasks
-  SET completed = true
-  WHERE due_date < date('now')
-`);
-```
+When creating rows with foreign key references, pass the ObjectId:
 
-## Transactions
+<include>../../../examples/react/src/mutations.ts#create-related-data</include>
 
-Jazz automatically wraps each mutation in a transaction. For multiple operations:
+## With React Hooks
 
-```typescript title="mutations/transactions.ts"
-import { client } from '../client';
+Use `useMutate()` to get mutation helpers in React components:
 
-// Execute multiple operations in a transaction
-await client.transaction(async (tx) => {
-  // Create a user
-  const user = await tx.tables.users.insert({
-    name: 'Alice Johnson',
-    email: 'alice@example.com',
-  });
+<include>../../../examples/react/src/components/UserProfile.tsx#create-user-button</include>
 
-  // Create tasks for the user
-  await tx.tables.tasks.insert({
-    title: 'Setup development environment',
-    completed: false,
-    user_id: user.id,
-  });
+Or use the mutations returned from `useAll()` and `useOne()`:
 
-  await tx.tables.tasks.insert({
-    title: 'Review architecture',
-    completed: false,
-    user_id: user.id,
-  });
+<include>../../../examples/react/src/components/TaskForm.tsx#task-form</include>
 
-  // If any operation fails, the entire transaction is rolled back
-});
+## Mutations and Subscriptions
 
-// Using raw SQL in a transaction
-await client.transaction(async (tx) => {
-  // Mark all tasks as completed for a user
-  await tx.execute(
-    'UPDATE tasks SET completed = ? WHERE user_id = ?',
-    [true, 'user-123']
-  );
-
-  // Update user's last activity timestamp
-  await tx.execute(
-    'UPDATE users SET last_active = ? WHERE id = ?',
-    [Date.now(), 'user-123']
-  );
-});
-```
+When you mutate data, all active subscriptions are automatically notified. There's no need to manually refresh queries—the reactive system handles updates automatically.
