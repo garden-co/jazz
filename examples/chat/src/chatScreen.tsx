@@ -30,21 +30,18 @@ export function ChatScreen(props: { chatID: string }) {
     INITIAL_MESSAGES_TO_SHOW,
   );
 
-  const messages = useMultiCoState(
-    chat
-      // We call slice before reverse to avoid mutating the original array
-      .slice(-showNLastMessages)
-      // Reverse plus flex-col-reverse on ChatBody gives us scroll-to-bottom behavior
-      .reverse()
-      .map((msg) => ({
-        schema: Message,
-        id: msg.$jazz.id,
-      })),
-  );
+  const messageIds = chat
+    // We call slice before reverse to avoid mutating the original array
+    .slice(-showNLastMessages)
+    // Reverse plus flex-col-reverse on ChatBody gives us scroll-to-bottom behavior
+    .reverse()
+    .map((msg) => msg.$jazz.id);
+
+  const messages = useMultiCoState(Message, messageIds);
 
   // The initial messages should be loaded all at once, so we can avoid flickering
   if (
-    messages.slice(0, INITIAL_MESSAGES_TO_SHOW).some((msg) => !msg.$isLoaded)
+    messages.slice(0, INITIAL_MESSAGES_TO_SHOW).some((msg) => !msg?.$isLoaded)
   ) {
     return null;
   }
@@ -76,7 +73,7 @@ export function ChatScreen(props: { chatID: string }) {
       <ChatBody>
         {messages.length > 0 ? (
           messages.map((msg) =>
-            msg.$isLoaded ? (
+            msg?.$isLoaded ? (
               <ChatBubble me={me} msg={msg} key={msg.$jazz.id} />
             ) : null,
           )

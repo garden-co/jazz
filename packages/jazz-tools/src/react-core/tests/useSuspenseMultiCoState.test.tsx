@@ -30,12 +30,8 @@ describe("useSuspenseMultiCoState", () => {
       name: z.string(),
     });
 
-    const TaskSchema = co.map({
-      title: z.string(),
-    });
-
-    const project = ProjectSchema.create({ name: "My Project" });
-    const task = TaskSchema.create({ title: "Task 1" });
+    const project1 = ProjectSchema.create({ name: "My Project 1" });
+    const project2 = ProjectSchema.create({ name: "My Project 2" });
 
     const wrapper = ({ children }: { children: React.ReactNode }) => (
       <Suspense fallback={<div>Loading...</div>}>{children}</Suspense>
@@ -43,10 +39,10 @@ describe("useSuspenseMultiCoState", () => {
 
     const { result } = renderHook(
       () =>
-        useSuspenseMultiCoState([
-          { schema: ProjectSchema, id: project.$jazz.id },
-          { schema: TaskSchema, id: task.$jazz.id },
-        ] as const),
+        useSuspenseMultiCoState(ProjectSchema, [
+          project1.$jazz.id,
+          project2.$jazz.id,
+        ]),
       {
         wrapper,
       },
@@ -57,27 +53,27 @@ describe("useSuspenseMultiCoState", () => {
       expect(result.current.length).toBe(2);
     });
 
-    const [loadedProject, loadedTask] = result.current;
+    const [loadedProject1, loadedProject2] = result.current;
 
-    assertLoaded(loadedProject);
-    expect(loadedProject.name).toBe("My Project");
+    expect(loadedProject1).not.toBeNull();
+    expect(loadedProject1).not.toBeUndefined();
+    assertLoaded(loadedProject1!);
+    expect(loadedProject1!.name).toBe("My Project 1");
 
-    assertLoaded(loadedTask);
-    expect(loadedTask.title).toBe("Task 1");
+    expect(loadedProject2).not.toBeNull();
+    expect(loadedProject2).not.toBeUndefined();
+    assertLoaded(loadedProject2!);
+    expect(loadedProject2!.name).toBe("My Project 2");
   });
 
   it("should have correct return types for each entry", async () => {
     const ProjectSchema = co.map({
       name: z.string(),
-    });
-
-    const TaskSchema = co.map({
-      title: z.string(),
       priority: z.number(),
     });
 
-    const project = ProjectSchema.create({ name: "Project" });
-    const task = TaskSchema.create({ title: "Task", priority: 1 });
+    const project1 = ProjectSchema.create({ name: "Project 1", priority: 1 });
+    const project2 = ProjectSchema.create({ name: "Project 2", priority: 2 });
 
     const wrapper = ({ children }: { children: React.ReactNode }) => (
       <Suspense fallback={<div>Loading...</div>}>{children}</Suspense>
@@ -85,10 +81,10 @@ describe("useSuspenseMultiCoState", () => {
 
     const { result } = renderHook(
       () =>
-        useSuspenseMultiCoState([
-          { schema: ProjectSchema, id: project.$jazz.id },
-          { schema: TaskSchema, id: task.$jazz.id },
-        ] as const),
+        useSuspenseMultiCoState(ProjectSchema, [
+          project1.$jazz.id,
+          project2.$jazz.id,
+        ]),
       {
         wrapper,
       },
@@ -99,13 +95,15 @@ describe("useSuspenseMultiCoState", () => {
       expect(result.current.length).toBe(2);
     });
 
-    const [loadedProject, loadedTask] = result.current;
+    const [loadedProject1, loadedProject2] = result.current;
 
     // Verify types are correctly inferred
-    expectTypeOf(loadedProject).toEqualTypeOf<Loaded<
-      typeof ProjectSchema
-    > | null>();
-    expectTypeOf(loadedTask).toEqualTypeOf<Loaded<typeof TaskSchema> | null>();
+    expectTypeOf(loadedProject1).toEqualTypeOf<
+      Loaded<typeof ProjectSchema> | null | undefined
+    >();
+    expectTypeOf(loadedProject2).toEqualTypeOf<
+      Loaded<typeof ProjectSchema> | null | undefined
+    >();
   });
 
   it("should return null for undefined IDs", async () => {
@@ -121,10 +119,7 @@ describe("useSuspenseMultiCoState", () => {
 
     const { result } = renderHook(
       () =>
-        useSuspenseMultiCoState([
-          { schema: ProjectSchema, id: project.$jazz.id },
-          { schema: ProjectSchema, id: undefined },
-        ] as const),
+        useSuspenseMultiCoState(ProjectSchema, [project.$jazz.id, undefined]),
       {
         wrapper,
       },
@@ -137,8 +132,10 @@ describe("useSuspenseMultiCoState", () => {
 
     const [loadedProject, nullValue] = result.current;
 
-    assertLoaded(loadedProject);
-    expect(loadedProject.name).toBe("My Project");
+    expect(loadedProject).not.toBeNull();
+    expect(loadedProject).not.toBeUndefined();
+    assertLoaded(loadedProject!);
+    expect(loadedProject!.name).toBe("My Project");
     expect(nullValue).toBe(null);
   });
 
@@ -155,11 +152,7 @@ describe("useSuspenseMultiCoState", () => {
     );
 
     const { result } = renderHook(
-      () =>
-        useSuspenseMultiCoState([
-          { schema: TestMap, id: map1.$jazz.id },
-          { schema: TestMap, id: map2.$jazz.id },
-        ] as const),
+      () => useSuspenseMultiCoState(TestMap, [map1.$jazz.id, map2.$jazz.id]),
       {
         wrapper,
       },
@@ -170,8 +163,10 @@ describe("useSuspenseMultiCoState", () => {
       expect(result.current.length).toBe(2);
     });
 
-    assertLoaded(result.current[0]);
-    expect(result.current[0].value).toBe("initial1");
+    expect(result.current[0]).not.toBeNull();
+    expect(result.current[0]).not.toBeUndefined();
+    assertLoaded(result.current[0]!);
+    expect(result.current[0]!.value).toBe("initial1");
 
     // Update one of the values
     act(() => {
@@ -184,13 +179,20 @@ describe("useSuspenseMultiCoState", () => {
   });
 
   it("should handle empty subscription array", async () => {
+    const ProjectSchema = co.map({
+      name: z.string(),
+    });
+
     const wrapper = ({ children }: { children: React.ReactNode }) => (
       <Suspense fallback={<div>Loading...</div>}>{children}</Suspense>
     );
 
-    const { result } = renderHook(() => useSuspenseMultiCoState([] as const), {
-      wrapper,
-    });
+    const { result } = renderHook(
+      () => useSuspenseMultiCoState(ProjectSchema, []),
+      {
+        wrapper,
+      },
+    );
 
     await waitFor(() => {
       expect(result.current).not.toBeNull();
@@ -206,18 +208,11 @@ describe("useMultiCoState", () => {
       name: z.string(),
     });
 
-    const TaskSchema = co.map({
-      title: z.string(),
-    });
-
-    const project = ProjectSchema.create({ name: "My Project" });
-    const task = TaskSchema.create({ title: "Task 1" });
+    const project1 = ProjectSchema.create({ name: "My Project 1" });
+    const project2 = ProjectSchema.create({ name: "My Project 2" });
 
     const { result } = renderHook(() =>
-      useMultiCoState([
-        { schema: ProjectSchema, id: project.$jazz.id },
-        { schema: TaskSchema, id: task.$jazz.id },
-      ] as const),
+      useMultiCoState(ProjectSchema, [project1.$jazz.id, project2.$jazz.id]),
     );
 
     await waitFor(() => {
@@ -225,13 +220,19 @@ describe("useMultiCoState", () => {
       expect(result.current[1]?.$isLoaded).toBe(true);
     });
 
-    const [loadedProject, loadedTask] = result.current;
+    const [loadedProject1, loadedProject2] = result.current;
 
-    assertLoaded(loadedProject);
-    expect(loadedProject.name).toBe("My Project");
+    expect(loadedProject1).not.toBeNull();
+    if (loadedProject1) {
+      assertLoaded(loadedProject1);
+      expect(loadedProject1.name).toBe("My Project 1");
+    }
 
-    assertLoaded(loadedTask);
-    expect(loadedTask.title).toBe("Task 1");
+    expect(loadedProject2).not.toBeNull();
+    if (loadedProject2) {
+      assertLoaded(loadedProject2);
+      expect(loadedProject2.name).toBe("My Project 2");
+    }
   });
 
   it("should return null for undefined IDs", async () => {
@@ -242,10 +243,7 @@ describe("useMultiCoState", () => {
     const project = ProjectSchema.create({ name: "My Project" });
 
     const { result } = renderHook(() =>
-      useMultiCoState([
-        { schema: ProjectSchema, id: project.$jazz.id },
-        { schema: ProjectSchema, id: undefined },
-      ] as const),
+      useMultiCoState(ProjectSchema, [project.$jazz.id, undefined]),
     );
 
     await waitFor(() => {
@@ -254,8 +252,11 @@ describe("useMultiCoState", () => {
 
     const [loadedProject, nullValue] = result.current;
 
-    assertLoaded(loadedProject);
-    expect(loadedProject.name).toBe("My Project");
+    expect(loadedProject).not.toBeNull();
+    if (loadedProject) {
+      assertLoaded(loadedProject);
+      expect(loadedProject.name).toBe("My Project");
+    }
     expect(nullValue).toBe(null);
   });
 
@@ -268,18 +269,18 @@ describe("useMultiCoState", () => {
     const map2 = TestMap.create({ value: "initial2" });
 
     const { result } = renderHook(() =>
-      useMultiCoState([
-        { schema: TestMap, id: map1.$jazz.id },
-        { schema: TestMap, id: map2.$jazz.id },
-      ] as const),
+      useMultiCoState(TestMap, [map1.$jazz.id, map2.$jazz.id]),
     );
 
     await waitFor(() => {
       expect(result.current[0]?.$isLoaded).toBe(true);
     });
 
-    assertLoaded(result.current[0]);
-    expect(result.current[0].value).toBe("initial1");
+    expect(result.current[0]).not.toBeNull();
+    if (result.current[0]) {
+      assertLoaded(result.current[0]);
+      expect(result.current[0].value).toBe("initial1");
+    }
 
     // Update one of the values
     act(() => {
@@ -291,12 +292,19 @@ describe("useMultiCoState", () => {
       return val?.$isLoaded && val.value === "updated1";
     });
 
-    assertLoaded(result.current[0]);
-    expect(result.current[0].value).toBe("updated1");
+    expect(result.current[0]).not.toBeNull();
+    if (result.current[0]) {
+      assertLoaded(result.current[0]);
+      expect(result.current[0].value).toBe("updated1");
+    }
   });
 
   it("should handle empty subscription array", async () => {
-    const { result } = renderHook(() => useMultiCoState([] as const));
+    const ProjectSchema = co.map({
+      name: z.string(),
+    });
+
+    const { result } = renderHook(() => useMultiCoState(ProjectSchema, []));
 
     await waitFor(() => {
       expect(result.current).not.toBeNull();
