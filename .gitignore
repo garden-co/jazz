@@ -16,6 +16,9 @@ target/
 node_modules/
 dist/
 
+# Turborepo
+.turbo/
+
 # WASM build artifacts (groove-wasm/pkg is committed for easier onboarding)
 
 # macOS

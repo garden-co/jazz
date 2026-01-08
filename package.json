@@ -1,7 +1,14 @@
 {
   "name": "jazz2",
   "private": true,
+  "packageManager": "pnpm@10.25.0",
   "scripts": {
-    "build": "pnpm -r build"
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "dev": "turbo run dev",
+    "test": "turbo run test"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.0"
   }
 }
