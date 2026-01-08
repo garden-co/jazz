@@ -7,7 +7,6 @@ use crate::object::ObjectId;
 use crate::sql::query_graph::cache::RowCache;
 use crate::sql::query_graph::delta::{DeltaBatch, RowDelta};
 use crate::sql::query_graph::node::{NodeId, QueryNode};
-use crate::sql::row::Row;
 use crate::sql::row_buffer::{OwnedRow, RowDescriptor};
 use crate::sql::schema::TableSchema;
 
@@ -315,19 +314,16 @@ impl QueryGraph {
             } else {
                 // Single-table query: load all rows from the primary table
                 let rows = db.read_all_rows(&self.table);
-                let descriptor = Arc::new(RowDescriptor::from_table_schema(&self.schema));
 
-                for row in rows {
+                for (id, owned) in rows {
                     // Skip the triggering row - it will be processed as a delta
-                    if skip_table == Some(&self.table) && skip_id == Some(row.id) {
+                    if skip_table == Some(&self.table) && skip_id == Some(id) {
                         continue;
                     }
 
-                    cache.insert(&self.table, row.clone());
+                    cache.insert(&self.table, id, owned.clone());
 
-                    // Convert to buffer format and process as Added delta
-                    let id = row.id;
-                    let owned = OwnedRow::from_legacy_row(&row, &self.schema, descriptor.clone());
+                    // Process as Added delta
                     let mut delta = DeltaBatch::added(id, owned);
                     for node in &mut self.nodes {
                         if delta.is_empty() {
@@ -355,21 +351,15 @@ impl QueryGraph {
         // Load all rows from the primary (left) table
         let left_rows = db.read_all_rows(&table);
 
-        // Get schema and descriptor for the left table
-        let left_schema = self.all_schemas.get(&table).cloned().unwrap_or_else(|| self.schema.clone());
-        let descriptor = Arc::new(RowDescriptor::from_table_schema_qualified(&left_schema, &table));
-
-        for left_row in left_rows {
+        for (id, owned) in left_rows {
             // Skip if this is the triggering row
-            if skip_table == Some(table.as_str()) && skip_id == Some(left_row.id) {
+            if skip_table == Some(table.as_str()) && skip_id == Some(id) {
                 continue;
             }
 
-            cache.insert(&table, left_row.clone());
+            cache.insert(&table, id, owned.clone());
 
-            // Convert to buffer format and process through nodes
-            let id = left_row.id;
-            let owned = OwnedRow::from_legacy_row_qualified(&left_row, &left_schema, descriptor.clone(), Some(&table));
+            // Process through nodes - rows already have qualified columns from read_all_rows
             let delta = RowDelta::Added { id, row: owned };
             self.process_delta_through_nodes(delta, &table, cache, db);
         }
@@ -390,29 +380,25 @@ impl QueryGraph {
     ) {
         let table = self.table.clone();
         let schema = self.schema.clone();
-        let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
 
         // Load all rows
         let rows = db.read_all_rows(&table);
 
         // First pass: populate the RecursiveFilter node's all_rows and children_index
-        for row in &rows {
-            if skip_table == Some(&table) && skip_id == Some(row.id) {
+        for (id, owned) in &rows {
+            if skip_table == Some(&table) && skip_id == Some(*id) {
                 continue;
             }
-            cache.insert(&table, row.clone());
+            cache.insert(&table, *id, owned.clone());
         }
 
         // Process all rows through nodes up to (but not including) RecursiveFilter
         // Then do fixpoint iteration on the RecursiveFilter
-        for row in rows {
-            if skip_table == Some(&table) && skip_id == Some(row.id) {
+        for (id, owned) in rows {
+            if skip_table == Some(&table) && skip_id == Some(id) {
                 continue;
             }
 
-            // Convert to buffer format
-            let id = row.id;
-            let owned = OwnedRow::from_legacy_row(&row, &schema, descriptor.clone());
             let mut delta = DeltaBatch::added(id, owned);
 
             for node in &mut self.nodes {
@@ -445,22 +431,19 @@ impl QueryGraph {
         skip_table: Option<&str>,
     ) {
         let table = self.table.clone();
-        let descriptor = Arc::new(RowDescriptor::from_table_schema(&self.schema));
 
         // Load all rows from the outer (primary) table
         let rows = db.read_all_rows(&table);
 
-        for row in rows {
+        for (id, owned) in rows {
             // Skip the triggering row - it will be processed as a delta
-            if skip_table == Some(&table) && skip_id == Some(row.id) {
+            if skip_table == Some(&table) && skip_id == Some(id) {
                 continue;
             }
 
-            cache.insert(&table, row.clone());
+            cache.insert(&table, id, owned.clone());
 
-            // Convert to buffer format and process as Added delta
-            let id = row.id;
-            let owned = OwnedRow::from_legacy_row(&row, &self.schema, descriptor.clone());
+            // Process as Added delta
             let mut delta = DeltaBatch::added(id, owned);
 
             for node in &mut self.nodes {
@@ -490,7 +473,7 @@ impl QueryGraph {
                                 },
                                 |table_name, id| {
                                     // Look up a row by table and id (for resolving inner joins)
-                                    db.get_row(table_name, id)
+                                    db.get_row(table_name, id).map(|(_, row)| row)
                                 },
                             );
                             output.extend(batch);
@@ -566,7 +549,7 @@ impl QueryGraph {
                             source_table,
                             &input_schema,
                             is_from_input,
-                            |table, id| db.get_row(table, id),
+                            |table, id| db.get_row(table, id).map(|(_, row)| row),
                             |table, column, target_id| {
                                 db.find_referencing(table, column, target_id)
                             },
@@ -617,7 +600,7 @@ impl QueryGraph {
                                 },
                                 |table_name, id| {
                                     // Look up a row by table and id (for resolving inner joins)
-                                    db.get_row(table_name, id)
+                                    db.get_row(table_name, id).map(|(_, row)| row)
                                 },
                             );
                             output.extend(batch);
@@ -649,15 +632,10 @@ impl QueryGraph {
             // Check if the input to Output is an ArrayAggregate node (even for JOIN queries)
             // This handles JOIN + ARRAY subquery cases
             if let Some(outer_rows) = self.nodes[input_idx].outer_rows() {
-                // ArrayAggregate still uses legacy Row - convert to buffer format
-                // TODO: Migrate ArrayAggregate to buffer format
-                let descriptor = Arc::new(RowDescriptor::from_table_schema(&self.schema));
+                // ArrayAggregate now uses buffer format directly
                 return outer_rows
                     .iter()
-                    .map(|(id, row)| {
-                        let owned = OwnedRow::from_legacy_row(row, &self.schema, descriptor.clone());
-                        (*id, owned)
-                    })
+                    .map(|(id, row)| (*id, row.clone()))
                     .collect();
             }
 
@@ -712,14 +690,10 @@ impl QueryGraph {
 
             // For ArrayAggregate queries, get rows from outer_rows
             if let Some(outer_rows) = self.nodes[input_idx].outer_rows() {
-                // TODO: Migrate ArrayAggregate to buffer format
-                let descriptor = Arc::new(RowDescriptor::from_table_schema(&self.schema));
+                // ArrayAggregate now uses buffer format directly
                 return outer_rows
                     .iter()
-                    .map(|(id, row)| {
-                        let owned = OwnedRow::from_legacy_row(row, &self.schema, descriptor.clone());
-                        (*id, owned)
-                    })
+                    .map(|(id, row)| (*id, row.clone()))
                     .collect();
             }
 
@@ -735,15 +709,12 @@ impl QueryGraph {
             }
 
             // For single-table queries, use cached IDs
-            // Cache still uses legacy Row - convert to buffer format
             if let Some(ids) = self.nodes[input_idx].cached_ids() {
-                let descriptor = Arc::new(RowDescriptor::from_table_schema(&self.schema));
                 return ids
                     .iter()
                     .filter_map(|id| {
                         cache.get(&self.table, *id).flatten().map(|row| {
-                            let owned = OwnedRow::from_legacy_row(row, &self.schema, descriptor.clone());
-                            (*id, owned)
+                            (*id, row.clone())
                         })
                     })
                     .collect();
@@ -778,21 +749,18 @@ impl QueryGraph {
         self.ensure_initialized_skip(cache, db, skip_id, Some(source_table));
 
         // Update cache with new value
-        // Note: Cache still uses legacy Row format for now. Convert from OwnedRow.
-        let table_schema = self.all_schemas.get(source_table).unwrap_or(&self.schema);
         match &delta {
             RowDelta::Added { id, row } => {
-                let legacy = row.to_legacy_row_with_schema(*id, table_schema);
-                cache.insert(source_table, legacy);
+                cache.insert(source_table, *id, row.clone());
             }
             RowDelta::Removed { id, .. } => cache.mark_deleted(source_table, *id),
             RowDelta::Updated { id, row, .. } => {
-                let legacy = row.to_legacy_row_with_schema(*id, table_schema);
-                cache.insert(source_table, legacy);
+                cache.insert(source_table, *id, row.clone());
             }
         }
 
         // For JOIN queries, convert delta to use qualified column names
+        let table_schema = self.all_schemas.get(source_table).unwrap_or(&self.schema);
         let delta = if self.is_join {
             delta.qualify_columns(source_table, table_schema)
         } else {

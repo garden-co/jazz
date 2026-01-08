@@ -89,10 +89,11 @@ fn incremental_query_basic() {
 
     // Query should now return both rows
     let rows = query.rows();
+    eprintln!("DEBUG: rows = {:?}", rows);
     assert_eq!(rows.len(), 2);
-    let names: Vec<_> = rows.iter().map(|r| &r.values[0]).collect();
-    assert!(names.contains(&&Value::String("Alice".into())));
-    assert!(names.contains(&&Value::String("Bob".into())));
+    let names: Vec<_> = rows.iter().map(|(_id, row)| row.get_column(0).unwrap()).collect();
+    assert!(names.contains(&Value::String("Alice".into())));
+    assert!(names.contains(&Value::String("Bob".into())));
 }
 
 #[test]
@@ -111,10 +112,10 @@ fn incremental_query_with_filter() {
     // Query should only return active users
     let rows = query.rows();
     assert_eq!(rows.len(), 2);
-    let names: Vec<_> = rows.iter().map(|r| &r.values[0]).collect();
-    assert!(names.contains(&&Value::String("Alice".into())));
-    assert!(names.contains(&&Value::String("Carol".into())));
-    assert!(!names.contains(&&Value::String("Bob".into())));
+    let names: Vec<_> = rows.iter().map(|(_id, row)| row.get_column(0).unwrap()).collect();
+    assert!(names.contains(&Value::String("Alice".into())));
+    assert!(names.contains(&Value::String("Carol".into())));
+    assert!(!names.contains(&Value::String("Bob".into())));
 }
 
 #[test]
@@ -140,8 +141,8 @@ fn incremental_query_update_enters_filter() {
     // Should now appear in results
     let rows = query.rows();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].values[0], Value::String("Alice".into()));
-    assert_eq!(rows[0].values[1], Value::Bool(true));
+    assert_eq!(rows[0].1.get_column(0).unwrap(), Value::String("Alice".into()));
+    assert_eq!(rows[0].1.get_column(1).unwrap(), Value::Bool(true));
 }
 
 #[test]
@@ -161,8 +162,8 @@ fn incremental_query_update_leaves_filter() {
     // Should be in results
     let rows = query.rows();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].values[0], Value::String("Alice".into()));
-    assert_eq!(rows[0].values[1], Value::Bool(true));
+    assert_eq!(rows[0].1.get_column(0).unwrap(), Value::String("Alice".into()));
+    assert_eq!(rows[0].1.get_column(1).unwrap(), Value::Bool(true));
 
     // Deactivate the user
     db.update("users", id, &[("active", Value::Bool(false))]).unwrap();
@@ -185,8 +186,8 @@ fn incremental_query_delete() {
 
     let rows = query.rows();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].values[0], Value::String("Alice".into()));
-    assert_eq!(rows[0].id, id);
+    assert_eq!(rows[0].1.get_column(0).unwrap(), Value::String("Alice".into()));
+    assert_eq!(rows[0].0, id);
 
     db.delete("users", id).unwrap();
 
@@ -194,7 +195,7 @@ fn incremental_query_delete() {
 }
 
 #[test]
-fn incremental_query_subscribe_delta() {
+fn incremental_query_subscribe() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let db = Database::in_memory();
@@ -205,7 +206,7 @@ fn incremental_query_subscribe_delta() {
     let delta_count = Arc::new(AtomicUsize::new(0));
     let delta_count_clone = delta_count.clone();
 
-    let _listener_id = query.subscribe_delta(Box::new(move |delta| {
+    let _listener_id = query.subscribe(Box::new(move |delta| {
         delta_count_clone.fetch_add(delta.len(), Ordering::SeqCst);
     }));
 
@@ -227,19 +228,22 @@ fn incremental_query_subscribe_rows() {
 
     let query = db.incremental_query("SELECT * FROM users").unwrap();
 
-    let row_count = Arc::new(AtomicUsize::new(0));
-    let row_count_clone = row_count.clone();
+    let delta_count = Arc::new(AtomicUsize::new(0));
+    let delta_count_clone = delta_count.clone();
 
-    let _listener_id = query.subscribe(move |rows| {
-        row_count_clone.store(rows.len(), Ordering::SeqCst);
-    });
+    let _listener_id = query.subscribe(Box::new(move |deltas| {
+        delta_count_clone.fetch_add(deltas.len(), Ordering::SeqCst);
+    }));
 
-    // Insert triggers callback with full row set
+    // Initial state callback has 0 rows (no data yet)
+    assert_eq!(delta_count.load(Ordering::SeqCst), 0);
+
+    // Insert triggers callback with 1 delta (Added)
     db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap();
-    assert_eq!(row_count.load(Ordering::SeqCst), 1);
+    assert_eq!(delta_count.load(Ordering::SeqCst), 1);
 
     db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap();
-    assert_eq!(row_count.load(Ordering::SeqCst), 2);
+    assert_eq!(delta_count.load(Ordering::SeqCst), 2);
 }
 
 #[test]
@@ -267,8 +271,8 @@ fn incremental_query_join_basic() {
     // Now we should have one joined row
     let rows = query.rows();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].values[1], Value::String("Hello World".to_string()));
-    assert_eq!(rows[0].values[2], Value::String("Alice".to_string()));
+    assert_eq!(rows[0].1.get_column(1).unwrap(), Value::String("Hello World".to_string()));
+    assert_eq!(rows[0].1.get_column(2).unwrap(), Value::String("Alice".to_string()));
 }
 
 #[test]
@@ -294,11 +298,11 @@ fn incremental_query_join_left_table_change() {
     assert_eq!(rows.len(), 2);
     // Both rows should have Alice as author
     for row in &rows {
-        assert_eq!(row.values[2], Value::String("Alice".to_string()));
+        assert_eq!(row.1.get_column(2).unwrap(), Value::String("Alice".to_string()));
     }
-    let titles: Vec<_> = rows.iter().map(|r| &r.values[1]).collect();
-    assert!(titles.contains(&&Value::String("Post 1".to_string())));
-    assert!(titles.contains(&&Value::String("Post 2".to_string())));
+    let titles: Vec<_> = rows.iter().map(|r| r.1.get_column(1).unwrap()).collect();
+    assert!(titles.contains(&Value::String("Post 1".to_string())));
+    assert!(titles.contains(&Value::String("Post 2".to_string())));
 }
 
 #[test]
@@ -325,7 +329,7 @@ fn incremental_query_join_right_table_change() {
     let delta_count = Arc::new(AtomicUsize::new(0));
     let delta_count_clone = delta_count.clone();
 
-    let _listener = query.subscribe_delta(Box::new(move |delta| {
+    let _listener = query.subscribe(Box::new(move |delta| {
         delta_count_clone.fetch_add(delta.len(), Ordering::SeqCst);
     }));
 
@@ -392,9 +396,9 @@ fn select_all_as_filters_by_policy() {
     // Without policy: both users see all documents
     let all_docs = db.select_all("documents").unwrap();
     assert_eq!(all_docs.len(), 2);
-    let all_titles: Vec<_> = all_docs.iter().map(|r| &r.values[0]).collect();
-    assert!(all_titles.contains(&&Value::String("Alice's Doc".into())));
-    assert!(all_titles.contains(&&Value::String("Bob's Doc".into())));
+    let all_titles: Vec<_> = all_docs.iter().map(|r| r.1.get_column(0).unwrap()).collect();
+    assert!(all_titles.contains(&Value::String("Alice's Doc".into())));
+    assert!(all_titles.contains(&Value::String("Bob's Doc".into())));
 
     // Add policy: owner can read their own documents
     db.execute("CREATE POLICY ON documents FOR SELECT WHERE owner_id = @viewer").unwrap();
@@ -402,12 +406,12 @@ fn select_all_as_filters_by_policy() {
     // Alice can only see her document
     let alice_docs = db.select_all_as("documents", alice_id).unwrap();
     assert_eq!(alice_docs.len(), 1);
-    assert_eq!(alice_docs[0].values[0], Value::String("Alice's Doc".into()));
+    assert_eq!(alice_docs[0].1.get_column(0).unwrap(), Value::String("Alice's Doc".into()));
 
     // Bob can only see his document
     let bob_docs = db.select_all_as("documents", bob_id).unwrap();
     assert_eq!(bob_docs.len(), 1);
-    assert_eq!(bob_docs[0].values[0], Value::String("Bob's Doc".into()));
+    assert_eq!(bob_docs[0].1.get_column(0).unwrap(), Value::String("Bob's Doc".into()));
 }
 
 #[test]
@@ -450,7 +454,7 @@ fn select_all_as_with_inheritance() {
     // Alice can see the document (via folder ownership)
     let alice_docs = db.select_all_as("documents", alice_id).unwrap();
     assert_eq!(alice_docs.len(), 1);
-    assert_eq!(alice_docs[0].values[0], Value::String("Secret Doc".into()));
+    assert_eq!(alice_docs[0].1.get_column(0).unwrap(), Value::String("Secret Doc".into()));
 
     // Bob cannot see the document
     let bob_docs = db.select_all_as("documents", bob_id).unwrap();
@@ -691,13 +695,13 @@ fn incremental_query_as_filters_by_policy() {
     let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id).unwrap();
     let alice_rows = alice_query.rows();
     assert_eq!(alice_rows.len(), 1);
-    assert_eq!(alice_rows[0].values[0], Value::String("Alice's Doc".into()));
+    assert_eq!(alice_rows[0].1.get_column(0).unwrap(), Value::String("Alice's Doc".into()));
 
     // Bob's incremental query should only see his document
     let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id).unwrap();
     let bob_rows = bob_query.rows();
     assert_eq!(bob_rows.len(), 1);
-    assert_eq!(bob_rows[0].values[0], Value::String("Bob's Doc".into()));
+    assert_eq!(bob_rows[0].1.get_column(0).unwrap(), Value::String("Bob's Doc".into()));
 }
 
 #[test]
@@ -735,7 +739,7 @@ fn incremental_query_as_updates_on_insert() {
     // Alice should see it
     let alice_rows = alice_query.rows();
     assert_eq!(alice_rows.len(), 1);
-    assert_eq!(alice_rows[0].values[0], Value::String("Alice's Doc".into()));
+    assert_eq!(alice_rows[0].1.get_column(0).unwrap(), Value::String("Alice's Doc".into()));
 
     // Insert document for Bob
     db.insert("documents", &["title", "owner_id"], vec![
@@ -746,7 +750,7 @@ fn incremental_query_as_updates_on_insert() {
     // Alice should still only see 1 document (her own)
     let alice_rows_after = alice_query.rows();
     assert_eq!(alice_rows_after.len(), 1);
-    assert_eq!(alice_rows_after[0].values[0], Value::String("Alice's Doc".into()));
+    assert_eq!(alice_rows_after[0].1.get_column(0).unwrap(), Value::String("Alice's Doc".into()));
 }
 
 #[test]
@@ -785,7 +789,7 @@ fn incremental_query_as_combines_with_where_clause() {
 
     // Should only see published documents owned by Alice
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].values[0], Value::String("Published".into()));
+    assert_eq!(rows[0].1.get_column(0).unwrap(), Value::String("Published".into()));
 }
 
 #[test]
@@ -804,9 +808,9 @@ fn incremental_query_as_no_policy_allows_all() {
     let query = db.incremental_query_as("SELECT * FROM items", ObjectId::new(999)).unwrap();
     let rows = query.rows();
     assert_eq!(rows.len(), 2);
-    let names: Vec<_> = rows.iter().map(|r| &r.values[0]).collect();
-    assert!(names.contains(&&Value::String("Item 1".into())));
-    assert!(names.contains(&&Value::String("Item 2".into())));
+    let names: Vec<_> = rows.iter().map(|r| r.1.get_column(0).unwrap()).collect();
+    assert!(names.contains(&Value::String("Item 1".into())));
+    assert!(names.contains(&Value::String("Item 2".into())));
 }
 
 #[test]
@@ -856,10 +860,10 @@ fn incremental_query_as_or_policy() {
     let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id).unwrap();
     let alice_rows = alice_query.rows();
     assert_eq!(alice_rows.len(), 2);
-    let alice_titles: Vec<_> = alice_rows.iter().map(|r| &r.values[0]).collect();
-    assert!(alice_titles.contains(&&Value::String("Alice Private".into())));
-    assert!(alice_titles.contains(&&Value::String("Alice Public".into())));
-    assert!(!alice_titles.contains(&&Value::String("Bob Private".into())));
+    let alice_titles: Vec<_> = alice_rows.iter().map(|r| r.1.get_column(0).unwrap()).collect();
+    assert!(alice_titles.contains(&Value::String("Alice Private".into())));
+    assert!(alice_titles.contains(&Value::String("Alice Public".into())));
+    assert!(!alice_titles.contains(&Value::String("Bob Private".into())));
 
     // Bob can see: his private, alice's public
     // - Alice Private: owner=alice, public=false ✗
@@ -868,10 +872,10 @@ fn incremental_query_as_or_policy() {
     let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id).unwrap();
     let bob_rows = bob_query.rows();
     assert_eq!(bob_rows.len(), 2);
-    let bob_titles: Vec<_> = bob_rows.iter().map(|r| &r.values[0]).collect();
-    assert!(bob_titles.contains(&&Value::String("Alice Public".into())));
-    assert!(bob_titles.contains(&&Value::String("Bob Private".into())));
-    assert!(!bob_titles.contains(&&Value::String("Alice Private".into())));
+    let bob_titles: Vec<_> = bob_rows.iter().map(|r| r.1.get_column(0).unwrap()).collect();
+    assert!(bob_titles.contains(&Value::String("Alice Public".into())));
+    assert!(bob_titles.contains(&Value::String("Bob Private".into())));
+    assert!(!bob_titles.contains(&Value::String("Alice Private".into())));
 }
 
 #[test]
@@ -925,13 +929,13 @@ fn incremental_query_as_inherits_flattened_to_join() {
     let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id).unwrap();
     let alice_rows = alice_query.rows();
     assert_eq!(alice_rows.len(), 1, "Alice should see 1 doc: {:?}", alice_rows);
-    assert_eq!(alice_rows[0].values[0], Value::String("Alice's Doc".into()));
+    assert_eq!(alice_rows[0].1.get_column(0).unwrap(), Value::String("Alice's Doc".into()));
 
     // Bob can only see his document
     let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id).unwrap();
     let bob_rows = bob_query.rows();
     assert_eq!(bob_rows.len(), 1, "Bob should see 1 doc: {:?}", bob_rows);
-    assert_eq!(bob_rows[0].values[0], Value::String("Bob's Doc".into()));
+    assert_eq!(bob_rows[0].1.get_column(0).unwrap(), Value::String("Bob's Doc".into()));
 }
 
 #[test]
@@ -968,7 +972,7 @@ fn incremental_query_as_inherits_incremental_updates() {
     // Track changes via subscription
     let change_count = Arc::new(AtomicUsize::new(0));
     let change_count_clone = change_count.clone();
-    let _listener = alice_query.subscribe_delta(Box::new(move |delta| {
+    let _listener = alice_query.subscribe(Box::new(move |delta| {
         change_count_clone.fetch_add(delta.len(), Ordering::SeqCst);
     }));
 
@@ -981,7 +985,7 @@ fn incremental_query_as_inherits_incremental_updates() {
     // Query should now have one row
     let rows = alice_query.rows();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].values[0], Value::String("New Doc".into()));
+    assert_eq!(rows[0].1.get_column(0).unwrap(), Value::String("New Doc".into()));
     // And we should have received a delta
     assert!(change_count.load(Ordering::SeqCst) > 0, "Should have received delta notification");
 }
@@ -1026,7 +1030,7 @@ fn incremental_query_as_inherits_folder_ownership_change() {
     let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id).unwrap();
     let alice_rows = alice_query.rows();
     assert_eq!(alice_rows.len(), 1);
-    assert_eq!(alice_rows[0].values[0], Value::String("Important Doc".into()));
+    assert_eq!(alice_rows[0].1.get_column(0).unwrap(), Value::String("Important Doc".into()));
 
     // Bob cannot see the document
     let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id).unwrap();
@@ -1043,7 +1047,7 @@ fn incremental_query_as_inherits_folder_ownership_change() {
     // Bob should now see the document
     let bob_rows_after = bob_query.rows();
     assert_eq!(bob_rows_after.len(), 1, "Bob should now see doc after folder transfer");
-    assert_eq!(bob_rows_after[0].values[0], Value::String("Important Doc".into()));
+    assert_eq!(bob_rows_after[0].1.get_column(0).unwrap(), Value::String("Important Doc".into()));
 }
 
 #[test]
@@ -1117,8 +1121,8 @@ fn incremental_query_as_nested_inherits_chain() {
     let alice_docs = alice_query.rows();
 
     assert_eq!(alice_docs.len(), 1, "Alice should see 1 document through the chain");
-    assert_eq!(alice_docs[0].id, alice_doc_id, "Alice should see her own document");
-    assert_eq!(alice_docs[0].values[0], Value::String("Alice's Doc".into()));
+    assert_eq!(alice_docs[0].0, alice_doc_id, "Alice should see her own document");
+    assert_eq!(alice_docs[0].1.get_column(0).unwrap(), Value::String("Alice's Doc".into()));
 
     // Bob should only see his document
     let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id)
@@ -1126,7 +1130,7 @@ fn incremental_query_as_nested_inherits_chain() {
     let bob_docs = bob_query.rows();
 
     assert_eq!(bob_docs.len(), 1, "Bob should see 1 document through the chain");
-    assert_eq!(bob_docs[0].values[0], Value::String("Bob's Doc".into()));
+    assert_eq!(bob_docs[0].1.get_column(0).unwrap(), Value::String("Bob's Doc".into()));
 }
 
 #[test]
@@ -1172,10 +1176,10 @@ fn incremental_query_as_inherits_multiple_docs_same_folder() {
     let rows = alice_query.rows();
 
     assert_eq!(rows.len(), 3, "Alice should see all 3 documents in her folder");
-    let titles: Vec<_> = rows.iter().map(|r| &r.values[0]).collect();
-    assert!(titles.contains(&&Value::String("Doc 1".into())));
-    assert!(titles.contains(&&Value::String("Doc 2".into())));
-    assert!(titles.contains(&&Value::String("Doc 3".into())));
+    let titles: Vec<_> = rows.iter().map(|r| r.1.get_column(0).unwrap()).collect();
+    assert!(titles.contains(&Value::String("Doc 1".into())));
+    assert!(titles.contains(&Value::String("Doc 2".into())));
+    assert!(titles.contains(&Value::String("Doc 3".into())));
 }
 
 #[test]
@@ -1213,7 +1217,7 @@ fn incremental_query_as_inherits_delete_propagates() {
     // Initially Alice can see the document
     let initial_rows = alice_query.rows();
     assert_eq!(initial_rows.len(), 1);
-    assert_eq!(initial_rows[0].values[0], Value::String("Orphan Doc".into()));
+    assert_eq!(initial_rows[0].1.get_column(0).unwrap(), Value::String("Orphan Doc".into()));
 
     // Delete the folder
     db.delete("folders", folder_id).unwrap();
@@ -1285,7 +1289,7 @@ fn incremental_query_as_self_referential_recursive_inherits() {
     assert_eq!(alice_rows.len(), 4, "Alice should see all 4 folders through recursive inheritance");
 
     // Verify specific folders are visible
-    let folder_ids: Vec<_> = alice_rows.iter().map(|r| r.id).collect();
+    let folder_ids: Vec<_> = alice_rows.iter().map(|r| r.0).collect();
     assert!(folder_ids.contains(&root_id), "Root should be visible (owned by Alice)");
     assert!(folder_ids.contains(&child_id), "Child should be visible (inherits from root)");
     assert!(folder_ids.contains(&grandchild_id), "Grandchild should be visible (inherits from child)");
@@ -1306,7 +1310,7 @@ fn incremental_query_as_self_referential_recursive_inherits() {
     // Alice should now see 5 folders
     let alice_rows_after = query.rows();
     assert_eq!(alice_rows_after.len(), 5, "Alice should now see 5 folders after insert");
-    let folder_ids_after: Vec<_> = alice_rows_after.iter().map(|r| r.id).collect();
+    let folder_ids_after: Vec<_> = alice_rows_after.iter().map(|r| r.0).collect();
     assert!(folder_ids_after.contains(&new_folder_id), "New folder should be visible via inheritance");
 }
 
@@ -1436,8 +1440,8 @@ fn incremental_query_as_3_hop_inherits_chain() {
     let alice_docs = alice_query.rows();
 
     assert_eq!(alice_docs.len(), 1, "Alice should see 1 document through 3-hop chain");
-    assert_eq!(alice_docs[0].id, alice_doc_id, "Alice should see her own document");
-    assert_eq!(alice_docs[0].values[0], Value::String("Alice's Doc".into()));
+    assert_eq!(alice_docs[0].0, alice_doc_id, "Alice should see her own document");
+    assert_eq!(alice_docs[0].1.get_column(0).unwrap(), Value::String("Alice's Doc".into()));
 
     // Bob should only see his document
     let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id)
@@ -1445,7 +1449,7 @@ fn incremental_query_as_3_hop_inherits_chain() {
     let bob_docs = bob_query.rows();
 
     assert_eq!(bob_docs.len(), 1, "Bob should see 1 document through 3-hop chain");
-    assert_eq!(bob_docs[0].values[0], Value::String("Bob's Doc".into()));
+    assert_eq!(bob_docs[0].1.get_column(0).unwrap(), Value::String("Bob's Doc".into()));
 }
 
 #[test]
@@ -1505,7 +1509,7 @@ fn incremental_query_as_3_hop_chain_delta_from_org_update() {
 
     // Initially, Alice sees the document, Bob doesn't
     assert_eq!(alice_query.rows().len(), 1, "Alice should see doc initially");
-    assert_eq!(alice_query.rows()[0].id, doc_id);
+    assert_eq!(alice_query.rows()[0].0, doc_id);
     assert_eq!(bob_query.rows().len(), 0, "Bob should not see doc initially");
 
     // Transfer org ownership from Alice to Bob
@@ -1517,8 +1521,8 @@ fn incremental_query_as_3_hop_chain_delta_from_org_update() {
 
     assert_eq!(alice_rows_after.len(), 0, "Alice should not see doc after org transfer");
     assert_eq!(bob_rows_after.len(), 1, "Bob should see doc after org transfer");
-    assert_eq!(bob_rows_after[0].id, doc_id);
-    assert_eq!(bob_rows_after[0].values[0], Value::String("Test Doc".into()));
+    assert_eq!(bob_rows_after[0].0, doc_id);
+    assert_eq!(bob_rows_after[0].1.get_column(0).unwrap(), Value::String("Test Doc".into()));
 }
 
 #[test]
@@ -1595,8 +1599,8 @@ fn incremental_query_as_3_hop_chain_delta_from_workspace_update() {
 
     assert_eq!(alice_rows_after.len(), 0, "Alice should not see doc after workspace move");
     assert_eq!(bob_rows_after.len(), 1, "Bob should see doc after workspace move");
-    assert_eq!(bob_rows_after[0].id, doc_id);
-    assert_eq!(bob_rows_after[0].values[0], Value::String("Test Doc".into()));
+    assert_eq!(bob_rows_after[0].0, doc_id);
+    assert_eq!(bob_rows_after[0].1.get_column(0).unwrap(), Value::String("Test Doc".into()));
 }
 
 #[test]
@@ -1678,8 +1682,8 @@ fn incremental_query_as_3_hop_chain_delta_from_folder_update() {
 
     assert_eq!(alice_rows_after.len(), 0, "Alice should not see doc after folder move");
     assert_eq!(bob_rows_after.len(), 1, "Bob should see doc after folder move");
-    assert_eq!(bob_rows_after[0].id, doc_id);
-    assert_eq!(bob_rows_after[0].values[0], Value::String("Test Doc".into()));
+    assert_eq!(bob_rows_after[0].0, doc_id);
+    assert_eq!(bob_rows_after[0].1.get_column(0).unwrap(), Value::String("Test Doc".into()));
 }
 
 #[test]
@@ -1745,8 +1749,8 @@ fn incremental_query_as_3_hop_chain_new_document_insert() {
     let bob_rows_after = bob_query.rows();
 
     assert_eq!(alice_rows_after.len(), 1, "Alice should see new doc after insert");
-    assert_eq!(alice_rows_after[0].id, new_doc_id);
-    assert_eq!(alice_rows_after[0].values[0], Value::String("New Alice Doc".into()));
+    assert_eq!(alice_rows_after[0].0, new_doc_id);
+    assert_eq!(alice_rows_after[0].1.get_column(0).unwrap(), Value::String("New Alice Doc".into()));
     assert_eq!(bob_rows_after.len(), 0, "Bob should still see 0 docs");
 }
 
@@ -1811,9 +1815,9 @@ fn incremental_query_as_3_hop_chain_with_filter() {
 
     // Alice should only see the active document (filter applied)
     assert_eq!(rows.len(), 1, "Alice should see only 1 non-archived doc");
-    assert_eq!(rows[0].id, active_doc_id);
-    assert_eq!(rows[0].values[0], Value::String("Active Doc".into()));
-    assert_eq!(rows[0].values[1], Value::Bool(false));
+    assert_eq!(rows[0].0, active_doc_id);
+    assert_eq!(rows[0].1.get_column(0).unwrap(), Value::String("Active Doc".into()));
+    assert_eq!(rows[0].1.get_column(1).unwrap(), Value::Bool(false));
 }
 
 #[test]
@@ -1911,7 +1915,7 @@ fn policy_chain_or_condition_with_inherits() {
     // - Doc in her workspace (via INHERITS to workspace owner)
     // - Doc in folder she owns (via OR condition on folder owner)
     assert_eq!(alice_docs.len(), 2, "Alice should see 2 documents");
-    let alice_doc_ids: std::collections::HashSet<_> = alice_docs.iter().map(|r| r.id).collect();
+    let alice_doc_ids: std::collections::HashSet<_> = alice_docs.iter().map(|r| r.0).collect();
     assert!(alice_doc_ids.contains(&doc_in_alice_ws), "Alice should see doc in her workspace");
     assert!(alice_doc_ids.contains(&doc_in_alice_folder), "Alice should see doc in folder she owns");
 }
@@ -1975,9 +1979,9 @@ fn policy_chain_multiple_viewers_concurrent() {
 
     // Initially: Alice sees 1, Bob sees 1, Charlie sees 0
     assert_eq!(alice_query.rows().len(), 1, "Alice should see her project");
-    assert_eq!(alice_query.rows()[0].id, alice_project);
+    assert_eq!(alice_query.rows()[0].0, alice_project);
     assert_eq!(bob_query.rows().len(), 1, "Bob should see his project");
-    assert_eq!(bob_query.rows()[0].id, bob_project);
+    assert_eq!(bob_query.rows()[0].0, bob_project);
     assert_eq!(charlie_query.rows().len(), 0, "Charlie should see no projects");
 
     // Transfer Alice's org to Charlie
@@ -1987,7 +1991,7 @@ fn policy_chain_multiple_viewers_concurrent() {
     assert_eq!(alice_query.rows().len(), 0, "Alice should no longer see her project");
     assert_eq!(bob_query.rows().len(), 1, "Bob should still see his project");
     assert_eq!(charlie_query.rows().len(), 1, "Charlie should now see Alice's project");
-    assert_eq!(charlie_query.rows()[0].id, alice_project);
+    assert_eq!(charlie_query.rows()[0].0, alice_project);
 
     // Add a new project to Bob's org
     let new_bob_project = db.insert("projects", &["name", "org_id"], vec![
@@ -1998,7 +2002,7 @@ fn policy_chain_multiple_viewers_concurrent() {
     // Bob should now see 2 projects
     let bob_rows = bob_query.rows();
     assert_eq!(bob_rows.len(), 2, "Bob should now see 2 projects");
-    let bob_project_ids: Vec<_> = bob_rows.iter().map(|r| r.id).collect();
+    let bob_project_ids: Vec<_> = bob_rows.iter().map(|r| r.0).collect();
     assert!(bob_project_ids.contains(&bob_project));
     assert!(bob_project_ids.contains(&new_bob_project));
 
@@ -2058,8 +2062,8 @@ fn policy_chain_insert_intermediate_row() {
     // Now Alice should see the document
     let rows = alice_query.rows();
     assert_eq!(rows.len(), 1, "Alice should see the new document");
-    assert_eq!(rows[0].id, doc);
-    assert_eq!(rows[0].values[0], Value::String("New Doc".into()));
+    assert_eq!(rows[0].0, doc);
+    assert_eq!(rows[0].1.get_column(0).unwrap(), Value::String("New Doc".into()));
 }
 
 #[test]
@@ -2104,7 +2108,7 @@ fn policy_chain_delete_intermediate_row() {
 
     // Initially Alice sees the document
     assert_eq!(alice_query.rows().len(), 1, "Alice should see doc initially");
-    assert_eq!(alice_query.rows()[0].id, doc);
+    assert_eq!(alice_query.rows()[0].0, doc);
 
     // Delete the folder (this should cascade to make doc invisible)
     db.delete("folders", folder).unwrap();
@@ -2193,8 +2197,8 @@ fn policy_chain_4_hop_deep() {
     let alice_files = alice_query.rows();
 
     assert_eq!(alice_files.len(), 1, "Alice should see 1 file");
-    assert_eq!(alice_files[0].id, alice_file);
-    assert_eq!(alice_files[0].values[0], Value::String("Alice File".into()));
+    assert_eq!(alice_files[0].0, alice_file);
+    assert_eq!(alice_files[0].1.get_column(0).unwrap(), Value::String("Alice File".into()));
 
     // Bob should only see his file
     let bob_query = db.incremental_query_as("SELECT * FROM files", bob_id).unwrap();
@@ -2210,7 +2214,7 @@ fn policy_chain_4_hop_deep() {
     let bob_files = bob_query.rows();
     assert_eq!(bob_files.len(), 2, "Bob should see 2 files after org transfer");
     let bob_file_names: Vec<_> = bob_files.iter()
-        .map(|r| r.values[0].clone())
+        .map(|r| r.1.get_column(0).unwrap().clone())
         .collect();
     assert!(bob_file_names.contains(&Value::String("Alice File".into())));
     assert!(bob_file_names.contains(&Value::String("Bob File".into())));
@@ -2272,7 +2276,7 @@ fn policy_chain_update_at_each_level() {
 
     // Initially Alice sees the task
     assert_eq!(alice_query.rows().len(), 1);
-    assert_eq!(alice_query.rows()[0].id, task);
+    assert_eq!(alice_query.rows()[0].0, task);
     assert_eq!(bob_query.rows().len(), 0);
 
     // Update 1: Move team to Bob's org
@@ -2280,7 +2284,7 @@ fn policy_chain_update_at_each_level() {
 
     assert_eq!(alice_query.rows().len(), 0, "Alice should not see task after team moved");
     assert_eq!(bob_query.rows().len(), 1, "Bob should see task after team moved");
-    assert_eq!(bob_query.rows()[0].id, task);
+    assert_eq!(bob_query.rows()[0].0, task);
 
     // Update 2: Move team back to Alice's org
     db.update("teams", team, &[("org_id", Value::Ref(alice_org))]).unwrap();
@@ -2298,7 +2302,7 @@ fn policy_chain_update_at_each_level() {
     db.update("tasks", task, &[("title", Value::String("Updated Task".into()))]).unwrap();
 
     assert_eq!(bob_query.rows().len(), 1);
-    assert_eq!(bob_query.rows()[0].values[0], Value::String("Updated Task".into()));
+    assert_eq!(bob_query.rows()[0].1.get_column(0).unwrap(), Value::String("Updated Task".into()));
 }
 
 // ========== Reverse JOIN Tests ==========
@@ -2346,9 +2350,9 @@ fn incremental_query_reverse_join_basic() {
     let rows = query.rows();
     assert_eq!(rows.len(), 1, "Should find 1 issue assigned to Alice");
     // The output should be Issues columns: title, priority
-    assert_eq!(rows[0].values.len(), 2, "Should have 2 columns from Issues");
-    assert_eq!(rows[0].values[0], Value::String("Bug 1".to_string()));
-    assert_eq!(rows[0].values[1], Value::String("high".to_string()));
+    assert_eq!(rows[0].1.descriptor.columns.len(), 2, "Should have 2 columns from Issues");
+    assert_eq!(rows[0].1.get_column(0).unwrap(), Value::String("Bug 1".to_string()));
+    assert_eq!(rows[0].1.get_column(1).unwrap(), Value::String("high".to_string()));
 }
 
 #[test]
@@ -2383,7 +2387,7 @@ fn incremental_query_reverse_join_no_filter() {
 
     let rows = query.rows();
     assert_eq!(rows.len(), 1, "Should find 1 issue (the one with an assignee)");
-    assert_eq!(rows[0].values[0], Value::String("Bug 1".to_string()));
+    assert_eq!(rows[0].1.get_column(0).unwrap(), Value::String("Bug 1".to_string()));
 }
 
 #[test]
@@ -2419,8 +2423,8 @@ fn incremental_query_reverse_join_with_from_table_filter() {
 
     let rows = query.rows();
     assert_eq!(rows.len(), 1, "Should find 1 low priority issue");
-    assert_eq!(rows[0].values[0], Value::String("Bug 2".to_string()));
-    assert_eq!(rows[0].values[1], Value::String("low".to_string()));
+    assert_eq!(rows[0].1.get_column(0).unwrap(), Value::String("Bug 2".to_string()));
+    assert_eq!(rows[0].1.get_column(1).unwrap(), Value::String("low".to_string()));
 }
 
 #[test]
@@ -2469,7 +2473,7 @@ fn incremental_query_reverse_join_combined_filters() {
 
     let rows = query.rows();
     assert_eq!(rows.len(), 1, "Should find 1 low priority issue assigned to Alice");
-    assert_eq!(rows[0].values[0], Value::String("Bug 2".to_string()));
+    assert_eq!(rows[0].1.get_column(0).unwrap(), Value::String("Bug 2".to_string()));
 }
 
 #[test]
@@ -2503,13 +2507,13 @@ fn incremental_query_reverse_join_with_alias() {
 
     let rows = query.rows();
     assert_eq!(rows.len(), 1, "Should find 1 issue assigned to Alice");
-    assert_eq!(rows[0].values[0], Value::String("Bug 1".to_string()));
-    assert_eq!(rows[0].values[1], Value::String("high".to_string()));
+    assert_eq!(rows[0].1.get_column(0).unwrap(), Value::String("Bug 1".to_string()));
+    assert_eq!(rows[0].1.get_column(1).unwrap(), Value::String("high".to_string()));
 }
 
 #[test]
-fn incremental_query_reverse_join_subscribe_delta() {
-    // Test that subscribe_delta works for reverse JOINs - this mirrors what the WASM layer does
+fn incremental_query_reverse_join_subscribe() {
+    // Test that subscribe works for reverse JOINs - this mirrors what the WASM layer does
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let db = Database::in_memory();
@@ -2544,7 +2548,7 @@ fn incremental_query_reverse_join_subscribe_delta() {
     let initial_count = Arc::new(AtomicUsize::new(0));
     let initial_count_clone = initial_count.clone();
 
-    let _listener = query.subscribe_delta(Box::new(move |delta| {
+    let _listener = query.subscribe(Box::new(move |delta| {
         callback_count_clone.fetch_add(1, Ordering::SeqCst);
         initial_count_clone.fetch_add(delta.len(), Ordering::SeqCst);
     }));

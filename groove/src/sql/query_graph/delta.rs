@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use crate::commit::CommitId;
 use crate::object::ObjectId;
-use crate::sql::row::{Row, Value};  // Row/Value still used by JoinedRow (legacy) and BufferJoinedRow conversion
 use crate::sql::row_buffer::{OwnedRow, RowDescriptor};
 use crate::sql::schema::TableSchema;
 
@@ -276,94 +275,7 @@ impl DeltaBatch {
     }
 }
 
-/// A row that has been joined from multiple tables.
-///
-/// This represents the result of a JOIN operation, containing the
-/// row data from the primary table plus any joined tables.
-#[derive(Clone, Debug)]
-pub struct JoinedRow {
-    /// The primary (left) table name.
-    pub primary_table: String,
-    /// Row ID from the primary table.
-    pub primary_id: ObjectId,
-    /// Column values from all tables in order: primary columns, then join1 columns, etc.
-    pub values: Vec<Value>,
-    /// Map from table name to (row_id, start_column_index).
-    /// This allows looking up which columns belong to which table.
-    pub table_offsets: HashMap<String, (ObjectId, usize)>,
-}
-
-impl JoinedRow {
-    /// Create a JoinedRow from a single table's row.
-    pub fn from_single(table: &str, row: Row) -> Self {
-        let mut table_offsets = HashMap::new();
-        table_offsets.insert(table.to_string(), (row.id, 0));
-
-        Self {
-            primary_table: table.to_string(),
-            primary_id: row.id,
-            values: row.values,
-            table_offsets,
-        }
-    }
-
-    /// Add columns from a joined table.
-    pub fn add_joined(&mut self, table: &str, row: Row) {
-        let start_idx = self.values.len();
-        self.table_offsets.insert(table.to_string(), (row.id, start_idx));
-        self.values.extend(row.values);
-    }
-
-    /// Get the row ID for a specific table.
-    pub fn get_row_id(&self, table: &str) -> Option<ObjectId> {
-        self.table_offsets.get(table).map(|(id, _)| *id)
-    }
-
-    /// Get a column value by table and column index within that table.
-    pub fn get_value(&self, table: &str, col_idx: usize) -> Option<&Value> {
-        let (_, start) = self.table_offsets.get(table)?;
-        self.values.get(start + col_idx)
-    }
-
-    /// Get a column value by table name and column name.
-    pub fn get_column(&self, table: &str, column: &str, schema: &TableSchema) -> Option<&Value> {
-        let col_idx = schema.column_index(column)?;
-        self.get_value(table, col_idx)
-    }
-
-    /// Convert to an output Row using the joined values.
-    /// The output row ID is the primary table's row ID.
-    pub fn to_output_row(&self) -> Row {
-        Row::new(self.primary_id, self.values.clone())
-    }
-
-    /// Convert to an output Row containing only values from a specific table.
-    ///
-    /// Used for reverse JOINs where we want `SELECT Table.*` but the graph
-    /// had to swap tables for the join logic.
-    pub fn to_projected_row(&self, table: &str, column_count: usize) -> Option<Row> {
-        let (row_id, start_idx) = self.table_offsets.get(table)?;
-        let end_idx = start_idx + column_count;
-        if end_idx > self.values.len() {
-            return None;
-        }
-        let projected_values = self.values[*start_idx..end_idx].to_vec();
-        Some(Row::new(*row_id, projected_values))
-    }
-
-    /// Check if this joined row contains a specific table.
-    pub fn has_table(&self, table: &str) -> bool {
-        self.table_offsets.contains_key(table)
-    }
-
-    /// Get all table names in this joined row.
-    pub fn tables(&self) -> impl Iterator<Item = &str> {
-        self.table_offsets.keys().map(|s| s.as_str())
-    }
-}
-
-// BufferRowDelta and BufferDeltaBatch have been removed - RowDelta/DeltaBatch
-// now directly use the unified buffer format (OwnedRow).
+// Legacy JoinedRow has been removed - use BufferJoinedRow instead.
 
 // ============================================================================
 // Buffer-based JoinedRow
@@ -471,130 +383,50 @@ impl BufferJoinedRow {
         result
     }
 
-    /// Convert to the legacy JoinedRow format.
-    ///
-    /// This is provided for compatibility during migration.
-    pub fn to_legacy(&self, schemas: &HashMap<String, TableSchema>) -> JoinedRow {
-        let mut values = Vec::new();
-        let mut table_offsets = HashMap::new();
-
-        // Add primary table first
-        if let Some((row_id, row)) = self.table_rows.get(&self.primary_table) {
-            let schema = schemas.get(&self.primary_table);
-            let legacy_row = if let Some(s) = schema {
-                row.to_legacy_row_with_schema(*row_id, s)
-            } else {
-                row.to_legacy_row(*row_id)
-            };
-            table_offsets.insert(self.primary_table.clone(), (*row_id, 0));
-            values.extend(legacy_row.values);
-        }
-
-        // Add other tables
-        for (table, (row_id, row)) in &self.table_rows {
-            if table != &self.primary_table {
-                let start_idx = values.len();
-                let schema = schemas.get(table);
-                let legacy_row = if let Some(s) = schema {
-                    row.to_legacy_row_with_schema(*row_id, s)
-                } else {
-                    row.to_legacy_row(*row_id)
-                };
-                table_offsets.insert(table.clone(), (*row_id, start_idx));
-                values.extend(legacy_row.values);
-            }
-        }
-
-        JoinedRow {
-            primary_table: self.primary_table.clone(),
-            primary_id: self.primary_id,
-            values,
-            table_offsets,
-        }
-    }
-
-    /// Create from a legacy JoinedRow.
-    ///
-    /// Requires descriptors for each table since JoinedRow doesn't store type info.
-    pub fn from_legacy(
-        legacy: &JoinedRow,
-        schemas: &HashMap<String, TableSchema>,
-        descriptors: &HashMap<String, Arc<RowDescriptor>>,
-    ) -> Self {
-        let mut table_rows = HashMap::new();
-
-        for (table, (row_id, start_idx)) in &legacy.table_offsets {
-            if let (Some(schema), Some(descriptor)) = (schemas.get(table), descriptors.get(table)) {
-                // Extract values for this table
-                let end_idx = start_idx + schema.columns.len();
-                let values = if end_idx <= legacy.values.len() {
-                    legacy.values[*start_idx..end_idx].to_vec()
-                } else {
-                    continue;
-                };
-
-                // Create a legacy Row and convert to OwnedRow
-                let legacy_row = Row::new(*row_id, values);
-                let owned_row = OwnedRow::from_legacy_row(&legacy_row, schema, descriptor.clone());
-                table_rows.insert(table.clone(), (*row_id, owned_row));
-            }
-        }
-
-        Self {
-            primary_table: legacy.primary_table.clone(),
-            primary_id: legacy.primary_id,
-            table_rows,
-        }
-    }
-
-    /// Convert to a legacy Row with values in schema order.
+    /// Convert to an output OwnedRow with values in schema order.
     ///
     /// The combined schema specifies the expected output column order.
     /// Values are looked up by qualified column name to ensure correct ordering.
-    pub fn to_legacy_row_with_schema(&self, primary_id: ObjectId, combined_schema: &TableSchema) -> Row {
-        use crate::sql::row_buffer::RowValue;
+    pub fn to_output_row_with_schema(&self, combined_schema: &TableSchema, descriptor: Arc<RowDescriptor>) -> OwnedRow {
+        use crate::sql::row_buffer::RowBuilder;
 
-        let mut values = Vec::with_capacity(combined_schema.columns.len());
+        let mut builder = RowBuilder::new(descriptor.clone());
 
-        for col_def in &combined_schema.columns {
-            let value = if let Some((table, _col_name)) = col_def.name.split_once('.') {
+        for (col_idx, col_def) in combined_schema.columns.iter().enumerate() {
+            if let Some((table, _col_name)) = col_def.name.split_once('.') {
                 if let Some((_, owned_row)) = self.table_rows.get(table) {
-                    owned_row.get_by_name(&col_def.name)
-                        .map(|rv| if col_def.nullable { rv.to_nullable_value() } else { rv.to_value() })
-                        .unwrap_or(Value::NullableNone)
-                } else {
-                    Value::NullableNone
+                    if let Some(rv) = owned_row.get_by_name(&col_def.name) {
+                        // Get the buffer column index for this schema column index
+                        if let Some(buf_col_idx) = descriptor.columns.iter().position(|c| c.schema_index == col_idx) {
+                            builder = builder.set_from_row_value(buf_col_idx, rv);
+                        }
+                    }
                 }
-            } else {
-                Value::NullableNone
-            };
-            values.push(value);
+            }
         }
 
-        Row::new(primary_id, values)
+        builder.build()
     }
 
-    /// Convert to an output Row containing only values from a specific table.
-    pub fn to_projected_row(&self, table: &str, schema: &TableSchema) -> Option<Row> {
-        use crate::sql::row_buffer::RowValue;
+    /// Convert to an output OwnedRow containing only values from a specific table.
+    pub fn to_projected_row(&self, table: &str, schema: &TableSchema, descriptor: Arc<RowDescriptor>) -> Option<(ObjectId, OwnedRow)> {
+        use crate::sql::row_buffer::RowBuilder;
 
         let (row_id, owned_row) = self.table_rows.get(table)?;
 
-        let values: Vec<Value> = schema
-            .columns
-            .iter()
-            .map(|col_def| {
-                let qualified_name = format!("{}.{}", table, col_def.name);
-                let value = owned_row.get_by_name(&qualified_name).unwrap_or(RowValue::Null);
-                if col_def.nullable {
-                    value.to_nullable_value()
-                } else {
-                    value.to_value()
-                }
-            })
-            .collect();
+        let mut builder = RowBuilder::new(descriptor.clone());
 
-        Some(Row::new(*row_id, values))
+        for (col_idx, col_def) in schema.columns.iter().enumerate() {
+            let qualified_name = format!("{}.{}", table, col_def.name);
+            if let Some(rv) = owned_row.get_by_name(&qualified_name) {
+                // Get the buffer column index for this schema column index
+                if let Some(buf_col_idx) = descriptor.columns.iter().position(|c| c.schema_index == col_idx) {
+                    builder = builder.set_from_row_value(buf_col_idx, rv);
+                }
+            }
+        }
+
+        Some((*row_id, builder.build()))
     }
 }
 
@@ -846,42 +678,6 @@ mod tests {
         // Output should have columns from both tables
         // The order depends on HashMap iteration, but we can check count
         assert!(output.descriptor.columns.len() >= 4); // 2 from users + 2 from posts
-    }
-
-    #[test]
-    fn buffer_joined_row_legacy_roundtrip() {
-        let users_desc = make_users_descriptor();
-        let users_schema = make_users_schema();
-
-        let user_row = make_user_row(&users_desc, "Alice", 30);
-        let user_id = ObjectId::new(1);
-
-        let joined = BufferJoinedRow::from_single("users", user_id, user_row);
-
-        // Convert to legacy
-        let mut schemas = HashMap::new();
-        schemas.insert("users".to_string(), users_schema.clone());
-        let legacy = joined.to_legacy(&schemas);
-
-        assert_eq!(legacy.primary_table, "users");
-        assert_eq!(legacy.primary_id, user_id);
-        assert_eq!(legacy.values.len(), 2); // name + age
-
-        // Convert back
-        let mut descriptors = HashMap::new();
-        descriptors.insert("users".to_string(), users_desc.clone());
-        let back = BufferJoinedRow::from_legacy(&legacy, &schemas, &descriptors);
-
-        assert_eq!(back.primary_table, "users");
-        assert_eq!(back.primary_id, user_id);
-        assert!(back.has_table("users"));
-
-        // Check the row data
-        let row_ref = back.get_row("users").unwrap();
-        match row_ref.get_by_name("name") {
-            Some(RowValue::String(s)) => assert_eq!(s, "Alice"),
-            other => panic!("Expected String, got {:?}", other),
-        }
     }
 
     #[test]

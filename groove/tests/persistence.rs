@@ -6,11 +6,12 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use groove::sql::{Database, ExecuteResult, Row, Value};
-use groove::{ChunkStore, ContentRef, MemoryEnvironment, INLINE_THRESHOLD};
+use groove::sql::row_buffer::OwnedRow;
+use groove::sql::{Database, ExecuteResult, Value};
+use groove::{ChunkStore, ContentRef, MemoryEnvironment, ObjectId, INLINE_THRESHOLD};
 
 /// Helper to extract rows from ExecuteResult
-fn get_rows(result: ExecuteResult) -> Vec<Row> {
+fn get_rows(result: ExecuteResult) -> Vec<(ObjectId, OwnedRow)> {
     match result {
         ExecuteResult::Selected(rows) => rows,
         other => panic!("expected Selected, got {:?}", other),
@@ -64,13 +65,13 @@ fn database_roundtrip_simple() {
     assert_eq!(rows.len(), 2, "should have 2 rows");
 
     // Check row values
-    let names: Vec<&Value> = rows.iter().map(|r| &r.values[1]).collect();
+    let names: Vec<Value> = rows.iter().map(|r| r.1.get_column(1).unwrap()).collect();
     assert!(
-        names.contains(&&Value::String("Alice".to_string())),
+        names.contains(&Value::String("Alice".to_string())),
         "should contain Alice"
     );
     assert!(
-        names.contains(&&Value::String("Bob".to_string())),
+        names.contains(&Value::String("Bob".to_string())),
         "should contain Bob"
     );
 }
@@ -189,15 +190,15 @@ fn database_roundtrip_with_policies() {
     let users = get_rows(db.execute("SELECT * FROM users").unwrap());
     let alice_id = users
         .iter()
-        .find(|r| r.values[1] == Value::String("Alice".to_string()))
+        .find(|r| r.1.get_column(1).unwrap() == Value::String("Alice".to_string()))
         .unwrap()
-        .id;
+        .0;
 
     // Verify policy works (select_all_as should filter)
     let rows = db.select_all_as("documents", alice_id).unwrap();
     assert_eq!(rows.len(), 1, "policy should filter to owner's docs");
     assert_eq!(
-        rows[0].values[1],
+        rows[0].1.get_column(1).unwrap(),
         Value::String("Doc1".to_string()),
         "should see Doc1"
     );
@@ -225,9 +226,9 @@ fn database_roundtrip_after_delete() {
         let items = get_rows(db.execute("SELECT * FROM items").unwrap());
         let item2_id = items
             .iter()
-            .find(|r| r.values[1] == Value::String("Item2".to_string()))
+            .find(|r| r.1.get_column(1).unwrap() == Value::String("Item2".to_string()))
             .unwrap()
-            .id;
+            .0;
 
         db.execute(&format!("DELETE FROM items WHERE id = '{}'", item2_id))
             .unwrap();
@@ -245,9 +246,9 @@ fn database_roundtrip_after_delete() {
     let items = get_rows(db.execute("SELECT * FROM items").unwrap());
     assert_eq!(items.len(), 2, "delete should be persisted");
 
-    let names: Vec<&Value> = items.iter().map(|r| &r.values[1]).collect();
+    let names: Vec<Value> = items.iter().map(|r| r.1.get_column(1).unwrap()).collect();
     assert!(
-        !names.contains(&&Value::String("Item2".to_string())),
+        !names.contains(&Value::String("Item2".to_string())),
         "Item2 should be deleted"
     );
 }
@@ -268,7 +269,7 @@ fn database_roundtrip_after_update() {
 
         // Get ID of the row
         let settings = get_rows(db.execute("SELECT * FROM settings").unwrap());
-        let row_id = settings[0].id;
+        let row_id = settings[0].0;
 
         db.execute(&format!(
             "UPDATE settings SET value = 'new_value' WHERE id = '{}'",
@@ -279,7 +280,7 @@ fn database_roundtrip_after_update() {
         // Verify update worked
         let settings = get_rows(db.execute("SELECT * FROM settings").unwrap());
         assert_eq!(
-            settings[0].values[1],
+            settings[0].1.get_column(1).unwrap(),
             Value::String("new_value".to_string())
         );
 
@@ -292,7 +293,7 @@ fn database_roundtrip_after_update() {
     let settings = get_rows(db.execute("SELECT * FROM settings").unwrap());
     assert_eq!(settings.len(), 1);
     assert_eq!(
-        settings[0].values[1],
+        settings[0].1.get_column(1).unwrap(),
         Value::String("new_value".to_string()),
         "update should be persisted"
     );
@@ -326,22 +327,22 @@ fn database_roundtrip_with_nullable() {
     // Find Alice and Bob
     let alice = contacts
         .iter()
-        .find(|r| r.values[1] == Value::String("Alice".to_string()))
+        .find(|r| r.1.get_column(1).unwrap() == Value::String("Alice".to_string()))
         .unwrap();
     let bob = contacts
         .iter()
-        .find(|r| r.values[1] == Value::String("Bob".to_string()))
+        .find(|r| r.1.get_column(1).unwrap() == Value::String("Bob".to_string()))
         .unwrap();
 
     // Alice has phone
     assert!(
-        matches!(&alice.values[2], Value::NullableSome(_)),
+        matches!(&alice.1.get_column(2).unwrap(), Value::NullableSome(_)),
         "Alice should have phone"
     );
 
     // Bob doesn't have phone (should be NullableNone)
     assert!(
-        matches!(&bob.values[2], Value::NullableNone),
+        matches!(&bob.1.get_column(2).unwrap(), Value::NullableNone),
         "Bob should have null phone"
     );
 }
@@ -385,11 +386,11 @@ fn database_roundtrip_with_inline_blob() {
     assert_eq!(rows.len(), 1, "should have 1 file");
 
     // Check blob content
-    if let Value::Blob(content_ref) = &rows[0].values[2] {
+    if let Value::Blob(content_ref) = &rows[0].1.get_column(2).unwrap() {
         let data = content_ref.as_inline().expect("should be inline blob");
         assert_eq!(data, small_data.as_slice(), "blob data should match");
     } else {
-        panic!("expected Blob value, got {:?}", rows[0].values[2]);
+        panic!("expected Blob value, got {:?}", rows[0].1.get_column(2).unwrap());
     }
 }
 
@@ -444,7 +445,7 @@ fn database_roundtrip_with_chunked_blob() {
     assert_eq!(rows.len(), 1, "should have 1 file");
 
     // Check blob content - need to read chunks from environment
-    if let Value::Blob(content_ref) = &rows[0].values[2] {
+    if let Value::Blob(content_ref) = &rows[0].1.get_column(2).unwrap() {
         let chunk_hashes = content_ref.as_chunks().expect("should be chunked blob");
         assert_eq!(chunk_hashes.len(), 2, "should have 2 chunks");
 
@@ -458,6 +459,6 @@ fn database_roundtrip_with_chunked_blob() {
         assert_eq!(restored_data.len(), large_data.len(), "blob size should match");
         assert_eq!(restored_data, large_data, "blob data should match");
     } else {
-        panic!("expected Blob value, got {:?}", rows[0].values[2]);
+        panic!("expected Blob value, got {:?}", rows[0].1.get_column(2).unwrap());
     }
 }

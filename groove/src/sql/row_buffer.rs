@@ -25,8 +25,161 @@ use std::sync::Arc;
 use crate::object::ObjectId;
 use crate::storage::ContentRef;
 
-use super::row::{Row, Value};
 use super::schema::{ColumnType, TableSchema};
+
+/// Runtime value representation.
+///
+/// This type is used for encoding/decoding and as an intermediate
+/// representation for SQL operations. For row storage and manipulation,
+/// use OwnedRow directly.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Value {
+    Bool(bool),
+    I32(i32),
+    U32(u32),
+    I64(i64),
+    F64(f64),
+    String(String),
+    Bytes(Vec<u8>),
+    Ref(ObjectId),
+    /// A composite row value (table alias in SELECT returns this).
+    /// Contains an OwnedRow with its embedded descriptor.
+    Row(OwnedRow),
+    /// An array of rows (from ARRAY subquery).
+    Array(Vec<OwnedRow>),
+    /// A nullable column with a present value.
+    NullableSome(Box<Value>),
+    /// A nullable column that is null.
+    NullableNone,
+    /// Large binary data, potentially chunked via ContentRef.
+    Blob(ContentRef),
+    /// Array of blobs.
+    BlobArray(Vec<ContentRef>),
+}
+
+impl Value {
+    /// Check if value is null.
+    pub fn is_null(&self) -> bool {
+        matches!(self, Value::NullableNone)
+    }
+
+    /// Check if value is a nullable variant.
+    pub fn is_nullable(&self) -> bool {
+        matches!(self, Value::NullableSome(_) | Value::NullableNone)
+    }
+
+    /// Wrap a value as nullable (present).
+    pub fn nullable_some(value: Value) -> Value {
+        Value::NullableSome(Box::new(value))
+    }
+
+    /// Unwrap a nullable value.
+    pub fn unwrap_nullable(&self) -> Option<&Value> {
+        match self {
+            Value::NullableSome(v) => Some(v),
+            Value::NullableNone => None,
+            other => Some(other),
+        }
+    }
+
+    /// Try to get as bool.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Value::Bool(b) => Some(*b),
+            Value::NullableSome(v) => v.as_bool(),
+            _ => None,
+        }
+    }
+
+    /// Try to get as i32.
+    pub fn as_i32(&self) -> Option<i32> {
+        match self {
+            Value::I32(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// Try to get as u32.
+    pub fn as_u32(&self) -> Option<u32> {
+        match self {
+            Value::U32(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// Try to get as i64.
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Value::I64(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// Try to get as f64.
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Value::F64(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// Try to get as string.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Value::String(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Try to get as bytes.
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Value::Bytes(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    /// Try to get as ref (object ID).
+    pub fn as_ref(&self) -> Option<ObjectId> {
+        match self {
+            Value::Ref(id) => Some(*id),
+            Value::NullableSome(inner) => Value::as_ref(inner),
+            _ => None,
+        }
+    }
+
+    /// Try to get as row.
+    pub fn as_row(&self) -> Option<&OwnedRow> {
+        match self {
+            Value::Row(row) => Some(row),
+            _ => None,
+        }
+    }
+
+    /// Try to get as array of rows.
+    pub fn as_array(&self) -> Option<&[OwnedRow]> {
+        match self {
+            Value::Array(arr) => Some(arr),
+            _ => None,
+        }
+    }
+
+    /// Try to get as blob.
+    pub fn as_blob(&self) -> Option<&ContentRef> {
+        match self {
+            Value::Blob(content_ref) => Some(content_ref),
+            _ => None,
+        }
+    }
+
+    /// Try to get as blob array.
+    pub fn as_blob_array(&self) -> Option<&[ContentRef]> {
+        match self {
+            Value::BlobArray(refs) => Some(refs),
+            _ => None,
+        }
+    }
+}
 
 /// Column type for the unified row format.
 ///
@@ -58,11 +211,24 @@ pub enum ColType {
     Blob,
     BlobArray,
 
+    /// Array of rows, each following the item descriptor's layout.
+    /// Buffer format: [item_count: varint][item1_len: varint][item1_data]...
+    Array {
+        /// Descriptor for each item in the array.
+        item_descriptor: Arc<RowDescriptor>,
+    },
+
     // Nullable variable-size types
     NullableString,
     NullableBytes,
     NullableBlob,
     NullableBlobArray,
+
+    /// Nullable array of rows.
+    NullableArray {
+        /// Descriptor for each item in the array.
+        item_descriptor: Arc<RowDescriptor>,
+    },
 }
 
 impl ColType {
@@ -123,10 +289,12 @@ impl ColType {
             | ColType::Bytes
             | ColType::Blob
             | ColType::BlobArray
+            | ColType::Array { .. }
             | ColType::NullableString
             | ColType::NullableBytes
             | ColType::NullableBlob
-            | ColType::NullableBlobArray => None,
+            | ColType::NullableBlobArray
+            | ColType::NullableArray { .. } => None,
         }
     }
 
@@ -144,6 +312,7 @@ impl ColType {
                 | ColType::NullableBytes
                 | ColType::NullableBlob
                 | ColType::NullableBlobArray
+                | ColType::NullableArray { .. }
         )
     }
 
@@ -160,6 +329,7 @@ impl ColType {
             ColType::NullableBytes => ColType::Bytes,
             ColType::NullableBlob => ColType::Blob,
             ColType::NullableBlobArray => ColType::BlobArray,
+            ColType::NullableArray { item_descriptor } => ColType::Array { item_descriptor: item_descriptor.clone() },
             other => other.clone(),
         }
     }
@@ -177,6 +347,7 @@ impl ColType {
             ColType::Bytes => ColType::NullableBytes,
             ColType::Blob => ColType::NullableBlob,
             ColType::BlobArray => ColType::NullableBlobArray,
+            ColType::Array { item_descriptor } => ColType::NullableArray { item_descriptor: item_descriptor.clone() },
             other => other.clone(),
         }
     }
@@ -192,6 +363,8 @@ pub struct ColDescriptor {
     /// Byte offset within the fixed-size section (for fixed-size columns),
     /// or index into the variable-size section (for variable-size columns).
     pub offset: usize,
+    /// Original index in the schema (before reordering for buffer layout).
+    pub schema_index: usize,
 }
 
 /// Descriptor for a row's structure.
@@ -237,14 +410,14 @@ impl RowDescriptor {
     /// Columns are reordered: fixed-size columns first, then variable-size.
     /// The `offset` field is computed for each column.
     pub fn new(columns: impl IntoIterator<Item = (String, ColType)>) -> Self {
-        let mut fixed_cols: Vec<(String, ColType)> = Vec::new();
-        let mut var_cols: Vec<(String, ColType)> = Vec::new();
+        let mut fixed_cols: Vec<(usize, String, ColType)> = Vec::new();
+        let mut var_cols: Vec<(usize, String, ColType)> = Vec::new();
 
-        for (name, col_type) in columns {
+        for (schema_idx, (name, col_type)) in columns.into_iter().enumerate() {
             if col_type.is_fixed_size() {
-                fixed_cols.push((name, col_type));
+                fixed_cols.push((schema_idx, name, col_type));
             } else {
-                var_cols.push((name, col_type));
+                var_cols.push((schema_idx, name, col_type));
             }
         }
 
@@ -252,12 +425,13 @@ impl RowDescriptor {
         let mut fixed_offset = 0;
 
         // Add fixed-size columns with byte offsets
-        for (name, col_type) in fixed_cols {
+        for (schema_idx, name, col_type) in fixed_cols {
             let size = col_type.fixed_size().unwrap();
             descriptors.push(ColDescriptor {
                 name,
                 col_type,
                 offset: fixed_offset,
+                schema_index: schema_idx,
             });
             fixed_offset += size;
         }
@@ -265,11 +439,12 @@ impl RowDescriptor {
         let fixed_size = fixed_offset;
 
         // Add variable-size columns with indices
-        for (var_idx, (name, col_type)) in var_cols.into_iter().enumerate() {
+        for (var_idx, (schema_idx, name, col_type)) in var_cols.into_iter().enumerate() {
             descriptors.push(ColDescriptor {
                 name,
                 col_type,
                 offset: var_idx,
+                schema_index: schema_idx,
             });
         }
 
@@ -288,7 +463,7 @@ impl RowDescriptor {
     /// The buffer layout still has fixed columns first, but the descriptor
     /// remembers the original order for iteration.
     pub fn new_ordered(columns: impl IntoIterator<Item = (String, ColType)>) -> Self {
-        let columns: Vec<_> = columns.into_iter().collect();
+        let columns: Vec<_> = columns.into_iter().enumerate().collect();
 
         // Compute fixed-size total
         let mut fixed_offset = 0;
@@ -297,13 +472,14 @@ impl RowDescriptor {
         let mut descriptors = Vec::with_capacity(columns.len());
 
         // First pass: compute fixed-size offsets
-        for (name, col_type) in &columns {
+        for (schema_idx, (name, col_type)) in &columns {
             if col_type.is_fixed_size() {
                 let size = col_type.fixed_size().unwrap();
                 descriptors.push(ColDescriptor {
                     name: name.clone(),
                     col_type: col_type.clone(),
                     offset: fixed_offset,
+                    schema_index: *schema_idx,
                 });
                 fixed_offset += size;
             }
@@ -312,12 +488,13 @@ impl RowDescriptor {
         let fixed_size = fixed_offset;
 
         // Second pass: add variable-size columns
-        for (name, col_type) in &columns {
+        for (schema_idx, (name, col_type)) in &columns {
             if !col_type.is_fixed_size() {
                 descriptors.push(ColDescriptor {
                     name: name.clone(),
                     col_type: col_type.clone(),
                     offset: var_idx,
+                    schema_index: *schema_idx,
                 });
                 var_idx += 1;
             }
@@ -391,11 +568,100 @@ pub enum RowValue<'a> {
     Bytes(&'a [u8]),
     Blob(ContentRef),
     BlobArray(Vec<ContentRef>),
+    /// Array of rows. Items can be iterated without allocation.
+    Array(ArrayValue<'a>),
     Null,
 }
 
+/// An array value that provides zero-copy iteration over items.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ArrayValue<'a> {
+    /// Descriptor for each item in the array.
+    pub item_descriptor: &'a RowDescriptor,
+    /// Raw buffer containing the array data.
+    /// Format: [item_count: varint][item1_len: varint][item1_data]...
+    pub data: &'a [u8],
+}
+
+impl<'a> ArrayValue<'a> {
+    /// Get the number of items in the array.
+    pub fn len(&self) -> usize {
+        if self.data.is_empty() {
+            return 0;
+        }
+        let (count, _) = read_varint(self.data);
+        count as usize
+    }
+
+    /// Returns true if the array is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Iterate over items in the array.
+    pub fn iter(&self) -> ArrayValueIter<'a> {
+        if self.data.is_empty() {
+            return ArrayValueIter {
+                item_descriptor: self.item_descriptor,
+                remaining_data: &[],
+                remaining_count: 0,
+            };
+        }
+        let (count, bytes_read) = read_varint(self.data);
+        ArrayValueIter {
+            item_descriptor: self.item_descriptor,
+            remaining_data: &self.data[bytes_read..],
+            remaining_count: count as usize,
+        }
+    }
+}
+
+/// Iterator over array items.
+pub struct ArrayValueIter<'a> {
+    item_descriptor: &'a RowDescriptor,
+    remaining_data: &'a [u8],
+    remaining_count: usize,
+}
+
+impl<'a> Iterator for ArrayValueIter<'a> {
+    type Item = RowRef<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining_count == 0 || self.remaining_data.is_empty() {
+            return None;
+        }
+
+        // Read item length
+        let (item_len, len_bytes) = read_varint(self.remaining_data);
+        let item_len = item_len as usize;
+        let data_start = len_bytes;
+        let data_end = data_start + item_len;
+
+        if data_end > self.remaining_data.len() {
+            // Malformed data - stop iteration
+            self.remaining_count = 0;
+            return None;
+        }
+
+        let item_data = &self.remaining_data[data_start..data_end];
+        self.remaining_data = &self.remaining_data[data_end..];
+        self.remaining_count -= 1;
+
+        Some(RowRef {
+            descriptor: self.item_descriptor,
+            buffer: item_data,
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining_count, Some(self.remaining_count))
+    }
+}
+
+impl<'a> ExactSizeIterator for ArrayValueIter<'a> {}
+
 impl<'a> RowValue<'a> {
-    /// Convert to the legacy Value type (allocates for strings/bytes).
+    /// Convert to the Value type (allocates for strings/bytes).
     pub fn to_value(&self) -> Value {
         match self {
             RowValue::Bool(v) => Value::Bool(*v),
@@ -408,6 +674,16 @@ impl<'a> RowValue<'a> {
             RowValue::Bytes(v) => Value::Bytes((*v).to_vec()),
             RowValue::Blob(v) => Value::Blob(v.clone()),
             RowValue::BlobArray(v) => Value::BlobArray(v.clone()),
+            RowValue::Array(arr) => {
+                // Convert array items to OwnedRow
+                let items: Vec<OwnedRow> = arr.iter()
+                    .map(|row_ref| OwnedRow::new(
+                        Arc::new(row_ref.descriptor.clone()),
+                        row_ref.buffer.to_vec(),
+                    ))
+                    .collect();
+                Value::Array(items)
+            }
             RowValue::Null => Value::NullableNone,
         }
     }
@@ -440,7 +716,7 @@ impl<'a> RowRef<'a> {
     }
 
     /// Get value from a column descriptor.
-    fn get_column(&self, col: &ColDescriptor) -> Option<RowValue<'a>> {
+    fn get_column(&self, col: &'a ColDescriptor) -> Option<RowValue<'a>> {
         if col.col_type.is_fixed_size() {
             self.get_fixed(col)
         } else {
@@ -528,7 +804,7 @@ impl<'a> RowRef<'a> {
     }
 
     /// Get a variable-size column value.
-    fn get_variable(&self, col: &ColDescriptor) -> Option<RowValue<'a>> {
+    fn get_variable(&self, col: &'a ColDescriptor) -> Option<RowValue<'a>> {
         let var_idx = col.offset;
 
         // Parse varint header to find the offset and length
@@ -569,6 +845,12 @@ impl<'a> RowRef<'a> {
                 }
                 Some(RowValue::BlobArray(refs))
             }
+            ColType::Array { item_descriptor } | ColType::NullableArray { item_descriptor } => {
+                Some(RowValue::Array(ArrayValue {
+                    item_descriptor: item_descriptor.as_ref(),
+                    data: value_data,
+                }))
+            }
             _ => None, // Not a variable-size type
         }
     }
@@ -596,10 +878,11 @@ impl<'a> RowRef<'a> {
 
         Some((offset, *lengths.get(var_idx)?))
     }
+
 }
 
 /// An owned row with its own buffer. For caching and WASM transfer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct OwnedRow {
     /// Descriptor defining the row structure.
     pub descriptor: Arc<RowDescriptor>,
@@ -631,136 +914,32 @@ impl OwnedRow {
         self.as_ref().get_by_name(name)
     }
 
-    /// Convert to the legacy Row type (allocates).
+    /// Get the value at the given schema index as a Value.
     ///
-    /// This is provided for compatibility during migration. The `id` must be
-    /// provided since it's stored out-of-band in the new format.
-    /// Values are returned in descriptor column order.
-    pub fn to_legacy_row(&self, id: ObjectId) -> Row {
-        let values: Vec<Value> = self
+    /// This method uses schema-order indexing (the order columns were defined
+    /// in the table schema), not buffer-order indexing. This is the expected
+    /// behavior for user-facing code that thinks in terms of schema columns.
+    ///
+    /// For nullable columns, non-null values are wrapped in NullableSome,
+    /// and null values return NullableNone.
+    ///
+    /// This is a convenience method for tests and external code that needs
+    /// to work with Value types directly.
+    pub fn get_column(&self, schema_idx: usize) -> Option<Value> {
+        // Find the buffer index for this schema index
+        let buf_idx = self
             .descriptor
             .columns
             .iter()
-            .enumerate()
-            .map(|(idx, col)| {
-                let value = self.get(idx).unwrap_or(RowValue::Null);
-                if col.col_type.is_nullable() {
-                    value.to_nullable_value()
-                } else {
-                    value.to_value()
-                }
-            })
-            .collect();
-        Row::new(id, values)
-    }
+            .position(|c| c.schema_index == schema_idx)?;
+        let col = &self.descriptor.columns[buf_idx];
+        let rv = self.get(buf_idx)?;
 
-    /// Convert to the legacy Row type with values in schema order.
-    ///
-    /// This is provided for compatibility during migration. Values are
-    /// returned in the order specified by the schema, not descriptor order.
-    pub fn to_legacy_row_with_schema(&self, id: ObjectId, schema: &TableSchema) -> Row {
-        let values: Vec<Value> = schema
-            .columns
-            .iter()
-            .map(|col_def| {
-                // Find the value by column name
-                let value = self.get_by_name(&col_def.name).unwrap_or(RowValue::Null);
-                if col_def.nullable {
-                    value.to_nullable_value()
-                } else {
-                    value.to_value()
-                }
-            })
-            .collect();
-        Row::new(id, values)
-    }
-
-    /// Create an OwnedRow from a legacy Row.
-    ///
-    /// This is provided for compatibility during migration. The schema is
-    /// needed to map value indices to column names.
-    pub fn from_legacy_row(row: &Row, schema: &TableSchema, descriptor: Arc<RowDescriptor>) -> Self {
-        Self::from_legacy_row_qualified(row, schema, descriptor, None)
-    }
-
-    /// Create an OwnedRow from a legacy Row with optional table name qualification.
-    ///
-    /// When `table_name` is provided, column names are qualified as `table.column`
-    /// when looking up the descriptor index. This is needed for JOIN operations
-    /// where descriptors use qualified names.
-    pub fn from_legacy_row_qualified(
-        row: &Row,
-        schema: &TableSchema,
-        descriptor: Arc<RowDescriptor>,
-        table_name: Option<&str>,
-    ) -> Self {
-        let mut builder = RowBuilder::new(descriptor.clone());
-
-        // Legacy rows have values in schema column order
-        for (schema_idx, value) in row.values.iter().enumerate() {
-            // Find the column name from the schema
-            if let Some(col_def) = schema.columns.get(schema_idx) {
-                // Build the lookup name (optionally qualified)
-                let lookup_name = if let Some(table) = table_name {
-                    format!("{}.{}", table, col_def.name)
-                } else {
-                    col_def.name.clone()
-                };
-                // Find the corresponding descriptor column index
-                if let Some(desc_idx) = descriptor.column_index(&lookup_name) {
-                    builder = Self::set_from_value(builder, desc_idx, value);
-                }
-            }
-        }
-
-        builder.build()
-    }
-
-    /// Create an OwnedRow for a single table from a combined legacy Row.
-    ///
-    /// Used for chain joins where the input row contains data from multiple tables.
-    /// The combined_schema has qualified column names like "table.column".
-    /// We extract only the columns belonging to `table_name`.
-    pub fn from_legacy_row_combined(
-        row: &Row,
-        combined_schema: &TableSchema,
-        descriptor: Arc<RowDescriptor>,
-        table_name: &str,
-    ) -> Self {
-        let mut builder = RowBuilder::new(descriptor.clone());
-        let prefix = format!("{}.", table_name);
-
-        // Iterate through combined schema and extract values for this table
-        for (schema_idx, col_def) in combined_schema.columns.iter().enumerate() {
-            if col_def.name.starts_with(&prefix) {
-                // This column belongs to our table
-                if let Some(value) = row.values.get(schema_idx) {
-                    // Find the descriptor column by qualified name
-                    if let Some(desc_idx) = descriptor.column_index(&col_def.name) {
-                        builder = Self::set_from_value(builder, desc_idx, value);
-                    }
-                }
-            }
-        }
-
-        builder.build()
-    }
-
-    /// Helper to set a builder value from a legacy Value.
-    fn set_from_value(builder: RowBuilder, idx: usize, value: &Value) -> RowBuilder {
-        match value {
-            Value::Bool(v) => builder.set_bool(idx, *v),
-            Value::I32(v) => builder.set_i32(idx, *v),
-            Value::U32(v) => builder.set_u32(idx, *v),
-            Value::I64(v) => builder.set_i64(idx, *v),
-            Value::F64(v) => builder.set_f64(idx, *v),
-            Value::String(v) => builder.set_string(idx, v),
-            Value::Bytes(v) => builder.set_bytes(idx, v),
-            Value::Ref(v) => builder.set_ref(idx, *v),
-            Value::NullableNone => builder.set_null(idx),
-            Value::NullableSome(inner) => Self::set_from_value(builder, idx, inner),
-            // TODO: Handle Row, Array, Blob, BlobArray
-            _ => builder,
+        // If the column is nullable, wrap the value appropriately
+        if col.col_type.is_nullable() {
+            Some(rv.to_nullable_value())
+        } else {
+            Some(rv.to_value())
         }
     }
 
@@ -804,6 +983,65 @@ impl OwnedRow {
             RowValue::Bytes(v) => builder.set_bytes(idx, v),
             RowValue::Ref(v) => builder.set_ref(idx, v),
             RowValue::Null => builder.set_null(idx),
+            RowValue::Array(arr) => {
+                // Collect items into OwnedRows
+                let items: Vec<OwnedRow> = arr.iter().map(|row_ref| {
+                    OwnedRow::new(
+                        Arc::new(row_ref.descriptor.clone()),
+                        row_ref.buffer.to_vec(),
+                    )
+                }).collect();
+                builder.set_array(idx, &items)
+            }
+            // TODO: Handle Blob, BlobArray
+            _ => builder,
+        }
+    }
+
+    /// Create an OwnedRow from a slice of Values using the given descriptor.
+    ///
+    /// The values should be in schema order (not buffer order) - the descriptor
+    /// contains the mapping from schema to buffer order.
+    pub fn from_values(values: &[Value], descriptor: Arc<RowDescriptor>) -> Self {
+        let mut builder = RowBuilder::new(descriptor.clone());
+
+        for (schema_idx, value) in values.iter().enumerate() {
+            // Find the column in the descriptor by looking at schema_index
+            // The descriptor has columns sorted by fixed-size-first, but we need to
+            // find the column that corresponds to this schema index
+            let col_idx = descriptor
+                .columns
+                .iter()
+                .position(|c| c.schema_index == schema_idx);
+
+            if let Some(col_idx) = col_idx {
+                builder = Self::set_from_value(builder, col_idx, value);
+            }
+        }
+
+        builder.build()
+    }
+
+    /// Helper to set a builder value from a Value.
+    fn set_from_value(builder: RowBuilder, col_idx: usize, value: &Value) -> RowBuilder {
+        match value {
+            Value::Bool(v) => builder.set_bool(col_idx, *v),
+            Value::I32(v) => builder.set_i32(col_idx, *v),
+            Value::U32(v) => builder.set_u32(col_idx, *v),
+            Value::I64(v) => builder.set_i64(col_idx, *v),
+            Value::F64(v) => builder.set_f64(col_idx, *v),
+            Value::String(v) => builder.set_string(col_idx, v),
+            Value::Bytes(v) => builder.set_bytes(col_idx, v),
+            Value::Ref(v) => builder.set_ref(col_idx, *v),
+            Value::NullableNone => builder.set_null(col_idx),
+            Value::NullableSome(inner) => Self::set_from_value(builder, col_idx, inner),
+            Value::Row(owned_row) => {
+                // For nested rows, we set as a single-item array
+                builder.set_array(col_idx, &[owned_row.clone()])
+            }
+            Value::Array(items) => {
+                builder.set_array(col_idx, items)
+            }
             // TODO: Handle Blob, BlobArray
             _ => builder,
         }
@@ -1101,6 +1339,85 @@ impl RowBuilder {
         }
     }
 
+    /// Set an array column value.
+    ///
+    /// The items are encoded as: `[item_count: varint][item1_len: varint][item1_data]...`
+    pub fn set_array(mut self, col_idx: usize, items: &[OwnedRow]) -> Self {
+        if let Some(col) = self.descriptor.columns.get(col_idx) {
+            if !col.col_type.is_fixed_size() {
+                let var_idx = col.offset;
+                match &col.col_type {
+                    ColType::Array { .. } => {
+                        let mut data = Vec::new();
+                        // Write item count
+                        encode_varint(items.len(), &mut data);
+                        // Write each item: length prefix + data
+                        for item in items {
+                            encode_varint(item.buffer.len(), &mut data);
+                            data.extend_from_slice(&item.buffer);
+                        }
+                        self.variable_sections[var_idx] = data;
+                    }
+                    ColType::NullableArray { .. } => {
+                        let mut data = vec![1u8]; // present flag
+                        // Write item count
+                        encode_varint(items.len(), &mut data);
+                        // Write each item: length prefix + data
+                        for item in items {
+                            encode_varint(item.buffer.len(), &mut data);
+                            data.extend_from_slice(&item.buffer);
+                        }
+                        self.variable_sections[var_idx] = data;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        self
+    }
+
+    /// Set an array column value by name.
+    pub fn set_array_by_name(self, name: &str, items: &[OwnedRow]) -> Self {
+        if let Some(idx) = self.descriptor.column_index(name) {
+            self.set_array(idx, items)
+        } else {
+            self
+        }
+    }
+
+    /// Set a column value from a RowValue.
+    ///
+    /// This is useful when copying values between rows or when
+    /// working with dynamically typed row data.
+    pub fn set_from_row_value(self, idx: usize, value: RowValue<'_>) -> Self {
+        match value {
+            RowValue::Bool(v) => self.set_bool(idx, v),
+            RowValue::I32(v) => self.set_i32(idx, v),
+            RowValue::U32(v) => self.set_u32(idx, v),
+            RowValue::I64(v) => self.set_i64(idx, v),
+            RowValue::F64(v) => self.set_f64(idx, v),
+            RowValue::String(v) => self.set_string(idx, v),
+            RowValue::Bytes(v) => self.set_bytes(idx, v),
+            RowValue::Ref(v) => self.set_ref(idx, v),
+            RowValue::Null => self.set_null(idx),
+            RowValue::Array(arr) => {
+                // Collect items into OwnedRows
+                let items: Vec<OwnedRow> = arr
+                    .iter()
+                    .map(|row_ref| {
+                        OwnedRow::new(
+                            Arc::new(row_ref.descriptor.clone()),
+                            row_ref.buffer.to_vec(),
+                        )
+                    })
+                    .collect();
+                self.set_array(idx, &items)
+            }
+            // TODO: Handle Blob, BlobArray
+            _ => self,
+        }
+    }
+
     /// Build the final row buffer.
     pub fn build(self) -> OwnedRow {
         let mut buffer = self.fixed_section;
@@ -1155,32 +1472,21 @@ pub fn project_row(
 
 /// Join two rows by concatenating their buffers.
 ///
-/// This is a more efficient operation than project_row for JOINs,
-/// as it can memcpy entire sections.
+/// Matches columns by name from left and right rows to the target descriptor.
+/// This handles the case where the target descriptor may have a different
+/// column order due to fixed-first reordering.
 pub fn join_rows(
     left: RowRef<'_>,
     right: RowRef<'_>,
     target_descriptor: Arc<RowDescriptor>,
 ) -> OwnedRow {
-    // For now, use the simple approach via builder
-    // TODO: Optimize with direct memcpy of fixed sections
-    let left_col_count = left.descriptor.columns.len();
-    let right_col_count = right.descriptor.columns.len();
+    let mut builder = RowBuilder::new(target_descriptor.clone());
 
-    let source_cols: Vec<usize> = (0..left_col_count)
-        .chain((0..right_col_count).map(|i| left_col_count + i))
-        .collect();
-
-    // Create a temporary combined row view
-    // For now, just build using the builder
-    let mut builder = RowBuilder::new(target_descriptor);
-
-    for (target_idx, source_idx) in source_cols.iter().enumerate() {
-        let value = if *source_idx < left_col_count {
-            left.get(*source_idx)
-        } else {
-            right.get(*source_idx - left_col_count)
-        };
+    // For each target column, find the value from left or right row by name
+    for (target_idx, target_col) in target_descriptor.columns.iter().enumerate() {
+        // Try left row first
+        let value = left.get_by_name(&target_col.name)
+            .or_else(|| right.get_by_name(&target_col.name));
 
         if let Some(value) = value {
             builder = match value {
@@ -1233,6 +1539,12 @@ fn decode_varint(data: &[u8]) -> Option<(usize, usize)> {
     }
 
     None
+}
+
+/// Read a varint from data, returning (value, bytes_consumed).
+/// Panics on malformed data (used for internal buffer parsing).
+fn read_varint(data: &[u8]) -> (usize, usize) {
+    decode_varint(data).expect("malformed varint in buffer")
 }
 
 #[cfg(test)]
@@ -1381,7 +1693,7 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_conversion_roundtrip() {
+    fn test_from_values() {
         use super::super::schema::{ColumnDef, ColumnType, TableSchema};
 
         // Create a table schema
@@ -1397,38 +1709,20 @@ mod tests {
         // Create a RowDescriptor from the schema
         let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
 
-        // Create a legacy Row
-        let id = ObjectId::new(12345);
-        let legacy_row = Row::new(
-            id,
-            vec![
+        // Create an OwnedRow from values
+        let owned_row = OwnedRow::from_values(
+            &[
                 Value::String("Alice".to_string()),
                 Value::I32(30),
                 Value::NullableSome(Box::new(Value::F64(95.5))),
             ],
+            desc.clone(),
         );
-
-        // Convert to OwnedRow
-        let owned_row = OwnedRow::from_legacy_row(&legacy_row, &schema, desc.clone());
 
         // Verify values
         assert_eq!(owned_row.get_by_name("name"), Some(RowValue::String("Alice")));
         assert_eq!(owned_row.get_by_name("age"), Some(RowValue::I32(30)));
         assert_eq!(owned_row.get_by_name("score"), Some(RowValue::F64(95.5)));
-
-        // Convert back to legacy Row (in schema order)
-        let converted_back = owned_row.to_legacy_row_with_schema(id, &schema);
-        assert_eq!(converted_back.id, legacy_row.id);
-        assert_eq!(converted_back.values.len(), legacy_row.values.len());
-
-        // Check individual values
-        assert_eq!(converted_back.values[0].as_str(), Some("Alice"));
-        assert_eq!(converted_back.values[1].as_i32(), Some(30));
-        // The score comes back as NullableSome(F64(95.5))
-        match &converted_back.values[2] {
-            Value::NullableSome(inner) => assert_eq!(inner.as_f64(), Some(95.5)),
-            _ => panic!("Expected NullableSome for nullable column"),
-        }
     }
 
     #[test]

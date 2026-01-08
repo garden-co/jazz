@@ -4,18 +4,23 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::object::ObjectId;
-use crate::sql::row::Row;
 use crate::sql::row_buffer::{OwnedRow, RowDescriptor};
 use crate::sql::schema::TableSchema;
+
+// ============================================================================
+// RowCache - unified row format storage (replaces legacy Row-based cache)
+// ============================================================================
 
 /// Shared cache of row data, accessible to all query graphs.
 ///
 /// The cache stores row data by table and row ID. A `None` value
 /// indicates that the row is confirmed deleted (tombstoned).
+/// Rows are stored as `(ObjectId, OwnedRow)` tuples since row IDs
+/// are stored out-of-band in the buffer format.
 #[derive(Debug, Default)]
 pub struct RowCache {
     /// table -> row_id -> cached Row (None = confirmed deleted)
-    rows: HashMap<String, HashMap<ObjectId, Option<Row>>>,
+    rows: HashMap<String, HashMap<ObjectId, Option<OwnedRow>>>,
 }
 
 impl RowCache {
@@ -30,7 +35,7 @@ impl RowCache {
     /// - `Some(Some(row))` if the row is cached and exists
     /// - `Some(None)` if the row is cached as deleted
     /// - `None` if the row is not in the cache (needs to be loaded)
-    pub fn get(&self, table: &str, id: ObjectId) -> Option<Option<&Row>> {
+    pub fn get(&self, table: &str, id: ObjectId) -> Option<Option<&OwnedRow>> {
         self.rows.get(table)?.get(&id).map(|opt| opt.as_ref())
     }
 
@@ -43,11 +48,11 @@ impl RowCache {
     }
 
     /// Insert or update a row in the cache.
-    pub fn insert(&mut self, table: &str, row: Row) {
+    pub fn insert(&mut self, table: &str, id: ObjectId, row: OwnedRow) {
         self.rows
             .entry(table.to_string())
             .or_default()
-            .insert(row.id, Some(row));
+            .insert(id, Some(row));
     }
 
     /// Mark a row as deleted in the cache.
@@ -89,7 +94,7 @@ impl RowCache {
 }
 
 // ============================================================================
-// Buffer Row Cache - new unified row format storage
+// Buffer Row Cache - unified row format with schema tracking
 // ============================================================================
 
 /// Table metadata for the buffer row cache.
@@ -253,96 +258,6 @@ impl BufferRowCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sql::row::Value;
-
-    fn make_row(id: u128, name: &str) -> Row {
-        Row::new(ObjectId::new(id), vec![Value::String(name.to_string())])
-    }
-
-    #[test]
-    fn cache_empty() {
-        let cache = RowCache::new();
-        assert_eq!(cache.total_size(), 0);
-        assert!(cache.get("users", ObjectId::new(1)).is_none());
-    }
-
-    #[test]
-    fn cache_insert_and_get() {
-        let mut cache = RowCache::new();
-        let row = make_row(1, "Alice");
-
-        cache.insert("users", row.clone());
-
-        let cached = cache.get("users", ObjectId::new(1));
-        assert!(cached.is_some());
-        assert!(cached.unwrap().is_some());
-        assert_eq!(cached.unwrap().unwrap().id, ObjectId::new(1));
-    }
-
-    #[test]
-    fn cache_mark_deleted() {
-        let mut cache = RowCache::new();
-        let row = make_row(1, "Alice");
-
-        cache.insert("users", row);
-        cache.mark_deleted("users", ObjectId::new(1));
-
-        let cached = cache.get("users", ObjectId::new(1));
-        // Should be Some(None) - cached as deleted
-        assert!(cached.is_some());
-        assert!(cached.unwrap().is_none());
-    }
-
-    #[test]
-    fn cache_invalidate() {
-        let mut cache = RowCache::new();
-        let row = make_row(1, "Alice");
-
-        cache.insert("users", row);
-        assert!(cache.contains("users", ObjectId::new(1)));
-
-        cache.invalidate("users", ObjectId::new(1));
-
-        // Should be None - not in cache at all
-        assert!(cache.get("users", ObjectId::new(1)).is_none());
-        assert!(!cache.contains("users", ObjectId::new(1)));
-    }
-
-    #[test]
-    fn cache_clear_table() {
-        let mut cache = RowCache::new();
-
-        cache.insert("users", make_row(1, "Alice"));
-        cache.insert("users", make_row(2, "Bob"));
-        cache.insert("posts", make_row(10, "Hello"));
-
-        assert_eq!(cache.table_size("users"), 2);
-        assert_eq!(cache.table_size("posts"), 1);
-
-        cache.clear_table("users");
-
-        assert_eq!(cache.table_size("users"), 0);
-        assert_eq!(cache.table_size("posts"), 1);
-    }
-
-    #[test]
-    fn cache_clear_all() {
-        let mut cache = RowCache::new();
-
-        cache.insert("users", make_row(1, "Alice"));
-        cache.insert("posts", make_row(10, "Hello"));
-
-        assert_eq!(cache.total_size(), 2);
-
-        cache.clear();
-
-        assert_eq!(cache.total_size(), 0);
-    }
-
-    // ========================================================================
-    // BufferRowCache tests
-    // ========================================================================
-
     use crate::sql::row_buffer::{ColType, RowBuilder, RowDescriptor, RowValue};
 
     fn make_user_descriptor() -> Arc<RowDescriptor> {

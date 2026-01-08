@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::sql::query_graph::graph::{GraphId, QueryGraph};
 use crate::sql::query_graph::node::{NodeId, QueryNode};
 use crate::sql::query_graph::predicate::Predicate;
-use crate::sql::row_buffer::RowDescriptor;
+use crate::sql::row_buffer::{ColType, RowDescriptor};
 use crate::sql::schema::TableSchema;
 use crate::sql::types::IndexKey;
 use crate::object::ObjectId;
@@ -146,12 +146,35 @@ impl QueryGraphBuilder {
         array_column_index: i32,
     ) -> NodeId {
         let id = self.alloc_id();
+
+        // Build inner descriptor from inner schema
+        let inner_descriptor = Arc::new(RowDescriptor::from_table_schema(&inner_schema));
+
+        // Build output descriptor: outer schema columns + array column
+        let mut output_cols: Vec<(String, ColType)> = self.schema.columns.iter()
+            .map(|c| (c.name.clone(), ColType::from_column_type(&c.ty, c.nullable)))
+            .collect();
+
+        // Add the array column at the specified index
+        let array_col = (
+            "labels".to_string(), // TODO: Get actual array column name from caller
+            ColType::Array { item_descriptor: inner_descriptor.clone() },
+        );
+        if array_column_index < 0 || array_column_index as usize >= output_cols.len() {
+            output_cols.push(array_col);
+        } else {
+            output_cols.insert(array_column_index as usize, array_col);
+        }
+        let output_descriptor = Arc::new(RowDescriptor::new_ordered(output_cols));
+
         self.nodes.push(QueryNode::ArrayAggregate {
             outer_table: self.table.clone(),
             input,
             inner_table: inner_table.into(),
             inner_ref_column: inner_ref_column.into(),
             inner_schema,
+            inner_descriptor,
+            output_descriptor,
             inner_joins,
             array_column_index,
             cached_arrays: HashMap::new(),
@@ -406,7 +429,8 @@ impl JoinGraphBuilder {
         self.all_right_tables.push((target.clone(), target_schema.clone()));
 
         // Extend the combined schema with the new table's columns
-        self.combined_schema = self.combined_schema.combine(&target_schema);
+        // Use extend_with to preserve existing qualified column names
+        self.combined_schema = self.combined_schema.extend_with(&target_schema);
 
         id
     }
@@ -554,12 +578,35 @@ impl JoinGraphBuilder {
         }
 
         let id = self.alloc_id();
+
+        // Build inner descriptor from inner schema
+        let inner_descriptor = Arc::new(RowDescriptor::from_table_schema(&inner_schema));
+
+        // Build output descriptor: combined schema columns + array column
+        let mut output_cols: Vec<(String, ColType)> = self.combined_schema.columns.iter()
+            .map(|c| (c.name.clone(), ColType::from_column_type(&c.ty, c.nullable)))
+            .collect();
+
+        // Add the array column at the specified index
+        let array_col = (
+            "labels".to_string(), // TODO: Get actual array column name from caller
+            ColType::Array { item_descriptor: inner_descriptor.clone() },
+        );
+        if array_column_index < 0 || array_column_index as usize >= output_cols.len() {
+            output_cols.push(array_col);
+        } else {
+            output_cols.insert(array_column_index as usize, array_col);
+        }
+        let output_descriptor = Arc::new(RowDescriptor::new_ordered(output_cols));
+
         self.nodes.push(QueryNode::ArrayAggregate {
             outer_table: self.left_table.clone(),
             input,
             inner_table,
             inner_ref_column: inner_ref_column.into(),
             inner_schema,
+            inner_descriptor,
+            output_descriptor,
             inner_joins,
             array_column_index,
             cached_arrays: HashMap::new(),

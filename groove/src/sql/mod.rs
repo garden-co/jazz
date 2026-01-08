@@ -28,7 +28,7 @@ pub use policy::{
     PolicyExpr, PolicyLookup, PolicyResult, PolicyValue, RowLookup, TablePolicies,
     clear_policy_warnings,
 };
-pub use row::{Row, RowError, Value, decode_row, encode_row};
+pub use row::{RowError, Value, decode_row, encode_row};
 pub use row_buffer::{
     ColDescriptor, ColType, OwnedRow, RowBuilder, RowDescriptor, RowRef, RowValue, join_rows,
     project_row,
