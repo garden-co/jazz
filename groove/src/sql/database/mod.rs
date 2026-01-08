@@ -573,6 +573,12 @@ impl DatabaseState {
             // Check if we need to evaluate expressions (for ARRAY subqueries)
             match &select.projection {
                 Projection::Expressions(exprs) => {
+                    // Build output descriptor from projection expressions
+                    let output_descriptor = Arc::new(self.build_projection_descriptor(
+                        exprs,
+                        &primary_schema,
+                    ));
+
                     // Evaluate each expression for each row
                     filtered
                         .into_iter()
@@ -585,9 +591,7 @@ impl DatabaseState {
                                 table_alias,
                                 &primary_schema,
                             );
-                            // Build output row - for now just use primary descriptor
-                            // TODO: build output descriptor from projection
-                            let output = OwnedRow::from_values(&values, primary_descriptor.clone());
+                            let output = OwnedRow::from_values(&values, output_descriptor.clone());
                             (id, output)
                         })
                         .collect()
@@ -655,6 +659,117 @@ impl DatabaseState {
             }
         }
         true
+    }
+
+    /// Build a row descriptor from projection expressions.
+    ///
+    /// This is used to create the output descriptor for queries with ARRAY subqueries
+    /// or other computed columns.
+    fn build_projection_descriptor(
+        &self,
+        exprs: &[SelectExpr],
+        outer_schema: &TableSchema,
+    ) -> RowDescriptor {
+        let cols: Vec<(String, ColType)> = exprs
+            .iter()
+            .enumerate()
+            .map(|(idx, expr)| {
+                let (name, col_type) = self.infer_expr_type(expr, outer_schema, idx);
+                (name, col_type)
+            })
+            .collect();
+        RowDescriptor::new_ordered(cols)
+    }
+
+    /// Infer the type and name of a projection expression.
+    fn infer_expr_type(
+        &self,
+        expr: &SelectExpr,
+        outer_schema: &TableSchema,
+        idx: usize,
+    ) -> (String, ColType) {
+        match expr {
+            SelectExpr::Column(qc) => {
+                // Look up column type from schema
+                if let Some(col) = outer_schema.columns.iter().find(|c| c.name == qc.column) {
+                    let col_type = ColType::from_column_type(&col.ty, col.nullable);
+                    (qc.column.clone(), col_type)
+                } else if qc.column == "id" {
+                    // Special case: id column
+                    (qc.column.clone(), ColType::Ref)
+                } else {
+                    // Default to nullable string if not found
+                    (qc.column.clone(), ColType::NullableString)
+                }
+            }
+            SelectExpr::TableRow(alias) => {
+                // Table row reference - this returns a Row type (the whole row)
+                // Build the item descriptor from the outer schema
+                let item_descriptor = Arc::new(RowDescriptor::from_table_schema(outer_schema));
+                (alias.clone(), ColType::Array { item_descriptor })
+            }
+            SelectExpr::ArraySubquery(subquery) => {
+                // Array subqueries return Array type
+                let name = format!("_array_{}", idx);
+
+                // Build item descriptor based on subquery's projection and table
+                let inner_table = &subquery.from.table;
+                let inner_alias = subquery.from.alias.as_deref();
+
+                if let Some(inner_schema) = self.get_schema(inner_table) {
+                    let item_descriptor = match &subquery.projection {
+                        Projection::All | Projection::TableAll(_) => {
+                            // SELECT * - return table schema
+                            Arc::new(RowDescriptor::from_table_schema(&inner_schema))
+                        }
+                        Projection::Expressions(exprs) => {
+                            // Check if selecting whole table via alias
+                            if exprs.len() == 1 {
+                                if let SelectExpr::Column(qc) = &exprs[0] {
+                                    if qc.table.is_none() {
+                                        let col_name = &qc.column;
+                                        if inner_alias == Some(col_name.as_str()) || col_name == inner_table {
+                                            return (name, ColType::Array {
+                                                item_descriptor: Arc::new(RowDescriptor::from_table_schema(&inner_schema))
+                                            });
+                                        }
+                                    }
+                                }
+                                if let SelectExpr::TableRow(alias) = &exprs[0] {
+                                    if inner_alias == Some(alias.as_str()) || alias == inner_table {
+                                        return (name, ColType::Array {
+                                            item_descriptor: Arc::new(RowDescriptor::from_table_schema(&inner_schema))
+                                        });
+                                    }
+                                }
+                            }
+                            // Build descriptor from expressions
+                            Arc::new(self.build_projection_descriptor(exprs, &inner_schema))
+                        }
+                        Projection::Columns(cols) => {
+                            // Build descriptor from specific columns
+                            let col_defs: Vec<(String, ColType)> = cols.iter().filter_map(|qc| {
+                                inner_schema.columns.iter().find(|c| c.name == qc.column)
+                                    .map(|c| (qc.column.clone(), ColType::from_column_type(&c.ty, c.nullable)))
+                            }).collect();
+                            Arc::new(RowDescriptor::new_ordered(col_defs))
+                        }
+                    };
+                    (name, ColType::Array { item_descriptor })
+                } else {
+                    // Fallback: couldn't find inner table schema
+                    let item_descriptor = Arc::new(RowDescriptor::new_ordered(vec![
+                        ("value".to_string(), ColType::String)
+                    ]));
+                    (name, ColType::Array { item_descriptor })
+                }
+            }
+            SelectExpr::Aliased { expr, alias } => {
+                // Use the alias as the name, infer type from inner expression
+                let (_, col_type) = self.infer_expr_type(expr, outer_schema, idx);
+                (alias.clone(), col_type)
+            }
+        }
     }
 
     /// Evaluate projection expressions for a single outer row (buffer format).
@@ -780,6 +895,7 @@ impl DatabaseState {
             Projection::Expressions(exprs) => {
                 // Check if it's just the table alias (returns whole row)
                 if exprs.len() == 1 {
+                    // Check for SelectExpr::Column variant
                     if let SelectExpr::Column(qc) = &exprs[0] {
                         if qc.table.is_none() {
                             let name = &qc.column;
@@ -787,6 +903,13 @@ impl DatabaseState {
                                 // Table alias - return whole rows
                                 return Value::Array(filtered.into_iter().map(|(_, row)| row).collect());
                             }
+                        }
+                    }
+                    // Check for SelectExpr::TableRow variant
+                    if let SelectExpr::TableRow(alias) = &exprs[0] {
+                        if inner_alias == Some(alias.as_str()) || alias == inner_table {
+                            // Table alias - return whole rows
+                            return Value::Array(filtered.into_iter().map(|(_, row)| row).collect());
                         }
                     }
                 }
@@ -804,8 +927,8 @@ impl DatabaseState {
                             &inner_schema,
                         );
                         // Build an OwnedRow from the projected values
-                        let descriptor = Arc::new(RowDescriptor::from_table_schema(&inner_schema));
-                        OwnedRow::from_values(&values, descriptor)
+                        let descriptor = self.build_projection_descriptor(exprs, &inner_schema);
+                        OwnedRow::from_values(&values, Arc::new(descriptor))
                     })
                     .collect()
             }

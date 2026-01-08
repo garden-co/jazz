@@ -2152,10 +2152,7 @@ fn incremental_query_with_array_subquery() {
 
 /// Test that JOIN + ArrayAggregate preserves nullable columns from joined tables.
 /// This directly tests the query graph without SQL parsing to isolate the issue.
-// TODO(GCO-1068): This test inspects internal Value::Array contents which need
-// to be updated when ArrayAggregate is fully migrated to buffer format.
 #[test]
-#[ignore = "Needs ArrayAggregate buffer format migration (GCO-1068)"]
 fn incremental_query_join_plus_array_aggregate_preserves_nullable_columns() {
     use groove::sql::query_graph::{JoinGraphBuilder, GraphId};
 
@@ -2328,8 +2325,7 @@ fn incremental_query_join_plus_array_aggregate_preserves_nullable_columns() {
     assert_eq!(rows.len(), 1, "Should return 1 issue");
 
     // Output is now (ObjectId, OwnedRow) format
-    // TODO(GCO-1068): When ArrayAggregate is migrated to buffer format,
-    // update this test to verify the internal values using RowValue accessors.
+    // ArrayAggregate uses buffer format - values can be verified using RowValue accessors
     let (id, _owned_row) = &rows[0];
     eprintln!("Row id: {:?}", id);
 }
@@ -2567,6 +2563,9 @@ fn incremental_query_sql_join_with_array_preserves_nullable_columns() {
 /// This tests the case where:
 ///   ARRAY(SELECT il.*, Labels as label FROM IssueLabels il JOIN Labels ON il.label = Labels.id WHERE il.issue = i.id)
 /// The ARRAY elements should include the resolved Labels row, not just the FK.
+///
+/// In buffer format, nested rows are stored as single-item arrays (ColType::Array)
+/// rather than a separate Value::Row type.
 #[test]
 fn incremental_query_array_with_nested_join() {
     let db = Database::in_memory();
@@ -2675,7 +2674,11 @@ fn incremental_query_array_with_nested_join() {
         );
 
         // Check that values[1] is a nested Row (resolved Labels)
-        if let Value::Row(label_row) = &issue_label_row.get_column(1).unwrap() {
+        // NOTE: In buffer format, nested rows are stored as single-item Arrays
+        if let Value::Array(label_arr) = &issue_label_row.get_column(1).unwrap() {
+            assert_eq!(label_arr.len(), 1, "Nested row should be a single-item array");
+            let label_row = &label_arr[0];
+
             eprintln!("Label row values (len={}):", label_row.descriptor.columns.len());
             for i in 0..label_row.descriptor.columns.len() {
                 eprintln!("  [{}]: {:?}", i, label_row.get_column(i));
@@ -2703,7 +2706,7 @@ fn incremental_query_array_with_nested_join() {
                 label_row.get_column(1).unwrap()
             );
         } else {
-            panic!("values[1] should be a Row (resolved Labels), got: {:?}", issue_label_row.get_column(1).unwrap());
+            panic!("values[1] should be an Array (nested row as single-item array), got: {:?}", issue_label_row.get_column(1).unwrap());
         }
     } else {
         panic!("values[1] should be an Array, got: {:?}", array);

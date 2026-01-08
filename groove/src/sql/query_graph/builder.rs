@@ -147,8 +147,9 @@ impl QueryGraphBuilder {
     ) -> NodeId {
         let id = self.alloc_id();
 
-        // Build inner descriptor from inner schema
-        let inner_descriptor = Arc::new(RowDescriptor::from_table_schema(&inner_schema));
+        // Build inner descriptor from inner schema, accounting for inner joins
+        // If inner_joins is non-empty, the join columns become nested Row/Array types
+        let inner_descriptor = Self::build_inner_descriptor_with_joins(&inner_schema, &inner_joins);
 
         // Build output descriptor: outer schema columns + array column
         let mut output_cols: Vec<(String, ColType)> = self.schema.columns.iter()
@@ -235,6 +236,38 @@ impl QueryGraphBuilder {
             node_indices,
             output_id,
         )
+    }
+
+    /// Build an inner descriptor that accounts for inner joins.
+    ///
+    /// When inner_joins is non-empty, join columns (Ref types) are converted to
+    /// Array types (single-item arrays containing the resolved Row).
+    fn build_inner_descriptor_with_joins(
+        inner_schema: &TableSchema,
+        inner_joins: &[(String, String, TableSchema)],
+    ) -> Arc<RowDescriptor> {
+        if inner_joins.is_empty() {
+            return Arc::new(RowDescriptor::from_table_schema(inner_schema));
+        }
+
+        // Build columns, converting join ref columns to Array types
+        let cols: Vec<(String, ColType)> = inner_schema.columns.iter()
+            .map(|col| {
+                // Check if this column is a join column
+                let join_info = inner_joins.iter().find(|(ref_col, _, _)| ref_col == &col.name);
+
+                if let Some((_, _, target_schema)) = join_info {
+                    // This is a join column - convert to Array type containing target rows
+                    let target_descriptor = Arc::new(RowDescriptor::from_table_schema(target_schema));
+                    (col.name.clone(), ColType::Array { item_descriptor: target_descriptor })
+                } else {
+                    // Regular column - use normal type conversion
+                    (col.name.clone(), ColType::from_column_type(&col.ty, col.nullable))
+                }
+            })
+            .collect();
+
+        Arc::new(RowDescriptor::new_ordered(cols))
     }
 }
 
@@ -579,8 +612,9 @@ impl JoinGraphBuilder {
 
         let id = self.alloc_id();
 
-        // Build inner descriptor from inner schema
-        let inner_descriptor = Arc::new(RowDescriptor::from_table_schema(&inner_schema));
+        // Build inner descriptor from inner schema, accounting for inner joins
+        // If inner_joins is non-empty, the join columns become nested Row/Array types
+        let inner_descriptor = QueryGraphBuilder::build_inner_descriptor_with_joins(&inner_schema, &inner_joins);
 
         // Build output descriptor: combined schema columns + array column
         let mut output_cols: Vec<(String, ColType)> = self.combined_schema.columns.iter()

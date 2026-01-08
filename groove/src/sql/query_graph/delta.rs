@@ -354,16 +354,16 @@ impl BufferJoinedRow {
         self.table_rows.keys().map(|s| s.as_str())
     }
 
-    /// Convert to an output OwnedRow by joining all tables' rows.
+    /// Convert to an output OwnedRow by merging all tables' rows.
     ///
     /// Creates a new row with columns from all tables concatenated.
-    /// The output descriptor is the join of all table descriptors.
+    /// Uses merge_rows to preserve buffer order and handle duplicate column names.
     pub fn to_output_row(&self) -> OwnedRow {
-        use crate::sql::row_buffer::{join_rows, RowBuilder};
+        use crate::sql::row_buffer::RowBuilder;
 
         // Start with the primary table's row
         let primary_row = match self.table_rows.get(&self.primary_table) {
-            Some((_, row)) => row.clone(),
+            Some((_, row)) => row,
             None => {
                 // No primary table row - return empty
                 let empty_desc = Arc::new(RowDescriptor::new([]));
@@ -371,16 +371,18 @@ impl BufferJoinedRow {
             }
         };
 
-        // Join with all other tables
-        let mut result = primary_row;
-        for (table, (_, row)) in &self.table_rows {
-            if table != &self.primary_table {
-                let joined_desc = Arc::new(result.descriptor.join(&row.descriptor));
-                result = join_rows(result.as_ref(), row.as_ref(), joined_desc);
-            }
+        // Collect all rows to merge: primary first, then others in stable order
+        let mut rows_to_merge: Vec<&OwnedRow> = vec![primary_row];
+        let mut other_tables: Vec<_> = self.table_rows.iter()
+            .filter(|(table, _)| *table != &self.primary_table)
+            .collect();
+        // Sort by table name for stable ordering
+        other_tables.sort_by(|(a, _), (b, _)| a.cmp(b));
+        for (_, (_, row)) in other_tables {
+            rows_to_merge.push(row);
         }
 
-        result
+        OwnedRow::merge_rows(&rows_to_merge)
     }
 
     /// Convert to an output OwnedRow with values in schema order.
@@ -393,9 +395,11 @@ impl BufferJoinedRow {
         let mut builder = RowBuilder::new(descriptor.clone());
 
         for (col_idx, col_def) in combined_schema.columns.iter().enumerate() {
-            if let Some((table, _col_name)) = col_def.name.split_once('.') {
+            // col_def.name is qualified like "folders.owner_id"
+            if let Some((table, col_name)) = col_def.name.split_once('.') {
                 if let Some((_, owned_row)) = self.table_rows.get(table) {
-                    if let Some(rv) = owned_row.get_by_name(&col_def.name) {
+                    // The individual owned_row has unqualified column names, so use col_name
+                    if let Some(rv) = owned_row.get_by_name(col_name) {
                         // Get the buffer column index for this schema column index
                         if let Some(buf_col_idx) = descriptor.columns.iter().position(|c| c.schema_index == col_idx) {
                             builder = builder.set_from_row_value(buf_col_idx, rv);

@@ -351,6 +351,9 @@ impl QueryGraph {
         // Load all rows from the primary (left) table
         let left_rows = db.read_all_rows(&table);
 
+        // Get the schema for qualification
+        let table_schema = self.all_schemas.get(&table).cloned().unwrap_or_else(|| self.schema.clone());
+
         for (id, owned) in left_rows {
             // Skip if this is the triggering row
             if skip_table == Some(table.as_str()) && skip_id == Some(id) {
@@ -359,8 +362,9 @@ impl QueryGraph {
 
             cache.insert(&table, id, owned.clone());
 
-            // Process through nodes - rows already have qualified columns from read_all_rows
-            let delta = RowDelta::Added { id, row: owned };
+            // For JOIN queries, qualify the column names so predicates with qualified names work
+            let qualified_row = owned.qualify_columns(&table, &table_schema);
+            let delta = RowDelta::Added { id, row: qualified_row };
             self.process_delta_through_nodes(delta, &table, cache, db);
         }
     }
@@ -999,11 +1003,7 @@ mod tests {
         (ObjectId::new(id), row)
     }
 
-    // TODO(GCO-1068): ArrayAggregate tests need to be updated when ArrayAggregate
-    // internal logic is migrated to buffer format. These tests currently check
-    // internal Value::Array contents which are still using legacy Row format.
     #[test]
-    #[ignore = "Needs ArrayAggregate buffer format migration (GCO-1068)"]
     fn array_aggregate_outer_added() {
         let outer_schema = folder_schema();
         let inner_schema = note_schema();
@@ -1034,7 +1034,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Needs ArrayAggregate buffer format migration (GCO-1068)"]
     fn array_aggregate_inner_added_updates_outer() {
         let outer_schema = folder_schema();
         let inner_schema = note_schema();
@@ -1069,7 +1068,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Needs ArrayAggregate buffer format migration (GCO-1068)"]
     fn array_aggregate_inner_removed_updates_outer() {
         let outer_schema = folder_schema();
         let inner_schema = note_schema();

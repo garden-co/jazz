@@ -565,7 +565,7 @@ impl RowDescriptor {
     pub fn concat_preserving_buffer_order(descriptors: &[&RowDescriptor]) -> RowDescriptor {
         // First, compute the logical schema order for each source descriptor.
         // For each descriptor, we need to know the schema indices in order.
-        let mut logical_order: Vec<(usize, usize, &ColDescriptor)> = Vec::new(); // (desc_idx, original_schema_idx, col)
+        let mut logical_order: Vec<(usize, usize, &ColDescriptor)> = Vec::new(); // (desc_idx, new_logical_idx, col)
 
         let mut logical_idx = 0;
         for (desc_idx, desc) in descriptors.iter().enumerate() {
@@ -573,7 +573,7 @@ impl RowDescriptor {
             let mut cols_by_schema: Vec<_> = desc.columns.iter().enumerate().collect();
             cols_by_schema.sort_by_key(|(_, c)| c.schema_index);
 
-            for (buf_idx, col) in cols_by_schema {
+            for (_, col) in cols_by_schema {
                 logical_order.push((desc_idx, logical_idx, col));
                 logical_idx += 1;
             }
@@ -588,9 +588,10 @@ impl RowDescriptor {
             for col in &desc.columns {
                 let mut new_col = col.clone();
 
-                // Find this column's logical index
+                // Find this column's logical index by matching on original schema_index
+                // (schema_index is unique within a descriptor)
                 let logical_schema_idx = logical_order.iter()
-                    .find(|(d, _, c)| *d == desc_idx && c.name == col.name)
+                    .find(|(d, _, c)| *d == desc_idx && c.schema_index == col.schema_index)
                     .map(|(_, idx, _)| *idx)
                     .unwrap_or(columns.len());
 
@@ -1115,8 +1116,8 @@ impl OwnedRow {
             Value::Array(items) => {
                 builder.set_array(col_idx, items)
             }
-            // TODO: Handle Blob, BlobArray
-            _ => builder,
+            Value::Blob(content_ref) => builder.set_blob(col_idx, content_ref.clone()),
+            Value::BlobArray(refs) => builder.set_blob_array(col_idx, refs),
         }
     }
 
@@ -1342,6 +1343,56 @@ impl RowBuilder {
                     ColType::NullableBytes => {
                         let mut data = vec![1u8]; // present
                         data.extend_from_slice(value);
+                        self.variable_sections[var_idx] = data;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        self
+    }
+
+    /// Set a blob column value.
+    pub fn set_blob(mut self, col_idx: usize, value: ContentRef) -> Self {
+        if let Some(col) = self.descriptor.columns.get(col_idx) {
+            if !col.col_type.is_fixed_size() {
+                let var_idx = col.offset;
+                match &col.col_type {
+                    ColType::Blob => {
+                        self.variable_sections[var_idx] = value.to_row_bytes();
+                    }
+                    ColType::NullableBlob => {
+                        let mut data = vec![1u8]; // present
+                        data.extend_from_slice(&value.to_row_bytes());
+                        self.variable_sections[var_idx] = data;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        self
+    }
+
+    /// Set a blob array column value.
+    pub fn set_blob_array(mut self, col_idx: usize, values: &[ContentRef]) -> Self {
+        if let Some(col) = self.descriptor.columns.get(col_idx) {
+            if !col.col_type.is_fixed_size() {
+                let var_idx = col.offset;
+                match &col.col_type {
+                    ColType::BlobArray => {
+                        let mut data = Vec::new();
+                        encode_varint(values.len(), &mut data);
+                        for v in values {
+                            data.extend_from_slice(&v.to_row_bytes());
+                        }
+                        self.variable_sections[var_idx] = data;
+                    }
+                    ColType::NullableBlobArray => {
+                        let mut data = vec![1u8]; // present
+                        encode_varint(values.len(), &mut data);
+                        for v in values {
+                            data.extend_from_slice(&v.to_row_bytes());
+                        }
                         self.variable_sections[var_idx] = data;
                     }
                     _ => {}
