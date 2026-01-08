@@ -1,32 +1,24 @@
 import { co, z } from "jazz-tools";
 
+// #region BrokenSchema
 export const Task = co.map({
   title: z.string(),
   description: co.plainText().optional(),
   completed: z.boolean().optional(),
+  // @ts-expect-error This is intentionally broken
+  get project() {
+    return Project;
+  },
 });
 
-// #region BrokenSchema
 // @ts-expect-error This is intentionally broken
 export const Project = co
   .map({
     name: z.string(),
     tasks: co.list(Task),
-    get projectManager() {
-      // As MyAppAccount refers back to Project, this creates a circular reference that TypeScript cannot resolve.
-      return MyAppAccount;
-    },
   })
-  .resolved({
-    projectManager: true,
-  });
-
-export const MyAppAccount = co.account({
-  profile: co.profile(),
-  root: co.map({}),
   // @ts-expect-error This is intentionally broken
-  get projects(): co.List<typeof Project> {
-    return co.list(Project);
-  },
-});
+  .resolved({
+    tasks: true,
+  });
 // #endregion

@@ -135,7 +135,7 @@ You can also specify resolve queries at the schema level, using the `.resolved()
 ```
 </CodeGroup>
 
-It is possible that in more complex cases, TypeScript cannot accurately infer types with circular references. For example, below, attempting to resolve `createdBy` on `Project` will in turn force `MyAppAccount` to resolve `projects`, which refers back to `Project`. This will result in an error.
+It is possible that in more complex cases, TypeScript cannot accurately infer types with circular references. For example, below, attempting to resolve `Project` on `Task` will in turn force `Project` to resolve `tasks`, which refers back to `Task`. This will result in an error.
 
 <CodeGroup preferWrap>
 ```ts broken-schema.ts#BrokenSchema
@@ -148,8 +148,6 @@ In cases where you come across this, you can create a shallowly-loaded version o
 ```ts fixed-schema.ts#FixedSchema
 ```
 </CodeGroup>
-
-
 
 
 ## Loading Errors

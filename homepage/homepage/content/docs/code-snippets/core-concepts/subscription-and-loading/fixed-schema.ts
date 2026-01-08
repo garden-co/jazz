@@ -1,32 +1,24 @@
 import { co, z } from "jazz-tools";
 
+// #region FixedSchema
 export const Task = co.map({
   title: z.string(),
   description: co.plainText().optional(),
   completed: z.boolean().optional(),
+  get project() {
+    // Use a shallowly loaded project reference here
+    return ShallowProject;
+  },
 });
 
-// #region FixedSchema
-// Don't resolve the circular reference here...
-const ShallowProject = co.map({
+// Which you create here
+export const ShallowProject = co.map({
   name: z.string(),
   tasks: co.list(Task),
-  get projectManager() {
-    return MyAppAccount;
-  },
 });
 
-// Do it separately here
+// And then resolve separately here
 export const Project = ShallowProject.resolved({
-  projectManager: true,
-});
-
-export const MyAppAccount = co.account({
-  profile: co.profile(),
-  root: co.map({}),
-  // And use the shallowly loaded project here too
-  get projects(): co.List<typeof ShallowProject> {
-    return co.list(ShallowProject);
-  },
+  tasks: true,
 });
 // #endregion
