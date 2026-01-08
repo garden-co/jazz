@@ -1,17 +1,15 @@
 import { Counter, ValueType, metrics } from "@opentelemetry/api";
 import type { PeerState } from "../PeerState.js";
-import { SYNC_SCHEDULER_CONFIG } from "../config.js";
-import { logger } from "../logger.js";
 import type { SyncMessage } from "../sync.js";
 import { LinkedList } from "./LinkedList.js";
 
 /**
- * A queue that schedules messages across different peers using a round-robin approach.
+ * A queue that manages incoming sync messages across different peers using a round-robin approach.
  *
  * This class manages incoming sync messages from multiple peers, ensuring fair processing
- * by cycling through each peer's message queue in a round-robin fashion. It also implements
- * collaborative scheduling on message processing, pausing when the main thread is blocked
- * for more than 50ms.
+ * by cycling through each peer's message queue in a round-robin fashion.
+ *
+ * Queue processing and scheduling is handled by SyncManager.processQueues().
  */
 export class IncomingMessagesQueue {
   private pullCounter: Counter;
@@ -21,7 +19,7 @@ export class IncomingMessagesQueue {
   peerToQueue: WeakMap<PeerState, LinkedList<SyncMessage>>;
   currentQueue = 0;
 
-  constructor() {
+  constructor(private processQueues: () => void) {
     this.pullCounter = metrics
       .getMeter("cojson")
       .createCounter(`jazz.messagequeue.incoming.pulled`, {
@@ -74,6 +72,8 @@ export class IncomingMessagesQueue {
     this.pushCounter.add(1, {
       peerRole: peer.role,
     });
+
+    this.processQueues();
   }
 
   public pull() {
@@ -106,37 +106,5 @@ export class IncomingMessagesQueue {
     }
 
     return undefined;
-  }
-
-  processing = false;
-
-  async processQueue(callback: (msg: SyncMessage, peer: PeerState) => void) {
-    this.processing = true;
-
-    let entry: { msg: SyncMessage; peer: PeerState } | undefined;
-    let lastTimer = performance.now();
-
-    while ((entry = this.pull())) {
-      const { msg, peer } = entry;
-
-      try {
-        callback(msg, peer);
-      } catch (err) {
-        logger.error("Error processing message", { err });
-      }
-
-      const currentTimer = performance.now();
-
-      // We check if we have blocked the main thread for too long
-      // and if so, we schedule a timer task to yield to the event loop
-      if (
-        currentTimer - lastTimer >
-        SYNC_SCHEDULER_CONFIG.INCOMING_MESSAGES_TIME_BUDGET
-      ) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-    }
-
-    this.processing = false;
   }
 }

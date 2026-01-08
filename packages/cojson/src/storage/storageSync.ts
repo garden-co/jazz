@@ -1,4 +1,3 @@
-import { UpDownCounter, metrics } from "@opentelemetry/api";
 import {
   createContentMessage,
   exceedsRecommendedSize,
@@ -30,22 +29,25 @@ import type {
   StoredCoValueRow,
   StoredSessionRow,
 } from "./types.js";
+import {
+  ContentCallback,
+  StorageStreamingQueue,
+} from "../queue/StorageStreamingQueue.js";
+import { CO_VALUE_PRIORITY, getPriorityFromHeader } from "../priority.js";
 
 export class StorageApiSync implements StorageAPI {
-  private streamingCounter: UpDownCounter;
-
   private readonly dbClient: DBClientInterfaceSync;
   private loadedCoValues = new Set<RawCoID>();
 
+  /**
+   * Queue for streaming content that will be pulled by SyncManager.
+   * Only used when content requires streaming (multiple chunks) and priority is not HIGH.
+   */
+  readonly streamingQueue: StorageStreamingQueue;
+
   constructor(dbClient: DBClientInterfaceSync) {
     this.dbClient = dbClient;
-    this.streamingCounter = metrics
-      .getMeter("cojson")
-      .createUpDownCounter(`jazz.storage.streaming`, {
-        description: "Number of streaming coValues",
-        unit: "1",
-      });
-    this.streamingCounter.add(0);
+    this.streamingQueue = new StorageStreamingQueue();
   }
 
   knownStates = new StorageKnownState();
@@ -62,7 +64,7 @@ export class StorageApiSync implements StorageAPI {
     await this.loadCoValue(id, callback, done);
   }
 
-  async loadCoValue(
+  loadCoValue(
     id: string,
     callback: (data: NewContentMessage) => void,
     done?: (found: boolean) => void,
@@ -89,8 +91,18 @@ export class StorageApiSync implements StorageAPI {
 
       if (signatures.length > 0) {
         contentStreaming = true;
-        signaturesBySession.set(sessionRow.sessionID, signatures);
       }
+
+      const lastSignature = signatures[signatures.length - 1];
+
+      if (lastSignature?.signature !== sessionRow.lastSignature) {
+        signatures.push({
+          idx: sessionRow.lastIdx,
+          signature: sessionRow.lastSignature,
+        });
+      }
+
+      signaturesBySession.set(sessionRow.sessionID, signatures);
     }
 
     const knownState = this.knownStates.getKnownState(coValueRow.id);
@@ -106,76 +118,114 @@ export class StorageApiSync implements StorageAPI {
 
     this.loadedCoValues.add(coValueRow.id);
 
-    let contentMessage = createContentMessage(coValueRow.id, coValueRow.header);
+    const priority = getPriorityFromHeader(coValueRow.header);
+    const contentMessage = createContentMessage(
+      coValueRow.id,
+      coValueRow.header,
+    );
 
     if (contentStreaming) {
-      this.streamingCounter.add(1);
       contentMessage.expectContentUntil = knownState.sessions;
     }
 
+    const streamingQueue: ContentCallback[] = [];
+
     for (const sessionRow of allCoValueSessions) {
-      const signatures = signaturesBySession.get(sessionRow.sessionID) || [];
+      const signatures = signaturesBySession.get(sessionRow.sessionID);
 
-      let idx = 0;
-
-      const lastSignature = signatures[signatures.length - 1];
-
-      if (lastSignature?.signature !== sessionRow.lastSignature) {
-        signatures.push({
-          idx: sessionRow.lastIdx,
-          signature: sessionRow.lastSignature,
-        });
+      if (!signatures) {
+        throw new Error("Signatures not found for session");
       }
 
-      for (const signature of signatures) {
-        const newTxsInSession = this.dbClient.getNewTransactionInSession(
-          sessionRow.rowID,
-          idx,
-          signature.idx,
-        );
+      const firstSignature = signatures[0];
 
-        collectNewTxs({
-          newTxsInSession,
-          contentMessage,
-          sessionRow,
-          firstNewTxIdx: idx,
-          signature: signature.signature,
-        });
+      if (!firstSignature) {
+        continue;
+      }
 
-        idx = signature.idx + 1;
+      this.loadSessionTransactions(
+        contentMessage,
+        sessionRow,
+        0,
+        firstSignature,
+      );
 
-        if (signatures.length > 1) {
-          this.pushContentWithDependencies(
-            coValueRow,
-            contentMessage,
-            callback,
-          );
-          contentMessage = createContentMessage(
+      for (let i = 1; i < signatures.length; i++) {
+        const prevSignature = signatures[i - 1];
+
+        if (!prevSignature) {
+          throw new Error("Previous signature is nullish");
+        }
+
+        streamingQueue.push(() => {
+          const contentMessage = createContentMessage(
             coValueRow.id,
             coValueRow.header,
           );
 
-          // Introduce a delay to not block the main thread
-          // for the entire content processing
-          await new Promise((resolve) => setTimeout(resolve));
-        }
+          const signature = signatures[i];
+          if (!signature) throw new Error("Signature item is nullish");
+
+          this.loadSessionTransactions(
+            contentMessage,
+            sessionRow,
+            prevSignature.idx + 1,
+            signature,
+          );
+
+          if (Object.keys(contentMessage.new).length > 0) {
+            this.pushContentWithDependencies(
+              coValueRow,
+              contentMessage,
+              callback,
+            );
+          }
+        });
       }
     }
 
-    const hasNewContent = Object.keys(contentMessage.new).length > 0;
-
-    // If there is no new content but steaming is not active, it's the case for a coValue with the header but no transactions
-    // For streaming the push has already been done in the loop above
-    if (hasNewContent || !contentStreaming) {
-      this.pushContentWithDependencies(coValueRow, contentMessage, callback);
-    }
-
-    if (contentStreaming) {
-      this.streamingCounter.add(-1);
-    }
-
+    // Send the first chunk
+    this.pushContentWithDependencies(coValueRow, contentMessage, callback);
     this.knownStates.handleUpdate(coValueRow.id, knownState);
+
+    // Groups and accounts are streamed directly, other CoValues are queued
+    const useQueue = priority !== CO_VALUE_PRIORITY.HIGH;
+
+    for (const pushStreamingContent of streamingQueue) {
+      if (useQueue) {
+        this.streamingQueue.push(pushStreamingContent, priority);
+      } else {
+        pushStreamingContent();
+      }
+    }
+
+    // Trigger the queue to process the entries
+    if (useQueue) {
+      this.streamingQueue.emit();
+    }
+
     done?.(true);
+  }
+
+  private loadSessionTransactions(
+    contentMessage: NewContentMessage,
+    sessionRow: StoredSessionRow,
+    idx: number,
+    signature: Pick<SignatureAfterRow, "idx" | "signature">,
+  ) {
+    const newTxsInSession = this.dbClient.getNewTransactionInSession(
+      sessionRow.rowID,
+      idx,
+      signature.idx,
+    );
+
+    collectNewTxs({
+      newTxsInSession,
+      contentMessage,
+      sessionRow,
+      firstNewTxIdx: idx,
+      signature: signature.signature,
+    });
   }
 
   async pushContentWithDependencies(

@@ -356,13 +356,6 @@ describe("client syncs with a server with storage", () => {
 
     await largeMap.core.waitForSync();
 
-    // Test streaming counter during initial sync
-    // The streaming counter should be 0 after the sync is complete
-    const streamingCounterAfterSync = await metricReader.getMetricValue(
-      "jazz.storage.streaming",
-    );
-    expect(streamingCounterAfterSync).toBe(0);
-
     expect(
       SyncMessagesLog.getMessages({
         Group: group.core,
@@ -403,30 +396,10 @@ describe("client syncs with a server with storage", () => {
       storage,
     });
 
-    // Test streaming counter before loading the large coValue
-    const streamingCounterBeforeLoad = await metricReader.getMetricValue(
-      "jazz.storage.streaming",
-    );
-    expect(streamingCounterBeforeLoad).toBe(0);
-
     const promise = loadCoValueOrFail(client.node, largeMap.id);
-
-    // Test streaming counter during loading (should be 1 during streaming)
-    const streamingCounterDuringLoad = await metricReader.getMetricValue(
-      "jazz.storage.streaming",
-    );
-    expect(streamingCounterDuringLoad).toBe(1);
 
     const mapOnClient2 = await promise;
     await mapOnClient2.core.waitForFullStreaming();
-
-    // Test streaming counter after loading is complete (should be 0)
-    await waitFor(async () => {
-      const streamingCounterAfterLoad = await metricReader.getMetricValue(
-        "jazz.storage.streaming",
-      );
-      expect(streamingCounterAfterLoad).toBe(0);
-    });
 
     expect(
       SyncMessagesLog.getMessages({
@@ -440,8 +413,6 @@ describe("client syncs with a server with storage", () => {
         "client -> server | LOAD Group sessions: header/5",
         "storage -> client | CONTENT Map header: true new: After: 0 New: 73 expectContentUntil: header/200",
         "client -> server | LOAD Map sessions: header/200",
-        "server -> client | KNOWN Group sessions: header/5",
-        "server -> client | KNOWN Map sessions: header/200",
         "storage -> client | CONTENT Map header: true new: After: 73 New: 73",
         "storage -> client | CONTENT Map header: true new: After: 146 New: 54",
       ]
@@ -823,20 +794,20 @@ describe("client syncs with a server with storage", () => {
         "bob -> server | LOAD Map sessions: empty",
         "syncServer -> storage | LOAD Map sessions: empty",
         "storage -> syncServer | CONTENT ParentGroup header: true new: After: 0 New: 76 expectContentUntil: header/205",
+        "storage -> syncServer | CONTENT ParentGroup header: true new: After: 76 New: 73",
+        "storage -> syncServer | CONTENT ParentGroup header: true new: After: 149 New: 56",
         "storage -> syncServer | CONTENT Group header: true new: After: 0 New: 5",
         "storage -> syncServer | CONTENT Map header: true new: After: 0 New: 1",
         "server -> bob | CONTENT ParentGroup header: true new: After: 0 New: 76 expectContentUntil: header/205",
+        "server -> bob | CONTENT ParentGroup header: false new: After: 76 New: 73",
+        "server -> bob | CONTENT ParentGroup header: false new: After: 149 New: 56",
         "server -> bob | CONTENT Group header: true new: After: 0 New: 5",
         "server -> bob | CONTENT Map header: true new: After: 0 New: 1",
-        "storage -> syncServer | CONTENT ParentGroup header: true new: After: 76 New: 73",
-        "server -> bob | CONTENT ParentGroup header: false new: After: 76 New: 73 expectContentUntil: header/205",
         "bob -> server | KNOWN ParentGroup sessions: header/76",
+        "bob -> server | KNOWN ParentGroup sessions: header/149",
+        "bob -> server | KNOWN ParentGroup sessions: header/205",
         "bob -> server | KNOWN Group sessions: header/5",
         "bob -> server | KNOWN Map sessions: header/1",
-        "bob -> server | KNOWN ParentGroup sessions: header/149",
-        "storage -> syncServer | CONTENT ParentGroup header: true new: After: 149 New: 56",
-        "server -> bob | CONTENT ParentGroup header: false new: After: 149 New: 56",
-        "bob -> server | KNOWN ParentGroup sessions: header/205",
       ]
     `);
 
