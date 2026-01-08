@@ -251,10 +251,30 @@ export class JazzContextManager<
 
   /**
    * Authenticates the user with the given credentials
+   * @param credentials - The credentials to authenticate with
+   * @param forceContextCreation - If true, the context will be created even if the same account is already authenticated
    */
-  authenticate = async (credentials: AuthCredentials) => {
+  authenticate = async (
+    credentials: AuthCredentials,
+    forceContextCreation: boolean = false,
+  ) => {
     if (!this.props) {
       throw new Error("Props required");
+    }
+
+    // Check if already authenticated with the same account
+    // to avoid the creation of a new session
+    if (
+      !forceContextCreation &&
+      this.context &&
+      "me" in this.context &&
+      this.context.me.$jazz.id === credentials.accountID
+    ) {
+      console.log(
+        "Already authenticated with the same account",
+        credentials.accountID,
+      );
+      return;
     }
 
     if (
