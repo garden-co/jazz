@@ -469,8 +469,9 @@ describe("createAs", () => {
 
     const created = await CustomAccount.createAs(worker, {
       creationProps: { name: "Test Account" },
-      onCreate: async (account, loadedWorker) => {
+      onCreate: async (account, loadedWorker, credentials) => {
         executionOrder.push("onCreate");
+        expect(credentials.accountID).toBe(account.$jazz.id);
 
         // Verify migration ran before onCreate
         expect(executionOrder).toEqual(["migration", "onCreate"]);
