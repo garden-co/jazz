@@ -1,6 +1,7 @@
 import { MusicaAccount, MusicTrack } from "@/1_schema";
 import { MediaPlayer } from "@/5_useMediaPlayer";
 import { useMediaEndListener } from "@/lib/audio/useMediaEndListener";
+import { useMediaSession } from "@/lib/audio/useMediaSession";
 import { usePlayState } from "@/lib/audio/usePlayState";
 import { useKeyboardListener } from "@/lib/useKeyboardListener";
 import { useCoState, useSuspenseAccount } from "jazz-tools/react";
@@ -198,6 +199,20 @@ export function KeyboardListener({
   mediaPlayer: MediaPlayer;
 }) {
   const playState = usePlayState();
+  const activeTrack = useCoState(MusicTrack, mediaPlayer.activeTrackId);
+  const activePlaylistTitle = useSuspenseAccount(MusicaAccount, {
+    select: (me) =>
+      me.root.activePlaylist?.$isLoaded
+        ? (me.root.activePlaylist.title ?? "All tracks")
+        : "All tracks",
+  });
+
+  useMediaSession({
+    trackTitle: activeTrack?.$isLoaded ? activeTrack.title : undefined,
+    playlistTitle: activePlaylistTitle,
+    onPrevTrack: mediaPlayer.playPrevTrack,
+    onNextTrack: mediaPlayer.playNextTrack,
+  });
 
   useMediaEndListener(mediaPlayer.playNextTrack);
   useKeyboardListener("Space", () => {
