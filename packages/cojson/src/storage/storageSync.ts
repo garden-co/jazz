@@ -10,7 +10,7 @@ import {
   type StorageAPI,
   logger,
 } from "../exports.js";
-import { NewContentMessage } from "../sync.js";
+import { NewContentMessage, type PeerID } from "../sync.js";
 import { StorageKnownState } from "./knownState.js";
 import {
   CoValueKnownState,
@@ -400,6 +400,25 @@ export class StorageApiSync implements StorageAPI {
 
   waitForSync(id: string, coValue: CoValueCore) {
     return this.knownStates.waitForSync(id, coValue);
+  }
+
+  trackCoValuesSyncState(
+    updates: { id: RawCoID; peerId: PeerID; synced: boolean }[],
+    done?: () => void,
+  ): void {
+    this.dbClient.trackCoValuesSyncState(updates);
+    done?.();
+  }
+
+  getUnsyncedCoValueIDs(
+    callback: (unsyncedCoValueIDs: RawCoID[]) => void,
+  ): void {
+    const ids = this.dbClient.getUnsyncedCoValueIDs();
+    callback(ids);
+  }
+
+  stopTrackingSyncState(id: RawCoID): void {
+    this.dbClient.stopTrackingSyncState(id);
   }
 
   close() {

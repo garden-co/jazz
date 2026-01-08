@@ -1,13 +1,11 @@
-import { assert, beforeEach, describe, expect, test, vi } from "vitest";
+import { beforeEach, describe, expect, test } from "vitest";
 
 import { setGarbageCollectorMaxAge } from "../config";
-import { emptyKnownState } from "../exports";
 import {
   SyncMessagesLog,
   TEST_NODE_CONFIG,
   loadCoValueOrFail,
   setupTestNode,
-  waitFor,
 } from "./testUtils";
 
 // We want to simulate a real world communication that happens asynchronously

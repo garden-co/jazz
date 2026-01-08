@@ -1,5 +1,63 @@
 # jazz-tools
 
+## 0.19.19
+
+### Patch Changes
+
+- 171e1c6: Add Better Auth provider for Svelte
+- 053a283: Added `getJazzErrorType` helper function to identify the type of Jazz error from an Error object thrown by suspense hooks. This enables error boundaries to display appropriate UI based on whether the error is "unauthorized", "unavailable", or "unknown".
+- 41b2cf4: Context.authenticate now doesn't replace the context if the same AccountID is already logged in
+- 923bc8e: Adds Svelte Better Auth support
+  Upgrades Better Auth compatibility to version 1.4.7
+- 83f84ca: Resume interrupted CoValue sync on app restart (without requiring CoValues to be manually reloaded)
+- Updated dependencies [83f84ca]
+  - cojson@0.19.19
+  - cojson-storage-indexeddb@0.19.19
+  - cojson-transport-ws@0.19.19
+
+## 0.19.18
+
+### Patch Changes
+
+- 729d46c: Fixed Clerk types schema to use `.or()` method consistently for union types
+  - cojson@0.19.18
+  - cojson-storage-indexeddb@0.19.18
+  - cojson-transport-ws@0.19.18
+
+## 0.19.17
+
+### Patch Changes
+
+- d46cffd: Bugfix: fixed an issue where calling logOut multiple times concurrently could trigger duplicate logout operations
+  - cojson@0.19.17
+  - cojson-storage-indexeddb@0.19.17
+  - cojson-transport-ws@0.19.17
+
+## 0.19.16
+
+### Patch Changes
+
+- 25268bf: Bugfix: fixed a race condition in Clerk auth where the signup flow could trigger a duplicate login attempt
+- Updated dependencies [265d0e9]
+  - cojson@0.19.16
+  - cojson-storage-indexeddb@0.19.16
+  - cojson-transport-ws@0.19.16
+
+## 0.19.15
+
+### Patch Changes
+
+- 94012a1: Added a locking system for session IDs in React Native
+
+  Now it should be safer to mount multiple JazzProviders, but still not advised as it is really expensive
+
+- 86f9676: Adds a createdBy getter
+- b27dbc2: Fix Object.keys(coMap.getEdits()) to return also deleted keys
+- Updated dependencies [71ed9d6]
+  - cojson@0.19.15
+  - cojson-storage-indexeddb@0.19.15
+  - cojson-transport-ws@0.19.15
+
 ## 0.19.14
 
 ### Patch Changes

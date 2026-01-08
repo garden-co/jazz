@@ -18,7 +18,7 @@ import { applyCoValueMigrations } from "../lib/migration.js";
 import { CoValueCoreSubscription } from "./CoValueCoreSubscription.js";
 import {
   JazzError,
-  jazzErrorToError,
+  fillErrorWithJazzErrorInfo,
   type JazzErrorIssue,
 } from "./JazzError.js";
 import type {
@@ -352,7 +352,7 @@ export class SubscriptionScope<D extends CoValue> {
     if (currentValue.$jazz.loadingState !== CoValueLoadingState.LOADING) {
       const error = this.getError();
       return rejectedPromise<D>(
-        jazzErrorToError(
+        fillErrorWithJazzErrorInfo(
           new Error("Unknown error", this.getErrorOpts()),
           error,
         ),
@@ -373,7 +373,7 @@ export class SubscriptionScope<D extends CoValue> {
           resolve(currentValue);
         } else {
           promise.status = "rejected";
-          promise.reason = jazzErrorToError(
+          promise.reason = fillErrorWithJazzErrorInfo(
             new Error("Unknown error", this.getErrorOpts()),
             this.getError(),
           );
@@ -400,7 +400,7 @@ export class SubscriptionScope<D extends CoValue> {
         this.lastPromise.value = value;
       } else if (value.$jazz.loadingState !== CoValueLoadingState.LOADING) {
         this.lastPromise.status = "rejected";
-        this.lastPromise.reason = jazzErrorToError(
+        this.lastPromise.reason = fillErrorWithJazzErrorInfo(
           new Error("Unknown error", this.getErrorOpts()),
           this.getError(),
         );

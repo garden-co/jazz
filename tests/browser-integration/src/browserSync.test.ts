@@ -1,5 +1,5 @@
-import { commands } from "@vitest/browser/context";
-import { AuthSecretStorage, Group, co, z } from "jazz-tools";
+import { commands } from "vitest/browser";
+import { AuthSecretStorage, Group, assertLoaded, co, z } from "jazz-tools";
 import {
   assert,
   afterAll,
@@ -66,8 +66,8 @@ describe("Browser sync", () => {
       loadAs: account2,
     });
 
-    expect(loadedMap).toBeDefined();
-    expect(loadedMap?.value).toBe("test data");
+    assertLoaded(loadedMap);
+    expect(loadedMap.value).toBe("test data");
   });
 
   test("loads the previous account through the sync server", async () => {
@@ -133,8 +133,8 @@ describe("Browser sync", () => {
       loadAs: account2,
     });
 
-    expect(loadedMap).toBeDefined();
-    expect(loadedMap?.value).toBe("test data");
+    assertLoaded(loadedMap);
+    expect(loadedMap.value).toBe("test data");
   });
 
   test("syncs data between accounts when the the storage is shared but the sync server is not", async () => {
@@ -173,8 +173,8 @@ describe("Browser sync", () => {
       loadAs: account2,
     });
 
-    expect(loadedMap).toBeDefined();
-    expect(loadedMap?.value).toBe("test data");
+    assertLoaded(loadedMap);
+    expect(loadedMap.value).toBe("test data");
   });
 
   test("syncs data between accounts through storage when the the connection is down", async () => {
@@ -217,8 +217,8 @@ describe("Browser sync", () => {
       loadAs: account2,
     });
 
-    expect(loadedMap).toBeDefined();
-    expect(loadedMap?.value).toBe("test data");
+    assertLoaded(loadedMap);
+    expect(loadedMap.value).toBe("test data");
   });
 
   test("manage to persist the account even when the node is closed immediately after creating the value", async () => {
@@ -278,8 +278,8 @@ describe("Browser sync", () => {
         loadAs: account,
       });
 
-      assert(groupToExtend);
-      childGroup.extend(groupToExtend);
+      assertLoaded(groupToExtend);
+      childGroup.addMember(groupToExtend);
       await childGroup.$jazz.waitForSync();
       contextManager.getAuthSecretStorage().clear();
       contextManager.done();

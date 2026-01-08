@@ -1,5 +1,3 @@
-/// <reference types="@vitest/browser/providers/playwright" />
-
 /**
  * Vitest commands that we can run on the server side to generate chaos and spawn sync servers
  * https://vitest.dev/guide/browser/commands.html
@@ -69,7 +67,7 @@ const cleanupCommand: BrowserCommand<[]> = async () => {
   }
 };
 
-declare module "@vitest/browser/context" {
+declare module "vitest/browser" {
   interface BrowserCommands {
     startSyncServer: (
       port?: number,

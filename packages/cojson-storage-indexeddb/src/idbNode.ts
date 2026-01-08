@@ -9,7 +9,7 @@ export function internal_setDatabaseName(name: string) {
 
 export async function getIndexedDBStorage(name = DATABASE_NAME) {
   const dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open(name, 5);
+    const request = indexedDB.open(name, 6);
     request.onerror = () => {
       reject(request.error);
     };
@@ -48,6 +48,20 @@ export async function getIndexedDBStorage(name = DATABASE_NAME) {
         });
       }
       if (ev.oldVersion <= 4) {
+        const unsyncedCoValues = db.createObjectStore("unsyncedCoValues", {
+          autoIncrement: true,
+          keyPath: "rowID",
+        });
+        unsyncedCoValues.createIndex("byCoValueId", "coValueId");
+        unsyncedCoValues.createIndex(
+          "uniqueUnsyncedCoValues",
+          ["coValueId", "peerId"],
+          {
+            unique: true,
+          },
+        );
+      }
+      if (ev.oldVersion <= 5) {
         const deletedCoValues = db.createObjectStore("deletedCoValues", {
           keyPath: "coValueID",
         });

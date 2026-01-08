@@ -68,6 +68,7 @@ export {
   getUnloadedCoValueWithoutId,
   setDefaultSchemaPermissions,
   deleteCoValues,
+  getJazzErrorType,
 } from "./internal.js";
 
 export {
@@ -89,8 +90,6 @@ export { KvStoreContext, type KvStore } from "./auth/KvStoreContext.js";
 export { InMemoryKVStore } from "./auth/InMemoryKVStore.js";
 export { DemoAuth } from "./auth/DemoAuth.js";
 export { PassphraseAuth } from "./auth/PassphraseAuth.js";
-
-export { getJazzErrorType } from "./subscribe/JazzError.js";
 
 export {
   createInviteLink,

@@ -4,5 +4,6 @@ export default defineProject({
   test: {
     name: "cloudflare-workers",
     testTimeout: 10_000,
+    include: ["tests/**.test.ts"],
   },
 });

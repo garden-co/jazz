@@ -53,6 +53,7 @@ async function setupPeers(options: BaseReactNativeContextOptions) {
       addConnectionListener: () => () => {},
       connected: () => false,
       peers,
+      syncWhen: options.sync.when,
       setNode: () => {},
       crypto,
       storage,
@@ -101,6 +102,7 @@ async function setupPeers(options: BaseReactNativeContextOptions) {
     },
     connected: () => wsPeer.connected,
     peers,
+    syncWhen: options.sync.when,
     setNode,
     crypto,
     storage,
@@ -113,6 +115,7 @@ export async function createJazzReactNativeGuestContext(
   const {
     toggleNetwork,
     peers,
+    syncWhen,
     setNode,
     crypto,
     storage,
@@ -123,6 +126,7 @@ export async function createJazzReactNativeGuestContext(
   const context = createAnonymousJazzContext({
     crypto,
     peers,
+    syncWhen,
     storage,
   });
 
@@ -165,6 +169,7 @@ export async function createJazzReactNativeContext<
   const {
     toggleNetwork,
     peers,
+    syncWhen,
     setNode,
     crypto,
     storage,
@@ -199,6 +204,7 @@ export async function createJazzReactNativeContext<
     credentials: options.credentials,
     newAccountProps: options.newAccountProps,
     peers,
+    syncWhen,
     crypto,
     defaultProfileName: options.defaultProfileName,
     AccountSchema: options.AccountSchema,

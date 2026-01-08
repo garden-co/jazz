@@ -1,4 +1,4 @@
-import { Alert, CodeGroup, ContentByFramework, FileName, ReactLogo, SvelteLogo, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
+import { Alert, CodeGroup, ContentByFramework, FileName, ReactLogo, SvelteLogo, TabbedCodeGroup, TabbedCodeGroupItem, VanillaLogo } from "@/components/forMdx";
 
 export const metadata = {
   description: "Learn how to subscribe to CoValues, specify loading depths, and handle loading states and inaccessible data."
@@ -24,7 +24,7 @@ You can load and subscribe to CoValues in one of two ways:
 On your front-end, using a subscription hook is the easiest way to manage your subscriptions. The subscription and related clean-up is handled automatically, and you can use your data like any other piece of state in your app.
 
 ### Subscribe to CoValues
-<ContentByFramework framework="react">
+<ContentByFramework framework={["react", "react-native", "react-native-expo"]}>
 The `useCoState` hook allows you to reactively subscribe to CoValues in your React components. It will subscribe to updates when the component mounts and unsubscribe when it unmounts, ensuring your UI stays in sync and avoiding memory leaks.
 </ContentByFramework>
 <ContentByFramework framework="svelte">
@@ -77,6 +77,23 @@ You can use the `$isLoaded` field to check whether a CoValue is loaded. For more
 - `"unavailable"` → The CoValue couldn't be found or an error (e.g. a network timeout) occurred while loading
 
 See the examples above for practical demonstrations of how to handle these three states in your application.
+
+<ContentByFramework framework={["react", "react-native", "react-native-expo"]}>
+### Suspense Hooks [!framework=react,react-native,react-native-expo]
+
+`useSuspenseCoState` and `useSuspenseAccount` are the suspense-enabled counterparts for `useCoState` and `useAccount`. They integrate with React's Suspense API by suspending component rendering while the requested value loads. 
+
+Once the component renders successfully, all of the data requested is guaranteed to be loaded and accessible. In case the requested data **can't** be loaded, the hook will throw an error during rendering.
+
+To handle the various loading states, instead of checking `$isLoaded` or `$jazz.loadingState`, these hooks should be combined with `<Suspense>` and error boundaries.
+
+<CodeGroup preferWrap>
+```tsx ProjectView.tsx#Suspense 
+```
+</CodeGroup>
+
+[Check out an example error boundary here](https://github.com/garden-co/jazz/blob/main/examples/music-player/src/components/ErrorBoundary.tsx).
+</ContentByFramework>
 
 ## Deep Loading
 
@@ -236,6 +253,10 @@ You can tell your application how deeply your data is loaded by using the `co.lo
 The `co.loaded` type is especially useful when passing data between components, because it allows TypeScript to check at compile time whether data your application depends is properly loaded. The second argument lets you pass a `resolve` query to specify how deeply your data is loaded.
 
 <TabbedCodeGroup id="coloaded" default="react" savedPreferenceKey="framework">
+<TabbedCodeGroupItem label="Vanilla" value="vanilla" icon={<VanillaLogo />} preferWrap>
+```ts core-concepts/subscription-and-loading/vanilla.ts
+```
+</TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
 ```tsx TaskList.tsx
 ```

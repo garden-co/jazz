@@ -1,4 +1,5 @@
-**Jazz 0.20.0 released - Full native crypto**
+
+Released Jazz 0.20.0:
 
 With this release we complete the migration to a pure Rust toolchain and remove the JavaScript crypto compatibility layer. The native Rust core now runs everywhere: React Native, Edge runtimes, all server-side environments, and the web.
 
@@ -9,6 +10,22 @@ Changes:
 - **React Native + Expo**: **`RNCrypto` (via `cojson-core-rn`) is now the default**.
 
 Full migration guide: [here](https://jazz.tools/docs/upgrade/0-20-0)
+
+Released Jazz 0.19.19:
+- Added Svelte Better Auth support and upgraded Better Auth compatibility to version 1.4.7
+- Added `getJazzErrorType` helper function to identify the type of Jazz error from an Error object thrown by suspense hooks. This enables error boundaries to display appropriate UI based on whether the error is "unauthorized", "unavailable", or "unknown"
+- Resume interrupted CoValue sync on app restart (without requiring CoValues to be manually reloaded)
+- Bugfix: Context.authenticate now doesn't replace the context if the same AccountID is already logged in
+
+Released Jazz 0.19.18:
+- Bugfix: fixed Clerk metadata schema to correctly parse the Jazz credentials. Bug introduced in 0.19.17
+
+Released Jazz 0.19.17:
+- Bugfix: fixed an issue where calling logOut multiple times concurrently could trigger duplicate logout operations
+
+Released Jazz 0.19.16:
+- Improved sync timeout error messages to include known state, peer state, and any error information when waiting for sync times out
+- Bugfix: fixed a race condition in Clerk auth where the signup flow could trigger a duplicate login attempt
 
 Released Jazz 0.19.15:
 - Added a locking system for session IDs in React Native to make mounting multiple JazzProviders safer (still not advised as duplicate the data loading effort)

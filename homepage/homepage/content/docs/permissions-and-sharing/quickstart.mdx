@@ -1,4 +1,4 @@
-import { Alert, CodeGroup, ContentByFramework, FileName, ReactLogo, SvelteLogo, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
+import { Alert, CodeGroup, ContentByFramework, FileName, ReactLogo, SvelteLogo, TabbedCodeGroup, TabbedCodeGroupItem, VanillaLogo } from "@/components/forMdx";
 import RunDevServer from "@/components/docs/snippets/RunDevServer.mdx";
 import StuckCTA from "@/components/docs/snippets/StuckCTA.mdx";
 
@@ -24,6 +24,9 @@ Let's create an invite link that others can use to access our data. We'll create
 
 When we create a link, we can choose what level of permission to grant. Here, we want others to be able to collaborate, so we'll grant `writer` permissions.
 
+<ContentByFramework framework="vanilla">
+  <FileName>src/main.ts</FileName>
+</ContentByFramework>
 <ContentByFramework framework="react">
   <FileName>app/components/Festival.tsx</FileName>
 </ContentByFramework>
@@ -32,6 +35,10 @@ When we create a link, we can choose what level of permission to grant. Here, we
 </ContentByFramework>
 
 <TabbedCodeGroup default="react" savedPreferenceKey="framework" id="create-invite-link">
+<TabbedCodeGroupItem icon={<VanillaLogo />} label="Vanilla" value="vanilla" preferWrap>
+```ts FestivalWithoutProp.ts#CreateInvite
+```
+</TabbedCodeGroupItem>
 <TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
 ```tsx FestivalWithoutProp.tsx
 ```
@@ -47,6 +54,9 @@ Now we need to set up a way for Jazz to handle the links for the users who are f
 
 Jazz provides a handler which we can add to our `Festival` component to accept the invite. This will automatically fire when there's an invite link in the URL, and grant the user the right accesses.
 
+<ContentByFramework framework="vanilla">
+  <FileName>src/main.ts</FileName>
+</ContentByFramework>
 <ContentByFramework framework="react">
   <FileName>app/components/Festival.tsx</FileName>
 </ContentByFramework>
@@ -55,13 +65,16 @@ Jazz provides a handler which we can add to our `Festival` component to accept t
 </ContentByFramework>
 
 <TabbedCodeGroup savedPreferenceKey="framework" id="accept-invite">
+<TabbedCodeGroupItem icon={<VanillaLogo />} label="Vanilla" value="vanilla" preferWrap>
+```ts FestivalWithoutProp.ts#AcceptInvite
+```
+</TabbedCodeGroupItem>
 <TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
 ```tsx FestivalWithAccept.tsx
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
 ```svelte FestivalWithAccept.svelte
-
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
@@ -86,9 +99,25 @@ You'll also need to be aware that the server agent can only render public CoValu
 ## Create the festival page
 Now we need to create the festival page, so that we can view other people's festivals and collaborate with them.
 
-### Update our Festival component
-We're going to continue updating our existing `Festival` component so that it can optionally take a prop for the festival ID.
+<ContentByFramework framework="vanilla">
+  We will use `URLPattern` to determine what to render. Vite already supports this in dev mode, but you'll need to make sure your server is properly configured or replace this with another routing strategy.
 
+  In order to do this, we'll extract the form and the band list from the `main.ts` file, and export them from their own modules.
+</ContentByFramework>
+
+### Update our Festival component
+
+<ContentByFramework framework={['react', 'svelte']}>
+We're going to continue updating our existing `Festival` component so that it can optionally take a prop for the festival ID.
+</ContentByFramework>
+
+<ContentByFramework framework="vanilla">
+We're going to encapsulate our logic for rendering a festival and extract it to its own file. We can import it, and pass in a festival ID to tell it what to render, similar to a front-end framework component.
+</ContentByFramework>
+
+<ContentByFramework framework="vanilla">
+  <FileName>src/FestivalComponent.ts</FileName>
+</ContentByFramework>
 <ContentByFramework framework="react">
   <FileName>app/components/Festival.tsx</FileName>
 </ContentByFramework>
@@ -97,6 +126,10 @@ We're going to continue updating our existing `Festival` component so that it ca
 </ContentByFramework>
 
 <TabbedCodeGroup default="react" savedPreferenceKey="framework" id="festival-component">
+<TabbedCodeGroupItem icon={<VanillaLogo />} label="Vanilla" value="vanilla" preferWrap>
+```ts FestivalComponent.ts
+```
+</TabbedCodeGroupItem>
 <TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
 ```tsx Festival.tsx
 ```
@@ -109,8 +142,13 @@ We're going to continue updating our existing `Festival` component so that it ca
 
 ### Update our New Band component
 
-We'll also update our `NewBand` component so that it can take a prop for the festival ID, which will make it reusable on our home page and the new festival page.
+<ContentByFramework framework="vanilla">
+We're going to do the same thing for our form that adds a new band to our festival. We'll pass in the festival so we can be sure we're adding the band in the right place.
+</ContentByFramework>
 
+<ContentByFramework framework="vanilla">
+  <FileName>src/NewBandComponent.ts</FileName>
+</ContentByFramework>
 <ContentByFramework framework="react">
   <FileName>app/components/NewBand.tsx</FileName>
 </ContentByFramework>
@@ -120,6 +158,10 @@ We'll also update our `NewBand` component so that it can take a prop for the fes
 
 <TabbedCodeGroup default="react" savedPreferenceKey="framework"
 id="new-band-component">
+<TabbedCodeGroupItem icon={<VanillaLogo />} label="Vanilla" value="vanilla" preferWrap>
+```ts NewBandComponent.ts
+```
+</TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
 ```tsx NewBand.tsx
 ```
@@ -132,6 +174,12 @@ id="new-band-component">
 
 ### Create a route
 
+<ContentByFramework framework="vanilla">
+  Last, we need to set up our `main.ts` so that it can react to different routes. 
+</ContentByFramework>
+<ContentByFramework framework="vanilla">
+  <FileName>src/main.ts</FileName>
+</ContentByFramework>
 <ContentByFramework framework="react">
   <FileName>app/festival/[festivalId]/page.tsx</FileName>
 </ContentByFramework>
@@ -140,6 +188,10 @@ id="new-band-component">
 </ContentByFramework>
 
 <TabbedCodeGroup savedPreferenceKey="framework" id="create-festival-page">
+<TabbedCodeGroupItem icon={<VanillaLogo />} label="Vanilla" value="vanilla" preferWrap>
+```ts mainWithRouter.ts
+```
+</TabbedCodeGroupItem>
 <TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
 ```tsx page.tsx
 ```
