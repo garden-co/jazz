@@ -652,8 +652,8 @@ export async function setupTestAccount(
     connectToSyncServer();
   }
 
-  onTestFinished(() => {
-    ctx.node.gracefulShutdown();
+  onTestFinished(async () => {
+    await ctx.node.gracefulShutdown();
   });
 
   return {
