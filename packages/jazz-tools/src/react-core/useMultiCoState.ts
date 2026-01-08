@@ -20,76 +20,6 @@ import { useJazzContextManager, useAgent } from "./hooks.js";
 import { use } from "./use.js";
 
 /**
- * Check if a type is null or undefined.
- */
-type IsNullish<T> = null extends T ? true : undefined extends T ? true : false;
-
-/**
- * Helper type to map an ID type to the corresponding result type.
- * Returns Loaded<S, R> for string IDs, null for null/undefined IDs.
- */
-type IdToResult<
-  S extends CoValueClassOrSchema,
-  R extends ResolveQuery<S>,
-  Id,
-> = Id extends string
-  ? Loaded<S, R>
-  : Id extends null | undefined
-    ? null
-    : never;
-
-/**
- * Helper type to map an ID type to the corresponding MaybeLoaded result type.
- */
-type IdToMaybeResult<
-  S extends CoValueClassOrSchema,
-  R extends ResolveQuery<S>,
-  Id,
-> = Id extends string
-  ? MaybeLoaded<Loaded<S, R>>
-  : Id extends null | undefined
-    ? null
-    : never;
-
-/**
- * Maps an array/tuple of IDs to the corresponding result type.
- * If the IDs array is a tuple, preserves tuple structure.
- * If all IDs are strings (no null/undefined), excludes null from the result type.
- */
-type MapIdsToResult<
-  S extends CoValueClassOrSchema,
-  R extends ResolveQuery<S>,
-  TIds extends readonly (string | undefined | null)[],
-> = TIds extends readonly [infer First, ...infer Rest]
-  ? Rest extends readonly (string | undefined | null)[]
-    ? [IdToResult<S, R, First>, ...MapIdsToResult<S, R, Rest>]
-    : [IdToResult<S, R, First>]
-  : TIds extends readonly []
-    ? []
-    : // For non-tuple arrays, check if any element could be null/undefined
-      IsNullish<TIds[number]> extends true
-      ? Array<Loaded<S, R> | null>
-      : Array<Loaded<S, R>>;
-
-/**
- * Maps an array/tuple of IDs to the corresponding MaybeLoaded result type.
- */
-type MapIdsToMaybeResult<
-  S extends CoValueClassOrSchema,
-  R extends ResolveQuery<S>,
-  TIds extends readonly (string | undefined | null)[],
-> = TIds extends readonly [infer First, ...infer Rest]
-  ? Rest extends readonly (string | undefined | null)[]
-    ? [IdToMaybeResult<S, R, First>, ...MapIdsToMaybeResult<S, R, Rest>]
-    : [IdToMaybeResult<S, R, First>]
-  : TIds extends readonly []
-    ? []
-    : // For non-tuple arrays, check if any element could be null/undefined
-      IsNullish<TIds[number]> extends true
-      ? Array<MaybeLoaded<Loaded<S, R>> | null>
-      : Array<MaybeLoaded<Loaded<S, R>>>;
-
-/**
  * Gets the resolve query from a schema, falling back to the schema's default or `true`.
  */
 function getResolveQuery(
@@ -109,9 +39,9 @@ function getResolveQuery(
  * Tracked state for the entire subscriptions array.
  */
 interface SubscriptionsState {
-  subscriptions: (SubscriptionScope<CoValue> | null)[];
+  subscriptions: SubscriptionScope<CoValue>[];
   schema: CoValueClassOrSchema;
-  ids: readonly (string | undefined | null)[];
+  ids: readonly string[];
   resolve: ResolveQuery<any>;
   contextManager: ReturnType<typeof useJazzContextManager>;
   agent: AnonymousJazzAgent | Loaded<any, true>;
@@ -123,13 +53,12 @@ interface SubscriptionsState {
  * - Uses a ref to track subscriptions by index
  * - Detects changes by comparing schema/ids/resolve
  * - Creates new subscriptions via SubscriptionScopeCache.getOrCreate()
- * - Returns null for entries with undefined/null IDs
  */
 function useMultiCoStateSubscriptions(
   schema: CoValueClassOrSchema,
-  ids: readonly (string | undefined | null)[],
+  ids: readonly string[],
   resolve: ResolveQuery<any>,
-): (SubscriptionScope<CoValue> | null)[] {
+): SubscriptionScope<CoValue>[] {
   const contextManager = useJazzContextManager();
   const agent = useAgent();
 
@@ -143,10 +72,6 @@ function useMultiCoStateSubscriptions(
     const cache = contextManager.getSubscriptionScopeCache();
 
     const subscriptions = ids.map((id) => {
-      if (!id) {
-        return null;
-      }
-
       const subscription = cache.getOrCreate(
         node,
         schema,
@@ -224,28 +149,18 @@ function resolvedPromise<T>(value: T): PromiseWithStatus<T> {
  * Internal hook that creates a combined suspense promise from multiple subscriptions.
  *
  * - Creates a Promise.all from individual getCachedPromise() calls
- * - Returns Promise.resolve(null) for null subscriptions (undefined/null IDs)
  * - Suspends via the use() hook until all values are loaded
  *
- * @param subscriptions - Array of SubscriptionScope instances (or null for skipped entries)
+ * @param subscriptions - Array of SubscriptionScope instances
  */
 export function useMultiCoStateSuspense(
-  subscriptions: (SubscriptionScope<CoValue> | null)[],
+  subscriptions: SubscriptionScope<CoValue>[],
 ): void {
   // Create a stable key based on subscriptions to memoize the combined promise
-  const subscriptionIds = subscriptions
-    .map((sub) => sub?.id ?? "null")
-    .join(",");
+  const subscriptionIds = subscriptions.map((sub) => sub.id).join(",");
 
   const combinedPromise = useMemo(() => {
-    const promises = subscriptions.map((sub) => {
-      if (!sub) {
-        // For null subscriptions (undefined/null IDs), resolve immediately with null
-        return resolvedPromise(null);
-      }
-      return sub.getCachedPromise();
-    });
-
+    const promises = subscriptions.map((sub) => sub.getCachedPromise());
     return Promise.all(promises);
   }, [subscriptionIds]);
 
@@ -260,29 +175,22 @@ export function useMultiCoStateSuspense(
  * - Returns an array of current values from each scope
  * - Maintains stable references for unchanged values
  *
- * @param subscriptions - Array of SubscriptionScope instances (or null for skipped entries)
- * @returns Array of loaded CoValues (or null for skipped entries)
+ * @param subscriptions - Array of SubscriptionScope instances
+ * @returns Array of loaded CoValues
  */
-export function useMultiCoStateStore(
-  subscriptions: (SubscriptionScope<CoValue> | null)[],
-): (CoValue | null)[] {
+function useMultiCoStateStore(
+  subscriptions: SubscriptionScope<CoValue>[],
+): CoValue[] {
   // Create a stable key for memoization
-  const subscriptionIds = subscriptions
-    .map((sub) => sub?.id ?? "null")
-    .join(",");
+  const subscriptionIds = subscriptions.map((sub) => sub.id).join(",");
 
   // Cache for the snapshot to avoid infinite loops
-  const cachedSnapshotRef = useRef<(CoValue | null)[]>([]);
+  const cachedSnapshotRef = useRef<CoValue[]>([]);
 
   // Combined subscribe function that subscribes to all scopes
   const subscribe = useCallback(
     (callback: () => void) => {
-      const unsubscribes = subscriptions.map((sub) => {
-        if (!sub) {
-          return () => {};
-        }
-        return sub.subscribe(callback);
-      });
+      const unsubscribes = subscriptions.map((sub) => sub.subscribe(callback));
 
       // Return combined unsubscribe function
       return () => {
@@ -295,9 +203,6 @@ export function useMultiCoStateStore(
   // Get current values from all subscriptions, with caching to prevent infinite loops
   const getSnapshot = useCallback(() => {
     const newValues = subscriptions.map((sub) => {
-      if (!sub) {
-        return null;
-      }
       const value = sub.getCurrentValue();
       if (!value.$isLoaded) {
         throw new Error("CoValue must be loaded in a suspense context");
@@ -329,7 +234,7 @@ export function useMultiCoStateStore(
  * Suspense boundary.
  *
  * @param Schema - The CoValue schema or class constructor (same for all IDs)
- * @param ids - Array of CoValue IDs to subscribe to. Entries with `undefined` or `null` return `null`
+ * @param ids - Array of CoValue IDs to subscribe to (must all be strings)
  * @param options - Optional configuration, including resolve query (same for all IDs)
  * @returns An array of loaded CoValues in the same order as the input IDs
  *
@@ -344,26 +249,20 @@ export function useMultiCoStateStore(
  *
  * @remarks
  * - All IDs use the same schema and resolve query
- * - Entries with `undefined` or `null` IDs return `null` without suspending
- * - All valid entries suspend together until loaded
+ * - All entries suspend together until loaded
  */
 export function useSuspenseMultiCoState<
   S extends CoValueClassOrSchema,
   // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
   const R extends ResolveQuery<S> = SchemaResolveQuery<S>,
-  TIds extends readonly (string | undefined | null)[] = readonly (
-    | string
-    | undefined
-    | null
-  )[],
 >(
   Schema: S,
-  ids: TIds,
+  ids: readonly string[],
   options?: {
     /** Resolve query to specify which nested CoValues to load (same for all IDs) */
     resolve?: ResolveQueryStrict<S, R>;
   },
-): MapIdsToResult<S, R, TIds> {
+): Loaded<S, R>[] {
   const resolve = getResolveQuery(Schema, options?.resolve);
 
   // Step 1: Create/get subscriptions for each ID
@@ -375,36 +274,29 @@ export function useSuspenseMultiCoState<
   // Step 3: Get current values via useSyncExternalStore
   const values = useMultiCoStateStore(subscriptionScopes);
 
-  return values as MapIdsToResult<S, R, TIds>;
+  return values as Loaded<S, R>[];
 }
 
 /**
  * Internal hook that uses useSyncExternalStore to subscribe to multiple SubscriptionScopes.
  * Returns MaybeLoaded values instead of throwing when values aren't loaded.
  *
- * @param subscriptions - Array of SubscriptionScope instances (or null for skipped entries)
- * @returns Array of MaybeLoaded CoValues (or null for skipped entries)
+ * @param subscriptions - Array of SubscriptionScope instances
+ * @returns Array of MaybeLoaded CoValues
  */
 function useMultiCoStateStoreMaybeLoaded(
-  subscriptions: (SubscriptionScope<CoValue> | null)[],
-): (MaybeLoaded<CoValue> | null)[] {
+  subscriptions: SubscriptionScope<CoValue>[],
+): MaybeLoaded<CoValue>[] {
   // Create a stable key for memoization
-  const subscriptionIds = subscriptions
-    .map((sub) => sub?.id ?? "null")
-    .join(",");
+  const subscriptionIds = subscriptions.map((sub) => sub.id).join(",");
 
   // Cache for the snapshot to avoid infinite loops
-  const cachedSnapshotRef = useRef<(MaybeLoaded<CoValue> | null)[]>([]);
+  const cachedSnapshotRef = useRef<MaybeLoaded<CoValue>[]>([]);
 
   // Combined subscribe function that subscribes to all scopes
   const subscribe = useCallback(
     (callback: () => void) => {
-      const unsubscribes = subscriptions.map((sub) => {
-        if (!sub) {
-          return () => {};
-        }
-        return sub.subscribe(callback);
-      });
+      const unsubscribes = subscriptions.map((sub) => sub.subscribe(callback));
 
       // Return combined unsubscribe function
       return () => {
@@ -416,12 +308,7 @@ function useMultiCoStateStoreMaybeLoaded(
 
   // Get current values from all subscriptions (MaybeLoaded, no throwing)
   const getSnapshot = useCallback(() => {
-    const newValues = subscriptions.map((sub) => {
-      if (!sub) {
-        return null;
-      }
-      return sub.getCurrentValue();
-    });
+    const newValues = subscriptions.map((sub) => sub.getCurrentValue());
 
     // Check if values have changed by comparing each element
     const cached = cachedSnapshotRef.current;
@@ -446,9 +333,9 @@ function useMultiCoStateStoreMaybeLoaded(
  * Unlike `useSuspenseMultiCoState`, this hook does not suspend and returns loading/unavailable
  * states that can be checked via the `$isLoaded` property.
  *
- * @param Schema - The CoValue schema or class constructor (same for all IDs)
- * @param ids - Array of CoValue IDs to subscribe to. Entries with `undefined` or `null` return `null`
- * @param options - Optional configuration, including resolve query (same for all IDs)
+ * @param Schema - The CoValue schema or class constructor
+ * @param ids - Array of CoValue IDs to subscribe to (must all be strings)
+ * @param options - Optional configuration, including resolve query
  * @returns An array of MaybeLoaded CoValues in the same order as the input IDs
  *
  * @example
@@ -459,33 +346,27 @@ function useMultiCoStateStoreMaybeLoaded(
  *   { resolve: { assignee: true } }
  * );
  *
- * if (!project1?.$isLoaded || !project2?.$isLoaded) {
+ * if (!project1.$isLoaded || !project2.$isLoaded) {
  *   return <Loading />;
  * }
  * ```
  *
  * @remarks
  * - All IDs use the same schema and resolve query
- * - Entries with `undefined` or `null` IDs return `null`
  * - Check `$isLoaded` on each value to determine if it's ready
  */
 export function useMultiCoState<
   S extends CoValueClassOrSchema,
   // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
   const R extends ResolveQuery<S> = SchemaResolveQuery<S>,
-  TIds extends readonly (string | undefined | null)[] = readonly (
-    | string
-    | undefined
-    | null
-  )[],
 >(
   Schema: S,
-  ids: TIds,
+  ids: readonly string[],
   options?: {
     /** Resolve query to specify which nested CoValues to load (same for all IDs) */
     resolve?: ResolveQueryStrict<S, R>;
   },
-): MapIdsToMaybeResult<S, R, TIds> {
+): MaybeLoaded<Loaded<S, R>>[] {
   const resolve = getResolveQuery(Schema, options?.resolve);
 
   // Step 1: Create/get subscriptions for each ID
@@ -494,5 +375,5 @@ export function useMultiCoState<
   // Step 2: Get current values via useSyncExternalStore (no suspending)
   const values = useMultiCoStateStoreMaybeLoaded(subscriptionScopes);
 
-  return values as MapIdsToMaybeResult<S, R, TIds>;
+  return values as MaybeLoaded<Loaded<S, R>>[];
 }
