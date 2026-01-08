@@ -2488,9 +2488,6 @@ importers:
       goober:
         specifier: ^2.1.18
         version: 2.1.18(csstype@3.2.3)
-      prosemirror-example-setup:
-        specifier: ^1.2.2
-        version: 1.2.3
       prosemirror-menu:
         specifier: ^1.2.4
         version: 1.2.5
