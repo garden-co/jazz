@@ -106,7 +106,7 @@ export class AccountSchema<
    * @param options.creationProps - The creation properties for the new account
    * @param options.onCreate - The callback to use to initialize the account after it is created
    * @param options.waitForSyncTimeout - The timeout for the sync to complete
-   * @returns The credentials and the created account
+   * @returns The credentials and the created account loaded by the worker account
    *
    *
    * @example
