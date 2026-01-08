@@ -1,4 +1,4 @@
-import { commands } from "@vitest/browser/context";
+import { commands } from "vitest/browser";
 import { AuthSecretStorage, FileStream, Group, co, z } from "jazz-tools";
 import { assert, afterAll, afterEach, describe, expect, test } from "vitest";
 import { createAccountContext, startSyncServer } from "./testUtils";

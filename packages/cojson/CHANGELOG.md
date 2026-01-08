@@ -1,5 +1,48 @@
 # cojson
 
+## 0.19.19
+
+### Patch Changes
+
+- 83f84ca: Resume interrupted CoValue sync on app restart (without requiring CoValues to be manually reloaded)
+  - cojson-core-wasm@0.19.19
+  - cojson-core-rn@0.19.19
+  - cojson-core-napi@0.19.19
+
+## 0.19.18
+
+### Patch Changes
+
+- cojson-core-wasm@0.19.18
+- cojson-core-rn@0.19.18
+- cojson-core-napi@0.19.18
+
+## 0.19.17
+
+### Patch Changes
+
+- cojson-core-wasm@0.19.17
+- cojson-core-rn@0.19.17
+- cojson-core-napi@0.19.17
+
+## 0.19.16
+
+### Patch Changes
+
+- 265d0e9: Improved sync timeout error messages to include known state, peer state, and any error information when waiting for sync times out
+  - cojson-core-wasm@0.19.16
+  - cojson-core-rn@0.19.16
+  - cojson-core-napi@0.19.16
+
+## 0.19.15
+
+### Patch Changes
+
+- 71ed9d6: Fixed an issue where spreading the uniqueness object when creating CoValues could introduce unexpected properties into the header
+  - cojson-core-wasm@0.19.15
+  - cojson-core-rn@0.19.15
+  - cojson-core-napi@0.19.15
+
 ## 0.19.14
 
 ### Patch Changes

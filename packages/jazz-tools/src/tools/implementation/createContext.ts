@@ -18,6 +18,7 @@ import {
   type ID,
   type InstanceOfSchema,
   coValueClassFromCoValueClassOrSchema,
+  type SyncWhen,
 } from "../internal.js";
 import { AuthCredentials, NewAccountProps } from "../types.js";
 import { activeAccountContext } from "./activeAccountContext.js";
@@ -110,6 +111,7 @@ export async function createJazzContextFromExistingCredentials<
 >({
   credentials,
   peers,
+  syncWhen,
   crypto,
   storage,
   AccountSchema: PropsAccountSchema,
@@ -119,6 +121,7 @@ export async function createJazzContextFromExistingCredentials<
 }: {
   credentials: Credentials;
   peers: Peer[];
+  syncWhen?: SyncWhen;
   crypto: CryptoProvider;
   AccountSchema?: S;
   sessionProvider: SessionProvider;
@@ -140,9 +143,10 @@ export async function createJazzContextFromExistingCredentials<
   const node = await LocalNode.withLoadedAccount({
     accountID: credentials.accountID as unknown as CoID<RawAccount>,
     accountSecret: credentials.secret,
-    sessionID: sessionID,
-    peers: peers,
-    crypto: crypto,
+    sessionID,
+    peers,
+    syncWhen,
+    crypto,
     storage,
     migration: async (rawAccount, _node, creationProps) => {
       const account = AccountClass.fromRaw(rawAccount) as InstanceOfSchema<S>;
@@ -167,7 +171,7 @@ export async function createJazzContextFromExistingCredentials<
       sessionDone();
     },
     logOut: async () => {
-      node.gracefulShutdown();
+      await node.gracefulShutdown();
       sessionDone();
       await onLogOut?.();
     },
@@ -182,6 +186,7 @@ export async function createJazzContextForNewAccount<
   creationProps,
   initialAgentSecret,
   peers,
+  syncWhen,
   crypto,
   AccountSchema: PropsAccountSchema,
   onLogOut,
@@ -191,6 +196,7 @@ export async function createJazzContextForNewAccount<
   creationProps: { name: string };
   initialAgentSecret?: AgentSecret;
   peers: Peer[];
+  syncWhen?: SyncWhen;
   crypto: CryptoProvider;
   AccountSchema?: S;
   onLogOut?: () => Promise<void>;
@@ -206,6 +212,7 @@ export async function createJazzContextForNewAccount<
   const { node } = await LocalNode.withNewlyCreatedAccount({
     creationProps,
     peers,
+    syncWhen,
     crypto,
     initialAgentSecret,
     storage,
@@ -233,7 +240,7 @@ export async function createJazzContextForNewAccount<
       sessionDone();
     },
     logOut: async () => {
-      node.gracefulShutdown();
+      await node.gracefulShutdown();
       await onLogOut?.();
     },
   };
@@ -247,6 +254,7 @@ export async function createJazzContext<
   credentials?: AuthCredentials;
   newAccountProps?: NewAccountProps;
   peers: Peer[];
+  syncWhen?: SyncWhen;
   crypto: CryptoProvider;
   defaultProfileName?: string;
   AccountSchema?: S;
@@ -271,6 +279,7 @@ export async function createJazzContext<
         secret: credentials.accountSecret,
       },
       peers: options.peers,
+      syncWhen: options.syncWhen,
       crypto,
       AccountSchema: options.AccountSchema,
       sessionProvider: options.sessionProvider,
@@ -295,6 +304,7 @@ export async function createJazzContext<
       creationProps,
       initialAgentSecret,
       peers: options.peers,
+      syncWhen: options.syncWhen,
       crypto,
       AccountSchema: options.AccountSchema,
       sessionProvider: options.sessionProvider,
@@ -322,10 +332,12 @@ export async function createJazzContext<
 
 export function createAnonymousJazzContext({
   peers,
+  syncWhen,
   crypto,
   storage,
 }: {
   peers: Peer[];
+  syncWhen?: SyncWhen;
   crypto: CryptoProvider;
   storage?: StorageAPI;
 }): JazzContextWithAgent {
@@ -335,6 +347,7 @@ export function createAnonymousJazzContext({
     agentSecret,
     crypto.newRandomSessionID(crypto.getAgentID(agentSecret)),
     crypto,
+    syncWhen,
   );
 
   for (const peer of peers) {

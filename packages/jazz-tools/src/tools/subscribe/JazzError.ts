@@ -1,4 +1,4 @@
-import type { CoValue, ID } from "../internal.js";
+import type { CoValue, CoValueErrorState, ID } from "../internal.js";
 import { CoValueLoadingState } from "./types.js";
 
 export class JazzError {
@@ -55,3 +55,39 @@ export type JazzErrorIssue = {
   params: Record<string, any>;
   path: string[];
 };
+
+export function fillErrorWithJazzErrorInfo(
+  /**
+   * The error we are going to fill with the jazz error info.
+   *
+   * Passed externally to provide a better stack trace.
+   */
+  errorBase: Error,
+  jazzError: JazzError | undefined,
+): Error {
+  if (!jazzError) {
+    return errorBase;
+  }
+
+  errorBase.message = jazzError.toString();
+
+  Object.defineProperty(errorBase, "@jazzErrorType", {
+    value: jazzError.type,
+  });
+
+  return errorBase;
+}
+
+export function getJazzErrorType(
+  error: unknown,
+): CoValueErrorState | "unknown" {
+  if (
+    error instanceof Error &&
+    "@jazzErrorType" in error &&
+    typeof error["@jazzErrorType"] === "string"
+  ) {
+    return error["@jazzErrorType"] as CoValueErrorState;
+  }
+
+  return "unknown";
+}

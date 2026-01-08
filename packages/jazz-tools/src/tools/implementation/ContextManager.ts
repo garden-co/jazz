@@ -188,24 +188,45 @@ export class JazzContextManager<
     return this.subscriptionCache;
   }
 
+  /**
+   * Flag to indicate if a logout operation is currently in progress.
+   * Used to prevent concurrent logout attempts or double-logout issues.
+   * Set to true when logout starts, reset to false once all logout logic runs.
+   */
+  loggingOut = false;
+
+  /**
+   * Handles the logout process.
+   * Uses the loggingOut flag to ensure only one logout can happen at a time.
+   */
   logOut = async () => {
-    if (!this.context || !this.props) {
+    if (!this.context || !this.props || this.loggingOut) {
       return;
     }
+
+    // Mark as logging out to prevent reentry
+    this.loggingOut = true;
 
     this.authenticatingAccountID = null;
 
     // Clear cache on logout to prevent subscription leaks across authentication boundaries
     this.subscriptionCache.clear();
 
-    await this.props.onLogOut?.();
+    try {
+      await this.props.onLogOut?.();
 
-    if (this.props.logOutReplacement) {
-      await this.props.logOutReplacement();
-    } else {
-      await this.context.logOut();
-      return this.createContext(this.props);
+      if (this.props.logOutReplacement) {
+        await this.props.logOutReplacement();
+      } else {
+        await this.context.logOut();
+        await this.createContext(this.props);
+      }
+    } catch (error) {
+      console.error("Error during logout", error);
     }
+
+    // Reset flag after standard logout finishes
+    this.loggingOut = false;
   };
 
   done = () => {
@@ -230,10 +251,30 @@ export class JazzContextManager<
 
   /**
    * Authenticates the user with the given credentials
+   * @param credentials - The credentials to authenticate with
+   * @param forceContextCreation - If true, the context will be created even if the same account is already authenticated
    */
-  authenticate = async (credentials: AuthCredentials) => {
+  authenticate = async (
+    credentials: AuthCredentials,
+    forceContextCreation: boolean = false,
+  ) => {
     if (!this.props) {
       throw new Error("Props required");
+    }
+
+    // Check if already authenticated with the same account
+    // to avoid the creation of a new session
+    if (
+      !forceContextCreation &&
+      this.context &&
+      "me" in this.context &&
+      this.context.me.$jazz.id === credentials.accountID
+    ) {
+      console.log(
+        "Already authenticated with the same account",
+        credentials.accountID,
+      );
+      return;
     }
 
     if (

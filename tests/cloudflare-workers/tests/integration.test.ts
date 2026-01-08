@@ -10,13 +10,10 @@ const projectRoot = join(packageRoot, "../..");
 describe("Cloudflare Workers Integration Test", () => {
   async function setupServer() {
     // Start the dev server
-    const server = execa(
-      join(projectRoot, "node_modules/.bin/wrangler"),
-      ["dev"],
-      {
-        cwd: packageRoot,
-      },
-    );
+    const server = execa({
+      cwd: packageRoot,
+    })`${join(projectRoot, "node_modules/.bin/wrangler")} dev --port 9230`;
+
     // Wait for server to be ready
     const url = await new Promise<URL>((resolve, reject) => {
       server.stdout?.on("data", (data) => {

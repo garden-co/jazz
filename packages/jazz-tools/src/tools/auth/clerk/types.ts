@@ -1,32 +1,57 @@
-import { AgentSecret } from "cojson";
-import { Account, ID } from "jazz-tools";
+import { type AgentSecret } from "cojson";
+import { z } from "zod/v4";
+
+const ClerkJazzCredentialsSchema = z.object({
+  jazzAccountID: z.string(),
+  jazzAccountSecret: z.string(),
+  jazzAccountSeed: z.array(z.number()).optional(),
+});
+
+const ClerkUserSchema = z.object({
+  fullName: z.string().nullish(),
+  username: z.string().nullish(),
+  firstName: z.string().nullish(),
+  lastName: z.string().nullish(),
+  id: z.string().optional(),
+  primaryEmailAddress: z
+    .object({
+      emailAddress: z.string().nullable(),
+    })
+    .nullish(),
+  unsafeMetadata: ClerkJazzCredentialsSchema.or(z.object({})),
+  update: z.function({
+    input: [
+      z.object({
+        unsafeMetadata: ClerkJazzCredentialsSchema,
+      }),
+    ],
+    output: z.promise(z.unknown()),
+  }),
+});
+
+export const ClerkEventSchema = z.object({
+  user: ClerkUserSchema.nullish(),
+});
+export type ClerkEventSchema = z.infer<typeof ClerkEventSchema>;
+
+export type ClerkUser = z.infer<typeof ClerkUserSchema>;
+
+// Need to provide a permissive type externally to accept
+type PermissiveClerkUser = Omit<ClerkUser, "unsafeMetadata" | "update"> & {
+  unsafeMetadata: Record<string, unknown>;
+  update: (args: {
+    unsafeMetadata: Record<string, unknown>;
+  }) => Promise<unknown>;
+};
 
 export type MinimalClerkClient = {
-  user:
-    | {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        unsafeMetadata: Record<string, any>;
-        fullName: string | null;
-        username: string | null;
-        firstName: string | null;
-        lastName: string | null;
-        id: string;
-        primaryEmailAddress: {
-          emailAddress: string | null;
-        } | null;
-        update: (args: {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          unsafeMetadata: Record<string, any>;
-        }) => Promise<unknown>;
-      }
-    | null
-    | undefined;
+  user: PermissiveClerkUser | null | undefined;
   signOut: () => Promise<void>;
   addListener: (listener: (data: unknown) => void) => void;
 };
 
 export type ClerkCredentials = {
-  jazzAccountID: ID<Account>;
+  jazzAccountID: string;
   jazzAccountSecret: AgentSecret;
   jazzAccountSeed?: number[];
 };
@@ -36,21 +61,34 @@ export type ClerkCredentials = {
  * **Note**: It does not validate the credentials, only checks if the necessary fields are present in the metadata object.
  */
 export function isClerkCredentials(
-  data: NonNullable<MinimalClerkClient["user"]>["unsafeMetadata"] | undefined,
+  data: Record<string, unknown> | undefined,
 ): data is ClerkCredentials {
   return !!data && "jazzAccountID" in data && "jazzAccountSecret" in data;
 }
 
+type ClerkUserWithUnsafeMetadata =
+  | Pick<ClerkUser, "unsafeMetadata">
+  | null
+  | undefined;
+
 export function isClerkAuthStateEqual(
-  previousUser: MinimalClerkClient["user"] | null | undefined,
-  newUser: MinimalClerkClient["user"] | null | undefined,
+  previousUser: ClerkUserWithUnsafeMetadata,
+  newUser: ClerkUserWithUnsafeMetadata,
 ) {
   if (Boolean(previousUser) !== Boolean(newUser)) {
     return false;
   }
 
-  const previousCredentials = isClerkCredentials(previousUser?.unsafeMetadata);
-  const newCredentials = isClerkCredentials(newUser?.unsafeMetadata);
+  const previousCredentials = isClerkCredentials(previousUser?.unsafeMetadata)
+    ? previousUser?.unsafeMetadata
+    : null;
+  const newCredentials = isClerkCredentials(newUser?.unsafeMetadata)
+    ? newUser?.unsafeMetadata
+    : null;
 
-  return previousCredentials === newCredentials;
+  if (!previousCredentials || !newCredentials) {
+    return previousCredentials === newCredentials;
+  }
+
+  return previousCredentials.jazzAccountID === newCredentials.jazzAccountID;
 }
