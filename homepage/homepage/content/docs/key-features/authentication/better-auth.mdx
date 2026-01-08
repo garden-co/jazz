@@ -1,7 +1,7 @@
 export const metadata = {
   description: "Integrate Better Auth with your Jazz app to authenticate users."
 };
-import { Alert, CodeGroup, ContentByFramework, FileName } from "@/components/forMdx";
+import { Alert, CodeGroup, ContentByFramework, FileName, SvelteLogo, ReactLogo, TabbedCodeGroup, TabbedCodeGroupItem, VanillaLogo } from "@/components/forMdx";
 
 # Better Auth authentication
 
@@ -113,33 +113,32 @@ Create the Better Auth client with the Jazz plugin:
 ```ts auth-client.ts
 ```
 </CodeGroup>
-
-<ContentByFramework framework={["react", "react-native", "react-native-expo"]}>
-
+<ContentByFramework framework="vanilla">
+  Register your Jazz context with the Better Auth plugin.
+</ContentByFramework>
+<ContentByFramework frameworks={['react', 'svelte', 'react-native', 'react-native-expo']}>
 Wrap your app with the `AuthProvider`, passing the `betterAuthClient` instance:
+</ContentByFramework>
 
-<CodeGroup>
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="better-auth">
+  <TabbedCodeGroupItem icon={<VanillaLogo />} label="Vanilla" value="vanilla" preferWrap>
+    ```ts index.ts#Basic
+    ```
+  </TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
 ```ts app.tsx
 ```
-</CodeGroup>
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
+  ```svelte app.svelte
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
 
 <Alert variant="warning" className="mt-4" title="Important">
-  The AuthProvider component uses the `better-auth/client` package, not `better-auth/react`.
+  The AuthProvider component uses the `better-auth/client` package.
   To verify the authentication state in your app, see <a href="#authentication-states" aria-label="Jump to Authentication states section">Authentication states</a>.
 </Alert>
-
-</ContentByFramework>
-
-<ContentByFramework framework={["vanilla", "svelte"]}>
-
-Set JazzContext and AuthSecretStorage in the Better Auth client:
-
-<CodeGroup>
-```ts index.ts#Basic
-```
-</CodeGroup>
-
-</ContentByFramework>
 
 ## Authentication methods
 

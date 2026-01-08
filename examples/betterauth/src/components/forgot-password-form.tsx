@@ -22,7 +22,7 @@ export function ForgotPasswordForm() {
 
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    betterAuthClient.forgetPassword(
+    betterAuthClient.requestPasswordReset(
       { email, redirectTo: `${window.location.origin}/auth/reset-password` },
       {
         onSuccess: () => {
