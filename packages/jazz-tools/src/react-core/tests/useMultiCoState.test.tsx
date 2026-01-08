@@ -37,18 +37,24 @@ describe("useSuspenseMultiCoState", () => {
       <Suspense fallback={<div>Loading...</div>}>{children}</Suspense>
     );
 
-    const { result } = renderHook(
-      () =>
-        useSuspenseMultiCoState(ProjectSchema, [
-          project1.$jazz.id,
-          project2.$jazz.id,
-        ]),
-      {
-        wrapper,
-      },
-    );
+    const { result } = await act(async () => {
+      return renderHook(
+        () =>
+          useSuspenseMultiCoState(ProjectSchema, [
+            project1.$jazz.id,
+            project2.$jazz.id,
+          ]),
+        {
+          wrapper,
+        },
+      );
+    });
 
-    await waitFor(() => result.current?.length === 2);
+    // Wait for any async operations to complete
+    await waitFor(() => {
+      expect(result.current).toBeDefined();
+      expect(result.current.length).toBe(2);
+    });
 
     const [loadedProject1, loadedProject2] = result.current;
 
@@ -78,21 +84,17 @@ describe("useSuspenseMultiCoState", () => {
 
     const ids = [project1.$jazz.id, project2.$jazz.id] as const;
 
-    const { result } = renderHook(
-      () => useSuspenseMultiCoState(ProjectSchema, ids),
-      {
+    const { result } = await act(async () => {
+      return renderHook(() => useSuspenseMultiCoState(ProjectSchema, ids), {
         wrapper,
-      },
-    );
+      });
+    });
 
     await waitFor(() => {
-      expect(result.current).not.toBeNull();
+      expect(result.current).toBeDefined();
       expect(result.current.length).toBe(2);
     });
 
-    const [loadedProject1, loadedProject2] = result.current;
-
-    // Verify types are correctly inferred
     // When all IDs are strings, result should be tuple of Loaded<S, R> without null
     expectTypeOf(result.current).toEqualTypeOf<
       [Loaded<typeof ProjectSchema>, Loaded<typeof ProjectSchema>]
@@ -110,16 +112,18 @@ describe("useSuspenseMultiCoState", () => {
       <Suspense fallback={<div>Loading...</div>}>{children}</Suspense>
     );
 
-    const { result } = renderHook(
-      () =>
-        useSuspenseMultiCoState(ProjectSchema, [project.$jazz.id, undefined]),
-      {
-        wrapper,
-      },
-    );
+    const { result } = await act(async () => {
+      return renderHook(
+        () =>
+          useSuspenseMultiCoState(ProjectSchema, [project.$jazz.id, undefined]),
+        {
+          wrapper,
+        },
+      );
+    });
 
     await waitFor(() => {
-      expect(result.current).not.toBeNull();
+      expect(result.current).toBeDefined();
       expect(result.current.length).toBe(2);
     });
 
@@ -144,15 +148,17 @@ describe("useSuspenseMultiCoState", () => {
       <Suspense fallback={<div>Loading...</div>}>{children}</Suspense>
     );
 
-    const { result } = renderHook(
-      () => useSuspenseMultiCoState(TestMap, [map1.$jazz.id, map2.$jazz.id]),
-      {
-        wrapper,
-      },
-    );
+    const { result } = await act(async () => {
+      return renderHook(
+        () => useSuspenseMultiCoState(TestMap, [map1.$jazz.id, map2.$jazz.id]),
+        {
+          wrapper,
+        },
+      );
+    });
 
     await waitFor(() => {
-      expect(result.current).not.toBeNull();
+      expect(result.current).toBeDefined();
       expect(result.current.length).toBe(2);
     });
 
@@ -180,15 +186,14 @@ describe("useSuspenseMultiCoState", () => {
       <Suspense fallback={<div>Loading...</div>}>{children}</Suspense>
     );
 
-    const { result } = renderHook(
-      () => useSuspenseMultiCoState(ProjectSchema, []),
-      {
+    const { result } = await act(async () => {
+      return renderHook(() => useSuspenseMultiCoState(ProjectSchema, []), {
         wrapper,
-      },
-    );
+      });
+    });
 
     await waitFor(() => {
-      expect(result.current).not.toBeNull();
+      expect(result.current).toBeDefined();
     });
 
     expect(result.current).toEqual([]);
@@ -196,7 +201,7 @@ describe("useSuspenseMultiCoState", () => {
 });
 
 describe("useMultiCoState", () => {
-  it("should return MaybeLoaded values without suspending", async () => {
+  it("should return MaybeLoaded values", async () => {
     const ProjectSchema = co.map({
       name: z.string(),
     });
