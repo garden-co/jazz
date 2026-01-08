@@ -8,8 +8,15 @@ export type AuthCredentials = {
   provider?: "anonymous" | "clerk" | "demo" | "passkey" | "passphrase" | string;
 };
 
+/**
+ * Authenticates the user with the given credentials
+ * @param credentials - The credentials to authenticate with
+ * @param forceContextCreation - If true, the context will be created even if the same account is already authenticated
+ * @returns A promise that resolves when the authentication is complete
+ */
 export type AuthenticateAccountFunction = (
   credentials: AuthCredentials,
+  forceContextCreation?: boolean,
 ) => Promise<void>;
 
 export type RegisterAccountFunction = (
