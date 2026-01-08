@@ -1,0 +1,16 @@
+import { experimental_defineRequest } from "jazz-tools";
+import { Band, BandList } from "./schema";
+
+const workerId = process.env.JAZZ_WORKER_ACCOUNT;
+
+if (!workerId) throw new Error("JAZZ_WORKER_ACCOUNT is not set");
+
+export const announceBand = experimental_defineRequest({
+  url: "/api/announce-band", // update to the URL where your backend will run
+  workerId: workerId,
+  request: { schema: { band: Band }, resolve: { band: true } },
+  response: {
+    schema: { bandList: BandList },
+    resolve: { bandList: { $each: true } },
+  },
+});

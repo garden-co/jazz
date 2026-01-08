@@ -7,7 +7,12 @@ export default defineProject({
     browser: {
       enabled: true,
       provider: playwright(),
-      instances: [{ browser: "chromium", headless: true }],
+      instances: [
+        {
+          headless: process.env.HEADLESS !== "false",
+          browser: "chromium",
+        },
+      ],
     },
     include: ["src/**/*.test.ts"],
   },

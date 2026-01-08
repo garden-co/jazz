@@ -36,6 +36,7 @@
     "@types/node": "^20",
     "@types/react": "catalog:react",
     "@types/react-dom": "catalog:react",
+    "@playwright/test": "^1.52.0",
     "typescript": "catalog:default"
   }
 }

@@ -58,4 +58,6 @@ export * from "./coValues/extensions/imageDef.js";
 
 export * from "./implementation/ContextManager.js";
 
+export * from "./subscribe/JazzError.js";
+
 import "./implementation/devtoolsFormatters.js";

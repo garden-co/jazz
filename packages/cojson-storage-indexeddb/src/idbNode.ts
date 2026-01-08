@@ -9,7 +9,7 @@ export function internal_setDatabaseName(name: string) {
 
 export async function getIndexedDBStorage(name = DATABASE_NAME) {
   const dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open(name, 4);
+    const request = indexedDB.open(name, 5);
     request.onerror = () => {
       reject(request.error);
     };
@@ -46,6 +46,20 @@ export async function getIndexedDBStorage(name = DATABASE_NAME) {
         db.createObjectStore("signatureAfter", {
           keyPath: ["ses", "idx"],
         });
+      }
+      if (ev.oldVersion <= 4) {
+        const unsyncedCoValues = db.createObjectStore("unsyncedCoValues", {
+          autoIncrement: true,
+          keyPath: "rowID",
+        });
+        unsyncedCoValues.createIndex("byCoValueId", "coValueId");
+        unsyncedCoValues.createIndex(
+          "uniqueUnsyncedCoValues",
+          ["coValueId", "peerId"],
+          {
+            unique: true,
+          },
+        );
       }
     };
   });
