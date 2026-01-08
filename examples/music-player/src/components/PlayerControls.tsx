@@ -49,7 +49,7 @@ export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
 
   return (
     <Drawer open={drawerOpen} onOpenChange={setDrawerOpen}>
-      <footer className="flex flex-nowrap items-center justify-between p-4 gap-4 bg-white border-t border-gray-200 absolute bottom-0 left-0 right-0 w-full z-50">
+      <footer className="flex flex-nowrap items-center justify-between p-4 pb-[max(1rem,env(safe-area-inset-bottom))] gap-4 bg-white border-t border-gray-200 fixed bottom-0 left-0 right-0 w-full z-50">
         <div className="flex justify-center items-center space-x-1 sm:space-x-2 flex-shrink-0 w-auto order-none">
           <div className="flex items-center space-x-2">
             <Button
