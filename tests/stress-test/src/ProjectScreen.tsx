@@ -1,17 +1,24 @@
-import { useAccount, useCoState } from "jazz-tools/react-core";
+import { useAccount, useCoState, useMultiCoState } from "jazz-tools/react-core";
 import { useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router";
-import { TodoAccount, TodoProject } from "./1_schema";
+import { TodoAccount, TodoProject, Task } from "./1_schema";
 
 export function ProjectScreen() {
   const { projectId } = useParams();
+  const [visibleTasks, setVisibleTasks] = useState(20);
   const project = useCoState(TodoProject, projectId, {
     resolve: {
-      tasks: {
-        $each: {
-          text: true,
-        },
-      },
+      tasks: true,
+    },
+  });
+  const taskIds = project.$isLoaded
+    ? Array.from(project.tasks.$jazz.refs)
+        .slice(0, visibleTasks)
+        .map((ref) => ref.id)
+    : [];
+  const tasks = useMultiCoState(Task, taskIds, {
+    resolve: {
+      text: true,
     },
   });
   const me = useAccount(TodoAccount, {
@@ -47,7 +54,6 @@ export function ProjectScreen() {
     }
   }
 
-  const [visibleTasks, setVisibleTasks] = useState(20);
   const navigate = useNavigate();
 
   if (!project.$isLoaded) return null;
@@ -108,58 +114,61 @@ export function ProjectScreen() {
           marginBottom: "30px",
         }}
       >
-        {project.tasks.slice(0, visibleTasks).map((task, index) => (
-          <label
-            key={task?.$jazz.id ?? index}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              padding: "16px 20px",
-              backgroundColor: "white",
-              borderRadius: "12px",
-              boxShadow: "0 2px 8px rgba(0, 0, 0, 0.1)",
-              border: "1px solid #e9ecef",
-              transition: "all 0.2s ease",
-              cursor: "pointer",
-            }}
-            onMouseOver={(e) => {
-              e.currentTarget.style.transform = "translateY(-2px)";
-              e.currentTarget.style.boxShadow =
-                "0 4px 16px rgba(0, 0, 0, 0.15)";
-            }}
-            onMouseOut={(e) => {
-              e.currentTarget.style.transform = "translateY(0)";
-              e.currentTarget.style.boxShadow = "0 2px 8px rgba(0, 0, 0, 0.1)";
-            }}
-          >
-            <input
-              type="checkbox"
-              checked={task?.done}
-              onChange={(e) => {
-                if (task) task.$jazz.set("done", e.target.checked);
-              }}
+        {tasks
+          .filter((task) => task.$isLoaded)
+          .map((task, index) => (
+            <label
+              key={task?.$jazz.id ?? index}
               style={{
-                width: "20px",
-                height: "20px",
-                marginRight: "16px",
-                accentColor: "#28a745",
+                display: "flex",
+                alignItems: "center",
+                padding: "16px 20px",
+                backgroundColor: "white",
+                borderRadius: "12px",
+                boxShadow: "0 2px 8px rgba(0, 0, 0, 0.1)",
+                border: "1px solid #e9ecef",
+                transition: "all 0.2s ease",
                 cursor: "pointer",
               }}
-            />
-            <span
-              style={{
-                fontSize: "16px",
-                color: task?.done ? "#6c757d" : "#2c3e50",
-                textDecoration: task?.done ? "line-through" : "none",
-                flex: 1,
-                fontWeight: task?.done ? "400" : "500",
-                transition: "all 0.2s ease",
+              onMouseOver={(e) => {
+                e.currentTarget.style.transform = "translateY(-2px)";
+                e.currentTarget.style.boxShadow =
+                  "0 4px 16px rgba(0, 0, 0, 0.15)";
+              }}
+              onMouseOut={(e) => {
+                e.currentTarget.style.transform = "translateY(0)";
+                e.currentTarget.style.boxShadow =
+                  "0 2px 8px rgba(0, 0, 0, 0.1)";
               }}
             >
-              {task?.text}
-            </span>
-          </label>
-        ))}
+              <input
+                type="checkbox"
+                checked={task?.done}
+                onChange={(e) => {
+                  if (task) task.$jazz.set("done", e.target.checked);
+                }}
+                style={{
+                  width: "20px",
+                  height: "20px",
+                  marginRight: "16px",
+                  accentColor: "#28a745",
+                  cursor: "pointer",
+                }}
+              />
+              <span
+                style={{
+                  fontSize: "16px",
+                  color: task?.done ? "#6c757d" : "#2c3e50",
+                  textDecoration: task?.done ? "line-through" : "none",
+                  flex: 1,
+                  fontWeight: task?.done ? "400" : "500",
+                  transition: "all 0.2s ease",
+                }}
+              >
+                {task?.text}
+              </span>
+            </label>
+          ))}
       </div>
 
       <div
