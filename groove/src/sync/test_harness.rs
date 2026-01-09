@@ -1,25 +1,18 @@
 //! In-memory test harness for sync testing.
 //!
+//! **TEMPORARY**: These tests only exercise the sync protocol layer in isolation.
+//! They do NOT go through LocalNode - commits are created directly and sent via
+//! the transport layer. This means they don't test:
+//! - LocalNode detecting local changes and triggering sync
+//! - Client-side storage of received commits
+//! - The full round-trip: write locally → push → broadcast → apply to local storage
+//!
+//! TODO: Replace these with proper integration tests that use LocalNode on both
+//! client and server sides, testing the complete sync flow.
+//!
 //! This module provides an in-memory ensemble of clients and server
 //! communicating via channels, enabling fast, deterministic sync tests
 //! without network overhead.
-//!
-//! # Example
-//!
-//! ```ignore
-//! let harness = TestHarness::new();
-//!
-//! // Create two clients
-//! let client1 = harness.create_client("alice");
-//! let client2 = harness.create_client("bob");
-//!
-//! // Client 1 subscribes and pushes
-//! let stream1 = client1.subscribe("*").await?;
-//! client1.push(object_id, "main").await?;
-//!
-//! // Client 2 receives the update via its subscription
-//! let event = stream2.next().await;
-//! ```
 
 use std::collections::HashSet;
 use std::sync::Arc;
