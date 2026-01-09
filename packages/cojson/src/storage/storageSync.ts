@@ -41,7 +41,7 @@ export class StorageApiSync implements StorageAPI {
 
   /**
    * Queue for streaming content that will be pulled by SyncManager.
-   * Only used when content requires streaming (multiple chunks) and priority is not HIGH.
+   * Only used when content requires streaming (multiple chunks).
    */
   readonly streamingQueue: StorageStreamingQueue;
 

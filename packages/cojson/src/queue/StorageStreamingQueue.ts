@@ -15,9 +15,9 @@ const PRIORITY_TO_QUEUE_INDEX = {
 } as const;
 
 type StreamingQueueTuple = [
-  LinkedList<ContentCallback>,
-  LinkedList<ContentCallback>,
-  LinkedList<ContentCallback>,
+  high: LinkedList<ContentCallback>,
+  medium: LinkedList<ContentCallback>,
+  low: LinkedList<ContentCallback>,
 ];
 
 /**

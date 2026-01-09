@@ -798,20 +798,20 @@ describe("client syncs with a server with storage", () => {
         "bob -> server | LOAD Map sessions: empty",
         "syncServer -> storage | LOAD Map sessions: empty",
         "storage -> syncServer | CONTENT ParentGroup header: true new: After: 0 New: 76 expectContentUntil: header/205",
-        "storage -> syncServer | CONTENT ParentGroup header: true new: After: 76 New: 73",
-        "storage -> syncServer | CONTENT ParentGroup header: true new: After: 149 New: 56",
         "storage -> syncServer | CONTENT Group header: true new: After: 0 New: 5",
         "storage -> syncServer | CONTENT Map header: true new: After: 0 New: 1",
         "server -> bob | CONTENT ParentGroup header: true new: After: 0 New: 76 expectContentUntil: header/205",
-        "server -> bob | CONTENT ParentGroup header: false new: After: 76 New: 73",
-        "server -> bob | CONTENT ParentGroup header: false new: After: 149 New: 56",
         "server -> bob | CONTENT Group header: true new: After: 0 New: 5",
         "server -> bob | CONTENT Map header: true new: After: 0 New: 1",
+        "storage -> syncServer | CONTENT ParentGroup header: true new: After: 76 New: 73",
+        "server -> bob | CONTENT ParentGroup header: false new: After: 76 New: 73 expectContentUntil: header/205",
+        "storage -> syncServer | CONTENT ParentGroup header: true new: After: 149 New: 56",
+        "server -> bob | CONTENT ParentGroup header: false new: After: 149 New: 56",
         "bob -> server | KNOWN ParentGroup sessions: header/76",
-        "bob -> server | KNOWN ParentGroup sessions: header/149",
-        "bob -> server | KNOWN ParentGroup sessions: header/205",
         "bob -> server | KNOWN Group sessions: header/5",
         "bob -> server | KNOWN Map sessions: header/1",
+        "bob -> server | KNOWN ParentGroup sessions: header/149",
+        "bob -> server | KNOWN ParentGroup sessions: header/205",
       ]
     `);
 
@@ -922,7 +922,7 @@ describe("client syncs with a server with storage", () => {
     });
 
     test("large parent group streaming from storage", async () => {
-      cojsonInternals.setIncomingMessagesTimeBudget(0); // Should not affect the test because the streaming value is a group
+      cojsonInternals.setIncomingMessagesTimeBudget(0);
 
       const syncServer = setupTestNode({
         isSyncServer: true,
@@ -1010,26 +1010,26 @@ describe("client syncs with a server with storage", () => {
           Map: map.core,
         }),
       ).toMatchInlineSnapshot(`
-      [
-        "bob -> server | LOAD Map sessions: empty",
-        "syncServer -> storage | LOAD Map sessions: empty",
-        "storage -> syncServer | CONTENT ParentGroup header: true new: After: 0 New: 76 expectContentUntil: header/205",
-        "storage -> syncServer | CONTENT ParentGroup header: true new: After: 76 New: 73",
-        "storage -> syncServer | CONTENT ParentGroup header: true new: After: 149 New: 56",
-        "storage -> syncServer | CONTENT Group header: true new: After: 0 New: 5",
-        "storage -> syncServer | CONTENT Map header: true new: After: 0 New: 1",
-        "server -> bob | CONTENT ParentGroup header: true new: After: 0 New: 76 expectContentUntil: header/205",
-        "server -> bob | CONTENT ParentGroup header: false new: After: 76 New: 73",
-        "server -> bob | CONTENT ParentGroup header: false new: After: 149 New: 56",
-        "server -> bob | CONTENT Group header: true new: After: 0 New: 5",
-        "server -> bob | CONTENT Map header: true new: After: 0 New: 1",
-        "bob -> server | KNOWN ParentGroup sessions: header/76",
-        "bob -> server | KNOWN ParentGroup sessions: header/149",
-        "bob -> server | KNOWN ParentGroup sessions: header/205",
-        "bob -> server | KNOWN Group sessions: header/5",
-        "bob -> server | KNOWN Map sessions: header/1",
-      ]
-    `);
+        [
+          "bob -> server | LOAD Map sessions: empty",
+          "syncServer -> storage | LOAD Map sessions: empty",
+          "storage -> syncServer | CONTENT ParentGroup header: true new: After: 0 New: 76 expectContentUntil: header/205",
+          "storage -> syncServer | CONTENT Group header: true new: After: 0 New: 5",
+          "storage -> syncServer | CONTENT Map header: true new: After: 0 New: 1",
+          "server -> bob | CONTENT ParentGroup header: true new: After: 0 New: 76 expectContentUntil: header/205",
+          "server -> bob | CONTENT Group header: true new: After: 0 New: 5",
+          "server -> bob | CONTENT Map header: true new: After: 0 New: 1",
+          "storage -> syncServer | CONTENT ParentGroup header: true new: After: 76 New: 73",
+          "server -> bob | CONTENT ParentGroup header: false new: After: 76 New: 73 expectContentUntil: header/205",
+          "bob -> server | KNOWN ParentGroup sessions: header/76",
+          "storage -> syncServer | CONTENT ParentGroup header: true new: After: 149 New: 56",
+          "server -> bob | CONTENT ParentGroup header: false new: After: 149 New: 56",
+          "bob -> server | KNOWN Group sessions: header/5",
+          "bob -> server | KNOWN Map sessions: header/1",
+          "bob -> server | KNOWN ParentGroup sessions: header/149",
+          "bob -> server | KNOWN ParentGroup sessions: header/205",
+        ]
+      `);
 
       expect(mapOnBob.get("hello")).toEqual("world");
     });

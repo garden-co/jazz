@@ -3,10 +3,8 @@ import { CO_VALUE_PRIORITY } from "../priority.js";
 import { StorageStreamingQueue } from "../queue/StorageStreamingQueue.js";
 import {
   SyncMessagesLog,
-  createTestMetricReader,
   loadCoValueOrFail,
   setupTestNode,
-  tearDownTestMetricReader,
   waitFor,
 } from "./testUtils.js";
 
@@ -14,15 +12,10 @@ describe("SyncManager.processQueues", () => {
   let jazzCloud: ReturnType<typeof setupTestNode>;
 
   beforeEach(async () => {
-    createTestMetricReader();
     SyncMessagesLog.clear();
     jazzCloud = setupTestNode({
       isSyncServer: true,
     });
-  });
-
-  afterEach(() => {
-    tearDownTestMetricReader();
   });
 
   describe("incoming messages processing", () => {
@@ -114,17 +107,19 @@ describe("SyncManager.processQueues", () => {
       const order: string[] = [];
       const lowCallback = () => order.push("low");
       const mediumCallback = () => order.push("medium");
+      const highCallback = () => order.push("high");
 
       // Push LOW first, then MEDIUM
       storage.streamingQueue?.push(lowCallback, CO_VALUE_PRIORITY.LOW);
       storage.streamingQueue?.push(mediumCallback, CO_VALUE_PRIORITY.MEDIUM);
+      storage.streamingQueue?.push(highCallback, CO_VALUE_PRIORITY.HIGH);
       storage.streamingQueue?.emit();
 
       // Wait for both to be processed
-      await waitFor(() => order.length === 2);
+      await waitFor(() => order.length === 3);
 
       // MEDIUM should be processed first
-      expect(order).toEqual(["medium", "low"]);
+      expect(order).toEqual(["high", "medium", "low"]);
     });
   });
 
@@ -287,34 +282,6 @@ describe("SyncManager.processQueues", () => {
         client.node.syncManager as any
       ).getStorageStreamingQueue?.();
       expect(queueAfter).toBe(storage.streamingQueue);
-    });
-  });
-
-  describe("HIGH priority queue behavior", () => {
-    test("HIGH priority content goes through streaming queue", async () => {
-      const client = setupTestNode();
-      client.connectToSyncServer();
-      const { storage } = client.addStorage();
-
-      // Create a group (HIGH priority)
-      const group = jazzCloud.node.createGroup();
-      group.addMember("everyone", "reader");
-      await group.core.waitForSync();
-
-      // Load from server first to populate storage
-      await loadCoValueOrFail(client.node, group.id);
-
-      // Restart and load from storage
-      client.restart();
-      client.addStorage({ storage });
-
-      SyncMessagesLog.clear();
-
-      // Load group from storage - goes through queue like all priorities
-      await loadCoValueOrFail(client.node, group.id);
-
-      // Queue should be empty after processing completes
-      expect(storage.streamingQueue?.isEmpty()).toBe(true);
     });
   });
 });

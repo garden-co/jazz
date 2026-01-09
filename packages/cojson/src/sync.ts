@@ -465,52 +465,50 @@ export class SyncManager {
     this.processing = true;
     let lastTimer = performance.now();
 
-    try {
-      const streamingQueue = this.getStorageStreamingQueue();
+    const streamingQueue = this.getStorageStreamingQueue();
 
-      while (true) {
-        // First, try to pull from incoming messages queue
-        const messageEntry = this.messagesQueue.pull();
-        if (messageEntry) {
-          try {
-            this.handleSyncMessage(messageEntry.msg, messageEntry.peer);
-          } catch (err) {
-            logger.error("Error processing message", { err });
-          }
-        }
-
-        // Then, try to pull from storage streaming queue
-        const pushStreamingContent = streamingQueue?.pull();
-        if (pushStreamingContent) {
-          try {
-            // Invoke the pushContent callback to stream the content
-            pushStreamingContent();
-          } catch (err) {
-            logger.error("Error processing storage streaming entry", {
-              err,
-            });
-          }
-        }
-
-        // If both queues are empty, we're done
-        if (!messageEntry && !pushStreamingContent) {
-          break;
-        }
-
-        // Check if we have blocked the main thread for too long
-        // and if so, yield to the event loop
-        const currentTimer = performance.now();
-        if (
-          currentTimer - lastTimer >
-          SYNC_SCHEDULER_CONFIG.INCOMING_MESSAGES_TIME_BUDGET
-        ) {
-          await new Promise<void>((resolve) => setTimeout(resolve));
-          lastTimer = performance.now();
+    while (true) {
+      // First, try to pull from incoming messages queue
+      const messageEntry = this.messagesQueue.pull();
+      if (messageEntry) {
+        try {
+          this.handleSyncMessage(messageEntry.msg, messageEntry.peer);
+        } catch (err) {
+          logger.error("Error processing message", { err });
         }
       }
-    } finally {
-      this.processing = false;
+
+      // Then, try to pull from storage streaming queue
+      const pushStreamingContent = streamingQueue?.pull();
+      if (pushStreamingContent) {
+        try {
+          // Invoke the pushContent callback to stream the content
+          pushStreamingContent();
+        } catch (err) {
+          logger.error("Error processing storage streaming entry", {
+            err,
+          });
+        }
+      }
+
+      // If both queues are empty, we're done
+      if (!messageEntry && !pushStreamingContent) {
+        break;
+      }
+
+      // Check if we have blocked the main thread for too long
+      // and if so, yield to the event loop
+      const currentTimer = performance.now();
+      if (
+        currentTimer - lastTimer >
+        SYNC_SCHEDULER_CONFIG.INCOMING_MESSAGES_TIME_BUDGET
+      ) {
+        await new Promise<void>((resolve) => setTimeout(resolve));
+        lastTimer = performance.now();
+      }
     }
+
+    this.processing = false;
   }
 
   addPeer(peer: Peer, skipReconciliation: boolean = false) {
