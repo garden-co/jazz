@@ -1,11 +1,12 @@
 //! Delta types for representing row changes.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::commit::CommitId;
-use crate::sql::row::{Row, Value};
-use crate::sql::schema::TableSchema;
 use crate::object::ObjectId;
+use crate::sql::row_buffer::{OwnedRow, RowDescriptor};
+use crate::sql::schema::TableSchema;
 
 /// Reference to prior row state via commit graph.
 ///
@@ -35,11 +36,16 @@ impl PriorState {
     }
 }
 
-/// A change to a single row.
+/// A change to a single row using the unified buffer format.
 #[derive(Clone, Debug)]
 pub enum RowDelta {
     /// Row was inserted (no prior state).
-    Added(Row),
+    Added {
+        /// The ID of the added row.
+        id: ObjectId,
+        /// The new row data in buffer format.
+        row: OwnedRow,
+    },
 
     /// Row was deleted.
     Removed {
@@ -53,8 +59,8 @@ pub enum RowDelta {
     Updated {
         /// The ID of the updated row.
         id: ObjectId,
-        /// The new row values.
-        new: Row,
+        /// The new row data in buffer format.
+        row: OwnedRow,
         /// Prior tips for looking up old values on-demand.
         prior: PriorState,
     },
@@ -64,17 +70,26 @@ impl RowDelta {
     /// Get the row ID affected by this delta.
     pub fn row_id(&self) -> ObjectId {
         match self {
-            RowDelta::Added(row) => row.id,
+            RowDelta::Added { id, .. } => *id,
             RowDelta::Removed { id, .. } => *id,
             RowDelta::Updated { id, .. } => *id,
         }
     }
 
     /// Get the new row data if this delta has it.
-    pub fn new_row(&self) -> Option<&Row> {
+    pub fn new_row(&self) -> Option<&OwnedRow> {
         match self {
-            RowDelta::Added(row) => Some(row),
-            RowDelta::Updated { new, .. } => Some(new),
+            RowDelta::Added { row, .. } => Some(row),
+            RowDelta::Updated { row, .. } => Some(row),
+            RowDelta::Removed { .. } => None,
+        }
+    }
+
+    /// Get the row descriptor if available.
+    pub fn descriptor(&self) -> Option<&Arc<RowDescriptor>> {
+        match self {
+            RowDelta::Added { row, .. } => Some(&row.descriptor),
+            RowDelta::Updated { row, .. } => Some(&row.descriptor),
             RowDelta::Removed { .. } => None,
         }
     }
@@ -82,9 +97,30 @@ impl RowDelta {
     /// Returns true if this delta has prior state that can be looked up.
     pub fn has_prior(&self) -> bool {
         match self {
-            RowDelta::Added(_) => false,
+            RowDelta::Added { .. } => false,
             RowDelta::Removed { prior, .. } => !prior.is_new(),
             RowDelta::Updated { prior, .. } => !prior.is_new(),
+        }
+    }
+
+    /// Create a new delta with qualified column names.
+    ///
+    /// Converts column names from `column` to `table.column` format.
+    /// This is needed for JOIN queries where predicates use qualified names.
+    pub fn qualify_columns(self, table: &str, schema: &TableSchema) -> Self {
+        match self {
+            RowDelta::Added { id, row } => {
+                let qualified_row = row.qualify_columns(table, schema);
+                RowDelta::Added { id, row: qualified_row }
+            }
+            RowDelta::Updated { id, row, prior } => {
+                let qualified_row = row.qualify_columns(table, schema);
+                RowDelta::Updated { id, row: qualified_row, prior }
+            }
+            RowDelta::Removed { id, prior } => {
+                // Removed deltas don't have row data to qualify
+                RowDelta::Removed { id, prior }
+            }
         }
     }
 }
@@ -110,18 +146,18 @@ impl DeltaBatch {
     }
 
     /// Create a batch with a single Added delta.
-    pub fn added(row: Row) -> Self {
+    pub fn added(id: ObjectId, row: OwnedRow) -> Self {
         Self {
-            deltas: vec![RowDelta::Added(row)],
+            deltas: vec![RowDelta::Added { id, row }],
         }
     }
 
     /// Create a batch with a single Updated delta.
-    pub fn updated(id: ObjectId, new: Row, prior_tips: Vec<CommitId>) -> Self {
+    pub fn updated(id: ObjectId, row: OwnedRow, prior_tips: Vec<CommitId>) -> Self {
         Self {
             deltas: vec![RowDelta::Updated {
                 id,
-                new,
+                row,
                 prior: PriorState::new(prior_tips),
             }],
         }
@@ -178,7 +214,7 @@ impl DeltaBatch {
         }
 
         // Track final state per row: None = removed/not present, Some = added/updated
-        let mut final_state: HashMap<ObjectId, Option<(Row, PriorState)>> = HashMap::new();
+        let mut final_state: HashMap<ObjectId, Option<(OwnedRow, PriorState)>> = HashMap::new();
         // Track which rows existed before this batch (had prior state on first delta)
         let mut existed_before: HashMap<ObjectId, bool> = HashMap::new();
 
@@ -189,7 +225,7 @@ impl DeltaBatch {
             existed_before.entry(id).or_insert_with(|| delta.has_prior());
 
             match delta {
-                RowDelta::Added(row) => {
+                RowDelta::Added { row, .. } => {
                     final_state.insert(id, Some((row, PriorState::empty())));
                 }
                 RowDelta::Removed {  .. } => {
@@ -200,7 +236,7 @@ impl DeltaBatch {
                         final_state.remove(&id);
                     }
                 }
-                RowDelta::Updated { new, prior, .. } => {
+                RowDelta::Updated { row, prior, .. } => {
                     // Keep prior from first delta for this row
                     let prior_to_use = if let Some(Some((_, existing_prior))) = final_state.get(&id)
                     {
@@ -208,7 +244,7 @@ impl DeltaBatch {
                     } else {
                         prior
                     };
-                    final_state.insert(id, Some((new, prior_to_use)));
+                    final_state.insert(id, Some((row, prior_to_use)));
                 }
             }
         }
@@ -219,9 +255,9 @@ impl DeltaBatch {
             match state {
                 Some((row, prior)) => {
                     if existed {
-                        self.deltas.push(RowDelta::Updated { id, new: row, prior });
+                        self.deltas.push(RowDelta::Updated { id, row, prior });
                     } else {
-                        self.deltas.push(RowDelta::Added(row));
+                        self.deltas.push(RowDelta::Added { id, row });
                     }
                 }
                 None => {
@@ -239,98 +275,180 @@ impl DeltaBatch {
     }
 }
 
-/// A row that has been joined from multiple tables.
+// Legacy JoinedRow has been removed - use BufferJoinedRow instead.
+
+// ============================================================================
+// Buffer-based JoinedRow
+// ============================================================================
+
+/// A joined row using the unified buffer format.
 ///
-/// This represents the result of a JOIN operation, containing the
-/// row data from the primary table plus any joined tables.
+/// Unlike the legacy `JoinedRow` which stores `Vec<Value>`, this stores
+/// `OwnedRow` instances with their descriptors. Each table in the join
+/// has its own row buffer with a shared descriptor.
 #[derive(Clone, Debug)]
-pub struct JoinedRow {
+pub struct BufferJoinedRow {
     /// The primary (left) table name.
     pub primary_table: String,
     /// Row ID from the primary table.
     pub primary_id: ObjectId,
-    /// Column values from all tables in order: primary columns, then join1 columns, etc.
-    pub values: Vec<Value>,
-    /// Map from table name to (row_id, start_column_index).
-    /// This allows looking up which columns belong to which table.
-    pub table_offsets: HashMap<String, (ObjectId, usize)>,
+    /// Rows keyed by table name: (row_id, OwnedRow).
+    /// Each table has its own descriptor via the OwnedRow.
+    pub table_rows: HashMap<String, (ObjectId, OwnedRow)>,
 }
 
-impl JoinedRow {
-    /// Create a JoinedRow from a single table's row.
-    pub fn from_single(table: &str, row: Row) -> Self {
-        let mut table_offsets = HashMap::new();
-        table_offsets.insert(table.to_string(), (row.id, 0));
-
+impl BufferJoinedRow {
+    /// Create an empty BufferJoinedRow with just a primary table designation.
+    pub fn new(primary_table: &str, primary_id: ObjectId) -> Self {
         Self {
-            primary_table: table.to_string(),
-            primary_id: row.id,
-            values: row.values,
-            table_offsets,
+            primary_table: primary_table.to_string(),
+            primary_id,
+            table_rows: HashMap::new(),
         }
     }
 
-    /// Add columns from a joined table.
-    pub fn add_joined(&mut self, table: &str, row: Row) {
-        let start_idx = self.values.len();
-        self.table_offsets.insert(table.to_string(), (row.id, start_idx));
-        self.values.extend(row.values);
+    /// Create a BufferJoinedRow from a single table's row.
+    pub fn from_single(table: &str, row_id: ObjectId, row: OwnedRow) -> Self {
+        let mut table_rows = HashMap::new();
+        table_rows.insert(table.to_string(), (row_id, row));
+
+        Self {
+            primary_table: table.to_string(),
+            primary_id: row_id,
+            table_rows,
+        }
+    }
+
+    /// Add a row from a joined table.
+    pub fn add_joined(&mut self, table: &str, row_id: ObjectId, row: OwnedRow) {
+        self.table_rows.insert(table.to_string(), (row_id, row));
     }
 
     /// Get the row ID for a specific table.
     pub fn get_row_id(&self, table: &str) -> Option<ObjectId> {
-        self.table_offsets.get(table).map(|(id, _)| *id)
+        self.table_rows.get(table).map(|(id, _)| *id)
     }
 
-    /// Get a column value by table and column index within that table.
-    pub fn get_value(&self, table: &str, col_idx: usize) -> Option<&Value> {
-        let (_, start) = self.table_offsets.get(table)?;
-        self.values.get(start + col_idx)
+    /// Get a row reference for a specific table.
+    pub fn get_row(&self, table: &str) -> Option<crate::sql::row_buffer::RowRef<'_>> {
+        self.table_rows.get(table).map(|(_, row)| row.as_ref())
     }
 
-    /// Get a column value by table name and column name.
-    pub fn get_column(&self, table: &str, column: &str, schema: &TableSchema) -> Option<&Value> {
-        let col_idx = schema.column_index(column)?;
-        self.get_value(table, col_idx)
+    /// Get an owned row clone for a specific table.
+    pub fn get_owned_row(&self, table: &str) -> Option<&OwnedRow> {
+        self.table_rows.get(table).map(|(_, row)| row)
     }
 
-    /// Convert to an output Row using the joined values.
-    /// The output row ID is the primary table's row ID.
-    pub fn to_output_row(&self) -> Row {
-        Row::new(self.primary_id, self.values.clone())
-    }
-
-    /// Convert to an output Row containing only values from a specific table.
-    ///
-    /// Used for reverse JOINs where we want `SELECT Table.*` but the graph
-    /// had to swap tables for the join logic.
-    pub fn to_projected_row(&self, table: &str, column_count: usize) -> Option<Row> {
-        let (row_id, start_idx) = self.table_offsets.get(table)?;
-        let end_idx = start_idx + column_count;
-        if end_idx > self.values.len() {
-            return None;
-        }
-        let projected_values = self.values[*start_idx..end_idx].to_vec();
-        Some(Row::new(*row_id, projected_values))
+    /// Get the descriptor for a specific table.
+    pub fn get_descriptor(&self, table: &str) -> Option<&Arc<RowDescriptor>> {
+        self.table_rows.get(table).map(|(_, row)| &row.descriptor)
     }
 
     /// Check if this joined row contains a specific table.
     pub fn has_table(&self, table: &str) -> bool {
-        self.table_offsets.contains_key(table)
+        self.table_rows.contains_key(table)
     }
 
     /// Get all table names in this joined row.
     pub fn tables(&self) -> impl Iterator<Item = &str> {
-        self.table_offsets.keys().map(|s| s.as_str())
+        self.table_rows.keys().map(|s| s.as_str())
+    }
+
+    /// Convert to an output OwnedRow by merging all tables' rows.
+    ///
+    /// Creates a new row with columns from all tables concatenated.
+    /// Uses merge_rows to preserve buffer order and handle duplicate column names.
+    pub fn to_output_row(&self) -> OwnedRow {
+        use crate::sql::row_buffer::RowBuilder;
+
+        // Start with the primary table's row
+        let primary_row = match self.table_rows.get(&self.primary_table) {
+            Some((_, row)) => row,
+            None => {
+                // No primary table row - return empty
+                let empty_desc = Arc::new(RowDescriptor::new([]));
+                return RowBuilder::new(empty_desc).build();
+            }
+        };
+
+        // Collect all rows to merge: primary first, then others in stable order
+        let mut rows_to_merge: Vec<&OwnedRow> = vec![primary_row];
+        let mut other_tables: Vec<_> = self.table_rows.iter()
+            .filter(|(table, _)| *table != &self.primary_table)
+            .collect();
+        // Sort by table name for stable ordering
+        other_tables.sort_by(|(a, _), (b, _)| a.cmp(b));
+        for (_, (_, row)) in other_tables {
+            rows_to_merge.push(row);
+        }
+
+        OwnedRow::merge_rows(&rows_to_merge)
+    }
+
+    /// Convert to an output OwnedRow with values in schema order.
+    ///
+    /// The combined schema specifies the expected output column order.
+    /// Values are looked up by qualified column name to ensure correct ordering.
+    pub fn to_output_row_with_schema(&self, combined_schema: &TableSchema, descriptor: Arc<RowDescriptor>) -> OwnedRow {
+        use crate::sql::row_buffer::RowBuilder;
+
+        let mut builder = RowBuilder::new(descriptor.clone());
+
+        for (col_idx, col_def) in combined_schema.columns.iter().enumerate() {
+            // col_def.name is qualified like "folders.owner_id"
+            if let Some((table, col_name)) = col_def.name.split_once('.') {
+                if let Some((_, owned_row)) = self.table_rows.get(table) {
+                    // The individual owned_row has unqualified column names, so use col_name
+                    if let Some(rv) = owned_row.get_by_name(col_name) {
+                        // Get the buffer column index for this schema column index
+                        if let Some(buf_col_idx) = descriptor.columns.iter().position(|c| c.schema_index == col_idx) {
+                            builder = builder.set_from_row_value(buf_col_idx, rv);
+                        }
+                    }
+                }
+            }
+        }
+
+        builder.build()
+    }
+
+    /// Convert to an output OwnedRow containing only values from a specific table.
+    pub fn to_projected_row(&self, table: &str, schema: &TableSchema, descriptor: Arc<RowDescriptor>) -> Option<(ObjectId, OwnedRow)> {
+        use crate::sql::row_buffer::RowBuilder;
+
+        let (row_id, owned_row) = self.table_rows.get(table)?;
+
+        let mut builder = RowBuilder::new(descriptor.clone());
+
+        for (col_idx, col_def) in schema.columns.iter().enumerate() {
+            let qualified_name = format!("{}.{}", table, col_def.name);
+            if let Some(rv) = owned_row.get_by_name(&qualified_name) {
+                // Get the buffer column index for this schema column index
+                if let Some(buf_col_idx) = descriptor.columns.iter().position(|c| c.schema_index == col_idx) {
+                    builder = builder.set_from_row_value(buf_col_idx, rv);
+                }
+            }
+        }
+
+        Some((*row_id, builder.build()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sql::row_buffer::{RowBuilder, RowDescriptor, RowValue};
+    use crate::sql::schema::{ColumnDef, ColumnType};
 
-    fn make_row(id: u128, name: &str) -> Row {
-        Row::new(ObjectId::new(id), vec![Value::String(name.to_string())])
+    fn make_test_descriptor() -> Arc<RowDescriptor> {
+        Arc::new(RowDescriptor::new([("name".to_string(), ColumnType::String, false)]))
+    }
+
+    fn make_buffer_row(descriptor: &Arc<RowDescriptor>, name: &str) -> OwnedRow {
+        let idx = descriptor.column_index("name").unwrap();
+        RowBuilder::new(descriptor.clone())
+            .set_string(idx, name)
+            .build()
     }
 
     #[test]
@@ -342,25 +460,29 @@ mod tests {
 
     #[test]
     fn delta_batch_added() {
-        let row = make_row(1, "Alice");
-        let batch = DeltaBatch::added(row.clone());
+        let descriptor = make_test_descriptor();
+        let row = make_buffer_row(&descriptor, "Alice");
+        let id = ObjectId::new(1);
+        let batch = DeltaBatch::added(id, row);
 
         assert!(!batch.is_empty());
         assert_eq!(batch.len(), 1);
 
         let delta = batch.iter().next().unwrap();
-        assert_eq!(delta.row_id(), ObjectId::new(1));
-        assert!(matches!(delta, RowDelta::Added(_)));
+        assert_eq!(delta.row_id(), id);
+        assert!(matches!(delta, RowDelta::Added { .. }));
     }
 
     #[test]
     fn delta_batch_compact_add_remove() {
-        let row = make_row(1, "Alice");
-        let mut batch = DeltaBatch::new();
+        let descriptor = make_test_descriptor();
+        let row = make_buffer_row(&descriptor, "Alice");
+        let id = ObjectId::new(1);
 
-        batch.push(RowDelta::Added(row));
+        let mut batch = DeltaBatch::new();
+        batch.push(RowDelta::Added { id, row });
         batch.push(RowDelta::Removed {
-            id: ObjectId::new(1),
+            id,
             prior: PriorState::empty(),
         });
 
@@ -372,24 +494,26 @@ mod tests {
 
     #[test]
     fn delta_batch_compact_multiple_updates() {
-        let row1 = make_row(1, "Alice");
-        let row2 = make_row(1, "Alicia");
-        let row3 = make_row(1, "Alex");
+        let descriptor = make_test_descriptor();
+        let id = ObjectId::new(1);
+        let row1 = make_buffer_row(&descriptor, "Alice");
+        let row2 = make_buffer_row(&descriptor, "Alicia");
+        let row3 = make_buffer_row(&descriptor, "Alex");
 
         let mut batch = DeltaBatch::new();
         batch.push(RowDelta::Updated {
-            id: ObjectId::new(1),
-            new: row1,
+            id,
+            row: row1,
             prior: PriorState::new(vec![CommitId::from_bytes([1; 32])]), // Existed before
         });
         batch.push(RowDelta::Updated {
-            id: ObjectId::new(1),
-            new: row2,
+            id,
+            row: row2,
             prior: PriorState::empty(),
         });
         batch.push(RowDelta::Updated {
-            id: ObjectId::new(1),
-            new: row3.clone(),
+            id,
+            row: row3,
             prior: PriorState::empty(),
         });
 
@@ -398,16 +522,23 @@ mod tests {
         // Should have single update to final state
         assert_eq!(batch.len(), 1);
         let delta = batch.iter().next().unwrap();
-        assert!(matches!(delta, RowDelta::Updated { new, .. } if new.values[0] == Value::String("Alex".to_string())));
+        if let RowDelta::Updated { row, .. } = delta {
+            assert_eq!(row.get_by_name("name"), Some(RowValue::String("Alex")));
+        } else {
+            panic!("Expected Updated delta");
+        }
     }
 
     #[test]
     fn row_delta_accessors() {
-        let row = make_row(1, "Alice");
+        let descriptor = make_test_descriptor();
+        let row = make_buffer_row(&descriptor, "Alice");
+        let id = ObjectId::new(1);
 
-        let added = RowDelta::Added(row.clone());
-        assert_eq!(added.row_id(), ObjectId::new(1));
+        let added = RowDelta::Added { id, row: row.clone() };
+        assert_eq!(added.row_id(), id);
         assert!(added.new_row().is_some());
+        assert!(added.descriptor().is_some());
         assert!(!added.has_prior());
 
         let removed = RowDelta::Removed {
@@ -416,15 +547,159 @@ mod tests {
         };
         assert_eq!(removed.row_id(), ObjectId::new(2));
         assert!(removed.new_row().is_none());
+        assert!(removed.descriptor().is_none());
         assert!(removed.has_prior());
 
         let updated = RowDelta::Updated {
-            id: ObjectId::new(1),
-            new: row,
+            id,
+            row,
             prior: PriorState::empty(),
         };
-        assert_eq!(updated.row_id(), ObjectId::new(1));
+        assert_eq!(updated.row_id(), id);
         assert!(updated.new_row().is_some());
+        assert!(updated.descriptor().is_some());
         assert!(!updated.has_prior());
+    }
+
+    // ========================================================================
+    // BufferJoinedRow tests
+    // ========================================================================
+
+    fn make_users_descriptor() -> Arc<RowDescriptor> {
+        Arc::new(RowDescriptor::new([
+            ("name".to_string(), ColumnType::String, false),
+            ("age".to_string(), ColumnType::I32, false),
+        ]))
+    }
+
+    fn make_posts_descriptor() -> Arc<RowDescriptor> {
+        Arc::new(RowDescriptor::new([
+            ("title".to_string(), ColumnType::String, false),
+            ("author_id".to_string(), ColumnType::Ref("users".to_string()), false),
+        ]))
+    }
+
+    fn make_users_schema() -> TableSchema {
+        TableSchema::new(
+            "users",
+            vec![
+                ColumnDef::required("name", ColumnType::String),
+                ColumnDef::required("age", ColumnType::I32),
+            ],
+        )
+    }
+
+    fn make_posts_schema() -> TableSchema {
+        TableSchema::new(
+            "posts",
+            vec![
+                ColumnDef::required("title", ColumnType::String),
+                ColumnDef::required("author_id", ColumnType::Ref("users".to_string())),
+            ],
+        )
+    }
+
+    fn make_user_row(descriptor: &Arc<RowDescriptor>, name: &str, age: i32) -> OwnedRow {
+        let name_idx = descriptor.column_index("name").unwrap();
+        let age_idx = descriptor.column_index("age").unwrap();
+        RowBuilder::new(descriptor.clone())
+            .set_string(name_idx, name)
+            .set_i32(age_idx, age)
+            .build()
+    }
+
+    fn make_post_row(descriptor: &Arc<RowDescriptor>, title: &str, author_id: ObjectId) -> OwnedRow {
+        let title_idx = descriptor.column_index("title").unwrap();
+        let author_idx = descriptor.column_index("author_id").unwrap();
+        RowBuilder::new(descriptor.clone())
+            .set_string(title_idx, title)
+            .set_ref(author_idx, author_id)
+            .build()
+    }
+
+    #[test]
+    fn buffer_joined_row_from_single() {
+        let users_desc = make_users_descriptor();
+        let user_row = make_user_row(&users_desc, "Alice", 30);
+        let user_id = ObjectId::new(1);
+
+        let joined = BufferJoinedRow::from_single("users", user_id, user_row);
+
+        assert_eq!(joined.primary_table, "users");
+        assert_eq!(joined.primary_id, user_id);
+        assert!(joined.has_table("users"));
+        assert!(!joined.has_table("posts"));
+        assert_eq!(joined.get_row_id("users"), Some(user_id));
+    }
+
+    #[test]
+    fn buffer_joined_row_add_joined() {
+        let users_desc = make_users_descriptor();
+        let posts_desc = make_posts_descriptor();
+
+        let user_row = make_user_row(&users_desc, "Alice", 30);
+        let user_id = ObjectId::new(1);
+        let post_row = make_post_row(&posts_desc, "Hello World", user_id);
+        let post_id = ObjectId::new(2);
+
+        let mut joined = BufferJoinedRow::from_single("users", user_id, user_row);
+        joined.add_joined("posts", post_id, post_row);
+
+        assert!(joined.has_table("users"));
+        assert!(joined.has_table("posts"));
+        assert_eq!(joined.get_row_id("users"), Some(user_id));
+        assert_eq!(joined.get_row_id("posts"), Some(post_id));
+
+        // Check we can access the rows
+        let user_ref = joined.get_row("users").unwrap();
+        match user_ref.get_by_name("name") {
+            Some(RowValue::String(s)) => assert_eq!(s, "Alice"),
+            other => panic!("Expected String, got {:?}", other),
+        }
+
+        let post_ref = joined.get_row("posts").unwrap();
+        match post_ref.get_by_name("title") {
+            Some(RowValue::String(s)) => assert_eq!(s, "Hello World"),
+            other => panic!("Expected String, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn buffer_joined_row_to_output() {
+        let users_desc = make_users_descriptor();
+        let posts_desc = make_posts_descriptor();
+
+        let user_row = make_user_row(&users_desc, "Alice", 30);
+        let user_id = ObjectId::new(1);
+        let post_row = make_post_row(&posts_desc, "Hello World", user_id);
+        let post_id = ObjectId::new(2);
+
+        let mut joined = BufferJoinedRow::from_single("users", user_id, user_row);
+        joined.add_joined("posts", post_id, post_row);
+
+        let output = joined.to_output_row();
+
+        // Output should have columns from both tables
+        // The order depends on HashMap iteration, but we can check count
+        assert!(output.descriptor.columns.len() >= 4); // 2 from users + 2 from posts
+    }
+
+    #[test]
+    fn buffer_joined_row_tables_iter() {
+        let users_desc = make_users_descriptor();
+        let posts_desc = make_posts_descriptor();
+
+        let user_row = make_user_row(&users_desc, "Alice", 30);
+        let user_id = ObjectId::new(1);
+        let post_row = make_post_row(&posts_desc, "Hello World", user_id);
+        let post_id = ObjectId::new(2);
+
+        let mut joined = BufferJoinedRow::from_single("users", user_id, user_row);
+        joined.add_joined("posts", post_id, post_row);
+
+        let tables: Vec<&str> = joined.tables().collect();
+        assert_eq!(tables.len(), 2);
+        assert!(tables.contains(&"users"));
+        assert!(tables.contains(&"posts"));
     }
 }

@@ -1,8 +1,10 @@
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 use groove::sql::{
-    Database, IncrementalQuery, Value, ExecuteResult, Row,
+    Database, IncrementalQuery, ExecuteResult,
     encode_rows, encode_delta,
+    row_buffer::{OwnedRow, RowBuilder, RowDescriptor},
+    query_graph::DeltaBatch,
 };
 use groove::{ObjectId, ContentRef, ChunkHash, INLINE_THRESHOLD};
 use groove::ListenerId;
@@ -237,7 +239,7 @@ impl WasmDatabase {
                     ExecuteResult::Selected(rows) => {
                         let row_data: Vec<Vec<String>> = rows
                             .iter()
-                            .map(|row| row_to_strings(row))
+                            .map(|(_id, row)| row_to_strings(row))
                             .collect();
                         serde_wasm_bindgen::to_value(&row_data).unwrap()
                     }
@@ -273,8 +275,9 @@ impl WasmDatabase {
     pub fn update_row(&self, table: &str, row_id: &str, column: &str, value: &str) -> Result<bool, JsValue> {
         let id: ObjectId = row_id.parse()
             .map_err(|e| JsValue::from_str(&format!("invalid row_id: {:?}", e)))?;
+        let value = value.to_string();
         self.db
-            .update(table, id, &[(column, Value::String(value.to_string()))])
+            .update_with(table, id, |b| b.set_string_by_name(column, &value).build())
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))
     }
 
@@ -285,7 +288,7 @@ impl WasmDatabase {
         let id: ObjectId = row_id.parse()
             .map_err(|e| JsValue::from_str(&format!("invalid row_id: {:?}", e)))?;
         self.db
-            .update(table, id, &[(column, Value::I64(value))])
+            .update_with(table, id, |b| b.set_i64_by_name(column, value).build())
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))
     }
 
@@ -494,14 +497,15 @@ impl WasmDatabase {
         let blob_cols: Vec<(String, u64)> = serde_wasm_bindgen::from_value(blob_columns)
             .map_err(|e| JsValue::from_str(&format!("invalid blob_columns: {:?}", e)))?;
 
-        // Build column names and values
-        let mut column_names: Vec<String> = Vec::new();
-        let mut values: Vec<Value> = Vec::new();
+        // Get table schema and build row using RowBuilder
+        let schema = self.db.get_table(table)
+            .ok_or_else(|| JsValue::from_str(&format!("table not found: {}", table)))?;
+        let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
+        let mut builder = RowBuilder::new(descriptor);
 
         // Add string columns
         for (name, value) in string_cols {
-            column_names.push(name);
-            values.push(Value::String(value));
+            builder = builder.set_string_by_name(&name, &value);
         }
 
         // Add blob columns
@@ -509,16 +513,13 @@ impl WasmDatabase {
         for (name, handle_id) in blob_cols {
             let content_ref = registry.get(handle_id)
                 .ok_or_else(|| JsValue::from_str(&format!("invalid blob handle: {}", handle_id)))?;
-            column_names.push(name);
-            values.push(Value::Blob(content_ref.clone()));
+            builder = builder.set_blob_by_name(&name, content_ref.clone());
         }
         drop(registry);
 
-        // Convert to &str slice for the API
-        let column_refs: Vec<&str> = column_names.iter().map(|s| s.as_str()).collect();
-
         // Execute insert
-        let id = self.db.insert(table, &column_refs, values)
+        let row = builder.build();
+        let id = self.db.insert_row(table, row)
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
         Ok(id.to_string())
@@ -539,17 +540,27 @@ impl WasmDatabase {
         let registry = self.blob_registry.borrow();
         let content_ref = registry.get(blob_handle_id)
             .ok_or_else(|| JsValue::from_str("invalid blob handle"))?;
+        let content_ref = content_ref.clone();
+        drop(registry);
 
         self.db
-            .update(table, id, &[(column, Value::Blob(content_ref.clone()))])
+            .update_with(table, id, |b| b.set_blob_by_name(column, content_ref.clone()).build())
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))
     }
 }
 
-fn row_to_strings(row: &Row) -> Vec<String> {
-    row.values
+fn row_to_strings(row: &OwnedRow) -> Vec<String> {
+    row.descriptor
+        .columns
         .iter()
-        .map(|v| format!("{:?}", v))
+        .enumerate()
+        .map(|(i, _)| {
+            if let Some(value) = row.get(i) {
+                format!("{:?}", value)
+            } else {
+                "NULL".to_string()
+            }
+        })
         .collect()
 }
 
@@ -568,16 +579,19 @@ impl WasmQueryHandle {
     fn new(query: IncrementalQuery, callback: js_sys::Function) -> Self {
         // Wrap the JS callback in a Rust closure
         // The closure will be called synchronously when data changes
-        let rust_callback = move |rows: Vec<Row>| {
-            let row_data: Vec<Vec<String>> = rows
+        // Note: This legacy API shows all current rows on each update (not just deltas)
+        let rust_callback = Box::new(move |delta_batch: &DeltaBatch| {
+            // Collect rows from Added and Updated deltas (representing current state)
+            let row_data: Vec<Vec<String>> = delta_batch
                 .iter()
+                .filter_map(|delta| delta.new_row())
                 .map(|row| row_to_strings(row))
                 .collect();
 
             // Call the JS callback synchronously
             let js_rows = serde_wasm_bindgen::to_value(&row_data).unwrap();
             let _ = callback.call1(&JsValue::NULL, &js_rows);
-        };
+        });
 
         // Subscribe - this will call the callback whenever data changes
         let listener_id = query.subscribe(rust_callback);
@@ -608,11 +622,18 @@ pub struct WasmQueryHandleBinary {
 #[wasm_bindgen]
 impl WasmQueryHandleBinary {
     fn new(query: IncrementalQuery, callback: js_sys::Function) -> Self {
-        let rust_callback = move |rows: Vec<Row>| {
+        let rust_callback = Box::new(move |delta_batch: &DeltaBatch| {
+            // Collect (id, row) pairs from Added and Updated deltas
+            let rows: Vec<(ObjectId, OwnedRow)> = delta_batch
+                .iter()
+                .filter_map(|delta| {
+                    delta.new_row().map(|row| (delta.row_id(), row.clone()))
+                })
+                .collect();
             let binary = encode_rows(&rows);
             let js_array = Uint8Array::from(binary.as_slice());
             let _ = callback.call1(&JsValue::NULL, &js_array);
-        };
+        });
 
         let listener_id = query.subscribe(rust_callback);
 
@@ -656,7 +677,7 @@ impl WasmQueryHandleDelta {
             let _ = callback.call1(&JsValue::NULL, &js_deltas);
         });
 
-        let listener_id = query.subscribe_delta(rust_callback);
+        let listener_id = query.subscribe(rust_callback);
 
         WasmQueryHandleDelta {
             _query: query,

@@ -1,5 +1,5 @@
 use crate::sql::policy::{Policy, PolicyAction, PolicyColumnRef, PolicyExpr, PolicyValue};
-use crate::sql::row::Value;
+use crate::sql::query_graph::PredicateValue;
 use crate::sql::schema::{ColumnDef, ColumnType};
 
 /// Parsed SQL statement.
@@ -34,14 +34,14 @@ pub struct CreateTable {
 pub struct Insert {
     pub table: String,
     pub columns: Vec<String>,
-    pub values: Vec<Value>,
+    pub values: Vec<PredicateValue>,
 }
 
 /// UPDATE statement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Update {
     pub table: String,
-    pub assignments: Vec<(String, Value)>,
+    pub assignments: Vec<(String, PredicateValue)>,
     pub where_clause: Vec<Condition>,
 }
 
@@ -128,14 +128,14 @@ pub struct Condition {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConditionValue {
     /// A literal value
-    Literal(Value),
+    Literal(PredicateValue),
     /// A column reference (for correlated subqueries)
     Column(QualifiedColumn),
 }
 
 impl Condition {
     /// Get the value if this condition has a literal right-hand side.
-    pub fn value(&self) -> Option<&Value> {
+    pub fn value(&self) -> Option<&PredicateValue> {
         match &self.right {
             ConditionValue::Literal(v) => Some(v),
             ConditionValue::Column(_) => None,
@@ -284,7 +284,8 @@ impl<'a> Parser<'a> {
         Err(self.error("unterminated string literal"))
     }
 
-    fn parse_number(&mut self) -> Result<Value, ParseError> {
+    /// Parse a number literal.
+    fn parse_number(&mut self) -> Result<PredicateValue, ParseError> {
         self.skip_whitespace();
 
         let start = self.pos;
@@ -313,10 +314,10 @@ impl<'a> Parser<'a> {
 
         if has_dot {
             let n: f64 = num_str.parse().map_err(|_| self.error("invalid float"))?;
-            Ok(Value::F64(n))
+            Ok(PredicateValue::F64(n))
         } else {
             let n: i64 = num_str.parse().map_err(|_| self.error("invalid integer"))?;
-            Ok(Value::I64(n))
+            Ok(PredicateValue::I64(n))
         }
     }
 
@@ -342,27 +343,28 @@ impl<'a> Parser<'a> {
         num_str.parse().map_err(|_| self.error("invalid number"))
     }
 
-    fn parse_value(&mut self) -> Result<Value, ParseError> {
+    /// Parse a SQL value (used in INSERT/UPDATE statements).
+    fn parse_value(&mut self) -> Result<PredicateValue, ParseError> {
         self.skip_whitespace();
 
         // NULL
         if self.try_keyword("NULL") {
-            return Ok(Value::NullableNone);
+            return Ok(PredicateValue::Null);
         }
 
         // Boolean
         if self.try_keyword("true") {
-            return Ok(Value::Bool(true));
+            return Ok(PredicateValue::Bool(true));
         }
         if self.try_keyword("false") {
-            return Ok(Value::Bool(false));
+            return Ok(PredicateValue::Bool(false));
         }
 
         // String literal - always parse as String.
         // The database executor coerces to ObjectId when inserting into Ref columns.
         if self.peek_char() == Some('\'') {
             let s = self.parse_string_literal()?;
-            return Ok(Value::String(s));
+            return Ok(PredicateValue::String(s));
         }
 
         // Number
@@ -851,17 +853,17 @@ impl<'a> Parser<'a> {
         // Try to parse as a literal value first
         // Check for NULL, true, false, string literal, or number
         if self.try_keyword("NULL") {
-            return Ok(ConditionValue::Literal(Value::NullableNone));
+            return Ok(ConditionValue::Literal(PredicateValue::Null));
         }
         if self.try_keyword("true") {
-            return Ok(ConditionValue::Literal(Value::Bool(true)));
+            return Ok(ConditionValue::Literal(PredicateValue::Bool(true)));
         }
         if self.try_keyword("false") {
-            return Ok(ConditionValue::Literal(Value::Bool(false)));
+            return Ok(ConditionValue::Literal(PredicateValue::Bool(false)));
         }
         if self.peek_char() == Some('\'') {
             let s = self.parse_string_literal()?;
-            return Ok(ConditionValue::Literal(Value::String(s)));
+            return Ok(ConditionValue::Literal(PredicateValue::String(s)));
         }
         if self
             .peek_char()
@@ -1118,19 +1120,19 @@ impl<'a> Parser<'a> {
 
         // Literal values
         if self.try_keyword("NULL") {
-            return Ok(PolicyValue::Literal(Value::NullableNone));
+            return Ok(PolicyValue::Literal(PredicateValue::Null));
         }
         if self.try_keyword("true") {
-            return Ok(PolicyValue::Literal(Value::Bool(true)));
+            return Ok(PolicyValue::Literal(PredicateValue::Bool(true)));
         }
         if self.try_keyword("false") {
-            return Ok(PolicyValue::Literal(Value::Bool(false)));
+            return Ok(PolicyValue::Literal(PredicateValue::Bool(false)));
         }
 
         // String literal
         if self.peek_char() == Some('\'') {
             let s = self.parse_string_literal()?;
-            return Ok(PolicyValue::Literal(Value::String(s)));
+            return Ok(PolicyValue::Literal(PredicateValue::String(s)));
         }
 
         // Number

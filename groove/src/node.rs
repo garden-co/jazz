@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
 
-use crate::commit::{Commit, CommitId};
+use crate::commit::CommitId;
 use crate::listener::{ListenerId, ListenerError, ObjectCallback, ObjectKey, ObjectListenerRegistry, ObjectState};
 use crate::object::{Object, ObjectId};
 use crate::storage::{Environment, MemoryEnvironment};

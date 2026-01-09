@@ -1,3 +1,7 @@
+use std::sync::Arc;
+
+use super::row_buffer::RowDescriptor;
+
 /// Column type definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColumnType {
@@ -23,6 +27,9 @@ pub enum ColumnType {
     Blob,
     /// Array of blobs.
     BlobArray,
+    /// Array of rows (used for ARRAY_AGG and array subqueries).
+    /// Contains the descriptor for each item in the array.
+    Array(Arc<RowDescriptor>),
 }
 
 impl ColumnType {
@@ -47,10 +54,18 @@ impl ColumnType {
             ColumnType::I64 => Some(8),
             ColumnType::F64 => Some(8),
             ColumnType::Ref(_) => Some(16),
-            ColumnType::String | ColumnType::Bytes | ColumnType::Blob | ColumnType::BlobArray => {
-                None
-            }
+            ColumnType::String
+            | ColumnType::Bytes
+            | ColumnType::Blob
+            | ColumnType::BlobArray
+            | ColumnType::Array(_) => None,
         }
+    }
+
+    /// Returns the fixed size in bytes accounting for nullability.
+    /// Nullable fixed-size types have an extra presence byte.
+    pub fn fixed_size_nullable(&self, nullable: bool) -> Option<usize> {
+        self.fixed_size().map(|size| if nullable { size + 1 } else { size })
     }
 }
 
@@ -157,6 +172,47 @@ impl TableSchema {
         }
     }
 
+    /// Extend this schema with columns from another table.
+    ///
+    /// Unlike `combine()`, this preserves existing column names unchanged and
+    /// only qualifies the new table's columns. This is used for chain joins
+    /// where the input already has qualified column names.
+    pub fn extend_with(&self, other: &TableSchema) -> TableSchema {
+        let mut combined_columns = self.columns.clone();
+
+        // Add columns from other table with qualified names
+        for col in &other.columns {
+            combined_columns.push(ColumnDef {
+                name: format!("{}.{}", other.name, col.name),
+                ty: col.ty.clone(),
+                nullable: col.nullable,
+            });
+        }
+
+        TableSchema {
+            name: format!("{}+{}", self.name, other.name),
+            columns: combined_columns,
+        }
+    }
+
+    /// Create a schema with qualified column names (table.column format).
+    ///
+    /// This is used when projecting a single table from a JOIN result.
+    pub fn qualify(&self, table_name: &str) -> TableSchema {
+        let qualified_columns = self.columns.iter().map(|col| {
+            ColumnDef {
+                name: format!("{}.{}", table_name, col.name),
+                ty: col.ty.clone(),
+                nullable: col.nullable,
+            }
+        }).collect();
+
+        TableSchema {
+            name: table_name.to_string(),
+            columns: qualified_columns,
+        }
+    }
+
     /// Count of variable-size columns (for header).
     pub fn variable_column_count(&self) -> usize {
         self.columns.iter().filter(|c| !c.ty.is_fixed_size()).count()
@@ -193,6 +249,7 @@ impl TableSchema {
                 ColumnType::U32 => 7,
                 ColumnType::Blob => 8,
                 ColumnType::BlobArray => 9,
+                ColumnType::Array(_) => panic!("Array columns cannot be serialized in table schemas"),
             };
             buf.push(type_tag);
 
