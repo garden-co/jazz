@@ -6,6 +6,7 @@ mod node;
 mod object;
 pub mod sql;
 mod storage;
+pub mod sync;
 
 pub use branch::{Branch, BranchError};
 pub use commit::{Commit, CommitId};

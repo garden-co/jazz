@@ -206,7 +206,7 @@ impl Branch {
     }
 
     /// Get all ancestors of a commit (including itself).
-    pub(crate) fn ancestors(&self, id: &CommitId) -> HashSet<CommitId> {
+    pub fn ancestors(&self, id: &CommitId) -> HashSet<CommitId> {
         let mut result = HashSet::new();
         let mut queue = VecDeque::new();
         queue.push_back(*id);
