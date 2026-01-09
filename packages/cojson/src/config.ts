@@ -60,3 +60,16 @@ export function setGarbageCollectorMaxAge(maxAge: number) {
 export function setGarbageCollectorInterval(interval: number) {
   GARBAGE_COLLECTOR_CONFIG.INTERVAL = interval;
 }
+
+export const WEBSOCKET_CONFIG = {
+  MAX_OUTGOING_MESSAGES_CHUNK_BYTES: 25_000,
+  OUTGOING_MESSAGES_CHUNK_DELAY: 5,
+};
+
+export function setMaxOutgoingMessagesChunkBytes(bytes: number) {
+  WEBSOCKET_CONFIG.MAX_OUTGOING_MESSAGES_CHUNK_BYTES = bytes;
+}
+
+export function setOutgoingMessagesChunkDelay(delay: number) {
+  WEBSOCKET_CONFIG.OUTGOING_MESSAGES_CHUNK_DELAY = delay;
+}

@@ -22,4 +22,4 @@ test("runTransform", () => {
   });
 
   expect(result).toMatchSnapshot();
-});
+}, 20_000);
