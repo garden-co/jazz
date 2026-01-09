@@ -160,6 +160,48 @@ describe("ReactNativePasskeyAuth", () => {
         "Passkey authentication aborted",
       );
     });
+
+    it("should return early when passkey.get returns null", async () => {
+      const auth = new ReactNativePasskeyAuth(
+        mockCrypto,
+        mockAuthenticate,
+        authSecretStorage,
+        "Test App",
+        "example.com",
+      );
+
+      mockGet.mockResolvedValue(null);
+
+      await auth.logIn();
+
+      expect(mockAuthenticate).not.toHaveBeenCalled();
+    });
+
+    it("should throw error when userHandle is null", async () => {
+      const auth = new ReactNativePasskeyAuth(
+        mockCrypto,
+        mockAuthenticate,
+        authSecretStorage,
+        "Test App",
+        "example.com",
+      );
+
+      mockGet.mockResolvedValue({
+        id: "credential-id",
+        rawId: "raw-credential-id",
+        type: "public-key",
+        response: {
+          clientDataJSON: "mock-client-data",
+          authenticatorData: "mock-auth-data",
+          signature: "mock-signature",
+          userHandle: null,
+        },
+      });
+
+      await expect(auth.logIn()).rejects.toThrow(
+        "Passkey credential is missing userHandle",
+      );
+    });
   });
 
   describe("signUp", () => {

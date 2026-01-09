@@ -54,7 +54,7 @@ interface PasskeyGetResult {
     clientDataJSON: string;
     authenticatorData: string;
     signature: string;
-    userHandle: string;
+    userHandle: string | null;
   };
 }
 
@@ -64,7 +64,7 @@ interface PasskeyGetResult {
  */
 export interface PasskeyModule {
   create: (request: PasskeyCreateRequest) => Promise<unknown>;
-  get: (request: PasskeyGetRequest) => Promise<PasskeyGetResult>;
+  get: (request: PasskeyGetRequest) => Promise<PasskeyGetResult | null>;
   isSupported: () => Promise<boolean>;
 }
 
@@ -160,6 +160,14 @@ export class ReactNativePasskeyAuth {
     const { crypto, authenticate } = this;
 
     const webAuthNCredential = await this.getPasskeyCredentials();
+
+    if (!webAuthNCredential) {
+      return;
+    }
+
+    if (!webAuthNCredential.response.userHandle) {
+      throw new Error("Passkey credential is missing userHandle");
+    }
 
     const webAuthNCredentialPayload = base64UrlToUint8Array(
       webAuthNCredential.response.userHandle,
@@ -285,7 +293,7 @@ export class ReactNativePasskeyAuth {
     }
   }
 
-  private async getPasskeyCredentials(): Promise<PasskeyGetResult> {
+  private async getPasskeyCredentials(): Promise<PasskeyGetResult | null> {
     const challenge = uint8ArrayToBase64Url(
       new Uint8Array(this.crypto.randomBytes(32)),
     );
