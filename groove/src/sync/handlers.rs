@@ -179,15 +179,48 @@ async fn handle_unsubscribe<E: Environment>(
     body: axum::body::Bytes,
 ) -> Result<Response, SyncError> {
     // Authenticate
-    let _identity = authenticate(&*state, &headers).await?;
+    let identity = authenticate(&*state, &headers).await?;
 
     // Decode request
-    let _request = UnsubscribeRequest::from_bytes(&body)
+    let request = UnsubscribeRequest::from_bytes(&body)
         .map_err(|e| SyncError::bad_request(format!("Invalid request: {}", e)))?;
 
-    // TODO: Find session by identity and remove subscription
-    // For now, just return success
-    // In a real implementation, we'd need to track session IDs per identity
+    // Find sessions for this identity and remove the subscription
+    let mut server = state.server.write().await;
+    let session_ids = server.sessions_for_identity(&identity.id);
+
+    let query_id = super::server::QueryId(request.subscription_id);
+
+    // First pass: find the session with this query and collect cleanup info
+    let mut cleanup_info: Option<(super::server::SessionId, Vec<crate::object::ObjectId>)> = None;
+
+    for session_id in session_ids {
+        if let Some(session) = server.get_session_mut(&session_id) {
+            if session.queries.remove(&query_id).is_some() {
+                // Found and removed the subscription
+                // Collect objects that need cleanup
+                let objects_to_check: Vec<_> = session.object_queries.keys().copied().collect();
+                let mut objects_to_unregister = Vec::new();
+
+                for object_id in objects_to_check {
+                    if session.remove_object_from_query(object_id, query_id) {
+                        // Object no longer needed by any query
+                        objects_to_unregister.push(object_id);
+                    }
+                }
+
+                cleanup_info = Some((session_id, objects_to_unregister));
+                break;
+            }
+        }
+    }
+
+    // Second pass: unregister objects from server
+    if let Some((session_id, objects_to_unregister)) = cleanup_info {
+        for object_id in objects_to_unregister {
+            server.unregister_object_session(&object_id, &session_id);
+        }
+    }
 
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -202,19 +235,67 @@ async fn handle_push<E: Environment>(
     body: axum::body::Bytes,
 ) -> Result<Response, SyncError> {
     // Authenticate
-    let _identity = authenticate(&*state, &headers).await?;
+    let identity = authenticate(&*state, &headers).await?;
 
     // Decode request
     let request = PushRequest::from_bytes(&body)
         .map_err(|e| SyncError::bad_request(format!("Invalid request: {}", e)))?;
 
-    // TODO: Apply commits to storage and update session state
-    // For now, just accept all pushes
+    if request.commits.is_empty() {
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .body(Body::from(
+                PushResponse {
+                    object_id: request.object_id,
+                    accepted: true,
+                    frontier: vec![],
+                }
+                .to_bytes(),
+            ))
+            .unwrap());
+    }
+
+    // Find the sender's session to exclude from broadcast
+    let sender_session = {
+        let server = state.server.read().await;
+        server
+            .sessions_for_identity(&identity.id)
+            .into_iter()
+            .next()
+    };
+
+    // Store commits and get new frontier
+    let frontier = {
+        let server = state.server.read().await;
+        server
+            .store_commits(request.object_id, &request.commits, "main")
+            .await
+    };
+
+    // Broadcast to other sessions tracking this object
+    {
+        let server = state.server.read().await;
+        server
+            .broadcast_commits(
+                request.object_id,
+                request.commits.clone(),
+                frontier.clone(),
+                sender_session,
+            )
+            .await;
+    }
+
+    // Update sender's known state
+    if let Some(session_id) = sender_session {
+        let mut server = state.server.write().await;
+        server.update_client_known_state(&session_id, request.object_id, frontier.clone());
+    }
 
     let response = PushResponse {
         object_id: request.object_id,
         accepted: true,
-        frontier: request.commits.iter().map(|c| c.compute_id()).collect(),
+        frontier,
     };
 
     Ok(Response::builder()
@@ -230,20 +311,81 @@ async fn handle_reconcile<E: Environment>(
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Response, SyncError> {
+    use futures::stream::StreamExt as _;
+
     // Authenticate
-    let _identity = authenticate(&*state, &headers).await?;
+    let identity = authenticate(&*state, &headers).await?;
 
     // Decode request
     let request = ReconcileRequest::from_bytes(&body)
         .map_err(|e| SyncError::bad_request(format!("Invalid request: {}", e)))?;
 
-    // TODO: Compare frontiers and determine what commits to send
-    // For now, just return empty commits event
+    // Get server frontier and commits
+    let server = state.server.read().await;
+    let server_frontier = server
+        .env
+        .get_frontier(request.object_id.0, "main")
+        .await;
+
+    // If server has no commits, return empty
+    if server_frontier.is_empty() {
+        let event = SseEvent::Commits {
+            object_id: request.object_id,
+            commits: vec![],
+            frontier: vec![],
+        };
+
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .body(Body::from(event.to_bytes()))
+            .unwrap());
+    }
+
+    // Build set of commits client claims to have
+    let client_known: std::collections::HashSet<_> =
+        request.local_frontier.iter().copied().collect();
+
+    // Collect all commits from server for this object
+    let commit_ids: Vec<_> = server
+        .env
+        .list_commits(request.object_id.0, "main")
+        .collect()
+        .await;
+
+    // Load commits that client doesn't have
+    // Simple approach: send all commits not in client's frontier ancestors
+    // (In a full implementation, we'd walk the graph to find exactly what's missing)
+    let mut commits_to_send = Vec::new();
+    for commit_id in &commit_ids {
+        if !client_known.contains(commit_id) {
+            if let Some(commit) = server.env.get_commit(commit_id).await {
+                commits_to_send.push(commit);
+            }
+        }
+    }
+
+    // Update client's known state
+    drop(server);
+    if let Some(session_id) = {
+        let server = state.server.read().await;
+        server
+            .sessions_for_identity(&identity.id)
+            .into_iter()
+            .next()
+    } {
+        let mut server = state.server.write().await;
+        server.update_client_known_state(
+            &session_id,
+            request.object_id,
+            server_frontier.clone(),
+        );
+    }
 
     let event = SseEvent::Commits {
         object_id: request.object_id,
-        commits: vec![],
-        frontier: request.local_frontier,
+        commits: commits_to_send,
+        frontier: server_frontier,
     };
 
     Ok(Response::builder()

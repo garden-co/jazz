@@ -158,6 +158,8 @@ pub struct SyncServer<E: Environment> {
     pub sessions: HashMap<SessionId, ClientSession>,
     /// Reverse index: object -> sessions that have it
     pub object_sessions: HashMap<ObjectId, HashSet<SessionId>>,
+    /// Reverse index: identity -> sessions (for finding session by auth)
+    pub identity_sessions: HashMap<String, HashSet<SessionId>>,
     /// Next session ID
     next_session_id: u64,
 }
@@ -170,6 +172,7 @@ impl<E: Environment> SyncServer<E> {
             token_validator,
             sessions: HashMap::new(),
             object_sessions: HashMap::new(),
+            identity_sessions: HashMap::new(),
             next_session_id: 1,
         }
     }
@@ -178,6 +181,13 @@ impl<E: Environment> SyncServer<E> {
     pub fn create_session(&mut self, identity: ClientIdentity, sse_sender: SseSender) -> SessionId {
         let id = SessionId(self.next_session_id);
         self.next_session_id += 1;
+
+        // Track identity -> session mapping
+        self.identity_sessions
+            .entry(identity.id.clone())
+            .or_default()
+            .insert(id);
+
         self.sessions.insert(id, ClientSession::new(identity, sse_sender));
         id
     }
@@ -194,7 +204,20 @@ impl<E: Environment> SyncServer<E> {
                     }
                 }
             }
+
+            // Clean up identity_sessions reverse index
+            if let Some(sessions) = self.identity_sessions.get_mut(&session.identity.id) {
+                sessions.remove(&session_id);
+                if sessions.is_empty() {
+                    self.identity_sessions.remove(&session.identity.id);
+                }
+            }
         }
+    }
+
+    /// Get sessions for an identity.
+    pub fn sessions_for_identity(&self, identity_id: &str) -> HashSet<SessionId> {
+        self.identity_sessions.get(identity_id).cloned().unwrap_or_default()
     }
 
     /// Get a session by ID.
@@ -262,6 +285,83 @@ impl<E: Environment> SyncServer<E> {
         self.sessions
             .get(session_id)
             .and_then(|s| s.client_known_state.get(object_id))
+    }
+
+    /// Store commits for an object and update the frontier.
+    ///
+    /// Returns the new frontier after applying commits.
+    pub async fn store_commits(
+        &self,
+        object_id: ObjectId,
+        commits: &[crate::commit::Commit],
+        branch: &str,
+    ) -> Vec<CommitId> {
+        // Store each commit
+        let mut commit_ids = Vec::new();
+        for commit in commits {
+            let id = self.env.put_commit(commit).await;
+            commit_ids.push(id);
+        }
+
+        // Get current frontier
+        let mut frontier = self.env.get_frontier(object_id.0, branch).await;
+
+        // Update frontier: remove parents of new commits, add new tips
+        let parent_set: std::collections::HashSet<CommitId> = commits
+            .iter()
+            .flat_map(|c| c.parents.iter().copied())
+            .collect();
+
+        frontier.retain(|id| !parent_set.contains(id));
+
+        // Add commits that are not parents of any other new commit
+        for &id in &commit_ids {
+            // Only add if this commit is not a parent of another new commit
+            let is_parent = commits.iter().any(|other| other.parents.contains(&id));
+            if !is_parent && !frontier.contains(&id) {
+                frontier.push(id);
+            }
+        }
+
+        // Deduplicate frontier
+        let frontier: Vec<CommitId> = frontier
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        // Save updated frontier
+        self.env.set_frontier(object_id.0, branch, &frontier).await;
+
+        frontier
+    }
+
+    /// Broadcast commits to all sessions tracking an object (except the sender).
+    pub async fn broadcast_commits(
+        &self,
+        object_id: ObjectId,
+        commits: Vec<crate::commit::Commit>,
+        frontier: Vec<CommitId>,
+        exclude_session: Option<SessionId>,
+    ) {
+        let sessions = self.sessions_for_object(&object_id);
+        let event = SseEvent::Commits {
+            object_id,
+            commits,
+            frontier,
+        };
+
+        for session_id in sessions {
+            // Skip the sender session
+            if Some(session_id) == exclude_session {
+                continue;
+            }
+
+            if let Some(session) = self.sessions.get(&session_id) {
+                // Ignore send errors (client may have disconnected)
+                let _ = session.sse_sender.send(event.clone()).await;
+            }
+        }
     }
 }
 
