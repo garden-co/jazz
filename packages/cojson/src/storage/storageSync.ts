@@ -33,7 +33,7 @@ import {
   ContentCallback,
   StorageStreamingQueue,
 } from "../queue/StorageStreamingQueue.js";
-import { CO_VALUE_PRIORITY, getPriorityFromHeader } from "../priority.js";
+import { getPriorityFromHeader } from "../priority.js";
 
 export class StorageApiSync implements StorageAPI {
   private readonly dbClient: DBClientInterfaceSync;
@@ -188,19 +188,13 @@ export class StorageApiSync implements StorageAPI {
     this.pushContentWithDependencies(coValueRow, contentMessage, callback);
     this.knownStates.handleUpdate(coValueRow.id, knownState);
 
-    // Groups and accounts are streamed directly, other CoValues are queued
-    const useQueue = priority !== CO_VALUE_PRIORITY.HIGH;
-
+    // All priorities go through the queue (HIGH > MEDIUM > LOW)
     for (const pushStreamingContent of streamingQueue) {
-      if (useQueue) {
-        this.streamingQueue.push(pushStreamingContent, priority);
-      } else {
-        pushStreamingContent();
-      }
+      this.streamingQueue.push(pushStreamingContent, priority);
     }
 
     // Trigger the queue to process the entries
-    if (useQueue) {
+    if (streamingQueue.length > 0) {
       this.streamingQueue.emit();
     }
 

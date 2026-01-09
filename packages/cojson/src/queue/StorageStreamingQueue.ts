@@ -1,5 +1,4 @@
 import { CO_VALUE_PRIORITY, type CoValuePriority } from "../priority.js";
-import type { RawCoID } from "../ids.js";
 import { LinkedList } from "./LinkedList.js";
 
 /**
@@ -8,13 +7,15 @@ import { LinkedList } from "./LinkedList.js";
  */
 export type ContentCallback = () => void;
 
-// Only MEDIUM and LOW priorities use the queue (HIGH bypasses it)
+// All priorities use the queue, processed in order: HIGH > MEDIUM > LOW
 const PRIORITY_TO_QUEUE_INDEX = {
-  [CO_VALUE_PRIORITY.MEDIUM]: 0,
-  [CO_VALUE_PRIORITY.LOW]: 1,
+  [CO_VALUE_PRIORITY.HIGH]: 0,
+  [CO_VALUE_PRIORITY.MEDIUM]: 1,
+  [CO_VALUE_PRIORITY.LOW]: 2,
 } as const;
 
 type StreamingQueueTuple = [
+  LinkedList<ContentCallback>,
   LinkedList<ContentCallback>,
   LinkedList<ContentCallback>,
 ];
@@ -22,15 +23,12 @@ type StreamingQueueTuple = [
 /**
  * A priority-based queue for storage content streaming.
  *
- * This queue manages content streaming for MEDIUM and LOW priority CoValues.
- * HIGH priority content (accounts, groups) bypasses this queue entirely and
- * streams directly via callbacks.
+ * This queue manages content streaming for all priority levels (HIGH, MEDIUM, LOW).
+ * Content is processed in priority order: HIGH first, then MEDIUM, then LOW.
  *
  * Key features:
  * - Stores callbacks to get content (lazy evaluation) rather than content itself
- * - Tracks active streaming sessions per CoValue
- * - Automatically removes CoValue from active streams when last chunk is pulled
- * - Priority-based ordering: MEDIUM priority is processed before LOW
+ * - Priority-based ordering: HIGH > MEDIUM > LOW
  */
 export class StorageStreamingQueue {
   private queues: StreamingQueueTuple;
@@ -39,15 +37,11 @@ export class StorageStreamingQueue {
     this.queues = [
       new LinkedList<ContentCallback>(),
       new LinkedList<ContentCallback>(),
+      new LinkedList<ContentCallback>(),
     ];
   }
 
   private getQueue(priority: CoValuePriority) {
-    if (priority === CO_VALUE_PRIORITY.HIGH) {
-      throw new Error(
-        "HIGH priority content should bypass the queue and stream directly",
-      );
-    }
     return this.queues[PRIORITY_TO_QUEUE_INDEX[priority]];
   }
 
@@ -55,10 +49,8 @@ export class StorageStreamingQueue {
    * Push a content callback to the queue with explicit priority.
    * The callback will be invoked when the entry is pulled and processed.
    *
-   * @param id - The CoValue ID
-   * @param getContent - Callback that returns the content when invoked
-   * @param priority - Explicit priority for this entry (MEDIUM or LOW only)
-   * @param isLastChunk - Whether this is the final chunk for this CoValue
+   * @param entry - Callback that pushes content when invoked
+   * @param priority - Priority for this entry (HIGH, MEDIUM, or LOW)
    */
   public push(entry: ContentCallback, priority: CoValuePriority): void {
     this.getQueue(priority).push(entry);
@@ -67,12 +59,10 @@ export class StorageStreamingQueue {
   /**
    * Pull the next entry from the queue.
    * Returns undefined if no entries are available.
-   *
-   * When isLastChunk is true, the CoValue is automatically
-   * removed from the active streams set.
+   * Priority order: HIGH > MEDIUM > LOW
    */
   public pull(): ContentCallback | undefined {
-    // Find the first non-empty queue (MEDIUM has priority over LOW)
+    // Find the first non-empty queue (HIGH > MEDIUM > LOW)
     const queueIndex = this.queues.findIndex((queue) => queue.length > 0);
 
     if (queueIndex === -1) {

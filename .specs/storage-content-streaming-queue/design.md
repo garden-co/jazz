@@ -5,14 +5,14 @@
 This design introduces a priority-aware architecture for storage content streaming that integrates with the existing sync scheduling infrastructure. The key changes are:
 
 1. **Content that doesn't require streaming** (single chunk) streams directly via callbacks — no queueing
-2. **HIGH priority content (accounts, groups)** always streams directly via callbacks — no queueing
-3. **MEDIUM/LOW priority content requiring streaming** (multiple chunks) uses a pull-based queue model where SyncManager controls the flow
+2. **Content requiring streaming** (multiple chunks) uses a pull-based queue model where SyncManager controls the flow
+3. **All priority levels go through the same queue** with priority ordering: HIGH > MEDIUM > LOW
 
 The queue is only used when content requires streaming (has multiple signature chunks that would block the main thread). This ensures most CoValues load directly without queue overhead, while large binary streams are properly scheduled.
 
 The design consists of three main changes:
 1. A new `StorageStreamingQueue` class for priority-based content queuing
-2. Modifications to `StorageApiSync` to use queue only when streaming is needed and priority is not HIGH
+2. Modifications to `StorageApiSync` to use queue for all streaming content
 3. Unified scheduling logic in `SyncManager` that coordinates both incoming messages and storage streaming
 
 ## Architecture / Components
@@ -61,14 +61,14 @@ export class StorageStreamingQueue {
    * The callback will be invoked when the entry is pulled and processed.
    * 
    * @param entry - Callback that pushes content when invoked
-   * @param priority - Priority for this entry (MEDIUM or LOW only, HIGH throws)
+   * @param priority - Priority for this entry (HIGH, MEDIUM, or LOW)
    */
   push(entry: ContentCallback, priority: CoValuePriority): void;
   
   /**
    * Pull the next callback from the queue.
    * Returns undefined if no entries are available.
-   * Priority order: MEDIUM before LOW.
+   * Priority order: HIGH > MEDIUM > LOW.
    */
   pull(): ContentCallback | undefined;
   
@@ -95,12 +95,9 @@ export class StorageStreamingQueue {
 - Uses the same priority levels as `PriorityBasedMessageQueue` (HIGH, MEDIUM, LOW)
 - Priority is provided explicitly on each `push()` call
 - Caller (StorageApiSync) determines priority using `getPriorityFromHeader()`
-- HIGH priority: accounts and groups — **bypasses the queue entirely**
-- MEDIUM priority: regular CoValues — queued
-- LOW priority: binary streams — queued
-
-**HIGH Priority Bypass:**
-HIGH priority content (accounts, groups) is streamed directly via the callback without going through the queue. This ensures critical content is never delayed by queue processing. Only MEDIUM and LOW priority content uses the queue.
+- HIGH priority: accounts and groups — processed first
+- MEDIUM priority: regular CoValues — processed after HIGH
+- LOW priority: binary streams — processed last
 
 ### 2. StorageApiSync Modifications
 
@@ -119,13 +116,12 @@ load() → loadCoValue() → check if streaming needed (multiple chunks)
               ┌───────────────┴───────────────┐
               ↓                               ↓
     No streaming needed              Streaming needed
-    OR HIGH priority                 AND MEDIUM/LOW priority
               ↓                               ↓
-    callback() directly           queue.push(getContent, priority)
-    (no queueing)                 SyncManager.processQueues()
-                                  → queue.pull()
-                                  → entry.getContent()
-                                  → handleNewContent()
+    First chunk sent               queue.push(getContent, priority)
+    directly                       SyncManager.processQueues()
+    (no queueing)                  → queue.pull() (HIGH > MEDIUM > LOW)
+                                   → entry.getContent()
+                                   → handleNewContent()
 ```
 
 **New interface additions:**
@@ -156,8 +152,8 @@ export class StorageApiSync implements StorageAPI {
 - Remove `await new Promise((resolve) => setTimeout(resolve))` yielding
 - Check if content requires streaming (multiple signature chunks)
 - Determine priority using `getPriorityFromHeader()`
-- Use queue only if: streaming needed AND priority is not HIGH
-- Otherwise: call callback directly
+- All streaming content goes through the queue regardless of priority
+- First chunk is sent directly, subsequent chunks are queued
 - Dependencies are still loaded directly
 
 **Example of streaming with queue check:**
@@ -190,19 +186,13 @@ for (const sessionRow of allCoValueSessions) {
 // Send the first chunk directly
 this.pushContentWithDependencies(coValueRow, contentMessage, callback);
 
-// Groups and accounts (HIGH priority) stream directly, others use queue
-const useQueue = priority !== CO_VALUE_PRIORITY.HIGH;
-
+// All priorities go through the queue (HIGH > MEDIUM > LOW)
 for (const pushStreamingContent of streamingQueue) {
-  if (useQueue) {
-    this.streamingQueue.push(pushStreamingContent, priority);
-  } else {
-    pushStreamingContent();
-  }
+  this.streamingQueue.push(pushStreamingContent, priority);
 }
 
 // Trigger the queue to process the entries
-if (useQueue) {
+if (streamingQueue.length > 0) {
   this.streamingQueue.emit();
 }
 ```
@@ -292,10 +282,10 @@ The unified scheduler alternates between:
 
 Processing order per iteration:
 1. Pull one message from `IncomingMessagesQueue` (if available)
-2. Pull one entry from `StorageStreamingQueue` (if available, MEDIUM before LOW)
+2. Pull one entry from `StorageStreamingQueue` (if available, HIGH > MEDIUM > LOW)
 3. Continue until both queues are empty
 
-Note: HIGH priority storage content (accounts, groups) bypasses the queue entirely and streams directly via `pushContent()` calls in `loadCoValue()`.
+All streaming content goes through the queue regardless of priority, with HIGH priority entries processed before MEDIUM and LOW.
 
 ### 4. IncomingMessagesQueue Changes
 
@@ -352,37 +342,9 @@ When processing a storage entry, SyncManager invokes the callback directly (`cal
 
 ## Sequence Diagrams
 
-### HIGH Priority Path (Direct Streaming)
+### Queued Streaming Path (All Priorities)
 
-HIGH priority content (accounts, groups) bypasses the queue entirely:
-
-```
-┌─────────┐     ┌─────────────┐     ┌─────────────┐
-│ Storage │     │ StorageApi  │     │ SyncManager │
-│   DB    │     │   Sync      │     │             │
-└────┬────┘     └──────┬──────┘     └──────┬──────┘
-     │                 │                   │
-     │  load(id)       │                   │
-     │ ◄───────────────│                   │
-     │                 │                   │
-     │  group data     │                   │
-     │ ────────────────►                   │
-     │                 │                   │
-     │                 │ getPriorityFromHeader() → HIGH
-     │                 │                   │
-     │                 │ callback(content) │
-     │                 │ ──────────────────►
-     │                 │                   │
-     │                 │         handleNewContent()
-     │                 │                   │
-     │                 │ done(true)        │
-```
-
-No queue involvement — content streams directly.
-
-### MEDIUM/LOW Priority Path (Queued Streaming)
-
-MEDIUM and LOW priority content goes through the queue:
+All streaming content goes through the priority-based queue (HIGH > MEDIUM > LOW):
 
 ```
 ┌─────────┐     ┌─────────────┐     ┌────────────────────┐     ┌─────────────┐
@@ -393,15 +355,15 @@ MEDIUM and LOW priority content goes through the queue:
      │  load(id)       │                      │                       │
      │ ◄───────────────│                      │                       │
      │                 │                      │                       │
-     │  binary meta    │                      │                       │
+     │  coValue data   │                      │                       │
      │ ────────────────►                      │                       │
      │                 │                      │                       │
-     │                 │ getPriorityFromHeader() → LOW                │
+     │                 │ getPriorityFromHeader() → priority            │
      │                 │                      │                       │
-     │                 │ push({id, pushContent1, LOW})                │
+     │                 │ push({id, pushContent1, priority})            │
      │                 │ ─────────────────────►                       │
      │                 │                      │                       │
-     │                 │ push({id, pushContentN, LOW})                │
+     │                 │ push({id, pushContentN, priority})           │
      │                 │ ─────────────────────►                       │
      │                 │                      │                       │
      │                 │ emit()               │                       │
@@ -438,25 +400,20 @@ Follow the patterns from `PriorityBasedMessageQueue.test.ts`:
 ```typescript
 describe("StorageStreamingQueue", () => {
   describe("push and pull", () => {
-    test("should pull callbacks in priority order (MEDIUM before LOW)", () => {
+    test("should pull callbacks in priority order (HIGH > MEDIUM > LOW)", () => {
       const queue = new StorageStreamingQueue();
       
       const lowCallback = () => {};
       const mediumCallback = () => {};
+      const highCallback = () => {};
       
       queue.push(lowCallback, CO_VALUE_PRIORITY.LOW);
       queue.push(mediumCallback, CO_VALUE_PRIORITY.MEDIUM);
+      queue.push(highCallback, CO_VALUE_PRIORITY.HIGH);
       
+      expect(queue.pull()).toBe(highCallback);
       expect(queue.pull()).toBe(mediumCallback);
       expect(queue.pull()).toBe(lowCallback);
-    });
-
-    test("should throw when pushing HIGH priority (must bypass queue)", () => {
-      const queue = new StorageStreamingQueue();
-      
-      expect(() => {
-        queue.push(() => {}, CO_VALUE_PRIORITY.HIGH);
-      }).toThrow("HIGH priority content should bypass the queue");
     });
 
     test("callback is not invoked until caller invokes it", () => {
@@ -580,7 +537,7 @@ describe("storage streaming with unified scheduling", () => {
     expect(mapOnClient.get("key")).toBe("value");
   });
 
-  test("high-priority coValues bypass queue and load immediately", async () => {
+  test("high-priority coValues are processed first in the queue", async () => {
     const client = setupTestNode();
     client.addStorage();
 
@@ -592,10 +549,10 @@ describe("storage streaming with unified scheduling", () => {
     // Queue the binary load first (goes through queue - LOW priority)
     const binaryPromise = loadCoValueOrFail(client.node, binary.id);
 
-    // Then request the group (HIGH priority - bypasses queue)
+    // Then request the group (HIGH priority - processed first in queue)
     const groupPromise = loadCoValueOrFail(client.node, group.id);
 
-    // Group should complete first because it bypasses the queue entirely
+    // Group should complete first because HIGH priority is processed first
     const results = await Promise.race([
       groupPromise.then(() => "group"),
       binaryPromise.then(() => "binary"),
@@ -604,7 +561,7 @@ describe("storage streaming with unified scheduling", () => {
     expect(results).toBe("group");
   });
 
-  test("high-priority content is streamed directly without queueing", async () => {
+  test("queue is empty after all streaming completes", async () => {
     const client = setupTestNode();
     const { storage } = client.addStorage();
 
@@ -615,8 +572,7 @@ describe("storage streaming with unified scheduling", () => {
     // Load the group from storage
     await loadCoValueOrFail(client.node, group.id);
 
-    // HIGH priority content should NOT go through the streaming queue
-    // (queue should be empty after loading)
+    // Queue should be empty after processing completes
     expect(storage.streamingQueue.isEmpty()).toBe(true);
   });
 });

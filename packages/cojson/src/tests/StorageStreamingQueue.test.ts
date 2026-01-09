@@ -27,12 +27,12 @@ describe("StorageStreamingQueue", () => {
       expect(queue.isEmpty()).toBe(false);
     });
 
-    test("should throw when pushing HIGH priority entry", () => {
+    test("should add HIGH priority entry to queue", () => {
       const queue = new StorageStreamingQueue();
 
-      expect(() => queue.push(() => {}, CO_VALUE_PRIORITY.HIGH)).toThrow(
-        "HIGH priority content should bypass the queue and stream directly",
-      );
+      queue.push(() => {}, CO_VALUE_PRIORITY.HIGH);
+
+      expect(queue.isEmpty()).toBe(false);
     });
 
     test("should accept multiple entries", () => {
@@ -63,6 +63,23 @@ describe("StorageStreamingQueue", () => {
 
       expect(pulled).toBe(entry);
       expect(queue.isEmpty()).toBe(true);
+    });
+
+    test("should pull HIGH priority before MEDIUM and LOW", () => {
+      const queue = new StorageStreamingQueue();
+      const lowEntry = () => {};
+      const mediumEntry = () => {};
+      const highEntry = () => {};
+
+      // Push in reverse order
+      queue.push(lowEntry, CO_VALUE_PRIORITY.LOW);
+      queue.push(mediumEntry, CO_VALUE_PRIORITY.MEDIUM);
+      queue.push(highEntry, CO_VALUE_PRIORITY.HIGH);
+
+      // Should pull HIGH first, then MEDIUM, then LOW
+      expect(queue.pull()).toBe(highEntry);
+      expect(queue.pull()).toBe(mediumEntry);
+      expect(queue.pull()).toBe(lowEntry);
     });
 
     test("should pull MEDIUM priority before LOW priority", () => {
@@ -98,15 +115,22 @@ describe("StorageStreamingQueue", () => {
       const queue = new StorageStreamingQueue();
       const low1 = () => {};
       const medium1 = () => {};
+      const high1 = () => {};
       const low2 = () => {};
       const medium2 = () => {};
+      const high2 = () => {};
 
       queue.push(low1, CO_VALUE_PRIORITY.LOW);
       queue.push(medium1, CO_VALUE_PRIORITY.MEDIUM);
+      queue.push(high1, CO_VALUE_PRIORITY.HIGH);
       queue.push(low2, CO_VALUE_PRIORITY.LOW);
       queue.push(medium2, CO_VALUE_PRIORITY.MEDIUM);
+      queue.push(high2, CO_VALUE_PRIORITY.HIGH);
 
-      // All MEDIUM should come first, in order
+      // All HIGH should come first, in order
+      expect(queue.pull()).toBe(high1);
+      expect(queue.pull()).toBe(high2);
+      // Then all MEDIUM, in order
       expect(queue.pull()).toBe(medium1);
       expect(queue.pull()).toBe(medium2);
       // Then all LOW, in order
@@ -130,6 +154,12 @@ describe("StorageStreamingQueue", () => {
     test("should return false when LOW queue has entries", () => {
       const queue = new StorageStreamingQueue();
       queue.push(() => {}, CO_VALUE_PRIORITY.LOW);
+      expect(queue.isEmpty()).toBe(false);
+    });
+
+    test("should return false when HIGH queue has entries", () => {
+      const queue = new StorageStreamingQueue();
+      queue.push(() => {}, CO_VALUE_PRIORITY.HIGH);
       expect(queue.isEmpty()).toBe(false);
     });
 

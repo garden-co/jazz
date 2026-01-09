@@ -290,8 +290,8 @@ describe("SyncManager.processQueues", () => {
     });
   });
 
-  describe("HIGH priority bypass", () => {
-    test("HIGH priority content should not go through streaming queue", async () => {
+  describe("HIGH priority queue behavior", () => {
+    test("HIGH priority content goes through streaming queue", async () => {
       const client = setupTestNode();
       client.connectToSyncServer();
       const { storage } = client.addStorage();
@@ -310,10 +310,10 @@ describe("SyncManager.processQueues", () => {
 
       SyncMessagesLog.clear();
 
-      // Load group from storage - should bypass queue
+      // Load group from storage - goes through queue like all priorities
       await loadCoValueOrFail(client.node, group.id);
 
-      // Queue should be empty after loading HIGH priority content
+      // Queue should be empty after processing completes
       expect(storage.streamingQueue?.isEmpty()).toBe(true);
     });
   });
