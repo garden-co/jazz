@@ -155,6 +155,40 @@ If you see this error at runtime, check that:
 2. You've rebuilt the app (not just reloaded JS)
 3. Bridgeless mode is disabled (see above)
 
+### Android Build Hangs at configureCMakeDebug
+
+If your Android build hangs indefinitely at `:app:configureCMakeDebug[arm64-v8a]` (specifically at `_CMakeLTOTest-CXX`), upgrade your NDK version. NDK 27.x has issues with the CMake LTO test when cross-compiling.
+
+In `android/build.gradle`, use NDK 28.2 or later:
+
+```groovy
+buildscript {
+    ext {
+        ndkVersion = "28.2.13676358"
+    }
+}
+```
+
+Then clean and rebuild:
+
+```bash
+cd android && rm -rf app/.cxx .gradle && cd ..
+pnpm android
+```
+
+### Android App Crashes on Startup (SoLoader)
+
+If the app crashes with `SoLoader.init() not yet called` or `Feature flags cannot be overridden more than once`, ensure your `MainApplication.kt` only calls `loadReactNative()`:
+
+```kotlin
+override fun onCreate() {
+    super.onCreate()
+    loadReactNative(this)
+}
+```
+
+Do **not** separately call `DefaultNewArchitectureEntryPoint.load()` - this is already handled by `loadReactNative()`.
+
 ## Development Notes
 
 - Passkeys require HTTPS domain verification and won't work without proper configuration
@@ -176,5 +210,5 @@ src/
 ## Related
 
 - [Jazz Documentation](https://jazz.tools/docs)
-- [react-native-passkey](https://github.com/nicklockwood/react-native-passkey)
+- [react-native-passkey](https://github.com/f-23/react-native-passkey)
 - [WebAuthn Spec](https://www.w3.org/TR/webauthn-3/)
