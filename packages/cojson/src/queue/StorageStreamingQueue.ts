@@ -1,5 +1,5 @@
 import { CO_VALUE_PRIORITY, type CoValuePriority } from "../priority.js";
-import { LinkedList } from "./LinkedList.js";
+import { LinkedList, meteredList } from "./LinkedList.js";
 
 /**
  * A callback that pushes content when invoked.
@@ -35,9 +35,9 @@ export class StorageStreamingQueue {
 
   constructor() {
     this.queues = [
-      new LinkedList<ContentCallback>(),
-      new LinkedList<ContentCallback>(),
-      new LinkedList<ContentCallback>(),
+      meteredList("storage-streaming", { priority: CO_VALUE_PRIORITY.HIGH }),
+      meteredList("storage-streaming", { priority: CO_VALUE_PRIORITY.MEDIUM }),
+      meteredList("storage-streaming", { priority: CO_VALUE_PRIORITY.LOW }),
     ];
   }
 
