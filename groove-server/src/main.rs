@@ -3,7 +3,7 @@
 //! A standalone HTTP server for Jazz sync protocol.
 //!
 //! Usage:
-//!   cargo run --bin sync_server --features sync-server -- [OPTIONS]
+//!   cargo run -p groove-server -- [OPTIONS]
 //!
 //! Options:
 //!   --host HOST     Host to bind to (default: 127.0.0.1)
@@ -15,8 +15,9 @@ use std::sync::Arc;
 use axum::Router;
 use tokio::net::TcpListener;
 
+use groove::sync::AcceptAllTokens;
 use groove::MemoryEnvironment;
-use groove::sync::{sync_router, AcceptAllTokens, AppState};
+use groove_server::{sync_router, AppState};
 
 #[tokio::main]
 async fn main() {
@@ -52,7 +53,7 @@ async fn main() {
             "--help" | "-h" => {
                 println!("Jazz Sync Server");
                 println!();
-                println!("Usage: sync_server [OPTIONS]");
+                println!("Usage: groove-server [OPTIONS]");
                 println!();
                 println!("Options:");
                 println!("  --host HOST     Host to bind to (default: 127.0.0.1)");

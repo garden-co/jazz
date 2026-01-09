@@ -6,28 +6,31 @@
 //! - POST /sync/push - Send new commits for an object
 //! - POST /sync/reconcile - Request full reconciliation for an object
 
-use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::{
     body::Body,
     extract::State,
     http::{header, StatusCode},
-    response::{sse::Event, IntoResponse, Response, Sse},
+    response::{IntoResponse, Response},
     routing::post,
     Router,
 };
-// StreamExt is imported locally in handlers that need it
-use tokio::sync::{mpsc, RwLock};
-use tokio_stream::wrappers::ReceiverStream;
+use futures::stream::StreamExt;
+use tokio::sync::RwLock;
 
-use crate::storage::Environment;
-
-use super::protocol::{
-    Decode, Encode, PushRequest, PushResponse, ReconcileRequest, SseEvent, SubscribeRequest,
+use groove::sync::{
+    ActiveQuery, ClientIdentity, Decode, Encode, PushRequest, PushResponse, QueryId,
+    ReconcileRequest, ServerEnv, SseEvent, SubscribeRequest, SyncServer, TokenValidator,
     UnsubscribeRequest,
 };
-use super::server::{ClientIdentity, SyncServer, TokenValidator};
+use groove::Environment;
+
+use crate::AxumServerEnv;
+
+// ============================================================================
+// App State and Router
+// ============================================================================
 
 /// Shared state for the sync server.
 pub struct AppState<E: Environment> {
@@ -128,9 +131,7 @@ async fn handle_subscribe<E: Environment + 'static>(
     State(state): State<Arc<AppState<E>>>,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
-) -> Result<impl IntoResponse, SyncError> {
-    use futures::stream::StreamExt as _;
-
+) -> Result<Response, SyncError> {
     // Authenticate
     let identity = authenticate(&*state, &headers).await?;
 
@@ -138,8 +139,8 @@ async fn handle_subscribe<E: Environment + 'static>(
     let request = SubscribeRequest::from_bytes(&body)
         .map_err(|e| SyncError::bad_request(format!("Invalid request: {}", e)))?;
 
-    // Create SSE channel
-    let (tx, rx) = mpsc::channel::<SseEvent>(32);
+    // Create SSE channel using ServerEnv
+    let (tx, stream) = AxumServerEnv::create_sse_channel();
 
     // Create session and get query info
     let (session_id, query_id) = {
@@ -151,7 +152,7 @@ async fn handle_subscribe<E: Environment + 'static>(
         let query_id = session.next_query_id();
         session.queries.insert(
             query_id,
-            super::server::ActiveQuery::new(request.query.clone(), request.options.clone()),
+            ActiveQuery::new(request.query.clone(), request.options.clone()),
         );
 
         (session_id, query_id)
@@ -172,7 +173,7 @@ async fn handle_subscribe<E: Environment + 'static>(
             };
 
             for oid in object_ids {
-                let object_id = crate::object::ObjectId(oid);
+                let object_id = groove::ObjectId(oid);
 
                 // Get frontier and commits for this object
                 let (frontier, commits) = {
@@ -183,11 +184,7 @@ async fn handle_subscribe<E: Environment + 'static>(
                     }
 
                     // Load all commits for this object
-                    let commit_ids: Vec<_> = server
-                        .env
-                        .list_commits(oid, "main")
-                        .collect()
-                        .await;
+                    let commit_ids: Vec<_> = server.env.list_commits(oid, "main").collect().await;
 
                     let mut commits = Vec::new();
                     for commit_id in commit_ids {
@@ -223,21 +220,8 @@ async fn handle_subscribe<E: Environment + 'static>(
         });
     }
 
-    // Create SSE stream
-    let stream = ReceiverStream::new(rx);
-    let sse_stream = stream.map(move |event| {
-        // Encode event as base64 for SSE data field
-        let bytes = event.to_bytes();
-        let encoded = base64_encode(&bytes);
-        Ok::<_, Infallible>(Event::default().data(encoded))
-    });
-
-    // Return SSE response with keep-alive
-    Ok(Sse::new(sse_stream).keep_alive(
-        axum::response::sse::KeepAlive::new()
-            .interval(std::time::Duration::from_secs(15))
-            .text("ping"),
-    ))
+    // Convert stream to SSE response using ServerEnv
+    Ok(AxumServerEnv::sse_response(stream))
 }
 
 /// Handle POST /sync/unsubscribe
@@ -257,10 +241,10 @@ async fn handle_unsubscribe<E: Environment>(
     let mut server = state.server.write().await;
     let session_ids = server.sessions_for_identity(&identity.id);
 
-    let query_id = super::server::QueryId(request.subscription_id);
+    let query_id = QueryId(request.subscription_id);
 
     // First pass: find the session with this query and collect cleanup info
-    let mut cleanup_info: Option<(super::server::SessionId, Vec<crate::object::ObjectId>)> = None;
+    let mut cleanup_info: Option<(groove::sync::SessionId, Vec<groove::ObjectId>)> = None;
 
     for session_id in session_ids {
         if let Some(session) = server.get_session_mut(&session_id) {
@@ -379,8 +363,6 @@ async fn handle_reconcile<E: Environment>(
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Response, SyncError> {
-    use futures::stream::StreamExt as _;
-
     // Authenticate
     let identity = authenticate(&*state, &headers).await?;
 
@@ -463,56 +445,26 @@ async fn handle_reconcile<E: Environment>(
         .unwrap())
 }
 
-/// Simple base64 encoding (for SSE data which must be text).
-fn base64_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    let mut result = String::new();
-    let mut i = 0;
-
-    while i < data.len() {
-        let b0 = data[i] as usize;
-        let b1 = data.get(i + 1).copied().unwrap_or(0) as usize;
-        let b2 = data.get(i + 2).copied().unwrap_or(0) as usize;
-
-        result.push(ALPHABET[b0 >> 2] as char);
-        result.push(ALPHABET[((b0 & 0x03) << 4) | (b1 >> 4)] as char);
-
-        if i + 1 < data.len() {
-            result.push(ALPHABET[((b1 & 0x0f) << 2) | (b2 >> 6)] as char);
-        } else {
-            result.push('=');
-        }
-
-        if i + 2 < data.len() {
-            result.push(ALPHABET[b2 & 0x3f] as char);
-        } else {
-            result.push('=');
-        }
-
-        i += 3;
-    }
-
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::Commit;
-    use crate::object::ObjectId;
-    use crate::storage::{CommitStore, MemoryEnvironment};
-    use crate::sync::server::AcceptAllTokens;
+    use groove::sync::AcceptAllTokens;
+    use groove::{Commit, MemoryEnvironment};
+    use tokio::sync::mpsc;
 
-    #[test]
-    fn test_base64_encode() {
-        assert_eq!(base64_encode(b""), "");
-        assert_eq!(base64_encode(b"f"), "Zg==");
-        assert_eq!(base64_encode(b"fo"), "Zm8=");
-        assert_eq!(base64_encode(b"foo"), "Zm9v");
-        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
-        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
-        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    fn make_state() -> Arc<AppState<MemoryEnvironment>> {
+        let env = Arc::new(MemoryEnvironment::new());
+        let validator = Arc::new(AcceptAllTokens);
+        Arc::new(AppState::new(env, validator))
+    }
+
+    fn make_headers(token: &str) -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {}", token).parse().unwrap(),
+        );
+        headers
     }
 
     #[test]
@@ -534,23 +486,10 @@ mod tests {
         assert_eq!(extract_bearer_token(&headers), Some("mytoken123"));
     }
 
-    fn make_state() -> Arc<AppState<MemoryEnvironment>> {
-        let env = Arc::new(MemoryEnvironment::new());
-        let validator = Arc::new(AcceptAllTokens);
-        Arc::new(AppState::new(env, validator))
-    }
-
-    fn make_headers(token: &str) -> axum::http::HeaderMap {
-        let mut headers = axum::http::HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {}", token).parse().unwrap(),
-        );
-        headers
-    }
-
     #[tokio::test]
     async fn test_push_stores_commits() {
+        use groove::CommitStore;
+
         let state = make_state();
         let headers = make_headers("user1");
 
@@ -566,7 +505,7 @@ mod tests {
 
         // Create push request
         let request = PushRequest {
-            object_id: ObjectId(42),
+            object_id: groove::ObjectId(42),
             commits: vec![commit],
         };
 
@@ -588,7 +527,7 @@ mod tests {
         let push_response = PushResponse::from_bytes(&body).unwrap();
 
         assert!(push_response.accepted);
-        assert_eq!(push_response.object_id, ObjectId(42));
+        assert_eq!(push_response.object_id, groove::ObjectId(42));
         assert_eq!(push_response.frontier, vec![commit_id]);
 
         // Verify commit was stored
@@ -606,14 +545,14 @@ mod tests {
         let (tx1, mut rx1) = mpsc::channel::<SseEvent>(16);
         let (tx2, mut rx2) = mpsc::channel::<SseEvent>(16);
 
-        let object_id = ObjectId(42);
+        let object_id = groove::ObjectId(42);
 
         {
             let mut server = state.server.write().await;
 
             // Session 1 - the pusher
             let s1 = server.create_session(
-                super::super::server::ClientIdentity {
+                ClientIdentity {
                     id: "user1".to_string(),
                     name: None,
                 },
@@ -622,7 +561,7 @@ mod tests {
 
             // Session 2 - should receive the broadcast
             let s2 = server.create_session(
-                super::super::server::ClientIdentity {
+                ClientIdentity {
                     id: "user2".to_string(),
                     name: None,
                 },
@@ -663,7 +602,11 @@ mod tests {
         // User2 should receive the broadcast
         let event = rx2.try_recv().unwrap();
         match event {
-            SseEvent::Commits { object_id: oid, commits, .. } => {
+            SseEvent::Commits {
+                object_id: oid,
+                commits,
+                ..
+            } => {
                 assert_eq!(oid, object_id);
                 assert_eq!(commits.len(), 1);
                 assert_eq!(commits[0].author, "user1");
@@ -676,7 +619,7 @@ mod tests {
     async fn test_reconcile_sends_missing_commits() {
         let state = make_state();
         let headers = make_headers("user1");
-        let object_id = ObjectId(99);
+        let object_id = groove::ObjectId(99);
 
         // First push some commits
         let commit1 = Commit {
@@ -724,7 +667,11 @@ mod tests {
         let event = SseEvent::from_bytes(&body).unwrap();
 
         match event {
-            SseEvent::Commits { object_id: oid, commits, frontier } => {
+            SseEvent::Commits {
+                object_id: oid,
+                commits,
+                frontier,
+            } => {
                 assert_eq!(oid, object_id);
                 assert_eq!(commits.len(), 1);
                 assert_eq!(commits[0].author, "alice");
@@ -746,7 +693,7 @@ mod tests {
         {
             let mut server = state.server.write().await;
             session_id = server.create_session(
-                super::super::server::ClientIdentity {
+                ClientIdentity {
                     id: "user1".to_string(),
                     name: None,
                 },
@@ -756,7 +703,7 @@ mod tests {
             query_id = session.next_query_id();
             session.queries.insert(
                 query_id,
-                super::super::server::ActiveQuery::new("*".to_string(), Default::default()),
+                ActiveQuery::new("*".to_string(), Default::default()),
             );
         }
 

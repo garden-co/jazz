@@ -19,5 +19,5 @@ pub use node::{generate_object_id, LocalNode};
 pub use object::{Object, ObjectId, ObjectIdParseError, SchemaId};
 pub use storage::{
     ChunkHash, ChunkStore, CommitMeta, CommitStore, ContentRef, Environment, MemoryContentStore,
-    MemoryEnvironment, Storage, INLINE_THRESHOLD,
+    MemoryEnvironment, Storage, SyncStateStore, INLINE_THRESHOLD,
 };

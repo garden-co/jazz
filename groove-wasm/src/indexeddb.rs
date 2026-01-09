@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt};
-use groove::{ChunkHash, ChunkStore, CommitId, CommitStore};
+use groove::{ChunkHash, ChunkStore, CommitId, CommitStore, ObjectId, SyncStateStore};
 use js_sys::{Array, Uint8Array};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -17,7 +17,7 @@ use web_sys::{
 };
 
 const DB_NAME: &str = "groove";
-const DB_VERSION: u32 = 2;
+const DB_VERSION: u32 = 3;
 
 // Object store names
 const CHUNKS_STORE: &str = "chunks";
@@ -26,6 +26,7 @@ const FRONTIERS_STORE: &str = "frontiers";
 const TRUNCATIONS_STORE: &str = "truncations";
 const OBJECTS_STORE: &str = "objects";
 const METADATA_STORE: &str = "metadata";
+const UNSYNCED_STORE: &str = "unsynced";
 
 // Metadata keys
 const CATALOG_ID_KEY: &str = "catalog_id";
@@ -97,6 +98,9 @@ impl IndexedDbEnvironment {
             }
             if !db.object_store_names().contains(METADATA_STORE) {
                 db.create_object_store(METADATA_STORE).unwrap();
+            }
+            if !db.object_store_names().contains(UNSYNCED_STORE) {
+                db.create_object_store(UNSYNCED_STORE).unwrap();
             }
         }) as Box<dyn FnOnce(_)>);
 
@@ -205,6 +209,16 @@ impl IndexedDbEnvironment {
     /// Encode a frontier/truncation key as "object_id:branch".
     fn branch_key(object_id: u128, branch: &str) -> String {
         format!("{}:{}", object_id, branch)
+    }
+
+    /// Encode an ObjectId as a string key for IndexedDB.
+    fn object_id_to_key(id: &ObjectId) -> String {
+        id.to_string()
+    }
+
+    /// Decode an ObjectId from a string key.
+    fn key_to_object_id(key: &str) -> Option<ObjectId> {
+        key.parse().ok()
     }
 
     /// Decode a branch key to (object_id, branch).
@@ -544,6 +558,94 @@ impl CommitStore for IndexedDbEnvironment {
 
         // TODO: Implement cursor-based iteration
         vec![]
+    }
+}
+
+#[async_trait(?Send)]
+impl SyncStateStore for IndexedDbEnvironment {
+    async fn mark_unsynced(&self, object_id: ObjectId) {
+        let tx = self
+            .transaction(&[UNSYNCED_STORE], IdbTransactionMode::Readwrite)
+            .expect("failed to start transaction");
+        let store = Self::object_store(&tx, UNSYNCED_STORE).expect("failed to get store");
+
+        let key = JsValue::from_str(&Self::object_id_to_key(&object_id));
+        // Store empty value - we just need to track the key
+        let value = Uint8Array::new_with_length(0);
+        let request = store.put_with_key(&value, &key).expect("failed to put");
+        let _ = Self::await_request(&request).await;
+    }
+
+    async fn clear_unsynced(&self, object_id: &ObjectId) {
+        let tx = self
+            .transaction(&[UNSYNCED_STORE], IdbTransactionMode::Readwrite)
+            .expect("failed to start transaction");
+        let store = Self::object_store(&tx, UNSYNCED_STORE).expect("failed to get store");
+
+        let key = JsValue::from_str(&Self::object_id_to_key(object_id));
+        let request = store.delete(&key).expect("failed to delete");
+        let _ = Self::await_request(&request).await;
+    }
+
+    async fn get_unsynced_objects(&self) -> Vec<ObjectId> {
+        let tx = match self.transaction(&[UNSYNCED_STORE], IdbTransactionMode::Readonly) {
+            Ok(tx) => tx,
+            Err(_) => return vec![],
+        };
+        let store = match Self::object_store(&tx, UNSYNCED_STORE) {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+
+        // Get all keys from the store
+        let request = match store.get_all_keys() {
+            Ok(r) => r,
+            Err(_) => return vec![],
+        };
+        let result = match Self::await_request(&request).await {
+            Ok(r) => r,
+            Err(_) => return vec![],
+        };
+
+        // Convert JS array of keys to Vec<ObjectId>
+        let array: Array = match result.dyn_into() {
+            Ok(a) => a,
+            Err(_) => return vec![],
+        };
+
+        let mut object_ids = Vec::new();
+        for i in 0..array.length() {
+            if let Some(key_str) = array.get(i).as_string() {
+                if let Some(object_id) = Self::key_to_object_id(&key_str) {
+                    object_ids.push(object_id);
+                }
+            }
+        }
+        object_ids
+    }
+
+    async fn is_unsynced(&self, object_id: &ObjectId) -> bool {
+        let tx = match self.transaction(&[UNSYNCED_STORE], IdbTransactionMode::Readonly) {
+            Ok(tx) => tx,
+            Err(_) => return false,
+        };
+        let store = match Self::object_store(&tx, UNSYNCED_STORE) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+
+        let key = JsValue::from_str(&Self::object_id_to_key(object_id));
+        let request = match store.get(&key) {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        let result = match Self::await_request(&request).await {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+
+        // If we got a result (even undefined array buffer), key exists
+        !result.is_undefined()
     }
 }
 

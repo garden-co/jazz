@@ -14,7 +14,10 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 pub mod indexeddb;
+pub mod sync;
+
 pub use indexeddb::IndexedDbEnvironment;
+pub use sync::WasmSyncClient;
 
 // ==================== Blob Registry ====================
 

@@ -3,6 +3,7 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 
 use crate::commit::CommitId;
+use crate::object::ObjectId;
 
 /// Threshold for inline content storage (bytes).
 /// Content at or below this size is stored directly in the commit.
@@ -313,6 +314,43 @@ pub trait CommitStore {
     async fn list_branches(&self, object_id: u128) -> Vec<String>;
 }
 
+/// Storage interface for sync-related persistent state.
+///
+/// This trait handles persistence of sync metadata that must survive restarts,
+/// like which objects have unsynced local changes that need to be pushed to server.
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait]
+pub trait SyncStateStore: Send + Sync {
+    /// Mark an object as having unsynced local changes.
+    async fn mark_unsynced(&self, object_id: ObjectId);
+
+    /// Clear the unsynced flag for an object (after server acknowledgment).
+    async fn clear_unsynced(&self, object_id: &ObjectId);
+
+    /// Get all objects with unsynced local changes.
+    async fn get_unsynced_objects(&self) -> Vec<ObjectId>;
+
+    /// Check if an object has unsynced changes.
+    async fn is_unsynced(&self, object_id: &ObjectId) -> bool;
+}
+
+/// Storage interface for sync state (WASM version without Send + Sync).
+#[cfg(target_arch = "wasm32")]
+#[async_trait(?Send)]
+pub trait SyncStateStore {
+    /// Mark an object as having unsynced local changes.
+    async fn mark_unsynced(&self, object_id: ObjectId);
+
+    /// Clear the unsynced flag for an object (after server acknowledgment).
+    async fn clear_unsynced(&self, object_id: &ObjectId);
+
+    /// Get all objects with unsynced local changes.
+    async fn get_unsynced_objects(&self) -> Vec<ObjectId>;
+
+    /// Check if an object has unsynced changes.
+    async fn is_unsynced(&self, object_id: &ObjectId) -> bool;
+}
+
 /// Combined storage interface (legacy alias).
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait]
@@ -328,17 +366,17 @@ impl<T: ChunkStore + CommitStore> Storage for T {}
 /// Environment trait - combines all storage capabilities.
 /// This is the main trait that LocalNode uses for storage.
 #[cfg(not(target_arch = "wasm32"))]
-pub trait Environment: ChunkStore + CommitStore + Send + Sync + std::fmt::Debug {}
+pub trait Environment: ChunkStore + CommitStore + SyncStateStore + Send + Sync + std::fmt::Debug {}
 
 #[cfg(target_arch = "wasm32")]
-pub trait Environment: ChunkStore + CommitStore + std::fmt::Debug {}
+pub trait Environment: ChunkStore + CommitStore + SyncStateStore + std::fmt::Debug {}
 
 // Blanket impl for Environment
 #[cfg(not(target_arch = "wasm32"))]
-impl<T: ChunkStore + CommitStore + Send + Sync + std::fmt::Debug> Environment for T {}
+impl<T: ChunkStore + CommitStore + SyncStateStore + Send + Sync + std::fmt::Debug> Environment for T {}
 
 #[cfg(target_arch = "wasm32")]
-impl<T: ChunkStore + CommitStore + std::fmt::Debug> Environment for T {}
+impl<T: ChunkStore + CommitStore + SyncStateStore + std::fmt::Debug> Environment for T {}
 
 // ========== In-Memory Environment for Testing ==========
 
@@ -346,7 +384,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
 /// In-memory environment for testing.
-/// Implements both ChunkStore and CommitStore.
+/// Implements ChunkStore, CommitStore, and SyncStateStore.
 #[derive(Debug, Default)]
 pub struct MemoryEnvironment {
     chunks: RwLock<HashMap<ChunkHash, Bytes>>,
@@ -355,6 +393,8 @@ pub struct MemoryEnvironment {
     truncations: RwLock<HashMap<(u128, String), CommitId>>,
     /// Track which objects exist (object IDs that have at least one branch).
     objects: RwLock<HashSet<u128>>,
+    /// Track objects with unsynced local changes (for sync state persistence).
+    unsynced: RwLock<HashSet<ObjectId>>,
 }
 
 impl MemoryEnvironment {
@@ -495,6 +535,26 @@ impl CommitStore for MemoryEnvironment {
                 }
             })
             .collect()
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl SyncStateStore for MemoryEnvironment {
+    async fn mark_unsynced(&self, object_id: ObjectId) {
+        self.unsynced.write().unwrap().insert(object_id);
+    }
+
+    async fn clear_unsynced(&self, object_id: &ObjectId) {
+        self.unsynced.write().unwrap().remove(object_id);
+    }
+
+    async fn get_unsynced_objects(&self) -> Vec<ObjectId> {
+        self.unsynced.read().unwrap().iter().copied().collect()
+    }
+
+    async fn is_unsynced(&self, object_id: &ObjectId) -> bool {
+        self.unsynced.read().unwrap().contains(object_id)
     }
 }
 

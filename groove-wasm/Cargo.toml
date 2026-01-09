@@ -28,6 +28,15 @@ web-sys = { version = "0.3", features = [
     "IdbKeyRange",
     "DomException",
     "Window",
+    # Sync client features
+    "Headers",
+    "Request",
+    "RequestInit",
+    "RequestMode",
+    "Response",
+    "EventSource",
+    "EventSourceInit",
+    "MessageEvent",
 ] }
 serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"

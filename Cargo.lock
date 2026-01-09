@@ -309,16 +309,26 @@ name = "groove"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "axum",
  "blake3",
  "bytes",
  "futures",
  "getrandom 0.2.16",
  "tokio",
- "tokio-stream",
  "uuid",
  "wasm-bindgen-futures",
  "web-time",
+]
+
+[[package]]
+name = "groove-server"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "futures",
+ "groove",
+ "tokio",
+ "tokio-stream",
 ]
 
 [[package]]
