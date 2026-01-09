@@ -256,15 +256,18 @@ impl<E: ClientEnv> SyncClient<E> {
     }
 
     /// Handle an SSE event from the server.
-    pub fn handle_sse_event(&mut self, event: &SseEvent) {
+    ///
+    /// For `Commits` events, this applies the commits to the local node
+    /// and updates the server known state.
+    pub fn handle_sse_event(&mut self, event: &SseEvent, branch: &str) {
         match event {
             SseEvent::Commits {
                 object_id,
-                commits: _,
+                commits,
                 frontier,
             } => {
                 // Apply commits to local node
-                // TODO: This requires adding commits to LocalNode - implementation detail
+                self.node.apply_commits(*object_id, branch, commits.clone());
 
                 // Update server known state
                 self.update_server_known_state(*object_id, frontier.clone());
@@ -381,7 +384,7 @@ impl<E: ClientEnv> SyncClient<E> {
             .ok_or_else(|| ClientError::new(0, "Object or branch not found"))?;
 
         let event = self.env.reconcile(request).await?;
-        self.handle_sse_event(&event);
+        self.handle_sse_event(&event, branch);
 
         Ok(event)
     }
