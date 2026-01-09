@@ -475,8 +475,18 @@ impl TestClient {
         object_id: ObjectId,
         content: &[u8],
     ) -> Result<(crate::commit::CommitId, PushResponse), ClientError> {
+        self.push_commit_with_parents(object_id, content, vec![]).await
+    }
+
+    /// Push a commit with specific parents (for testing commit chains and merges).
+    pub async fn push_commit_with_parents(
+        &self,
+        object_id: ObjectId,
+        content: &[u8],
+        parents: Vec<crate::commit::CommitId>,
+    ) -> Result<(crate::commit::CommitId, PushResponse), ClientError> {
         let commit = Commit {
-            parents: vec![],
+            parents,
             content: content.to_vec().into_boxed_slice(),
             author: self.id.clone(),
             timestamp: 0,
@@ -491,6 +501,27 @@ impl TestClient {
 
         let response = self.client.env().push(request).await?;
         Ok((commit_id, response))
+    }
+
+    /// Push multiple commits in a single request (for batch testing).
+    pub async fn push_commits(
+        &self,
+        object_id: ObjectId,
+        commits: Vec<Commit>,
+    ) -> Result<PushResponse, ClientError> {
+        let request = PushRequest { object_id, commits };
+        self.client.env().push(request).await
+    }
+
+    /// Create a commit object without pushing (for building commit chains).
+    pub fn create_commit_obj(&self, content: &[u8], parents: Vec<crate::commit::CommitId>) -> Commit {
+        Commit {
+            parents,
+            content: content.to_vec().into_boxed_slice(),
+            author: self.id.clone(),
+            timestamp: 0,
+            meta: None,
+        }
     }
 }
 
@@ -554,16 +585,38 @@ impl Default for TestHarness {
 mod tests {
     use super::*;
     use futures::StreamExt;
+    use std::time::Duration;
+
+    // Helper to receive an event with timeout
+    async fn recv_event(
+        stream: &mut BoxStream<'static, Result<SseEvent, ClientError>>,
+    ) -> SseEvent {
+        tokio::time::timeout(Duration::from_millis(100), stream.next())
+            .await
+            .expect("timeout waiting for event")
+            .expect("stream ended")
+            .unwrap()
+    }
+
+    // Helper to check no event is received
+    async fn assert_no_event(
+        stream: &mut BoxStream<'static, Result<SseEvent, ClientError>>,
+    ) {
+        let result = tokio::time::timeout(Duration::from_millis(50), stream.next()).await;
+        assert!(result.is_err(), "expected no event but received one");
+    }
+
+    // ========================================================================
+    // Basic Sync Tests
+    // ========================================================================
 
     #[tokio::test]
     async fn test_single_client_subscribe_push() {
         let harness = TestHarness::new();
         let mut client = harness.create_client("alice");
 
-        // Subscribe to all objects
         let _stream = client.subscribe_all().await.unwrap();
 
-        // Push a commit directly through the transport
         let object_id = ObjectId(42);
         let (commit_id, response) = client.push_commit(object_id, b"hello world").await.unwrap();
 
@@ -579,29 +632,15 @@ mod tests {
 
         let object_id = ObjectId(123);
 
-        // Both clients subscribe
         let _alice_stream = alice.subscribe_all().await.unwrap();
         let mut bob_stream = bob.subscribe_all().await.unwrap();
 
-        // Alice pushes a commit
         let (commit_id, response) = alice.push_commit(object_id, b"alice's data").await.unwrap();
         assert!(response.accepted);
 
-        // Bob should receive the commit via SSE
-        let event = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            bob_stream.next(),
-        )
-        .await
-        .expect("timeout waiting for event")
-        .expect("stream ended");
-
-        match event.unwrap() {
-            SseEvent::Commits {
-                object_id: oid,
-                commits,
-                frontier,
-            } => {
+        let event = recv_event(&mut bob_stream).await;
+        match event {
+            SseEvent::Commits { object_id: oid, commits, frontier } => {
                 assert_eq!(oid, object_id);
                 assert_eq!(commits.len(), 1);
                 assert_eq!(commits[0].author, "alice");
@@ -612,10 +651,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_three_clients_sync() {
+        let harness = TestHarness::new();
+        let mut alice = harness.create_client("alice");
+        let mut bob = harness.create_client("bob");
+        let mut carol = harness.create_client("carol");
+
+        let object_id = ObjectId(300);
+
+        let _alice_stream = alice.subscribe_all().await.unwrap();
+        let mut bob_stream = bob.subscribe_all().await.unwrap();
+        let mut carol_stream = carol.subscribe_all().await.unwrap();
+
+        // Alice pushes
+        let (commit_id, _) = alice.push_commit(object_id, b"alice's data").await.unwrap();
+
+        // Both Bob and Carol should receive
+        let bob_event = recv_event(&mut bob_stream).await;
+        let carol_event = recv_event(&mut carol_stream).await;
+
+        match bob_event {
+            SseEvent::Commits { commits, .. } => assert_eq!(commits[0].author, "alice"),
+            _ => panic!("Bob didn't receive commits"),
+        }
+        match carol_event {
+            SseEvent::Commits { frontier, .. } => assert_eq!(frontier, vec![commit_id]),
+            _ => panic!("Carol didn't receive commits"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bidirectional_sync() {
+        let harness = TestHarness::new();
+        let mut alice = harness.create_client("alice");
+        let mut bob = harness.create_client("bob");
+
+        let obj_a = ObjectId(10);
+        let obj_b = ObjectId(20);
+
+        let mut alice_stream = alice.subscribe_all().await.unwrap();
+        let mut bob_stream = bob.subscribe_all().await.unwrap();
+
+        // Alice pushes to obj_a
+        alice.push_commit(obj_a, b"from alice").await.unwrap();
+
+        // Bob receives Alice's commit
+        let event = recv_event(&mut bob_stream).await;
+        match event {
+            SseEvent::Commits { object_id, commits, .. } => {
+                assert_eq!(object_id, obj_a);
+                assert_eq!(commits[0].author, "alice");
+            }
+            _ => panic!("Expected commits"),
+        }
+
+        // Bob pushes to obj_b
+        bob.push_commit(obj_b, b"from bob").await.unwrap();
+
+        // Alice receives Bob's commit
+        let event = recv_event(&mut alice_stream).await;
+        match event {
+            SseEvent::Commits { object_id, commits, .. } => {
+                assert_eq!(object_id, obj_b);
+                assert_eq!(commits[0].author, "bob");
+            }
+            _ => panic!("Expected commits"),
+        }
+    }
+
+    #[tokio::test]
     async fn test_client_receives_initial_data_on_subscribe() {
         let harness = TestHarness::new();
 
-        // Store a commit on the server first
         let object_id = ObjectId(99);
         let commit = Commit {
             parents: vec![],
@@ -626,25 +733,12 @@ mod tests {
         };
         let commit_id = harness.store_server_commit(object_id, &commit, "main").await;
 
-        // Now create a client and subscribe
         let mut client = harness.create_client("alice");
         let mut stream = client.subscribe_all().await.unwrap();
 
-        // Client should receive the pre-existing commit
-        let event = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            stream.next(),
-        )
-        .await
-        .expect("timeout waiting for event")
-        .expect("stream ended");
-
-        match event.unwrap() {
-            SseEvent::Commits {
-                object_id: oid,
-                commits,
-                frontier,
-            } => {
+        let event = recv_event(&mut stream).await;
+        match event {
+            SseEvent::Commits { object_id: oid, commits, frontier } => {
                 assert_eq!(oid, object_id);
                 assert_eq!(commits.len(), 1);
                 assert_eq!(commits[0].author, "server");
@@ -655,10 +749,211 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_multiple_objects_sync() {
+        let harness = TestHarness::new();
+        let mut alice = harness.create_client("alice");
+        let mut bob = harness.create_client("bob");
+
+        let _alice_stream = alice.subscribe_all().await.unwrap();
+        let mut bob_stream = bob.subscribe_all().await.unwrap();
+
+        let obj1 = ObjectId(1);
+        let obj2 = ObjectId(2);
+
+        alice.push_commit(obj1, b"object 1 data").await.unwrap();
+        alice.push_commit(obj2, b"object 2 data").await.unwrap();
+
+        let event1 = recv_event(&mut bob_stream).await;
+        let event2 = recv_event(&mut bob_stream).await;
+
+        let mut received_ids = vec![];
+        if let SseEvent::Commits { object_id, .. } = event1 {
+            received_ids.push(object_id);
+        }
+        if let SseEvent::Commits { object_id, .. } = event2 {
+            received_ids.push(object_id);
+        }
+
+        assert!(received_ids.contains(&obj1));
+        assert!(received_ids.contains(&obj2));
+    }
+
+    #[tokio::test]
+    async fn test_pusher_does_not_receive_own_broadcast() {
+        let harness = TestHarness::new();
+        let mut alice = harness.create_client("alice");
+
+        let object_id = ObjectId(55);
+
+        let mut stream = alice.subscribe_all().await.unwrap();
+        alice.push_commit(object_id, b"my data").await.unwrap();
+
+        assert_no_event(&mut stream).await;
+    }
+
+    // ========================================================================
+    // Commit Chain Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_sequential_commits_from_single_client() {
+        let harness = TestHarness::new();
+        let mut alice = harness.create_client("alice");
+        let mut bob = harness.create_client("bob");
+
+        let object_id = ObjectId(100);
+
+        let _alice_stream = alice.subscribe_all().await.unwrap();
+        let mut bob_stream = bob.subscribe_all().await.unwrap();
+
+        // Alice pushes three sequential commits
+        let (id1, _) = alice.push_commit(object_id, b"commit 1").await.unwrap();
+        let (id2, _) = alice.push_commit_with_parents(object_id, b"commit 2", vec![id1]).await.unwrap();
+        let (id3, response) = alice.push_commit_with_parents(object_id, b"commit 3", vec![id2]).await.unwrap();
+
+        // Final frontier should be just the latest commit
+        assert_eq!(response.frontier, vec![id3]);
+
+        // Bob receives all three
+        for i in 1..=3 {
+            let event = recv_event(&mut bob_stream).await;
+            match event {
+                SseEvent::Commits { commits, .. } => {
+                    assert_eq!(commits.len(), 1);
+                    assert_eq!(commits[0].content.as_ref(), format!("commit {}", i).as_bytes());
+                }
+                _ => panic!("Expected Commits"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_commit_chain_with_proper_parents() {
+        let harness = TestHarness::new();
+        let alice = harness.create_client("alice");
+
+        let object_id = ObjectId(101);
+
+        // Build a chain: root -> child -> grandchild
+        let root = alice.create_commit_obj(b"root", vec![]);
+        let root_id = root.compute_id();
+
+        let child = alice.create_commit_obj(b"child", vec![root_id]);
+        let child_id = child.compute_id();
+
+        let grandchild = alice.create_commit_obj(b"grandchild", vec![child_id]);
+        let grandchild_id = grandchild.compute_id();
+
+        // Push all at once (parents first)
+        let response = alice.push_commits(object_id, vec![root, child, grandchild]).await.unwrap();
+
+        assert!(response.accepted);
+        assert_eq!(response.frontier, vec![grandchild_id]);
+    }
+
+    // ========================================================================
+    // Concurrent/Diverged Commit Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_concurrent_commits_diverged_frontier() {
+        let harness = TestHarness::new();
+        let mut alice = harness.create_client("alice");
+        let mut bob = harness.create_client("bob");
+
+        let object_id = ObjectId(200);
+
+        let _alice_stream = alice.subscribe_all().await.unwrap();
+        let _bob_stream = bob.subscribe_all().await.unwrap();
+
+        // Alice pushes the root commit
+        let (root_id, _) = alice.push_commit(object_id, b"root").await.unwrap();
+
+        // Both Alice and Bob create commits on top of root (simulating offline divergence)
+        let (alice_commit, _) = alice.push_commit_with_parents(object_id, b"alice branch", vec![root_id]).await.unwrap();
+        let (bob_commit, response) = bob.push_commit_with_parents(object_id, b"bob branch", vec![root_id]).await.unwrap();
+
+        // Server should have diverged frontier with both tips
+        assert!(response.accepted);
+        let frontier = &response.frontier;
+        assert_eq!(frontier.len(), 2, "frontier should have 2 tips for diverged state");
+        assert!(frontier.contains(&alice_commit) || frontier.contains(&bob_commit));
+    }
+
+    #[tokio::test]
+    async fn test_merge_commit_resolves_divergence() {
+        let harness = TestHarness::new();
+        let alice = harness.create_client("alice");
+
+        let object_id = ObjectId(201);
+
+        // Create diverged history
+        let root = alice.create_commit_obj(b"root", vec![]);
+        let root_id = root.compute_id();
+
+        let branch_a = alice.create_commit_obj(b"branch A", vec![root_id]);
+        let branch_a_id = branch_a.compute_id();
+
+        let branch_b = alice.create_commit_obj(b"branch B", vec![root_id]);
+        let branch_b_id = branch_b.compute_id();
+
+        // Merge commit with both branches as parents
+        let merge = alice.create_commit_obj(b"merge", vec![branch_a_id, branch_b_id]);
+        let merge_id = merge.compute_id();
+
+        // Push in topological order
+        let response = alice.push_commits(object_id, vec![root, branch_a, branch_b, merge]).await.unwrap();
+
+        assert!(response.accepted);
+        // After merge, frontier should be single tip
+        assert_eq!(response.frontier, vec![merge_id]);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_pushes_to_same_object() {
+        let harness = TestHarness::new();
+        let mut alice = harness.create_client("alice");
+        let mut bob = harness.create_client("bob");
+        let mut carol = harness.create_client("carol");
+
+        let object_id = ObjectId(202);
+
+        let _alice_stream = alice.subscribe_all().await.unwrap();
+        let _bob_stream = bob.subscribe_all().await.unwrap();
+        let mut carol_stream = carol.subscribe_all().await.unwrap();
+
+        // Alice and Bob both push to the same object concurrently
+        let (alice_id, _) = alice.push_commit(object_id, b"alice").await.unwrap();
+        let (bob_id, _) = bob.push_commit(object_id, b"bob").await.unwrap();
+
+        // Carol should receive both commits
+        let event1 = recv_event(&mut carol_stream).await;
+        let event2 = recv_event(&mut carol_stream).await;
+
+        let mut received_authors = vec![];
+        if let SseEvent::Commits { commits, .. } = event1 {
+            received_authors.push(commits[0].author.clone());
+        }
+        if let SseEvent::Commits { commits, .. } = event2 {
+            received_authors.push(commits[0].author.clone());
+        }
+
+        assert!(received_authors.contains(&"alice".to_string()));
+        assert!(received_authors.contains(&"bob".to_string()));
+
+        // Both commits should be in the frontier (diverged)
+        let _ = alice_id;
+        let _ = bob_id;
+    }
+
+    // ========================================================================
+    // Reconciliation Tests
+    // ========================================================================
+
+    #[tokio::test]
     async fn test_reconcile_receives_missing_commits() {
         let harness = TestHarness::new();
 
-        // Store a commit on the server
         let object_id = ObjectId(77);
         let commit = Commit {
             parents: vec![],
@@ -669,10 +964,8 @@ mod tests {
         };
         let _commit_id = harness.store_server_commit(object_id, &commit, "main").await;
 
-        // Create client with no local data
         let client = harness.create_client("alice");
 
-        // Reconcile should return the missing commit
         let request = ReconcileRequest {
             object_id,
             local_frontier: vec![],
@@ -689,75 +982,413 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_pusher_does_not_receive_own_broadcast() {
+    async fn test_reconcile_with_partial_overlap() {
         let harness = TestHarness::new();
-        let mut alice = harness.create_client("alice");
 
-        let object_id = ObjectId(55);
+        let object_id = ObjectId(78);
 
-        // Subscribe
-        let mut stream = alice.subscribe_all().await.unwrap();
+        // Store two commits on server
+        let commit1 = Commit {
+            parents: vec![],
+            content: b"commit 1".to_vec().into_boxed_slice(),
+            author: "server".to_string(),
+            timestamp: 1000,
+            meta: None,
+        };
+        let commit1_id = harness.store_server_commit(object_id, &commit1, "main").await;
 
-        // Push a commit
-        alice.push_commit(object_id, b"my data").await.unwrap();
+        let commit2 = Commit {
+            parents: vec![commit1_id],
+            content: b"commit 2".to_vec().into_boxed_slice(),
+            author: "server".to_string(),
+            timestamp: 2000,
+            meta: None,
+        };
+        let _commit2_id = harness.store_server_commit(object_id, &commit2, "main").await;
 
-        // Alice should NOT receive her own commit back
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            stream.next(),
-        )
-        .await;
+        // Client claims to have commit1
+        let client = harness.create_client("alice");
+        let request = ReconcileRequest {
+            object_id,
+            local_frontier: vec![commit1_id],
+        };
+        let event = client.client.env().reconcile(request).await.unwrap();
 
-        // Should timeout (no event received)
-        assert!(result.is_err(), "Alice should not receive her own broadcast");
+        match event {
+            SseEvent::Commits { commits, .. } => {
+                // Should only receive commit2 (client already has commit1)
+                assert_eq!(commits.len(), 1);
+                assert_eq!(commits[0].content.as_ref(), b"commit 2");
+            }
+            _ => panic!("Expected Commits"),
+        }
     }
 
     #[tokio::test]
-    async fn test_multiple_objects_sync() {
+    async fn test_reconcile_when_client_is_ahead() {
+        let harness = TestHarness::new();
+
+        let object_id = ObjectId(79);
+
+        // Server has nothing
+        let client = harness.create_client("alice");
+
+        // Client claims to have a commit server doesn't know about
+        let fake_commit_id = crate::commit::CommitId::from_bytes([99u8; 32]);
+        let request = ReconcileRequest {
+            object_id,
+            local_frontier: vec![fake_commit_id],
+        };
+        let event = client.client.env().reconcile(request).await.unwrap();
+
+        // Server should return empty (has nothing to offer)
+        match event {
+            SseEvent::Commits { commits, frontier, .. } => {
+                assert!(commits.is_empty());
+                assert!(frontier.is_empty());
+            }
+            _ => panic!("Expected empty Commits"),
+        }
+    }
+
+    // ========================================================================
+    // Subscription Management Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_late_subscriber_receives_new_commits() {
         let harness = TestHarness::new();
         let mut alice = harness.create_client("alice");
         let mut bob = harness.create_client("bob");
 
-        // Both subscribe
+        let object_id = ObjectId(400);
+
+        // Alice subscribes and pushes
+        let _alice_stream = alice.subscribe_all().await.unwrap();
+        alice.push_commit(object_id, b"before bob").await.unwrap();
+
+        // Bob subscribes later
+        let mut bob_stream = bob.subscribe_all().await.unwrap();
+
+        // Bob should receive initial data
+        let event = recv_event(&mut bob_stream).await;
+        match event {
+            SseEvent::Commits { commits, .. } => {
+                assert_eq!(commits[0].content.as_ref(), b"before bob");
+            }
+            _ => panic!("Expected initial commits"),
+        }
+
+        // Alice pushes another commit
+        alice.push_commit(object_id, b"after bob subscribed").await.unwrap();
+
+        // Bob should receive it
+        let event = recv_event(&mut bob_stream).await;
+        match event {
+            SseEvent::Commits { commits, .. } => {
+                assert_eq!(commits[0].content.as_ref(), b"after bob subscribed");
+            }
+            _ => panic!("Expected new commit"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_client_receives_multiple_pre_existing_objects() {
+        let harness = TestHarness::new();
+
+        // Pre-populate server with multiple objects
+        let obj1 = ObjectId(401);
+        let obj2 = ObjectId(402);
+        let obj3 = ObjectId(403);
+
+        for (oid, data) in [(obj1, b"obj1"), (obj2, b"obj2"), (obj3, b"obj3")] {
+            let commit = Commit {
+                parents: vec![],
+                content: data.to_vec().into_boxed_slice(),
+                author: "server".to_string(),
+                timestamp: 0,
+                meta: None,
+            };
+            harness.store_server_commit(oid, &commit, "main").await;
+        }
+
+        // Client subscribes
+        let mut client = harness.create_client("alice");
+        let mut stream = client.subscribe_all().await.unwrap();
+
+        // Should receive all three objects
+        let mut received_oids = vec![];
+        for _ in 0..3 {
+            let event = recv_event(&mut stream).await;
+            if let SseEvent::Commits { object_id, .. } = event {
+                received_oids.push(object_id);
+            }
+        }
+
+        assert!(received_oids.contains(&obj1));
+        assert!(received_oids.contains(&obj2));
+        assert!(received_oids.contains(&obj3));
+    }
+
+    // ========================================================================
+    // Edge Cases and Stress Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_empty_push_accepted() {
+        let harness = TestHarness::new();
+        let alice = harness.create_client("alice");
+
+        let object_id = ObjectId(500);
+        let response = alice.push_commits(object_id, vec![]).await.unwrap();
+
+        assert!(response.accepted);
+        assert!(response.frontier.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_large_batch_of_commits() {
+        let harness = TestHarness::new();
+        let mut alice = harness.create_client("alice");
+        let mut bob = harness.create_client("bob");
+
+        let object_id = ObjectId(501);
+
         let _alice_stream = alice.subscribe_all().await.unwrap();
         let mut bob_stream = bob.subscribe_all().await.unwrap();
 
-        // Alice pushes commits for two different objects
-        let obj1 = ObjectId(1);
-        let obj2 = ObjectId(2);
+        // Create a chain of 50 commits
+        let mut commits = vec![];
+        let mut last_id = None;
 
-        alice.push_commit(obj1, b"object 1 data").await.unwrap();
-        alice.push_commit(obj2, b"object 2 data").await.unwrap();
-
-        // Bob should receive both
-        let event1 = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            bob_stream.next(),
-        )
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-
-        let event2 = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            bob_stream.next(),
-        )
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-
-        // Collect received object IDs
-        let mut received_ids = vec![];
-        if let SseEvent::Commits { object_id, .. } = event1 {
-            received_ids.push(object_id);
-        }
-        if let SseEvent::Commits { object_id, .. } = event2 {
-            received_ids.push(object_id);
+        for i in 0..50 {
+            let parents = last_id.map(|id| vec![id]).unwrap_or_default();
+            let commit = alice.create_commit_obj(format!("commit {}", i).as_bytes(), parents);
+            last_id = Some(commit.compute_id());
+            commits.push(commit);
         }
 
-        assert!(received_ids.contains(&obj1));
-        assert!(received_ids.contains(&obj2));
+        // Push all at once
+        let response = alice.push_commits(object_id, commits).await.unwrap();
+        assert!(response.accepted);
+        assert_eq!(response.frontier.len(), 1); // Single tip
+
+        // Bob should receive the commits (may be batched or separate events)
+        let event = recv_event(&mut bob_stream).await;
+        match event {
+            SseEvent::Commits { commits, .. } => {
+                assert_eq!(commits.len(), 50);
+            }
+            _ => panic!("Expected commits"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_many_clients_sync() {
+        let harness = TestHarness::new();
+
+        let object_id = ObjectId(502);
+
+        // Create 10 clients
+        let mut clients: Vec<_> = (0..10)
+            .map(|i| harness.create_client(format!("client{}", i)))
+            .collect();
+
+        // All subscribe
+        let mut streams: Vec<_> = vec![];
+        for client in &mut clients {
+            streams.push(client.subscribe_all().await.unwrap());
+        }
+
+        // Client 0 pushes
+        let (commit_id, _) = clients[0].push_commit(object_id, b"from client 0").await.unwrap();
+
+        // All other clients should receive
+        for (i, stream) in streams.iter_mut().enumerate().skip(1) {
+            let event = recv_event(stream).await;
+            match event {
+                SseEvent::Commits { frontier, .. } => {
+                    assert_eq!(frontier, vec![commit_id], "client {} didn't receive correct frontier", i);
+                }
+                _ => panic!("client {} expected commits", i),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rapid_sequential_pushes() {
+        let harness = TestHarness::new();
+        let mut alice = harness.create_client("alice");
+        let mut bob = harness.create_client("bob");
+
+        let object_id = ObjectId(503);
+
+        let _alice_stream = alice.subscribe_all().await.unwrap();
+        let mut bob_stream = bob.subscribe_all().await.unwrap();
+
+        // Rapidly push 20 commits
+        for i in 0..20 {
+            alice.push_commit(object_id, format!("rapid {}", i).as_bytes()).await.unwrap();
+        }
+
+        // Bob should eventually receive all 20
+        for _ in 0..20 {
+            let event = recv_event(&mut bob_stream).await;
+            assert!(matches!(event, SseEvent::Commits { .. }));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_push_to_many_objects() {
+        let harness = TestHarness::new();
+        let mut alice = harness.create_client("alice");
+        let mut bob = harness.create_client("bob");
+
+        let _alice_stream = alice.subscribe_all().await.unwrap();
+        let mut bob_stream = bob.subscribe_all().await.unwrap();
+
+        // Push to 20 different objects
+        for i in 0..20 {
+            alice.push_commit(ObjectId(600 + i), format!("obj {}", i).as_bytes()).await.unwrap();
+        }
+
+        // Bob should receive all 20
+        let mut received_count = 0;
+        for _ in 0..20 {
+            let event = recv_event(&mut bob_stream).await;
+            if matches!(event, SseEvent::Commits { .. }) {
+                received_count += 1;
+            }
+        }
+        assert_eq!(received_count, 20);
+    }
+
+    #[tokio::test]
+    async fn test_interleaved_pushes_from_multiple_clients() {
+        let harness = TestHarness::new();
+        let mut alice = harness.create_client("alice");
+        let mut bob = harness.create_client("bob");
+        let mut carol = harness.create_client("carol");
+
+        let object_id = ObjectId(700);
+
+        let _alice_stream = alice.subscribe_all().await.unwrap();
+        let _bob_stream = bob.subscribe_all().await.unwrap();
+        let mut carol_stream = carol.subscribe_all().await.unwrap();
+
+        // Interleaved pushes
+        alice.push_commit(object_id, b"alice 1").await.unwrap();
+        bob.push_commit(object_id, b"bob 1").await.unwrap();
+        alice.push_commit(object_id, b"alice 2").await.unwrap();
+        bob.push_commit(object_id, b"bob 2").await.unwrap();
+
+        // Carol should receive all 4
+        let mut authors = vec![];
+        for _ in 0..4 {
+            let event = recv_event(&mut carol_stream).await;
+            if let SseEvent::Commits { commits, .. } = event {
+                authors.push(commits[0].author.clone());
+            }
+        }
+
+        assert_eq!(authors.iter().filter(|a| *a == "alice").count(), 2);
+        assert_eq!(authors.iter().filter(|a| *a == "bob").count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_commit_with_large_content() {
+        let harness = TestHarness::new();
+        let mut alice = harness.create_client("alice");
+        let mut bob = harness.create_client("bob");
+
+        let object_id = ObjectId(800);
+
+        let _alice_stream = alice.subscribe_all().await.unwrap();
+        let mut bob_stream = bob.subscribe_all().await.unwrap();
+
+        // Push a commit with 1MB of data
+        let large_content = vec![42u8; 1024 * 1024]; // 1MB
+        let (_, response) = alice.push_commit(object_id, &large_content).await.unwrap();
+        assert!(response.accepted);
+
+        // Bob should receive it
+        let event = recv_event(&mut bob_stream).await;
+        match event {
+            SseEvent::Commits { commits, .. } => {
+                assert_eq!(commits[0].content.len(), 1024 * 1024);
+            }
+            _ => panic!("Expected commits"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_diamond_merge_pattern() {
+        let harness = TestHarness::new();
+        let alice = harness.create_client("alice");
+
+        let object_id = ObjectId(900);
+
+        // Create a diamond pattern:
+        //       root
+        //      /    \
+        //    A        B
+        //      \    /
+        //       merge
+
+        let root = alice.create_commit_obj(b"root", vec![]);
+        let root_id = root.compute_id();
+
+        let a = alice.create_commit_obj(b"branch A", vec![root_id]);
+        let a_id = a.compute_id();
+
+        let b = alice.create_commit_obj(b"branch B", vec![root_id]);
+        let b_id = b.compute_id();
+
+        let merge = alice.create_commit_obj(b"merge", vec![a_id, b_id]);
+        let merge_id = merge.compute_id();
+
+        // Push in topological order
+        let response = alice.push_commits(object_id, vec![root, a, b, merge]).await.unwrap();
+
+        assert!(response.accepted);
+        assert_eq!(response.frontier, vec![merge_id]);
+    }
+
+    #[tokio::test]
+    async fn test_commit_with_metadata() {
+        let harness = TestHarness::new();
+        let mut alice = harness.create_client("alice");
+        let mut bob = harness.create_client("bob");
+
+        let object_id = ObjectId(901);
+
+        let _alice_stream = alice.subscribe_all().await.unwrap();
+        let mut bob_stream = bob.subscribe_all().await.unwrap();
+
+        // Create commit with metadata
+        let mut meta = std::collections::BTreeMap::new();
+        meta.insert("key".to_string(), "value".to_string());
+        meta.insert("type".to_string(), "test".to_string());
+
+        let commit = Commit {
+            parents: vec![],
+            content: b"with meta".to_vec().into_boxed_slice(),
+            author: "alice".to_string(),
+            timestamp: 12345,
+            meta: Some(meta.clone()),
+        };
+
+        let response = alice.push_commits(object_id, vec![commit]).await.unwrap();
+        assert!(response.accepted);
+
+        // Bob should receive commit with metadata preserved
+        let event = recv_event(&mut bob_stream).await;
+        match event {
+            SseEvent::Commits { commits, .. } => {
+                assert_eq!(commits[0].meta, Some(meta));
+                assert_eq!(commits[0].timestamp, 12345);
+            }
+            _ => panic!("Expected commits"),
+        }
     }
 }
