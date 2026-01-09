@@ -583,33 +583,92 @@ export class SyncManager {
     peer.setKnownState(msg.id, knownStateFrom(msg));
     const coValue = this.local.getCoValue(msg.id);
 
+    // Fast path: CoValue is already in memory
     if (coValue.isAvailable()) {
       this.sendNewContent(msg.id, peer);
       return;
     }
 
-    const peers = this.getServerPeers(msg.id, peer.id);
+    const peerKnownState = peer.getOptimisticKnownState(msg.id);
 
-    coValue.load(peers);
+    // Use lazyLoad to check storage before doing full load
+    coValue.lazyLoad(peerKnownState, {
+      onNeedsContent: () => {
+        // CoValue loaded (or was already in memory), send new content
+        this.sendNewContent(msg.id, peer);
+      },
+      onUpToDate: (storageKnownState) => {
+        // Peer already has everything - reply with known message, no full load needed
+        peer.trackToldKnownState(msg.id);
+        this.trySendToPeer(peer, {
+          action: "known",
+          ...storageKnownState,
+        });
+      },
+      onNotFound: () => {
+        // Not in storage, try loading from peers
+        this.loadFromPeersAndRespond(msg.id, peer, coValue);
+      },
+    });
+  }
+
+  /**
+   * Helper to load from peers and respond appropriately.
+   */
+  private loadFromPeersAndRespond(
+    id: RawCoID,
+    peer: PeerState,
+    coValue: CoValueCore,
+  ) {
+    const peers = this.getServerPeers(id, peer.id);
+    coValue.loadFromPeers(peers);
 
     const handleLoadResult = () => {
       if (coValue.isAvailable()) {
+        this.sendNewContent(id, peer);
         return;
       }
-
-      peer.trackToldKnownState(msg.id);
-      this.trySendToPeer(peer, {
-        action: "known",
-        id: msg.id,
-        header: false,
-        sessions: {},
-      });
+      this.handleLoadNotFound(id, peer);
     };
 
-    if (peers.length > 0 || this.local.storage) {
+    if (peers.length > 0) {
       coValue.waitForAvailableOrUnavailable().then(handleLoadResult);
     } else {
       handleLoadResult();
+    }
+  }
+
+  /**
+   * Handle case when CoValue is not found.
+   */
+  private handleLoadNotFound(id: RawCoID, peer: PeerState) {
+    peer.trackToldKnownState(id);
+    this.trySendToPeer(peer, {
+      action: "known",
+      id,
+      header: false,
+      sessions: {},
+    });
+  }
+
+  /**
+   * Request full content from a peer when we don't have the CoValue.
+   */
+  private requestFullContent(id: RawCoID, peer: PeerState | undefined) {
+    if (peer) {
+      this.trySendToPeer(peer, {
+        action: "known",
+        isCorrection: true,
+        id,
+        header: false,
+        sessions: {},
+      });
+    } else {
+      // The wrong assumption has been made by storage or import, we don't have a recovery mechanism
+      // Should never happen
+      logger.error("Received new content with no header on a missing CoValue", {
+        id,
+      });
     }
   }
 
@@ -697,43 +756,26 @@ export class SyncManager {
        * The peer has assumed we already have the CoValue
        */
       if (!msg.header) {
-        // We check if the covalue was in memory and has been garbage collected
-        // In that case we should have it tracked in the storage
-        const storageKnownState = this.local.storage?.getKnownState(msg.id);
-
-        if (storageKnownState?.header) {
-          // If the CoValue has been garbage collected, we load it from the storage before handling the new content
-          coValue.loadFromStorage((found) => {
-            if (found) {
-              this.handleNewContent(msg, from);
-            } else {
-              logger.error("Known CoValue not found in storage", {
-                id: msg.id,
-              });
-            }
-          });
-          return;
-        }
-
-        // The peer assumption is not correct, so we ask for the full CoValue
-        if (peer) {
-          this.trySendToPeer(peer, {
-            action: "known",
-            isCorrection: true,
-            id: msg.id,
-            header: false,
-            sessions: {},
-          });
-        } else {
-          // The wrong assumption has been made by storage or import, we don't have a recovery mechanism
-          // Should never happen
-          logger.error(
-            "Received new content with no header on a missing CoValue",
-            {
-              id: msg.id,
-            },
-          );
-        }
+        // Use lazyLoadFromStorage to check if CoValue exists in storage
+        // This is more efficient than getKnownState as it queries the DB if not cached
+        coValue.lazyLoadFromStorage((storageKnownState) => {
+          if (storageKnownState) {
+            // CoValue exists in storage but was garbage collected from memory
+            // Do full load before processing the new content
+            coValue.loadFromStorage((found) => {
+              if (found) {
+                this.handleNewContent(msg, from);
+              } else {
+                logger.error("Known CoValue not found in storage", {
+                  id: msg.id,
+                });
+              }
+            });
+          } else {
+            // CoValue not in storage, ask peer for full content
+            this.requestFullContent(msg.id, peer);
+          }
+        });
         return;
       }
 

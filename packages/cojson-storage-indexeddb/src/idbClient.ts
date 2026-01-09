@@ -291,4 +291,30 @@ export class IDBClient implements DBClientInterfaceAsync {
       ["unsyncedCoValues"],
     );
   }
+
+  async getCoValueKnownState(
+    coValueId: string,
+  ): Promise<CojsonInternalTypes.CoValueKnownState | undefined> {
+    // First check if the CoValue exists
+    const coValueRow = await this.getCoValue(coValueId as RawCoID);
+
+    if (!coValueRow) {
+      return undefined;
+    }
+
+    // Get all session counters without loading transactions
+    const sessions = await this.getCoValueSessions(coValueRow.rowID);
+
+    const knownState: CojsonInternalTypes.CoValueKnownState = {
+      id: coValueId as RawCoID,
+      header: true,
+      sessions: {},
+    };
+
+    for (const session of sessions) {
+      knownState.sessions[session.sessionID] = session.lastIdx;
+    }
+
+    return knownState;
+  }
 }

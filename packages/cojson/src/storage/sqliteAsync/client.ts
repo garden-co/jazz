@@ -4,6 +4,7 @@ import type {
 } from "../../coValueCore/verifiedState.js";
 import type { Signature } from "../../crypto/crypto.js";
 import type { RawCoID, SessionID } from "../../exports.js";
+import type { CoValueKnownState } from "../../knownState.js";
 import { logger } from "../../logger.js";
 import type {
   DBClientInterfaceAsync,
@@ -235,5 +236,39 @@ export class SQLiteClientAsync
     await this.db.run("DELETE FROM unsynced_covalues WHERE co_value_id = ?", [
       id,
     ]);
+  }
+
+  async getCoValueKnownState(
+    coValueId: string,
+  ): Promise<CoValueKnownState | undefined> {
+    // First check if the CoValue exists
+    const coValueRow = await this.db.get<{ rowID: number }>(
+      "SELECT rowID FROM coValues WHERE id = ?",
+      [coValueId],
+    );
+
+    if (!coValueRow) {
+      return undefined;
+    }
+
+    // Get all session counters without loading transactions
+    const sessions = await this.db.query<{
+      sessionID: SessionID;
+      lastIdx: number;
+    }>("SELECT sessionID, lastIdx FROM sessions WHERE coValue = ?", [
+      coValueRow.rowID,
+    ]);
+
+    const knownState: CoValueKnownState = {
+      id: coValueId as RawCoID,
+      header: true,
+      sessions: {},
+    };
+
+    for (const session of sessions) {
+      knownState.sessions[session.sessionID] = session.lastIdx;
+    }
+
+    return knownState;
   }
 }

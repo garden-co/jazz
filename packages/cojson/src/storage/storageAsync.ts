@@ -46,6 +46,28 @@ export class StorageApiAsync implements StorageAPI {
     return this.knownStates.getKnownState(id);
   }
 
+  loadKnownState(
+    id: string,
+    callback: (knownState: CoValueKnownState | undefined) => void,
+  ): void {
+    // Check in-memory cache first
+    const cached = this.knownStates.getCachedKnownState(id);
+    if (cached) {
+      callback(cached);
+      return;
+    }
+
+    // Load from database asynchronously
+    this.dbClient.getCoValueKnownState(id).then((knownState) => {
+      if (knownState) {
+        // Cache for future use
+        this.knownStates.setKnownState(id, knownState);
+      }
+
+      callback(knownState);
+    });
+  }
+
   async load(
     id: string,
     callback: (data: NewContentMessage) => void,
