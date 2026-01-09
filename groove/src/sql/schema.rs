@@ -1,3 +1,7 @@
+use std::sync::Arc;
+
+use super::row_buffer::RowDescriptor;
+
 /// Column type definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColumnType {
@@ -23,6 +27,9 @@ pub enum ColumnType {
     Blob,
     /// Array of blobs.
     BlobArray,
+    /// Array of rows (used for ARRAY_AGG and array subqueries).
+    /// Contains the descriptor for each item in the array.
+    Array(Arc<RowDescriptor>),
 }
 
 impl ColumnType {
@@ -47,10 +54,18 @@ impl ColumnType {
             ColumnType::I64 => Some(8),
             ColumnType::F64 => Some(8),
             ColumnType::Ref(_) => Some(16),
-            ColumnType::String | ColumnType::Bytes | ColumnType::Blob | ColumnType::BlobArray => {
-                None
-            }
+            ColumnType::String
+            | ColumnType::Bytes
+            | ColumnType::Blob
+            | ColumnType::BlobArray
+            | ColumnType::Array(_) => None,
         }
+    }
+
+    /// Returns the fixed size in bytes accounting for nullability.
+    /// Nullable fixed-size types have an extra presence byte.
+    pub fn fixed_size_nullable(&self, nullable: bool) -> Option<usize> {
+        self.fixed_size().map(|size| if nullable { size + 1 } else { size })
     }
 }
 
@@ -234,6 +249,7 @@ impl TableSchema {
                 ColumnType::U32 => 7,
                 ColumnType::Blob => 8,
                 ColumnType::BlobArray => 9,
+                ColumnType::Array(_) => panic!("Array columns cannot be serialized in table schemas"),
             };
             buf.push(type_tag);
 

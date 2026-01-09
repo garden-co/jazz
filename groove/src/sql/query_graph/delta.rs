@@ -437,11 +437,11 @@ impl BufferJoinedRow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sql::row_buffer::{ColType, RowBuilder, RowDescriptor, RowValue};
+    use crate::sql::row_buffer::{RowBuilder, RowDescriptor, RowValue};
     use crate::sql::schema::{ColumnDef, ColumnType};
 
     fn make_test_descriptor() -> Arc<RowDescriptor> {
-        Arc::new(RowDescriptor::new([("name".to_string(), ColType::String)]))
+        Arc::new(RowDescriptor::new([("name".to_string(), ColumnType::String, false)]))
     }
 
     fn make_buffer_row(descriptor: &Arc<RowDescriptor>, name: &str) -> OwnedRow {
@@ -567,15 +567,15 @@ mod tests {
 
     fn make_users_descriptor() -> Arc<RowDescriptor> {
         Arc::new(RowDescriptor::new([
-            ("name".to_string(), ColType::String),
-            ("age".to_string(), ColType::I32),
+            ("name".to_string(), ColumnType::String, false),
+            ("age".to_string(), ColumnType::I32, false),
         ]))
     }
 
     fn make_posts_descriptor() -> Arc<RowDescriptor> {
         Arc::new(RowDescriptor::new([
-            ("title".to_string(), ColType::String),
-            ("author_id".to_string(), ColType::Ref),
+            ("title".to_string(), ColumnType::String, false),
+            ("author_id".to_string(), ColumnType::Ref("users".to_string()), false),
         ]))
     }
 

@@ -258,12 +258,13 @@ impl BufferRowCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sql::row_buffer::{ColType, RowBuilder, RowDescriptor, RowValue};
+    use crate::sql::row_buffer::{RowBuilder, RowDescriptor, RowValue};
+    use crate::sql::schema::ColumnType;
 
     fn make_user_descriptor() -> Arc<RowDescriptor> {
         Arc::new(RowDescriptor::new([
-            ("name".to_string(), ColType::String),
-            ("age".to_string(), ColType::I32),
+            ("name".to_string(), ColumnType::String, false),
+            ("age".to_string(), ColumnType::I32, false),
         ]))
     }
 

@@ -8,7 +8,7 @@ use crate::sql::query_graph::cache::RowCache;
 use crate::sql::query_graph::delta::{BufferJoinedRow, DeltaBatch, PriorState, RowDelta};
 use crate::sql::query_graph::predicate::Predicate;
 use crate::sql::row_buffer::{OwnedRow, RowDescriptor, RowValue};
-use crate::sql::schema::TableSchema;
+use crate::sql::schema::{ColumnType, TableSchema};
 use crate::sql::types::IndexKey;
 
 /// Unique identifier for a node within a query graph.
@@ -1475,22 +1475,20 @@ impl QueryNode {
 
                 // Build the resolved row - but we need a descriptor that reflects
                 // the resolved types (Row instead of Ref for joined columns)
-                let mut new_cols: Vec<(String, crate::sql::row_buffer::ColType)> = Vec::new();
+                let mut new_cols: Vec<(String, ColumnType, bool)> = Vec::new();
                 for (idx, col) in inner_schema.columns.iter().enumerate() {
-                    let col_type = if inner_joins.iter().any(|(ref_col, _, _)| ref_col == &col.name) {
+                    let (col_ty, nullable) = if inner_joins.iter().any(|(ref_col, _, _)| ref_col == &col.name) {
                         // This column is resolved to a Row
                         // Get the target row's descriptor for the Array type
                         if let Some(Value::Row(target_row)) = values.get(idx) {
-                            crate::sql::row_buffer::ColType::Array {
-                                item_descriptor: target_row.descriptor.clone()
-                            }
+                            (ColumnType::Array(target_row.descriptor.clone()), false)
                         } else {
-                            crate::sql::row_buffer::ColType::from_column_type(&col.ty, col.nullable)
+                            (col.ty.clone(), col.nullable)
                         }
                     } else {
-                        crate::sql::row_buffer::ColType::from_column_type(&col.ty, col.nullable)
+                        (col.ty.clone(), col.nullable)
                     };
-                    new_cols.push((col.name.clone(), col_type));
+                    new_cols.push((col.name.clone(), col_ty, nullable));
                 }
                 let resolved_descriptor = Arc::new(crate::sql::row_buffer::RowDescriptor::new_ordered(new_cols));
                 OwnedRow::from_values(&values, resolved_descriptor)

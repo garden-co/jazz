@@ -147,7 +147,7 @@ fn encode_owned_row_to_buf(buf: &mut Vec<u8>, id: ObjectId, row: RowRef<'_>) {
     // Encode each value using the descriptor
     for (col_idx, col) in row.descriptor.columns.iter().enumerate() {
         if let Some(value) = row.get(col_idx) {
-            encode_row_value(buf, &value, col.col_type.is_nullable());
+            encode_row_value(buf, &value, col.nullable);
         }
     }
 }
@@ -232,16 +232,17 @@ fn encode_row_value(buf: &mut Vec<u8>, value: &RowValue<'_>, nullable: bool) {
 mod tests {
     use super::*;
     use crate::object::ObjectId;
-    use crate::sql::row_buffer::{ColType, RowBuilder, RowDescriptor};
+    use crate::sql::row_buffer::{RowBuilder, RowDescriptor};
+    use crate::sql::schema::ColumnType;
     use std::sync::Arc;
 
     #[test]
     fn encode_owned_row_simple() {
         // Build a row descriptor with fixed-size columns
         let descriptor = Arc::new(RowDescriptor::new([
-            ("age".to_string(), ColType::I32),
-            ("score".to_string(), ColType::F64),
-            ("active".to_string(), ColType::Bool),
+            ("age".to_string(), ColumnType::I32, false),
+            ("score".to_string(), ColumnType::F64, false),
+            ("active".to_string(), ColumnType::Bool, false),
         ]));
 
         // Get column indices
@@ -276,7 +277,7 @@ mod tests {
     #[test]
     fn encode_owned_rows_batch() {
         let descriptor = Arc::new(RowDescriptor::new([
-            ("value".to_string(), ColType::I32),
+            ("value".to_string(), ColumnType::I32, false),
         ]));
 
         let value_idx = descriptor.column_index("value").unwrap();
@@ -310,7 +311,7 @@ mod tests {
     #[test]
     fn encode_owned_row_with_string() {
         let descriptor = Arc::new(RowDescriptor::new([
-            ("name".to_string(), ColType::String),
+            ("name".to_string(), ColumnType::String, false),
         ]));
 
         let name_idx = descriptor.column_index("name").unwrap();
@@ -333,7 +334,7 @@ mod tests {
     #[test]
     fn encode_owned_row_with_nullable() {
         let descriptor = Arc::new(RowDescriptor::new([
-            ("maybe_num".to_string(), ColType::NullableI32),
+            ("maybe_num".to_string(), ColumnType::I32, true),
         ]));
 
         let idx = descriptor.column_index("maybe_num").unwrap();

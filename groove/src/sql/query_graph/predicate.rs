@@ -408,14 +408,15 @@ impl Predicate {
 mod tests {
     use super::*;
 
-    use crate::sql::row_buffer::{ColType, RowBuilder, RowDescriptor};
+    use crate::sql::row_buffer::{RowBuilder, RowDescriptor};
+    use crate::sql::schema::ColumnType;
     use std::sync::Arc;
 
     fn make_buffer_descriptor() -> Arc<RowDescriptor> {
         Arc::new(RowDescriptor::new([
-            ("name".to_string(), ColType::String),
-            ("active".to_string(), ColType::Bool),
-            ("age".to_string(), ColType::NullableI64),
+            ("name".to_string(), ColumnType::String, false),
+            ("active".to_string(), ColumnType::Bool, false),
+            ("age".to_string(), ColumnType::I64, true),
         ]))
     }
 

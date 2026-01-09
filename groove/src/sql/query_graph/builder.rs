@@ -6,8 +6,8 @@ use std::sync::Arc;
 use crate::sql::query_graph::graph::{GraphId, QueryGraph};
 use crate::sql::query_graph::node::{NodeId, QueryNode};
 use crate::sql::query_graph::predicate::Predicate;
-use crate::sql::row_buffer::{ColType, RowDescriptor};
-use crate::sql::schema::TableSchema;
+use crate::sql::row_buffer::RowDescriptor;
+use crate::sql::schema::{ColumnType, TableSchema};
 use crate::sql::types::IndexKey;
 use crate::object::ObjectId;
 
@@ -152,14 +152,15 @@ impl QueryGraphBuilder {
         let inner_descriptor = Self::build_inner_descriptor_with_joins(&inner_schema, &inner_joins);
 
         // Build output descriptor: outer schema columns + array column
-        let mut output_cols: Vec<(String, ColType)> = self.schema.columns.iter()
-            .map(|c| (c.name.clone(), ColType::from_column_type(&c.ty, c.nullable)))
+        let mut output_cols: Vec<(String, ColumnType, bool)> = self.schema.columns.iter()
+            .map(|c| (c.name.clone(), c.ty.clone(), c.nullable))
             .collect();
 
         // Add the array column at the specified index
         let array_col = (
             "labels".to_string(), // TODO: Get actual array column name from caller
-            ColType::Array { item_descriptor: inner_descriptor.clone() },
+            ColumnType::Array(inner_descriptor.clone()),
+            false,
         );
         if array_column_index < 0 || array_column_index as usize >= output_cols.len() {
             output_cols.push(array_col);
@@ -251,7 +252,7 @@ impl QueryGraphBuilder {
         }
 
         // Build columns, converting join ref columns to Array types
-        let cols: Vec<(String, ColType)> = inner_schema.columns.iter()
+        let cols: Vec<(String, ColumnType, bool)> = inner_schema.columns.iter()
             .map(|col| {
                 // Check if this column is a join column
                 let join_info = inner_joins.iter().find(|(ref_col, _, _)| ref_col == &col.name);
@@ -259,10 +260,10 @@ impl QueryGraphBuilder {
                 if let Some((_, _, target_schema)) = join_info {
                     // This is a join column - convert to Array type containing target rows
                     let target_descriptor = Arc::new(RowDescriptor::from_table_schema(target_schema));
-                    (col.name.clone(), ColType::Array { item_descriptor: target_descriptor })
+                    (col.name.clone(), ColumnType::Array(target_descriptor), false)
                 } else {
                     // Regular column - use normal type conversion
-                    (col.name.clone(), ColType::from_column_type(&col.ty, col.nullable))
+                    (col.name.clone(), col.ty.clone(), col.nullable)
                 }
             })
             .collect();
@@ -617,14 +618,15 @@ impl JoinGraphBuilder {
         let inner_descriptor = QueryGraphBuilder::build_inner_descriptor_with_joins(&inner_schema, &inner_joins);
 
         // Build output descriptor: combined schema columns + array column
-        let mut output_cols: Vec<(String, ColType)> = self.combined_schema.columns.iter()
-            .map(|c| (c.name.clone(), ColType::from_column_type(&c.ty, c.nullable)))
+        let mut output_cols: Vec<(String, ColumnType, bool)> = self.combined_schema.columns.iter()
+            .map(|c| (c.name.clone(), c.ty.clone(), c.nullable))
             .collect();
 
         // Add the array column at the specified index
         let array_col = (
             "labels".to_string(), // TODO: Get actual array column name from caller
-            ColType::Array { item_descriptor: inner_descriptor.clone() },
+            ColumnType::Array(inner_descriptor.clone()),
+            false,
         );
         if array_column_index < 0 || array_column_index as usize >= output_cols.len() {
             output_cols.push(array_col);

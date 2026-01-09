@@ -181,190 +181,41 @@ impl Value {
     }
 }
 
-/// Column type for the unified row format.
-///
-/// This enum determines how column values are encoded in the buffer.
-/// Fixed-size types enable O(1) access, variable-size types require
-/// scanning the variable section.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ColType {
-    // Fixed-size types (come first in buffer)
-    Bool,
-    I32,
-    U32,
-    I64,
-    F64,
-    /// ObjectId reference - 16 bytes
-    Ref,
-
-    // Nullable fixed-size types (1 byte presence + value)
-    NullableBool,
-    NullableI32,
-    NullableU32,
-    NullableI64,
-    NullableF64,
-    NullableRef,
-
-    // Variable-size types (come after fixed in buffer)
-    String,
-    Bytes,
-    Blob,
-    BlobArray,
-
-    /// Array of rows, each following the item descriptor's layout.
-    /// Buffer format: [item_count: varint][item1_len: varint][item1_data]...
-    Array {
-        /// Descriptor for each item in the array.
-        item_descriptor: Arc<RowDescriptor>,
-    },
-
-    // Nullable variable-size types
-    NullableString,
-    NullableBytes,
-    NullableBlob,
-    NullableBlobArray,
-
-    /// Nullable array of rows.
-    NullableArray {
-        /// Descriptor for each item in the array.
-        item_descriptor: Arc<RowDescriptor>,
-    },
-}
-
-impl ColType {
-    /// Convert from the existing ColumnType.
-    pub fn from_column_type(ct: &ColumnType, nullable: bool) -> Self {
-        let base = match ct {
-            ColumnType::Bool => ColType::Bool,
-            ColumnType::I32 => ColType::I32,
-            ColumnType::U32 => ColType::U32,
-            ColumnType::I64 => ColType::I64,
-            ColumnType::F64 => ColType::F64,
-            ColumnType::String => ColType::String,
-            ColumnType::Bytes => ColType::Bytes,
-            ColumnType::Ref(_) => ColType::Ref,
-            ColumnType::Blob => ColType::Blob,
-            ColumnType::BlobArray => ColType::BlobArray,
-        };
-        if nullable {
-            base.to_nullable()
-        } else {
-            base
-        }
-    }
-
-    /// Returns true if this is a fixed-size type.
-    pub fn is_fixed_size(&self) -> bool {
-        matches!(
-            self,
-            ColType::Bool
-                | ColType::I32
-                | ColType::U32
-                | ColType::I64
-                | ColType::F64
-                | ColType::Ref
-                | ColType::NullableBool
-                | ColType::NullableI32
-                | ColType::NullableU32
-                | ColType::NullableI64
-                | ColType::NullableF64
-                | ColType::NullableRef
-        )
-    }
-
-    /// Returns the fixed size in bytes, or None for variable-size types.
-    pub fn fixed_size(&self) -> Option<usize> {
-        match self {
-            ColType::Bool => Some(1),
-            ColType::I32 | ColType::U32 => Some(4),
-            ColType::I64 | ColType::F64 => Some(8),
-            ColType::Ref => Some(16),
-            // Nullable: 1 byte presence + value
-            ColType::NullableBool => Some(2),
-            ColType::NullableI32 | ColType::NullableU32 => Some(5),
-            ColType::NullableI64 | ColType::NullableF64 => Some(9),
-            ColType::NullableRef => Some(17),
-            // Variable-size
-            ColType::String
-            | ColType::Bytes
-            | ColType::Blob
-            | ColType::BlobArray
-            | ColType::Array { .. }
-            | ColType::NullableString
-            | ColType::NullableBytes
-            | ColType::NullableBlob
-            | ColType::NullableBlobArray
-            | ColType::NullableArray { .. } => None,
-        }
-    }
-
-    /// Returns true if this is a nullable type.
-    pub fn is_nullable(&self) -> bool {
-        matches!(
-            self,
-            ColType::NullableBool
-                | ColType::NullableI32
-                | ColType::NullableU32
-                | ColType::NullableI64
-                | ColType::NullableF64
-                | ColType::NullableRef
-                | ColType::NullableString
-                | ColType::NullableBytes
-                | ColType::NullableBlob
-                | ColType::NullableBlobArray
-                | ColType::NullableArray { .. }
-        )
-    }
-
-    /// Returns the non-nullable version of this type.
-    pub fn to_non_nullable(&self) -> ColType {
-        match self {
-            ColType::NullableBool => ColType::Bool,
-            ColType::NullableI32 => ColType::I32,
-            ColType::NullableU32 => ColType::U32,
-            ColType::NullableI64 => ColType::I64,
-            ColType::NullableF64 => ColType::F64,
-            ColType::NullableRef => ColType::Ref,
-            ColType::NullableString => ColType::String,
-            ColType::NullableBytes => ColType::Bytes,
-            ColType::NullableBlob => ColType::Blob,
-            ColType::NullableBlobArray => ColType::BlobArray,
-            ColType::NullableArray { item_descriptor } => ColType::Array { item_descriptor: item_descriptor.clone() },
-            other => other.clone(),
-        }
-    }
-
-    /// Returns the nullable version of this type.
-    pub fn to_nullable(&self) -> ColType {
-        match self {
-            ColType::Bool => ColType::NullableBool,
-            ColType::I32 => ColType::NullableI32,
-            ColType::U32 => ColType::NullableU32,
-            ColType::I64 => ColType::NullableI64,
-            ColType::F64 => ColType::NullableF64,
-            ColType::Ref => ColType::NullableRef,
-            ColType::String => ColType::NullableString,
-            ColType::Bytes => ColType::NullableBytes,
-            ColType::Blob => ColType::NullableBlob,
-            ColType::BlobArray => ColType::NullableBlobArray,
-            ColType::Array { item_descriptor } => ColType::NullableArray { item_descriptor: item_descriptor.clone() },
-            other => other.clone(),
-        }
-    }
-}
-
 /// Descriptor for a single column in the row buffer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColDescriptor {
     /// Column name.
     pub name: String,
-    /// Column type determining encoding.
-    pub col_type: ColType,
+    /// Column type (base type from schema, includes Array descriptor if applicable).
+    pub ty: ColumnType,
+    /// Whether this column is nullable.
+    pub nullable: bool,
     /// Byte offset within the fixed-size section (for fixed-size columns),
     /// or index into the variable-size section (for variable-size columns).
     pub offset: usize,
     /// Original index in the schema (before reordering for buffer layout).
     pub schema_index: usize,
+}
+
+impl ColDescriptor {
+    /// Returns true if this column is fixed-size in the buffer.
+    pub fn is_fixed_size(&self) -> bool {
+        self.ty.is_fixed_size()
+    }
+
+    /// Returns the fixed size in bytes, accounting for nullability.
+    /// Nullable fixed-size types have an extra presence byte.
+    pub fn fixed_size(&self) -> Option<usize> {
+        self.ty.fixed_size_nullable(self.nullable)
+    }
+
+    /// Get the item descriptor for Array types.
+    pub fn item_descriptor(&self) -> Option<&Arc<RowDescriptor>> {
+        match &self.ty {
+            ColumnType::Array(desc) => Some(desc),
+            _ => None,
+        }
+    }
 }
 
 /// Descriptor for a row's structure.
@@ -388,8 +239,7 @@ impl RowDescriptor {
     /// Create a RowDescriptor from an existing TableSchema.
     pub fn from_table_schema(schema: &TableSchema) -> Self {
         let columns = schema.columns.iter().map(|col| {
-            let col_type = ColType::from_column_type(&col.ty, col.nullable);
-            (col.name.clone(), col_type)
+            (col.name.clone(), col.ty.clone(), col.nullable)
         });
         Self::new(columns)
     }
@@ -399,8 +249,7 @@ impl RowDescriptor {
     /// This is used for JOIN operations where predicates use qualified names.
     pub fn from_table_schema_qualified(schema: &TableSchema, table_name: &str) -> Self {
         let columns = schema.columns.iter().map(|col| {
-            let col_type = ColType::from_column_type(&col.ty, col.nullable);
-            (format!("{}.{}", table_name, col.name), col_type)
+            (format!("{}.{}", table_name, col.name), col.ty.clone(), col.nullable)
         });
         Self::new(columns)
     }
@@ -409,15 +258,15 @@ impl RowDescriptor {
     ///
     /// Columns are reordered: fixed-size columns first, then variable-size.
     /// The `offset` field is computed for each column.
-    pub fn new(columns: impl IntoIterator<Item = (String, ColType)>) -> Self {
-        let mut fixed_cols: Vec<(usize, String, ColType)> = Vec::new();
-        let mut var_cols: Vec<(usize, String, ColType)> = Vec::new();
+    pub fn new(columns: impl IntoIterator<Item = (String, ColumnType, bool)>) -> Self {
+        let mut fixed_cols: Vec<(usize, String, ColumnType, bool)> = Vec::new();
+        let mut var_cols: Vec<(usize, String, ColumnType, bool)> = Vec::new();
 
-        for (schema_idx, (name, col_type)) in columns.into_iter().enumerate() {
-            if col_type.is_fixed_size() {
-                fixed_cols.push((schema_idx, name, col_type));
+        for (schema_idx, (name, ty, nullable)) in columns.into_iter().enumerate() {
+            if ty.is_fixed_size() {
+                fixed_cols.push((schema_idx, name, ty, nullable));
             } else {
-                var_cols.push((schema_idx, name, col_type));
+                var_cols.push((schema_idx, name, ty, nullable));
             }
         }
 
@@ -425,11 +274,12 @@ impl RowDescriptor {
         let mut fixed_offset = 0;
 
         // Add fixed-size columns with byte offsets
-        for (schema_idx, name, col_type) in fixed_cols {
-            let size = col_type.fixed_size().unwrap();
+        for (schema_idx, name, ty, nullable) in fixed_cols {
+            let size = ty.fixed_size_nullable(nullable).unwrap();
             descriptors.push(ColDescriptor {
                 name,
-                col_type,
+                ty,
+                nullable,
                 offset: fixed_offset,
                 schema_index: schema_idx,
             });
@@ -439,16 +289,17 @@ impl RowDescriptor {
         let fixed_size = fixed_offset;
 
         // Add variable-size columns with indices
-        for (var_idx, (schema_idx, name, col_type)) in var_cols.into_iter().enumerate() {
+        for (var_idx, (schema_idx, name, ty, nullable)) in var_cols.into_iter().enumerate() {
             descriptors.push(ColDescriptor {
                 name,
-                col_type,
+                ty,
+                nullable,
                 offset: var_idx,
                 schema_index: schema_idx,
             });
         }
 
-        let variable_count = descriptors.len() - descriptors.iter().filter(|c| c.col_type.is_fixed_size()).count();
+        let variable_count = descriptors.len() - descriptors.iter().filter(|c| c.is_fixed_size()).count();
 
         RowDescriptor {
             columns: descriptors,
@@ -462,7 +313,7 @@ impl RowDescriptor {
     /// Use this when you need columns in a specific order (e.g., for JOIN output).
     /// The buffer layout still has fixed columns first, but the descriptor
     /// remembers the original order for iteration.
-    pub fn new_ordered(columns: impl IntoIterator<Item = (String, ColType)>) -> Self {
+    pub fn new_ordered(columns: impl IntoIterator<Item = (String, ColumnType, bool)>) -> Self {
         let columns: Vec<_> = columns.into_iter().enumerate().collect();
 
         // Compute fixed-size total
@@ -472,12 +323,13 @@ impl RowDescriptor {
         let mut descriptors = Vec::with_capacity(columns.len());
 
         // First pass: compute fixed-size offsets
-        for (schema_idx, (name, col_type)) in &columns {
-            if col_type.is_fixed_size() {
-                let size = col_type.fixed_size().unwrap();
+        for (schema_idx, (name, ty, nullable)) in &columns {
+            if ty.is_fixed_size() {
+                let size = ty.fixed_size_nullable(*nullable).unwrap();
                 descriptors.push(ColDescriptor {
                     name: name.clone(),
-                    col_type: col_type.clone(),
+                    ty: ty.clone(),
+                    nullable: *nullable,
                     offset: fixed_offset,
                     schema_index: *schema_idx,
                 });
@@ -488,11 +340,12 @@ impl RowDescriptor {
         let fixed_size = fixed_offset;
 
         // Second pass: add variable-size columns
-        for (schema_idx, (name, col_type)) in &columns {
-            if !col_type.is_fixed_size() {
+        for (schema_idx, (name, ty, nullable)) in &columns {
+            if !ty.is_fixed_size() {
                 descriptors.push(ColDescriptor {
                     name: name.clone(),
-                    col_type: col_type.clone(),
+                    ty: ty.clone(),
+                    nullable: *nullable,
                     offset: var_idx,
                     schema_index: *schema_idx,
                 });
@@ -525,7 +378,7 @@ impl RowDescriptor {
                 self.columns
                     .iter()
                     .find(|c| c.name == *name)
-                    .map(|c| (c.name.clone(), c.col_type.clone()))
+                    .map(|c| (c.name.clone(), c.ty.clone(), c.nullable))
             })
             .collect();
         RowDescriptor::new_ordered(cols)
@@ -537,7 +390,7 @@ impl RowDescriptor {
             .columns
             .iter()
             .chain(other.columns.iter())
-            .map(|c| (c.name.clone(), c.col_type.clone()))
+            .map(|c| (c.name.clone(), c.ty.clone(), c.nullable))
             .collect();
         RowDescriptor::new_ordered(cols)
     }
@@ -548,7 +401,7 @@ impl RowDescriptor {
         let cols: Vec<_> = descriptors
             .iter()
             .flat_map(|d| d.columns.iter())
-            .map(|c| (c.name.clone(), c.col_type.clone()))
+            .map(|c| (c.name.clone(), c.ty.clone(), c.nullable))
             .collect();
         RowDescriptor::new_ordered(cols)
     }
@@ -597,9 +450,9 @@ impl RowDescriptor {
 
                 new_col.schema_index = logical_schema_idx;
 
-                if col.col_type.is_fixed_size() {
+                if col.is_fixed_size() {
                     new_col.offset = fixed_offset;
-                    fixed_offset += col.col_type.fixed_size().unwrap();
+                    fixed_offset += col.fixed_size().unwrap();
                 } else {
                     new_col.offset = var_idx;
                     var_idx += 1;
@@ -791,7 +644,7 @@ impl<'a> RowRef<'a> {
 
     /// Get value from a column descriptor.
     fn get_column(&self, col: &'a ColDescriptor) -> Option<RowValue<'a>> {
-        if col.col_type.is_fixed_size() {
+        if col.is_fixed_size() {
             self.get_fixed(col)
         } else {
             self.get_variable(col)
@@ -803,77 +656,62 @@ impl<'a> RowRef<'a> {
         let offset = col.offset;
         let data = &self.buffer[offset..];
 
-        match &col.col_type {
-            ColType::Bool => Some(RowValue::Bool(data.first()? != &0)),
-            ColType::I32 => {
-                let bytes: [u8; 4] = data.get(..4)?.try_into().ok()?;
-                Some(RowValue::I32(i32::from_le_bytes(bytes)))
+        if col.nullable {
+            // First byte is presence flag
+            if data.first()? == &0 {
+                return Some(RowValue::Null);
             }
-            ColType::U32 => {
-                let bytes: [u8; 4] = data.get(..4)?.try_into().ok()?;
-                Some(RowValue::U32(u32::from_le_bytes(bytes)))
-            }
-            ColType::I64 => {
-                let bytes: [u8; 8] = data.get(..8)?.try_into().ok()?;
-                Some(RowValue::I64(i64::from_le_bytes(bytes)))
-            }
-            ColType::F64 => {
-                let bytes: [u8; 8] = data.get(..8)?.try_into().ok()?;
-                Some(RowValue::F64(f64::from_le_bytes(bytes)))
-            }
-            ColType::Ref => {
-                let bytes: [u8; 16] = data.get(..16)?.try_into().ok()?;
-                Some(RowValue::Ref(ObjectId::from_le_bytes(bytes)))
-            }
-            // Nullable fixed-size
-            ColType::NullableBool => {
-                if data.first()? == &0 {
-                    Some(RowValue::Null)
-                } else {
-                    Some(RowValue::Bool(data.get(1)? != &0))
-                }
-            }
-            ColType::NullableI32 => {
-                if data.first()? == &0 {
-                    Some(RowValue::Null)
-                } else {
-                    let bytes: [u8; 4] = data.get(1..5)?.try_into().ok()?;
+            // Data starts after presence byte
+            let data = &data[1..];
+            match &col.ty {
+                ColumnType::Bool => Some(RowValue::Bool(data.first()? != &0)),
+                ColumnType::I32 => {
+                    let bytes: [u8; 4] = data.get(..4)?.try_into().ok()?;
                     Some(RowValue::I32(i32::from_le_bytes(bytes)))
                 }
-            }
-            ColType::NullableU32 => {
-                if data.first()? == &0 {
-                    Some(RowValue::Null)
-                } else {
-                    let bytes: [u8; 4] = data.get(1..5)?.try_into().ok()?;
+                ColumnType::U32 => {
+                    let bytes: [u8; 4] = data.get(..4)?.try_into().ok()?;
                     Some(RowValue::U32(u32::from_le_bytes(bytes)))
                 }
-            }
-            ColType::NullableI64 => {
-                if data.first()? == &0 {
-                    Some(RowValue::Null)
-                } else {
-                    let bytes: [u8; 8] = data.get(1..9)?.try_into().ok()?;
+                ColumnType::I64 => {
+                    let bytes: [u8; 8] = data.get(..8)?.try_into().ok()?;
                     Some(RowValue::I64(i64::from_le_bytes(bytes)))
                 }
-            }
-            ColType::NullableF64 => {
-                if data.first()? == &0 {
-                    Some(RowValue::Null)
-                } else {
-                    let bytes: [u8; 8] = data.get(1..9)?.try_into().ok()?;
+                ColumnType::F64 => {
+                    let bytes: [u8; 8] = data.get(..8)?.try_into().ok()?;
                     Some(RowValue::F64(f64::from_le_bytes(bytes)))
                 }
-            }
-            ColType::NullableRef => {
-                if data.first()? == &0 {
-                    Some(RowValue::Null)
-                } else {
-                    let bytes: [u8; 16] = data.get(1..17)?.try_into().ok()?;
+                ColumnType::Ref(_) => {
+                    let bytes: [u8; 16] = data.get(..16)?.try_into().ok()?;
                     Some(RowValue::Ref(ObjectId::from_le_bytes(bytes)))
                 }
+                _ => None, // Not a fixed-size type
             }
-            _ => None, // Not a fixed-size type
+        } else {
+            match &col.ty {
+                ColumnType::Bool => Some(RowValue::Bool(data.first()? != &0)),
+                ColumnType::I32 => {
+                    let bytes: [u8; 4] = data.get(..4)?.try_into().ok()?;
+                    Some(RowValue::I32(i32::from_le_bytes(bytes)))
+                }
+                ColumnType::U32 => {
+                    let bytes: [u8; 4] = data.get(..4)?.try_into().ok()?;
+                    Some(RowValue::U32(u32::from_le_bytes(bytes)))
+                }
+                ColumnType::I64 => {
+                    let bytes: [u8; 8] = data.get(..8)?.try_into().ok()?;
+                    Some(RowValue::I64(i64::from_le_bytes(bytes)))
+                }
+                ColumnType::F64 => {
+                    let bytes: [u8; 8] = data.get(..8)?.try_into().ok()?;
+                    Some(RowValue::F64(f64::from_le_bytes(bytes)))
+                }
+                ColumnType::Ref(_) => {
+                    let bytes: [u8; 16] = data.get(..16)?.try_into().ok()?;
+                    Some(RowValue::Ref(ObjectId::from_le_bytes(bytes)))
+                }
+                _ => None, // Not a fixed-size type
+            }
         }
     }
 
@@ -886,7 +724,7 @@ impl<'a> RowRef<'a> {
         let data = self.buffer.get(offset..offset + len)?;
 
         // Handle nullable types
-        let (_is_null, value_data) = if col.col_type.is_nullable() {
+        let (_is_null, value_data) = if col.nullable {
             if data.is_empty() || data[0] == 0 {
                 return Some(RowValue::Null);
             }
@@ -895,17 +733,17 @@ impl<'a> RowRef<'a> {
             (false, data)
         };
 
-        match &col.col_type {
-            ColType::String | ColType::NullableString => {
+        match &col.ty {
+            ColumnType::String => {
                 let s = std::str::from_utf8(value_data).ok()?;
                 Some(RowValue::String(s))
             }
-            ColType::Bytes | ColType::NullableBytes => Some(RowValue::Bytes(value_data)),
-            ColType::Blob | ColType::NullableBlob => {
+            ColumnType::Bytes => Some(RowValue::Bytes(value_data)),
+            ColumnType::Blob => {
                 let (content_ref, _) = ContentRef::from_row_bytes(value_data).ok()?;
                 Some(RowValue::Blob(content_ref))
             }
-            ColType::BlobArray | ColType::NullableBlobArray => {
+            ColumnType::BlobArray => {
                 let mut pos = 0;
                 let (count, consumed) = decode_varint(&value_data[pos..])?;
                 pos += consumed;
@@ -919,7 +757,7 @@ impl<'a> RowRef<'a> {
                 }
                 Some(RowValue::BlobArray(refs))
             }
-            ColType::Array { item_descriptor } | ColType::NullableArray { item_descriptor } => {
+            ColumnType::Array(item_descriptor) => {
                 Some(RowValue::Array(ArrayValue {
                     item_descriptor: item_descriptor.as_ref(),
                     data: value_data,
@@ -1010,7 +848,7 @@ impl OwnedRow {
         let rv = self.get(buf_idx)?;
 
         // If the column is nullable, wrap the value appropriately
-        if col.col_type.is_nullable() {
+        if col.nullable {
             Some(rv.to_nullable_value())
         } else {
             Some(rv.to_value())
@@ -1139,7 +977,7 @@ impl OwnedRow {
         for (buf_idx, col) in self.descriptor.columns.iter().enumerate() {
             let schema_idx = col.schema_index;
             if let Some(row_value) = self.get(buf_idx) {
-                values[schema_idx] = if col.col_type.is_nullable() {
+                values[schema_idx] = if col.nullable {
                     row_value.to_nullable_value()
                 } else {
                     row_value.to_value()
@@ -1212,17 +1050,13 @@ impl RowBuilder {
     /// Set a boolean column value.
     pub fn set_bool(mut self, col_idx: usize, value: bool) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if col.col_type.is_fixed_size() {
+            if col.is_fixed_size() && matches!(&col.ty, ColumnType::Bool) {
                 let offset = col.offset;
-                match &col.col_type {
-                    ColType::Bool => {
-                        self.fixed_section[offset] = if value { 1 } else { 0 };
-                    }
-                    ColType::NullableBool => {
-                        self.fixed_section[offset] = 1; // present
-                        self.fixed_section[offset + 1] = if value { 1 } else { 0 };
-                    }
-                    _ => {}
+                if col.nullable {
+                    self.fixed_section[offset] = 1; // present
+                    self.fixed_section[offset + 1] = if value { 1 } else { 0 };
+                } else {
+                    self.fixed_section[offset] = if value { 1 } else { 0 };
                 }
             }
         }
@@ -1232,19 +1066,13 @@ impl RowBuilder {
     /// Set an i32 column value.
     pub fn set_i32(mut self, col_idx: usize, value: i32) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if col.col_type.is_fixed_size() {
+            if col.is_fixed_size() && matches!(&col.ty, ColumnType::I32) {
                 let offset = col.offset;
-                match &col.col_type {
-                    ColType::I32 => {
-                        self.fixed_section[offset..offset + 4]
-                            .copy_from_slice(&value.to_le_bytes());
-                    }
-                    ColType::NullableI32 => {
-                        self.fixed_section[offset] = 1; // present
-                        self.fixed_section[offset + 1..offset + 5]
-                            .copy_from_slice(&value.to_le_bytes());
-                    }
-                    _ => {}
+                if col.nullable {
+                    self.fixed_section[offset] = 1; // present
+                    self.fixed_section[offset + 1..offset + 5].copy_from_slice(&value.to_le_bytes());
+                } else {
+                    self.fixed_section[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
                 }
             }
         }
@@ -1254,19 +1082,13 @@ impl RowBuilder {
     /// Set a u32 column value.
     pub fn set_u32(mut self, col_idx: usize, value: u32) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if col.col_type.is_fixed_size() {
+            if col.is_fixed_size() && matches!(&col.ty, ColumnType::U32) {
                 let offset = col.offset;
-                match &col.col_type {
-                    ColType::U32 => {
-                        self.fixed_section[offset..offset + 4]
-                            .copy_from_slice(&value.to_le_bytes());
-                    }
-                    ColType::NullableU32 => {
-                        self.fixed_section[offset] = 1; // present
-                        self.fixed_section[offset + 1..offset + 5]
-                            .copy_from_slice(&value.to_le_bytes());
-                    }
-                    _ => {}
+                if col.nullable {
+                    self.fixed_section[offset] = 1; // present
+                    self.fixed_section[offset + 1..offset + 5].copy_from_slice(&value.to_le_bytes());
+                } else {
+                    self.fixed_section[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
                 }
             }
         }
@@ -1276,19 +1098,13 @@ impl RowBuilder {
     /// Set an i64 column value.
     pub fn set_i64(mut self, col_idx: usize, value: i64) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if col.col_type.is_fixed_size() {
+            if col.is_fixed_size() && matches!(&col.ty, ColumnType::I64) {
                 let offset = col.offset;
-                match &col.col_type {
-                    ColType::I64 => {
-                        self.fixed_section[offset..offset + 8]
-                            .copy_from_slice(&value.to_le_bytes());
-                    }
-                    ColType::NullableI64 => {
-                        self.fixed_section[offset] = 1; // present
-                        self.fixed_section[offset + 1..offset + 9]
-                            .copy_from_slice(&value.to_le_bytes());
-                    }
-                    _ => {}
+                if col.nullable {
+                    self.fixed_section[offset] = 1; // present
+                    self.fixed_section[offset + 1..offset + 9].copy_from_slice(&value.to_le_bytes());
+                } else {
+                    self.fixed_section[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
                 }
             }
         }
@@ -1298,19 +1114,13 @@ impl RowBuilder {
     /// Set an f64 column value.
     pub fn set_f64(mut self, col_idx: usize, value: f64) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if col.col_type.is_fixed_size() {
+            if col.is_fixed_size() && matches!(&col.ty, ColumnType::F64) {
                 let offset = col.offset;
-                match &col.col_type {
-                    ColType::F64 => {
-                        self.fixed_section[offset..offset + 8]
-                            .copy_from_slice(&value.to_le_bytes());
-                    }
-                    ColType::NullableF64 => {
-                        self.fixed_section[offset] = 1; // present
-                        self.fixed_section[offset + 1..offset + 9]
-                            .copy_from_slice(&value.to_le_bytes());
-                    }
-                    _ => {}
+                if col.nullable {
+                    self.fixed_section[offset] = 1; // present
+                    self.fixed_section[offset + 1..offset + 9].copy_from_slice(&value.to_le_bytes());
+                } else {
+                    self.fixed_section[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
                 }
             }
         }
@@ -1320,19 +1130,13 @@ impl RowBuilder {
     /// Set a Ref (ObjectId) column value.
     pub fn set_ref(mut self, col_idx: usize, value: ObjectId) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if col.col_type.is_fixed_size() {
+            if col.is_fixed_size() && matches!(&col.ty, ColumnType::Ref(_)) {
                 let offset = col.offset;
-                match &col.col_type {
-                    ColType::Ref => {
-                        self.fixed_section[offset..offset + 16]
-                            .copy_from_slice(&value.0.to_le_bytes());
-                    }
-                    ColType::NullableRef => {
-                        self.fixed_section[offset] = 1; // present
-                        self.fixed_section[offset + 1..offset + 17]
-                            .copy_from_slice(&value.0.to_le_bytes());
-                    }
-                    _ => {}
+                if col.nullable {
+                    self.fixed_section[offset] = 1; // present
+                    self.fixed_section[offset + 1..offset + 17].copy_from_slice(&value.0.to_le_bytes());
+                } else {
+                    self.fixed_section[offset..offset + 16].copy_from_slice(&value.0.to_le_bytes());
                 }
             }
         }
@@ -1342,18 +1146,14 @@ impl RowBuilder {
     /// Set a string column value.
     pub fn set_string(mut self, col_idx: usize, value: &str) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if !col.col_type.is_fixed_size() {
+            if !col.is_fixed_size() && matches!(&col.ty, ColumnType::String) {
                 let var_idx = col.offset;
-                match &col.col_type {
-                    ColType::String => {
-                        self.variable_sections[var_idx] = value.as_bytes().to_vec();
-                    }
-                    ColType::NullableString => {
-                        let mut data = vec![1u8]; // present
-                        data.extend_from_slice(value.as_bytes());
-                        self.variable_sections[var_idx] = data;
-                    }
-                    _ => {}
+                if col.nullable {
+                    let mut data = vec![1u8]; // present
+                    data.extend_from_slice(value.as_bytes());
+                    self.variable_sections[var_idx] = data;
+                } else {
+                    self.variable_sections[var_idx] = value.as_bytes().to_vec();
                 }
             }
         }
@@ -1363,18 +1163,14 @@ impl RowBuilder {
     /// Set a bytes column value.
     pub fn set_bytes(mut self, col_idx: usize, value: &[u8]) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if !col.col_type.is_fixed_size() {
+            if !col.is_fixed_size() && matches!(&col.ty, ColumnType::Bytes) {
                 let var_idx = col.offset;
-                match &col.col_type {
-                    ColType::Bytes => {
-                        self.variable_sections[var_idx] = value.to_vec();
-                    }
-                    ColType::NullableBytes => {
-                        let mut data = vec![1u8]; // present
-                        data.extend_from_slice(value);
-                        self.variable_sections[var_idx] = data;
-                    }
-                    _ => {}
+                if col.nullable {
+                    let mut data = vec![1u8]; // present
+                    data.extend_from_slice(value);
+                    self.variable_sections[var_idx] = data;
+                } else {
+                    self.variable_sections[var_idx] = value.to_vec();
                 }
             }
         }
@@ -1384,18 +1180,14 @@ impl RowBuilder {
     /// Set a blob column value.
     pub fn set_blob(mut self, col_idx: usize, value: ContentRef) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if !col.col_type.is_fixed_size() {
+            if !col.is_fixed_size() && matches!(&col.ty, ColumnType::Blob) {
                 let var_idx = col.offset;
-                match &col.col_type {
-                    ColType::Blob => {
-                        self.variable_sections[var_idx] = value.to_row_bytes();
-                    }
-                    ColType::NullableBlob => {
-                        let mut data = vec![1u8]; // present
-                        data.extend_from_slice(&value.to_row_bytes());
-                        self.variable_sections[var_idx] = data;
-                    }
-                    _ => {}
+                if col.nullable {
+                    let mut data = vec![1u8]; // present
+                    data.extend_from_slice(&value.to_row_bytes());
+                    self.variable_sections[var_idx] = data;
+                } else {
+                    self.variable_sections[var_idx] = value.to_row_bytes();
                 }
             }
         }
@@ -1405,27 +1197,14 @@ impl RowBuilder {
     /// Set a blob array column value.
     pub fn set_blob_array(mut self, col_idx: usize, values: &[ContentRef]) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if !col.col_type.is_fixed_size() {
+            if !col.is_fixed_size() && matches!(&col.ty, ColumnType::BlobArray) {
                 let var_idx = col.offset;
-                match &col.col_type {
-                    ColType::BlobArray => {
-                        let mut data = Vec::new();
-                        encode_varint(values.len(), &mut data);
-                        for v in values {
-                            data.extend_from_slice(&v.to_row_bytes());
-                        }
-                        self.variable_sections[var_idx] = data;
-                    }
-                    ColType::NullableBlobArray => {
-                        let mut data = vec![1u8]; // present
-                        encode_varint(values.len(), &mut data);
-                        for v in values {
-                            data.extend_from_slice(&v.to_row_bytes());
-                        }
-                        self.variable_sections[var_idx] = data;
-                    }
-                    _ => {}
+                let mut data = if col.nullable { vec![1u8] } else { Vec::new() };
+                encode_varint(values.len(), &mut data);
+                for v in values {
+                    data.extend_from_slice(&v.to_row_bytes());
                 }
+                self.variable_sections[var_idx] = data;
             }
         }
         self
@@ -1434,8 +1213,8 @@ impl RowBuilder {
     /// Set a nullable column to null.
     pub fn set_null(mut self, col_idx: usize) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if col.col_type.is_nullable() {
-                if col.col_type.is_fixed_size() {
+            if col.nullable {
+                if col.is_fixed_size() {
                     let offset = col.offset;
                     self.fixed_section[offset] = 0; // null flag
                 } else {
@@ -1535,33 +1314,17 @@ impl RowBuilder {
     /// The items are encoded as: `[item_count: varint][item1_len: varint][item1_data]...`
     pub fn set_array(mut self, col_idx: usize, items: &[OwnedRow]) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if !col.col_type.is_fixed_size() {
+            if !col.is_fixed_size() && matches!(&col.ty, ColumnType::Array(_)) {
                 let var_idx = col.offset;
-                match &col.col_type {
-                    ColType::Array { .. } => {
-                        let mut data = Vec::new();
-                        // Write item count
-                        encode_varint(items.len(), &mut data);
-                        // Write each item: length prefix + data
-                        for item in items {
-                            encode_varint(item.buffer.len(), &mut data);
-                            data.extend_from_slice(&item.buffer);
-                        }
-                        self.variable_sections[var_idx] = data;
-                    }
-                    ColType::NullableArray { .. } => {
-                        let mut data = vec![1u8]; // present flag
-                        // Write item count
-                        encode_varint(items.len(), &mut data);
-                        // Write each item: length prefix + data
-                        for item in items {
-                            encode_varint(item.buffer.len(), &mut data);
-                            data.extend_from_slice(&item.buffer);
-                        }
-                        self.variable_sections[var_idx] = data;
-                    }
-                    _ => {}
+                let mut data = if col.nullable { vec![1u8] } else { Vec::new() };
+                // Write item count
+                encode_varint(items.len(), &mut data);
+                // Write each item: length prefix + data
+                for item in items {
+                    encode_varint(item.buffer.len(), &mut data);
+                    data.extend_from_slice(&item.buffer);
                 }
+                self.variable_sections[var_idx] = data;
             }
         }
         self
@@ -1741,13 +1504,14 @@ fn read_varint(data: &[u8]) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sql::schema::ColumnType;
 
     #[test]
     fn test_row_descriptor_new() {
         let desc = RowDescriptor::new([
-            ("name".to_string(), ColType::String),
-            ("age".to_string(), ColType::I32),
-            ("active".to_string(), ColType::Bool),
+            ("name".to_string(), ColumnType::String, false),
+            ("age".to_string(), ColumnType::I32, false),
+            ("active".to_string(), ColumnType::Bool, false),
         ]);
 
         // Fixed columns should come first
@@ -1757,21 +1521,21 @@ mod tests {
 
         // Check that fixed columns have correct offsets
         let age_col = desc.column("age").unwrap();
-        assert!(age_col.col_type.is_fixed_size());
+        assert!(age_col.is_fixed_size());
 
         let active_col = desc.column("active").unwrap();
-        assert!(active_col.col_type.is_fixed_size());
+        assert!(active_col.is_fixed_size());
 
         let name_col = desc.column("name").unwrap();
-        assert!(!name_col.col_type.is_fixed_size());
+        assert!(!name_col.is_fixed_size());
     }
 
     #[test]
     fn test_row_builder_and_reader() {
         let desc = Arc::new(RowDescriptor::new([
-            ("name".to_string(), ColType::String),
-            ("age".to_string(), ColType::I32),
-            ("score".to_string(), ColType::F64),
+            ("name".to_string(), ColumnType::String, false),
+            ("age".to_string(), ColumnType::I32, false),
+            ("score".to_string(), ColumnType::F64, false),
         ]));
 
         // Find column indices
@@ -1794,8 +1558,8 @@ mod tests {
     #[test]
     fn test_nullable_columns() {
         let desc = Arc::new(RowDescriptor::new([
-            ("name".to_string(), ColType::NullableString),
-            ("age".to_string(), ColType::NullableI32),
+            ("name".to_string(), ColumnType::String, true),
+            ("age".to_string(), ColumnType::I32, true),
         ]));
 
         let name_idx = desc.column_index("name").unwrap();
@@ -1823,9 +1587,9 @@ mod tests {
     #[test]
     fn test_projection() {
         let source_desc = Arc::new(RowDescriptor::new([
-            ("a".to_string(), ColType::I32),
-            ("b".to_string(), ColType::String),
-            ("c".to_string(), ColType::I64),
+            ("a".to_string(), ColumnType::I32, false),
+            ("b".to_string(), ColumnType::String, false),
+            ("c".to_string(), ColumnType::I64, false),
         ]));
 
         let a_idx = source_desc.column_index("a").unwrap();
@@ -1840,8 +1604,8 @@ mod tests {
 
         // Project to just columns a and c
         let target_desc = Arc::new(RowDescriptor::new([
-            ("a".to_string(), ColType::I32),
-            ("c".to_string(), ColType::I64),
+            ("a".to_string(), ColumnType::I32, false),
+            ("c".to_string(), ColumnType::I64, false),
         ]));
 
         let projected = project_row(row.as_ref(), &[a_idx, c_idx], target_desc);
@@ -1853,13 +1617,13 @@ mod tests {
     #[test]
     fn test_join_descriptor() {
         let left_desc = RowDescriptor::new([
-            ("a".to_string(), ColType::I32),
-            ("b".to_string(), ColType::String),
+            ("a".to_string(), ColumnType::I32, false),
+            ("b".to_string(), ColumnType::String, false),
         ]);
 
         let right_desc = RowDescriptor::new([
-            ("c".to_string(), ColType::I64),
-            ("d".to_string(), ColType::Bool),
+            ("c".to_string(), ColumnType::I64, false),
+            ("d".to_string(), ColumnType::Bool, false),
         ]);
 
         let joined = left_desc.join(&right_desc);
@@ -1935,23 +1699,23 @@ mod tests {
         // Should have 4 columns
         assert_eq!(desc.columns.len(), 4);
 
-        // Check that nullable columns have nullable types
+        // Check that nullable columns have nullable flag set
         let name_col = desc.column("name").unwrap();
-        assert!(!name_col.col_type.is_nullable());
-        assert_eq!(name_col.col_type, ColType::String);
+        assert!(!name_col.nullable);
+        assert_eq!(name_col.ty, ColumnType::String);
 
         let email_col = desc.column("email").unwrap();
-        assert!(email_col.col_type.is_nullable());
-        assert_eq!(email_col.col_type, ColType::NullableString);
+        assert!(email_col.nullable);
+        assert_eq!(email_col.ty, ColumnType::String);
 
         // Fixed-size columns should have computed offsets
         let age_col = desc.column("age").unwrap();
-        assert_eq!(age_col.col_type, ColType::I32);
-        assert!(age_col.col_type.is_fixed_size());
+        assert_eq!(age_col.ty, ColumnType::I32);
+        assert!(age_col.is_fixed_size());
 
         let active_col = desc.column("active").unwrap();
-        assert_eq!(active_col.col_type, ColType::Bool);
-        assert!(active_col.col_type.is_fixed_size());
+        assert_eq!(active_col.ty, ColumnType::Bool);
+        assert!(active_col.is_fixed_size());
 
         // Fixed size should be: i32 (4) + bool (1) = 5
         assert_eq!(desc.fixed_size, 5);

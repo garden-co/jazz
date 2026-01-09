@@ -15,7 +15,7 @@ use crate::sql::query_graph::{
     DeltaBatch, GraphId, JoinGraphBuilder, Predicate, PredicateValue, PriorState, QueryGraphBuilder, RowDelta,
 };
 use crate::sql::row::{RowError, Value};
-use crate::sql::row_buffer::{ColType, OwnedRow, RowBuilder, RowDescriptor, RowValue};
+use crate::sql::row_buffer::{OwnedRow, RowBuilder, RowDescriptor, RowValue};
 use crate::sql::schema::{ColumnType, SchemaError, TableSchema};
 use crate::sql::table_rows::TableRows;
 use crate::sql::types::{IndexKey, SchemaId};
@@ -215,12 +215,12 @@ impl JoinedRow {
                     .filter_map(|qc| self.get_column(qc.table.as_deref(), &qc.column))
                     .collect();
                 // Build descriptor from the column names
-                let col_defs: Vec<(String, ColType)> = cols.iter()
+                let col_defs: Vec<(String, ColumnType, bool)> = cols.iter()
                     .filter_map(|qc| {
                         // Find the column in the appropriate table
                         let table_name = qc.table.as_deref().unwrap_or(&self.primary_table);
                         self.tables.get(table_name).and_then(|(_, row)| {
-                            row.descriptor.column(&qc.column).map(|c| (qc.column.clone(), c.col_type.clone()))
+                            row.descriptor.column(&qc.column).map(|c| (qc.column.clone(), c.ty.clone(), c.nullable))
                         })
                     })
                     .collect();
@@ -667,13 +667,10 @@ impl DatabaseState {
         exprs: &[SelectExpr],
         outer_schema: &TableSchema,
     ) -> RowDescriptor {
-        let cols: Vec<(String, ColType)> = exprs
+        let cols: Vec<(String, ColumnType, bool)> = exprs
             .iter()
             .enumerate()
-            .map(|(idx, expr)| {
-                let (name, col_type) = self.infer_expr_type(expr, outer_schema, idx);
-                (name, col_type)
-            })
+            .map(|(idx, expr)| self.infer_expr_type(expr, outer_schema, idx))
             .collect();
         RowDescriptor::new_ordered(cols)
     }
@@ -684,26 +681,25 @@ impl DatabaseState {
         expr: &SelectExpr,
         outer_schema: &TableSchema,
         idx: usize,
-    ) -> (String, ColType) {
+    ) -> (String, ColumnType, bool) {
         match expr {
             SelectExpr::Column(qc) => {
                 // Look up column type from schema
                 if let Some(col) = outer_schema.columns.iter().find(|c| c.name == qc.column) {
-                    let col_type = ColType::from_column_type(&col.ty, col.nullable);
-                    (qc.column.clone(), col_type)
+                    (qc.column.clone(), col.ty.clone(), col.nullable)
                 } else if qc.column == "id" {
-                    // Special case: id column
-                    (qc.column.clone(), ColType::Ref)
+                    // Special case: id column (Ref to self table, not nullable)
+                    (qc.column.clone(), ColumnType::Ref(String::new()), false)
                 } else {
                     // Default to nullable string if not found
-                    (qc.column.clone(), ColType::NullableString)
+                    (qc.column.clone(), ColumnType::String, true)
                 }
             }
             SelectExpr::TableRow(alias) => {
                 // Table row reference - this returns a Row type (the whole row)
                 // Build the item descriptor from the outer schema
                 let item_descriptor = Arc::new(RowDescriptor::from_table_schema(outer_schema));
-                (alias.clone(), ColType::Array { item_descriptor })
+                (alias.clone(), ColumnType::Array(item_descriptor), false)
             }
             SelectExpr::ArraySubquery(subquery) => {
                 // Array subqueries return Array type
@@ -726,17 +722,17 @@ impl DatabaseState {
                                     if qc.table.is_none() {
                                         let col_name = &qc.column;
                                         if inner_alias == Some(col_name.as_str()) || col_name == inner_table {
-                                            return (name, ColType::Array {
-                                                item_descriptor: Arc::new(RowDescriptor::from_table_schema(&inner_schema))
-                                            });
+                                            return (name, ColumnType::Array(
+                                                Arc::new(RowDescriptor::from_table_schema(&inner_schema))
+                                            ), false);
                                         }
                                     }
                                 }
                                 if let SelectExpr::TableRow(alias) = &exprs[0] {
                                     if inner_alias == Some(alias.as_str()) || alias == inner_table {
-                                        return (name, ColType::Array {
-                                            item_descriptor: Arc::new(RowDescriptor::from_table_schema(&inner_schema))
-                                        });
+                                        return (name, ColumnType::Array(
+                                            Arc::new(RowDescriptor::from_table_schema(&inner_schema))
+                                        ), false);
                                     }
                                 }
                             }
@@ -745,26 +741,26 @@ impl DatabaseState {
                         }
                         Projection::Columns(cols) => {
                             // Build descriptor from specific columns
-                            let col_defs: Vec<(String, ColType)> = cols.iter().filter_map(|qc| {
+                            let col_defs: Vec<(String, ColumnType, bool)> = cols.iter().filter_map(|qc| {
                                 inner_schema.columns.iter().find(|c| c.name == qc.column)
-                                    .map(|c| (qc.column.clone(), ColType::from_column_type(&c.ty, c.nullable)))
+                                    .map(|c| (qc.column.clone(), c.ty.clone(), c.nullable))
                             }).collect();
                             Arc::new(RowDescriptor::new_ordered(col_defs))
                         }
                     };
-                    (name, ColType::Array { item_descriptor })
+                    (name, ColumnType::Array(item_descriptor), false)
                 } else {
                     // Fallback: couldn't find inner table schema
                     let item_descriptor = Arc::new(RowDescriptor::new_ordered(vec![
-                        ("value".to_string(), ColType::String)
+                        ("value".to_string(), ColumnType::String, false)
                     ]));
-                    (name, ColType::Array { item_descriptor })
+                    (name, ColumnType::Array(item_descriptor), false)
                 }
             }
             SelectExpr::Aliased { expr, alias } => {
                 // Use the alias as the name, infer type from inner expression
-                let (_, col_type) = self.infer_expr_type(expr, outer_schema, idx);
-                (alias.clone(), col_type)
+                let (_, ty, nullable) = self.infer_expr_type(expr, outer_schema, idx);
+                (alias.clone(), ty, nullable)
             }
         }
     }
