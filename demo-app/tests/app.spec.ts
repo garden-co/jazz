@@ -264,8 +264,8 @@ test.describe('Issue Detail', () => {
 
   test('opens issue detail when clicking an issue', async ({ page }) => {
     // Look for issue rows containing issue titles from the fake data
-    // Issues have text like "Fix...", "Add...", etc.
-    const issueText = page.getByText(/Fix login button|Add dark mode|Optimize database/);
+    // The titles may be truncated in the UI, so use partial matches
+    const issueText = page.getByText(/login button|dark mode|database queries/);
     await issueText.first().click();
 
     // Wait for dialog to open
@@ -368,5 +368,81 @@ test.describe('Current User', () => {
     const userNames = ['Alice Chen', 'Bob Smith', 'Carol Williams', 'David Jones', 'Eve Brown'];
     const userNameRegex = new RegExp(userNames.join('|'));
     await expect(header.getByText(userNameRegex)).toBeVisible({ timeout: 10000 });
+  });
+});
+
+test.describe('Issue Data Integrity', () => {
+  test.beforeEach(async ({ page }) => {
+    // Capture console logs
+    page.on('console', msg => {
+      const text = msg.text();
+      if (text.includes('DEBUG')) {
+        console.log('BROWSER:', text);
+      }
+    });
+
+    await page.goto('/?persist=false');
+    await expect(page.getByRole('heading', { name: 'Issue Tracker' })).toBeVisible({ timeout: 15000 });
+    // Wait for issues to fully load
+    await page.waitForTimeout(1000);
+  });
+
+  test('issue titles are not truncated in the data', async ({ page }) => {
+    // Check that issue titles from ISSUE_TITLES constant are fully displayed
+    // These are known titles from the fake data
+    const expectedTitles = [
+      'Fix login button not responding on mobile',
+      'Add dark mode support',
+      'Optimize database queries for dashboard',
+      'Implement user avatar upload',
+      'Update API documentation',
+    ];
+
+    // At least one of these full titles should be visible
+    let foundFullTitle = false;
+    for (const title of expectedTitles) {
+      const titleLocator = page.getByText(title, { exact: false });
+      const count = await titleLocator.count();
+      if (count > 0) {
+        foundFullTitle = true;
+        break;
+      }
+    }
+    expect(foundFullTitle).toBe(true);
+  });
+
+  test('issues display labels when they have them', async ({ page }) => {
+    // Labels from the fake data: bug, feature, enhancement, documentation, design, testing, performance, security, refactor, blocked
+    const labelNames = ['bug', 'feature', 'enhancement', 'documentation', 'design', 'testing', 'performance', 'security', 'refactor', 'blocked'];
+    const labelRegex = new RegExp(labelNames.join('|'), 'i');
+
+    // Some issues should have labels visible
+    // Labels are shown as small badges below the issue title
+    const labelsFound = await page.getByText(labelRegex).count();
+    expect(labelsFound).toBeGreaterThan(0);
+  });
+
+  test('issues display assignee avatars', async ({ page }) => {
+    // Assignees are displayed as avatar circles with initials
+    // Check for avatar elements with initials like "AC", "BS", "CW", "DJ", "EB"
+    const initials = ['AC', 'BS', 'CW', 'DJ', 'EB'];
+    const initialsRegex = new RegExp(`^(${initials.join('|')})$`);
+
+    // Look for avatar fallback elements containing these initials
+    const avatarsFound = await page.locator('[class*="avatar"]').filter({ hasText: initialsRegex }).count();
+    expect(avatarsFound).toBeGreaterThan(0);
+  });
+
+  test('issues display project names', async ({ page }) => {
+    // Projects: Frontend, Backend, Infrastructure
+    // Each issue row should show its project name
+    const issueList = page.locator('[class*="border-b"]'); // Issue rows have border-b
+
+    // At least some issues should show project names
+    const frontendCount = await issueList.filter({ hasText: 'Frontend' }).count();
+    const backendCount = await issueList.filter({ hasText: 'Backend' }).count();
+    const infraCount = await issueList.filter({ hasText: 'Infrastructure' }).count();
+
+    expect(frontendCount + backendCount + infraCount).toBeGreaterThan(0);
   });
 });
