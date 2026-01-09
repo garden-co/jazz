@@ -116,36 +116,33 @@ export class BatchedOutgoingMessages
       this.egressBytesCounter.add(getContentMessageSize(msg), this.meta);
     }
 
+    const stringifiedMsg = JSON.stringify(msg);
+
     if (!this.batching) {
-      this.websocket.send(JSON.stringify(msg));
+      this.websocket.send(stringifiedMsg);
       return;
     }
 
-    const payload = JSON.stringify(msg);
+    const msgSize = stringifiedMsg.length;
+    const newBacklogSize = this.backlog.length + msgSize;
 
-    const maxChunkSizeReached =
-      this.backlog.length + payload.length >=
-      WEBSOCKET_CONFIG.MAX_OUTGOING_MESSAGES_CHUNK_BYTES;
-    const backlogExists = this.backlog.length > 0;
+    // If backlog+message exceeds the chunk size, send the backlog and reset it
+    if (
+      this.backlog.length > 0 &&
+      newBacklogSize > WEBSOCKET_CONFIG.MAX_OUTGOING_MESSAGES_CHUNK_BYTES
+    ) {
+      this.sendMessagesInBulk();
+    }
 
-    if (maxChunkSizeReached) {
-      if (backlogExists) {
-        this.sendMessagesInBulk();
-      }
-
-      this.backlog = payload;
-
-      if (
-        payload.length >= WEBSOCKET_CONFIG.MAX_OUTGOING_MESSAGES_CHUNK_BYTES
-      ) {
-        this.sendMessagesInBulk();
-      }
+    if (this.backlog.length > 0) {
+      this.backlog += `\n${stringifiedMsg}`;
     } else {
-      if (backlogExists) {
-        this.backlog += `\n${payload}`;
-      } else {
-        this.backlog = payload;
-      }
+      this.backlog = stringifiedMsg;
+    }
+
+    // If message itself exceeds the chunk size, send it immediately
+    if (msgSize >= WEBSOCKET_CONFIG.MAX_OUTGOING_MESSAGES_CHUNK_BYTES) {
+      this.sendMessagesInBulk();
     }
   }
 
