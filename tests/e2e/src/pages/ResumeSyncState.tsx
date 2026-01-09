@@ -1,14 +1,18 @@
-import { CoMap, Group, ID, coField } from "jazz-tools";
+import { co, z } from "jazz-tools";
 import { useAccount, useCoState } from "jazz-tools/react";
 import { useEffect, useState } from "react";
 
-export class ResumeSyncCoMap extends CoMap {
-  value = coField.string;
-}
+export const ResumeSyncCoMap = co
+  .map({
+    value: z.string(),
+  })
+  .withPermissions({
+    onCreate: (group) => group.makePublic("writer"),
+  });
 
 function getIdParam() {
   const url = new URL(window.location.href);
-  return (url.searchParams.get("id") as ID<ResumeSyncCoMap>) ?? undefined;
+  return url.searchParams.get("id") ?? undefined;
 }
 
 export function ResumeSyncState() {
@@ -27,11 +31,9 @@ export function ResumeSyncState() {
   useEffect(() => {
     if (!me.$isLoaded || id) return;
 
-    const group = Group.create({ owner: me });
+    const map = ResumeSyncCoMap.create({ value: "" });
 
-    group.addMember("everyone", "writer");
-
-    setId(ResumeSyncCoMap.create({ value: "" }, { owner: group }).$jazz.id);
+    setId(map.$jazz.id);
   }, [me]);
 
   if (!coMap.$isLoaded) return null;
@@ -45,7 +47,7 @@ export function ResumeSyncState() {
         id="value"
         value={coMap.value}
         onChange={(e) => {
-          coMap.value = e.target.value;
+          coMap.$jazz.set("value", e.target.value);
         }}
       />
     </div>
