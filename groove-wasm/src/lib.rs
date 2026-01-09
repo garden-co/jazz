@@ -1,10 +1,10 @@
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 use groove::sql::{
-    Database, IncrementalQuery, Value, ExecuteResult,
+    Database, IncrementalQuery, ExecuteResult,
     encode_rows, encode_delta,
     row_buffer::{OwnedRow, RowBuilder, RowDescriptor},
-    query_graph::{DeltaBatch, RowDelta},
+    query_graph::DeltaBatch,
 };
 use groove::{ObjectId, ContentRef, ChunkHash, INLINE_THRESHOLD};
 use groove::ListenerId;

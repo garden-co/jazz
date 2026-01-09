@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use groove::sql::row_buffer::{OwnedRow, RowValue};
-use groove::sql::{Database, ExecuteResult, Value};
+use groove::sql::{Database, ExecuteResult};
 use groove::{ChunkStore, ContentRef, MemoryEnvironment, ObjectId, INLINE_THRESHOLD};
 
 /// Helper to extract rows from ExecuteResult

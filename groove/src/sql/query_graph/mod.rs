@@ -27,7 +27,7 @@
 //! // Build a query graph
 //! let mut builder = QueryGraphBuilder::new("users", schema);
 //! let scan = builder.table_scan();
-//! let filter = builder.filter(scan, Predicate::eq("active", Value::Bool(true)));
+//! let filter = builder.filter(scan, Predicate::eq("active", PredicateValue::Bool(true)));
 //! let graph = builder.output(filter, GraphId(1));
 //!
 //! // Process a change

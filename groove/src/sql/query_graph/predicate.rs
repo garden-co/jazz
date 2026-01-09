@@ -59,22 +59,6 @@ impl PredicateValue {
             PredicateValue::Null => "NULL".to_string(),
         }
     }
-
-    /// Convert to legacy Value type (for backwards compatibility with policy system).
-    pub fn to_value(&self) -> crate::sql::row::Value {
-        use crate::sql::row::Value;
-        match self {
-            PredicateValue::Bool(v) => Value::Bool(*v),
-            PredicateValue::I32(v) => Value::I32(*v),
-            PredicateValue::U32(v) => Value::U32(*v),
-            PredicateValue::I64(v) => Value::I64(*v),
-            PredicateValue::F64(v) => Value::F64(*v),
-            PredicateValue::String(v) => Value::String(v.clone()),
-            PredicateValue::Bytes(v) => Value::Bytes(v.clone()),
-            PredicateValue::Ref(v) => Value::Ref(*v),
-            PredicateValue::Null => Value::NullableNone,
-        }
-    }
 }
 
 /// A predicate for filtering rows.

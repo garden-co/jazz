@@ -1428,6 +1428,7 @@ impl QueryNode {
 
     /// Resolve inner joins for array rows (buffer format).
     /// For each inner row, replace ref columns with their resolved row values.
+    /// Writes directly to RowBuilder instead of using intermediate Vec<Value>.
     fn resolve_inner_joins_buffer<G>(
         inner_rows: &[(ObjectId, OwnedRow)],
         inner_joins: &[(String, String, TableSchema)],
@@ -1437,7 +1438,7 @@ impl QueryNode {
     where
         G: Fn(&str, ObjectId) -> Option<OwnedRow>,
     {
-        use crate::sql::row_buffer::Value;
+        use crate::sql::row_buffer::{RowBuilder, RowDescriptor, RowValue};
 
         if inner_joins.is_empty() {
             return inner_rows.iter().map(|(_, row)| row.clone()).collect();
@@ -1446,44 +1447,54 @@ impl QueryNode {
         inner_rows
             .iter()
             .map(|(_, row)| {
-                // We need to build a new row with some Ref values replaced by Row values
-                // Extract all current values in schema order
-                let mut values = row.to_values();
+                // First pass: resolve refs to get target row descriptors for the output schema
+                let mut resolved_targets: std::collections::HashMap<&str, OwnedRow> =
+                    std::collections::HashMap::new();
 
-                // Now resolve each inner join
-                for (ref_column, target_table, _target_schema) in inner_joins {
-                    // Find the column index for this ref column
-                    if let Some(col_idx) = inner_schema.column_index(ref_column) {
-                        // Get the ref value from the row
-                        if let Some(Value::Ref(target_id)) = values.get(col_idx) {
-                            // Look up the target row
-                            if let Some(target_row) = lookup_row_by_id(target_table, *target_id) {
-                                // Replace the ref with a nested Row value
-                                values[col_idx] = Value::Row(target_row);
+                for (ref_column, target_table, _) in inner_joins {
+                    if let Some(rv) = row.get_by_name(ref_column) {
+                        if let RowValue::Ref(target_id) = rv {
+                            if let Some(target_row) = lookup_row_by_id(target_table, target_id) {
+                                resolved_targets.insert(ref_column.as_str(), target_row);
                             }
                         }
                     }
                 }
 
-                // Build the resolved row - but we need a descriptor that reflects
-                // the resolved types (Row instead of Ref for joined columns)
-                let mut new_cols: Vec<(String, ColumnType, bool)> = Vec::new();
-                for (idx, col) in inner_schema.columns.iter().enumerate() {
-                    let (col_ty, nullable) = if inner_joins.iter().any(|(ref_col, _, _)| ref_col == &col.name) {
-                        // This column is resolved to a Row
-                        // Get the target row's descriptor for the Array type
-                        if let Some(Value::Row(target_row)) = values.get(idx) {
-                            (ColumnType::Array(target_row.descriptor.clone()), false)
+                // Build the resolved descriptor with Array types for joined columns
+                let new_cols: Vec<(String, ColumnType, bool)> = inner_schema
+                    .columns
+                    .iter()
+                    .map(|col| {
+                        if let Some(target_row) = resolved_targets.get(col.name.as_str()) {
+                            // This column is resolved to a nested row - use Array type
+                            (col.name.clone(), ColumnType::Array(target_row.descriptor.clone()), false)
                         } else {
-                            (col.ty.clone(), col.nullable)
+                            (col.name.clone(), col.ty.clone(), col.nullable)
                         }
-                    } else {
-                        (col.ty.clone(), col.nullable)
-                    };
-                    new_cols.push((col.name.clone(), col_ty, nullable));
+                    })
+                    .collect();
+                let resolved_descriptor = Arc::new(RowDescriptor::new_ordered(new_cols));
+
+                // Build the output row directly
+                let mut builder = RowBuilder::new(resolved_descriptor.clone());
+                for (schema_idx, col) in inner_schema.columns.iter().enumerate() {
+                    let col_idx = resolved_descriptor
+                        .columns
+                        .iter()
+                        .position(|c| c.schema_index == schema_idx)
+                        .unwrap_or(schema_idx);
+
+                    if let Some(target_row) = resolved_targets.get(col.name.as_str()) {
+                        // Set as single-item array containing the resolved row
+                        builder = builder.set_array(col_idx, &[target_row.clone()]);
+                    } else if let Some(rv) = row.get_by_name(&col.name) {
+                        // Copy the value directly
+                        builder = builder.set_from_row_value(col_idx, rv);
+                    }
                 }
-                let resolved_descriptor = Arc::new(crate::sql::row_buffer::RowDescriptor::new_ordered(new_cols));
-                OwnedRow::from_values(&values, resolved_descriptor)
+
+                builder.build()
             })
             .collect()
     }

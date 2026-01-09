@@ -21,7 +21,7 @@ use crate::object::ObjectId;
 ///
 /// // SELECT * FROM users WHERE active = true
 /// let scan = builder.table_scan();
-/// let filter = builder.filter(scan, Predicate::eq("active", Value::Bool(true)));
+/// let filter = builder.filter(scan, Predicate::eq("active", PredicateValue::Bool(true)));
 /// let graph = builder.output(filter, GraphId(1));
 /// ```
 pub struct QueryGraphBuilder {

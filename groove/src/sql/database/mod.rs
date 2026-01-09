@@ -14,7 +14,7 @@ use crate::sql::query_graph::registry::{GraphRegistry, OutputCallback};
 use crate::sql::query_graph::{
     DeltaBatch, GraphId, JoinGraphBuilder, Predicate, PredicateValue, PriorState, QueryGraphBuilder, RowDelta,
 };
-use crate::sql::row::{RowError, Value};
+use crate::sql::row::RowError;
 use crate::sql::row_buffer::{OwnedRow, RowBuilder, RowDescriptor, RowValue};
 use crate::sql::schema::{ColumnType, SchemaError, TableSchema};
 use crate::sql::table_rows::TableRows;
@@ -559,19 +559,18 @@ impl DatabaseState {
                         &primary_schema,
                     ));
 
-                    // Evaluate each expression for each row
+                    // Evaluate each expression for each row - write directly to buffer
                     filtered
                         .into_iter()
                         .map(|(id, row)| {
-                            let values = self.evaluate_projection_exprs_buffer(
+                            let output = self.build_projection_row(
                                 exprs,
                                 id,
                                 &row,
                                 primary_table,
                                 table_alias,
-                                &primary_schema,
+                                output_descriptor.clone(),
                             );
-                            let output = OwnedRow::from_values(&values, output_descriptor.clone());
                             (id, output)
                         })
                         .collect()
@@ -749,34 +748,52 @@ impl DatabaseState {
         }
     }
 
-    /// Evaluate projection expressions for a single outer row (buffer format).
-    fn evaluate_projection_exprs_buffer(
+    /// Build a projection row directly, writing expression results into a RowBuilder.
+    /// This avoids the intermediate Vec<Value> by writing directly to the output buffer.
+    fn build_projection_row(
         &self,
         exprs: &[SelectExpr],
         outer_id: ObjectId,
         outer_row: &OwnedRow,
         outer_table: &str,
         outer_alias: Option<&str>,
-        outer_schema: &TableSchema,
-    ) -> Vec<Value> {
-        exprs
-            .iter()
-            .map(|expr| {
-                self.evaluate_select_expr_buffer(expr, outer_id, outer_row, outer_table, outer_alias, outer_schema)
-            })
-            .collect()
+        output_descriptor: Arc<RowDescriptor>,
+    ) -> OwnedRow {
+        let mut builder = RowBuilder::new(output_descriptor.clone());
+
+        for (schema_idx, expr) in exprs.iter().enumerate() {
+            // Find the buffer index for this schema column
+            let col_idx = output_descriptor
+                .columns
+                .iter()
+                .position(|c| c.schema_index == schema_idx)
+                .unwrap_or(schema_idx);
+
+            builder = self.evaluate_expr_into_builder(
+                expr,
+                builder,
+                col_idx,
+                outer_id,
+                outer_row,
+                outer_table,
+                outer_alias,
+            );
+        }
+
+        builder.build()
     }
 
-    /// Evaluate a single SELECT expression (buffer format).
-    fn evaluate_select_expr_buffer(
+    /// Evaluate a single SELECT expression directly into a RowBuilder.
+    fn evaluate_expr_into_builder(
         &self,
         expr: &SelectExpr,
+        builder: RowBuilder,
+        col_idx: usize,
         outer_id: ObjectId,
         outer_row: &OwnedRow,
         outer_table: &str,
         outer_alias: Option<&str>,
-        _outer_schema: &TableSchema,
-    ) -> Value {
+    ) -> RowBuilder {
         match expr {
             SelectExpr::Column(qc) => {
                 // Check if this is a reference to the outer table alias (composite row)
@@ -784,48 +801,54 @@ impl DatabaseState {
                     // Bare identifier - check if it matches outer table alias
                     if let Some(alias) = outer_alias {
                         if qc.column == alias {
-                            // Return the whole row as Value::Row
-                            return Value::Row(outer_row.clone());
+                            // Return the whole row as a single-item array
+                            return builder.set_array(col_idx, &[outer_row.clone()]);
                         }
                     }
                     // Also check if it matches the table name
                     if qc.column == outer_table {
-                        return Value::Row(outer_row.clone());
+                        return builder.set_array(col_idx, &[outer_row.clone()]);
                     }
                 }
 
                 // Regular column reference
                 if qc.column == "id" {
-                    Value::Ref(outer_id)
-                } else if let Some(v) = outer_row.get_by_name(&qc.column) {
-                    v.to_value()
+                    builder.set_ref(col_idx, outer_id)
+                } else if let Some(rv) = outer_row.get_by_name(&qc.column) {
+                    builder.set_from_row_value(col_idx, rv)
                 } else {
-                    Value::NullableNone
+                    builder.set_null(col_idx)
                 }
             }
 
             SelectExpr::TableRow(alias) => {
-                // Direct table row reference - return the whole row
+                // Direct table row reference - return the whole row as single-item array
                 if outer_alias == Some(alias.as_str()) || alias == outer_table {
-                    Value::Row(outer_row.clone())
+                    builder.set_array(col_idx, &[outer_row.clone()])
                 } else {
-                    Value::NullableNone
+                    builder.set_null(col_idx)
                 }
             }
 
             SelectExpr::ArraySubquery(subquery) => {
-                // Execute subquery with outer row context
-                self.execute_array_subquery_buffer(subquery, outer_id, outer_row, outer_table, outer_alias)
+                // Execute subquery with outer row context - returns Vec<OwnedRow>
+                let rows = self.execute_array_subquery_buffer(
+                    subquery, outer_id, outer_row, outer_table, outer_alias,
+                );
+                builder.set_array(col_idx, &rows)
             }
 
             SelectExpr::Aliased { expr, .. } => {
                 // Alias doesn't affect the value, just evaluate the inner expression
-                self.evaluate_select_expr_buffer(expr, outer_id, outer_row, outer_table, outer_alias, _outer_schema)
+                self.evaluate_expr_into_builder(
+                    expr, builder, col_idx, outer_id, outer_row, outer_table, outer_alias,
+                )
             }
         }
     }
 
     /// Execute an ARRAY subquery with outer row context (buffer format).
+    /// Returns Vec<OwnedRow> directly instead of wrapping in Value::Array.
     fn execute_array_subquery_buffer(
         &self,
         subquery: &Select,
@@ -833,13 +856,13 @@ impl DatabaseState {
         outer_row: &OwnedRow,
         outer_table: &str,
         outer_alias: Option<&str>,
-    ) -> Value {
+    ) -> Vec<OwnedRow> {
         let inner_table = &subquery.from.table;
         let inner_alias = subquery.from.alias.as_deref();
 
         let inner_schema = match self.get_schema(inner_table) {
             Some(s) => s,
-            None => return Value::Array(vec![]),
+            None => return vec![],
         };
 
         // Read all rows from inner table
@@ -878,7 +901,7 @@ impl DatabaseState {
                             let name = &qc.column;
                             if inner_alias == Some(name.as_str()) || name == inner_table {
                                 // Table alias - return whole rows
-                                return Value::Array(filtered.into_iter().map(|(_, row)| row).collect());
+                                return filtered.into_iter().map(|(_, row)| row).collect();
                             }
                         }
                     }
@@ -886,26 +909,24 @@ impl DatabaseState {
                     if let SelectExpr::TableRow(alias) = &exprs[0] {
                         if inner_alias == Some(alias.as_str()) || alias == inner_table {
                             // Table alias - return whole rows
-                            return Value::Array(filtered.into_iter().map(|(_, row)| row).collect());
+                            return filtered.into_iter().map(|(_, row)| row).collect();
                         }
                     }
                 }
 
-                // Evaluate expressions for each row
+                // Evaluate expressions for each row - write directly to buffer
+                let descriptor = Arc::new(self.build_projection_descriptor(exprs, &inner_schema));
                 filtered
                     .into_iter()
                     .map(|(inner_id, inner_row)| {
-                        let values = self.evaluate_projection_exprs_buffer(
+                        self.build_projection_row(
                             exprs,
                             inner_id,
                             &inner_row,
                             inner_table,
                             inner_alias,
-                            &inner_schema,
-                        );
-                        // Build an OwnedRow from the projected values
-                        let descriptor = self.build_projection_descriptor(exprs, &inner_schema);
-                        OwnedRow::from_values(&values, Arc::new(descriptor))
+                            descriptor.clone(),
+                        )
                     })
                     .collect()
             }
@@ -917,27 +938,45 @@ impl DatabaseState {
                 }
             }
             Projection::Columns(cols) => {
+                // Build descriptor for the selected columns
+                let col_descriptors: Vec<(String, ColumnType, bool)> = cols
+                    .iter()
+                    .filter_map(|qc| {
+                        if qc.column == "id" {
+                            Some(("id".to_string(), ColumnType::Ref("".to_string()), false))
+                        } else {
+                            inner_schema.columns.iter()
+                                .find(|c| c.name == qc.column)
+                                .map(|c| (c.name.clone(), c.ty.clone(), c.nullable))
+                        }
+                    })
+                    .collect();
+                let descriptor = Arc::new(RowDescriptor::new_ordered(col_descriptors));
+
                 filtered
                     .into_iter()
                     .map(|(inner_id, inner_row)| {
-                        let values: Vec<Value> = cols
-                            .iter()
-                            .filter_map(|qc| {
-                                if qc.column == "id" {
-                                    Some(Value::Ref(inner_id))
-                                } else {
-                                    inner_row.get_by_name(&qc.column).map(|v| v.to_value())
-                                }
-                            })
-                            .collect();
-                        let descriptor = Arc::new(RowDescriptor::from_table_schema(&inner_schema));
-                        OwnedRow::from_values(&values, descriptor)
+                        let mut builder = RowBuilder::new(descriptor.clone());
+                        for (schema_idx, qc) in cols.iter().enumerate() {
+                            let col_idx = descriptor
+                                .columns
+                                .iter()
+                                .position(|c| c.schema_index == schema_idx)
+                                .unwrap_or(schema_idx);
+
+                            if qc.column == "id" {
+                                builder = builder.set_ref(col_idx, inner_id);
+                            } else if let Some(rv) = inner_row.get_by_name(&qc.column) {
+                                builder = builder.set_from_row_value(col_idx, rv);
+                            }
+                        }
+                        builder.build()
                     })
                     .collect()
             }
         };
 
-        Value::Array(array_values)
+        array_values
     }
 
     /// Check if a row matches WHERE conditions, resolving references to outer row (buffer format).
@@ -974,7 +1013,7 @@ impl DatabaseState {
 
             // Resolve right-hand side value
             let rhs_value = match &cond.right {
-                ConditionValue::Literal(v) => Some(v.to_value()),
+                ConditionValue::Literal(v) => Some(v.clone()),
                 ConditionValue::Column(rhs_col) => self.resolve_column_value_buffer(
                     rhs_col.table.as_deref(),
                     &rhs_col.column,
@@ -1003,6 +1042,7 @@ impl DatabaseState {
     }
 
     /// Resolve a column reference, looking in both inner and outer contexts (buffer format).
+    /// Returns PredicateValue for efficient comparisons without Value allocation.
     #[allow(clippy::too_many_arguments)]
     fn resolve_column_value_buffer(
         &self,
@@ -1016,7 +1056,7 @@ impl DatabaseState {
         outer_row: &OwnedRow,
         outer_table: &str,
         outer_alias: Option<&str>,
-    ) -> Option<Value> {
+    ) -> Option<PredicateValue> {
         // Check if this references the inner table
         let is_inner = match table_ref {
             Some(t) => t == inner_table || inner_alias == Some(t),
@@ -1028,10 +1068,10 @@ impl DatabaseState {
 
         if is_inner {
             if column == "id" {
-                return Some(Value::Ref(inner_id));
+                return Some(PredicateValue::Ref(inner_id));
             }
             if let Some(v) = inner_row.get_by_name(column) {
-                return Some(v.to_value());
+                return Some(v.to_predicate_value());
             }
         }
 
@@ -1046,10 +1086,10 @@ impl DatabaseState {
 
         if is_outer {
             if column == "id" {
-                return Some(Value::Ref(outer_id));
+                return Some(PredicateValue::Ref(outer_id));
             }
             if let Some(v) = outer_row.get_by_name(column) {
-                return Some(v.to_value());
+                return Some(v.to_predicate_value());
             }
         }
 
