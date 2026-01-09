@@ -417,31 +417,8 @@ export function useCoState<
   },
 ): TSelectorReturn {
   useImportCoValueContent(id, options?.preloaded);
-
   const subscription = useCoValueSubscription(Schema, id, options);
-  const getCurrentValue = useGetCurrentValue(subscription);
-
-  const value = useSyncExternalStoreWithSelector<
-    MaybeLoaded<Loaded<S, R>>,
-    TSelectorReturn
-  >(
-    React.useCallback(
-      (callback) => {
-        if (!subscription) {
-          return () => {};
-        }
-
-        return subscription.subscribe(callback);
-      },
-      [subscription],
-    ),
-    getCurrentValue,
-    getCurrentValue,
-    options?.select ?? ((value) => value as TSelectorReturn),
-    options?.equalityFn ?? Object.is,
-  );
-
-  return value;
+  return useSubscriptionSelector(subscription, options);
 }
 
 export function useSuspenseCoState<
@@ -491,50 +468,27 @@ export function useSuspenseCoState<
 
   use(subscription.getCachedPromise());
 
-  const getCurrentValue = () => {
-    const value = subscription.getCurrentValue();
-
-    if (!value.$isLoaded) {
-      throw new Error("CoValue must be loaded in a suspense context");
-    }
-
-    return value;
-  };
-
-  const value = useSyncExternalStoreWithSelector<Loaded<S, R>, TSelectorReturn>(
-    React.useCallback(
-      (callback) => {
-        return subscription.subscribe(callback);
-      },
-      [subscription],
-    ),
-    getCurrentValue,
-    getCurrentValue,
-    options?.select ?? ((value) => value as TSelectorReturn),
-    options?.equalityFn ?? Object.is,
-  );
-
-  return value;
+  return useSubscriptionSelector(subscription, options);
 }
 
 export function useSubscriptionSelector<
   S extends CoValueClassOrSchema,
   // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
   const R extends ResolveQuery<S> = SchemaResolveQuery<S>,
-  TSelectorReturn = MaybeLoaded<Loaded<S, R>>,
+  // Selector input can be an already loaded or a maybe-loaded value,
+  // depending on whether a suspense hook is used or not, respectively.
+  TSelectorInput = MaybeLoaded<Loaded<S, R>>,
+  TSelectorReturn = TSelectorInput,
 >(
   subscription: CoValueSubscription<S, R>,
   options?: {
-    select?: (value: MaybeLoaded<Loaded<S, R>>) => TSelectorReturn;
+    select?: (value: TSelectorInput) => TSelectorReturn;
     equalityFn?: (a: TSelectorReturn, b: TSelectorReturn) => boolean;
   },
-) {
+): TSelectorReturn {
   const getCurrentValue = useGetCurrentValue(subscription);
 
-  return useSyncExternalStoreWithSelector<
-    MaybeLoaded<Loaded<S, R>>,
-    TSelectorReturn
-  >(
+  return useSyncExternalStoreWithSelector<TSelectorInput, TSelectorReturn>(
     React.useCallback(
       (callback) => {
         if (!subscription) {
@@ -547,7 +501,7 @@ export function useSubscriptionSelector<
     ),
     getCurrentValue,
     getCurrentValue,
-    options?.select ?? ((value) => value as TSelectorReturn),
+    options?.select ?? ((value) => value as unknown as TSelectorReturn),
     options?.equalityFn ?? Object.is,
   );
 }
@@ -759,27 +713,7 @@ export function useAccount<
   },
 ): TSelectorReturn {
   const subscription = useAccountSubscription(AccountSchema, options);
-  const getCurrentValue = useGetCurrentValue(subscription);
-
-  return useSyncExternalStoreWithSelector<
-    MaybeLoaded<Loaded<A, R>>,
-    TSelectorReturn
-  >(
-    React.useCallback(
-      (callback) => {
-        if (!subscription) {
-          return () => {};
-        }
-
-        return subscription.subscribe(callback);
-      },
-      [subscription],
-    ),
-    getCurrentValue,
-    getCurrentValue,
-    options?.select ?? ((value) => value as TSelectorReturn),
-    options?.equalityFn ?? Object.is,
-  );
+  return useSubscriptionSelector(subscription, options);
 }
 
 export function useSuspenseAccount<
@@ -826,32 +760,7 @@ export function useSuspenseAccount<
 
   use(subscription.getCachedPromise());
 
-  const getCurrentValue = () => {
-    const value = subscription.getCurrentValue();
-
-    if (!value.$isLoaded) {
-      throw new Error("Account must be loaded in a suspense context");
-    }
-
-    return value;
-  };
-
-  return useSyncExternalStoreWithSelector<Loaded<A, R>, TSelectorReturn>(
-    React.useCallback(
-      (callback) => {
-        if (!subscription) {
-          return () => {};
-        }
-
-        return subscription.subscribe(callback);
-      },
-      [subscription],
-    ),
-    getCurrentValue,
-    getCurrentValue,
-    options?.select ?? ((value) => value as TSelectorReturn),
-    options?.equalityFn ?? Object.is,
-  );
+  return useSubscriptionSelector(subscription, options);
 }
 
 /**
