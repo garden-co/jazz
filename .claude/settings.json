@@ -1,8 +1,21 @@
 {
   "permissions": {
     "allow": [
-      "mcp__linear__create_issue",
-      "Bash(curl -s -X POST https://api.linear.app/graphql *)"
+      "Bash(cargo build:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo test:*)",
+      "Bash(curl:*)",
+      "Bash(gh pr create:*)",
+      "Bash(git add:*)",
+      "Bash(git branch:*)",
+      "Bash(git checkout:*)",
+      "Bash(git commit:*)",
+      "Bash(git fetch:*)",
+      "Bash(git merge:*)",
+      "Bash(git push:*)",
+      "Bash(git stash:*)",
+      "Bash(DEBUG_FILTER=1 cargo test:*)",
+      "Bash(RUST_BACKTRACE=1 cargo test:*)"
     ]
   },
   "hooks": {
