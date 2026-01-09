@@ -54,7 +54,7 @@ interface SubscriptionsState {
  * - Detects changes by comparing schema/ids/resolve
  * - Creates new subscriptions via SubscriptionScopeCache.getOrCreate()
  */
-function useMultiCoStateSubscriptions(
+function useCoValueSubscriptions(
   schema: CoValueClassOrSchema,
   ids: readonly string[],
   resolve: ResolveQuery<any>,
@@ -129,36 +129,14 @@ function useMultiCoStateSubscriptions(
 }
 
 /**
- * A promise with status tracking for the `use()` hook.
- */
-type PromiseWithStatus<T> = Promise<T> & {
-  status?: "pending" | "fulfilled" | "rejected";
-  value?: T;
-  reason?: unknown;
-};
-
-/**
- * Creates a resolved promise with the correct status for immediate use.
- */
-function resolvedPromise<T>(value: T): PromiseWithStatus<T> {
-  const promise = Promise.resolve(value) as PromiseWithStatus<T>;
-  promise.status = "fulfilled";
-  promise.value = value;
-  return promise;
-}
-
-/**
- * Internal hook that creates a combined suspense promise from multiple subscriptions.
+ * Internal hook that suspends until all values are loaded.
  *
  * - Creates a Promise.all from individual getCachedPromise() calls
  * - Suspends via the use() hook until all values are loaded
- *
- * @param subscriptions - Array of SubscriptionScope instances
  */
-export function useMultiCoStateSuspense(
+function useSuspendUntilLoaded(
   subscriptions: SubscriptionScope<CoValue>[],
 ): void {
-  // Create a stable key based on subscriptions to memoize the combined promise
   const subscriptionIds = subscriptions.map((sub) => sub.id).join(",");
 
   const combinedPromise = useMemo(() => {
@@ -166,7 +144,6 @@ export function useMultiCoStateSuspense(
     return Promise.all(promises);
   }, [subscriptionIds]);
 
-  // Suspend until all promises are resolved
   use(combinedPromise);
 }
 
@@ -180,21 +157,16 @@ export function useMultiCoStateSuspense(
  * @param subscriptions - Array of SubscriptionScope instances
  * @returns Array of loaded CoValues
  */
-function useMultiCoStateStore(
+function useSubscriptionsSelector<T extends CoValue[] | MaybeLoaded<CoValue>[]>(
   subscriptions: SubscriptionScope<CoValue>[],
-): CoValue[] {
+): T {
   // Create a stable key for memoization
   const subscriptionIds = subscriptions.map((sub) => sub.id).join(",");
-
-  // Cache for the snapshot to avoid infinite loops
-  const cachedSnapshotRef = useRef<CoValue[]>([]);
 
   // Combined subscribe function that subscribes to all scopes
   const subscribe = useCallback(
     (callback: () => void) => {
       const unsubscribes = subscriptions.map((sub) => sub.subscribe(callback));
-
-      // Return combined unsubscribe function
       return () => {
         unsubscribes.forEach((unsub) => unsub());
       };
@@ -202,30 +174,25 @@ function useMultiCoStateStore(
     [subscriptionIds],
   );
 
-  // Get current values from all subscriptions, with caching to prevent infinite loops
-  const getSnapshot = useCallback(() => {
-    const newValues = subscriptions.map((sub) => {
-      const value = sub.getCurrentValue();
-      if (!value.$isLoaded) {
-        throw new Error("CoValue must be loaded in a suspense context");
-      }
-      return value;
-    });
+  // Cache current values to avoid infinite loops
+  const cachedCurrentValuesRef = useRef<T>([] as unknown as T);
+  const getCurrentValues = useCallback(() => {
+    const newValues = subscriptions.map((sub) => sub.getCurrentValue());
 
     // Check if values have changed by comparing each element
-    const cached = cachedSnapshotRef.current;
+    const cached = cachedCurrentValuesRef.current;
     const hasChanged =
       cached.length !== newValues.length ||
       newValues.some((value, index) => value !== cached[index]);
 
     if (hasChanged) {
-      cachedSnapshotRef.current = newValues;
+      cachedCurrentValuesRef.current = newValues as T;
     }
 
-    return cachedSnapshotRef.current;
+    return cachedCurrentValuesRef.current;
   }, [subscriptionIds]);
 
-  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  return useSyncExternalStore(subscribe, getCurrentValues, getCurrentValues);
 }
 
 /**
@@ -242,7 +209,7 @@ function useMultiCoStateStore(
  *
  * @example
  * ```typescript
- * const [project1, project2] = useSuspenseMultiCoState(
+ * const [project1, project2] = useSuspenseCoStates(
  *   ProjectSchema,
  *   [projectId1, projectId2],
  *   { resolve: { assignee: true } }
@@ -253,7 +220,7 @@ function useMultiCoStateStore(
  * - All IDs use the same schema and resolve query
  * - All entries suspend together until loaded
  */
-export function useSuspenseMultiCoState<
+export function useSuspenseCoStates<
   S extends CoValueClassOrSchema,
   // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
   const R extends ResolveQuery<S> = SchemaResolveQuery<S>,
@@ -266,73 +233,16 @@ export function useSuspenseMultiCoState<
   },
 ): Loaded<S, R>[] {
   const resolve = getResolveQuery(Schema, options?.resolve);
-
-  // Step 1: Create/get subscriptions for each ID
-  const subscriptionScopes = useMultiCoStateSubscriptions(Schema, ids, resolve);
-
-  // Step 2: Suspend until all subscriptions are loaded
-  useMultiCoStateSuspense(subscriptionScopes);
-
-  // Step 3: Get current values via useSyncExternalStore
-  const values = useMultiCoStateStore(subscriptionScopes);
-
-  return values as Loaded<S, R>[];
-}
-
-/**
- * Internal hook that uses useSyncExternalStore to subscribe to multiple SubscriptionScopes.
- * Returns MaybeLoaded values instead of throwing when values aren't loaded.
- *
- * @param subscriptions - Array of SubscriptionScope instances
- * @returns Array of MaybeLoaded CoValues
- */
-function useMultiCoStateStoreMaybeLoaded(
-  subscriptions: SubscriptionScope<CoValue>[],
-): MaybeLoaded<CoValue>[] {
-  // Create a stable key for memoization
-  const subscriptionIds = subscriptions.map((sub) => sub.id).join(",");
-
-  // Cache for the snapshot to avoid infinite loops
-  const cachedSnapshotRef = useRef<MaybeLoaded<CoValue>[]>([]);
-
-  // Combined subscribe function that subscribes to all scopes
-  const subscribe = useCallback(
-    (callback: () => void) => {
-      const unsubscribes = subscriptions.map((sub) => sub.subscribe(callback));
-
-      // Return combined unsubscribe function
-      return () => {
-        unsubscribes.forEach((unsub) => unsub());
-      };
-    },
-    [subscriptionIds],
-  );
-
-  // Get current values from all subscriptions (MaybeLoaded, no throwing)
-  const getSnapshot = useCallback(() => {
-    const newValues = subscriptions.map((sub) => sub.getCurrentValue());
-
-    // Check if values have changed by comparing each element
-    const cached = cachedSnapshotRef.current;
-    const hasChanged =
-      cached.length !== newValues.length ||
-      newValues.some((value, index) => value !== cached[index]);
-
-    if (hasChanged) {
-      cachedSnapshotRef.current = newValues;
-    }
-
-    return cachedSnapshotRef.current;
-  }, [subscriptionIds]);
-
-  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  const subscriptionScopes = useCoValueSubscriptions(Schema, ids, resolve);
+  useSuspendUntilLoaded(subscriptionScopes);
+  return useSubscriptionsSelector<Loaded<S, R>[]>(subscriptionScopes);
 }
 
 /**
  * Subscribe to multiple CoValues without Suspense.
  *
  * This hook accepts a schema, resolve query, and a list of IDs, returning an array of MaybeLoaded values.
- * Unlike `useSuspenseMultiCoState`, this hook does not suspend and returns loading/unavailable
+ * Unlike `useSuspenseCoStates`, this hook does not suspend and returns loading/unavailable
  * states that can be checked via the `$isLoaded` property.
  *
  * @param Schema - The CoValue schema or class constructor
@@ -342,7 +252,7 @@ function useMultiCoStateStoreMaybeLoaded(
  *
  * @example
  * ```typescript
- * const [project1, project2] = useMultiCoState(
+ * const [project1, project2] = useCoStates(
  *   ProjectSchema,
  *   [projectId1, projectId2],
  *   { resolve: { assignee: true } }
@@ -357,7 +267,7 @@ function useMultiCoStateStoreMaybeLoaded(
  * - All IDs use the same schema and resolve query
  * - Check `$isLoaded` on each value to determine if it's ready
  */
-export function useMultiCoState<
+export function useCoStates<
   S extends CoValueClassOrSchema,
   // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
   const R extends ResolveQuery<S> = SchemaResolveQuery<S>,
@@ -370,12 +280,8 @@ export function useMultiCoState<
   },
 ): MaybeLoaded<Loaded<S, R>>[] {
   const resolve = getResolveQuery(Schema, options?.resolve);
-
-  // Step 1: Create/get subscriptions for each ID
-  const subscriptionScopes = useMultiCoStateSubscriptions(Schema, ids, resolve);
-
-  // Step 2: Get current values via useSyncExternalStore (no suspending)
-  const values = useMultiCoStateStoreMaybeLoaded(subscriptionScopes);
-
-  return values as MaybeLoaded<Loaded<S, R>>[];
+  const subscriptionScopes = useCoValueSubscriptions(Schema, ids, resolve);
+  return useSubscriptionsSelector<MaybeLoaded<Loaded<S, R>>[]>(
+    subscriptionScopes,
+  );
 }

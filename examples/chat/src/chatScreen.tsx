@@ -15,7 +15,7 @@ import {
   InputBar,
   TextInput,
 } from "./ui.tsx";
-import { useMultiCoState } from "jazz-tools/react-core";
+import { useCoStates } from "jazz-tools/react-core";
 
 const INITIAL_MESSAGES_TO_SHOW = 30;
 
@@ -37,7 +37,7 @@ export function ChatScreen(props: { chatID: string }) {
     .reverse()
     .map((msg) => msg.$jazz.id);
 
-  const messages = useMultiCoState(Message, messageIds);
+  const messages = useCoStates(Message, messageIds);
 
   // The initial messages should be loaded all at once, so we can avoid flickering
   if (

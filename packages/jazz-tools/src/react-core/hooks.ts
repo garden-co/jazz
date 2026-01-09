@@ -2,7 +2,6 @@ import { useSyncExternalStoreWithSelector } from "use-sync-external-store/shim/w
 import React, {
   useCallback,
   useContext,
-  useMemo,
   useRef,
   useSyncExternalStore,
 } from "react";
@@ -23,7 +22,6 @@ import {
   Loaded,
   MaybeLoaded,
   NotLoaded,
-  RefsToResolve,
   ResolveQuery,
   ResolveQueryStrict,
   SchemaResolveQuery,
@@ -92,6 +90,23 @@ export function useIsAuthenticated() {
   );
 }
 
+/**
+ * Tracked subscription state. If any of the dependencies change, the subscription will be recreated.
+ */
+interface SubscriptionState<
+  S extends CoValueClassOrSchema,
+  R extends ResolveQuery<S>,
+> {
+  value: CoValueSubscription<S, R> | null;
+  contextManager: ReturnType<typeof useJazzContextManager>;
+  id: string | undefined | null;
+  Schema: S;
+  resolve?: R;
+  branchName?: string;
+  branchOwnerId?: string;
+  agent?: AnonymousJazzAgent | Loaded<any, true>;
+}
+
 export function useCoValueSubscription<
   S extends CoValueClassOrSchema,
   // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
@@ -103,20 +118,19 @@ export function useCoValueSubscription<
     resolve?: ResolveQueryStrict<S, R>;
     unstable_branch?: BranchDefinition;
   },
-) {
+): CoValueSubscription<S, R> | null {
   const contextManager = useJazzContextManager();
   const agent = useAgent();
 
   const callerStack = React.useRef<Error | undefined>(undefined);
-
   if (!callerStack.current) {
     callerStack.current = captureStack();
   }
 
-  const createSubscription = () => {
+  const createSubscription = (): SubscriptionState<S, R> => {
     if (!id) {
       return {
-        subscription: null,
+        value: null,
         contextManager,
         id,
         Schema,
@@ -125,7 +139,7 @@ export function useCoValueSubscription<
 
     if (options?.unstable_branch?.owner === null) {
       return {
-        subscription: null,
+        value: null,
         contextManager,
         id,
         Schema,
@@ -152,7 +166,7 @@ export function useCoValueSubscription<
     }
 
     return {
-      value: subscription,
+      value: subscription as CoValueSubscription<S, R>,
       contextManager,
       id,
       Schema,
@@ -190,7 +204,7 @@ export function useCoValueSubscription<
   }
 
   // Subscribe to the context manager to react to auth changes
-  return subscription.value as CoValueSubscription<S, R>;
+  return subscription.value;
 }
 
 function useImportCoValueContent<V>(
@@ -885,6 +899,6 @@ function getResolveQuery(
 
 // Re-export multi-state hooks
 export {
-  useMultiCoState,
-  useSuspenseMultiCoState,
-} from "./useMultiCoState.js";
+  useCoStates,
+  useSuspenseCoStates,
+} from "./useCoStates.js";

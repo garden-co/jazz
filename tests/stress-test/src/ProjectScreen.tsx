@@ -1,4 +1,4 @@
-import { useAccount, useCoState, useMultiCoState } from "jazz-tools/react-core";
+import { useAccount, useCoState, useCoStates } from "jazz-tools/react-core";
 import { useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { TodoAccount, TodoProject, Task } from "./1_schema";
@@ -16,7 +16,7 @@ export function ProjectScreen() {
         .slice(0, visibleTasks)
         .map((ref) => ref.id)
     : [];
-  const tasks = useMultiCoState(Task, taskIds, {
+  const tasks = useCoStates(Task, taskIds, {
     resolve: {
       text: true,
     },

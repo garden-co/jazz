@@ -5,7 +5,7 @@ import { Loaded, co, z } from "jazz-tools";
 import { assertLoaded } from "jazz-tools/testing";
 import { assert, beforeEach, describe, expect, expectTypeOf, it } from "vitest";
 import React, { Suspense } from "react";
-import { useMultiCoState, useSuspenseMultiCoState } from "../hooks.js";
+import { useCoStates, useSuspenseCoStates } from "../hooks.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { act, renderHook, waitFor } from "./testUtils.js";
 
@@ -25,7 +25,7 @@ beforeEach(async () => {
   });
 });
 
-describe("useSuspenseMultiCoState", () => {
+describe("useSuspenseCoStates", () => {
   it("should return loaded values for all subscriptions", async () => {
     const project1 = ProjectSchema.create({ name: "My Project 1" });
     const project2 = ProjectSchema.create({ name: "My Project 2" });
@@ -37,7 +37,7 @@ describe("useSuspenseMultiCoState", () => {
     const { result } = await act(async () => {
       return renderHook(
         () =>
-          useSuspenseMultiCoState(ProjectSchema, [
+          useSuspenseCoStates(ProjectSchema, [
             project1.$jazz.id,
             project2.$jazz.id,
           ]),
@@ -73,7 +73,7 @@ describe("useSuspenseMultiCoState", () => {
     const ids = [project1.$jazz.id, project2.$jazz.id] as const;
 
     const { result } = await act(async () => {
-      return renderHook(() => useSuspenseMultiCoState(ProjectSchema, ids), {
+      return renderHook(() => useSuspenseCoStates(ProjectSchema, ids), {
         wrapper,
       });
     });
@@ -99,7 +99,7 @@ describe("useSuspenseMultiCoState", () => {
     const { result } = await act(async () => {
       return renderHook(
         () =>
-          useSuspenseMultiCoState(ProjectSchema, [
+          useSuspenseCoStates(ProjectSchema, [
             project1.$jazz.id,
             project2.$jazz.id,
           ]),
@@ -135,7 +135,7 @@ describe("useSuspenseMultiCoState", () => {
     );
 
     const { result } = await act(async () => {
-      return renderHook(() => useSuspenseMultiCoState(ProjectSchema, []), {
+      return renderHook(() => useSuspenseCoStates(ProjectSchema, []), {
         wrapper,
       });
     });
@@ -148,13 +148,13 @@ describe("useSuspenseMultiCoState", () => {
   });
 });
 
-describe("useMultiCoState", () => {
+describe("useCoStates", () => {
   it("should return MaybeLoaded values", async () => {
     const project1 = ProjectSchema.create({ name: "My Project 1" });
     const project2 = ProjectSchema.create({ name: "My Project 2" });
 
     const { result } = renderHook(() =>
-      useMultiCoState(ProjectSchema, [project1.$jazz.id, project2.$jazz.id]),
+      useCoStates(ProjectSchema, [project1.$jazz.id, project2.$jazz.id]),
     );
 
     await waitFor(() => {
@@ -177,7 +177,7 @@ describe("useMultiCoState", () => {
     const project2 = ProjectSchema.create({ name: "Project 2" });
 
     const { result } = renderHook(() =>
-      useMultiCoState(ProjectSchema, [project1.$jazz.id, project2.$jazz.id]),
+      useCoStates(ProjectSchema, [project1.$jazz.id, project2.$jazz.id]),
     );
 
     await waitFor(() => {
@@ -205,7 +205,7 @@ describe("useMultiCoState", () => {
   });
 
   it("should handle empty subscription array", async () => {
-    const { result } = renderHook(() => useMultiCoState(ProjectSchema, []));
+    const { result } = renderHook(() => useCoStates(ProjectSchema, []));
 
     await waitFor(() => {
       expect(result.current).not.toBeNull();
@@ -220,7 +220,7 @@ describe("useMultiCoState", () => {
 
     let ids: string[] = [project1.$jazz.id, project2.$jazz.id];
     const { result, rerender } = renderHook(
-      ({ ids }: { ids: string[] }) => useMultiCoState(ProjectSchema, ids),
+      ({ ids }: { ids: string[] }) => useCoStates(ProjectSchema, ids),
       {
         initialProps: { ids },
       },
@@ -257,7 +257,7 @@ describe("useMultiCoState", () => {
 
     let ids: string[] = [project1.$jazz.id, project2.$jazz.id];
     const { result, rerender } = renderHook(
-      ({ ids }: { ids: string[] }) => useMultiCoState(ProjectSchema, ids),
+      ({ ids }: { ids: string[] }) => useCoStates(ProjectSchema, ids),
       {
         initialProps: { ids },
       },
@@ -291,7 +291,7 @@ describe("useMultiCoState", () => {
     const { result, rerender } = renderHook(
       ({ ids }: { ids: string[] }) => {
         renderCount++;
-        return useMultiCoState(ProjectSchema, ids);
+        return useCoStates(ProjectSchema, ids);
       },
       {
         initialProps: { ids },
