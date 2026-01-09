@@ -1,7 +1,6 @@
 import type { CojsonInternalTypes, SyncMessage } from "cojson";
 import { cojsonInternals } from "cojson";
 import { type Mocked, afterEach, describe, expect, test, vi } from "vitest";
-import { MAX_OUTGOING_MESSAGES_CHUNK_BYTES } from "../BatchedOutgoingMessages.js";
 import {
   type CreateWebSocketPeerOpts,
   createWebSocketPeer,
@@ -10,7 +9,9 @@ import type { AnyWebSocket } from "../types.js";
 import { BUFFER_LIMIT, BUFFER_LIMIT_POLLING_INTERVAL } from "../utils.js";
 import { createTestMetricReader, tearDownTestMetricReader } from "./utils.js";
 
-const { CO_VALUE_PRIORITY } = cojsonInternals;
+const { CO_VALUE_PRIORITY, WEBSOCKET_CONFIG } = cojsonInternals;
+
+const { MAX_OUTGOING_MESSAGES_CHUNK_BYTES } = WEBSOCKET_CONFIG;
 
 function setup(opts: Partial<CreateWebSocketPeerOpts> = {}) {
   const listeners = new Map<string, (event: MessageEvent) => void>();

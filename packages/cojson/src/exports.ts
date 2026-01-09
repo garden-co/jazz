@@ -82,10 +82,13 @@ import { getDependedOnCoValuesFromRawData } from "./coValueCore/utils.js";
 import {
   CO_VALUE_LOADING_CONFIG,
   TRANSACTION_CONFIG,
+  WEBSOCKET_CONFIG,
   setCoValueLoadingMaxRetries,
   setCoValueLoadingRetryDelay,
   setCoValueLoadingTimeout,
   setIncomingMessagesTimeBudget,
+  setMaxOutgoingMessagesChunkBytes,
+  setOutgoingMessagesChunkDelay,
   setMaxRecommendedTxSize,
 } from "./config.js";
 import { LogLevel, logger } from "./logger.js";
@@ -135,6 +138,9 @@ export const cojsonInternals = {
   TRANSACTION_CONFIG,
   setMaxRecommendedTxSize,
   canBeBranched,
+  WEBSOCKET_CONFIG,
+  setMaxOutgoingMessagesChunkBytes,
+  setOutgoingMessagesChunkDelay,
 };
 
 export {

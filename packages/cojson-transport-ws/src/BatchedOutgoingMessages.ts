@@ -15,9 +15,8 @@ import {
   waitForWebSocketOpen,
 } from "./utils.js";
 
-const { CO_VALUE_PRIORITY, getContentMessageSize } = cojsonInternals;
-
-export const MAX_OUTGOING_MESSAGES_CHUNK_BYTES = 25_000;
+const { CO_VALUE_PRIORITY, getContentMessageSize, WEBSOCKET_CONFIG } =
+  cojsonInternals;
 
 export class BatchedOutgoingMessages
   implements CojsonInternalTypes.OutgoingPeerChannel
@@ -82,7 +81,9 @@ export class BatchedOutgoingMessages
 
     // Delay the initiation of the queue processing to accumulate messages
     // before sending them, in order to do prioritization and batching
-    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    await new Promise<void>((resolve) =>
+      setTimeout(resolve, WEBSOCKET_CONFIG.OUTGOING_MESSAGES_CHUNK_DELAY),
+    );
 
     let msg = this.queue.pull();
 
@@ -123,7 +124,8 @@ export class BatchedOutgoingMessages
     const payload = JSON.stringify(msg);
 
     const maxChunkSizeReached =
-      this.backlog.length + payload.length >= MAX_OUTGOING_MESSAGES_CHUNK_BYTES;
+      this.backlog.length + payload.length >=
+      WEBSOCKET_CONFIG.MAX_OUTGOING_MESSAGES_CHUNK_BYTES;
     const backlogExists = this.backlog.length > 0;
 
     if (maxChunkSizeReached) {
@@ -133,7 +135,9 @@ export class BatchedOutgoingMessages
 
       this.backlog = payload;
 
-      if (payload.length >= MAX_OUTGOING_MESSAGES_CHUNK_BYTES) {
+      if (
+        payload.length >= WEBSOCKET_CONFIG.MAX_OUTGOING_MESSAGES_CHUNK_BYTES
+      ) {
         this.sendMessagesInBulk();
       }
     } else {
