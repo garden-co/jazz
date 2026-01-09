@@ -9,6 +9,10 @@ import { useMultiCoState, useSuspenseMultiCoState } from "../hooks.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { act, renderHook, waitFor } from "./testUtils.js";
 
+const ProjectSchema = co.map({
+  name: z.string(),
+});
+
 beforeEach(async () => {
   cojsonInternals.setCoValueLoadingRetryDelay(20);
 
@@ -23,10 +27,6 @@ beforeEach(async () => {
 
 describe("useSuspenseMultiCoState", () => {
   it("should return loaded values for all subscriptions", async () => {
-    const ProjectSchema = co.map({
-      name: z.string(),
-    });
-
     const project1 = ProjectSchema.create({ name: "My Project 1" });
     const project2 = ProjectSchema.create({ name: "My Project 2" });
 
@@ -63,13 +63,8 @@ describe("useSuspenseMultiCoState", () => {
   });
 
   it("should have correct return types for each entry", async () => {
-    const ProjectSchema = co.map({
-      name: z.string(),
-      priority: z.number(),
-    });
-
-    const project1 = ProjectSchema.create({ name: "Project 1", priority: 1 });
-    const project2 = ProjectSchema.create({ name: "Project 2", priority: 2 });
+    const project1 = ProjectSchema.create({ name: "Project 1" });
+    const project2 = ProjectSchema.create({ name: "Project 2" });
 
     const wrapper = ({ children }: { children: React.ReactNode }) => (
       <Suspense fallback={<div>Loading...</div>}>{children}</Suspense>
@@ -94,12 +89,8 @@ describe("useSuspenseMultiCoState", () => {
   });
 
   it("should re-render when any value changes", async () => {
-    const TestMap = co.map({
-      value: z.string(),
-    });
-
-    const map1 = TestMap.create({ value: "initial1" });
-    const map2 = TestMap.create({ value: "initial2" });
+    const project1 = ProjectSchema.create({ name: "Project 1" });
+    const project2 = ProjectSchema.create({ name: "Project 2" });
 
     const wrapper = ({ children }: { children: React.ReactNode }) => (
       <Suspense fallback={<div>Loading...</div>}>{children}</Suspense>
@@ -107,7 +98,11 @@ describe("useSuspenseMultiCoState", () => {
 
     const { result } = await act(async () => {
       return renderHook(
-        () => useSuspenseMultiCoState(TestMap, [map1.$jazz.id, map2.$jazz.id]),
+        () =>
+          useSuspenseMultiCoState(ProjectSchema, [
+            project1.$jazz.id,
+            project2.$jazz.id,
+          ]),
         {
           wrapper,
         },
@@ -121,24 +116,20 @@ describe("useSuspenseMultiCoState", () => {
 
     assert(result.current[0]);
     assert(result.current[0]);
-    expect(result.current[0].value).toBe("initial1");
+    expect(result.current[0].name).toBe("Project 1");
 
     // Update one of the values
     act(() => {
-      map1.$jazz.set("value", "updated1");
+      project1.$jazz.set("name", "updated1");
     });
 
     await waitFor(() => {
       assert(result.current[0]);
-      expect(result.current[0].value).toBe("updated1");
+      expect(result.current[0].name).toBe("updated1");
     });
   });
 
   it("should handle empty subscription array", async () => {
-    const ProjectSchema = co.map({
-      name: z.string(),
-    });
-
     const wrapper = ({ children }: { children: React.ReactNode }) => (
       <Suspense fallback={<div>Loading...</div>}>{children}</Suspense>
     );
@@ -159,10 +150,6 @@ describe("useSuspenseMultiCoState", () => {
 
 describe("useMultiCoState", () => {
   it("should return MaybeLoaded values", async () => {
-    const ProjectSchema = co.map({
-      name: z.string(),
-    });
-
     const project1 = ProjectSchema.create({ name: "My Project 1" });
     const project2 = ProjectSchema.create({ name: "My Project 2" });
 
@@ -186,15 +173,11 @@ describe("useMultiCoState", () => {
   });
 
   it("should re-render when any value changes", async () => {
-    const TestMap = co.map({
-      value: z.string(),
-    });
-
-    const map1 = TestMap.create({ value: "initial1" });
-    const map2 = TestMap.create({ value: "initial2" });
+    const project1 = ProjectSchema.create({ name: "Project 1" });
+    const project2 = ProjectSchema.create({ name: "Project 2" });
 
     const { result } = renderHook(() =>
-      useMultiCoState(TestMap, [map1.$jazz.id, map2.$jazz.id]),
+      useMultiCoState(ProjectSchema, [project1.$jazz.id, project2.$jazz.id]),
     );
 
     await waitFor(() => {
@@ -204,28 +187,24 @@ describe("useMultiCoState", () => {
     expect(result.current[0]).not.toBeNull();
     if (result.current[0]) {
       assertLoaded(result.current[0]);
-      expect(result.current[0].value).toBe("initial1");
+      expect(result.current[0].name).toBe("Project 1");
     }
 
     // Update one of the values
     act(() => {
-      map1.$jazz.set("value", "updated1");
+      project1.$jazz.set("name", "updated1");
     });
 
     await waitFor(() => {
       const val = result.current[0];
-      return val?.$isLoaded && val.value === "updated1";
+      return val?.$isLoaded && val.name === "updated1";
     });
 
     assert(result.current[0]);
-    expect(result.current[0].value).toBe("updated1");
+    expect(result.current[0].name).toBe("updated1");
   });
 
   it("should handle empty subscription array", async () => {
-    const ProjectSchema = co.map({
-      name: z.string(),
-    });
-
     const { result } = renderHook(() => useMultiCoState(ProjectSchema, []));
 
     await waitFor(() => {
@@ -233,5 +212,134 @@ describe("useMultiCoState", () => {
     });
 
     expect(result.current).toEqual([]);
+  });
+
+  it("should update when ids change", async () => {
+    const project1 = ProjectSchema.create({ name: "My Project 1" });
+    const project2 = ProjectSchema.create({ name: "My Project 2" });
+
+    let ids: string[] = [project1.$jazz.id, project2.$jazz.id];
+    const { result, rerender } = renderHook(
+      ({ ids }: { ids: string[] }) => useMultiCoState(ProjectSchema, ids),
+      {
+        initialProps: { ids },
+      },
+    );
+
+    await waitFor(() => {
+      expect(result.current[0]?.$isLoaded).toBe(true);
+      expect(result.current[1]?.$isLoaded).toBe(true);
+    });
+
+    const project3 = ProjectSchema.create({ name: "My Project 3" });
+    act(() => {
+      // Create a new array with updated IDs
+      ids = [project2.$jazz.id, project3.$jazz.id];
+      rerender({ ids });
+    });
+
+    await waitFor(() => {
+      expect(result.current[0]?.$isLoaded).toBe(true);
+      expect(result.current[1]?.$isLoaded).toBe(true);
+    });
+
+    assert(result.current[0]);
+    assert(result.current[1]);
+    assertLoaded(result.current[0]);
+    assertLoaded(result.current[1]);
+    expect(result.current[0].name).toBe("My Project 2");
+    expect(result.current[1].name).toBe("My Project 3");
+  });
+
+  it("should not update when ids are the same", async () => {
+    const project1 = ProjectSchema.create({ name: "My Project 1" });
+    const project2 = ProjectSchema.create({ name: "My Project 2" });
+
+    let ids: string[] = [project1.$jazz.id, project2.$jazz.id];
+    const { result, rerender } = renderHook(
+      ({ ids }: { ids: string[] }) => useMultiCoState(ProjectSchema, ids),
+      {
+        initialProps: { ids },
+      },
+    );
+
+    await waitFor(() => {
+      expect(result.current[0]?.$isLoaded).toBe(true);
+      expect(result.current[1]?.$isLoaded).toBe(true);
+    });
+
+    const firstResult = result.current;
+
+    act(() => {
+      // Create a new array with the same IDs
+      ids = [...ids];
+      rerender({ ids });
+    });
+
+    // The result should be the same reference when IDs haven't changed
+    expect(result.current).toBe(firstResult);
+    expect(result.current[0]).toBe(firstResult[0]);
+    expect(result.current[1]).toBe(firstResult[1]);
+  });
+
+  it("should remove subscriptions for removed ids", async () => {
+    const project1 = ProjectSchema.create({ name: "My Project 1" });
+    const project2 = ProjectSchema.create({ name: "My Project 2" });
+
+    let ids = [project1.$jazz.id, project2.$jazz.id];
+    let renderCount = 0;
+    const { result, rerender } = renderHook(
+      ({ ids }: { ids: string[] }) => {
+        renderCount++;
+        return useMultiCoState(ProjectSchema, ids);
+      },
+      {
+        initialProps: { ids },
+      },
+    );
+
+    await waitFor(() => {
+      expect(result.current[0]?.$isLoaded).toBe(true);
+      expect(result.current[1]?.$isLoaded).toBe(true);
+    });
+
+    assert(result.current[0]);
+    assertLoaded(result.current[0]);
+    const loadedProject1 = result.current[0];
+
+    act(() => {
+      ids.shift(); // Remove project1, keeping only project2
+      rerender({ ids });
+    });
+
+    await waitFor(() => {
+      expect(result.current.length).toBe(1);
+      expect(result.current[0]?.$isLoaded).toBe(true);
+    });
+    assert(result.current[0]);
+    assertLoaded(result.current[0]);
+    expect(result.current[0].name).toBe("My Project 2");
+
+    expect(renderCount).toBe(2);
+
+    // Modify project1. The hook should NOT re-render because project1 is no longer subscribed
+    act(() => {
+      project1.$jazz.set("name", "Modified Project 1");
+    });
+
+    // Wait a bit to ensure any potential updates would have occurred
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // The hook didn't re-render
+    expect(renderCount).toBe(2);
+
+    // project2's name is still the same
+    assert(result.current[0]);
+    assertLoaded(result.current[0]);
+    expect(result.current[0].name).toBe("My Project 2");
+
+    // project1's subscription scope is no longer subscribed to
+    const project1SubscriptionScope = loadedProject1.$jazz._subscriptionScope;
+    expect(project1SubscriptionScope?.subscribers.size).toBe(0);
   });
 });

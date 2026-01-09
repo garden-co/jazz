@@ -115,8 +115,10 @@ function useMultiCoStateSubscriptions(
   const paramsChanged =
     state.schema !== schema ||
     state.resolve !== resolve ||
-    state.ids.length !== ids.length ||
-    state.ids.some((id, index) => id !== ids[index]);
+    state.subscriptions.length !== ids.length ||
+    state.subscriptions.some(
+      (subscription, index) => subscription.id !== ids[index],
+    );
 
   if (contextChanged || paramsChanged) {
     stateRef.current = createAllSubscriptions();
