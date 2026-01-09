@@ -48,7 +48,7 @@ pub use cache::{BufferRowCache, RowCache};
 pub use delta::{BufferJoinedRow, DeltaBatch, PriorState, RowDelta};
 pub use graph::{GraphId, GraphState, QueryGraph};
 pub use node::{AccessReason, NodeId, QueryNode};
-pub use predicate::Predicate;
+pub use predicate::{Predicate, PredicateValue};
 
 // Re-export from parent for internal use
 use super::database::DatabaseState;

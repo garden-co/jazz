@@ -857,7 +857,7 @@ mod tests {
     use super::*;
     use crate::sql::query_graph::builder::QueryGraphBuilder;
     use crate::sql::query_graph::predicate::Predicate;
-    use crate::sql::row::Value;
+    use crate::sql::query_graph::PredicateValue;
     use crate::sql::row_buffer::RowBuilder;
     use crate::sql::schema::{ColumnDef, ColumnType};
     use crate::sql::Database;
@@ -901,7 +901,7 @@ mod tests {
         let schema = test_schema();
         let mut builder = QueryGraphBuilder::new("users", schema.clone());
         let scan = builder.table_scan();
-        let filter = builder.filter(scan, Predicate::eq("active", Value::Bool(true)));
+        let filter = builder.filter(scan, Predicate::eq("active", PredicateValue::Bool(true)));
         let mut graph = builder.output(filter, GraphId(1));
 
         // Create a mock database state
@@ -933,7 +933,7 @@ mod tests {
         let schema = test_schema();
         let mut builder = QueryGraphBuilder::new("users", schema.clone());
         let scan = builder.table_scan();
-        let filter = builder.filter(scan, Predicate::eq("active", Value::Bool(true)));
+        let filter = builder.filter(scan, Predicate::eq("active", PredicateValue::Bool(true)));
         let mut graph = builder.output(filter, GraphId(1));
 
         let db = Database::in_memory();
@@ -1118,7 +1118,7 @@ mod tests {
         let schema = test_schema();
         let mut builder = QueryGraphBuilder::new("users", schema);
         let scan = builder.table_scan();
-        let filter = builder.filter(scan, Predicate::eq("active", Value::Bool(true)));
+        let filter = builder.filter(scan, Predicate::eq("active", PredicateValue::Bool(true)));
         let graph = builder.output(filter, GraphId(42));
 
         let diagram = graph.to_diagram();

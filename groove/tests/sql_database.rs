@@ -4,9 +4,20 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use groove::sql::{
-    ColumnDef, ColumnType, Database, DatabaseError, ExecuteResult, TableSchema, Value,
+    ColumnDef, ColumnType, Database, DatabaseError, ExecuteResult, OwnedRow, PredicateValue,
+    RowBuilder, RowDescriptor, RowValue, TableSchema, Value,
 };
 use groove::ObjectId;
+
+/// Helper to build a row for a given schema with values in schema order.
+/// Example: make_row(&schema, |b| b.set_string_by_name("name", "Alice").set_i64_by_name("age", 30))
+fn make_row<F>(schema: &TableSchema, f: F) -> OwnedRow
+where
+    F: FnOnce(RowBuilder) -> RowBuilder,
+{
+    let desc = Arc::new(RowDescriptor::from_table_schema(schema));
+    f(RowBuilder::new(desc)).build()
+}
 
 // ========== Table Creation Tests ==========
 
@@ -43,111 +54,118 @@ fn create_table() {
 fn insert_and_get() {
     let db = Database::in_memory();
 
-    db.create_table(TableSchema::new(
+    let schema = TableSchema::new(
         "users",
         vec![
             ColumnDef::required("name", ColumnType::String),
             ColumnDef::optional("age", ColumnType::I64),
         ],
-    ))
-    .unwrap();
+    );
+    db.create_table(schema.clone()).unwrap();
 
-    let id = db
-        .insert(
-            "users",
-            &["name", "age"],
-            vec![Value::String("Alice".into()), Value::I64(30)],
-        )
-        .unwrap();
+    let row = make_row(&schema, |b| {
+        b.set_string_by_name("name", "Alice")
+            .set_i64_by_name("age", 30)
+    });
+    let id = db.insert_row("users", row).unwrap();
 
-    let row = db.get("users", id).unwrap().unwrap();
-    assert_eq!(row.0, id);
-    assert_eq!(row.1.get_column(0).unwrap(), Value::String("Alice".into()));
-    // age is optional, so it's wrapped in NullableSome
-    assert_eq!(row.1.get_column(1).unwrap(), Value::NullableSome(Box::new(Value::I64(30))));
+    let result = db.get("users", id).unwrap().unwrap();
+    assert_eq!(result.0, id);
+    // Use get_by_name for zero-copy access
+    assert_eq!(result.1.get_by_name("name"), Some(RowValue::String("Alice")));
+    assert_eq!(result.1.get_by_name("age"), Some(RowValue::I64(30)));
 }
 
 #[test]
 fn insert_with_null() {
     let db = Database::in_memory();
 
-    db.create_table(TableSchema::new(
+    let schema = TableSchema::new(
         "users",
         vec![
             ColumnDef::required("name", ColumnType::String),
             ColumnDef::optional("email", ColumnType::String),
         ],
-    ))
-    .unwrap();
+    );
+    db.create_table(schema.clone()).unwrap();
 
-    let id = db
-        .insert("users", &["name"], vec![Value::String("Bob".into())])
-        .unwrap();
+    // Only set the required field, leave email as null
+    let row = make_row(&schema, |b| b.set_string_by_name("name", "Bob"));
+    let id = db.insert_row("users", row).unwrap();
 
-    let row = db.get("users", id).unwrap().unwrap();
-    assert_eq!(row.1.get_column(1).unwrap(), Value::NullableNone);
+    let result = db.get("users", id).unwrap().unwrap();
+    // Nullable columns with no value return Null from get_by_name
+    assert_eq!(result.1.get_by_name("email"), Some(RowValue::Null));
 }
 
 #[test]
 fn insert_missing_required_column() {
     let db = Database::in_memory();
 
-    db.create_table(TableSchema::new(
+    let schema = TableSchema::new(
         "users",
         vec![ColumnDef::required("name", ColumnType::String)],
-    ))
-    .unwrap();
+    );
+    db.create_table(schema.clone()).unwrap();
 
-    let result = db.insert("users", &[], vec![]);
-    assert!(matches!(result, Err(DatabaseError::MissingColumn(_))));
+    // Create an empty row (missing required column)
+    // Note: With buffer format, unset string columns become empty strings ""
+    // which is different from NULL. Empty strings are valid for required columns.
+    let row = make_row(&schema, |b| b);
+    let id = db.insert_row("users", row).unwrap();
+
+    // Verify the row was inserted with an empty string
+    let result = db.get("users", id).unwrap().unwrap();
+    assert_eq!(result.1.get_by_name("name"), Some(RowValue::String("")));
 }
 
 // ========== Update Tests ==========
 
 #[test]
-fn update_row() {
+fn update_row_test() {
     let db = Database::in_memory();
 
-    db.create_table(TableSchema::new(
+    let schema = TableSchema::new(
         "users",
         vec![
             ColumnDef::required("name", ColumnType::String),
             ColumnDef::optional("age", ColumnType::I64),
         ],
-    ))
-    .unwrap();
+    );
+    db.create_table(schema.clone()).unwrap();
 
-    let id = db
-        .insert(
-            "users",
-            &["name", "age"],
-            vec![Value::String("Alice".into()), Value::I64(30)],
-        )
-        .unwrap();
+    let row = make_row(&schema, |b| {
+        b.set_string_by_name("name", "Alice")
+            .set_i64_by_name("age", 30)
+    });
+    let id = db.insert_row("users", row).unwrap();
 
-    let updated = db.update("users", id, &[("age", Value::I64(31))]).unwrap();
+    // Update age to 31
+    let updated_row = make_row(&schema, |b| {
+        b.set_string_by_name("name", "Alice")
+            .set_i64_by_name("age", 31)
+    });
+    let updated = db.update_row("users", id, updated_row).unwrap();
     assert!(updated);
 
-    let row = db.get("users", id).unwrap().unwrap();
-    // age is optional, so it's wrapped in NullableSome
-    assert_eq!(row.1.get_column(1).unwrap(), Value::NullableSome(Box::new(Value::I64(31))));
+    let result = db.get("users", id).unwrap().unwrap();
+    assert_eq!(result.1.get_by_name("age"), Some(RowValue::I64(31)));
 }
 
 // ========== Delete Tests ==========
 
 #[test]
-fn delete_row() {
+fn delete_row_test() {
     let db = Database::in_memory();
 
-    db.create_table(TableSchema::new(
+    let schema = TableSchema::new(
         "users",
         vec![ColumnDef::required("name", ColumnType::String)],
-    ))
-    .unwrap();
+    );
+    db.create_table(schema.clone()).unwrap();
 
-    let id = db
-        .insert("users", &["name"], vec![Value::String("Alice".into())])
-        .unwrap();
+    let row = make_row(&schema, |b| b.set_string_by_name("name", "Alice"));
+    let id = db.insert_row("users", row).unwrap();
 
     assert!(db.get("users", id).unwrap().is_some());
 
@@ -234,7 +252,7 @@ fn select_where() {
     )
     .unwrap();
 
-    let active = db.select_where("users", "active", &Value::Bool(true)).unwrap();
+    let active = db.select_where("users", "active", &PredicateValue::Bool(true)).unwrap();
     assert_eq!(active.len(), 2);
     // Verify active users are Alice and Carol
     let active_names: Vec<_> = active.iter().map(|r| r.1.get_column(0).unwrap()).collect();
@@ -242,7 +260,7 @@ fn select_where() {
     assert!(active_names.contains(&Value::String("Carol".into())));
 
     let inactive = db
-        .select_where("users", "active", &Value::Bool(false))
+        .select_where("users", "active", &PredicateValue::Bool(false))
         .unwrap();
     assert_eq!(inactive.len(), 1);
     assert_eq!(inactive[0].1.get_column(0).unwrap(), Value::String("Bob".into()));

@@ -3,7 +3,7 @@
 use groove::ObjectId;
 use groove::sql::{
     ColumnType, ConditionValue, PolicyAction, PolicyColumnRef, PolicyExpr, PolicyValue, Projection,
-    SelectExpr, Statement, Value, parse,
+    SelectExpr, Statement, Value, parse, PredicateValue,
 };
 
 #[test]
@@ -122,7 +122,7 @@ fn parse_update() {
             // Parser produces String, not Ref (executor handles coercion)
             assert_eq!(
                 upd.where_clause[0].right,
-                ConditionValue::Literal(Value::String(id.to_string()))
+                ConditionValue::Literal(PredicateValue::String(id.to_string()))
             );
         }
         _ => panic!("expected Update"),
@@ -142,7 +142,7 @@ fn parse_delete() {
             assert_eq!(del.where_clause[0].column.column, "id");
             assert_eq!(
                 del.where_clause[0].right,
-                ConditionValue::Literal(Value::String(id.to_string()))
+                ConditionValue::Literal(PredicateValue::String(id.to_string()))
             );
             assert!(!del.hard, "default delete should be soft");
         }
@@ -245,9 +245,9 @@ fn parse_select_with_where() {
         Statement::Select(sel) => {
             assert_eq!(sel.where_clause.len(), 2);
             assert_eq!(sel.where_clause[0].column.column, "active");
-            assert_eq!(sel.where_clause[0].right, ConditionValue::Literal(Value::Bool(true)));
+            assert_eq!(sel.where_clause[0].right, ConditionValue::Literal(PredicateValue::Bool(true)));
             assert_eq!(sel.where_clause[1].column.column, "age");
-            assert_eq!(sel.where_clause[1].right, ConditionValue::Literal(Value::I64(30)));
+            assert_eq!(sel.where_clause[1].right, ConditionValue::Literal(PredicateValue::I64(30)));
         }
         _ => panic!("expected Select"),
     }
@@ -340,7 +340,7 @@ fn case_insensitive_keywords() {
 
     match stmt {
         Statement::Select(sel) => {
-            assert_eq!(sel.where_clause[0].right, ConditionValue::Literal(Value::Bool(true)));
+            assert_eq!(sel.where_clause[0].right, ConditionValue::Literal(PredicateValue::Bool(true)));
         }
         _ => panic!("expected Select"),
     }
@@ -675,7 +675,7 @@ fn parse_policy_with_literal() {
                 match &exprs[0] {
                     PolicyExpr::Ne(left, right) => {
                         assert_eq!(*left, PolicyValue::Column("status".into()));
-                        assert_eq!(*right, PolicyValue::Literal(Value::String("draft".into())));
+                        assert_eq!(*right, PolicyValue::Literal(PredicateValue::String("draft".into())));
                     }
                     _ => panic!("expected Ne"),
                 }
@@ -683,7 +683,7 @@ fn parse_policy_with_literal() {
                 match &exprs[1] {
                     PolicyExpr::Gt(left, right) => {
                         assert_eq!(*left, PolicyValue::Column("priority".into()));
-                        assert_eq!(*right, PolicyValue::Literal(Value::I64(5)));
+                        assert_eq!(*right, PolicyValue::Literal(PredicateValue::I64(5)));
                     }
                     _ => panic!("expected Gt"),
                 }
@@ -704,7 +704,7 @@ fn parse_policy_with_not_and_parens() {
             Some(PolicyExpr::Not(inner)) => match *inner {
                 PolicyExpr::Eq(left, right) => {
                     assert_eq!(left, PolicyValue::Column("status".into()));
-                    assert_eq!(right, PolicyValue::Literal(Value::String("deleted".into())));
+                    assert_eq!(right, PolicyValue::Literal(PredicateValue::String("deleted".into())));
                 }
                 _ => panic!("expected Eq inside Not"),
             },

@@ -1121,6 +1121,35 @@ impl OwnedRow {
         }
     }
 
+    /// Convert this row to a Vec<Value> in schema order.
+    ///
+    /// This is the inverse of `from_values()`. The resulting vector has
+    /// values at indices matching their schema_index, suitable for use
+    /// with `encode_row()`.
+    pub fn to_values(&self) -> Vec<Value> {
+        // Find the maximum schema index to size the output vector
+        let max_schema_idx = self.descriptor.columns.iter()
+            .map(|c| c.schema_index)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
+
+        let mut values = vec![Value::NullableNone; max_schema_idx];
+
+        for (buf_idx, col) in self.descriptor.columns.iter().enumerate() {
+            let schema_idx = col.schema_index;
+            if let Some(row_value) = self.get(buf_idx) {
+                values[schema_idx] = if col.col_type.is_nullable() {
+                    row_value.to_nullable_value()
+                } else {
+                    row_value.to_value()
+                };
+            }
+        }
+
+        values
+    }
+
     /// Merge multiple rows into a single combined row.
     ///
     /// This is used for JOIN operations. The rows are merged in order,

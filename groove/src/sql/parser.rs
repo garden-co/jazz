@@ -1,4 +1,5 @@
 use crate::sql::policy::{Policy, PolicyAction, PolicyColumnRef, PolicyExpr, PolicyValue};
+use crate::sql::query_graph::PredicateValue;
 use crate::sql::row::Value;
 use crate::sql::schema::{ColumnDef, ColumnType};
 
@@ -128,14 +129,14 @@ pub struct Condition {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConditionValue {
     /// A literal value
-    Literal(Value),
+    Literal(PredicateValue),
     /// A column reference (for correlated subqueries)
     Column(QualifiedColumn),
 }
 
 impl Condition {
     /// Get the value if this condition has a literal right-hand side.
-    pub fn value(&self) -> Option<&Value> {
+    pub fn value(&self) -> Option<&PredicateValue> {
         match &self.right {
             ConditionValue::Literal(v) => Some(v),
             ConditionValue::Column(_) => None,
@@ -317,6 +318,43 @@ impl<'a> Parser<'a> {
         } else {
             let n: i64 = num_str.parse().map_err(|_| self.error("invalid integer"))?;
             Ok(Value::I64(n))
+        }
+    }
+
+    /// Parse a number as PredicateValue (for policy literals).
+    fn parse_number_predicate_value(&mut self) -> Result<PredicateValue, ParseError> {
+        self.skip_whitespace();
+
+        let start = self.pos;
+        let mut has_dot = false;
+        // Optional minus
+        if self.peek_char() == Some('-') {
+            self.pos += 1;
+        }
+
+        while self.pos < self.input.len() {
+            let c = self.input.as_bytes()[self.pos];
+            if c.is_ascii_digit() {
+                self.pos += 1;
+            } else if c == b'.' && !has_dot {
+                has_dot = true;
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+
+        let num_str = &self.input[start..self.pos];
+        if num_str.is_empty() || num_str == "-" {
+            return Err(self.error("expected number"));
+        }
+
+        if has_dot {
+            let n: f64 = num_str.parse().map_err(|_| self.error("invalid float"))?;
+            Ok(PredicateValue::F64(n))
+        } else {
+            let n: i64 = num_str.parse().map_err(|_| self.error("invalid integer"))?;
+            Ok(PredicateValue::I64(n))
         }
     }
 
@@ -851,24 +889,24 @@ impl<'a> Parser<'a> {
         // Try to parse as a literal value first
         // Check for NULL, true, false, string literal, or number
         if self.try_keyword("NULL") {
-            return Ok(ConditionValue::Literal(Value::NullableNone));
+            return Ok(ConditionValue::Literal(PredicateValue::Null));
         }
         if self.try_keyword("true") {
-            return Ok(ConditionValue::Literal(Value::Bool(true)));
+            return Ok(ConditionValue::Literal(PredicateValue::Bool(true)));
         }
         if self.try_keyword("false") {
-            return Ok(ConditionValue::Literal(Value::Bool(false)));
+            return Ok(ConditionValue::Literal(PredicateValue::Bool(false)));
         }
         if self.peek_char() == Some('\'') {
             let s = self.parse_string_literal()?;
-            return Ok(ConditionValue::Literal(Value::String(s)));
+            return Ok(ConditionValue::Literal(PredicateValue::String(s)));
         }
         if self
             .peek_char()
             .map(|c| c.is_ascii_digit() || c == '-')
             .unwrap_or(false)
         {
-            let val = self.parse_number()?;
+            let val = self.parse_number_predicate_value()?;
             return Ok(ConditionValue::Literal(val));
         }
 
@@ -1118,19 +1156,19 @@ impl<'a> Parser<'a> {
 
         // Literal values
         if self.try_keyword("NULL") {
-            return Ok(PolicyValue::Literal(Value::NullableNone));
+            return Ok(PolicyValue::Literal(PredicateValue::Null));
         }
         if self.try_keyword("true") {
-            return Ok(PolicyValue::Literal(Value::Bool(true)));
+            return Ok(PolicyValue::Literal(PredicateValue::Bool(true)));
         }
         if self.try_keyword("false") {
-            return Ok(PolicyValue::Literal(Value::Bool(false)));
+            return Ok(PolicyValue::Literal(PredicateValue::Bool(false)));
         }
 
         // String literal
         if self.peek_char() == Some('\'') {
             let s = self.parse_string_literal()?;
-            return Ok(PolicyValue::Literal(Value::String(s)));
+            return Ok(PolicyValue::Literal(PredicateValue::String(s)));
         }
 
         // Number
@@ -1139,7 +1177,7 @@ impl<'a> Parser<'a> {
             .map(|c| c.is_ascii_digit() || c == '-')
             .unwrap_or(false)
         {
-            let val = self.parse_number()?;
+            let val = self.parse_number_predicate_value()?;
             return Ok(PolicyValue::Literal(val));
         }
 

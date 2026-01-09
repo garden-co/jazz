@@ -283,7 +283,7 @@ mod tests {
     use super::*;
     use crate::sql::query_graph::builder::QueryGraphBuilder;
     use crate::sql::query_graph::predicate::Predicate;
-    use crate::sql::row::Value;
+    use crate::sql::query_graph::PredicateValue;
     use crate::sql::row_buffer::{RowBuilder, RowDescriptor};
     use crate::sql::schema::{ColumnDef, ColumnType};
     use crate::sql::{Database, TableSchema};
@@ -343,7 +343,7 @@ mod tests {
         // Build and register a filtered query
         let mut builder = QueryGraphBuilder::new("users", schema);
         let scan = builder.table_scan();
-        let filter = builder.filter(scan, Predicate::eq("active", Value::Bool(true)));
+        let filter = builder.filter(scan, Predicate::eq("active", PredicateValue::Bool(true)));
         let graph = builder.output(filter, GraphId(0));
 
         let graph_id = registry.register(graph);
@@ -380,7 +380,7 @@ mod tests {
 
         let mut builder = QueryGraphBuilder::new("users", schema);
         let scan = builder.table_scan();
-        let filter = builder.filter(scan, Predicate::eq("active", Value::Bool(true)));
+        let filter = builder.filter(scan, Predicate::eq("active", PredicateValue::Bool(true)));
         let graph = builder.output(filter, GraphId(0));
 
         let graph_id = registry.register(graph);

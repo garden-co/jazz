@@ -1,59 +1,97 @@
 //! Predicate types for filtering rows.
 
 use crate::object::ObjectId;
-use crate::sql::row::Value;
 use crate::sql::row_buffer::{RowDescriptor, RowRef, RowValue};
-use crate::sql::schema::TableSchema;
 
-/// Convert a Value to a display string for predicates.
-fn value_to_display(value: &Value) -> String {
-    match value {
-        Value::Bool(b) => b.to_string().to_uppercase(),
-        Value::I32(n) => n.to_string(),
-        Value::U32(n) => n.to_string(),
-        Value::I64(n) => n.to_string(),
-        Value::F64(n) => n.to_string(),
-        Value::String(s) => format!("'{}'", s),
-        Value::Bytes(b) => format!("<{} bytes>", b.len()),
-        Value::Ref(id) => format!("@{}", id),
-        Value::NullableNone => "NULL".to_string(),
-        Value::NullableSome(inner) => value_to_display(inner),
-        Value::Array(arr) => format!("[{} items]", arr.len()),
-        Value::Row(_) => "<Row>".to_string(),
-        Value::Blob(content_ref) => {
-            if content_ref.is_inline() {
-                format!("<Blob inline>")
-            } else {
-                format!("<Blob chunked>")
-            }
-        }
-        Value::BlobArray(refs) => format!("<{} blobs>", refs.len()),
-    }
+/// A minimal value type for predicate and policy literals.
+///
+/// Unlike the full `Value` enum, this only contains primitive types suitable
+/// for comparison. No `Row`, `Array`, or nullable wrappers - null is explicit.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PredicateValue {
+    Bool(bool),
+    I32(i32),
+    U32(u32),
+    I64(i64),
+    F64(f64),
+    String(String),
+    Bytes(Vec<u8>),
+    Ref(ObjectId),
+    Null,
 }
 
-/// Compare a RowValue from a buffer with a predicate Value.
-/// Returns true if they are equal, handling null cases.
-fn buffer_value_equals_pred(row_value: RowValue<'_>, pred_value: &Value) -> bool {
-    // Unwrap NullableSome from the predicate value
-    let pred_inner = match pred_value {
-        Value::NullableSome(inner) => inner.as_ref(),
-        Value::NullableNone => return matches!(row_value, RowValue::Null),
-        other => other,
-    };
+impl PredicateValue {
+    /// Create from a legacy Value type.
+    ///
+    /// Converts Value to PredicateValue, stripping nullable wrappers.
+    pub fn from_value(value: &crate::sql::row::Value) -> Self {
+        use crate::sql::row::Value;
+        match value {
+            Value::Bool(v) => PredicateValue::Bool(*v),
+            Value::I32(v) => PredicateValue::I32(*v),
+            Value::U32(v) => PredicateValue::U32(*v),
+            Value::I64(v) => PredicateValue::I64(*v),
+            Value::F64(v) => PredicateValue::F64(*v),
+            Value::String(v) => PredicateValue::String(v.clone()),
+            Value::Bytes(v) => PredicateValue::Bytes(v.clone()),
+            Value::Ref(v) => PredicateValue::Ref(*v),
+            Value::NullableNone => PredicateValue::Null,
+            Value::NullableSome(inner) => PredicateValue::from_value(inner),
+            // Complex types not supported in predicates - treat as null
+            Value::Array(_) | Value::Row(_) | Value::Blob(_) | Value::BlobArray(_) => {
+                PredicateValue::Null
+            }
+        }
+    }
 
-    match (row_value, pred_inner) {
-        (RowValue::Null, Value::NullableNone) => true,
-        (RowValue::Null, _) => false,
-        (RowValue::Bool(a), Value::Bool(b)) => a == *b,
-        (RowValue::I32(a), Value::I32(b)) => a == *b,
-        (RowValue::U32(a), Value::U32(b)) => a == *b,
-        (RowValue::I64(a), Value::I64(b)) => a == *b,
-        (RowValue::F64(a), Value::F64(b)) => a == *b,
-        (RowValue::Ref(a), Value::Ref(b)) => a == *b,
-        (RowValue::String(a), Value::String(b)) => a == b,
-        (RowValue::Bytes(a), Value::Bytes(b)) => a == b,
-        // Type mismatch - not equal
-        _ => false,
+    /// Check if this value matches a RowValue from a buffer.
+    pub fn matches(&self, row_value: &RowValue<'_>) -> bool {
+        match (self, row_value) {
+            (PredicateValue::Null, RowValue::Null) => true,
+            (PredicateValue::Null, _) => false,
+            (_, RowValue::Null) => false,
+            (PredicateValue::Bool(a), RowValue::Bool(b)) => *a == *b,
+            (PredicateValue::I32(a), RowValue::I32(b)) => *a == *b,
+            (PredicateValue::U32(a), RowValue::U32(b)) => *a == *b,
+            (PredicateValue::I64(a), RowValue::I64(b)) => *a == *b,
+            (PredicateValue::F64(a), RowValue::F64(b)) => *a == *b,
+            (PredicateValue::Ref(a), RowValue::Ref(b)) => *a == *b,
+            (PredicateValue::String(a), RowValue::String(b)) => a.as_str() == *b,
+            (PredicateValue::Bytes(a), RowValue::Bytes(b)) => a.as_slice() == *b,
+            // Type mismatch - not equal
+            _ => false,
+        }
+    }
+
+    /// Convert to a display string for predicates.
+    pub fn to_display_string(&self) -> String {
+        match self {
+            PredicateValue::Bool(b) => b.to_string().to_uppercase(),
+            PredicateValue::I32(n) => n.to_string(),
+            PredicateValue::U32(n) => n.to_string(),
+            PredicateValue::I64(n) => n.to_string(),
+            PredicateValue::F64(n) => n.to_string(),
+            PredicateValue::String(s) => format!("'{}'", s),
+            PredicateValue::Bytes(b) => format!("<{} bytes>", b.len()),
+            PredicateValue::Ref(id) => format!("@{}", id),
+            PredicateValue::Null => "NULL".to_string(),
+        }
+    }
+
+    /// Convert to legacy Value type (for backwards compatibility with policy system).
+    pub fn to_value(&self) -> crate::sql::row::Value {
+        use crate::sql::row::Value;
+        match self {
+            PredicateValue::Bool(v) => Value::Bool(*v),
+            PredicateValue::I32(v) => Value::I32(*v),
+            PredicateValue::U32(v) => Value::U32(*v),
+            PredicateValue::I64(v) => Value::I64(*v),
+            PredicateValue::F64(v) => Value::F64(*v),
+            PredicateValue::String(v) => Value::String(v.clone()),
+            PredicateValue::Bytes(v) => Value::Bytes(v.clone()),
+            PredicateValue::Ref(v) => Value::Ref(*v),
+            PredicateValue::Null => Value::NullableNone,
+        }
     }
 }
 
@@ -65,9 +103,9 @@ pub enum Predicate {
     /// Always false.
     False,
     /// Column equals value.
-    Eq { column: String, value: Value },
+    Eq { column: String, value: PredicateValue },
     /// Column not equals value.
-    Ne { column: String, value: Value },
+    Ne { column: String, value: PredicateValue },
     /// Logical AND of predicates.
     And(Vec<Predicate>),
     /// Logical OR of predicates.
@@ -78,7 +116,7 @@ pub enum Predicate {
 
 impl Predicate {
     /// Create an equality predicate.
-    pub fn eq(column: impl Into<String>, value: Value) -> Self {
+    pub fn eq(column: impl Into<String>, value: PredicateValue) -> Self {
         Predicate::Eq {
             column: column.into(),
             value,
@@ -86,7 +124,7 @@ impl Predicate {
     }
 
     /// Create a not-equals predicate.
-    pub fn ne(column: impl Into<String>, value: Value) -> Self {
+    pub fn ne(column: impl Into<String>, value: PredicateValue) -> Self {
         Predicate::Ne {
             column: column.into(),
             value,
@@ -109,9 +147,9 @@ impl Predicate {
                 if is_id_column {
                     // Special case: implicit id column
                     match value {
-                        Value::Ref(id) => row_id == *id,
+                        PredicateValue::Ref(id) => row_id == *id,
                         // Also allow matching against string representation
-                        Value::String(s) => {
+                        PredicateValue::String(s) => {
                             if let Ok(id) = s.parse::<ObjectId>() {
                                 row_id == id
                             } else {
@@ -122,7 +160,7 @@ impl Predicate {
                     }
                 } else if let Some(idx) = descriptor.column_index(column) {
                     if let Some(row_value) = row.get(idx) {
-                        buffer_value_equals_pred(row_value, value)
+                        value.matches(&row_value)
                     } else {
                         false
                     }
@@ -136,8 +174,8 @@ impl Predicate {
                 let is_id_column = column == "id" || column.ends_with(".id");
                 if is_id_column {
                     match value {
-                        Value::Ref(id) => row_id != *id,
-                        Value::String(s) => {
+                        PredicateValue::Ref(id) => row_id != *id,
+                        PredicateValue::String(s) => {
                             if let Ok(id) = s.parse::<ObjectId>() {
                                 row_id != id
                             } else {
@@ -148,7 +186,7 @@ impl Predicate {
                     }
                 } else if let Some(idx) = descriptor.column_index(column) {
                     if let Some(row_value) = row.get(idx) {
-                        !buffer_value_equals_pred(row_value, value)
+                        !value.matches(&row_value)
                     } else {
                         false // Unknown column - can't evaluate
                     }
@@ -289,10 +327,10 @@ impl Predicate {
             Predicate::True => "TRUE".to_string(),
             Predicate::False => "FALSE".to_string(),
             Predicate::Eq { column, value } => {
-                format!("{} = {}", column, value_to_display(value))
+                format!("{} = {}", column, value.to_display_string())
             }
             Predicate::Ne { column, value } => {
-                format!("{} != {}", column, value_to_display(value))
+                format!("{} != {}", column, value.to_display_string())
             }
             Predicate::And(preds) => {
                 if preds.is_empty() {
@@ -421,21 +459,21 @@ mod tests {
         let row_id = ObjectId::new(1);
 
         // Match by string column
-        assert!(Predicate::eq("name", Value::String("Alice".to_string()))
+        assert!(Predicate::eq("name", PredicateValue::String("Alice".to_string()))
             .matches_buffer(row_id, row.as_ref(), &descriptor));
-        assert!(!Predicate::eq("name", Value::String("Bob".to_string()))
+        assert!(!Predicate::eq("name", PredicateValue::String("Bob".to_string()))
             .matches_buffer(row_id, row.as_ref(), &descriptor));
 
         // Match by bool column
-        assert!(Predicate::eq("active", Value::Bool(true))
+        assert!(Predicate::eq("active", PredicateValue::Bool(true))
             .matches_buffer(row_id, row.as_ref(), &descriptor));
-        assert!(!Predicate::eq("active", Value::Bool(false))
+        assert!(!Predicate::eq("active", PredicateValue::Bool(false))
             .matches_buffer(row_id, row.as_ref(), &descriptor));
 
         // Match by id
-        assert!(Predicate::eq("id", Value::Ref(ObjectId::new(1)))
+        assert!(Predicate::eq("id", PredicateValue::Ref(ObjectId::new(1)))
             .matches_buffer(row_id, row.as_ref(), &descriptor));
-        assert!(!Predicate::eq("id", Value::Ref(ObjectId::new(2)))
+        assert!(!Predicate::eq("id", PredicateValue::Ref(ObjectId::new(2)))
             .matches_buffer(row_id, row.as_ref(), &descriptor));
     }
 
@@ -445,9 +483,9 @@ mod tests {
         let row = make_buffer_row(&descriptor, "Alice", true, Some(30));
         let row_id = ObjectId::new(1);
 
-        assert!(!Predicate::ne("name", Value::String("Alice".to_string()))
+        assert!(!Predicate::ne("name", PredicateValue::String("Alice".to_string()))
             .matches_buffer(row_id, row.as_ref(), &descriptor));
-        assert!(Predicate::ne("name", Value::String("Bob".to_string()))
+        assert!(Predicate::ne("name", PredicateValue::String("Bob".to_string()))
             .matches_buffer(row_id, row.as_ref(), &descriptor));
     }
 
@@ -457,13 +495,13 @@ mod tests {
         let row = make_buffer_row(&descriptor, "Alice", true, Some(30));
         let row_id = ObjectId::new(1);
 
-        let pred = Predicate::eq("name", Value::String("Alice".to_string()))
-            .and(Predicate::eq("active", Value::Bool(true)));
+        let pred = Predicate::eq("name", PredicateValue::String("Alice".to_string()))
+            .and(Predicate::eq("active", PredicateValue::Bool(true)));
 
         assert!(pred.matches_buffer(row_id, row.as_ref(), &descriptor));
 
-        let pred2 = Predicate::eq("name", Value::String("Alice".to_string()))
-            .and(Predicate::eq("active", Value::Bool(false)));
+        let pred2 = Predicate::eq("name", PredicateValue::String("Alice".to_string()))
+            .and(Predicate::eq("active", PredicateValue::Bool(false)));
 
         assert!(!pred2.matches_buffer(row_id, row.as_ref(), &descriptor));
     }
@@ -474,13 +512,13 @@ mod tests {
         let row = make_buffer_row(&descriptor, "Alice", true, Some(30));
         let row_id = ObjectId::new(1);
 
-        let pred = Predicate::eq("name", Value::String("Alice".to_string()))
-            .or(Predicate::eq("name", Value::String("Bob".to_string())));
+        let pred = Predicate::eq("name", PredicateValue::String("Alice".to_string()))
+            .or(Predicate::eq("name", PredicateValue::String("Bob".to_string())));
 
         assert!(pred.matches_buffer(row_id, row.as_ref(), &descriptor));
 
-        let pred2 = Predicate::eq("name", Value::String("Bob".to_string()))
-            .or(Predicate::eq("name", Value::String("Carol".to_string())));
+        let pred2 = Predicate::eq("name", PredicateValue::String("Bob".to_string()))
+            .or(Predicate::eq("name", PredicateValue::String("Carol".to_string())));
 
         assert!(!pred2.matches_buffer(row_id, row.as_ref(), &descriptor));
     }
@@ -491,10 +529,10 @@ mod tests {
         let row = make_buffer_row(&descriptor, "Alice", true, Some(30));
         let row_id = ObjectId::new(1);
 
-        let pred = Predicate::eq("active", Value::Bool(false)).not();
+        let pred = Predicate::eq("active", PredicateValue::Bool(false)).not();
         assert!(pred.matches_buffer(row_id, row.as_ref(), &descriptor));
 
-        let pred2 = Predicate::eq("active", Value::Bool(true)).not();
+        let pred2 = Predicate::eq("active", PredicateValue::Bool(true)).not();
         assert!(!pred2.matches_buffer(row_id, row.as_ref(), &descriptor));
     }
 
@@ -505,13 +543,13 @@ mod tests {
         let row_null_age = make_buffer_row(&descriptor, "Bob", true, None);
         let row_id = ObjectId::new(1);
 
-        // Match non-null value
-        let pred = Predicate::eq("age", Value::NullableSome(Box::new(Value::I64(30))));
+        // Match non-null value - PredicateValue has no NullableSome, just use the value directly
+        let pred = Predicate::eq("age", PredicateValue::I64(30));
         assert!(pred.matches_buffer(row_id, row_with_age.as_ref(), &descriptor));
         assert!(!pred.matches_buffer(row_id, row_null_age.as_ref(), &descriptor));
 
         // Match null
-        let null_pred = Predicate::eq("age", Value::NullableNone);
+        let null_pred = Predicate::eq("age", PredicateValue::Null);
         assert!(!null_pred.matches_buffer(row_id, row_with_age.as_ref(), &descriptor));
         assert!(null_pred.matches_buffer(row_id, row_null_age.as_ref(), &descriptor));
     }

@@ -45,7 +45,6 @@
 
 use crate::object::ObjectId;
 use crate::sql::query_graph::{DeltaBatch, RowDelta};
-use crate::sql::row::Value;
 use crate::sql::row_buffer::{OwnedRow, RowRef, RowValue};
 
 /// Delta type tags for binary encoding
@@ -228,86 +227,6 @@ fn encode_row_value(buf: &mut Vec<u8>, value: &RowValue<'_>, nullable: bool) {
 // ============================================================================
 // Legacy Value Encoding Functions
 // ============================================================================
-
-/// Encode a single value to the buffer.
-///
-/// Nullability is self-describing via Value::NullableSome and Value::NullableNone.
-/// NullableSome writes presence byte 1 + inner value.
-/// NullableNone writes presence byte 0.
-fn encode_value(buf: &mut Vec<u8>, value: &Value) {
-    match value {
-        Value::NullableNone => {
-            // Null: write presence byte 0
-            buf.push(0);
-        }
-        Value::NullableSome(inner) => {
-            // Present: write presence byte 1 + inner value
-            buf.push(1);
-            encode_value(buf, inner);
-        }
-        Value::Bool(b) => {
-            buf.push(if *b { 1 } else { 0 });
-        }
-        Value::I32(n) => {
-            buf.extend_from_slice(&n.to_le_bytes());
-        }
-        Value::U32(n) => {
-            buf.extend_from_slice(&n.to_le_bytes());
-        }
-        Value::I64(n) => {
-            buf.extend_from_slice(&n.to_le_bytes());
-        }
-        Value::F64(n) => {
-            buf.extend_from_slice(&n.to_le_bytes());
-        }
-        Value::String(s) => {
-            let bytes = s.as_bytes();
-            buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-            buf.extend_from_slice(bytes);
-        }
-        Value::Bytes(b) => {
-            buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
-            buf.extend_from_slice(b);
-        }
-        Value::Ref(id) => {
-            // ObjectId as 26-byte Base32 string
-            let id_str = id.to_string();
-            buf.extend_from_slice(id_str.as_bytes());
-        }
-        Value::Row(row) => {
-            // Nested OwnedRow: encode the raw buffer with length prefix
-            let row_buf = &row.buffer;
-            buf.extend_from_slice(&(row_buf.len() as u32).to_le_bytes());
-            buf.extend_from_slice(row_buf);
-        }
-        Value::Array(arr) => {
-            // Array of OwnedRows: count + each row's buffer
-            buf.extend_from_slice(&(arr.len() as u32).to_le_bytes());
-            for owned_row in arr {
-                let row_buf = &owned_row.buffer;
-                buf.extend_from_slice(&(row_buf.len() as u32).to_le_bytes());
-                buf.extend_from_slice(row_buf);
-            }
-        }
-        Value::Blob(content_ref) => {
-            // Blob: serialize ContentRef bytes with length prefix
-            // Format: u32 length + ContentRef bytes
-            let blob_bytes = content_ref.to_row_bytes();
-            buf.extend_from_slice(&(blob_bytes.len() as u32).to_le_bytes());
-            buf.extend_from_slice(&blob_bytes);
-        }
-        Value::BlobArray(refs) => {
-            // BlobArray: count + each blob's serialized ContentRef
-            buf.extend_from_slice(&(refs.len() as u32).to_le_bytes());
-            for content_ref in refs {
-                let blob_bytes = content_ref.to_row_bytes();
-                buf.extend_from_slice(&(blob_bytes.len() as u32).to_le_bytes());
-                buf.extend_from_slice(&blob_bytes);
-            }
-        }
-    }
-}
-
 
 #[cfg(test)]
 mod tests {

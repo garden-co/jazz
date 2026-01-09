@@ -4,6 +4,7 @@
 //! Permissions can be inherited through foreign key references using INHERITS clauses.
 
 use crate::object::ObjectId;
+use crate::sql::query_graph::PredicateValue;
 use crate::sql::row::Value;
 use crate::sql::row_buffer::OwnedRow;
 use std::collections::HashMap;
@@ -167,7 +168,7 @@ pub enum PolicyValue {
     /// The viewer's user ID (@viewer)
     Viewer,
     /// A literal value
-    Literal(Value),
+    Literal(PredicateValue),
 }
 
 impl PolicyValue {
@@ -187,7 +188,7 @@ impl PolicyValue {
     }
 
     /// Create a literal value.
-    pub fn literal(value: Value) -> Self {
+    pub fn literal(value: PredicateValue) -> Self {
         PolicyValue::Literal(value)
     }
 }
@@ -464,47 +465,41 @@ fn serialize_string(buf: &mut Vec<u8>, s: &str) {
     buf.extend_from_slice(bytes);
 }
 
-fn serialize_literal(buf: &mut Vec<u8>, val: &Value) {
+fn serialize_literal(buf: &mut Vec<u8>, val: &PredicateValue) {
     match val {
-        Value::NullableNone => buf.push(0),
-        Value::Bool(b) => {
+        PredicateValue::Null => buf.push(0),
+        PredicateValue::Bool(b) => {
             buf.push(1);
             buf.push(if *b { 1 } else { 0 });
         }
-        Value::I64(n) => {
+        PredicateValue::I64(n) => {
             buf.push(2);
             buf.extend_from_slice(&n.to_le_bytes());
         }
-        Value::F64(n) => {
+        PredicateValue::F64(n) => {
             buf.push(3);
             buf.extend_from_slice(&n.to_le_bytes());
         }
-        Value::String(s) => {
+        PredicateValue::String(s) => {
             buf.push(4);
             serialize_string(buf, s);
         }
-        Value::Bytes(b) => {
+        PredicateValue::Bytes(b) => {
             buf.push(5);
             buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
             buf.extend_from_slice(b);
         }
-        Value::Ref(id) => {
+        PredicateValue::Ref(id) => {
             buf.push(6);
             buf.extend_from_slice(&id.inner().to_le_bytes());
         }
-        Value::I32(n) => {
+        PredicateValue::I32(n) => {
             buf.push(7);
             buf.extend_from_slice(&n.to_le_bytes());
         }
-        Value::U32(n) => {
+        PredicateValue::U32(n) => {
             buf.push(8);
             buf.extend_from_slice(&n.to_le_bytes());
-        }
-        // NullableSome: serialize the inner value
-        Value::NullableSome(inner) => serialize_literal(buf, inner),
-        // Row, Array, Blob, BlobArray are not valid in policy literals - they're only for query results
-        Value::Row(_) | Value::Array(_) | Value::Blob(_) | Value::BlobArray(_) => {
-            panic!("Row, Array, Blob, and BlobArray values cannot be used in policy literals");
         }
     }
 }
@@ -715,7 +710,7 @@ fn deserialize_string(data: &[u8], pos: usize) -> Result<(String, usize), Policy
     Ok((s, pos + len))
 }
 
-fn deserialize_literal(data: &[u8], pos: usize) -> Result<(Value, usize), PolicyError> {
+fn deserialize_literal(data: &[u8], pos: usize) -> Result<(PredicateValue, usize), PolicyError> {
     if pos >= data.len() {
         return Err(PolicyError::DeserializationError(
             "unexpected end of data".into(),
@@ -726,14 +721,14 @@ fn deserialize_literal(data: &[u8], pos: usize) -> Result<(Value, usize), Policy
     let pos = pos + 1;
 
     match tag {
-        0 => Ok((Value::NullableNone, pos)),
+        0 => Ok((PredicateValue::Null, pos)),
         1 => {
             if pos >= data.len() {
                 return Err(PolicyError::DeserializationError(
                     "unexpected end of data".into(),
                 ));
             }
-            Ok((Value::Bool(data[pos] != 0), pos + 1))
+            Ok((PredicateValue::Bool(data[pos] != 0), pos + 1))
         }
         2 => {
             if pos + 8 > data.len() {
@@ -742,7 +737,7 @@ fn deserialize_literal(data: &[u8], pos: usize) -> Result<(Value, usize), Policy
                 ));
             }
             let n = i64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
-            Ok((Value::I64(n), pos + 8))
+            Ok((PredicateValue::I64(n), pos + 8))
         }
         3 => {
             if pos + 8 > data.len() {
@@ -751,11 +746,11 @@ fn deserialize_literal(data: &[u8], pos: usize) -> Result<(Value, usize), Policy
                 ));
             }
             let n = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
-            Ok((Value::F64(n), pos + 8))
+            Ok((PredicateValue::F64(n), pos + 8))
         }
         4 => {
             let (s, new_pos) = deserialize_string(data, pos)?;
-            Ok((Value::String(s), new_pos))
+            Ok((PredicateValue::String(s), new_pos))
         }
         5 => {
             if pos + 4 > data.len() {
@@ -770,7 +765,7 @@ fn deserialize_literal(data: &[u8], pos: usize) -> Result<(Value, usize), Policy
                     "unexpected end of data".into(),
                 ));
             }
-            Ok((Value::Bytes(data[pos..pos + len].to_vec()), pos + len))
+            Ok((PredicateValue::Bytes(data[pos..pos + len].to_vec()), pos + len))
         }
         6 => {
             if pos + 16 > data.len() {
@@ -779,7 +774,7 @@ fn deserialize_literal(data: &[u8], pos: usize) -> Result<(Value, usize), Policy
                 ));
             }
             let id = u128::from_le_bytes(data[pos..pos + 16].try_into().unwrap());
-            Ok((Value::Ref(ObjectId::from(id)), pos + 16))
+            Ok((PredicateValue::Ref(ObjectId::from(id)), pos + 16))
         }
         7 => {
             if pos + 4 > data.len() {
@@ -788,7 +783,7 @@ fn deserialize_literal(data: &[u8], pos: usize) -> Result<(Value, usize), Policy
                 ));
             }
             let n = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
-            Ok((Value::I32(n), pos + 4))
+            Ok((PredicateValue::I32(n), pos + 4))
         }
         8 => {
             if pos + 4 > data.len() {
@@ -797,7 +792,7 @@ fn deserialize_literal(data: &[u8], pos: usize) -> Result<(Value, usize), Policy
                 ));
             }
             let n = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
-            Ok((Value::U32(n), pos + 4))
+            Ok((PredicateValue::U32(n), pos + 4))
         }
         _ => Err(PolicyError::DeserializationError(format!(
             "invalid literal tag: {}",
@@ -1204,7 +1199,7 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
             PolicyValue::OldColumn(name) => ctx.get_old_column(name),
             PolicyValue::NewColumn(name) => ctx.get_new_column(name),
             PolicyValue::Viewer => Some(Value::Ref(self.viewer)),
-            PolicyValue::Literal(v) => Some(v.clone()),
+            PolicyValue::Literal(v) => Some(v.to_value()),
         }
     }
 
@@ -1479,15 +1474,15 @@ mod tests {
         let policy = Policy::new("test", PolicyAction::Select).with_where(PolicyExpr::And(vec![
             PolicyExpr::Eq(
                 PolicyValue::Column("status".into()),
-                PolicyValue::Literal(Value::String("active".into())),
+                PolicyValue::Literal(PredicateValue::String("active".into())),
             ),
             PolicyExpr::Eq(
                 PolicyValue::Column("count".into()),
-                PolicyValue::Literal(Value::I64(42)),
+                PolicyValue::Literal(PredicateValue::I64(42)),
             ),
             PolicyExpr::Eq(
                 PolicyValue::Column("enabled".into()),
-                PolicyValue::Literal(Value::Bool(true)),
+                PolicyValue::Literal(PredicateValue::Bool(true)),
             ),
         ]));
 

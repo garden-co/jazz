@@ -1,8 +1,10 @@
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 use groove::sql::{
-    Database, IncrementalQuery, Value, ExecuteResult, Row,
+    Database, IncrementalQuery, Value, ExecuteResult,
     encode_rows, encode_delta,
+    row_buffer::OwnedRow,
+    query_graph::{DeltaBatch, RowDelta},
 };
 use groove::{ObjectId, ContentRef, ChunkHash, INLINE_THRESHOLD};
 use groove::ListenerId;
@@ -237,7 +239,7 @@ impl WasmDatabase {
                     ExecuteResult::Selected(rows) => {
                         let row_data: Vec<Vec<String>> = rows
                             .iter()
-                            .map(|row| row_to_strings(row))
+                            .map(|(_id, row)| row_to_strings(row))
                             .collect();
                         serde_wasm_bindgen::to_value(&row_data).unwrap()
                     }
@@ -546,10 +548,18 @@ impl WasmDatabase {
     }
 }
 
-fn row_to_strings(row: &Row) -> Vec<String> {
-    row.values
+fn row_to_strings(row: &OwnedRow) -> Vec<String> {
+    row.descriptor
+        .columns
         .iter()
-        .map(|v| format!("{:?}", v))
+        .enumerate()
+        .map(|(i, _)| {
+            if let Some(value) = row.get(i) {
+                format!("{:?}", value)
+            } else {
+                "NULL".to_string()
+            }
+        })
         .collect()
 }
 
@@ -568,16 +578,19 @@ impl WasmQueryHandle {
     fn new(query: IncrementalQuery, callback: js_sys::Function) -> Self {
         // Wrap the JS callback in a Rust closure
         // The closure will be called synchronously when data changes
-        let rust_callback = move |rows: Vec<Row>| {
-            let row_data: Vec<Vec<String>> = rows
+        // Note: This legacy API shows all current rows on each update (not just deltas)
+        let rust_callback = Box::new(move |delta_batch: &DeltaBatch| {
+            // Collect rows from Added and Updated deltas (representing current state)
+            let row_data: Vec<Vec<String>> = delta_batch
                 .iter()
+                .filter_map(|delta| delta.new_row())
                 .map(|row| row_to_strings(row))
                 .collect();
 
             // Call the JS callback synchronously
             let js_rows = serde_wasm_bindgen::to_value(&row_data).unwrap();
             let _ = callback.call1(&JsValue::NULL, &js_rows);
-        };
+        });
 
         // Subscribe - this will call the callback whenever data changes
         let listener_id = query.subscribe(rust_callback);
@@ -608,11 +621,18 @@ pub struct WasmQueryHandleBinary {
 #[wasm_bindgen]
 impl WasmQueryHandleBinary {
     fn new(query: IncrementalQuery, callback: js_sys::Function) -> Self {
-        let rust_callback = move |rows: Vec<Row>| {
+        let rust_callback = Box::new(move |delta_batch: &DeltaBatch| {
+            // Collect (id, row) pairs from Added and Updated deltas
+            let rows: Vec<(ObjectId, OwnedRow)> = delta_batch
+                .iter()
+                .filter_map(|delta| {
+                    delta.new_row().map(|row| (delta.row_id(), row.clone()))
+                })
+                .collect();
             let binary = encode_rows(&rows);
             let js_array = Uint8Array::from(binary.as_slice());
             let _ = callback.call1(&JsValue::NULL, &js_array);
-        };
+        });
 
         let listener_id = query.subscribe(rust_callback);
 
@@ -656,7 +676,7 @@ impl WasmQueryHandleDelta {
             let _ = callback.call1(&JsValue::NULL, &js_deltas);
         });
 
-        let listener_id = query.subscribe_delta(rust_callback);
+        let listener_id = query.subscribe(rust_callback);
 
         WasmQueryHandleDelta {
             _query: query,

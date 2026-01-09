@@ -3,6 +3,96 @@
 
 use super::*;
 
+// ========== Tests for Buffer-Based Row APIs ==========
+
+#[test]
+fn insert_row_basic() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL, age I32 NOT NULL)").unwrap();
+
+    let schema = db.get_table("users").unwrap();
+    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+
+    let row = RowBuilder::new(desc)
+        .set_string_by_name("name", "Alice")
+        .set_i32_by_name("age", 30)
+        .build();
+
+    let id = db.insert_row("users", row).unwrap();
+
+    // Verify we can retrieve the row
+    let (retrieved_id, retrieved_row) = db.get("users", id).unwrap().unwrap();
+    assert_eq!(retrieved_id, id);
+    assert_eq!(
+        retrieved_row.get_by_name("name").map(|v| format!("{:?}", v)),
+        Some("String(\"Alice\")".to_string())
+    );
+    assert_eq!(
+        retrieved_row.get_by_name("age").map(|v| format!("{:?}", v)),
+        Some("I32(30)".to_string())
+    );
+}
+
+#[test]
+fn update_row_basic() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL, age I32 NOT NULL)").unwrap();
+
+    // Insert using old API
+    let id = db.insert("users", &["name", "age"], vec![Value::String("Alice".into()), Value::I32(30)]).unwrap();
+
+    // Update using new API
+    let schema = db.get_table("users").unwrap();
+    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+
+    let new_row = RowBuilder::new(desc)
+        .set_string_by_name("name", "Bob")
+        .set_i32_by_name("age", 35)
+        .build();
+
+    let updated = db.update_row("users", id, new_row).unwrap();
+    assert!(updated);
+
+    // Verify the update
+    let (_, retrieved_row) = db.get("users", id).unwrap().unwrap();
+    assert_eq!(
+        retrieved_row.get_by_name("name").map(|v| format!("{:?}", v)),
+        Some("String(\"Bob\")".to_string())
+    );
+    assert_eq!(
+        retrieved_row.get_by_name("age").map(|v| format!("{:?}", v)),
+        Some("I32(35)".to_string())
+    );
+}
+
+#[test]
+fn insert_row_with_ref() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)").unwrap();
+
+    // Insert user using old API
+    let user_id = db.insert("users", &["name"], vec![Value::String("Alice".into())]).unwrap();
+
+    // Insert post using new API
+    let schema = db.get_table("posts").unwrap();
+    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+
+    let post = RowBuilder::new(desc)
+        .set_ref_by_name("author", user_id)
+        .set_string_by_name("title", "Hello World")
+        .build();
+
+    let post_id = db.insert_row("posts", post).unwrap();
+
+    // Verify we can retrieve the post with correct reference
+    let (_, retrieved_post) = db.get("posts", post_id).unwrap().unwrap();
+    assert_eq!(
+        retrieved_post.get_by_name("author"),
+        Some(RowValue::Ref(user_id))
+    );
+}
+
 // ========== Tests Using Internal APIs ==========
 // These tests use private methods or #[cfg(test)] methods and must remain as unit tests.
 

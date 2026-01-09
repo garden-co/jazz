@@ -2024,7 +2024,7 @@ enum WindowChange {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sql::row::Value;
+    use crate::sql::query_graph::PredicateValue;
     use crate::sql::row_buffer::RowBuilder;
     use crate::sql::schema::{ColumnDef, ColumnType};
     use crate::object::ObjectId;
@@ -2112,7 +2112,7 @@ mod tests {
         let mut node = QueryNode::Filter {
             table: "users".to_string(),
             input: NodeId(0),
-            predicate: Predicate::eq("active", Value::Bool(true)),
+            predicate: Predicate::eq("active", PredicateValue::Bool(true)),
             descriptor: test_descriptor(),
             cached_ids: HashSet::new(),
         };
@@ -2134,7 +2134,7 @@ mod tests {
         let mut node = QueryNode::Filter {
             table: "users".to_string(),
             input: NodeId(0),
-            predicate: Predicate::eq("active", Value::Bool(true)),
+            predicate: Predicate::eq("active", PredicateValue::Bool(true)),
             descriptor: test_descriptor(),
             cached_ids: HashSet::new(),
         };
@@ -2157,7 +2157,7 @@ mod tests {
         let mut node = QueryNode::Filter {
             table: "users".to_string(),
             input: NodeId(0),
-            predicate: Predicate::eq("active", Value::Bool(true)),
+            predicate: Predicate::eq("active", PredicateValue::Bool(true)),
             descriptor: test_descriptor(),
             cached_ids: HashSet::new(), // Not in set initially
         };
@@ -2182,7 +2182,7 @@ mod tests {
         let mut node = QueryNode::Filter {
             table: "users".to_string(),
             input: NodeId(0),
-            predicate: Predicate::eq("active", Value::Bool(true)),
+            predicate: Predicate::eq("active", PredicateValue::Bool(true)),
             descriptor: test_descriptor(),
             cached_ids: HashSet::from([ObjectId::new(1)]), // In set initially
         };
@@ -2210,7 +2210,7 @@ mod tests {
         let mut node = QueryNode::Filter {
             table: "users".to_string(),
             input: NodeId(0),
-            predicate: Predicate::eq("active", Value::Bool(true)),
+            predicate: Predicate::eq("active", PredicateValue::Bool(true)),
             descriptor: test_descriptor(),
             cached_ids: HashSet::from([ObjectId::new(1)]),
         };
@@ -2237,7 +2237,7 @@ mod tests {
         let mut node = QueryNode::Filter {
             table: "users".to_string(),
             input: NodeId(0),
-            predicate: Predicate::eq("active", Value::Bool(true)),
+            predicate: Predicate::eq("active", PredicateValue::Bool(true)),
             descriptor: test_descriptor(),
             cached_ids: HashSet::new(),
         };
@@ -2296,7 +2296,7 @@ mod tests {
         let mut node = QueryNode::RecursiveFilter {
             table: "folders".to_string(),
             input: NodeId(0),
-            base_predicate: Predicate::eq("owner_id", Value::Ref(viewer)),
+            base_predicate: Predicate::eq("owner_id", PredicateValue::Ref(viewer)),
             recursive_column: "parent_id".to_string(),
             descriptor: folder_descriptor(),
             accessible: HashMap::new(),
@@ -2325,7 +2325,7 @@ mod tests {
         let mut node = QueryNode::RecursiveFilter {
             table: "folders".to_string(),
             input: NodeId(0),
-            base_predicate: Predicate::eq("owner_id", Value::Ref(viewer)),
+            base_predicate: Predicate::eq("owner_id", PredicateValue::Ref(viewer)),
             recursive_column: "parent_id".to_string(),
             descriptor: folder_descriptor(),
             accessible: HashMap::new(),
@@ -2352,7 +2352,7 @@ mod tests {
         let mut node = QueryNode::RecursiveFilter {
             table: "folders".to_string(),
             input: NodeId(0),
-            base_predicate: Predicate::eq("owner_id", Value::Ref(viewer)),
+            base_predicate: Predicate::eq("owner_id", PredicateValue::Ref(viewer)),
             recursive_column: "parent_id".to_string(),
             descriptor: folder_descriptor(),
             accessible: HashMap::new(),
@@ -2387,7 +2387,7 @@ mod tests {
         let mut node = QueryNode::RecursiveFilter {
             table: "folders".to_string(),
             input: NodeId(0),
-            base_predicate: Predicate::eq("owner_id", Value::Ref(viewer)),
+            base_predicate: Predicate::eq("owner_id", PredicateValue::Ref(viewer)),
             recursive_column: "parent_id".to_string(),
             descriptor: folder_descriptor(),
             accessible: HashMap::new(),
@@ -2428,7 +2428,7 @@ mod tests {
         let mut node = QueryNode::RecursiveFilter {
             table: "folders".to_string(),
             input: NodeId(0),
-            base_predicate: Predicate::eq("owner_id", Value::Ref(viewer)),
+            base_predicate: Predicate::eq("owner_id", PredicateValue::Ref(viewer)),
             recursive_column: "parent_id".to_string(),
             descriptor: folder_descriptor(),
             accessible: HashMap::new(),
@@ -2464,7 +2464,7 @@ mod tests {
         let mut node = QueryNode::RecursiveFilter {
             table: "folders".to_string(),
             input: NodeId(0),
-            base_predicate: Predicate::eq("owner_id", Value::Ref(viewer)),
+            base_predicate: Predicate::eq("owner_id", PredicateValue::Ref(viewer)),
             recursive_column: "parent_id".to_string(),
             descriptor: folder_descriptor(),
             accessible: HashMap::new(),

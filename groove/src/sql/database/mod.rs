@@ -12,10 +12,10 @@ use crate::sql::policy::{
 };
 use crate::sql::query_graph::registry::{GraphRegistry, OutputCallback};
 use crate::sql::query_graph::{
-    DeltaBatch, GraphId, JoinGraphBuilder, Predicate, PriorState, QueryGraphBuilder, RowDelta,
+    DeltaBatch, GraphId, JoinGraphBuilder, Predicate, PredicateValue, PriorState, QueryGraphBuilder, RowDelta,
 };
-use crate::sql::row::{RowError, Value, decode_row, encode_row};
-use crate::sql::row_buffer::{ColType, OwnedRow, RowDescriptor};
+use crate::sql::row::{RowError, Value};
+use crate::sql::row_buffer::{ColType, OwnedRow, RowBuilder, RowDescriptor, RowValue};
 use crate::sql::schema::{ColumnType, SchemaError, TableSchema};
 use crate::sql::table_rows::TableRows;
 use crate::sql::types::{IndexKey, SchemaId};
@@ -37,6 +37,23 @@ fn coerce_value(value: Value, ty: &ColumnType) -> Value {
         }
         // No coercion needed
         _ => value,
+    }
+}
+
+/// Coerce a PredicateValue to match the expected ColumnType.
+/// This converts String values to Ref(ObjectId) when the column type is Ref.
+fn coerce_predicate_value(value: &PredicateValue, ty: &ColumnType) -> PredicateValue {
+    match (value, ty) {
+        // String to Ref coercion: parse the string as ObjectId
+        (PredicateValue::String(s), ColumnType::Ref(_)) => {
+            if let Ok(id) = s.parse::<ObjectId>() {
+                PredicateValue::Ref(id)
+            } else {
+                value.clone() // Keep as string if not a valid ObjectId
+            }
+        }
+        // No coercion needed
+        _ => value.clone(),
     }
 }
 
@@ -117,7 +134,7 @@ impl JoinedRow {
 
         // Get the right-hand side value (either literal or from another column)
         let rhs_value: Option<Value> = match &cond.right {
-            ConditionValue::Literal(v) => Some(v.clone()),
+            ConditionValue::Literal(v) => Some(v.to_value()),
             ConditionValue::Column(rhs_col) => {
                 // Get value from referenced column
                 if rhs_col.column == "id" {
@@ -458,13 +475,8 @@ impl DatabaseState {
                 _ => continue,
             };
 
-            let values = match decode_row(&data, &schema) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            // Build OwnedRow from values
-            let owned = OwnedRow::from_values(&values, descriptor.clone());
+            // Create OwnedRow directly from buffer
+            let owned = OwnedRow::new(descriptor.clone(), data);
             rows.push((row_id, owned));
         }
 
@@ -490,12 +502,8 @@ impl DatabaseState {
             _ => return None,
         };
 
-        let values = match decode_row(&data, &schema) {
-            Ok(v) => v,
-            Err(_) => return None,
-        };
-
-        let owned = OwnedRow::from_values(&values, descriptor);
+        // Create OwnedRow directly from buffer
+        let owned = OwnedRow::new(descriptor, data);
         Some((id, owned))
     }
 
@@ -509,35 +517,23 @@ impl DatabaseState {
         column: &str,
         target_id: ObjectId,
     ) -> Vec<(ObjectId, OwnedRow)> {
-        self.select_where_buffer(table, column, &Value::Ref(target_id))
-    }
+        // Use PredicateValue::Ref for the search
+        let search_value = PredicateValue::Ref(target_id);
 
-    /// Find rows matching a column = value condition, returning buffer format.
-    fn select_where_buffer(
-        &self,
-        table: &str,
-        column: &str,
-        value: &Value,
-    ) -> Vec<(ObjectId, OwnedRow)> {
         // Special case: id column (implicit Ref type)
         if column == "id" {
-            // Coerce String to Ref for id comparison
-            let coerced = coerce_value(value.clone(), &ColumnType::Ref("".to_string()));
-            if let Value::Ref(id) = coerced {
-                return match self.get_row(table, id) {
-                    Some((id, owned)) => vec![(id, owned)],
-                    None => vec![],
-                };
-            }
-            return vec![];
+            return match self.get_row(table, target_id) {
+                Some((id, owned)) => vec![(id, owned)],
+                None => vec![],
+            };
         }
 
-        // Find column by name in the rows (uses buffer format's get_by_name)
+        // Find matching rows using PredicateValue comparison
         self.read_all_rows(table)
             .into_iter()
             .filter(|(_, row)| {
                 if let Some(row_value) = row.get_by_name(column) {
-                    row_value.to_value() == *value
+                    search_value.matches(&row_value)
                 } else {
                     false
                 }
@@ -644,17 +640,18 @@ impl DatabaseState {
 
             // Get the actual value from the row
             let row_value = match row.get_by_name(col_name) {
-                Some(v) => v.to_value(),
+                Some(v) => v,
                 None => return false,
             };
 
             // Only handle literal values in simple WHERE matching
             let expected = match cond.value() {
-                Some(v) => v.clone(),
+                Some(v) => v,
                 None => return false, // Column references not supported in simple matches
             };
 
-            if row_value != expected {
+            // Use PredicateValue::matches() to compare against RowValue
+            if !expected.matches(&row_value) {
                 return false;
             }
         }
@@ -997,7 +994,7 @@ impl DatabaseState {
 
             // Resolve right-hand side value
             let rhs_value = match &cond.right {
-                ConditionValue::Literal(v) => Some(v.clone()),
+                ConditionValue::Literal(v) => Some(v.to_value()),
                 ConditionValue::Column(rhs_col) => self.resolve_column_value_buffer(
                     rhs_col.table.as_deref(),
                     &rhs_col.column,
@@ -1122,9 +1119,12 @@ impl DatabaseState {
                 None => continue,
             };
 
+            // Convert Value to PredicateValue for matching
+            let pred_value = PredicateValue::from_value(&lookup_value);
+
             // Find matching rows from the join table
             let matching = if join_column == "id" {
-                if let Value::Ref(id) = &lookup_value {
+                if let PredicateValue::Ref(id) = &pred_value {
                     match self.get_row(&join.table, *id) {
                         Some((id, row)) => vec![(id, row)],
                         None => vec![],
@@ -1133,7 +1133,17 @@ impl DatabaseState {
                     vec![]
                 }
             } else {
-                self.select_where_buffer(&join.table, join_column, &lookup_value)
+                // Find matching rows using PredicateValue comparison
+                self.read_all_rows(&join.table)
+                    .into_iter()
+                    .filter(|(_, row)| {
+                        if let Some(row_value) = row.get_by_name(join_column) {
+                            pred_value.matches(&row_value)
+                        } else {
+                            false
+                        }
+                    })
+                    .collect()
             };
 
             // Produce cartesian product of matches (inner join)
@@ -1964,8 +1974,10 @@ impl Database {
             }
         }
 
-        // Encode row
-        let row_bytes = encode_row(&row_values, &schema)?;
+        // Convert to buffer format for storage
+        let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
+        let owned = OwnedRow::from_values(&row_values, descriptor);
+        let row_bytes = owned.buffer.clone();
 
         // Create object for row
         let row_id =
@@ -2016,6 +2028,105 @@ impl Database {
         Ok(row_id)
     }
 
+    /// Insert a row using the new buffer-based format.
+    ///
+    /// The row should be built using `RowBuilder` with a descriptor from the table schema:
+    /// ```ignore
+    /// let schema = db.get_table("users")?;
+    /// let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    /// let row = RowBuilder::new(desc)
+    ///     .set_string_by_name("name", "Alice")
+    ///     .set_i32_by_name("age", 30)
+    ///     .build();
+    /// db.insert_row("users", row)?;
+    /// ```
+    pub fn insert_row(
+        &self,
+        table: &str,
+        row: OwnedRow,
+    ) -> Result<ObjectId, DatabaseError> {
+        let schema = self
+            .get_table(table)
+            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+
+        // Validate references: check that referenced rows exist
+        {
+            let row_table = self.state.row_table.read().unwrap();
+            for col in schema.columns.iter() {
+                if let ColumnType::Ref(target_table) = &col.ty {
+                    // Get the value by schema column name
+                    if let Some(RowValue::Ref(target_id)) = row.get_by_name(&col.name) {
+                        // Check target row exists
+                        if !row_table.contains_key(&target_id) {
+                            return Err(DatabaseError::InvalidReference {
+                                column: col.name.clone(),
+                                target_table: target_table.clone(),
+                                target_id,
+                            });
+                        }
+                        // Also verify target row is in the correct table
+                        if row_table.get(&target_id) != Some(target_table) {
+                            return Err(DatabaseError::InvalidReference {
+                                column: col.name.clone(),
+                                target_table: target_table.clone(),
+                                target_id,
+                            });
+                        }
+                    }
+                    // Null refs are ok if column is nullable
+                }
+            }
+        }
+
+        // Store buffer directly (no Value conversion needed)
+        let row_bytes = row.buffer.clone();
+
+        // Create object for row
+        let row_id =
+            self.state
+                .node
+                .create_object(&format!("row:{}:{}", table, generate_object_id()));
+
+        // Store row data
+        self.state
+            .node
+            .write(row_id, "main", &row_bytes, "system", timestamp_now())
+            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+
+        // Track row -> table mapping
+        self.state
+            .row_table
+            .write()
+            .unwrap()
+            .insert(row_id, table.to_string());
+
+        // Add to table rows object (for reactive queries)
+        let mut table_rows = self.read_table_rows(table)?;
+        table_rows.add(row_id);
+        self.write_table_rows(table, &table_rows)?;
+
+        // Update indexes for Ref columns
+        for col in schema.columns.iter() {
+            if matches!(col.ty, ColumnType::Ref(_)) {
+                if let Some(RowValue::Ref(target_id)) = row.get_by_name(&col.name) {
+                    let key = IndexKey::new(table, &col.name);
+                    if self.state.index_objects.read().unwrap().contains_key(&key) {
+                        let mut index = self.read_index(&key)?;
+                        index.add(target_id, row_id);
+                        self.write_index(&key, &index)?;
+                    }
+                }
+            }
+        }
+
+        // Notify query graphs of the change
+        self.state
+            .graph_registry
+            .notify_row_change(table, RowDelta::Added { id: row_id, row: row.clone() }, &*self.state);
+
+        Ok(row_id)
+    }
+
     /// Get a row by ID in buffer format.
     pub fn get(&self, table: &str, id: ObjectId) -> Result<Option<(ObjectId, OwnedRow)>, DatabaseError> {
         let schema = self
@@ -2039,10 +2150,9 @@ impl Database {
             Err(e) => return Err(DatabaseError::Storage(format!("{:?}", e))),
         };
 
-        // Decode row
-        let values = decode_row(&data, &schema)?;
+        // Create OwnedRow directly from buffer
         let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
-        let owned = OwnedRow::from_values(&values, descriptor);
+        let owned = OwnedRow::new(descriptor, data);
 
         Ok(Some((id, owned)))
     }
@@ -2074,8 +2184,10 @@ impl Database {
             Err(e) => return Err(DatabaseError::Storage(format!("{:?}", e))),
         };
 
-        // Decode current values
-        let old_values = decode_row(&data, &schema)?;
+        // Create OwnedRow from buffer and convert to values for modification
+        let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
+        let old_row = OwnedRow::new(descriptor.clone(), data);
+        let old_values = old_row.to_values();
         let mut new_values = old_values.clone();
 
         // Apply assignments
@@ -2123,8 +2235,9 @@ impl Database {
             }
         }
 
-        // Re-encode row
-        let row_bytes = encode_row(&new_values, &schema)?;
+        // Convert to buffer format for storage (reuse descriptor from above)
+        let owned = OwnedRow::from_values(&new_values, descriptor.clone());
+        let row_bytes = owned.buffer.clone();
 
         // Write updated row
         self.state
@@ -2172,6 +2285,125 @@ impl Database {
         Ok(true)
     }
 
+    /// Update a row using the new buffer-based format.
+    ///
+    /// This replaces the entire row with the new values. Build the row using `RowBuilder`:
+    /// ```ignore
+    /// let schema = db.get_table("users")?;
+    /// let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    /// let row = RowBuilder::new(desc)
+    ///     .set_string_by_name("name", "Bob")
+    ///     .set_i32_by_name("age", 35)
+    ///     .build();
+    /// db.update_row("users", row_id, row)?;
+    /// ```
+    pub fn update_row(
+        &self,
+        table: &str,
+        id: ObjectId,
+        new_row: OwnedRow,
+    ) -> Result<bool, DatabaseError> {
+        let schema = self
+            .get_table(table)
+            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+
+        // Check row exists and belongs to table
+        {
+            let row_table = self.state.row_table.read().unwrap();
+            match row_table.get(&id) {
+                Some(t) if t == table => {}
+                _ => return Ok(false),
+            }
+        }
+
+        // Read current row data for index updates (directly as OwnedRow)
+        let old_row = match self.state.node.read(id, "main") {
+            Ok(Some(data)) => {
+                let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
+                OwnedRow::new(descriptor, data)
+            }
+            Ok(None) => return Ok(false),
+            Err(e) => return Err(DatabaseError::Storage(format!("{:?}", e))),
+        };
+
+        // Validate new references: check that referenced rows exist
+        {
+            let row_table = self.state.row_table.read().unwrap();
+            for col in schema.columns.iter() {
+                if let ColumnType::Ref(target_table) = &col.ty {
+                    if let Some(RowValue::Ref(target_id)) = new_row.get_by_name(&col.name) {
+                        if !row_table.contains_key(&target_id) {
+                            return Err(DatabaseError::InvalidReference {
+                                column: col.name.clone(),
+                                target_table: target_table.clone(),
+                                target_id,
+                            });
+                        }
+                        if row_table.get(&target_id) != Some(target_table) {
+                            return Err(DatabaseError::InvalidReference {
+                                column: col.name.clone(),
+                                target_table: target_table.clone(),
+                                target_id,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Store buffer directly (no Value conversion needed)
+        let row_bytes = new_row.buffer.clone();
+
+        // Write updated row
+        self.state
+            .node
+            .write(id, "main", &row_bytes, "system", timestamp_now())
+            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+
+        // Update indexes for changed Ref columns
+        for col in schema.columns.iter() {
+            if matches!(col.ty, ColumnType::Ref(_)) {
+                let old_ref = match old_row.get_by_name(&col.name) {
+                    Some(RowValue::Ref(id)) => Some(id),
+                    _ => None,
+                };
+                let new_ref = match new_row.get_by_name(&col.name) {
+                    Some(RowValue::Ref(id)) => Some(id),
+                    _ => None,
+                };
+
+                if old_ref != new_ref {
+                    let key = IndexKey::new(table, &col.name);
+                    if self.state.index_objects.read().unwrap().contains_key(&key) {
+                        let mut index = self.read_index(&key)?;
+                        // Remove old reference
+                        if let Some(old_target) = old_ref {
+                            index.remove(old_target, id);
+                        }
+                        // Add new reference
+                        if let Some(new_target) = new_ref {
+                            index.add(new_target, id);
+                        }
+                        self.write_index(&key, &index)?;
+                    }
+                }
+            }
+        }
+
+        // Notify query graphs of the change
+        self.state.graph_registry.notify_row_change(
+            table,
+            RowDelta::Updated {
+                id,
+                row: new_row,
+                prior: PriorState::empty(), // TODO: Get prior commit tips
+            },
+            &*self.state,
+        );
+
+        Ok(true)
+    }
+
     /// Delete a row by ID (soft delete).
     /// Creates a commit with deleted=true metadata marker.
     /// The row remains in the system but is filtered from queries.
@@ -2210,16 +2442,16 @@ impl Database {
 
         // Remove from indexes
         if let Some(data) = data {
-            if let Ok(values) = decode_row(&data, &schema) {
-                for (i, col) in schema.columns.iter().enumerate() {
-                    if matches!(col.ty, ColumnType::Ref(_)) {
-                        if let Value::Ref(target_id) = &values[i] {
-                            let key = IndexKey::new(table, &col.name);
-                            if self.state.index_objects.read().unwrap().contains_key(&key) {
-                                let mut index = self.read_index(&key)?;
-                                index.remove(*target_id, id);
-                                self.write_index(&key, &index)?;
-                            }
+            let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
+            let row = OwnedRow::new(descriptor, data);
+            for col in schema.columns.iter() {
+                if matches!(col.ty, ColumnType::Ref(_)) {
+                    if let Some(RowValue::Ref(target_id)) = row.get_by_name(&col.name) {
+                        let key = IndexKey::new(table, &col.name);
+                        if self.state.index_objects.read().unwrap().contains_key(&key) {
+                            let mut index = self.read_index(&key)?;
+                            index.remove(target_id, id);
+                            self.write_index(&key, &index)?;
                         }
                     }
                 }
@@ -2288,14 +2520,9 @@ impl Database {
                 _ => continue, // Skip deleted or missing rows
             };
 
-            // Decode row
-            match decode_row(&data, &schema) {
-                Ok(values) => {
-                    let owned = OwnedRow::from_values(&values, descriptor.clone());
-                    rows.push((row_id, owned));
-                }
-                Err(_) => continue, // Skip malformed rows
-            }
+            // Create OwnedRow directly from buffer (no Value conversion needed)
+            let owned = OwnedRow::new(descriptor.clone(), data);
+            rows.push((row_id, owned));
         }
 
         Ok(rows)
@@ -2306,7 +2533,7 @@ impl Database {
         &self,
         table: &str,
         column: &str,
-        value: &Value,
+        value: &PredicateValue,
     ) -> Result<Vec<(ObjectId, OwnedRow)>, DatabaseError> {
         let schema = self
             .get_table(table)
@@ -2316,8 +2543,8 @@ impl Database {
         // Special case: id column (implicit, not in schema)
         if column == "id" {
             // Coerce String to Ref for id comparison
-            let coerced = coerce_value(value.clone(), &ColumnType::Ref("".to_string()));
-            if let Value::Ref(id) = coerced {
+            let coerced = coerce_predicate_value(value, &ColumnType::Ref("".to_string()));
+            if let PredicateValue::Ref(id) = coerced {
                 return match self.get(table, id)? {
                     Some((id, row)) => Ok(vec![(id, row)]),
                     None => Ok(vec![]),
@@ -2332,7 +2559,7 @@ impl Database {
             .ok_or_else(|| DatabaseError::ColumnNotFound(column.to_string()))?;
 
         // Coerce the value to match the column type
-        let coerced = coerce_value(value.clone(), &schema.columns[col_idx].ty);
+        let coerced = coerce_predicate_value(value, &schema.columns[col_idx].ty);
 
         let mut rows = Vec::new();
 
@@ -2348,14 +2575,13 @@ impl Database {
                 _ => continue,
             };
 
-            match decode_row(&data, &schema) {
-                Ok(values) => {
-                    if values[col_idx] == coerced {
-                        let owned = OwnedRow::from_values(&values, descriptor.clone());
-                        rows.push((row_id, owned));
-                    }
+            // Create OwnedRow directly from buffer
+            let owned = OwnedRow::new(descriptor.clone(), data);
+            // Check if the column value matches using PredicateValue::matches
+            if let Some(row_value) = owned.get_by_name(column) {
+                if coerced.matches(&row_value) {
+                    rows.push((row_id, owned));
                 }
-                Err(_) => continue,
             }
         }
 
@@ -2375,7 +2601,7 @@ impl Database {
         &self,
         table: &str,
         column: &str,
-        value: &Value,
+        value: &PredicateValue,
         viewer: ObjectId,
     ) -> Result<Vec<(ObjectId, OwnedRow)>, DatabaseError> {
         let rows = self.select_where(table, column, value)?;
@@ -2643,7 +2869,7 @@ impl Database {
                         })?;
                         rows.retain(|(_, row)| {
                             if let Some(v) = row.get_by_name(col_name) {
-                                v.to_value() == *value
+                                value.matches(&v)
                             } else {
                                 false
                             }
@@ -2696,7 +2922,7 @@ impl Database {
                         })?;
                         rows.retain(|(_, row)| {
                             if let Some(v) = row.get_by_name(col_name) {
-                                v.to_value() == *value
+                                value.matches(&v)
                             } else {
                                 false
                             }
@@ -3500,13 +3726,13 @@ impl Database {
         right: &PolicyValue,
         viewer: ObjectId,
         table_prefix: &str,
-    ) -> Result<(String, Value), DatabaseError> {
+    ) -> Result<(String, PredicateValue), DatabaseError> {
         match (left, right) {
             (PolicyValue::Column(col), PolicyValue::Viewer) => {
-                Ok((format!("{}.{}", table_prefix, col), Value::Ref(viewer)))
+                Ok((format!("{}.{}", table_prefix, col), PredicateValue::Ref(viewer)))
             }
             (PolicyValue::Viewer, PolicyValue::Column(col)) => {
-                Ok((format!("{}.{}", table_prefix, col), Value::Ref(viewer)))
+                Ok((format!("{}.{}", table_prefix, col), PredicateValue::Ref(viewer)))
             }
             (PolicyValue::Column(col), PolicyValue::Literal(val)) => {
                 Ok((format!("{}.{}", table_prefix, col), val.clone()))
@@ -3597,15 +3823,15 @@ impl Database {
         left: &PolicyValue,
         right: &PolicyValue,
         viewer: ObjectId,
-    ) -> Result<(String, Value), DatabaseError> {
+    ) -> Result<(String, PredicateValue), DatabaseError> {
         match (left, right) {
             // column = @viewer
             (PolicyValue::Column(col), PolicyValue::Viewer) => {
-                Ok((col.clone(), Value::Ref(viewer)))
+                Ok((col.clone(), PredicateValue::Ref(viewer)))
             }
             // @viewer = column
             (PolicyValue::Viewer, PolicyValue::Column(col)) => {
-                Ok((col.clone(), Value::Ref(viewer)))
+                Ok((col.clone(), PredicateValue::Ref(viewer)))
             }
             // column = literal
             (PolicyValue::Column(col), PolicyValue::Literal(val)) => Ok((col.clone(), val.clone())),
@@ -4245,7 +4471,7 @@ impl Database {
                 }
             };
 
-            let value = coerce_value(literal_value, &column_type);
+            let value = coerce_predicate_value(&literal_value, &column_type);
 
             // Use qualified column name for multi-table queries
             let qualified_col = format!("{}.{}", table_name, col_name);
@@ -4332,7 +4558,7 @@ impl Database {
                 }
             };
 
-            let value = coerce_value(literal_value, &column_type);
+            let value = coerce_predicate_value(&literal_value, &column_type);
 
             // Use actual table name (not alias) for qualified column
             let qualified_col = format!("{}.{}", table_name, col_name);
@@ -4397,7 +4623,7 @@ impl Database {
                 None => continue,
             };
 
-            let value = coerce_value(literal_value, &column_type);
+            let value = coerce_predicate_value(&literal_value, &column_type);
 
             // Use unqualified column name (the join table's schema doesn't have qualified names)
             predicates.push(Predicate::eq(col_name, value));
@@ -4676,7 +4902,7 @@ impl Database {
                     ));
                 }
             };
-            let value = coerce_value(literal_value, &col_type);
+            let value = coerce_predicate_value(&literal_value, &col_type);
             predicates.push(Predicate::eq(qualified_column, value));
         }
 
@@ -4721,10 +4947,10 @@ impl Database {
 
             // Coerce value if needed
             let value = if column == "id" {
-                coerce_value(literal_value, &ColumnType::Ref("".to_string()))
+                coerce_predicate_value(&literal_value, &ColumnType::Ref("".to_string()))
             } else {
                 let col_idx = schema.column_index(column).unwrap();
-                coerce_value(literal_value, &schema.columns[col_idx].ty)
+                coerce_predicate_value(&literal_value, &schema.columns[col_idx].ty)
             };
 
             predicates.push(Predicate::eq(column, value));

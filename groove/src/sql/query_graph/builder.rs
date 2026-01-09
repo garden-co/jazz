@@ -688,7 +688,7 @@ impl JoinGraphBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sql::row::Value;
+    use crate::sql::query_graph::PredicateValue;
     use crate::sql::schema::{ColumnDef, ColumnType};
 
     fn test_schema() -> TableSchema {
@@ -719,7 +719,7 @@ mod tests {
         let mut builder = QueryGraphBuilder::new("users", schema);
 
         let scan = builder.table_scan();
-        let filter = builder.filter(scan, Predicate::eq("active", Value::Bool(true)));
+        let filter = builder.filter(scan, Predicate::eq("active", PredicateValue::Bool(true)));
         let graph = builder.output(filter, GraphId(1));
 
         assert_eq!(graph.node_count(), 3); // scan + filter + output
@@ -731,8 +731,8 @@ mod tests {
         let mut builder = QueryGraphBuilder::new("users", schema);
 
         let scan = builder.table_scan();
-        let f1 = builder.filter(scan, Predicate::eq("active", Value::Bool(true)));
-        let f2 = builder.filter(f1, Predicate::eq("name", Value::String("Alice".to_string())));
+        let f1 = builder.filter(scan, Predicate::eq("active", PredicateValue::Bool(true)));
+        let f2 = builder.filter(f1, Predicate::eq("name", PredicateValue::String("Alice".to_string())));
         let graph = builder.output(f2, GraphId(1));
 
         assert_eq!(graph.node_count(), 4); // scan + filter + filter + output
