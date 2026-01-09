@@ -153,6 +153,10 @@ export class BatchedOutgoingMessages
     }
   }
 
+  drain() {
+    while (this.queue.pull()) {}
+  }
+
   setBatching(enabled: boolean) {
     this.batching = enabled;
   }
