@@ -1,6 +1,5 @@
 use crate::sql::policy::{Policy, PolicyAction, PolicyColumnRef, PolicyExpr, PolicyValue};
 use crate::sql::query_graph::PredicateValue;
-use crate::sql::row::Value;
 use crate::sql::schema::{ColumnDef, ColumnType};
 
 /// Parsed SQL statement.
@@ -35,14 +34,14 @@ pub struct CreateTable {
 pub struct Insert {
     pub table: String,
     pub columns: Vec<String>,
-    pub values: Vec<Value>,
+    pub values: Vec<PredicateValue>,
 }
 
 /// UPDATE statement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Update {
     pub table: String,
-    pub assignments: Vec<(String, Value)>,
+    pub assignments: Vec<(String, PredicateValue)>,
     pub where_clause: Vec<Condition>,
 }
 
@@ -285,44 +284,8 @@ impl<'a> Parser<'a> {
         Err(self.error("unterminated string literal"))
     }
 
-    fn parse_number(&mut self) -> Result<Value, ParseError> {
-        self.skip_whitespace();
-
-        let start = self.pos;
-        let mut has_dot = false;
-        // Optional minus
-        if self.peek_char() == Some('-') {
-            self.pos += 1;
-        }
-
-        while self.pos < self.input.len() {
-            let c = self.input.as_bytes()[self.pos];
-            if c.is_ascii_digit() {
-                self.pos += 1;
-            } else if c == b'.' && !has_dot {
-                has_dot = true;
-                self.pos += 1;
-            } else {
-                break;
-            }
-        }
-
-        let num_str = &self.input[start..self.pos];
-        if num_str.is_empty() || num_str == "-" {
-            return Err(self.error("expected number"));
-        }
-
-        if has_dot {
-            let n: f64 = num_str.parse().map_err(|_| self.error("invalid float"))?;
-            Ok(Value::F64(n))
-        } else {
-            let n: i64 = num_str.parse().map_err(|_| self.error("invalid integer"))?;
-            Ok(Value::I64(n))
-        }
-    }
-
-    /// Parse a number as PredicateValue (for policy literals).
-    fn parse_number_predicate_value(&mut self) -> Result<PredicateValue, ParseError> {
+    /// Parse a number literal.
+    fn parse_number(&mut self) -> Result<PredicateValue, ParseError> {
         self.skip_whitespace();
 
         let start = self.pos;
@@ -380,27 +343,28 @@ impl<'a> Parser<'a> {
         num_str.parse().map_err(|_| self.error("invalid number"))
     }
 
-    fn parse_value(&mut self) -> Result<Value, ParseError> {
+    /// Parse a SQL value (used in INSERT/UPDATE statements).
+    fn parse_value(&mut self) -> Result<PredicateValue, ParseError> {
         self.skip_whitespace();
 
         // NULL
         if self.try_keyword("NULL") {
-            return Ok(Value::NullableNone);
+            return Ok(PredicateValue::Null);
         }
 
         // Boolean
         if self.try_keyword("true") {
-            return Ok(Value::Bool(true));
+            return Ok(PredicateValue::Bool(true));
         }
         if self.try_keyword("false") {
-            return Ok(Value::Bool(false));
+            return Ok(PredicateValue::Bool(false));
         }
 
         // String literal - always parse as String.
         // The database executor coerces to ObjectId when inserting into Ref columns.
         if self.peek_char() == Some('\'') {
             let s = self.parse_string_literal()?;
-            return Ok(Value::String(s));
+            return Ok(PredicateValue::String(s));
         }
 
         // Number
@@ -906,7 +870,7 @@ impl<'a> Parser<'a> {
             .map(|c| c.is_ascii_digit() || c == '-')
             .unwrap_or(false)
         {
-            let val = self.parse_number_predicate_value()?;
+            let val = self.parse_number()?;
             return Ok(ConditionValue::Literal(val));
         }
 
@@ -1177,7 +1141,7 @@ impl<'a> Parser<'a> {
             .map(|c| c.is_ascii_digit() || c == '-')
             .unwrap_or(false)
         {
-            let val = self.parse_number_predicate_value()?;
+            let val = self.parse_number()?;
             return Ok(PolicyValue::Literal(val));
         }
 

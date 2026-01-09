@@ -38,8 +38,8 @@ fn update_row_basic() {
     let db = Database::in_memory();
     db.execute("CREATE TABLE users (name STRING NOT NULL, age I32 NOT NULL)").unwrap();
 
-    // Insert using old API
-    let id = db.insert("users", &["name", "age"], vec![Value::String("Alice".into()), Value::I32(30)]).unwrap();
+    // Insert using builder API
+    let id = db.insert_with("users", |b| b.set_string_by_name("name", "Alice").set_i32_by_name("age", 30).build()).unwrap();
 
     // Update using new API
     let schema = db.get_table("users").unwrap();
@@ -71,8 +71,8 @@ fn insert_row_with_ref() {
     db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
     db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)").unwrap();
 
-    // Insert user using old API
-    let user_id = db.insert("users", &["name"], vec![Value::String("Alice".into())]).unwrap();
+    // Insert user using builder API
+    let user_id = db.insert_with("users", |b| b.set_string_by_name("name", "Alice").build()).unwrap();
 
     // Insert post using new API
     let schema = db.get_table("posts").unwrap();
@@ -226,13 +226,13 @@ fn incremental_query_update_enters_filter() {
     assert!(query.rows().is_empty());
 
     // Activate the user
-    db.update("users", id, &[("active", Value::Bool(true))]).unwrap();
+    db.update_with("users", id, |b| b.set_bool_by_name("active", true).build()).unwrap();
 
     // Should now appear in results
     let rows = query.rows();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].1.get_column(0).unwrap(), Value::String("Alice".into()));
-    assert_eq!(rows[0].1.get_column(1).unwrap(), Value::Bool(true));
+    assert_eq!(rows[0].1.get_by_name("name"), Some(RowValue::String("Alice")));
+    assert_eq!(rows[0].1.get_by_name("active"), Some(RowValue::Bool(true)));
 }
 
 #[test]
@@ -252,11 +252,11 @@ fn incremental_query_update_leaves_filter() {
     // Should be in results
     let rows = query.rows();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].1.get_column(0).unwrap(), Value::String("Alice".into()));
-    assert_eq!(rows[0].1.get_column(1).unwrap(), Value::Bool(true));
+    assert_eq!(rows[0].1.get_by_name("name"), Some(RowValue::String("Alice")));
+    assert_eq!(rows[0].1.get_by_name("active"), Some(RowValue::Bool(true)));
 
     // Deactivate the user
-    db.update("users", id, &[("active", Value::Bool(false))]).unwrap();
+    db.update_with("users", id, |b| b.set_bool_by_name("active", false).build()).unwrap();
 
     // Should no longer be in results
     assert!(query.rows().is_empty());
@@ -276,7 +276,7 @@ fn incremental_query_delete() {
 
     let rows = query.rows();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].1.get_column(0).unwrap(), Value::String("Alice".into()));
+    assert_eq!(rows[0].1.get_by_name("name"), Some(RowValue::String("Alice")));
     assert_eq!(rows[0].0, id);
 
     db.delete("users", id).unwrap();
@@ -356,13 +356,13 @@ fn incremental_query_join_basic() {
     assert!(query.rows().is_empty());
 
     // Insert a post by Alice
-    db.insert("posts", &["author", "title"], vec![Value::Ref(user_id), Value::String("Hello World".to_string())]).unwrap();
+    db.insert_with("posts", |b| b.set_ref_by_name("author", user_id).set_string_by_name("title", "Hello World").build()).unwrap();
 
     // Now we should have one joined row
     let rows = query.rows();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].1.get_column(1).unwrap(), Value::String("Hello World".to_string()));
-    assert_eq!(rows[0].1.get_column(2).unwrap(), Value::String("Alice".to_string()));
+    assert_eq!(rows[0].1.get_by_name("posts.title"), Some(RowValue::String("Hello World")));
+    assert_eq!(rows[0].1.get_by_name("users.name"), Some(RowValue::String("Alice")));
 }
 
 #[test]
@@ -381,18 +381,22 @@ fn incremental_query_join_left_table_change() {
     let query = db.incremental_query("SELECT * FROM posts JOIN users ON posts.author = users.id").unwrap();
 
     // Insert multiple posts
-    db.insert("posts", &["author", "title"], vec![Value::Ref(user_id), Value::String("Post 1".to_string())]).unwrap();
-    db.insert("posts", &["author", "title"], vec![Value::Ref(user_id), Value::String("Post 2".to_string())]).unwrap();
+    db.insert_with("posts", |b| b.set_ref_by_name("author", user_id).set_string_by_name("title", "Post 1").build()).unwrap();
+    db.insert_with("posts", |b| b.set_ref_by_name("author", user_id).set_string_by_name("title", "Post 2").build()).unwrap();
 
     let rows = query.rows();
     assert_eq!(rows.len(), 2);
     // Both rows should have Alice as author
     for row in &rows {
-        assert_eq!(row.1.get_column(2).unwrap(), Value::String("Alice".to_string()));
+        assert_eq!(row.1.get_by_name("users.name"), Some(RowValue::String("Alice")));
     }
-    let titles: Vec<_> = rows.iter().map(|r| r.1.get_column(1).unwrap()).collect();
-    assert!(titles.contains(&Value::String("Post 1".to_string())));
-    assert!(titles.contains(&Value::String("Post 2".to_string())));
+    let titles: Vec<_> = rows.iter().filter_map(|r| {
+        if let Some(RowValue::String(s)) = r.1.get_by_name("posts.title") {
+            Some(s.to_string())
+        } else { None }
+    }).collect();
+    assert!(titles.contains(&"Post 1".to_string()));
+    assert!(titles.contains(&"Post 2".to_string()));
 }
 
 #[test]
@@ -410,7 +414,7 @@ fn incremental_query_join_right_table_change() {
     };
 
     // Insert a post
-    db.insert("posts", &["author", "title"], vec![Value::Ref(user_id), Value::String("Hello".to_string())]).unwrap();
+    db.insert_with("posts", |b| b.set_ref_by_name("author", user_id).set_string_by_name("title", "Hello").build()).unwrap();
 
     // Create JOIN query after initial data
     let query = db.incremental_query("SELECT * FROM posts JOIN users ON posts.author = users.id").unwrap();
@@ -425,7 +429,7 @@ fn incremental_query_join_right_table_change() {
 
     // Updating the right table (users) should trigger notification
     // because the joined row contains data from that table
-    db.update("users", user_id, &[("name", Value::String("Alice Updated".to_string()))]).unwrap();
+    db.update_with("users", user_id, |b| b.set_string_by_name("name", "Alice Updated").build()).unwrap();
 
     // The join should have been notified of the right table change
     assert!(delta_count.load(Ordering::SeqCst) > 0);
@@ -474,21 +478,17 @@ fn select_all_as_filters_by_policy() {
     };
 
     // Create documents
-    db.insert("documents", &["title", "owner_id"], vec![
-        Value::String("Alice's Doc".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
-    db.insert("documents", &["title", "owner_id"], vec![
-        Value::String("Bob's Doc".into()),
-        Value::Ref(bob_id),
-    ]).unwrap();
+    db.insert_with("documents", |b| b.set_string_by_name("title", "Alice's Doc").set_ref_by_name("owner_id", alice_id).build()).unwrap();
+    db.insert_with("documents", |b| b.set_string_by_name("title", "Bob's Doc").set_ref_by_name("owner_id", bob_id).build()).unwrap();
 
     // Without policy: both users see all documents
     let all_docs = db.select_all("documents").unwrap();
     assert_eq!(all_docs.len(), 2);
-    let all_titles: Vec<_> = all_docs.iter().map(|r| r.1.get_column(0).unwrap()).collect();
-    assert!(all_titles.contains(&Value::String("Alice's Doc".into())));
-    assert!(all_titles.contains(&Value::String("Bob's Doc".into())));
+    let all_titles: Vec<_> = all_docs.iter().filter_map(|r| {
+        if let Some(RowValue::String(s)) = r.1.get_by_name("title") { Some(s.to_string()) } else { None }
+    }).collect();
+    assert!(all_titles.contains(&"Alice's Doc".to_string()));
+    assert!(all_titles.contains(&"Bob's Doc".to_string()));
 
     // Add policy: owner can read their own documents
     db.execute("CREATE POLICY ON documents FOR SELECT WHERE owner_id = @viewer").unwrap();
@@ -496,12 +496,12 @@ fn select_all_as_filters_by_policy() {
     // Alice can only see her document
     let alice_docs = db.select_all_as("documents", alice_id).unwrap();
     assert_eq!(alice_docs.len(), 1);
-    assert_eq!(alice_docs[0].1.get_column(0).unwrap(), Value::String("Alice's Doc".into()));
+    assert_eq!(alice_docs[0].1.get_by_name("title"), Some(RowValue::String("Alice's Doc")));
 
     // Bob can only see his document
     let bob_docs = db.select_all_as("documents", bob_id).unwrap();
     assert_eq!(bob_docs.len(), 1);
-    assert_eq!(bob_docs[0].1.get_column(0).unwrap(), Value::String("Bob's Doc".into()));
+    assert_eq!(bob_docs[0].1.get_by_name("title"), Some(RowValue::String("Bob's Doc")));
 }
 
 #[test]
@@ -577,19 +577,17 @@ fn insert_as_checks_policy() {
     db.execute("CREATE POLICY ON documents FOR INSERT CHECK (@new.author_id = @viewer)").unwrap();
 
     // Alice can insert doc with herself as author
-    let result = db.insert_as(
+    let result = db.insert_with_as(
         "documents",
-        &["title", "author_id"],
-        vec![Value::String("Alice's Doc".into()), Value::Ref(alice_id)],
+        |b| b.set_string_by_name("title", "Alice's Doc").set_ref_by_name("author_id", alice_id).build(),
         alice_id,
     );
     assert!(result.is_ok(), "owner should be able to insert: {:?}", result);
 
     // Alice cannot insert doc with Bob as author
-    let result = db.insert_as(
+    let result = db.insert_with_as(
         "documents",
-        &["title", "author_id"],
-        vec![Value::String("Forged Doc".into()), Value::Ref(bob_id)],
+        |b| b.set_string_by_name("title", "Forged Doc").set_ref_by_name("author_id", bob_id).build(),
         alice_id,
     );
     assert!(matches!(result, Err(DatabaseError::PolicyDenied { .. })),
@@ -617,20 +615,17 @@ fn update_as_checks_policy() {
     };
 
     // Create a document owned by Alice
-    let doc_id = db.insert("documents", &["title", "owner_id"], vec![
-        Value::String("Original".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let doc_id = db.insert_with("documents", |b| b.set_string_by_name("title", "Original").set_ref_by_name("owner_id", alice_id).build()).unwrap();
 
     // Add UPDATE policy: owner can update
     db.execute("CREATE POLICY ON documents FOR UPDATE WHERE owner_id = @viewer").unwrap();
 
     // Alice can update
-    let result = db.update_as("documents", doc_id, &[("title", Value::String("Updated".into()))], alice_id);
+    let result = db.update_with_as("documents", doc_id, |b| b.set_string_by_name("title", "Updated").build(), alice_id);
     assert!(result.is_ok(), "owner should be able to update: {:?}", result);
 
     // Bob cannot update
-    let result = db.update_as("documents", doc_id, &[("title", Value::String("Hacked".into()))], bob_id);
+    let result = db.update_with_as("documents", doc_id, |b| b.set_string_by_name("title", "Hacked").build(), bob_id);
     assert!(matches!(result, Err(DatabaseError::PolicyDenied { .. })),
         "non-owner should not be able to update: {:?}", result);
 }
@@ -654,20 +649,17 @@ fn update_as_checks_both_where_and_check() {
         _ => panic!("expected Inserted"),
     };
 
-    let doc_id = db.insert("documents", &["title", "owner_id"], vec![
-        Value::String("Original".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let doc_id = db.insert_with("documents", |b| b.set_string_by_name("title", "Original").set_ref_by_name("owner_id", alice_id).build()).unwrap();
 
     // Add UPDATE policy: owner can update, but cannot change owner
     db.execute("CREATE POLICY ON documents FOR UPDATE WHERE owner_id = @viewer CHECK (@new.owner_id = @old.owner_id)").unwrap();
 
     // Alice can update title
-    let result = db.update_as("documents", doc_id, &[("title", Value::String("New Title".into()))], alice_id);
+    let result = db.update_with_as("documents", doc_id, |b| b.set_string_by_name("title", "New Title").build(), alice_id);
     assert!(result.is_ok(), "should allow updating title: {:?}", result);
 
     // Alice cannot change owner
-    let result = db.update_as("documents", doc_id, &[("owner_id", Value::Ref(bob_id))], alice_id);
+    let result = db.update_with_as("documents", doc_id, |b| b.set_ref_by_name("owner_id", bob_id).build(), alice_id);
     assert!(matches!(result, Err(DatabaseError::PolicyDenied { .. })),
         "should deny changing owner: {:?}", result);
 }
@@ -691,10 +683,7 @@ fn delete_as_checks_policy() {
         _ => panic!("expected Inserted"),
     };
 
-    let doc_id = db.insert("documents", &["title", "owner_id"], vec![
-        Value::String("To Delete".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let doc_id = db.insert_with("documents", |b| b.set_string_by_name("title", "To Delete").set_ref_by_name("owner_id", alice_id).build()).unwrap();
 
     // Add DELETE policy: owner can delete
     db.execute("CREATE POLICY ON documents FOR DELETE WHERE owner_id = @viewer").unwrap();
@@ -728,10 +717,7 @@ fn delete_as_falls_back_to_update_policy() {
         _ => panic!("expected Inserted"),
     };
 
-    let doc_id = db.insert("documents", &["title", "owner_id"], vec![
-        Value::String("Deletable".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let doc_id = db.insert_with("documents", |b| b.set_string_by_name("title", "Deletable").set_ref_by_name("owner_id", alice_id).build()).unwrap();
 
     // Only add UPDATE policy (no DELETE policy)
     db.execute("CREATE POLICY ON documents FOR UPDATE WHERE owner_id = @viewer").unwrap();
@@ -769,14 +755,8 @@ fn incremental_query_as_filters_by_policy() {
     };
 
     // Create documents
-    db.insert("documents", &["title", "owner_id"], vec![
-        Value::String("Alice's Doc".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
-    db.insert("documents", &["title", "owner_id"], vec![
-        Value::String("Bob's Doc".into()),
-        Value::Ref(bob_id),
-    ]).unwrap();
+    db.insert_with("documents", |b| b.set_string_by_name("title", "Alice's Doc").set_ref_by_name("owner_id", alice_id).build()).unwrap();
+    db.insert_with("documents", |b| b.set_string_by_name("title", "Bob's Doc").set_ref_by_name("owner_id", bob_id).build()).unwrap();
 
     // Add SELECT policy: owner can read
     db.execute("CREATE POLICY ON documents FOR SELECT WHERE owner_id = @viewer").unwrap();
@@ -785,13 +765,13 @@ fn incremental_query_as_filters_by_policy() {
     let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id).unwrap();
     let alice_rows = alice_query.rows();
     assert_eq!(alice_rows.len(), 1);
-    assert_eq!(alice_rows[0].1.get_column(0).unwrap(), Value::String("Alice's Doc".into()));
+    assert_eq!(alice_rows[0].1.get_by_name("title"), Some(RowValue::String("Alice's Doc")));
 
     // Bob's incremental query should only see his document
     let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id).unwrap();
     let bob_rows = bob_query.rows();
     assert_eq!(bob_rows.len(), 1);
-    assert_eq!(bob_rows[0].1.get_column(0).unwrap(), Value::String("Bob's Doc".into()));
+    assert_eq!(bob_rows[0].1.get_by_name("title"), Some(RowValue::String("Bob's Doc")));
 }
 
 #[test]
@@ -821,26 +801,20 @@ fn incremental_query_as_updates_on_insert() {
     assert!(alice_query.rows().is_empty());
 
     // Insert document for Alice
-    db.insert("documents", &["title", "owner_id"], vec![
-        Value::String("Alice's Doc".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    db.insert_with("documents", |b| b.set_string_by_name("title", "Alice's Doc").set_ref_by_name("owner_id", alice_id).build()).unwrap();
 
     // Alice should see it
     let alice_rows = alice_query.rows();
     assert_eq!(alice_rows.len(), 1);
-    assert_eq!(alice_rows[0].1.get_column(0).unwrap(), Value::String("Alice's Doc".into()));
+    assert_eq!(alice_rows[0].1.get_by_name("title"), Some(RowValue::String("Alice's Doc")));
 
     // Insert document for Bob
-    db.insert("documents", &["title", "owner_id"], vec![
-        Value::String("Bob's Doc".into()),
-        Value::Ref(bob_id),
-    ]).unwrap();
+    db.insert_with("documents", |b| b.set_string_by_name("title", "Bob's Doc").set_ref_by_name("owner_id", bob_id).build()).unwrap();
 
     // Alice should still only see 1 document (her own)
     let alice_rows_after = alice_query.rows();
     assert_eq!(alice_rows_after.len(), 1);
-    assert_eq!(alice_rows_after[0].1.get_column(0).unwrap(), Value::String("Alice's Doc".into()));
+    assert_eq!(alice_rows_after[0].1.get_by_name("title"), Some(RowValue::String("Alice's Doc")));
 }
 
 #[test]
@@ -862,16 +836,8 @@ fn incremental_query_as_combines_with_where_clause() {
     db.execute("CREATE POLICY ON documents FOR SELECT WHERE owner_id = @viewer").unwrap();
 
     // Insert multiple documents for Alice
-    db.insert("documents", &["title", "owner_id", "published"], vec![
-        Value::String("Draft".into()),
-        Value::Ref(alice_id),
-        Value::Bool(false),
-    ]).unwrap();
-    db.insert("documents", &["title", "owner_id", "published"], vec![
-        Value::String("Published".into()),
-        Value::Ref(alice_id),
-        Value::Bool(true),
-    ]).unwrap();
+    db.insert_with("documents", |b| b.set_string_by_name("title", "Draft").set_ref_by_name("owner_id", alice_id).set_bool_by_name("published", false).build()).unwrap();
+    db.insert_with("documents", |b| b.set_string_by_name("title", "Published").set_ref_by_name("owner_id", alice_id).set_bool_by_name("published", true).build()).unwrap();
 
     // Query with user WHERE clause combined with policy
     let query = db.incremental_query_as("SELECT * FROM documents WHERE published = true", alice_id).unwrap();

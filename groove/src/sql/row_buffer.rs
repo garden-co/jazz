@@ -25,6 +25,7 @@ use std::sync::Arc;
 use crate::object::ObjectId;
 use crate::storage::ContentRef;
 
+use super::query_graph::PredicateValue;
 use super::schema::{ColumnType, TableSchema};
 
 /// Runtime value representation.
@@ -1047,6 +1048,20 @@ impl RowBuilder {
         }
     }
 
+    /// Create a builder initialized from an existing row.
+    ///
+    /// This is useful for updates where you want to modify only some columns
+    /// while preserving others.
+    pub fn from_owned_row(row: &OwnedRow) -> Self {
+        let mut builder = Self::new(row.descriptor.clone());
+        for idx in 0..row.descriptor.columns.len() {
+            if let Some(value) = row.get(idx) {
+                builder = builder.set_from_row_value(idx, value);
+            }
+        }
+        builder
+    }
+
     /// Set a boolean column value.
     pub fn set_bool(mut self, col_idx: usize, value: bool) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx) {
@@ -1369,6 +1384,33 @@ impl RowBuilder {
             }
             // TODO: Handle Blob, BlobArray
             _ => self,
+        }
+    }
+
+    /// Set a column value from a PredicateValue.
+    ///
+    /// This is useful when applying SQL UPDATE assignments or setting
+    /// values from parsed SQL literals.
+    pub fn set_from_predicate_value(self, idx: usize, value: &PredicateValue) -> Self {
+        match value {
+            PredicateValue::Bool(v) => self.set_bool(idx, *v),
+            PredicateValue::I32(v) => self.set_i32(idx, *v),
+            PredicateValue::U32(v) => self.set_u32(idx, *v),
+            PredicateValue::I64(v) => self.set_i64(idx, *v),
+            PredicateValue::F64(v) => self.set_f64(idx, *v),
+            PredicateValue::String(v) => self.set_string(idx, v),
+            PredicateValue::Bytes(v) => self.set_bytes(idx, v),
+            PredicateValue::Ref(v) => self.set_ref(idx, *v),
+            PredicateValue::Null => self.set_null(idx),
+        }
+    }
+
+    /// Set a column value from a PredicateValue, looking up by column name.
+    pub fn set_from_predicate_value_by_name(self, name: &str, value: &PredicateValue) -> Self {
+        if let Some(idx) = self.descriptor.column_index(name) {
+            self.set_from_predicate_value(idx, value)
+        } else {
+            self
         }
     }
 

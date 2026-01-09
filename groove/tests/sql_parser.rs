@@ -3,7 +3,7 @@
 use groove::ObjectId;
 use groove::sql::{
     ColumnType, ConditionValue, PolicyAction, PolicyColumnRef, PolicyExpr, PolicyValue, Projection,
-    SelectExpr, Statement, Value, parse, PredicateValue,
+    SelectExpr, Statement, parse, PredicateValue,
 };
 
 #[test]
@@ -52,9 +52,9 @@ fn parse_insert() {
             assert_eq!(
                 ins.values,
                 vec![
-                    Value::String("Alice".into()),
-                    Value::I64(30),
-                    Value::Bool(true),
+                    PredicateValue::String("Alice".into()),
+                    PredicateValue::I64(30),
+                    PredicateValue::Bool(true),
                 ]
             );
         }
@@ -69,7 +69,7 @@ fn parse_insert_with_null() {
 
     match stmt {
         Statement::Insert(ins) => {
-            assert_eq!(ins.values, vec![Value::String("Bob".into()), Value::NullableNone,]);
+            assert_eq!(ins.values, vec![PredicateValue::String("Bob".into()), PredicateValue::Null]);
         }
         _ => panic!("expected Insert"),
     }
@@ -78,7 +78,7 @@ fn parse_insert_with_null() {
 #[test]
 fn parse_insert_with_object_id() {
     // ObjectIds are passed as string literals containing Base32.
-    // The parser produces Value::String; the executor coerces to Value::Ref
+    // The parser produces PredicateValue::String; the executor coerces to Ref
     // when inserting into a Ref column.
     let id = ObjectId::new(0x0192abcd12345678);
     let sql = format!(
@@ -90,7 +90,7 @@ fn parse_insert_with_object_id() {
     match stmt {
         Statement::Insert(ins) => {
             // Parser produces String, not Ref (executor handles coercion)
-            assert_eq!(ins.values[0], Value::String(id.to_string()));
+            assert_eq!(ins.values[0], PredicateValue::String(id.to_string()));
         }
         _ => panic!("expected Insert"),
     }
@@ -99,7 +99,7 @@ fn parse_insert_with_object_id() {
 #[test]
 fn parse_update() {
     // ObjectIds are passed as string literals containing Base32.
-    // The parser produces Value::String; the executor coerces to Value::Ref
+    // The parser produces PredicateValue::String; the executor coerces to Ref
     // when comparing against id or Ref columns.
     let id = ObjectId::new(0xabc123);
     let sql = format!(
@@ -114,9 +114,9 @@ fn parse_update() {
             assert_eq!(upd.assignments.len(), 2);
             assert_eq!(
                 upd.assignments[0],
-                ("email".into(), Value::String("new@example.com".into()))
+                ("email".into(), PredicateValue::String("new@example.com".into()))
             );
-            assert_eq!(upd.assignments[1], ("age".into(), Value::I64(31)));
+            assert_eq!(upd.assignments[1], ("age".into(), PredicateValue::I64(31)));
             assert_eq!(upd.where_clause.len(), 1);
             assert_eq!(upd.where_clause[0].column.column, "id");
             // Parser produces String, not Ref (executor handles coercion)
@@ -292,7 +292,7 @@ fn parse_float() {
 
     match stmt {
         Statement::Insert(ins) => {
-            assert_eq!(ins.values[0], Value::F64(3.14));
+            assert_eq!(ins.values[0], PredicateValue::F64(3.14));
         }
         _ => panic!("expected Insert"),
     }
@@ -305,7 +305,7 @@ fn parse_negative_number() {
 
     match stmt {
         Statement::Insert(ins) => {
-            assert_eq!(ins.values[0], Value::I64(-42));
+            assert_eq!(ins.values[0], PredicateValue::I64(-42));
         }
         _ => panic!("expected Insert"),
     }

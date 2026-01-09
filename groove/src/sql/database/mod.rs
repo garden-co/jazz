@@ -2123,6 +2123,61 @@ impl Database {
         Ok(row_id)
     }
 
+    /// Insert a row using a builder function.
+    ///
+    /// This is a convenience method that creates the descriptor and builds the row
+    /// in one step. The builder function receives a `RowBuilder` pre-configured
+    /// with the table's schema.
+    ///
+    /// # Example
+    /// ```ignore
+    /// db.insert_with("users", |b| b
+    ///     .set_string_by_name("name", "Alice")
+    ///     .set_i32_by_name("age", 30)
+    ///     .build()
+    /// )?;
+    /// ```
+    pub fn insert_with<F>(&self, table: &str, f: F) -> Result<ObjectId, DatabaseError>
+    where
+        F: FnOnce(RowBuilder) -> OwnedRow,
+    {
+        let schema = self
+            .get_table(table)
+            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+        let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
+        let row = f(RowBuilder::new(descriptor));
+        self.insert_row(table, row)
+    }
+
+    /// Update a row using a builder pattern.
+    ///
+    /// The closure receives a RowBuilder initialized with the existing row's data,
+    /// allowing you to modify specific columns while preserving others.
+    ///
+    /// Returns false if the row doesn't exist.
+    ///
+    /// # Example
+    /// ```ignore
+    /// db.update_with("users", id, |b| {
+    ///     b.set_string_by_name("name", "Bob")
+    ///      .build()
+    /// })?;
+    /// ```
+    pub fn update_with<F>(&self, table: &str, id: ObjectId, f: F) -> Result<bool, DatabaseError>
+    where
+        F: FnOnce(RowBuilder) -> OwnedRow,
+    {
+        // Get existing row
+        let (_, existing) = match self.get(table, id)? {
+            Some(row) => row,
+            None => return Ok(false),
+        };
+        // Create builder from existing row and let user modify
+        let builder = RowBuilder::from_owned_row(&existing);
+        let new_row = f(builder);
+        self.update_row(table, id, new_row)
+    }
+
     /// Get a row by ID in buffer format.
     pub fn get(&self, table: &str, id: ObjectId) -> Result<Option<(ObjectId, OwnedRow)>, DatabaseError> {
         let schema = self
@@ -2772,6 +2827,104 @@ impl Database {
         self.delete(table, id)
     }
 
+    /// Insert a row, checking INSERT policy for the given viewer.
+    ///
+    /// This is the buffer-based version that takes an OwnedRow directly.
+    pub fn insert_row_as(
+        &self,
+        table: &str,
+        row: OwnedRow,
+        viewer: ObjectId,
+    ) -> Result<ObjectId, DatabaseError> {
+        use crate::sql::policy::{PolicyConfig, PolicyEvaluator, PolicyResult};
+
+        let temp_id = ObjectId::default();
+
+        // Check INSERT policy
+        let config = PolicyConfig::default();
+        let mut evaluator = PolicyEvaluator::new(self, self, viewer, config);
+        let result = evaluator.check_insert(table, temp_id, &row);
+
+        match result {
+            PolicyResult::Denied { reason } => {
+                return Err(DatabaseError::PolicyDenied {
+                    action: PolicyAction::Insert,
+                    reason,
+                });
+            }
+            PolicyResult::Allowed { .. } => {}
+        }
+
+        // Policy passed, perform the actual insert
+        self.insert_row(table, row)
+    }
+
+    /// Insert a row using builder pattern, checking INSERT policy.
+    pub fn insert_with_as<F>(&self, table: &str, f: F, viewer: ObjectId) -> Result<ObjectId, DatabaseError>
+    where
+        F: FnOnce(RowBuilder) -> OwnedRow,
+    {
+        let schema = self
+            .get_table(table)
+            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+        let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
+        let row = f(RowBuilder::new(descriptor));
+        self.insert_row_as(table, row, viewer)
+    }
+
+    /// Update a row, checking UPDATE policy for the given viewer.
+    ///
+    /// This is the buffer-based version that takes an OwnedRow directly.
+    pub fn update_row_as(
+        &self,
+        table: &str,
+        id: ObjectId,
+        new_row: OwnedRow,
+        viewer: ObjectId,
+    ) -> Result<bool, DatabaseError> {
+        use crate::sql::policy::{PolicyConfig, PolicyEvaluator, PolicyResult};
+
+        // Get the existing row
+        let (old_id, old_row) = match self.get(table, id)? {
+            Some(row) => row,
+            None => return Ok(false),
+        };
+
+        // Check UPDATE policy
+        let config = PolicyConfig::default();
+        let mut evaluator = PolicyEvaluator::new(self, self, viewer, config);
+        let result = evaluator.check_update(table, old_id, &old_row, id, &new_row);
+
+        match result {
+            PolicyResult::Denied { reason } => {
+                return Err(DatabaseError::PolicyDenied {
+                    action: PolicyAction::Update,
+                    reason,
+                });
+            }
+            PolicyResult::Allowed { .. } => {}
+        }
+
+        // Policy passed, perform the actual update
+        self.update_row(table, id, new_row)
+    }
+
+    /// Update a row using builder pattern, checking UPDATE policy.
+    pub fn update_with_as<F>(&self, table: &str, id: ObjectId, f: F, viewer: ObjectId) -> Result<bool, DatabaseError>
+    where
+        F: FnOnce(RowBuilder) -> OwnedRow,
+    {
+        // Get existing row
+        let (_, existing) = match self.get(table, id)? {
+            Some(row) => row,
+            None => return Ok(false),
+        };
+        // Create builder from existing row and let user modify
+        let builder = RowBuilder::from_owned_row(&existing);
+        let new_row = f(builder);
+        self.update_row_as(table, id, new_row, viewer)
+    }
+
     /// Find all rows referencing a target ID via a specific column.
     /// Uses the reverse index for O(1) lookup.
     pub fn find_referencing(
@@ -2830,8 +2983,44 @@ impl Database {
                 Ok(ExecuteResult::PolicyCreated { table, action })
             }
             Statement::Insert(ins) => {
-                let columns: Vec<&str> = ins.columns.iter().map(|s| s.as_str()).collect();
-                let id = self.insert(&ins.table, &columns, ins.values)?;
+                // Build row using RowBuilder with PredicateValue
+                let schema = self
+                    .get_table(&ins.table)
+                    .ok_or_else(|| DatabaseError::TableNotFound(ins.table.clone()))?;
+                let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
+
+                if ins.columns.len() != ins.values.len() {
+                    return Err(DatabaseError::ColumnMismatch {
+                        expected: ins.columns.len(),
+                        got: ins.values.len(),
+                    });
+                }
+
+                let mut builder = RowBuilder::new(descriptor);
+                for (col_name, value) in ins.columns.iter().zip(ins.values.iter()) {
+                    // Coerce string to Ref if inserting into a Ref column
+                    let coerced_value = if let Some(col_def) = schema.column(col_name) {
+                        if matches!(col_def.ty, ColumnType::Ref(_)) {
+                            if let PredicateValue::String(s) = value {
+                                // Parse string as ObjectId
+                                match s.parse::<ObjectId>() {
+                                    Ok(id) => PredicateValue::Ref(id),
+                                    Err(_) => value.clone(),
+                                }
+                            } else {
+                                value.clone()
+                            }
+                        } else {
+                            value.clone()
+                        }
+                    } else {
+                        value.clone()
+                    };
+                    builder = builder.set_from_predicate_value_by_name(col_name, &coerced_value);
+                }
+                let row = builder.build();
+
+                let id = self.insert_row(&ins.table, row)?;
                 Ok(ExecuteResult::Inserted(id))
             }
             Statement::Update(upd) => {
@@ -2875,14 +3064,46 @@ impl Database {
                 };
 
                 let count = rows_to_update.len();
-                let assignments: Vec<(&str, Value)> = upd
-                    .assignments
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v.clone()))
-                    .collect();
+                let schema = self
+                    .get_table(&upd.table)
+                    .ok_or_else(|| DatabaseError::TableNotFound(upd.table.clone()))?;
 
-                for (id, _) in rows_to_update {
-                    self.update(&upd.table, id, &assignments)?;
+                for (id, old_row) in rows_to_update {
+                    // Build new row by copying existing values and applying updates
+                    let descriptor = old_row.descriptor.clone();
+                    let mut builder = RowBuilder::new(descriptor.clone());
+
+                    // Copy all existing values
+                    for col_idx in 0..descriptor.columns.len() {
+                        if let Some(value) = old_row.get(col_idx) {
+                            builder = builder.set_from_row_value(col_idx, value);
+                        }
+                    }
+
+                    // Apply updates
+                    for (col_name, value) in &upd.assignments {
+                        // Coerce string to Ref if updating a Ref column
+                        let coerced_value = if let Some(col_def) = schema.column(col_name) {
+                            if matches!(col_def.ty, ColumnType::Ref(_)) {
+                                if let PredicateValue::String(s) = value {
+                                    match s.parse::<ObjectId>() {
+                                        Ok(id) => PredicateValue::Ref(id),
+                                        Err(_) => value.clone(),
+                                    }
+                                } else {
+                                    value.clone()
+                                }
+                            } else {
+                                value.clone()
+                            }
+                        } else {
+                            value.clone()
+                        };
+                        builder = builder.set_from_predicate_value_by_name(col_name, &coerced_value);
+                    }
+
+                    let new_row = builder.build();
+                    self.update_row(&upd.table, id, new_row)?;
                 }
 
                 Ok(ExecuteResult::Updated(count))
