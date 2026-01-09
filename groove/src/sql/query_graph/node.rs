@@ -1447,16 +1447,8 @@ impl QueryNode {
             .iter()
             .map(|(_, row)| {
                 // We need to build a new row with some Ref values replaced by Row values
-                let mut values: Vec<Value> = Vec::with_capacity(row.descriptor.columns.len());
-
                 // Extract all current values in schema order
-                for schema_idx in 0..inner_schema.columns.len() {
-                    if let Some(val) = row.get_column(schema_idx) {
-                        values.push(val);
-                    } else {
-                        values.push(Value::NullableNone);
-                    }
-                }
+                let mut values = row.to_values();
 
                 // Now resolve each inner join
                 for (ref_column, target_table, _target_schema) in inner_joins {

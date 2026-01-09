@@ -847,35 +847,6 @@ impl OwnedRow {
         self.as_ref().get_by_name(name)
     }
 
-    /// Get the value at the given schema index as a Value.
-    ///
-    /// This method uses schema-order indexing (the order columns were defined
-    /// in the table schema), not buffer-order indexing. This is the expected
-    /// behavior for user-facing code that thinks in terms of schema columns.
-    ///
-    /// For nullable columns, non-null values are wrapped in NullableSome,
-    /// and null values return NullableNone.
-    ///
-    /// This is a convenience method for tests and external code that needs
-    /// to work with Value types directly.
-    pub fn get_column(&self, schema_idx: usize) -> Option<Value> {
-        // Find the buffer index for this schema index
-        let buf_idx = self
-            .descriptor
-            .columns
-            .iter()
-            .position(|c| c.schema_index == schema_idx)?;
-        let col = &self.descriptor.columns[buf_idx];
-        let rv = self.get(buf_idx)?;
-
-        // If the column is nullable, wrap the value appropriately
-        if col.nullable {
-            Some(rv.to_nullable_value())
-        } else {
-            Some(rv.to_value())
-        }
-    }
-
     /// Create a new OwnedRow with qualified column names.
     ///
     /// Converts column names from `column` to `table.column` format.
