@@ -21,29 +21,6 @@ pub enum PredicateValue {
 }
 
 impl PredicateValue {
-    /// Create from a legacy Value type.
-    ///
-    /// Converts Value to PredicateValue, stripping nullable wrappers.
-    pub fn from_value(value: &crate::sql::row::Value) -> Self {
-        use crate::sql::row::Value;
-        match value {
-            Value::Bool(v) => PredicateValue::Bool(*v),
-            Value::I32(v) => PredicateValue::I32(*v),
-            Value::U32(v) => PredicateValue::U32(*v),
-            Value::I64(v) => PredicateValue::I64(*v),
-            Value::F64(v) => PredicateValue::F64(*v),
-            Value::String(v) => PredicateValue::String(v.clone()),
-            Value::Bytes(v) => PredicateValue::Bytes(v.clone()),
-            Value::Ref(v) => PredicateValue::Ref(*v),
-            Value::NullableNone => PredicateValue::Null,
-            Value::NullableSome(inner) => PredicateValue::from_value(inner),
-            // Complex types not supported in predicates - treat as null
-            Value::Array(_) | Value::Row(_) | Value::Blob(_) | Value::BlobArray(_) => {
-                PredicateValue::Null
-            }
-        }
-    }
-
     /// Check if this value matches a RowValue from a buffer.
     pub fn matches(&self, row_value: &RowValue<'_>) -> bool {
         match (self, row_value) {
