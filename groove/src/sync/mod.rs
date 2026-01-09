@@ -25,6 +25,9 @@ mod protocol;
 #[cfg(feature = "sync-server")]
 mod server;
 
+#[cfg(all(test, feature = "sync-server"))]
+pub mod test_harness;
+
 pub use client::*;
 pub use env::*;
 pub use negotiation::*;

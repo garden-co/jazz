@@ -314,6 +314,7 @@ dependencies = [
  "futures",
  "getrandom 0.2.16",
  "tokio",
+ "tokio-stream",
  "uuid",
  "wasm-bindgen-futures",
  "web-time",
