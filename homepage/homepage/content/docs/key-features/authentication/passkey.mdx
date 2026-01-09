@@ -62,7 +62,21 @@ Passkey authentication on React Native requires the `react-native-passkey` libra
    - **iOS**: Add an Associated Domains entitlement with `webcredentials:yourdomain.com` and host an Apple App Site Association (AASA) file at `https://yourdomain.com/.well-known/apple-app-site-association`
    - **Android**: Host a Digital Asset Links file at `https://yourdomain.com/.well-known/assetlinks.json`
 
-See the [react-native-passkey documentation](https://github.com/nicklockwood/react-native-passkey) for detailed setup instructions.
+3. **For React Native 0.76+ with New Architecture**: The `react-native-passkey` library uses the legacy `NativeModules` bridge pattern. You need to disable bridgeless mode while keeping New Architecture enabled.
+
+   Add this override to your `AppDelegate.swift`:
+
+   ```swift
+   class ReactNativeDelegate: RCTDefaultReactNativeFactoryDelegate {
+     // ... existing methods ...
+
+     override func bridgelessEnabled() -> Bool {
+       return false
+     }
+   }
+   ```
+
+See the [react-native-passkey documentation](https://github.com/f-23/react-native-passkey) for detailed setup instructions.
 
 </ContentByFramework>
 
@@ -91,6 +105,7 @@ Passkeys are ideal when:
 - Requires `react-native-passkey` peer dependency
 - Passkeys require domain verification (AASA for iOS, assetlinks.json for Android)
 - Not available in Expo Go (requires a development build)
+- React Native 0.76+ with New Architecture requires disabling bridgeless mode (see setup instructions above)
 
 </ContentByFramework>
 

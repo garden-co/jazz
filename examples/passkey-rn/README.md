@@ -12,7 +12,8 @@ A minimal React Native app demonstrating Jazz passkey (WebAuthn) authentication 
 
 - Node.js 20+
 - React Native development environment set up
-- Physical iOS/Android device (passkeys don't work well in simulators)
+- Physical iOS/Android device (passkeys don't work in simulators)
+- A domain with HTTPS for hosting AASA/assetlinks files
 
 ## Setup
 
@@ -94,11 +95,72 @@ const auth = usePasskeyAuth({
 }]
 ```
 
+## Troubleshooting
+
+### New Architecture / Bridgeless Mode
+
+The `react-native-passkey` library uses the legacy `NativeModules` bridge pattern and doesn't yet support TurboModules. In React Native 0.76+ with New Architecture enabled (which is the default), you need to disable bridgeless mode.
+
+Add this override to your `AppDelegate.swift`:
+
+```swift
+class ReactNativeDelegate: RCTDefaultReactNativeFactoryDelegate {
+  // ... existing methods ...
+
+  // Disable bridgeless mode to support legacy NativeModules (react-native-passkey)
+  override func bridgelessEnabled() -> Bool {
+    return false
+  }
+}
+```
+
+This keeps the New Architecture (Fabric, TurboModules) enabled while also maintaining the legacy bridge for backward compatibility with libraries like react-native-passkey.
+
+### Monorepo / Metro Resolution Issues
+
+If you're using a monorepo and encounter "Unknown named module" errors when loading react-native-passkey, you can inject the module manually in your entry file:
+
+```javascript
+// index.js
+import "jazz-tools/react-native/polyfills";
+import { Passkey } from "react-native-passkey";
+import { setPasskeyModule } from "jazz-tools/react-native-core";
+
+// Inject the passkey module to avoid dynamic require issues
+setPasskeyModule(Passkey);
+
+// ... rest of your app
+```
+
+You may also need to add a custom resolver to your `metro.config.js`:
+
+```javascript
+resolver: {
+  resolveRequest: (context, moduleName, platform) => {
+    if (moduleName === "react-native-passkey") {
+      return {
+        type: "sourceFile",
+        filePath: path.resolve(workspaceRoot, "node_modules/react-native-passkey/lib/module/index.js"),
+      };
+    }
+    return context.resolveRequest(context, moduleName, platform);
+  },
+}
+```
+
+### "The package doesn't seem to be linked" Error
+
+If you see this error at runtime, check that:
+1. You've run `pod install` after adding react-native-passkey
+2. You've rebuilt the app (not just reloaded JS)
+3. Bridgeless mode is disabled (see above)
+
 ## Development Notes
 
 - Passkeys require HTTPS domain verification and won't work without proper configuration
 - For development, consider using demo auth or passphrase auth instead
 - Test on physical devices with biometric hardware
+- The library's own example app doesn't enable New Architecture, which is why there are no open issues about this
 
 ## Project Structure
 
