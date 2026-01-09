@@ -21,25 +21,6 @@ use crate::sql::table_rows::TableRows;
 use crate::sql::types::{IndexKey, SchemaId};
 use crate::storage::Environment;
 
-/// Coerce a Value to match the expected ColumnType.
-/// This is primarily used to convert String values to Ref(ObjectId) when
-/// the column type is Ref, since the SQL parser parses all string literals
-/// as Value::String (to avoid ambiguity with regular strings).
-fn coerce_value(value: Value, ty: &ColumnType) -> Value {
-    match (&value, ty) {
-        // String to Ref coercion: parse the string as ObjectId
-        (Value::String(s), ColumnType::Ref(_)) => {
-            if let Ok(id) = s.parse::<ObjectId>() {
-                Value::Ref(id)
-            } else {
-                value // Keep as string if not a valid ObjectId
-            }
-        }
-        // No coercion needed
-        _ => value,
-    }
-}
-
 /// Coerce a PredicateValue to match the expected ColumnType.
 /// This converts String values to Ref(ObjectId) when the column type is Ref.
 fn coerce_predicate_value(value: &PredicateValue, ty: &ColumnType) -> PredicateValue {
@@ -89,15 +70,15 @@ impl JoinedRow {
 
     /// Get a column value by optional table qualifier and column name.
     /// If table is None, searches all tables (returns first match).
-    /// Returns Some(Value) by converting from RowValue.
-    fn get_column(&self, table: Option<&str>, column: &str) -> Option<Value> {
+    /// Returns Some(PredicateValue) by converting from RowValue.
+    fn get_column(&self, table: Option<&str>, column: &str) -> Option<PredicateValue> {
         if column == "id" {
             // Special case: id is the row's object ID
             // Return as Ref value
             if let Some(table_name) = table {
-                return self.get_row_id(table_name).map(Value::Ref);
+                return self.get_row_id(table_name).map(PredicateValue::Ref);
             } else {
-                return self.get_row_id(&self.primary_table).map(Value::Ref);
+                return self.get_row_id(&self.primary_table).map(PredicateValue::Ref);
             }
         }
 
@@ -105,7 +86,7 @@ impl JoinedRow {
             // Qualified column: look in specific table
             if let Some((_, row)) = self.tables.get(table_name) {
                 if let Some(value) = row.get_by_name(column) {
-                    return Some(value.to_value());
+                    return Some(value.to_predicate_value());
                 }
             }
             None
@@ -113,7 +94,7 @@ impl JoinedRow {
             // Unqualified column: search all tables
             for (_, row) in self.tables.values() {
                 if let Some(value) = row.get_by_name(column) {
-                    return Some(value.to_value());
+                    return Some(value.to_predicate_value());
                 }
             }
             None
@@ -133,13 +114,13 @@ impl JoinedRow {
         let column = &cond.column.column;
 
         // Get the right-hand side value (either literal or from another column)
-        let rhs_value: Option<Value> = match &cond.right {
-            ConditionValue::Literal(v) => Some(v.to_value()),
+        let rhs_value: Option<PredicateValue> = match &cond.right {
+            ConditionValue::Literal(v) => Some(v.clone()),
             ConditionValue::Column(rhs_col) => {
                 // Get value from referenced column
                 if rhs_col.column == "id" {
                     let rhs_table = rhs_col.table.as_deref().unwrap_or(&self.primary_table);
-                    self.get_row_id(rhs_table).map(Value::Ref)
+                    self.get_row_id(rhs_table).map(PredicateValue::Ref)
                 } else {
                     self.get_column(rhs_col.table.as_deref(), &rhs_col.column)
                 }
@@ -154,8 +135,8 @@ impl JoinedRow {
         // Handle special "id" column on left side
         if column == "id" {
             // Coerce String to Ref for id comparison
-            let coerced = coerce_value(rhs_value, &ColumnType::Ref("".to_string()));
-            if let Value::Ref(target_id) = coerced {
+            let coerced = coerce_predicate_value(&rhs_value, &ColumnType::Ref("".to_string()));
+            if let PredicateValue::Ref(target_id) = coerced {
                 if let Some(table_name) = table {
                     if let Some(row_id) = self.get_row_id(table_name) {
                         return row_id == target_id;
@@ -211,9 +192,6 @@ impl JoinedRow {
             }
             Projection::Columns(cols) => {
                 // Specific columns - need to build a new row with just those columns
-                let values: Vec<Value> = cols.iter()
-                    .filter_map(|qc| self.get_column(qc.table.as_deref(), &qc.column))
-                    .collect();
                 // Build descriptor from the column names
                 let col_defs: Vec<(String, ColumnType, bool)> = cols.iter()
                     .filter_map(|qc| {
@@ -225,7 +203,13 @@ impl JoinedRow {
                     })
                     .collect();
                 let descriptor = Arc::new(RowDescriptor::new_ordered(col_defs));
-                OwnedRow::from_values(&values, descriptor)
+                let mut builder = RowBuilder::new(descriptor);
+                for qc in cols.iter() {
+                    if let Some(pv) = self.get_column(qc.table.as_deref(), &qc.column) {
+                        builder = builder.set_from_predicate_value_by_name(&qc.column, &pv);
+                    }
+                }
+                builder.build()
             }
             Projection::Expressions(_) => {
                 // Expressions are handled in execute_select, not here
@@ -1094,7 +1078,7 @@ impl DatabaseState {
                 // Right side is from join table
                 let left_val = if left_column == "id" {
                     let table_name = left_table.unwrap_or(&jr.primary_table);
-                    jr.get_row_id(table_name).map(Value::Ref)
+                    jr.get_row_id(table_name).map(PredicateValue::Ref)
                 } else {
                     jr.get_column(left_table, left_column)
                 };
@@ -1103,20 +1087,17 @@ impl DatabaseState {
                 // Left side is from join table
                 let right_val = if right_column == "id" {
                     let table_name = right_table.unwrap_or(&jr.primary_table);
-                    jr.get_row_id(table_name).map(Value::Ref)
+                    jr.get_row_id(table_name).map(PredicateValue::Ref)
                 } else {
                     jr.get_column(right_table, right_column)
                 };
                 (right_val, left_column.as_str())
             };
 
-            let lookup_value = match lookup_value {
+            let pred_value = match lookup_value {
                 Some(v) => v,
                 None => continue,
             };
-
-            // Convert Value to PredicateValue for matching
-            let pred_value = PredicateValue::from_value(&lookup_value);
 
             // Find matching rows from the join table
             let matching = if join_column == "id" {

@@ -589,6 +589,26 @@ impl<'a> Iterator for ArrayValueIter<'a> {
 impl<'a> ExactSizeIterator for ArrayValueIter<'a> {}
 
 impl<'a> RowValue<'a> {
+    /// Convert to PredicateValue for use in policy/predicate comparisons.
+    ///
+    /// This is the preferred conversion method - it produces a minimal value
+    /// type suitable for comparisons without complex nested types.
+    pub fn to_predicate_value(&self) -> PredicateValue {
+        match self {
+            RowValue::Bool(v) => PredicateValue::Bool(*v),
+            RowValue::I32(v) => PredicateValue::I32(*v),
+            RowValue::U32(v) => PredicateValue::U32(*v),
+            RowValue::I64(v) => PredicateValue::I64(*v),
+            RowValue::F64(v) => PredicateValue::F64(*v),
+            RowValue::Ref(v) => PredicateValue::Ref(*v),
+            RowValue::String(v) => PredicateValue::String((*v).to_string()),
+            RowValue::Bytes(v) => PredicateValue::Bytes((*v).to_vec()),
+            RowValue::Null => PredicateValue::Null,
+            // Complex types not directly representable in PredicateValue
+            RowValue::Blob(_) | RowValue::BlobArray(_) | RowValue::Array(_) => PredicateValue::Null,
+        }
+    }
+
     /// Convert to the Value type (allocates for strings/bytes).
     pub fn to_value(&self) -> Value {
         match self {

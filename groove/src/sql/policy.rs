@@ -5,7 +5,6 @@
 
 use crate::object::ObjectId;
 use crate::sql::query_graph::PredicateValue;
-use crate::sql::row::Value;
 use crate::sql::row_buffer::OwnedRow;
 use std::collections::HashMap;
 
@@ -899,21 +898,21 @@ impl<'a> EvalContext<'a> {
     }
 
     /// Get column value from current row.
-    fn get_column(&self, name: &str) -> Option<Value> {
+    fn get_column(&self, name: &str) -> Option<PredicateValue> {
         let row = self.row?;
-        row.get_by_name(name).map(|v| v.to_value())
+        row.get_by_name(name).map(|v| v.to_predicate_value())
     }
 
     /// Get column value from @old row.
-    fn get_old_column(&self, name: &str) -> Option<Value> {
+    fn get_old_column(&self, name: &str) -> Option<PredicateValue> {
         let row = self.old_row?;
-        row.get_by_name(name).map(|v| v.to_value())
+        row.get_by_name(name).map(|v| v.to_predicate_value())
     }
 
     /// Get column value from @new row.
-    fn get_new_column(&self, name: &str) -> Option<Value> {
+    fn get_new_column(&self, name: &str) -> Option<PredicateValue> {
         let row = self.new_row?;
-        row.get_by_name(name).map(|v| v.to_value())
+        row.get_by_name(name).map(|v| v.to_predicate_value())
     }
 
     /// Get the row ID (current row).
@@ -1192,14 +1191,14 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
         }
     }
 
-    /// Resolve a PolicyValue to an actual Value.
-    fn resolve_value<'b>(&self, pv: &'b PolicyValue, ctx: &'b EvalContext) -> Option<Value> {
+    /// Resolve a PolicyValue to a PredicateValue for comparison.
+    fn resolve_value(&self, pv: &PolicyValue, ctx: &EvalContext) -> Option<PredicateValue> {
         match pv {
             PolicyValue::Column(name) => ctx.get_column(name),
             PolicyValue::OldColumn(name) => ctx.get_old_column(name),
             PolicyValue::NewColumn(name) => ctx.get_new_column(name),
-            PolicyValue::Viewer => Some(Value::Ref(self.viewer)),
-            PolicyValue::Literal(v) => Some(v.to_value()),
+            PolicyValue::Viewer => Some(PredicateValue::Ref(self.viewer)),
+            PolicyValue::Literal(v) => Some(v.clone()),
         }
     }
 
@@ -1212,7 +1211,7 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
         pred: F,
     ) -> bool
     where
-        F: Fn(&Value, &Value) -> bool,
+        F: Fn(&PredicateValue, &PredicateValue) -> bool,
     {
         match (
             self.resolve_value(left, ctx),
@@ -1238,11 +1237,12 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
         let r = self.resolve_value(right, ctx);
 
         match (l, r) {
-            (Some(Value::I64(a)), Some(Value::I64(b))) => pred(a.cmp(&b)),
-            (Some(Value::F64(a)), Some(Value::F64(b))) => {
+            (Some(PredicateValue::I32(a)), Some(PredicateValue::I32(b))) => pred(a.cmp(&b)),
+            (Some(PredicateValue::I64(a)), Some(PredicateValue::I64(b))) => pred(a.cmp(&b)),
+            (Some(PredicateValue::F64(a)), Some(PredicateValue::F64(b))) => {
                 a.partial_cmp(&b).map(|o| pred(o)).unwrap_or(false)
             }
-            (Some(Value::String(a)), Some(Value::String(b))) => pred(a.cmp(&b)),
+            (Some(PredicateValue::String(ref a)), Some(PredicateValue::String(ref b))) => pred(a.cmp(b)),
             _ => false,
         }
     }
@@ -1266,8 +1266,12 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
 
         // Get the referenced ID from the column
         let ref_id = match column {
-            PolicyColumnRef::Current(name) => ctx.get_column(name).and_then(|v| v.as_ref()),
-            PolicyColumnRef::New(name) => ctx.get_new_column(name).and_then(|v| v.as_ref()),
+            PolicyColumnRef::Current(name) => ctx.get_column(name).and_then(|v| {
+                if let PredicateValue::Ref(id) = v { Some(id) } else { None }
+            }),
+            PolicyColumnRef::New(name) => ctx.get_new_column(name).and_then(|v| {
+                if let PredicateValue::Ref(id) = v { Some(id) } else { None }
+            }),
         };
 
         let ref_id = match ref_id {
@@ -1498,7 +1502,7 @@ mod tests {
 
     use crate::sql::schema::{ColumnDef, ColumnType};
 
-    use crate::sql::row_buffer::{OwnedRow, RowDescriptor};
+    use crate::sql::row_buffer::{OwnedRow, RowBuilder, RowDescriptor};
     use std::sync::Arc;
 
     /// Mock implementation for testing.
@@ -1526,10 +1530,13 @@ mod tests {
                 .insert(name.to_string(), TableSchema::new(name.to_string(), cols));
         }
 
-        fn add_row(&mut self, table: &str, id: ObjectId, values: &[Value]) {
+        fn add_row_with<F>(&mut self, table: &str, id: ObjectId, f: F)
+        where
+            F: FnOnce(RowBuilder) -> OwnedRow,
+        {
             let schema = self.schemas.get(table).expect("schema must exist");
             let descriptor = Arc::new(RowDescriptor::from_table_schema(schema));
-            let row = OwnedRow::from_values(values, descriptor);
+            let row = f(RowBuilder::new(descriptor));
             self.rows.insert((table.to_string(), id), row);
         }
 
@@ -1580,16 +1587,19 @@ mod tests {
         // Create a user
         let user_id = ObjectId::new(1);
         let other_user_id = ObjectId::new(2);
-        lookup.add_row("users", user_id, &[Value::String("Alice".into())]);
-        lookup.add_row("users", other_user_id, &[Value::String("Bob".into())]);
+        lookup.add_row_with("users", user_id, |b| b
+            .set_string_by_name("name", "Alice")
+            .build());
+        lookup.add_row_with("users", other_user_id, |b| b
+            .set_string_by_name("name", "Bob")
+            .build());
 
         // Create a document owned by user 1
         let doc_id = ObjectId::new(100);
-        lookup.add_row(
-            "documents",
-            doc_id,
-            &[Value::String("My Doc".into()), Value::Ref(user_id)],
-        );
+        lookup.add_row_with("documents", doc_id, |b| b
+            .set_string_by_name("title", "My Doc")
+            .set_ref_by_name("owner_id", user_id)
+            .build());
 
         // Add policy: owner can read
         lookup.add_policy(Policy::new("documents", PolicyAction::Select).with_where(
@@ -1651,24 +1661,26 @@ mod tests {
         // Create users
         let alice_id = ObjectId::new(1);
         let bob_id = ObjectId::new(2);
-        lookup.add_row("users", alice_id, &[Value::String("Alice".into())]);
-        lookup.add_row("users", bob_id, &[Value::String("Bob".into())]);
+        lookup.add_row_with("users", alice_id, |b| b
+            .set_string_by_name("name", "Alice")
+            .build());
+        lookup.add_row_with("users", bob_id, |b| b
+            .set_string_by_name("name", "Bob")
+            .build());
 
         // Create a folder owned by Alice
         let folder_id = ObjectId::new(10);
-        lookup.add_row(
-            "folders",
-            folder_id,
-            &[Value::String("Alice's Folder".into()), Value::Ref(alice_id)],
-        );
+        lookup.add_row_with("folders", folder_id, |b| b
+            .set_string_by_name("name", "Alice's Folder")
+            .set_ref_by_name("owner_id", alice_id)
+            .build());
 
         // Create a document in that folder
         let doc_id = ObjectId::new(100);
-        lookup.add_row(
-            "documents",
-            doc_id,
-            &[Value::String("Doc in Folder".into()), Value::Ref(folder_id)],
-        );
+        lookup.add_row_with("documents", doc_id, |b| b
+            .set_string_by_name("title", "Doc in Folder")
+            .set_ref_by_name("folder_id", folder_id)
+            .build());
 
         // Add folder policy: owner can read
         lookup.add_policy(
@@ -1733,44 +1745,36 @@ mod tests {
         // Create user
         let alice_id = ObjectId::new(1);
         let bob_id = ObjectId::new(2);
-        lookup.add_row("users", alice_id, &[Value::String("Alice".into())]);
-        lookup.add_row("users", bob_id, &[Value::String("Bob".into())]);
+        lookup.add_row_with("users", alice_id, |b| b
+            .set_string_by_name("name", "Alice")
+            .build());
+        lookup.add_row_with("users", bob_id, |b| b
+            .set_string_by_name("name", "Bob")
+            .build());
 
         // Create root folder owned by Alice
         let root_folder_id = ObjectId::new(10);
-        lookup.add_row(
-            "folders",
-            root_folder_id,
-            &[
-                Value::String("Root".into()),
-                Value::NullableNone, // no parent
-                Value::Ref(alice_id),
-            ],
-        );
+        lookup.add_row_with("folders", root_folder_id, |b| b
+            .set_string_by_name("name", "Root")
+            .set_null_by_name("parent_id") // no parent
+            .set_ref_by_name("owner_id", alice_id)
+            .build());
 
         // Create child folder
         let child_folder_id = ObjectId::new(11);
-        lookup.add_row(
-            "folders",
-            child_folder_id,
-            &[
-                Value::String("Child".into()),
-                Value::Ref(root_folder_id), // parent is root
-                Value::NullableNone,        // no direct owner
-            ],
-        );
+        lookup.add_row_with("folders", child_folder_id, |b| b
+            .set_string_by_name("name", "Child")
+            .set_ref_by_name("parent_id", root_folder_id) // parent is root
+            .set_null_by_name("owner_id") // no direct owner
+            .build());
 
         // Create grandchild folder
         let grandchild_folder_id = ObjectId::new(12);
-        lookup.add_row(
-            "folders",
-            grandchild_folder_id,
-            &[
-                Value::String("Grandchild".into()),
-                Value::Ref(child_folder_id), // parent is child
-                Value::NullableNone,         // no direct owner
-            ],
-        );
+        lookup.add_row_with("folders", grandchild_folder_id, |b| b
+            .set_string_by_name("name", "Grandchild")
+            .set_ref_by_name("parent_id", child_folder_id) // parent is child
+            .set_null_by_name("owner_id") // no direct owner
+            .build());
 
         // Add folder policy: owner OR inherit from parent
         lookup.add_policy(
@@ -1828,8 +1832,12 @@ mod tests {
 
         let alice_id = ObjectId::new(1);
         let bob_id = ObjectId::new(2);
-        lookup.add_row("users", alice_id, &[Value::String("Alice".into())]);
-        lookup.add_row("users", bob_id, &[Value::String("Bob".into())]);
+        lookup.add_row_with("users", alice_id, |b| b
+            .set_string_by_name("name", "Alice")
+            .build());
+        lookup.add_row_with("users", bob_id, |b| b
+            .set_string_by_name("name", "Bob")
+            .build());
 
         // Add INSERT policy: author must be viewer
         lookup.add_policy(Policy::new("documents", PolicyAction::Insert).with_check(
@@ -1848,10 +1856,10 @@ mod tests {
         let doc_schema = lookup.schemas.get("documents").unwrap();
         let new_doc_desc = Arc::new(RowDescriptor::from_table_schema(doc_schema));
         let new_doc_id = ObjectId::new(100);
-        let new_doc = OwnedRow::from_values(
-            &[Value::String("Alice's Doc".into()), Value::Ref(alice_id)],
-            new_doc_desc.clone(),
-        );
+        let new_doc = RowBuilder::new(new_doc_desc.clone())
+            .set_string_by_name("title", "Alice's Doc")
+            .set_ref_by_name("author_id", alice_id)
+            .build();
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, alice_id, config.clone());
         let result = eval.check_insert("documents", new_doc_id, &new_doc);
         assert!(
@@ -1862,10 +1870,10 @@ mod tests {
 
         // Alice cannot insert doc with Bob as author
         let new_doc_id = ObjectId::new(101);
-        let new_doc = OwnedRow::from_values(
-            &[Value::String("Forged Doc".into()), Value::Ref(bob_id)],
-            new_doc_desc,
-        );
+        let new_doc = RowBuilder::new(new_doc_desc)
+            .set_string_by_name("title", "Forged Doc")
+            .set_ref_by_name("author_id", bob_id)
+            .build();
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, alice_id, config);
         let result = eval.check_insert("documents", new_doc_id, &new_doc);
         assert!(
@@ -1895,15 +1903,18 @@ mod tests {
 
         let alice_id = ObjectId::new(1);
         let bob_id = ObjectId::new(2);
-        lookup.add_row("users", alice_id, &[Value::String("Alice".into())]);
-        lookup.add_row("users", bob_id, &[Value::String("Bob".into())]);
+        lookup.add_row_with("users", alice_id, |b| b
+            .set_string_by_name("name", "Alice")
+            .build());
+        lookup.add_row_with("users", bob_id, |b| b
+            .set_string_by_name("name", "Bob")
+            .build());
 
         let doc_id = ObjectId::new(100);
-        lookup.add_row(
-            "documents",
-            doc_id,
-            &[Value::String("Original".into()), Value::Ref(alice_id)],
-        );
+        lookup.add_row_with("documents", doc_id, |b| b
+            .set_string_by_name("title", "Original")
+            .set_ref_by_name("author_id", alice_id)
+            .build());
 
         // Add UPDATE policy: author can update, but cannot change author
         lookup.add_policy(
@@ -1928,13 +1939,10 @@ mod tests {
         let doc_desc = Arc::new(RowDescriptor::from_table_schema(doc_schema));
 
         // Alice can update title
-        let new_doc = OwnedRow::from_values(
-            &[
-                Value::String("Updated".into()),
-                Value::Ref(alice_id), // same author
-            ],
-            doc_desc.clone(),
-        );
+        let new_doc = RowBuilder::new(doc_desc.clone())
+            .set_string_by_name("title", "Updated")
+            .set_ref_by_name("author_id", alice_id) // same author
+            .build();
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, alice_id, config.clone());
         let result = eval.check_update("documents", old_doc_id, &old_doc_row, old_doc_id, &new_doc);
         assert!(
@@ -1944,13 +1952,10 @@ mod tests {
         );
 
         // Alice cannot change author to Bob
-        let new_doc = OwnedRow::from_values(
-            &[
-                Value::String("Updated".into()),
-                Value::Ref(bob_id), // changed author!
-            ],
-            doc_desc.clone(),
-        );
+        let new_doc = RowBuilder::new(doc_desc.clone())
+            .set_string_by_name("title", "Updated")
+            .set_ref_by_name("author_id", bob_id) // changed author!
+            .build();
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, alice_id, config.clone());
         let result = eval.check_update("documents", old_doc_id, &old_doc_row, old_doc_id, &new_doc);
         assert!(
@@ -1960,10 +1965,10 @@ mod tests {
         );
 
         // Bob cannot update at all
-        let new_doc = OwnedRow::from_values(
-            &[Value::String("Hacked".into()), Value::Ref(alice_id)],
-            doc_desc,
-        );
+        let new_doc = RowBuilder::new(doc_desc)
+            .set_string_by_name("title", "Hacked")
+            .set_ref_by_name("author_id", alice_id)
+            .build();
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, bob_id, config);
         let result = eval.check_update("documents", old_doc_id, &old_doc_row, old_doc_id, &new_doc);
         assert!(
@@ -1982,7 +1987,9 @@ mod tests {
         lookup.add_table("items", vec![("name", ColumnType::String)]);
 
         let item_id = ObjectId::new(1);
-        lookup.add_row("items", item_id, &[Value::String("Item".into())]);
+        lookup.add_row_with("items", item_id, |b| b
+            .set_string_by_name("name", "Item")
+            .build());
 
         // No policy defined
         let (item_row_id, item_row) = lookup.get_row("items", item_id).unwrap();
@@ -2016,14 +2023,15 @@ mod tests {
 
         let alice_id = ObjectId::new(1);
         let bob_id = ObjectId::new(2);
-        lookup.add_row("users", alice_id, &[Value::String("Alice".into())]);
+        lookup.add_row_with("users", alice_id, |b| b
+            .set_string_by_name("name", "Alice")
+            .build());
 
         let item_id = ObjectId::new(100);
-        lookup.add_row(
-            "items",
-            item_id,
-            &[Value::String("Item".into()), Value::Ref(alice_id)],
-        );
+        lookup.add_row_with("items", item_id, |b| b
+            .set_string_by_name("name", "Item")
+            .set_ref_by_name("owner_id", alice_id)
+            .build());
 
         // Only add UPDATE policy, no DELETE policy
         lookup.add_policy(

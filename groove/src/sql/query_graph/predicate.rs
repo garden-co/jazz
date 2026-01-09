@@ -63,6 +63,11 @@ impl PredicateValue {
         }
     }
 
+    /// Check if this value is null.
+    pub fn is_null(&self) -> bool {
+        matches!(self, PredicateValue::Null)
+    }
+
     /// Convert to a display string for predicates.
     pub fn to_display_string(&self) -> String {
         match self {
