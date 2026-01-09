@@ -85,7 +85,7 @@ export function JazzReactProvider<
     } satisfies JazzContextManagerProps<S>;
   }, [guestMode, sync.peer, sync.when, storage]);
 
-  if (contextManager.propsChanged(props)) {
+  if (contextManager.propsChanged(props) && typeof window !== "undefined") {
     contextManager.createContext(props).catch((error) => {
       console.log(error.stack);
       console.error("Error creating Jazz browser context:", error);
