@@ -16,6 +16,17 @@ module.exports = makeMetroConfig({
   ],
   resolver: {
     resolveRequest: (context, moduleName, platform) => {
+      // Force react-native-passkey to resolve from workspace root
+      if (moduleName === "react-native-passkey") {
+        return {
+          type: "sourceFile",
+          filePath: path.resolve(
+            workspaceRoot,
+            "node_modules/react-native-passkey/lib/module/index.js",
+          ),
+        };
+      }
+
       // First try the symlinks resolver
       try {
         const result = symlinkResolver(context, moduleName, platform);
@@ -33,6 +44,12 @@ module.exports = makeMetroConfig({
       path.resolve(projectRoot, "node_modules"),
       path.resolve(workspaceRoot, "node_modules"),
     ],
+    extraNodeModules: {
+      "react-native-passkey": path.resolve(
+        workspaceRoot,
+        "node_modules/react-native-passkey",
+      ),
+    },
     sourceExts: ["mjs", "js", "json", "ts", "tsx"],
     unstable_enableSymlinks: true,
   },

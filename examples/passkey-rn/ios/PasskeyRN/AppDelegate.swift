@@ -45,4 +45,9 @@ class ReactNativeDelegate: RCTDefaultReactNativeFactoryDelegate {
     Bundle.main.url(forResource: "main", withExtension: "jsbundle")
 #endif
   }
+
+  // Disable bridgeless mode to support legacy NativeModules (react-native-passkey)
+  override func bridgelessEnabled() -> Bool {
+    return false
+  }
 }

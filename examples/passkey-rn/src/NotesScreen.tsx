@@ -11,13 +11,18 @@ import {
 } from "react-native";
 import { co, Group } from "jazz-tools";
 import { useAccount, useCoState, useLogOut } from "jazz-tools/react-native";
+import { useIsAuthenticated } from "jazz-tools/react-core";
 import { Note, NoteList } from "./schema";
+
+type Props = {
+  navigation: any;
+};
 
 /**
  * A simple notes screen demonstrating Jazz CRUD operations.
  * Notes are synced in real-time across all devices.
  */
-export function NotesScreen() {
+export function NotesScreen({ navigation }: Props) {
   const colorScheme = useColorScheme();
   const darkMode = colorScheme === "dark";
   const [newNoteTitle, setNewNoteTitle] = useState("");
@@ -25,6 +30,14 @@ export function NotesScreen() {
 
   const me = useAccount();
   const logOut = useLogOut();
+  const isAuthenticated = useIsAuthenticated();
+
+  // Navigate back to Auth when logged out
+  useEffect(() => {
+    if (!isAuthenticated) {
+      navigation.replace("Auth");
+    }
+  }, [isAuthenticated, navigation]);
 
   // Create a note list when the user is loaded
   useEffect(() => {

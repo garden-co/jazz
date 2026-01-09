@@ -87,7 +87,8 @@ export function getPasskeyModule(): PasskeyModule {
       module.Passkey || module.default || module;
     cachedPasskeyModule = passkeyModule;
     return passkeyModule;
-  } catch {
+  } catch (e) {
+    console.error("Failed to load react-native-passkey:", e);
     throw new Error(
       "react-native-passkey is not installed. Please install it to use passkey authentication: npm install react-native-passkey",
     );
