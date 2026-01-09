@@ -93,3 +93,14 @@ Get your API key from https://linear.app/settings/api
 
 If a team member tries to interact with Linear but doesn't have this set up, walk them through creating an API key and adding it to their shell profile.
 
+### Fetching Issues
+
+**Always use the Linear GraphQL API** to fetch issues (not the web UI). Example:
+
+```bash
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Content-Type: application/json" \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -d '{"query": "query { issue(id: \"GCO-1071\") { id identifier title description state { name } comments { nodes { body createdAt user { name } } } } }"}'
+```
+
