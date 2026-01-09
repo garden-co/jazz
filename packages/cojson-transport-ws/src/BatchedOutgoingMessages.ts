@@ -7,7 +7,6 @@ import {
   cojsonInternals,
   logger,
 } from "cojson";
-import { addMessageToBacklog } from "./serialization.js";
 import type { AnyWebSocket } from "./types.js";
 import {
   hasWebSocketTooMuchBufferedData,
@@ -121,20 +120,28 @@ export class BatchedOutgoingMessages
       return;
     }
 
-    const payload = addMessageToBacklog(this.backlog, msg);
+    const payload = JSON.stringify(msg);
 
     const maxChunkSizeReached =
-      payload.length >= MAX_OUTGOING_MESSAGES_CHUNK_BYTES;
+      this.backlog.length + payload.length >= MAX_OUTGOING_MESSAGES_CHUNK_BYTES;
     const backlogExists = this.backlog.length > 0;
 
-    if (maxChunkSizeReached && backlogExists) {
-      this.sendMessagesInBulk();
-      this.backlog = addMessageToBacklog("", msg);
-    } else if (maxChunkSizeReached) {
+    if (maxChunkSizeReached) {
+      if (backlogExists) {
+        this.sendMessagesInBulk();
+      }
+
       this.backlog = payload;
-      this.sendMessagesInBulk();
+
+      if (payload.length >= MAX_OUTGOING_MESSAGES_CHUNK_BYTES) {
+        this.sendMessagesInBulk();
+      }
     } else {
-      this.backlog = payload;
+      if (backlogExists) {
+        this.backlog += `\n${payload}`;
+      } else {
+        this.backlog = payload;
+      }
     }
   }
 
