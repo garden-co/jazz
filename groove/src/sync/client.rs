@@ -259,9 +259,9 @@ impl SyncClient {
         match event {
             SseEvent::Commits { object_id, commits, frontier } => {
                 // Apply commits to local node
-                for commit in commits {
+                for _commit in commits {
                     // Store commit locally
-                    // Note: This requires adding commits to LocalNode - implementation detail
+                    // TODO: This requires adding commits to LocalNode - implementation detail
                 }
                 // Update server known state
                 self.update_server_known_state(*object_id, frontier.clone());
@@ -271,18 +271,16 @@ impl SyncClient {
                 // Remove from our tracking but keep local data
                 self.server_known_state.remove(object_id);
             }
-            SseEvent::Truncate { object_id, truncate_at } => {
+            SseEvent::Truncate { object_id: _, truncate_at: _ } => {
                 // Server is truncating history
-                // We should truncate our local copy too
-                // Note: Requires truncation support in LocalNode
+                // TODO: Truncate local copy - requires truncation support in LocalNode
             }
-            SseEvent::Request { object_id, commit_ids } => {
+            SseEvent::Request { object_id: _, commit_ids: _ } => {
                 // Server is requesting commits we have
-                // We should push these commits
-                // This would trigger a push request
+                // TODO: Push these commits - would trigger a push request
             }
-            SseEvent::Error { code, message } => {
-                // Handle error - log or surface to application
+            SseEvent::Error { code: _, message: _ } => {
+                // TODO: Handle error - log or surface to application
             }
         }
     }

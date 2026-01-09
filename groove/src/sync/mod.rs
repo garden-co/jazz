@@ -11,11 +11,15 @@ mod negotiation;
 mod protocol;
 
 #[cfg(feature = "sync-server")]
+mod handlers;
+#[cfg(feature = "sync-server")]
 mod server;
 
 pub use client::*;
 pub use negotiation::*;
 pub use protocol::*;
 
+#[cfg(feature = "sync-server")]
+pub use handlers::*;
 #[cfg(feature = "sync-server")]
 pub use server::*;

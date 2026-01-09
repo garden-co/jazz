@@ -3,6 +3,11 @@ name = "groove"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "sync_server"
+path = "src/bin/sync_server.rs"
+required-features = ["sync-server"]
+
 [features]
 default = []
 wasm = ["uuid/js", "getrandom/js", "dep:web-time"]
