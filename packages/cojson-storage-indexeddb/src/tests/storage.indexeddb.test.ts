@@ -15,12 +15,12 @@ import {
 
 const Crypto = await WasmCrypto.create();
 let syncMessages: ReturnType<typeof trackMessages>;
+
 let dbName: string;
 
-const DATABASE_NAME = "jazz-storage";
-internal_setDatabaseName(DATABASE_NAME);
-
 beforeEach(() => {
+  dbName = `test-${crypto.randomUUID()}`;
+  internal_setDatabaseName(dbName);
   syncMessages = trackMessages();
   cojsonInternals.setSyncStateTrackingBatchDelay(0);
   cojsonInternals.setCoValueLoadingRetryDelay(10);
@@ -28,7 +28,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   syncMessages.restore();
-  indexedDB.deleteDatabase(DATABASE_NAME);
+  indexedDB.deleteDatabase(dbName);
 });
 
 test("should sync and load data from storage", async () => {
