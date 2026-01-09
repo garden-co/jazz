@@ -364,16 +364,11 @@ fn database_roundtrip_with_inline_blob() {
         let blob_ref = ContentRef::inline(small_data.clone());
 
         // Insert with blob
-        db.insert(
-            "files",
-            &["id", "name", "data"],
-            vec![
-                Value::I64(1),
-                Value::String("small.bin".to_string()),
-                Value::Blob(blob_ref),
-            ],
-        )
-        .unwrap();
+        db.insert_with("files", |b| b
+            .set_i64_by_name("id", 1)
+            .set_string_by_name("name", "small.bin")
+            .set_blob_by_name("data", blob_ref)
+            .build()).unwrap();
 
         db.catalog_object_id()
     };
@@ -423,16 +418,11 @@ fn database_roundtrip_with_chunked_blob() {
         let blob_ref = ContentRef::chunked(hashes);
 
         // Insert with blob
-        db.insert(
-            "files",
-            &["id", "name", "data"],
-            vec![
-                Value::I64(1),
-                Value::String("large.bin".to_string()),
-                Value::Blob(blob_ref),
-            ],
-        )
-        .unwrap();
+        db.insert_with("files", |b| b
+            .set_i64_by_name("id", 1)
+            .set_string_by_name("name", "large.bin")
+            .set_blob_by_name("data", blob_ref)
+            .build()).unwrap();
 
         db.catalog_object_id()
     };

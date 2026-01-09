@@ -191,24 +191,18 @@ fn select_all() {
     ))
     .unwrap();
 
-    db.insert(
-        "users",
-        &["name", "active"],
-        vec![Value::String("Alice".into()), Value::Bool(true)],
-    )
-    .unwrap();
-    db.insert(
-        "users",
-        &["name", "active"],
-        vec![Value::String("Bob".into()), Value::Bool(false)],
-    )
-    .unwrap();
-    db.insert(
-        "users",
-        &["name", "active"],
-        vec![Value::String("Carol".into()), Value::Bool(true)],
-    )
-    .unwrap();
+    db.insert_with("users", |b| b
+        .set_string_by_name("name", "Alice")
+        .set_bool_by_name("active", true)
+        .build()).unwrap();
+    db.insert_with("users", |b| b
+        .set_string_by_name("name", "Bob")
+        .set_bool_by_name("active", false)
+        .build()).unwrap();
+    db.insert_with("users", |b| b
+        .set_string_by_name("name", "Carol")
+        .set_bool_by_name("active", true)
+        .build()).unwrap();
 
     let rows = db.select_all("users").unwrap();
     assert_eq!(rows.len(), 3);
@@ -233,24 +227,18 @@ fn select_where() {
     ))
     .unwrap();
 
-    db.insert(
-        "users",
-        &["name", "active"],
-        vec![Value::String("Alice".into()), Value::Bool(true)],
-    )
-    .unwrap();
-    db.insert(
-        "users",
-        &["name", "active"],
-        vec![Value::String("Bob".into()), Value::Bool(false)],
-    )
-    .unwrap();
-    db.insert(
-        "users",
-        &["name", "active"],
-        vec![Value::String("Carol".into()), Value::Bool(true)],
-    )
-    .unwrap();
+    db.insert_with("users", |b| b
+        .set_string_by_name("name", "Alice")
+        .set_bool_by_name("active", true)
+        .build()).unwrap();
+    db.insert_with("users", |b| b
+        .set_string_by_name("name", "Bob")
+        .set_bool_by_name("active", false)
+        .build()).unwrap();
+    db.insert_with("users", |b| b
+        .set_string_by_name("name", "Carol")
+        .set_bool_by_name("active", true)
+        .build()).unwrap();
 
     let active = db.select_where("users", "active", &PredicateValue::Bool(true)).unwrap();
     assert_eq!(active.len(), 2);
@@ -497,29 +485,22 @@ fn insert_validates_ref() {
     .unwrap();
 
     // Insert with non-existent user fails
-    let result = db.insert(
-        "posts",
-        &["author", "title"],
-        vec![
-            Value::Ref(ObjectId::new(0x12345)), // fake user ID
-            Value::String("Hello".into()),
-        ],
-    );
+    let result = db.insert_with("posts", |b| b
+        .set_ref_by_name("author", ObjectId::new(0x12345))  // fake user ID
+        .set_string_by_name("title", "Hello")
+        .build());
     assert!(matches!(result, Err(DatabaseError::InvalidReference { .. })));
 
     // Create a user
-    let user_id = db
-        .insert("users", &["name"], vec![Value::String("Alice".into())])
-        .unwrap();
+    let user_id = db.insert_with("users", |b| b
+        .set_string_by_name("name", "Alice")
+        .build()).unwrap();
 
     // Now insert post with valid ref works
-    let post_id = db
-        .insert(
-            "posts",
-            &["author", "title"],
-            vec![Value::Ref(user_id), Value::String("Hello".into())],
-        )
-        .unwrap();
+    let post_id = db.insert_with("posts", |b| b
+        .set_ref_by_name("author", user_id)
+        .set_string_by_name("title", "Hello")
+        .build()).unwrap();
 
     let post = db.get("posts", post_id).unwrap().unwrap();
     assert_eq!(post.1.get_column(0).unwrap(), Value::Ref(user_id));
@@ -544,34 +525,28 @@ fn find_referencing_uses_index() {
     ))
     .unwrap();
 
-    let alice_id = db
-        .insert("users", &["name"], vec![Value::String("Alice".into())])
-        .unwrap();
-    let bob_id = db
-        .insert("users", &["name"], vec![Value::String("Bob".into())])
-        .unwrap();
+    let alice_id = db.insert_with("users", |b| b
+        .set_string_by_name("name", "Alice")
+        .build()).unwrap();
+    let bob_id = db.insert_with("users", |b| b
+        .set_string_by_name("name", "Bob")
+        .build()).unwrap();
 
     // Create posts by Alice
-    db.insert(
-        "posts",
-        &["author", "title"],
-        vec![Value::Ref(alice_id), Value::String("Post 1".into())],
-    )
-    .unwrap();
-    db.insert(
-        "posts",
-        &["author", "title"],
-        vec![Value::Ref(alice_id), Value::String("Post 2".into())],
-    )
-    .unwrap();
+    db.insert_with("posts", |b| b
+        .set_ref_by_name("author", alice_id)
+        .set_string_by_name("title", "Post 1")
+        .build()).unwrap();
+    db.insert_with("posts", |b| b
+        .set_ref_by_name("author", alice_id)
+        .set_string_by_name("title", "Post 2")
+        .build()).unwrap();
 
     // Create post by Bob
-    db.insert(
-        "posts",
-        &["author", "title"],
-        vec![Value::Ref(bob_id), Value::String("Bob's Post".into())],
-    )
-    .unwrap();
+    db.insert_with("posts", |b| b
+        .set_ref_by_name("author", bob_id)
+        .set_string_by_name("title", "Bob's Post")
+        .build()).unwrap();
 
     // Find all posts by Alice
     let alice_posts = db.find_referencing("posts", "author", alice_id).unwrap();
@@ -605,20 +580,17 @@ fn update_maintains_index() {
     ))
     .unwrap();
 
-    let alice_id = db
-        .insert("users", &["name"], vec![Value::String("Alice".into())])
-        .unwrap();
-    let bob_id = db
-        .insert("users", &["name"], vec![Value::String("Bob".into())])
-        .unwrap();
+    let alice_id = db.insert_with("users", |b| b
+        .set_string_by_name("name", "Alice")
+        .build()).unwrap();
+    let bob_id = db.insert_with("users", |b| b
+        .set_string_by_name("name", "Bob")
+        .build()).unwrap();
 
-    let post_id = db
-        .insert(
-            "posts",
-            &["author", "title"],
-            vec![Value::Ref(alice_id), Value::String("A Post".into())],
-        )
-        .unwrap();
+    let post_id = db.insert_with("posts", |b| b
+        .set_ref_by_name("author", alice_id)
+        .set_string_by_name("title", "A Post")
+        .build()).unwrap();
 
     // Initially Alice has the post
     assert_eq!(
@@ -633,8 +605,9 @@ fn update_maintains_index() {
     );
 
     // Reassign post to Bob
-    db.update("posts", post_id, &[("author", Value::Ref(bob_id))])
-        .unwrap();
+    db.update_with("posts", post_id, |b| b
+        .set_ref_by_name("author", bob_id)
+        .build()).unwrap();
 
     // Now Bob has the post, Alice doesn't
     assert_eq!(
@@ -668,16 +641,13 @@ fn delete_maintains_index() {
     ))
     .unwrap();
 
-    let alice_id = db
-        .insert("users", &["name"], vec![Value::String("Alice".into())])
-        .unwrap();
-    let post_id = db
-        .insert(
-            "posts",
-            &["author", "title"],
-            vec![Value::Ref(alice_id), Value::String("A Post".into())],
-        )
-        .unwrap();
+    let alice_id = db.insert_with("users", |b| b
+        .set_string_by_name("name", "Alice")
+        .build()).unwrap();
+    let post_id = db.insert_with("posts", |b| b
+        .set_ref_by_name("author", alice_id)
+        .set_string_by_name("title", "A Post")
+        .build()).unwrap();
 
     assert_eq!(
         db.find_referencing("posts", "author", alice_id)
@@ -732,23 +702,20 @@ fn nullable_ref_column() {
     .unwrap();
 
     // Insert post with no author
-    let post_id = db
-        .insert("posts", &["title"], vec![Value::String("Anonymous".into())])
-        .unwrap();
+    let post_id = db.insert_with("posts", |b| b
+        .set_string_by_name("title", "Anonymous")
+        .build()).unwrap();
     let post = db.get("posts", post_id).unwrap().unwrap();
     assert_eq!(post.1.get_column(0).unwrap(), Value::NullableNone);
 
     // Insert post with author
-    let user_id = db
-        .insert("users", &["name"], vec![Value::String("Alice".into())])
-        .unwrap();
-    let post2_id = db
-        .insert(
-            "posts",
-            &["author", "title"],
-            vec![Value::Ref(user_id), Value::String("By Alice".into())],
-        )
-        .unwrap();
+    let user_id = db.insert_with("users", |b| b
+        .set_string_by_name("name", "Alice")
+        .build()).unwrap();
+    let post2_id = db.insert_with("posts", |b| b
+        .set_ref_by_name("author", user_id)
+        .set_string_by_name("title", "By Alice")
+        .build()).unwrap();
 
     // Only the authored post shows in index
     let posts = db.find_referencing("posts", "author", user_id).unwrap();
@@ -1190,8 +1157,9 @@ fn incremental_query_auto_updates_on_update() {
     assert_eq!(initial_rows[0].1.get_column(0).unwrap(), Value::String("Alice".into()));
 
     // Update the row to have a different name
-    db.update("users", id, &[("name", Value::String("Alicia".into()))])
-        .unwrap();
+    db.update_with("users", id, |b| b
+        .set_string_by_name("name", "Alicia")
+        .build()).unwrap();
 
     // Query auto-updates - should now return 0 rows (name no longer matches)
     assert_eq!(query.rows().len(), 0);
@@ -1433,8 +1401,9 @@ fn incremental_join_updates_on_user_change() {
     }));
 
     // Update user - should trigger callback since the joined row includes user data
-    db.update("users", alice_id, &[("name", Value::String("Alicia".into()))])
-        .unwrap();
+    db.update_with("users", alice_id, |b| b
+        .set_string_by_name("name", "Alicia")
+        .build()).unwrap();
 
     // The join should have been notified
     assert!(call_count.load(Ordering::SeqCst) > 0);
@@ -1816,9 +1785,9 @@ fn soft_delete_removes_row_from_queries() {
     ))
     .unwrap();
 
-    let id = db
-        .insert("users", &["name"], vec![Value::String("Alice".into())])
-        .unwrap();
+    let id = db.insert_with("users", |b| b
+        .set_string_by_name("name", "Alice")
+        .build()).unwrap();
 
     // Row exists
     assert!(db.get("users", id).unwrap().is_some());
@@ -2243,56 +2212,44 @@ fn incremental_query_join_plus_array_aggregate_preserves_nullable_columns() {
     db.create_table(assignees_schema.clone()).unwrap();
 
     // Insert project with description (nullable column with value)
-    let project_id = db
-        .insert(
-            "Projects",
-            &["name", "color", "description"],
-            vec![
-                Value::String("Test Project".into()),
-                Value::String("#00ff00".into()),
-                Value::String("A test project".into()),
-            ],
-        )
-        .unwrap();
+    let project_id = db.insert_with("Projects", |b| b
+        .set_string_by_name("name", "Test Project")
+        .set_string_by_name("color", "#00ff00")
+        .set_string_by_name("description", "A test project")
+        .build()).unwrap();
 
     // Insert issue referencing the project
-    let issue_id = db
-        .insert(
-            "Issues",
-            &["title", "description", "status", "priority", "project", "createdAt", "updatedAt"],
-            vec![
-                Value::String("Test Issue".into()),
-                Value::String("Test description".into()),
-                Value::String("open".into()),
-                Value::String("high".into()),
-                Value::Ref(project_id),
-                Value::I64(1234567890),
-                Value::I64(1234567890),
-            ],
-        )
-        .unwrap();
+    let issue_id = db.insert_with("Issues", |b| b
+        .set_string_by_name("title", "Test Issue")
+        .set_string_by_name("description", "Test description")
+        .set_string_by_name("status", "open")
+        .set_string_by_name("priority", "high")
+        .set_ref_by_name("project", project_id)
+        .set_i64_by_name("createdAt", 1234567890)
+        .set_i64_by_name("updatedAt", 1234567890)
+        .build()).unwrap();
 
     // Insert actual Label row
-    let label_id = db.insert("Labels", &["name"], vec![Value::String("Bug".into())]).unwrap();
+    let label_id = db.insert_with("Labels", |b| b
+        .set_string_by_name("name", "Bug")
+        .build()).unwrap();
 
     // Insert actual User row
-    let user_id = db.insert("Users", &["name"], vec![Value::String("Alice".into())]).unwrap();
+    let user_id = db.insert_with("Users", |b| b
+        .set_string_by_name("name", "Alice")
+        .build()).unwrap();
 
     // Insert IssueLabel row
-    db.insert(
-        "IssueLabels",
-        &["issue", "label"],
-        vec![Value::Ref(issue_id), Value::Ref(label_id)],
-    )
-    .unwrap();
+    db.insert_with("IssueLabels", |b| b
+        .set_ref_by_name("issue", issue_id)
+        .set_ref_by_name("label", label_id)
+        .build()).unwrap();
 
     // Insert IssueAssignee row
-    db.insert(
-        "IssueAssignees",
-        &["issue", "user"],
-        vec![Value::Ref(issue_id), Value::Ref(user_id)],
-    )
-    .unwrap();
+    db.insert_with("IssueAssignees", |b| b
+        .set_ref_by_name("issue", issue_id)
+        .set_ref_by_name("user", user_id)
+        .build()).unwrap();
 
     // Build query graph manually:
     // Issues JOIN Projects + ArrayAggregate(IssueLabels) + ArrayAggregate(IssueAssignees)
@@ -2381,33 +2338,22 @@ fn incremental_query_sql_join_preserves_nullable_columns() {
     db.create_table(issues_schema.clone()).unwrap();
 
     // Insert project with description
-    let project_id = db
-        .insert(
-            "Projects",
-            &["name", "color", "description"],
-            vec![
-                Value::String("Test Project".into()),
-                Value::String("#00ff00".into()),
-                Value::String("A test project".into()),
-            ],
-        )
-        .unwrap();
+    let project_id = db.insert_with("Projects", |b| b
+        .set_string_by_name("name", "Test Project")
+        .set_string_by_name("color", "#00ff00")
+        .set_string_by_name("description", "A test project")
+        .build()).unwrap();
 
     // Insert issue referencing the project
-    db.insert(
-        "Issues",
-        &["title", "description", "status", "priority", "project", "createdAt", "updatedAt"],
-        vec![
-            Value::String("Test Issue".into()),
-            Value::String("Test description".into()),
-            Value::String("open".into()),
-            Value::String("high".into()),
-            Value::Ref(project_id),
-            Value::I64(1234567890),
-            Value::I64(1234567890),
-        ],
-    )
-    .unwrap();
+    db.insert_with("Issues", |b| b
+        .set_string_by_name("title", "Test Issue")
+        .set_string_by_name("description", "Test description")
+        .set_string_by_name("status", "open")
+        .set_string_by_name("priority", "high")
+        .set_ref_by_name("project", project_id)
+        .set_i64_by_name("createdAt", 1234567890)
+        .set_i64_by_name("updatedAt", 1234567890)
+        .build()).unwrap();
 
     // Use incremental_query via SQL - this is the path TypeScript uses
     let sql = "SELECT i.* FROM Issues i JOIN Projects ON i.project = Projects.id";
@@ -2493,45 +2439,33 @@ fn incremental_query_sql_join_with_array_preserves_nullable_columns() {
     db.create_table(issue_labels_schema.clone()).unwrap();
 
     // Insert project with description
-    let project_id = db
-        .insert(
-            "Projects",
-            &["name", "color", "description"],
-            vec![
-                Value::String("Test Project".into()),
-                Value::String("#00ff00".into()),
-                Value::String("A test project".into()),
-            ],
-        )
-        .unwrap();
+    let project_id = db.insert_with("Projects", |b| b
+        .set_string_by_name("name", "Test Project")
+        .set_string_by_name("color", "#00ff00")
+        .set_string_by_name("description", "A test project")
+        .build()).unwrap();
 
     // Insert issue referencing the project
-    let issue_id = db
-        .insert(
-            "Issues",
-            &["title", "description", "status", "priority", "project", "createdAt", "updatedAt"],
-            vec![
-                Value::String("Test Issue".into()),
-                Value::String("Test description".into()),
-                Value::String("open".into()),
-                Value::String("high".into()),
-                Value::Ref(project_id),
-                Value::I64(1234567890),
-                Value::I64(1234567890),
-            ],
-        )
-        .unwrap();
+    let issue_id = db.insert_with("Issues", |b| b
+        .set_string_by_name("title", "Test Issue")
+        .set_string_by_name("description", "Test description")
+        .set_string_by_name("status", "open")
+        .set_string_by_name("priority", "high")
+        .set_ref_by_name("project", project_id)
+        .set_i64_by_name("createdAt", 1234567890)
+        .set_i64_by_name("updatedAt", 1234567890)
+        .build()).unwrap();
 
     // Insert label
-    let label_id = db.insert("Labels", &["name"], vec![Value::String("Bug".into())]).unwrap();
+    let label_id = db.insert_with("Labels", |b| b
+        .set_string_by_name("name", "Bug")
+        .build()).unwrap();
 
     // Insert IssueLabel linking issue to label
-    db.insert(
-        "IssueLabels",
-        &["issue", "label"],
-        vec![Value::Ref(issue_id), Value::Ref(label_id)],
-    )
-    .unwrap();
+    db.insert_with("IssueLabels", |b| b
+        .set_ref_by_name("issue", issue_id)
+        .set_ref_by_name("label", label_id)
+        .build()).unwrap();
 
     // Use incremental_query with JOIN + ARRAY subquery - this is what TypeScript generates
     let sql = "SELECT i.*, ARRAY(SELECT il.* FROM IssueLabels il WHERE il.issue = i.id) as labels FROM Issues i JOIN Projects ON i.project = Projects.id";
@@ -2618,25 +2552,21 @@ fn incremental_query_array_with_nested_join() {
     db.create_table(issue_labels_schema.clone()).unwrap();
 
     // Insert label
-    let label_id = db
-        .insert("Labels", &["name", "color"], vec![
-            Value::String("Bug".into()),
-            Value::String("#ff0000".into()),
-        ])
-        .unwrap();
+    let label_id = db.insert_with("Labels", |b| b
+        .set_string_by_name("name", "Bug")
+        .set_string_by_name("color", "#ff0000")
+        .build()).unwrap();
 
     // Insert issue
-    let issue_id = db
-        .insert("Issues", &["title"], vec![Value::String("Test Issue".into())])
-        .unwrap();
+    let issue_id = db.insert_with("Issues", |b| b
+        .set_string_by_name("title", "Test Issue")
+        .build()).unwrap();
 
     // Insert IssueLabel linking issue to label
-    db.insert(
-        "IssueLabels",
-        &["issue", "label"],
-        vec![Value::Ref(issue_id), Value::Ref(label_id)],
-    )
-    .unwrap();
+    db.insert_with("IssueLabels", |b| b
+        .set_ref_by_name("issue", issue_id)
+        .set_ref_by_name("label", label_id)
+        .build()).unwrap();
 
     // Query with ARRAY subquery that has a nested JOIN
     // This is what TypeScript generates for: { IssueLabels: { label: true } }

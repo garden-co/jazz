@@ -1354,6 +1354,15 @@ impl RowBuilder {
         }
     }
 
+    /// Set a blob column value by name.
+    pub fn set_blob_by_name(self, name: &str, value: ContentRef) -> Self {
+        if let Some(idx) = self.descriptor.column_index(name) {
+            self.set_blob(idx, value)
+        } else {
+            self
+        }
+    }
+
     /// Set a column value from a RowValue.
     ///
     /// This is useful when copying values between rows or when
