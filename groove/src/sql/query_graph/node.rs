@@ -1437,7 +1437,7 @@ impl QueryNode {
     where
         G: Fn(&str, ObjectId) -> Option<OwnedRow>,
     {
-        use crate::sql::row_buffer::{RowBuilder, Value};
+        use crate::sql::row_buffer::Value;
 
         if inner_joins.is_empty() {
             return inner_rows.iter().map(|(_, row)| row.clone()).collect();

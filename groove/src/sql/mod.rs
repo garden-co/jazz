@@ -29,7 +29,11 @@ pub use policy::{
     clear_policy_warnings,
 };
 pub use query_graph::PredicateValue;
-pub use row::{RowError, Value, decode_row, encode_row};
+pub use row::{RowError, Value};
+// Legacy encoding functions - no longer used for storage (OwnedRow.buffer is used directly).
+// Re-exported only for test compatibility. Will be removed when Value type is deleted.
+#[doc(hidden)]
+pub use row::{decode_row, encode_row};
 pub use row_buffer::{
     ColDescriptor, ColType, OwnedRow, RowBuilder, RowDescriptor, RowRef, RowValue, join_rows,
     project_row,

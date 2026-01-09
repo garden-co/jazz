@@ -1,13 +1,12 @@
 //! Query graph - the main computation DAG.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use crate::object::ObjectId;
 use crate::sql::query_graph::cache::RowCache;
 use crate::sql::query_graph::delta::{DeltaBatch, RowDelta};
 use crate::sql::query_graph::node::{NodeId, QueryNode};
-use crate::sql::row_buffer::{OwnedRow, RowDescriptor};
+use crate::sql::row_buffer::OwnedRow;
 use crate::sql::schema::TableSchema;
 
 use super::DatabaseState;
@@ -854,11 +853,12 @@ impl QueryGraph {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use super::*;
     use crate::sql::query_graph::builder::QueryGraphBuilder;
     use crate::sql::query_graph::predicate::Predicate;
     use crate::sql::query_graph::PredicateValue;
-    use crate::sql::row_buffer::RowBuilder;
+    use crate::sql::row_buffer::{RowBuilder, RowDescriptor};
     use crate::sql::schema::{ColumnDef, ColumnType};
     use crate::sql::Database;
     use crate::object::ObjectId;
