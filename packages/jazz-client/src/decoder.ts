@@ -85,40 +85,68 @@ interface RowBufferLayout {
 }
 
 /**
- * Information about a reverse ref (array) in the row buffer.
+ * Information about an array column (reverse ref or forward ref in array context) in the row buffer.
  */
-interface ReverseRefLayout {
+interface ArrayColumnLayout {
   name: string;
   sourceTable: string;
   varIndex: number;
+  /** Column metadata for decoding each item in the array */
+  itemColumns: ColumnMeta[];
+  /** Nested include spec for joining related tables in array items */
+  nestedInclude?: IncludeSpec;
+  /** Reference metadata from the source table for building nested joins */
+  sourceTableMeta?: TableMeta;
+  /**
+   * When true, this is a forward ref in array context that Groove wraps in a single-item array.
+   * We should extract items[0] instead of keeping the array.
+   */
+  isSingleItemUnwrap?: boolean;
 }
 
 /**
- * Extended row buffer layout with reverse refs.
+ * Extended row buffer layout with array columns.
  */
 interface RowBufferLayoutExt extends RowBufferLayout {
-  reverseRefs: ReverseRefLayout[];
+  arrayColumns: ArrayColumnLayout[];
 }
 
 /**
  * Compute the row buffer layout for a table with optional includes.
  * This matches the Rust RowDescriptor layout (fixed columns first, then variable).
  *
- * When reverse refs (arrays) are included, they're added as variable columns at the end.
+ * When reverse refs (arrays) are included, they're added as variable columns.
+ * Arrays ARE included in the offset table (unlike the previous incorrect assumption).
  */
 function computeLayout(
   tableMeta: TableMeta,
   schema: SchemaMeta,
-  include?: IncludeSpec
+  include?: IncludeSpec,
+  isArrayItemContext = false
 ): RowBufferLayoutExt {
   const fixedColumns: ColumnLayout[] = [];
   const variableColumns: ColumnLayout[] = [];
-  const reverseRefs: ReverseRefLayout[] = [];
+  const arrayColumns: ArrayColumnLayout[] = [];
   let fixedOffset = 0;
   let varIndex = 0;
 
+  // For array item context (nested includes), Groove excludes FK columns that are being
+  // resolved by inner JOINs. For main query context, Groove includes both FK and expanded columns.
+  const resolvedRefColumns = new Set<string>();
+  if (isArrayItemContext && include) {
+    for (const ref of tableMeta.refs) {
+      if (include[ref.column]) {
+        resolvedRefColumns.add(ref.column);
+      }
+    }
+  }
+
   // Process main table columns
   for (const col of tableMeta.columns) {
+    // In array item context, skip FK columns that are being resolved by includes
+    if (resolvedRefColumns.has(col.name)) {
+      continue;
+    }
     const fixedSize = getColumnFixedSize(col);
     if (fixedSize !== null) {
       fixedColumns.push({ col, tableName: tableMeta.name, isFixed: true, offset: fixedOffset });
@@ -129,54 +157,77 @@ function computeLayout(
   }
 
   // Process included forward refs (joined tables)
+  // Behavior differs based on context:
+  // - Main query: Groove expands JOIN columns inline
+  // - Array item context: Groove wraps the joined row in a single-item Array
   if (include) {
     for (const ref of tableMeta.refs) {
       if (include[ref.column]) {
         const targetTable = schema.tables[ref.targetTable];
         if (targetTable) {
-          // Add joined table's columns
-          for (const col of targetTable.columns) {
-            const fixedSize = getColumnFixedSize(col);
-            if (fixedSize !== null) {
-              fixedColumns.push({ col, tableName: targetTable.name, isFixed: true, offset: fixedOffset });
-              fixedOffset += fixedSize;
-            } else {
-              variableColumns.push({ col, tableName: targetTable.name, isFixed: false, offset: varIndex++ });
+          if (isArrayItemContext) {
+            // In array context, joined tables are wrapped in single-item Arrays, not expanded inline
+            // The FK column was already skipped, add a pseudo-array column for the joined data
+            arrayColumns.push({
+              name: ref.column,
+              sourceTable: ref.targetTable,
+              varIndex: varIndex++,
+              itemColumns: targetTable.columns,
+              nestedInclude: undefined, // No further nesting
+              sourceTableMeta: targetTable,
+              isSingleItemUnwrap: true, // Extract single item, not array
+            });
+          } else {
+            // Main query context: add joined table's columns inline
+            for (const col of targetTable.columns) {
+              const fixedSize = getColumnFixedSize(col);
+              if (fixedSize !== null) {
+                fixedColumns.push({ col, tableName: targetTable.name, isFixed: true, offset: fixedOffset });
+                fixedOffset += fixedSize;
+              } else {
+                variableColumns.push({ col, tableName: targetTable.name, isFixed: false, offset: varIndex++ });
+              }
             }
           }
-
-          // Groove's JOIN output includes an extra variable-length column after the joined table's columns.
-          // TODO: Investigate what this extra variable column actually is.
-          // Add a dummy variable column to account for this in the offset table.
-          // Use '__internal__' as tableName so it doesn't get included in joined objects.
-          const joinMarker: ColumnMeta = { name: `__join_${ref.column}`, type: { kind: 'bytes' }, nullable: false };
-          variableColumns.push({ col: joinMarker, tableName: '__internal__', isFixed: false, offset: varIndex++ });
         }
       }
     }
 
-    // Process included reverse refs (arrays) - these add extra variable columns
+    // Process included reverse refs (arrays) - these ARE variable columns in the row buffer
+    // Arrays are included in the offset table calculation
     for (const reverseRef of tableMeta.reverseRefs) {
-      if (include[reverseRef.name]) {
-        reverseRefs.push({
+      const arrayInclude = include[reverseRef.name];
+      if (arrayInclude) {
+        const sourceTable = schema.tables[reverseRef.sourceTable];
+        // Get columns from the source table for decoding array items
+        const itemColumns = sourceTable?.columns ?? [];
+
+        // Check if there's a nested include spec (e.g., { user: true } in IssueAssignees: { user: true })
+        const nestedInclude = typeof arrayInclude === 'object' ? arrayInclude as IncludeSpec : undefined;
+
+        arrayColumns.push({
           name: reverseRef.name,
           sourceTable: reverseRef.sourceTable,
           varIndex: varIndex++,
+          itemColumns,
+          nestedInclude,
+          sourceTableMeta: sourceTable,
         });
       }
     }
   }
 
   // Offset table has N-1 entries for N variable columns
-  // NOTE: Arrays (reverse refs) are NOT included in the offset table - they're appended after
-  const offsetTableSize = variableColumns.length > 1 ? (variableColumns.length - 1) * 4 : 0;
+  // Arrays ARE included in the offset table (they're variable-size columns)
+  const totalVarColumns = variableColumns.length + arrayColumns.length;
+  const offsetTableSize = totalVarColumns > 1 ? (totalVarColumns - 1) * 4 : 0;
 
   return {
     fixedSize: fixedOffset,
     fixedColumns,
     variableColumns,
     offsetTableSize,
-    reverseRefs,
+    arrayColumns,
   };
 }
 
@@ -278,6 +329,234 @@ function readVariableValue(
 }
 
 /**
+ * Read array data from the variable section and return the raw bytes.
+ * Returns the slice of bytes containing the array data.
+ */
+function readArrayData(
+  bytes: Uint8Array,
+  view: DataView,
+  bufferStart: number,
+  layout: RowBufferLayoutExt,
+  varIndex: number,
+  rowEnd: number,
+  totalVarCount: number
+): Uint8Array {
+  const offsetTableStart = bufferStart + layout.fixedSize;
+  const varDataStart = offsetTableStart + layout.offsetTableSize;
+
+  // Calculate start position for this variable column
+  let start: number;
+  if (varIndex === 0) {
+    start = varDataStart;
+  } else {
+    // Read offset from table (offset for column i is at position i-1)
+    const rawOffset = view.getUint32(offsetTableStart + (varIndex - 1) * 4, true);
+    start = bufferStart + rawOffset;
+  }
+
+  // Calculate end position
+  let end: number;
+  if (varIndex === totalVarCount - 1) {
+    end = rowEnd;
+  } else {
+    const rawOffset = view.getUint32(offsetTableStart + varIndex * 4, true);
+    end = bufferStart + rawOffset;
+  }
+
+  return bytes.subarray(start, end);
+}
+
+/**
+ * Decode an array from its buffer format.
+ *
+ * Array format: [u32 count][u32 offset₂][u32 offset₃]...[item₁][item₂]...
+ * For N items, N-1 offsets are stored. Item 0 starts after the offset table.
+ * Each item is a row buffer with the structure defined by itemColumns.
+ *
+ * When nestedInclude is provided, array items can have nested joins (e.g., IssueAssignees.user).
+ */
+function decodeArrayItems(
+  arrayData: Uint8Array,
+  itemColumns: ColumnMeta[],
+  schema: SchemaMeta,
+  nestedInclude?: IncludeSpec,
+  sourceTableMeta?: TableMeta
+): Record<string, unknown>[] {
+  if (arrayData.length < 4) {
+    return [];
+  }
+
+  const view = new DataView(arrayData.buffer, arrayData.byteOffset, arrayData.byteLength);
+  const count = view.getUint32(0, true);
+
+  if (count === 0) {
+    return [];
+  }
+
+  // Header size: 4 bytes count + (count-1) * 4 bytes offsets
+  const headerSize = 4 + (count > 1 ? (count - 1) * 4 : 0);
+
+  const items: Record<string, unknown>[] = [];
+
+  for (let i = 0; i < count; i++) {
+    // Get start offset for item i
+    let itemStart: number;
+    if (i === 0) {
+      itemStart = headerSize;
+    } else {
+      // Offset for item i is at position 4 + (i-1) * 4
+      const offsetPos = 4 + (i - 1) * 4;
+      itemStart = view.getUint32(offsetPos, true);
+    }
+
+    // Get end offset for item i
+    let itemEnd: number;
+    if (i === count - 1) {
+      itemEnd = arrayData.length;
+    } else {
+      const offsetPos = 4 + i * 4;
+      itemEnd = view.getUint32(offsetPos, true);
+    }
+
+    // Decode the item row buffer
+    const itemBytes = arrayData.subarray(itemStart, itemEnd);
+    const itemView = new DataView(itemBytes.buffer, itemBytes.byteOffset, itemBytes.byteLength);
+
+    // If we have nested includes and source table metadata, use full row buffer decoding
+    // to properly handle joined columns
+    let item: Record<string, unknown>;
+    if (nestedInclude && sourceTableMeta) {
+      // Pass isArrayItemContext=true so the decoder knows to skip FK columns
+      // that are resolved by inner JOINs in ARRAY subqueries
+      item = decodeRowBuffer(itemBytes, itemView, 0, itemBytes.length, sourceTableMeta, schema, nestedInclude, true);
+    } else {
+      // Fall back to simple layout for flat items
+      const itemLayout = computeItemLayout(itemColumns);
+      const itemOffsetTableSize = itemLayout.variableColumns.length > 1
+        ? (itemLayout.variableColumns.length - 1) * 4
+        : 0;
+      item = decodeItemRowBuffer(itemBytes, itemView, itemLayout, itemOffsetTableSize);
+    }
+    items.push(item);
+  }
+
+  return items;
+}
+
+/**
+ * Compute layout for array item columns.
+ * This is a simplified version for flat item schemas (no nested includes).
+ */
+function computeItemLayout(columns: ColumnMeta[]): {
+  fixedSize: number;
+  fixedColumns: Array<{ col: ColumnMeta; offset: number }>;
+  variableColumns: Array<{ col: ColumnMeta; offset: number }>;
+} {
+  const fixedColumns: Array<{ col: ColumnMeta; offset: number }> = [];
+  const variableColumns: Array<{ col: ColumnMeta; offset: number }> = [];
+  let fixedOffset = 0;
+  let varIndex = 0;
+
+  for (const col of columns) {
+    const fixedSize = getColumnFixedSize(col);
+    if (fixedSize !== null) {
+      fixedColumns.push({ col, offset: fixedOffset });
+      fixedOffset += fixedSize;
+    } else {
+      variableColumns.push({ col, offset: varIndex++ });
+    }
+  }
+
+  return { fixedSize: fixedOffset, fixedColumns, variableColumns };
+}
+
+/**
+ * Decode a row buffer for an array item.
+ */
+function decodeItemRowBuffer(
+  bytes: Uint8Array,
+  view: DataView,
+  layout: { fixedSize: number; fixedColumns: Array<{ col: ColumnMeta; offset: number }>; variableColumns: Array<{ col: ColumnMeta; offset: number }> },
+  offsetTableSize: number
+): Record<string, unknown> {
+  const row: Record<string, unknown> = {};
+  const varDataStart = layout.fixedSize + offsetTableSize;
+  const totalVarCount = layout.variableColumns.length;
+
+  // Read fixed columns
+  for (const { col, offset } of layout.fixedColumns) {
+    const value = readFixedValueSimple(bytes, view, col, offset);
+    row[col.name] = value;
+  }
+
+  // Read variable columns
+  for (const { col, offset: varIndex } of layout.variableColumns) {
+    // Calculate start position
+    let start: number;
+    if (varIndex === 0) {
+      start = varDataStart;
+    } else {
+      const rawOffset = view.getUint32(layout.fixedSize + (varIndex - 1) * 4, true);
+      start = rawOffset;
+    }
+
+    // Calculate end position
+    let end: number;
+    if (varIndex === totalVarCount - 1) {
+      end = bytes.length;
+    } else {
+      const rawOffset = view.getUint32(layout.fixedSize + varIndex * 4, true);
+      end = rawOffset;
+    }
+
+    // Read value
+    if (col.nullable) {
+      if (bytes[start] === 0) {
+        row[col.name] = null;
+      } else {
+        const data = bytes.subarray(start + 1, end);
+        row[col.name] = col.type.kind === "string" ? textDecoder.decode(data) : new Uint8Array(data);
+      }
+    } else {
+      const data = bytes.subarray(start, end);
+      row[col.name] = col.type.kind === "string" ? textDecoder.decode(data) : new Uint8Array(data);
+    }
+  }
+
+  return row;
+}
+
+/**
+ * Read a fixed column value (simplified version for array items).
+ */
+function readFixedValueSimple(
+  bytes: Uint8Array,
+  view: DataView,
+  col: ColumnMeta,
+  offset: number
+): unknown {
+  if (col.nullable) {
+    if (bytes[offset] === 0) return null;
+    const valueOffset = offset + 1;
+    switch (col.type.kind) {
+      case "bool": return bytes[valueOffset] === 1;
+      case "i64": return view.getBigInt64(valueOffset, true);
+      case "f64": return view.getFloat64(valueOffset, true);
+      case "ref": return objectIdToString(bytes, valueOffset);
+      default: throw new Error(`Unknown fixed column type: ${col.type.kind}`);
+    }
+  } else {
+    switch (col.type.kind) {
+      case "bool": return bytes[offset] === 1;
+      case "i64": return view.getBigInt64(offset, true);
+      case "f64": return view.getFloat64(offset, true);
+      case "ref": return objectIdToString(bytes, offset);
+      default: throw new Error(`Unknown fixed column type: ${col.type.kind}`);
+    }
+  }
+}
+
+/**
  * Decode a row from row buffer format.
  *
  * The row buffer is structured as:
@@ -287,6 +566,9 @@ function readVariableValue(
  *
  * For JOINed queries, the row buffer contains columns from all joined tables
  * in the order: main table columns, then joined table columns.
+ *
+ * @param isArrayItemContext - When true, indicates this is decoding an array item
+ *   where Groove excludes FK columns that are resolved by inner JOINs.
  */
 function decodeRowBuffer(
   bytes: Uint8Array,
@@ -295,13 +577,15 @@ function decodeRowBuffer(
   rowEnd: number,
   tableMeta: TableMeta,
   schema: SchemaMeta,
-  include?: IncludeSpec
+  include?: IncludeSpec,
+  isArrayItemContext = false
 ): Record<string, unknown> {
   const row: Record<string, unknown> = {};
-  const layout = computeLayout(tableMeta, schema, include);
-  // Total variable column count - arrays are NOT in the offset table, they're appended after
-  const totalVarCount = layout.variableColumns.length;
+  const layout = computeLayout(tableMeta, schema, include, isArrayItemContext);
+  // Total variable column count includes regular variable columns AND array columns
+  const totalVarCount = layout.variableColumns.length + layout.arrayColumns.length;
 
+  // Debug: log once for Issues table
 
   // Track which table each column belongs to for building nested objects
   const mainTableColumns: Array<{ name: string; value: unknown }> = [];
@@ -360,13 +644,19 @@ function decodeRowBuffer(
       }
     }
 
-    // Read and decode reverse refs (arrays)
-    // Array data format: [u32 count][row1 id (16 bytes)][row1 buffer]...
-    // TODO: Arrays (reverse refs) are not included in the Rust row buffer offset table.
-    // The ARRAY subquery results may be returned separately or not at all.
-    // For now, set arrays to empty until we investigate how Groove encodes ARRAY results.
-    for (const revRef of layout.reverseRefs) {
-      row[revRef.name] = [];
+    // Read and decode array columns (reverse refs and forward refs in array context)
+    // Arrays ARE variable columns in the row buffer and ARE in the offset table
+    for (const arrayCol of layout.arrayColumns) {
+      const arrayData = readArrayData(bytes, view, bufferStart, layout, arrayCol.varIndex, rowEnd, totalVarCount);
+      const items = decodeArrayItems(arrayData, arrayCol.itemColumns, schema, arrayCol.nestedInclude, arrayCol.sourceTableMeta);
+
+      // For forward refs in array context, Groove wraps the joined row in a single-item array
+      // Extract the single item instead of keeping the array
+      if (arrayCol.isSingleItemUnwrap) {
+        row[arrayCol.name] = items[0] ?? null;
+      } else {
+        row[arrayCol.name] = items;
+      }
     }
   }
 
@@ -387,6 +677,7 @@ export function decodeDeltaWithIncludes<T>(
   schema: SchemaMeta,
   include?: IncludeSpec
 ): { type: "added" | "updated"; row: T } | { type: "removed"; id: string } {
+  try {
   // Handle both Uint8Array (preserves byteOffset) and ArrayBuffer
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -410,4 +701,8 @@ export function decodeDeltaWithIncludes<T>(
     type: deltaType === DELTA_ADDED ? "added" : "updated",
     row: row as T
   };
+  } catch (error) {
+    console.error('decodeDeltaWithIncludes error:', error);
+    throw error;
+  }
 }
