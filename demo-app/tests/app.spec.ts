@@ -2,6 +2,9 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Issue Tracker App', () => {
   test.beforeEach(async ({ page }) => {
+    // Capture all console output and errors
+    page.on('console', msg => console.log('CONSOLE:', msg.type(), msg.text().substring(0, 200)));
+    page.on('pageerror', err => console.log('PAGE ERROR:', err.message));
     // Use non-persistent mode to start fresh each test
     await page.goto('/?persist=false');
     // Wait for app to initialize and fake data to load
@@ -264,8 +267,8 @@ test.describe('Issue Detail', () => {
 
   test('opens issue detail when clicking an issue', async ({ page }) => {
     // Look for issue rows containing issue titles from the fake data
-    // The titles may be truncated in the UI, so use partial matches
-    const issueText = page.getByText(/login button|dark mode|database queries/);
+    // Issues have text like "Fix...", "Add...", etc.
+    const issueText = page.getByText(/Fix login button|Add dark mode|Optimize database/);
     await issueText.first().click();
 
     // Wait for dialog to open
@@ -423,6 +426,23 @@ test.describe('Issue Data Integrity', () => {
   });
 
   test('issues display assignee avatars', async ({ page }) => {
+    // Collect ALL console logs for debugging
+    page.on('console', msg => {
+      console.log(`BROWSER [${msg.type()}]:`, msg.text());
+    });
+
+    // Also capture errors
+    page.on('pageerror', err => {
+      console.log('BROWSER ERROR:', err.message);
+    });
+
+    // Navigate again to capture logs from the start
+    await page.goto('/?persist=false');
+    await expect(page.getByRole('heading', { name: 'Issue Tracker' })).toBeVisible({ timeout: 15000 });
+
+    // Wait a bit for data to load and logs to appear
+    await page.waitForTimeout(3000);
+
     // Assignees are displayed as avatar circles with initials
     // Check for avatar elements with initials like "AC", "BS", "CW", "DJ", "EB"
     const initials = ['AC', 'BS', 'CW', 'DJ', 'EB'];
