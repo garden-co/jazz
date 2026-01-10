@@ -323,6 +323,28 @@ export class SyncedQueryHandle {
     unsubscribe() {
         wasm.syncedqueryhandle_unsubscribe(this.__wbg_ptr);
     }
+    /**
+     * Get a text diagram of the query graph.
+     * @returns {string}
+     */
+    diagram() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.syncedqueryhandle_diagram(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * Free resources (no-op, but required by WasmQueryHandleLike interface).
+     */
+    free() {
+        wasm.syncedqueryhandle_free(this.__wbg_ptr);
+    }
 }
 if (Symbol.dispose) SyncedQueryHandle.prototype[Symbol.dispose] = SyncedQueryHandle.prototype.free;
 

@@ -28,6 +28,14 @@ export class SyncedQueryHandle {
    * Unsubscribe from updates.
    */
   unsubscribe(): void;
+  /**
+   * Get a text diagram of the query graph.
+   */
+  diagram(): string;
+  /**
+   * Free resources (no-op, but required by WasmQueryHandleLike interface).
+   */
+  free(): void;
 }
 
 export class WasmBlobWriter {
@@ -434,6 +442,8 @@ export interface InitOutput {
   readonly wasmsyncedlocalnode_subscribeRows: (a: number, b: number, c: number, d: any) => [number, number, number];
   readonly __wbg_syncedqueryhandle_free: (a: number, b: number) => void;
   readonly syncedqueryhandle_unsubscribe: (a: number) => void;
+  readonly syncedqueryhandle_diagram: (a: number) => [number, number];
+  readonly syncedqueryhandle_free: (a: number) => void;
   readonly __wbg_wasmsyncclient_free: (a: number, b: number) => void;
   readonly wasmsyncclient_new: (a: number, b: number, c: number, d: number) => number;
   readonly wasmsyncclient_setOnCommits: (a: number, b: any) => void;

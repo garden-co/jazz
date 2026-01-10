@@ -55,6 +55,8 @@ export const wasmsyncedlocalnode_subscribeDelta: (a: number, b: number, c: numbe
 export const wasmsyncedlocalnode_subscribeRows: (a: number, b: number, c: number, d: any) => [number, number, number];
 export const __wbg_syncedqueryhandle_free: (a: number, b: number) => void;
 export const syncedqueryhandle_unsubscribe: (a: number) => void;
+export const syncedqueryhandle_diagram: (a: number) => [number, number];
+export const syncedqueryhandle_free: (a: number) => void;
 export const __wbg_wasmsyncclient_free: (a: number, b: number) => void;
 export const wasmsyncclient_new: (a: number, b: number, c: number, d: number) => number;
 export const wasmsyncclient_setOnCommits: (a: number, b: any) => void;

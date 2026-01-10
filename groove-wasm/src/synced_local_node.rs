@@ -564,6 +564,18 @@ impl SyncedQueryHandle {
             self._query.unsubscribe(id);
         }
     }
+
+    /// Get a text diagram of the query graph.
+    #[wasm_bindgen]
+    pub fn diagram(&self) -> String {
+        self._query.diagram()
+    }
+
+    /// Free resources (no-op, but required by WasmQueryHandleLike interface).
+    #[wasm_bindgen]
+    pub fn free(&mut self) {
+        // Resources are freed when the handle is dropped
+    }
 }
 
 // ============================================================================
