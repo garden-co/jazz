@@ -20,12 +20,13 @@ export function IssueRow({ issue, onClick }: IssueRowProps) {
     <div
       className="flex items-center gap-4 border-b px-4 py-3 hover:bg-muted/50 cursor-pointer transition-colors"
       onClick={onClick}
+      data-issue-id={issue.id}
     >
       <PriorityIcon priority={issue.priority} />
 
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
-          <span className="font-medium truncate">{issue.title}</span>
+          <span className="font-medium truncate" data-testid="issue-title">{issue.title}</span>
         </div>
         <div className="flex items-center gap-2 mt-1">
           <div className="flex items-center gap-1 text-xs text-muted-foreground">

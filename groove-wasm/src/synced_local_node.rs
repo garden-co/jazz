@@ -618,6 +618,26 @@ fn handle_sse_event(state: &Rc<RefCell<SyncedState>>, event: &SseEvent) {
                         )));
                     }
                 }
+            } else {
+                // No metadata - this might be an update to an existing row
+                // Try to notify query graphs if we already know about this row
+                match state_ref.db.notify_synced_row_update(*object_id) {
+                    Ok(true) => {
+                        web_sys::console::log_1(&JsValue::from_str(&format!(
+                            "Notified query graphs about update to row {}",
+                            object_id
+                        )));
+                    }
+                    Ok(false) => {
+                        // Row not known to us - this is fine, might be a non-row object
+                    }
+                    Err(e) => {
+                        web_sys::console::log_1(&JsValue::from_str(&format!(
+                            "Failed to notify synced row update: {:?}",
+                            e
+                        )));
+                    }
+                }
             }
         }
         SseEvent::Excluded { object_id } => {

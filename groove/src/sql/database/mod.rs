@@ -2090,17 +2090,56 @@ impl Database {
             self.write_table_rows(&table_name, &table_rows)?;
         }
 
-        // Notify query graphs about the new row
-        // We need to read the row data to create the Row struct
-        if is_new {
-            if let Some(row) = self.get_row(&table_name, row_id) {
-                self.state
-                    .graph_registry
-                    .notify_row_change(&table_name, RowDelta::Added(row), &*self.state);
-            }
+        // Notify query graphs about the row change
+        // For new rows: Added, for existing rows: Updated
+        if let Some(row) = self.get_row(&table_name, row_id) {
+            let delta = if is_new {
+                RowDelta::Added(row)
+            } else {
+                RowDelta::Updated {
+                    id: row_id,
+                    new: row,
+                    prior: PriorState::empty(), // No prior state available from sync
+                }
+            };
+            self.state
+                .graph_registry
+                .notify_row_change(&table_name, delta, &*self.state);
         }
 
         Ok(())
+    }
+
+    /// Notify query graphs about an update to a row we already know about.
+    ///
+    /// This is used when we receive synced commits for a row that was already
+    /// registered (e.g., an update to an existing row). We don't need the
+    /// descriptor since we already have the row in our row_table mapping.
+    pub fn notify_synced_row_update(&self, row_id: ObjectId) -> Result<bool, DatabaseError> {
+        // Look up the table from row_table
+        let table_name = {
+            let row_table = self.state.row_table.read().unwrap();
+            row_table.get(&row_id).cloned()
+        };
+
+        let table_name = match table_name {
+            Some(t) => t,
+            None => return Ok(false), // Row not known to us
+        };
+
+        // Get the updated row and notify query graphs
+        if let Some(row) = self.get_row(&table_name, row_id) {
+            let delta = RowDelta::Updated {
+                id: row_id,
+                new: row,
+                prior: PriorState::empty(), // No prior state available from sync
+            };
+            self.state
+                .graph_registry
+                .notify_row_change(&table_name, delta, &*self.state);
+        }
+
+        Ok(true)
     }
 
     /// Update a row by ID.
