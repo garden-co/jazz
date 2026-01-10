@@ -682,6 +682,79 @@ pub struct OwnedRow {
     pub buffer: Vec<u8>,
 }
 
+/// An owned row with its ObjectId. Combines identity and data.
+///
+/// This type is used throughout the codebase where we need both the row ID
+/// and the row data together. It replaces `(ObjectId, OwnedRow)` tuples.
+///
+/// The binary format for WASM transfer is:
+/// ```text
+/// [16 bytes: ObjectId as u128 LE][row buffer bytes]
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct IdentifiedRow {
+    /// The row's unique identifier.
+    pub id: ObjectId,
+    /// The row data.
+    pub row: OwnedRow,
+}
+
+impl IdentifiedRow {
+    /// Create a new IdentifiedRow.
+    pub fn new(id: ObjectId, row: OwnedRow) -> Self {
+        Self { id, row }
+    }
+
+    /// Get the row ID.
+    pub fn id(&self) -> ObjectId {
+        self.id
+    }
+
+    /// Get a reference to the row.
+    pub fn row(&self) -> &OwnedRow {
+        &self.row
+    }
+
+    /// Get a borrowed view of the row.
+    pub fn as_row_ref(&self) -> RowRef<'_> {
+        self.row.as_ref()
+    }
+
+    /// Destructure into (ObjectId, OwnedRow) tuple for compatibility.
+    pub fn into_tuple(self) -> (ObjectId, OwnedRow) {
+        (self.id, self.row)
+    }
+
+    /// Create from (ObjectId, OwnedRow) tuple for compatibility.
+    pub fn from_tuple((id, row): (ObjectId, OwnedRow)) -> Self {
+        Self { id, row }
+    }
+
+    /// Encode to binary format for WASM transfer.
+    ///
+    /// Format: `[16 bytes ObjectId LE][row buffer]`
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let id_bytes = self.id.to_le_bytes();
+        let mut buf = Vec::with_capacity(16 + self.row.buffer.len());
+        buf.extend_from_slice(&id_bytes);
+        buf.extend_from_slice(&self.row.buffer);
+        buf
+    }
+
+    /// Decode from binary format.
+    ///
+    /// Returns None if buffer is too short.
+    pub fn from_bytes(data: &[u8], descriptor: Arc<RowDescriptor>) -> Option<Self> {
+        if data.len() < 16 {
+            return None;
+        }
+        let id_bytes: [u8; 16] = data[0..16].try_into().ok()?;
+        let id = ObjectId::from_le_bytes(id_bytes);
+        let row = OwnedRow::new(descriptor, data[16..].to_vec());
+        Some(Self { id, row })
+    }
+}
+
 impl OwnedRow {
     /// Create a new OwnedRow.
     pub fn new(descriptor: Arc<RowDescriptor>, buffer: Vec<u8>) -> Self {
