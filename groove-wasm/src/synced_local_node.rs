@@ -357,6 +357,50 @@ impl WasmSyncedLocalNode {
         Ok(())
     }
 
+    /// Update a specific row's column with a string value.
+    #[wasm_bindgen(js_name = updateRow)]
+    pub fn update_row(&self, table: &str, row_id: &str, column: &str, value: &str) -> Result<bool, JsValue> {
+        use groove::sql::Value;
+        let id: groove::ObjectId = row_id.parse()
+            .map_err(|e| JsValue::from_str(&format!("invalid row_id: {:?}", e)))?;
+        let mut state = self.state.borrow_mut();
+        let result = state.db
+            .update(table, id, &[(column, Value::String(value.to_string()))])
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+
+        // Track for sync if update succeeded
+        if result {
+            state.pending_objects.insert(id);
+            let state_clone = Rc::clone(&self.state);
+            wasm_bindgen_futures::spawn_local(async move {
+                push_pending_objects(&state_clone).await;
+            });
+        }
+        Ok(result)
+    }
+
+    /// Update a specific row's column with an i64 value.
+    #[wasm_bindgen(js_name = updateRowI64)]
+    pub fn update_row_i64(&self, table: &str, row_id: &str, column: &str, value: i64) -> Result<bool, JsValue> {
+        use groove::sql::Value;
+        let id: groove::ObjectId = row_id.parse()
+            .map_err(|e| JsValue::from_str(&format!("invalid row_id: {:?}", e)))?;
+        let mut state = self.state.borrow_mut();
+        let result = state.db
+            .update(table, id, &[(column, Value::I64(value))])
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+
+        // Track for sync if update succeeded
+        if result {
+            state.pending_objects.insert(id);
+            let state_clone = Rc::clone(&self.state);
+            wasm_bindgen_futures::spawn_local(async move {
+                push_pending_objects(&state_clone).await;
+            });
+        }
+        Ok(result)
+    }
+
     /// List all tables in the database.
     #[wasm_bindgen(js_name = listTables)]
     pub fn list_tables(&self) -> JsValue {

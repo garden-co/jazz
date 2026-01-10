@@ -1,4 +1,4 @@
-import { test, expect, Page } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 
 test.describe('Groove Sync', () => {
   test.beforeEach(async ({ browser }) => {
@@ -16,8 +16,8 @@ test.describe('Groove Sync', () => {
 
     try {
       // Navigate both to sync test page
-      await page1.goto('/?sync-test');
-      await page2.goto('/?sync-test');
+      await page1.goto('/');
+      await page2.goto('/');
 
       // Wait for both to initialize
       await expect(page1.getByTestId('status')).toContainText('Ready', { timeout: 10000 });
@@ -43,7 +43,7 @@ test.describe('Groove Sync', () => {
   });
 
   test('insert is visible locally', async ({ page }) => {
-    await page.goto('/?sync-test');
+    await page.goto('/');
 
     // Wait for initialization
     await expect(page.getByTestId('status')).toContainText('Ready', { timeout: 10000 });
@@ -69,7 +69,7 @@ test.describe('Groove Sync', () => {
 
     try {
       // Tab 1: Initialize and connect
-      await page1.goto('/?sync-test');
+      await page1.goto('/');
       await expect(page1.getByTestId('status')).toContainText('Ready', { timeout: 10000 });
       await page1.getByTestId('connectBtn').click();
       await expect(page1.getByTestId('log')).toContainText('Connected', { timeout: 10000 });
@@ -82,7 +82,7 @@ test.describe('Groove Sync', () => {
       await new Promise(resolve => setTimeout(resolve, 500));
 
       // Tab 2: Now initialize and connect
-      await page2.goto('/?sync-test');
+      await page2.goto('/');
       await expect(page2.getByTestId('status')).toContainText('Ready', { timeout: 10000 });
       await page2.getByTestId('connectBtn').click();
       await expect(page2.getByTestId('log')).toContainText('Connected', { timeout: 10000 });
@@ -110,8 +110,8 @@ test.describe('Groove Sync', () => {
 
     try {
       // Navigate and wait for initialization
-      await page1.goto('/?sync-test');
-      await page2.goto('/?sync-test');
+      await page1.goto('/');
+      await page2.goto('/');
 
       await expect(page1.getByTestId('status')).toContainText('Ready', { timeout: 10000 });
       await expect(page2.getByTestId('status')).toContainText('Ready', { timeout: 10000 });

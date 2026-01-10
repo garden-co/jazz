@@ -66,17 +66,17 @@ export interface TableDecoder<T> {
  */
 export interface WasmDatabaseLike {
   execute(sql: string): unknown;
-  subscribe_delta(
+  subscribeDelta(
     sql: string,
     callback: (deltas: Uint8Array[]) => void
   ): WasmQueryHandleLike;
-  update_row(
+  updateRow(
     table: string,
     rowId: string,
     column: string,
     value: string
   ): boolean;
-  update_row_i64(
+  updateRowI64(
     table: string,
     rowId: string,
     column: string,

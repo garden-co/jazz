@@ -104,12 +104,12 @@ export class WasmDatabase {
    * Update a specific row's column with a string value.
    * row_id should be a Base32 ObjectId string.
    */
-  update_row(table: string, row_id: string, column: string, value: string): boolean;
+  updateRow(table: string, row_id: string, column: string, value: string): boolean;
   /**
    * Update a specific row's column with an i64 value.
    * row_id should be a Base32 ObjectId string.
    */
-  update_row_i64(table: string, row_id: string, column: string, value: bigint): boolean;
+  updateRowI64(table: string, row_id: string, column: string, value: bigint): boolean;
   /**
    * Initialize the database schema from a SQL string containing CREATE TABLE statements.
    * Statements are separated by semicolons.
@@ -137,7 +137,7 @@ export class WasmDatabase {
    * Each delta is: u8 type (1=add, 2=update, 3=remove) + row data (or just id for removes).
    * Returns a handle that must be kept alive to maintain the subscription.
    */
-  subscribe_delta(sql: string, callback: Function): WasmQueryHandleDelta;
+  subscribeDelta(sql: string, callback: Function): WasmQueryHandleDelta;
   /**
    * Create a blob from raw bytes.
    * Returns a blob handle ID that can be used in insert/update operations.
@@ -337,6 +337,14 @@ export class WasmSyncedLocalNode {
    */
   initSchema(schema: string): void;
   /**
+   * Update a specific row's column with a string value.
+   */
+  updateRow(table: string, row_id: string, column: string, value: string): boolean;
+  /**
+   * Update a specific row's column with an i64 value.
+   */
+  updateRowI64(table: string, row_id: string, column: string, value: bigint): boolean;
+  /**
    * List all tables in the database.
    */
   listTables(): any;
@@ -379,13 +387,13 @@ export interface InitOutput {
   readonly wasmdatabase_deletePersistedDatabase: (a: number, b: number) => any;
   readonly wasmdatabase_execute: (a: number, b: number, c: number) => [number, number, number];
   readonly wasmdatabase_select_binary: (a: number, b: number, c: number) => [number, number, number];
-  readonly wasmdatabase_update_row: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number];
-  readonly wasmdatabase_update_row_i64: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: bigint) => [number, number, number];
+  readonly wasmdatabase_updateRow: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number];
+  readonly wasmdatabase_updateRowI64: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: bigint) => [number, number, number];
   readonly wasmdatabase_init_schema: (a: number, b: number, c: number) => [number, number];
   readonly wasmdatabase_list_tables: (a: number) => any;
   readonly wasmdatabase_subscribe: (a: number, b: number, c: number, d: any) => [number, number, number];
   readonly wasmdatabase_subscribe_binary: (a: number, b: number, c: number, d: any) => [number, number, number];
-  readonly wasmdatabase_subscribe_delta: (a: number, b: number, c: number, d: any) => [number, number, number];
+  readonly wasmdatabase_subscribeDelta: (a: number, b: number, c: number, d: any) => [number, number, number];
   readonly wasmdatabase_create_blob: (a: number, b: number, c: number) => bigint;
   readonly wasmdatabase_create_blob_writer: (a: number) => number;
   readonly wasmdatabase_read_blob: (a: number, b: bigint) => [number, number, number];
@@ -419,6 +427,8 @@ export interface InitOutput {
   readonly wasmsyncedlocalnode_execute: (a: number, b: number, c: number) => [number, number, number];
   readonly wasmsyncedlocalnode_selectBinary: (a: number, b: number, c: number) => [number, number, number];
   readonly wasmsyncedlocalnode_initSchema: (a: number, b: number, c: number) => [number, number];
+  readonly wasmsyncedlocalnode_updateRow: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number];
+  readonly wasmsyncedlocalnode_updateRowI64: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: bigint) => [number, number, number];
   readonly wasmsyncedlocalnode_listTables: (a: number) => any;
   readonly wasmsyncedlocalnode_subscribeDelta: (a: number, b: number, c: number, d: any) => [number, number, number];
   readonly wasmsyncedlocalnode_subscribeRows: (a: number, b: number, c: number, d: any) => [number, number, number];
@@ -435,10 +445,10 @@ export interface InitOutput {
   readonly wasmsyncclient_push: (a: number, b: number, c: number, d: any) => any;
   readonly wasmsyncclient_reconcile: (a: number, b: number, c: number, d: any) => any;
   readonly wasmsyncclient_disconnect: (a: number) => void;
-  readonly wasm_bindgen__convert__closures_____invoke__h76dfe62a3b69c085: (a: number, b: number, c: any) => void;
-  readonly wasm_bindgen__closure__destroy__h3d685ebc6ca20542: (a: number, b: number) => void;
   readonly wasm_bindgen__convert__closures_____invoke__h20bec3cca755663f: (a: number, b: number, c: any) => void;
   readonly wasm_bindgen__closure__destroy__h4df8827c3765d533: (a: number, b: number) => void;
+  readonly wasm_bindgen__convert__closures_____invoke__h76dfe62a3b69c085: (a: number, b: number, c: any) => void;
+  readonly wasm_bindgen__closure__destroy__h3d685ebc6ca20542: (a: number, b: number) => void;
   readonly wasm_bindgen__convert__closures_____invoke__h3097c68d921a6b39: (a: number, b: number, c: any, d: any) => void;
   readonly __wbindgen_malloc: (a: number, b: number) => number;
   readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
