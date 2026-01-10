@@ -14,6 +14,7 @@ export function SyncTest() {
   const [tableContents, setTableContents] = useState<string>("(not loaded)");
   const [isReady, setIsReady] = useState(false);
   const dbRef = useRef<any>(null);
+  const queryHandleRef = useRef<any>(null);
 
   const log = (msg: string) => {
     const time = new Date().toISOString().substring(11, 19);
@@ -66,6 +67,17 @@ export function SyncTest() {
           )
         `);
 
+        // Set up reactive query subscription
+        // The callback fires whenever the query results change
+        queryHandleRef.current = db.subscribeDelta(
+          "SELECT * FROM test_items",
+          (_deltas: any) => {
+            // Defer refresh to avoid RefCell borrow conflict
+            // (callback is called while Rust has state borrowed)
+            queueMicrotask(() => refreshTable());
+          }
+        );
+
         setStatus("Ready (disconnected)");
         setIsReady(true);
         log("Initialization complete");
@@ -80,9 +92,12 @@ export function SyncTest() {
 
     init();
 
-    // Refresh table every second
-    const interval = setInterval(refreshTable, 1000);
-    return () => clearInterval(interval);
+    // Cleanup subscription on unmount
+    return () => {
+      if (queryHandleRef.current) {
+        queryHandleRef.current.unsubscribe();
+      }
+    };
   }, []);
 
   const handleConnect = async () => {

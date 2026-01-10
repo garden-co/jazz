@@ -2084,9 +2084,20 @@ impl Database {
 
         // Add to table_rows object
         let mut table_rows = self.read_table_rows(&table_name)?;
-        if !table_rows.contains(row_id) {
+        let is_new = !table_rows.contains(row_id);
+        if is_new {
             table_rows.add(row_id);
             self.write_table_rows(&table_name, &table_rows)?;
+        }
+
+        // Notify query graphs about the new row
+        // We need to read the row data to create the Row struct
+        if is_new {
+            if let Some(row) = self.get_row(&table_name, row_id) {
+                self.state
+                    .graph_registry
+                    .notify_row_change(&table_name, RowDelta::Added(row), &*self.state);
+            }
         }
 
         Ok(())

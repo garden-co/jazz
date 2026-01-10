@@ -464,9 +464,6 @@ fn handle_sse_event(state: &Rc<RefCell<SyncedState>>, event: &SseEvent) {
                     }
                 }
             }
-
-            // Notify that data changed
-            state_ref.notify_data_change();
         }
         SseEvent::Excluded { object_id } => {
             web_sys::console::log_1(&JsValue::from_str(&format!(
