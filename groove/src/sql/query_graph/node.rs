@@ -902,7 +902,9 @@ impl QueryNode {
                         // Filter join rows if a reverse_filter predicate is provided
                         let join_rows: Vec<_> = if let Some(filter) = reverse_filter {
                             all_join_rows.into_iter()
-                                .filter(|(id, row)| filter.matches_buffer(*id, row.as_ref(), &join_descriptor))
+                                .filter(|(id, row)| {
+                                    filter.matches_buffer(*id, row.as_ref(), &join_descriptor)
+                                })
                                 .collect()
                         } else {
                             all_join_rows
@@ -1243,13 +1245,17 @@ impl QueryNode {
     /// - Inner table deltas: Update the arrays for affected outer rows
     ///
     /// `source_table` indicates which table the delta came from.
+    /// `is_outer_delta` and `is_inner_delta` indicate which type of delta this is
+    /// (considering contained_tables from upstream ArrayAggregates).
     /// `lookup_inner_rows` is a function to find all inner rows matching an outer id.
     /// `lookup_row_by_id` is a function to look up a row from any table by (table_name, id).
     pub fn evaluate_array_aggregate<F, G>(
         &mut self,
         delta: RowDelta,
-        source_table: &str,
-        outer_schema: &TableSchema,
+        _source_table: &str,
+        is_outer_delta: bool,
+        is_inner_delta: bool,
+        _outer_schema: &TableSchema,
         lookup_inner_rows: F,
         lookup_row_by_id: G,
     ) -> DeltaBatch
@@ -1259,8 +1265,6 @@ impl QueryNode {
     {
         match self {
             QueryNode::ArrayAggregate {
-                outer_table,
-                inner_table,
                 inner_ref_column,
                 inner_schema,
                 inner_descriptor,
@@ -1273,9 +1277,6 @@ impl QueryNode {
                 ..
             } => {
                 let mut output = DeltaBatch::new();
-
-                let is_outer_delta = source_table == outer_table;
-                let is_inner_delta = source_table == inner_table;
 
                 if is_outer_delta {
                     // Delta from outer table - add/remove/update outer rows
@@ -1363,6 +1364,7 @@ impl QueryNode {
                     output_descriptor.clone(),
                     inner_descriptor.clone(),
                 );
+
                 outer_rows.insert(*outer_id, output_row.clone());
 
                 output.push(RowDelta::Added { id: *outer_id, row: output_row });
@@ -1709,34 +1711,24 @@ impl QueryNode {
 
         let mut builder = RowBuilder::new(output_descriptor.clone());
 
-        // Copy outer row values to output, skipping the array column position
-        let outer_col_count = outer_row.descriptor.columns.len();
-        let array_idx = if array_column_index < 0 {
-            outer_col_count // Append at end
-        } else {
-            array_column_index as usize
-        };
+        // array_column_index should already be the actual index (computed during graph building)
+        // This is the index in output_descriptor where this ArrayAggregate's array column is
+        let array_idx = array_column_index as usize;
 
+        // Copy columns from outer_row to output
+        // Skip only the array column we're about to set (other arrays should be preserved)
         let mut out_idx = 0;
-        for src_idx in 0..outer_col_count {
-            // Skip the array column position in output
+        for col in &output_descriptor.columns {
             if out_idx == array_idx {
+                // This is the array column position - skip it, we'll set it later
                 out_idx += 1;
+                continue;
             }
 
-            if let Some(value) = outer_row.get(src_idx) {
-                builder = match value {
-                    RowValue::Bool(v) => builder.set_bool(out_idx, v),
-                    RowValue::I32(v) => builder.set_i32(out_idx, v),
-                    RowValue::U32(v) => builder.set_u32(out_idx, v),
-                    RowValue::I64(v) => builder.set_i64(out_idx, v),
-                    RowValue::F64(v) => builder.set_f64(out_idx, v),
-                    RowValue::Ref(v) => builder.set_ref(out_idx, v),
-                    RowValue::String(v) => builder.set_string(out_idx, v),
-                    RowValue::Bytes(v) => builder.set_bytes(out_idx, v),
-                    RowValue::Null => builder.set_null(out_idx),
-                    _ => builder,
-                };
+            // Find the corresponding column in outer_row by name
+            if let Some(value) = outer_row.get_by_name(&col.name) {
+                // Copy the value (including any existing arrays from previous ArrayAggregates)
+                builder = builder.set_from_row_value(out_idx, value);
             }
             out_idx += 1;
         }

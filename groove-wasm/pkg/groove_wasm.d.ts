@@ -203,6 +203,21 @@ export function create_blob_readable_stream(db: WasmDatabase, handle_id: bigint)
  */
 export function init(): void;
 
+/**
+ * Convert a Base32 string ObjectId to 16-byte binary.
+ *
+ * Returns a Uint8Array containing the u128 little-endian bytes.
+ */
+export function object_id_from_string(s: string): Uint8Array;
+
+/**
+ * Convert a 16-byte binary ObjectId to a Base32 string.
+ *
+ * This is useful for displaying ObjectIds or using them as string keys.
+ * The binary format is u128 little-endian.
+ */
+export function object_id_to_string(bytes: Uint8Array): string;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -243,11 +258,13 @@ export interface InitOutput {
   readonly wasmblobwriter_abort: (a: number) => void;
   readonly create_blob_readable_stream: (a: number, b: bigint) => [number, number, number];
   readonly init: () => void;
-  readonly wasm_bindgen__convert__closures_____invoke__h5d5fcffed857b58c: (a: number, b: number, c: any) => void;
-  readonly wasm_bindgen__closure__destroy__h04a9bc17558f661f: (a: number, b: number) => void;
-  readonly wasm_bindgen__convert__closures_____invoke__h1dcff5ec13377df8: (a: number, b: number, c: any) => void;
-  readonly wasm_bindgen__closure__destroy__h04ee08a7339e081a: (a: number, b: number) => void;
-  readonly wasm_bindgen__convert__closures_____invoke__h057c7a511bd56d49: (a: number, b: number, c: any, d: any) => void;
+  readonly object_id_to_string: (a: number, b: number) => [number, number, number, number];
+  readonly object_id_from_string: (a: number, b: number) => [number, number, number];
+  readonly wasm_bindgen__convert__closures_____invoke__haa2d63a01d602fe2: (a: number, b: number, c: any) => void;
+  readonly wasm_bindgen__closure__destroy__h9b930e98f1df4768: (a: number, b: number) => void;
+  readonly wasm_bindgen__convert__closures_____invoke__h76dfe62a3b69c085: (a: number, b: number, c: any) => void;
+  readonly wasm_bindgen__closure__destroy__h3d685ebc6ca20542: (a: number, b: number) => void;
+  readonly wasm_bindgen__convert__closures_____invoke__h3097c68d921a6b39: (a: number, b: number, c: any, d: any) => void;
   readonly __wbindgen_malloc: (a: number, b: number) => number;
   readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
   readonly __wbindgen_exn_store: (a: number) => void;
