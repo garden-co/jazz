@@ -29,6 +29,9 @@ pub struct QueryGraphBuilder {
     schema: TableSchema,
     nodes: Vec<QueryNode>,
     next_id: u32,
+    /// Current output descriptor - evolves as array aggregates are added.
+    /// None means use schema (no arrays added yet).
+    current_descriptor: Option<Arc<RowDescriptor>>,
 }
 
 impl QueryGraphBuilder {
@@ -39,6 +42,7 @@ impl QueryGraphBuilder {
             schema,
             nodes: Vec::new(),
             next_id: 0,
+            current_descriptor: None,
         }
     }
 
@@ -145,40 +149,55 @@ impl QueryGraphBuilder {
         inner_joins: Vec<(String, String, TableSchema)>,
         array_column_index: i32,
     ) -> NodeId {
+        let inner_table = inner_table.into();
         let id = self.alloc_id();
 
         // Build inner descriptor from inner schema, accounting for inner joins
         // If inner_joins is non-empty, the join columns become nested Row/Array types
         let inner_descriptor = Self::build_inner_descriptor_with_joins(&inner_schema, &inner_joins);
 
-        // Build output descriptor: outer schema columns + array column
-        let mut output_cols: Vec<(String, ColumnType, bool)> = self.schema.columns.iter()
-            .map(|c| (c.name.clone(), c.ty.clone(), c.nullable))
-            .collect();
+        // Build output descriptor: start from current descriptor (or schema if first array)
+        // This allows multiple array aggregates to accumulate their columns
+        let mut output_cols: Vec<(String, ColumnType, bool)> = match &self.current_descriptor {
+            Some(desc) => desc.columns.iter()
+                .map(|c| (c.name.clone(), c.ty.clone(), c.nullable))
+                .collect(),
+            None => self.schema.columns.iter()
+                .map(|c| (c.name.clone(), c.ty.clone(), c.nullable))
+                .collect(),
+        };
 
         // Add the array column at the specified index
+        // Use inner_table name for the array column (e.g., "IssueLabels", "IssueAssignees")
         let array_col = (
-            "labels".to_string(), // TODO: Get actual array column name from caller
+            inner_table.clone(),
             ColumnType::Array(inner_descriptor.clone()),
             false,
         );
-        if array_column_index < 0 || array_column_index as usize >= output_cols.len() {
+        // Compute the actual array column index (may differ from requested if -1 or out of range)
+        let actual_array_index = if array_column_index < 0 || array_column_index as usize >= output_cols.len() {
+            let idx = output_cols.len() as i32;
             output_cols.push(array_col);
+            idx
         } else {
             output_cols.insert(array_column_index as usize, array_col);
-        }
+            array_column_index
+        };
         let output_descriptor = Arc::new(RowDescriptor::new_ordered(output_cols));
+
+        // Update current_descriptor so next array_aggregate builds on top of this
+        self.current_descriptor = Some(output_descriptor.clone());
 
         self.nodes.push(QueryNode::ArrayAggregate {
             outer_table: self.table.clone(),
             input,
-            inner_table: inner_table.into(),
+            inner_table,
             inner_ref_column: inner_ref_column.into(),
             inner_schema,
             inner_descriptor,
             output_descriptor,
             inner_joins,
-            array_column_index,
+            array_column_index: actual_array_index,
             cached_arrays: HashMap::new(),
             inner_to_outer: HashMap::new(),
             outer_rows: HashMap::new(),
@@ -292,6 +311,9 @@ pub struct JoinGraphBuilder {
     all_right_tables: Vec<(String, TableSchema)>,
     /// For reverse JOINs, which table's columns to output (SELECT Table.*)
     projection_table: Option<String>,
+    /// Current output descriptor - evolves as array aggregates are added.
+    /// None means use combined_schema (no arrays added yet).
+    current_descriptor: Option<Arc<RowDescriptor>>,
 }
 
 impl JoinGraphBuilder {
@@ -330,6 +352,7 @@ impl JoinGraphBuilder {
             combined_schema,
             all_right_tables,
             projection_table: None,
+            current_descriptor: None,
         }
     }
 
@@ -617,23 +640,37 @@ impl JoinGraphBuilder {
         // If inner_joins is non-empty, the join columns become nested Row/Array types
         let inner_descriptor = QueryGraphBuilder::build_inner_descriptor_with_joins(&inner_schema, &inner_joins);
 
-        // Build output descriptor: combined schema columns + array column
-        let mut output_cols: Vec<(String, ColumnType, bool)> = self.combined_schema.columns.iter()
-            .map(|c| (c.name.clone(), c.ty.clone(), c.nullable))
-            .collect();
+        // Build output descriptor: start from current descriptor (or combined schema if first array)
+        // This allows multiple array aggregates to accumulate their columns
+        let mut output_cols: Vec<(String, ColumnType, bool)> = match &self.current_descriptor {
+            Some(desc) => desc.columns.iter()
+                .map(|c| (c.name.clone(), c.ty.clone(), c.nullable))
+                .collect(),
+            None => self.combined_schema.columns.iter()
+                .map(|c| (c.name.clone(), c.ty.clone(), c.nullable))
+                .collect(),
+        };
 
         // Add the array column at the specified index
+        // Use inner_table name for the array column (e.g., "IssueLabels", "IssueAssignees")
         let array_col = (
-            "labels".to_string(), // TODO: Get actual array column name from caller
+            inner_table.clone(),
             ColumnType::Array(inner_descriptor.clone()),
             false,
         );
-        if array_column_index < 0 || array_column_index as usize >= output_cols.len() {
+        // Compute the actual array column index (may differ from requested if -1 or out of range)
+        let actual_array_index = if array_column_index < 0 || array_column_index as usize >= output_cols.len() {
+            let idx = output_cols.len() as i32;
             output_cols.push(array_col);
+            idx
         } else {
             output_cols.insert(array_column_index as usize, array_col);
-        }
+            array_column_index
+        };
         let output_descriptor = Arc::new(RowDescriptor::new_ordered(output_cols));
+
+        // Update current_descriptor so next array_aggregate builds on top of this
+        self.current_descriptor = Some(output_descriptor.clone());
 
         self.nodes.push(QueryNode::ArrayAggregate {
             outer_table: self.left_table.clone(),
@@ -644,7 +681,7 @@ impl JoinGraphBuilder {
             inner_descriptor,
             output_descriptor,
             inner_joins,
-            array_column_index,
+            array_column_index: actual_array_index,
             cached_arrays: HashMap::new(),
             inner_to_outer: HashMap::new(),
             outer_rows: HashMap::new(),
