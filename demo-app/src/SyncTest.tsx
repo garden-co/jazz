@@ -67,10 +67,7 @@ export function SyncTest() {
         // The callback receives the complete result set on each change
         queryHandleRef.current = db.subscribeRows(
           "SELECT * FROM test_items",
-          (rows: TestItem[]) => {
-            // Defer state update to avoid RefCell borrow conflict
-            queueMicrotask(() => setItems(rows));
-          }
+          (rows: TestItem[]) => setItems(rows)
         );
 
         setStatus("Ready (disconnected)");
