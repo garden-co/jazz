@@ -8,7 +8,7 @@ import {
   vi,
 } from "vitest";
 
-import { emptyKnownState, JsonValue } from "../exports";
+import type { JsonValue } from "../exports";
 import { cojsonInternals, emptyKnownState } from "../exports";
 import {
   SyncMessagesLog,
