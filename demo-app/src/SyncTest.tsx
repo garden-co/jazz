@@ -8,10 +8,16 @@ interface LogEntry {
   message: string;
 }
 
+interface TestItem {
+  id: string;
+  name: string;
+  created_by: string;
+}
+
 export function SyncTest() {
   const [status, setStatus] = useState("Initializing...");
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [tableContents, setTableContents] = useState<string>("(not loaded)");
+  const [items, setItems] = useState<TestItem[]>([]);
   const [isReady, setIsReady] = useState(false);
   const dbRef = useRef<any>(null);
   const queryHandleRef = useRef<any>(null);
@@ -20,16 +26,6 @@ export function SyncTest() {
     const time = new Date().toISOString().substring(11, 19);
     setLogs((prev) => [...prev, { time, message: msg }]);
     console.log(`[${time}] ${msg}`);
-  };
-
-  const refreshTable = () => {
-    if (!dbRef.current) return;
-    try {
-      const result = dbRef.current.execute("SELECT * FROM test_items");
-      setTableContents(JSON.stringify(result, null, 2));
-    } catch (e: any) {
-      setTableContents(`Error: ${e.message}`);
-    }
   };
 
   useEffect(() => {
@@ -67,21 +63,19 @@ export function SyncTest() {
           )
         `);
 
-        // Set up reactive query subscription
-        // The callback fires whenever the query results change
-        queryHandleRef.current = db.subscribeDelta(
+        // Set up reactive query subscription with full row data
+        // The callback receives the complete result set on each change
+        queryHandleRef.current = db.subscribeRows(
           "SELECT * FROM test_items",
-          (_deltas: any) => {
-            // Defer refresh to avoid RefCell borrow conflict
-            // (callback is called while Rust has state borrowed)
-            queueMicrotask(() => refreshTable());
+          (rows: TestItem[]) => {
+            // Defer state update to avoid RefCell borrow conflict
+            queueMicrotask(() => setItems(rows));
           }
         );
 
         setStatus("Ready (disconnected)");
         setIsReady(true);
         log("Initialization complete");
-        refreshTable();
       } catch (e: any) {
         const errorMsg = e?.message || String(e);
         log(`Error: ${errorMsg}`);
@@ -122,7 +116,7 @@ export function SyncTest() {
         `INSERT INTO test_items (name, created_by) VALUES ('${name}', '${tabId}')`
       );
       log(`Insert result: ${result}`);
-      refreshTable();
+      // No need to refresh - reactive subscription updates automatically
     } catch (e: any) {
       log(`Insert error: ${e.message}`);
     }
@@ -157,9 +151,9 @@ export function SyncTest() {
       </div>
 
       <div style={{ marginTop: "20px" }}>
-        <strong>Table Contents:</strong>
+        <strong>Table Contents ({items.length} rows):</strong>
         <pre data-testid="tableContents" style={{ background: "#f0f0f0", padding: "10px", color: "#000" }}>
-          {tableContents}
+          {JSON.stringify(items, null, 2)}
         </pre>
       </div>
 

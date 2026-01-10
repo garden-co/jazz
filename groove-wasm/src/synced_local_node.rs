@@ -365,7 +365,7 @@ impl WasmSyncedLocalNode {
         serde_wasm_bindgen::to_value(&tables).unwrap_or(JsValue::NULL)
     }
 
-    /// Create an incremental query subscription.
+    /// Create an incremental query subscription (delta-based).
     #[wasm_bindgen(js_name = subscribeDelta)]
     pub fn subscribe_delta(
         &self,
@@ -398,6 +398,105 @@ impl WasmSyncedLocalNode {
             _query: query,
             listener_id,
         })
+    }
+
+    /// Subscribe to query results with full row data on each change.
+    ///
+    /// Callback receives: Array of row objects with {id, ...columns}
+    /// This is simpler than subscribeDelta - you get the complete result set each time.
+    #[wasm_bindgen(js_name = subscribeRows)]
+    pub fn subscribe_rows(
+        &self,
+        sql: &str,
+        callback: js_sys::Function,
+    ) -> Result<SyncedQueryHandle, JsValue> {
+        use groove::sql::{Row, Value};
+
+        let state = self.state.borrow();
+
+        // Get the schema for this query to know column names
+        let query = state
+            .db
+            .incremental_query(sql)
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+
+        // Parse the SQL to get table name for schema lookup
+        let table_name = extract_table_name(sql);
+        let schema = table_name.and_then(|t| state.db.get_table(&t));
+        let column_names: Vec<String> = schema
+            .map(|s| s.columns.iter().map(|c| c.name.clone()).collect())
+            .unwrap_or_default();
+
+        let rust_callback = Box::new(move |rows: Vec<Row>| {
+            let js_rows = Array::new();
+
+            for row in rows {
+                let obj = js_sys::Object::new();
+
+                // Add row ID
+                let _ = js_sys::Reflect::set(
+                    &obj,
+                    &JsValue::from_str("id"),
+                    &JsValue::from_str(&row.id.to_string()),
+                );
+
+                // Add column values
+                for (i, value) in row.values.iter().enumerate() {
+                    let col_name = column_names.get(i)
+                        .map(|s: &String| s.as_str())
+                        .unwrap_or("col");
+                    let js_value = value_to_js_inner(value);
+                    let _ = js_sys::Reflect::set(&obj, &JsValue::from_str(col_name), &js_value);
+                }
+
+                js_rows.push(&obj);
+            }
+
+            let _ = callback.call1(&JsValue::NULL, &js_rows);
+        });
+
+        let listener_id = query.subscribe(rust_callback);
+
+        Ok(SyncedQueryHandle {
+            _query: query,
+            listener_id,
+        })
+    }
+}
+
+/// Extract table name from a simple SELECT query.
+fn extract_table_name(sql: &str) -> Option<String> {
+    let sql_upper = sql.to_uppercase();
+    let from_idx = sql_upper.find("FROM")?;
+    let after_from = &sql[from_idx + 4..].trim_start();
+    let end = after_from.find(|c: char| c.is_whitespace() || c == ';').unwrap_or(after_from.len());
+    Some(after_from[..end].to_string())
+}
+
+/// Convert a groove Value to JsValue.
+fn value_to_js_inner(value: &groove::sql::Value) -> JsValue {
+    use groove::sql::Value;
+    match value {
+        Value::Bool(b) => JsValue::from_bool(*b),
+        Value::I32(i) => JsValue::from_f64(*i as f64),
+        Value::U32(u) => JsValue::from_f64(*u as f64),
+        Value::I64(i) => JsValue::from_f64(*i as f64),
+        Value::F64(f) => JsValue::from_f64(*f),
+        Value::String(s) => JsValue::from_str(s),
+        Value::Bytes(b) => JsValue::from_str(&format!("bytes:{}", b.len())),
+        Value::Ref(oid) => JsValue::from_str(&oid.to_string()),
+        Value::Row(row) => JsValue::from_str(&format!("row:{}", row.id)),
+        Value::Array(arr) => {
+            let js_arr = Array::new();
+            for v in arr {
+                js_arr.push(&value_to_js_inner(v));
+            }
+            js_arr.into()
+        }
+        Value::NullableSome(inner) => value_to_js_inner(inner),
+        Value::NullableNone => JsValue::NULL,
+        Value::Blob(_) => JsValue::from_str("[blob]"),
+        Value::BlobArray(arr) => JsValue::from_str(&format!("[blob_array:{}]", arr.len())),
     }
 }
 

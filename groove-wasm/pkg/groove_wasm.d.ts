@@ -341,9 +341,16 @@ export class WasmSyncedLocalNode {
    */
   listTables(): any;
   /**
-   * Create an incremental query subscription.
+   * Create an incremental query subscription (delta-based).
    */
   subscribeDelta(sql: string, callback: Function): SyncedQueryHandle;
+  /**
+   * Subscribe to query results with full row data on each change.
+   *
+   * Callback receives: Array of row objects with {id, ...columns}
+   * This is simpler than subscribeDelta - you get the complete result set each time.
+   */
+  subscribeRows(sql: string, callback: Function): SyncedQueryHandle;
   /**
    * Get current sync state.
    */
@@ -401,17 +408,6 @@ export interface InitOutput {
   readonly wasmblobwriter_abort: (a: number) => void;
   readonly create_blob_readable_stream: (a: number, b: bigint) => [number, number, number];
   readonly init: () => void;
-  readonly __wbg_wasmsyncclient_free: (a: number, b: number) => void;
-  readonly wasmsyncclient_new: (a: number, b: number, c: number, d: number) => number;
-  readonly wasmsyncclient_setOnCommits: (a: number, b: any) => void;
-  readonly wasmsyncclient_setOnExcluded: (a: number, b: any) => void;
-  readonly wasmsyncclient_setOnError: (a: number, b: any) => void;
-  readonly wasmsyncclient_setOnStateChange: (a: number, b: any) => void;
-  readonly wasmsyncclient_connectionState: (a: number) => number;
-  readonly wasmsyncclient_subscribe: (a: number, b: number, c: number) => any;
-  readonly wasmsyncclient_push: (a: number, b: number, c: number, d: any) => any;
-  readonly wasmsyncclient_reconcile: (a: number, b: number, c: number, d: any) => any;
-  readonly wasmsyncclient_disconnect: (a: number) => void;
   readonly __wbg_wasmsyncedlocalnode_free: (a: number, b: number) => void;
   readonly wasmsyncedlocalnode_new: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
   readonly wasmsyncedlocalnode_withIndexedDb: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
@@ -425,12 +421,24 @@ export interface InitOutput {
   readonly wasmsyncedlocalnode_initSchema: (a: number, b: number, c: number) => [number, number];
   readonly wasmsyncedlocalnode_listTables: (a: number) => any;
   readonly wasmsyncedlocalnode_subscribeDelta: (a: number, b: number, c: number, d: any) => [number, number, number];
+  readonly wasmsyncedlocalnode_subscribeRows: (a: number, b: number, c: number, d: any) => [number, number, number];
   readonly __wbg_syncedqueryhandle_free: (a: number, b: number) => void;
   readonly syncedqueryhandle_unsubscribe: (a: number) => void;
-  readonly wasm_bindgen__convert__closures_____invoke__h20bec3cca755663f: (a: number, b: number, c: any) => void;
-  readonly wasm_bindgen__closure__destroy__h4df8827c3765d533: (a: number, b: number) => void;
+  readonly __wbg_wasmsyncclient_free: (a: number, b: number) => void;
+  readonly wasmsyncclient_new: (a: number, b: number, c: number, d: number) => number;
+  readonly wasmsyncclient_setOnCommits: (a: number, b: any) => void;
+  readonly wasmsyncclient_setOnExcluded: (a: number, b: any) => void;
+  readonly wasmsyncclient_setOnError: (a: number, b: any) => void;
+  readonly wasmsyncclient_setOnStateChange: (a: number, b: any) => void;
+  readonly wasmsyncclient_connectionState: (a: number) => number;
+  readonly wasmsyncclient_subscribe: (a: number, b: number, c: number) => any;
+  readonly wasmsyncclient_push: (a: number, b: number, c: number, d: any) => any;
+  readonly wasmsyncclient_reconcile: (a: number, b: number, c: number, d: any) => any;
+  readonly wasmsyncclient_disconnect: (a: number) => void;
   readonly wasm_bindgen__convert__closures_____invoke__h76dfe62a3b69c085: (a: number, b: number, c: any) => void;
   readonly wasm_bindgen__closure__destroy__h3d685ebc6ca20542: (a: number, b: number) => void;
+  readonly wasm_bindgen__convert__closures_____invoke__h20bec3cca755663f: (a: number, b: number, c: any) => void;
+  readonly wasm_bindgen__closure__destroy__h4df8827c3765d533: (a: number, b: number) => void;
   readonly wasm_bindgen__convert__closures_____invoke__h3097c68d921a6b39: (a: number, b: number, c: any, d: any) => void;
   readonly __wbindgen_malloc: (a: number, b: number) => number;
   readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
