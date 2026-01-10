@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::commit::CommitId;
 use crate::object::ObjectId;
@@ -70,6 +71,8 @@ pub struct ClientSession {
     pub queries: HashMap<QueryId, ActiveQuery>,
     /// Next query ID
     next_query_id: u32,
+    /// Last activity timestamp for timeout detection.
+    pub last_activity: Instant,
 }
 
 impl ClientSession {
@@ -82,7 +85,13 @@ impl ClientSession {
             object_queries: HashMap::new(),
             queries: HashMap::new(),
             next_query_id: 1,
+            last_activity: Instant::now(),
         }
+    }
+
+    /// Update the last activity timestamp.
+    pub fn touch(&mut self) {
+        self.last_activity = Instant::now();
     }
 
     /// Allocate a new query ID.
