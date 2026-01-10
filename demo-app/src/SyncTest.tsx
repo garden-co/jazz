@@ -39,9 +39,12 @@ export function SyncTest() {
         await wasm.default();
 
         log("Creating WasmSyncedLocalNode...");
+        // Use a shared catalog ID so all clients have the same schema object IDs
+        const SHARED_CATALOG_ID = "sync-test-catalog-v1";
         const db = new wasm.WasmSyncedLocalNode(
           "http://localhost:8080",
-          `token-${tabId}`
+          `token-${tabId}`,
+          SHARED_CATALOG_ID
         );
         dbRef.current = db;
 
@@ -58,9 +61,8 @@ export function SyncTest() {
         log("Initializing schema...");
         db.initSchema(`
           CREATE TABLE test_items (
-            id INTEGER PRIMARY KEY,
-            name TEXT,
-            created_by TEXT
+            name STRING NOT NULL,
+            created_by STRING NOT NULL
           )
         `);
 
@@ -69,7 +71,9 @@ export function SyncTest() {
         log("Initialization complete");
         refreshTable();
       } catch (e: any) {
-        log(`Error: ${e.message}`);
+        const errorMsg = e?.message || String(e);
+        log(`Error: ${errorMsg}`);
+        console.error("Init error:", e);
         setStatus("Error");
       }
     }
@@ -88,7 +92,9 @@ export function SyncTest() {
       await dbRef.current.connect("SELECT * FROM test_items");
       log("Connected!");
     } catch (e: any) {
-      log(`Connection error: ${e.message}`);
+      const errorMsg = e?.message || String(e);
+      log(`Connection error: ${errorMsg}`);
+      console.error("Connect error:", e);
     }
   };
 
@@ -97,9 +103,10 @@ export function SyncTest() {
     try {
       const name = `Item-${Date.now()}`;
       log(`Inserting: ${name}`);
-      dbRef.current.execute(
+      const result = dbRef.current.execute(
         `INSERT INTO test_items (name, created_by) VALUES ('${name}', '${tabId}')`
       );
+      log(`Insert result: ${result}`);
       refreshTable();
     } catch (e: any) {
       log(`Insert error: ${e.message}`);
@@ -136,16 +143,16 @@ export function SyncTest() {
 
       <div style={{ marginTop: "20px" }}>
         <strong>Table Contents:</strong>
-        <pre data-testid="tableContents" style={{ background: "#f0f0f0", padding: "10px" }}>
+        <pre data-testid="tableContents" style={{ background: "#f0f0f0", padding: "10px", color: "#000" }}>
           {tableContents}
         </pre>
       </div>
 
       <div
-        style={{ background: "#f0f0f0", padding: "10px", marginTop: "20px" }}
+        style={{ background: "#f0f0f0", padding: "10px", marginTop: "20px", color: "#000" }}
       >
         <strong>Log:</strong>
-        <pre data-testid="log">
+        <pre data-testid="log" style={{ color: "#000" }}>
           {logs.map((entry, i) => (
             <div key={i}>
               [{entry.time}] {entry.message}

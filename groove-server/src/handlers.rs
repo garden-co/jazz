@@ -13,7 +13,7 @@ use axum::{
     extract::State,
     http::{header, StatusCode},
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
     Router,
 };
 use futures::stream::StreamExt;
@@ -48,10 +48,17 @@ impl<E: Environment> AppState<E> {
 /// Create the axum router for sync endpoints.
 pub fn sync_router<E: Environment + 'static>() -> Router<Arc<AppState<E>>> {
     Router::new()
+        .route("/", get(handle_health))
         .route("/sync/subscribe", post(handle_subscribe::<E>))
         .route("/sync/unsubscribe", post(handle_unsubscribe::<E>))
         .route("/sync/push", post(handle_push::<E>))
         .route("/sync/reconcile", post(handle_reconcile::<E>))
+        .route("/sync/events", get(handle_events::<E>))
+}
+
+/// Health check endpoint for load balancers and orchestration tools.
+async fn handle_health() -> &'static str {
+    "OK"
 }
 
 /// Error response for sync endpoints.
@@ -175,8 +182,8 @@ async fn handle_subscribe<E: Environment + 'static>(
             for oid in object_ids {
                 let object_id = groove::ObjectId(oid);
 
-                // Get frontier and commits for this object
-                let (frontier, commits) = {
+                // Get frontier, commits, and metadata for this object
+                let (frontier, commits, object_meta) = {
                     let server = state_clone.server.read().await;
                     let frontier = server.env.get_frontier(oid, "main").await;
                     if frontier.is_empty() {
@@ -193,7 +200,10 @@ async fn handle_subscribe<E: Environment + 'static>(
                         }
                     }
 
-                    (frontier, commits)
+                    // Get cached object metadata
+                    let object_meta = server.get_object_meta(&object_id);
+
+                    (frontier, commits, object_meta)
                 };
 
                 if !commits.is_empty() {
@@ -201,6 +211,7 @@ async fn handle_subscribe<E: Environment + 'static>(
                         object_id,
                         commits,
                         frontier: frontier.clone(),
+                        object_meta,
                     };
 
                     // Send to client (ignore errors - client may have disconnected)
@@ -325,23 +336,30 @@ async fn handle_push<E: Environment>(
             .await
     };
 
-    // Broadcast to other sessions tracking this object
+    // Broadcast to ALL other sessions (MVP: no query filtering)
     {
         let server = state.server.read().await;
         server
-            .broadcast_commits(
+            .broadcast_commits_to_all(
                 request.object_id,
                 request.commits.clone(),
                 frontier.clone(),
+                request.object_meta.clone(),
                 sender_session,
             )
             .await;
     }
 
-    // Update sender's known state
-    if let Some(session_id) = sender_session {
+    // Update sender's known state and cache object metadata
+    {
         let mut server = state.server.write().await;
-        server.update_client_known_state(&session_id, request.object_id, frontier.clone());
+        if let Some(session_id) = sender_session {
+            server.update_client_known_state(&session_id, request.object_id, frontier.clone());
+        }
+        // Cache object metadata for future subscribers
+        if let Some(meta) = request.object_meta {
+            server.store_object_meta(request.object_id, meta);
+        }
     }
 
     let response = PushResponse {
@@ -383,6 +401,7 @@ async fn handle_reconcile<E: Environment>(
             object_id: request.object_id,
             commits: vec![],
             frontier: vec![],
+            object_meta: None,
         };
 
         return Ok(Response::builder()
@@ -415,8 +434,10 @@ async fn handle_reconcile<E: Environment>(
         }
     }
 
-    // Update client's known state
+    // Get object metadata and update client's known state
+    let object_meta = server.get_object_meta(&request.object_id);
     drop(server);
+
     if let Some(session_id) = {
         let server = state.server.read().await;
         server
@@ -436,6 +457,7 @@ async fn handle_reconcile<E: Environment>(
         object_id: request.object_id,
         commits: commits_to_send,
         frontier: server_frontier,
+        object_meta,
     };
 
     Ok(Response::builder()
@@ -443,6 +465,113 @@ async fn handle_reconcile<E: Environment>(
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .body(Body::from(event.to_bytes()))
         .unwrap())
+}
+
+/// Handle GET /sync/events
+///
+/// Opens an SSE connection for a client. Uses token query param for auth.
+/// This is separate from subscribe because EventSource only supports GET.
+async fn handle_events<E: Environment + 'static>(
+    State(state): State<Arc<AppState<E>>>,
+    axum::extract::Query(params): axum::extract::Query<EventsParams>,
+) -> Result<Response, SyncError> {
+    // Validate token
+    let server = state.server.read().await;
+    let identity = server
+        .token_validator
+        .validate(&params.token)
+        .ok_or_else(|| SyncError::unauthorized("Invalid token"))?;
+    drop(server);
+
+    // Create SSE channel
+    let (tx, stream) = AxumServerEnv::create_sse_channel();
+
+    // Create session
+    let session_id = {
+        let mut server = state.server.write().await;
+        server.create_session(identity, tx.clone())
+    };
+
+    web_sys_log(&format!("Created SSE session: {:?}", session_id));
+
+    // Send initial data (all objects) to this session
+    // This is MVP behavior - in production we'd send based on query subscriptions
+    let state_clone = Arc::clone(&state);
+    let tx_clone = tx;
+
+    tokio::spawn(async move {
+        // Get all objects from storage
+        let object_ids: Vec<u128> = {
+            let server = state_clone.server.read().await;
+            server.env.list_objects().collect().await
+        };
+
+        for oid in object_ids {
+            let object_id = groove::ObjectId(oid);
+
+            // Get frontier, commits, and metadata for this object
+            let (frontier, commits, object_meta) = {
+                let server = state_clone.server.read().await;
+                let frontier = server.env.get_frontier(oid, "main").await;
+                if frontier.is_empty() {
+                    continue;
+                }
+
+                // Load all commits for this object
+                let commit_ids: Vec<_> = server.env.list_commits(oid, "main").collect().await;
+
+                let mut commits = Vec::new();
+                for commit_id in commit_ids {
+                    if let Some(commit) = server.env.get_commit(&commit_id).await {
+                        commits.push(commit);
+                    }
+                }
+
+                // Get cached object metadata
+                let object_meta = server.get_object_meta(&object_id);
+
+                (frontier, commits, object_meta)
+            };
+
+            if !commits.is_empty() {
+                let event = SseEvent::Commits {
+                    object_id,
+                    commits,
+                    frontier: frontier.clone(),
+                    object_meta,
+                };
+
+                // Send to client (ignore errors - client may have disconnected)
+                let _ = tx_clone.send(event).await;
+            }
+
+            // Register this object for the session
+            {
+                let mut server = state_clone.server.write().await;
+                if let Some(session) = server.get_session_mut(&session_id) {
+                    session.add_object_to_query(object_id, QueryId(1));
+                    session.client_known_state.insert(object_id, frontier);
+                }
+                server.register_object_session(object_id, session_id);
+            }
+        }
+    });
+
+    // Return SSE response
+    Ok(AxumServerEnv::sse_response(stream))
+}
+
+/// Query parameters for /sync/events
+#[derive(Debug, serde::Deserialize)]
+struct EventsParams {
+    token: String,
+}
+
+/// Log helper (only prints in debug builds)
+#[allow(dead_code)]
+fn web_sys_log(_msg: &str) {
+    #[cfg(debug_assertions)]
+    eprintln!("{}", _msg);
 }
 
 #[cfg(test)]
@@ -507,6 +636,7 @@ mod tests {
         let request = PushRequest {
             object_id: groove::ObjectId(42),
             commits: vec![commit],
+            object_meta: None,
         };
 
         // Call handler
@@ -586,6 +716,7 @@ mod tests {
         let request = PushRequest {
             object_id,
             commits: vec![commit.clone()],
+            object_meta: None,
         };
 
         let _ = handle_push(
@@ -634,6 +765,7 @@ mod tests {
         let push_req = PushRequest {
             object_id,
             commits: vec![commit1],
+            object_meta: None,
         };
 
         let _ = handle_push(
@@ -671,6 +803,7 @@ mod tests {
                 object_id: oid,
                 commits,
                 frontier,
+                ..
             } => {
                 assert_eq!(oid, object_id);
                 assert_eq!(commits.len(), 1);

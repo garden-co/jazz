@@ -127,6 +127,7 @@ impl TestTransport {
                     object_id,
                     commits,
                     frontier: frontier.clone(),
+                    object_meta: None, // TODO: Include metadata for first sync
                 };
                 let _ = tx.send(event).await;
             }
@@ -206,6 +207,7 @@ impl TestTransport {
                     request.object_id,
                     request.commits.clone(),
                     frontier.clone(),
+                    request.object_meta.clone(),
                     sender_session,
                 )
                 .await;
@@ -242,6 +244,7 @@ impl TestTransport {
                 object_id: request.object_id,
                 commits: vec![],
                 frontier: vec![],
+                object_meta: None,
             });
         }
 
@@ -277,6 +280,7 @@ impl TestTransport {
             object_id: request.object_id,
             commits: commits_to_send,
             frontier: server_frontier,
+            object_meta: None, // TODO: Include metadata for first sync
         })
     }
 

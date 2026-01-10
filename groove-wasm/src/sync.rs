@@ -360,6 +360,7 @@ impl WasmSyncClient {
         let request = PushRequest {
             object_id: ObjectId(object_id_parsed),
             commits,
+            object_meta: None, // TODO: Include metadata for first push
         };
 
         let env = self.client_env();
@@ -462,6 +463,7 @@ impl WasmSyncClient {
                 object_id,
                 commits,
                 frontier,
+                ..
             } => {
                 js_sys::Reflect::set(
                     &result,

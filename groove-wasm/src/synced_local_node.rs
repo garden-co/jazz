@@ -13,6 +13,7 @@
 //! ```
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -22,7 +23,10 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 
 use groove::sql::{encode_rows, Database, ExecuteResult, Row};
-use groove::sync::{ClientEnv, ClientEnvConfig, SseEvent, SubscribeRequest, SubscriptionOptions};
+use groove::sync::{
+    commits_to_send, ClientEnv, ClientEnvConfig, PushRequest, SseEvent, SubscribeRequest,
+    SubscriptionOptions,
+};
 use groove::ObjectId;
 
 use crate::indexeddb::IndexedDbEnvironment;
@@ -43,6 +47,64 @@ pub enum SyncState {
 }
 
 // ============================================================================
+// Internal State (shared between sync task and main thread)
+// ============================================================================
+
+/// Shared state for sync operations.
+struct SyncedState {
+    /// The underlying SQL database
+    db: Database,
+    /// Server URL for sync
+    server_url: String,
+    /// Auth token for sync
+    auth_token: String,
+    /// Current sync state
+    sync_state: SyncState,
+    /// Objects we're tracking for sync (have pending writes)
+    pending_objects: HashSet<ObjectId>,
+    /// Callback for state changes
+    on_state_change: Option<Function>,
+    /// Callback for sync errors
+    on_error: Option<Function>,
+    /// Callback for data changes (called when sync applies changes)
+    on_data_change: Option<Function>,
+}
+
+impl SyncedState {
+    fn set_sync_state(&mut self, new_state: SyncState) {
+        self.sync_state = new_state;
+        if let Some(ref cb) = self.on_state_change {
+            let state_str = match new_state {
+                SyncState::Disconnected => "disconnected",
+                SyncState::Connecting => "connecting",
+                SyncState::Connected => "connected",
+                SyncState::Reconnecting => "reconnecting",
+            };
+            let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(state_str));
+        }
+    }
+
+    fn report_error(&self, message: &str) {
+        if let Some(ref cb) = self.on_error {
+            let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(message));
+        }
+    }
+
+    fn notify_data_change(&self) {
+        if let Some(ref cb) = self.on_data_change {
+            let _ = cb.call0(&JsValue::NULL);
+        }
+    }
+
+    fn client_env(&self) -> WasmClientEnv {
+        WasmClientEnv::new(ClientEnvConfig::new(
+            self.server_url.clone(),
+            self.auth_token.clone(),
+        ))
+    }
+}
+
+// ============================================================================
 // WasmSyncedLocalNode
 // ============================================================================
 
@@ -53,23 +115,7 @@ pub enum SyncState {
 /// changes from other clients are automatically applied.
 #[wasm_bindgen]
 pub struct WasmSyncedLocalNode {
-    /// The underlying SQL database
-    db: Database,
-
-    /// Server URL for sync
-    server_url: String,
-
-    /// Auth token for sync
-    auth_token: String,
-
-    /// Current sync state
-    sync_state: Rc<RefCell<SyncState>>,
-
-    /// Callback for state changes
-    on_state_change: Rc<RefCell<Option<Function>>>,
-
-    /// Callback for sync errors
-    on_error: Rc<RefCell<Option<Function>>>,
+    state: Rc<RefCell<SyncedState>>,
 }
 
 #[wasm_bindgen]
@@ -78,15 +124,28 @@ impl WasmSyncedLocalNode {
     ///
     /// @param server_url - The sync server URL (e.g., "http://localhost:8080")
     /// @param auth_token - Bearer token for authentication
+    /// @param catalog_id - Optional shared catalog ID (for sync between multiple clients)
     #[wasm_bindgen(constructor)]
-    pub fn new(server_url: String, auth_token: String) -> Self {
+    pub fn new(server_url: String, auth_token: String, catalog_id: Option<String>) -> Self {
+        let db = if let Some(id_str) = catalog_id {
+            // Use shared catalog ID for sync
+            let id = ObjectId::from_key(&id_str);
+            Database::in_memory_with_catalog(id)
+        } else {
+            Database::in_memory()
+        };
+
         Self {
-            db: Database::in_memory(),
-            server_url,
-            auth_token,
-            sync_state: Rc::new(RefCell::new(SyncState::Disconnected)),
-            on_state_change: Rc::new(RefCell::new(None)),
-            on_error: Rc::new(RefCell::new(None)),
+            state: Rc::new(RefCell::new(SyncedState {
+                db,
+                server_url,
+                auth_token,
+                sync_state: SyncState::Disconnected,
+                pending_objects: HashSet::new(),
+                on_state_change: None,
+                on_error: None,
+                on_data_change: None,
+            })),
         }
     }
 
@@ -128,12 +187,16 @@ impl WasmSyncedLocalNode {
             };
 
             Ok(JsValue::from(WasmSyncedLocalNode {
-                db,
-                server_url,
-                auth_token,
-                sync_state: Rc::new(RefCell::new(SyncState::Disconnected)),
-                on_state_change: Rc::new(RefCell::new(None)),
-                on_error: Rc::new(RefCell::new(None)),
+                state: Rc::new(RefCell::new(SyncedState {
+                    db,
+                    server_url,
+                    auth_token,
+                    sync_state: SyncState::Disconnected,
+                    pending_objects: HashSet::new(),
+                    on_state_change: None,
+                    on_error: None,
+                    on_data_change: None,
+                })),
             }))
         })
     }
@@ -143,7 +206,7 @@ impl WasmSyncedLocalNode {
     /// Callback receives: (state: string)
     #[wasm_bindgen(js_name = setOnStateChange)]
     pub fn set_on_state_change(&self, callback: Function) {
-        *self.on_state_change.borrow_mut() = Some(callback);
+        self.state.borrow_mut().on_state_change = Some(callback);
     }
 
     /// Set callback for sync errors.
@@ -151,13 +214,21 @@ impl WasmSyncedLocalNode {
     /// Callback receives: (message: string)
     #[wasm_bindgen(js_name = setOnError)]
     pub fn set_on_error(&self, callback: Function) {
-        *self.on_error.borrow_mut() = Some(callback);
+        self.state.borrow_mut().on_error = Some(callback);
+    }
+
+    /// Set callback for data changes (called when sync applies remote changes).
+    ///
+    /// Callback receives: no arguments
+    #[wasm_bindgen(js_name = setOnDataChange)]
+    pub fn set_on_data_change(&self, callback: Function) {
+        self.state.borrow_mut().on_data_change = Some(callback);
     }
 
     /// Get current sync state.
     #[wasm_bindgen(getter, js_name = syncState)]
     pub fn sync_state(&self) -> SyncState {
-        *self.sync_state.borrow()
+        self.state.borrow().sync_state
     }
 
     /// Connect to the sync server and start receiving updates.
@@ -166,20 +237,12 @@ impl WasmSyncedLocalNode {
     /// to receive real-time updates from other clients.
     #[wasm_bindgen]
     pub fn connect(&self, query: String) -> Promise {
-        let server_url = self.server_url.clone();
-        let auth_token = self.auth_token.clone();
-        let sync_state = Rc::clone(&self.sync_state);
-        let on_state_change = Rc::clone(&self.on_state_change);
-        let on_error = Rc::clone(&self.on_error);
-
-        // We need to clone the database reference for the async block
-        // This is tricky because Database is not Clone...
-        // For now, we'll use a simpler approach where we return a handle
+        let state = Rc::clone(&self.state);
 
         future_to_promise(async move {
-            set_sync_state(&sync_state, &on_state_change, SyncState::Connecting);
+            state.borrow_mut().set_sync_state(SyncState::Connecting);
 
-            let env = WasmClientEnv::new(ClientEnvConfig::new(server_url, auth_token));
+            let env = state.borrow().client_env();
 
             let request = SubscribeRequest {
                 query,
@@ -188,39 +251,30 @@ impl WasmSyncedLocalNode {
 
             match env.subscribe(request).await {
                 Ok(mut stream) => {
-                    set_sync_state(&sync_state, &on_state_change, SyncState::Connected);
+                    state.borrow_mut().set_sync_state(SyncState::Connected);
 
                     // Spawn a task to process incoming events
-                    // Note: In a full implementation, we'd apply these to the database
+                    let state_clone = Rc::clone(&state);
                     wasm_bindgen_futures::spawn_local(async move {
                         while let Some(result) = stream.next().await {
                             match result {
                                 Ok(event) => {
-                                    // TODO: Apply event to database
-                                    // This requires access to the database which is tricky
-                                    // in this async context
-                                    web_sys::console::log_1(&JsValue::from_str(&format!(
-                                        "Received sync event: {:?}",
-                                        event_type(&event)
-                                    )));
+                                    handle_sse_event(&state_clone, &event);
                                 }
                                 Err(e) => {
-                                    if let Some(ref callback) = *on_error.borrow() {
-                                        let _ =
-                                            callback.call1(&JsValue::NULL, &JsValue::from_str(&e.message));
-                                    }
+                                    state_clone.borrow().report_error(&e.message);
                                     break;
                                 }
                             }
                         }
 
-                        set_sync_state(&sync_state, &on_state_change, SyncState::Disconnected);
+                        state_clone.borrow_mut().set_sync_state(SyncState::Disconnected);
                     });
 
                     Ok(JsValue::TRUE)
                 }
                 Err(e) => {
-                    set_sync_state(&sync_state, &on_state_change, SyncState::Disconnected);
+                    state.borrow_mut().set_sync_state(SyncState::Disconnected);
                     Err(JsValue::from_str(&e.message))
                 }
             }
@@ -234,7 +288,9 @@ impl WasmSyncedLocalNode {
     /// Execute a SQL statement.
     #[wasm_bindgen]
     pub fn execute(&self, sql: &str) -> Result<JsValue, JsValue> {
-        match self.db.execute(sql) {
+        let mut state = self.state.borrow_mut();
+
+        match state.db.execute(sql) {
             Ok(result) => {
                 let js_result = match result {
                     ExecuteResult::Created(_) => {
@@ -244,16 +300,22 @@ impl WasmSyncedLocalNode {
                         serde_wasm_bindgen::to_value(&format!("policy_created:{}:{}", table, action))
                             .unwrap()
                     }
-                    ExecuteResult::Inserted(id) => {
-                        // TODO: Push the new commit to server
-                        serde_wasm_bindgen::to_value(&format!("inserted:{}", id)).unwrap()
+                    ExecuteResult::Inserted { row_id, .. } => {
+                        // Track only the row object for sync (table_rows is private per-node)
+                        state.pending_objects.insert(row_id);
+                        // Trigger push in background
+                        let state_clone = Rc::clone(&self.state);
+                        wasm_bindgen_futures::spawn_local(async move {
+                            push_pending_objects(&state_clone).await;
+                        });
+                        serde_wasm_bindgen::to_value(&format!("inserted:{}", row_id)).unwrap()
                     }
                     ExecuteResult::Updated(count) => {
-                        // TODO: Push the updated commits to server
+                        // TODO: Track updated objects for sync
                         serde_wasm_bindgen::to_value(&format!("updated:{}", count)).unwrap()
                     }
                     ExecuteResult::Deleted(count) => {
-                        // TODO: Push the delete commits to server
+                        // TODO: Track deleted objects for sync
                         serde_wasm_bindgen::to_value(&format!("deleted:{}", count)).unwrap()
                     }
                     ExecuteResult::Selected(rows) => {
@@ -271,7 +333,8 @@ impl WasmSyncedLocalNode {
     /// Execute a SELECT query and return results as binary Uint8Array.
     #[wasm_bindgen(js_name = selectBinary)]
     pub fn select_binary(&self, sql: &str) -> Result<Uint8Array, JsValue> {
-        match self.db.execute(sql) {
+        let state = self.state.borrow();
+        match state.db.execute(sql) {
             Ok(ExecuteResult::Selected(rows)) => {
                 let binary = encode_rows(&rows);
                 Ok(Uint8Array::from(binary.as_slice()))
@@ -284,8 +347,10 @@ impl WasmSyncedLocalNode {
     /// Initialize the database schema from a SQL string.
     #[wasm_bindgen(js_name = initSchema)]
     pub fn init_schema(&self, schema: &str) -> Result<(), JsValue> {
+        let state = self.state.borrow();
         for stmt in schema.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            self.db
+            state
+                .db
                 .execute(stmt)
                 .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
         }
@@ -295,7 +360,8 @@ impl WasmSyncedLocalNode {
     /// List all tables in the database.
     #[wasm_bindgen(js_name = listTables)]
     pub fn list_tables(&self) -> JsValue {
-        let tables = self.db.list_tables();
+        let state = self.state.borrow();
+        let tables = state.db.list_tables();
         serde_wasm_bindgen::to_value(&tables).unwrap_or(JsValue::NULL)
     }
 
@@ -308,7 +374,8 @@ impl WasmSyncedLocalNode {
     ) -> Result<SyncedQueryHandle, JsValue> {
         use groove::sql::{encode_delta, query_graph::DeltaBatch};
 
-        let query = self
+        let state = self.state.borrow();
+        let query = state
             .db
             .incremental_query(sql)
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
@@ -357,33 +424,180 @@ impl SyncedQueryHandle {
 }
 
 // ============================================================================
-// Helper Functions
+// Sync Helpers
 // ============================================================================
 
-fn set_sync_state(
-    state: &Rc<RefCell<SyncState>>,
-    callback: &Rc<RefCell<Option<Function>>>,
-    new_state: SyncState,
-) {
-    *state.borrow_mut() = new_state;
-    if let Some(ref cb) = *callback.borrow() {
-        let state_str = match new_state {
-            SyncState::Disconnected => "disconnected",
-            SyncState::Connecting => "connecting",
-            SyncState::Connected => "connected",
-            SyncState::Reconnecting => "reconnecting",
-        };
-        let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(state_str));
+/// Handle an SSE event from the server.
+fn handle_sse_event(state: &Rc<RefCell<SyncedState>>, event: &SseEvent) {
+    match event {
+        SseEvent::Commits {
+            object_id,
+            commits,
+            frontier: _,
+            object_meta,
+        } => {
+            web_sys::console::log_1(&JsValue::from_str(&format!(
+                "Received {} commits for object {}",
+                commits.len(),
+                object_id
+            )));
+
+            // Apply commits to the LocalNode underlying the Database
+            let state_ref = state.borrow();
+            let node = state_ref.db.node();
+            node.apply_commits(*object_id, "main", commits.clone());
+
+            // If we received object metadata with a descriptor, register the row
+            if let Some(meta) = object_meta {
+                if let Some(descriptor_str) = meta.get("descriptor") {
+                    web_sys::console::log_1(&JsValue::from_str(&format!(
+                        "Row {} belongs to descriptor {}",
+                        object_id, descriptor_str
+                    )));
+
+                    // Register the synced row with the database
+                    if let Err(e) = state_ref.db.register_synced_row(*object_id, descriptor_str) {
+                        web_sys::console::log_1(&JsValue::from_str(&format!(
+                            "Failed to register synced row: {:?}",
+                            e
+                        )));
+                    }
+                }
+            }
+
+            // Notify that data changed
+            state_ref.notify_data_change();
+        }
+        SseEvent::Excluded { object_id } => {
+            web_sys::console::log_1(&JsValue::from_str(&format!(
+                "Object {} excluded from subscription",
+                object_id
+            )));
+        }
+        SseEvent::Truncate { object_id, .. } => {
+            web_sys::console::log_1(&JsValue::from_str(&format!(
+                "Truncate event for object {}",
+                object_id
+            )));
+        }
+        SseEvent::Request { object_id, .. } => {
+            web_sys::console::log_1(&JsValue::from_str(&format!(
+                "Request event for object {}",
+                object_id
+            )));
+        }
+        SseEvent::Error { code, message } => {
+            state.borrow().report_error(&format!("SSE error {}: {}", code, message));
+        }
     }
 }
 
-fn event_type(event: &SseEvent) -> &'static str {
-    match event {
-        SseEvent::Commits { .. } => "commits",
-        SseEvent::Excluded { .. } => "excluded",
-        SseEvent::Truncate { .. } => "truncate",
-        SseEvent::Request { .. } => "request",
-        SseEvent::Error { .. } => "error",
+/// Push pending objects to the server.
+async fn push_pending_objects(state: &Rc<RefCell<SyncedState>>) {
+    // Get pending objects and client env
+    let (pending, env) = {
+        let mut state_ref = state.borrow_mut();
+        let pending: Vec<ObjectId> = state_ref.pending_objects.drain().collect();
+        let env = state_ref.client_env();
+        (pending, env)
+    };
+
+    if pending.is_empty() {
+        return;
+    }
+
+    for object_id in pending {
+        // Get commits to push from the LocalNode
+        let commits = {
+            let state_ref = state.borrow();
+            let node = state_ref.db.node();
+
+            // Get object and branch to find commits to send
+            let obj = match node.get_object(object_id) {
+                Some(o) => o,
+                None => {
+                    web_sys::console::log_1(&JsValue::from_str(&format!(
+                        "Object {} not found",
+                        object_id
+                    )));
+                    continue;
+                }
+            };
+
+            let obj_read = obj.read().unwrap();
+            let branch_ref = match obj_read.branch_ref("main") {
+                Some(b) => b,
+                None => {
+                    web_sys::console::log_1(&JsValue::from_str(&format!(
+                        "Branch 'main' not found for object {}",
+                        object_id
+                    )));
+                    continue;
+                }
+            };
+
+            let branch_read = branch_ref.read().unwrap();
+            let local_frontier = branch_read.frontier().to_vec();
+
+            // For new objects, server frontier is empty
+            let server_frontier: Vec<groove::CommitId> = vec![];
+
+            commits_to_send(&branch_read, &local_frontier, &server_frontier)
+        };
+
+        if commits.is_empty() {
+            web_sys::console::log_1(&JsValue::from_str(&format!(
+                "No commits to push for object {}",
+                object_id
+            )));
+            continue;
+        }
+
+        web_sys::console::log_1(&JsValue::from_str(&format!(
+            "Pushing {} commits for object {}",
+            commits.len(),
+            object_id
+        )));
+
+        // Get object metadata for first push
+        let object_meta = {
+            let state_ref = state.borrow();
+            let node = state_ref.db.node();
+            if let Some(obj) = node.get_object(object_id) {
+                if let Ok(obj_read) = obj.read() {
+                    obj_read.meta.clone()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        let request = PushRequest {
+            object_id,
+            commits,
+            object_meta,
+        };
+
+        match env.push(request).await {
+            Ok(response) => {
+                if response.accepted {
+                    web_sys::console::log_1(&JsValue::from_str(&format!(
+                        "Push accepted for object {}",
+                        object_id
+                    )));
+                } else {
+                    web_sys::console::log_1(&JsValue::from_str(&format!(
+                        "Push rejected for object {}",
+                        object_id
+                    )));
+                }
+            }
+            Err(e) => {
+                state.borrow().report_error(&format!("Push failed: {}", e.message));
+            }
+        }
     }
 }
 

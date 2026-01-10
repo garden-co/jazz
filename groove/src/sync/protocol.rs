@@ -50,6 +50,8 @@ pub struct PushRequest {
     pub object_id: ObjectId,
     /// Commits to push (topologically sorted, parents first)
     pub commits: Vec<Commit>,
+    /// Object-level metadata (included on first push of an object)
+    pub object_meta: Option<BTreeMap<String, String>>,
 }
 
 /// Response to a push request.
@@ -86,6 +88,8 @@ pub enum SseEvent {
         commits: Vec<Commit>,
         /// Server's frontier after these commits
         frontier: Vec<CommitId>,
+        /// Object-level metadata (included on first send of an object)
+        object_meta: Option<BTreeMap<String, String>>,
     },
     /// Object no longer matches any active query
     Excluded { object_id: ObjectId },
@@ -488,7 +492,8 @@ impl Decode for UnsubscribeRequest {
 impl Encode for PushRequest {
     fn encode<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         self.object_id.encode(writer)?;
-        self.commits.encode(writer)
+        self.commits.encode(writer)?;
+        self.object_meta.encode(writer)
     }
 }
 
@@ -497,6 +502,7 @@ impl Decode for PushRequest {
         Ok(PushRequest {
             object_id: ObjectId::decode(reader)?,
             commits: Vec::<Commit>::decode(reader)?,
+            object_meta: Option::<BTreeMap<String, String>>::decode(reader)?,
         })
     }
 }
@@ -546,11 +552,13 @@ impl Encode for SseEvent {
                 object_id,
                 commits,
                 frontier,
+                object_meta,
             } => {
                 (SseEventType::Commits as u8).encode(writer)?;
                 object_id.encode(writer)?;
                 commits.encode(writer)?;
-                frontier.encode(writer)
+                frontier.encode(writer)?;
+                object_meta.encode(writer)
             }
             SseEvent::Excluded { object_id } => {
                 (SseEventType::Excluded as u8).encode(writer)?;
@@ -589,6 +597,7 @@ impl Decode for SseEvent {
                 object_id: ObjectId::decode(reader)?,
                 commits: Vec::<Commit>::decode(reader)?,
                 frontier: Vec::<CommitId>::decode(reader)?,
+                object_meta: Option::<BTreeMap<String, String>>::decode(reader)?,
             }),
             SseEventType::Excluded => Ok(SseEvent::Excluded {
                 object_id: ObjectId::decode(reader)?,
@@ -745,6 +754,7 @@ mod tests {
         let req = PushRequest {
             object_id: ObjectId(42),
             commits: vec![commit],
+            object_meta: None,
         };
 
         let bytes = req.to_bytes();
@@ -753,6 +763,7 @@ mod tests {
         assert_eq!(decoded.object_id, req.object_id);
         assert_eq!(decoded.commits.len(), 1);
         assert_eq!(decoded.commits[0].author, "test");
+        assert!(decoded.object_meta.is_none());
     }
 
     #[test]
@@ -770,6 +781,7 @@ mod tests {
             object_id: ObjectId(123),
             commits: vec![commit],
             frontier: vec![commit_id],
+            object_meta: None,
         };
 
         let bytes = event.to_bytes();
@@ -780,10 +792,12 @@ mod tests {
                 object_id,
                 commits,
                 frontier,
+                object_meta,
             } => {
                 assert_eq!(object_id, ObjectId(123));
                 assert_eq!(commits.len(), 1);
                 assert_eq!(frontier.len(), 1);
+                assert!(object_meta.is_none());
             }
             _ => panic!("wrong event type"),
         }

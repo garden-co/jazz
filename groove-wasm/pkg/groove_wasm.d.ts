@@ -1,6 +1,35 @@
 /* tslint:disable */
 /* eslint-disable */
 
+/**
+ * Connection state for the sync client.
+ */
+export enum ConnectionState {
+  Disconnected = 0,
+  Connecting = 1,
+  Connected = 2,
+}
+
+/**
+ * Connection state for the synced node.
+ */
+export enum SyncState {
+  Disconnected = 0,
+  Connecting = 1,
+  Connected = 2,
+  Reconnecting = 3,
+}
+
+export class SyncedQueryHandle {
+  private constructor();
+  free(): void;
+  [Symbol.dispose](): void;
+  /**
+   * Unsubscribe from updates.
+   */
+  unsubscribe(): void;
+}
+
 export class WasmBlobWriter {
   private constructor();
   free(): void;
@@ -192,6 +221,135 @@ export class WasmQueryHandleDelta {
   diagram(): string;
 }
 
+export class WasmSyncClient {
+  free(): void;
+  [Symbol.dispose](): void;
+  /**
+   * Create a new sync client.
+   *
+   * # Arguments
+   * * `base_url` - The sync server URL (e.g., "http://localhost:8080")
+   * * `auth_token` - Bearer token for authentication
+   */
+  constructor(base_url: string, auth_token: string);
+  /**
+   * Set callback for commit events.
+   *
+   * Callback receives: (object_id: string, commits: Uint8Array[], frontier: string[])
+   */
+  setOnCommits(callback: Function): void;
+  /**
+   * Set callback for excluded events.
+   *
+   * Callback receives: (object_id: string)
+   */
+  setOnExcluded(callback: Function): void;
+  /**
+   * Set callback for error events.
+   *
+   * Callback receives: (code: number, message: string)
+   */
+  setOnError(callback: Function): void;
+  /**
+   * Set callback for connection state changes.
+   *
+   * Callback receives: (state: string)
+   */
+  setOnStateChange(callback: Function): void;
+  /**
+   * Subscribe to a query and start receiving updates.
+   *
+   * This opens an SSE connection to receive real-time updates.
+   */
+  subscribe(query: string): Promise<number>;
+  /**
+   * Push commits for an object to the server.
+   */
+  push(object_id: string, commits_data: Array<any>): Promise<any>;
+  /**
+   * Request reconciliation for an object.
+   */
+  reconcile(object_id: string, local_frontier: Array<any>): Promise<any>;
+  /**
+   * Disconnect from the server.
+   */
+  disconnect(): void;
+  /**
+   * Get current connection state.
+   */
+  readonly connectionState: ConnectionState;
+}
+
+export class WasmSyncedLocalNode {
+  free(): void;
+  [Symbol.dispose](): void;
+  /**
+   * Create a new synced local node with in-memory storage.
+   *
+   * @param server_url - The sync server URL (e.g., "http://localhost:8080")
+   * @param auth_token - Bearer token for authentication
+   * @param catalog_id - Optional shared catalog ID (for sync between multiple clients)
+   */
+  constructor(server_url: string, auth_token: string, catalog_id?: string | null);
+  /**
+   * Create a synced local node with IndexedDB persistence.
+   *
+   * @param server_url - The sync server URL
+   * @param auth_token - Bearer token for authentication
+   * @param db_name - Optional database name (defaults to "groove")
+   */
+  static withIndexedDb(server_url: string, auth_token: string, db_name?: string | null): Promise<any>;
+  /**
+   * Set callback for sync state changes.
+   *
+   * Callback receives: (state: string)
+   */
+  setOnStateChange(callback: Function): void;
+  /**
+   * Set callback for sync errors.
+   *
+   * Callback receives: (message: string)
+   */
+  setOnError(callback: Function): void;
+  /**
+   * Set callback for data changes (called when sync applies remote changes).
+   *
+   * Callback receives: no arguments
+   */
+  setOnDataChange(callback: Function): void;
+  /**
+   * Connect to the sync server and start receiving updates.
+   *
+   * This subscribes to the given query and starts an SSE stream
+   * to receive real-time updates from other clients.
+   */
+  connect(query: string): Promise<any>;
+  /**
+   * Execute a SQL statement.
+   */
+  execute(sql: string): any;
+  /**
+   * Execute a SELECT query and return results as binary Uint8Array.
+   */
+  selectBinary(sql: string): Uint8Array;
+  /**
+   * Initialize the database schema from a SQL string.
+   */
+  initSchema(schema: string): void;
+  /**
+   * List all tables in the database.
+   */
+  listTables(): any;
+  /**
+   * Create an incremental query subscription.
+   */
+  subscribeDelta(sql: string, callback: Function): SyncedQueryHandle;
+  /**
+   * Get current sync state.
+   */
+  readonly syncState: SyncState;
+}
+
 /**
  * Create a ReadableStream that reads from a blob.
  * This is a convenience wrapper for JS interop.
@@ -243,11 +401,37 @@ export interface InitOutput {
   readonly wasmblobwriter_abort: (a: number) => void;
   readonly create_blob_readable_stream: (a: number, b: bigint) => [number, number, number];
   readonly init: () => void;
-  readonly wasm_bindgen__convert__closures_____invoke__h5d5fcffed857b58c: (a: number, b: number, c: any) => void;
-  readonly wasm_bindgen__closure__destroy__h04a9bc17558f661f: (a: number, b: number) => void;
-  readonly wasm_bindgen__convert__closures_____invoke__h1dcff5ec13377df8: (a: number, b: number, c: any) => void;
-  readonly wasm_bindgen__closure__destroy__h04ee08a7339e081a: (a: number, b: number) => void;
-  readonly wasm_bindgen__convert__closures_____invoke__h057c7a511bd56d49: (a: number, b: number, c: any, d: any) => void;
+  readonly __wbg_wasmsyncclient_free: (a: number, b: number) => void;
+  readonly wasmsyncclient_new: (a: number, b: number, c: number, d: number) => number;
+  readonly wasmsyncclient_setOnCommits: (a: number, b: any) => void;
+  readonly wasmsyncclient_setOnExcluded: (a: number, b: any) => void;
+  readonly wasmsyncclient_setOnError: (a: number, b: any) => void;
+  readonly wasmsyncclient_setOnStateChange: (a: number, b: any) => void;
+  readonly wasmsyncclient_connectionState: (a: number) => number;
+  readonly wasmsyncclient_subscribe: (a: number, b: number, c: number) => any;
+  readonly wasmsyncclient_push: (a: number, b: number, c: number, d: any) => any;
+  readonly wasmsyncclient_reconcile: (a: number, b: number, c: number, d: any) => any;
+  readonly wasmsyncclient_disconnect: (a: number) => void;
+  readonly __wbg_wasmsyncedlocalnode_free: (a: number, b: number) => void;
+  readonly wasmsyncedlocalnode_new: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
+  readonly wasmsyncedlocalnode_withIndexedDb: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
+  readonly wasmsyncedlocalnode_setOnStateChange: (a: number, b: any) => void;
+  readonly wasmsyncedlocalnode_setOnError: (a: number, b: any) => void;
+  readonly wasmsyncedlocalnode_setOnDataChange: (a: number, b: any) => void;
+  readonly wasmsyncedlocalnode_syncState: (a: number) => number;
+  readonly wasmsyncedlocalnode_connect: (a: number, b: number, c: number) => any;
+  readonly wasmsyncedlocalnode_execute: (a: number, b: number, c: number) => [number, number, number];
+  readonly wasmsyncedlocalnode_selectBinary: (a: number, b: number, c: number) => [number, number, number];
+  readonly wasmsyncedlocalnode_initSchema: (a: number, b: number, c: number) => [number, number];
+  readonly wasmsyncedlocalnode_listTables: (a: number) => any;
+  readonly wasmsyncedlocalnode_subscribeDelta: (a: number, b: number, c: number, d: any) => [number, number, number];
+  readonly __wbg_syncedqueryhandle_free: (a: number, b: number) => void;
+  readonly syncedqueryhandle_unsubscribe: (a: number) => void;
+  readonly wasm_bindgen__convert__closures_____invoke__h20bec3cca755663f: (a: number, b: number, c: any) => void;
+  readonly wasm_bindgen__closure__destroy__h4df8827c3765d533: (a: number, b: number) => void;
+  readonly wasm_bindgen__convert__closures_____invoke__h76dfe62a3b69c085: (a: number, b: number, c: any) => void;
+  readonly wasm_bindgen__closure__destroy__h3d685ebc6ca20542: (a: number, b: number) => void;
+  readonly wasm_bindgen__convert__closures_____invoke__h3097c68d921a6b39: (a: number, b: number, c: any, d: any) => void;
   readonly __wbindgen_malloc: (a: number, b: number) => number;
   readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
   readonly __wbindgen_exn_store: (a: number) => void;

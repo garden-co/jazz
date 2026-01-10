@@ -94,6 +94,23 @@ impl ObjectId {
         ObjectId(value)
     }
 
+    /// Create a deterministic ObjectId from a string key.
+    /// Uses FNV-1a hash to generate a reproducible ID.
+    /// This is useful when multiple clients need to reference the same object
+    /// without explicitly syncing the ID.
+    pub fn from_key(key: &str) -> Self {
+        // FNV-1a hash constants for 128-bit
+        const FNV_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
+        const FNV_PRIME: u128 = 0x0000000001000000000000000000013b;
+
+        let mut hash = FNV_OFFSET;
+        for byte in key.as_bytes() {
+            hash ^= *byte as u128;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        ObjectId(hash)
+    }
+
     /// Get the inner u128 value.
     pub const fn inner(self) -> u128 {
         self.0
@@ -242,6 +259,16 @@ impl Object {
     /// Create a new object with the given ID and prefix.
     /// Automatically creates a "main" branch.
     pub fn new(id: ObjectId, prefix: impl Into<String>) -> Self {
+        Self::new_with_meta(id, prefix, None)
+    }
+
+    /// Create a new object with the given ID, prefix, and optional metadata.
+    /// Automatically creates a "main" branch.
+    pub fn new_with_meta(
+        id: ObjectId,
+        prefix: impl Into<String>,
+        meta: Option<BTreeMap<String, String>>,
+    ) -> Self {
         let mut branches = HashMap::new();
         branches.insert(
             "main".to_string(),
@@ -252,8 +279,13 @@ impl Object {
             id,
             prefix: prefix.into(),
             branches,
-            meta: None,
+            meta,
         }
+    }
+
+    /// Set object metadata.
+    pub fn set_meta(&mut self, meta: BTreeMap<String, String>) {
+        self.meta = Some(meta);
     }
 
     /// Get a reference to a branch (Arc<RwLock<Branch>>).

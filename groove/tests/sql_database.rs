@@ -273,7 +273,7 @@ fn execute_insert() {
         .execute("INSERT INTO users (name, age) VALUES ('Alice', 30)")
         .unwrap();
     match result {
-        ExecuteResult::Inserted(id) => {
+        ExecuteResult::Inserted { row_id: id, .. } => {
             let row = db.get("users", id).unwrap().unwrap();
             assert_eq!(row.values[0], Value::String("Alice".into()));
             // age is optional (no NOT NULL), so it's wrapped in NullableSome
@@ -328,7 +328,7 @@ fn execute_update() {
         .execute("INSERT INTO users (name, age) VALUES ('Alice', 30)")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -361,7 +361,7 @@ fn execute_delete() {
         .execute("INSERT INTO users (name, active) VALUES ('Alice', true)")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -753,7 +753,7 @@ fn join_basic() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -804,7 +804,7 @@ fn join_with_where_on_primary_table() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -846,14 +846,14 @@ fn join_with_where_on_joined_table() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
     let bob_id = match db
         .execute("INSERT INTO users (name) VALUES ('Bob')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -934,7 +934,7 @@ fn join_table_star_projection() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -973,21 +973,21 @@ fn join_multiple_conditions_where() {
         .execute("INSERT INTO users (name, active) VALUES ('Alice', true)")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
     let bob_id = match db
         .execute("INSERT INTO users (name, active) VALUES ('Bob', false)")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
     let charlie_id = match db
         .execute("INSERT INTO users (name, active) VALUES ('Charlie', true)")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -1160,7 +1160,7 @@ fn incremental_query_auto_updates_on_update() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -1189,7 +1189,7 @@ fn incremental_query_auto_updates_on_delete() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -1255,7 +1255,7 @@ fn incremental_query_callback_on_delete() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
     db.execute("INSERT INTO users (name) VALUES ('Bob')")
@@ -1300,7 +1300,7 @@ fn incremental_join_basic() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -1334,7 +1334,7 @@ fn incremental_join_updates_on_post_insert() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -1381,7 +1381,7 @@ fn incremental_join_updates_on_user_change() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -1422,7 +1422,7 @@ fn incremental_join_delete_post() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -1433,7 +1433,7 @@ fn incremental_join_delete_post() {
         ))
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -1465,7 +1465,7 @@ fn incremental_join_delete_user() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -1516,14 +1516,14 @@ fn incremental_join_multiple_users() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
     let bob_id = match db
         .execute("INSERT INTO users (name) VALUES ('Bob')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -1579,14 +1579,14 @@ fn array_subquery_correlated() {
         .execute("INSERT INTO folders (name) VALUES ('Work')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
     let folder2_id = match db
         .execute("INSERT INTO folders (name) VALUES ('Personal')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -1644,7 +1644,7 @@ fn array_subquery_returns_whole_rows() {
         .execute("INSERT INTO folders (name) VALUES ('Work')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -1741,7 +1741,7 @@ fn test_note_with_i64_timestamps() {
     
     let user_result = db.execute("INSERT INTO User (name, email) VALUES ('Alice', 'alice@example.com')").unwrap();
     let user_id = match user_result {
-        ExecuteResult::Inserted(id) => id.to_string(),
+        ExecuteResult::Inserted { row_id: id, .. } => id.to_string(),
         _ => panic!("Expected Inserted"),
     };
     
@@ -1802,7 +1802,7 @@ fn hard_delete_via_sql() {
     // Insert a user
     let result = db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap();
     let id = match result {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -1830,7 +1830,7 @@ fn soft_delete_via_sql() {
     // Insert a user
     let result = db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap();
     let id = match result {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -2079,7 +2079,7 @@ fn incremental_query_with_array_subquery() {
         .execute("INSERT INTO Issues (title) VALUES ('Test Issue')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 

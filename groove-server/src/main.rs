@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use tokio::net::TcpListener;
+use tower_http::cors::{Any, CorsLayer};
 
 use groove::sync::AcceptAllTokens;
 use groove::MemoryEnvironment;
@@ -78,8 +79,14 @@ async fn main() {
     // Create app state
     let state = Arc::new(AppState::new(env, token_validator));
 
+    // Configure CORS for development (allow any origin)
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     // Build router
-    let app: Router = sync_router().with_state(state);
+    let app: Router = sync_router().with_state(state).layer(cors);
 
     // Bind and serve
     let addr: SocketAddr = format!("{}:{}", host, port).parse().unwrap_or_else(|_| {

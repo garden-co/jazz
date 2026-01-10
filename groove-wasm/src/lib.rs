@@ -230,8 +230,8 @@ impl WasmDatabase {
                     ExecuteResult::PolicyCreated { table, action } => {
                         serde_wasm_bindgen::to_value(&format!("policy_created:{}:{}", table, action)).unwrap()
                     }
-                    ExecuteResult::Inserted(id) => {
-                        serde_wasm_bindgen::to_value(&format!("inserted:{}", id)).unwrap()
+                    ExecuteResult::Inserted { row_id, .. } => {
+                        serde_wasm_bindgen::to_value(&format!("inserted:{}", row_id)).unwrap()
                     }
                     ExecuteResult::Updated(count) => {
                         serde_wasm_bindgen::to_value(&format!("updated:{}", count)).unwrap()

@@ -156,6 +156,18 @@ impl LocalNode {
         id
     }
 
+    /// Create a new object with the given prefix and metadata. Returns the object ID.
+    pub fn create_object_with_meta(
+        &self,
+        prefix: impl Into<String>,
+        meta: std::collections::BTreeMap<String, String>,
+    ) -> ObjectId {
+        let id = generate_object_id();
+        let object = Object::new_with_meta(id, prefix, Some(meta));
+        self.objects.write().unwrap().insert(id, Arc::new(RwLock::new(object)));
+        id
+    }
+
     /// Create or get an object with a specific ID.
     /// If the object already exists, returns false. If created, returns true.
     /// Useful for testing and sync scenarios where object IDs are known.

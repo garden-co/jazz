@@ -679,6 +679,7 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
                 object_id,
                 commits,
                 frontier,
+                object_meta: None, // TODO: Include metadata for first sync
             };
             self.broadcast_to_clients(object_id, &event);
         }

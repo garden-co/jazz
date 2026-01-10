@@ -84,6 +84,7 @@ async fn test_two_clients_sync() {
             object_id: oid,
             commits,
             frontier,
+            ..
         } => {
             assert_eq!(*oid, object_id);
             assert_eq!(commits.len(), 1);

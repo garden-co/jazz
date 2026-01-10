@@ -41,7 +41,7 @@ fn table_rows_updates_on_insert() {
     assert!(table_rows.is_empty());
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -56,7 +56,7 @@ fn table_rows_updates_on_delete() {
 
     db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
     let id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -127,7 +127,7 @@ fn incremental_query_update_enters_filter() {
 
     // Insert an inactive user
     let id = match db.execute("INSERT INTO users (name, active) VALUES ('Alice', false)").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -154,7 +154,7 @@ fn incremental_query_update_leaves_filter() {
 
     // Insert an active user
     let id = match db.execute("INSERT INTO users (name, active) VALUES ('Alice', true)").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -179,7 +179,7 @@ fn incremental_query_delete() {
     let query = db.incremental_query("SELECT * FROM users").unwrap();
 
     let id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -254,7 +254,7 @@ fn incremental_query_join_basic() {
 
     // Insert a user
     let user_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -279,7 +279,7 @@ fn incremental_query_join_left_table_change() {
 
     // Insert a user first
     let user_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -311,7 +311,7 @@ fn incremental_query_join_right_table_change() {
 
     // Insert a user
     let user_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -371,11 +371,11 @@ fn select_all_as_filters_by_policy() {
 
     // Create users
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -423,11 +423,11 @@ fn select_all_as_with_inheritance() {
 
     // Create users
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -471,11 +471,11 @@ fn insert_as_checks_policy() {
 
     // Create users
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -514,11 +514,11 @@ fn update_as_checks_policy() {
 
     // Create users
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -552,11 +552,11 @@ fn update_as_checks_both_where_and_check() {
     db.execute("CREATE TABLE documents (title STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -589,11 +589,11 @@ fn delete_as_checks_policy() {
     db.execute("CREATE TABLE documents (title STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -626,11 +626,11 @@ fn delete_as_falls_back_to_update_policy() {
     db.execute("CREATE TABLE documents (title STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -666,11 +666,11 @@ fn incremental_query_as_filters_by_policy() {
 
     // Create users
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -711,11 +711,11 @@ fn incremental_query_as_updates_on_insert() {
     db.execute("CREATE TABLE documents (title STRING NOT NULL, owner_id REFERENCES users NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -760,7 +760,7 @@ fn incremental_query_as_combines_with_where_clause() {
     db.execute("CREATE TABLE documents (title STRING NOT NULL, owner_id REFERENCES users NOT NULL, published BOOL NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -820,11 +820,11 @@ fn incremental_query_as_or_policy() {
     db.execute("CREATE TABLE documents (title STRING NOT NULL, owner_id REFERENCES users NOT NULL, public BOOL NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -887,11 +887,11 @@ fn incremental_query_as_inherits_flattened_to_join() {
 
     // Create users
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -948,7 +948,7 @@ fn incremental_query_as_inherits_incremental_updates() {
     db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -999,11 +999,11 @@ fn incremental_query_as_inherits_folder_ownership_change() {
     db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -1066,11 +1066,11 @@ fn incremental_query_as_nested_inherits_chain() {
     db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -1142,7 +1142,7 @@ fn incremental_query_as_inherits_multiple_docs_same_folder() {
     db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -1191,7 +1191,7 @@ fn incremental_query_as_inherits_delete_propagates() {
     db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -1243,11 +1243,11 @@ fn incremental_query_as_self_referential_recursive_inherits() {
     db.execute("CREATE TABLE folders (name STRING NOT NULL, parent_id REFERENCES folders, owner_id REFERENCES users)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -1327,7 +1327,7 @@ fn incremental_query_as_pure_recursive_inherits_returns_nothing() {
     db.execute("CREATE TABLE folders (name STRING NOT NULL, parent_id REFERENCES folders, owner_id REFERENCES users)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -1374,11 +1374,11 @@ fn incremental_query_as_3_hop_inherits_chain() {
     db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -1464,11 +1464,11 @@ fn incremental_query_as_3_hop_chain_delta_from_org_update() {
     db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -1537,11 +1537,11 @@ fn incremental_query_as_3_hop_chain_delta_from_workspace_update() {
     db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -1615,11 +1615,11 @@ fn incremental_query_as_3_hop_chain_delta_from_folder_update() {
     db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -1697,11 +1697,11 @@ fn incremental_query_as_3_hop_chain_new_document_insert() {
     db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -1766,7 +1766,7 @@ fn incremental_query_as_3_hop_chain_with_filter() {
     db.execute("CREATE TABLE documents (title STRING NOT NULL, archived BOOL NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -1837,11 +1837,11 @@ fn policy_chain_or_condition_with_inherits() {
     db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -1930,15 +1930,15 @@ fn policy_chain_multiple_viewers_concurrent() {
     db.execute("CREATE TABLE projects (name STRING NOT NULL, org_id REFERENCES orgs NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let charlie_id = match db.execute("INSERT INTO users (name) VALUES ('Charlie')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -2021,7 +2021,7 @@ fn policy_chain_insert_intermediate_row() {
     db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -2076,7 +2076,7 @@ fn policy_chain_delete_intermediate_row() {
     db.execute("CREATE TABLE documents (title STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -2131,11 +2131,11 @@ fn policy_chain_4_hop_deep() {
     db.execute("CREATE TABLE files (name STRING NOT NULL, folder_id REFERENCES folders NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -2230,11 +2230,11 @@ fn policy_chain_update_at_each_level() {
     db.execute("CREATE TABLE tasks (title STRING NOT NULL, team_id REFERENCES teams NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -2317,18 +2317,18 @@ fn incremental_query_reverse_join_basic() {
 
     // Create user
     let alice_id = match db.execute("INSERT INTO Users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
     // Create issues
     let issue1_id = match db.execute("INSERT INTO Issues (title, priority) VALUES ('Bug 1', 'high')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     // issue2 is created but unassigned - we don't need its ID
     let _issue2_id = match db.execute("INSERT INTO Issues (title, priority) VALUES ('Bug 2', 'low')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -2360,16 +2360,16 @@ fn incremental_query_reverse_join_no_filter() {
     db.execute("CREATE TABLE IssueAssignees (issue REFERENCES Issues NOT NULL, user REFERENCES Users NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO Users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
     let issue1_id = match db.execute("INSERT INTO Issues (title) VALUES ('Bug 1')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let _issue2_id = match db.execute("INSERT INTO Issues (title) VALUES ('Bug 2')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -2395,16 +2395,16 @@ fn incremental_query_reverse_join_with_from_table_filter() {
     db.execute("CREATE TABLE IssueAssignees (issue REFERENCES Issues NOT NULL, user REFERENCES Users NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO Users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
     let issue1_id = match db.execute("INSERT INTO Issues (title, priority) VALUES ('Bug 1', 'high')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let issue2_id = match db.execute("INSERT INTO Issues (title, priority) VALUES ('Bug 2', 'low')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -2432,24 +2432,24 @@ fn incremental_query_reverse_join_combined_filters() {
     db.execute("CREATE TABLE IssueAssignees (issue REFERENCES Issues NOT NULL, user REFERENCES Users NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO Users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let bob_id = match db.execute("INSERT INTO Users (name) VALUES ('Bob')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
     let issue1_id = match db.execute("INSERT INTO Issues (title, priority) VALUES ('Bug 1', 'high')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let issue2_id = match db.execute("INSERT INTO Issues (title, priority) VALUES ('Bug 2', 'low')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
     let issue3_id = match db.execute("INSERT INTO Issues (title, priority) VALUES ('Bug 3', 'low')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -2481,12 +2481,12 @@ fn incremental_query_reverse_join_with_alias() {
     db.execute("CREATE TABLE IssueAssignees (issue REFERENCES Issues NOT NULL, user REFERENCES Users NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO Users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
     let issue1_id = match db.execute("INSERT INTO Issues (title, priority) VALUES ('Bug 1', 'high')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -2518,12 +2518,12 @@ fn incremental_query_reverse_join_subscribe_delta() {
     db.execute("CREATE TABLE IssueAssignees (issue REFERENCES Issues NOT NULL, user REFERENCES Users NOT NULL)").unwrap();
 
     let alice_id = match db.execute("INSERT INTO Users (name) VALUES ('Alice')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
     let issue1_id = match db.execute("INSERT INTO Issues (title, priority) VALUES ('Bug 1', 'high')").unwrap() {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 

@@ -241,7 +241,18 @@ impl<E: ClientEnv> SyncClient<E> {
             return None;
         }
 
-        Some(PushRequest { object_id, commits })
+        // Include object metadata on first push (when server has no known state)
+        let object_meta = if server_frontier.is_empty() {
+            obj_read.meta.clone()
+        } else {
+            None
+        };
+
+        Some(PushRequest {
+            object_id,
+            commits,
+            object_meta,
+        })
     }
 
     /// Handle a push response from the server.
@@ -265,9 +276,19 @@ impl<E: ClientEnv> SyncClient<E> {
                 object_id,
                 commits,
                 frontier,
+                object_meta,
             } => {
                 // Apply commits to local node
                 self.node.apply_commits(*object_id, branch, commits.clone());
+
+                // If we received object metadata, store it on the object
+                if let Some(meta) = object_meta {
+                    if let Some(obj) = self.node.get_object(*object_id) {
+                        if let Ok(mut obj_write) = obj.write() {
+                            obj_write.set_meta(meta.clone());
+                        }
+                    }
+                }
 
                 // Update server known state
                 self.update_server_known_state(*object_id, frontier.clone());

@@ -169,6 +169,8 @@ pub struct SyncServer<E: Environment> {
     pub object_sessions: HashMap<ObjectId, HashSet<SessionId>>,
     /// Reverse index: identity -> sessions (for finding session by auth)
     pub identity_sessions: HashMap<String, HashSet<SessionId>>,
+    /// Object metadata cache (for sending to new subscribers)
+    pub object_metadata: HashMap<ObjectId, std::collections::BTreeMap<String, String>>,
     /// Next session ID
     next_session_id: u64,
 }
@@ -182,8 +184,26 @@ impl<E: Environment> SyncServer<E> {
             sessions: HashMap::new(),
             object_sessions: HashMap::new(),
             identity_sessions: HashMap::new(),
+            object_metadata: HashMap::new(),
             next_session_id: 1,
         }
+    }
+
+    /// Store object metadata for later retrieval by new subscribers.
+    pub fn store_object_meta(
+        &mut self,
+        object_id: ObjectId,
+        meta: std::collections::BTreeMap<String, String>,
+    ) {
+        self.object_metadata.insert(object_id, meta);
+    }
+
+    /// Get cached object metadata (for sending to new subscribers).
+    pub fn get_object_meta(
+        &self,
+        object_id: &ObjectId,
+    ) -> Option<std::collections::BTreeMap<String, String>> {
+        self.object_metadata.get(object_id).cloned()
     }
 
     /// Create a new client session.
@@ -351,6 +371,7 @@ impl<E: Environment> SyncServer<E> {
         object_id: ObjectId,
         commits: Vec<crate::commit::Commit>,
         frontier: Vec<CommitId>,
+        object_meta: Option<std::collections::BTreeMap<String, String>>,
         exclude_session: Option<SessionId>,
     ) {
         let sessions = self.sessions_for_object(&object_id);
@@ -358,6 +379,7 @@ impl<E: Environment> SyncServer<E> {
             object_id,
             commits,
             frontier,
+            object_meta,
         };
 
         for session_id in sessions {
@@ -370,6 +392,34 @@ impl<E: Environment> SyncServer<E> {
                 // Ignore send errors (client may have disconnected)
                 let _ = session.sse_sender.send(event.clone()).await;
             }
+        }
+    }
+
+    /// Broadcast commits to ALL active sessions (except the sender).
+    /// This is a simplified version for MVP that doesn't require query matching.
+    pub async fn broadcast_commits_to_all(
+        &self,
+        object_id: ObjectId,
+        commits: Vec<crate::commit::Commit>,
+        frontier: Vec<CommitId>,
+        object_meta: Option<std::collections::BTreeMap<String, String>>,
+        exclude_session: Option<SessionId>,
+    ) {
+        let event = SseEvent::Commits {
+            object_id,
+            commits,
+            frontier,
+            object_meta,
+        };
+
+        for (session_id, session) in &self.sessions {
+            // Skip the sender session
+            if Some(*session_id) == exclude_session {
+                continue;
+            }
+
+            // Ignore send errors (client may have disconnected)
+            let _ = session.sse_sender.send(event.clone()).await;
         }
     }
 }

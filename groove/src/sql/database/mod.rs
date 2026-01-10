@@ -455,6 +455,42 @@ impl DatabaseState {
         }
     }
 
+    /// Create in-memory database state with a specific catalog ID.
+    /// If the catalog already exists in the node, it will be reused.
+    /// This allows multiple clients to share the same catalog via sync.
+    fn in_memory_with_catalog(catalog_object_id: ObjectId) -> Self {
+        let node = LocalNode::in_memory();
+
+        // Ensure catalog object exists (creates if new, reuses if exists)
+        let is_new = node.ensure_object(catalog_object_id, "catalog");
+
+        if is_new {
+            // Initialize empty catalog
+            let empty_catalog = Catalog::new();
+            node.write(
+                catalog_object_id,
+                "main",
+                &empty_catalog.to_bytes(),
+                "system",
+                timestamp_now(),
+            )
+            .expect("failed to initialize catalog");
+        }
+
+        DatabaseState {
+            node,
+            catalog_object_id,
+            tables: RwLock::new(HashMap::new()),
+            schemas: RwLock::new(HashMap::new()),
+            table_rows_objects: RwLock::new(HashMap::new()),
+            descriptor_objects: RwLock::new(HashMap::new()),
+            row_table: RwLock::new(HashMap::new()),
+            index_objects: RwLock::new(HashMap::new()),
+            policies: RwLock::new(HashMap::new()),
+            graph_registry: GraphRegistry::new(),
+        }
+    }
+
     /// Get a table schema by name.
     fn get_schema(&self, table: &str) -> Option<TableSchema> {
         let tables = self.tables.read().unwrap();
@@ -1091,8 +1127,11 @@ pub enum ExecuteResult {
     Created(SchemaId),
     /// CREATE POLICY - returns table name and action
     PolicyCreated { table: String, action: PolicyAction },
-    /// INSERT - returns new row ID
-    Inserted(ObjectId),
+    /// INSERT - returns row object ID and table rows object ID (for sync)
+    Inserted {
+        row_id: ObjectId,
+        table_rows_id: ObjectId,
+    },
     /// UPDATE - returns number of rows affected
     Updated(usize),
     /// DELETE - returns number of rows affected
@@ -1321,6 +1360,15 @@ impl Database {
     pub fn in_memory() -> Self {
         Database {
             state: Arc::new(DatabaseState::in_memory()),
+        }
+    }
+
+    /// Create an in-memory database with a specific catalog ID.
+    /// All clients using the same catalog ID will share schema definitions
+    /// when synced, allowing INSERT/SELECT to work across clients.
+    pub fn in_memory_with_catalog(catalog_id: ObjectId) -> Self {
+        Database {
+            state: Arc::new(DatabaseState::in_memory_with_catalog(catalog_id)),
         }
     }
 
@@ -1573,11 +1621,10 @@ impl Database {
             }
         }
 
-        // Create object for schema (uses internal mutability)
-        let schema_id = self
-            .state
-            .node
-            .create_object(&format!("schema:{}", schema.name));
+        // Create object for schema with deterministic ID (for multi-client sync)
+        let schema_key = format!("schema:{}", schema.name);
+        let schema_id = crate::ObjectId::from_key(&schema_key);
+        self.state.node.ensure_object(schema_id, &schema_key);
 
         // Serialize and store schema
         let schema_bytes = schema.to_bytes();
@@ -1586,11 +1633,10 @@ impl Database {
             .write(schema_id, "main", &schema_bytes, "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
-        // Create table rows object to track row membership
-        let rows_id = self
-            .state
-            .node
-            .create_object(&format!("rows:{}", schema.name));
+        // Create table rows object with deterministic ID (for multi-client sync)
+        let rows_key = format!("rows:{}", schema.name);
+        let rows_id = crate::ObjectId::from_key(&rows_key);
+        self.state.node.ensure_object(rows_id, &rows_key);
         let empty_rows = TableRows::new();
         self.state
             .node
@@ -1608,15 +1654,14 @@ impl Database {
             .unwrap()
             .insert(schema.name.clone(), rows_id);
 
-        // Create index objects for Ref columns
+        // Create index objects for Ref columns with deterministic IDs
         let mut index_object_ids: HashMap<String, ObjectId> = HashMap::new();
         for col in &schema.columns {
             if matches!(col.ty, ColumnType::Ref(_)) {
                 let key = IndexKey::new(&schema.name, &col.name);
-                let index_id = self
-                    .state
-                    .node
-                    .create_object(&format!("index:{}:{}", schema.name, col.name));
+                let index_key = format!("index:{}:{}", schema.name, col.name);
+                let index_id = crate::ObjectId::from_key(&index_key);
+                self.state.node.ensure_object(index_id, &index_key);
 
                 // Initialize with empty index
                 let empty_index = RefIndex::new();
@@ -1641,11 +1686,10 @@ impl Database {
             }
         }
 
-        // Create table descriptor object
-        let descriptor_id = self
-            .state
-            .node
-            .create_object(&format!("descriptor:{}", schema.name));
+        // Create table descriptor object with deterministic ID
+        let descriptor_key = format!("descriptor:{}", schema.name);
+        let descriptor_id = crate::ObjectId::from_key(&descriptor_key);
+        self.state.node.ensure_object(descriptor_id, &descriptor_key);
 
         let descriptor = TableDescriptor {
             schema: schema.clone(),
@@ -1817,12 +1861,25 @@ impl Database {
     }
 
     /// Insert a new row into a table.
+    /// Returns the row object ID.
     pub fn insert(
         &self,
         table: &str,
         columns: &[&str],
         values: Vec<Value>,
     ) -> Result<ObjectId, DatabaseError> {
+        let (row_id, _table_rows_id) = self.insert_returning_both(table, columns, values)?;
+        Ok(row_id)
+    }
+
+    /// Insert a new row into a table, returning both row_id and table_rows_id.
+    /// Used internally by execute() for sync purposes.
+    fn insert_returning_both(
+        &self,
+        table: &str,
+        columns: &[&str],
+        values: Vec<Value>,
+    ) -> Result<(ObjectId, ObjectId), DatabaseError> {
         let schema = self
             .get_table(table)
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
@@ -1894,11 +1951,24 @@ impl Database {
         // Encode row
         let row_bytes = encode_row(&row_values, &schema)?;
 
-        // Create object for row
-        let row_id =
-            self.state
-                .node
-                .create_object(&format!("row:{}:{}", table, generate_object_id()));
+        // Get the table descriptor ID for row metadata
+        let descriptor_id = self
+            .state
+            .descriptor_objects
+            .read()
+            .unwrap()
+            .get(table)
+            .copied()
+            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+
+        // Create object for row with descriptor ID in metadata
+        let mut row_meta = std::collections::BTreeMap::new();
+        row_meta.insert("descriptor".to_string(), descriptor_id.to_string());
+
+        let row_id = self.state.node.create_object_with_meta(
+            &format!("row:{}:{}", table, generate_object_id()),
+            row_meta,
+        );
 
         // Store row data
         self.state
@@ -1939,7 +2009,12 @@ impl Database {
             .graph_registry
             .notify_row_change(table, RowDelta::Added(row), &*self.state);
 
-        Ok(row_id)
+        // Get the table rows object ID for sync purposes
+        let table_rows_id = self
+            .table_rows_object_id(table)
+            .expect("table_rows_object_id should exist for table");
+
+        Ok((row_id, table_rows_id))
     }
 
     /// Get a row by ID.
@@ -1969,6 +2044,52 @@ impl Database {
         let values = decode_row(&data, &schema)?;
 
         Ok(Some(Row::new(id, values)))
+    }
+
+    /// Register a synced row from another client.
+    ///
+    /// When we receive a row via sync, we need to:
+    /// 1. Look up the descriptor to find the table name
+    /// 2. Add the row to local table_rows
+    /// 3. Update the row_table mapping
+    pub fn register_synced_row(
+        &self,
+        row_id: ObjectId,
+        descriptor_id_str: &str,
+    ) -> Result<(), DatabaseError> {
+        // Parse descriptor ID
+        let descriptor_id: ObjectId = descriptor_id_str
+            .parse()
+            .map_err(|_| DatabaseError::Storage(format!("Invalid descriptor ID: {}", descriptor_id_str)))?;
+
+        // Find the table name by looking up which table has this descriptor ID
+        let table_name = {
+            let descriptor_objects = self.state.descriptor_objects.read().unwrap();
+            descriptor_objects
+                .iter()
+                .find(|(_, id)| **id == descriptor_id)
+                .map(|(name, _)| name.clone())
+        };
+
+        let table_name = table_name.ok_or_else(|| {
+            DatabaseError::Storage(format!("Descriptor {} not found in local catalog", descriptor_id_str))
+        })?;
+
+        // Add to row_table mapping
+        self.state
+            .row_table
+            .write()
+            .unwrap()
+            .insert(row_id, table_name.clone());
+
+        // Add to table_rows object
+        let mut table_rows = self.read_table_rows(&table_name)?;
+        if !table_rows.contains(row_id) {
+            table_rows.add(row_id);
+            self.write_table_rows(&table_name, &table_rows)?;
+        }
+
+        Ok(())
     }
 
     /// Update a row by ID.
@@ -2314,6 +2435,7 @@ impl Database {
     // ========== Policy-Checked Write Operations ==========
 
     /// Insert a new row, checking INSERT policy for the given viewer.
+    /// Returns the row object ID.
     pub fn insert_as(
         &self,
         table: &str,
@@ -2516,8 +2638,8 @@ impl Database {
             }
             Statement::Insert(ins) => {
                 let columns: Vec<&str> = ins.columns.iter().map(|s| s.as_str()).collect();
-                let id = self.insert(&ins.table, &columns, ins.values)?;
-                Ok(ExecuteResult::Inserted(id))
+                let (row_id, table_rows_id) = self.insert_returning_both(&ins.table, &columns, ins.values)?;
+                Ok(ExecuteResult::Inserted { row_id, table_rows_id })
             }
             Statement::Update(upd) => {
                 // Find rows matching where clause
