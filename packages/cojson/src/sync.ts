@@ -3,6 +3,7 @@ import { Histogram, ValueType, metrics } from "@opentelemetry/api";
 import { PeerState } from "./PeerState.js";
 import { SyncStateManager } from "./SyncStateManager.js";
 import { UnsyncedCoValuesTracker } from "./UnsyncedCoValuesTracker.js";
+import { SYNC_SCHEDULER_CONFIG } from "./config.js";
 import {
   getContenDebugInfo,
   getNewTransactionsFromContentMessage,
@@ -19,6 +20,7 @@ import { logger } from "./logger.js";
 import { CoValuePriority } from "./priority.js";
 import { IncomingMessagesQueue } from "./queue/IncomingMessagesQueue.js";
 import { LocalTransactionsSyncQueue } from "./queue/LocalTransactionsSyncQueue.js";
+import type { StorageStreamingQueue } from "./queue/StorageStreamingQueue.js";
 import {
   CoValueKnownState,
   knownStateFrom,
@@ -426,17 +428,87 @@ export class SyncManager {
     }
   }
 
-  messagesQueue = new IncomingMessagesQueue();
+  messagesQueue = new IncomingMessagesQueue(() => this.processQueues());
+  private processing = false;
+
   pushMessage(incoming: SyncMessage, peer: PeerState) {
     this.messagesQueue.push(incoming, peer);
+  }
 
-    if (this.messagesQueue.processing) {
+  /**
+   * Get the storage streaming queue if available.
+   * Returns undefined if storage doesn't have a streaming queue.
+   */
+  private getStorageStreamingQueue(): StorageStreamingQueue | undefined {
+    const storage = this.local.storage;
+    if (storage && "streamingQueue" in storage) {
+      return storage.streamingQueue as StorageStreamingQueue;
+    }
+    return undefined;
+  }
+
+  /**
+   * Unified queue processing that coordinates both incoming messages
+   * and storage streaming entries.
+   *
+   * Processes items from both queues with priority ordering:
+   * - Incoming messages are processed via round-robin across peers
+   * - Storage streaming entries are processed by priority (MEDIUM before LOW)
+   *
+   * Implements time budget scheduling to avoid blocking the main thread.
+   */
+  private async processQueues() {
+    if (this.processing) {
       return;
     }
 
-    this.messagesQueue.processQueue((msg, peer) => {
-      this.handleSyncMessage(msg, peer);
-    });
+    this.processing = true;
+    let lastTimer = performance.now();
+
+    const streamingQueue = this.getStorageStreamingQueue();
+
+    while (true) {
+      // First, try to pull from incoming messages queue
+      const messageEntry = this.messagesQueue.pull();
+      if (messageEntry) {
+        try {
+          this.handleSyncMessage(messageEntry.msg, messageEntry.peer);
+        } catch (err) {
+          logger.error("Error processing message", { err });
+        }
+      }
+
+      // Then, try to pull from storage streaming queue
+      const pushStreamingContent = streamingQueue?.pull();
+      if (pushStreamingContent) {
+        try {
+          // Invoke the pushContent callback to stream the content
+          pushStreamingContent();
+        } catch (err) {
+          logger.error("Error processing storage streaming entry", {
+            err,
+          });
+        }
+      }
+
+      // If both queues are empty, we're done
+      if (!messageEntry && !pushStreamingContent) {
+        break;
+      }
+
+      // Check if we have blocked the main thread for too long
+      // and if so, yield to the event loop
+      const currentTimer = performance.now();
+      if (
+        currentTimer - lastTimer >
+        SYNC_SCHEDULER_CONFIG.INCOMING_MESSAGES_TIME_BUDGET
+      ) {
+        await new Promise<void>((resolve) => setTimeout(resolve));
+        lastTimer = performance.now();
+      }
+    }
+
+    this.processing = false;
   }
 
   addPeer(peer: Peer, skipReconciliation: boolean = false) {
@@ -1053,6 +1125,13 @@ export class SyncManager {
 
   setStorage(storage: StorageAPI) {
     this.unsyncedTracker.setStorage(storage);
+
+    const storageStreamingQueue = this.getStorageStreamingQueue();
+    if (storageStreamingQueue) {
+      storageStreamingQueue.setListener(() => {
+        this.processQueues();
+      });
+    }
   }
 
   removeStorage() {

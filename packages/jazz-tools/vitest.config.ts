@@ -30,6 +30,7 @@ export default defineProject({
   test: {
     name: "jazz-tools",
     include: ["src/**/*.test.{js,ts,tsx,svelte}"],
+    setupFiles: ["./testSetup.ts"],
     typecheck: {
       enabled: true,
       checker: "tsc",
