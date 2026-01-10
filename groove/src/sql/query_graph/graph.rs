@@ -192,6 +192,23 @@ impl QueryGraph {
 
         let combined_schema = TableSchema::new("_joined", combined_columns);
 
+        // Check for ArrayAggregate nodes and add their inner tables
+        for node in &nodes {
+            if let QueryNode::ArrayAggregate { inner_table, inner_schema, inner_joins, .. } = node {
+                if !all_tables.contains(inner_table) {
+                    all_tables.push(inner_table.clone());
+                    all_schemas.insert(inner_table.clone(), inner_schema.clone());
+                }
+                // Also add tables from inner joins within the ARRAY subquery
+                for (_, target_table, target_schema) in inner_joins {
+                    if !all_tables.contains(target_table) {
+                        all_tables.push(target_table.clone());
+                        all_schemas.insert(target_table.clone(), target_schema.clone());
+                    }
+                }
+            }
+        }
+
         Self {
             id,
             state: GraphState::Uninitialized,
@@ -469,6 +486,8 @@ impl QueryGraph {
                             let batch = node.evaluate_array_aggregate(
                                 d,
                                 &table, // source is outer table
+                                true,   // is_outer_delta = true (initialization is always outer)
+                                false,  // is_inner_delta = false
                                 &outer_schema,
                                 |outer_id| {
                                     // Look up all inner rows that reference this outer id
@@ -510,7 +529,7 @@ impl QueryGraph {
         // with data from multiple tables.
         let mut contained_tables: Vec<String> = vec![source_table.to_string()];
 
-        for node in &mut self.nodes {
+        for (_node_idx, node) in self.nodes.iter_mut().enumerate() {
             if current.is_empty() {
                 break; // Early cutoff
             }
@@ -575,15 +594,18 @@ impl QueryGraph {
                     // RecursiveFilter needs special evaluation for fixpoint iteration
                     current = node.evaluate_recursive(current, &self.schema);
                 }
-                QueryNode::ArrayAggregate { outer_table, inner_table, inner_ref_column, .. } => {
+                QueryNode::ArrayAggregate { outer_table, inner_table, inner_ref_column, outer_rows, inner_joins, .. } => {
                     // Clone values before borrowing node mutably
                     let outer_tbl = outer_table.clone();
                     let inner_tbl = inner_table.clone();
                     let inner_ref = inner_ref_column.clone();
+                    let join_tables: Vec<String> = inner_joins.iter().map(|(_, t, _)| t.clone()).collect();
 
                     // Check if this delta is for this node
                     let is_outer_delta = source_table == outer_tbl || contained_tables.contains(&outer_tbl);
                     let is_inner_delta = source_table == inner_tbl;
+                    // Check if delta is for a table in inner joins (e.g., Users in IssueAssignees JOIN Users)
+                    let is_inner_join_delta = join_tables.contains(&source_table.to_string());
 
                     if is_outer_delta || is_inner_delta {
                         // Process deltas through ArrayAggregate
@@ -596,6 +618,8 @@ impl QueryGraph {
                             let batch = node.evaluate_array_aggregate(
                                 d,
                                 source_table,
+                                is_outer_delta,
+                                is_inner_delta,
                                 &outer_schema,
                                 |outer_id| {
                                     // Look up all inner rows that reference this outer id
@@ -609,8 +633,36 @@ impl QueryGraph {
                             output.extend(batch);
                         }
                         current = output;
+
+                        // After processing, output deltas represent outer table rows (Issues, not IssueLabels)
+                        // Update contained_tables so downstream ArrayAggregates know this
+                        if is_inner_delta && !contained_tables.contains(&outer_tbl) {
+                            contained_tables.push(outer_tbl.clone());
+                        }
+                    } else if is_inner_join_delta {
+                        // Delta from inner join table (e.g., Users change)
+                        // TODO: Ideally we should find affected IssueAssignees and update those Issues
+                        // For now, clear current to prevent unrelated rows from flowing through
+                        current = DeltaBatch::new();
+                    } else {
+                        // Not for this node - update outer_rows cache if this is a pass-through
+                        // from an upstream ArrayAggregate that added an array to the row
+                        // Only update if the delta contains outer table data
+                        if contained_tables.contains(&outer_tbl) {
+                            for d in current.iter() {
+                                match d {
+                                    RowDelta::Added { id, row } | RowDelta::Updated { id, row, .. } => {
+                                        // Update our cached outer_row so subsequent inner deltas use fresh data
+                                        outer_rows.insert(*id, row.clone());
+                                    }
+                                    RowDelta::Removed { id, .. } => {
+                                        outer_rows.remove(id);
+                                    }
+                                }
+                            }
+                        }
+                        // Pass through unchanged
                     }
-                    // If not for this node, pass through unchanged
                 }
                 QueryNode::LimitOffset { .. } => {
                     // LimitOffset needs special evaluation with cache access
@@ -1111,6 +1163,272 @@ mod tests {
         // Should emit Updated delta
         assert_eq!(delta.len(), 1);
         assert!(matches!(delta.iter().next(), Some(RowDelta::Updated { .. })));
+    }
+
+    #[test]
+    fn array_aggregate_initial_load_with_existing_data() {
+        // This test mimics the demo app scenario:
+        // 1. Data exists in the database before the query is subscribed
+        // 2. When get_output is called, it should find the existing inner rows
+
+        let outer_schema = folder_schema();
+        let inner_schema = note_schema();
+
+        // Create database and add data BEFORE creating the query
+        let db = Database::in_memory();
+        db.create_table(outer_schema.clone()).unwrap();
+        db.create_table(inner_schema.clone()).unwrap();
+
+        // Insert a folder using the Database API
+        let folder_id = db.insert_with("folders", |b| {
+            b.set_string_by_name("name", "Work").build()
+        }).unwrap();
+
+        // Insert notes that reference the folder
+        let _note1_id = db.insert_with("notes", |b| {
+            b.set_ref_by_name("folder", folder_id)
+             .set_string_by_name("title", "Meeting Notes")
+             .build()
+        }).unwrap();
+        let _note2_id = db.insert_with("notes", |b| {
+            b.set_ref_by_name("folder", folder_id)
+             .set_string_by_name("title", "Project Plan")
+             .build()
+        }).unwrap();
+
+        // Verify the data exists
+        eprintln!("[TEST] folders count: {}", db.state().read_all_rows("folders").len());
+        eprintln!("[TEST] notes count: {}", db.state().read_all_rows("notes").len());
+
+        // Verify find_referencing works
+        let refs = db.state().find_referencing("notes", "folder", folder_id);
+        eprintln!("[TEST] find_referencing('notes', 'folder', {:?}) returned {} rows", folder_id, refs.len());
+
+        // Now create the query graph
+        let mut builder = QueryGraphBuilder::new("folders", outer_schema.clone());
+        let scan = builder.table_scan();
+        let agg = builder.array_aggregate(scan, "notes", "folder", inner_schema.clone(), vec![], -1);
+        let mut graph = builder.output(agg, GraphId(1));
+
+        let mut cache = RowCache::new();
+
+        // Get output - this should initialize and find the existing notes
+        let output = graph.get_output(&mut cache, &db.state());
+
+        eprintln!("[TEST] output.len() = {}", output.len());
+        assert_eq!(output.len(), 1);
+
+        // The folder should have an array with 2 notes
+        let (id, row) = &output[0];
+        assert_eq!(*id, folder_id);
+
+        // Check the array in the output row
+        eprintln!("[TEST] output row buffer len: {}", row.buffer.len());
+
+        // The buffer should be larger than just the folder data (which is ~8 bytes)
+        // because it includes the array of notes
+        assert!(row.buffer.len() > 20, "Buffer should include array data, got {} bytes", row.buffer.len());
+
+        // Parse the array from the buffer to verify it has 2 items
+        // The array is at variable index 0 (after the fixed "name" column)
+        // Array format: [u32 count][offset table][items...]
+        // The name field is at index 0, the array is at index 1
+        // First we need to get the array bytes from the variable section
+        // This is a simplified check - just verify the buffer has the expected size
+        eprintln!("[TEST] Test passed - inner rows were found during initialization");
+    }
+
+    /// Test that mimics the exact demo app flow:
+    /// 1. Query is registered FIRST (before any data)
+    /// 2. Outer row (folder) is inserted via Database API
+    /// 3. Inner row (note) is inserted via Database API
+    /// 4. Check that arrays are populated via inner delta processing
+    #[test]
+    fn array_aggregate_inner_delta_via_database_api() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let outer_schema = folder_schema();
+        let inner_schema = note_schema();
+
+        // Create database with tables
+        let db = Database::in_memory();
+        db.create_table(outer_schema.clone()).unwrap();
+        db.create_table(inner_schema.clone()).unwrap();
+
+        // Create incremental query BEFORE any data exists (like demo app's useAll)
+        let query = db.incremental_query(
+            "SELECT f.id, f.name, ARRAY(SELECT n.id, n.folder, n.title FROM notes n WHERE n.folder = f.id) as notes FROM folders f"
+        ).unwrap();
+
+        // Track updates
+        let update_count = Arc::new(AtomicUsize::new(0));
+        let update_count_clone = update_count.clone();
+        query.subscribe(Box::new(move |_delta| {
+            update_count_clone.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        // Insert a folder via Database API (should trigger outer delta)
+        let folder_id = db.insert_with("folders", |b| {
+            b.set_string_by_name("name", "Work").build()
+        }).unwrap();
+        eprintln!("[TEST] Inserted folder with id: {:?}", folder_id);
+
+        // The subscription callback fires with initial state + the Added delta
+        // So we expect at least 1 update after insert
+        let count_after_folder = update_count.load(Ordering::SeqCst);
+        eprintln!("[TEST] update_count after folder insert: {}", count_after_folder);
+        assert!(count_after_folder >= 1, "Expected at least 1 update after folder insert");
+
+        // Insert a note via Database API (should trigger inner delta)
+        let note_id = db.insert_with("notes", |b| {
+            b.set_ref_by_name("folder", folder_id)
+             .set_string_by_name("title", "Meeting Notes")
+             .build()
+        }).unwrap();
+        eprintln!("[TEST] Inserted note with id: {:?}", note_id);
+
+        // Should have gotten another update (Updated delta for folder with new array)
+        let count_after_note = update_count.load(Ordering::SeqCst);
+        eprintln!("[TEST] update_count after note insert: {}", count_after_note);
+        assert!(count_after_note > count_after_folder, "Expected additional update after note insert, got {} -> {}", count_after_folder, count_after_note);
+
+        // Get the output and check the array
+        let output = query.rows();
+        eprintln!("[TEST] output.len() = {}", output.len());
+        assert_eq!(output.len(), 1);
+
+        let (id, row) = &output[0];
+        assert_eq!(*id, folder_id);
+
+        // Debug: print all columns in the row
+        eprintln!("[TEST] Row descriptor columns: {:?}", row.descriptor.columns.iter().map(|c| (&c.name, &c.ty)).collect::<Vec<_>>());
+        eprintln!("[TEST] Row buffer len: {}", row.buffer.len());
+        for (i, col) in row.descriptor.columns.iter().enumerate() {
+            eprintln!("[TEST] Column {} ({}): {:?}", i, col.name, row.get(i));
+        }
+
+        // Find the notes array by name
+        let notes_value = row.get_by_name("notes");
+        eprintln!("[TEST] notes column value: {:?}", notes_value);
+
+        // Check that the array column has data
+        if let Some(crate::sql::row_buffer::RowValue::Array(arr)) = notes_value {
+            eprintln!("[TEST] Array length: {}", arr.len());
+            assert_eq!(arr.len(), 1, "Expected 1 note in array");
+
+            // Check the note data
+            if let Some(note_row) = arr.get(0) {
+                let title = note_row.get_by_name("title");
+                eprintln!("[TEST] Note title: {:?}", title);
+            }
+        } else {
+            panic!("Expected Array for 'notes', got {:?}", notes_value);
+        }
+    }
+
+    /// Test two chained ArrayAggregates (like Issues with IssueLabels and IssueAssignees)
+    #[test]
+    fn array_aggregate_two_chained_inner_deltas_via_database_api() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        // Create schemas
+        let folder_schema = folder_schema();
+        let note_schema = note_schema();
+        // Second inner table schema (like IssueAssignees)
+        let task_schema = TableSchema::new(
+            "tasks",
+            vec![
+                ColumnDef::required("folder", ColumnType::Ref("folders".to_string())),
+                ColumnDef::required("name", ColumnType::String),
+            ],
+        );
+
+        // Create database with all tables
+        let db = Database::in_memory();
+        db.create_table(folder_schema.clone()).unwrap();
+        db.create_table(note_schema.clone()).unwrap();
+        db.create_table(task_schema.clone()).unwrap();
+
+        // Create incremental query with TWO array subqueries
+        let query = db.incremental_query(
+            "SELECT f.id, f.name, \
+             ARRAY(SELECT n.id, n.folder, n.title FROM notes n WHERE n.folder = f.id) as notes, \
+             ARRAY(SELECT t.id, t.folder, t.name FROM tasks t WHERE t.folder = f.id) as tasks \
+             FROM folders f"
+        ).unwrap();
+
+        // Track updates
+        let update_count = Arc::new(AtomicUsize::new(0));
+        let update_count_clone = update_count.clone();
+        query.subscribe(Box::new(move |_delta| {
+            update_count_clone.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        // Insert a folder
+        let folder_id = db.insert_with("folders", |b| {
+            b.set_string_by_name("name", "Work").build()
+        }).unwrap();
+        eprintln!("[TEST] Inserted folder with id: {:?}", folder_id);
+
+        let count_after_folder = update_count.load(Ordering::SeqCst);
+        eprintln!("[TEST] update_count after folder insert: {}", count_after_folder);
+
+        // Insert a note
+        let note_id = db.insert_with("notes", |b| {
+            b.set_ref_by_name("folder", folder_id)
+             .set_string_by_name("title", "Meeting Notes")
+             .build()
+        }).unwrap();
+        eprintln!("[TEST] Inserted note with id: {:?}", note_id);
+
+        let count_after_note = update_count.load(Ordering::SeqCst);
+        eprintln!("[TEST] update_count after note insert: {}", count_after_note);
+        assert!(count_after_note > count_after_folder, "Expected update after note insert");
+
+        // Insert a task
+        let task_id = db.insert_with("tasks", |b| {
+            b.set_ref_by_name("folder", folder_id)
+             .set_string_by_name("name", "Review PR")
+             .build()
+        }).unwrap();
+        eprintln!("[TEST] Inserted task with id: {:?}", task_id);
+
+        let count_after_task = update_count.load(Ordering::SeqCst);
+        eprintln!("[TEST] update_count after task insert: {}", count_after_task);
+        assert!(count_after_task > count_after_note, "Expected update after task insert");
+
+        // Get the output and check both arrays
+        let output = query.rows();
+        eprintln!("[TEST] output.len() = {}", output.len());
+        assert_eq!(output.len(), 1);
+
+        let (id, row) = &output[0];
+        assert_eq!(*id, folder_id);
+
+        // Debug: print all columns
+        eprintln!("[TEST] Row descriptor columns: {:?}", row.descriptor.columns.iter().map(|c| &c.name).collect::<Vec<_>>());
+
+        // Check notes array
+        let notes_value = row.get_by_name("notes");
+        eprintln!("[TEST] notes value: {:?}", notes_value);
+        if let Some(crate::sql::row_buffer::RowValue::Array(arr)) = notes_value {
+            eprintln!("[TEST] notes array length: {}", arr.len());
+            assert_eq!(arr.len(), 1, "Expected 1 note in array");
+        } else {
+            panic!("Expected Array for 'notes', got {:?}", notes_value);
+        }
+
+        // Check tasks array
+        let tasks_value = row.get_by_name("tasks");
+        eprintln!("[TEST] tasks value: {:?}", tasks_value);
+        if let Some(crate::sql::row_buffer::RowValue::Array(arr)) = tasks_value {
+            eprintln!("[TEST] tasks array length: {}", arr.len());
+            assert_eq!(arr.len(), 1, "Expected 1 task in array");
+        } else {
+            panic!("Expected Array for 'tasks', got {:?}", tasks_value);
+        }
     }
 
     #[test]

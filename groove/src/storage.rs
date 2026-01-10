@@ -74,19 +74,19 @@ impl ContentRef {
     /// Serialize ContentRef for embedding in row data.
     ///
     /// Format:
-    /// - Inline:  0x00 + varint(length) + bytes
-    /// - Chunked: 0x01 + varint(chunk_count) + [32-byte ChunkHash]*count
+    /// - Inline:  0x00 + u32(length) + bytes
+    /// - Chunked: 0x01 + u32(chunk_count) + [32-byte ChunkHash]*count
     pub fn to_row_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         match self {
             ContentRef::Inline(data) => {
                 buf.push(0x00); // Tag: inline
-                encode_varint(data.len(), &mut buf);
+                buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
                 buf.extend_from_slice(data);
             }
             ContentRef::Chunked(hashes) => {
                 buf.push(0x01); // Tag: chunked
-                encode_varint(hashes.len(), &mut buf);
+                buf.extend_from_slice(&(hashes.len() as u32).to_le_bytes());
                 for hash in hashes {
                     buf.extend_from_slice(hash.as_bytes());
                 }
@@ -108,9 +108,13 @@ impl ContentRef {
 
         match tag {
             0x00 => {
-                // Inline
-                let (len, consumed) = decode_varint(&data[pos..])?;
-                pos += consumed;
+                // Inline: tag + u32(len) + bytes
+                if data.len() < pos + 4 {
+                    return Err(ContentRefError::UnexpectedEof);
+                }
+                let len_bytes: [u8; 4] = data[pos..pos + 4].try_into().unwrap();
+                let len = u32::from_le_bytes(len_bytes) as usize;
+                pos += 4;
 
                 if data.len() < pos + len {
                     return Err(ContentRefError::UnexpectedEof);
@@ -121,9 +125,13 @@ impl ContentRef {
                 Ok((ContentRef::Inline(content), pos))
             }
             0x01 => {
-                // Chunked
-                let (count, consumed) = decode_varint(&data[pos..])?;
-                pos += consumed;
+                // Chunked: tag + u32(count) + [32-byte hash]*count
+                if data.len() < pos + 4 {
+                    return Err(ContentRefError::UnexpectedEof);
+                }
+                let count_bytes: [u8; 4] = data[pos..pos + 4].try_into().unwrap();
+                let count = u32::from_le_bytes(count_bytes) as usize;
+                pos += 4;
 
                 let mut hashes = Vec::with_capacity(count);
                 for _ in 0..count {
@@ -147,7 +155,6 @@ impl ContentRef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentRefError {
     UnexpectedEof,
-    VarintOverflow,
     InvalidTag(u8),
 }
 
@@ -155,47 +162,12 @@ impl std::fmt::Display for ContentRefError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ContentRefError::UnexpectedEof => write!(f, "unexpected end of ContentRef data"),
-            ContentRefError::VarintOverflow => write!(f, "varint overflow"),
             ContentRefError::InvalidTag(tag) => write!(f, "invalid ContentRef tag: {}", tag),
         }
     }
 }
 
 impl std::error::Error for ContentRefError {}
-
-/// Encode a varint (LEB128 unsigned).
-fn encode_varint(mut value: usize, buf: &mut Vec<u8>) {
-    loop {
-        let mut byte = (value & 0x7f) as u8;
-        value >>= 7;
-        if value != 0 {
-            byte |= 0x80;
-        }
-        buf.push(byte);
-        if value == 0 {
-            break;
-        }
-    }
-}
-
-/// Decode a varint (LEB128 unsigned). Returns (value, bytes_consumed).
-fn decode_varint(data: &[u8]) -> Result<(usize, usize), ContentRefError> {
-    let mut result: usize = 0;
-    let mut shift = 0;
-
-    for (i, &byte) in data.iter().enumerate() {
-        result |= ((byte & 0x7f) as usize) << shift;
-        if byte & 0x80 == 0 {
-            return Ok((result, i + 1));
-        }
-        shift += 7;
-        if shift >= 64 {
-            return Err(ContentRefError::VarintOverflow);
-        }
-    }
-
-    Err(ContentRefError::UnexpectedEof)
-}
 
 /// Metadata about a commit (without full content bytes).
 #[derive(Debug, Clone)]

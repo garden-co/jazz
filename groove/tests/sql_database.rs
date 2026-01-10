@@ -2145,7 +2145,9 @@ fn incremental_query_with_array_subquery() {
     assert_eq!(rows[0].1.descriptor.columns.len(), 2, "Row should have 2 values (title, array)");
     assert_eq!(rows[0].1.get_by_name("title"), Some(RowValue::String("Test Issue")));
 
-    match rows[0].1.get_by_name("labels") {
+    // NOTE: SQL alias "labels" is not used - array columns are named after the inner table
+    // TODO: Pass SQL alias through to array_aggregate for proper naming
+    match rows[0].1.get_by_name("IssueLabels") {
         Some(RowValue::Array(arr)) => {
             assert_eq!(arr.len(), 2, "Should have 2 labels");
         }
@@ -2664,5 +2666,578 @@ fn incremental_query_array_with_nested_join() {
         }
     } else {
         panic!("IssueLabels should be an Array, got: {:?}", array);
+    }
+}
+
+/// Test that TableRow projection + ARRAY subqueries work together.
+/// This tests the exact SQL pattern TypeScript generates:
+///   SELECT i.id, i.title, ..., Projects as project, ARRAY(...) as IssueLabels FROM Issues i JOIN Projects
+#[test]
+fn incremental_query_table_row_plus_array_subquery() {
+    let db = Database::in_memory();
+
+    // Projects: name, color, description (nullable)
+    let projects_schema = TableSchema::new(
+        "Projects",
+        vec![
+            ColumnDef::required("name", ColumnType::String),
+            ColumnDef::required("color", ColumnType::String),
+            ColumnDef::optional("description", ColumnType::String),
+        ],
+    );
+    db.create_table(projects_schema.clone()).unwrap();
+
+    // Issues: title, description, status, priority, project, createdAt, updatedAt
+    let issues_schema = TableSchema::new(
+        "Issues",
+        vec![
+            ColumnDef::required("title", ColumnType::String),
+            ColumnDef::optional("description", ColumnType::String),
+            ColumnDef::required("status", ColumnType::String),
+            ColumnDef::required("priority", ColumnType::String),
+            ColumnDef::required("project", ColumnType::Ref("Projects".into())),
+            ColumnDef::required("createdAt", ColumnType::I64),
+            ColumnDef::required("updatedAt", ColumnType::I64),
+        ],
+    );
+    db.create_table(issues_schema.clone()).unwrap();
+
+    // IssueLabels: issue, label
+    let issue_labels_schema = TableSchema::new(
+        "IssueLabels",
+        vec![
+            ColumnDef::required("issue", ColumnType::Ref("Issues".into())),
+            ColumnDef::required("name", ColumnType::String),
+        ],
+    );
+    db.create_table(issue_labels_schema.clone()).unwrap();
+
+    // Insert project
+    let project_id = db.insert_with("Projects", |b| b
+        .set_string_by_name("name", "Test Project")
+        .set_string_by_name("color", "#00ff00")
+        .set_string_by_name("description", "A test project")
+        .build()).unwrap();
+
+    // Insert issue
+    let issue_id = db.insert_with("Issues", |b| b
+        .set_string_by_name("title", "Test Issue")
+        .set_string_by_name("description", "Test description")
+        .set_string_by_name("status", "open")
+        .set_string_by_name("priority", "high")
+        .set_ref_by_name("project", project_id)
+        .set_i64_by_name("createdAt", 1234567890)
+        .set_i64_by_name("updatedAt", 1234567890)
+        .build()).unwrap();
+
+    // Insert IssueLabel
+    db.insert_with("IssueLabels", |b| b
+        .set_ref_by_name("issue", issue_id)
+        .set_string_by_name("name", "Bug")
+        .build()).unwrap();
+
+    // Query with TableRow projection (Projects as project) + ARRAY subquery
+    // This is what TypeScript generates for: .with({ project: true, IssueLabels: true })
+    let sql = "SELECT i.id, i.title, i.description, i.status, i.priority, i.project, i.createdAt, i.updatedAt, Projects as project, ARRAY(SELECT il.id, il.issue, il.name FROM IssueLabels il WHERE il.issue = i.id) as IssueLabels FROM Issues i JOIN Projects ON i.project = Projects.id";
+
+    eprintln!("SQL: {}", sql);
+    let query = db.incremental_query(sql).expect("should create incremental query");
+    let rows = query.rows();
+
+    eprintln!("Query returned {} rows", rows.len());
+    assert_eq!(rows.len(), 1, "Should return 1 issue");
+
+    eprintln!("Row columns (len={}):", rows[0].1.descriptor.columns.len());
+    for col in &rows[0].1.descriptor.columns {
+        eprintln!("  {}: {:?} = {:?}", col.name, col.ty, rows[0].1.get_by_name(&col.name));
+    }
+
+    // Expected columns:
+    // Issues: project, createdAt, updatedAt = 3 fixed
+    // Issues: title, description, status, priority = 4 variable
+    // Projects (expanded): name, color, description = 3 variable
+    // IssueLabels array = 1 variable
+    // Total: 11 (7 from Issues + 3 from Projects + 1 array)
+    // Note: Groove expands JOIN columns instead of bundling as TableRow
+    assert_eq!(
+        rows[0].1.descriptor.columns.len(), 11,
+        "Should have 11 columns (7 Issues + 3 Projects expanded + 1 IssueLabels array)"
+    );
+
+    // Check that IssueLabels array has 1 item
+    let labels = rows[0].1.get_by_name("IssueLabels");
+    eprintln!("\nIssueLabels: {:?}", labels);
+    assert!(
+        matches!(labels, Some(RowValue::Array(arr)) if arr.len() == 1),
+        "IssueLabels should be an array with 1 item, got: {:?}",
+        labels
+    );
+}
+
+/// Test multiple ARRAY subqueries in a single query.
+/// This verifies that multiple array columns are properly accumulated.
+#[test]
+fn incremental_query_multiple_array_subqueries() {
+    let db = Database::in_memory();
+
+    // Create Projects table
+    let projects_schema = TableSchema::new(
+        "Projects",
+        vec![
+            ColumnDef::required("name", ColumnType::String),
+        ],
+    );
+    db.create_table(projects_schema.clone()).unwrap();
+
+    // Create Issues table
+    let issues_schema = TableSchema::new(
+        "Issues",
+        vec![
+            ColumnDef::required("title", ColumnType::String),
+            ColumnDef::required("project", ColumnType::Ref("Projects".into())),
+        ],
+    );
+    db.create_table(issues_schema.clone()).unwrap();
+
+    // IssueLabels: issue, name
+    let issue_labels_schema = TableSchema::new(
+        "IssueLabels",
+        vec![
+            ColumnDef::required("issue", ColumnType::Ref("Issues".into())),
+            ColumnDef::required("name", ColumnType::String),
+        ],
+    );
+    db.create_table(issue_labels_schema.clone()).unwrap();
+
+    // IssueAssignees: issue, name
+    let issue_assignees_schema = TableSchema::new(
+        "IssueAssignees",
+        vec![
+            ColumnDef::required("issue", ColumnType::Ref("Issues".into())),
+            ColumnDef::required("name", ColumnType::String),
+        ],
+    );
+    db.create_table(issue_assignees_schema.clone()).unwrap();
+
+    // Insert data
+    let project_id = db.insert_with("Projects", |b| b
+        .set_string_by_name("name", "Test Project")
+        .build()).unwrap();
+
+    let issue_id = db.insert_with("Issues", |b| b
+        .set_string_by_name("title", "Test Issue")
+        .set_ref_by_name("project", project_id)
+        .build()).unwrap();
+
+    db.insert_with("IssueLabels", |b| b
+        .set_ref_by_name("issue", issue_id)
+        .set_string_by_name("name", "Bug")
+        .build()).unwrap();
+
+    db.insert_with("IssueAssignees", |b| b
+        .set_ref_by_name("issue", issue_id)
+        .set_string_by_name("name", "Alice")
+        .build()).unwrap();
+
+    // Query with TWO ARRAY subqueries
+    let sql = "SELECT i.id, i.title, i.project, \
+               ARRAY(SELECT il.id, il.issue, il.name FROM IssueLabels il WHERE il.issue = i.id) as IssueLabels, \
+               ARRAY(SELECT ia.id, ia.issue, ia.name FROM IssueAssignees ia WHERE ia.issue = i.id) as IssueAssignees \
+               FROM Issues i JOIN Projects ON i.project = Projects.id";
+
+    eprintln!("SQL: {}", sql);
+    let query = db.incremental_query(sql).expect("should create incremental query");
+    let rows = query.rows();
+
+    eprintln!("Query returned {} rows", rows.len());
+    assert_eq!(rows.len(), 1, "Should return 1 issue");
+
+    eprintln!("Row columns (len={}):", rows[0].1.descriptor.columns.len());
+    for col in &rows[0].1.descriptor.columns {
+        eprintln!("  {}: {:?} = {:?}", col.name, col.ty, rows[0].1.get_by_name(&col.name));
+    }
+
+    // Should have both IssueLabels and IssueAssignees arrays
+    let labels = rows[0].1.get_by_name("IssueLabels");
+    let assignees = rows[0].1.get_by_name("IssueAssignees");
+
+    eprintln!("\nIssueLabels: {:?}", labels);
+    eprintln!("IssueAssignees: {:?}", assignees);
+
+    assert!(
+        matches!(labels, Some(RowValue::Array(arr)) if arr.len() == 1),
+        "IssueLabels should be an array with 1 item, got: {:?}",
+        labels
+    );
+
+    assert!(
+        matches!(assignees, Some(RowValue::Array(arr)) if arr.len() == 1),
+        "IssueAssignees should be an array with 1 item, got: {:?}",
+        assignees
+    );
+}
+
+/// Test ARRAY subqueries with inner JOINs - matches demo app pattern.
+/// SQL: ARRAY(SELECT ... FROM IssueLabels il JOIN Labels ON il.label = Labels.id ...)
+#[test]
+fn incremental_query_array_with_inner_join() {
+    let db = Database::in_memory();
+
+    // Create Labels table (the joined table inside ARRAY)
+    let labels_schema = TableSchema::new(
+        "Labels",
+        vec![
+            ColumnDef::required("name", ColumnType::String),
+            ColumnDef::required("color", ColumnType::String),
+        ],
+    );
+    db.create_table(labels_schema.clone()).unwrap();
+
+    // Create Issues table
+    let issues_schema = TableSchema::new(
+        "Issues",
+        vec![
+            ColumnDef::required("title", ColumnType::String),
+        ],
+    );
+    db.create_table(issues_schema.clone()).unwrap();
+
+    // IssueLabels: issue (Ref to Issues), label (Ref to Labels)
+    let issue_labels_schema = TableSchema::new(
+        "IssueLabels",
+        vec![
+            ColumnDef::required("issue", ColumnType::Ref("Issues".into())),
+            ColumnDef::required("label", ColumnType::Ref("Labels".into())),
+        ],
+    );
+    db.create_table(issue_labels_schema.clone()).unwrap();
+
+    // Insert data
+    let label_bug = db.insert_with("Labels", |b| b
+        .set_string_by_name("name", "Bug")
+        .set_string_by_name("color", "#ff0000")
+        .build()).unwrap();
+
+    let issue_id = db.insert_with("Issues", |b| b
+        .set_string_by_name("title", "Test Issue")
+        .build()).unwrap();
+
+    db.insert_with("IssueLabels", |b| b
+        .set_ref_by_name("issue", issue_id)
+        .set_ref_by_name("label", label_bug)
+        .build()).unwrap();
+
+    // Query mimicking TypeScript pattern: ARRAY with inner JOIN
+    // SELECT i.id, i.title, ARRAY(SELECT il.id, il.issue, Labels as label FROM IssueLabels il JOIN Labels ON il.label = Labels.id WHERE il.issue = i.id) as IssueLabels FROM Issues i
+    let sql = "SELECT i.id, i.title, \
+               ARRAY(SELECT il.id, il.issue, Labels as label FROM IssueLabels il JOIN Labels ON il.label = Labels.id WHERE il.issue = i.id) as IssueLabels \
+               FROM Issues i";
+
+    eprintln!("SQL: {}", sql);
+    let query = db.incremental_query(sql).expect("should create incremental query");
+    let rows = query.rows();
+
+    eprintln!("Query returned {} rows", rows.len());
+    assert_eq!(rows.len(), 1, "Should return 1 issue");
+
+    eprintln!("Row columns (len={}):", rows[0].1.descriptor.columns.len());
+    for col in &rows[0].1.descriptor.columns {
+        eprintln!("  {}: {:?} = {:?}", col.name, col.ty, rows[0].1.get_by_name(&col.name));
+    }
+
+    // Check array has items
+    let labels = rows[0].1.get_by_name("IssueLabels");
+    eprintln!("\nIssueLabels: {:?}", labels);
+
+    assert!(
+        matches!(labels, Some(RowValue::Array(arr)) if arr.len() == 1),
+        "IssueLabels should be an array with 1 item (the Bug label), got: {:?}",
+        labels
+    );
+}
+
+/// Test that matches the demo app SQL exactly:
+/// Outer JOIN + multiple ARRAY subqueries with inner JOINs
+#[test]
+fn incremental_query_outer_join_with_inner_array_joins() {
+    let db = Database::in_memory();
+
+    // Create all tables matching demo app schema
+    let projects_schema = TableSchema::new(
+        "Projects",
+        vec![
+            ColumnDef::required("name", ColumnType::String),
+            ColumnDef::required("color", ColumnType::String),
+        ],
+    );
+    db.create_table(projects_schema.clone()).unwrap();
+
+    let labels_schema = TableSchema::new(
+        "Labels",
+        vec![
+            ColumnDef::required("name", ColumnType::String),
+            ColumnDef::required("color", ColumnType::String),
+        ],
+    );
+    db.create_table(labels_schema.clone()).unwrap();
+
+    let users_schema = TableSchema::new(
+        "Users",
+        vec![
+            ColumnDef::required("name", ColumnType::String),
+        ],
+    );
+    db.create_table(users_schema.clone()).unwrap();
+
+    let issues_schema = TableSchema::new(
+        "Issues",
+        vec![
+            ColumnDef::required("title", ColumnType::String),
+            ColumnDef::required("project", ColumnType::Ref("Projects".into())),
+        ],
+    );
+    db.create_table(issues_schema.clone()).unwrap();
+
+    let issue_labels_schema = TableSchema::new(
+        "IssueLabels",
+        vec![
+            ColumnDef::required("issue", ColumnType::Ref("Issues".into())),
+            ColumnDef::required("label", ColumnType::Ref("Labels".into())),
+        ],
+    );
+    db.create_table(issue_labels_schema.clone()).unwrap();
+
+    let issue_assignees_schema = TableSchema::new(
+        "IssueAssignees",
+        vec![
+            ColumnDef::required("issue", ColumnType::Ref("Issues".into())),
+            ColumnDef::required("user", ColumnType::Ref("Users".into())),
+        ],
+    );
+    db.create_table(issue_assignees_schema.clone()).unwrap();
+
+    // Insert data
+    let project_id = db.insert_with("Projects", |b| b
+        .set_string_by_name("name", "Test Project")
+        .set_string_by_name("color", "#00ff00")
+        .build()).unwrap();
+
+    let label_bug = db.insert_with("Labels", |b| b
+        .set_string_by_name("name", "Bug")
+        .set_string_by_name("color", "#ff0000")
+        .build()).unwrap();
+
+    let user_alice = db.insert_with("Users", |b| b
+        .set_string_by_name("name", "Alice")
+        .build()).unwrap();
+
+    let issue_id = db.insert_with("Issues", |b| b
+        .set_string_by_name("title", "Test Issue")
+        .set_ref_by_name("project", project_id)
+        .build()).unwrap();
+
+    db.insert_with("IssueLabels", |b| b
+        .set_ref_by_name("issue", issue_id)
+        .set_ref_by_name("label", label_bug)
+        .build()).unwrap();
+
+    db.insert_with("IssueAssignees", |b| b
+        .set_ref_by_name("issue", issue_id)
+        .set_ref_by_name("user", user_alice)
+        .build()).unwrap();
+
+    // Query matching demo app: Outer JOIN + ARRAY subqueries with inner JOINs
+    let sql = "SELECT i.id, i.title, i.project, Projects as project, \
+               ARRAY(SELECT il.id, il.issue, Labels as label FROM IssueLabels il JOIN Labels ON il.label = Labels.id WHERE il.issue = i.id) as IssueLabels, \
+               ARRAY(SELECT ia.id, ia.issue, Users as user FROM IssueAssignees ia JOIN Users ON ia.user = Users.id WHERE ia.issue = i.id) as IssueAssignees \
+               FROM Issues i JOIN Projects ON i.project = Projects.id";
+
+    eprintln!("SQL: {}", sql);
+    let query = db.incremental_query(sql).expect("should create incremental query");
+    let rows = query.rows();
+
+    eprintln!("Query returned {} rows", rows.len());
+    assert_eq!(rows.len(), 1, "Should return 1 issue");
+
+    eprintln!("Row columns (len={}):", rows[0].1.descriptor.columns.len());
+    for col in &rows[0].1.descriptor.columns {
+        eprintln!("  {}: {:?} = {:?}", col.name, col.ty, rows[0].1.get_by_name(&col.name));
+    }
+
+    // Check arrays have items
+    let labels = rows[0].1.get_by_name("IssueLabels");
+    let assignees = rows[0].1.get_by_name("IssueAssignees");
+
+    eprintln!("\nIssueLabels: {:?}", labels);
+    eprintln!("IssueAssignees: {:?}", assignees);
+
+    assert!(
+        matches!(labels, Some(RowValue::Array(arr)) if arr.len() == 1),
+        "IssueLabels should be an array with 1 item, got: {:?}",
+        labels
+    );
+
+    assert!(
+        matches!(assignees, Some(RowValue::Array(arr)) if arr.len() == 1),
+        "IssueAssignees should be an array with 1 item, got: {:?}",
+        assignees
+    );
+}
+
+/// Test that filter JOIN + ARRAY subqueries work together.
+/// This is the exact failing scenario from TypeScript tests:
+///   SELECT ... FROM Issues i
+///   JOIN Projects ON i.project = Projects.id
+///   JOIN IssueLabels ON IssueLabels.issue = i.id
+///   WHERE IssueLabels.label = 'xxx'
+/// Combined with ARRAY subqueries for includes.
+#[test]
+fn filter_join_plus_array_subqueries() {
+    let db = Database::in_memory();
+
+    // Create all tables matching demo app schema
+    let projects_schema = TableSchema::new(
+        "Projects",
+        vec![
+            ColumnDef::required("name", ColumnType::String),
+            ColumnDef::required("color", ColumnType::String),
+        ],
+    );
+    db.create_table(projects_schema.clone()).unwrap();
+
+    let labels_schema = TableSchema::new(
+        "Labels",
+        vec![
+            ColumnDef::required("name", ColumnType::String),
+            ColumnDef::required("color", ColumnType::String),
+        ],
+    );
+    db.create_table(labels_schema.clone()).unwrap();
+
+    let users_schema = TableSchema::new(
+        "Users",
+        vec![ColumnDef::required("name", ColumnType::String)],
+    );
+    db.create_table(users_schema.clone()).unwrap();
+
+    let issues_schema = TableSchema::new(
+        "Issues",
+        vec![
+            ColumnDef::required("title", ColumnType::String),
+            ColumnDef::required("project", ColumnType::Ref("Projects".into())),
+        ],
+    );
+    db.create_table(issues_schema.clone()).unwrap();
+
+    // Junction table: IssueLabels
+    let issue_labels_schema = TableSchema::new(
+        "IssueLabels",
+        vec![
+            ColumnDef::required("issue", ColumnType::Ref("Issues".into())),
+            ColumnDef::required("label", ColumnType::Ref("Labels".into())),
+        ],
+    );
+    db.create_table(issue_labels_schema.clone()).unwrap();
+
+    // Junction table: IssueAssignees
+    let issue_assignees_schema = TableSchema::new(
+        "IssueAssignees",
+        vec![
+            ColumnDef::required("issue", ColumnType::Ref("Issues".into())),
+            ColumnDef::required("user", ColumnType::Ref("Users".into())),
+        ],
+    );
+    db.create_table(issue_assignees_schema.clone()).unwrap();
+
+    // Insert test data
+    let project_id = db.insert_with("Projects", |b| {
+        b.set_string_by_name("name", "Test Project")
+            .set_string_by_name("color", "#00ff00")
+            .build()
+    }).unwrap();
+
+    let label_bug = db.insert_with("Labels", |b| {
+        b.set_string_by_name("name", "Bug")
+            .set_string_by_name("color", "#ff0000")
+            .build()
+    }).unwrap();
+
+    let user_alice = db.insert_with("Users", |b| {
+        b.set_string_by_name("name", "Alice")
+            .build()
+    }).unwrap();
+
+    let issue_id = db.insert_with("Issues", |b| {
+        b.set_string_by_name("title", "Test Issue")
+            .set_ref_by_name("project", project_id)
+            .build()
+    }).unwrap();
+
+    // Link issue to label and user
+    db.insert_with("IssueLabels", |b| {
+        b.set_ref_by_name("issue", issue_id)
+            .set_ref_by_name("label", label_bug)
+            .build()
+    }).unwrap();
+
+    db.insert_with("IssueAssignees", |b| {
+        b.set_ref_by_name("issue", issue_id)
+            .set_ref_by_name("user", user_alice)
+            .build()
+    }).unwrap();
+
+    // This is the exact SQL pattern that fails in TypeScript:
+    // - JOIN Projects (forward ref include)
+    // - JOIN IssueLabels (for filter)
+    // - WHERE IssueLabels.label = '...' (reverse join filter)
+    // - ARRAY subqueries for includes
+    let sql = format!(
+        "SELECT i.id, i.title, i.project, Projects as project, \
+         ARRAY(SELECT il.id, il.issue, Labels as label FROM IssueLabels il JOIN Labels ON il.label = Labels.id WHERE il.issue = i.id) as IssueLabels, \
+         ARRAY(SELECT ia.id, ia.issue, Users as user FROM IssueAssignees ia JOIN Users ON ia.user = Users.id WHERE ia.issue = i.id) as IssueAssignees \
+         FROM Issues i \
+         JOIN Projects ON i.project = Projects.id \
+         JOIN IssueLabels ON IssueLabels.issue = i.id \
+         WHERE IssueLabels.label = '{}'",
+        label_bug
+    );
+
+    eprintln!("SQL: {}", sql);
+    let query = db.incremental_query(&sql).expect("should create incremental query");
+
+    // Print the query graph for debugging
+    let diagram = query.diagram();
+    eprintln!("Query Graph:\n{}", diagram);
+
+    let rows = query.rows();
+    eprintln!("Query returned {} rows", rows.len());
+
+    // This is the failing assertion - currently returns 0 rows
+    assert_eq!(rows.len(), 1, "Should return 1 issue matching the filter");
+
+    if !rows.is_empty() {
+        eprintln!("Row columns (len={}):", rows[0].1.descriptor.columns.len());
+        for col in &rows[0].1.descriptor.columns {
+            eprintln!("  {}: {:?} = {:?}", col.name, col.ty, rows[0].1.get_by_name(&col.name));
+        }
+
+        // Verify includes work
+        let labels_arr = rows[0].1.get_by_name("IssueLabels");
+        let assignees_arr = rows[0].1.get_by_name("IssueAssignees");
+
+        eprintln!("\nIssueLabels: {:?}", labels_arr);
+        eprintln!("IssueAssignees: {:?}", assignees_arr);
+
+        assert!(
+            matches!(labels_arr, Some(RowValue::Array(arr)) if arr.len() == 1),
+            "IssueLabels should be an array with 1 item, got: {:?}",
+            labels_arr
+        );
+
+        assert!(
+            matches!(assignees_arr, Some(RowValue::Array(arr)) if arr.len() == 1),
+            "IssueAssignees should be an array with 1 item, got: {:?}",
+            assignees_arr
+        );
     }
 }

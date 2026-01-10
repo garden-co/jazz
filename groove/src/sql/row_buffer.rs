@@ -7,12 +7,13 @@
 //! # Buffer Layout
 //!
 //! ```text
-//! [fixed-size columns in descriptor order]
-//! [variable-size columns: varint length prefix + data, in descriptor order]
+//! [fixed-size columns][u32 offset₂][u32 offset₃]...[var_data₁][var_data₂][var_data₃]...
 //! ```
 //!
-//! Fixed-size columns come first to enable O(1) random access. Variable-size
-//! columns follow with varint length prefixes.
+//! Fixed-size columns come first, followed by an offset table for variable-size
+//! columns, then the variable column data. For N variable columns, N-1 offsets
+//! are stored (the first variable column starts immediately after the offset table,
+//! the last ends at buffer end). All columns are O(1) accessible.
 //!
 //! # Nullable Columns
 //!
@@ -353,18 +354,21 @@ pub struct ArrayValue<'a> {
     /// Descriptor for each item in the array.
     pub item_descriptor: &'a RowDescriptor,
     /// Raw buffer containing the array data.
-    /// Format: [item_count: varint][item1_len: varint][item1_data]...
+    /// Format: `[u32 count][u32 offset₂][u32 offset₃]...[item₁][item₂]...`
+    /// For N items, N-1 offsets are stored. Item 0 starts after the offset table.
     pub data: &'a [u8],
 }
 
 impl<'a> ArrayValue<'a> {
     /// Get the number of items in the array.
+    ///
+    /// Array format: `[u32 count][u32 offset₂][u32 offset₃]...[item₁][item₂]...`
     pub fn len(&self) -> usize {
-        if self.data.is_empty() {
+        if self.data.len() < 4 {
             return 0;
         }
-        let (count, _) = read_varint(self.data);
-        count as usize
+        let bytes: [u8; 4] = self.data[0..4].try_into().unwrap();
+        u32::from_le_bytes(bytes) as usize
     }
 
     /// Returns true if the array is empty.
@@ -372,63 +376,75 @@ impl<'a> ArrayValue<'a> {
         self.len() == 0
     }
 
-    /// Iterate over items in the array.
-    pub fn iter(&self) -> ArrayValueIter<'a> {
-        if self.data.is_empty() {
-            return ArrayValueIter {
-                item_descriptor: self.item_descriptor,
-                remaining_data: &[],
-                remaining_count: 0,
-            };
-        }
-        let (count, bytes_read) = read_varint(self.data);
-        ArrayValueIter {
-            item_descriptor: self.item_descriptor,
-            remaining_data: &self.data[bytes_read..],
-            remaining_count: count as usize,
-        }
-    }
-}
-
-/// Iterator over array items.
-pub struct ArrayValueIter<'a> {
-    item_descriptor: &'a RowDescriptor,
-    remaining_data: &'a [u8],
-    remaining_count: usize,
-}
-
-impl<'a> Iterator for ArrayValueIter<'a> {
-    type Item = RowRef<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining_count == 0 || self.remaining_data.is_empty() {
+    /// Get an item at a specific index (O(1) access).
+    pub fn get(&self, index: usize) -> Option<RowRef<'a>> {
+        let count = self.len();
+        if index >= count {
             return None;
         }
 
-        // Read item length
-        let (item_len, len_bytes) = read_varint(self.remaining_data);
-        let item_len = item_len as usize;
-        let data_start = len_bytes;
-        let data_end = data_start + item_len;
+        // Header size: 4 bytes count + (count-1) * 4 bytes offsets
+        let header_size = 4 + if count > 1 { (count - 1) * 4 } else { 0 };
 
-        if data_end > self.remaining_data.len() {
-            // Malformed data - stop iteration
-            self.remaining_count = 0;
-            return None;
-        }
+        // Get start offset
+        let start = if index == 0 {
+            header_size
+        } else {
+            // Offset for item i is at position 4 + (i-1) * 4
+            let offset_pos = 4 + (index - 1) * 4;
+            let bytes: [u8; 4] = self.data.get(offset_pos..offset_pos + 4)?.try_into().ok()?;
+            u32::from_le_bytes(bytes) as usize
+        };
 
-        let item_data = &self.remaining_data[data_start..data_end];
-        self.remaining_data = &self.remaining_data[data_end..];
-        self.remaining_count -= 1;
+        // Get end offset
+        let end = if index == count - 1 {
+            self.data.len()
+        } else {
+            let offset_pos = 4 + index * 4;
+            let bytes: [u8; 4] = self.data.get(offset_pos..offset_pos + 4)?.try_into().ok()?;
+            u32::from_le_bytes(bytes) as usize
+        };
 
+        let item_data = self.data.get(start..end)?;
         Some(RowRef {
             descriptor: self.item_descriptor,
             buffer: item_data,
         })
     }
 
+    /// Iterate over items in the array.
+    pub fn iter(&self) -> ArrayValueIter<'a> {
+        let count = self.len();
+        ArrayValueIter {
+            array: *self,
+            current_index: 0,
+            count,
+        }
+    }
+}
+
+/// Iterator over array items.
+pub struct ArrayValueIter<'a> {
+    array: ArrayValue<'a>,
+    current_index: usize,
+    count: usize,
+}
+
+impl<'a> Iterator for ArrayValueIter<'a> {
+    type Item = RowRef<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_index >= self.count {
+            return None;
+        }
+        let item = self.array.get(self.current_index)?;
+        self.current_index += 1;
+        Some(item)
+    }
+
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.remaining_count, Some(self.remaining_count))
+        let remaining = self.count - self.current_index;
+        (remaining, Some(remaining))
     }
 }
 
@@ -576,9 +592,12 @@ impl<'a> RowRef<'a> {
                 Some(RowValue::Blob(content_ref))
             }
             ColumnType::BlobArray => {
-                let mut pos = 0;
-                let (count, consumed) = decode_varint(&value_data[pos..])?;
-                pos += consumed;
+                if value_data.len() < 4 {
+                    return None;
+                }
+                let count_bytes: [u8; 4] = value_data[0..4].try_into().ok()?;
+                let count = u32::from_le_bytes(count_bytes) as usize;
+                let mut pos = 4;
 
                 let mut refs = Vec::with_capacity(count);
                 for _ in 0..count {
@@ -600,27 +619,56 @@ impl<'a> RowRef<'a> {
     }
 
     /// Find the offset and length of a variable-size column.
+    ///
+    /// Buffer layout for variable columns:
+    /// ```text
+    /// [fixed section][u32 offset₂][u32 offset₃]...[var_data₁][var_data₂]...
+    /// ```
+    ///
+    /// For N variable columns, N-1 offsets are stored. Column 0 starts after
+    /// the offset table. Column N-1 ends at buffer end. O(1) access.
     fn find_variable_column(&self, var_idx: usize) -> Option<(usize, usize)> {
-        // Variable column data starts after fixed-size section
-        // First we read the varint headers for all variable columns
-        let mut pos = 0;
-        let header_data = &self.buffer[self.descriptor.fixed_size..];
-
-        let mut lengths = Vec::with_capacity(self.descriptor.variable_count);
-        for _ in 0..self.descriptor.variable_count {
-            let (len, consumed) = decode_varint(&header_data[pos..])?;
-            lengths.push(len);
-            pos += consumed;
+        let var_count = self.descriptor.variable_count;
+        if var_idx >= var_count {
+            return None;
         }
 
-        // Now calculate the offset for the requested column
-        let data_start = self.descriptor.fixed_size + pos;
-        let mut offset = data_start;
-        for i in 0..var_idx {
-            offset += lengths.get(i)?;
+        let fixed_size = self.descriptor.fixed_size;
+
+        // Special case: single variable column (no offset table)
+        if var_count == 1 {
+            let start = fixed_size;
+            let len = self.buffer.len() - start;
+            return Some((start, len));
         }
 
-        Some((offset, *lengths.get(var_idx)?))
+        // Offset table has N-1 entries for N variable columns
+        let offset_table_size = (var_count - 1) * 4;
+        let var_data_start = fixed_size + offset_table_size;
+
+        // Get start offset for this column
+        let start = if var_idx == 0 {
+            // First column starts right after offset table
+            var_data_start
+        } else {
+            // Read offset from table (0-indexed: offset for column i is at position i-1)
+            let offset_pos = fixed_size + (var_idx - 1) * 4;
+            let bytes: [u8; 4] = self.buffer.get(offset_pos..offset_pos + 4)?.try_into().ok()?;
+            u32::from_le_bytes(bytes) as usize
+        };
+
+        // Get end offset for this column
+        let end = if var_idx == var_count - 1 {
+            // Last column ends at buffer end
+            self.buffer.len()
+        } else {
+            // Read next column's offset from table
+            let offset_pos = fixed_size + var_idx * 4;
+            let bytes: [u8; 4] = self.buffer.get(offset_pos..offset_pos + 4)?.try_into().ok()?;
+            u32::from_le_bytes(bytes) as usize
+        };
+
+        Some((start, end - start))
     }
 
 }
@@ -632,6 +680,79 @@ pub struct OwnedRow {
     pub descriptor: Arc<RowDescriptor>,
     /// Owned buffer containing row data.
     pub buffer: Vec<u8>,
+}
+
+/// An owned row with its ObjectId. Combines identity and data.
+///
+/// This type is used throughout the codebase where we need both the row ID
+/// and the row data together. It replaces `(ObjectId, OwnedRow)` tuples.
+///
+/// The binary format for WASM transfer is:
+/// ```text
+/// [16 bytes: ObjectId as u128 LE][row buffer bytes]
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct IdentifiedRow {
+    /// The row's unique identifier.
+    pub id: ObjectId,
+    /// The row data.
+    pub row: OwnedRow,
+}
+
+impl IdentifiedRow {
+    /// Create a new IdentifiedRow.
+    pub fn new(id: ObjectId, row: OwnedRow) -> Self {
+        Self { id, row }
+    }
+
+    /// Get the row ID.
+    pub fn id(&self) -> ObjectId {
+        self.id
+    }
+
+    /// Get a reference to the row.
+    pub fn row(&self) -> &OwnedRow {
+        &self.row
+    }
+
+    /// Get a borrowed view of the row.
+    pub fn as_row_ref(&self) -> RowRef<'_> {
+        self.row.as_ref()
+    }
+
+    /// Destructure into (ObjectId, OwnedRow) tuple for compatibility.
+    pub fn into_tuple(self) -> (ObjectId, OwnedRow) {
+        (self.id, self.row)
+    }
+
+    /// Create from (ObjectId, OwnedRow) tuple for compatibility.
+    pub fn from_tuple((id, row): (ObjectId, OwnedRow)) -> Self {
+        Self { id, row }
+    }
+
+    /// Encode to binary format for WASM transfer.
+    ///
+    /// Format: `[16 bytes ObjectId LE][row buffer]`
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let id_bytes = self.id.to_le_bytes();
+        let mut buf = Vec::with_capacity(16 + self.row.buffer.len());
+        buf.extend_from_slice(&id_bytes);
+        buf.extend_from_slice(&self.row.buffer);
+        buf
+    }
+
+    /// Decode from binary format.
+    ///
+    /// Returns None if buffer is too short.
+    pub fn from_bytes(data: &[u8], descriptor: Arc<RowDescriptor>) -> Option<Self> {
+        if data.len() < 16 {
+            return None;
+        }
+        let id_bytes: [u8; 16] = data[0..16].try_into().ok()?;
+        let id = ObjectId::from_le_bytes(id_bytes);
+        let row = OwnedRow::new(descriptor, data[16..].to_vec());
+        Some(Self { id, row })
+    }
 }
 
 impl OwnedRow {
@@ -934,12 +1055,14 @@ impl RowBuilder {
     }
 
     /// Set a blob array column value.
+    ///
+    /// Format: `[u32 count][content_ref₁][content_ref₂]...`
     pub fn set_blob_array(mut self, col_idx: usize, values: &[ContentRef]) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx) {
             if !col.is_fixed_size() && matches!(&col.ty, ColumnType::BlobArray) {
                 let var_idx = col.offset;
                 let mut data = if col.nullable { vec![1u8] } else { Vec::new() };
-                encode_varint(values.len(), &mut data);
+                data.extend_from_slice(&(values.len() as u32).to_le_bytes());
                 for v in values {
                     data.extend_from_slice(&v.to_row_bytes());
                 }
@@ -1050,19 +1173,44 @@ impl RowBuilder {
 
     /// Set an array column value.
     ///
-    /// The items are encoded as: `[item_count: varint][item1_len: varint][item1_data]...`
+    /// Format: `[u32 count][u32 offset₂][u32 offset₃]...[item₁][item₂]...`
+    /// For N items, N-1 offsets are stored. Item 0 starts after the offset table.
     pub fn set_array(mut self, col_idx: usize, items: &[OwnedRow]) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx) {
             if !col.is_fixed_size() && matches!(&col.ty, ColumnType::Array(_)) {
                 let var_idx = col.offset;
                 let mut data = if col.nullable { vec![1u8] } else { Vec::new() };
-                // Write item count
-                encode_varint(items.len(), &mut data);
-                // Write each item: length prefix + data
+                let count = items.len();
+
+                // Write item count as u32
+                data.extend_from_slice(&(count as u32).to_le_bytes());
+
+                if count == 0 {
+                    // Empty array: just the count
+                    self.variable_sections[var_idx] = data;
+                    return self;
+                }
+
+                // Calculate header size: count (4) + (N-1) offsets * 4
+                let array_header_start = data.len(); // Account for nullable byte if present
+                let offset_table_size = if count > 1 { (count - 1) * 4 } else { 0 };
+                let items_start = array_header_start - 4 + 4 + offset_table_size; // relative to array data start
+
+                // Calculate absolute offsets for items 1 through N-1
+                let mut current_offset = items_start;
+                for i in 0..count {
+                    if i > 0 {
+                        // Write offset for item i
+                        data.extend_from_slice(&(current_offset as u32).to_le_bytes());
+                    }
+                    current_offset += items[i].buffer.len();
+                }
+
+                // Write item data
                 for item in items {
-                    encode_varint(item.buffer.len(), &mut data);
                     data.extend_from_slice(&item.buffer);
                 }
+
                 self.variable_sections[var_idx] = data;
             }
         }
@@ -1148,12 +1296,40 @@ impl RowBuilder {
     }
 
     /// Build the final row buffer.
+    ///
+    /// Buffer layout:
+    /// ```text
+    /// [fixed-size columns][u32 offset₂][u32 offset₃]...[var_data₁][var_data₂][var_data₃]...
+    /// ```
+    ///
+    /// For N variable columns, we store N-1 offsets. The first variable column
+    /// starts immediately after the offset table. The last variable column ends
+    /// at the buffer end. Offsets are absolute from buffer start.
     pub fn build(self) -> OwnedRow {
         let mut buffer = self.fixed_section;
+        let var_count = self.variable_sections.len();
 
-        // Add varint headers for variable columns
-        for section in &self.variable_sections {
-            encode_varint(section.len(), &mut buffer);
+        if var_count == 0 {
+            // No variable columns, no offset table needed
+            return OwnedRow {
+                descriptor: self.descriptor,
+                buffer,
+            };
+        }
+
+        // Calculate where variable data starts (after fixed section + offset table)
+        // We store N-1 offsets for N variable columns
+        let offset_table_size = if var_count > 1 { (var_count - 1) * 4 } else { 0 };
+        let var_data_start = buffer.len() + offset_table_size;
+
+        // Calculate absolute offsets for each variable column (except the first)
+        let mut current_offset = var_data_start;
+        for i in 0..var_count {
+            if i > 0 {
+                // Write offset for column i (columns 1 through N-1)
+                buffer.extend_from_slice(&(current_offset as u32).to_le_bytes());
+            }
+            current_offset += self.variable_sections[i].len();
         }
 
         // Add variable column data
@@ -1234,46 +1410,6 @@ pub fn join_rows(
     }
 
     builder.build()
-}
-
-// Varint encoding/decoding helpers
-
-fn encode_varint(mut value: usize, buf: &mut Vec<u8>) {
-    loop {
-        let mut byte = (value & 0x7f) as u8;
-        value >>= 7;
-        if value != 0 {
-            byte |= 0x80;
-        }
-        buf.push(byte);
-        if value == 0 {
-            break;
-        }
-    }
-}
-
-fn decode_varint(data: &[u8]) -> Option<(usize, usize)> {
-    let mut result: usize = 0;
-    let mut shift = 0;
-
-    for (i, &byte) in data.iter().enumerate() {
-        result |= ((byte & 0x7f) as usize) << shift;
-        if byte & 0x80 == 0 {
-            return Some((result, i + 1));
-        }
-        shift += 7;
-        if shift >= 64 {
-            return None;
-        }
-    }
-
-    None
-}
-
-/// Read a varint from data, returning (value, bytes_consumed).
-/// Panics on malformed data (used for internal buffer parsing).
-fn read_varint(data: &[u8]) -> (usize, usize) {
-    decode_varint(data).expect("malformed varint in buffer")
 }
 
 #[cfg(test)]
@@ -1408,18 +1544,6 @@ mod tests {
         assert!(joined.column("b").is_some());
         assert!(joined.column("c").is_some());
         assert!(joined.column("d").is_some());
-    }
-
-    #[test]
-    fn test_varint_roundtrip() {
-        let test_values = [0, 1, 127, 128, 255, 256, 16383, 16384, 1_000_000];
-
-        for &value in &test_values {
-            let mut buf = Vec::new();
-            encode_varint(value, &mut buf);
-            let (decoded, _) = decode_varint(&buf).unwrap();
-            assert_eq!(value, decoded, "varint roundtrip failed for {}", value);
-        }
     }
 
     #[test]

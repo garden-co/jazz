@@ -4486,8 +4486,9 @@ impl Database {
 
             let value = coerce_predicate_value(&literal_value, &column_type);
 
-            // Use unqualified column name (the join table's schema doesn't have qualified names)
-            predicates.push(Predicate::eq(col_name, value));
+            // Use qualified column name since the join descriptor has qualified column names
+            let qualified_name = format!("{}.{}", target_table, col_name);
+            predicates.push(Predicate::eq(&qualified_name, value));
         }
 
         if predicates.is_empty() {

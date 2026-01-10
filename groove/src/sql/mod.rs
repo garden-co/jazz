@@ -31,8 +31,8 @@ pub use policy::{
 pub use query_graph::PredicateValue;
 pub use row::RowError;
 pub use row_buffer::{
-    ColDescriptor, OwnedRow, RowBuilder, RowDescriptor, RowRef, RowValue, join_rows,
-    project_row,
+    ColDescriptor, IdentifiedRow, OwnedRow, RowBuilder, RowDescriptor, RowRef, RowValue,
+    join_rows, project_row,
 };
 pub use schema::{ColumnDef, ColumnType, SchemaError, TableSchema};
 pub use table_rows::TableRows;

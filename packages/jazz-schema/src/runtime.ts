@@ -405,14 +405,10 @@ function buildIncludeProjection(
       }
 
       if (nestedProjections.length > 0) {
-        // Rebuild base columns excluding resolved refs
-        const filteredBaseColumns = [
-          `${innerAlias}.id`,
-          ...sourceTable.columns
-            .filter(c => !nestedResolvedRefs.has(c.name))
-            .map(c => `${innerAlias}.${c.name}`)
-        ];
-        innerProjection = `${filteredBaseColumns.join(", ")}, ${nestedProjections.join(", ")}`;
+        // Include ALL base columns - Groove's JOIN handling produces all columns from
+        // the combined schema regardless of the SELECT clause, so we must include the
+        // FK columns even though they're being resolved by nested includes.
+        innerProjection = `${innerBaseColumns.join(", ")}, ${nestedProjections.join(", ")}`;
       }
     }
 

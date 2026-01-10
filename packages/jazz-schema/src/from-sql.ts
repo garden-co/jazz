@@ -589,103 +589,68 @@ function generateTypes(
 }
 
 /**
- * Generate binary decoder for a single column type
- *
- * For nullable refs, we detect null by checking if the first byte is 0.
- * Base32 ObjectIds use characters 0-9 and A-Z (ASCII 48-90), so byte 0 can't appear.
- * This matches Rust's encoding which writes byte 0 for null, or 26 bytes for a ref.
+ * Get the fixed byte size of a column type, or null if variable-size.
+ * For nullable fixed columns, includes the 1-byte presence flag.
  */
-function generateColumnDecoder(sqlType: SqlColumnType, varName: string, nullable: boolean): string[] {
-  const lines: string[] = [];
+function getColumnFixedSize(sqlType: SqlColumnType, nullable: boolean): number | null {
+  const baseSize = (() => {
+    switch (sqlType.kind) {
+      case "bool": return 1;
+      case "i32": return 4;
+      case "u32": return 4;
+      case "i64": return 8;
+      case "f64": return 8;
+      case "ref": return 16; // 16-byte binary ObjectId
+      case "string": return null; // variable
+      case "bytes": return null; // variable
+    }
+  })();
 
-  // Nullable refs use a presence flag (0x00 = null, 0x01 = present followed by 26-byte ObjectId)
-  if (nullable && sqlType.kind === "ref") {
-    lines.push(`    const ${varName}Present = bytes[offset++];`);
-    lines.push(`    if (${varName}Present === 0) {`);
-    lines.push(`      row.${varName} = null;`);
-    lines.push(`    } else {`);
-    lines.push(`      row.${varName} = decodeObjectId(bytes, offset);`);
-    lines.push(`      offset += 26;`);
-    lines.push(`    }`);
-    return lines;
-  }
-
-  if (nullable) {
-    lines.push(`    const ${varName}Present = view.getUint8(offset++);`);
-    lines.push(`    if (${varName}Present === 0) {`);
-    lines.push(`      row.${varName} = null;`);
-    lines.push(`    } else {`);
-  }
-
-  const indent = nullable ? "      " : "    ";
-
-  switch (sqlType.kind) {
-    case "bool":
-      lines.push(`${indent}row.${varName} = view.getUint8(offset++) === 1;`);
-      break;
-    case "i32":
-      lines.push(`${indent}row.${varName} = view.getInt32(offset, true);`);
-      lines.push(`${indent}offset += 4;`);
-      break;
-    case "u32":
-      lines.push(`${indent}row.${varName} = view.getUint32(offset, true);`);
-      lines.push(`${indent}offset += 4;`);
-      break;
-    case "i64":
-      lines.push(`${indent}row.${varName} = view.getBigInt64(offset, true);`);
-      lines.push(`${indent}offset += 8;`);
-      break;
-    case "f64":
-      lines.push(`${indent}row.${varName} = view.getFloat64(offset, true);`);
-      lines.push(`${indent}offset += 8;`);
-      break;
-    case "string":
-      lines.push(`${indent}const ${varName}Len = view.getUint32(offset, true);`);
-      lines.push(`${indent}offset += 4;`);
-      lines.push(`${indent}row.${varName} = decoder.decode(new Uint8Array(buffer, offset, ${varName}Len));`);
-      lines.push(`${indent}offset += ${varName}Len;`);
-      break;
-    case "bytes":
-      lines.push(`${indent}const ${varName}Len = view.getUint32(offset, true);`);
-      lines.push(`${indent}offset += 4;`);
-      lines.push(`${indent}row.${varName} = new Uint8Array(buffer, offset, ${varName}Len);`);
-      lines.push(`${indent}offset += ${varName}Len;`);
-      break;
-    case "ref":
-      lines.push(`${indent}row.${varName} = decodeObjectId(bytes, offset);`);
-      lines.push(`${indent}offset += 26;`);
-      break;
-  }
-
-  if (nullable) {
-    lines.push(`    }`);
-  }
-
-  return lines;
+  if (baseSize === null) return null;
+  return nullable ? 1 + baseSize : baseSize; // presence byte for nullable
 }
 
 /**
- * Generate a BinaryReader method call for a column type
+ * Check if a column type is variable-size
  */
-function generateReaderCall(sqlType: SqlColumnType): string {
-  switch (sqlType.kind) {
-    case "bool":
-      return "reader.readBool()";
-    case "i32":
-      return "reader.readI32()";
-    case "u32":
-      return "reader.readU32()";
-    case "i64":
-      return "reader.readI64()";
-    case "f64":
-      return "reader.readF64()";
-    case "string":
-      return "reader.readString()";
-    case "bytes":
-      return "reader.readBytes()";
-    case "ref":
-      return "reader.readObjectId()";
+function isVariableColumn(sqlType: SqlColumnType): boolean {
+  return sqlType.kind === "string" || sqlType.kind === "bytes";
+}
+
+/**
+ * Analyze table columns to get fixed section size and variable column info
+ */
+interface TableLayout {
+  fixedSize: number;
+  fixedColumns: Array<{ col: ParsedColumn; offset: number }>;
+  variableColumns: ParsedColumn[];
+  offsetTableSize: number;
+}
+
+function analyzeTableLayout(table: ParsedTable): TableLayout {
+  const fixedColumns: Array<{ col: ParsedColumn; offset: number }> = [];
+  const variableColumns: ParsedColumn[] = [];
+  let fixedOffset = 0;
+
+  for (const col of table.columns) {
+    const fixedSize = getColumnFixedSize(col.sqlType, col.nullable);
+    if (fixedSize !== null) {
+      fixedColumns.push({ col, offset: fixedOffset });
+      fixedOffset += fixedSize;
+    } else {
+      variableColumns.push(col);
+    }
   }
+
+  // Offset table has N-1 entries for N variable columns
+  const offsetTableSize = variableColumns.length > 1 ? (variableColumns.length - 1) * 4 : 0;
+
+  return {
+    fixedSize: fixedOffset,
+    fixedColumns,
+    variableColumns,
+    offsetTableSize,
+  };
 }
 
 /**
@@ -704,14 +669,19 @@ function generateRowType(table: ParsedTable): string {
 }
 
 /**
- * Generate binary decoders for all tables
+ * Generate binary decoders for all tables using the row buffer format.
+ *
+ * Row buffer format:
+ * - Batch: [u32 count][u32 size₁][16-byte ObjectId][row buffer]...
+ * - Row buffer: [fixed columns][offset table (N-1 u32s for N var cols)][variable data]
+ * - ObjectId: 16 bytes binary (u128 LE), converted to Base32 string
  */
 function generateDecoders(tables: ParsedTable[]): string {
   const lines: string[] = [
     "// Generated from SQL schema by @jazz/schema",
     "// DO NOT EDIT MANUALLY",
     "",
-    "// Shared decoder for UTF-8 strings (used for variable-length strings)",
+    "// Shared decoder for UTF-8 strings",
     "const decoder = new TextDecoder();",
     "",
     "// Delta type constants",
@@ -719,19 +689,30 @@ function generateDecoders(tables: ParsedTable[]): string {
     "export const DELTA_UPDATED = 2;",
     "export const DELTA_REMOVED = 3;",
     "",
+    "// Crockford Base32 alphabet (matches Rust ObjectId encoding)",
+    "const CROCKFORD_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';",
+    "",
     "/**",
-    " * Fast ObjectId decoding using String.fromCharCode.",
-    " * Since Base32 is ASCII-only, this is faster than TextDecoder.",
+    " * Convert a 16-byte binary ObjectId to Base32 string.",
+    " * Matches the Rust ObjectId encoding format.",
     " */",
-    "function decodeObjectId(bytes: Uint8Array, offset: number): string {",
-    "  return String.fromCharCode(",
-    "    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3], bytes[offset+4],",
-    "    bytes[offset+5], bytes[offset+6], bytes[offset+7], bytes[offset+8], bytes[offset+9],",
-    "    bytes[offset+10], bytes[offset+11], bytes[offset+12], bytes[offset+13], bytes[offset+14],",
-    "    bytes[offset+15], bytes[offset+16], bytes[offset+17], bytes[offset+18], bytes[offset+19],",
-    "    bytes[offset+20], bytes[offset+21], bytes[offset+22], bytes[offset+23], bytes[offset+24],",
-    "    bytes[offset+25]",
-    "  );",
+    "function objectIdToString(bytes: Uint8Array, offset: number): string {",
+    "  // Read as two 64-bit values (little-endian)",
+    "  const view = new DataView(bytes.buffer, bytes.byteOffset + offset, 16);",
+    "  const lo = view.getBigUint64(0, true);",
+    "  const hi = view.getBigUint64(8, true);",
+    "",
+    "  // Combine into 128-bit value",
+    "  let value = (hi << 64n) | lo;",
+    "",
+    "  // Encode to Base32 (26 characters for 128 bits)",
+    "  const chars = new Array(26);",
+    "  for (let i = 25; i >= 0; i--) {",
+    "    chars[i] = CROCKFORD_ALPHABET[Number(value & 0x1fn)];",
+    "    value >>= 5n;",
+    "  }",
+    "",
+    "  return chars.join('');",
     "}",
     "",
     "/** Delta type for incremental updates */",
@@ -756,8 +737,8 @@ function generateDecoders(tables: ParsedTable[]): string {
     "  }",
     "",
     "  readObjectId(): string {",
-    "    const id = decodeObjectId(this.bytes, this.offset);",
-    "    this.offset += 26;",
+    "    const id = objectIdToString(this.bytes, this.offset);",
+    "    this.offset += 16;",
     "    return id;",
     "  }",
     "",
@@ -789,21 +770,7 @@ function generateDecoders(tables: ParsedTable[]): string {
     "    return this.bytes[this.offset++] === 1;",
     "  }",
     "",
-    "  readString(): string {",
-    "    const len = this.readU32();",
-    "    const str = decoder.decode(new Uint8Array(this.bytes.buffer, this.offset, len));",
-    "    this.offset += len;",
-    "    return str;",
-    "  }",
-    "",
-    "  readBytes(): Uint8Array {",
-    "    const len = this.readU32();",
-    "    const bytes = new Uint8Array(this.bytes.buffer, this.offset, len);",
-    "    this.offset += len;",
-    "    return bytes;",
-    "  }",
-    "",
-    "  /** Read nullable value. Returns null if not present. */",
+    "  /** Read nullable value. Returns null if not present (presence byte = 0). */",
     "  readNullable<T>(readValue: () => T): T | null {",
     "    if (this.bytes[this.offset++] === 0) return null;",
     "    return readValue();",
@@ -811,27 +778,14 @@ function generateDecoders(tables: ParsedTable[]): string {
     "",
     "  /**",
     "   * Read a nullable ObjectId ref.",
-    "   * Uses presence flag: 0x00 = null, 0x01 = present followed by 26-byte ObjectId.",
+    "   * Nullable refs have a presence byte before the 16-byte ObjectId.",
     "   */",
     "  readNullableRef(): string | null {",
-    "    const present = this.bytes[this.offset++];",
-    "    if (present === 0) {",
+    "    if (this.bytes[this.offset++] === 0) {",
+    "      this.offset += 16; // Skip the zeroed ObjectId bytes",
     "      return null;",
     "    }",
     "    return this.readObjectId();",
-    "  }",
-    "",
-    "  /**",
-    "   * Read an array of values.",
-    "   * @param readElement Function to read each element",
-    "   */",
-    "  readArray<T>(readElement: () => T): T[] {",
-    "    const count = this.readU32();",
-    "    const arr = new Array(count);",
-    "    for (let i = 0; i < count; i++) {",
-    "      arr[i] = readElement();",
-    "    }",
-    "    return arr;",
     "  }",
     "}",
     "",
@@ -840,12 +794,16 @@ function generateDecoders(tables: ParsedTable[]): string {
   for (const table of tables) {
     const typeName = singularize(toPascalCase(table.name));
     const rowType = generateRowType(table);
+    const layout = analyzeTableLayout(table);
 
-    // Generate batch decoder (with row count header)
+    // Generate batch decoder (with row count and size headers)
     lines.push(`/**`);
     lines.push(` * Decode binary rows for ${table.name} table (batch format)`);
-    lines.push(` * @param buffer ArrayBuffer from WASM`);
-    lines.push(` * @returns Array of ${typeName} rows`);
+    lines.push(` *`);
+    lines.push(` * Row buffer layout:`);
+    lines.push(` * - Fixed size: ${layout.fixedSize} bytes`);
+    lines.push(` * - Variable columns: ${layout.variableColumns.length}`);
+    lines.push(` * - Offset table: ${layout.offsetTableSize} bytes`);
     lines.push(` */`);
     lines.push(`export function decode${typeName}Rows(buffer: ArrayBufferLike): Array<${rowType}> {`);
     lines.push(`  const bytes = new Uint8Array(buffer);`);
@@ -859,110 +817,227 @@ function generateDecoders(tables: ParsedTable[]): string {
     lines.push(`  const rows = new Array(rowCount);`);
     lines.push(``);
     lines.push(`  for (let i = 0; i < rowCount; i++) {`);
-    lines.push(`    const row: any = {};`);
+    lines.push(`    // Read row size (includes 16-byte ObjectId + row buffer)`);
+    lines.push(`    const rowSize = view.getUint32(offset, true);`);
+    lines.push(`    offset += 4;`);
+    lines.push(`    const rowStart = offset;`);
+    lines.push(`    const rowEnd = rowStart + rowSize;`);
     lines.push(``);
-    lines.push(`    // Read ObjectId (26 bytes Base32)`);
-    lines.push(`    row.id = decodeObjectId(bytes, offset);`);
-    lines.push(`    offset += 26;`);
+    lines.push(`    // Read ObjectId (16 bytes binary -> Base32 string)`);
+    lines.push(`    const id = objectIdToString(bytes, offset);`);
+    lines.push(`    offset += 16;`);
+    lines.push(`    const bufferStart = offset; // Start of row buffer (after ObjectId)`);
     lines.push(``);
 
-    // Generate decoder for each column
-    for (const col of table.columns) {
-      lines.push(`    // ${col.name}: ${col.sqlType.kind}${col.nullable ? " (nullable)" : ""}`);
-      lines.push(...generateColumnDecoder(col.sqlType, col.name, col.nullable));
+    // Generate fixed column reads
+    if (layout.fixedColumns.length > 0) {
+      lines.push(`    // Fixed columns`);
+      for (const { col, offset: colOffset } of layout.fixedColumns) {
+        const absOffset = `bufferStart + ${colOffset}`;
+        if (col.nullable) {
+          lines.push(`    const ${col.name} = bytes[${absOffset}] === 0 ? null : ${generateFixedRead(col.sqlType, `${absOffset} + 1`, "view", "bytes")};`);
+        } else {
+          lines.push(`    const ${col.name} = ${generateFixedRead(col.sqlType, absOffset, "view", "bytes")};`);
+        }
+      }
       lines.push(``);
     }
 
-    lines.push(`    rows[i] = row;`);
+    // Generate variable column reads
+    if (layout.variableColumns.length > 0) {
+      const offsetTableStart = `bufferStart + ${layout.fixedSize}`;
+      const varDataStart = `${offsetTableStart} + ${layout.offsetTableSize}`;
+
+      lines.push(`    // Variable columns (using offset table)`);
+      lines.push(`    const offsetTableStart = ${offsetTableStart};`);
+
+      // Read offset table entries (N-1 for N variable columns)
+      if (layout.variableColumns.length > 1) {
+        for (let i = 0; i < layout.variableColumns.length - 1; i++) {
+          // Offsets are relative to row buffer start, add bufferStart for absolute position
+          lines.push(`    const varOffset${i + 1} = bufferStart + view.getUint32(offsetTableStart + ${i * 4}, true);`);
+        }
+      }
+      lines.push(`    const varDataStart = ${varDataStart};`);
+      lines.push(``);
+
+      // Generate variable column reads
+      for (let i = 0; i < layout.variableColumns.length; i++) {
+        const col = layout.variableColumns[i];
+        const startExpr = i === 0 ? "varDataStart" : `varOffset${i}`;
+        const endExpr = i === layout.variableColumns.length - 1 ? "rowEnd" : `varOffset${i + 1}`;
+
+        if (col.nullable) {
+          lines.push(`    let ${col.name}: string | null = null;`);
+          lines.push(`    if (bytes[${startExpr}] === 1) {`);
+          lines.push(`      ${col.name} = decoder.decode(bytes.subarray(${startExpr} + 1, ${endExpr}));`);
+          lines.push(`    }`);
+        } else {
+          lines.push(`    const ${col.name} = decoder.decode(bytes.subarray(${startExpr}, ${endExpr}));`);
+        }
+      }
+      lines.push(``);
+    }
+
+    // Build row object
+    const fieldNames = ["id", ...table.columns.map(c => c.name)];
+    lines.push(`    rows[i] = { ${fieldNames.join(", ")} };`);
+    lines.push(`    offset = rowEnd;`);
     lines.push(`  }`);
     lines.push(``);
     lines.push(`  return rows;`);
     lines.push(`}`);
     lines.push(``);
 
-    // Generate single row decoder (no header, for delta updates)
-    lines.push(`/**`);
-    lines.push(` * Decode a single ${typeName} row from binary (no header)`);
-    lines.push(` * @param buffer ArrayBuffer containing a single row`);
-    lines.push(` * @param startOffset Byte offset to start reading from`);
-    lines.push(` * @returns Decoded row and bytes consumed`);
-    lines.push(` */`);
-    lines.push(`export function decode${typeName}Row(buffer: ArrayBufferLike, startOffset = 0): { row: ${rowType}; bytesRead: number } {`);
-    lines.push(`  const bytes = new Uint8Array(buffer);`);
-    lines.push(`  const view = new DataView(buffer as ArrayBuffer);`);
-    lines.push(`  let offset = startOffset;`);
-    lines.push(``);
-    lines.push(`  const row: any = {};`);
-    lines.push(``);
-    lines.push(`  // Read ObjectId (26 bytes Base32)`);
-    lines.push(`  row.id = decodeObjectId(bytes, offset);`);
-    lines.push(`  offset += 26;`);
-    lines.push(``);
-
-    for (const col of table.columns) {
-      lines.push(`  // ${col.name}: ${col.sqlType.kind}${col.nullable ? " (nullable)" : ""}`);
-      // Adjust indentation for single-row decoder (2 spaces instead of 4)
-      const colLines = generateColumnDecoder(col.sqlType, col.name, col.nullable);
-      lines.push(...colLines.map(l => l.replace(/^    /, "  ")));
-      lines.push(``);
-    }
-
-    lines.push(`  return { row, bytesRead: offset - startOffset };`);
-    lines.push(`}`);
-    lines.push(``);
-
     // Generate delta decoder
     lines.push(`/**`);
     lines.push(` * Decode a ${typeName} delta from binary`);
-    lines.push(` * Format: u8 type (1=added, 2=updated, 3=removed) + row data or id`);
-    lines.push(` * @param buffer ArrayBuffer containing a single delta`);
-    lines.push(` * @returns Decoded delta`);
+    lines.push(` * Format: u8 type (1=added, 2=updated, 3=removed) + [16-byte ObjectId][row buffer] or just ObjectId`);
     lines.push(` */`);
     lines.push(`export function decode${typeName}Delta(buffer: ArrayBufferLike): Delta<${rowType}> {`);
     lines.push(`  const bytes = new Uint8Array(buffer);`);
+    lines.push(`  const view = new DataView(buffer as ArrayBuffer);`);
     lines.push(`  const deltaType = bytes[0];`);
     lines.push(``);
     lines.push(`  if (deltaType === DELTA_REMOVED) {`);
-    lines.push(`    // Removed: just the ObjectId`);
-    lines.push(`    const id = decodeObjectId(bytes, 1);`);
+    lines.push(`    const id = objectIdToString(bytes, 1);`);
     lines.push(`    return { type: 'removed', id };`);
     lines.push(`  }`);
     lines.push(``);
-    lines.push(`  // Added or Updated: decode the full row`);
-    lines.push(`  const { row } = decode${typeName}Row(buffer, 1);`);
+    lines.push(`  // Added or Updated: decode the row`);
+    lines.push(`  const id = objectIdToString(bytes, 1);`);
+    lines.push(`  const bufferStart = 17; // 1 (delta type) + 16 (ObjectId)`);
+    lines.push(`  const rowEnd = bytes.length;`);
+    lines.push(``);
+
+    // Generate fixed column reads for delta
+    if (layout.fixedColumns.length > 0) {
+      for (const { col, offset: colOffset } of layout.fixedColumns) {
+        const absOffset = `bufferStart + ${colOffset}`;
+        if (col.nullable) {
+          lines.push(`  const ${col.name} = bytes[${absOffset}] === 0 ? null : ${generateFixedRead(col.sqlType, `${absOffset} + 1`, "view", "bytes")};`);
+        } else {
+          lines.push(`  const ${col.name} = ${generateFixedRead(col.sqlType, absOffset, "view", "bytes")};`);
+        }
+      }
+    }
+
+    // Generate variable column reads for delta
+    if (layout.variableColumns.length > 0) {
+      const offsetTableStart = `bufferStart + ${layout.fixedSize}`;
+      const varDataStart = `${offsetTableStart} + ${layout.offsetTableSize}`;
+
+      lines.push(`  const offsetTableStart = ${offsetTableStart};`);
+      if (layout.variableColumns.length > 1) {
+        for (let i = 0; i < layout.variableColumns.length - 1; i++) {
+          lines.push(`  const varOffset${i + 1} = bufferStart + view.getUint32(offsetTableStart + ${i * 4}, true);`);
+        }
+      }
+      lines.push(`  const varDataStart = ${varDataStart};`);
+
+      for (let i = 0; i < layout.variableColumns.length; i++) {
+        const col = layout.variableColumns[i];
+        const startExpr = i === 0 ? "varDataStart" : `varOffset${i}`;
+        const endExpr = i === layout.variableColumns.length - 1 ? "rowEnd" : `varOffset${i + 1}`;
+
+        if (col.nullable) {
+          lines.push(`  let ${col.name}: string | null = null;`);
+          lines.push(`  if (bytes[${startExpr}] === 1) {`);
+          lines.push(`    ${col.name} = decoder.decode(bytes.subarray(${startExpr} + 1, ${endExpr}));`);
+          lines.push(`  }`);
+        } else {
+          lines.push(`  const ${col.name} = decoder.decode(bytes.subarray(${startExpr}, ${endExpr}));`);
+        }
+      }
+    }
+
+    lines.push(``);
     lines.push(`  return {`);
     lines.push(`    type: deltaType === DELTA_ADDED ? 'added' : 'updated',`);
-    lines.push(`    row`);
+    lines.push(`    row: { ${fieldNames.join(", ")} }`);
     lines.push(`  };`);
     lines.push(`}`);
     lines.push(``);
 
-    // Generate reader function for composing with BinaryReader (for nested rows)
+    // Generate reader function for BinaryReader (for nested rows)
+    // Note: Tables with variable columns can't use BinaryReader directly
     lines.push(`/**`);
     lines.push(` * Read a ${typeName} row using a BinaryReader.`);
-    lines.push(` * Use this for nested/joined row decoding.`);
-    lines.push(` */`);
-    lines.push(`export function read${typeName}(reader: BinaryReader): ${rowType} {`);
-    lines.push(`  const id = reader.readObjectId();`);
+    if (layout.variableColumns.length > 0) {
+      lines.push(` * NOTE: This table has variable columns - use decode${typeName}Rows/decode${typeName}Delta instead.`);
+      lines.push(` */`);
+      lines.push(`export function read${typeName}(reader: BinaryReader): ${rowType} {`);
+      lines.push(`  throw new Error('read${typeName} requires row boundary context - use decode${typeName}Rows or decode${typeName}Delta instead');`);
+      lines.push(`}`);
+    } else {
+      lines.push(` * Use this for nested/joined row decoding.`);
+      lines.push(` */`);
+      lines.push(`export function read${typeName}(reader: BinaryReader): ${rowType} {`);
+      lines.push(`  const id = reader.readObjectId();`);
 
-    for (const col of table.columns) {
-      if (col.nullable && col.sqlType.kind === "ref") {
-        // Nullable refs use byte-0 detection instead of presence flag
-        lines.push(`  const ${col.name} = reader.readNullableRef();`);
-      } else if (col.nullable) {
-        lines.push(`  const ${col.name} = reader.readNullable(() => ${generateReaderCall(col.sqlType)});`);
-      } else {
-        lines.push(`  const ${col.name} = ${generateReaderCall(col.sqlType)};`);
+      for (const col of table.columns) {
+        if (col.nullable && col.sqlType.kind === "ref") {
+          lines.push(`  const ${col.name} = reader.readNullableRef();`);
+        } else if (col.nullable) {
+          lines.push(`  const ${col.name} = reader.readNullable(() => ${generateReaderCall(col.sqlType)});`);
+        } else {
+          lines.push(`  const ${col.name} = ${generateReaderCall(col.sqlType)};`);
+        }
       }
-    }
 
-    const fieldNames = ["id", ...table.columns.map(c => c.name)];
-    lines.push(`  return { ${fieldNames.join(", ")} };`);
-    lines.push(`}`);
+      lines.push(`  return { ${fieldNames.join(", ")} };`);
+      lines.push(`}`);
+    }
     lines.push(``);
   }
 
   return lines.join("\n");
+}
+
+/**
+ * Generate code to read a fixed-size value at a known offset
+ */
+function generateFixedRead(sqlType: SqlColumnType, offset: string, viewVar: string, bytesVar: string): string {
+  switch (sqlType.kind) {
+    case "bool":
+      return `${bytesVar}[${offset}] === 1`;
+    case "i32":
+      return `${viewVar}.getInt32(${offset}, true)`;
+    case "u32":
+      return `${viewVar}.getUint32(${offset}, true)`;
+    case "i64":
+      return `${viewVar}.getBigInt64(${offset}, true)`;
+    case "f64":
+      return `${viewVar}.getFloat64(${offset}, true)`;
+    case "ref":
+      return `objectIdToString(${bytesVar}, ${offset})`;
+    default:
+      throw new Error(`Not a fixed-size type: ${sqlType.kind}`);
+  }
+}
+
+/**
+ * Generate a BinaryReader method call for a column type
+ */
+function generateReaderCall(sqlType: SqlColumnType): string {
+  switch (sqlType.kind) {
+    case "bool":
+      return "reader.readBool()";
+    case "i32":
+      return "reader.readI32()";
+    case "u32":
+      return "reader.readU32()";
+    case "i64":
+      return "reader.readI64()";
+    case "f64":
+      return "reader.readF64()";
+    case "string":
+      throw new Error("String columns should use row buffer format, not BinaryReader");
+    case "bytes":
+      throw new Error("Bytes columns should use row buffer format, not BinaryReader");
+    case "ref":
+      return "reader.readObjectId()";
+  }
 }
 
 /**
