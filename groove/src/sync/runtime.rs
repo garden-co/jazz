@@ -11,6 +11,11 @@ use std::future::Future;
 /// Implementations provide platform-specific task spawning:
 /// - `TokioRuntime`: Uses `tokio::spawn` for native environments
 /// - `WasmRuntime`: Uses `wasm_bindgen_futures::spawn_local` for browsers
+///
+/// The trait bounds differ by platform:
+/// - Native: Requires `Send + Sync` on the runtime and `Send` on futures
+/// - WASM: No `Send` requirements (single-threaded)
+#[cfg(not(target_arch = "wasm32"))]
 pub trait Runtime: Clone + Send + Sync + 'static {
     /// Spawn an async task to run in the background.
     ///
@@ -18,6 +23,20 @@ pub trait Runtime: Clone + Send + Sync + 'static {
     fn spawn<F>(&self, future: F)
     where
         F: Future<Output = ()> + Send + 'static;
+}
+
+/// Runtime abstraction for spawning async tasks (WASM version).
+///
+/// In WASM, futures don't need to be `Send` since everything runs
+/// on a single thread.
+#[cfg(target_arch = "wasm32")]
+pub trait Runtime: Clone + 'static {
+    /// Spawn an async task to run in the background.
+    ///
+    /// The task runs independently and the caller does not wait for completion.
+    fn spawn<F>(&self, future: F)
+    where
+        F: Future<Output = ()> + 'static;
 }
 
 /// Tokio-based runtime for native environments.
@@ -37,14 +56,31 @@ impl Runtime for TokioRuntime {
     }
 }
 
+/// WASM-based runtime for browser environments.
+///
+/// Uses `wasm_bindgen_futures::spawn_local` to spawn tasks on the browser's event loop.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Debug, Default)]
+pub struct WasmRuntime;
+
+#[cfg(target_arch = "wasm32")]
+impl Runtime for WasmRuntime {
+    fn spawn<F>(&self, future: F)
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        wasm_bindgen_futures::spawn_local(future);
+    }
+}
+
 /// Test runtime that executes futures synchronously.
 ///
 /// Useful for testing where we want deterministic execution.
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 #[derive(Clone, Debug, Default)]
 pub struct TestRuntime;
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 impl Runtime for TestRuntime {
     fn spawn<F>(&self, future: F)
     where

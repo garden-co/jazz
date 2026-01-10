@@ -8,7 +8,7 @@ export default defineConfig({
   workers: 1,
   reporter: 'html',
   use: {
-    baseURL: 'http://localhost:5173',
+    baseURL: 'http://localhost:5180',
     trace: 'on-first-retry',
   },
   projects: [
@@ -17,9 +17,18 @@ export default defineConfig({
       use: { ...devices['Desktop Chrome'] },
     },
   ],
-  webServer: {
-    command: 'npm run dev',
-    url: 'http://localhost:5173',
-    reuseExistingServer: !process.env.CI,
-  },
+  webServer: [
+    {
+      command: 'npm run dev',
+      url: 'http://localhost:5180',
+      reuseExistingServer: !process.env.CI,
+    },
+    {
+      command: 'cargo run -p groove-server -- --port 8080',
+      url: 'http://localhost:8080',
+      reuseExistingServer: !process.env.CI,
+      cwd: '..',
+      timeout: 120000, // Rust build can take a while
+    },
+  ],
 });

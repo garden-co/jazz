@@ -15,9 +15,11 @@ use bytes::Bytes;
 
 pub mod indexeddb;
 pub mod sync;
+pub mod synced_local_node;
 
 pub use indexeddb::IndexedDbEnvironment;
 pub use sync::WasmSyncClient;
+pub use synced_local_node::WasmSyncedLocalNode;
 
 // ==================== Blob Registry ====================
 
