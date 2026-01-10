@@ -826,6 +826,33 @@ pub fn init() {
     console_error_panic_hook::set_once();
 }
 
+// ==================== ObjectId Helpers ====================
+
+/// Convert a 16-byte binary ObjectId to a Base32 string.
+///
+/// This is useful for displaying ObjectIds or using them as string keys.
+/// The binary format is u128 little-endian.
+#[wasm_bindgen]
+pub fn object_id_to_string(bytes: &[u8]) -> Result<String, JsValue> {
+    if bytes.len() != 16 {
+        return Err(JsValue::from_str("ObjectId must be exactly 16 bytes"));
+    }
+    let id_bytes: [u8; 16] = bytes.try_into().unwrap();
+    let id = ObjectId::from_le_bytes(id_bytes);
+    Ok(id.to_string())
+}
+
+/// Convert a Base32 string ObjectId to 16-byte binary.
+///
+/// Returns a Uint8Array containing the u128 little-endian bytes.
+#[wasm_bindgen]
+pub fn object_id_from_string(s: &str) -> Result<Uint8Array, JsValue> {
+    let id: ObjectId = s.parse()
+        .map_err(|e| JsValue::from_str(&format!("invalid ObjectId: {:?}", e)))?;
+    let bytes = id.to_le_bytes();
+    Ok(Uint8Array::from(&bytes[..]))
+}
+
 // ==================== JS Helper Code ====================
 // See blob-helpers.ts for TypeScript convenience wrappers around these WASM APIs:
 // - blobToReadableStream(): Convert blob handle to ReadableStream
