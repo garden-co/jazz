@@ -38,6 +38,18 @@ function shouldUsePersistence(): boolean {
   return localStorage.getItem('groove_persist') !== 'false';
 }
 
+// Check if sync mode is enabled via URL param
+function shouldUseSync(): boolean {
+  const urlParams = new URLSearchParams(window.location.search);
+  return urlParams.has('sync');
+}
+
+// Get sync server URL from URL params or default
+function getSyncServerUrl(): string {
+  const urlParams = new URLSearchParams(window.location.search);
+  return urlParams.get('syncUrl') || 'http://localhost:8080';
+}
+
 function App() {
   const db = useJazz();
 
@@ -147,6 +159,7 @@ function Root() {
   const [wasmDb, setWasmDb] = useState<WasmDatabaseLike | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isPersistent, setIsPersistent] = useState<boolean | null>(null);
+  const [isSyncEnabled, setIsSyncEnabled] = useState<boolean | null>(null);
   const initRef = useRef(false);
 
   useEffect(() => {
@@ -157,32 +170,66 @@ function Root() {
       try {
         const wasm = await initWasm();
         const usePersistence = shouldUsePersistence();
+        const useSync = shouldUseSync();
         setIsPersistent(usePersistence);
+        setIsSyncEnabled(useSync);
 
-        let db;
-        if (usePersistence) {
-          // Use IndexedDB for persistence
+        let db: WasmDatabaseLike;
+
+        if (useSync) {
+          // Use synced database with shared catalog for multi-client sync
+          const serverUrl = getSyncServerUrl();
+          const tabId = Math.random().toString(36).substring(7);
+          console.log(`Using synced database (server: ${serverUrl}, tabId: ${tabId})`);
+
+          const syncedDb = new wasm.WasmSyncedLocalNode(
+            serverUrl,
+            `token-${tabId}`,
+            "demo-app-catalog-v1" // Shared catalog ID for sync
+          );
+
+          syncedDb.setOnStateChange((state: string) => {
+            console.log(`Sync state: ${state}`);
+          });
+
+          syncedDb.setOnError((msg: string) => {
+            console.error(`Sync error: ${msg}`);
+          });
+
+          syncedDb.initSchema(schema);
+
+          // Auto-connect and subscribe to all issues
+          syncedDb.connect("SELECT * FROM Issues").catch((e: Error) => {
+            console.error("Sync connection error:", e);
+          });
+
+          db = syncedDb as unknown as WasmDatabaseLike;
+        } else if (usePersistence) {
+          // Use IndexedDB for persistence (no sync)
           console.log("Using IndexedDB persistence...");
-          db = await wasm.WasmDatabase.withIndexedDb(undefined);
+          const persistedDb = await wasm.WasmDatabase.withIndexedDb(undefined);
 
           // Check if this is a fresh database (no tables)
-          const tables = db.list_tables() as string[];
+          const tables = persistedDb.list_tables() as string[];
           const needsSchema = !tables || tables.length === 0;
 
           if (needsSchema) {
             console.log("Initializing schema...");
-            db.init_schema(schema);
+            persistedDb.init_schema(schema);
           } else {
             console.log("Loaded existing database from IndexedDB with tables:", tables);
           }
+
+          db = persistedDb as unknown as WasmDatabaseLike;
         } else {
-          // Use in-memory database
+          // Use in-memory database (no sync, no persistence)
           console.log("Using in-memory database (no persistence)");
-          db = new wasm.WasmDatabase();
-          db.init_schema(schema);
+          const memDb = new wasm.WasmDatabase();
+          memDb.init_schema(schema);
+          db = memDb as unknown as WasmDatabaseLike;
         }
 
-        setWasmDb(db as unknown as WasmDatabaseLike);
+        setWasmDb(db);
       } catch (e) {
         console.error("Init error:", e);
         setError(e instanceof Error ? e.message : String(e));
@@ -206,6 +253,7 @@ function Root() {
         {isPersistent !== null && (
           <div className="text-xs text-muted-foreground">
             Storage: {isPersistent ? "IndexedDB (persistent)" : "Memory (not persistent)"}
+            {isSyncEnabled && " + Sync"}
           </div>
         )}
       </div>
