@@ -524,7 +524,7 @@ export function useSubscriptionSelector<
 ): TSelectorReturn {
   const getCurrentValue = useGetCurrentValue(subscription);
 
-  return useSyncExternalStoreWithSelector<TSelectorInput, TSelectorReturn>(
+  return useSyncExternalStoreWithSelector(
     React.useCallback(
       (callback) => {
         if (!subscription) {
@@ -955,9 +955,19 @@ function useSuspendUntilLoaded(
  * @param subscriptions - Array of SubscriptionScope instances (or null for skipped entries)
  * @returns Array of loaded CoValues (or null for skipped entries)
  */
-function useSubscriptionsSelector<T extends CoValue[] | MaybeLoaded<CoValue>[]>(
+function useSubscriptionsSelector<
+  T extends CoValue[] | MaybeLoaded<CoValue>[],
+  // Selector input can be an already loaded or a maybe-loaded value,
+  // depending on whether a suspense hook is used or not, respectively.
+  TSelectorInput = T[number],
+  TSelectorReturn = TSelectorInput,
+>(
   subscriptions: (SubscriptionScope<CoValue> | null)[],
-): T {
+  options?: {
+    select?: (value: TSelectorInput) => TSelectorReturn;
+    equalityFn?: (a: TSelectorReturn, b: TSelectorReturn) => boolean;
+  },
+): TSelectorReturn[] {
   const subscriptionIds = subscriptions
     .map((sub) => sub?.id ?? "null")
     .join(",");
@@ -999,10 +1009,35 @@ function useSubscriptionsSelector<T extends CoValue[] | MaybeLoaded<CoValue>[]>(
       cachedCurrentValuesRef.current = newValues as T;
     }
 
-    return cachedCurrentValuesRef.current;
+    return cachedCurrentValuesRef.current as unknown as TSelectorInput[];
   }, [subscriptionIds]);
 
-  return useSyncExternalStore(subscribe, getCurrentValues, getCurrentValues);
+  const selectFn = useMemo(() => {
+    if (!options?.select) {
+      return (values: TSelectorInput[]) =>
+        values as unknown as TSelectorReturn[];
+    }
+    return (values: TSelectorInput[]) =>
+      values.map((value) => options.select!(value));
+  }, [options?.select]);
+
+  const elementEqualityFn = useMemo(
+    () => options?.equalityFn ?? Object.is,
+    [options?.equalityFn],
+  );
+  const equalityFn = useMemo(() => {
+    return (a: TSelectorReturn[], b: TSelectorReturn[]) =>
+      a.length === b.length &&
+      a.every((value, index) => b[index] && elementEqualityFn(value, b[index]));
+  }, [options?.equalityFn]);
+
+  return useSyncExternalStoreWithSelector(
+    subscribe,
+    getCurrentValues,
+    getCurrentValues,
+    selectFn,
+    equalityFn,
+  );
 }
 
 /**
@@ -1020,12 +1055,17 @@ export function useSuspenseCoStates<
   S extends CoValueClassOrSchema,
   // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
   const R extends ResolveQuery<S> = SchemaResolveQuery<S>,
+  TSelectorReturn = Loaded<S, R>,
 >(
   Schema: S,
   ids: readonly string[],
   options?: {
     /** Resolve query to specify which nested CoValues to load */
     resolve?: ResolveQueryStrict<S, R>;
+    /** Select which value to return. Applies to each element individually. */
+    select?: (value: Loaded<S, R>) => TSelectorReturn;
+    /** Equality function to determine if a selected value has changed, defaults to `Object.is` */
+    equalityFn?: (a: TSelectorReturn, b: TSelectorReturn) => boolean;
     /**
      * Create or load a branch for isolated editing.
      *
@@ -1043,7 +1083,7 @@ export function useSuspenseCoStates<
      */
     unstable_branch?: BranchDefinition;
   },
-): Loaded<S, R>[] {
+): TSelectorReturn[] {
   const resolve = getResolveQuery(Schema, options?.resolve);
   const subscriptionScopes = useCoValueSubscriptions(
     Schema,
@@ -1052,7 +1092,7 @@ export function useSuspenseCoStates<
     options?.unstable_branch,
   );
   useSuspendUntilLoaded(subscriptionScopes);
-  return useSubscriptionsSelector<Loaded<S, R>[]>(subscriptionScopes);
+  return useSubscriptionsSelector(subscriptionScopes, options);
 }
 
 /**
@@ -1084,12 +1124,17 @@ export function useCoStates<
   S extends CoValueClassOrSchema,
   // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
   const R extends ResolveQuery<S> = SchemaResolveQuery<S>,
+  TSelectorReturn = MaybeLoaded<Loaded<S, R>>,
 >(
   Schema: S,
   ids: readonly string[],
   options?: {
     /** Resolve query to specify which nested CoValues to load */
     resolve?: ResolveQueryStrict<S, R>;
+    /** Select which value to return. Applies to each element individually. */
+    select?: (value: MaybeLoaded<Loaded<S, R>>) => TSelectorReturn;
+    /** Equality function to determine if a selected value has changed, defaults to `Object.is` */
+    equalityFn?: (a: TSelectorReturn, b: TSelectorReturn) => boolean;
     /**
      * Create or load a branch for isolated editing.
      *
@@ -1107,7 +1152,7 @@ export function useCoStates<
      */
     unstable_branch?: BranchDefinition;
   },
-): MaybeLoaded<Loaded<S, R>>[] {
+): TSelectorReturn[] {
   const resolve = getResolveQuery(Schema, options?.resolve);
   const subscriptionScopes = useCoValueSubscriptions(
     Schema,
@@ -1115,7 +1160,5 @@ export function useCoStates<
     resolve,
     options?.unstable_branch,
   );
-  return useSubscriptionsSelector<MaybeLoaded<Loaded<S, R>>[]>(
-    subscriptionScopes,
-  );
+  return useSubscriptionsSelector(subscriptionScopes, options);
 }
