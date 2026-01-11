@@ -185,15 +185,15 @@ impl TestTransport {
                     && !server
                         .sessions_for_object(&request.object_id)
                         .contains(&session_id)
+                {
+                    server.register_object_session(request.object_id, session_id);
+                    if let Some(session) = server.get_session_mut(&session_id)
+                        && let Some((&query_id, _)) =
+                            session.queries.iter().find(|(_, q)| q.query == "*")
                     {
-                        server.register_object_session(request.object_id, session_id);
-                        if let Some(session) = server.get_session_mut(&session_id)
-                            && let Some((&query_id, _)) =
-                                session.queries.iter().find(|(_, q)| q.query == "*")
-                            {
-                                session.add_object_to_query(request.object_id, query_id);
-                            }
+                        session.add_object_to_query(request.object_id, query_id);
                     }
+                }
             }
         }
 
@@ -256,9 +256,10 @@ impl TestTransport {
         let mut commits_to_send = Vec::new();
         for commit_id in &commit_ids {
             if !client_known.contains(commit_id)
-                && let Some(commit) = self.server_env.get_commit(commit_id).await {
-                    commits_to_send.push(commit);
-                }
+                && let Some(commit) = self.server_env.get_commit(commit_id).await
+            {
+                commits_to_send.push(commit);
+            }
         }
 
         if let Some(session_id) = {
@@ -289,9 +290,10 @@ impl TestTransport {
 
         for session_id in session_ids {
             if let Some(session) = server.get_session_mut(&session_id)
-                && session.queries.remove(&query_id).is_some() {
-                    break;
-                }
+                && session.queries.remove(&query_id).is_some()
+            {
+                break;
+            }
         }
 
         Ok(())

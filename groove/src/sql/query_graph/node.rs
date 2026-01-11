@@ -724,9 +724,10 @@ impl QueryNode {
         // Remove from children_index (this row as a child of its parent)
         if let Some(owned_row) = &removed_row
             && let Some(parent_id) = Self::get_ref_value_buffer(owned_row, recursive_column, None)
-                && let Some(siblings) = children_index.get_mut(&parent_id) {
-                    siblings.remove(&row_id);
-                }
+            && let Some(siblings) = children_index.get_mut(&parent_id)
+        {
+            siblings.remove(&row_id);
+        }
 
         // If row was accessible, remove it and cascade to children
         if accessible.remove(&row_id).is_some() {
@@ -993,48 +994,48 @@ impl QueryNode {
                     // Forward join: look up join_table row by ref value
                     if let Some(join_id) =
                         Self::get_ref_value_buffer(input_row, join_column, Some(primary_table))
-                        && let Some(join_row) = lookup_row(join_table, join_id) {
-                            // Qualify the join row's columns (lookup returns unqualified names)
-                            let qualified_join_row =
-                                join_row.qualify_columns(join_table, join_schema);
+                        && let Some(join_row) = lookup_row(join_table, join_id)
+                    {
+                        // Qualify the join row's columns (lookup returns unqualified names)
+                        let qualified_join_row = join_row.qualify_columns(join_table, join_schema);
 
-                            // Check if this is a chain join (input contains multiple tables)
-                            let is_chain_join = input_tables.len() > 1;
+                        // Check if this is a chain join (input contains multiple tables)
+                        let is_chain_join = input_tables.len() > 1;
 
-                            let mut joined = if is_chain_join {
-                                // Chain join: input row contains combined data from all input_tables
-                                // The input OwnedRow already has all the data, create BufferJoinedRow from it
-                                let mut jr = BufferJoinedRow::new(primary_table, *primary_id);
+                        let mut joined = if is_chain_join {
+                            // Chain join: input row contains combined data from all input_tables
+                            // The input OwnedRow already has all the data, create BufferJoinedRow from it
+                            let mut jr = BufferJoinedRow::new(primary_table, *primary_id);
 
-                                // For chain joins, we need to split the combined input_row back into per-table rows
-                                // This is complex - for now, use a single entry with the combined data
-                                // TODO: Properly track per-table rows in chain joins
-                                jr.add_joined(primary_table, *primary_id, input_row.clone());
-                                jr
-                            } else {
-                                // Single table input: simple case - input_row is already in buffer format
-                                BufferJoinedRow::from_single(
-                                    primary_table,
-                                    *primary_id,
-                                    input_row.clone(),
-                                )
-                            };
+                            // For chain joins, we need to split the combined input_row back into per-table rows
+                            // This is complex - for now, use a single entry with the combined data
+                            // TODO: Properly track per-table rows in chain joins
+                            jr.add_joined(primary_table, *primary_id, input_row.clone());
+                            jr
+                        } else {
+                            // Single table input: simple case - input_row is already in buffer format
+                            BufferJoinedRow::from_single(
+                                primary_table,
+                                *primary_id,
+                                input_row.clone(),
+                            )
+                        };
 
-                            // Add the join row with qualified column names
-                            joined.add_joined(join_table, join_id, qualified_join_row);
+                        // Add the join row with qualified column names
+                        joined.add_joined(join_table, join_id, qualified_join_row);
 
-                            // Update caches
-                            cached_rows.insert(*primary_id, joined.clone());
-                            reverse_index
-                                .entry(join_id)
-                                .or_default()
-                                .insert(*primary_id);
+                        // Update caches
+                        cached_rows.insert(*primary_id, joined.clone());
+                        reverse_index
+                            .entry(join_id)
+                            .or_default()
+                            .insert(*primary_id);
 
-                            output.push(RowDelta::Added {
-                                id: *primary_id,
-                                row: joined.to_output_row(),
-                            });
-                        }
+                        output.push(RowDelta::Added {
+                            id: *primary_id,
+                            row: joined.to_output_row(),
+                        });
+                    }
                 }
             }
 
@@ -1167,12 +1168,13 @@ impl QueryNode {
                     // Update reverse_index if join_id changed
                     if old_join_id != new_join_id
                         && let Some(old_id) = old_join_id
-                            && let Some(set) = reverse_index.get_mut(&old_id) {
-                                set.remove(primary_id);
-                                if set.is_empty() {
-                                    reverse_index.remove(&old_id);
-                                }
-                            }
+                        && let Some(set) = reverse_index.get_mut(&old_id)
+                    {
+                        set.remove(primary_id);
+                        if set.is_empty() {
+                            reverse_index.remove(&old_id);
+                        }
+                    }
 
                     // Remove old entry
                     let existed = cached_rows.remove(primary_id).is_some();
@@ -1584,9 +1586,10 @@ impl QueryNode {
                     // Try to find the column (might be qualified like "IssueLabels.label")
                     if let Some(actual_col_name) = find_column_name(row, ref_column)
                         && let Some(RowValue::Ref(target_id)) = row.get_by_name(actual_col_name)
-                            && let Some(target_row) = lookup_row_by_id(target_table, target_id) {
-                                resolved_targets.insert(ref_column.as_str(), target_row);
-                            }
+                        && let Some(target_row) = lookup_row_by_id(target_table, target_id)
+                    {
+                        resolved_targets.insert(ref_column.as_str(), target_row);
+                    }
                 }
 
                 // Build the resolved descriptor with Array types for joined columns
@@ -1767,21 +1770,22 @@ impl QueryNode {
                     if let Some(old_id) = old_outer_id {
                         inner_to_outer.remove(inner_id);
                         if let Some(array) = cached_arrays.get(&old_id)
-                            && let Some(base_outer_row) = outer_rows.get(&old_id) {
-                                let output_row = rebuild_output(
-                                    base_outer_row,
-                                    array,
-                                    output_descriptor.clone(),
-                                    inner_descriptor.clone(),
-                                );
-                                outer_rows.insert(old_id, output_row.clone());
+                            && let Some(base_outer_row) = outer_rows.get(&old_id)
+                        {
+                            let output_row = rebuild_output(
+                                base_outer_row,
+                                array,
+                                output_descriptor.clone(),
+                                inner_descriptor.clone(),
+                            );
+                            outer_rows.insert(old_id, output_row.clone());
 
-                                output.push(RowDelta::Updated {
-                                    id: old_id,
-                                    row: output_row,
-                                    prior: prior.clone(),
-                                });
-                            }
+                            output.push(RowDelta::Updated {
+                                id: old_id,
+                                row: output_row,
+                                prior: prior.clone(),
+                            });
+                        }
                     }
 
                     // Add to new
@@ -1840,9 +1844,10 @@ impl QueryNode {
         descriptor: &RowDescriptor,
     ) -> Option<ObjectId> {
         if let Some(idx) = descriptor.column_index(column)
-            && let Some(RowValue::Ref(id)) = row.get(idx) {
-                return Some(id);
-            }
+            && let Some(RowValue::Ref(id)) = row.get(idx)
+        {
+            return Some(id);
+        }
         None
     }
 
@@ -2018,7 +2023,9 @@ impl QueryNode {
                         }
                         RowDelta::Updated { id, row, prior } => {
                             // Update the stored row if it exists
-                            if let std::collections::btree_map::Entry::Occupied(mut e) = all_rows.entry(id) {
+                            if let std::collections::btree_map::Entry::Occupied(mut e) =
+                                all_rows.entry(id)
+                            {
                                 e.insert(row.clone());
                                 // If the row is visible, emit the update
                                 if visible_ids.contains(&id) {

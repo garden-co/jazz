@@ -288,9 +288,10 @@ impl<E: ClientEnv> SyncClient<E> {
                 // If we received object metadata, store it on the object
                 if let Some(meta) = object_meta
                     && let Some(obj) = self.node.get_object(*object_id)
-                        && let Ok(mut obj_write) = obj.write() {
-                            obj_write.set_meta(meta.clone());
-                        }
+                    && let Ok(mut obj_write) = obj.write()
+                {
+                    obj_write.set_meta(meta.clone());
+                }
 
                 // Update server known state
                 self.update_server_known_state(*object_id, frontier.clone());

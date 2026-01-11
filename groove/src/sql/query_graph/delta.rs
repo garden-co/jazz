@@ -416,19 +416,20 @@ impl BufferJoinedRow {
         for (col_idx, col_def) in combined_schema.columns.iter().enumerate() {
             // col_def.name is qualified like "folders.owner_id"
             if let Some((table, col_name)) = col_def.name.split_once('.')
-                && let Some((_, owned_row)) = self.table_rows.get(table) {
-                    // The individual owned_row has unqualified column names, so use col_name
-                    if let Some(rv) = owned_row.get_by_name(col_name) {
-                        // Get the buffer column index for this schema column index
-                        if let Some(buf_col_idx) = descriptor
-                            .columns
-                            .iter()
-                            .position(|c| c.schema_index == col_idx)
-                        {
-                            builder = builder.set_from_row_value(buf_col_idx, rv);
-                        }
+                && let Some((_, owned_row)) = self.table_rows.get(table)
+            {
+                // The individual owned_row has unqualified column names, so use col_name
+                if let Some(rv) = owned_row.get_by_name(col_name) {
+                    // Get the buffer column index for this schema column index
+                    if let Some(buf_col_idx) = descriptor
+                        .columns
+                        .iter()
+                        .position(|c| c.schema_index == col_idx)
+                    {
+                        builder = builder.set_from_row_value(buf_col_idx, rv);
                     }
                 }
+            }
         }
 
         builder.build()

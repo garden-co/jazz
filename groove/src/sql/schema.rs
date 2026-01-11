@@ -159,9 +159,10 @@ impl TableSchema {
 
         // For qualified names, try matching table.column against this schema
         if let Some((table, col)) = name.split_once('.')
-            && table == self.name {
-                return self.columns.iter().position(|c| c.name == col);
-            }
+            && table == self.name
+        {
+            return self.columns.iter().position(|c| c.name == col);
+        }
 
         None
     }

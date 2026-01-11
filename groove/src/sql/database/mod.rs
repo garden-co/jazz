@@ -745,22 +745,12 @@ impl DatabaseState {
                             // Check if selecting whole table via alias
                             if exprs.len() == 1 {
                                 if let SelectExpr::Column(qc) = &exprs[0]
-                                    && qc.table.is_none() {
-                                        let col_name = &qc.column;
-                                        if inner_alias == Some(col_name.as_str())
-                                            || col_name == inner_table
-                                        {
-                                            return (
-                                                name,
-                                                ColumnType::Array(Arc::new(
-                                                    RowDescriptor::from_table_schema(&inner_schema),
-                                                )),
-                                                false,
-                                            );
-                                        }
-                                    }
-                                if let SelectExpr::TableRow(alias) = &exprs[0]
-                                    && (inner_alias == Some(alias.as_str()) || alias == inner_table) {
+                                    && qc.table.is_none()
+                                {
+                                    let col_name = &qc.column;
+                                    if inner_alias == Some(col_name.as_str())
+                                        || col_name == inner_table
+                                    {
                                         return (
                                             name,
                                             ColumnType::Array(Arc::new(
@@ -769,6 +759,18 @@ impl DatabaseState {
                                             false,
                                         );
                                     }
+                                }
+                                if let SelectExpr::TableRow(alias) = &exprs[0]
+                                    && (inner_alias == Some(alias.as_str()) || alias == inner_table)
+                                {
+                                    return (
+                                        name,
+                                        ColumnType::Array(Arc::new(
+                                            RowDescriptor::from_table_schema(&inner_schema),
+                                        )),
+                                        false,
+                                    );
+                                }
                             }
                             // Build descriptor from expressions
                             Arc::new(self.build_projection_descriptor(exprs, &inner_schema))
@@ -860,10 +862,11 @@ impl DatabaseState {
                 if qc.table.is_none() {
                     // Bare identifier - check if it matches outer table alias
                     if let Some(alias) = outer_alias
-                        && qc.column == alias {
-                            // Return the whole row as a single-item array
-                            return builder.set_array(col_idx, std::slice::from_ref(outer_row));
-                        }
+                        && qc.column == alias
+                    {
+                        // Return the whole row as a single-item array
+                        return builder.set_array(col_idx, std::slice::from_ref(outer_row));
+                    }
                     // Also check if it matches the table name
                     if qc.column == outer_table {
                         return builder.set_array(col_idx, std::slice::from_ref(outer_row));
@@ -966,19 +969,21 @@ impl DatabaseState {
                 if exprs.len() == 1 {
                     // Check for SelectExpr::Column variant
                     if let SelectExpr::Column(qc) = &exprs[0]
-                        && qc.table.is_none() {
-                            let name = &qc.column;
-                            if inner_alias == Some(name.as_str()) || name == inner_table {
-                                // Table alias - return whole rows
-                                return filtered.into_iter().map(|(_, row)| row).collect();
-                            }
-                        }
-                    // Check for SelectExpr::TableRow variant
-                    if let SelectExpr::TableRow(alias) = &exprs[0]
-                        && (inner_alias == Some(alias.as_str()) || alias == inner_table) {
+                        && qc.table.is_none()
+                    {
+                        let name = &qc.column;
+                        if inner_alias == Some(name.as_str()) || name == inner_table {
                             // Table alias - return whole rows
                             return filtered.into_iter().map(|(_, row)| row).collect();
                         }
+                    }
+                    // Check for SelectExpr::TableRow variant
+                    if let SelectExpr::TableRow(alias) = &exprs[0]
+                        && (inner_alias == Some(alias.as_str()) || alias == inner_table)
+                    {
+                        // Table alias - return whole rows
+                        return filtered.into_iter().map(|(_, row)| row).collect();
+                    }
                 }
 
                 // Evaluate expressions for each row - write directly to buffer
@@ -1962,9 +1967,7 @@ impl Database {
         // Add policy to table's policy collection
         {
             let mut policies = self.state.policies.write().unwrap();
-            let table_policies = policies
-                .entry(table_name.clone())
-                .or_default();
+            let table_policies = policies.entry(table_name.clone()).or_default();
 
             table_policies.add(policy)?;
         }
@@ -2091,9 +2094,10 @@ impl Database {
             let mut meta = std::collections::BTreeMap::new();
             meta.insert("table".to_string(), table.to_string());
             if let Some(obj) = self.state.node.get_object(row_id)
-                && let Ok(mut obj_write) = obj.write() {
-                    obj_write.set_meta(meta);
-                }
+                && let Ok(mut obj_write) = obj.write()
+            {
+                obj_write.set_meta(meta);
+            }
         }
 
         // Inject the id into the row buffer at column 0
@@ -2126,14 +2130,15 @@ impl Database {
         // Update indexes for Ref columns
         for col in schema.columns.iter() {
             if matches!(col.ty, ColumnType::Ref(_))
-                && let Some(RowValue::Ref(target_id)) = row_with_id.get_by_name(&col.name) {
-                    let key = IndexKey::new(table, &col.name);
-                    if self.state.index_objects.read().unwrap().contains_key(&key) {
-                        let mut index = self.read_index(&key)?;
-                        index.add(target_id, row_id);
-                        self.write_index(&key, &index)?;
-                    }
+                && let Some(RowValue::Ref(target_id)) = row_with_id.get_by_name(&col.name)
+            {
+                let key = IndexKey::new(table, &col.name);
+                if self.state.index_objects.read().unwrap().contains_key(&key) {
+                    let mut index = self.read_index(&key)?;
+                    index.add(target_id, row_id);
+                    self.write_index(&key, &index)?;
                 }
+            }
         }
 
         // Notify query graphs of the change
@@ -2438,22 +2443,23 @@ impl Database {
             let row_table = self.state.row_table.read().unwrap();
             for col in schema.columns.iter() {
                 if let ColumnType::Ref(target_table) = &col.ty
-                    && let Some(RowValue::Ref(target_id)) = new_row.get_by_name(&col.name) {
-                        if !row_table.contains_key(&target_id) {
-                            return Err(DatabaseError::InvalidReference {
-                                column: col.name.clone(),
-                                target_table: target_table.clone(),
-                                target_id,
-                            });
-                        }
-                        if row_table.get(&target_id) != Some(target_table) {
-                            return Err(DatabaseError::InvalidReference {
-                                column: col.name.clone(),
-                                target_table: target_table.clone(),
-                                target_id,
-                            });
-                        }
+                    && let Some(RowValue::Ref(target_id)) = new_row.get_by_name(&col.name)
+                {
+                    if !row_table.contains_key(&target_id) {
+                        return Err(DatabaseError::InvalidReference {
+                            column: col.name.clone(),
+                            target_table: target_table.clone(),
+                            target_id,
+                        });
                     }
+                    if row_table.get(&target_id) != Some(target_table) {
+                        return Err(DatabaseError::InvalidReference {
+                            column: col.name.clone(),
+                            target_table: target_table.clone(),
+                            target_id,
+                        });
+                    }
+                }
             }
         }
 
@@ -2558,14 +2564,15 @@ impl Database {
             let row = OwnedRow::new(descriptor, data);
             for col in schema.columns.iter() {
                 if matches!(col.ty, ColumnType::Ref(_))
-                    && let Some(RowValue::Ref(target_id)) = row.get_by_name(&col.name) {
-                        let key = IndexKey::new(table, &col.name);
-                        if self.state.index_objects.read().unwrap().contains_key(&key) {
-                            let mut index = self.read_index(&key)?;
-                            index.remove(target_id, id);
-                            self.write_index(&key, &index)?;
-                        }
+                    && let Some(RowValue::Ref(target_id)) = row.get_by_name(&col.name)
+                {
+                    let key = IndexKey::new(table, &col.name);
+                    if self.state.index_objects.read().unwrap().contains_key(&key) {
+                        let mut index = self.read_index(&key)?;
+                        index.remove(target_id, id);
+                        self.write_index(&key, &index)?;
                     }
+                }
             }
         }
 
@@ -2691,9 +2698,10 @@ impl Database {
             let owned = OwnedRow::new(descriptor.clone(), data);
             // Check if the column value matches using PredicateValue::matches
             if let Some(row_value) = owned.get_by_name(column)
-                && coerced.matches(&row_value) {
-                    rows.push((row_id, owned));
-                }
+                && coerced.matches(&row_value)
+            {
+                rows.push((row_id, owned));
+            }
         }
 
         Ok(rows)
@@ -3236,34 +3244,26 @@ impl Database {
         // Check if policy contains INHERITS
         if let Some(policy) = select_policy
             && let Some(ref where_expr) = policy.where_clause
-                && let Some(inherits_info) = self.extract_inherits(where_expr, table, &schema)? {
-                    if inherits_info.is_self_referential {
-                        // Self-referential INHERITS: use RecursiveFilter
-                        return self.build_recursive_filter_graph(
-                            select,
-                            viewer,
-                            &inherits_info,
-                            &schema,
-                        );
-                    } else {
-                        // Non-self-referential INHERITS: resolve the full chain
-                        let mut visited = vec![table.to_string()];
-                        let chain = self.resolve_inherits_chain(
-                            &inherits_info,
-                            table,
-                            viewer,
-                            &mut visited,
-                        )?;
+            && let Some(inherits_info) = self.extract_inherits(where_expr, table, &schema)?
+        {
+            if inherits_info.is_self_referential {
+                // Self-referential INHERITS: use RecursiveFilter
+                return self.build_recursive_filter_graph(select, viewer, &inherits_info, &schema);
+            } else {
+                // Non-self-referential INHERITS: resolve the full chain
+                let mut visited = vec![table.to_string()];
+                let chain =
+                    self.resolve_inherits_chain(&inherits_info, table, viewer, &mut visited)?;
 
-                        if chain.hops.len() == 1 {
-                            // Single hop: use existing simple JOIN graph
-                            return self.build_inherits_join_graph(select, viewer, &inherits_info);
-                        } else {
-                            // Multi-hop chain: use chain JOIN graph
-                            return self.build_chain_join_graph(select, viewer, &chain, &schema);
-                        }
-                    }
+                if chain.hops.len() == 1 {
+                    // Single hop: use existing simple JOIN graph
+                    return self.build_inherits_join_graph(select, viewer, &inherits_info);
+                } else {
+                    // Multi-hop chain: use chain JOIN graph
+                    return self.build_chain_join_graph(select, viewer, &chain, &schema);
                 }
+            }
+        }
 
         // No INHERITS - build a simple single-table graph
         let mut builder = QueryGraphBuilder::new(table, schema.clone());
@@ -3465,67 +3465,65 @@ impl Database {
             .and_then(|p| p.get(PolicyAction::Select));
 
         if let Some(policy) = target_select
-            && let Some(ref where_expr) = policy.where_clause {
-                // Check if target policy also has INHERITS
-                if let Some(nested_inherits) = self.extract_inherits(
-                    where_expr,
-                    &initial_inherits.target_table,
-                    &target_schema,
-                )? {
-                    if nested_inherits.is_self_referential {
-                        // Self-referential in the chain - not supported yet
-                        return Err(DatabaseError::Parse(parser::ParseError {
-                            message: "Self-referential INHERITS in chain not yet supported"
-                                .to_string(),
-                            position: 0,
-                        }));
-                    }
-
-                    // Convert the target table's base_predicate (the OR sibling at this level)
-                    let target_base = if let Some(ref base_expr) = nested_inherits.base_predicate {
-                        Some(self.policy_expr_to_predicate(base_expr, viewer)?)
-                    } else {
-                        None
-                    };
-
-                    // Create the first hop with its base predicate
-                    let first_hop = ChainHop {
-                        ref_column: initial_inherits.ref_column.clone(),
-                        target_table: initial_inherits.target_table.clone(),
-                        // The base_predicate on this hop is the target table's base predicate
-                        // (the OR sibling that allows short-circuiting at this level)
-                        base_predicate: target_base,
-                    };
-
-                    // Recursively resolve the rest of the chain
-                    let mut rest_of_chain = self.resolve_inherits_chain(
-                        &nested_inherits,
-                        &initial_inherits.target_table,
-                        viewer,
-                        visited,
-                    )?;
-
-                    // Prepend our hop
-                    let mut hops = vec![first_hop];
-                    hops.extend(rest_of_chain.hops);
-                    rest_of_chain.hops = hops;
-
-                    return Ok(rest_of_chain);
+            && let Some(ref where_expr) = policy.where_clause
+        {
+            // Check if target policy also has INHERITS
+            if let Some(nested_inherits) =
+                self.extract_inherits(where_expr, &initial_inherits.target_table, &target_schema)?
+            {
+                if nested_inherits.is_self_referential {
+                    // Self-referential in the chain - not supported yet
+                    return Err(DatabaseError::Parse(parser::ParseError {
+                        message: "Self-referential INHERITS in chain not yet supported".to_string(),
+                        position: 0,
+                    }));
                 }
 
-                // No INHERITS - this is the terminal table
-                let terminal_predicate = self.policy_expr_to_predicate(where_expr, viewer)?;
+                // Convert the target table's base_predicate (the OR sibling at this level)
+                let target_base = if let Some(ref base_expr) = nested_inherits.base_predicate {
+                    Some(self.policy_expr_to_predicate(base_expr, viewer)?)
+                } else {
+                    None
+                };
+
+                // Create the first hop with its base predicate
                 let first_hop = ChainHop {
                     ref_column: initial_inherits.ref_column.clone(),
                     target_table: initial_inherits.target_table.clone(),
-                    base_predicate: None, // Terminal table - no base predicate needed
+                    // The base_predicate on this hop is the target table's base predicate
+                    // (the OR sibling that allows short-circuiting at this level)
+                    base_predicate: target_base,
                 };
-                return Ok(InheritsChain {
-                    hops: vec![first_hop],
-                    terminal_predicate: Some(terminal_predicate),
-                    terminal_table: initial_inherits.target_table.clone(),
-                });
+
+                // Recursively resolve the rest of the chain
+                let mut rest_of_chain = self.resolve_inherits_chain(
+                    &nested_inherits,
+                    &initial_inherits.target_table,
+                    viewer,
+                    visited,
+                )?;
+
+                // Prepend our hop
+                let mut hops = vec![first_hop];
+                hops.extend(rest_of_chain.hops);
+                rest_of_chain.hops = hops;
+
+                return Ok(rest_of_chain);
             }
+
+            // No INHERITS - this is the terminal table
+            let terminal_predicate = self.policy_expr_to_predicate(where_expr, viewer)?;
+            let first_hop = ChainHop {
+                ref_column: initial_inherits.ref_column.clone(),
+                target_table: initial_inherits.target_table.clone(),
+                base_predicate: None, // Terminal table - no base predicate needed
+            };
+            return Ok(InheritsChain {
+                hops: vec![first_hop],
+                terminal_predicate: Some(terminal_predicate),
+                terminal_table: initial_inherits.target_table.clone(),
+            });
+        }
 
         // No policy on target table = allow all (terminal with no predicate)
         let first_hop = ChainHop {
@@ -4269,9 +4267,10 @@ impl Database {
             // Verify it's actually a Ref column to the target
             let col_name = &on.left.column;
             if let Some(col) = inner_schema.column(col_name)
-                && matches!(&col.ty, ColumnType::Ref(t) if t == target_table) {
-                    return Ok(col_name.clone());
-                }
+                && matches!(&col.ty, ColumnType::Ref(t) if t == target_table)
+            {
+                return Ok(col_name.clone());
+            }
         }
 
         // Check reverse: target.id = inner.col
@@ -4291,9 +4290,10 @@ impl Database {
         if left_is_target && right_is_inner && on.left.column == "id" {
             let col_name = &on.right.column;
             if let Some(col) = inner_schema.column(col_name)
-                && matches!(&col.ty, ColumnType::Ref(t) if t == target_table) {
-                    return Ok(col_name.clone());
-                }
+                && matches!(&col.ty, ColumnType::Ref(t) if t == target_table)
+            {
+                return Ok(col_name.clone());
+            }
         }
 
         Err(DatabaseError::Parse(parser::ParseError {
@@ -4509,12 +4509,13 @@ impl Database {
             if left_is_existing && right_is_target && on.right.column == "id" {
                 let col_name = &on.left.column;
                 if let Some(col) = schema.column(col_name)
-                    && matches!(&col.ty, ColumnType::Ref(t) if t == target_table) {
-                        return Ok(ChainJoinInfo::Forward {
-                            source_table: table_name.to_string(),
-                            ref_column: col_name.clone(),
-                        });
-                    }
+                    && matches!(&col.ty, ColumnType::Ref(t) if t == target_table)
+                {
+                    return Ok(ChainJoinInfo::Forward {
+                        source_table: table_name.to_string(),
+                        ref_column: col_name.clone(),
+                    });
+                }
             }
 
             // Check reverse: target.id = existing.col (forward ref, swapped)
@@ -4524,12 +4525,13 @@ impl Database {
             if left_is_target && right_is_existing && on.left.column == "id" {
                 let col_name = &on.right.column;
                 if let Some(col) = schema.column(col_name)
-                    && matches!(&col.ty, ColumnType::Ref(t) if t == target_table) {
-                        return Ok(ChainJoinInfo::Forward {
-                            source_table: table_name.to_string(),
-                            ref_column: col_name.clone(),
-                        });
-                    }
+                    && matches!(&col.ty, ColumnType::Ref(t) if t == target_table)
+                {
+                    return Ok(ChainJoinInfo::Forward {
+                        source_table: table_name.to_string(),
+                        ref_column: col_name.clone(),
+                    });
+                }
             }
         }
 
@@ -4541,13 +4543,14 @@ impl Database {
             if left_is_target && right_is_existing && on.right.column == "id" {
                 let col_name = &on.left.column;
                 if let Some(col) = target_schema.column(col_name)
-                    && matches!(&col.ty, ColumnType::Ref(t) if t == *table_name) {
-                        // This is a reverse join - the target table has the ref
-                        return Ok(ChainJoinInfo::Reverse {
-                            existing_table: table_name.to_string(),
-                            ref_column: col_name.clone(),
-                        });
-                    }
+                    && matches!(&col.ty, ColumnType::Ref(t) if t == *table_name)
+                {
+                    // This is a reverse join - the target table has the ref
+                    return Ok(ChainJoinInfo::Reverse {
+                        existing_table: table_name.to_string(),
+                        ref_column: col_name.clone(),
+                    });
+                }
             }
 
             // Also check: existing.id = target.col (swapped)
@@ -4557,13 +4560,14 @@ impl Database {
             if left_is_existing && right_is_target && on.left.column == "id" {
                 let col_name = &on.right.column;
                 if let Some(col) = target_schema.column(col_name)
-                    && matches!(&col.ty, ColumnType::Ref(t) if t == *table_name) {
-                        // This is a reverse join - the target table has the ref
-                        return Ok(ChainJoinInfo::Reverse {
-                            existing_table: table_name.to_string(),
-                            ref_column: col_name.clone(),
-                        });
-                    }
+                    && matches!(&col.ty, ColumnType::Ref(t) if t == *table_name)
+                {
+                    // This is a reverse join - the target table has the ref
+                    return Ok(ChainJoinInfo::Reverse {
+                        existing_table: table_name.to_string(),
+                        ref_column: col_name.clone(),
+                    });
+                }
             }
         }
 
@@ -4866,9 +4870,10 @@ impl Database {
             // Check if left column is a Ref to right table
             let col_name = &on.left.column;
             if let Some(col) = left_schema.column(col_name)
-                && matches!(&col.ty, ColumnType::Ref(target) if target == right_table) {
-                    return Ok(JoinDirection::LeftToRight(col_name.clone()));
-                }
+                && matches!(&col.ty, ColumnType::Ref(target) if target == right_table)
+            {
+                return Ok(JoinDirection::LeftToRight(col_name.clone()));
+            }
         }
 
         let right_is_from_left = on
@@ -4888,9 +4893,10 @@ impl Database {
             // ON right_table.id = left_table.col pattern
             let col_name = &on.right.column;
             if let Some(col) = left_schema.column(col_name)
-                && matches!(&col.ty, ColumnType::Ref(target) if target == right_table) {
-                    return Ok(JoinDirection::LeftToRight(col_name.clone()));
-                }
+                && matches!(&col.ty, ColumnType::Ref(target) if target == right_table)
+            {
+                return Ok(JoinDirection::LeftToRight(col_name.clone()));
+            }
         }
 
         // Try to find any Ref column in left_schema that points to right_table
@@ -4918,18 +4924,20 @@ impl Database {
         if left_is_from_right_2 && right_is_from_left_2 {
             let col_name = &on.left.column;
             if let Some(col) = right_schema.column(col_name)
-                && matches!(&col.ty, ColumnType::Ref(target) if target == left_table) {
-                    return Ok(JoinDirection::RightToLeft(col_name.clone()));
-                }
+                && matches!(&col.ty, ColumnType::Ref(target) if target == left_table)
+            {
+                return Ok(JoinDirection::RightToLeft(col_name.clone()));
+            }
         }
 
         // Also check: ON left_table.id = right_table.col
         if left_is_from_left && right_is_from_right {
             let col_name = &on.right.column;
             if let Some(col) = right_schema.column(col_name)
-                && matches!(&col.ty, ColumnType::Ref(target) if target == left_table) {
-                    return Ok(JoinDirection::RightToLeft(col_name.clone()));
-                }
+                && matches!(&col.ty, ColumnType::Ref(target) if target == left_table)
+            {
+                return Ok(JoinDirection::RightToLeft(col_name.clone()));
+            }
         }
 
         // Try to find any Ref column in right_schema that points to left_table

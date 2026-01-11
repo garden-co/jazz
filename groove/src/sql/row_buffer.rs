@@ -943,143 +943,156 @@ impl RowBuilder {
     /// Set a boolean column value.
     pub fn set_bool(mut self, col_idx: usize, value: bool) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx)
-            && col.is_fixed_size() && matches!(&col.ty, ColumnType::Bool) {
-                let offset = col.offset;
-                if col.nullable {
-                    self.fixed_section[offset] = 1; // present
-                    self.fixed_section[offset + 1] = if value { 1 } else { 0 };
-                } else {
-                    self.fixed_section[offset] = if value { 1 } else { 0 };
-                }
+            && col.is_fixed_size()
+            && matches!(&col.ty, ColumnType::Bool)
+        {
+            let offset = col.offset;
+            if col.nullable {
+                self.fixed_section[offset] = 1; // present
+                self.fixed_section[offset + 1] = if value { 1 } else { 0 };
+            } else {
+                self.fixed_section[offset] = if value { 1 } else { 0 };
             }
+        }
         self
     }
 
     /// Set an i32 column value.
     pub fn set_i32(mut self, col_idx: usize, value: i32) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx)
-            && col.is_fixed_size() && matches!(&col.ty, ColumnType::I32) {
-                let offset = col.offset;
-                if col.nullable {
-                    self.fixed_section[offset] = 1; // present
-                    self.fixed_section[offset + 1..offset + 5]
-                        .copy_from_slice(&value.to_le_bytes());
-                } else {
-                    self.fixed_section[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-                }
+            && col.is_fixed_size()
+            && matches!(&col.ty, ColumnType::I32)
+        {
+            let offset = col.offset;
+            if col.nullable {
+                self.fixed_section[offset] = 1; // present
+                self.fixed_section[offset + 1..offset + 5].copy_from_slice(&value.to_le_bytes());
+            } else {
+                self.fixed_section[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
             }
+        }
         self
     }
 
     /// Set a u32 column value.
     pub fn set_u32(mut self, col_idx: usize, value: u32) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx)
-            && col.is_fixed_size() && matches!(&col.ty, ColumnType::U32) {
-                let offset = col.offset;
-                if col.nullable {
-                    self.fixed_section[offset] = 1; // present
-                    self.fixed_section[offset + 1..offset + 5]
-                        .copy_from_slice(&value.to_le_bytes());
-                } else {
-                    self.fixed_section[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-                }
+            && col.is_fixed_size()
+            && matches!(&col.ty, ColumnType::U32)
+        {
+            let offset = col.offset;
+            if col.nullable {
+                self.fixed_section[offset] = 1; // present
+                self.fixed_section[offset + 1..offset + 5].copy_from_slice(&value.to_le_bytes());
+            } else {
+                self.fixed_section[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
             }
+        }
         self
     }
 
     /// Set an i64 column value.
     pub fn set_i64(mut self, col_idx: usize, value: i64) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx)
-            && col.is_fixed_size() && matches!(&col.ty, ColumnType::I64) {
-                let offset = col.offset;
-                if col.nullable {
-                    self.fixed_section[offset] = 1; // present
-                    self.fixed_section[offset + 1..offset + 9]
-                        .copy_from_slice(&value.to_le_bytes());
-                } else {
-                    self.fixed_section[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-                }
+            && col.is_fixed_size()
+            && matches!(&col.ty, ColumnType::I64)
+        {
+            let offset = col.offset;
+            if col.nullable {
+                self.fixed_section[offset] = 1; // present
+                self.fixed_section[offset + 1..offset + 9].copy_from_slice(&value.to_le_bytes());
+            } else {
+                self.fixed_section[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
             }
+        }
         self
     }
 
     /// Set an f64 column value.
     pub fn set_f64(mut self, col_idx: usize, value: f64) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx)
-            && col.is_fixed_size() && matches!(&col.ty, ColumnType::F64) {
-                let offset = col.offset;
-                if col.nullable {
-                    self.fixed_section[offset] = 1; // present
-                    self.fixed_section[offset + 1..offset + 9]
-                        .copy_from_slice(&value.to_le_bytes());
-                } else {
-                    self.fixed_section[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-                }
+            && col.is_fixed_size()
+            && matches!(&col.ty, ColumnType::F64)
+        {
+            let offset = col.offset;
+            if col.nullable {
+                self.fixed_section[offset] = 1; // present
+                self.fixed_section[offset + 1..offset + 9].copy_from_slice(&value.to_le_bytes());
+            } else {
+                self.fixed_section[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
             }
+        }
         self
     }
 
     /// Set a Ref (ObjectId) or ObjectId column value.
     pub fn set_ref(mut self, col_idx: usize, value: ObjectId) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx)
-            && col.is_fixed_size() && matches!(&col.ty, ColumnType::Ref(_) | ColumnType::ObjectId) {
-                let offset = col.offset;
-                if col.nullable {
-                    self.fixed_section[offset] = 1; // present
-                    self.fixed_section[offset + 1..offset + 17]
-                        .copy_from_slice(&value.0.to_le_bytes());
-                } else {
-                    self.fixed_section[offset..offset + 16].copy_from_slice(&value.0.to_le_bytes());
-                }
+            && col.is_fixed_size()
+            && matches!(&col.ty, ColumnType::Ref(_) | ColumnType::ObjectId)
+        {
+            let offset = col.offset;
+            if col.nullable {
+                self.fixed_section[offset] = 1; // present
+                self.fixed_section[offset + 1..offset + 17].copy_from_slice(&value.0.to_le_bytes());
+            } else {
+                self.fixed_section[offset..offset + 16].copy_from_slice(&value.0.to_le_bytes());
             }
+        }
         self
     }
 
     /// Set a string column value.
     pub fn set_string(mut self, col_idx: usize, value: &str) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx)
-            && !col.is_fixed_size() && matches!(&col.ty, ColumnType::String) {
-                let var_idx = col.offset;
-                if col.nullable {
-                    let mut data = vec![1u8]; // present
-                    data.extend_from_slice(value.as_bytes());
-                    self.variable_sections[var_idx] = data;
-                } else {
-                    self.variable_sections[var_idx] = value.as_bytes().to_vec();
-                }
+            && !col.is_fixed_size()
+            && matches!(&col.ty, ColumnType::String)
+        {
+            let var_idx = col.offset;
+            if col.nullable {
+                let mut data = vec![1u8]; // present
+                data.extend_from_slice(value.as_bytes());
+                self.variable_sections[var_idx] = data;
+            } else {
+                self.variable_sections[var_idx] = value.as_bytes().to_vec();
             }
+        }
         self
     }
 
     /// Set a bytes column value.
     pub fn set_bytes(mut self, col_idx: usize, value: &[u8]) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx)
-            && !col.is_fixed_size() && matches!(&col.ty, ColumnType::Bytes) {
-                let var_idx = col.offset;
-                if col.nullable {
-                    let mut data = vec![1u8]; // present
-                    data.extend_from_slice(value);
-                    self.variable_sections[var_idx] = data;
-                } else {
-                    self.variable_sections[var_idx] = value.to_vec();
-                }
+            && !col.is_fixed_size()
+            && matches!(&col.ty, ColumnType::Bytes)
+        {
+            let var_idx = col.offset;
+            if col.nullable {
+                let mut data = vec![1u8]; // present
+                data.extend_from_slice(value);
+                self.variable_sections[var_idx] = data;
+            } else {
+                self.variable_sections[var_idx] = value.to_vec();
             }
+        }
         self
     }
 
     /// Set a blob column value.
     pub fn set_blob(mut self, col_idx: usize, value: ContentRef) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx)
-            && !col.is_fixed_size() && matches!(&col.ty, ColumnType::Blob) {
-                let var_idx = col.offset;
-                if col.nullable {
-                    let mut data = vec![1u8]; // present
-                    data.extend_from_slice(&value.to_row_bytes());
-                    self.variable_sections[var_idx] = data;
-                } else {
-                    self.variable_sections[var_idx] = value.to_row_bytes();
-                }
+            && !col.is_fixed_size()
+            && matches!(&col.ty, ColumnType::Blob)
+        {
+            let var_idx = col.offset;
+            if col.nullable {
+                let mut data = vec![1u8]; // present
+                data.extend_from_slice(&value.to_row_bytes());
+                self.variable_sections[var_idx] = data;
+            } else {
+                self.variable_sections[var_idx] = value.to_row_bytes();
             }
+        }
         self
     }
 
@@ -1088,30 +1101,33 @@ impl RowBuilder {
     /// Format: `[u32 count][content_ref₁][content_ref₂]...`
     pub fn set_blob_array(mut self, col_idx: usize, values: &[ContentRef]) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx)
-            && !col.is_fixed_size() && matches!(&col.ty, ColumnType::BlobArray) {
-                let var_idx = col.offset;
-                let mut data = if col.nullable { vec![1u8] } else { Vec::new() };
-                data.extend_from_slice(&(values.len() as u32).to_le_bytes());
-                for v in values {
-                    data.extend_from_slice(&v.to_row_bytes());
-                }
-                self.variable_sections[var_idx] = data;
+            && !col.is_fixed_size()
+            && matches!(&col.ty, ColumnType::BlobArray)
+        {
+            let var_idx = col.offset;
+            let mut data = if col.nullable { vec![1u8] } else { Vec::new() };
+            data.extend_from_slice(&(values.len() as u32).to_le_bytes());
+            for v in values {
+                data.extend_from_slice(&v.to_row_bytes());
             }
+            self.variable_sections[var_idx] = data;
+        }
         self
     }
 
     /// Set a nullable column to null.
     pub fn set_null(mut self, col_idx: usize) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx)
-            && col.nullable {
-                if col.is_fixed_size() {
-                    let offset = col.offset;
-                    self.fixed_section[offset] = 0; // null flag
-                } else {
-                    let var_idx = col.offset;
-                    self.variable_sections[var_idx] = vec![0u8]; // null flag
-                }
+            && col.nullable
+        {
+            if col.is_fixed_size() {
+                let offset = col.offset;
+                self.fixed_section[offset] = 0; // null flag
+            } else {
+                let var_idx = col.offset;
+                self.variable_sections[var_idx] = vec![0u8]; // null flag
             }
+        }
         self
     }
 
@@ -1204,42 +1220,44 @@ impl RowBuilder {
     /// For N items, N-1 offsets are stored. Item 0 starts after the offset table.
     pub fn set_array(mut self, col_idx: usize, items: &[OwnedRow]) -> Self {
         if let Some(col) = self.descriptor.columns.get(col_idx)
-            && !col.is_fixed_size() && matches!(&col.ty, ColumnType::Array(_)) {
-                let var_idx = col.offset;
-                let mut data = if col.nullable { vec![1u8] } else { Vec::new() };
-                let count = items.len();
+            && !col.is_fixed_size()
+            && matches!(&col.ty, ColumnType::Array(_))
+        {
+            let var_idx = col.offset;
+            let mut data = if col.nullable { vec![1u8] } else { Vec::new() };
+            let count = items.len();
 
-                // Write item count as u32
-                data.extend_from_slice(&(count as u32).to_le_bytes());
+            // Write item count as u32
+            data.extend_from_slice(&(count as u32).to_le_bytes());
 
-                if count == 0 {
-                    // Empty array: just the count
-                    self.variable_sections[var_idx] = data;
-                    return self;
-                }
-
-                // Calculate header size: count (4) + (N-1) offsets * 4
-                let array_header_start = data.len(); // Account for nullable byte if present
-                let offset_table_size = if count > 1 { (count - 1) * 4 } else { 0 };
-                let items_start = array_header_start - 4 + 4 + offset_table_size; // relative to array data start
-
-                // Calculate absolute offsets for items 1 through N-1
-                let mut current_offset = items_start;
-                for (i, item) in items.iter().enumerate() {
-                    if i > 0 {
-                        // Write offset for item i
-                        data.extend_from_slice(&(current_offset as u32).to_le_bytes());
-                    }
-                    current_offset += item.buffer.len();
-                }
-
-                // Write item data
-                for item in items {
-                    data.extend_from_slice(&item.buffer);
-                }
-
+            if count == 0 {
+                // Empty array: just the count
                 self.variable_sections[var_idx] = data;
+                return self;
             }
+
+            // Calculate header size: count (4) + (N-1) offsets * 4
+            let array_header_start = data.len(); // Account for nullable byte if present
+            let offset_table_size = if count > 1 { (count - 1) * 4 } else { 0 };
+            let items_start = array_header_start - 4 + 4 + offset_table_size; // relative to array data start
+
+            // Calculate absolute offsets for items 1 through N-1
+            let mut current_offset = items_start;
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    // Write offset for item i
+                    data.extend_from_slice(&(current_offset as u32).to_le_bytes());
+                }
+                current_offset += item.buffer.len();
+            }
+
+            // Write item data
+            for item in items {
+                data.extend_from_slice(&item.buffer);
+            }
+
+            self.variable_sections[var_idx] = data;
+        }
         self
     }
 

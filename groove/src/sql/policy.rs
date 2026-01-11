@@ -1348,8 +1348,6 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
         let policies = self.policy_lookup.get_policies(&target_table);
         let policy = policies.as_ref().and_then(|p| p.get(action));
 
-        
-
         match policy {
             Some(p) => {
                 // Mark as visited and increment depth
@@ -1573,11 +1571,7 @@ mod tests {
 
         fn add_policy(&mut self, policy: Policy) {
             let table = policy.table.clone();
-            self.policies
-                .entry(table)
-                .or_default()
-                .add(policy)
-                .unwrap();
+            self.policies.entry(table).or_default().add(policy).unwrap();
         }
     }
 

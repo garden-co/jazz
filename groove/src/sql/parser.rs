@@ -614,23 +614,24 @@ impl<'a> Parser<'a> {
             // Check if this is a simple table.* projection
             if exprs.len() == 1
                 && let SelectExpr::Column(qc) = &exprs[0]
-                    && qc.column == "*"
-                        && let Some(table) = &qc.table {
-                            let from = self.parse_from_clause()?;
-                            let where_clause = self.parse_where_clause()?;
-                            let (limit, offset) = self.parse_limit_offset()?;
-                            self.skip_whitespace();
-                            if self.peek_char() == Some(';') {
-                                self.consume_char();
-                            }
-                            return Ok(Select {
-                                projection: Projection::TableAll(table.clone()),
-                                from,
-                                where_clause,
-                                limit,
-                                offset,
-                            });
-                        }
+                && qc.column == "*"
+                && let Some(table) = &qc.table
+            {
+                let from = self.parse_from_clause()?;
+                let where_clause = self.parse_where_clause()?;
+                let (limit, offset) = self.parse_limit_offset()?;
+                self.skip_whitespace();
+                if self.peek_char() == Some(';') {
+                    self.consume_char();
+                }
+                return Ok(Select {
+                    projection: Projection::TableAll(table.clone()),
+                    from,
+                    where_clause,
+                    limit,
+                    offset,
+                });
+            }
 
             Projection::Expressions(exprs)
         };

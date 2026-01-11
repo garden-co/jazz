@@ -112,10 +112,11 @@ impl QueryGraph {
                 inner_schema,
                 ..
             } = node
-                && !all_tables.contains(inner_table) {
-                    all_tables.push(inner_table.clone());
-                    all_schemas.insert(inner_table.clone(), inner_schema.clone());
-                }
+                && !all_tables.contains(inner_table)
+            {
+                all_tables.push(inner_table.clone());
+                all_schemas.insert(inner_table.clone(), inner_schema.clone());
+            }
         }
 
         Self {
@@ -295,10 +296,11 @@ impl QueryGraph {
     pub fn output_schema(&self) -> Option<TableSchema> {
         // If there's a projection, return that table's schema with qualified column names
         if let Some(proj_table) = &self.projection_table
-            && let Some(proj_schema) = self.all_schemas.get(proj_table) {
-                // Create a schema with qualified column names to match the OwnedRow
-                return Some(proj_schema.qualify(proj_table));
-            }
+            && let Some(proj_schema) = self.all_schemas.get(proj_table)
+        {
+            // Create a schema with qualified column names to match the OwnedRow
+            return Some(proj_schema.qualify(proj_table));
+        }
         Some(self.schema.clone())
     }
 
@@ -748,42 +750,45 @@ impl QueryGraph {
                 let join_node = self.nodes.iter().find(|n| n.cached_joined().is_some());
 
                 if let Some(join_node) = join_node
-                    && let Some(joined_rows) = join_node.cached_joined() {
-                        // Get IDs to filter by from downstream Filter node (if any)
-                        let filter_ids = self.nodes[input_idx].cached_ids();
+                    && let Some(joined_rows) = join_node.cached_joined()
+                {
+                    // Get IDs to filter by from downstream Filter node (if any)
+                    let filter_ids = self.nodes[input_idx].cached_ids();
 
-                        // Apply the filter and projection - now returns OwnedRow directly
-                        let rows: Vec<(ObjectId, OwnedRow)> = joined_rows
-                            .iter()
-                            .filter(|(id, _)| {
-                                // If there's a filter, only include matching IDs
-                                filter_ids.is_none_or(|ids| ids.contains(id))
-                            })
-                            .map(|(primary_id, jr)| {
-                                // Apply projection if set
-                                if let Some(proj_table) = &self.projection_table
-                                    && self.all_schemas.contains_key(proj_table)
-                                        && let Some((_, row)) = jr.table_rows.get(proj_table) {
-                                            return (*primary_id, row.clone());
-                                        }
-                                // Default: return all joined columns as OwnedRow
-                                (*primary_id, jr.to_output_row())
-                            })
-                            .collect();
+                    // Apply the filter and projection - now returns OwnedRow directly
+                    let rows: Vec<(ObjectId, OwnedRow)> = joined_rows
+                        .iter()
+                        .filter(|(id, _)| {
+                            // If there's a filter, only include matching IDs
+                            filter_ids.is_none_or(|ids| ids.contains(id))
+                        })
+                        .map(|(primary_id, jr)| {
+                            // Apply projection if set
+                            if let Some(proj_table) = &self.projection_table
+                                && self.all_schemas.contains_key(proj_table)
+                                && let Some((_, row)) = jr.table_rows.get(proj_table)
+                            {
+                                return (*primary_id, row.clone());
+                            }
+                            // Default: return all joined columns as OwnedRow
+                            (*primary_id, jr.to_output_row())
+                        })
+                        .collect();
 
-                        return rows;
-                    }
+                    return rows;
+                }
             }
 
             // For RecursiveFilter queries, get rows from accessible set
             // OwnedRow is already in buffer format
             if let Some(accessible) = self.nodes[input_idx].accessible()
-                && let Some(all_rows) = self.nodes[input_idx].all_rows() {
-                    return accessible
-                        .keys()
-                        .filter_map(|id| all_rows.get(id).map(|owned_row| (*id, owned_row.clone())))
-                        .collect();
-                }
+                && let Some(all_rows) = self.nodes[input_idx].all_rows()
+            {
+                return accessible
+                    .keys()
+                    .filter_map(|id| all_rows.get(id).map(|owned_row| (*id, owned_row.clone())))
+                    .collect();
+            }
 
             // For ArrayAggregate queries, get rows from outer_rows
             if let Some(outer_rows) = self.nodes[input_idx].outer_rows() {
