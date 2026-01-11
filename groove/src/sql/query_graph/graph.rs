@@ -347,6 +347,7 @@ impl QueryGraph {
             } else {
                 // Single-table query: load all rows from the primary table
                 let rows = db.read_all_rows(&self.table);
+                let schema = self.schema.clone();
 
                 for (id, owned) in rows {
                     // Skip the triggering row - it will be processed as a delta
@@ -362,7 +363,13 @@ impl QueryGraph {
                         if delta.is_empty() {
                             break;
                         }
-                        delta = node.evaluate(delta, cache);
+                        // LimitOffset nodes need special handling
+                        delta = match node {
+                            QueryNode::LimitOffset { .. } => {
+                                node.evaluate_limit_offset(delta, &schema, cache)
+                            }
+                            _ => node.evaluate(delta, cache),
+                        };
                     }
                 }
             }

@@ -644,7 +644,7 @@ fn select_all_as_filters_by_policy() {
     .unwrap();
 
     // Without policy: both users see all documents
-    let all_docs = db.select_all("documents").unwrap();
+    let all_docs = db.query("SELECT * FROM documents").unwrap();
     assert_eq!(all_docs.len(), 2);
     let all_titles: Vec<_> = all_docs
         .iter()
@@ -664,7 +664,7 @@ fn select_all_as_filters_by_policy() {
         .unwrap();
 
     // Alice can only see her document
-    let alice_docs = db.select_all_as("documents", alice_id).unwrap();
+    let alice_docs = db.query_as("SELECT * FROM documents", alice_id).unwrap();
     assert_eq!(alice_docs.len(), 1);
     assert_eq!(
         alice_docs[0].1.get_by_name("title"),
@@ -672,7 +672,7 @@ fn select_all_as_filters_by_policy() {
     );
 
     // Bob can only see his document
-    let bob_docs = db.select_all_as("documents", bob_id).unwrap();
+    let bob_docs = db.query_as("SELECT * FROM documents", bob_id).unwrap();
     assert_eq!(bob_docs.len(), 1);
     assert_eq!(
         bob_docs[0].1.get_by_name("title"),
@@ -736,15 +736,18 @@ fn select_all_as_with_inheritance() {
         .unwrap();
 
     // Alice can see the document (via folder ownership)
-    let alice_docs = db.select_all_as("documents", alice_id).unwrap();
+    // Note: INHERITS policy expands to a JOIN, so column names may be qualified
+    let alice_docs = db.query_as("SELECT * FROM documents", alice_id).unwrap();
     assert_eq!(alice_docs.len(), 1);
-    assert_eq!(
-        alice_docs[0].1.get_by_name("title"),
-        Some(RowValue::String("Secret Doc"))
-    );
+    // Try both qualified and unqualified names since INHERITS may add a JOIN
+    let title = alice_docs[0]
+        .1
+        .get_by_name("title")
+        .or_else(|| alice_docs[0].1.get_by_name("documents.title"));
+    assert_eq!(title, Some(RowValue::String("Secret Doc")));
 
     // Bob cannot see the document
-    let bob_docs = db.select_all_as("documents", bob_id).unwrap();
+    let bob_docs = db.query_as("SELECT * FROM documents", bob_id).unwrap();
     assert_eq!(bob_docs.len(), 0);
 }
 
