@@ -2631,7 +2631,11 @@ impl Database {
         // Apply LIMIT/OFFSET if specified
         let limited = builder.limit_offset(after_policy, select.limit, select.offset.unwrap_or(0));
 
-        Ok(builder.output(limited, GraphId(0)))
+        // Add projection to unqualify column names
+        // (SELECT * FROM documents should return "title", not "documents.title")
+        let projected = builder.projection_unqualify(limited, left_table, &left_schema);
+
+        Ok(builder.output(projected, GraphId(0)))
     }
 
     /// Build a JOIN graph for INHERITS chains with multiple hops.
@@ -2759,7 +2763,11 @@ impl Database {
         // Apply LIMIT/OFFSET if specified
         let limited = builder.limit_offset(current_node, select.limit, select.offset.unwrap_or(0));
 
-        Ok(builder.output(limited, GraphId(0)))
+        // Add projection to unqualify column names
+        // (SELECT * FROM documents should return "title", not "documents.title")
+        let projected = builder.projection_unqualify(limited, left_table, source_schema);
+
+        Ok(builder.output(projected, GraphId(0)))
     }
 
     /// Build a query graph with RecursiveFilter for self-referential INHERITS.

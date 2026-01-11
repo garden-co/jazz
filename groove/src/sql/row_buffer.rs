@@ -866,6 +866,30 @@ impl OwnedRow {
         }
     }
 
+    /// Create a new OwnedRow by projecting and renaming columns.
+    ///
+    /// Used by Projection nodes to convert qualified column names back to
+    /// unqualified names (e.g., "documents.title" → "title").
+    ///
+    /// Columns not in the map are excluded from the output.
+    pub fn project_rename(
+        &self,
+        column_map: &std::collections::HashMap<String, String>,
+        output_descriptor: Arc<RowDescriptor>,
+    ) -> Self {
+        let mut builder = RowBuilder::new(output_descriptor.clone());
+
+        for (old_name, new_name) in column_map {
+            if let Some(value) = self.get_by_name(old_name)
+                && let Some(new_idx) = output_descriptor.column_index(new_name)
+            {
+                builder = Self::set_from_row_value(builder, new_idx, value);
+            }
+        }
+
+        builder.build()
+    }
+
     /// Merge multiple rows into a single combined row.
     ///
     /// This is used for JOIN operations. The rows are merged in order,
@@ -1642,5 +1666,59 @@ mod tests {
 
         // Variable count should be: name + email = 2
         assert_eq!(desc.variable_count, 2);
+    }
+
+    #[test]
+    fn test_project_rename() {
+        use std::collections::HashMap;
+
+        // Create a row with qualified column names (like after a JOIN)
+        let source_desc = Arc::new(RowDescriptor::new([
+            ("documents.id".to_string(), ColumnType::I32, false),
+            ("documents.title".to_string(), ColumnType::String, false),
+            ("documents.folder_id".to_string(), ColumnType::I64, false),
+        ]));
+
+        let id_idx = source_desc.column_index("documents.id").unwrap();
+        let title_idx = source_desc.column_index("documents.title").unwrap();
+        let folder_idx = source_desc.column_index("documents.folder_id").unwrap();
+
+        let row = RowBuilder::new(source_desc.clone())
+            .set_i32(id_idx, 42)
+            .set_string(title_idx, "Test Document")
+            .set_i64(folder_idx, 123)
+            .build();
+
+        // Verify source row has qualified names
+        assert_eq!(
+            row.get_by_name("documents.title"),
+            Some(RowValue::String("Test Document"))
+        );
+        assert_eq!(row.get_by_name("title"), None);
+
+        // Create column map: qualified -> unqualified
+        let mut column_map = HashMap::new();
+        column_map.insert("documents.id".to_string(), "id".to_string());
+        column_map.insert("documents.title".to_string(), "title".to_string());
+        column_map.insert("documents.folder_id".to_string(), "folder_id".to_string());
+
+        // Create output descriptor with unqualified names
+        let output_desc = Arc::new(RowDescriptor::new([
+            ("id".to_string(), ColumnType::I32, false),
+            ("title".to_string(), ColumnType::String, false),
+            ("folder_id".to_string(), ColumnType::I64, false),
+        ]));
+
+        // Project and rename
+        let projected = row.project_rename(&column_map, output_desc);
+
+        // Verify projected row has unqualified names
+        assert_eq!(projected.get_by_name("id"), Some(RowValue::I32(42)));
+        assert_eq!(
+            projected.get_by_name("title"),
+            Some(RowValue::String("Test Document"))
+        );
+        assert_eq!(projected.get_by_name("folder_id"), Some(RowValue::I64(123)));
+        assert_eq!(projected.get_by_name("documents.title"), None);
     }
 }

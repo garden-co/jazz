@@ -201,6 +201,25 @@ pub enum QueryNode {
         /// Currently visible row IDs (in the window [offset, offset+limit)).
         visible_ids: HashSet<ObjectId>,
     },
+
+    /// Transform: project and rename columns from input rows.
+    ///
+    /// Used at the end of INHERITS JOIN graphs to strip table qualification
+    /// from column names ("documents.title" → "title"). Also useful for
+    /// explicit SELECT column lists.
+    Projection {
+        /// Primary table name (for debugging/display).
+        table: String,
+        /// Input node providing rows to project.
+        input: NodeId,
+        /// Column mappings: input_column_name → output_column_name.
+        /// Columns not in this map are excluded from output.
+        column_map: HashMap<String, String>,
+        /// Descriptor for output rows (with renamed columns).
+        output_descriptor: Arc<RowDescriptor>,
+        /// Cached projected rows.
+        cached_rows: HashMap<ObjectId, OwnedRow>,
+    },
 }
 
 impl QueryNode {
@@ -217,6 +236,7 @@ impl QueryNode {
             QueryNode::RecursiveFilter { table, .. } => table,
             QueryNode::ArrayAggregate { outer_table, .. } => outer_table,
             QueryNode::LimitOffset { table, .. } => table,
+            QueryNode::Projection { table, .. } => table,
         }
     }
 
@@ -245,6 +265,7 @@ impl QueryNode {
                 vec![outer_table, inner_table]
             }
             QueryNode::LimitOffset { table, .. } => vec![table],
+            QueryNode::Projection { table, .. } => vec![table],
         }
     }
 
@@ -259,6 +280,7 @@ impl QueryNode {
             QueryNode::RecursiveFilter { .. } => None, // Uses accessible instead
             QueryNode::ArrayAggregate { .. } => None,  // Uses outer_rows instead
             QueryNode::LimitOffset { visible_ids, .. } => Some(visible_ids),
+            QueryNode::Projection { .. } => None, // Uses cached_rows HashMap instead
         }
     }
 
@@ -273,6 +295,7 @@ impl QueryNode {
             QueryNode::RecursiveFilter { .. } => None,
             QueryNode::ArrayAggregate { .. } => None,
             QueryNode::LimitOffset { visible_ids, .. } => Some(visible_ids),
+            QueryNode::Projection { .. } => None,
         }
     }
 
@@ -330,6 +353,14 @@ impl QueryNode {
         }
     }
 
+    /// Get the cached projected rows for Projection nodes.
+    pub fn cached_projected(&self) -> Option<&HashMap<ObjectId, OwnedRow>> {
+        match self {
+            QueryNode::Projection { cached_rows, .. } => Some(cached_rows),
+            _ => None,
+        }
+    }
+
     /// Get the input node ID if this node has one.
     pub fn input(&self) -> Option<NodeId> {
         match self {
@@ -341,6 +372,7 @@ impl QueryNode {
             QueryNode::RecursiveFilter { input, .. } => Some(*input),
             QueryNode::ArrayAggregate { input, .. } => Some(*input),
             QueryNode::LimitOffset { input, .. } => Some(*input),
+            QueryNode::Projection { input, .. } => Some(*input),
         }
     }
 
@@ -466,6 +498,19 @@ impl QueryNode {
                     ],
                 )
             }
+
+            QueryNode::Projection {
+                table,
+                column_map,
+                cached_rows,
+                ..
+            } => (
+                format!("Projection [{}]", table),
+                vec![
+                    format!("columns: {} mappings", column_map.len()),
+                    format!("cached: {} rows", cached_rows.len()),
+                ],
+            ),
         }
     }
 
@@ -512,7 +557,51 @@ impl QueryNode {
                 // This should be called via evaluate_limit_offset instead
                 DeltaBatch::new()
             }
+
+            QueryNode::Projection {
+                column_map,
+                output_descriptor,
+                cached_rows,
+                ..
+            } => Self::eval_projection(column_map, output_descriptor, cached_rows, input),
         }
+    }
+
+    /// Evaluate a Projection node.
+    ///
+    /// Projects and renames columns from input rows.
+    fn eval_projection(
+        column_map: &HashMap<String, String>,
+        output_descriptor: &Arc<RowDescriptor>,
+        cached_rows: &mut HashMap<ObjectId, OwnedRow>,
+        input: DeltaBatch,
+    ) -> DeltaBatch {
+        let mut output = DeltaBatch::new();
+
+        for delta in input.into_iter() {
+            match delta {
+                RowDelta::Added { id, row } => {
+                    let projected = row.project_rename(column_map, output_descriptor.clone());
+                    cached_rows.insert(id, projected.clone());
+                    output.push(RowDelta::Added { id, row: projected });
+                }
+                RowDelta::Removed { id, prior } => {
+                    cached_rows.remove(&id);
+                    output.push(RowDelta::Removed { id, prior });
+                }
+                RowDelta::Updated { id, row, prior } => {
+                    let projected = row.project_rename(column_map, output_descriptor.clone());
+                    cached_rows.insert(id, projected.clone());
+                    output.push(RowDelta::Updated {
+                        id,
+                        row: projected,
+                        prior,
+                    });
+                }
+            }
+        }
+
+        output
     }
 
     /// Evaluate a RecursiveFilter node with fixpoint iteration.

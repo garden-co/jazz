@@ -289,6 +289,41 @@ impl QueryGraphBuilder {
         id
     }
 
+    /// Add a projection node to unqualify column names.
+    ///
+    /// Used after INHERITS JOINs to convert qualified column names back to
+    /// unqualified names (e.g., "documents.title" → "title").
+    ///
+    /// The `source_schema` should be the original table schema with unqualified
+    /// column names.
+    pub fn projection_unqualify(
+        &mut self,
+        input: NodeId,
+        table: &str,
+        source_schema: &TableSchema,
+    ) -> NodeId {
+        let id = self.alloc_id();
+
+        // Build column map: "documents.title" → "title"
+        let column_map: HashMap<String, String> = source_schema
+            .columns
+            .iter()
+            .map(|col| (format!("{}.{}", table, col.name), col.name.clone()))
+            .collect();
+
+        let output_descriptor = Arc::new(RowDescriptor::from_table_schema(source_schema));
+
+        self.nodes.push(QueryNode::Projection {
+            table: table.to_string(),
+            input,
+            column_map,
+            output_descriptor,
+            cached_rows: HashMap::new(),
+        });
+
+        id
+    }
+
     /// Add the output node and build the graph.
     ///
     /// This consumes the builder and returns the constructed graph.

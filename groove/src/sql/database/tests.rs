@@ -743,7 +743,7 @@ fn select_all_as_with_inheritance() {
     let title = alice_docs[0]
         .1
         .get_by_name("title")
-        .or_else(|| alice_docs[0].1.get_by_name("documents.title"));
+        .or_else(|| alice_docs[0].1.get_by_name("title"));
     assert_eq!(title, Some(RowValue::String("Secret Doc")));
 
     // Bob cannot see the document
@@ -1484,8 +1484,9 @@ fn incremental_query_as_inherits_flattened_to_join() {
         "Alice should see 1 doc: {:?}",
         alice_rows
     );
+    // After Projection, column names should be unqualified ("title" not "documents.title")
     assert_eq!(
-        alice_rows[0].1.get_by_name("documents.title"),
+        alice_rows[0].1.get_by_name("title"),
         Some(RowValue::String("Alice's Doc"))
     );
 
@@ -1496,7 +1497,7 @@ fn incremental_query_as_inherits_flattened_to_join() {
     let bob_rows = bob_query.rows();
     assert_eq!(bob_rows.len(), 1, "Bob should see 1 doc: {:?}", bob_rows);
     assert_eq!(
-        bob_rows[0].1.get_by_name("documents.title"),
+        bob_rows[0].1.get_by_name("title"),
         Some(RowValue::String("Bob's Doc"))
     );
 }
@@ -1566,7 +1567,7 @@ fn incremental_query_as_inherits_incremental_updates() {
     let rows = alice_query.rows();
     assert_eq!(rows.len(), 1);
     assert_eq!(
-        rows[0].1.get_by_name("documents.title"),
+        rows[0].1.get_by_name("title"),
         Some(RowValue::String("New Doc"))
     );
     // And we should have received a delta
@@ -1637,7 +1638,7 @@ fn incremental_query_as_inherits_folder_ownership_change() {
     let alice_rows = alice_query.rows();
     assert_eq!(alice_rows.len(), 1);
     assert_eq!(
-        alice_rows[0].1.get_by_name("documents.title"),
+        alice_rows[0].1.get_by_name("title"),
         Some(RowValue::String("Important Doc"))
     );
 
@@ -1670,7 +1671,7 @@ fn incremental_query_as_inherits_folder_ownership_change() {
         "Bob should now see doc after folder transfer"
     );
     assert_eq!(
-        bob_rows_after[0].1.get_by_name("documents.title"),
+        bob_rows_after[0].1.get_by_name("title"),
         Some(RowValue::String("Important Doc"))
     );
 }
@@ -1793,7 +1794,7 @@ fn incremental_query_as_nested_inherits_chain() {
         "Alice should see her own document"
     );
     assert_eq!(
-        alice_docs[0].1.get_by_name("documents.title"),
+        alice_docs[0].1.get_by_name("title"),
         Some(RowValue::String("Alice's Doc"))
     );
 
@@ -1809,7 +1810,7 @@ fn incremental_query_as_nested_inherits_chain() {
         "Bob should see 1 document through the chain"
     );
     assert_eq!(
-        bob_docs[0].1.get_by_name("documents.title"),
+        bob_docs[0].1.get_by_name("title"),
         Some(RowValue::String("Bob's Doc"))
     );
 }
@@ -1882,10 +1883,7 @@ fn incremental_query_as_inherits_multiple_docs_same_folder() {
         3,
         "Alice should see all 3 documents in her folder"
     );
-    let titles: Vec<_> = rows
-        .iter()
-        .map(|r| r.1.get_by_name("documents.title"))
-        .collect();
+    let titles: Vec<_> = rows.iter().map(|r| r.1.get_by_name("title")).collect();
     assert!(titles.contains(&Some(RowValue::String("Doc 1"))));
     assert!(titles.contains(&Some(RowValue::String("Doc 2"))));
     assert!(titles.contains(&Some(RowValue::String("Doc 3"))));
@@ -1944,7 +1942,7 @@ fn incremental_query_as_inherits_delete_propagates() {
     let initial_rows = alice_query.rows();
     assert_eq!(initial_rows.len(), 1);
     assert_eq!(
-        initial_rows[0].1.get_by_name("documents.title"),
+        initial_rows[0].1.get_by_name("title"),
         Some(RowValue::String("Orphan Doc"))
     );
 
@@ -2292,7 +2290,7 @@ fn incremental_query_as_3_hop_inherits_chain() {
         "Alice should see her own document"
     );
     assert_eq!(
-        alice_docs[0].1.get_by_name("documents.title"),
+        alice_docs[0].1.get_by_name("title"),
         Some(RowValue::String("Alice's Doc"))
     );
 
@@ -2308,7 +2306,7 @@ fn incremental_query_as_3_hop_inherits_chain() {
         "Bob should see 1 document through 3-hop chain"
     );
     assert_eq!(
-        bob_docs[0].1.get_by_name("documents.title"),
+        bob_docs[0].1.get_by_name("title"),
         Some(RowValue::String("Bob's Doc"))
     );
 }
@@ -2442,7 +2440,7 @@ fn incremental_query_as_3_hop_chain_delta_from_org_update() {
     );
     assert_eq!(bob_rows_after[0].0, doc_id);
     assert_eq!(
-        bob_rows_after[0].1.get_by_name("documents.title"),
+        bob_rows_after[0].1.get_by_name("title"),
         Some(RowValue::String("Test Doc"))
     );
 }
@@ -2584,7 +2582,7 @@ fn incremental_query_as_3_hop_chain_delta_from_workspace_update() {
     );
     assert_eq!(bob_rows_after[0].0, doc_id);
     assert_eq!(
-        bob_rows_after[0].1.get_by_name("documents.title"),
+        bob_rows_after[0].1.get_by_name("title"),
         Some(RowValue::String("Test Doc"))
     );
 }
@@ -2734,7 +2732,7 @@ fn incremental_query_as_3_hop_chain_delta_from_folder_update() {
     );
     assert_eq!(bob_rows_after[0].0, doc_id);
     assert_eq!(
-        bob_rows_after[0].1.get_by_name("documents.title"),
+        bob_rows_after[0].1.get_by_name("title"),
         Some(RowValue::String("Test Doc"))
     );
 }
@@ -2851,7 +2849,7 @@ fn incremental_query_as_3_hop_chain_new_document_insert() {
     );
     assert_eq!(alice_rows_after[0].0, new_doc_id);
     assert_eq!(
-        alice_rows_after[0].1.get_by_name("documents.title"),
+        alice_rows_after[0].1.get_by_name("title"),
         Some(RowValue::String("New Alice Doc"))
     );
     assert_eq!(bob_rows_after.len(), 0, "Bob should still see 0 docs");
@@ -2954,11 +2952,11 @@ fn incremental_query_as_3_hop_chain_with_filter() {
     assert_eq!(rows.len(), 1, "Alice should see only 1 non-archived doc");
     assert_eq!(rows[0].0, active_doc_id);
     assert_eq!(
-        rows[0].1.get_by_name("documents.title"),
+        rows[0].1.get_by_name("title"),
         Some(RowValue::String("Active Doc"))
     );
     assert_eq!(
-        rows[0].1.get_by_name("documents.archived"),
+        rows[0].1.get_by_name("archived"),
         Some(RowValue::Bool(false))
     );
 }
@@ -3334,7 +3332,7 @@ fn policy_chain_insert_intermediate_row() {
     assert_eq!(rows.len(), 1, "Alice should see the new document");
     assert_eq!(rows[0].0, doc);
     assert_eq!(
-        rows[0].1.get_by_name("documents.title"),
+        rows[0].1.get_by_name("title"),
         Some(RowValue::String("New Doc"))
     );
 }
@@ -3549,7 +3547,7 @@ fn policy_chain_4_hop_deep() {
     assert_eq!(alice_files.len(), 1, "Alice should see 1 file");
     assert_eq!(alice_files[0].0, alice_file);
     assert_eq!(
-        alice_files[0].1.get_by_name("files.name"),
+        alice_files[0].1.get_by_name("name"),
         Some(RowValue::String("Alice File"))
     );
 
@@ -3579,10 +3577,7 @@ fn policy_chain_4_hop_deep() {
         2,
         "Bob should see 2 files after org transfer"
     );
-    let bob_file_names: Vec<_> = bob_files
-        .iter()
-        .map(|r| r.1.get_by_name("files.name"))
-        .collect();
+    let bob_file_names: Vec<_> = bob_files.iter().map(|r| r.1.get_by_name("name")).collect();
     assert!(bob_file_names.contains(&Some(RowValue::String("Alice File"))));
     assert!(bob_file_names.contains(&Some(RowValue::String("Bob File"))));
 }
@@ -3727,7 +3722,7 @@ fn policy_chain_update_at_each_level() {
 
     assert_eq!(bob_query.rows().len(), 1);
     assert_eq!(
-        bob_query.rows()[0].1.get_by_name("tasks.title"),
+        bob_query.rows()[0].1.get_by_name("title"),
         Some(RowValue::String("Updated Task"))
     );
 }

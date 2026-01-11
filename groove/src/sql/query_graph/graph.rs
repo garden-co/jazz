@@ -741,6 +741,15 @@ impl QueryGraph {
         if let QueryNode::Output { input, .. } = &self.nodes[output_idx] {
             let input_idx = self.node_indices[input];
 
+            // Check if the input to Output is a Projection node
+            // This handles INHERITS queries where we need to unqualify column names
+            if let Some(projected) = self.nodes[input_idx].cached_projected() {
+                return projected
+                    .iter()
+                    .map(|(id, row)| (*id, row.clone()))
+                    .collect();
+            }
+
             // Check if the input to Output is an ArrayAggregate node (even for JOIN queries)
             // This handles JOIN + ARRAY subquery cases
             if let Some(outer_rows) = self.nodes[input_idx].outer_rows() {
