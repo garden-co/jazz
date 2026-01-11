@@ -1,6 +1,9 @@
 //! Integration tests for ObjectListenerRegistry.
 
-use groove::{Branch, Commit, Environment, MemoryEnvironment, ObjectKey, ObjectListenerRegistry, ObjectState, ObjectId};
+use groove::{
+    Branch, Commit, Environment, MemoryEnvironment, ObjectId, ObjectKey, ObjectListenerRegistry,
+    ObjectState,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -31,9 +34,13 @@ fn basic_subscribe_and_notify() {
     let call_count = Arc::new(AtomicUsize::new(0));
     let call_count_clone = call_count.clone();
 
-    let listener_id = registry.subscribe(key.clone(), env, Box::new(move |_state| {
-        call_count_clone.fetch_add(1, Ordering::SeqCst);
-    }));
+    let listener_id = registry.subscribe(
+        key.clone(),
+        env,
+        Box::new(move |_state| {
+            call_count_clone.fetch_add(1, Ordering::SeqCst);
+        }),
+    );
 
     // No initial call since there's no cached state yet
     assert_eq!(call_count.load(Ordering::SeqCst), 0);
@@ -63,9 +70,13 @@ fn new_subscriber_gets_current_state() {
     // Second subscriber should get called immediately with current state
     let call_count = Arc::new(AtomicUsize::new(0));
     let call_count_clone = call_count.clone();
-    let _id2 = registry.subscribe(key.clone(), env, Box::new(move |_state| {
-        call_count_clone.fetch_add(1, Ordering::SeqCst);
-    }));
+    let _id2 = registry.subscribe(
+        key.clone(),
+        env,
+        Box::new(move |_state| {
+            call_count_clone.fetch_add(1, Ordering::SeqCst);
+        }),
+    );
 
     assert_eq!(call_count.load(Ordering::SeqCst), 1);
 }
@@ -82,12 +93,20 @@ fn multiple_listeners_all_called() {
     let count1_clone = count1.clone();
     let count2_clone = count2.clone();
 
-    let _id1 = registry.subscribe(key.clone(), env.clone(), Box::new(move |_| {
-        count1_clone.fetch_add(1, Ordering::SeqCst);
-    }));
-    let _id2 = registry.subscribe(key.clone(), env, Box::new(move |_| {
-        count2_clone.fetch_add(1, Ordering::SeqCst);
-    }));
+    let _id1 = registry.subscribe(
+        key.clone(),
+        env.clone(),
+        Box::new(move |_| {
+            count1_clone.fetch_add(1, Ordering::SeqCst);
+        }),
+    );
+    let _id2 = registry.subscribe(
+        key.clone(),
+        env,
+        Box::new(move |_| {
+            count2_clone.fetch_add(1, Ordering::SeqCst);
+        }),
+    );
 
     registry.notify(&key, vec![id], branch);
 
@@ -105,9 +124,16 @@ fn state_tracks_previous_tips() {
     let has_previous = Arc::new(RwLock::new(Vec::new()));
     let has_previous_clone = has_previous.clone();
 
-    let _id = registry.subscribe(key.clone(), env, Box::new(move |state| {
-        has_previous_clone.write().unwrap().push(state.has_previous());
-    }));
+    let _id = registry.subscribe(
+        key.clone(),
+        env,
+        Box::new(move |state| {
+            has_previous_clone
+                .write()
+                .unwrap()
+                .push(state.has_previous());
+        }),
+    );
 
     // First notify - no previous
     registry.notify(&key, vec![id1], branch.clone());
@@ -162,9 +188,13 @@ fn unsubscribe_removes_listener() {
     let call_count = Arc::new(AtomicUsize::new(0));
     let call_count_clone = call_count.clone();
 
-    let listener_id = registry.subscribe(key.clone(), env, Box::new(move |_| {
-        call_count_clone.fetch_add(1, Ordering::SeqCst);
-    }));
+    let listener_id = registry.subscribe(
+        key.clone(),
+        env,
+        Box::new(move |_| {
+            call_count_clone.fetch_add(1, Ordering::SeqCst);
+        }),
+    );
 
     registry.notify(&key, vec![id], branch.clone());
     assert_eq!(call_count.load(Ordering::SeqCst), 1);

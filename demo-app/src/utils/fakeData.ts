@@ -1,19 +1,19 @@
-import type { WasmDatabaseLike } from "@jazz/react";
 import { app } from "@/generated/client";
 import type { ObjectId } from "@/generated/types";
+import type { WasmDatabaseLike } from "@jazz/react";
 import {
-  USER_NAMES,
-  USER_COLORS,
-  PROJECT_DATA,
-  LABEL_DATA,
   ISSUE_TITLES,
-  STATUSES,
+  LABEL_DATA,
   PRIORITIES,
+  PROJECT_DATA,
+  STATUSES,
+  USER_COLORS,
+  USER_NAMES,
 } from "./constants";
 
 export async function generateFakeData(
   db: WasmDatabaseLike,
-  issueCount: number
+  issueCount: number,
 ): Promise<ObjectId> {
   // 1. Create Users
   const userIds: ObjectId[] = [];
@@ -21,7 +21,7 @@ export async function generateFakeData(
     const name = USER_NAMES[i];
     const id = app.users.create(db, {
       name,
-      email: name.toLowerCase().replace(" ", ".") + "@example.com",
+      email: `${name.toLowerCase().replace(" ", ".")}@example.com`,
       avatarColor: USER_COLORS[i],
     });
     userIds.push(id);
@@ -45,10 +45,12 @@ export async function generateFakeData(
   const issueIds: ObjectId[] = [];
   for (let i = 0; i < issueCount; i++) {
     const now = BigInt(
-      Date.now() - Math.floor(Math.random() * 7 * 24 * 60 * 60 * 1000)
+      Date.now() - Math.floor(Math.random() * 7 * 24 * 60 * 60 * 1000),
     );
     const id = app.issues.create(db, {
-      title: ISSUE_TITLES[i % ISSUE_TITLES.length] + (i >= ISSUE_TITLES.length ? ` (#${i + 1})` : ""),
+      title:
+        ISSUE_TITLES[i % ISSUE_TITLES.length] +
+        (i >= ISSUE_TITLES.length ? ` (#${i + 1})` : ""),
       description: `Description for issue ${i + 1}. This is a sample issue created for testing purposes.`,
       status: STATUSES[Math.floor(Math.random() * STATUSES.length)],
       priority: PRIORITIES[Math.floor(Math.random() * PRIORITIES.length)],

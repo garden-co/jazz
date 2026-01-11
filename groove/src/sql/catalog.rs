@@ -281,8 +281,12 @@ mod tests {
     #[test]
     fn catalog_roundtrip() {
         let mut catalog = Catalog::new();
-        catalog.tables.insert("users".to_string(), ObjectId::new(100));
-        catalog.tables.insert("posts".to_string(), ObjectId::new(200));
+        catalog
+            .tables
+            .insert("users".to_string(), ObjectId::new(100));
+        catalog
+            .tables
+            .insert("posts".to_string(), ObjectId::new(200));
 
         let bytes = catalog.to_bytes();
         let restored = Catalog::from_bytes(&bytes).unwrap();

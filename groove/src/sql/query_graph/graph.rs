@@ -64,10 +64,6 @@ pub struct QueryGraph {
     /// Whether this is a join query.
     is_join: bool,
 
-    /// For JOIN queries, which table to project in output (e.g., "Issues" for SELECT Issues.*).
-    /// If None, all columns from all joined tables are returned.
-    projection_table: Option<String>,
-
     /// Nodes in topological order.
     nodes: Vec<QueryNode>,
 
@@ -76,6 +72,10 @@ pub struct QueryGraph {
 
     /// The output node.
     output_node: NodeId,
+
+    /// Entry points for each table: table name → node indices where deltas should enter.
+    /// A table can have multiple entry points if joined multiple times.
+    entry_points: HashMap<String, Vec<usize>>,
 }
 
 impl std::fmt::Debug for QueryGraph {
@@ -90,6 +90,65 @@ impl std::fmt::Debug for QueryGraph {
 }
 
 impl QueryGraph {
+    /// Build entry points map from nodes.
+    ///
+    /// Maps each table to the node indices where its deltas should enter.
+    /// - Primary table enters at node 0
+    /// - Join tables enter at their Join node
+    /// - For Join nodes with input_tables_need_entry, input_tables also get entry points
+    /// - ArrayAggregate inner tables enter at the ArrayAggregate node (unless handled by Join)
+    fn build_entry_points(nodes: &[QueryNode], primary_table: &str) -> HashMap<String, Vec<usize>> {
+        let mut entry_points: HashMap<String, Vec<usize>> = HashMap::new();
+
+        // Primary table always enters at node 0
+        entry_points.insert(primary_table.to_string(), vec![0]);
+
+        // Join tables enter at their Join node (may have multiple entries for same table)
+        // For inner joins (input_tables_need_entry), input_tables also get entry points
+        for (idx, node) in nodes.iter().enumerate() {
+            if let QueryNode::Join {
+                join_table,
+                input_tables,
+                input_tables_need_entry,
+                ..
+            } = node
+            {
+                entry_points
+                    .entry(join_table.clone())
+                    .or_default()
+                    .push(idx);
+
+                // For ARRAY inner joins, input_tables also need entry points
+                if *input_tables_need_entry {
+                    for table in input_tables {
+                        entry_points.entry(table.clone()).or_default().push(idx);
+                    }
+                }
+            }
+        }
+
+        // ArrayAggregate inner tables enter at the ArrayAggregate node
+        // Skip if already handled by a Join node (for ARRAY subqueries with inner joins)
+        for (idx, node) in nodes.iter().enumerate() {
+            if let QueryNode::ArrayAggregate {
+                inner_table,
+                inner_joins,
+                ..
+            } = node
+            {
+                // Only add entry point if no inner joins (otherwise Join handles it)
+                if inner_joins.is_empty() {
+                    entry_points
+                        .entry(inner_table.clone())
+                        .or_default()
+                        .push(idx);
+                }
+            }
+        }
+
+        entry_points
+    }
+
     /// Create a new single-table query graph.
     ///
     /// This is typically called by `QueryGraphBuilder::output()`.
@@ -107,13 +166,34 @@ impl QueryGraph {
 
         // Check for ArrayAggregate nodes and add their inner tables
         for node in &nodes {
-            if let QueryNode::ArrayAggregate { inner_table, inner_schema, .. } = node {
-                if !all_tables.contains(inner_table) {
-                    all_tables.push(inner_table.clone());
-                    all_schemas.insert(inner_table.clone(), inner_schema.clone());
-                }
+            if let QueryNode::ArrayAggregate {
+                inner_table,
+                inner_schema,
+                ..
+            } = node
+                && !all_tables.contains(inner_table)
+            {
+                all_tables.push(inner_table.clone());
+                all_schemas.insert(inner_table.clone(), inner_schema.clone());
             }
         }
+
+        // Check for Join nodes (e.g., from ARRAY inner joins) and add their join_table
+        for node in &nodes {
+            if let QueryNode::Join {
+                join_table,
+                join_schema,
+                ..
+            } = node
+                && !all_tables.contains(join_table)
+            {
+                all_tables.push(join_table.clone());
+                all_schemas.insert(join_table.clone(), join_schema.clone());
+            }
+        }
+
+        // Build entry points for multi-entry routing
+        let entry_points = Self::build_entry_points(&nodes, &table);
 
         Self {
             id,
@@ -123,10 +203,10 @@ impl QueryGraph {
             schema,
             all_schemas,
             is_join: false,
-            projection_table: None,
             nodes,
             node_indices,
             output_node,
+            entry_points,
         }
     }
 
@@ -134,9 +214,7 @@ impl QueryGraph {
     ///
     /// Used for INHERITS chains like: documents → folders → workspaces
     /// The `additional_right_tables` contains tables beyond the first join.
-    ///
-    /// `projection_table` specifies which table's columns to output (for reverse JOINs
-    /// where we SELECT Table.* but swapped the tables for the graph builder).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_chain_join(
         id: GraphId,
         left_table: String,
@@ -144,7 +222,6 @@ impl QueryGraph {
         right_table: String,
         right_schema: TableSchema,
         additional_right_tables: Vec<(String, TableSchema)>,
-        projection_table: Option<String>,
         nodes: Vec<QueryNode>,
         node_indices: HashMap<NodeId, usize>,
         output_node: NodeId,
@@ -194,7 +271,13 @@ impl QueryGraph {
 
         // Check for ArrayAggregate nodes and add their inner tables
         for node in &nodes {
-            if let QueryNode::ArrayAggregate { inner_table, inner_schema, inner_joins, .. } = node {
+            if let QueryNode::ArrayAggregate {
+                inner_table,
+                inner_schema,
+                inner_joins,
+                ..
+            } = node
+            {
                 if !all_tables.contains(inner_table) {
                     all_tables.push(inner_table.clone());
                     all_schemas.insert(inner_table.clone(), inner_schema.clone());
@@ -209,6 +292,9 @@ impl QueryGraph {
             }
         }
 
+        // Build entry points for multi-entry routing
+        let entry_points = Self::build_entry_points(&nodes, &left_table);
+
         Self {
             id,
             state: GraphState::Uninitialized,
@@ -217,10 +303,10 @@ impl QueryGraph {
             schema: combined_schema, // Use combined schema for JOIN graphs
             all_schemas,
             is_join: true,
-            projection_table,
             nodes,
             node_indices,
             output_node,
+            entry_points,
         }
     }
 
@@ -270,20 +356,39 @@ impl QueryGraph {
     }
 
     /// Get current output rows in buffer format, initializing lazily if needed.
-    pub fn get_output(&mut self, cache: &mut RowCache, db: &DatabaseState) -> Vec<(ObjectId, OwnedRow)> {
+    pub fn get_output(
+        &mut self,
+        cache: &mut RowCache,
+        db: &DatabaseState,
+    ) -> Vec<(ObjectId, OwnedRow)> {
         self.ensure_initialized_skip(cache, db, None, None);
         self.collect_output(cache, db)
     }
 
     /// Get the output schema for this query.
     ///
-    /// For JOIN queries with projection, returns a qualified version of the projected table's schema.
+    /// For queries with a Projection node before Output, returns a schema matching
+    /// the projection's output descriptor.
     pub fn output_schema(&self) -> Option<TableSchema> {
-        // If there's a projection, return that table's schema with qualified column names
-        if let Some(proj_table) = &self.projection_table {
-            if let Some(proj_schema) = self.all_schemas.get(proj_table) {
-                // Create a schema with qualified column names to match the OwnedRow
-                return Some(proj_schema.qualify(proj_table));
+        use crate::sql::schema::ColumnDef;
+
+        // Find the Output node and check if its input is a Projection
+        let output_idx = self.node_indices.get(&self.output_node)?;
+        if let QueryNode::Output { input, .. } = &self.nodes[*output_idx] {
+            let input_idx = self.node_indices.get(input)?;
+            if let QueryNode::Projection {
+                output_descriptor,
+                table,
+                ..
+            } = &self.nodes[*input_idx]
+            {
+                // Create a schema from the projection's output descriptor
+                let columns: Vec<ColumnDef> = output_descriptor
+                    .columns
+                    .iter()
+                    .map(|col| ColumnDef::new(col.name.clone(), col.ty.clone(), col.nullable))
+                    .collect();
+                return Some(TableSchema::new_raw(table, columns));
             }
         }
         Some(self.schema.clone())
@@ -312,14 +417,16 @@ impl QueryGraph {
             self.init_join_query(cache, db, skip_id, skip_table);
         } else {
             // Check if this graph has a RecursiveFilter node
-            let has_recursive = self.nodes.iter().any(|n| {
-                matches!(n, QueryNode::RecursiveFilter { .. })
-            });
+            let has_recursive = self
+                .nodes
+                .iter()
+                .any(|n| matches!(n, QueryNode::RecursiveFilter { .. }));
 
             // Check if this graph has ArrayAggregate nodes
-            let has_array_aggregate = self.nodes.iter().any(|n| {
-                matches!(n, QueryNode::ArrayAggregate { .. })
-            });
+            let has_array_aggregate = self
+                .nodes
+                .iter()
+                .any(|n| matches!(n, QueryNode::ArrayAggregate { .. }));
 
             if has_recursive {
                 // RecursiveFilter requires fixpoint iteration
@@ -330,6 +437,7 @@ impl QueryGraph {
             } else {
                 // Single-table query: load all rows from the primary table
                 let rows = db.read_all_rows(&self.table);
+                let schema = self.schema.clone();
 
                 for (id, owned) in rows {
                     // Skip the triggering row - it will be processed as a delta
@@ -345,7 +453,13 @@ impl QueryGraph {
                         if delta.is_empty() {
                             break;
                         }
-                        delta = node.evaluate(delta, &self.schema, cache);
+                        // LimitOffset nodes need special handling
+                        delta = match node {
+                            QueryNode::LimitOffset { .. } => {
+                                node.evaluate_limit_offset(delta, &schema, cache)
+                            }
+                            _ => node.evaluate(delta, cache),
+                        };
                     }
                 }
             }
@@ -355,6 +469,10 @@ impl QueryGraph {
     }
 
     /// Initialize a JOIN query by loading and joining all rows.
+    ///
+    /// With streaming joins, we must load tables in the right order:
+    /// 1. Load right (join) table rows first - populates right_index
+    /// 2. Load left (input) table rows - finds matches in right_index
     fn init_join_query(
         &mut self,
         cache: &mut RowCache,
@@ -364,14 +482,52 @@ impl QueryGraph {
     ) {
         let table = self.table.clone();
 
-        // Load all rows from the primary (left) table
-        let left_rows = db.read_all_rows(&table);
+        // Collect all join tables from Join nodes
+        let mut join_tables: Vec<String> = Vec::new();
+        for node in &self.nodes {
+            if let QueryNode::Join { join_table, .. } = node
+                && !join_tables.contains(join_table)
+            {
+                join_tables.push(join_table.clone());
+            }
+        }
 
-        // Get the schema for qualification
-        let table_schema = self.all_schemas.get(&table).cloned().unwrap_or_else(|| self.schema.clone());
+        // 1. Load right (join) table rows first - populates right_index
+        for join_table in &join_tables {
+            let right_rows = db.read_all_rows(join_table);
+            let right_schema = self
+                .all_schemas
+                .get(join_table)
+                .cloned()
+                .unwrap_or_else(|| self.schema.clone());
+
+            for (id, owned) in right_rows {
+                if skip_table == Some(join_table.as_str()) && skip_id == Some(id) {
+                    continue;
+                }
+
+                cache.insert(join_table, id, owned.clone());
+
+                // Qualify column names for the right table
+                let qualified_row = owned.qualify_columns(join_table, &right_schema);
+                let delta = RowDelta::Added {
+                    id,
+                    row: qualified_row,
+                };
+                // Process through nodes - this populates right_index in Join nodes
+                self.process_delta_through_nodes(delta, join_table, cache, db);
+            }
+        }
+
+        // 2. Load left (input) table rows - finds matches in right_index
+        let left_rows = db.read_all_rows(&table);
+        let table_schema = self
+            .all_schemas
+            .get(&table)
+            .cloned()
+            .unwrap_or_else(|| self.schema.clone());
 
         for (id, owned) in left_rows {
-            // Skip if this is the triggering row
             if skip_table == Some(table.as_str()) && skip_id == Some(id) {
                 continue;
             }
@@ -380,7 +536,10 @@ impl QueryGraph {
 
             // For JOIN queries, qualify the column names so predicates with qualified names work
             let qualified_row = owned.qualify_columns(&table, &table_schema);
-            let delta = RowDelta::Added { id, row: qualified_row };
+            let delta = RowDelta::Added {
+                id,
+                row: qualified_row,
+            };
             self.process_delta_through_nodes(delta, &table, cache, db);
         }
     }
@@ -399,7 +558,6 @@ impl QueryGraph {
         skip_table: Option<&str>,
     ) {
         let table = self.table.clone();
-        let schema = self.schema.clone();
 
         // Load all rows
         let rows = db.read_all_rows(&table);
@@ -430,12 +588,108 @@ impl QueryGraph {
                     QueryNode::RecursiveFilter { .. } => {
                         // RecursiveFilter handles its own fixpoint iteration internally
                         // via propagate_access_to_children
-                        delta = node.evaluate_recursive(delta, &schema);
+                        delta = node.evaluate_recursive(delta);
                     }
                     _ => {
-                        delta = node.evaluate(delta, &schema, cache);
+                        delta = node.evaluate(delta, cache);
                     }
                 }
+            }
+        }
+    }
+
+    /// Initialize Join nodes that are for ARRAY inner joins.
+    ///
+    /// These nodes have `input_tables_need_entry = true` and need their tables loaded
+    /// before the main query can process incremental updates.
+    fn init_inner_join_nodes(
+        &mut self,
+        cache: &mut RowCache,
+        db: &DatabaseState,
+        skip_id: Option<ObjectId>,
+        skip_table: Option<&str>,
+    ) {
+        // Find Join nodes with input_tables_need_entry = true
+        // Collect info first to avoid borrow issues
+        let inner_join_info: Vec<(usize, String, Vec<String>)> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, node)| {
+                if let QueryNode::Join {
+                    join_table,
+                    input_tables,
+                    input_tables_need_entry: true,
+                    ..
+                } = node
+                {
+                    Some((idx, join_table.clone(), input_tables.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (node_idx, join_table, input_tables) in inner_join_info {
+            // Get schema for the join table (unused for now, may be useful for validation)
+            let _join_schema = self
+                .all_schemas
+                .get(&join_table)
+                .cloned()
+                .unwrap_or_else(|| self.schema.clone());
+
+            // 1. Load join table rows (e.g., Labels) - populates right_index
+            let join_rows = db.read_all_rows(&join_table);
+            for (id, owned) in join_rows {
+                if skip_table == Some(join_table.as_str()) && skip_id == Some(id) {
+                    continue;
+                }
+
+                cache.insert(&join_table, id, owned.clone());
+
+                // Process directly through the Join node
+                let delta = RowDelta::Added {
+                    id,
+                    row: owned.clone(),
+                };
+
+                // Evaluate just this Join node to populate its indexes
+                if let QueryNode::Join { .. } = &mut self.nodes[node_idx] {
+                    // For join table deltas, is_from_input = false
+                    self.nodes[node_idx].evaluate_join(delta, &join_table, false);
+                }
+            }
+
+            // 2. Load input table rows (e.g., IssueLabels) - populates left_index
+            for input_table in &input_tables {
+                let input_schema = self
+                    .all_schemas
+                    .get(input_table)
+                    .cloned()
+                    .unwrap_or_else(|| self.schema.clone());
+
+                let input_rows = db.read_all_rows(input_table);
+                for (id, owned) in input_rows {
+                    if skip_table == Some(input_table.as_str()) && skip_id == Some(id) {
+                        continue;
+                    }
+
+                    cache.insert(input_table, id, owned.clone());
+
+                    let delta = RowDelta::Added {
+                        id,
+                        row: owned.clone(),
+                    };
+
+                    // Evaluate just this Join node to populate its indexes
+                    if let QueryNode::Join { .. } = &mut self.nodes[node_idx] {
+                        // For input table deltas, is_from_input = true
+                        self.nodes[node_idx].evaluate_join(delta, input_table, true);
+                    }
+                }
+
+                // Don't add this to all_schemas since it's handled by the Join node
+                let _ = input_schema;
             }
         }
     }
@@ -443,6 +697,7 @@ impl QueryGraph {
     /// Initialize a query with ArrayAggregate nodes.
     ///
     /// ArrayAggregate needs database access to look up inner rows for each outer row.
+    /// For ArrayAggregates with inner joins, we must initialize the Join nodes first.
     fn init_array_aggregate_query(
         &mut self,
         cache: &mut RowCache,
@@ -451,6 +706,10 @@ impl QueryGraph {
         skip_table: Option<&str>,
     ) {
         let table = self.table.clone();
+
+        // First, initialize any Join nodes that are for ARRAY inner joins.
+        // These need their join tables (e.g., Labels) loaded before processing inner table deltas.
+        self.init_inner_join_nodes(cache, db, skip_id, skip_table);
 
         // Load all rows from the outer (primary) table
         let rows = db.read_all_rows(&table);
@@ -472,12 +731,41 @@ impl QueryGraph {
                 }
 
                 match node {
-                    QueryNode::ArrayAggregate { outer_table, inner_table, inner_ref_column, .. } => {
+                    QueryNode::Join {
+                        input_tables,
+                        join_table: node_join_table,
+                        ..
+                    } => {
+                        // For ARRAY inner join nodes, outer table deltas should pass through
+                        // Check if this delta is for the Join node
+                        let is_input_delta = input_tables.iter().any(|t| t == &table);
+                        let is_join_table_delta = &table == node_join_table;
+
+                        if is_input_delta || is_join_table_delta {
+                            // This Join processes this delta - evaluate it
+                            let is_from_input = is_input_delta;
+                            let mut output = DeltaBatch::new();
+                            for d in delta.into_iter() {
+                                let batch = node.evaluate_join(d, &table, is_from_input);
+                                output.extend(batch);
+                            }
+                            delta = output;
+                        }
+                        // Otherwise, delta passes through unchanged (delta = delta)
+                    }
+                    QueryNode::ArrayAggregate {
+                        outer_table,
+                        inner_table,
+                        inner_ref_column,
+                        ..
+                    } => {
                         // Clone values before borrowing node mutably
                         let inner_tbl = inner_table.clone();
                         let inner_ref = inner_ref_column.clone();
 
-                        let outer_schema = self.all_schemas.get(outer_table)
+                        let outer_schema = self
+                            .all_schemas
+                            .get(outer_table)
                             .cloned()
                             .unwrap_or_else(|| self.schema.clone());
 
@@ -506,7 +794,7 @@ impl QueryGraph {
                         delta = node.evaluate_limit_offset(delta, &self.schema, cache);
                     }
                     _ => {
-                        delta = node.evaluate(delta, &self.schema, cache);
+                        delta = node.evaluate(delta, cache);
                     }
                 }
             }
@@ -514,6 +802,10 @@ impl QueryGraph {
     }
 
     /// Process a delta through all nodes, handling JOIN and RecursiveFilter nodes specially.
+    ///
+    /// Uses multi-entry routing: deltas enter at the node that needs them.
+    /// A table can have multiple entry points (e.g., if joined twice), and
+    /// each path is processed independently.
     fn process_delta_through_nodes(
         &mut self,
         delta: RowDelta,
@@ -521,160 +813,176 @@ impl QueryGraph {
         cache: &mut RowCache,
         db: &DatabaseState,
     ) -> DeltaBatch {
-        let mut current = DeltaBatch::new();
-        current.push(delta);
+        // Find all entry points for this table
+        let entry_indices = self
+            .entry_points
+            .get(source_table)
+            .cloned()
+            .unwrap_or_else(|| vec![0]);
 
-        // Track tables that are "contained" in the current deltas.
-        // For chain joins, after the first Join, deltas contain combined rows
-        // with data from multiple tables.
-        let mut contained_tables: Vec<String> = vec![source_table.to_string()];
+        let mut all_output = DeltaBatch::new();
 
-        for (_node_idx, node) in self.nodes.iter_mut().enumerate() {
-            if current.is_empty() {
-                break; // Early cutoff
-            }
+        // Process each entry point path independently
+        for start_idx in entry_indices {
+            let mut current = DeltaBatch::new();
+            current.push(delta.clone());
 
-            match node {
-                QueryNode::Join { input_tables, join_table, .. } => {
-                    // Clone values we need before borrowing node mutably
-                    let input_tables_cloned = input_tables.clone();
-                    let join_table_str = join_table.clone();
+            // Track tables that are "contained" in the current deltas.
+            // For chain joins, after the first Join, deltas contain combined rows
+            // with data from multiple tables.
+            let mut contained_tables: Vec<String> = vec![source_table.to_string()];
 
-                    // Check if this delta is for this Join node
-                    let is_input_delta = input_tables_cloned.iter().any(|t| contained_tables.contains(t));
-                    let is_join_table_delta = source_table == &join_table_str && !is_input_delta;
-                    let is_for_this_node = is_input_delta || is_join_table_delta;
+            for node in self.nodes[start_idx..].iter_mut() {
+                if current.is_empty() {
+                    break; // Early cutoff
+                }
 
-                    if !is_for_this_node {
-                        // Delta is for a downstream node - pass through unchanged
-                        // Don't update contained_tables since we didn't process anything
-                        continue;
-                    }
+                match node {
+                    QueryNode::Join {
+                        input_tables,
+                        join_table,
+                        ..
+                    } => {
+                        // Clone values we need before borrowing node mutably
+                        let input_tables_cloned = input_tables.clone();
+                        let join_table_str = join_table.clone();
 
-                    // Check if this delta came from input (prior join output or raw input table)
-                    let is_from_input = contained_tables.len() > 1 || is_input_delta;
+                        // Check if this delta is for this Join node
+                        let is_input_delta = input_tables_cloned
+                            .iter()
+                            .any(|t| contained_tables.contains(t));
+                        let is_join_table_delta = source_table == join_table_str && !is_input_delta;
+                        let is_for_this_node = is_input_delta || is_join_table_delta;
 
-                    // Use combined schema for chain joins (contains qualified column names)
-                    let input_schema = if contained_tables.len() > 1 || input_tables_cloned.len() > 1 {
-                        self.schema.clone()
-                    } else {
-                        // First join - use the input table's schema
-                        input_tables_cloned.first()
-                            .and_then(|t| self.all_schemas.get(t).cloned())
-                            .unwrap_or_else(|| self.schema.clone())
-                    };
-
-                    let mut output = DeltaBatch::new();
-                    for d in current.into_iter() {
-                        let batch = node.evaluate_join(
-                            d,
-                            source_table,
-                            &input_schema,
-                            is_from_input,
-                            |table, id| db.get_row(table, id).map(|(_, row)| row),
-                            |table, column, target_id| {
-                                db.find_referencing(table, column, target_id)
-                            },
-                        );
-                        output.extend(batch);
-                    }
-                    current = output;
-
-                    // After a Join, the delta now contains data from all input tables plus join_table
-                    for table in input_tables_cloned {
-                        if !contained_tables.contains(&table) {
-                            contained_tables.push(table);
+                        if !is_for_this_node {
+                            // Delta is for a downstream node - pass through unchanged
+                            // Don't update contained_tables since we didn't process anything
+                            continue;
                         }
-                    }
-                    if !contained_tables.contains(&join_table_str) {
-                        contained_tables.push(join_table_str);
-                    }
-                }
-                QueryNode::RecursiveFilter { .. } => {
-                    // RecursiveFilter needs special evaluation for fixpoint iteration
-                    current = node.evaluate_recursive(current, &self.schema);
-                }
-                QueryNode::ArrayAggregate { outer_table, inner_table, inner_ref_column, outer_rows, inner_joins, .. } => {
-                    // Clone values before borrowing node mutably
-                    let outer_tbl = outer_table.clone();
-                    let inner_tbl = inner_table.clone();
-                    let inner_ref = inner_ref_column.clone();
-                    let join_tables: Vec<String> = inner_joins.iter().map(|(_, t, _)| t.clone()).collect();
 
-                    // Check if this delta is for this node
-                    let is_outer_delta = source_table == outer_tbl || contained_tables.contains(&outer_tbl);
-                    let is_inner_delta = source_table == inner_tbl;
-                    // Check if delta is for a table in inner joins (e.g., Users in IssueAssignees JOIN Users)
-                    let is_inner_join_delta = join_tables.contains(&source_table.to_string());
-
-                    if is_outer_delta || is_inner_delta {
-                        // Process deltas through ArrayAggregate
-                        let outer_schema = self.all_schemas.get(&outer_tbl)
-                            .cloned()
-                            .unwrap_or_else(|| self.schema.clone());
+                        // Check if this delta came from input (prior join output or raw input table)
+                        let is_from_input = contained_tables.len() > 1 || is_input_delta;
 
                         let mut output = DeltaBatch::new();
                         for d in current.into_iter() {
-                            let batch = node.evaluate_array_aggregate(
-                                d,
-                                source_table,
-                                is_outer_delta,
-                                is_inner_delta,
-                                &outer_schema,
-                                |outer_id| {
-                                    // Look up all inner rows that reference this outer id
-                                    db.find_referencing(&inner_tbl, &inner_ref, outer_id)
-                                },
-                                |table_name, id| {
-                                    // Look up a row by table and id (for resolving inner joins)
-                                    db.get_row(table_name, id).map(|(_, row)| row)
-                                },
-                            );
+                            // Use streaming join - no on-demand lookups
+                            let batch = node.evaluate_join(d, source_table, is_from_input);
                             output.extend(batch);
                         }
                         current = output;
 
-                        // After processing, output deltas represent outer table rows (Issues, not IssueLabels)
-                        // Update contained_tables so downstream ArrayAggregates know this
-                        if is_inner_delta && !contained_tables.contains(&outer_tbl) {
-                            contained_tables.push(outer_tbl.clone());
+                        // After a Join, the delta now contains data from all input tables plus join_table
+                        for table in input_tables_cloned {
+                            if !contained_tables.contains(&table) {
+                                contained_tables.push(table);
+                            }
                         }
-                    } else if is_inner_join_delta {
-                        // Delta from inner join table (e.g., Users change)
-                        // TODO: Ideally we should find affected IssueAssignees and update those Issues
-                        // For now, clear current to prevent unrelated rows from flowing through
-                        current = DeltaBatch::new();
-                    } else {
-                        // Not for this node - update outer_rows cache if this is a pass-through
-                        // from an upstream ArrayAggregate that added an array to the row
-                        // Only update if the delta contains outer table data
-                        if contained_tables.contains(&outer_tbl) {
-                            for d in current.iter() {
-                                match d {
-                                    RowDelta::Added { id, row } | RowDelta::Updated { id, row, .. } => {
-                                        // Update our cached outer_row so subsequent inner deltas use fresh data
-                                        outer_rows.insert(*id, row.clone());
-                                    }
-                                    RowDelta::Removed { id, .. } => {
-                                        outer_rows.remove(id);
+                        if !contained_tables.contains(&join_table_str) {
+                            contained_tables.push(join_table_str);
+                        }
+                    }
+                    QueryNode::RecursiveFilter { .. } => {
+                        // RecursiveFilter needs special evaluation for fixpoint iteration
+                        current = node.evaluate_recursive(current);
+                    }
+                    QueryNode::ArrayAggregate {
+                        outer_table,
+                        inner_table,
+                        inner_ref_column,
+                        outer_rows,
+                        inner_joins,
+                        ..
+                    } => {
+                        // Clone values before borrowing node mutably
+                        let outer_tbl = outer_table.clone();
+                        let inner_tbl = inner_table.clone();
+                        let inner_ref = inner_ref_column.clone();
+                        let join_tables: Vec<String> =
+                            inner_joins.iter().map(|(_, t, _)| t.clone()).collect();
+
+                        // Check if this delta is for this node
+                        // After Join processing, contained_tables includes all joined tables
+                        let is_outer_delta =
+                            source_table == outer_tbl || contained_tables.contains(&outer_tbl);
+                        let is_inner_delta =
+                            source_table == inner_tbl || contained_tables.contains(&inner_tbl);
+                        // Check if delta is for a table in inner joins (e.g., Users in IssueAssignees JOIN Users)
+                        let is_inner_join_delta = join_tables.contains(&source_table.to_string());
+
+                        if is_outer_delta || is_inner_delta {
+                            // Process deltas through ArrayAggregate
+                            let outer_schema = self
+                                .all_schemas
+                                .get(&outer_tbl)
+                                .cloned()
+                                .unwrap_or_else(|| self.schema.clone());
+
+                            let mut output = DeltaBatch::new();
+                            for d in current.into_iter() {
+                                let batch = node.evaluate_array_aggregate(
+                                    d,
+                                    source_table,
+                                    is_outer_delta,
+                                    is_inner_delta,
+                                    &outer_schema,
+                                    |outer_id| {
+                                        // Look up all inner rows that reference this outer id
+                                        db.find_referencing(&inner_tbl, &inner_ref, outer_id)
+                                    },
+                                    |table_name, id| {
+                                        // Look up a row by table and id (for resolving inner joins)
+                                        db.get_row(table_name, id).map(|(_, row)| row)
+                                    },
+                                );
+                                output.extend(batch);
+                            }
+                            current = output;
+
+                            // After processing, output deltas represent outer table rows (Issues, not IssueLabels)
+                            // Update contained_tables so downstream ArrayAggregates know this
+                            if is_inner_delta && !contained_tables.contains(&outer_tbl) {
+                                contained_tables.push(outer_tbl.clone());
+                            }
+                        } else if is_inner_join_delta {
+                            // Delta from inner join table (e.g., Users change)
+                            // TODO: Ideally we should find affected IssueAssignees and update those Issues
+                            // For now, clear current to prevent unrelated rows from flowing through
+                            current = DeltaBatch::new();
+                        } else {
+                            // Not for this node - update outer_rows cache if this is a pass-through
+                            // from an upstream ArrayAggregate that added an array to the row
+                            // Only update if the delta contains outer table data
+                            if contained_tables.contains(&outer_tbl) {
+                                for d in current.iter() {
+                                    match d {
+                                        RowDelta::Added { id, row }
+                                        | RowDelta::Updated { id, row, .. } => {
+                                            // Update our cached outer_row so subsequent inner deltas use fresh data
+                                            outer_rows.insert(*id, row.clone());
+                                        }
+                                        RowDelta::Removed { id, .. } => {
+                                            outer_rows.remove(id);
+                                        }
                                     }
                                 }
                             }
+                            // Pass through unchanged
                         }
-                        // Pass through unchanged
+                    }
+                    QueryNode::LimitOffset { .. } => {
+                        // LimitOffset needs special evaluation with cache access
+                        current = node.evaluate_limit_offset(current, &self.schema, cache);
+                    }
+                    _ => {
+                        current = node.evaluate(current, cache);
                     }
                 }
-                QueryNode::LimitOffset { .. } => {
-                    // LimitOffset needs special evaluation with cache access
-                    current = node.evaluate_limit_offset(current, &self.schema, cache);
-                }
-                _ => {
-                    current = node.evaluate(current, &self.schema, cache);
-                }
             }
+
+            all_output.extend(current);
         }
 
-        current
+        all_output
     }
 
     /// Collect output rows in buffer format from the final cached set.
@@ -683,6 +991,15 @@ impl QueryGraph {
         let output_idx = self.node_indices[&self.output_node];
         if let QueryNode::Output { input, .. } = &self.nodes[output_idx] {
             let input_idx = self.node_indices[input];
+
+            // Check if the input to Output is a Projection node
+            // This handles INHERITS queries where we need to unqualify column names
+            if let Some(projected) = self.nodes[input_idx].cached_projected() {
+                return projected
+                    .iter()
+                    .map(|(id, row)| (*id, row.clone()))
+                    .collect();
+            }
 
             // Check if the input to Output is an ArrayAggregate node (even for JOIN queries)
             // This handles JOIN + ARRAY subquery cases
@@ -699,48 +1016,35 @@ impl QueryGraph {
                 // Find the Join node (it has cached_rows with JoinedRow data)
                 let join_node = self.nodes.iter().find(|n| n.cached_joined().is_some());
 
-                if let Some(join_node) = join_node {
-                    if let Some(joined_rows) = join_node.cached_joined() {
-                        // Get IDs to filter by from downstream Filter node (if any)
-                        let filter_ids = self.nodes[input_idx].cached_ids();
+                if let Some(join_node) = join_node
+                    && let Some(joined_rows) = join_node.cached_joined()
+                {
+                    // Get IDs to filter by from downstream Filter node (if any)
+                    let filter_ids = self.nodes[input_idx].cached_ids();
 
-                        // Apply the filter and projection - now returns OwnedRow directly
-                        let rows: Vec<(ObjectId, OwnedRow)> = joined_rows
-                            .iter()
-                            .filter(|(id, _)| {
-                                // If there's a filter, only include matching IDs
-                                filter_ids.map_or(true, |ids| ids.contains(id))
-                            })
-                            .map(|(primary_id, jr)| {
-                                // Apply projection if set
-                                if let Some(proj_table) = &self.projection_table {
-                                    if self.all_schemas.contains_key(proj_table) {
-                                        if let Some((_, row)) = jr.table_rows.get(proj_table) {
-                                            return (*primary_id, row.clone());
-                                        }
-                                    }
-                                }
-                                // Default: return all joined columns as OwnedRow
-                                (*primary_id, jr.to_output_row())
-                            })
-                            .collect();
+                    // Apply the filter - projection is now handled by explicit Projection nodes
+                    let rows: Vec<(ObjectId, OwnedRow)> = joined_rows
+                        .iter()
+                        .filter(|(id, _)| {
+                            // If there's a filter, only include matching IDs
+                            filter_ids.is_none_or(|ids| ids.contains(id))
+                        })
+                        .map(|(primary_id, jr)| (*primary_id, jr.to_output_row()))
+                        .collect();
 
-                        return rows;
-                    }
+                    return rows;
                 }
             }
 
             // For RecursiveFilter queries, get rows from accessible set
             // OwnedRow is already in buffer format
-            if let Some(accessible) = self.nodes[input_idx].accessible() {
-                if let Some(all_rows) = self.nodes[input_idx].all_rows() {
-                    return accessible
-                        .keys()
-                        .filter_map(|id| {
-                            all_rows.get(id).map(|owned_row| (*id, owned_row.clone()))
-                        })
-                        .collect();
-                }
+            if let Some(accessible) = self.nodes[input_idx].accessible()
+                && let Some(all_rows) = self.nodes[input_idx].all_rows()
+            {
+                return accessible
+                    .keys()
+                    .filter_map(|id| all_rows.get(id).map(|owned_row| (*id, owned_row.clone())))
+                    .collect();
             }
 
             // For ArrayAggregate queries, get rows from outer_rows
@@ -753,7 +1057,12 @@ impl QueryGraph {
             }
 
             // For LimitOffset queries, get rows from all_rows filtered by visible_ids
-            if let QueryNode::LimitOffset { all_rows, visible_ids, .. } = &self.nodes[input_idx] {
+            if let QueryNode::LimitOffset {
+                all_rows,
+                visible_ids,
+                ..
+            } = &self.nodes[input_idx]
+            {
                 // Return rows in sorted order (BTreeMap maintains order)
                 // Already in buffer format
                 return all_rows
@@ -768,9 +1077,10 @@ impl QueryGraph {
                 return ids
                     .iter()
                     .filter_map(|id| {
-                        cache.get(&self.table, *id).flatten().map(|row| {
-                            (*id, row.clone())
-                        })
+                        cache
+                            .get(&self.table, *id)
+                            .flatten()
+                            .map(|row| (*id, row.clone()))
                     })
                     .collect();
             }
@@ -860,19 +1170,34 @@ impl QueryGraph {
         let mut out = String::new();
 
         // Header
-        writeln!(out, "┌─────────────────────────────────────────────────────────────┐").unwrap();
-        writeln!(out, "│  Query Graph (id: {})                                       │", self.id.0).unwrap();
+        writeln!(
+            out,
+            "┌─────────────────────────────────────────────────────────────┐"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "│  Query Graph (id: {})                                       │",
+            self.id.0
+        )
+        .unwrap();
         writeln!(out, "│  Primary table: {:42} │", self.table).unwrap();
         if self.is_join {
             let tables = self.all_tables.join(", ");
             writeln!(out, "│  Join tables: {:44} │", truncate_str(&tables, 44)).unwrap();
         }
-        writeln!(out, "└─────────────────────────────────────────────────────────────┘").unwrap();
+        writeln!(
+            out,
+            "└─────────────────────────────────────────────────────────────┘"
+        )
+        .unwrap();
         writeln!(out).unwrap();
 
         // Nodes in topological order (reverse for visual flow: sources at top)
         for (idx, node) in self.nodes.iter().enumerate() {
-            let node_id = self.node_indices.iter()
+            let node_id = self
+                .node_indices
+                .iter()
                 .find(|&(_, i)| *i == idx)
                 .map(|(id, _)| id.0)
                 .unwrap_or(0);
@@ -905,15 +1230,15 @@ impl QueryGraph {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use super::*;
+    use crate::object::ObjectId;
+    use crate::sql::Database;
+    use crate::sql::query_graph::PredicateValue;
     use crate::sql::query_graph::builder::QueryGraphBuilder;
     use crate::sql::query_graph::predicate::Predicate;
-    use crate::sql::query_graph::PredicateValue;
     use crate::sql::row_buffer::{RowBuilder, RowDescriptor};
     use crate::sql::schema::{ColumnDef, ColumnType};
-    use crate::sql::Database;
-    use crate::object::ObjectId;
+    use std::sync::Arc;
 
     fn test_schema() -> TableSchema {
         TableSchema::new(
@@ -964,14 +1289,14 @@ mod tests {
 
         // Process an active user - should appear in output
         let (id, row) = make_owned_row(1, "Alice", true);
-        let delta = graph.process_change(RowDelta::Added { id, row }, &mut cache, &db.state());
+        let delta = graph.process_change(RowDelta::Added { id, row }, &mut cache, db.state());
 
         assert_eq!(delta.len(), 1);
         assert!(matches!(delta.iter().next(), Some(RowDelta::Added { .. })));
 
         // Process an inactive user - should be filtered out
         let (id, row) = make_owned_row(2, "Bob", false);
-        let delta = graph.process_change(RowDelta::Added { id, row }, &mut cache, &db.state());
+        let delta = graph.process_change(RowDelta::Added { id, row }, &mut cache, db.state());
 
         // Early cutoff - no output
         assert!(delta.is_empty());
@@ -998,12 +1323,24 @@ mod tests {
         let (id2, row2) = make_owned_row(2, "Bob", false);
         let (id3, row3) = make_owned_row(3, "Carol", true);
 
-        graph.process_change(RowDelta::Added { id: id1, row: row1 }, &mut cache, &db.state());
-        graph.process_change(RowDelta::Added { id: id2, row: row2 }, &mut cache, &db.state());
-        graph.process_change(RowDelta::Added { id: id3, row: row3 }, &mut cache, &db.state());
+        graph.process_change(
+            RowDelta::Added { id: id1, row: row1 },
+            &mut cache,
+            db.state(),
+        );
+        graph.process_change(
+            RowDelta::Added { id: id2, row: row2 },
+            &mut cache,
+            db.state(),
+        );
+        graph.process_change(
+            RowDelta::Added { id: id3, row: row3 },
+            &mut cache,
+            db.state(),
+        );
 
         // Get output - should only have active users
-        let output = graph.get_output(&mut cache, &db.state());
+        let output = graph.get_output(&mut cache, db.state());
 
         assert_eq!(output.len(), 2);
         let ids: Vec<_> = output.iter().map(|(id, _)| id.0).collect();
@@ -1062,7 +1399,8 @@ mod tests {
 
         let mut builder = QueryGraphBuilder::new("folders", outer_schema.clone());
         let scan = builder.table_scan();
-        let agg = builder.array_aggregate(scan, "notes", "folder", inner_schema.clone(), vec![], -1);
+        let agg =
+            builder.array_aggregate(scan, "notes", "folder", inner_schema.clone(), vec![], -1);
         let mut graph = builder.output(agg, GraphId(1));
 
         // Verify inner table is tracked
@@ -1078,7 +1416,7 @@ mod tests {
 
         // Add a folder
         let (id, row) = make_owned_folder(1, "Work");
-        let delta = graph.process_change(RowDelta::Added { id, row }, &mut cache, &db.state());
+        let delta = graph.process_change(RowDelta::Added { id, row }, &mut cache, db.state());
 
         // Should emit Added delta
         assert_eq!(delta.len(), 1);
@@ -1092,7 +1430,8 @@ mod tests {
 
         let mut builder = QueryGraphBuilder::new("folders", outer_schema.clone());
         let scan = builder.table_scan();
-        let agg = builder.array_aggregate(scan, "notes", "folder", inner_schema.clone(), vec![], -1);
+        let agg =
+            builder.array_aggregate(scan, "notes", "folder", inner_schema.clone(), vec![], -1);
         let mut graph = builder.output(agg, GraphId(1));
 
         let db = Database::in_memory();
@@ -1103,7 +1442,7 @@ mod tests {
 
         // Add a folder first
         let (id, row) = make_owned_folder(1, "Work");
-        graph.process_change(RowDelta::Added { id, row }, &mut cache, &db.state());
+        graph.process_change(RowDelta::Added { id, row }, &mut cache, db.state());
 
         // Now add a note to that folder
         let (id, row) = make_owned_note(100, 1, "Meeting Notes");
@@ -1111,7 +1450,7 @@ mod tests {
             RowDelta::Added { id, row },
             "notes",
             &mut cache,
-            &db.state(),
+            db.state(),
         );
 
         // Should emit Updated delta for the folder
@@ -1126,7 +1465,8 @@ mod tests {
 
         let mut builder = QueryGraphBuilder::new("folders", outer_schema.clone());
         let scan = builder.table_scan();
-        let agg = builder.array_aggregate(scan, "notes", "folder", inner_schema.clone(), vec![], -1);
+        let agg =
+            builder.array_aggregate(scan, "notes", "folder", inner_schema.clone(), vec![], -1);
         let mut graph = builder.output(agg, GraphId(1));
 
         let db = Database::in_memory();
@@ -1137,16 +1477,26 @@ mod tests {
 
         // Add a folder
         let (id, row) = make_owned_folder(1, "Work");
-        graph.process_change(RowDelta::Added { id, row }, &mut cache, &db.state());
+        graph.process_change(RowDelta::Added { id, row }, &mut cache, db.state());
 
         // Add two notes
         let (id, row) = make_owned_note(100, 1, "Note 1");
-        graph.process_change_from_table(RowDelta::Added { id, row }, "notes", &mut cache, &db.state());
+        graph.process_change_from_table(
+            RowDelta::Added { id, row },
+            "notes",
+            &mut cache,
+            db.state(),
+        );
         let (id, row) = make_owned_note(101, 1, "Note 2");
-        graph.process_change_from_table(RowDelta::Added { id, row }, "notes", &mut cache, &db.state());
+        graph.process_change_from_table(
+            RowDelta::Added { id, row },
+            "notes",
+            &mut cache,
+            db.state(),
+        );
 
         // Get output
-        let output = graph.get_output(&mut cache, &db.state());
+        let output = graph.get_output(&mut cache, db.state());
         assert_eq!(output.len(), 1);
 
         // Remove one note
@@ -1157,12 +1507,15 @@ mod tests {
             },
             "notes",
             &mut cache,
-            &db.state(),
+            db.state(),
         );
 
         // Should emit Updated delta
         assert_eq!(delta.len(), 1);
-        assert!(matches!(delta.iter().next(), Some(RowDelta::Updated { .. })));
+        assert!(matches!(
+            delta.iter().next(),
+            Some(RowDelta::Updated { .. })
+        ));
     }
 
     #[test]
@@ -1180,40 +1533,55 @@ mod tests {
         db.create_table(inner_schema.clone()).unwrap();
 
         // Insert a folder using the Database API
-        let folder_id = db.insert_with("folders", |b| {
-            b.set_string_by_name("name", "Work").build()
-        }).unwrap();
+        let folder_id = db
+            .insert_with("folders", |b| b.set_string_by_name("name", "Work").build())
+            .unwrap();
 
         // Insert notes that reference the folder
-        let _note1_id = db.insert_with("notes", |b| {
-            b.set_ref_by_name("folder", folder_id)
-             .set_string_by_name("title", "Meeting Notes")
-             .build()
-        }).unwrap();
-        let _note2_id = db.insert_with("notes", |b| {
-            b.set_ref_by_name("folder", folder_id)
-             .set_string_by_name("title", "Project Plan")
-             .build()
-        }).unwrap();
+        let _note1_id = db
+            .insert_with("notes", |b| {
+                b.set_ref_by_name("folder", folder_id)
+                    .set_string_by_name("title", "Meeting Notes")
+                    .build()
+            })
+            .unwrap();
+        let _note2_id = db
+            .insert_with("notes", |b| {
+                b.set_ref_by_name("folder", folder_id)
+                    .set_string_by_name("title", "Project Plan")
+                    .build()
+            })
+            .unwrap();
 
         // Verify the data exists
-        eprintln!("[TEST] folders count: {}", db.state().read_all_rows("folders").len());
-        eprintln!("[TEST] notes count: {}", db.state().read_all_rows("notes").len());
+        eprintln!(
+            "[TEST] folders count: {}",
+            db.state().read_all_rows("folders").len()
+        );
+        eprintln!(
+            "[TEST] notes count: {}",
+            db.state().read_all_rows("notes").len()
+        );
 
         // Verify find_referencing works
         let refs = db.state().find_referencing("notes", "folder", folder_id);
-        eprintln!("[TEST] find_referencing('notes', 'folder', {:?}) returned {} rows", folder_id, refs.len());
+        eprintln!(
+            "[TEST] find_referencing('notes', 'folder', {:?}) returned {} rows",
+            folder_id,
+            refs.len()
+        );
 
         // Now create the query graph
         let mut builder = QueryGraphBuilder::new("folders", outer_schema.clone());
         let scan = builder.table_scan();
-        let agg = builder.array_aggregate(scan, "notes", "folder", inner_schema.clone(), vec![], -1);
+        let agg =
+            builder.array_aggregate(scan, "notes", "folder", inner_schema.clone(), vec![], -1);
         let mut graph = builder.output(agg, GraphId(1));
 
         let mut cache = RowCache::new();
 
         // Get output - this should initialize and find the existing notes
-        let output = graph.get_output(&mut cache, &db.state());
+        let output = graph.get_output(&mut cache, db.state());
 
         eprintln!("[TEST] output.len() = {}", output.len());
         assert_eq!(output.len(), 1);
@@ -1227,7 +1595,11 @@ mod tests {
 
         // The buffer should be larger than just the folder data (which is ~8 bytes)
         // because it includes the array of notes
-        assert!(row.buffer.len() > 20, "Buffer should include array data, got {} bytes", row.buffer.len());
+        assert!(
+            row.buffer.len() > 20,
+            "Buffer should include array data, got {} bytes",
+            row.buffer.len()
+        );
 
         // Parse the array from the buffer to verify it has 2 items
         // The array is at variable index 0 (after the fixed "name" column)
@@ -1245,8 +1617,8 @@ mod tests {
     /// 4. Check that arrays are populated via inner delta processing
     #[test]
     fn array_aggregate_inner_delta_via_database_api() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         let outer_schema = folder_schema();
         let inner_schema = note_schema();
@@ -1269,29 +1641,45 @@ mod tests {
         }));
 
         // Insert a folder via Database API (should trigger outer delta)
-        let folder_id = db.insert_with("folders", |b| {
-            b.set_string_by_name("name", "Work").build()
-        }).unwrap();
+        let folder_id = db
+            .insert_with("folders", |b| b.set_string_by_name("name", "Work").build())
+            .unwrap();
         eprintln!("[TEST] Inserted folder with id: {:?}", folder_id);
 
         // The subscription callback fires with initial state + the Added delta
         // So we expect at least 1 update after insert
         let count_after_folder = update_count.load(Ordering::SeqCst);
-        eprintln!("[TEST] update_count after folder insert: {}", count_after_folder);
-        assert!(count_after_folder >= 1, "Expected at least 1 update after folder insert");
+        eprintln!(
+            "[TEST] update_count after folder insert: {}",
+            count_after_folder
+        );
+        assert!(
+            count_after_folder >= 1,
+            "Expected at least 1 update after folder insert"
+        );
 
         // Insert a note via Database API (should trigger inner delta)
-        let note_id = db.insert_with("notes", |b| {
-            b.set_ref_by_name("folder", folder_id)
-             .set_string_by_name("title", "Meeting Notes")
-             .build()
-        }).unwrap();
+        let note_id = db
+            .insert_with("notes", |b| {
+                b.set_ref_by_name("folder", folder_id)
+                    .set_string_by_name("title", "Meeting Notes")
+                    .build()
+            })
+            .unwrap();
         eprintln!("[TEST] Inserted note with id: {:?}", note_id);
 
         // Should have gotten another update (Updated delta for folder with new array)
         let count_after_note = update_count.load(Ordering::SeqCst);
-        eprintln!("[TEST] update_count after note insert: {}", count_after_note);
-        assert!(count_after_note > count_after_folder, "Expected additional update after note insert, got {} -> {}", count_after_folder, count_after_note);
+        eprintln!(
+            "[TEST] update_count after note insert: {}",
+            count_after_note
+        );
+        assert!(
+            count_after_note > count_after_folder,
+            "Expected additional update after note insert, got {} -> {}",
+            count_after_folder,
+            count_after_note
+        );
 
         // Get the output and check the array
         let output = query.rows();
@@ -1302,7 +1690,14 @@ mod tests {
         assert_eq!(*id, folder_id);
 
         // Debug: print all columns in the row
-        eprintln!("[TEST] Row descriptor columns: {:?}", row.descriptor.columns.iter().map(|c| (&c.name, &c.ty)).collect::<Vec<_>>());
+        eprintln!(
+            "[TEST] Row descriptor columns: {:?}",
+            row.descriptor
+                .columns
+                .iter()
+                .map(|c| (&c.name, &c.ty))
+                .collect::<Vec<_>>()
+        );
         eprintln!("[TEST] Row buffer len: {}", row.buffer.len());
         for (i, col) in row.descriptor.columns.iter().enumerate() {
             eprintln!("[TEST] Column {} ({}): {:?}", i, col.name, row.get(i));
@@ -1330,8 +1725,8 @@ mod tests {
     /// Test two chained ArrayAggregates (like Issues with IssueLabels and IssueAssignees)
     #[test]
     fn array_aggregate_two_chained_inner_deltas_via_database_api() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         // Create schemas
         let folder_schema = folder_schema();
@@ -1352,12 +1747,14 @@ mod tests {
         db.create_table(task_schema.clone()).unwrap();
 
         // Create incremental query with TWO array subqueries
-        let query = db.incremental_query(
-            "SELECT f.id, f.name, \
+        let query = db
+            .incremental_query(
+                "SELECT f.id, f.name, \
              ARRAY(SELECT n.id, n.folder, n.title FROM notes n WHERE n.folder = f.id) as notes, \
              ARRAY(SELECT t.id, t.folder, t.name FROM tasks t WHERE t.folder = f.id) as tasks \
-             FROM folders f"
-        ).unwrap();
+             FROM folders f",
+            )
+            .unwrap();
 
         // Track updates
         let update_count = Arc::new(AtomicUsize::new(0));
@@ -1367,37 +1764,56 @@ mod tests {
         }));
 
         // Insert a folder
-        let folder_id = db.insert_with("folders", |b| {
-            b.set_string_by_name("name", "Work").build()
-        }).unwrap();
+        let folder_id = db
+            .insert_with("folders", |b| b.set_string_by_name("name", "Work").build())
+            .unwrap();
         eprintln!("[TEST] Inserted folder with id: {:?}", folder_id);
 
         let count_after_folder = update_count.load(Ordering::SeqCst);
-        eprintln!("[TEST] update_count after folder insert: {}", count_after_folder);
+        eprintln!(
+            "[TEST] update_count after folder insert: {}",
+            count_after_folder
+        );
 
         // Insert a note
-        let note_id = db.insert_with("notes", |b| {
-            b.set_ref_by_name("folder", folder_id)
-             .set_string_by_name("title", "Meeting Notes")
-             .build()
-        }).unwrap();
+        let note_id = db
+            .insert_with("notes", |b| {
+                b.set_ref_by_name("folder", folder_id)
+                    .set_string_by_name("title", "Meeting Notes")
+                    .build()
+            })
+            .unwrap();
         eprintln!("[TEST] Inserted note with id: {:?}", note_id);
 
         let count_after_note = update_count.load(Ordering::SeqCst);
-        eprintln!("[TEST] update_count after note insert: {}", count_after_note);
-        assert!(count_after_note > count_after_folder, "Expected update after note insert");
+        eprintln!(
+            "[TEST] update_count after note insert: {}",
+            count_after_note
+        );
+        assert!(
+            count_after_note > count_after_folder,
+            "Expected update after note insert"
+        );
 
         // Insert a task
-        let task_id = db.insert_with("tasks", |b| {
-            b.set_ref_by_name("folder", folder_id)
-             .set_string_by_name("name", "Review PR")
-             .build()
-        }).unwrap();
+        let task_id = db
+            .insert_with("tasks", |b| {
+                b.set_ref_by_name("folder", folder_id)
+                    .set_string_by_name("name", "Review PR")
+                    .build()
+            })
+            .unwrap();
         eprintln!("[TEST] Inserted task with id: {:?}", task_id);
 
         let count_after_task = update_count.load(Ordering::SeqCst);
-        eprintln!("[TEST] update_count after task insert: {}", count_after_task);
-        assert!(count_after_task > count_after_note, "Expected update after task insert");
+        eprintln!(
+            "[TEST] update_count after task insert: {}",
+            count_after_task
+        );
+        assert!(
+            count_after_task > count_after_note,
+            "Expected update after task insert"
+        );
 
         // Get the output and check both arrays
         let output = query.rows();
@@ -1408,7 +1824,14 @@ mod tests {
         assert_eq!(*id, folder_id);
 
         // Debug: print all columns
-        eprintln!("[TEST] Row descriptor columns: {:?}", row.descriptor.columns.iter().map(|c| &c.name).collect::<Vec<_>>());
+        eprintln!(
+            "[TEST] Row descriptor columns: {:?}",
+            row.descriptor
+                .columns
+                .iter()
+                .map(|c| &c.name)
+                .collect::<Vec<_>>()
+        );
 
         // Check notes array
         let notes_value = row.get_by_name("notes");

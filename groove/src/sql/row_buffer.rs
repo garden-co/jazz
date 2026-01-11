@@ -86,9 +86,10 @@ pub struct RowDescriptor {
 impl RowDescriptor {
     /// Create a RowDescriptor from an existing TableSchema.
     pub fn from_table_schema(schema: &TableSchema) -> Self {
-        let columns = schema.columns.iter().map(|col| {
-            (col.name.clone(), col.ty.clone(), col.nullable)
-        });
+        let columns = schema
+            .columns
+            .iter()
+            .map(|col| (col.name.clone(), col.ty.clone(), col.nullable));
         Self::new(columns)
     }
 
@@ -97,7 +98,11 @@ impl RowDescriptor {
     /// This is used for JOIN operations where predicates use qualified names.
     pub fn from_table_schema_qualified(schema: &TableSchema, table_name: &str) -> Self {
         let columns = schema.columns.iter().map(|col| {
-            (format!("{}.{}", table_name, col.name), col.ty.clone(), col.nullable)
+            (
+                format!("{}.{}", table_name, col.name),
+                col.ty.clone(),
+                col.nullable,
+            )
         });
         Self::new(columns)
     }
@@ -147,7 +152,8 @@ impl RowDescriptor {
             });
         }
 
-        let variable_count = descriptors.len() - descriptors.iter().filter(|c| c.is_fixed_size()).count();
+        let variable_count =
+            descriptors.len() - descriptors.iter().filter(|c| c.is_fixed_size()).count();
 
         RowDescriptor {
             columns: descriptors,
@@ -209,8 +215,34 @@ impl RowDescriptor {
     }
 
     /// Find column index by name.
+    ///
+    /// Supports both qualified (table.column) and unqualified (column) names.
+    /// First tries exact match, then:
+    /// - If searching for "column", tries to find "*.column" (any table prefix)
+    /// - If searching for "table.column", tries to find "column" (unqualified)
     pub fn column_index(&self, name: &str) -> Option<usize> {
-        self.columns.iter().position(|c| c.name == name)
+        // First try exact match
+        if let Some(idx) = self.columns.iter().position(|c| c.name == name) {
+            return Some(idx);
+        }
+
+        // If the search name is unqualified, try to find a qualified match
+        if !name.contains('.') {
+            // Search for any column ending with ".{name}"
+            let suffix = format!(".{}", name);
+            if let Some(idx) = self.columns.iter().position(|c| c.name.ends_with(&suffix)) {
+                return Some(idx);
+            }
+        } else {
+            // If the search name is qualified, try to find an unqualified match
+            if let Some(col_name) = name.split('.').next_back()
+                && let Some(idx) = self.columns.iter().position(|c| c.name == col_name)
+            {
+                return Some(idx);
+            }
+        }
+
+        None
     }
 
     /// Get column descriptor by name.
@@ -291,7 +323,8 @@ impl RowDescriptor {
 
                 // Find this column's logical index by matching on original schema_index
                 // (schema_index is unique within a descriptor)
-                let logical_schema_idx = logical_order.iter()
+                let logical_schema_idx = logical_order
+                    .iter()
                     .find(|(d, _, c)| *d == desc_idx && c.schema_index == col.schema_index)
                     .map(|(_, idx, _)| *idx)
                     .unwrap_or(columns.len());
@@ -608,12 +641,10 @@ impl<'a> RowRef<'a> {
                 }
                 Some(RowValue::BlobArray(refs))
             }
-            ColumnType::Array(item_descriptor) => {
-                Some(RowValue::Array(ArrayValue {
-                    item_descriptor: item_descriptor.as_ref(),
-                    data: value_data,
-                }))
-            }
+            ColumnType::Array(item_descriptor) => Some(RowValue::Array(ArrayValue {
+                item_descriptor: item_descriptor.as_ref(),
+                data: value_data,
+            })),
             _ => None, // Not a variable-size type
         }
     }
@@ -653,7 +684,11 @@ impl<'a> RowRef<'a> {
         } else {
             // Read offset from table (0-indexed: offset for column i is at position i-1)
             let offset_pos = fixed_size + (var_idx - 1) * 4;
-            let bytes: [u8; 4] = self.buffer.get(offset_pos..offset_pos + 4)?.try_into().ok()?;
+            let bytes: [u8; 4] = self
+                .buffer
+                .get(offset_pos..offset_pos + 4)?
+                .try_into()
+                .ok()?;
             u32::from_le_bytes(bytes) as usize
         };
 
@@ -664,13 +699,16 @@ impl<'a> RowRef<'a> {
         } else {
             // Read next column's offset from table
             let offset_pos = fixed_size + var_idx * 4;
-            let bytes: [u8; 4] = self.buffer.get(offset_pos..offset_pos + 4)?.try_into().ok()?;
+            let bytes: [u8; 4] = self
+                .buffer
+                .get(offset_pos..offset_pos + 4)?
+                .try_into()
+                .ok()?;
             u32::from_le_bytes(bytes) as usize
         };
 
         Some((start, end - start))
     }
-
 }
 
 /// An owned row with its own buffer. For caching and WASM transfer.
@@ -801,7 +839,8 @@ impl OwnedRow {
     /// This is needed for JOIN queries where predicates use qualified names.
     pub fn qualify_columns(&self, table: &str, schema: &TableSchema) -> Self {
         // Create a new descriptor with qualified column names
-        let qualified_descriptor = Arc::new(RowDescriptor::from_table_schema_qualified(schema, table));
+        let qualified_descriptor =
+            Arc::new(RowDescriptor::from_table_schema_qualified(schema, table));
 
         // Build the new row with qualified column names
         let mut builder = RowBuilder::new(qualified_descriptor.clone());
@@ -837,17 +876,44 @@ impl OwnedRow {
             RowValue::Null => builder.set_null(idx),
             RowValue::Array(arr) => {
                 // Collect items into OwnedRows
-                let items: Vec<OwnedRow> = arr.iter().map(|row_ref| {
-                    OwnedRow::new(
-                        Arc::new(row_ref.descriptor.clone()),
-                        row_ref.buffer.to_vec(),
-                    )
-                }).collect();
+                let items: Vec<OwnedRow> = arr
+                    .iter()
+                    .map(|row_ref| {
+                        OwnedRow::new(
+                            Arc::new(row_ref.descriptor.clone()),
+                            row_ref.buffer.to_vec(),
+                        )
+                    })
+                    .collect();
                 builder.set_array(idx, &items)
             }
             RowValue::Blob(content_ref) => builder.set_blob(idx, content_ref),
             RowValue::BlobArray(refs) => builder.set_blob_array(idx, &refs),
         }
+    }
+
+    /// Create a new OwnedRow by projecting and renaming columns.
+    ///
+    /// Used by Projection nodes to convert qualified column names back to
+    /// unqualified names (e.g., "documents.title" → "title").
+    ///
+    /// Columns not in the map are excluded from the output.
+    pub fn project_rename(
+        &self,
+        column_map: &std::collections::HashMap<String, String>,
+        output_descriptor: Arc<RowDescriptor>,
+    ) -> Self {
+        let mut builder = RowBuilder::new(output_descriptor.clone());
+
+        for (old_name, new_name) in column_map {
+            if let Some(value) = self.get_by_name(old_name)
+                && let Some(new_idx) = output_descriptor.column_index(new_name)
+            {
+                builder = Self::set_from_row_value(builder, new_idx, value);
+            }
+        }
+
+        builder.build()
     }
 
     /// Merge multiple rows into a single combined row.
@@ -869,7 +935,8 @@ impl OwnedRow {
 
         // Build combined descriptor preserving buffer order from sources
         let descriptors: Vec<&RowDescriptor> = rows.iter().map(|r| r.descriptor.as_ref()).collect();
-        let combined_descriptor = Arc::new(RowDescriptor::concat_preserving_buffer_order(&descriptors));
+        let combined_descriptor =
+            Arc::new(RowDescriptor::concat_preserving_buffer_order(&descriptors));
 
         // Build the combined row using RowBuilder
         let mut builder = RowBuilder::new(combined_descriptor.clone());
@@ -925,15 +992,16 @@ impl RowBuilder {
 
     /// Set a boolean column value.
     pub fn set_bool(mut self, col_idx: usize, value: bool) -> Self {
-        if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if col.is_fixed_size() && matches!(&col.ty, ColumnType::Bool) {
-                let offset = col.offset;
-                if col.nullable {
-                    self.fixed_section[offset] = 1; // present
-                    self.fixed_section[offset + 1] = if value { 1 } else { 0 };
-                } else {
-                    self.fixed_section[offset] = if value { 1 } else { 0 };
-                }
+        if let Some(col) = self.descriptor.columns.get(col_idx)
+            && col.is_fixed_size()
+            && matches!(&col.ty, ColumnType::Bool)
+        {
+            let offset = col.offset;
+            if col.nullable {
+                self.fixed_section[offset] = 1; // present
+                self.fixed_section[offset + 1] = if value { 1 } else { 0 };
+            } else {
+                self.fixed_section[offset] = if value { 1 } else { 0 };
             }
         }
         self
@@ -941,15 +1009,16 @@ impl RowBuilder {
 
     /// Set an i32 column value.
     pub fn set_i32(mut self, col_idx: usize, value: i32) -> Self {
-        if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if col.is_fixed_size() && matches!(&col.ty, ColumnType::I32) {
-                let offset = col.offset;
-                if col.nullable {
-                    self.fixed_section[offset] = 1; // present
-                    self.fixed_section[offset + 1..offset + 5].copy_from_slice(&value.to_le_bytes());
-                } else {
-                    self.fixed_section[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-                }
+        if let Some(col) = self.descriptor.columns.get(col_idx)
+            && col.is_fixed_size()
+            && matches!(&col.ty, ColumnType::I32)
+        {
+            let offset = col.offset;
+            if col.nullable {
+                self.fixed_section[offset] = 1; // present
+                self.fixed_section[offset + 1..offset + 5].copy_from_slice(&value.to_le_bytes());
+            } else {
+                self.fixed_section[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
             }
         }
         self
@@ -957,15 +1026,16 @@ impl RowBuilder {
 
     /// Set a u32 column value.
     pub fn set_u32(mut self, col_idx: usize, value: u32) -> Self {
-        if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if col.is_fixed_size() && matches!(&col.ty, ColumnType::U32) {
-                let offset = col.offset;
-                if col.nullable {
-                    self.fixed_section[offset] = 1; // present
-                    self.fixed_section[offset + 1..offset + 5].copy_from_slice(&value.to_le_bytes());
-                } else {
-                    self.fixed_section[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-                }
+        if let Some(col) = self.descriptor.columns.get(col_idx)
+            && col.is_fixed_size()
+            && matches!(&col.ty, ColumnType::U32)
+        {
+            let offset = col.offset;
+            if col.nullable {
+                self.fixed_section[offset] = 1; // present
+                self.fixed_section[offset + 1..offset + 5].copy_from_slice(&value.to_le_bytes());
+            } else {
+                self.fixed_section[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
             }
         }
         self
@@ -973,15 +1043,16 @@ impl RowBuilder {
 
     /// Set an i64 column value.
     pub fn set_i64(mut self, col_idx: usize, value: i64) -> Self {
-        if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if col.is_fixed_size() && matches!(&col.ty, ColumnType::I64) {
-                let offset = col.offset;
-                if col.nullable {
-                    self.fixed_section[offset] = 1; // present
-                    self.fixed_section[offset + 1..offset + 9].copy_from_slice(&value.to_le_bytes());
-                } else {
-                    self.fixed_section[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-                }
+        if let Some(col) = self.descriptor.columns.get(col_idx)
+            && col.is_fixed_size()
+            && matches!(&col.ty, ColumnType::I64)
+        {
+            let offset = col.offset;
+            if col.nullable {
+                self.fixed_section[offset] = 1; // present
+                self.fixed_section[offset + 1..offset + 9].copy_from_slice(&value.to_le_bytes());
+            } else {
+                self.fixed_section[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
             }
         }
         self
@@ -989,15 +1060,16 @@ impl RowBuilder {
 
     /// Set an f64 column value.
     pub fn set_f64(mut self, col_idx: usize, value: f64) -> Self {
-        if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if col.is_fixed_size() && matches!(&col.ty, ColumnType::F64) {
-                let offset = col.offset;
-                if col.nullable {
-                    self.fixed_section[offset] = 1; // present
-                    self.fixed_section[offset + 1..offset + 9].copy_from_slice(&value.to_le_bytes());
-                } else {
-                    self.fixed_section[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-                }
+        if let Some(col) = self.descriptor.columns.get(col_idx)
+            && col.is_fixed_size()
+            && matches!(&col.ty, ColumnType::F64)
+        {
+            let offset = col.offset;
+            if col.nullable {
+                self.fixed_section[offset] = 1; // present
+                self.fixed_section[offset + 1..offset + 9].copy_from_slice(&value.to_le_bytes());
+            } else {
+                self.fixed_section[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
             }
         }
         self
@@ -1005,15 +1077,16 @@ impl RowBuilder {
 
     /// Set a Ref (ObjectId) or ObjectId column value.
     pub fn set_ref(mut self, col_idx: usize, value: ObjectId) -> Self {
-        if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if col.is_fixed_size() && matches!(&col.ty, ColumnType::Ref(_) | ColumnType::ObjectId) {
-                let offset = col.offset;
-                if col.nullable {
-                    self.fixed_section[offset] = 1; // present
-                    self.fixed_section[offset + 1..offset + 17].copy_from_slice(&value.0.to_le_bytes());
-                } else {
-                    self.fixed_section[offset..offset + 16].copy_from_slice(&value.0.to_le_bytes());
-                }
+        if let Some(col) = self.descriptor.columns.get(col_idx)
+            && col.is_fixed_size()
+            && matches!(&col.ty, ColumnType::Ref(_) | ColumnType::ObjectId)
+        {
+            let offset = col.offset;
+            if col.nullable {
+                self.fixed_section[offset] = 1; // present
+                self.fixed_section[offset + 1..offset + 17].copy_from_slice(&value.0.to_le_bytes());
+            } else {
+                self.fixed_section[offset..offset + 16].copy_from_slice(&value.0.to_le_bytes());
             }
         }
         self
@@ -1021,16 +1094,17 @@ impl RowBuilder {
 
     /// Set a string column value.
     pub fn set_string(mut self, col_idx: usize, value: &str) -> Self {
-        if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if !col.is_fixed_size() && matches!(&col.ty, ColumnType::String) {
-                let var_idx = col.offset;
-                if col.nullable {
-                    let mut data = vec![1u8]; // present
-                    data.extend_from_slice(value.as_bytes());
-                    self.variable_sections[var_idx] = data;
-                } else {
-                    self.variable_sections[var_idx] = value.as_bytes().to_vec();
-                }
+        if let Some(col) = self.descriptor.columns.get(col_idx)
+            && !col.is_fixed_size()
+            && matches!(&col.ty, ColumnType::String)
+        {
+            let var_idx = col.offset;
+            if col.nullable {
+                let mut data = vec![1u8]; // present
+                data.extend_from_slice(value.as_bytes());
+                self.variable_sections[var_idx] = data;
+            } else {
+                self.variable_sections[var_idx] = value.as_bytes().to_vec();
             }
         }
         self
@@ -1038,16 +1112,17 @@ impl RowBuilder {
 
     /// Set a bytes column value.
     pub fn set_bytes(mut self, col_idx: usize, value: &[u8]) -> Self {
-        if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if !col.is_fixed_size() && matches!(&col.ty, ColumnType::Bytes) {
-                let var_idx = col.offset;
-                if col.nullable {
-                    let mut data = vec![1u8]; // present
-                    data.extend_from_slice(value);
-                    self.variable_sections[var_idx] = data;
-                } else {
-                    self.variable_sections[var_idx] = value.to_vec();
-                }
+        if let Some(col) = self.descriptor.columns.get(col_idx)
+            && !col.is_fixed_size()
+            && matches!(&col.ty, ColumnType::Bytes)
+        {
+            let var_idx = col.offset;
+            if col.nullable {
+                let mut data = vec![1u8]; // present
+                data.extend_from_slice(value);
+                self.variable_sections[var_idx] = data;
+            } else {
+                self.variable_sections[var_idx] = value.to_vec();
             }
         }
         self
@@ -1055,16 +1130,17 @@ impl RowBuilder {
 
     /// Set a blob column value.
     pub fn set_blob(mut self, col_idx: usize, value: ContentRef) -> Self {
-        if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if !col.is_fixed_size() && matches!(&col.ty, ColumnType::Blob) {
-                let var_idx = col.offset;
-                if col.nullable {
-                    let mut data = vec![1u8]; // present
-                    data.extend_from_slice(&value.to_row_bytes());
-                    self.variable_sections[var_idx] = data;
-                } else {
-                    self.variable_sections[var_idx] = value.to_row_bytes();
-                }
+        if let Some(col) = self.descriptor.columns.get(col_idx)
+            && !col.is_fixed_size()
+            && matches!(&col.ty, ColumnType::Blob)
+        {
+            let var_idx = col.offset;
+            if col.nullable {
+                let mut data = vec![1u8]; // present
+                data.extend_from_slice(&value.to_row_bytes());
+                self.variable_sections[var_idx] = data;
+            } else {
+                self.variable_sections[var_idx] = value.to_row_bytes();
             }
         }
         self
@@ -1074,31 +1150,32 @@ impl RowBuilder {
     ///
     /// Format: `[u32 count][content_ref₁][content_ref₂]...`
     pub fn set_blob_array(mut self, col_idx: usize, values: &[ContentRef]) -> Self {
-        if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if !col.is_fixed_size() && matches!(&col.ty, ColumnType::BlobArray) {
-                let var_idx = col.offset;
-                let mut data = if col.nullable { vec![1u8] } else { Vec::new() };
-                data.extend_from_slice(&(values.len() as u32).to_le_bytes());
-                for v in values {
-                    data.extend_from_slice(&v.to_row_bytes());
-                }
-                self.variable_sections[var_idx] = data;
+        if let Some(col) = self.descriptor.columns.get(col_idx)
+            && !col.is_fixed_size()
+            && matches!(&col.ty, ColumnType::BlobArray)
+        {
+            let var_idx = col.offset;
+            let mut data = if col.nullable { vec![1u8] } else { Vec::new() };
+            data.extend_from_slice(&(values.len() as u32).to_le_bytes());
+            for v in values {
+                data.extend_from_slice(&v.to_row_bytes());
             }
+            self.variable_sections[var_idx] = data;
         }
         self
     }
 
     /// Set a nullable column to null.
     pub fn set_null(mut self, col_idx: usize) -> Self {
-        if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if col.nullable {
-                if col.is_fixed_size() {
-                    let offset = col.offset;
-                    self.fixed_section[offset] = 0; // null flag
-                } else {
-                    let var_idx = col.offset;
-                    self.variable_sections[var_idx] = vec![0u8]; // null flag
-                }
+        if let Some(col) = self.descriptor.columns.get(col_idx)
+            && col.nullable
+        {
+            if col.is_fixed_size() {
+                let offset = col.offset;
+                self.fixed_section[offset] = 0; // null flag
+            } else {
+                let var_idx = col.offset;
+                self.variable_sections[var_idx] = vec![0u8]; // null flag
             }
         }
         self
@@ -1192,43 +1269,44 @@ impl RowBuilder {
     /// Format: `[u32 count][u32 offset₂][u32 offset₃]...[item₁][item₂]...`
     /// For N items, N-1 offsets are stored. Item 0 starts after the offset table.
     pub fn set_array(mut self, col_idx: usize, items: &[OwnedRow]) -> Self {
-        if let Some(col) = self.descriptor.columns.get(col_idx) {
-            if !col.is_fixed_size() && matches!(&col.ty, ColumnType::Array(_)) {
-                let var_idx = col.offset;
-                let mut data = if col.nullable { vec![1u8] } else { Vec::new() };
-                let count = items.len();
+        if let Some(col) = self.descriptor.columns.get(col_idx)
+            && !col.is_fixed_size()
+            && matches!(&col.ty, ColumnType::Array(_))
+        {
+            let var_idx = col.offset;
+            let mut data = if col.nullable { vec![1u8] } else { Vec::new() };
+            let count = items.len();
 
-                // Write item count as u32
-                data.extend_from_slice(&(count as u32).to_le_bytes());
+            // Write item count as u32
+            data.extend_from_slice(&(count as u32).to_le_bytes());
 
-                if count == 0 {
-                    // Empty array: just the count
-                    self.variable_sections[var_idx] = data;
-                    return self;
-                }
-
-                // Calculate header size: count (4) + (N-1) offsets * 4
-                let array_header_start = data.len(); // Account for nullable byte if present
-                let offset_table_size = if count > 1 { (count - 1) * 4 } else { 0 };
-                let items_start = array_header_start - 4 + 4 + offset_table_size; // relative to array data start
-
-                // Calculate absolute offsets for items 1 through N-1
-                let mut current_offset = items_start;
-                for i in 0..count {
-                    if i > 0 {
-                        // Write offset for item i
-                        data.extend_from_slice(&(current_offset as u32).to_le_bytes());
-                    }
-                    current_offset += items[i].buffer.len();
-                }
-
-                // Write item data
-                for item in items {
-                    data.extend_from_slice(&item.buffer);
-                }
-
+            if count == 0 {
+                // Empty array: just the count
                 self.variable_sections[var_idx] = data;
+                return self;
             }
+
+            // Calculate header size: count (4) + (N-1) offsets * 4
+            let array_header_start = data.len(); // Account for nullable byte if present
+            let offset_table_size = if count > 1 { (count - 1) * 4 } else { 0 };
+            let items_start = array_header_start - 4 + 4 + offset_table_size; // relative to array data start
+
+            // Calculate absolute offsets for items 1 through N-1
+            let mut current_offset = items_start;
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    // Write offset for item i
+                    data.extend_from_slice(&(current_offset as u32).to_le_bytes());
+                }
+                current_offset += item.buffer.len();
+            }
+
+            // Write item data
+            for item in items {
+                data.extend_from_slice(&item.buffer);
+            }
+
+            self.variable_sections[var_idx] = data;
         }
         self
     }
@@ -1335,7 +1413,11 @@ impl RowBuilder {
 
         // Calculate where variable data starts (after fixed section + offset table)
         // We store N-1 offsets for N variable columns
-        let offset_table_size = if var_count > 1 { (var_count - 1) * 4 } else { 0 };
+        let offset_table_size = if var_count > 1 {
+            (var_count - 1) * 4
+        } else {
+            0
+        };
         let var_data_start = buffer.len() + offset_table_size;
 
         // Calculate absolute offsets for each variable column (except the first)
@@ -1406,7 +1488,8 @@ pub fn join_rows(
     // For each target column, find the value from left or right row by name
     for (target_idx, target_col) in target_descriptor.columns.iter().enumerate() {
         // Try left row first
-        let value = left.get_by_name(&target_col.name)
+        let value = left
+            .get_by_name(&target_col.name)
             .or_else(|| right.get_by_name(&target_col.name));
 
         if let Some(value) = value {
@@ -1609,5 +1692,59 @@ mod tests {
 
         // Variable count should be: name + email = 2
         assert_eq!(desc.variable_count, 2);
+    }
+
+    #[test]
+    fn test_project_rename() {
+        use std::collections::HashMap;
+
+        // Create a row with qualified column names (like after a JOIN)
+        let source_desc = Arc::new(RowDescriptor::new([
+            ("documents.id".to_string(), ColumnType::I32, false),
+            ("documents.title".to_string(), ColumnType::String, false),
+            ("documents.folder_id".to_string(), ColumnType::I64, false),
+        ]));
+
+        let id_idx = source_desc.column_index("documents.id").unwrap();
+        let title_idx = source_desc.column_index("documents.title").unwrap();
+        let folder_idx = source_desc.column_index("documents.folder_id").unwrap();
+
+        let row = RowBuilder::new(source_desc.clone())
+            .set_i32(id_idx, 42)
+            .set_string(title_idx, "Test Document")
+            .set_i64(folder_idx, 123)
+            .build();
+
+        // Verify source row has qualified names
+        assert_eq!(
+            row.get_by_name("documents.title"),
+            Some(RowValue::String("Test Document"))
+        );
+        assert_eq!(row.get_by_name("title"), None);
+
+        // Create column map: qualified -> unqualified
+        let mut column_map = HashMap::new();
+        column_map.insert("documents.id".to_string(), "id".to_string());
+        column_map.insert("documents.title".to_string(), "title".to_string());
+        column_map.insert("documents.folder_id".to_string(), "folder_id".to_string());
+
+        // Create output descriptor with unqualified names
+        let output_desc = Arc::new(RowDescriptor::new([
+            ("id".to_string(), ColumnType::I32, false),
+            ("title".to_string(), ColumnType::String, false),
+            ("folder_id".to_string(), ColumnType::I64, false),
+        ]));
+
+        // Project and rename
+        let projected = row.project_rename(&column_map, output_desc);
+
+        // Verify projected row has unqualified names
+        assert_eq!(projected.get_by_name("id"), Some(RowValue::I32(42)));
+        assert_eq!(
+            projected.get_by_name("title"),
+            Some(RowValue::String("Test Document"))
+        );
+        assert_eq!(projected.get_by_name("folder_id"), Some(RowValue::I64(123)));
+        assert_eq!(projected.get_by_name("documents.title"), None);
     }
 }

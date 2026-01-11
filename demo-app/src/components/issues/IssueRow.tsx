@@ -1,8 +1,8 @@
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { StatusBadge } from "./StatusBadge";
-import { PriorityIcon } from "./PriorityIcon";
-import { LabelBadge } from "./LabelBadge";
 import type { LoadedIssue } from "@/App";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { LabelBadge } from "./LabelBadge";
+import { PriorityIcon } from "./PriorityIcon";
+import { StatusBadge } from "./StatusBadge";
 
 interface IssueRowProps {
   issue: LoadedIssue;
@@ -26,7 +26,9 @@ export function IssueRow({ issue, onClick }: IssueRowProps) {
 
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
-          <span className="font-medium truncate" data-testid="issue-title">{issue.title}</span>
+          <span className="font-medium truncate" data-testid="issue-title">
+            {issue.title}
+          </span>
         </div>
         <div className="flex items-center gap-2 mt-1">
           <div className="flex items-center gap-1 text-xs text-muted-foreground">
@@ -39,7 +41,11 @@ export function IssueRow({ issue, onClick }: IssueRowProps) {
           {labels.length > 0 && (
             <div className="flex items-center gap-1">
               {labels.slice(0, 3).map((label) => (
-                <LabelBadge key={label.id} name={label.name} color={label.color} />
+                <LabelBadge
+                  key={label.id}
+                  name={label.name}
+                  color={label.color}
+                />
               ))}
               {labels.length > 3 && (
                 <span className="text-xs text-muted-foreground">
@@ -61,7 +67,10 @@ export function IssueRow({ issue, onClick }: IssueRowProps) {
             .join("")
             .toUpperCase();
           return (
-            <Avatar key={user.id} className="h-6 w-6 border-2 border-background">
+            <Avatar
+              key={user.id}
+              className="h-6 w-6 border-2 border-background"
+            >
               <AvatarFallback
                 style={{ backgroundColor: user.avatarColor }}
                 className="text-white text-[10px]"

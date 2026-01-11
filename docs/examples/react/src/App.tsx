@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
 import type { WasmDatabaseLike } from "@jazz/react";
+import { useEffect, useState } from "react";
 
 //#region jazz-provider-setup
 import { JazzProvider } from "@jazz/react";
@@ -11,6 +11,7 @@ declare function initWasmDatabase(): Promise<WasmDatabaseLike>;
 export function App() {
   const [db, setDb] = useState<WasmDatabaseLike | null>(null);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: initWasmDatabase is a declared mock function
   useEffect(() => {
     // Initialize WASM database
     initWasmDatabase().then(setDb);

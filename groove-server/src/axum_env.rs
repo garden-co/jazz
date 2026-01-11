@@ -5,8 +5,8 @@ use std::convert::Infallible;
 use async_trait::async_trait;
 use axum::{
     body::Body,
-    http::{header, StatusCode},
-    response::{sse::Event, IntoResponse, Response, Sse},
+    http::{StatusCode, header},
+    response::{IntoResponse, Response, Sse, sse::Event},
 };
 use futures::stream::StreamExt;
 use tokio::sync::mpsc;
@@ -84,7 +84,8 @@ impl ServerEnv for AxumServerEnv {
 
     fn sse_response(stream: Self::SseStream) -> Self::Response {
         // Convert SseEncodedEvent stream to axum's Event stream
-        let event_stream = stream.map(|encoded| Ok::<_, Infallible>(Event::default().data(encoded.data)));
+        let event_stream =
+            stream.map(|encoded| Ok::<_, Infallible>(Event::default().data(encoded.data)));
 
         // Wrap in Sse with keep-alive
         Sse::new(event_stream)

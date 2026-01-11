@@ -1,7 +1,7 @@
-import React from "react";
-import ReactDOM from "react-dom/client";
 import type { WasmDatabaseLike } from "@jazz/react";
 import { JazzProvider } from "@jazz/react";
+import React from "react";
+import ReactDOM from "react-dom/client";
 import { App } from "../App.js";
 
 //#region main-setup
@@ -18,7 +18,7 @@ async function main() {
       <JazzProvider database={db}>
         <App />
       </JazzProvider>
-    </React.StrictMode>
+    </React.StrictMode>,
   );
 }
 

@@ -1,19 +1,18 @@
-use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::future_to_promise;
-use groove::sql::{
-    Database, IncrementalQuery, ExecuteResult,
-    encode_rows, encode_delta,
-    row_buffer::{OwnedRow, RowBuilder, RowDescriptor},
-    query_graph::DeltaBatch,
-};
-use groove::{ObjectId, ContentRef, ChunkHash, INLINE_THRESHOLD};
+use bytes::Bytes;
 use groove::ListenerId;
+use groove::sql::{
+    Database, ExecuteResult, IncrementalQuery, encode_delta, encode_rows,
+    query_graph::DeltaBatch,
+    row_buffer::{OwnedRow, RowBuilder, RowDescriptor},
+};
+use groove::{ChunkHash, ContentRef, INLINE_THRESHOLD, ObjectId};
 use js_sys::{Array, Promise, Uint8Array};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-use bytes::Bytes;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::future_to_promise;
 
 pub mod indexeddb;
 pub mod sync;
@@ -88,7 +87,8 @@ impl BlobWriterState {
             (ContentRef::inline(combined), Vec::new())
         } else {
             // Hash each chunk and create a chunked ContentRef
-            let hashes: Vec<ChunkHash> = self.chunks
+            let hashes: Vec<ChunkHash> = self
+                .chunks
                 .iter()
                 .map(|chunk| ChunkHash::compute(chunk))
                 .collect();
@@ -134,10 +134,12 @@ impl WasmDatabase {
             // Check if database already exists
             let db = if let Some(catalog_id_str) = env.get_catalog_id().await {
                 // Load existing database
-                let catalog_id: ObjectId = catalog_id_str.parse()
+                let catalog_id: ObjectId = catalog_id_str
+                    .parse()
                     .map_err(|e| JsValue::from_str(&format!("invalid catalog_id: {:?}", e)))?;
 
-                Database::from_env(env.clone(), catalog_id).await
+                Database::from_env(env.clone(), catalog_id)
+                    .await
                     .map_err(|e| JsValue::from_str(&format!("failed to load database: {:?}", e)))?
             } else {
                 // Create new database
@@ -180,8 +182,7 @@ impl WasmDatabase {
         future_to_promise(async move {
             let name = db_name.as_deref().unwrap_or("groove");
 
-            let window = web_sys::window()
-                .ok_or_else(|| JsValue::from_str("no window"))?;
+            let window = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
             let idb = window
                 .indexed_db()?
                 .ok_or_else(|| JsValue::from_str("IndexedDB not available"))?;
@@ -226,12 +227,11 @@ impl WasmDatabase {
         match self.db.execute(sql) {
             Ok(result) => {
                 let js_result = match result {
-                    ExecuteResult::Created(_) => {
-                        serde_wasm_bindgen::to_value(&"created").unwrap()
-                    }
-                    ExecuteResult::PolicyCreated { table, action } => {
-                        serde_wasm_bindgen::to_value(&format!("policy_created:{}:{}", table, action)).unwrap()
-                    }
+                    ExecuteResult::Created(_) => serde_wasm_bindgen::to_value(&"created").unwrap(),
+                    ExecuteResult::PolicyCreated { table, action } => serde_wasm_bindgen::to_value(
+                        &format!("policy_created:{}:{}", table, action),
+                    )
+                    .unwrap(),
                     ExecuteResult::Inserted { row_id, .. } => {
                         serde_wasm_bindgen::to_value(&format!("inserted:{}", row_id)).unwrap()
                     }
@@ -242,10 +242,8 @@ impl WasmDatabase {
                         serde_wasm_bindgen::to_value(&format!("deleted:{}", count)).unwrap()
                     }
                     ExecuteResult::Selected(rows) => {
-                        let row_data: Vec<Vec<String>> = rows
-                            .iter()
-                            .map(|(_id, row)| row_to_strings(row))
-                            .collect();
+                        let row_data: Vec<Vec<String>> =
+                            rows.iter().map(|(_id, row)| row_to_strings(row)).collect();
                         serde_wasm_bindgen::to_value(&row_data).unwrap()
                     }
                 };
@@ -277,8 +275,15 @@ impl WasmDatabase {
     /// Update a specific row's column with a string value.
     /// row_id should be a Base32 ObjectId string.
     #[wasm_bindgen(js_name = updateRow)]
-    pub fn update_row(&self, table: &str, row_id: &str, column: &str, value: &str) -> Result<bool, JsValue> {
-        let id: ObjectId = row_id.parse()
+    pub fn update_row(
+        &self,
+        table: &str,
+        row_id: &str,
+        column: &str,
+        value: &str,
+    ) -> Result<bool, JsValue> {
+        let id: ObjectId = row_id
+            .parse()
             .map_err(|e| JsValue::from_str(&format!("invalid row_id: {:?}", e)))?;
         let value = value.to_string();
         self.db
@@ -289,8 +294,15 @@ impl WasmDatabase {
     /// Update a specific row's column with an i64 value.
     /// row_id should be a Base32 ObjectId string.
     #[wasm_bindgen(js_name = updateRowI64)]
-    pub fn update_row_i64(&self, table: &str, row_id: &str, column: &str, value: i64) -> Result<bool, JsValue> {
-        let id: ObjectId = row_id.parse()
+    pub fn update_row_i64(
+        &self,
+        table: &str,
+        row_id: &str,
+        column: &str,
+        value: i64,
+    ) -> Result<bool, JsValue> {
+        let id: ObjectId = row_id
+            .parse()
             .map_err(|e| JsValue::from_str(&format!("invalid row_id: {:?}", e)))?;
         self.db
             .update_with(table, id, |b| b.set_i64_by_name(column, value).build())
@@ -301,8 +313,13 @@ impl WasmDatabase {
     /// Statements are separated by semicolons.
     #[wasm_bindgen]
     pub fn init_schema(&self, schema: &str) -> Result<(), JsValue> {
-        for stmt in schema.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            self.db.execute(stmt)
+        for stmt in schema
+            .split(';')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            self.db
+                .execute(stmt)
                 .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
         }
         Ok(())
@@ -319,8 +336,13 @@ impl WasmDatabase {
     /// Create an incremental query that calls back on changes (legacy string-based).
     /// Returns a handle that must be kept alive to maintain the subscription.
     #[wasm_bindgen]
-    pub fn subscribe(&self, sql: &str, callback: js_sys::Function) -> Result<WasmQueryHandle, JsValue> {
-        let query = self.db
+    pub fn subscribe(
+        &self,
+        sql: &str,
+        callback: js_sys::Function,
+    ) -> Result<WasmQueryHandle, JsValue> {
+        let query = self
+            .db
             .incremental_query(sql)
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
@@ -331,8 +353,13 @@ impl WasmDatabase {
     /// The callback receives a Uint8Array in the binary row format.
     /// Returns a handle that must be kept alive to maintain the subscription.
     #[wasm_bindgen]
-    pub fn subscribe_binary(&self, sql: &str, callback: js_sys::Function) -> Result<WasmQueryHandleBinary, JsValue> {
-        let query = self.db
+    pub fn subscribe_binary(
+        &self,
+        sql: &str,
+        callback: js_sys::Function,
+    ) -> Result<WasmQueryHandleBinary, JsValue> {
+        let query = self
+            .db
             .incremental_query(sql)
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
@@ -344,8 +371,13 @@ impl WasmDatabase {
     /// Each delta is: u8 type (1=add, 2=update, 3=remove) + row data (or just id for removes).
     /// Returns a handle that must be kept alive to maintain the subscription.
     #[wasm_bindgen(js_name = subscribeDelta)]
-    pub fn subscribe_delta(&self, sql: &str, callback: js_sys::Function) -> Result<WasmQueryHandleDelta, JsValue> {
-        let query = self.db
+    pub fn subscribe_delta(
+        &self,
+        sql: &str,
+        callback: js_sys::Function,
+    ) -> Result<WasmQueryHandleDelta, JsValue> {
+        let query = self
+            .db
             .incremental_query(sql)
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
@@ -395,7 +427,8 @@ impl WasmDatabase {
         use futures::executor::block_on;
 
         let registry = self.blob_registry.borrow();
-        let content_ref = registry.get(handle_id)
+        let content_ref = registry
+            .get(handle_id)
             .ok_or_else(|| JsValue::from_str("invalid blob handle"))?;
 
         match content_ref {
@@ -419,17 +452,16 @@ impl WasmDatabase {
     #[wasm_bindgen]
     pub fn get_blob_info(&self, handle_id: u64) -> Result<JsValue, JsValue> {
         let registry = self.blob_registry.borrow();
-        let content_ref = registry.get(handle_id)
+        let content_ref = registry
+            .get(handle_id)
             .ok_or_else(|| JsValue::from_str("invalid blob handle"))?;
 
         let info = match content_ref {
-            ContentRef::Inline(data) => {
-                BlobInfo {
-                    is_inline: true,
-                    chunk_count: 1,
-                    size: Some(data.len() as u64),
-                }
-            }
+            ContentRef::Inline(data) => BlobInfo {
+                is_inline: true,
+                chunk_count: 1,
+                size: Some(data.len() as u64),
+            },
             ContentRef::Chunked(hashes) => {
                 BlobInfo {
                     is_inline: false,
@@ -451,7 +483,8 @@ impl WasmDatabase {
         use futures::executor::block_on;
 
         let registry = self.blob_registry.borrow();
-        let content_ref = registry.get(handle_id)
+        let content_ref = registry
+            .get(handle_id)
             .ok_or_else(|| JsValue::from_str("invalid blob handle"))?;
 
         match content_ref {
@@ -459,7 +492,9 @@ impl WasmDatabase {
                 if chunk_index == 0 {
                     Ok(Uint8Array::from(data.as_ref()))
                 } else {
-                    Err(JsValue::from_str("chunk index out of bounds for inline blob"))
+                    Err(JsValue::from_str(
+                        "chunk index out of bounds for inline blob",
+                    ))
                 }
             }
             ContentRef::Chunked(hashes) => {
@@ -503,7 +538,9 @@ impl WasmDatabase {
             .map_err(|e| JsValue::from_str(&format!("invalid blob_columns: {:?}", e)))?;
 
         // Get table schema and build row using RowBuilder
-        let schema = self.db.get_table(table)
+        let schema = self
+            .db
+            .get_table(table)
             .ok_or_else(|| JsValue::from_str(&format!("table not found: {}", table)))?;
         let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
         let mut builder = RowBuilder::new(descriptor);
@@ -516,7 +553,8 @@ impl WasmDatabase {
         // Add blob columns
         let registry = self.blob_registry.borrow();
         for (name, handle_id) in blob_cols {
-            let content_ref = registry.get(handle_id)
+            let content_ref = registry
+                .get(handle_id)
                 .ok_or_else(|| JsValue::from_str(&format!("invalid blob handle: {}", handle_id)))?;
             builder = builder.set_blob_by_name(&name, content_ref.clone());
         }
@@ -524,7 +562,9 @@ impl WasmDatabase {
 
         // Execute insert
         let row = builder.build();
-        let id = self.db.insert_row(table, row)
+        let id = self
+            .db
+            .insert_row(table, row)
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
         Ok(id.to_string())
@@ -539,17 +579,21 @@ impl WasmDatabase {
         column: &str,
         blob_handle_id: u64,
     ) -> Result<bool, JsValue> {
-        let id: ObjectId = row_id.parse()
+        let id: ObjectId = row_id
+            .parse()
             .map_err(|e| JsValue::from_str(&format!("invalid row_id: {:?}", e)))?;
 
         let registry = self.blob_registry.borrow();
-        let content_ref = registry.get(blob_handle_id)
+        let content_ref = registry
+            .get(blob_handle_id)
             .ok_or_else(|| JsValue::from_str("invalid blob handle"))?;
         let content_ref = content_ref.clone();
         drop(registry);
 
         self.db
-            .update_with(table, id, |b| b.set_blob_by_name(column, content_ref.clone()).build())
+            .update_with(table, id, |b| {
+                b.set_blob_by_name(column, content_ref.clone()).build()
+            })
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))
     }
 }
@@ -631,9 +675,7 @@ impl WasmQueryHandleBinary {
             // Collect (id, row) pairs from Added and Updated deltas
             let rows: Vec<(ObjectId, OwnedRow)> = delta_batch
                 .iter()
-                .filter_map(|delta| {
-                    delta.new_row().map(|row| (delta.row_id(), row.clone()))
-                })
+                .filter_map(|delta| delta.new_row().map(|row| (delta.row_id(), row.clone())))
                 .collect();
             let binary = encode_rows(&rows);
             let js_array = Uint8Array::from(binary.as_slice());
@@ -731,7 +773,10 @@ pub struct WasmBlobWriter {
 
 #[wasm_bindgen]
 impl WasmBlobWriter {
-    fn new(registry: Rc<RefCell<BlobRegistry>>, env: std::sync::Arc<dyn groove::Environment>) -> Self {
+    fn new(
+        registry: Rc<RefCell<BlobRegistry>>,
+        env: std::sync::Arc<dyn groove::Environment>,
+    ) -> Self {
         Self {
             state: Some(BlobWriterState::new()),
             registry,
@@ -743,7 +788,9 @@ impl WasmBlobWriter {
     /// Can be called multiple times before finish().
     #[wasm_bindgen]
     pub fn write(&mut self, data: &[u8]) -> Result<(), JsValue> {
-        let state = self.state.as_mut()
+        let state = self
+            .state
+            .as_mut()
             .ok_or_else(|| JsValue::from_str("blob writer already finished"))?;
         state.write(data);
         Ok(())
@@ -752,7 +799,9 @@ impl WasmBlobWriter {
     /// Get the current total size of data written.
     #[wasm_bindgen]
     pub fn size(&self) -> Result<u32, JsValue> {
-        let state = self.state.as_ref()
+        let state = self
+            .state
+            .as_ref()
             .ok_or_else(|| JsValue::from_str("blob writer already finished"))?;
         Ok(state.total_size as u32)
     }
@@ -764,7 +813,9 @@ impl WasmBlobWriter {
     pub fn finish(&mut self) -> Result<u64, JsValue> {
         use futures::executor::block_on;
 
-        let state = self.state.take()
+        let state = self
+            .state
+            .take()
             .ok_or_else(|| JsValue::from_str("blob writer already finished"))?;
         let (content_ref, chunk_data) = state.finish();
 
@@ -796,7 +847,8 @@ impl WasmBlobWriter {
 pub fn create_blob_readable_stream(db: &WasmDatabase, handle_id: u64) -> Result<JsValue, JsValue> {
     // Get blob info first
     let registry = db.blob_registry.borrow();
-    let content_ref = registry.get(handle_id)
+    let content_ref = registry
+        .get(handle_id)
         .ok_or_else(|| JsValue::from_str("invalid blob handle"))?;
 
     let (is_inline, chunk_count) = match content_ref {
@@ -852,7 +904,8 @@ pub fn object_id_to_string(bytes: &[u8]) -> Result<String, JsValue> {
 /// Returns a Uint8Array containing the u128 little-endian bytes.
 #[wasm_bindgen]
 pub fn object_id_from_string(s: &str) -> Result<Uint8Array, JsValue> {
-    let id: ObjectId = s.parse()
+    let id: ObjectId = s
+        .parse()
         .map_err(|e| JsValue::from_str(&format!("invalid ObjectId: {:?}", e)))?;
     let bytes = id.to_le_bytes();
     Ok(Uint8Array::from(&bytes[..]))

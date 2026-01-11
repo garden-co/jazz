@@ -3,7 +3,14 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**", ".next/**", ".source/**", "*.wasm", "*.js", "*.d.ts"],
+      "outputs": [
+        "dist/**",
+        ".next/**",
+        ".source/**",
+        "*.wasm",
+        "*.js",
+        "*.d.ts"
+      ],
       "cache": true
     },
     "typecheck": {
@@ -16,6 +23,23 @@
     },
     "test": {
       "dependsOn": ["^build"],
+      "cache": true
+    },
+    "test:e2e": {
+      "dependsOn": ["^build"],
+      "cache": false
+    },
+    "generate": {
+      "dependsOn": ["^build"],
+      "outputs": ["src/generated/**"],
+      "cache": true
+    },
+    "generate:test": {
+      "dependsOn": ["^build"],
+      "outputs": ["test/generated/**"],
+      "cache": true
+    },
+    "lint": {
       "cache": true
     }
   }

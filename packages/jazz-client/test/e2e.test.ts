@@ -7,14 +7,13 @@
  * Run: pnpm test
  */
 
-import { describe, it, expect, beforeAll, beforeEach } from "vitest";
-import { createDatabase, type Database } from "./generated/client.js";
-// @ts-ignore - vite handles ?raw imports
+import { beforeAll, describe, expect, it } from "vitest";
 import schema from "./fixtures/app.sql?raw";
+import { type Database, createDatabase } from "./generated/client.js";
 
 // Helper to subscribe and get first result
 function subscribeOnce<T>(
-  subscribe: (callback: (rows: T) => void) => () => void
+  subscribe: (callback: (rows: T) => void) => () => void,
 ): Promise<T> {
   return new Promise((resolve) => {
     let unsubscribe: (() => void) | undefined;
@@ -102,7 +101,9 @@ describe("CRUD Operations", () => {
         color: "#ff0000",
       });
 
-      const projects = await subscribeOnce((cb) => db.projects.subscribeAll(cb));
+      const projects = await subscribeOnce((cb) =>
+        db.projects.subscribeAll(cb),
+      );
       const project = projects.find((p) => p.id === projectId);
       expect(project).toBeDefined();
       expect(project!.name).toBe("Test Project");
@@ -253,7 +254,7 @@ describe("Subscribe Operations", () => {
   describe("subscribeAll with forward ref include", () => {
     it("resolves single forward ref", async () => {
       const tasks = await subscribeOnce((cb) =>
-        db.tasks.with({ project: true }).subscribeAll(cb)
+        db.tasks.with({ project: true }).subscribeAll(cb),
       );
       const task = tasks.find((t) => t.id === testTaskId);
       expect(task).toBeDefined();
@@ -264,7 +265,7 @@ describe("Subscribe Operations", () => {
 
     it("resolves nullable forward ref", async () => {
       const tasks = await subscribeOnce((cb) =>
-        db.tasks.with({ assignee: true }).subscribeAll(cb)
+        db.tasks.with({ assignee: true }).subscribeAll(cb),
       );
       const task = tasks.find((t) => t.id === testTaskId);
       expect(task).toBeDefined();
@@ -275,7 +276,7 @@ describe("Subscribe Operations", () => {
     // Skip: Groove doesn't support multiple JOINed tables in binary output yet
     it.skip("resolves multiple forward refs", async () => {
       const tasks = await subscribeOnce((cb) =>
-        db.tasks.with({ project: true, assignee: true }).subscribeAll(cb)
+        db.tasks.with({ project: true, assignee: true }).subscribeAll(cb),
       );
       const task = tasks.find((t) => t.id === testTaskId);
       expect(task).toBeDefined();
@@ -287,7 +288,7 @@ describe("Subscribe Operations", () => {
   describe("subscribeAll with reverse ref include", () => {
     it("resolves reverse ref as array", async () => {
       const projects = await subscribeOnce((cb) =>
-        db.projects.with({ Tasks: true }).subscribeAll(cb)
+        db.projects.with({ Tasks: true }).subscribeAll(cb),
       );
       const project = projects.find((p) => p.id === testProjectId);
       expect(project).toBeDefined();
@@ -300,7 +301,7 @@ describe("Subscribe Operations", () => {
 
     it("resolves user's tasks via reverse ref", async () => {
       const users = await subscribeOnce((cb) =>
-        db.users.with({ Projects: true }).subscribeAll(cb)
+        db.users.with({ Projects: true }).subscribeAll(cb),
       );
       const user = users.find((u) => u.id === testUserId);
       expect(user).toBeDefined();
@@ -314,7 +315,7 @@ describe("Subscribe Operations", () => {
   describe("subscribeAll with junction table include", () => {
     it("resolves junction table entries", async () => {
       const tasks = await subscribeOnce((cb) =>
-        db.tasks.with({ TaskTags: true }).subscribeAll(cb)
+        db.tasks.with({ TaskTags: true }).subscribeAll(cb),
       );
       const task = tasks.find((t) => t.id === testTaskId);
       expect(task).toBeDefined();
@@ -324,7 +325,7 @@ describe("Subscribe Operations", () => {
 
     it("resolves nested refs within junction table", async () => {
       const tasks = await subscribeOnce((cb) =>
-        db.tasks.with({ TaskTags: { tag: true } }).subscribeAll(cb)
+        db.tasks.with({ TaskTags: { tag: true } }).subscribeAll(cb),
       );
       const task = tasks.find((t) => t.id === testTaskId);
       expect(task).toBeDefined();
@@ -345,7 +346,7 @@ describe("Subscribe Operations", () => {
             assignee: true,
             TaskTags: { tag: true },
           })
-          .subscribeAll(cb)
+          .subscribeAll(cb),
       );
       const task = tasks.find((t) => t.id === testTaskId);
       expect(task).toBeDefined();
@@ -387,7 +388,7 @@ describe("Filter Operations", () => {
   describe("equality filters", () => {
     it("filters by exact string value", async () => {
       const users = await subscribeOnce((cb) =>
-        db.users.where({ name: "FilterUser1" }).subscribeAll(cb)
+        db.users.where({ name: "FilterUser1" }).subscribeAll(cb),
       );
       expect(users.length).toBe(1);
       expect(users[0].name).toBe("FilterUser1");
@@ -395,7 +396,7 @@ describe("Filter Operations", () => {
 
     it("filters by exact boolean value", async () => {
       const users = await subscribeOnce((cb) =>
-        db.users.where({ isAdmin: true }).subscribeAll(cb)
+        db.users.where({ isAdmin: true }).subscribeAll(cb),
       );
       expect(users.length).toBeGreaterThanOrEqual(1);
       expect(users.every((u) => u.isAdmin === true)).toBe(true);
@@ -403,7 +404,7 @@ describe("Filter Operations", () => {
 
     it("filters by bigint value", async () => {
       const users = await subscribeOnce((cb) =>
-        db.users.where({ age: BigInt(30) }).subscribeAll(cb)
+        db.users.where({ age: BigInt(30) }).subscribeAll(cb),
       );
       expect(users.length).toBeGreaterThanOrEqual(1);
       expect(users.every((u) => u.age === BigInt(30))).toBe(true);
@@ -414,7 +415,7 @@ describe("Filter Operations", () => {
   describe.skip("string filters", () => {
     it("filters by contains", async () => {
       const users = await subscribeOnce((cb) =>
-        db.users.where({ name: { contains: "FilterUser" } }).subscribeAll(cb)
+        db.users.where({ name: { contains: "FilterUser" } }).subscribeAll(cb),
       );
       expect(users.length).toBeGreaterThanOrEqual(3);
       expect(users.every((u) => u.name.includes("FilterUser"))).toBe(true);
@@ -422,7 +423,7 @@ describe("Filter Operations", () => {
 
     it("filters by contains (startsWith not reliable in Groove)", async () => {
       const users = await subscribeOnce((cb) =>
-        db.users.where({ name: { contains: "FilterUser" } }).subscribeAll(cb)
+        db.users.where({ name: { contains: "FilterUser" } }).subscribeAll(cb),
       );
       expect(users.length).toBeGreaterThanOrEqual(3);
       expect(users.every((u) => u.name.includes("FilterUser"))).toBe(true);
@@ -430,7 +431,7 @@ describe("Filter Operations", () => {
 
     it("filters by endsWith", async () => {
       const users = await subscribeOnce((cb) =>
-        db.users.where({ email: { endsWith: "@test.com" } }).subscribeAll(cb)
+        db.users.where({ email: { endsWith: "@test.com" } }).subscribeAll(cb),
       );
       expect(users.length).toBeGreaterThanOrEqual(1);
       expect(users.every((u) => u.email.endsWith("@test.com"))).toBe(true);
@@ -441,7 +442,7 @@ describe("Filter Operations", () => {
   describe.skip("comparison filters", () => {
     it("filters by gt (greater than)", async () => {
       const users = await subscribeOnce((cb) =>
-        db.users.where({ score: { gt: 80.0 } }).subscribeAll(cb)
+        db.users.where({ score: { gt: 80.0 } }).subscribeAll(cb),
       );
       expect(users.length).toBeGreaterThanOrEqual(2);
       expect(users.every((u) => u.score > 80.0)).toBe(true);
@@ -449,7 +450,7 @@ describe("Filter Operations", () => {
 
     it("filters by gte (greater than or equal)", async () => {
       const users = await subscribeOnce((cb) =>
-        db.users.where({ score: { gte: 85.0 } }).subscribeAll(cb)
+        db.users.where({ score: { gte: 85.0 } }).subscribeAll(cb),
       );
       expect(users.length).toBeGreaterThanOrEqual(2);
       expect(users.every((u) => u.score >= 85.0)).toBe(true);
@@ -457,7 +458,7 @@ describe("Filter Operations", () => {
 
     it("filters by lt (less than)", async () => {
       const users = await subscribeOnce((cb) =>
-        db.users.where({ score: { lt: 80.0 } }).subscribeAll(cb)
+        db.users.where({ score: { lt: 80.0 } }).subscribeAll(cb),
       );
       expect(users.length).toBeGreaterThanOrEqual(1);
       expect(users.every((u) => u.score < 80.0)).toBe(true);
@@ -465,7 +466,7 @@ describe("Filter Operations", () => {
 
     it("filters by lte (less than or equal)", async () => {
       const users = await subscribeOnce((cb) =>
-        db.users.where({ score: { lte: 75.0 } }).subscribeAll(cb)
+        db.users.where({ score: { lte: 75.0 } }).subscribeAll(cb),
       );
       expect(users.length).toBeGreaterThanOrEqual(1);
       expect(users.every((u) => u.score <= 75.0)).toBe(true);
@@ -473,7 +474,7 @@ describe("Filter Operations", () => {
 
     it("filters by range (gte + lt)", async () => {
       const users = await subscribeOnce((cb) =>
-        db.users.where({ score: { gte: 75.0, lt: 90.0 } }).subscribeAll(cb)
+        db.users.where({ score: { gte: 75.0, lt: 90.0 } }).subscribeAll(cb),
       );
       expect(users.length).toBeGreaterThanOrEqual(2);
       expect(users.every((u) => u.score >= 75.0 && u.score < 90.0)).toBe(true);
@@ -486,7 +487,7 @@ describe("Filter Operations", () => {
       const users = await subscribeOnce((cb) =>
         db.users
           .where({ name: { in: ["FilterUser1", "FilterUser3"] } })
-          .subscribeAll(cb)
+          .subscribeAll(cb),
       );
       expect(users.length).toBe(2);
       expect(users.map((u) => u.name).sort()).toEqual([
@@ -496,8 +497,8 @@ describe("Filter Operations", () => {
     });
 
     it("filters by notIn array", async () => {
-      const usersAll = await subscribeOnce((cb) =>
-        db.users.where({ name: { contains: "FilterUser" } }).subscribeAll(cb)
+      const _usersAll = await subscribeOnce((cb) =>
+        db.users.where({ name: { contains: "FilterUser" } }).subscribeAll(cb),
       );
       const usersFiltered = await subscribeOnce((cb) =>
         db.users
@@ -505,7 +506,7 @@ describe("Filter Operations", () => {
             name: { contains: "FilterUser" },
             AND: [{ name: { notIn: ["FilterUser1"] } }],
           })
-          .subscribeAll(cb)
+          .subscribeAll(cb),
       );
       expect(usersFiltered.every((u) => u.name !== "FilterUser1")).toBe(true);
     });
@@ -515,7 +516,7 @@ describe("Filter Operations", () => {
   describe.skip("NOT filter", () => {
     it("negates condition with not", async () => {
       const users = await subscribeOnce((cb) =>
-        db.users.where({ name: { not: "FilterUser1" } }).subscribeAll(cb)
+        db.users.where({ name: { not: "FilterUser1" } }).subscribeAll(cb),
       );
       expect(users.every((u) => u.name !== "FilterUser1")).toBe(true);
     });
@@ -532,11 +533,11 @@ describe("Filter Operations", () => {
               { score: { gte: 80.0 } },
             ],
           })
-          .subscribeAll(cb)
+          .subscribeAll(cb),
       );
       expect(users.length).toBeGreaterThanOrEqual(2);
       expect(
-        users.every((u) => u.name.includes("FilterUser") && u.score >= 80.0)
+        users.every((u) => u.name.includes("FilterUser") && u.score >= 80.0),
       ).toBe(true);
     });
 
@@ -546,7 +547,7 @@ describe("Filter Operations", () => {
           .where({
             OR: [{ name: "FilterUser1" }, { name: "FilterUser3" }],
           })
-          .subscribeAll(cb)
+          .subscribeAll(cb),
       );
       expect(users.length).toBe(2);
     });
@@ -558,7 +559,7 @@ describe("Filter Operations", () => {
             name: { contains: "FilterUser" },
             NOT: { isAdmin: true },
           })
-          .subscribeAll(cb)
+          .subscribeAll(cb),
       );
       expect(users.every((u) => !u.isAdmin)).toBe(true);
     });
@@ -585,7 +586,7 @@ describe("Filter Operations", () => {
         db.projects
           .where({ name: "FilterProject" })
           .with({ owner: true })
-          .subscribeAll(cb)
+          .subscribeAll(cb),
       );
       expect(projects.length).toBe(1);
       expect(projects[0].name).toBe("FilterProject");
@@ -604,7 +605,7 @@ describe("Self-referential Tables", () => {
     const rootId = db.categories.create({ name: "RootOnly" });
 
     const categories = await subscribeOnce((cb) =>
-      db.categories.subscribeAll(cb)
+      db.categories.subscribeAll(cb),
     );
     const root = categories.find((c) => c.id === rootId);
 
@@ -623,7 +624,7 @@ describe("Self-referential Tables", () => {
     });
 
     const categories = await subscribeOnce((cb) =>
-      db.categories.subscribeAll(cb)
+      db.categories.subscribeAll(cb),
     );
     const root = categories.find((c) => c.id === rootId);
     const child = categories.find((c) => c.id === childId);
@@ -640,7 +641,7 @@ describe("Self-referential Tables", () => {
   // Skip: Parent include in self-referential tables has issues
   it.skip("includes parent category", async () => {
     const rootId = db.categories.create({ name: "IncludeRoot" });
-    const childId = db.categories.create({
+    const _childId = db.categories.create({
       name: "IncludeChild",
       parent: rootId,
     });
@@ -649,7 +650,7 @@ describe("Self-referential Tables", () => {
       db.categories
         .where({ name: "IncludeChild" })
         .with({ parent: true })
-        .subscribeAll(cb)
+        .subscribeAll(cb),
     );
     expect(categories.length).toBe(1);
     expect(categories[0].name).toBe("IncludeChild");
@@ -667,7 +668,7 @@ describe("Self-referential Tables", () => {
       db.categories
         .where({ name: "ReverseParent" })
         .with({ Categories: true })
-        .subscribeAll(cb)
+        .subscribeAll(cb),
     );
     expect(categories.length).toBe(1);
     expect(categories[0].name).toBe("ReverseParent");
@@ -745,7 +746,7 @@ describe("Comments with Multiple Nullable Refs", () => {
     });
 
     const comments = await subscribeOnce((cb) =>
-      db.comments.with({ parentComment: true }).subscribeAll(cb)
+      db.comments.with({ parentComment: true }).subscribeAll(cb),
     );
     const childComment = comments.find((c) => c.id === childCommentId);
     expect(childComment).toBeDefined();
@@ -766,7 +767,7 @@ describe("Comments with Multiple Nullable Refs", () => {
       db.comments
         .where({ id: taskCommentId })
         .with({ author: true, task: true })
-        .subscribeAll(cb)
+        .subscribeAll(cb),
     );
     expect(comments.length).toBe(1);
     expect(comments[0].author.name).toBe("CommentUser");
@@ -787,7 +788,7 @@ describe("Junction Table Filters", () => {
   let filterTestTask1: string; // Has tag1, assigned to user1
   let filterTestTask2: string; // Has tag1 and tag2, assigned to user2
   let filterTestTask3: string; // Has tag2 and tag3, no assignee
-  let filterTestTask4: string; // No tags, assigned to user1
+  let _filterTestTask4: string; // No tags, assigned to user1
 
   beforeAll(() => {
     // Create test users
@@ -865,7 +866,7 @@ describe("Junction Table Filters", () => {
       isCompleted: true,
     });
 
-    filterTestTask4 = db.tasks.create({
+    _filterTestTask4 = db.tasks.create({
       title: "JunctionTask4",
       status: "open",
       priority: "high",
@@ -899,7 +900,7 @@ describe("Junction Table Filters", () => {
             project: filterTestProject,
             TaskTags: { some: { tag: filterTestTag1 } },
           })
-          .subscribeAll(cb)
+          .subscribeAll(cb),
       );
 
       // Should find Task1 and Task2 (both have tag1)
@@ -915,7 +916,7 @@ describe("Junction Table Filters", () => {
             project: filterTestProject,
             TaskTags: { some: { tag: filterTestTag3 } },
           })
-          .subscribeAll(cb)
+          .subscribeAll(cb),
       );
 
       // Should only find Task3 (only one with tag3)
@@ -931,7 +932,7 @@ describe("Junction Table Filters", () => {
             status: "open",
             TaskTags: { some: { tag: filterTestTag1 } },
           })
-          .subscribeAll(cb)
+          .subscribeAll(cb),
       );
 
       // Should only find Task1 (open with tag1)
@@ -947,7 +948,7 @@ describe("Junction Table Filters", () => {
             priority: "low",
             TaskTags: { some: { tag: filterTestTag2 } },
           })
-          .subscribeAll(cb)
+          .subscribeAll(cb),
       );
 
       // Should only find Task3 (low priority with tag2)
@@ -965,13 +966,15 @@ describe("Junction Table Filters", () => {
             TaskTags: { some: { tag: filterTestTag1 } },
           })
           .with({ project: true })
-          .subscribeAll(cb)
+          .subscribeAll(cb),
       );
 
       expect(tasks.length).toBe(2);
       // All tasks should have project included as object
       expect(tasks.every((t) => typeof t.project === "object")).toBe(true);
-      expect(tasks.every((t) => t.project.name === "JunctionFilterProject")).toBe(true);
+      expect(
+        tasks.every((t) => t.project.name === "JunctionFilterProject"),
+      ).toBe(true);
     });
 
     // TODO: This test reveals an issue with the dynamic decoder when only reverse ref includes
@@ -986,21 +989,21 @@ describe("Junction Table Filters", () => {
             TaskTags: { some: { tag: filterTestTag1 } },
           })
           .with({ TaskTags: { tag: true } })
-          .subscribeAll(cb)
+          .subscribeAll(cb),
       );
 
       expect(tasks.length).toBe(2);
 
       // Each task should have TaskTags array
-      tasks.forEach((task) => {
+      for (const task of tasks) {
         expect(Array.isArray(task.TaskTags)).toBe(true);
         // Each TaskTag should have tag as object
-        task.TaskTags.forEach((tt: any) => {
+        for (const tt of task.TaskTags as any[]) {
           expect(typeof tt.tag).toBe("object");
           expect(tt.tag.name).toBeDefined();
           expect(tt.tag.color).toBeDefined();
-        });
-      });
+        }
+      }
 
       // Verify specific tags are included
       const task2 = tasks.find((t) => t.title === "JunctionTask2");
@@ -1020,7 +1023,7 @@ describe("Junction Table Filters", () => {
             project: true,
             TaskTags: { tag: true },
           })
-          .subscribeAll(cb)
+          .subscribeAll(cb),
       );
 
       // Should find Task2 and Task3 (both have tag2)
@@ -1029,12 +1032,14 @@ describe("Junction Table Filters", () => {
       expect(titles).toEqual(["JunctionTask2", "JunctionTask3"]);
 
       // Verify includes
-      tasks.forEach((task) => {
+      for (const task of tasks) {
         expect(typeof task.project).toBe("object");
         expect(task.project.name).toBe("JunctionFilterProject");
         expect(Array.isArray(task.TaskTags)).toBe(true);
-        expect(task.TaskTags.every((tt: any) => typeof tt.tag === "object")).toBe(true);
-      });
+        expect(
+          task.TaskTags.every((tt: any) => typeof tt.tag === "object"),
+        ).toBe(true);
+      }
     });
 
     it("complex query mirroring demo app pattern", async () => {
@@ -1054,7 +1059,7 @@ describe("Junction Table Filters", () => {
             assignee: true,
             TaskTags: { tag: true },
           })
-          .subscribeAll(cb)
+          .subscribeAll(cb),
       );
 
       // Should only find Task2 (in_progress with tag1)
@@ -1090,7 +1095,7 @@ describe("Junction Table Filters", () => {
             project: filterTestProject,
             TaskTags: { some: { tag: unusedTag } },
           })
-          .subscribeAll(cb)
+          .subscribeAll(cb),
       );
 
       expect(tasks.length).toBe(0);
@@ -1104,7 +1109,7 @@ describe("Junction Table Filters", () => {
             status: "done", // Only Task3 is done
             TaskTags: { some: { tag: filterTestTag1 } }, // Only Task1 and Task2 have tag1
           })
-          .subscribeAll(cb)
+          .subscribeAll(cb),
       );
 
       // No task is both "done" AND has tag1
@@ -1154,7 +1159,9 @@ describe("Subscription Reactivity", () => {
     // Wait for update
     await new Promise((r) => setTimeout(r, 100));
     const afterUpdate = updates[updates.length - 1];
-    expect(afterUpdate.some((u) => u.name === "ReactiveUserUpdated")).toBe(true);
+    expect(afterUpdate.some((u) => u.name === "ReactiveUserUpdated")).toBe(
+      true,
+    );
 
     // Delete the user
     db.users.delete(userId);
@@ -1163,7 +1170,7 @@ describe("Subscription Reactivity", () => {
     await new Promise((r) => setTimeout(r, 100));
     const afterDelete = updates[updates.length - 1];
     expect(afterDelete.some((u) => u.name === "ReactiveUserUpdated")).toBe(
-      false
+      false,
     );
 
     unsubscribe();
@@ -1199,7 +1206,7 @@ describe("Subscription Reactivity", () => {
     });
 
     const project = await subscribeOnce((cb) =>
-      db.projects.with({ owner: true }).subscribe(projectId, cb)
+      db.projects.with({ owner: true }).subscribe(projectId, cb),
     );
     expect(project).not.toBeNull();
     expect(project!.name).toBe("SingleIncludeProject");

@@ -75,10 +75,7 @@ impl Branch {
 
         // Update parent->child relationships
         for parent_id in &commit.parents {
-            self.children
-                .entry(*parent_id)
-                .or_default()
-                .push(id);
+            self.children.entry(*parent_id).or_default().push(id);
         }
 
         self.commits.insert(id, commit);
@@ -111,10 +108,7 @@ impl Branch {
 
         // Update children index for each parent
         for parent_id in &commit.parents {
-            self.children
-                .entry(*parent_id)
-                .or_default()
-                .push(id);
+            self.children.entry(*parent_id).or_default().push(id);
 
             // Remove parent from frontier (it now has a child)
             self.frontier.retain(|f| f != parent_id);
@@ -266,10 +260,10 @@ impl Branch {
 
         // If there's an existing truncation point, the new one must be a descendant of it
         // (i.e., we can only move truncation forward, not backward)
-        if let Some(existing) = &self.truncation {
-            if !self.is_ancestor(existing, &commit_id) {
-                return Err(BranchError::InvalidTruncationPoint(commit_id));
-            }
+        if let Some(existing) = &self.truncation
+            && !self.is_ancestor(existing, &commit_id)
+        {
+            return Err(BranchError::InvalidTruncationPoint(commit_id));
         }
 
         // Find all commits to prune (ancestors of truncation point, excluding itself)

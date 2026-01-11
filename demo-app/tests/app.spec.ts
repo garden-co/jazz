@@ -1,248 +1,286 @@
-import { test, expect } from '@playwright/test';
+import { expect, test } from "@playwright/test";
 
-test.describe('Issue Tracker App', () => {
+test.describe("Issue Tracker App", () => {
   test.beforeEach(async ({ page }) => {
     // Capture all console output and errors
-    page.on('console', msg => console.log('CONSOLE:', msg.type(), msg.text().substring(0, 200)));
-    page.on('pageerror', err => console.log('PAGE ERROR:', err.message));
+    page.on("console", (msg) =>
+      console.log("CONSOLE:", msg.type(), msg.text().substring(0, 200)),
+    );
+    page.on("pageerror", (err) => console.log("PAGE ERROR:", err.message));
     // Use non-persistent mode to start fresh each test
-    await page.goto('/?persist=false');
+    await page.goto("/?persist=false");
     // Wait for app to initialize and fake data to load
-    await expect(page.getByRole('heading', { name: 'Issue Tracker' })).toBeVisible({ timeout: 15000 });
+    await expect(
+      page.getByRole("heading", { name: "Issue Tracker" }),
+    ).toBeVisible({ timeout: 15000 });
     // Wait for issues to load
-    await expect(page.getByRole('button', { name: /All Issues/ })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /All Issues/ }),
+    ).toBeVisible();
   });
 
-  test('displays initial state with fake data', async ({ page }) => {
+  test("displays initial state with fake data", async ({ page }) => {
     // Sidebar should be visible
-    await expect(page.getByRole('heading', { name: 'Issue Tracker' })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Issue Tracker" }),
+    ).toBeVisible();
 
     // All Issues and My Issues buttons should exist
-    await expect(page.getByRole('button', { name: /All Issues/ })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'My Issues' })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /All Issues/ }),
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "My Issues" })).toBeVisible();
 
     // Projects section should be visible
-    await expect(page.getByText('Projects')).toBeVisible();
+    await expect(page.getByText("Projects")).toBeVisible();
 
     // Filter bar should be visible
-    await expect(page.getByText('Filters:')).toBeVisible();
+    await expect(page.getByText("Filters:")).toBeVisible();
 
     // New Issue button in header
-    await expect(page.getByRole('button', { name: 'New Issue' })).toBeVisible();
+    await expect(page.getByRole("button", { name: "New Issue" })).toBeVisible();
   });
 
-  test('shows projects in sidebar', async ({ page }) => {
+  test("shows projects in sidebar", async ({ page }) => {
     // Default projects from fake data
-    await expect(page.getByRole('button', { name: /Frontend/ })).toBeVisible();
-    await expect(page.getByRole('button', { name: /Backend/ })).toBeVisible();
-    await expect(page.getByRole('button', { name: /Infrastructure/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Frontend/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Backend/ })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /Infrastructure/ }),
+    ).toBeVisible();
   });
 
-  test('filters by project when clicking sidebar', async ({ page }) => {
+  test("filters by project when clicking sidebar", async ({ page }) => {
     // Click on Frontend project
-    await page.getByRole('button', { name: /Frontend/ }).click();
+    await page.getByRole("button", { name: /Frontend/ }).click();
 
     // Button should now be selected (secondary variant)
-    await expect(page.getByRole('button', { name: /Frontend/ })).toHaveClass(/secondary/);
+    await expect(page.getByRole("button", { name: /Frontend/ })).toHaveClass(
+      /secondary/,
+    );
   });
 
-  test('toggles My Issues view', async ({ page }) => {
+  test("toggles My Issues view", async ({ page }) => {
     // Click My Issues
-    await page.getByRole('button', { name: 'My Issues' }).click();
+    await page.getByRole("button", { name: "My Issues" }).click();
 
     // Button should be selected
-    await expect(page.getByRole('button', { name: 'My Issues' })).toHaveClass(/secondary/);
+    await expect(page.getByRole("button", { name: "My Issues" })).toHaveClass(
+      /secondary/,
+    );
   });
 
-  test('creates a new issue', async ({ page }) => {
+  test("creates a new issue", async ({ page }) => {
     // Get initial issue count
-    const allIssuesButton = page.getByRole('button', { name: /All Issues/ });
+    const allIssuesButton = page.getByRole("button", { name: /All Issues/ });
     const initialCount = await allIssuesButton.textContent();
-    const initialNumber = parseInt(initialCount?.match(/\d+/)?.[0] || '0');
+    const initialNumber = Number.parseInt(
+      initialCount?.match(/\d+/)?.[0] || "0",
+    );
 
     // Open the issue form
-    await page.getByRole('button', { name: 'New Issue' }).click();
+    await page.getByRole("button", { name: "New Issue" }).click();
 
     // Form dialog should appear
-    await expect(page.getByRole('dialog', { name: 'New Issue' })).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole("dialog", { name: "New Issue" })).toBeVisible({
+      timeout: 5000,
+    });
 
     // Fill in the title
-    await page.getByPlaceholder('Issue title...').fill('Test Issue from E2E');
-    await page.getByPlaceholder('Describe the issue...').fill('This is a test description');
+    await page.getByPlaceholder("Issue title...").fill("Test Issue from E2E");
+    await page
+      .getByPlaceholder("Describe the issue...")
+      .fill("This is a test description");
 
     // Submit
-    await page.getByRole('button', { name: 'Create Issue' }).click();
+    await page.getByRole("button", { name: "Create Issue" }).click();
 
     // Wait for dialog to close
-    await expect(page.getByRole('dialog', { name: 'New Issue' })).not.toBeVisible({ timeout: 5000 });
+    await expect(
+      page.getByRole("dialog", { name: "New Issue" }),
+    ).not.toBeVisible({ timeout: 5000 });
 
     // Verify issue was created by checking count increased
-    await expect(allIssuesButton).toContainText(String(initialNumber + 1), { timeout: 5000 });
+    await expect(allIssuesButton).toContainText(String(initialNumber + 1), {
+      timeout: 5000,
+    });
   });
 
-  test('cancels issue creation', async ({ page }) => {
-    await page.getByRole('button', { name: 'New Issue' }).click();
-    await expect(page.getByRole('dialog', { name: 'New Issue' })).toBeVisible({ timeout: 5000 });
+  test("cancels issue creation", async ({ page }) => {
+    await page.getByRole("button", { name: "New Issue" }).click();
+    await expect(page.getByRole("dialog", { name: "New Issue" })).toBeVisible({
+      timeout: 5000,
+    });
 
-    await page.getByPlaceholder('Issue title...').fill('Should not be created');
-    await page.getByRole('button', { name: 'Cancel' }).click();
+    await page.getByPlaceholder("Issue title...").fill("Should not be created");
+    await page.getByRole("button", { name: "Cancel" }).click();
 
     // Dialog should close
-    await expect(page.getByRole('dialog', { name: 'New Issue' })).not.toBeVisible({ timeout: 5000 });
+    await expect(
+      page.getByRole("dialog", { name: "New Issue" }),
+    ).not.toBeVisible({ timeout: 5000 });
 
     // Issue should not exist
-    await expect(page.getByText('Should not be created')).not.toBeVisible();
+    await expect(page.getByText("Should not be created")).not.toBeVisible();
   });
 });
 
-test.describe('Filter Bar', () => {
+test.describe("Filter Bar", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('/?persist=false');
-    await expect(page.getByRole('heading', { name: 'Issue Tracker' })).toBeVisible({ timeout: 15000 });
-    await expect(page.getByRole('button', { name: /All Issues/ })).toBeVisible();
+    await page.goto("/?persist=false");
+    await expect(
+      page.getByRole("heading", { name: "Issue Tracker" }),
+    ).toBeVisible({ timeout: 15000 });
+    await expect(
+      page.getByRole("button", { name: /All Issues/ }),
+    ).toBeVisible();
   });
 
-  test('filters by status', async ({ page }) => {
+  test("filters by status", async ({ page }) => {
     // Get all comboboxes - status is the first one
-    const comboboxes = page.getByRole('combobox');
+    const comboboxes = page.getByRole("combobox");
     const statusTrigger = comboboxes.nth(0);
 
     // Verify initial state
-    await expect(statusTrigger).toContainText('All Statuses');
+    await expect(statusTrigger).toContainText("All Statuses");
 
     await statusTrigger.click();
-    await page.getByRole('option', { name: 'In Progress' }).click();
+    await page.getByRole("option", { name: "In Progress" }).click();
 
     // The trigger should now show "In Progress"
-    await expect(statusTrigger).toContainText('In Progress');
+    await expect(statusTrigger).toContainText("In Progress");
   });
 
-  test('filters by priority', async ({ page }) => {
+  test("filters by priority", async ({ page }) => {
     // Priority is the second combobox
-    const comboboxes = page.getByRole('combobox');
+    const comboboxes = page.getByRole("combobox");
     const priorityTrigger = comboboxes.nth(1);
 
-    await expect(priorityTrigger).toContainText('All Priorities');
+    await expect(priorityTrigger).toContainText("All Priorities");
 
     await priorityTrigger.click();
-    await page.getByRole('option', { name: 'High' }).click();
+    await page.getByRole("option", { name: "High" }).click();
 
-    await expect(priorityTrigger).toContainText('High');
+    await expect(priorityTrigger).toContainText("High");
   });
 
-  test('filters by assignee', async ({ page }) => {
+  test("filters by assignee", async ({ page }) => {
     // Assignee is the third combobox
-    const comboboxes = page.getByRole('combobox');
+    const comboboxes = page.getByRole("combobox");
     const assigneeTrigger = comboboxes.nth(2);
 
-    await expect(assigneeTrigger).toContainText('All Assignees');
+    await expect(assigneeTrigger).toContainText("All Assignees");
 
     await assigneeTrigger.click();
-    await page.getByRole('option', { name: 'Alice Chen' }).click();
+    await page.getByRole("option", { name: "Alice Chen" }).click();
 
-    await expect(assigneeTrigger).toContainText('Alice Chen');
+    await expect(assigneeTrigger).toContainText("Alice Chen");
   });
 
-  test('filters by label', async ({ page }) => {
+  test("filters by label", async ({ page }) => {
     // Label is the fourth combobox
-    const comboboxes = page.getByRole('combobox');
+    const comboboxes = page.getByRole("combobox");
     const labelTrigger = comboboxes.nth(3);
 
-    await expect(labelTrigger).toContainText('All Labels');
+    await expect(labelTrigger).toContainText("All Labels");
 
     await labelTrigger.click();
-    await page.getByRole('option', { name: 'bug' }).click();
+    await page.getByRole("option", { name: "bug" }).click();
 
-    await expect(labelTrigger).toContainText('bug');
+    await expect(labelTrigger).toContainText("bug");
   });
 
-  test('clears all filters', async ({ page }) => {
-    const comboboxes = page.getByRole('combobox');
+  test("clears all filters", async ({ page }) => {
+    const comboboxes = page.getByRole("combobox");
 
     // Apply a status filter
     await comboboxes.nth(0).click();
-    await page.getByRole('option', { name: 'Done' }).click();
+    await page.getByRole("option", { name: "Done" }).click();
 
     // Apply a priority filter
     await comboboxes.nth(1).click();
-    await page.getByRole('option', { name: 'Urgent' }).click();
+    await page.getByRole("option", { name: "Urgent" }).click();
 
     // Clear button should appear
-    await expect(page.getByRole('button', { name: 'Clear' })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Clear" })).toBeVisible();
 
     // Click clear
-    await page.getByRole('button', { name: 'Clear' }).click();
+    await page.getByRole("button", { name: "Clear" }).click();
 
     // Filters should be reset
-    await expect(comboboxes.nth(0)).toContainText('All Statuses');
-    await expect(comboboxes.nth(1)).toContainText('All Priorities');
+    await expect(comboboxes.nth(0)).toContainText("All Statuses");
+    await expect(comboboxes.nth(1)).toContainText("All Priorities");
 
     // Clear button should be hidden
-    await expect(page.getByRole('button', { name: 'Clear' })).not.toBeVisible();
+    await expect(page.getByRole("button", { name: "Clear" })).not.toBeVisible();
   });
 
-  test('combines multiple filters', async ({ page }) => {
-    const comboboxes = page.getByRole('combobox');
+  test("combines multiple filters", async ({ page }) => {
+    const comboboxes = page.getByRole("combobox");
 
     // Apply status filter
     await comboboxes.nth(0).click();
-    await page.getByRole('option', { name: 'Todo' }).click();
+    await page.getByRole("option", { name: "Todo" }).click();
 
     // Apply priority filter
     await comboboxes.nth(1).click();
-    await page.getByRole('option', { name: 'Medium' }).click();
+    await page.getByRole("option", { name: "Medium" }).click();
 
     // Both should be applied
-    await expect(comboboxes.nth(0)).toContainText('Todo');
-    await expect(comboboxes.nth(1)).toContainText('Medium');
+    await expect(comboboxes.nth(0)).toContainText("Todo");
+    await expect(comboboxes.nth(1)).toContainText("Medium");
 
     // Clear should appear
-    await expect(page.getByRole('button', { name: 'Clear' })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Clear" })).toBeVisible();
   });
 });
 
-test.describe('Issue List', () => {
+test.describe("Issue List", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('/?persist=false&items=50');
-    await expect(page.getByRole('heading', { name: 'Issue Tracker' })).toBeVisible({ timeout: 15000 });
-    await expect(page.getByRole('button', { name: /All Issues/ })).toBeVisible();
+    await page.goto("/?persist=false&items=50");
+    await expect(
+      page.getByRole("heading", { name: "Issue Tracker" }),
+    ).toBeVisible({ timeout: 15000 });
+    await expect(
+      page.getByRole("button", { name: /All Issues/ }),
+    ).toBeVisible();
   });
 
-  test('shows pagination for many issues', async ({ page }) => {
+  test("shows pagination for many issues", async ({ page }) => {
     // With 50 items and default page size of 20, should show pagination
     await expect(page.getByText(/Showing \d+-\d+ of \d+/)).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Next' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Previous' })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Next" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Previous" })).toBeVisible();
   });
 
-  test('navigates between pages', async ({ page }) => {
+  test("navigates between pages", async ({ page }) => {
     // Initial state: Previous disabled, Next enabled
-    await expect(page.getByRole('button', { name: 'Previous' })).toBeDisabled();
-    await expect(page.getByRole('button', { name: 'Next' })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Previous" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Next" })).toBeEnabled();
 
     // Click Next
-    await page.getByRole('button', { name: 'Next' }).click();
+    await page.getByRole("button", { name: "Next" }).click();
 
     // Now Previous should be enabled
-    await expect(page.getByRole('button', { name: 'Previous' })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Previous" })).toBeEnabled();
 
     // Text should show different range
     await expect(page.getByText(/Showing 21-/)).toBeVisible();
 
     // Go back
-    await page.getByRole('button', { name: 'Previous' }).click();
+    await page.getByRole("button", { name: "Previous" }).click();
     await expect(page.getByText(/Showing 1-/)).toBeVisible();
   });
 
-  test('resets pagination when filter changes', async ({ page }) => {
+  test("resets pagination when filter changes", async ({ page }) => {
     // Go to page 2
-    await page.getByRole('button', { name: 'Next' }).click();
+    await page.getByRole("button", { name: "Next" }).click();
     await expect(page.getByText(/Showing 21-/)).toBeVisible();
 
     // Apply a filter - clicking any filter option should reset pagination
-    const statusTrigger = page.getByRole('combobox').nth(0);
+    const statusTrigger = page.getByRole("combobox").nth(0);
     await statusTrigger.click();
-    await page.getByRole('option', { name: 'In Progress' }).click();
+    await page.getByRole("option", { name: "In Progress" }).click();
 
     // Wait for filter to apply
     await page.waitForTimeout(500);
@@ -256,149 +294,201 @@ test.describe('Issue List', () => {
   });
 });
 
-test.describe('Issue Detail', () => {
+test.describe("Issue Detail", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('/?persist=false');
-    await expect(page.getByRole('heading', { name: 'Issue Tracker' })).toBeVisible({ timeout: 15000 });
-    await expect(page.getByRole('button', { name: /All Issues/ })).toBeVisible();
+    await page.goto("/?persist=false");
+    await expect(
+      page.getByRole("heading", { name: "Issue Tracker" }),
+    ).toBeVisible({ timeout: 15000 });
+    await expect(
+      page.getByRole("button", { name: /All Issues/ }),
+    ).toBeVisible();
     // Wait for issues to render
     await page.waitForTimeout(1000);
   });
 
-  test('opens issue detail when clicking an issue', async ({ page }) => {
+  test("opens issue detail when clicking an issue", async ({ page }) => {
     // Look for issue rows containing issue titles from the fake data
     // Issues have text like "Fix...", "Add...", etc.
-    const issueText = page.getByText(/Fix login button|Add dark mode|Optimize database/);
+    const issueText = page.getByText(
+      /Fix login button|Add dark mode|Optimize database/,
+    );
     await issueText.first().click();
 
     // Wait for dialog to open
-    await expect(page.getByRole('dialog')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole("dialog")).toBeVisible({ timeout: 5000 });
   });
 });
 
-test.describe('Theme Toggle', () => {
+test.describe("Theme Toggle", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('/?persist=false');
-    await expect(page.getByRole('heading', { name: 'Issue Tracker' })).toBeVisible({ timeout: 15000 });
+    await page.goto("/?persist=false");
+    await expect(
+      page.getByRole("heading", { name: "Issue Tracker" }),
+    ).toBeVisible({ timeout: 15000 });
   });
 
-  test('toggles dark mode', async ({ page }) => {
+  test("toggles dark mode", async ({ page }) => {
     // Find the theme toggle button in header (icon-only button without text)
-    const header = page.locator('header');
+    const header = page.locator("header");
     // The theme button is an icon-only button in the header's right section
-    const buttons = header.getByRole('button');
+    const buttons = header.getByRole("button");
     // It's one of the buttons that's not "New Issue"
-    const themeButton = buttons.filter({ hasNot: page.getByText('New Issue') }).first();
+    const themeButton = buttons
+      .filter({ hasNot: page.getByText("New Issue") })
+      .first();
 
     // Get initial state
-    const htmlElement = page.locator('html');
-    const initialIsDark = await htmlElement.evaluate(el => el.classList.contains('dark'));
+    const htmlElement = page.locator("html");
+    const initialIsDark = await htmlElement.evaluate((el) =>
+      el.classList.contains("dark"),
+    );
 
     // Click to toggle
     await themeButton.click();
 
     // State should be opposite
-    const newIsDark = await htmlElement.evaluate(el => el.classList.contains('dark'));
+    const newIsDark = await htmlElement.evaluate((el) =>
+      el.classList.contains("dark"),
+    );
     expect(newIsDark).toBe(!initialIsDark);
 
     // Toggle back
     await themeButton.click();
-    const finalIsDark = await htmlElement.evaluate(el => el.classList.contains('dark'));
+    const finalIsDark = await htmlElement.evaluate((el) =>
+      el.classList.contains("dark"),
+    );
     expect(finalIsDark).toBe(initialIsDark);
   });
 });
 
-test.describe('Sidebar Navigation', () => {
+test.describe("Sidebar Navigation", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('/?persist=false');
-    await expect(page.getByRole('heading', { name: 'Issue Tracker' })).toBeVisible({ timeout: 15000 });
-    await expect(page.getByRole('button', { name: /All Issues/ })).toBeVisible();
+    await page.goto("/?persist=false");
+    await expect(
+      page.getByRole("heading", { name: "Issue Tracker" }),
+    ).toBeVisible({ timeout: 15000 });
+    await expect(
+      page.getByRole("button", { name: /All Issues/ }),
+    ).toBeVisible();
   });
 
-  test('selects All Issues by default', async ({ page }) => {
-    await expect(page.getByRole('button', { name: /All Issues/ })).toHaveClass(/secondary/);
+  test("selects All Issues by default", async ({ page }) => {
+    await expect(page.getByRole("button", { name: /All Issues/ })).toHaveClass(
+      /secondary/,
+    );
   });
 
-  test('switches between All Issues and My Issues', async ({ page }) => {
+  test("switches between All Issues and My Issues", async ({ page }) => {
     // Click My Issues
-    await page.getByRole('button', { name: 'My Issues' }).click();
-    await expect(page.getByRole('button', { name: 'My Issues' })).toHaveClass(/secondary/);
-    await expect(page.getByRole('button', { name: /All Issues/ })).not.toHaveClass(/secondary/);
+    await page.getByRole("button", { name: "My Issues" }).click();
+    await expect(page.getByRole("button", { name: "My Issues" })).toHaveClass(
+      /secondary/,
+    );
+    await expect(
+      page.getByRole("button", { name: /All Issues/ }),
+    ).not.toHaveClass(/secondary/);
 
     // Click back to All Issues
-    await page.getByRole('button', { name: /All Issues/ }).click();
-    await expect(page.getByRole('button', { name: /All Issues/ })).toHaveClass(/secondary/);
-    await expect(page.getByRole('button', { name: 'My Issues' })).not.toHaveClass(/secondary/);
+    await page.getByRole("button", { name: /All Issues/ }).click();
+    await expect(page.getByRole("button", { name: /All Issues/ })).toHaveClass(
+      /secondary/,
+    );
+    await expect(
+      page.getByRole("button", { name: "My Issues" }),
+    ).not.toHaveClass(/secondary/);
   });
 
-  test('selects a project and deselects All Issues', async ({ page }) => {
+  test("selects a project and deselects All Issues", async ({ page }) => {
     // Click Frontend project
-    await page.getByRole('button', { name: /Frontend/ }).click();
+    await page.getByRole("button", { name: /Frontend/ }).click();
 
     // Frontend should be selected
-    await expect(page.getByRole('button', { name: /Frontend/ })).toHaveClass(/secondary/);
+    await expect(page.getByRole("button", { name: /Frontend/ })).toHaveClass(
+      /secondary/,
+    );
 
     // All Issues should no longer be selected
-    await expect(page.getByRole('button', { name: /All Issues/ })).not.toHaveClass(/secondary/);
+    await expect(
+      page.getByRole("button", { name: /All Issues/ }),
+    ).not.toHaveClass(/secondary/);
   });
 
-  test('clicking All Issues deselects project', async ({ page }) => {
+  test("clicking All Issues deselects project", async ({ page }) => {
     // First select a project
-    await page.getByRole('button', { name: /Backend/ }).click();
-    await expect(page.getByRole('button', { name: /Backend/ })).toHaveClass(/secondary/);
+    await page.getByRole("button", { name: /Backend/ }).click();
+    await expect(page.getByRole("button", { name: /Backend/ })).toHaveClass(
+      /secondary/,
+    );
 
     // Click All Issues
-    await page.getByRole('button', { name: /All Issues/ }).click();
+    await page.getByRole("button", { name: /All Issues/ }).click();
 
     // All Issues should be selected, Backend should not
-    await expect(page.getByRole('button', { name: /All Issues/ })).toHaveClass(/secondary/);
-    await expect(page.getByRole('button', { name: /Backend/ })).not.toHaveClass(/secondary/);
+    await expect(page.getByRole("button", { name: /All Issues/ })).toHaveClass(
+      /secondary/,
+    );
+    await expect(page.getByRole("button", { name: /Backend/ })).not.toHaveClass(
+      /secondary/,
+    );
   });
 });
 
-test.describe('Current User', () => {
+test.describe("Current User", () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('/?persist=false');
-    await expect(page.getByRole('heading', { name: 'Issue Tracker' })).toBeVisible({ timeout: 15000 });
+    await page.goto("/?persist=false");
+    await expect(
+      page.getByRole("heading", { name: "Issue Tracker" }),
+    ).toBeVisible({ timeout: 15000 });
     // Wait longer for fake data including user to load
     await page.waitForTimeout(1000);
   });
 
-  test('displays current user in header', async ({ page }) => {
+  test("displays current user in header", async ({ page }) => {
     // Header should show a user name (one of the fake users)
     // The fake data picks the first user which could be any of: Alice Chen, Bob Smith, Carol Williams, David Jones, Eve Brown
-    const header = page.locator('header');
-    const userNames = ['Alice Chen', 'Bob Smith', 'Carol Williams', 'David Jones', 'Eve Brown'];
-    const userNameRegex = new RegExp(userNames.join('|'));
-    await expect(header.getByText(userNameRegex)).toBeVisible({ timeout: 10000 });
+    const header = page.locator("header");
+    const userNames = [
+      "Alice Chen",
+      "Bob Smith",
+      "Carol Williams",
+      "David Jones",
+      "Eve Brown",
+    ];
+    const userNameRegex = new RegExp(userNames.join("|"));
+    await expect(header.getByText(userNameRegex)).toBeVisible({
+      timeout: 10000,
+    });
   });
 });
 
-test.describe('Issue Data Integrity', () => {
+test.describe("Issue Data Integrity", () => {
   test.beforeEach(async ({ page }) => {
     // Capture console logs
-    page.on('console', msg => {
+    page.on("console", (msg) => {
       const text = msg.text();
-      if (text.includes('DEBUG')) {
-        console.log('BROWSER:', text);
+      if (text.includes("DEBUG")) {
+        console.log("BROWSER:", text);
       }
     });
 
-    await page.goto('/?persist=false');
-    await expect(page.getByRole('heading', { name: 'Issue Tracker' })).toBeVisible({ timeout: 15000 });
+    await page.goto("/?persist=false");
+    await expect(
+      page.getByRole("heading", { name: "Issue Tracker" }),
+    ).toBeVisible({ timeout: 15000 });
     // Wait for issues to fully load
     await page.waitForTimeout(1000);
   });
 
-  test('issue titles are not truncated in the data', async ({ page }) => {
+  test("issue titles are not truncated in the data", async ({ page }) => {
     // Check that issue titles from ISSUE_TITLES constant are fully displayed
     // These are known titles from the fake data
     const expectedTitles = [
-      'Fix login button not responding on mobile',
-      'Add dark mode support',
-      'Optimize database queries for dashboard',
-      'Implement user avatar upload',
-      'Update API documentation',
+      "Fix login button not responding on mobile",
+      "Add dark mode support",
+      "Optimize database queries for dashboard",
+      "Implement user avatar upload",
+      "Update API documentation",
     ];
 
     // At least one of these full titles should be visible
@@ -414,10 +504,21 @@ test.describe('Issue Data Integrity', () => {
     expect(foundFullTitle).toBe(true);
   });
 
-  test('issues display labels when they have them', async ({ page }) => {
+  test("issues display labels when they have them", async ({ page }) => {
     // Labels from the fake data: bug, feature, enhancement, documentation, design, testing, performance, security, refactor, blocked
-    const labelNames = ['bug', 'feature', 'enhancement', 'documentation', 'design', 'testing', 'performance', 'security', 'refactor', 'blocked'];
-    const labelRegex = new RegExp(labelNames.join('|'), 'i');
+    const labelNames = [
+      "bug",
+      "feature",
+      "enhancement",
+      "documentation",
+      "design",
+      "testing",
+      "performance",
+      "security",
+      "refactor",
+      "blocked",
+    ];
+    const labelRegex = new RegExp(labelNames.join("|"), "i");
 
     // Some issues should have labels visible
     // Labels are shown as small badges below the issue title
@@ -425,9 +526,11 @@ test.describe('Issue Data Integrity', () => {
     expect(labelsFound).toBeGreaterThan(0);
   });
 
-  test('issues display assignee avatars', async ({ page }) => {
-    await page.goto('/?persist=false');
-    await expect(page.getByRole('heading', { name: 'Issue Tracker' })).toBeVisible({ timeout: 15000 });
+  test("issues display assignee avatars", async ({ page }) => {
+    await page.goto("/?persist=false");
+    await expect(
+      page.getByRole("heading", { name: "Issue Tracker" }),
+    ).toBeVisible({ timeout: 15000 });
 
     // Wait for issues to load
     await page.waitForTimeout(2000);
@@ -436,7 +539,7 @@ test.describe('Issue Data Integrity', () => {
     // These are from user names: Alice Chen, Bob Smith, Carol Williams, David Jones, Eve Brown
     // The avatars are rendered inside a flex container with -space-x-2 class
     // Look for the avatar container div and check for initials text
-    const avatarContainers = page.locator('.flex.-space-x-2');
+    const avatarContainers = page.locator(".flex.-space-x-2");
     const containerCount = await avatarContainers.count();
 
     // At least some issue rows should have avatar containers (assigneeCount can be 0, 1, or 2)
@@ -445,35 +548,41 @@ test.describe('Issue Data Integrity', () => {
     // Check that at least one avatar shows initials (two capital letters)
     // The initials are in span elements with text-[10px] class inside the avatar circles
     const initialsPattern = /^[A-Z]{2}$/;
-    let foundInitials = false;
+    let _foundInitials = false;
 
     for (let i = 0; i < Math.min(containerCount, 10); i++) {
       const container = avatarContainers.nth(i);
       const text = await container.textContent();
       if (text && initialsPattern.test(text.trim().substring(0, 2))) {
-        foundInitials = true;
+        _foundInitials = true;
         break;
       }
     }
 
     // Some issues may have 0 assignees, so check that at least some have avatars
     // by looking for elements with short text (initials) in the avatar area
-    const roundedFullElements = page.locator('.rounded-full').filter({ hasText: /^[A-Z]{2}$/ });
+    const roundedFullElements = page
+      .locator(".rounded-full")
+      .filter({ hasText: /^[A-Z]{2}$/ });
     const avatarsWithInitials = await roundedFullElements.count();
 
     // With 30 issues and random 0-2 assignees each, we should have some avatars
     expect(avatarsWithInitials).toBeGreaterThan(0);
   });
 
-  test('issues display project names', async ({ page }) => {
+  test("issues display project names", async ({ page }) => {
     // Projects: Frontend, Backend, Infrastructure
     // Each issue row should show its project name
     const issueList = page.locator('[class*="border-b"]'); // Issue rows have border-b
 
     // At least some issues should show project names
-    const frontendCount = await issueList.filter({ hasText: 'Frontend' }).count();
-    const backendCount = await issueList.filter({ hasText: 'Backend' }).count();
-    const infraCount = await issueList.filter({ hasText: 'Infrastructure' }).count();
+    const frontendCount = await issueList
+      .filter({ hasText: "Frontend" })
+      .count();
+    const backendCount = await issueList.filter({ hasText: "Backend" }).count();
+    const infraCount = await issueList
+      .filter({ hasText: "Infrastructure" })
+      .count();
 
     expect(frontendCount + backendCount + infraCount).toBeGreaterThan(0);
   });

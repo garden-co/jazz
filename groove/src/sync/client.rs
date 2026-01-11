@@ -14,7 +14,7 @@ use crate::node::LocalNode;
 use crate::object::ObjectId;
 
 use super::env::{ClientEnv, ClientError};
-use super::negotiation::{commits_to_send, compare_frontiers, FrontierComparison};
+use super::negotiation::{FrontierComparison, commits_to_send, compare_frontiers};
 use super::protocol::{
     PushRequest, PushResponse, ReconcileRequest, SseEvent, SubscribeRequest, SubscriptionOptions,
 };
@@ -136,7 +136,11 @@ impl<E: ClientEnv> SyncClient<E> {
     }
 
     /// Create a new sync client with custom reconnection configuration.
-    pub fn with_reconnect_config(env: E, node: Arc<LocalNode>, reconnect_config: ReconnectConfig) -> Self {
+    pub fn with_reconnect_config(
+        env: E,
+        node: Arc<LocalNode>,
+        reconnect_config: ReconnectConfig,
+    ) -> Self {
         Self {
             env,
             node,
@@ -282,12 +286,11 @@ impl<E: ClientEnv> SyncClient<E> {
                 self.node.apply_commits(*object_id, branch, commits.clone());
 
                 // If we received object metadata, store it on the object
-                if let Some(meta) = object_meta {
-                    if let Some(obj) = self.node.get_object(*object_id) {
-                        if let Ok(mut obj_write) = obj.write() {
-                            obj_write.set_meta(meta.clone());
-                        }
-                    }
+                if let Some(meta) = object_meta
+                    && let Some(obj) = self.node.get_object(*object_id)
+                    && let Ok(mut obj_write) = obj.write()
+                {
+                    obj_write.set_meta(meta.clone());
                 }
 
                 // Update server known state
@@ -312,7 +315,10 @@ impl<E: ClientEnv> SyncClient<E> {
                 // Server is requesting commits we have
                 // TODO: Push these commits - would trigger a push request
             }
-            SseEvent::Error { code: _, message: _ } => {
+            SseEvent::Error {
+                code: _,
+                message: _,
+            } => {
                 // TODO: Handle error - log or surface to application
             }
         }
@@ -519,7 +525,7 @@ mod tests {
         // Remove
         let removed = client.remove_subscription(id);
         assert!(removed.is_some());
-        assert!(client.subscriptions.get(&id).is_none());
+        assert!(!client.subscriptions.contains_key(&id));
     }
 
     #[test]

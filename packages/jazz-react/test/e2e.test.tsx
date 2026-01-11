@@ -7,14 +7,18 @@
  * Run: pnpm test
  */
 
-import { describe, it, expect, beforeAll, afterEach } from "vitest";
-import { render, screen, waitFor, cleanup, act } from "@testing-library/react";
-import { createElement, useState, useEffect, type ReactNode } from "react";
-import { JazzProvider, useJazz, useOne, useAll, useMutate } from "../src/index.js";
-import { app, createDatabase, type Database } from "./generated/client.js";
-import type { User, Project, Task } from "./generated/types.js";
-// @ts-ignore - vite handles ?raw imports
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { type ReactNode, createElement, useEffect, useState } from "react";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import {
+  JazzProvider,
+  useAll,
+  useJazz,
+  useMutate,
+  useOne,
+} from "../src/index.js";
 import schema from "./fixtures/app.sql?raw";
+import { type Database, app, createDatabase } from "./generated/client.js";
 
 let wasmDb: any;
 let db: Database;
@@ -49,7 +53,11 @@ describe("useJazz", () => {
   it("returns the database from context", () => {
     function TestComponent() {
       const database = useJazz();
-      return createElement("div", { "data-testid": "result" }, database ? "has-db" : "no-db");
+      return createElement(
+        "div",
+        { "data-testid": "result" },
+        database ? "has-db" : "no-db",
+      );
     }
 
     renderWithJazz(createElement(TestComponent));
@@ -61,7 +69,7 @@ describe("useJazz", () => {
       try {
         useJazz();
         return createElement("div", null, "no-error");
-      } catch (e) {
+      } catch (_e) {
         return createElement("div", { "data-testid": "result" }, "error");
       }
     }
@@ -100,7 +108,7 @@ describe("useAll", () => {
         "div",
         null,
         createElement("span", { "data-testid": "loading" }, String(loading)),
-        createElement("span", { "data-testid": "count" }, String(users.length))
+        createElement("span", { "data-testid": "count" }, String(users.length)),
       );
     }
 
@@ -127,9 +135,9 @@ describe("useAll", () => {
           "ul",
           { "data-testid": "users" },
           users.map((u) =>
-            createElement("li", { key: u.id, "data-name": u.name }, u.name)
-          )
-        )
+            createElement("li", { key: u.id, "data-name": u.name }, u.name),
+          ),
+        ),
       );
     }
 
@@ -140,7 +148,9 @@ describe("useAll", () => {
     });
 
     // Should have at least the users we created
-    const count = parseInt(screen.getByTestId("count").textContent || "0");
+    const count = Number.parseInt(
+      screen.getByTestId("count").textContent || "0",
+    );
     expect(count).toBeGreaterThanOrEqual(2);
   });
 
@@ -148,13 +158,13 @@ describe("useAll", () => {
   it.skip("returns filtered rows with where()", async () => {
     function TestComponent() {
       const [users, loading] = useAll(
-        app.users.where({ name: { contains: "UseAllUser" } })
+        app.users.where({ name: { contains: "UseAllUser" } }),
       );
       return createElement(
         "div",
         null,
         createElement("span", { "data-testid": "loading" }, String(loading)),
-        createElement("span", { "data-testid": "count" }, String(users.length))
+        createElement("span", { "data-testid": "count" }, String(users.length)),
       );
     }
 
@@ -164,7 +174,9 @@ describe("useAll", () => {
       expect(screen.getByTestId("loading").textContent).toBe("false");
     });
 
-    expect(parseInt(screen.getByTestId("count").textContent || "0")).toBe(2);
+    expect(
+      Number.parseInt(screen.getByTestId("count").textContent || "0"),
+    ).toBe(2);
   });
 
   it("provides mutate functions", async () => {
@@ -173,11 +185,15 @@ describe("useAll", () => {
     let deleteFn: any;
 
     function TestComponent() {
-      const [users, loading, mutate] = useAll(app.users);
+      const [_users, loading, mutate] = useAll(app.users);
       createFn = mutate.create;
       updateFn = mutate.update;
       deleteFn = mutate.delete;
-      return createElement("span", { "data-testid": "loading" }, String(loading));
+      return createElement(
+        "span",
+        { "data-testid": "loading" },
+        String(loading),
+      );
     }
 
     renderWithJazz(createElement(TestComponent));
@@ -193,13 +209,13 @@ describe("useAll", () => {
 
   it("creates new rows via mutate.create", async () => {
     let createdId: string | undefined;
-    let userCount = 0;
+    let _userCount = 0;
 
     function TestComponent() {
       const [users, loading, mutate] = useAll(
-        app.users.where({ name: "MutateCreateTest" })
+        app.users.where({ name: "MutateCreateTest" }),
       );
-      userCount = users.length;
+      _userCount = users.length;
 
       useEffect(() => {
         if (!loading && !createdId) {
@@ -216,7 +232,7 @@ describe("useAll", () => {
       return createElement(
         "div",
         null,
-        createElement("span", { "data-testid": "count" }, String(users.length))
+        createElement("span", { "data-testid": "count" }, String(users.length)),
       );
     }
 
@@ -226,7 +242,7 @@ describe("useAll", () => {
       () => {
         expect(screen.getByTestId("count").textContent).toBe("1");
       },
-      { timeout: 2000 }
+      { timeout: 2000 },
     );
   });
 });
@@ -254,7 +270,7 @@ describe("useOne", () => {
         "div",
         null,
         createElement("span", { "data-testid": "loading" }, String(loading)),
-        createElement("span", { "data-testid": "name" }, user?.name || "null")
+        createElement("span", { "data-testid": "name" }, user?.name || "null"),
       );
     }
 
@@ -275,7 +291,11 @@ describe("useOne", () => {
         null,
         createElement("span", { "data-testid": "loading" }, String(loading)),
         createElement("span", { "data-testid": "name" }, user?.name || "null"),
-        createElement("span", { "data-testid": "email" }, user?.email || "null")
+        createElement(
+          "span",
+          { "data-testid": "email" },
+          user?.email || "null",
+        ),
       );
     }
 
@@ -296,7 +316,11 @@ describe("useOne", () => {
         "div",
         null,
         createElement("span", { "data-testid": "loading" }, String(loading)),
-        createElement("span", { "data-testid": "result" }, user ? "found" : "null")
+        createElement(
+          "span",
+          { "data-testid": "result" },
+          user ? "found" : "null",
+        ),
       );
     }
 
@@ -316,7 +340,11 @@ describe("useOne", () => {
         "div",
         null,
         createElement("span", { "data-testid": "loading" }, String(loading)),
-        createElement("span", { "data-testid": "result" }, user ? "found" : "null")
+        createElement(
+          "span",
+          { "data-testid": "result" },
+          user ? "found" : "null",
+        ),
       );
     }
 
@@ -335,10 +363,14 @@ describe("useOne", () => {
     let deleteFn: any;
 
     function TestComponent() {
-      const [user, loading, mutate] = useOne(app.users, testUserId);
+      const [_user, loading, mutate] = useOne(app.users, testUserId);
       updateFn = mutate.update;
       deleteFn = mutate.delete;
-      return createElement("span", { "data-testid": "loading" }, String(loading));
+      return createElement(
+        "span",
+        { "data-testid": "loading" },
+        String(loading),
+      );
     }
 
     renderWithJazz(createElement(TestComponent));
@@ -418,19 +450,19 @@ describe("Reactivity", () => {
   // Skip: Groove parser doesn't support LIKE operator (startsWith) yet
   it.skip("updates when data changes", async () => {
     let mutate: any;
-    let lastCount = 0;
+    let _lastCount = 0;
 
     function TestComponent() {
-      const [users, loading, m] = useAll(
-        app.users.where({ name: { startsWith: "Reactivity" } })
+      const [users, _loading, m] = useAll(
+        app.users.where({ name: { startsWith: "Reactivity" } }),
       );
       mutate = m;
-      lastCount = users.length;
+      _lastCount = users.length;
 
       return createElement(
         "div",
         null,
-        createElement("span", { "data-testid": "count" }, String(users.length))
+        createElement("span", { "data-testid": "count" }, String(users.length)),
       );
     }
 
@@ -455,7 +487,7 @@ describe("Reactivity", () => {
       () => {
         expect(screen.getByTestId("count").textContent).toBe("1");
       },
-      { timeout: 2000 }
+      { timeout: 2000 },
     );
   });
 });
@@ -465,7 +497,7 @@ describe("Reactivity", () => {
 describe("Includes with hooks", () => {
   let testProjectId: string;
   let testOwnerId: string;
-  let testTaskId: string;
+  let _testTaskId: string;
 
   beforeAll(() => {
     testOwnerId = db.users.create({
@@ -483,7 +515,7 @@ describe("Includes with hooks", () => {
       color: "#123456",
     });
 
-    testTaskId = db.tasks.create({
+    _testTaskId = db.tasks.create({
       title: "IncludesTask",
       status: "open",
       priority: "high",
@@ -498,7 +530,7 @@ describe("Includes with hooks", () => {
   it("useAll with forward ref include", async () => {
     function TestComponent() {
       const [tasks, loading] = useAll(
-        app.tasks.where({ title: "IncludesTask" }).with({ project: true })
+        app.tasks.where({ title: "IncludesTask" }).with({ project: true }),
       );
 
       if (loading) {
@@ -510,12 +542,16 @@ describe("Includes with hooks", () => {
         "div",
         null,
         createElement("span", { "data-testid": "loading" }, "false"),
-        createElement("span", { "data-testid": "title" }, task?.title || "none"),
+        createElement(
+          "span",
+          { "data-testid": "title" },
+          task?.title || "none",
+        ),
         createElement(
           "span",
           { "data-testid": "project" },
-          typeof task?.project === "object" ? task.project.name : "not-loaded"
-        )
+          typeof task?.project === "object" ? task.project.name : "not-loaded",
+        ),
       );
     }
 
@@ -533,7 +569,7 @@ describe("Includes with hooks", () => {
     function TestComponent() {
       const [project, loading] = useOne(
         app.projects.with({ owner: true }),
-        testProjectId
+        testProjectId,
       );
 
       if (loading) {
@@ -544,12 +580,18 @@ describe("Includes with hooks", () => {
         "div",
         null,
         createElement("span", { "data-testid": "loading" }, "false"),
-        createElement("span", { "data-testid": "name" }, project?.name || "none"),
+        createElement(
+          "span",
+          { "data-testid": "name" },
+          project?.name || "none",
+        ),
         createElement(
           "span",
           { "data-testid": "owner" },
-          typeof project?.owner === "object" ? project.owner.name : "not-loaded"
-        )
+          typeof project?.owner === "object"
+            ? project.owner.name
+            : "not-loaded",
+        ),
       );
     }
 
@@ -569,10 +611,10 @@ describe("Includes with hooks", () => {
 describe("Query key stability", () => {
   it("useAll does not resubscribe on rerender with same query", async () => {
     let renderCount = 0;
-    let subscribeCount = 0;
+    const _subscribeCount = 0;
 
     // Create a test-specific filter to count subscriptions
-    const originalSubscribeAll = app.users.subscribeAll;
+    const _originalSubscribeAll = app.users.subscribeAll;
 
     function TestComponent() {
       renderCount++;
@@ -590,8 +632,12 @@ describe("Query key stability", () => {
       return createElement(
         "div",
         null,
-        createElement("span", { "data-testid": "renders" }, String(renderCount)),
-        createElement("span", { "data-testid": "count" }, String(users.length))
+        createElement(
+          "span",
+          { "data-testid": "renders" },
+          String(renderCount),
+        ),
+        createElement("span", { "data-testid": "count" }, String(users.length)),
       );
     }
 
@@ -600,9 +646,11 @@ describe("Query key stability", () => {
     await waitFor(
       () => {
         // Should have rendered at least twice due to force update
-        expect(parseInt(screen.getByTestId("renders").textContent || "0")).toBeGreaterThanOrEqual(2);
+        expect(
+          Number.parseInt(screen.getByTestId("renders").textContent || "0"),
+        ).toBeGreaterThanOrEqual(2);
       },
-      { timeout: 2000 }
+      { timeout: 2000 },
     );
 
     // The component should have rerendered but subscription should be stable

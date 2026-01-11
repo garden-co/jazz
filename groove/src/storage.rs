@@ -338,14 +338,20 @@ impl<T: ChunkStore + CommitStore> Storage for T {}
 /// Environment trait - combines all storage capabilities.
 /// This is the main trait that LocalNode uses for storage.
 #[cfg(not(target_arch = "wasm32"))]
-pub trait Environment: ChunkStore + CommitStore + SyncStateStore + Send + Sync + std::fmt::Debug {}
+pub trait Environment:
+    ChunkStore + CommitStore + SyncStateStore + Send + Sync + std::fmt::Debug
+{
+}
 
 #[cfg(target_arch = "wasm32")]
 pub trait Environment: ChunkStore + CommitStore + SyncStateStore + std::fmt::Debug {}
 
 // Blanket impl for Environment
 #[cfg(not(target_arch = "wasm32"))]
-impl<T: ChunkStore + CommitStore + SyncStateStore + Send + Sync + std::fmt::Debug> Environment for T {}
+impl<T: ChunkStore + CommitStore + SyncStateStore + Send + Sync + std::fmt::Debug> Environment
+    for T
+{
+}
 
 #[cfg(target_arch = "wasm32")]
 impl<T: ChunkStore + CommitStore + SyncStateStore + std::fmt::Debug> Environment for T {}

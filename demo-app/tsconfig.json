@@ -12,11 +12,12 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "baseUrl": ".",
+    "types": ["vite/client"],
     "paths": {
       "@/*": ["./src/*"],
       "@jazz/schema": ["../packages/jazz-schema/dist/index.d.ts"],
       "@jazz/schema/runtime": ["../packages/jazz-schema/dist/runtime.d.ts"]
     }
   },
-  "include": ["src"]
+  "include": ["src", "tests"]
 }

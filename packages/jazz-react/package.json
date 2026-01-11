@@ -11,12 +11,11 @@
       "types": "./dist/index.d.ts"
     }
   },
-  "files": [
-    "dist"
-  ],
+  "files": ["dist"],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
     "generate:test": "tsx test/generate.ts",
     "test": "pnpm generate:test && vitest run",
     "test:watch": "pnpm generate:test && vitest"
@@ -30,10 +29,10 @@
     "@vitest/browser": "^2.1.9",
     "groove-wasm": "workspace:*",
     "playwright": "^1.57.0",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
     "tsx": "^4.21.0",
-    "typescript": "^5.3.0",
+    "typescript": "^5.9.3",
     "vite": "^5.0.0",
     "vite-plugin-top-level-await": "^1.4.0",
     "vite-plugin-wasm": "^3.3.0",

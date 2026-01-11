@@ -2,8 +2,8 @@
  * React context for Jazz database
  */
 
-import { createContext, useContext, type ReactNode } from "react";
 import type { WasmDatabaseLike } from "@jazz/client";
+import { type ReactNode, createContext, useContext } from "react";
 
 const JazzContext = createContext<WasmDatabaseLike | null>(null);
 

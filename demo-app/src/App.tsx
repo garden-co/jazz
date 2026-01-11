@@ -1,5 +1,10 @@
-import { useState, useEffect, useRef } from "react";
-import { JazzProvider, useJazz, useAll, type WasmDatabaseLike } from "@jazz/react";
+import {
+  JazzProvider,
+  type WasmDatabaseLike,
+  useAll,
+  useJazz,
+} from "@jazz/react";
+import { useEffect, useRef, useState } from "react";
 import { app } from "./generated/client";
 import type { IssueWith } from "./generated/types";
 
@@ -10,16 +15,15 @@ export type LoadedIssue = IssueWith<{
   IssueAssignees: { user: true };
 }>;
 
-// @ts-ignore - vite handles ?raw imports
 import schema from "./schema.sql?raw";
 import "./index.css";
 
-import { Sidebar } from "@/components/layout/Sidebar";
-import { Header } from "@/components/layout/Header";
-import { IssueList } from "@/components/issues/IssueList";
+import { FilterBar } from "@/components/filters/FilterBar";
 import { IssueDetail } from "@/components/issues/IssueDetail";
 import { IssueForm } from "@/components/issues/IssueForm";
-import { FilterBar } from "@/components/filters/FilterBar";
+import { IssueList } from "@/components/issues/IssueList";
+import { Header } from "@/components/layout/Header";
+import { Sidebar } from "@/components/layout/Sidebar";
 import { useFakeData } from "@/hooks/useFakeData";
 
 async function initWasm() {
@@ -31,30 +35,32 @@ async function initWasm() {
 // Check for persistence preference in URL params or localStorage
 function shouldUsePersistence(): boolean {
   const urlParams = new URLSearchParams(window.location.search);
-  if (urlParams.has('persist')) {
-    return urlParams.get('persist') === 'true';
+  if (urlParams.has("persist")) {
+    return urlParams.get("persist") === "true";
   }
   // Default to true for persistence
-  return localStorage.getItem('groove_persist') !== 'false';
+  return localStorage.getItem("groove_persist") !== "false";
 }
 
 // Check if sync mode is enabled via URL param
 function shouldUseSync(): boolean {
   const urlParams = new URLSearchParams(window.location.search);
-  return urlParams.has('sync');
+  return urlParams.has("sync");
 }
 
 // Get sync server URL from URL params or default
 function getSyncServerUrl(): string {
   const urlParams = new URLSearchParams(window.location.search);
-  return urlParams.get('syncUrl') || 'http://localhost:8080';
+  return urlParams.get("syncUrl") || "http://localhost:8080";
 }
 
 function App() {
   const db = useJazz();
 
   // UI state
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
+    null,
+  );
   const [showMyIssues, setShowMyIssues] = useState(false);
   const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
   const [showIssueForm, setShowIssueForm] = useState(false);
@@ -71,7 +77,8 @@ function App() {
   const { initialized, currentUserId } = useFakeData(db);
 
   // Compute effective assignee filter (explicit filter takes precedence over "My Issues")
-  const effectiveAssignee = assigneeFilter || (showMyIssues ? currentUserId : undefined);
+  const effectiveAssignee =
+    assigneeFilter || (showMyIssues ? currentUserId : undefined);
 
   // Subscribe to filtered issues - no useMemo needed, hook handles structural equality
   // undefined values are automatically ignored by the where clause builder
@@ -81,20 +88,30 @@ function App() {
         project: selectedProjectId ?? undefined,
         status: statusFilter,
         priority: priorityFilter,
-        IssueAssignees: effectiveAssignee ? { some: { user: effectiveAssignee } } : undefined,
+        IssueAssignees: effectiveAssignee
+          ? { some: { user: effectiveAssignee } }
+          : undefined,
         IssueLabels: labelFilter ? { some: { label: labelFilter } } : undefined,
       })
       .with({
         project: true,
         IssueLabels: { label: true },
         IssueAssignees: { user: true },
-      })
+      }),
   );
 
   // Reset page when filters change
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally reset page when any filter changes
   useEffect(() => {
     setCurrentPage(0);
-  }, [selectedProjectId, showMyIssues, statusFilter, priorityFilter, assigneeFilter, labelFilter]);
+  }, [
+    selectedProjectId,
+    showMyIssues,
+    statusFilter,
+    priorityFilter,
+    assigneeFilter,
+    labelFilter,
+  ]);
 
   if (!initialized || issuesLoading) {
     return (
@@ -146,10 +163,7 @@ function App() {
         onOpenChange={(open) => !open && setSelectedIssueId(null)}
       />
 
-      <IssueForm
-        open={showIssueForm}
-        onOpenChange={setShowIssueForm}
-      />
+      <IssueForm open={showIssueForm} onOpenChange={setShowIssueForm} />
     </div>
   );
 }
@@ -180,12 +194,14 @@ function Root() {
           // Use synced database with shared catalog for multi-client sync
           const serverUrl = getSyncServerUrl();
           const tabId = Math.random().toString(36).substring(7);
-          console.log(`Using synced database (server: ${serverUrl}, tabId: ${tabId})`);
+          console.log(
+            `Using synced database (server: ${serverUrl}, tabId: ${tabId})`,
+          );
 
           const syncedDb = new wasm.WasmSyncedLocalNode(
             serverUrl,
             `token-${tabId}`,
-            "demo-app-catalog-v1" // Shared catalog ID for sync
+            "demo-app-catalog-v1", // Shared catalog ID for sync
           );
 
           syncedDb.setOnStateChange((state: string) => {
@@ -217,7 +233,10 @@ function Root() {
             console.log("Initializing schema...");
             persistedDb.init_schema(schema);
           } else {
-            console.log("Loaded existing database from IndexedDB with tables:", tables);
+            console.log(
+              "Loaded existing database from IndexedDB with tables:",
+              tables,
+            );
           }
 
           db = persistedDb as unknown as WasmDatabaseLike;
@@ -252,7 +271,10 @@ function Root() {
         <div className="text-muted-foreground">Initializing WASM...</div>
         {isPersistent !== null && (
           <div className="text-xs text-muted-foreground">
-            Storage: {isPersistent ? "IndexedDB (persistent)" : "Memory (not persistent)"}
+            Storage:{" "}
+            {isPersistent
+              ? "IndexedDB (persistent)"
+              : "Memory (not persistent)"}
             {isSyncEnabled && " + Sync"}
           </div>
         )}

@@ -5,11 +5,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::stream::BoxStream;
 use futures::StreamExt;
+use futures::stream::BoxStream;
 
 use groove::sync::test_harness::{
-    create_synced_node, create_synced_node_with_config, TestClientEnv, TestHarness, TestTransport,
+    TestClientEnv, TestHarness, TestTransport, create_synced_node, create_synced_node_with_config,
 };
 use groove::sync::{ClientError, SseEvent, SyncConfig};
 use groove::{Commit, CommitStore, ObjectId};
@@ -45,7 +45,10 @@ async fn test_write_and_push() {
     let _stream = alice.subscribe_all().await.unwrap();
 
     let object_id = ObjectId(42);
-    let (commit_id, response) = alice.write_and_push(object_id, b"hello world").await.unwrap();
+    let (commit_id, response) = alice
+        .write_and_push(object_id, b"hello world")
+        .await
+        .unwrap();
 
     // Push should succeed
     assert!(response.accepted);
@@ -71,7 +74,10 @@ async fn test_two_clients_sync() {
     let mut bob_stream = bob.subscribe_all().await.unwrap();
 
     // Alice writes and pushes
-    let (commit_id, response) = alice.write_and_push(object_id, b"alice's data").await.unwrap();
+    let (commit_id, response) = alice
+        .write_and_push(object_id, b"alice's data")
+        .await
+        .unwrap();
     assert!(response.accepted);
 
     // Alice should have the commit
@@ -158,7 +164,10 @@ async fn test_three_clients_sync() {
     let mut charlie_stream = charlie.subscribe_all().await.unwrap();
 
     // Alice writes
-    let (commit_id, _) = alice.write_and_push(object_id, b"shared data").await.unwrap();
+    let (commit_id, _) = alice
+        .write_and_push(object_id, b"shared data")
+        .await
+        .unwrap();
 
     // Both Bob and Charlie receive
     let bob_event = recv_event(&mut bob_stream).await;
@@ -283,7 +292,10 @@ async fn test_concurrent_writes_to_different_objects() {
     let mut bob_stream = bob.subscribe_all().await.unwrap();
 
     // Both write simultaneously to different objects
-    let (ca, _) = alice.write_and_push(object_a, b"alice's object").await.unwrap();
+    let (ca, _) = alice
+        .write_and_push(object_a, b"alice's object")
+        .await
+        .unwrap();
     let (cb, _) = bob.write_and_push(object_b, b"bob's object").await.unwrap();
 
     // Each receives the other's broadcast
@@ -322,7 +334,10 @@ async fn test_concurrent_writes_to_same_object() {
     bob.apply_event(&bob_event);
 
     // Now Bob writes (his commit will have Alice's as parent)
-    let (cb, _) = bob.write_and_push(object_id, b"bob's version").await.unwrap();
+    let (cb, _) = bob
+        .write_and_push(object_id, b"bob's version")
+        .await
+        .unwrap();
 
     // Alice receives Bob's commit
     let alice_event = recv_event(&mut alice_stream).await;
@@ -440,7 +455,10 @@ async fn test_server_stores_commits() {
     let object_id = ObjectId(1200);
     let _stream = alice.subscribe_all().await.unwrap();
 
-    let (commit_id, _) = alice.write_and_push(object_id, b"server data").await.unwrap();
+    let (commit_id, _) = alice
+        .write_and_push(object_id, b"server data")
+        .await
+        .unwrap();
 
     // Server should have the commit
     let server_commit = harness.server_env().get_commit(&commit_id).await;
@@ -591,7 +609,11 @@ async fn test_synced_node_apply_upstream_commits() {
     synced_node.apply_upstream_commits(upstream_id, object_id, vec![commit], vec![commit_id]);
 
     // The commit should be in LocalNode
-    assert!(synced_node.inner().has_commit(object_id, "main", &commit_id));
+    assert!(
+        synced_node
+            .inner()
+            .has_commit(object_id, "main", &commit_id)
+    );
 
     // Can read the content
     let content = synced_node.inner().read(object_id, "main").unwrap();

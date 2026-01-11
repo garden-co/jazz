@@ -15,17 +15,17 @@
  * - [u8 type][16 byte ObjectId] for removed
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
-  decodeUserRows,
-  decodeUserDelta,
-  decodeNoteRows,
-  decodeNoteDelta,
-  decodeFolderRows,
   BinaryReader,
   DELTA_ADDED,
-  DELTA_UPDATED,
   DELTA_REMOVED,
+  DELTA_UPDATED,
+  decodeFolderRows,
+  decodeNoteDelta,
+  decodeNoteRows,
+  decodeUserDelta,
+  decodeUserRows,
 } from "./generated/decoders.js";
 
 // Crockford Base32 alphabet (lowercase, matches Rust)
@@ -126,14 +126,16 @@ function encodeUserRowBuffer(user: {
 }): Uint8Array {
   const nameBytes = textEncoder.encode(user.name);
   const emailBytes = textEncoder.encode(user.email);
-  const avatarBytes = user.avatar ? textEncoder.encode(user.avatar) : new Uint8Array(0);
+  const avatarBytes = user.avatar
+    ? textEncoder.encode(user.avatar)
+    : new Uint8Array(0);
 
   // Fixed section
   const fixedSection = concat(
     encodeObjectId(user.id),
     encodeI64(user.age),
     encodeF64(user.score),
-    encodeBool(user.isAdmin)
+    encodeBool(user.isAdmin),
   );
   // fixedSection is 33 bytes
 
@@ -154,13 +156,13 @@ function encodeUserRowBuffer(user: {
       nameBytes,
       emailBytes,
       new Uint8Array([1]), // presence byte
-      avatarBytes
+      avatarBytes,
     );
   } else {
     varData = concat(
       nameBytes,
       emailBytes,
-      new Uint8Array([0]) // null presence byte
+      new Uint8Array([0]), // null presence byte
     );
   }
 
@@ -194,14 +196,14 @@ function encodeFolderRowBuffer(folder: {
       encodeObjectId(folder.id),
       encodeObjectId(folder.owner),
       new Uint8Array([1]), // presence byte
-      encodeObjectId(folder.parent)
+      encodeObjectId(folder.parent),
     );
   } else {
     fixedSection = concat(
       encodeObjectId(folder.id),
       encodeObjectId(folder.owner),
       new Uint8Array([0]), // null presence byte
-      new Uint8Array(16) // zeroed ObjectId placeholder
+      new Uint8Array(16), // zeroed ObjectId placeholder
     );
   }
   // fixedSection is 49 bytes
@@ -250,7 +252,7 @@ function encodeNoteRowBuffer(note: {
       encodeObjectId(note.folder),
       encodeI64(note.createdAt),
       encodeI64(note.updatedAt),
-      encodeBool(note.isPublic)
+      encodeBool(note.isPublic),
     );
   } else {
     fixedSection = concat(
@@ -260,7 +262,7 @@ function encodeNoteRowBuffer(note: {
       new Uint8Array(16), // zeroed ObjectId placeholder
       encodeI64(note.createdAt),
       encodeI64(note.updatedAt),
-      encodeBool(note.isPublic)
+      encodeBool(note.isPublic),
     );
   }
   // fixedSection is 66 bytes
@@ -392,7 +394,10 @@ describe("Binary Decoders", () => {
         isAdmin: false,
       });
 
-      const deltaBuffer = concat(new Uint8Array([DELTA_ADDED]), rowBuffer).buffer;
+      const deltaBuffer = concat(
+        new Uint8Array([DELTA_ADDED]),
+        rowBuffer,
+      ).buffer;
       const delta = decodeUserDelta(deltaBuffer);
 
       expect(delta.type).toBe("added");
@@ -413,7 +418,10 @@ describe("Binary Decoders", () => {
         isAdmin: true,
       });
 
-      const deltaBuffer = concat(new Uint8Array([DELTA_UPDATED]), rowBuffer).buffer;
+      const deltaBuffer = concat(
+        new Uint8Array([DELTA_UPDATED]),
+        rowBuffer,
+      ).buffer;
       const delta = decodeUserDelta(deltaBuffer);
 
       expect(delta.type).toBe("updated");
@@ -426,7 +434,7 @@ describe("Binary Decoders", () => {
       const id = makeObjectId(7);
       const deltaBuffer = concat(
         new Uint8Array([DELTA_REMOVED]),
-        encodeObjectId(id)
+        encodeObjectId(id),
       ).buffer;
       const delta = decodeUserDelta(deltaBuffer);
 
@@ -450,16 +458,16 @@ describe("Binary Decoders", () => {
       const data = concat(
         encodeObjectId(makeObjectId(1)),
         encodeI64(123456789n),
-        encodeF64(3.14159),
+        encodeF64(Math.PI),
         encodeBool(true),
-        encodeU32(42)
+        encodeU32(42),
       );
 
       const reader = new BinaryReader(data.buffer);
 
       expect(reader.readObjectId()).toBe(makeObjectId(1));
       expect(reader.readI64()).toBe(123456789n);
-      expect(reader.readF64()).toBeCloseTo(3.14159);
+      expect(reader.readF64()).toBeCloseTo(Math.PI);
       expect(reader.readBool()).toBe(true);
       expect(reader.readU32()).toBe(42);
     });
@@ -470,7 +478,7 @@ describe("Binary Decoders", () => {
         new Uint8Array([0]), // null
         new Uint8Array(16), // zeroed ObjectId placeholder for null
         new Uint8Array([1]), // present
-        encodeObjectId(refId)
+        encodeObjectId(refId),
       );
 
       const reader = new BinaryReader(data.buffer);
@@ -606,7 +614,7 @@ describe("Binary Decoders", () => {
 
       const buffer = concat(
         new Uint8Array([DELTA_REMOVED]),
-        encodeObjectId(noteId)
+        encodeObjectId(noteId),
       ).buffer;
       const delta = decodeNoteDelta(buffer);
 

@@ -1,4 +1,4 @@
-import { useAll } from "@jazz/react";
+import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
@@ -6,10 +6,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Button } from "@/components/ui/button";
-import { X } from "lucide-react";
-import { STATUSES, STATUS_LABELS, PRIORITIES, PRIORITY_LABELS } from "@/utils/constants";
 import { app } from "@/generated/client";
+import {
+  PRIORITIES,
+  PRIORITY_LABELS,
+  STATUSES,
+  STATUS_LABELS,
+} from "@/utils/constants";
+import { useAll } from "@jazz/react";
+import { X } from "lucide-react";
 
 interface FilterBarProps {
   statusFilter: string | undefined;
@@ -35,7 +40,8 @@ export function FilterBar({
   // Fetch users and labels internally
   const [users] = useAll(app.users);
   const [labels] = useAll(app.labels);
-  const hasFilters = statusFilter || priorityFilter || assigneeFilter || labelFilter;
+  const hasFilters =
+    statusFilter || priorityFilter || assigneeFilter || labelFilter;
 
   const clearFilters = () => {
     onStatusFilterChange(undefined);
@@ -46,7 +52,9 @@ export function FilterBar({
 
   return (
     <div className="flex items-center gap-2 border-b px-4 py-2">
-      <span className="text-sm font-medium text-muted-foreground">Filters:</span>
+      <span className="text-sm font-medium text-muted-foreground">
+        Filters:
+      </span>
 
       <Select
         value={statusFilter || "all"}
@@ -67,7 +75,9 @@ export function FilterBar({
 
       <Select
         value={priorityFilter || "all"}
-        onValueChange={(v) => onPriorityFilterChange(v === "all" ? undefined : v)}
+        onValueChange={(v) =>
+          onPriorityFilterChange(v === "all" ? undefined : v)
+        }
       >
         <SelectTrigger className="w-[140px] h-8">
           <SelectValue placeholder="Priority" />
@@ -84,7 +94,9 @@ export function FilterBar({
 
       <Select
         value={assigneeFilter || "all"}
-        onValueChange={(v) => onAssigneeFilterChange(v === "all" ? undefined : v)}
+        onValueChange={(v) =>
+          onAssigneeFilterChange(v === "all" ? undefined : v)
+        }
       >
         <SelectTrigger className="w-[160px] h-8">
           <SelectValue placeholder="Assignee" />
@@ -123,7 +135,12 @@ export function FilterBar({
       </Select>
 
       {hasFilters && (
-        <Button variant="ghost" size="sm" onClick={clearFilters} className="h-8">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={clearFilters}
+          className="h-8"
+        >
           <X className="h-4 w-4 mr-1" />
           Clear
         </Button>

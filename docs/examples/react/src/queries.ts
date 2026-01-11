@@ -1,5 +1,5 @@
-import { app } from "./generated/client.js";
 import type { WasmDatabaseLike } from "@jazz/client";
+import { app } from "./generated/client.js";
 
 // This file shows non-React query patterns
 

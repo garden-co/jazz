@@ -2,9 +2,8 @@
  * Tests for subscribeAll with includes
  */
 
-import { describe, it, expect, beforeAll } from "vitest";
-import { createDatabase, type Database } from "../src/generated/client";
-// @ts-ignore - vite handles ?raw imports
+import { beforeAll, describe, expect, it } from "vitest";
+import { type Database, createDatabase } from "../src/generated/client";
 import schema from "../src/schema.sql?raw";
 
 // We need to load the WASM module
@@ -26,18 +25,18 @@ beforeAll(async () => {
   const userId = db.users.create({
     name: "Alice",
     email: "alice@test.com",
-    avatarColor: "#ff0000"
+    avatarColor: "#ff0000",
   });
 
   const projectId = db.projects.create({
     name: "Test Project",
     color: "#00ff00",
-    description: "A test project"
+    description: "A test project",
   });
 
   const labelId = db.labels.create({
     name: "Bug",
-    color: "#ff0000"
+    color: "#ff0000",
   });
 
   const issueId = db.issues.create({
@@ -47,18 +46,18 @@ beforeAll(async () => {
     priority: "high",
     project: projectId,
     createdAt: BigInt(Date.now()),
-    updatedAt: BigInt(Date.now())
+    updatedAt: BigInt(Date.now()),
   });
 
   // Create junction table entries
   db.issuelabels.create({
     issue: issueId,
-    label: labelId
+    label: labelId,
   });
 
   db.issueassignees.create({
     issue: issueId,
-    user: userId
+    user: userId,
   });
 });
 
@@ -104,7 +103,14 @@ describe("subscribeAll with forward ref include", () => {
       });
     });
 
-    console.log("Issues with project:", JSON.stringify(issues, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2));
+    console.log(
+      "Issues with project:",
+      JSON.stringify(
+        issues,
+        (_, v) => (typeof v === "bigint" ? v.toString() : v),
+        2,
+      ),
+    );
 
     expect(issues.length).toBe(1);
     expect(issues[0].title).toBe("Test Issue");
@@ -117,13 +123,22 @@ describe("subscribeAll with reverse ref include", () => {
   it("should resolve IssueLabels reverse ref", async () => {
     const issues = await new Promise<any[]>((resolve) => {
       let unsubscribe: (() => void) | undefined;
-      unsubscribe = db.issues.with({ IssueLabels: true }).subscribeAll((rows) => {
-        setTimeout(() => unsubscribe?.(), 0);
-        resolve(rows);
-      });
+      unsubscribe = db.issues
+        .with({ IssueLabels: true })
+        .subscribeAll((rows) => {
+          setTimeout(() => unsubscribe?.(), 0);
+          resolve(rows);
+        });
     });
 
-    console.log("Issues with IssueLabels:", JSON.stringify(issues, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2));
+    console.log(
+      "Issues with IssueLabels:",
+      JSON.stringify(
+        issues,
+        (_, v) => (typeof v === "bigint" ? v.toString() : v),
+        2,
+      ),
+    );
 
     expect(issues.length).toBe(1);
     expect(Array.isArray(issues[0].IssueLabels)).toBe(true);
@@ -137,17 +152,26 @@ describe("subscribeAll with mixed includes", () => {
       let unsubscribe: (() => void) | undefined;
       // For now, only test forward ref + reverse ref without nested includes
       // Nested includes within reverse refs need additional work
-      unsubscribe = db.issues.with({
-        project: true,
-        IssueLabels: true,
-        IssueAssignees: true
-      }).subscribeAll((rows) => {
-        setTimeout(() => unsubscribe?.(), 0);
-        resolve(rows);
-      });
+      unsubscribe = db.issues
+        .with({
+          project: true,
+          IssueLabels: true,
+          IssueAssignees: true,
+        })
+        .subscribeAll((rows) => {
+          setTimeout(() => unsubscribe?.(), 0);
+          resolve(rows);
+        });
     });
 
-    console.log("Issues with mixed includes:", JSON.stringify(issues, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2));
+    console.log(
+      "Issues with mixed includes:",
+      JSON.stringify(
+        issues,
+        (_, v) => (typeof v === "bigint" ? v.toString() : v),
+        2,
+      ),
+    );
 
     expect(issues.length).toBe(1);
     // Forward ref should be resolved
@@ -163,17 +187,26 @@ describe("subscribeAll with mixed includes", () => {
     const issues = await new Promise<any[]>((resolve) => {
       let unsubscribe: (() => void) | undefined;
       // Test nested includes: resolve label FK within IssueLabels, user FK within IssueAssignees
-      unsubscribe = db.issues.with({
-        project: true,
-        IssueLabels: { label: true },
-        IssueAssignees: { user: true }
-      }).subscribeAll((rows) => {
-        setTimeout(() => unsubscribe?.(), 0);
-        resolve(rows);
-      });
+      unsubscribe = db.issues
+        .with({
+          project: true,
+          IssueLabels: { label: true },
+          IssueAssignees: { user: true },
+        })
+        .subscribeAll((rows) => {
+          setTimeout(() => unsubscribe?.(), 0);
+          resolve(rows);
+        });
     });
 
-    console.log("Issues with nested includes:", JSON.stringify(issues, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2));
+    console.log(
+      "Issues with nested includes:",
+      JSON.stringify(
+        issues,
+        (_, v) => (typeof v === "bigint" ? v.toString() : v),
+        2,
+      ),
+    );
 
     expect(issues.length).toBe(1);
     // Forward ref should be resolved
@@ -203,25 +236,35 @@ describe("subscribeAll with filter and includes", () => {
         resolve(rows);
       });
     });
-    const bugLabel = labels.find(l => l.name === "Bug");
+    const bugLabel = labels.find((l) => l.name === "Bug");
     expect(bugLabel).toBeDefined();
 
     // Now filter issues by that label
     const issues = await new Promise<any[]>((resolve) => {
       let unsubscribe: (() => void) | undefined;
-      unsubscribe = db.issues.with({
-        project: true,
-        IssueLabels: { label: true },
-        IssueAssignees: { user: true }
-      }).where({
-        IssueLabels: { some: { label: bugLabel.id } }
-      }).subscribeAll((rows) => {
-        setTimeout(() => unsubscribe?.(), 0);
-        resolve(rows);
-      });
+      unsubscribe = db.issues
+        .with({
+          project: true,
+          IssueLabels: { label: true },
+          IssueAssignees: { user: true },
+        })
+        .where({
+          IssueLabels: { some: { label: bugLabel.id } },
+        })
+        .subscribeAll((rows) => {
+          setTimeout(() => unsubscribe?.(), 0);
+          resolve(rows);
+        });
     });
 
-    console.log("Issues filtered by label:", JSON.stringify(issues, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2));
+    console.log(
+      "Issues filtered by label:",
+      JSON.stringify(
+        issues,
+        (_, v) => (typeof v === "bigint" ? v.toString() : v),
+        2,
+      ),
+    );
 
     expect(issues.length).toBe(1);
     expect(issues[0].title).toBe("Test Issue");
@@ -240,7 +283,7 @@ describe("subscribeAll with filter and includes", () => {
         resolve(rows);
       });
     });
-    const bugLabel = labels.find(l => l.name === "Bug");
+    const bugLabel = labels.find((l) => l.name === "Bug");
     expect(bugLabel).toBeDefined();
 
     const users = await new Promise<any[]>((resolve) => {
@@ -250,27 +293,37 @@ describe("subscribeAll with filter and includes", () => {
         resolve(rows);
       });
     });
-    const alice = users.find(u => u.name === "Alice");
+    const alice = users.find((u) => u.name === "Alice");
     expect(alice).toBeDefined();
 
     // Filter by primary table field + junction tables
     const issues = await new Promise<any[]>((resolve) => {
       let unsubscribe: (() => void) | undefined;
-      unsubscribe = db.issues.with({
-        project: true,
-        IssueLabels: { label: true },
-        IssueAssignees: { user: true }
-      }).where({
-        priority: "high", // Filter on primary table (Issues)
-        IssueLabels: { some: { label: bugLabel.id } },
-        IssueAssignees: { some: { user: alice.id } }
-      }).subscribeAll((rows) => {
-        setTimeout(() => unsubscribe?.(), 0);
-        resolve(rows);
-      });
+      unsubscribe = db.issues
+        .with({
+          project: true,
+          IssueLabels: { label: true },
+          IssueAssignees: { user: true },
+        })
+        .where({
+          priority: "high", // Filter on primary table (Issues)
+          IssueLabels: { some: { label: bugLabel.id } },
+          IssueAssignees: { some: { user: alice.id } },
+        })
+        .subscribeAll((rows) => {
+          setTimeout(() => unsubscribe?.(), 0);
+          resolve(rows);
+        });
     });
 
-    console.log("Issues with combined filters:", JSON.stringify(issues, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2));
+    console.log(
+      "Issues with combined filters:",
+      JSON.stringify(
+        issues,
+        (_, v) => (typeof v === "bigint" ? v.toString() : v),
+        2,
+      ),
+    );
 
     expect(issues.length).toBe(1);
     expect(issues[0].title).toBe("Test Issue");

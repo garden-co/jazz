@@ -1,15 +1,5 @@
-import { useState, useEffect } from "react";
-import { useAll, useMutate } from "@jazz/react";
-import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-  SheetFooter,
-} from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -17,18 +7,30 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { STATUSES, STATUS_LABELS, PRIORITIES, PRIORITY_LABELS } from "@/utils/constants";
+import {
+  Sheet,
+  SheetContent,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import { Textarea } from "@/components/ui/textarea";
 import { app } from "@/generated/client";
+import {
+  PRIORITIES,
+  PRIORITY_LABELS,
+  STATUSES,
+  STATUS_LABELS,
+} from "@/utils/constants";
+import { useAll, useMutate } from "@jazz/react";
+import { useEffect, useState } from "react";
 
 interface IssueFormProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
-export function IssueForm({
-  open,
-  onOpenChange,
-}: IssueFormProps) {
+export function IssueForm({ open, onOpenChange }: IssueFormProps) {
   // Fetch projects internally
   const [allProjects] = useAll(app.projects);
   const issues = useMutate(app.issues);

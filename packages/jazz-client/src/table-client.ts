@@ -2,19 +2,19 @@
  * TableClient base class for generated table clients
  */
 
+import { decodeDeltaWithIncludes } from "./decoder.js";
 import {
-  type TableMeta,
-  type SchemaMeta,
   type BaseWhereInput,
-  type IncludeSpec,
-  type Unsubscribe,
-  type TableDecoder,
   type Delta,
+  type IncludeSpec,
+  type SchemaMeta,
+  type TableDecoder,
+  type TableMeta,
+  type Unsubscribe,
   type WasmDatabaseLike,
   buildQuery,
   buildQueryById,
 } from "./types.js";
-import { decodeDeltaWithIncludes } from "./decoder.js";
 
 /**
  * Base class for type-safe table descriptors.
@@ -29,7 +29,7 @@ export abstract class TableClient<T extends { id: string }> {
   constructor(
     protected readonly tableMeta: TableMeta,
     protected readonly schemaMeta: SchemaMeta,
-    protected readonly decoder: TableDecoder<T>
+    protected readonly decoder: TableDecoder<T>,
   ) {}
 
   /**
@@ -52,7 +52,7 @@ export abstract class TableClient<T extends { id: string }> {
     db: WasmDatabaseLike,
     id: string,
     options: { include?: IncludeSpec },
-    callback: (row: T | null) => void
+    callback: (row: T | null) => void,
   ): Unsubscribe {
     const sql = buildQueryById(this.tableMeta, this.schemaMeta, id, {
       include: options.include,
@@ -68,8 +68,13 @@ export abstract class TableClient<T extends { id: string }> {
 
         // Use dynamic decoder when includes are specified, otherwise use generated decoder
         const delta = options.include
-          ? decodeDeltaWithIncludes<T>(bufferCopy, this.tableMeta, this.schemaMeta, options.include)
-          : this.decoder.delta(bufferCopy.buffer) as Delta<T>;
+          ? decodeDeltaWithIncludes<T>(
+              bufferCopy,
+              this.tableMeta,
+              this.schemaMeta,
+              options.include,
+            )
+          : (this.decoder.delta(bufferCopy.buffer) as Delta<T>);
 
         if (delta.type === "added" || delta.type === "updated") {
           currentRow = delta.row;
@@ -97,7 +102,7 @@ export abstract class TableClient<T extends { id: string }> {
   protected _subscribeAll(
     db: WasmDatabaseLike,
     options: { where?: BaseWhereInput; include?: IncludeSpec },
-    callback: (rows: T[]) => void
+    callback: (rows: T[]) => void,
   ): Unsubscribe {
     const sql = buildQuery(this.tableMeta, this.schemaMeta, {
       where: options.where,
@@ -114,8 +119,13 @@ export abstract class TableClient<T extends { id: string }> {
 
         // Use dynamic decoder when includes are specified, otherwise use generated decoder
         const delta = options.include
-          ? decodeDeltaWithIncludes<T>(bufferCopy, this.tableMeta, this.schemaMeta, options.include)
-          : this.decoder.delta(bufferCopy.buffer) as Delta<T>;
+          ? decodeDeltaWithIncludes<T>(
+              bufferCopy,
+              this.tableMeta,
+              this.schemaMeta,
+              options.include,
+            )
+          : (this.decoder.delta(bufferCopy.buffer) as Delta<T>);
 
         if (delta.type === "added" || delta.type === "updated") {
           rowsById.set(delta.row.id, delta.row);
@@ -140,7 +150,10 @@ export abstract class TableClient<T extends { id: string }> {
    * @param values - Column name to value mapping
    * @returns The generated ObjectId of the new row
    */
-  protected _create(db: WasmDatabaseLike, values: Record<string, unknown>): string {
+  protected _create(
+    db: WasmDatabaseLike,
+    values: Record<string, unknown>,
+  ): string {
     const columns = Object.keys(values);
     const sqlValues = columns.map((col) => formatSqlValue(values[col]));
 
@@ -164,7 +177,11 @@ export abstract class TableClient<T extends { id: string }> {
    * @param id - The row's ObjectId
    * @param values - Column name to value mapping (partial)
    */
-  protected _update(db: WasmDatabaseLike, id: string, values: Record<string, unknown>): void {
+  protected _update(
+    db: WasmDatabaseLike,
+    id: string,
+    values: Record<string, unknown>,
+  ): void {
     for (const [column, value] of Object.entries(values)) {
       if (value === undefined) continue;
 
@@ -180,23 +197,23 @@ export abstract class TableClient<T extends { id: string }> {
         } else {
           // F64 values need SQL update
           db.execute(
-            `UPDATE ${this.tableName} SET ${column} = ${value} WHERE id = '${id}'`
+            `UPDATE ${this.tableName} SET ${column} = ${value} WHERE id = '${id}'`,
           );
         }
       } else if (typeof value === "boolean") {
         // Boolean values need SQL update
         db.execute(
-          `UPDATE ${this.tableName} SET ${column} = ${value ? 'TRUE' : 'FALSE'} WHERE id = '${id}'`
+          `UPDATE ${this.tableName} SET ${column} = ${value ? "TRUE" : "FALSE"} WHERE id = '${id}'`,
         );
       } else if (value === null) {
         // Handle null values via SQL UPDATE
         db.execute(
-          `UPDATE ${this.tableName} SET ${column} = NULL WHERE id = '${id}'`
+          `UPDATE ${this.tableName} SET ${column} = NULL WHERE id = '${id}'`,
         );
       } else {
         // Fallback to SQL for other types
         db.execute(
-          `UPDATE ${this.tableName} SET ${column} = ${formatSqlValue(value)} WHERE id = '${id}'`
+          `UPDATE ${this.tableName} SET ${column} = ${formatSqlValue(value)} WHERE id = '${id}'`,
         );
       }
     }

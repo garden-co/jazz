@@ -1,7 +1,7 @@
+import type { LoadedIssue } from "@/App";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { IssueRow } from "./IssueRow";
-import type { LoadedIssue } from "@/App";
 
 interface IssueListProps {
   issues: LoadedIssue[];
@@ -48,7 +48,8 @@ export function IssueList({
       {totalPages > 1 && (
         <div className="flex items-center justify-between border-t px-4 py-2">
           <span className="text-sm text-muted-foreground">
-            Showing {startIndex + 1}-{Math.min(startIndex + pageSize, issues.length)} of {issues.length}
+            Showing {startIndex + 1}-
+            {Math.min(startIndex + pageSize, issues.length)} of {issues.length}
           </span>
           <div className="flex gap-2">
             <Button

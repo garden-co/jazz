@@ -12,8 +12,8 @@ mod table_rows;
 mod types;
 
 pub use binary::{
-    encode_delta, encode_delta_batch, encode_owned_rows, encode_rows, encode_single_owned_row,
-    encode_single_row, DELTA_ADDED, DELTA_REMOVED, DELTA_UPDATED,
+    DELTA_ADDED, DELTA_REMOVED, DELTA_UPDATED, encode_delta, encode_delta_batch, encode_owned_rows,
+    encode_rows, encode_single_owned_row, encode_single_row,
 };
 pub use catalog::{Catalog, CatalogError, TableDescriptor};
 pub use database::{Database, DatabaseError, DatabaseState, ExecuteResult, IncrementalQuery};
@@ -31,8 +31,8 @@ pub use policy::{
 pub use query_graph::PredicateValue;
 pub use row::RowError;
 pub use row_buffer::{
-    ColDescriptor, IdentifiedRow, OwnedRow, RowBuilder, RowDescriptor, RowRef, RowValue,
-    join_rows, project_row,
+    ColDescriptor, IdentifiedRow, OwnedRow, RowBuilder, RowDescriptor, RowRef, RowValue, join_rows,
+    project_row,
 };
 pub use schema::{ColumnDef, ColumnType, SchemaError, TableSchema};
 pub use table_rows::TableRows;

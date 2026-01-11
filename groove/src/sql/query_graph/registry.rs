@@ -8,12 +8,12 @@ use std::sync::{Arc, RwLock};
 
 use crate::listener::ListenerId;
 use crate::object::ObjectId;
+use crate::sql::DatabaseState;
 use crate::sql::query_graph::cache::RowCache;
 use crate::sql::query_graph::delta::{DeltaBatch, RowDelta};
 use crate::sql::query_graph::graph::{GraphId, QueryGraph};
 use crate::sql::row_buffer::{OwnedRow, RowDescriptor};
 use crate::sql::schema::TableSchema;
-use crate::sql::DatabaseState;
 
 /// Callback type for query output changes.
 #[cfg(not(feature = "wasm"))]
@@ -115,7 +115,7 @@ impl GraphRegistry {
         graph.set_id(id);
 
         // Get all tables this graph depends on (for JOIN queries)
-        let tables: Vec<String> = graph.all_tables().iter().cloned().collect();
+        let tables: Vec<String> = graph.all_tables().to_vec();
 
         // Add to queries
         self.queries
@@ -171,7 +171,11 @@ impl GraphRegistry {
     }
 
     /// Get current output for a query in buffer format (initializes lazily).
-    pub fn get_output(&self, graph_id: GraphId, db: &DatabaseState) -> Option<Vec<(ObjectId, OwnedRow)>> {
+    pub fn get_output(
+        &self,
+        graph_id: GraphId,
+        db: &DatabaseState,
+    ) -> Option<Vec<(ObjectId, OwnedRow)>> {
         let mut cache = self.cache.write().unwrap();
         self.queries
             .write()
@@ -181,18 +185,18 @@ impl GraphRegistry {
     }
 
     /// Get the output schema and descriptor for a query.
-    pub fn get_output_schema(&self, graph_id: GraphId) -> Option<(TableSchema, Arc<RowDescriptor>)> {
-        self.queries
-            .read()
-            .unwrap()
-            .get(&graph_id)
-            .map(|q| {
-                let schema = q.graph.output_schema().unwrap_or_else(|| {
-                    TableSchema::new("_output", vec![])
-                });
-                let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
-                (schema, descriptor)
-            })
+    pub fn get_output_schema(
+        &self,
+        graph_id: GraphId,
+    ) -> Option<(TableSchema, Arc<RowDescriptor>)> {
+        self.queries.read().unwrap().get(&graph_id).map(|q| {
+            let schema = q
+                .graph
+                .output_schema()
+                .unwrap_or_else(|| TableSchema::new("_output", vec![]));
+            let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
+            (schema, descriptor)
+        })
     }
 
     /// Notify all relevant graphs of a row change.
@@ -281,9 +285,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::sql::query_graph::PredicateValue;
     use crate::sql::query_graph::builder::QueryGraphBuilder;
     use crate::sql::query_graph::predicate::Predicate;
-    use crate::sql::query_graph::PredicateValue;
     use crate::sql::row_buffer::{RowBuilder, RowDescriptor};
     use crate::sql::schema::{ColumnDef, ColumnType};
     use crate::sql::{Database, TableSchema};
@@ -353,9 +357,12 @@ mod tests {
         let call_count = Arc::new(AtomicUsize::new(0));
         let count_clone = call_count.clone();
 
-        registry.subscribe(graph_id, Box::new(move |delta| {
-            count_clone.fetch_add(delta.len(), Ordering::SeqCst);
-        }));
+        registry.subscribe(
+            graph_id,
+            Box::new(move |delta| {
+                count_clone.fetch_add(delta.len(), Ordering::SeqCst);
+            }),
+        );
 
         // Notify of an active user - should trigger callback
         let (id, row) = make_owned_row(1, "Alice", true);

@@ -129,7 +129,10 @@ impl ClientSession {
 
     /// Get all queries that need an object.
     pub fn queries_needing_object(&self, object_id: &ObjectId) -> HashSet<QueryId> {
-        self.object_queries.get(object_id).cloned().unwrap_or_default()
+        self.object_queries
+            .get(object_id)
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -217,7 +220,8 @@ impl<E: Environment> SyncServer<E> {
             .or_default()
             .insert(id);
 
-        self.sessions.insert(id, ClientSession::new(identity, sse_sender));
+        self.sessions
+            .insert(id, ClientSession::new(identity, sse_sender));
         id
     }
 
@@ -246,7 +250,10 @@ impl<E: Environment> SyncServer<E> {
 
     /// Get sessions for an identity.
     pub fn sessions_for_identity(&self, identity_id: &str) -> HashSet<SessionId> {
-        self.identity_sessions.get(identity_id).cloned().unwrap_or_default()
+        self.identity_sessions
+            .get(identity_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Get a session by ID.
@@ -279,7 +286,10 @@ impl<E: Environment> SyncServer<E> {
 
     /// Get all sessions tracking an object.
     pub fn sessions_for_object(&self, object_id: &ObjectId) -> HashSet<SessionId> {
-        self.object_sessions.get(object_id).cloned().unwrap_or_default()
+        self.object_sessions
+            .get(object_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Broadcast an event to all sessions tracking an object.
@@ -531,8 +541,20 @@ mod tests {
         let (tx1, mut rx1) = tokio::sync::mpsc::channel(16);
         let (tx2, mut rx2) = tokio::sync::mpsc::channel(16);
 
-        let s1 = server.create_session(ClientIdentity { id: "u1".to_string(), name: None }, tx1);
-        let s2 = server.create_session(ClientIdentity { id: "u2".to_string(), name: None }, tx2);
+        let s1 = server.create_session(
+            ClientIdentity {
+                id: "u1".to_string(),
+                name: None,
+            },
+            tx1,
+        );
+        let s2 = server.create_session(
+            ClientIdentity {
+                id: "u2".to_string(),
+                name: None,
+            },
+            tx2,
+        );
 
         let obj = ObjectId(42);
         server.register_object_session(obj, s1);

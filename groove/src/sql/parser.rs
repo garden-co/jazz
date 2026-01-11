@@ -463,14 +463,14 @@ impl<'a> Parser<'a> {
             let col_name = self.parse_identifier()?;
             let col_type = self.parse_column_type()?;
 
-            // Check for NOT NULL or NULL
+            // Check for NOT NULL (NULL or default means nullable)
             let nullable = if self.try_keyword("NOT") {
                 self.expect_keyword("NULL")?;
                 false
-            } else if self.try_keyword("NULL") {
-                true
             } else {
-                true // Default to nullable
+                // Consume optional NULL keyword but always return true (nullable)
+                self.try_keyword("NULL");
+                true
             };
 
             columns.push(ColumnDef::new(col_name, col_type, nullable));
@@ -612,27 +612,25 @@ impl<'a> Parser<'a> {
             }
 
             // Check if this is a simple table.* projection
-            if exprs.len() == 1 {
-                if let SelectExpr::Column(qc) = &exprs[0] {
-                    if qc.column == "*" {
-                        if let Some(table) = &qc.table {
-                            let from = self.parse_from_clause()?;
-                            let where_clause = self.parse_where_clause()?;
-                            let (limit, offset) = self.parse_limit_offset()?;
-                            self.skip_whitespace();
-                            if self.peek_char() == Some(';') {
-                                self.consume_char();
-                            }
-                            return Ok(Select {
-                                projection: Projection::TableAll(table.clone()),
-                                from,
-                                where_clause,
-                                limit,
-                                offset,
-                            });
-                        }
-                    }
+            if exprs.len() == 1
+                && let SelectExpr::Column(qc) = &exprs[0]
+                && qc.column == "*"
+                && let Some(table) = &qc.table
+            {
+                let from = self.parse_from_clause()?;
+                let where_clause = self.parse_where_clause()?;
+                let (limit, offset) = self.parse_limit_offset()?;
+                self.skip_whitespace();
+                if self.peek_char() == Some(';') {
+                    self.consume_char();
                 }
+                return Ok(Select {
+                    projection: Projection::TableAll(table.clone()),
+                    from,
+                    where_clause,
+                    limit,
+                    offset,
+                });
             }
 
             Projection::Expressions(exprs)

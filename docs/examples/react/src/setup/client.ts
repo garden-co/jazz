@@ -28,7 +28,7 @@ export async function initDatabase(): Promise<WasmDatabaseLike> {
   const db = createWasmDatabase();
 
   // Load schema into the database
-  const schemaSQL = `
+  const _schemaSQL = `
     CREATE TABLE Users (
       id STRING NOT NULL,
       name STRING NOT NULL,

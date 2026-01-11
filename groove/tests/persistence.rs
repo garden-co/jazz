@@ -6,17 +6,9 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use groove::sql::row_buffer::{OwnedRow, RowValue};
+use groove::sql::row_buffer::RowValue;
 use groove::sql::{Database, ExecuteResult};
-use groove::{ChunkStore, ContentRef, MemoryEnvironment, ObjectId, INLINE_THRESHOLD};
-
-/// Helper to extract rows from ExecuteResult
-fn get_rows(result: ExecuteResult) -> Vec<(ObjectId, OwnedRow)> {
-    match result {
-        ExecuteResult::Selected(rows) => rows,
-        other => panic!("expected Selected, got {:?}", other),
-    }
-}
+use groove::{ChunkStore, ContentRef, INLINE_THRESHOLD, MemoryEnvironment};
 
 /// Helper to extract inserted ID from ExecuteResult
 fn get_inserted_id(result: ExecuteResult) -> groove::ObjectId {
@@ -61,13 +53,16 @@ fn database_roundtrip_simple() {
     assert_eq!(schema.columns[1].name, "name");
 
     // Verify data
-    let result = db.execute("SELECT * FROM users").unwrap();
-    let rows = get_rows(result);
+    let rows = db.query("SELECT * FROM users").unwrap();
     assert_eq!(rows.len(), 2, "should have 2 rows");
 
     // Check row values by name
-    let has_alice = rows.iter().any(|r| r.1.get_by_name("name") == Some(RowValue::String("Alice")));
-    let has_bob = rows.iter().any(|r| r.1.get_by_name("name") == Some(RowValue::String("Bob")));
+    let has_alice = rows
+        .iter()
+        .any(|r| r.1.get_by_name("name") == Some(RowValue::String("Alice")));
+    let has_bob = rows
+        .iter()
+        .any(|r| r.1.get_by_name("name") == Some(RowValue::String("Bob")));
     assert!(has_alice, "should contain Alice");
     assert!(has_bob, "should contain Bob");
 }
@@ -119,11 +114,11 @@ fn database_roundtrip_multiple_tables() {
     assert!(tables.contains(&"users".to_string()));
 
     // Verify orgs data
-    let orgs = get_rows(db.execute("SELECT * FROM orgs").unwrap());
+    let orgs = db.query("SELECT * FROM orgs").unwrap();
     assert_eq!(orgs.len(), 2);
 
     // Verify users data
-    let users = get_rows(db.execute("SELECT * FROM users").unwrap());
+    let users = db.query("SELECT * FROM users").unwrap();
     assert_eq!(users.len(), 2);
 
     // Verify ref column type was preserved (org_id is now at index 2: id, name, org_id)
@@ -145,8 +140,10 @@ fn database_roundtrip_with_policies() {
         // Note: id columns are auto-added as ObjectId type
         db.execute("CREATE TABLE users (name STRING NOT NULL)")
             .unwrap();
-        db.execute("CREATE TABLE documents (title STRING NOT NULL, owner_id REFERENCES users NOT NULL)")
-            .unwrap();
+        db.execute(
+            "CREATE TABLE documents (title STRING NOT NULL, owner_id REFERENCES users NOT NULL)",
+        )
+        .unwrap();
 
         // Create users
         let alice_id = get_inserted_id(
@@ -185,15 +182,15 @@ fn database_roundtrip_with_policies() {
     assert!(!policies.is_empty(), "policies should be restored");
 
     // Get Alice's ID to use as viewer
-    let users = get_rows(db.execute("SELECT * FROM users").unwrap());
+    let users = db.query("SELECT * FROM users").unwrap();
     let alice_id = users
         .iter()
         .find(|r| r.1.get_by_name("name") == Some(RowValue::String("Alice")))
         .unwrap()
         .0;
 
-    // Verify policy works (select_all_as should filter)
-    let rows = db.select_all_as("documents", alice_id).unwrap();
+    // Verify policy works (query_as should filter)
+    let rows = db.query_as("SELECT * FROM documents", alice_id).unwrap();
     assert_eq!(rows.len(), 1, "policy should filter to owner's docs");
     assert_eq!(
         rows[0].1.get_by_name("title"),
@@ -222,7 +219,7 @@ fn database_roundtrip_after_delete() {
             .unwrap();
 
         // Get ID of Item2 to delete
-        let items = get_rows(db.execute("SELECT * FROM items").unwrap());
+        let items = db.query("SELECT * FROM items").unwrap();
         let item2_id = items
             .iter()
             .find(|r| r.1.get_by_name("name") == Some(RowValue::String("Item2")))
@@ -233,7 +230,7 @@ fn database_roundtrip_after_delete() {
             .unwrap();
 
         // Verify delete worked
-        let items = get_rows(db.execute("SELECT * FROM items").unwrap());
+        let items = db.query("SELECT * FROM items").unwrap();
         assert_eq!(items.len(), 2);
 
         db.catalog_object_id()
@@ -242,10 +239,12 @@ fn database_roundtrip_after_delete() {
     // Restore and verify delete was persisted
     let db = futures::executor::block_on(Database::from_env(env.clone(), catalog_id)).unwrap();
 
-    let items = get_rows(db.execute("SELECT * FROM items").unwrap());
+    let items = db.query("SELECT * FROM items").unwrap();
     assert_eq!(items.len(), 2, "delete should be persisted");
 
-    let has_item2 = items.iter().any(|r| r.1.get_by_name("name") == Some(RowValue::String("Item2")));
+    let has_item2 = items
+        .iter()
+        .any(|r| r.1.get_by_name("name") == Some(RowValue::String("Item2")));
     assert!(!has_item2, "Item2 should be deleted");
 }
 
@@ -264,7 +263,7 @@ fn database_roundtrip_after_update() {
             .unwrap();
 
         // Get ID of the row
-        let settings = get_rows(db.execute("SELECT * FROM settings").unwrap());
+        let settings = db.query("SELECT * FROM settings").unwrap();
         let row_id = settings[0].0;
 
         db.execute(&format!(
@@ -274,7 +273,7 @@ fn database_roundtrip_after_update() {
         .unwrap();
 
         // Verify update worked
-        let settings = get_rows(db.execute("SELECT * FROM settings").unwrap());
+        let settings = db.query("SELECT * FROM settings").unwrap();
         assert_eq!(
             settings[0].1.get_by_name("value"),
             Some(RowValue::String("new_value"))
@@ -286,7 +285,7 @@ fn database_roundtrip_after_update() {
     // Restore and verify update was persisted
     let db = futures::executor::block_on(Database::from_env(env.clone(), catalog_id)).unwrap();
 
-    let settings = get_rows(db.execute("SELECT * FROM settings").unwrap());
+    let settings = db.query("SELECT * FROM settings").unwrap();
     assert_eq!(settings.len(), 1);
     assert_eq!(
         settings[0].1.get_by_name("value"),
@@ -317,7 +316,7 @@ fn database_roundtrip_with_nullable() {
     // Restore and verify nulls are preserved
     let db = futures::executor::block_on(Database::from_env(env.clone(), catalog_id)).unwrap();
 
-    let contacts = get_rows(db.execute("SELECT * FROM contacts").unwrap());
+    let contacts = db.query("SELECT * FROM contacts").unwrap();
     assert_eq!(contacts.len(), 2);
 
     // Find Alice and Bob
@@ -361,11 +360,19 @@ fn database_roundtrip_with_inline_blob() {
 
         // Insert with blob - test row creation separately
         let schema = db.get_table("files").unwrap();
-        let descriptor = std::sync::Arc::new(groove::sql::row_buffer::RowDescriptor::from_table_schema(&schema));
-        eprintln!("Schema columns: {:?}", schema.columns.iter().map(|c| &c.name).collect::<Vec<_>>());
+        let descriptor = std::sync::Arc::new(
+            groove::sql::row_buffer::RowDescriptor::from_table_schema(&schema),
+        );
+        eprintln!(
+            "Schema columns: {:?}",
+            schema.columns.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
         eprintln!("Descriptor columns:");
         for (i, col) in descriptor.columns.iter().enumerate() {
-            eprintln!("  [{}]: name={}, ty={:?}, offset={}", i, col.name, col.ty, col.offset);
+            eprintln!(
+                "  [{}]: name={}, ty={:?}, offset={}",
+                i, col.name, col.ty, col.offset
+            );
         }
         let row = groove::sql::row_buffer::RowBuilder::new(descriptor.clone())
             .set_string_by_name("name", "small.bin")
@@ -376,7 +383,7 @@ fn database_roundtrip_with_inline_blob() {
         db.insert_row("files", row).unwrap();
 
         // Debug: check if blob was stored correctly
-        let rows_before = get_rows(db.execute("SELECT * FROM files").unwrap());
+        let rows_before = db.query("SELECT * FROM files").unwrap();
         eprintln!("BEFORE RESTORE:");
         eprintln!("Row buffer len: {}", rows_before[0].1.buffer.len());
         eprintln!("Data value: {:?}", rows_before[0].1.get_by_name("data"));
@@ -388,12 +395,15 @@ fn database_roundtrip_with_inline_blob() {
     let db = futures::executor::block_on(Database::from_env(env.clone(), catalog_id)).unwrap();
 
     // Verify blob data
-    let rows = get_rows(db.execute("SELECT * FROM files").unwrap());
+    let rows = db.query("SELECT * FROM files").unwrap();
     assert_eq!(rows.len(), 1, "should have 1 file");
 
     // Debug: print column names and types
     for (i, col) in rows[0].1.descriptor.columns.iter().enumerate() {
-        eprintln!("Col[{}]: name={}, ty={:?}, offset={}, nullable={}", i, col.name, col.ty, col.offset, col.nullable);
+        eprintln!(
+            "Col[{}]: name={}, ty={:?}, offset={}, nullable={}",
+            i, col.name, col.ty, col.offset, col.nullable
+        );
     }
     eprintln!("Row buffer len: {}", rows[0].1.buffer.len());
     eprintln!("Row buffer: {:?}", &rows[0].1.buffer);
@@ -406,7 +416,10 @@ fn database_roundtrip_with_inline_blob() {
         let data = content_ref.as_inline().expect("should be inline blob");
         assert_eq!(data, small_data.as_slice(), "blob data should match");
     } else {
-        panic!("expected Blob value, got {:?}", rows[0].1.get_by_name("data"));
+        panic!(
+            "expected Blob value, got {:?}",
+            rows[0].1.get_by_name("data")
+        );
     }
 }
 
@@ -439,10 +452,12 @@ fn database_roundtrip_with_chunked_blob() {
         let blob_ref = ContentRef::chunked(hashes);
 
         // Insert with blob
-        db.insert_with("files", |b| b
-            .set_string_by_name("name", "large.bin")
-            .set_blob_by_name("data", blob_ref)
-            .build()).unwrap();
+        db.insert_with("files", |b| {
+            b.set_string_by_name("name", "large.bin")
+                .set_blob_by_name("data", blob_ref)
+                .build()
+        })
+        .unwrap();
 
         db.catalog_object_id()
     };
@@ -451,7 +466,7 @@ fn database_roundtrip_with_chunked_blob() {
     let db = futures::executor::block_on(Database::from_env(env.clone(), catalog_id)).unwrap();
 
     // Verify blob data
-    let rows = get_rows(db.execute("SELECT * FROM files").unwrap());
+    let rows = db.query("SELECT * FROM files").unwrap();
     assert_eq!(rows.len(), 1, "should have 1 file");
 
     // Check blob content - need to read chunks from environment
@@ -466,9 +481,16 @@ fn database_roundtrip_with_chunked_blob() {
             restored_data.extend_from_slice(&chunk);
         }
 
-        assert_eq!(restored_data.len(), large_data.len(), "blob size should match");
+        assert_eq!(
+            restored_data.len(),
+            large_data.len(),
+            "blob size should match"
+        );
         assert_eq!(restored_data, large_data, "blob data should match");
     } else {
-        panic!("expected Blob value, got {:?}", rows[0].1.get_by_name("data"));
+        panic!(
+            "expected Blob value, got {:?}",
+            rows[0].1.get_by_name("data")
+        );
     }
 }

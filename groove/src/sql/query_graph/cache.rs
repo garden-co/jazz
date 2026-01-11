@@ -168,7 +168,11 @@ impl BufferRowCache {
     /// - `Some(None)` if the row is cached as deleted
     /// - `None` if the row is not in the cache (needs to be loaded)
     pub fn get(&self, table: &str, id: ObjectId) -> Option<Option<&OwnedRow>> {
-        self.tables.get(table)?.rows.get(&id).map(|opt| opt.as_ref())
+        self.tables
+            .get(table)?
+            .rows
+            .get(&id)
+            .map(|opt| opt.as_ref())
     }
 
     /// Check if a row is cached (regardless of whether it exists or is deleted).
@@ -377,8 +381,16 @@ mod tests {
         let descriptor = make_user_descriptor();
 
         cache.register_table_with_descriptor("users", descriptor.clone());
-        cache.insert("users", ObjectId::new(1), make_buffer_row(&descriptor, "Alice", 30));
-        cache.insert("users", ObjectId::new(2), make_buffer_row(&descriptor, "Bob", 25));
+        cache.insert(
+            "users",
+            ObjectId::new(1),
+            make_buffer_row(&descriptor, "Alice", 30),
+        );
+        cache.insert(
+            "users",
+            ObjectId::new(2),
+            make_buffer_row(&descriptor, "Bob", 25),
+        );
 
         assert_eq!(cache.table_size("users"), 2);
 
@@ -396,7 +408,11 @@ mod tests {
         let descriptor = make_user_descriptor();
 
         cache.register_table_with_descriptor("users", descriptor.clone());
-        cache.insert("users", ObjectId::new(1), make_buffer_row(&descriptor, "Alice", 30));
+        cache.insert(
+            "users",
+            ObjectId::new(1),
+            make_buffer_row(&descriptor, "Alice", 30),
+        );
 
         cache.remove_table("users");
 
@@ -410,8 +426,16 @@ mod tests {
         let descriptor = make_user_descriptor();
 
         cache.register_table_with_descriptor("users", descriptor.clone());
-        cache.insert("users", ObjectId::new(1), make_buffer_row(&descriptor, "Alice", 30));
-        cache.insert("users", ObjectId::new(2), make_buffer_row(&descriptor, "Bob", 25));
+        cache.insert(
+            "users",
+            ObjectId::new(1),
+            make_buffer_row(&descriptor, "Alice", 30),
+        );
+        cache.insert(
+            "users",
+            ObjectId::new(2),
+            make_buffer_row(&descriptor, "Bob", 25),
+        );
 
         let rows: Vec<_> = cache.iter_table("users").collect();
         assert_eq!(rows.len(), 2);

@@ -6,11 +6,11 @@
  * - useJazz hook to get raw database from context
  * - useOne hook for single-row subscriptions with update helper
  * - useAll hook for multi-row subscriptions with update/create helpers
- * - useCreate hook for creating rows without subscribing
+ * - useMutate hook for mutations without subscribing
  *
  * @example
  * ```tsx
- * import { JazzProvider, useAll, useOne, useCreate } from "@jazz/react";
+ * import { JazzProvider, useAll, useOne, useMutate } from "@jazz/react";
  * import { app } from "./generated/client.js";
  * import * as wasm from "groove-wasm";
  *
@@ -55,15 +55,7 @@
 
 export { JazzProvider, useJazz, type JazzProviderProps } from "./context.js";
 
-export {
-  useOne,
-  useAll,
-  useMutate,
-  useCreate, // deprecated alias for useMutate
-  // Deprecated types - prefer SubscribableAllWithDb/SubscribableOneWithDb from @jazz/client
-  type SubscribableOne,
-  type SubscribableAll,
-} from "./hooks.js";
+export { useOne, useAll, useMutate } from "./hooks.js";
 
 // Re-export commonly needed types from @jazz/client for convenience
 export type {

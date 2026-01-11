@@ -6,13 +6,15 @@ use crate::node::{LocalNode, generate_object_id};
 use crate::object::ObjectId;
 use crate::sql::catalog::{Catalog, TableDescriptor};
 use crate::sql::index::RefIndex;
-use crate::sql::parser::{self, Condition, ConditionValue, Join, Projection, Select, SelectExpr, Statement};
+use crate::sql::parser::{
+    self, Condition, ConditionValue, Projection, Select, SelectExpr, Statement,
+};
 use crate::sql::policy::{
     Policy, PolicyAction, PolicyError, PolicyExpr, PolicyValue, TablePolicies,
 };
 use crate::sql::query_graph::registry::{GraphRegistry, OutputCallback};
 use crate::sql::query_graph::{
-    DeltaBatch, GraphId, JoinGraphBuilder, Predicate, PredicateValue, PriorState, QueryGraphBuilder, RowDelta,
+    DeltaBatch, GraphId, Predicate, PredicateValue, PriorState, QueryGraphBuilder, RowDelta,
 };
 use crate::sql::row::RowError;
 use crate::sql::row_buffer::{OwnedRow, RowBuilder, RowDescriptor, RowValue};
@@ -43,185 +45,6 @@ mod tests;
 
 // ========== JOIN Support ==========
 
-/// A row resulting from a JOIN, containing data from multiple tables.
-#[derive(Clone)]
-struct JoinedRow {
-    /// Primary table name (for output row ID).
-    primary_table: String,
-    /// Table name → (row_id, OwnedRow)
-    tables: HashMap<String, (ObjectId, OwnedRow)>,
-}
-
-impl JoinedRow {
-    /// Create a JoinedRow from a single table's row.
-    fn from_single(table: &str, id: ObjectId, row: OwnedRow) -> Self {
-        let mut tables = HashMap::new();
-        tables.insert(table.to_string(), (id, row));
-        JoinedRow {
-            primary_table: table.to_string(),
-            tables,
-        }
-    }
-
-    /// Add another table's row to this joined row.
-    fn add_table(&mut self, table: &str, id: ObjectId, row: OwnedRow) {
-        self.tables.insert(table.to_string(), (id, row));
-    }
-
-    /// Get a column value by optional table qualifier and column name.
-    /// If table is None, searches all tables (returns first match).
-    /// Returns Some(PredicateValue) by converting from RowValue.
-    fn get_column(&self, table: Option<&str>, column: &str) -> Option<PredicateValue> {
-        if column == "id" {
-            // Special case: id is the row's object ID
-            // Return as Ref value
-            if let Some(table_name) = table {
-                return self.get_row_id(table_name).map(PredicateValue::Ref);
-            } else {
-                return self.get_row_id(&self.primary_table).map(PredicateValue::Ref);
-            }
-        }
-
-        if let Some(table_name) = table {
-            // Qualified column: look in specific table
-            if let Some((_, row)) = self.tables.get(table_name) {
-                if let Some(value) = row.get_by_name(column) {
-                    return Some(value.to_predicate_value());
-                }
-            }
-            None
-        } else {
-            // Unqualified column: search all tables
-            for (_, row) in self.tables.values() {
-                if let Some(value) = row.get_by_name(column) {
-                    return Some(value.to_predicate_value());
-                }
-            }
-            None
-        }
-    }
-
-    /// Get the row ID for a specific table.
-    fn get_row_id(&self, table: &str) -> Option<ObjectId> {
-        self.tables.get(table).map(|(id, _)| *id)
-    }
-
-    /// Check if this joined row matches a WHERE condition.
-    fn matches_condition(&self, cond: &Condition) -> bool {
-        use crate::sql::parser::ConditionValue;
-
-        let table = cond.column.table.as_deref();
-        let column = &cond.column.column;
-
-        // Get the right-hand side value (either literal or from another column)
-        let rhs_value: Option<PredicateValue> = match &cond.right {
-            ConditionValue::Literal(v) => Some(v.clone()),
-            ConditionValue::Column(rhs_col) => {
-                // Get value from referenced column
-                if rhs_col.column == "id" {
-                    let rhs_table = rhs_col.table.as_deref().unwrap_or(&self.primary_table);
-                    self.get_row_id(rhs_table).map(PredicateValue::Ref)
-                } else {
-                    self.get_column(rhs_col.table.as_deref(), &rhs_col.column)
-                }
-            }
-        };
-
-        let rhs_value = match rhs_value {
-            Some(v) => v,
-            None => return false,
-        };
-
-        // Handle special "id" column on left side
-        if column == "id" {
-            // Coerce String to Ref for id comparison
-            let coerced = coerce_predicate_value(&rhs_value, &ColumnType::Ref("".to_string()));
-            if let PredicateValue::Ref(target_id) = coerced {
-                if let Some(table_name) = table {
-                    if let Some(row_id) = self.get_row_id(table_name) {
-                        return row_id == target_id;
-                    }
-                } else {
-                    // Unqualified id - check primary table
-                    if let Some(row_id) = self.get_row_id(&self.primary_table) {
-                        return row_id == target_id;
-                    }
-                }
-            }
-            return false;
-        }
-
-        // Regular column - use buffer format comparison
-        let lhs_value = self.get_column(table, column);
-        match lhs_value {
-            Some(lhs) => lhs == rhs_value,
-            None => false,
-        }
-    }
-
-    /// Convert to output (ObjectId, OwnedRow) with combined values from all tables.
-    /// Uses primary table's row ID as the output row ID.
-    fn to_output_row(self, projection: &Projection) -> (ObjectId, OwnedRow) {
-        let row_id = self
-            .tables
-            .get(&self.primary_table)
-            .map(|(id, _)| *id)
-            .unwrap_or(ObjectId::default());
-
-        let owned = match projection {
-            Projection::All => {
-                // Merge all rows: primary first, then joined tables in insertion order
-                let mut rows_to_merge: Vec<&OwnedRow> = Vec::new();
-                if let Some((_, row)) = self.tables.get(&self.primary_table) {
-                    rows_to_merge.push(row);
-                }
-                for (table_name, (_, row)) in &self.tables {
-                    if table_name != &self.primary_table {
-                        rows_to_merge.push(row);
-                    }
-                }
-                OwnedRow::merge_rows(&rows_to_merge)
-            }
-            Projection::TableAll(table_name) => {
-                // Only the specified table's row
-                if let Some((_, row)) = self.tables.get(table_name) {
-                    row.clone()
-                } else {
-                    OwnedRow::new(Arc::new(RowDescriptor::new(std::iter::empty())), vec![])
-                }
-            }
-            Projection::Columns(cols) => {
-                // Specific columns - need to build a new row with just those columns
-                // Build descriptor from the column names
-                let col_defs: Vec<(String, ColumnType, bool)> = cols.iter()
-                    .filter_map(|qc| {
-                        // Find the column in the appropriate table
-                        let table_name = qc.table.as_deref().unwrap_or(&self.primary_table);
-                        self.tables.get(table_name).and_then(|(_, row)| {
-                            row.descriptor.column(&qc.column).map(|c| (qc.column.clone(), c.ty.clone(), c.nullable))
-                        })
-                    })
-                    .collect();
-                let descriptor = Arc::new(RowDescriptor::new_ordered(col_defs));
-                let mut builder = RowBuilder::new(descriptor);
-                for qc in cols.iter() {
-                    if let Some(pv) = self.get_column(qc.table.as_deref(), &qc.column) {
-                        builder = builder.set_from_predicate_value_by_name(&qc.column, &pv);
-                    }
-                }
-                builder.build()
-            }
-            Projection::Expressions(_) => {
-                // Expressions are handled in execute_select, not here
-                // This path should not be reached for JoinedRow
-                panic!("Projection::Expressions should be handled in execute_select");
-            }
-        };
-
-        (row_id, owned)
-    }
-}
-
 // ========== Incremental Query (Query Graph based) ==========
 
 /// A handle to an incremental query graph.
@@ -230,7 +53,6 @@ impl JoinedRow {
 /// change and propagating it through the computation graph.
 ///
 /// The query is automatically cleaned up when this handle is dropped.
-#[derive(Clone)]
 pub struct IncrementalQuery {
     /// The graph ID in the registry.
     graph_id: GraphId,
@@ -306,14 +128,7 @@ impl IncrementalQuery {
 
 impl Drop for IncrementalQuery {
     fn drop(&mut self) {
-        // Only unregister if this is the last reference
-        // Note: Clone creates a new Arc reference, so this is safe
-        if Arc::strong_count(&self.db_state) > 1 {
-            // Still being used elsewhere, don't unregister
-            // This is a simplification - in production we'd want reference counting on the query itself
-        }
-        // For now, we don't auto-unregister to allow cloning queries
-        // TODO: Add proper reference counting for query cleanup
+        self.db_state.graph_registry.unregister(self.graph_id);
     }
 }
 
@@ -560,655 +375,6 @@ impl DatabaseState {
             })
             .collect()
     }
-
-    /// Execute a SELECT statement and return the resulting rows in buffer format.
-    /// This is the shared implementation used by both reactive queries and direct execution.
-    fn execute_select(&self, select: &Select) -> Vec<(ObjectId, OwnedRow)> {
-        let primary_table = &select.from.table;
-        let table_alias = select.from.alias.as_deref();
-
-        // Get primary table schema
-        let primary_schema = match self.get_schema(primary_table) {
-            Some(s) => s,
-            None => return vec![],
-        };
-        let primary_descriptor = Arc::new(RowDescriptor::from_table_schema(&primary_schema));
-
-        // Read all rows from primary table
-        let primary_rows = self.read_all_rows(primary_table);
-
-        let result = if select.from.joins.is_empty() {
-            // Simple case: no JOINs
-            let filtered: Vec<(ObjectId, OwnedRow)> = primary_rows
-                .into_iter()
-                .filter(|(_, row)| {
-                    Self::matches_where_simple_buffer(&select.where_clause, row)
-                })
-                .collect();
-
-            // Check if we need to evaluate expressions (for ARRAY subqueries)
-            match &select.projection {
-                Projection::Expressions(exprs) => {
-                    // Build output descriptor from projection expressions
-                    let output_descriptor = Arc::new(self.build_projection_descriptor(
-                        exprs,
-                        &primary_schema,
-                    ));
-
-                    // Evaluate each expression for each row - write directly to buffer
-                    filtered
-                        .into_iter()
-                        .map(|(id, row)| {
-                            let output = self.build_projection_row(
-                                exprs,
-                                id,
-                                &row,
-                                primary_table,
-                                table_alias,
-                                output_descriptor.clone(),
-                            );
-                            (id, output)
-                        })
-                        .collect()
-                }
-                _ => filtered,
-            }
-        } else {
-            // JOIN case: build joined rows
-            let mut joined_rows: Vec<JoinedRow> = primary_rows
-                .into_iter()
-                .map(|(id, row)| JoinedRow::from_single(primary_table, id, row))
-                .collect();
-
-            // Apply each join
-            for join in &select.from.joins {
-                joined_rows = self.apply_join(joined_rows, join);
-            }
-
-            // Apply WHERE filtering on joined results
-            for cond in &select.where_clause {
-                joined_rows.retain(|jr| jr.matches_condition(cond));
-            }
-
-            // Apply projection and convert to output
-            // The to_output_row method handles building the combined descriptor
-            joined_rows
-                .into_iter()
-                .map(|jr| jr.to_output_row(&select.projection))
-                .collect()
-        };
-
-        // Apply LIMIT and OFFSET
-        Self::apply_limit_offset(result, select.limit, select.offset)
-    }
-
-    /// Apply LIMIT and OFFSET to a result set.
-    fn apply_limit_offset(rows: Vec<(ObjectId, OwnedRow)>, limit: Option<u64>, offset: Option<u64>) -> Vec<(ObjectId, OwnedRow)> {
-        let offset = offset.unwrap_or(0) as usize;
-        let rows: Vec<(ObjectId, OwnedRow)> = rows.into_iter().skip(offset).collect();
-        match limit {
-            Some(n) => rows.into_iter().take(n as usize).collect(),
-            None => rows,
-        }
-    }
-
-    /// Simple WHERE matching for non-JOIN queries using buffer format.
-    fn matches_where_simple_buffer(where_clause: &[Condition], row: &OwnedRow) -> bool {
-        for cond in where_clause {
-            let col_name = &cond.column.column;
-
-            // Get the actual value from the row
-            let row_value = match row.get_by_name(col_name) {
-                Some(v) => v,
-                None => return false,
-            };
-
-            // Only handle literal values in simple WHERE matching
-            let expected = match cond.value() {
-                Some(v) => v,
-                None => return false, // Column references not supported in simple matches
-            };
-
-            // Use PredicateValue::matches() to compare against RowValue
-            if !expected.matches(&row_value) {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// Build a row descriptor from projection expressions.
-    ///
-    /// This is used to create the output descriptor for queries with ARRAY subqueries
-    /// or other computed columns.
-    fn build_projection_descriptor(
-        &self,
-        exprs: &[SelectExpr],
-        outer_schema: &TableSchema,
-    ) -> RowDescriptor {
-        let cols: Vec<(String, ColumnType, bool)> = exprs
-            .iter()
-            .enumerate()
-            .map(|(idx, expr)| self.infer_expr_type(expr, outer_schema, idx))
-            .collect();
-        RowDescriptor::new_ordered(cols)
-    }
-
-    /// Infer the type and name of a projection expression.
-    fn infer_expr_type(
-        &self,
-        expr: &SelectExpr,
-        outer_schema: &TableSchema,
-        idx: usize,
-    ) -> (String, ColumnType, bool) {
-        match expr {
-            SelectExpr::Column(qc) => {
-                // Look up column type from schema
-                if let Some(col) = outer_schema.columns.iter().find(|c| c.name == qc.column) {
-                    (qc.column.clone(), col.ty.clone(), col.nullable)
-                } else if qc.column == "id" {
-                    // Special case: id column (Ref to self table, not nullable)
-                    (qc.column.clone(), ColumnType::Ref(String::new()), false)
-                } else {
-                    // Default to nullable string if not found
-                    (qc.column.clone(), ColumnType::String, true)
-                }
-            }
-            SelectExpr::TableRow(alias) => {
-                // Table row reference - this returns a Row type (the whole row)
-                // Build the item descriptor from the outer schema
-                let item_descriptor = Arc::new(RowDescriptor::from_table_schema(outer_schema));
-                (alias.clone(), ColumnType::Array(item_descriptor), false)
-            }
-            SelectExpr::ArraySubquery(subquery) => {
-                // Array subqueries return Array type
-                let name = format!("_array_{}", idx);
-
-                // Build item descriptor based on subquery's projection and table
-                let inner_table = &subquery.from.table;
-                let inner_alias = subquery.from.alias.as_deref();
-
-                if let Some(inner_schema) = self.get_schema(inner_table) {
-                    let item_descriptor = match &subquery.projection {
-                        Projection::All | Projection::TableAll(_) => {
-                            // SELECT * - return table schema
-                            Arc::new(RowDescriptor::from_table_schema(&inner_schema))
-                        }
-                        Projection::Expressions(exprs) => {
-                            // Check if selecting whole table via alias
-                            if exprs.len() == 1 {
-                                if let SelectExpr::Column(qc) = &exprs[0] {
-                                    if qc.table.is_none() {
-                                        let col_name = &qc.column;
-                                        if inner_alias == Some(col_name.as_str()) || col_name == inner_table {
-                                            return (name, ColumnType::Array(
-                                                Arc::new(RowDescriptor::from_table_schema(&inner_schema))
-                                            ), false);
-                                        }
-                                    }
-                                }
-                                if let SelectExpr::TableRow(alias) = &exprs[0] {
-                                    if inner_alias == Some(alias.as_str()) || alias == inner_table {
-                                        return (name, ColumnType::Array(
-                                            Arc::new(RowDescriptor::from_table_schema(&inner_schema))
-                                        ), false);
-                                    }
-                                }
-                            }
-                            // Build descriptor from expressions
-                            Arc::new(self.build_projection_descriptor(exprs, &inner_schema))
-                        }
-                        Projection::Columns(cols) => {
-                            // Build descriptor from specific columns
-                            let col_defs: Vec<(String, ColumnType, bool)> = cols.iter().filter_map(|qc| {
-                                inner_schema.columns.iter().find(|c| c.name == qc.column)
-                                    .map(|c| (qc.column.clone(), c.ty.clone(), c.nullable))
-                            }).collect();
-                            Arc::new(RowDescriptor::new_ordered(col_defs))
-                        }
-                    };
-                    (name, ColumnType::Array(item_descriptor), false)
-                } else {
-                    // Fallback: couldn't find inner table schema
-                    let item_descriptor = Arc::new(RowDescriptor::new_ordered(vec![
-                        ("value".to_string(), ColumnType::String, false)
-                    ]));
-                    (name, ColumnType::Array(item_descriptor), false)
-                }
-            }
-            SelectExpr::Aliased { expr, alias } => {
-                // Use the alias as the name, infer type from inner expression
-                let (_, ty, nullable) = self.infer_expr_type(expr, outer_schema, idx);
-                (alias.clone(), ty, nullable)
-            }
-        }
-    }
-
-    /// Build a projection row directly, writing expression results into a RowBuilder.
-    /// This avoids the intermediate Vec<Value> by writing directly to the output buffer.
-    fn build_projection_row(
-        &self,
-        exprs: &[SelectExpr],
-        outer_id: ObjectId,
-        outer_row: &OwnedRow,
-        outer_table: &str,
-        outer_alias: Option<&str>,
-        output_descriptor: Arc<RowDescriptor>,
-    ) -> OwnedRow {
-        let mut builder = RowBuilder::new(output_descriptor.clone());
-
-        for (schema_idx, expr) in exprs.iter().enumerate() {
-            // Find the buffer index for this schema column
-            let col_idx = output_descriptor
-                .columns
-                .iter()
-                .position(|c| c.schema_index == schema_idx)
-                .unwrap_or(schema_idx);
-
-            builder = self.evaluate_expr_into_builder(
-                expr,
-                builder,
-                col_idx,
-                outer_id,
-                outer_row,
-                outer_table,
-                outer_alias,
-            );
-        }
-
-        builder.build()
-    }
-
-    /// Evaluate a single SELECT expression directly into a RowBuilder.
-    fn evaluate_expr_into_builder(
-        &self,
-        expr: &SelectExpr,
-        builder: RowBuilder,
-        col_idx: usize,
-        outer_id: ObjectId,
-        outer_row: &OwnedRow,
-        outer_table: &str,
-        outer_alias: Option<&str>,
-    ) -> RowBuilder {
-        match expr {
-            SelectExpr::Column(qc) => {
-                // Check if this is a reference to the outer table alias (composite row)
-                if qc.table.is_none() {
-                    // Bare identifier - check if it matches outer table alias
-                    if let Some(alias) = outer_alias {
-                        if qc.column == alias {
-                            // Return the whole row as a single-item array
-                            return builder.set_array(col_idx, &[outer_row.clone()]);
-                        }
-                    }
-                    // Also check if it matches the table name
-                    if qc.column == outer_table {
-                        return builder.set_array(col_idx, &[outer_row.clone()]);
-                    }
-                }
-
-                // Regular column reference
-                if qc.column == "id" {
-                    builder.set_ref(col_idx, outer_id)
-                } else if let Some(rv) = outer_row.get_by_name(&qc.column) {
-                    builder.set_from_row_value(col_idx, rv)
-                } else {
-                    builder.set_null(col_idx)
-                }
-            }
-
-            SelectExpr::TableRow(alias) => {
-                // Direct table row reference - return the whole row as single-item array
-                if outer_alias == Some(alias.as_str()) || alias == outer_table {
-                    builder.set_array(col_idx, &[outer_row.clone()])
-                } else {
-                    builder.set_null(col_idx)
-                }
-            }
-
-            SelectExpr::ArraySubquery(subquery) => {
-                // Execute subquery with outer row context - returns Vec<OwnedRow>
-                let rows = self.execute_array_subquery_buffer(
-                    subquery, outer_id, outer_row, outer_table, outer_alias,
-                );
-                builder.set_array(col_idx, &rows)
-            }
-
-            SelectExpr::Aliased { expr, .. } => {
-                // Alias doesn't affect the value, just evaluate the inner expression
-                self.evaluate_expr_into_builder(
-                    expr, builder, col_idx, outer_id, outer_row, outer_table, outer_alias,
-                )
-            }
-        }
-    }
-
-    /// Execute an ARRAY subquery with outer row context (buffer format).
-    /// Returns Vec<OwnedRow> directly instead of wrapping in Value::Array.
-    fn execute_array_subquery_buffer(
-        &self,
-        subquery: &Select,
-        outer_id: ObjectId,
-        outer_row: &OwnedRow,
-        outer_table: &str,
-        outer_alias: Option<&str>,
-    ) -> Vec<OwnedRow> {
-        let inner_table = &subquery.from.table;
-        let inner_alias = subquery.from.alias.as_deref();
-
-        let inner_schema = match self.get_schema(inner_table) {
-            Some(s) => s,
-            None => return vec![],
-        };
-
-        // Read all rows from inner table
-        let inner_rows = self.read_all_rows(inner_table);
-
-        // Filter by WHERE clause, resolving outer references
-        let filtered: Vec<(ObjectId, OwnedRow)> = inner_rows
-            .into_iter()
-            .filter(|(inner_id, inner_row)| {
-                self.matches_where_with_outer_buffer(
-                    &subquery.where_clause,
-                    *inner_id,
-                    inner_row,
-                    inner_table,
-                    inner_alias,
-                    outer_id,
-                    outer_row,
-                    outer_table,
-                    outer_alias,
-                )
-            })
-            .collect();
-
-        // Apply projection to get the values
-        let array_values: Vec<OwnedRow> = match &subquery.projection {
-            Projection::All => {
-                // SELECT * - return all rows
-                filtered.into_iter().map(|(_, row)| row).collect()
-            }
-            Projection::Expressions(exprs) => {
-                // Check if it's just the table alias (returns whole row)
-                if exprs.len() == 1 {
-                    // Check for SelectExpr::Column variant
-                    if let SelectExpr::Column(qc) = &exprs[0] {
-                        if qc.table.is_none() {
-                            let name = &qc.column;
-                            if inner_alias == Some(name.as_str()) || name == inner_table {
-                                // Table alias - return whole rows
-                                return filtered.into_iter().map(|(_, row)| row).collect();
-                            }
-                        }
-                    }
-                    // Check for SelectExpr::TableRow variant
-                    if let SelectExpr::TableRow(alias) = &exprs[0] {
-                        if inner_alias == Some(alias.as_str()) || alias == inner_table {
-                            // Table alias - return whole rows
-                            return filtered.into_iter().map(|(_, row)| row).collect();
-                        }
-                    }
-                }
-
-                // Evaluate expressions for each row - write directly to buffer
-                let descriptor = Arc::new(self.build_projection_descriptor(exprs, &inner_schema));
-                filtered
-                    .into_iter()
-                    .map(|(inner_id, inner_row)| {
-                        self.build_projection_row(
-                            exprs,
-                            inner_id,
-                            &inner_row,
-                            inner_table,
-                            inner_alias,
-                            descriptor.clone(),
-                        )
-                    })
-                    .collect()
-            }
-            Projection::TableAll(table) => {
-                if table == inner_table || inner_alias == Some(table.as_str()) {
-                    filtered.into_iter().map(|(_, row)| row).collect()
-                } else {
-                    vec![]
-                }
-            }
-            Projection::Columns(cols) => {
-                // Build descriptor for the selected columns
-                let col_descriptors: Vec<(String, ColumnType, bool)> = cols
-                    .iter()
-                    .filter_map(|qc| {
-                        if qc.column == "id" {
-                            Some(("id".to_string(), ColumnType::Ref("".to_string()), false))
-                        } else {
-                            inner_schema.columns.iter()
-                                .find(|c| c.name == qc.column)
-                                .map(|c| (c.name.clone(), c.ty.clone(), c.nullable))
-                        }
-                    })
-                    .collect();
-                let descriptor = Arc::new(RowDescriptor::new_ordered(col_descriptors));
-
-                filtered
-                    .into_iter()
-                    .map(|(inner_id, inner_row)| {
-                        let mut builder = RowBuilder::new(descriptor.clone());
-                        for (schema_idx, qc) in cols.iter().enumerate() {
-                            let col_idx = descriptor
-                                .columns
-                                .iter()
-                                .position(|c| c.schema_index == schema_idx)
-                                .unwrap_or(schema_idx);
-
-                            if qc.column == "id" {
-                                builder = builder.set_ref(col_idx, inner_id);
-                            } else if let Some(rv) = inner_row.get_by_name(&qc.column) {
-                                builder = builder.set_from_row_value(col_idx, rv);
-                            }
-                        }
-                        builder.build()
-                    })
-                    .collect()
-            }
-        };
-
-        array_values
-    }
-
-    /// Check if a row matches WHERE conditions, resolving references to outer row (buffer format).
-    #[allow(clippy::too_many_arguments)]
-    fn matches_where_with_outer_buffer(
-        &self,
-        conditions: &[Condition],
-        inner_id: ObjectId,
-        inner_row: &OwnedRow,
-        inner_table: &str,
-        inner_alias: Option<&str>,
-        outer_id: ObjectId,
-        outer_row: &OwnedRow,
-        outer_table: &str,
-        outer_alias: Option<&str>,
-    ) -> bool {
-        for cond in conditions {
-            let lhs_table = cond.column.table.as_deref();
-            let lhs_col = &cond.column.column;
-
-            // Resolve left-hand side value
-            let lhs_value = self.resolve_column_value_buffer(
-                lhs_table,
-                lhs_col,
-                inner_id,
-                inner_row,
-                inner_table,
-                inner_alias,
-                outer_id,
-                outer_row,
-                outer_table,
-                outer_alias,
-            );
-
-            // Resolve right-hand side value
-            let rhs_value = match &cond.right {
-                ConditionValue::Literal(v) => Some(v.clone()),
-                ConditionValue::Column(rhs_col) => self.resolve_column_value_buffer(
-                    rhs_col.table.as_deref(),
-                    &rhs_col.column,
-                    inner_id,
-                    inner_row,
-                    inner_table,
-                    inner_alias,
-                    outer_id,
-                    outer_row,
-                    outer_table,
-                    outer_alias,
-                ),
-            };
-
-            // Compare values
-            match (lhs_value, rhs_value) {
-                (Some(lhs), Some(rhs)) => {
-                    if lhs != rhs {
-                        return false;
-                    }
-                }
-                _ => return false,
-            }
-        }
-        true
-    }
-
-    /// Resolve a column reference, looking in both inner and outer contexts (buffer format).
-    /// Returns PredicateValue for efficient comparisons without Value allocation.
-    #[allow(clippy::too_many_arguments)]
-    fn resolve_column_value_buffer(
-        &self,
-        table_ref: Option<&str>,
-        column: &str,
-        inner_id: ObjectId,
-        inner_row: &OwnedRow,
-        inner_table: &str,
-        inner_alias: Option<&str>,
-        outer_id: ObjectId,
-        outer_row: &OwnedRow,
-        outer_table: &str,
-        outer_alias: Option<&str>,
-    ) -> Option<PredicateValue> {
-        // Check if this references the inner table
-        let is_inner = match table_ref {
-            Some(t) => t == inner_table || inner_alias == Some(t),
-            None => {
-                // Unqualified - check inner first
-                column == "id" || inner_row.get_by_name(column).is_some()
-            }
-        };
-
-        if is_inner {
-            if column == "id" {
-                return Some(PredicateValue::Ref(inner_id));
-            }
-            if let Some(v) = inner_row.get_by_name(column) {
-                return Some(v.to_predicate_value());
-            }
-        }
-
-        // Check if this references the outer table
-        let is_outer = match table_ref {
-            Some(t) => t == outer_table || outer_alias == Some(t),
-            None => {
-                // Unqualified - check outer if not found in inner
-                column == "id" || outer_row.get_by_name(column).is_some()
-            }
-        };
-
-        if is_outer {
-            if column == "id" {
-                return Some(PredicateValue::Ref(outer_id));
-            }
-            if let Some(v) = outer_row.get_by_name(column) {
-                return Some(v.to_predicate_value());
-            }
-        }
-
-        None
-    }
-
-    /// Apply a single JOIN to a set of joined rows.
-    fn apply_join(&self, rows: Vec<JoinedRow>, join: &Join) -> Vec<JoinedRow> {
-        let join_schema = match self.get_schema(&join.table) {
-            Some(s) => s,
-            None => return vec![],
-        };
-
-        let mut result = Vec::new();
-
-        for jr in rows {
-            let left_table = join.on.left.table.as_deref();
-            let left_column = &join.on.left.column;
-            let right_table = join.on.right.table.as_deref();
-            let right_column = &join.on.right.column;
-
-            // Determine which side references the join table
-            let (lookup_value, join_column) = if right_table == Some(join.table.as_str())
-                || (right_table.is_none() && join_schema.column_index(right_column).is_some())
-            {
-                // Right side is from join table
-                let left_val = if left_column == "id" {
-                    let table_name = left_table.unwrap_or(&jr.primary_table);
-                    jr.get_row_id(table_name).map(PredicateValue::Ref)
-                } else {
-                    jr.get_column(left_table, left_column)
-                };
-                (left_val, right_column.as_str())
-            } else {
-                // Left side is from join table
-                let right_val = if right_column == "id" {
-                    let table_name = right_table.unwrap_or(&jr.primary_table);
-                    jr.get_row_id(table_name).map(PredicateValue::Ref)
-                } else {
-                    jr.get_column(right_table, right_column)
-                };
-                (right_val, left_column.as_str())
-            };
-
-            let pred_value = match lookup_value {
-                Some(v) => v,
-                None => continue,
-            };
-
-            // Find matching rows from the join table
-            let matching = if join_column == "id" {
-                if let PredicateValue::Ref(id) = &pred_value {
-                    match self.get_row(&join.table, *id) {
-                        Some((id, row)) => vec![(id, row)],
-                        None => vec![],
-                    }
-                } else {
-                    vec![]
-                }
-            } else {
-                // Find matching rows using PredicateValue comparison
-                self.read_all_rows(&join.table)
-                    .into_iter()
-                    .filter(|(_, row)| {
-                        if let Some(row_value) = row.get_by_name(join_column) {
-                            pred_value.matches(&row_value)
-                        } else {
-                            false
-                        }
-                    })
-                    .collect()
-            };
-
-            // Produce cartesian product of matches (inner join)
-            for (matched_id, matched_row) in matching {
-                let mut new_jr = jr.clone();
-                new_jr.add_table(&join.table, matched_id, matched_row);
-                result.push(new_jr);
-            }
-        }
-
-        result
-    }
 }
 
 /// Database providing SQL operations on top of LocalNode.
@@ -1236,8 +402,6 @@ pub enum ExecuteResult {
     Updated(usize),
     /// DELETE - returns number of rows affected
     Deleted(usize),
-    /// SELECT - returns matching rows in buffer format
-    Selected(Vec<(ObjectId, OwnedRow)>),
 }
 
 /// Information about an INHERITS clause for JOIN expansion.
@@ -1450,6 +614,7 @@ enum ChainJoinInfo {
 
 impl Database {
     /// Create a new database with the given environment.
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(env: Arc<dyn Environment>) -> Self {
         Database {
             state: Arc::new(DatabaseState::new(env)),
@@ -1457,6 +622,7 @@ impl Database {
     }
 
     /// Create a new in-memory database (for testing).
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn in_memory() -> Self {
         Database {
             state: Arc::new(DatabaseState::in_memory()),
@@ -1466,6 +632,7 @@ impl Database {
     /// Create an in-memory database with a specific catalog ID.
     /// All clients using the same catalog ID will share schema definitions
     /// when synced, allowing INSERT/SELECT to work across clients.
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn in_memory_with_catalog(catalog_id: ObjectId) -> Self {
         Database {
             state: Arc::new(DatabaseState::in_memory_with_catalog(catalog_id)),
@@ -1479,12 +646,19 @@ impl Database {
     ///
     /// This is async because loading objects from Environment may involve reading from
     /// IndexedDB or other async storage backends.
-    pub async fn from_env(env: Arc<dyn Environment>, catalog_object_id: ObjectId) -> Result<Self, DatabaseError> {
+    #[allow(clippy::arc_with_non_send_sync)]
+    pub async fn from_env(
+        env: Arc<dyn Environment>,
+        catalog_object_id: ObjectId,
+    ) -> Result<Self, DatabaseError> {
         let node = LocalNode::new(env);
 
         // Load catalog object from Environment
-        node.load_object(catalog_object_id, "catalog", "main").await
-            .ok_or_else(|| DatabaseError::Storage("catalog not found in environment".to_string()))?;
+        node.load_object(catalog_object_id, "catalog", "main")
+            .await
+            .ok_or_else(|| {
+                DatabaseError::Storage("catalog not found in environment".to_string())
+            })?;
 
         // Read catalog content
         let catalog_bytes = node
@@ -1507,9 +681,13 @@ impl Database {
         // Restore each table from its descriptor
         for (table_name, descriptor_id) in &catalog.tables {
             // Load descriptor object from Environment
-            node.load_object(*descriptor_id, format!("descriptor:{}", table_name), "main").await
+            node.load_object(*descriptor_id, format!("descriptor:{}", table_name), "main")
+                .await
                 .ok_or_else(|| {
-                    DatabaseError::Storage(format!("descriptor for {} not found in env", table_name))
+                    DatabaseError::Storage(format!(
+                        "descriptor for {} not found in env",
+                        table_name
+                    ))
                 })?;
 
             // Read descriptor content
@@ -1524,14 +702,29 @@ impl Database {
                 .map_err(|e| DatabaseError::Storage(format!("descriptor parse error: {}", e)))?;
 
             // Load schema object
-            node.load_object(descriptor.schema_object_id, format!("schema:{}", table_name), "main").await;
+            node.load_object(
+                descriptor.schema_object_id,
+                format!("schema:{}", table_name),
+                "main",
+            )
+            .await;
 
             // Load rows object
-            node.load_object(descriptor.rows_object_id, format!("rows:{}", table_name), "main").await;
+            node.load_object(
+                descriptor.rows_object_id,
+                format!("rows:{}", table_name),
+                "main",
+            )
+            .await;
 
             // Load index objects
             for (col_name, index_id) in &descriptor.index_object_ids {
-                node.load_object(*index_id, format!("index:{}:{}", table_name, col_name), "main").await;
+                node.load_object(
+                    *index_id,
+                    format!("index:{}:{}", table_name, col_name),
+                    "main",
+                )
+                .await;
                 let key = IndexKey::new(table_name, col_name);
                 index_objects.insert(key, *index_id);
             }
@@ -1553,11 +746,13 @@ impl Database {
                 .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
             if let Some(bytes) = rows_bytes {
-                let table_rows = TableRows::from_bytes(&bytes)
-                    .map_err(|e| DatabaseError::Storage(format!("table_rows parse error: {}", e)))?;
+                let table_rows = TableRows::from_bytes(&bytes).map_err(|e| {
+                    DatabaseError::Storage(format!("table_rows parse error: {}", e))
+                })?;
                 for row_id in table_rows.iter() {
                     // Load row object
-                    node.load_object(row_id, format!("row:{}:{}", table_name, row_id), "main").await;
+                    node.load_object(row_id, format!("row:{}:{}", table_name, row_id), "main")
+                        .await;
                     row_table.insert(row_id, table_name.clone());
                 }
             }
@@ -1789,7 +984,9 @@ impl Database {
         // Create table descriptor object with deterministic ID
         let descriptor_key = format!("descriptor:{}", schema.name);
         let descriptor_id = crate::ObjectId::from_key(&descriptor_key);
-        self.state.node.ensure_object(descriptor_id, &descriptor_key);
+        self.state
+            .node
+            .ensure_object(descriptor_id, &descriptor_key);
 
         let descriptor = TableDescriptor {
             schema: schema.clone(),
@@ -1896,9 +1093,7 @@ impl Database {
         // Add policy to table's policy collection
         {
             let mut policies = self.state.policies.write().unwrap();
-            let table_policies = policies
-                .entry(table_name.clone())
-                .or_insert_with(TablePolicies::new);
+            let table_policies = policies.entry(table_name.clone()).or_default();
 
             table_policies.add(policy)?;
         }
@@ -1934,10 +1129,7 @@ impl Database {
 
         // Update policies from current in-memory state
         let policies = self.state.policies.read().unwrap();
-        descriptor.policies = policies
-            .get(table_name)
-            .cloned()
-            .unwrap_or_default();
+        descriptor.policies = policies.get(table_name).cloned().unwrap_or_default();
 
         // Write updated descriptor
         self.state
@@ -1972,11 +1164,7 @@ impl Database {
     ///     .build();
     /// db.insert_row("users", row)?;
     /// ```
-    pub fn insert_row(
-        &self,
-        table: &str,
-        row: OwnedRow,
-    ) -> Result<ObjectId, DatabaseError> {
+    pub fn insert_row(&self, table: &str, row: OwnedRow) -> Result<ObjectId, DatabaseError> {
         let (row_id, _table_rows_id) = self.insert_row_returning_both(table, row)?;
         Ok(row_id)
     }
@@ -2025,16 +1213,16 @@ impl Database {
         let row_id =
             self.state
                 .node
-                .create_object(&format!("row:{}:{}", table, generate_object_id()));
+                .create_object(format!("row:{}:{}", table, generate_object_id()));
 
         // Set object metadata with table name for sync purposes
         {
             let mut meta = std::collections::BTreeMap::new();
             meta.insert("table".to_string(), table.to_string());
-            if let Some(obj) = self.state.node.get_object(row_id) {
-                if let Ok(mut obj_write) = obj.write() {
-                    obj_write.set_meta(meta);
-                }
+            if let Some(obj) = self.state.node.get_object(row_id)
+                && let Ok(mut obj_write) = obj.write()
+            {
+                obj_write.set_meta(meta);
             }
         }
 
@@ -2044,7 +1232,13 @@ impl Database {
         // Store row data (including the id column)
         self.state
             .node
-            .write(row_id, "main", &row_with_id.buffer, "system", timestamp_now())
+            .write(
+                row_id,
+                "main",
+                &row_with_id.buffer,
+                "system",
+                timestamp_now(),
+            )
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         // Track row -> table mapping
@@ -2061,22 +1255,27 @@ impl Database {
 
         // Update indexes for Ref columns
         for col in schema.columns.iter() {
-            if matches!(col.ty, ColumnType::Ref(_)) {
-                if let Some(RowValue::Ref(target_id)) = row_with_id.get_by_name(&col.name) {
-                    let key = IndexKey::new(table, &col.name);
-                    if self.state.index_objects.read().unwrap().contains_key(&key) {
-                        let mut index = self.read_index(&key)?;
-                        index.add(target_id, row_id);
-                        self.write_index(&key, &index)?;
-                    }
+            if matches!(col.ty, ColumnType::Ref(_))
+                && let Some(RowValue::Ref(target_id)) = row_with_id.get_by_name(&col.name)
+            {
+                let key = IndexKey::new(table, &col.name);
+                if self.state.index_objects.read().unwrap().contains_key(&key) {
+                    let mut index = self.read_index(&key)?;
+                    index.add(target_id, row_id);
+                    self.write_index(&key, &index)?;
                 }
             }
         }
 
         // Notify query graphs of the change
-        self.state
-            .graph_registry
-            .notify_row_change(table, RowDelta::Added { id: row_id, row: row_with_id }, &*self.state);
+        self.state.graph_registry.notify_row_change(
+            table,
+            RowDelta::Added {
+                id: row_id,
+                row: row_with_id,
+            },
+            &self.state,
+        );
 
         // Get the table rows object ID for sync purposes
         let table_rows_id = self
@@ -2142,7 +1341,11 @@ impl Database {
     }
 
     /// Get a row by ID in buffer format.
-    pub fn get(&self, table: &str, id: ObjectId) -> Result<Option<(ObjectId, OwnedRow)>, DatabaseError> {
+    pub fn get(
+        &self,
+        table: &str,
+        id: ObjectId,
+    ) -> Result<Option<(ObjectId, OwnedRow)>, DatabaseError> {
         let schema = self
             .get_table(table)
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
@@ -2183,9 +1386,9 @@ impl Database {
         descriptor_id_str: &str,
     ) -> Result<(), DatabaseError> {
         // Parse descriptor ID
-        let descriptor_id: ObjectId = descriptor_id_str
-            .parse()
-            .map_err(|_| DatabaseError::Storage(format!("Invalid descriptor ID: {}", descriptor_id_str)))?;
+        let descriptor_id: ObjectId = descriptor_id_str.parse().map_err(|_| {
+            DatabaseError::Storage(format!("Invalid descriptor ID: {}", descriptor_id_str))
+        })?;
 
         // Find the table name by looking up which table has this descriptor ID
         let table_name = {
@@ -2197,7 +1400,10 @@ impl Database {
         };
 
         let table_name = table_name.ok_or_else(|| {
-            DatabaseError::Storage(format!("Descriptor {} not found in local catalog", descriptor_id_str))
+            DatabaseError::Storage(format!(
+                "Descriptor {} not found in local catalog",
+                descriptor_id_str
+            ))
         })?;
 
         // Add to row_table mapping
@@ -2229,7 +1435,7 @@ impl Database {
             };
             self.state
                 .graph_registry
-                .notify_row_change(&table_name, delta, &*self.state);
+                .notify_row_change(&table_name, delta, &self.state);
         }
 
         Ok(())
@@ -2279,7 +1485,7 @@ impl Database {
             };
             self.state
                 .graph_registry
-                .notify_row_change(table_name, delta, &*self.state);
+                .notify_row_change(table_name, delta, &self.state);
         }
 
         Ok(())
@@ -2311,7 +1517,7 @@ impl Database {
             };
             self.state
                 .graph_registry
-                .notify_row_change(&table_name, delta, &*self.state);
+                .notify_row_change(&table_name, delta, &self.state);
         }
 
         Ok(true)
@@ -2362,22 +1568,22 @@ impl Database {
         {
             let row_table = self.state.row_table.read().unwrap();
             for col in schema.columns.iter() {
-                if let ColumnType::Ref(target_table) = &col.ty {
-                    if let Some(RowValue::Ref(target_id)) = new_row.get_by_name(&col.name) {
-                        if !row_table.contains_key(&target_id) {
-                            return Err(DatabaseError::InvalidReference {
-                                column: col.name.clone(),
-                                target_table: target_table.clone(),
-                                target_id,
-                            });
-                        }
-                        if row_table.get(&target_id) != Some(target_table) {
-                            return Err(DatabaseError::InvalidReference {
-                                column: col.name.clone(),
-                                target_table: target_table.clone(),
-                                target_id,
-                            });
-                        }
+                if let ColumnType::Ref(target_table) = &col.ty
+                    && let Some(RowValue::Ref(target_id)) = new_row.get_by_name(&col.name)
+                {
+                    if !row_table.contains_key(&target_id) {
+                        return Err(DatabaseError::InvalidReference {
+                            column: col.name.clone(),
+                            target_table: target_table.clone(),
+                            target_id,
+                        });
+                    }
+                    if row_table.get(&target_id) != Some(target_table) {
+                        return Err(DatabaseError::InvalidReference {
+                            column: col.name.clone(),
+                            target_table: target_table.clone(),
+                            target_id,
+                        });
                     }
                 }
             }
@@ -2389,7 +1595,13 @@ impl Database {
         // Write updated row
         self.state
             .node
-            .write(id, "main", &new_row_with_id.buffer, "system", timestamp_now())
+            .write(
+                id,
+                "main",
+                &new_row_with_id.buffer,
+                "system",
+                timestamp_now(),
+            )
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         // Update indexes for changed Ref columns
@@ -2430,7 +1642,7 @@ impl Database {
                 row: new_row_with_id,
                 prior: PriorState::empty(), // TODO: Get prior commit tips
             },
-            &*self.state,
+            &self.state,
         );
 
         Ok(true)
@@ -2477,14 +1689,14 @@ impl Database {
             let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
             let row = OwnedRow::new(descriptor, data);
             for col in schema.columns.iter() {
-                if matches!(col.ty, ColumnType::Ref(_)) {
-                    if let Some(RowValue::Ref(target_id)) = row.get_by_name(&col.name) {
-                        let key = IndexKey::new(table, &col.name);
-                        if self.state.index_objects.read().unwrap().contains_key(&key) {
-                            let mut index = self.read_index(&key)?;
-                            index.remove(target_id, id);
-                            self.write_index(&key, &index)?;
-                        }
+                if matches!(col.ty, ColumnType::Ref(_))
+                    && let Some(RowValue::Ref(target_id)) = row.get_by_name(&col.name)
+                {
+                    let key = IndexKey::new(table, &col.name);
+                    if self.state.index_objects.read().unwrap().contains_key(&key) {
+                        let mut index = self.read_index(&key)?;
+                        index.remove(target_id, id);
+                        self.write_index(&key, &index)?;
                     }
                 }
             }
@@ -2495,7 +1707,8 @@ impl Database {
         meta.insert("deleted".to_string(), "true".to_string());
 
         // Write soft delete commit with metadata marker
-        let commit_id = self.state
+        let commit_id = self
+            .state
             .node
             .write_with_meta(id, "main", &[], "system", timestamp_now(), Some(meta))
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
@@ -2523,133 +1736,10 @@ impl Database {
                 id,
                 prior: PriorState::empty(), // TODO: Get prior commit tips
             },
-            &*self.state,
+            &self.state,
         );
 
         Ok(true)
-    }
-
-    /// Simple select - returns all rows from a table in buffer format.
-    /// For now, implements only basic scans.
-    pub fn select_all(&self, table: &str) -> Result<Vec<(ObjectId, OwnedRow)>, DatabaseError> {
-        let schema = self
-            .get_table(table)
-            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
-        let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
-
-        let mut rows = Vec::new();
-
-        // Find all rows for this table
-        let row_table = self.state.row_table.read().unwrap();
-        for (&row_id, row_tbl) in row_table.iter() {
-            if row_tbl != table {
-                continue;
-            }
-
-            // Read row data
-            let data = match self.state.node.read(row_id, "main") {
-                Ok(Some(data)) if !data.is_empty() => data,
-                _ => continue, // Skip deleted or missing rows
-            };
-
-            // Create OwnedRow directly from buffer (no Value conversion needed)
-            let owned = OwnedRow::new(descriptor.clone(), data);
-            rows.push((row_id, owned));
-        }
-
-        Ok(rows)
-    }
-
-    /// Select rows matching a simple where clause (column = value) in buffer format.
-    pub fn select_where(
-        &self,
-        table: &str,
-        column: &str,
-        value: &PredicateValue,
-    ) -> Result<Vec<(ObjectId, OwnedRow)>, DatabaseError> {
-        let schema = self
-            .get_table(table)
-            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
-        let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
-
-        // Special case: id column (implicit, not in schema)
-        if column == "id" {
-            // Coerce String to Ref for id comparison
-            let coerced = coerce_predicate_value(value, &ColumnType::Ref("".to_string()));
-            if let PredicateValue::Ref(id) = coerced {
-                return match self.get(table, id)? {
-                    Some((id, row)) => Ok(vec![(id, row)]),
-                    None => Ok(vec![]),
-                };
-            }
-            // id column but non-Ref value and not coercible - no matches
-            return Ok(vec![]);
-        }
-
-        let col_idx = schema
-            .column_index(column)
-            .ok_or_else(|| DatabaseError::ColumnNotFound(column.to_string()))?;
-
-        // Coerce the value to match the column type
-        let coerced = coerce_predicate_value(value, &schema.columns[col_idx].ty);
-
-        let mut rows = Vec::new();
-
-        // Scan all rows
-        let row_table = self.state.row_table.read().unwrap();
-        for (&row_id, row_tbl) in row_table.iter() {
-            if row_tbl != table {
-                continue;
-            }
-
-            let data = match self.state.node.read(row_id, "main") {
-                Ok(Some(data)) if !data.is_empty() => data,
-                _ => continue,
-            };
-
-            // Create OwnedRow directly from buffer
-            let owned = OwnedRow::new(descriptor.clone(), data);
-            // Check if the column value matches using PredicateValue::matches
-            if let Some(row_value) = owned.get_by_name(column) {
-                if coerced.matches(&row_value) {
-                    rows.push((row_id, owned));
-                }
-            }
-        }
-
-        Ok(rows)
-    }
-
-    // ========== Policy-Filtered Queries ==========
-
-    /// Select all rows from a table, filtered by policy for the given viewer.
-    pub fn select_all_as(&self, table: &str, viewer: ObjectId) -> Result<Vec<(ObjectId, OwnedRow)>, DatabaseError> {
-        let rows = self.select_all(table)?;
-        Ok(self.filter_rows_by_policy(table, rows, viewer))
-    }
-
-    /// Select rows matching a condition, filtered by policy for the given viewer.
-    pub fn select_where_as(
-        &self,
-        table: &str,
-        column: &str,
-        value: &PredicateValue,
-        viewer: ObjectId,
-    ) -> Result<Vec<(ObjectId, OwnedRow)>, DatabaseError> {
-        let rows = self.select_where(table, column, value)?;
-        Ok(self.filter_rows_by_policy(table, rows, viewer))
-    }
-
-    /// Filter a list of rows by SELECT policy for the given viewer.
-    fn filter_rows_by_policy(&self, table: &str, rows: Vec<(ObjectId, OwnedRow)>, viewer: ObjectId) -> Vec<(ObjectId, OwnedRow)> {
-        use crate::sql::policy::{PolicyConfig, PolicyEvaluator};
-
-        let config = PolicyConfig::default();
-        let mut evaluator = PolicyEvaluator::new(self, self, viewer, config);
-
-        rows.into_iter()
-            .filter(|(id, row)| evaluator.check_select(table, *id, row).is_allowed())
-            .collect()
     }
 
     // ========== Policy-Checked Write Operations ==========
@@ -2721,7 +1811,12 @@ impl Database {
     }
 
     /// Insert a row using builder pattern, checking INSERT policy.
-    pub fn insert_with_as<F>(&self, table: &str, f: F, viewer: ObjectId) -> Result<ObjectId, DatabaseError>
+    pub fn insert_with_as<F>(
+        &self,
+        table: &str,
+        f: F,
+        viewer: ObjectId,
+    ) -> Result<ObjectId, DatabaseError>
     where
         F: FnOnce(RowBuilder) -> OwnedRow,
     {
@@ -2771,7 +1866,13 @@ impl Database {
     }
 
     /// Update a row using builder pattern, checking UPDATE policy.
-    pub fn update_with_as<F>(&self, table: &str, id: ObjectId, f: F, viewer: ObjectId) -> Result<bool, DatabaseError>
+    pub fn update_with_as<F>(
+        &self,
+        table: &str,
+        id: ObjectId,
+        f: F,
+        viewer: ObjectId,
+    ) -> Result<bool, DatabaseError>
     where
         F: FnOnce(RowBuilder) -> OwnedRow,
     {
@@ -2882,47 +1983,43 @@ impl Database {
                 let row = builder.build();
 
                 let (row_id, table_rows_id) = self.insert_row_returning_both(&ins.table, row)?;
-                Ok(ExecuteResult::Inserted { row_id, table_rows_id })
+                Ok(ExecuteResult::Inserted {
+                    row_id,
+                    table_rows_id,
+                })
             }
             Statement::Update(upd) => {
-                // Find rows matching where clause
-                let rows_to_update = if upd.where_clause.is_empty() {
-                    self.select_all(&upd.table)?
-                } else if upd.where_clause.len() == 1 {
-                    let cond = &upd.where_clause[0];
-                    let value = cond.value().ok_or_else(|| {
-                        DatabaseError::ColumnNotFound(
-                            "column references not supported in UPDATE WHERE".to_string(),
-                        )
-                    })?;
-                    self.select_where(&upd.table, &cond.column.column, value)?
-                } else {
-                    // Multiple conditions - start with first, then filter
-                    let cond = &upd.where_clause[0];
-                    let value = cond.value().ok_or_else(|| {
-                        DatabaseError::ColumnNotFound(
-                            "column references not supported in UPDATE WHERE".to_string(),
-                        )
-                    })?;
-                    let mut rows = self.select_where(&upd.table, &cond.column.column, value)?;
+                // Verify table exists
+                if self.get_table(&upd.table).is_none() {
+                    return Err(DatabaseError::TableNotFound(upd.table.clone()));
+                }
 
-                    for cond in &upd.where_clause[1..] {
-                        let col_name = &cond.column.column;
-                        let value = cond.value().ok_or_else(|| {
-                            DatabaseError::ColumnNotFound(
-                                "column references not supported in UPDATE WHERE".to_string(),
-                            )
-                        })?;
-                        rows.retain(|(_, row)| {
-                            if let Some(v) = row.get_by_name(col_name) {
-                                value.matches(&v)
-                            } else {
-                                false
+                // Get all rows and filter by WHERE clause
+                let mut rows_to_update = self.state.read_all_rows(&upd.table);
+                for cond in &upd.where_clause {
+                    let col_name = &cond.column.column;
+                    let value = cond.value().ok_or_else(|| {
+                        DatabaseError::ColumnNotFound(
+                            "column references not supported in UPDATE WHERE".to_string(),
+                        )
+                    })?;
+                    rows_to_update.retain(|(row_id, row)| {
+                        // Special case: "id" column is the row's ObjectId
+                        if col_name == "id" {
+                            let coerced =
+                                coerce_predicate_value(value, &ColumnType::Ref("".to_string()));
+                            if let PredicateValue::Ref(expected_id) = coerced {
+                                return *row_id == expected_id;
                             }
-                        });
-                    }
-                    rows
-                };
+                            return false;
+                        }
+                        if let Some(v) = row.get_by_name(col_name) {
+                            value.matches(&v)
+                        } else {
+                            false
+                        }
+                    });
+                }
 
                 let count = rows_to_update.len();
                 let schema = self
@@ -2960,7 +2057,8 @@ impl Database {
                         } else {
                             value.clone()
                         };
-                        builder = builder.set_from_predicate_value_by_name(col_name, &coerced_value);
+                        builder =
+                            builder.set_from_predicate_value_by_name(col_name, &coerced_value);
                     }
 
                     let new_row = builder.build();
@@ -2970,44 +2068,37 @@ impl Database {
                 Ok(ExecuteResult::Updated(count))
             }
             Statement::Delete(del) => {
-                // Find rows matching where clause
-                let rows_to_delete = if del.where_clause.is_empty() {
-                    self.select_all(&del.table)?
-                } else if del.where_clause.len() == 1 {
-                    let cond = &del.where_clause[0];
-                    let value = cond.value().ok_or_else(|| {
-                        DatabaseError::ColumnNotFound(
-                            "column references not supported in DELETE WHERE".to_string(),
-                        )
-                    })?;
-                    self.select_where(&del.table, &cond.column.column, value)?
-                } else {
-                    // Multiple conditions - start with first, then filter
-                    let cond = &del.where_clause[0];
-                    let value = cond.value().ok_or_else(|| {
-                        DatabaseError::ColumnNotFound(
-                            "column references not supported in DELETE WHERE".to_string(),
-                        )
-                    })?;
-                    let mut rows = self.select_where(&del.table, &cond.column.column, value)?;
+                // Verify table exists
+                if self.get_table(&del.table).is_none() {
+                    return Err(DatabaseError::TableNotFound(del.table.clone()));
+                }
 
-                    for cond in &del.where_clause[1..] {
-                        let col_name = &cond.column.column;
-                        let value = cond.value().ok_or_else(|| {
-                            DatabaseError::ColumnNotFound(
-                                "column references not supported in DELETE WHERE".to_string(),
-                            )
-                        })?;
-                        rows.retain(|(_, row)| {
-                            if let Some(v) = row.get_by_name(col_name) {
-                                value.matches(&v)
-                            } else {
-                                false
+                // Get all rows and filter by WHERE clause
+                let mut rows_to_delete = self.state.read_all_rows(&del.table);
+                for cond in &del.where_clause {
+                    let col_name = &cond.column.column;
+                    let value = cond.value().ok_or_else(|| {
+                        DatabaseError::ColumnNotFound(
+                            "column references not supported in DELETE WHERE".to_string(),
+                        )
+                    })?;
+                    rows_to_delete.retain(|(row_id, row)| {
+                        // Special case: "id" column is the row's ObjectId
+                        if col_name == "id" {
+                            let coerced =
+                                coerce_predicate_value(value, &ColumnType::Ref("".to_string()));
+                            if let PredicateValue::Ref(expected_id) = coerced {
+                                return *row_id == expected_id;
                             }
-                        });
-                    }
-                    rows
-                };
+                            return false;
+                        }
+                        if let Some(v) = row.get_by_name(col_name) {
+                            value.matches(&v)
+                        } else {
+                            false
+                        }
+                    });
+                }
 
                 let count = rows_to_delete.len();
 
@@ -3021,10 +2112,10 @@ impl Database {
 
                 Ok(ExecuteResult::Deleted(count))
             }
-            Statement::Select(sel) => {
-                let rows = self.state.execute_select(&sel);
-                Ok(ExecuteResult::Selected(rows))
-            }
+            Statement::Select(_) => Err(DatabaseError::Parse(parser::ParseError {
+                message: "SELECT statements should use query() instead of execute()".to_string(),
+                position: 0,
+            })),
         }
     }
 
@@ -3113,6 +2204,30 @@ impl Database {
         })
     }
 
+    /// Execute a SELECT query and return the results.
+    ///
+    /// This is a convenience method that creates an incremental query,
+    /// gets the current results, and automatically cleans up the query.
+    ///
+    /// For subscriptions to live updates, use `incremental_query()` instead.
+    pub fn query(&self, sql: &str) -> Result<Vec<(ObjectId, OwnedRow)>, DatabaseError> {
+        Ok(self.incremental_query(sql)?.rows())
+    }
+
+    /// Execute a SELECT query with policy filtering and return the results.
+    ///
+    /// This is a convenience method that creates an incremental query with
+    /// policy filtering, gets the current results, and automatically cleans up.
+    ///
+    /// For subscriptions to live updates, use `incremental_query_as()` instead.
+    pub fn query_as(
+        &self,
+        sql: &str,
+        viewer: ObjectId,
+    ) -> Result<Vec<(ObjectId, OwnedRow)>, DatabaseError> {
+        Ok(self.incremental_query_as(sql, viewer)?.rows())
+    }
+
     /// Build a query graph for a single-table SELECT with policy filtering.
     fn build_single_table_graph_with_policy(
         &self,
@@ -3131,35 +2246,25 @@ impl Database {
         let select_policy = policies.as_ref().and_then(|p| p.get(PolicyAction::Select));
 
         // Check if policy contains INHERITS
-        if let Some(policy) = select_policy {
-            if let Some(ref where_expr) = policy.where_clause {
-                if let Some(inherits_info) = self.extract_inherits(where_expr, table, &schema)? {
-                    if inherits_info.is_self_referential {
-                        // Self-referential INHERITS: use RecursiveFilter
-                        return self.build_recursive_filter_graph(
-                            select,
-                            viewer,
-                            &inherits_info,
-                            &schema,
-                        );
-                    } else {
-                        // Non-self-referential INHERITS: resolve the full chain
-                        let mut visited = vec![table.to_string()];
-                        let chain = self.resolve_inherits_chain(
-                            &inherits_info,
-                            table,
-                            viewer,
-                            &mut visited,
-                        )?;
+        if let Some(policy) = select_policy
+            && let Some(ref where_expr) = policy.where_clause
+            && let Some(inherits_info) = self.extract_inherits(where_expr, table, &schema)?
+        {
+            if inherits_info.is_self_referential {
+                // Self-referential INHERITS: use RecursiveFilter
+                return self.build_recursive_filter_graph(select, viewer, &inherits_info, &schema);
+            } else {
+                // Non-self-referential INHERITS: resolve the full chain
+                let mut visited = vec![table.to_string()];
+                let chain =
+                    self.resolve_inherits_chain(&inherits_info, table, viewer, &mut visited)?;
 
-                        if chain.hops.len() == 1 {
-                            // Single hop: use existing simple JOIN graph
-                            return self.build_inherits_join_graph(select, viewer, &inherits_info);
-                        } else {
-                            // Multi-hop chain: use chain JOIN graph
-                            return self.build_chain_join_graph(select, viewer, &chain, &schema);
-                        }
-                    }
+                if chain.hops.len() == 1 {
+                    // Single hop: use existing simple JOIN graph
+                    return self.build_inherits_join_graph(select, viewer, &inherits_info);
+                } else {
+                    // Multi-hop chain: use chain JOIN graph
+                    return self.build_chain_join_graph(select, viewer, &chain, &schema);
                 }
             }
         }
@@ -3196,11 +2301,7 @@ impl Database {
         };
 
         // Apply LIMIT/OFFSET if specified
-        let limited = builder.limit_offset(
-            after_policy,
-            select.limit,
-            select.offset.unwrap_or(0),
-        );
+        let limited = builder.limit_offset(after_policy, select.limit, select.offset.unwrap_or(0));
 
         Ok(builder.output(limited, GraphId(0)))
     }
@@ -3367,68 +2468,65 @@ impl Database {
             .as_ref()
             .and_then(|p| p.get(PolicyAction::Select));
 
-        if let Some(policy) = target_select {
-            if let Some(ref where_expr) = policy.where_clause {
-                // Check if target policy also has INHERITS
-                if let Some(nested_inherits) = self.extract_inherits(
-                    where_expr,
-                    &initial_inherits.target_table,
-                    &target_schema,
-                )? {
-                    if nested_inherits.is_self_referential {
-                        // Self-referential in the chain - not supported yet
-                        return Err(DatabaseError::Parse(parser::ParseError {
-                            message: "Self-referential INHERITS in chain not yet supported"
-                                .to_string(),
-                            position: 0,
-                        }));
-                    }
-
-                    // Convert the target table's base_predicate (the OR sibling at this level)
-                    let target_base = if let Some(ref base_expr) = nested_inherits.base_predicate {
-                        Some(self.policy_expr_to_predicate(base_expr, viewer)?)
-                    } else {
-                        None
-                    };
-
-                    // Create the first hop with its base predicate
-                    let first_hop = ChainHop {
-                        ref_column: initial_inherits.ref_column.clone(),
-                        target_table: initial_inherits.target_table.clone(),
-                        // The base_predicate on this hop is the target table's base predicate
-                        // (the OR sibling that allows short-circuiting at this level)
-                        base_predicate: target_base,
-                    };
-
-                    // Recursively resolve the rest of the chain
-                    let mut rest_of_chain = self.resolve_inherits_chain(
-                        &nested_inherits,
-                        &initial_inherits.target_table,
-                        viewer,
-                        visited,
-                    )?;
-
-                    // Prepend our hop
-                    let mut hops = vec![first_hop];
-                    hops.extend(rest_of_chain.hops);
-                    rest_of_chain.hops = hops;
-
-                    return Ok(rest_of_chain);
+        if let Some(policy) = target_select
+            && let Some(ref where_expr) = policy.where_clause
+        {
+            // Check if target policy also has INHERITS
+            if let Some(nested_inherits) =
+                self.extract_inherits(where_expr, &initial_inherits.target_table, &target_schema)?
+            {
+                if nested_inherits.is_self_referential {
+                    // Self-referential in the chain - not supported yet
+                    return Err(DatabaseError::Parse(parser::ParseError {
+                        message: "Self-referential INHERITS in chain not yet supported".to_string(),
+                        position: 0,
+                    }));
                 }
 
-                // No INHERITS - this is the terminal table
-                let terminal_predicate = self.policy_expr_to_predicate(where_expr, viewer)?;
+                // Convert the target table's base_predicate (the OR sibling at this level)
+                let target_base = if let Some(ref base_expr) = nested_inherits.base_predicate {
+                    Some(self.policy_expr_to_predicate(base_expr, viewer)?)
+                } else {
+                    None
+                };
+
+                // Create the first hop with its base predicate
                 let first_hop = ChainHop {
                     ref_column: initial_inherits.ref_column.clone(),
                     target_table: initial_inherits.target_table.clone(),
-                    base_predicate: None, // Terminal table - no base predicate needed
+                    // The base_predicate on this hop is the target table's base predicate
+                    // (the OR sibling that allows short-circuiting at this level)
+                    base_predicate: target_base,
                 };
-                return Ok(InheritsChain {
-                    hops: vec![first_hop],
-                    terminal_predicate: Some(terminal_predicate),
-                    terminal_table: initial_inherits.target_table.clone(),
-                });
+
+                // Recursively resolve the rest of the chain
+                let mut rest_of_chain = self.resolve_inherits_chain(
+                    &nested_inherits,
+                    &initial_inherits.target_table,
+                    viewer,
+                    visited,
+                )?;
+
+                // Prepend our hop
+                let mut hops = vec![first_hop];
+                hops.extend(rest_of_chain.hops);
+                rest_of_chain.hops = hops;
+
+                return Ok(rest_of_chain);
             }
+
+            // No INHERITS - this is the terminal table
+            let terminal_predicate = self.policy_expr_to_predicate(where_expr, viewer)?;
+            let first_hop = ChainHop {
+                ref_column: initial_inherits.ref_column.clone(),
+                target_table: initial_inherits.target_table.clone(),
+                base_predicate: None, // Terminal table - no base predicate needed
+            };
+            return Ok(InheritsChain {
+                hops: vec![first_hop],
+                terminal_predicate: Some(terminal_predicate),
+                terminal_table: initial_inherits.target_table.clone(),
+            });
         }
 
         // No policy on target table = allow all (terminal with no predicate)
@@ -3463,19 +2561,13 @@ impl Database {
             .ok_or_else(|| DatabaseError::TableNotFound(inherits.target_table.clone()))?;
 
         // Build a JOIN graph
-        let mut builder = JoinGraphBuilder::new(
-            left_table,
-            left_schema.clone(),
+        let mut builder = QueryGraphBuilder::new(left_table, left_schema.clone());
+
+        let join_node = builder.join(
             &inherits.target_table,
             right_schema.clone(),
             &inherits.ref_column,
         );
-
-        // For INHERITS join, we want to output only the source table's columns
-        // (SELECT * FROM documents with INHERITS should return documents.*, not joined columns)
-        builder.set_projection(left_table);
-
-        let join_node = builder.join();
 
         // Apply user's WHERE clause (needs qualified column handling)
         let after_user_where = if select.where_clause.is_empty() {
@@ -3506,11 +2598,8 @@ impl Database {
 
             // Add source table's base predicate (if any)
             if let Some(ref base_expr) = inherits.base_predicate {
-                let base_pred = self.policy_expr_to_predicate_qualified(
-                    base_expr,
-                    viewer,
-                    left_table,
-                )?;
+                let base_pred =
+                    self.policy_expr_to_predicate_qualified(base_expr, viewer, left_table)?;
                 or_predicates.push(base_pred);
             }
 
@@ -3536,13 +2625,13 @@ impl Database {
         };
 
         // Apply LIMIT/OFFSET if specified
-        let limited = builder.limit_offset(
-            after_policy,
-            select.limit,
-            select.offset.unwrap_or(0),
-        );
+        let limited = builder.limit_offset(after_policy, select.limit, select.offset.unwrap_or(0));
 
-        Ok(builder.output(limited, GraphId(0)))
+        // Add projection to unqualify column names
+        // (SELECT * FROM documents should return "title", not "documents.title")
+        let projected = builder.projection_unqualify(limited, left_table, &left_schema);
+
+        Ok(builder.output(projected, GraphId(0)))
     }
 
     /// Build a JOIN graph for INHERITS chains with multiple hops.
@@ -3591,16 +2680,7 @@ impl Database {
             .ok_or_else(|| DatabaseError::TableNotFound(first_hop.target_table.clone()))?;
 
         // Build the first join: source → first target
-        let mut builder = JoinGraphBuilder::new(
-            left_table,
-            source_schema.clone(),
-            &first_hop.target_table,
-            first_target_schema.clone(),
-            &first_hop.ref_column,
-        );
-
-        // For INHERITS chain, output only the source table's columns
-        builder.set_projection(left_table);
+        let mut builder = QueryGraphBuilder::new(left_table, source_schema.clone());
 
         // Pre-add schemas for all subsequent hops
         for hop in chain.hops.iter().skip(1) {
@@ -3611,13 +2691,17 @@ impl Database {
         }
 
         // Build first join
-        let mut current_node = builder.join();
+        let mut current_node = builder.join(
+            &first_hop.target_table,
+            first_target_schema.clone(),
+            &first_hop.ref_column,
+        );
 
         // Apply user's WHERE clause after first join
         // The predicate must use qualified column names since we're in a JOIN context
         if !select.where_clause.is_empty() {
             let predicate = self.build_predicate(&select.where_clause, source_schema)?;
-            let qualified_pred = predicate.qualify(&left_table);
+            let qualified_pred = predicate.qualify(left_table);
             current_node = builder.filter(current_node, qualified_pred);
         }
 
@@ -3670,13 +2754,13 @@ impl Database {
         }
 
         // Apply LIMIT/OFFSET if specified
-        let limited = builder.limit_offset(
-            current_node,
-            select.limit,
-            select.offset.unwrap_or(0),
-        );
+        let limited = builder.limit_offset(current_node, select.limit, select.offset.unwrap_or(0));
 
-        Ok(builder.output(limited, GraphId(0)))
+        // Add projection to unqualify column names
+        // (SELECT * FROM documents should return "title", not "documents.title")
+        let projected = builder.projection_unqualify(limited, left_table, source_schema);
+
+        Ok(builder.output(projected, GraphId(0)))
     }
 
     /// Build a query graph with RecursiveFilter for self-referential INHERITS.
@@ -3732,11 +2816,7 @@ impl Database {
             builder.recursive_filter(after_additional, base_predicate, &inherits.ref_column);
 
         // Apply LIMIT/OFFSET if specified
-        let limited = builder.limit_offset(
-            recursive,
-            select.limit,
-            select.offset.unwrap_or(0),
-        );
+        let limited = builder.limit_offset(recursive, select.limit, select.offset.unwrap_or(0));
 
         Ok(builder.output(limited, GraphId(0)))
     }
@@ -3782,7 +2862,7 @@ impl Database {
             }
             PolicyExpr::Not(inner) => Ok(self
                 .policy_expr_to_predicate_qualified(inner, viewer, table_prefix)?
-                .not()),
+                .negate()),
             PolicyExpr::Inherits { .. } => {
                 // Nested INHERITS - would need recursive flattening
                 Err(DatabaseError::Parse(parser::ParseError {
@@ -3806,12 +2886,14 @@ impl Database {
         table_prefix: &str,
     ) -> Result<(String, PredicateValue), DatabaseError> {
         match (left, right) {
-            (PolicyValue::Column(col), PolicyValue::Viewer) => {
-                Ok((format!("{}.{}", table_prefix, col), PredicateValue::Ref(viewer)))
-            }
-            (PolicyValue::Viewer, PolicyValue::Column(col)) => {
-                Ok((format!("{}.{}", table_prefix, col), PredicateValue::Ref(viewer)))
-            }
+            (PolicyValue::Column(col), PolicyValue::Viewer) => Ok((
+                format!("{}.{}", table_prefix, col),
+                PredicateValue::Ref(viewer),
+            )),
+            (PolicyValue::Viewer, PolicyValue::Column(col)) => Ok((
+                format!("{}.{}", table_prefix, col),
+                PredicateValue::Ref(viewer),
+            )),
             (PolicyValue::Column(col), PolicyValue::Literal(val)) => {
                 Ok((format!("{}.{}", table_prefix, col), val.clone()))
             }
@@ -3865,7 +2947,7 @@ impl Database {
             }
             PolicyExpr::Not(inner) => {
                 let pred = self.policy_expr_to_predicate(inner, viewer)?;
-                Ok(pred.not())
+                Ok(pred.negate())
             }
             // These require runtime evaluation
             PolicyExpr::Inherits { .. } => Err(DatabaseError::Parse(parser::ParseError {
@@ -3968,11 +3050,7 @@ impl Database {
         };
 
         // Apply LIMIT/OFFSET if specified
-        let limited = builder.limit_offset(
-            filtered,
-            select.limit,
-            select.offset.unwrap_or(0),
-        );
+        let limited = builder.limit_offset(filtered, select.limit, select.offset.unwrap_or(0));
 
         // Process ARRAY subqueries in projection
         let with_arrays = if let Projection::Expressions(exprs) = &select.projection {
@@ -4001,7 +3079,12 @@ impl Database {
             // The expression index doesn't correspond to the actual column position
             // because star expressions expand to multiple columns.
             current = self.add_array_aggregate_for_expr(
-                builder, current, expr, outer_table, outer_alias, -1,
+                builder,
+                current,
+                expr,
+                outer_table,
+                outer_alias,
+                -1,
             )?;
         }
 
@@ -4056,7 +3139,12 @@ impl Database {
             SelectExpr::Aliased { expr: inner, .. } => {
                 // Recurse into aliased expressions
                 self.add_array_aggregate_for_expr(
-                    builder, input, inner, outer_table, outer_alias, column_index,
+                    builder,
+                    input,
+                    inner,
+                    outer_table,
+                    outer_alias,
+                    column_index,
                 )
             }
             // Non-ARRAY expressions don't add nodes
@@ -4179,10 +3267,10 @@ impl Database {
         if left_is_inner && right_is_target && on.right.column == "id" {
             // Verify it's actually a Ref column to the target
             let col_name = &on.left.column;
-            if let Some(col) = inner_schema.column(col_name) {
-                if matches!(&col.ty, ColumnType::Ref(t) if t == target_table) {
-                    return Ok(col_name.clone());
-                }
+            if let Some(col) = inner_schema.column(col_name)
+                && matches!(&col.ty, ColumnType::Ref(t) if t == target_table)
+            {
+                return Ok(col_name.clone());
             }
         }
 
@@ -4202,10 +3290,10 @@ impl Database {
 
         if left_is_target && right_is_inner && on.left.column == "id" {
             let col_name = &on.right.column;
-            if let Some(col) = inner_schema.column(col_name) {
-                if matches!(&col.ty, ColumnType::Ref(t) if t == target_table) {
-                    return Ok(col_name.clone());
-                }
+            if let Some(col) = inner_schema.column(col_name)
+                && matches!(&col.ty, ColumnType::Ref(t) if t == target_table)
+            {
+                return Ok(col_name.clone());
             }
         }
 
@@ -4243,7 +3331,7 @@ impl Database {
             .ok_or_else(|| DatabaseError::TableNotFound(sql_first_right_table.clone()))?;
 
         // Determine the join column and direction for first join
-        // The JoinGraphBuilder expects the "left" table to have the Ref column
+        // The QueryGraphBuilder expects the "left" table to have the Ref column
         let first_join_direction = self.find_join_column(
             &first_join.on,
             sql_left_table,
@@ -4255,54 +3343,51 @@ impl Database {
 
         // For the graph builder, we need the table with the Ref to be "left"
         // If it's a reverse join (right table has Ref), we swap the roles
-        let (graph_left_table, graph_left_schema, graph_right_table, graph_right_schema, ref_column) =
-            match &first_join_direction {
-                JoinDirection::LeftToRight(col) => (
-                    sql_left_table.as_str(),
-                    sql_left_schema.clone(),
-                    sql_first_right_table.as_str(),
-                    sql_first_right_schema.clone(),
-                    col.clone(),
-                ),
-                JoinDirection::RightToLeft(col) => (
-                    sql_first_right_table.as_str(),
-                    sql_first_right_schema.clone(),
-                    sql_left_table.as_str(),
-                    sql_left_schema.clone(),
-                    col.clone(),
-                ),
-            };
+        let (
+            graph_left_table,
+            graph_left_schema,
+            graph_right_table,
+            graph_right_schema,
+            ref_column,
+        ) = match &first_join_direction {
+            JoinDirection::LeftToRight(col) => (
+                sql_left_table.as_str(),
+                sql_left_schema.clone(),
+                sql_first_right_table.as_str(),
+                sql_first_right_schema.clone(),
+                col.clone(),
+            ),
+            JoinDirection::RightToLeft(col) => (
+                sql_first_right_table.as_str(),
+                sql_first_right_schema.clone(),
+                sql_left_table.as_str(),
+                sql_left_schema.clone(),
+                col.clone(),
+            ),
+        };
 
         // Build the JOIN query graph
-        let mut builder = JoinGraphBuilder::new(
-            graph_left_table,
-            graph_left_schema.clone(),
-            graph_right_table,
-            graph_right_schema.clone(),
-            &ref_column,
-        );
-
-        // For reverse JOINs, set projection to output only the SQL FROM table's columns.
-        // The SQL is `SELECT Issues.* FROM Issues JOIN IssueAssignees`, but we swapped the
-        // tables for the graph builder (because IssueAssignees has the Ref). We need to
-        // project back to Issues (the original SQL left table, now graph_right_table).
-        if matches!(first_join_direction, JoinDirection::RightToLeft(_)) {
-            builder.set_projection(graph_right_table);
-        }
+        let mut builder = QueryGraphBuilder::new(graph_left_table, graph_left_schema.clone());
 
         // Start with first join node
-        let mut current_node = builder.join();
+        let mut current_node =
+            builder.join(graph_right_table, graph_right_schema.clone(), &ref_column);
 
         // Track all tables involved for predicate building
         // Store (table_name, alias, schema)
         let from_alias = select.from.alias.as_deref();
         let mut all_tables: Vec<(&str, Option<&str>, TableSchema)> = vec![
             (sql_left_table.as_str(), from_alias, sql_left_schema.clone()),
-            (sql_first_right_table.as_str(), None, sql_first_right_schema.clone()),
+            (
+                sql_first_right_table.as_str(),
+                None,
+                sql_first_right_schema.clone(),
+            ),
         ];
 
         // Track reverse-joined tables to handle their WHERE conditions specially
-        let mut reverse_joined_tables: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut reverse_joined_tables: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         // Process additional JOINs (chain joins)
         for join in select.from.joins.iter().skip(1) {
@@ -4315,23 +3400,20 @@ impl Database {
             builder.add_schema(target_table.clone(), target_schema.clone());
 
             // Determine which table in the chain has the ref column
-            let join_info = self.find_chain_join_info(
-                &join.on,
-                &all_tables,
-                target_table,
-                &target_schema,
-            )?;
+            let join_info =
+                self.find_chain_join_info(&join.on, &all_tables, target_table, &target_schema)?;
 
             current_node = match join_info {
-                ChainJoinInfo::Forward { source_table, ref_column } => {
-                    builder.chain_join(
-                        current_node,
-                        source_table,
-                        ref_column,
-                        target_table.clone(),
-                    )
+                ChainJoinInfo::Forward {
+                    source_table,
+                    ref_column,
+                } => {
+                    builder.chain_join(current_node, source_table, ref_column, target_table.clone())
                 }
-                ChainJoinInfo::Reverse { existing_table, ref_column } => {
+                ChainJoinInfo::Reverse {
+                    existing_table,
+                    ref_column,
+                } => {
                     // For reverse chain joins, the target table has the ref column
                     // pointing to an existing table.
                     reverse_joined_tables.insert(target_table.clone());
@@ -4361,7 +3443,9 @@ impl Database {
             current_node
         } else {
             // Filter out conditions on reverse-joined tables (already handled)
-            let remaining_conditions: Vec<_> = select.where_clause.iter()
+            let remaining_conditions: Vec<_> = select
+                .where_clause
+                .iter()
                 .filter(|cond| !self.condition_on_table(cond, &reverse_joined_tables))
                 .cloned()
                 .collect();
@@ -4370,17 +3454,14 @@ impl Database {
                 current_node
             } else {
                 // Build predicate for remaining conditions only (with alias support)
-                let predicate = self.build_multi_join_predicate_with_aliases(&remaining_conditions, &all_tables)?;
+                let predicate = self
+                    .build_multi_join_predicate_with_aliases(&remaining_conditions, &all_tables)?;
                 builder.filter(current_node, predicate)
             }
         };
 
         // Apply LIMIT/OFFSET if specified
-        let limited = builder.limit_offset(
-            filtered,
-            select.limit,
-            select.offset.unwrap_or(0),
-        );
+        let limited = builder.limit_offset(filtered, select.limit, select.offset.unwrap_or(0));
 
         // Process ARRAY subqueries in projection (for reverse refs with includes)
         let outer_table = sql_left_table;
@@ -4391,8 +3472,18 @@ impl Database {
             limited
         };
 
+        // For reverse JOINs, add projection to output only the SQL FROM table's columns.
+        // The SQL is `SELECT Issues.* FROM Issues JOIN IssueAssignees`, but we swapped the
+        // tables for the graph builder (because IssueAssignees has the Ref). We project
+        // back to Issues (the original SQL left table, now graph_right_table).
+        let final_node = if matches!(first_join_direction, JoinDirection::RightToLeft(_)) {
+            builder.projection_select_table(with_arrays, graph_right_table, &sql_left_schema)
+        } else {
+            with_arrays
+        };
+
         // Create output node
-        Ok(builder.output(with_arrays, GraphId(0))) // ID will be assigned by registry
+        Ok(builder.output(final_node, GraphId(0))) // ID will be assigned by registry
     }
 
     /// Find chain join information: which table has the ref column and what direction.
@@ -4415,13 +3506,13 @@ impl Database {
 
             if left_is_existing && right_is_target && on.right.column == "id" {
                 let col_name = &on.left.column;
-                if let Some(col) = schema.column(col_name) {
-                    if matches!(&col.ty, ColumnType::Ref(t) if t == target_table) {
-                        return Ok(ChainJoinInfo::Forward {
-                            source_table: table_name.to_string(),
-                            ref_column: col_name.clone(),
-                        });
-                    }
+                if let Some(col) = schema.column(col_name)
+                    && matches!(&col.ty, ColumnType::Ref(t) if t == target_table)
+                {
+                    return Ok(ChainJoinInfo::Forward {
+                        source_table: table_name.to_string(),
+                        ref_column: col_name.clone(),
+                    });
                 }
             }
 
@@ -4431,13 +3522,13 @@ impl Database {
 
             if left_is_target && right_is_existing && on.left.column == "id" {
                 let col_name = &on.right.column;
-                if let Some(col) = schema.column(col_name) {
-                    if matches!(&col.ty, ColumnType::Ref(t) if t == target_table) {
-                        return Ok(ChainJoinInfo::Forward {
-                            source_table: table_name.to_string(),
-                            ref_column: col_name.clone(),
-                        });
-                    }
+                if let Some(col) = schema.column(col_name)
+                    && matches!(&col.ty, ColumnType::Ref(t) if t == target_table)
+                {
+                    return Ok(ChainJoinInfo::Forward {
+                        source_table: table_name.to_string(),
+                        ref_column: col_name.clone(),
+                    });
                 }
             }
         }
@@ -4449,14 +3540,14 @@ impl Database {
 
             if left_is_target && right_is_existing && on.right.column == "id" {
                 let col_name = &on.left.column;
-                if let Some(col) = target_schema.column(col_name) {
-                    if matches!(&col.ty, ColumnType::Ref(t) if t == *table_name) {
-                        // This is a reverse join - the target table has the ref
-                        return Ok(ChainJoinInfo::Reverse {
-                            existing_table: table_name.to_string(),
-                            ref_column: col_name.clone(),
-                        });
-                    }
+                if let Some(col) = target_schema.column(col_name)
+                    && matches!(&col.ty, ColumnType::Ref(t) if t == *table_name)
+                {
+                    // This is a reverse join - the target table has the ref
+                    return Ok(ChainJoinInfo::Reverse {
+                        existing_table: table_name.to_string(),
+                        ref_column: col_name.clone(),
+                    });
                 }
             }
 
@@ -4466,14 +3557,14 @@ impl Database {
 
             if left_is_existing && right_is_target && on.left.column == "id" {
                 let col_name = &on.right.column;
-                if let Some(col) = target_schema.column(col_name) {
-                    if matches!(&col.ty, ColumnType::Ref(t) if t == *table_name) {
-                        // This is a reverse join - the target table has the ref
-                        return Ok(ChainJoinInfo::Reverse {
-                            existing_table: table_name.to_string(),
-                            ref_column: col_name.clone(),
-                        });
-                    }
+                if let Some(col) = target_schema.column(col_name)
+                    && matches!(&col.ty, ColumnType::Ref(t) if t == *table_name)
+                {
+                    // This is a reverse join - the target table has the ref
+                    return Ok(ChainJoinInfo::Reverse {
+                        existing_table: table_name.to_string(),
+                        ref_column: col_name.clone(),
+                    });
                 }
             }
         }
@@ -4485,84 +3576,6 @@ impl Database {
             ),
             position: 0,
         }))
-    }
-
-    /// Build predicate for multi-join queries.
-    fn build_multi_join_predicate(
-        &self,
-        conditions: &[Condition],
-        all_schemas: &[(&str, TableSchema)],
-    ) -> Result<Predicate, DatabaseError> {
-        let mut predicates = Vec::new();
-
-        for cond in conditions {
-            let table = cond.column.table.as_deref();
-            let col_name = &cond.column.column;
-
-            // Find the schema for this column
-            let (table_name, schema) = if let Some(t) = table {
-                all_schemas
-                    .iter()
-                    .find(|(name, _)| *name == t)
-                    .ok_or_else(|| DatabaseError::Parse(parser::ParseError {
-                        message: format!("Unknown table {} in WHERE clause", t),
-                        position: 0,
-                    }))?
-            } else {
-                // Unqualified column - search all schemas
-                // "id" is a special column that exists on every table
-                if col_name == "id" {
-                    all_schemas.first().ok_or_else(|| DatabaseError::Parse(parser::ParseError {
-                        message: "No tables in query".to_string(),
-                        position: 0,
-                    }))?
-                } else {
-                    all_schemas
-                        .iter()
-                        .find(|(_, s)| s.column(col_name).is_some())
-                        .ok_or_else(|| DatabaseError::Parse(parser::ParseError {
-                            message: format!("Unknown column {} in WHERE clause", col_name),
-                            position: 0,
-                        }))?
-                }
-            };
-
-            // "id" is a special column (ObjectId/String type) that exists on every table
-            let column_type = if col_name == "id" {
-                ColumnType::String
-            } else {
-                let column = schema.column(col_name).ok_or_else(|| {
-                    DatabaseError::Parse(parser::ParseError {
-                        message: format!("Column {} not found in table {}", col_name, table_name),
-                        position: 0,
-                    })
-                })?;
-                column.ty.clone()
-            };
-
-            // Only handle literal values in predicates for now
-            let literal_value = match cond.value() {
-                Some(v) => v.clone(),
-                None => {
-                    // Column references not yet supported in predicate building
-                    continue;
-                }
-            };
-
-            let value = coerce_predicate_value(&literal_value, &column_type);
-
-            // Use qualified column name for multi-table queries
-            let qualified_col = format!("{}.{}", table_name, col_name);
-            predicates.push(Predicate::eq(qualified_col, value));
-        }
-
-        if predicates.is_empty() {
-            Ok(Predicate::True)
-        } else if predicates.len() == 1 {
-            Ok(predicates.pop().unwrap())
-        } else {
-            Ok(Predicate::And(predicates))
-        }
     }
 
     /// Build predicate for multi-join queries with alias support.
@@ -4584,33 +3597,38 @@ impl Database {
             let (table_name, _schema) = if let Some(t) = table_ref {
                 all_tables
                     .iter()
-                    .find(|(name, alias, _)| {
-                        *name == t || alias.map_or(false, |a| a == t)
-                    })
+                    .find(|(name, alias, _)| *name == t || alias.is_some_and(|a| a == t))
                     .map(|(name, _, schema)| (*name, schema))
-                    .ok_or_else(|| DatabaseError::Parse(parser::ParseError {
-                        message: format!("Unknown table {} in WHERE clause", t),
-                        position: 0,
-                    }))?
+                    .ok_or_else(|| {
+                        DatabaseError::Parse(parser::ParseError {
+                            message: format!("Unknown table {} in WHERE clause", t),
+                            position: 0,
+                        })
+                    })?
             } else {
                 // Unqualified column - search all schemas
                 // "id" is a special column that exists on every table
                 if col_name == "id" {
-                    all_tables.first()
+                    all_tables
+                        .first()
                         .map(|(name, _, schema)| (*name, schema))
-                        .ok_or_else(|| DatabaseError::Parse(parser::ParseError {
-                            message: "No tables in query".to_string(),
-                            position: 0,
-                        }))?
+                        .ok_or_else(|| {
+                            DatabaseError::Parse(parser::ParseError {
+                                message: "No tables in query".to_string(),
+                                position: 0,
+                            })
+                        })?
                 } else {
                     all_tables
                         .iter()
                         .find(|(_, _, s)| s.column(col_name).is_some())
                         .map(|(name, _, schema)| (*name, schema))
-                        .ok_or_else(|| DatabaseError::Parse(parser::ParseError {
-                            message: format!("Unknown column {} in WHERE clause", col_name),
-                            position: 0,
-                        }))?
+                        .ok_or_else(|| {
+                            DatabaseError::Parse(parser::ParseError {
+                                message: format!("Unknown column {} in WHERE clause", col_name),
+                                position: 0,
+                            })
+                        })?
                 }
             };
 
@@ -4732,7 +3750,7 @@ impl Database {
     /// Add ArrayAggregate nodes to a JOIN graph for ARRAY subqueries in projection.
     fn add_join_array_aggregates(
         &self,
-        builder: &mut JoinGraphBuilder,
+        builder: &mut QueryGraphBuilder,
         input: crate::sql::query_graph::NodeId,
         exprs: &[SelectExpr],
         outer_table: &str,
@@ -4745,7 +3763,12 @@ impl Database {
             // The expression index doesn't correspond to the actual column position
             // because star expressions expand to multiple columns and joins add more columns.
             current = self.add_join_array_aggregate_for_expr(
-                builder, current, expr, outer_table, outer_alias, -1,
+                builder,
+                current,
+                expr,
+                outer_table,
+                outer_alias,
+                -1,
             )?;
         }
 
@@ -4755,7 +3778,7 @@ impl Database {
     /// Add ArrayAggregate node to a JOIN graph for a single expression.
     fn add_join_array_aggregate_for_expr(
         &self,
-        builder: &mut JoinGraphBuilder,
+        builder: &mut QueryGraphBuilder,
         input: crate::sql::query_graph::NodeId,
         expr: &SelectExpr,
         outer_table: &str,
@@ -4798,7 +3821,12 @@ impl Database {
             SelectExpr::Aliased { expr: inner, .. } => {
                 // Recurse into aliased expressions
                 self.add_join_array_aggregate_for_expr(
-                    builder, input, inner, outer_table, outer_alias, column_index,
+                    builder,
+                    input,
+                    inner,
+                    outer_table,
+                    outer_alias,
+                    column_index,
                 )
             }
             // Non-ARRAY expressions don't add nodes
@@ -4839,10 +3867,10 @@ impl Database {
             // ON left_table.col = right_table.id pattern
             // Check if left column is a Ref to right table
             let col_name = &on.left.column;
-            if let Some(col) = left_schema.column(col_name) {
-                if matches!(&col.ty, ColumnType::Ref(target) if target == right_table) {
-                    return Ok(JoinDirection::LeftToRight(col_name.clone()));
-                }
+            if let Some(col) = left_schema.column(col_name)
+                && matches!(&col.ty, ColumnType::Ref(target) if target == right_table)
+            {
+                return Ok(JoinDirection::LeftToRight(col_name.clone()));
             }
         }
 
@@ -4862,10 +3890,10 @@ impl Database {
         if right_is_from_left && left_is_from_right {
             // ON right_table.id = left_table.col pattern
             let col_name = &on.right.column;
-            if let Some(col) = left_schema.column(col_name) {
-                if matches!(&col.ty, ColumnType::Ref(target) if target == right_table) {
-                    return Ok(JoinDirection::LeftToRight(col_name.clone()));
-                }
+            if let Some(col) = left_schema.column(col_name)
+                && matches!(&col.ty, ColumnType::Ref(target) if target == right_table)
+            {
+                return Ok(JoinDirection::LeftToRight(col_name.clone()));
             }
         }
 
@@ -4893,20 +3921,20 @@ impl Database {
 
         if left_is_from_right_2 && right_is_from_left_2 {
             let col_name = &on.left.column;
-            if let Some(col) = right_schema.column(col_name) {
-                if matches!(&col.ty, ColumnType::Ref(target) if target == left_table) {
-                    return Ok(JoinDirection::RightToLeft(col_name.clone()));
-                }
+            if let Some(col) = right_schema.column(col_name)
+                && matches!(&col.ty, ColumnType::Ref(target) if target == left_table)
+            {
+                return Ok(JoinDirection::RightToLeft(col_name.clone()));
             }
         }
 
         // Also check: ON left_table.id = right_table.col
         if left_is_from_left && right_is_from_right {
             let col_name = &on.right.column;
-            if let Some(col) = right_schema.column(col_name) {
-                if matches!(&col.ty, ColumnType::Ref(target) if target == left_table) {
-                    return Ok(JoinDirection::RightToLeft(col_name.clone()));
-                }
+            if let Some(col) = right_schema.column(col_name)
+                && matches!(&col.ty, ColumnType::Ref(target) if target == left_table)
+            {
+                return Ok(JoinDirection::RightToLeft(col_name.clone()));
             }
         }
 
@@ -4924,73 +3952,6 @@ impl Database {
             ),
             position: 0,
         }))
-    }
-
-    /// Build a Predicate from SQL WHERE conditions for JOIN queries.
-    /// Handles qualified column names (table.column) and resolves aliases.
-    fn build_join_predicate(
-        &self,
-        conditions: &[parser::Condition],
-        left_schema: &TableSchema,
-        right_schema: &TableSchema,
-    ) -> Result<Predicate, DatabaseError> {
-        if conditions.is_empty() {
-            return Ok(Predicate::True);
-        }
-
-        let mut predicates = Vec::new();
-
-        for cond in conditions {
-            let column = &cond.column.column;
-
-            // Determine which schema has the column and get the qualified name
-            // The combined schema uses qualified names like "Issues.priority"
-            let (qualified_column, col_type) = if column == "id" {
-                // Special case: id exists in both tables
-                // Use the table qualifier to determine which one
-                if let Some(_table) = &cond.column.table {
-                    // Try to match the qualifier (might be alias) to a schema
-                    if left_schema.column_index(column).is_some() {
-                        (format!("{}.id", left_schema.name), ColumnType::Ref("".to_string()))
-                    } else {
-                        (format!("{}.id", right_schema.name), ColumnType::Ref("".to_string()))
-                    }
-                } else {
-                    // Default to left schema for unqualified id
-                    (format!("{}.id", left_schema.name), ColumnType::Ref("".to_string()))
-                }
-            } else if let Some(idx) = left_schema.column_index(column) {
-                // Column found in left schema - use qualified name
-                let qualified = format!("{}.{}", left_schema.name, column);
-                (qualified, left_schema.columns[idx].ty.clone())
-            } else if let Some(idx) = right_schema.column_index(column) {
-                // Column found in right schema - use qualified name
-                let qualified = format!("{}.{}", right_schema.name, column);
-                (qualified, right_schema.columns[idx].ty.clone())
-            } else {
-                return Err(DatabaseError::ColumnNotFound(column.clone()));
-            };
-
-            // Only handle literal values in predicates for now
-            let literal_value = match cond.value() {
-                Some(v) => v.clone(),
-                None => {
-                    // Column references not yet supported in predicate building
-                    return Err(DatabaseError::ColumnNotFound(
-                        "column references not supported in join predicate building".to_string(),
-                    ));
-                }
-            };
-            let value = coerce_predicate_value(&literal_value, &col_type);
-            predicates.push(Predicate::eq(qualified_column, value));
-        }
-
-        // AND all conditions together and optimize
-        let combined = predicates
-            .into_iter()
-            .reduce(|a, b| a.and(b))
-            .unwrap_or(Predicate::True);
-        Ok(combined.optimize())
     }
 
     /// Build a Predicate from SQL WHERE conditions.

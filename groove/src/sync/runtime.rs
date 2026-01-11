@@ -88,6 +88,6 @@ impl Runtime for TestRuntime {
     {
         // In tests, we don't actually spawn - the test controls execution
         // This is a no-op; tests manually drive the async code
-        let _ = future;
+        drop(future);
     }
 }

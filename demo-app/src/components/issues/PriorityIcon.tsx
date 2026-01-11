@@ -1,6 +1,11 @@
-import { SignalLow, SignalMedium, SignalHigh, AlertTriangle } from "lucide-react";
-import { PRIORITY_COLORS, type Priority } from "@/utils/constants";
 import { cn } from "@/lib/utils";
+import { PRIORITY_COLORS, type Priority } from "@/utils/constants";
+import {
+  AlertTriangle,
+  SignalHigh,
+  SignalLow,
+  SignalMedium,
+} from "lucide-react";
 
 interface PriorityIconProps {
   priority: string;
@@ -15,7 +20,11 @@ const PRIORITY_ICONS: Record<Priority, React.ReactNode> = {
   urgent: <AlertTriangle className="h-4 w-4" />,
 };
 
-export function PriorityIcon({ priority, className, showLabel }: PriorityIconProps) {
+export function PriorityIcon({
+  priority,
+  className,
+  showLabel,
+}: PriorityIconProps) {
   const p = priority as Priority;
   const color = PRIORITY_COLORS[p] || "#6B7280";
   const icon = PRIORITY_ICONS[p] || <SignalLow className="h-4 w-4" />;

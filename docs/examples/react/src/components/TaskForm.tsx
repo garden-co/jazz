@@ -1,5 +1,5 @@
-import { useState } from "react";
 import { useMutate } from "@jazz/react";
+import { useState } from "react";
 import { app } from "../generated/client.js";
 
 //#region task-form
@@ -41,7 +41,7 @@ export function TaskForm({ projectId }: TaskFormProps) {
           id="title"
           type="text"
           value={title}
-          onChange={e => setTitle(e.target.value)}
+          onChange={(e) => setTitle(e.target.value)}
           required
         />
       </div>
@@ -50,7 +50,7 @@ export function TaskForm({ projectId }: TaskFormProps) {
         <textarea
           id="description"
           value={description}
-          onChange={e => setDescription(e.target.value)}
+          onChange={(e) => setDescription(e.target.value)}
         />
       </div>
       <button type="submit">Create Task</button>

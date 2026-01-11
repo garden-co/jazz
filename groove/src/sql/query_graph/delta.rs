@@ -111,11 +111,18 @@ impl RowDelta {
         match self {
             RowDelta::Added { id, row } => {
                 let qualified_row = row.qualify_columns(table, schema);
-                RowDelta::Added { id, row: qualified_row }
+                RowDelta::Added {
+                    id,
+                    row: qualified_row,
+                }
             }
             RowDelta::Updated { id, row, prior } => {
                 let qualified_row = row.qualify_columns(table, schema);
-                RowDelta::Updated { id, row: qualified_row, prior }
+                RowDelta::Updated {
+                    id,
+                    row: qualified_row,
+                    prior,
+                }
             }
             RowDelta::Removed { id, prior } => {
                 // Removed deltas don't have row data to qualify
@@ -136,6 +143,15 @@ impl FromIterator<RowDelta> for DeltaBatch {
         Self {
             deltas: iter.into_iter().collect(),
         }
+    }
+}
+
+impl IntoIterator for DeltaBatch {
+    type Item = RowDelta;
+    type IntoIter = std::vec::IntoIter<RowDelta>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.deltas.into_iter()
     }
 }
 
@@ -198,11 +214,6 @@ impl DeltaBatch {
         self.deltas.iter()
     }
 
-    /// Consume the batch and iterate over deltas.
-    pub fn into_iter(self) -> impl Iterator<Item = RowDelta> {
-        self.deltas.into_iter()
-    }
-
     /// Compact the batch by removing redundant changes.
     ///
     /// For example, if a row is Added and then Removed, both entries
@@ -222,13 +233,15 @@ impl DeltaBatch {
             let id = delta.row_id();
 
             // Remember if row existed before (only on first encounter)
-            existed_before.entry(id).or_insert_with(|| delta.has_prior());
+            existed_before
+                .entry(id)
+                .or_insert_with(|| delta.has_prior());
 
             match delta {
                 RowDelta::Added { row, .. } => {
                     final_state.insert(id, Some((row, PriorState::empty())));
                 }
-                RowDelta::Removed {  .. } => {
+                RowDelta::Removed { .. } => {
                     final_state.insert(id, None);
                     // Keep the prior state if this is the first delta for this row
                     if !existed_before.get(&id).copied().unwrap_or(false) {
@@ -373,7 +386,9 @@ impl BufferJoinedRow {
 
         // Collect all rows to merge: primary first, then others in stable order
         let mut rows_to_merge: Vec<&OwnedRow> = vec![primary_row];
-        let mut other_tables: Vec<_> = self.table_rows.iter()
+        let mut other_tables: Vec<_> = self
+            .table_rows
+            .iter()
             .filter(|(table, _)| *table != &self.primary_table)
             .collect();
         // Sort by table name for stable ordering
@@ -389,21 +404,29 @@ impl BufferJoinedRow {
     ///
     /// The combined schema specifies the expected output column order.
     /// Values are looked up by qualified column name to ensure correct ordering.
-    pub fn to_output_row_with_schema(&self, combined_schema: &TableSchema, descriptor: Arc<RowDescriptor>) -> OwnedRow {
+    pub fn to_output_row_with_schema(
+        &self,
+        combined_schema: &TableSchema,
+        descriptor: Arc<RowDescriptor>,
+    ) -> OwnedRow {
         use crate::sql::row_buffer::RowBuilder;
 
         let mut builder = RowBuilder::new(descriptor.clone());
 
         for (col_idx, col_def) in combined_schema.columns.iter().enumerate() {
             // col_def.name is qualified like "folders.owner_id"
-            if let Some((table, col_name)) = col_def.name.split_once('.') {
-                if let Some((_, owned_row)) = self.table_rows.get(table) {
-                    // The individual owned_row has unqualified column names, so use col_name
-                    if let Some(rv) = owned_row.get_by_name(col_name) {
-                        // Get the buffer column index for this schema column index
-                        if let Some(buf_col_idx) = descriptor.columns.iter().position(|c| c.schema_index == col_idx) {
-                            builder = builder.set_from_row_value(buf_col_idx, rv);
-                        }
+            if let Some((table, col_name)) = col_def.name.split_once('.')
+                && let Some((_, owned_row)) = self.table_rows.get(table)
+            {
+                // The individual owned_row has unqualified column names, so use col_name
+                if let Some(rv) = owned_row.get_by_name(col_name) {
+                    // Get the buffer column index for this schema column index
+                    if let Some(buf_col_idx) = descriptor
+                        .columns
+                        .iter()
+                        .position(|c| c.schema_index == col_idx)
+                    {
+                        builder = builder.set_from_row_value(buf_col_idx, rv);
                     }
                 }
             }
@@ -413,7 +436,12 @@ impl BufferJoinedRow {
     }
 
     /// Convert to an output OwnedRow containing only values from a specific table.
-    pub fn to_projected_row(&self, table: &str, schema: &TableSchema, descriptor: Arc<RowDescriptor>) -> Option<(ObjectId, OwnedRow)> {
+    pub fn to_projected_row(
+        &self,
+        table: &str,
+        schema: &TableSchema,
+        descriptor: Arc<RowDescriptor>,
+    ) -> Option<(ObjectId, OwnedRow)> {
         use crate::sql::row_buffer::RowBuilder;
 
         let (row_id, owned_row) = self.table_rows.get(table)?;
@@ -424,7 +452,11 @@ impl BufferJoinedRow {
             let qualified_name = format!("{}.{}", table, col_def.name);
             if let Some(rv) = owned_row.get_by_name(&qualified_name) {
                 // Get the buffer column index for this schema column index
-                if let Some(buf_col_idx) = descriptor.columns.iter().position(|c| c.schema_index == col_idx) {
+                if let Some(buf_col_idx) = descriptor
+                    .columns
+                    .iter()
+                    .position(|c| c.schema_index == col_idx)
+                {
                     builder = builder.set_from_row_value(buf_col_idx, rv);
                 }
             }
@@ -438,10 +470,14 @@ impl BufferJoinedRow {
 mod tests {
     use super::*;
     use crate::sql::row_buffer::{RowBuilder, RowDescriptor, RowValue};
-    use crate::sql::schema::{ColumnDef, ColumnType};
+    use crate::sql::schema::ColumnType;
 
     fn make_test_descriptor() -> Arc<RowDescriptor> {
-        Arc::new(RowDescriptor::new([("name".to_string(), ColumnType::String, false)]))
+        Arc::new(RowDescriptor::new([(
+            "name".to_string(),
+            ColumnType::String,
+            false,
+        )]))
     }
 
     fn make_buffer_row(descriptor: &Arc<RowDescriptor>, name: &str) -> OwnedRow {
@@ -535,7 +571,10 @@ mod tests {
         let row = make_buffer_row(&descriptor, "Alice");
         let id = ObjectId::new(1);
 
-        let added = RowDelta::Added { id, row: row.clone() };
+        let added = RowDelta::Added {
+            id,
+            row: row.clone(),
+        };
         assert_eq!(added.row_id(), id);
         assert!(added.new_row().is_some());
         assert!(added.descriptor().is_some());
@@ -575,28 +614,12 @@ mod tests {
     fn make_posts_descriptor() -> Arc<RowDescriptor> {
         Arc::new(RowDescriptor::new([
             ("title".to_string(), ColumnType::String, false),
-            ("author_id".to_string(), ColumnType::Ref("users".to_string()), false),
+            (
+                "author_id".to_string(),
+                ColumnType::Ref("users".to_string()),
+                false,
+            ),
         ]))
-    }
-
-    fn make_users_schema() -> TableSchema {
-        TableSchema::new(
-            "users",
-            vec![
-                ColumnDef::required("name", ColumnType::String),
-                ColumnDef::required("age", ColumnType::I32),
-            ],
-        )
-    }
-
-    fn make_posts_schema() -> TableSchema {
-        TableSchema::new(
-            "posts",
-            vec![
-                ColumnDef::required("title", ColumnType::String),
-                ColumnDef::required("author_id", ColumnType::Ref("users".to_string())),
-            ],
-        )
     }
 
     fn make_user_row(descriptor: &Arc<RowDescriptor>, name: &str, age: i32) -> OwnedRow {
@@ -608,7 +631,11 @@ mod tests {
             .build()
     }
 
-    fn make_post_row(descriptor: &Arc<RowDescriptor>, title: &str, author_id: ObjectId) -> OwnedRow {
+    fn make_post_row(
+        descriptor: &Arc<RowDescriptor>,
+        title: &str,
+        author_id: ObjectId,
+    ) -> OwnedRow {
         let title_idx = descriptor.column_index("title").unwrap();
         let author_idx = descriptor.column_index("author_id").unwrap();
         RowBuilder::new(descriptor.clone())

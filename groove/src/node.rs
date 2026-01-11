@@ -4,7 +4,9 @@ use std::sync::{Arc, RwLock};
 use bytes::Bytes;
 
 use crate::commit::CommitId;
-use crate::listener::{ListenerId, ListenerError, ObjectCallback, ObjectKey, ObjectListenerRegistry, ObjectState};
+use crate::listener::{
+    ListenerError, ListenerId, ObjectCallback, ObjectKey, ObjectListenerRegistry, ObjectState,
+};
 use crate::object::{Object, ObjectId};
 use crate::storage::{Environment, MemoryEnvironment};
 
@@ -100,41 +102,49 @@ impl LocalNode {
     ///
     /// This is async because it reads from the Environment, which may be backed
     /// by IndexedDB or other async storage.
-    pub async fn load_object(&self, id: ObjectId, prefix: impl Into<String>, branch: &str) -> Option<ObjectId> {
+    pub async fn load_object(
+        &self,
+        id: ObjectId,
+        prefix: impl Into<String>,
+        branch: &str,
+    ) -> Option<ObjectId> {
         // Get frontier from Environment
         let frontier = self.env.get_frontier(id.into(), branch).await;
         if frontier.is_empty() {
             return None;
         }
 
-        // Create a new Object
-        let object = Object::new(id, prefix);
+        // Load all commits from the Environment first (without holding any locks)
+        let mut to_load = frontier.clone();
+        let mut loaded_ids = std::collections::HashSet::new();
+        let mut commits = Vec::new();
 
-        // Load all commits from the Environment and add them to the Object
+        while let Some(commit_id) = to_load.pop() {
+            if loaded_ids.contains(&commit_id) {
+                continue;
+            }
+            loaded_ids.insert(commit_id);
+
+            if let Some(commit) = self.env.get_commit(&commit_id).await {
+                // Add parent commits to load queue
+                for parent_id in &commit.parents {
+                    if !loaded_ids.contains(parent_id) {
+                        to_load.push(*parent_id);
+                    }
+                }
+                commits.push(commit);
+            }
+        }
+
+        // Create a new Object and add all commits (now synchronously)
+        let object = Object::new(id, prefix);
         let branch_ref = object.branch_ref(branch)?;
         {
             let mut branch_guard = branch_ref.write().unwrap();
 
-            // Walk the commit graph starting from frontier
-            let mut to_load = frontier.clone();
-            let mut loaded = std::collections::HashSet::new();
-
-            while let Some(commit_id) = to_load.pop() {
-                if loaded.contains(&commit_id) {
-                    continue;
-                }
-                loaded.insert(commit_id);
-
-                if let Some(commit) = self.env.get_commit(&commit_id).await {
-                    // Add parent commits to load queue
-                    for parent_id in &commit.parents {
-                        if !loaded.contains(parent_id) {
-                            to_load.push(*parent_id);
-                        }
-                    }
-                    // Restore commit without updating frontier
-                    branch_guard.restore_commit(commit);
-                }
+            // Restore all commits
+            for commit in commits {
+                branch_guard.restore_commit(commit);
             }
 
             // Set frontier explicitly from Environment
@@ -142,7 +152,10 @@ impl LocalNode {
         }
 
         // Register the object
-        self.objects.write().unwrap().insert(id, Arc::new(RwLock::new(object)));
+        self.objects
+            .write()
+            .unwrap()
+            .insert(id, Arc::new(RwLock::new(object)));
 
         Some(id)
     }
@@ -152,7 +165,10 @@ impl LocalNode {
     pub fn create_object(&self, prefix: impl Into<String>) -> ObjectId {
         let id = generate_object_id();
         let object = Object::new(id, prefix);
-        self.objects.write().unwrap().insert(id, Arc::new(RwLock::new(object)));
+        self.objects
+            .write()
+            .unwrap()
+            .insert(id, Arc::new(RwLock::new(object)));
         id
     }
 
@@ -164,7 +180,10 @@ impl LocalNode {
     ) -> ObjectId {
         let id = generate_object_id();
         let object = Object::new_with_meta(id, prefix, Some(meta));
-        self.objects.write().unwrap().insert(id, Arc::new(RwLock::new(object)));
+        self.objects
+            .write()
+            .unwrap()
+            .insert(id, Arc::new(RwLock::new(object)));
         id
     }
 
@@ -173,12 +192,12 @@ impl LocalNode {
     /// Useful for testing and sync scenarios where object IDs are known.
     pub fn ensure_object(&self, id: ObjectId, prefix: impl Into<String>) -> bool {
         let mut objects = self.objects.write().unwrap();
-        if objects.contains_key(&id) {
-            false
-        } else {
+        if let std::collections::btree_map::Entry::Vacant(e) = objects.entry(id) {
             let object = Object::new(id, prefix);
-            objects.insert(id, Arc::new(RwLock::new(object)));
+            e.insert(Arc::new(RwLock::new(object)));
             true
+        } else {
+            false
         }
     }
 
@@ -228,7 +247,8 @@ impl LocalNode {
 
         // Ensure initial state is set (only if not already set)
         // This must happen BEFORE subscribe so the callback gets called with initial state
-        self.listeners.ensure_initial_state(&key, self.env.clone(), tips, branch_ref);
+        self.listeners
+            .ensure_initial_state(&key, self.env.clone(), tips, branch_ref);
 
         // Subscribe with the callback - it will be called immediately with current state
         let id = self.listeners.subscribe(key, self.env.clone(), callback);
@@ -337,7 +357,11 @@ impl LocalNode {
     }
 
     /// Get the frontier commit IDs for an object's branch.
-    pub fn frontier(&self, object_id: ObjectId, branch: &str) -> Result<Option<Vec<CommitId>>, ListenerError> {
+    pub fn frontier(
+        &self,
+        object_id: ObjectId,
+        branch: &str,
+    ) -> Result<Option<Vec<CommitId>>, ListenerError> {
         let obj_lock = self
             .objects
             .read()
@@ -355,6 +379,7 @@ impl LocalNode {
     /// After truncation:
     /// - All commits before the truncation point are removed from memory
     /// - Future commits with parents before the truncation point will be rejected
+    ///
     /// Returns the number of commits pruned.
     pub fn truncate_at(
         &self,
@@ -371,9 +396,7 @@ impl LocalNode {
             .ok_or(ListenerError::NotFound)?;
 
         let obj = obj_lock.read().unwrap();
-        let branch_ref = obj
-            .branch_ref(branch)
-            .ok_or(ListenerError::NotFound)?;
+        let branch_ref = obj.branch_ref(branch).ok_or(ListenerError::NotFound)?;
 
         let mut branch_guard = branch_ref.write().unwrap();
         branch_guard
@@ -421,7 +444,12 @@ impl LocalNode {
     // ========== Helper: Load content for a commit ==========
 
     /// Load content for a commit.
-    pub fn load_content(&self, object_id: ObjectId, branch: &str, commit_id: &CommitId) -> Option<Bytes> {
+    pub fn load_content(
+        &self,
+        object_id: ObjectId,
+        branch: &str,
+        commit_id: &CommitId,
+    ) -> Option<Bytes> {
         let obj_lock = self.objects.read().unwrap().get(&object_id).cloned()?;
         let obj = obj_lock.read().unwrap();
         let branch = obj.branch(branch)?;
@@ -450,7 +478,11 @@ impl LocalNode {
 
         if commits.is_empty() {
             // Return current frontier if no commits to apply
-            return self.frontier(object_id, branch).ok().flatten().unwrap_or_default();
+            return self
+                .frontier(object_id, branch)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
         }
 
         // Get or create the object
@@ -506,7 +538,8 @@ impl LocalNode {
                 for commit in commits_to_persist {
                     env.put_commit(&commit).await;
                 }
-                env.set_frontier(object_id.into(), &branch_name, &frontier_clone).await;
+                env.set_frontier(object_id.into(), &branch_name, &frontier_clone)
+                    .await;
             });
         }
 
@@ -529,7 +562,12 @@ impl LocalNode {
     }
 
     /// Get a commit by ID.
-    pub fn get_commit(&self, object_id: ObjectId, branch: &str, commit_id: &CommitId) -> Option<crate::commit::Commit> {
+    pub fn get_commit(
+        &self,
+        object_id: ObjectId,
+        branch: &str,
+        commit_id: &CommitId,
+    ) -> Option<crate::commit::Commit> {
         let obj_lock = self.objects.read().unwrap().get(&object_id).cloned()?;
         let obj = obj_lock.read().unwrap();
         let branch_ref = obj.branch_ref(branch)?;

@@ -21,15 +21,11 @@ export function TaskDetail({ taskId }: TaskDetailProps) {
     <article>
       <h2>{task.title}</h2>
       {task.description && <p>{task.description}</p>}
-      <div>
-        Status: {task.isCompleted ? "Completed" : "Active"}
-      </div>
+      <div>Status: {task.isCompleted ? "Completed" : "Active"}</div>
       <button onClick={() => mutate.update({ isCompleted: !task.isCompleted })}>
         Toggle Complete
       </button>
-      <button onClick={() => mutate.delete()}>
-        Delete Task
-      </button>
+      <button onClick={() => mutate.delete()}>Delete Task</button>
     </article>
   );
 }
@@ -41,9 +37,9 @@ export function TaskDetailWithIncludes({ taskId }: TaskDetailProps) {
     app.tasks.with({
       project: { owner: true },
       assignee: true,
-      Comments: { author: true }
+      Comments: { author: true },
     }),
-    taskId
+    taskId,
   );
 
   if (loading) return <div>Loading...</div>;
@@ -52,12 +48,14 @@ export function TaskDetailWithIncludes({ taskId }: TaskDetailProps) {
   return (
     <article>
       <h2>{task.title}</h2>
-      <p>Project: {task.project?.name} (by {task.project?.owner?.name})</p>
+      <p>
+        Project: {task.project?.name} (by {task.project?.owner?.name})
+      </p>
       <p>Assigned to: {task.assignee?.name ?? "Unassigned"}</p>
 
       <h3>Comments</h3>
       <ul>
-        {task.Comments?.map(comment => (
+        {task.Comments?.map((comment) => (
           <li key={comment.id}>
             <strong>{comment.author?.name}:</strong> {comment.content}
           </li>

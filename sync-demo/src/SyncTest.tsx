@@ -28,6 +28,7 @@ export function SyncTest() {
     console.log(`[${time}] ${msg}`);
   };
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: log is stable (only uses setLogs)
   useEffect(() => {
     async function init() {
       try {
@@ -41,7 +42,7 @@ export function SyncTest() {
         const db = new wasm.WasmSyncedLocalNode(
           "http://localhost:8080",
           `token-${tabId}`,
-          SHARED_CATALOG_ID
+          SHARED_CATALOG_ID,
         );
         dbRef.current = db;
 
@@ -67,7 +68,7 @@ export function SyncTest() {
         // The callback receives the complete result set on each change
         queryHandleRef.current = db.subscribeRows(
           "SELECT * FROM test_items",
-          (rows: TestItem[]) => setItems(rows)
+          (rows: TestItem[]) => setItems(rows),
         );
 
         setStatus("Ready (disconnected)");
@@ -110,7 +111,7 @@ export function SyncTest() {
       const name = `Item-${Date.now()}`;
       log(`Inserting: ${name}`);
       const result = dbRef.current.execute(
-        `INSERT INTO test_items (name, created_by) VALUES ('${name}', '${tabId}')`
+        `INSERT INTO test_items (name, created_by) VALUES ('${name}', '${tabId}')`,
       );
       log(`Insert result: ${result}`);
       // No need to refresh - reactive subscription updates automatically
@@ -149,18 +150,26 @@ export function SyncTest() {
 
       <div style={{ marginTop: "20px" }}>
         <strong>Table Contents ({items.length} rows):</strong>
-        <pre data-testid="tableContents" style={{ background: "#f0f0f0", padding: "10px", color: "#000" }}>
+        <pre
+          data-testid="tableContents"
+          style={{ background: "#f0f0f0", padding: "10px", color: "#000" }}
+        >
           {JSON.stringify(items, null, 2)}
         </pre>
       </div>
 
       <div
-        style={{ background: "#f0f0f0", padding: "10px", marginTop: "20px", color: "#000" }}
+        style={{
+          background: "#f0f0f0",
+          padding: "10px",
+          marginTop: "20px",
+          color: "#000",
+        }}
       >
         <strong>Log:</strong>
         <pre data-testid="log" style={{ color: "#000" }}>
           {logs.map((entry, i) => (
-            <div key={i}>
+            <div key={`${entry.time}-${i}`}>
               [{entry.time}] {entry.message}
             </div>
           ))}

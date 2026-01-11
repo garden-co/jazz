@@ -161,7 +161,9 @@ export interface IncludeSpec {
 /**
  * Options for subscribeAll queries (generic version)
  */
-export interface SubscribeAllOptions<W extends BaseWhereInput = BaseWhereInput> {
+export interface SubscribeAllOptions<
+  W extends BaseWhereInput = BaseWhereInput,
+> {
   where?: W;
   include?: IncludeSpec;
 }
@@ -200,7 +202,7 @@ export interface SubscribeOptions {
 export function buildQuery(
   table: TableMeta,
   schema: SchemaMeta,
-  options: SubscribeAllOptions = {}
+  options: SubscribeAllOptions = {},
 ): string {
   const alias = table.name.toLowerCase()[0];
   const parts: string[] = [];
@@ -212,7 +214,7 @@ export function buildQuery(
   // object's id.
   const baseColumns = [
     `${alias}.id`,
-    ...table.columns.map(c => `${alias}.${c.name}`)
+    ...table.columns.map((c) => `${alias}.${c.name}`),
   ];
   const projections: string[] = baseColumns;
 
@@ -223,7 +225,7 @@ export function buildQuery(
         schema,
         alias,
         key,
-        includeValue
+        includeValue,
       );
       if (projection) {
         projections.push(projection);
@@ -238,10 +240,20 @@ export function buildQuery(
   }
 
   // Extract relation filters and build JOINs for them
-  const relationJoinInfo: Map<string, { tableName: string; conditions: string[] }> = new Map();
+  const relationJoinInfo: Map<
+    string,
+    { tableName: string; conditions: string[] }
+  > = new Map();
 
   if (options.where) {
-    extractRelationFilters(table, schema, alias, options.where, allJoins, relationJoinInfo);
+    extractRelationFilters(
+      table,
+      schema,
+      alias,
+      options.where,
+      allJoins,
+      relationJoinInfo,
+    );
   }
 
   parts.push(`SELECT ${projections.join(", ")}`);
@@ -282,7 +294,7 @@ function extractRelationFilters(
   tableAlias: string,
   where: BaseWhereInput,
   joins: string[],
-  joinInfo: Map<string, { tableName: string; conditions: string[] }>
+  joinInfo: Map<string, { tableName: string; conditions: string[] }>,
 ): void {
   for (const [key, value] of Object.entries(where)) {
     if (value === undefined) continue;
@@ -301,7 +313,7 @@ function extractRelationFilters(
       // Groove now handles detecting which side has the Ref column
       if (!joinInfo.has(key)) {
         joins.push(
-          `JOIN ${joinTableName} ON ${joinTableName}.${reverseRef.sourceColumn} = ${tableAlias}.id`
+          `JOIN ${joinTableName} ON ${joinTableName}.${reverseRef.sourceColumn} = ${tableAlias}.id`,
         );
         joinInfo.set(key, { tableName: joinTableName, conditions: [] });
       }
@@ -311,7 +323,12 @@ function extractRelationFilters(
 
       // Handle 'some' - at least one related record matches
       if (relationFilter.some) {
-        const condition = buildWhereClause(joinTableName, relationFilter.some, sourceTable, schema);
+        const condition = buildWhereClause(
+          joinTableName,
+          relationFilter.some,
+          sourceTable,
+          schema,
+        );
         if (condition) {
           info.conditions.push(condition);
         }
@@ -338,7 +355,7 @@ export function buildQueryById(
   table: TableMeta,
   schema: SchemaMeta,
   id: string,
-  options: SubscribeOptions = {}
+  options: SubscribeOptions = {},
 ): string {
   const baseQuery = buildQuery(table, schema, {
     include: options.include,
@@ -355,7 +372,7 @@ function buildIncludeProjection(
   schema: SchemaMeta,
   alias: string,
   key: string,
-  includeValue: true | IncludeSpec
+  includeValue: true | IncludeSpec,
 ): string | null {
   // Check if it's a forward ref
   const forwardRef = table.refs.find((r) => r.column === key);
@@ -374,10 +391,13 @@ function buildIncludeProjection(
     const sourceTable = schema.tables[reverseRef.sourceTable];
     if (!sourceTable) return null;
 
-    const innerAlias = reverseRef.sourceTable.toLowerCase()[0] + "_inner";
+    const innerAlias = `${reverseRef.sourceTable.toLowerCase()[0]}_inner`;
 
     // Build base columns for inner query (Groove doesn't support .*)
-    const innerBaseColumns = [`${innerAlias}.id`, ...sourceTable.columns.map(c => `${innerAlias}.${c.name}`)];
+    const innerBaseColumns = [
+      `${innerAlias}.id`,
+      ...sourceTable.columns.map((c) => `${innerAlias}.${c.name}`),
+    ];
     let innerProjection = innerBaseColumns.join(", ");
     const innerJoins: string[] = [];
 
@@ -387,18 +407,22 @@ function buildIncludeProjection(
       // Track which columns are resolved as refs (to skip from base columns)
       const nestedResolvedRefs = new Set<string>();
 
-      for (const [nestedKey, nestedValue] of Object.entries(includeValue)) {
-        const nestedForwardRef = sourceTable.refs.find((r) => r.column === nestedKey);
+      for (const [nestedKey, _nestedValue] of Object.entries(includeValue)) {
+        const nestedForwardRef = sourceTable.refs.find(
+          (r) => r.column === nestedKey,
+        );
         if (nestedForwardRef) {
           const nestedTargetTable = schema.tables[nestedForwardRef.targetTable];
           if (nestedTargetTable) {
             nestedResolvedRefs.add(nestedKey);
             // Groove's JOIN doesn't support aliases, use table name directly
-            nestedProjections.push(`${nestedForwardRef.targetTable} as ${nestedKey}`);
+            nestedProjections.push(
+              `${nestedForwardRef.targetTable} as ${nestedKey}`,
+            );
 
             // TODO: Groove parser doesn't support LEFT JOIN yet, using JOIN for now
             innerJoins.push(
-              `JOIN ${nestedForwardRef.targetTable} ON ${innerAlias}.${nestedKey} = ${nestedForwardRef.targetTable}.id`
+              `JOIN ${nestedForwardRef.targetTable} ON ${innerAlias}.${nestedKey} = ${nestedForwardRef.targetTable}.id`,
             );
           }
         }
@@ -424,9 +448,9 @@ function buildIncludeProjection(
  */
 function buildJoins(
   table: TableMeta,
-  schema: SchemaMeta,
+  _schema: SchemaMeta,
   alias: string,
-  include: IncludeSpec
+  include: IncludeSpec,
 ): string[] {
   const joins: string[] = [];
 
@@ -436,9 +460,7 @@ function buildJoins(
       // Groove's JOIN doesn't support aliases or LEFT JOIN, use table name directly
       const targetTable = forwardRef.targetTable;
       // TODO: Groove parser doesn't support LEFT JOIN yet, using JOIN for now
-      joins.push(
-        `JOIN ${targetTable} ON ${alias}.${key} = ${targetTable}.id`
-      );
+      joins.push(`JOIN ${targetTable} ON ${alias}.${key} = ${targetTable}.id`);
     }
   }
 
@@ -452,7 +474,7 @@ function buildWhereClause(
   alias: string,
   where: BaseWhereInput,
   table?: TableMeta,
-  schema?: SchemaMeta
+  schema?: SchemaMeta,
 ): string | null {
   const conditions: string[] = [];
 
@@ -472,7 +494,9 @@ function buildWhereClause(
         .map((w) => buildWhereClause(alias, w as BaseWhereInput, table, schema))
         .filter((c): c is string => c !== null);
       if (parts.length > 0) {
-        conditions.push(parts.length === 1 ? parts[0] : `(${parts.join(" AND ")})`);
+        conditions.push(
+          parts.length === 1 ? parts[0] : `(${parts.join(" AND ")})`,
+        );
       }
     } else if (key === "OR") {
       const orConditions = value as BaseWhereInput[];
@@ -509,7 +533,7 @@ function buildWhereClause(
 function buildColumnCondition(
   alias: string,
   column: string,
-  filter: unknown
+  filter: unknown,
 ): string | null {
   const col = `${alias}.${column}`;
 
@@ -559,10 +583,14 @@ function buildColumnCondition(
   }
 
   if ("contains" in f) {
-    conditions.push(`${col} LIKE '%${String(f.contains).replace(/'/g, "''")}%'`);
+    conditions.push(
+      `${col} LIKE '%${String(f.contains).replace(/'/g, "''")}%'`,
+    );
   }
   if ("startsWith" in f) {
-    conditions.push(`${col} LIKE '${String(f.startsWith).replace(/'/g, "''")}%'`);
+    conditions.push(
+      `${col} LIKE '${String(f.startsWith).replace(/'/g, "''")}%'`,
+    );
   }
   if ("endsWith" in f) {
     conditions.push(`${col} LIKE '%${String(f.endsWith).replace(/'/g, "''")}'`);

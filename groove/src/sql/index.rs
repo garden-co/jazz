@@ -72,7 +72,9 @@ impl RefIndex {
 
         let mut pos = 0;
         let entry_count = u32::from_le_bytes(
-            data[pos..pos + 4].try_into().map_err(|_| "invalid entry count")?
+            data[pos..pos + 4]
+                .try_into()
+                .map_err(|_| "invalid entry count")?,
         ) as usize;
         pos += 4;
 
@@ -83,7 +85,9 @@ impl RefIndex {
                 return Err("truncated target_id".to_string());
             }
             let target_id = ObjectId::from_le_bytes(
-                data[pos..pos + 16].try_into().map_err(|_| "invalid target_id")?
+                data[pos..pos + 16]
+                    .try_into()
+                    .map_err(|_| "invalid target_id")?,
             );
             pos += 16;
 
@@ -91,7 +95,9 @@ impl RefIndex {
                 return Err("truncated source_count".to_string());
             }
             let source_count = u32::from_le_bytes(
-                data[pos..pos + 4].try_into().map_err(|_| "invalid source_count")?
+                data[pos..pos + 4]
+                    .try_into()
+                    .map_err(|_| "invalid source_count")?,
             ) as usize;
             pos += 4;
 
@@ -101,7 +107,9 @@ impl RefIndex {
                     return Err("truncated source_id".to_string());
                 }
                 let source_id = ObjectId::from_le_bytes(
-                    data[pos..pos + 16].try_into().map_err(|_| "invalid source_id")?
+                    data[pos..pos + 16]
+                        .try_into()
+                        .map_err(|_| "invalid source_id")?,
                 );
                 pos += 16;
                 source_ids.insert(source_id);

@@ -13,9 +13,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::stream::BoxStream;
 use futures::StreamExt;
-use tokio::sync::{mpsc, RwLock};
+use futures::stream::BoxStream;
+use tokio::sync::{RwLock, mpsc};
 
 use crate::commit::CommitId;
 use crate::node::LocalNode;
@@ -181,19 +181,17 @@ impl TestTransport {
                     .map(|s| s.queries.values().any(|q| q.query == "*"))
                     .unwrap_or(false);
 
-                if has_wildcard {
-                    if !server
+                if has_wildcard
+                    && !server
                         .sessions_for_object(&request.object_id)
                         .contains(&session_id)
+                {
+                    server.register_object_session(request.object_id, session_id);
+                    if let Some(session) = server.get_session_mut(&session_id)
+                        && let Some((&query_id, _)) =
+                            session.queries.iter().find(|(_, q)| q.query == "*")
                     {
-                        server.register_object_session(request.object_id, session_id);
-                        if let Some(session) = server.get_session_mut(&session_id) {
-                            if let Some((&query_id, _)) =
-                                session.queries.iter().find(|(_, q)| q.query == "*")
-                            {
-                                session.add_object_to_query(request.object_id, query_id);
-                            }
-                        }
+                        session.add_object_to_query(request.object_id, query_id);
                     }
                 }
             }
@@ -257,10 +255,10 @@ impl TestTransport {
 
         let mut commits_to_send = Vec::new();
         for commit_id in &commit_ids {
-            if !client_known.contains(commit_id) {
-                if let Some(commit) = self.server_env.get_commit(commit_id).await {
-                    commits_to_send.push(commit);
-                }
+            if !client_known.contains(commit_id)
+                && let Some(commit) = self.server_env.get_commit(commit_id).await
+            {
+                commits_to_send.push(commit);
             }
         }
 
@@ -291,10 +289,10 @@ impl TestTransport {
         let query_id = super::server::QueryId(subscription_id);
 
         for session_id in session_ids {
-            if let Some(session) = server.get_session_mut(&session_id) {
-                if session.queries.remove(&query_id).is_some() {
-                    break;
-                }
+            if let Some(session) = server.get_session_mut(&session_id)
+                && session.queries.remove(&query_id).is_some()
+            {
+                break;
             }
         }
 
@@ -333,10 +331,7 @@ impl ClientEnv for TestClientEnv {
         &self,
         request: SubscribeRequest,
     ) -> Result<BoxStream<'static, Result<SseEvent, ClientError>>, ClientError> {
-        let (_session_id, rx) = self
-            .transport
-            .subscribe(&self.auth_token, request)
-            .await?;
+        let (_session_id, rx) = self.transport.subscribe(&self.auth_token, request).await?;
 
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx)
             .map(Ok)
@@ -418,7 +413,7 @@ impl TestClient {
         let commit_id = self
             .node()
             .write(object_id, "main", content, &self.id, 0)
-            .map_err(|e| ClientError::new(500, &format!("Write failed: {:?}", e)))?;
+            .map_err(|e| ClientError::new(500, format!("Write failed: {:?}", e)))?;
 
         // Push to server
         let response = self.sync_client.push(object_id, "main").await?;
