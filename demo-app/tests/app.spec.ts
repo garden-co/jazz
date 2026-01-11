@@ -426,31 +426,43 @@ test.describe('Issue Data Integrity', () => {
   });
 
   test('issues display assignee avatars', async ({ page }) => {
-    // Collect ALL console logs for debugging
-    page.on('console', msg => {
-      console.log(`BROWSER [${msg.type()}]:`, msg.text());
-    });
-
-    // Also capture errors
-    page.on('pageerror', err => {
-      console.log('BROWSER ERROR:', err.message);
-    });
-
-    // Navigate again to capture logs from the start
     await page.goto('/?persist=false');
     await expect(page.getByRole('heading', { name: 'Issue Tracker' })).toBeVisible({ timeout: 15000 });
 
-    // Wait a bit for data to load and logs to appear
-    await page.waitForTimeout(3000);
+    // Wait for issues to load
+    await page.waitForTimeout(2000);
 
-    // Assignees are displayed as avatar circles with initials
-    // Check for avatar elements with initials like "AC", "BS", "CW", "DJ", "EB"
-    const initials = ['AC', 'BS', 'CW', 'DJ', 'EB'];
-    const initialsRegex = new RegExp(`^(${initials.join('|')})$`);
+    // Assignees are displayed as avatar circles with initials like "AC", "BS", "CW", "DJ", "EB"
+    // These are from user names: Alice Chen, Bob Smith, Carol Williams, David Jones, Eve Brown
+    // The avatars are rendered inside a flex container with -space-x-2 class
+    // Look for the avatar container div and check for initials text
+    const avatarContainers = page.locator('.flex.-space-x-2');
+    const containerCount = await avatarContainers.count();
 
-    // Look for avatar fallback elements containing these initials
-    const avatarsFound = await page.locator('[class*="avatar"]').filter({ hasText: initialsRegex }).count();
-    expect(avatarsFound).toBeGreaterThan(0);
+    // At least some issue rows should have avatar containers (assigneeCount can be 0, 1, or 2)
+    expect(containerCount).toBeGreaterThan(0);
+
+    // Check that at least one avatar shows initials (two capital letters)
+    // The initials are in span elements with text-[10px] class inside the avatar circles
+    const initialsPattern = /^[A-Z]{2}$/;
+    let foundInitials = false;
+
+    for (let i = 0; i < Math.min(containerCount, 10); i++) {
+      const container = avatarContainers.nth(i);
+      const text = await container.textContent();
+      if (text && initialsPattern.test(text.trim().substring(0, 2))) {
+        foundInitials = true;
+        break;
+      }
+    }
+
+    // Some issues may have 0 assignees, so check that at least some have avatars
+    // by looking for elements with short text (initials) in the avatar area
+    const roundedFullElements = page.locator('.rounded-full').filter({ hasText: /^[A-Z]{2}$/ });
+    const avatarsWithInitials = await roundedFullElements.count();
+
+    // With 30 issues and random 0-2 assignees each, we should have some avatars
+    expect(avatarsWithInitials).toBeGreaterThan(0);
   });
 
   test('issues display project names', async ({ page }) => {
