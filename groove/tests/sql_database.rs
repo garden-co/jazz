@@ -2298,7 +2298,7 @@ fn incremental_query_with_array_subquery() {
 /// This directly tests the query graph without SQL parsing to isolate the issue.
 #[test]
 fn incremental_query_join_plus_array_aggregate_preserves_nullable_columns() {
-    use groove::sql::query_graph::{GraphId, JoinGraphBuilder};
+    use groove::sql::query_graph::{GraphId, QueryGraphBuilder};
 
     let db = Database::in_memory();
 
@@ -2416,18 +2416,12 @@ fn incremental_query_join_plus_array_aggregate_preserves_nullable_columns() {
 
     // Build query graph manually:
     // Issues JOIN Projects + ArrayAggregate(IssueLabels) + ArrayAggregate(IssueAssignees)
-    let mut builder = JoinGraphBuilder::new(
-        "Issues",
-        issues_schema.clone(),
-        "Projects",
-        projects_schema.clone(),
-        "project",
-    );
+    let mut builder = QueryGraphBuilder::new("Issues", issues_schema.clone());
     builder.add_schema("IssueLabels", labels_schema.clone());
     builder.add_schema("IssueAssignees", assignees_schema.clone());
 
     // Add Join node for Issues -> Projects
-    let join = builder.join();
+    let join = builder.join("Projects", projects_schema.clone(), "project");
 
     // Add ArrayAggregate for IssueLabels -> Issues
     let agg1 = builder.array_aggregate(

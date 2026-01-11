@@ -14,8 +14,7 @@ use crate::sql::policy::{
 };
 use crate::sql::query_graph::registry::{GraphRegistry, OutputCallback};
 use crate::sql::query_graph::{
-    DeltaBatch, GraphId, JoinGraphBuilder, Predicate, PredicateValue, PriorState,
-    QueryGraphBuilder, RowDelta,
+    DeltaBatch, GraphId, Predicate, PredicateValue, PriorState, QueryGraphBuilder, RowDelta,
 };
 use crate::sql::row::RowError;
 use crate::sql::row_buffer::{OwnedRow, RowBuilder, RowDescriptor, RowValue};
@@ -2562,19 +2561,17 @@ impl Database {
             .ok_or_else(|| DatabaseError::TableNotFound(inherits.target_table.clone()))?;
 
         // Build a JOIN graph
-        let mut builder = JoinGraphBuilder::new(
-            left_table,
-            left_schema.clone(),
-            &inherits.target_table,
-            right_schema.clone(),
-            &inherits.ref_column,
-        );
+        let mut builder = QueryGraphBuilder::new(left_table, left_schema.clone());
 
         // For INHERITS join, we want to output only the source table's columns
         // (SELECT * FROM documents with INHERITS should return documents.*, not joined columns)
         builder.set_projection(left_table);
 
-        let join_node = builder.join();
+        let join_node = builder.join(
+            &inherits.target_table,
+            right_schema.clone(),
+            &inherits.ref_column,
+        );
 
         // Apply user's WHERE clause (needs qualified column handling)
         let after_user_where = if select.where_clause.is_empty() {
@@ -2683,13 +2680,7 @@ impl Database {
             .ok_or_else(|| DatabaseError::TableNotFound(first_hop.target_table.clone()))?;
 
         // Build the first join: source → first target
-        let mut builder = JoinGraphBuilder::new(
-            left_table,
-            source_schema.clone(),
-            &first_hop.target_table,
-            first_target_schema.clone(),
-            &first_hop.ref_column,
-        );
+        let mut builder = QueryGraphBuilder::new(left_table, source_schema.clone());
 
         // For INHERITS chain, output only the source table's columns
         builder.set_projection(left_table);
@@ -2703,7 +2694,11 @@ impl Database {
         }
 
         // Build first join
-        let mut current_node = builder.join();
+        let mut current_node = builder.join(
+            &first_hop.target_table,
+            first_target_schema.clone(),
+            &first_hop.ref_column,
+        );
 
         // Apply user's WHERE clause after first join
         // The predicate must use qualified column names since we're in a JOIN context
@@ -3335,7 +3330,7 @@ impl Database {
             .ok_or_else(|| DatabaseError::TableNotFound(sql_first_right_table.clone()))?;
 
         // Determine the join column and direction for first join
-        // The JoinGraphBuilder expects the "left" table to have the Ref column
+        // The QueryGraphBuilder expects the "left" table to have the Ref column
         let first_join_direction = self.find_join_column(
             &first_join.on,
             sql_left_table,
@@ -3371,13 +3366,7 @@ impl Database {
         };
 
         // Build the JOIN query graph
-        let mut builder = JoinGraphBuilder::new(
-            graph_left_table,
-            graph_left_schema.clone(),
-            graph_right_table,
-            graph_right_schema.clone(),
-            &ref_column,
-        );
+        let mut builder = QueryGraphBuilder::new(graph_left_table, graph_left_schema.clone());
 
         // For reverse JOINs, set projection to output only the SQL FROM table's columns.
         // The SQL is `SELECT Issues.* FROM Issues JOIN IssueAssignees`, but we swapped the
@@ -3388,7 +3377,8 @@ impl Database {
         }
 
         // Start with first join node
-        let mut current_node = builder.join();
+        let mut current_node =
+            builder.join(graph_right_table, graph_right_schema.clone(), &ref_column);
 
         // Track all tables involved for predicate building
         // Store (table_name, alias, schema)
@@ -3757,7 +3747,7 @@ impl Database {
     /// Add ArrayAggregate nodes to a JOIN graph for ARRAY subqueries in projection.
     fn add_join_array_aggregates(
         &self,
-        builder: &mut JoinGraphBuilder,
+        builder: &mut QueryGraphBuilder,
         input: crate::sql::query_graph::NodeId,
         exprs: &[SelectExpr],
         outer_table: &str,
@@ -3785,7 +3775,7 @@ impl Database {
     /// Add ArrayAggregate node to a JOIN graph for a single expression.
     fn add_join_array_aggregate_for_expr(
         &self,
-        builder: &mut JoinGraphBuilder,
+        builder: &mut QueryGraphBuilder,
         input: crate::sql::query_graph::NodeId,
         expr: &SelectExpr,
         outer_table: &str,
