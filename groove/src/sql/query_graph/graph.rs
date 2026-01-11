@@ -64,10 +64,6 @@ pub struct QueryGraph {
     /// Whether this is a join query.
     is_join: bool,
 
-    /// For JOIN queries, which table to project in output (e.g., "Issues" for SELECT Issues.*).
-    /// If None, all columns from all joined tables are returned.
-    projection_table: Option<String>,
-
     /// Nodes in topological order.
     nodes: Vec<QueryNode>,
 
@@ -127,7 +123,6 @@ impl QueryGraph {
             schema,
             all_schemas,
             is_join: false,
-            projection_table: None,
             nodes,
             node_indices,
             output_node,
@@ -138,9 +133,6 @@ impl QueryGraph {
     ///
     /// Used for INHERITS chains like: documents → folders → workspaces
     /// The `additional_right_tables` contains tables beyond the first join.
-    ///
-    /// `projection_table` specifies which table's columns to output (for reverse JOINs
-    /// where we SELECT Table.* but swapped the tables for the graph builder).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_chain_join(
         id: GraphId,
@@ -149,7 +141,6 @@ impl QueryGraph {
         right_table: String,
         right_schema: TableSchema,
         additional_right_tables: Vec<(String, TableSchema)>,
-        projection_table: Option<String>,
         nodes: Vec<QueryNode>,
         node_indices: HashMap<NodeId, usize>,
         output_node: NodeId,
@@ -228,7 +219,6 @@ impl QueryGraph {
             schema: combined_schema, // Use combined schema for JOIN graphs
             all_schemas,
             is_join: true,
-            projection_table,
             nodes,
             node_indices,
             output_node,
@@ -292,14 +282,29 @@ impl QueryGraph {
 
     /// Get the output schema for this query.
     ///
-    /// For JOIN queries with projection, returns a qualified version of the projected table's schema.
+    /// For queries with a Projection node before Output, returns a schema matching
+    /// the projection's output descriptor.
     pub fn output_schema(&self) -> Option<TableSchema> {
-        // If there's a projection, return that table's schema with qualified column names
-        if let Some(proj_table) = &self.projection_table
-            && let Some(proj_schema) = self.all_schemas.get(proj_table)
-        {
-            // Create a schema with qualified column names to match the OwnedRow
-            return Some(proj_schema.qualify(proj_table));
+        use crate::sql::schema::ColumnDef;
+
+        // Find the Output node and check if its input is a Projection
+        let output_idx = self.node_indices.get(&self.output_node)?;
+        if let QueryNode::Output { input, .. } = &self.nodes[*output_idx] {
+            let input_idx = self.node_indices.get(input)?;
+            if let QueryNode::Projection {
+                output_descriptor,
+                table,
+                ..
+            } = &self.nodes[*input_idx]
+            {
+                // Create a schema from the projection's output descriptor
+                let columns: Vec<ColumnDef> = output_descriptor
+                    .columns
+                    .iter()
+                    .map(|col| ColumnDef::new(col.name.clone(), col.ty.clone(), col.nullable))
+                    .collect();
+                return Some(TableSchema::new_raw(table, columns));
+            }
         }
         Some(self.schema.clone())
     }
@@ -771,24 +776,14 @@ impl QueryGraph {
                     // Get IDs to filter by from downstream Filter node (if any)
                     let filter_ids = self.nodes[input_idx].cached_ids();
 
-                    // Apply the filter and projection - now returns OwnedRow directly
+                    // Apply the filter - projection is now handled by explicit Projection nodes
                     let rows: Vec<(ObjectId, OwnedRow)> = joined_rows
                         .iter()
                         .filter(|(id, _)| {
                             // If there's a filter, only include matching IDs
                             filter_ids.is_none_or(|ids| ids.contains(id))
                         })
-                        .map(|(primary_id, jr)| {
-                            // Apply projection if set
-                            if let Some(proj_table) = &self.projection_table
-                                && self.all_schemas.contains_key(proj_table)
-                                && let Some((_, row)) = jr.table_rows.get(proj_table)
-                            {
-                                return (*primary_id, row.clone());
-                            }
-                            // Default: return all joined columns as OwnedRow
-                            (*primary_id, jr.to_output_row())
-                        })
+                        .map(|(primary_id, jr)| (*primary_id, jr.to_output_row()))
                         .collect();
 
                     return rows;

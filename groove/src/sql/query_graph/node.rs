@@ -1015,7 +1015,7 @@ impl QueryNode {
                     // Format: "target@existing.column"
                     // We include the join table's columns in the output so downstream
                     // Filter nodes can filter on them (e.g., for INHERITS policy checks).
-                    // The projection_table setting handles final output projection.
+                    // An explicit Projection node handles final output projection.
                     if let Some(ref_col) = join_column
                         .split('@')
                         .nth(1)

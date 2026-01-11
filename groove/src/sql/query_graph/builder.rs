@@ -23,8 +23,6 @@ struct JoinState {
     combined_schema: TableSchema,
     /// Extra schemas for chain joins (table_name → schema)
     extra_schemas: HashMap<String, TableSchema>,
-    /// For reverse JOINs, which table to project
-    projection_table: Option<String>,
 }
 
 /// Builder for constructing `QueryGraph` instances.
@@ -324,6 +322,46 @@ impl QueryGraphBuilder {
         id
     }
 
+    /// Add a projection node to select one table's columns from a multi-table join.
+    ///
+    /// Used for reverse JOINs where we need to output only the SQL FROM table's columns.
+    /// Keeps qualified column names (e.g., "Issues.title" stays "Issues.title").
+    pub fn projection_select_table(
+        &mut self,
+        input: NodeId,
+        table: &str,
+        source_schema: &TableSchema,
+    ) -> NodeId {
+        let id = self.alloc_id();
+
+        // Build column map: keep qualified names for this table only
+        // "Issues.title" → "Issues.title" (passthrough)
+        let column_map: HashMap<String, String> = source_schema
+            .columns
+            .iter()
+            .map(|col| {
+                let qualified = format!("{}.{}", table, col.name);
+                (qualified.clone(), qualified)
+            })
+            .collect();
+
+        // Output descriptor uses qualified column names
+        let output_descriptor = Arc::new(RowDescriptor::from_table_schema_qualified(
+            source_schema,
+            table,
+        ));
+
+        self.nodes.push(QueryNode::Projection {
+            table: table.to_string(),
+            input,
+            column_map,
+            output_descriptor,
+            cached_rows: HashMap::new(),
+        });
+
+        id
+    }
+
     /// Add the output node and build the graph.
     ///
     /// This consumes the builder and returns the constructed graph.
@@ -356,7 +394,6 @@ impl QueryGraphBuilder {
                 js.first_right_table,
                 js.first_right_schema,
                 js.additional_right_tables,
-                js.projection_table,
                 self.nodes,
                 node_indices,
                 output_id,
@@ -409,32 +446,6 @@ impl QueryGraphBuilder {
     // JOIN methods - these transition the builder to JOIN mode
     // =========================================================================
 
-    /// Set the projection table for reverse JOINs.
-    ///
-    /// When tables are swapped for the graph (because the JOIN table has the Ref),
-    /// this specifies which table's columns should appear in the output.
-    /// Must be called before `join()`.
-    pub fn set_projection(&mut self, table: impl Into<String>) {
-        // Store in a temporary location; will be moved to join_state when join() is called
-        // For now, we need to handle this specially since join_state doesn't exist yet
-        if let Some(js) = &mut self.join_state {
-            js.projection_table = Some(table.into());
-        } else {
-            // Pre-join: store in a pending field - we'll initialize join_state with this
-            // Actually, we can just defer and require set_projection after join()
-            // Or we can store it temporarily. Let's use a simple approach:
-            // Initialize an empty join_state just to store the projection
-            self.join_state = Some(JoinState {
-                first_right_table: String::new(),
-                first_right_schema: TableSchema::new_raw("", vec![]),
-                additional_right_tables: Vec::new(),
-                combined_schema: self.primary_schema.clone(),
-                extra_schemas: HashMap::new(),
-                projection_table: Some(table.into()),
-            });
-        }
-    }
-
     /// Add an additional schema for chained joins.
     ///
     /// Call this before `chain_join()` to register the target table's schema.
@@ -451,7 +462,6 @@ impl QueryGraphBuilder {
                 additional_right_tables: Vec::new(),
                 combined_schema: self.primary_schema.clone(),
                 extra_schemas,
-                projection_table: None,
             });
         }
     }
@@ -477,10 +487,6 @@ impl QueryGraphBuilder {
         let combined_schema = self.primary_schema.combine(&right_schema);
 
         // Initialize or update join_state
-        let projection_table = self
-            .join_state
-            .as_ref()
-            .and_then(|js| js.projection_table.clone());
         let extra_schemas = self
             .join_state
             .take()
@@ -493,7 +499,6 @@ impl QueryGraphBuilder {
             additional_right_tables: Vec::new(),
             combined_schema,
             extra_schemas,
-            projection_table,
         });
 
         // Build table descriptors for buffer format with qualified column names

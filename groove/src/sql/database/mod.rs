@@ -2563,10 +2563,6 @@ impl Database {
         // Build a JOIN graph
         let mut builder = QueryGraphBuilder::new(left_table, left_schema.clone());
 
-        // For INHERITS join, we want to output only the source table's columns
-        // (SELECT * FROM documents with INHERITS should return documents.*, not joined columns)
-        builder.set_projection(left_table);
-
         let join_node = builder.join(
             &inherits.target_table,
             right_schema.clone(),
@@ -2685,9 +2681,6 @@ impl Database {
 
         // Build the first join: source → first target
         let mut builder = QueryGraphBuilder::new(left_table, source_schema.clone());
-
-        // For INHERITS chain, output only the source table's columns
-        builder.set_projection(left_table);
 
         // Pre-add schemas for all subsequent hops
         for hop in chain.hops.iter().skip(1) {
@@ -3376,14 +3369,6 @@ impl Database {
         // Build the JOIN query graph
         let mut builder = QueryGraphBuilder::new(graph_left_table, graph_left_schema.clone());
 
-        // For reverse JOINs, set projection to output only the SQL FROM table's columns.
-        // The SQL is `SELECT Issues.* FROM Issues JOIN IssueAssignees`, but we swapped the
-        // tables for the graph builder (because IssueAssignees has the Ref). We need to
-        // project back to Issues (the original SQL left table, now graph_right_table).
-        if matches!(first_join_direction, JoinDirection::RightToLeft(_)) {
-            builder.set_projection(graph_right_table);
-        }
-
         // Start with first join node
         let mut current_node =
             builder.join(graph_right_table, graph_right_schema.clone(), &ref_column);
@@ -3487,8 +3472,18 @@ impl Database {
             limited
         };
 
+        // For reverse JOINs, add projection to output only the SQL FROM table's columns.
+        // The SQL is `SELECT Issues.* FROM Issues JOIN IssueAssignees`, but we swapped the
+        // tables for the graph builder (because IssueAssignees has the Ref). We project
+        // back to Issues (the original SQL left table, now graph_right_table).
+        let final_node = if matches!(first_join_direction, JoinDirection::RightToLeft(_)) {
+            builder.projection_select_table(with_arrays, graph_right_table, &sql_left_schema)
+        } else {
+            with_arrays
+        };
+
         // Create output node
-        Ok(builder.output(with_arrays, GraphId(0))) // ID will be assigned by registry
+        Ok(builder.output(final_node, GraphId(0))) // ID will be assigned by registry
     }
 
     /// Find chain join information: which table has the ref column and what direction.
