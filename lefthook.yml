@@ -6,7 +6,8 @@ pre-commit:
     # Formatting (runs first, in parallel)
     rust-format:
       glob: "*.rs"
-      run: cargo fmt --all
+      run: cargo fmt --all && git add {staged_files}
+      stage_fixed: true
       priority: 1
     biome-format:
       glob: "*.{js,ts,tsx,jsx,json}"
