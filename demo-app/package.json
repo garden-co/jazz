@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build:wasm": "cd ../groove-wasm && wasm-pack build --target web --out-dir ../demo-app/pkg",
+    "build:wasm": "cd ../groove-wasm && wasm-pack build --target web",
     "generate": "npx tsx -e \"import { generateFromSql } from '@jazz/schema'; generateFromSql('src/schema.sql', { output: 'src/generated' })\"",
     "dev": "vite",
     "build": "vite build",

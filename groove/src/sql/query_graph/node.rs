@@ -1446,6 +1446,23 @@ impl QueryNode {
             return inner_rows.iter().map(|(_, row)| row.clone()).collect();
         }
 
+        // Helper to find value by name, trying both qualified and unqualified names
+        // The row might have qualified names like "IssueLabels.label" when delta flows through outer JOINs
+        fn find_column_name<'a>(row: &'a OwnedRow, col_name: &'a str) -> Option<&'a str> {
+            // First try exact match
+            if row.descriptor.columns.iter().any(|c| c.name == col_name) {
+                return Some(col_name);
+            }
+            // If not found, try to find a qualified column that ends with ".{col_name}"
+            let suffix = format!(".{}", col_name);
+            for col in &row.descriptor.columns {
+                if col.name.ends_with(&suffix) {
+                    return Some(&col.name);
+                }
+            }
+            None
+        }
+
         inner_rows
             .iter()
             .map(|(_, row)| {
@@ -1454,8 +1471,9 @@ impl QueryNode {
                     std::collections::HashMap::new();
 
                 for (ref_column, target_table, _) in inner_joins {
-                    if let Some(rv) = row.get_by_name(ref_column) {
-                        if let RowValue::Ref(target_id) = rv {
+                    // Try to find the column (might be qualified like "IssueLabels.label")
+                    if let Some(actual_col_name) = find_column_name(row, ref_column) {
+                        if let Some(RowValue::Ref(target_id)) = row.get_by_name(actual_col_name) {
                             if let Some(target_row) = lookup_row_by_id(target_table, target_id) {
                                 resolved_targets.insert(ref_column.as_str(), target_row);
                             }
@@ -1490,9 +1508,11 @@ impl QueryNode {
                     if let Some(target_row) = resolved_targets.get(col.name.as_str()) {
                         // Set as single-item array containing the resolved row
                         builder = builder.set_array(col_idx, &[target_row.clone()]);
-                    } else if let Some(rv) = row.get_by_name(&col.name) {
-                        // Copy the value directly
-                        builder = builder.set_from_row_value(col_idx, rv);
+                    } else if let Some(actual_col_name) = find_column_name(row, &col.name) {
+                        // Copy the value directly (using flexible lookup for qualified names)
+                        if let Some(rv) = row.get_by_name(actual_col_name) {
+                            builder = builder.set_from_row_value(col_idx, rv);
+                        }
                     }
                 }
 

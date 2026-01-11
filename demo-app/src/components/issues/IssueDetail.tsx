@@ -124,6 +124,7 @@ export function IssueDetail({
                 onBlur={handleTitleSave}
                 onKeyDown={(e) => e.key === "Enter" && handleTitleSave()}
                 autoFocus
+                data-testid="issue-title-input"
               />
             ) : (
               <span

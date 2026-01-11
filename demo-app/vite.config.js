@@ -12,6 +12,9 @@ export default defineConfig({
     topLevelAwait(),
     tailwindcss(),
   ],
+  server: {
+    port: 5180,
+  },
   optimizeDeps: {
     exclude: ['groove-wasm'],
   },

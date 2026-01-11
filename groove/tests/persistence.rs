@@ -21,7 +21,7 @@ fn get_rows(result: ExecuteResult) -> Vec<(ObjectId, OwnedRow)> {
 /// Helper to extract inserted ID from ExecuteResult
 fn get_inserted_id(result: ExecuteResult) -> groove::ObjectId {
     match result {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         other => panic!("expected Inserted, got {:?}", other),
     }
 }

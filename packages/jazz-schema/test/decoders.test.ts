@@ -1,50 +1,62 @@
 /**
  * Tests for binary row decoders
+ *
+ * These tests use the row buffer format expected by the generated decoders.
+ * The format matches what the Rust encoder produces.
+ *
+ * Row buffer format:
+ * - [id (16 bytes u128 LE)][fixed columns][offset table (N-1 u32s for N var cols)][variable data]
+ *
+ * Batch format:
+ * - [u32 count][u32 size₁][row buffer₁]...
+ *
+ * Delta format:
+ * - [u8 type][row buffer] for added/updated
+ * - [u8 type][16 byte ObjectId] for removed
  */
 
 import { describe, it, expect } from "vitest";
 import {
   decodeUserRows,
-  decodeUserRow,
   decodeUserDelta,
   decodeNoteRows,
-  decodeNoteRow,
   decodeNoteDelta,
   decodeFolderRows,
-  decodeFolderRow,
   BinaryReader,
-  readUser,
-  readNote,
-  readFolder,
   DELTA_ADDED,
   DELTA_UPDATED,
   DELTA_REMOVED,
 } from "./generated/decoders.js";
 
+// Crockford Base32 alphabet (lowercase, matches Rust)
+const CROCKFORD_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz";
+
 // Helper to create a test ObjectId (26 Base32 chars)
 function makeObjectId(n: number): string {
-  const base = "00000000000000000000000000";
-  const suffix = n.toString().padStart(6, "0");
-  return base.slice(0, 20) + suffix;
+  const base = "00000000000000000000000000"; // 26 zeros
+  const str = n.toString();
+  // Ensure total length is always 26 by slicing the base appropriately
+  return base.slice(0, 26 - str.length) + str;
 }
 
-// Helper to encode an ObjectId to bytes
-function encodeObjectId(id: string): Uint8Array {
-  const bytes = new Uint8Array(26);
-  for (let i = 0; i < 26; i++) {
-    bytes[i] = id.charCodeAt(i);
+// Helper to convert Base32 string to BigInt
+function base32ToU128(s: string): bigint {
+  let value = 0n;
+  for (const c of s.toLowerCase()) {
+    const idx = CROCKFORD_ALPHABET.indexOf(c);
+    value = (value << 5n) | BigInt(idx >= 0 ? idx : 0);
   }
-  return bytes;
+  return value;
 }
 
-// Helper to encode a string (u32 length + UTF-8 bytes)
-function encodeString(s: string): Uint8Array {
-  const encoder = new TextEncoder();
-  const strBytes = encoder.encode(s);
-  const result = new Uint8Array(4 + strBytes.length);
-  new DataView(result.buffer).setUint32(0, strBytes.length, true);
-  result.set(strBytes, 4);
-  return result;
+// Helper to encode an ObjectId to 16 bytes (u128 LE)
+function encodeObjectId(id: string): Uint8Array {
+  const value = base32ToU128(id);
+  const bytes = new Uint8Array(16);
+  const view = new DataView(bytes.buffer);
+  view.setBigUint64(0, value & 0xffffffffffffffffn, true); // Low 64 bits
+  view.setBigUint64(8, value >> 64n, true); // High 64 bits
+  return bytes;
 }
 
 // Helper to encode i64 (8 bytes LE)
@@ -85,6 +97,200 @@ function encodeU32(n: number): Uint8Array {
   return result;
 }
 
+// UTF-8 encoder
+const textEncoder = new TextEncoder();
+
+/**
+ * Encode a User row buffer.
+ *
+ * Layout:
+ * - Fixed size: 33 bytes
+ *   - id: 16 bytes (offset 0)
+ *   - age: 8 bytes i64 (offset 16)
+ *   - score: 8 bytes f64 (offset 24)
+ *   - isAdmin: 1 byte bool (offset 32)
+ * - Offset table: 8 bytes (2 u32s for offsets within row buffer)
+ * - Variable columns (start at offset 41):
+ *   - name: plain string
+ *   - email: plain string
+ *   - avatar: nullable (presence byte + string or just presence byte if null)
+ */
+function encodeUserRowBuffer(user: {
+  id: string;
+  name: string;
+  email: string;
+  avatar: string | null;
+  age: bigint;
+  score: number;
+  isAdmin: boolean;
+}): Uint8Array {
+  const nameBytes = textEncoder.encode(user.name);
+  const emailBytes = textEncoder.encode(user.email);
+  const avatarBytes = user.avatar ? textEncoder.encode(user.avatar) : new Uint8Array(0);
+
+  // Fixed section
+  const fixedSection = concat(
+    encodeObjectId(user.id),
+    encodeI64(user.age),
+    encodeF64(user.score),
+    encodeBool(user.isAdmin)
+  );
+  // fixedSection is 33 bytes
+
+  // Offset table starts at byte 33
+  // Variable data starts at byte 41 (33 + 8)
+  const varDataStart = 41;
+  const nameEnd = varDataStart + nameBytes.length;
+  const emailEnd = nameEnd + emailBytes.length;
+  // avatar is nullable - presence byte + optional data
+
+  // Offset table: offsets are relative to row buffer start
+  const offsetTable = concat(encodeU32(nameEnd), encodeU32(emailEnd));
+
+  // Variable data
+  let varData: Uint8Array;
+  if (user.avatar !== null) {
+    varData = concat(
+      nameBytes,
+      emailBytes,
+      new Uint8Array([1]), // presence byte
+      avatarBytes
+    );
+  } else {
+    varData = concat(
+      nameBytes,
+      emailBytes,
+      new Uint8Array([0]) // null presence byte
+    );
+  }
+
+  return concat(fixedSection, offsetTable, varData);
+}
+
+/**
+ * Encode a Folder row buffer.
+ *
+ * Layout:
+ * - Fixed size: 49 bytes
+ *   - id: 16 bytes (offset 0)
+ *   - owner: 16 bytes ref (offset 16)
+ *   - parent: 17 bytes nullable ref (1 presence + 16 bytes) (offset 32)
+ * - Offset table: 0 bytes (only 1 variable column)
+ * - Variable columns (start at offset 49):
+ *   - name: plain string
+ */
+function encodeFolderRowBuffer(folder: {
+  id: string;
+  name: string;
+  owner: string;
+  parent: string | null;
+}): Uint8Array {
+  const nameBytes = textEncoder.encode(folder.name);
+
+  // Fixed section
+  let fixedSection: Uint8Array;
+  if (folder.parent !== null) {
+    fixedSection = concat(
+      encodeObjectId(folder.id),
+      encodeObjectId(folder.owner),
+      new Uint8Array([1]), // presence byte
+      encodeObjectId(folder.parent)
+    );
+  } else {
+    fixedSection = concat(
+      encodeObjectId(folder.id),
+      encodeObjectId(folder.owner),
+      new Uint8Array([0]), // null presence byte
+      new Uint8Array(16) // zeroed ObjectId placeholder
+    );
+  }
+  // fixedSection is 49 bytes
+
+  // No offset table for 1 variable column
+  // Variable data starts at byte 49
+  return concat(fixedSection, nameBytes);
+}
+
+/**
+ * Encode a Note row buffer.
+ *
+ * Layout:
+ * - Fixed size: 66 bytes
+ *   - id: 16 bytes (offset 0)
+ *   - author: 16 bytes ref (offset 16)
+ *   - folder: 17 bytes nullable ref (1 presence + 16 bytes) (offset 32)
+ *   - createdAt: 8 bytes i64 (offset 49)
+ *   - updatedAt: 8 bytes i64 (offset 57)
+ *   - isPublic: 1 byte bool (offset 65)
+ * - Offset table: 4 bytes (1 u32 for 2 variable columns)
+ * - Variable columns (start at offset 70):
+ *   - title: plain string
+ *   - content: plain string
+ */
+function encodeNoteRowBuffer(note: {
+  id: string;
+  title: string;
+  content: string;
+  author: string;
+  folder: string | null;
+  createdAt: bigint;
+  updatedAt: bigint;
+  isPublic: boolean;
+}): Uint8Array {
+  const titleBytes = textEncoder.encode(note.title);
+  const contentBytes = textEncoder.encode(note.content);
+
+  // Fixed section
+  let fixedSection: Uint8Array;
+  if (note.folder !== null) {
+    fixedSection = concat(
+      encodeObjectId(note.id),
+      encodeObjectId(note.author),
+      new Uint8Array([1]), // presence byte
+      encodeObjectId(note.folder),
+      encodeI64(note.createdAt),
+      encodeI64(note.updatedAt),
+      encodeBool(note.isPublic)
+    );
+  } else {
+    fixedSection = concat(
+      encodeObjectId(note.id),
+      encodeObjectId(note.author),
+      new Uint8Array([0]), // null presence byte
+      new Uint8Array(16), // zeroed ObjectId placeholder
+      encodeI64(note.createdAt),
+      encodeI64(note.updatedAt),
+      encodeBool(note.isPublic)
+    );
+  }
+  // fixedSection is 66 bytes
+
+  // Offset table starts at byte 66
+  // Variable data starts at byte 70 (66 + 4)
+  const varDataStart = 70;
+  const titleEnd = varDataStart + titleBytes.length;
+
+  // Offset table: offset is relative to row buffer start
+  const offsetTable = encodeU32(titleEnd);
+
+  // Variable data
+  const varData = concat(titleBytes, contentBytes);
+
+  return concat(fixedSection, offsetTable, varData);
+}
+
+/**
+ * Encode a batch of rows with count and size headers.
+ */
+function encodeBatch(rowBuffers: Uint8Array[]): Uint8Array {
+  const parts: Uint8Array[] = [encodeU32(rowBuffers.length)];
+  for (const rowBuffer of rowBuffers) {
+    parts.push(encodeU32(rowBuffer.length));
+    parts.push(rowBuffer);
+  }
+  return concat(...parts);
+}
+
 describe("Binary Decoders", () => {
   describe("decodeUserRows", () => {
     it("decodes empty rows", () => {
@@ -95,17 +301,17 @@ describe("Binary Decoders", () => {
 
     it("decodes a single user row", () => {
       const id = makeObjectId(1);
-      const row = concat(
-        encodeObjectId(id),
-        encodeString("Alice"),
-        encodeString("alice@example.com"),
-        new Uint8Array([0]), // avatar is null
-        encodeI64(25n),
-        encodeF64(100.5),
-        encodeBool(true)
-      );
+      const rowBuffer = encodeUserRowBuffer({
+        id,
+        name: "Alice",
+        email: "alice@example.com",
+        avatar: null,
+        age: 25n,
+        score: 100.5,
+        isAdmin: true,
+      });
 
-      const buffer = concat(encodeU32(1), row).buffer;
+      const buffer = encodeBatch([rowBuffer]).buffer;
       const rows = decodeUserRows(buffer);
 
       expect(rows).toHaveLength(1);
@@ -122,18 +328,17 @@ describe("Binary Decoders", () => {
 
     it("decodes user with non-null avatar", () => {
       const id = makeObjectId(2);
-      const row = concat(
-        encodeObjectId(id),
-        encodeString("Bob"),
-        encodeString("bob@example.com"),
-        new Uint8Array([1]), // avatar is present
-        encodeString("https://example.com/avatar.png"),
-        encodeI64(30n),
-        encodeF64(200.0),
-        encodeBool(false)
-      );
+      const rowBuffer = encodeUserRowBuffer({
+        id,
+        name: "Bob",
+        email: "bob@example.com",
+        avatar: "https://example.com/avatar.png",
+        age: 30n,
+        score: 200.0,
+        isAdmin: false,
+      });
 
-      const buffer = concat(encodeU32(1), row).buffer;
+      const buffer = encodeBatch([rowBuffer]).buffer;
       const rows = decodeUserRows(buffer);
 
       expect(rows).toHaveLength(1);
@@ -145,27 +350,27 @@ describe("Binary Decoders", () => {
       const id1 = makeObjectId(1);
       const id2 = makeObjectId(2);
 
-      const row1 = concat(
-        encodeObjectId(id1),
-        encodeString("Alice"),
-        encodeString("alice@example.com"),
-        new Uint8Array([0]),
-        encodeI64(25n),
-        encodeF64(100.0),
-        encodeBool(true)
-      );
+      const row1 = encodeUserRowBuffer({
+        id: id1,
+        name: "Alice",
+        email: "alice@example.com",
+        avatar: null,
+        age: 25n,
+        score: 100.0,
+        isAdmin: true,
+      });
 
-      const row2 = concat(
-        encodeObjectId(id2),
-        encodeString("Bob"),
-        encodeString("bob@example.com"),
-        new Uint8Array([0]),
-        encodeI64(30n),
-        encodeF64(200.0),
-        encodeBool(false)
-      );
+      const row2 = encodeUserRowBuffer({
+        id: id2,
+        name: "Bob",
+        email: "bob@example.com",
+        avatar: null,
+        age: 30n,
+        score: 200.0,
+        isAdmin: false,
+      });
 
-      const buffer = concat(encodeU32(2), row1, row2).buffer;
+      const buffer = encodeBatch([row1, row2]).buffer;
       const rows = decodeUserRows(buffer);
 
       expect(rows).toHaveLength(2);
@@ -174,61 +379,20 @@ describe("Binary Decoders", () => {
     });
   });
 
-  describe("decodeUserRow", () => {
-    it("decodes a single row without header", () => {
-      const id = makeObjectId(3);
-      const rowBytes = concat(
-        encodeObjectId(id),
-        encodeString("Charlie"),
-        encodeString("charlie@example.com"),
-        new Uint8Array([0]),
-        encodeI64(35n),
-        encodeF64(150.0),
-        encodeBool(false)
-      );
-
-      const { row, bytesRead } = decodeUserRow(rowBytes.buffer);
-
-      expect(row.name).toBe("Charlie");
-      expect(row.id).toBe(id);
-      expect(bytesRead).toBe(rowBytes.length);
-    });
-
-    it("decodes from an offset", () => {
-      const prefix = new Uint8Array([0, 0, 0, 0]); // 4 bytes padding
-      const id = makeObjectId(4);
-      const rowBytes = concat(
-        encodeObjectId(id),
-        encodeString("Diana"),
-        encodeString("diana@example.com"),
-        new Uint8Array([0]),
-        encodeI64(28n),
-        encodeF64(175.0),
-        encodeBool(true)
-      );
-
-      const buffer = concat(prefix, rowBytes).buffer;
-      const { row, bytesRead } = decodeUserRow(buffer, 4);
-
-      expect(row.name).toBe("Diana");
-      expect(bytesRead).toBe(rowBytes.length);
-    });
-  });
-
   describe("decodeUserDelta", () => {
     it("decodes DELTA_ADDED", () => {
       const id = makeObjectId(5);
-      const rowBytes = concat(
-        encodeObjectId(id),
-        encodeString("Eve"),
-        encodeString("eve@example.com"),
-        new Uint8Array([0]),
-        encodeI64(22n),
-        encodeF64(50.0),
-        encodeBool(false)
-      );
+      const rowBuffer = encodeUserRowBuffer({
+        id,
+        name: "Eve",
+        email: "eve@example.com",
+        avatar: null,
+        age: 22n,
+        score: 50.0,
+        isAdmin: false,
+      });
 
-      const deltaBuffer = concat(new Uint8Array([DELTA_ADDED]), rowBytes).buffer;
+      const deltaBuffer = concat(new Uint8Array([DELTA_ADDED]), rowBuffer).buffer;
       const delta = decodeUserDelta(deltaBuffer);
 
       expect(delta.type).toBe("added");
@@ -239,17 +403,17 @@ describe("Binary Decoders", () => {
 
     it("decodes DELTA_UPDATED", () => {
       const id = makeObjectId(6);
-      const rowBytes = concat(
-        encodeObjectId(id),
-        encodeString("Frank Updated"),
-        encodeString("frank@example.com"),
-        new Uint8Array([0]),
-        encodeI64(40n),
-        encodeF64(300.0),
-        encodeBool(true)
-      );
+      const rowBuffer = encodeUserRowBuffer({
+        id,
+        name: "Frank Updated",
+        email: "frank@example.com",
+        avatar: null,
+        age: 40n,
+        score: 300.0,
+        isAdmin: true,
+      });
 
-      const deltaBuffer = concat(new Uint8Array([DELTA_UPDATED]), rowBytes).buffer;
+      const deltaBuffer = concat(new Uint8Array([DELTA_UPDATED]), rowBuffer).buffer;
       const delta = decodeUserDelta(deltaBuffer);
 
       expect(delta.type).toBe("updated");
@@ -260,7 +424,10 @@ describe("Binary Decoders", () => {
 
     it("decodes DELTA_REMOVED", () => {
       const id = makeObjectId(7);
-      const deltaBuffer = concat(new Uint8Array([DELTA_REMOVED]), encodeObjectId(id)).buffer;
+      const deltaBuffer = concat(
+        new Uint8Array([DELTA_REMOVED]),
+        encodeObjectId(id)
+      ).buffer;
       const delta = decodeUserDelta(deltaBuffer);
 
       expect(delta.type).toBe("removed");
@@ -271,10 +438,17 @@ describe("Binary Decoders", () => {
   });
 
   describe("BinaryReader", () => {
-    it("reads various types", () => {
+    it("reads ObjectId correctly", () => {
+      const id = makeObjectId(1);
+      const data = encodeObjectId(id);
+
+      const reader = new BinaryReader(data.buffer);
+      expect(reader.readObjectId()).toBe(id);
+    });
+
+    it("reads various fixed types", () => {
       const data = concat(
         encodeObjectId(makeObjectId(1)),
-        encodeString("test"),
         encodeI64(123456789n),
         encodeF64(3.14159),
         encodeBool(true),
@@ -284,38 +458,25 @@ describe("Binary Decoders", () => {
       const reader = new BinaryReader(data.buffer);
 
       expect(reader.readObjectId()).toBe(makeObjectId(1));
-      expect(reader.readString()).toBe("test");
       expect(reader.readI64()).toBe(123456789n);
       expect(reader.readF64()).toBeCloseTo(3.14159);
       expect(reader.readBool()).toBe(true);
       expect(reader.readU32()).toBe(42);
     });
 
-    it("reads nullable values", () => {
+    it("reads nullable ref values", () => {
+      const refId = makeObjectId(500);
       const data = concat(
         new Uint8Array([0]), // null
+        new Uint8Array(16), // zeroed ObjectId placeholder for null
         new Uint8Array([1]), // present
-        encodeString("value")
+        encodeObjectId(refId)
       );
 
       const reader = new BinaryReader(data.buffer);
 
-      expect(reader.readNullable(() => reader.readString())).toBe(null);
-      expect(reader.readNullable(() => reader.readString())).toBe("value");
-    });
-
-    it("reads arrays", () => {
-      const data = concat(
-        encodeU32(3),
-        encodeString("a"),
-        encodeString("b"),
-        encodeString("c")
-      );
-
-      const reader = new BinaryReader(data.buffer);
-      const arr = reader.readArray(() => reader.readString());
-
-      expect(arr).toEqual(["a", "b", "c"]);
+      expect(reader.readNullableRef()).toBe(null);
+      expect(reader.readNullableRef()).toBe(refId);
     });
   });
 
@@ -324,18 +485,18 @@ describe("Binary Decoders", () => {
       const noteId = makeObjectId(100);
       const authorId = makeObjectId(101);
 
-      const noteBytes = concat(
-        encodeObjectId(noteId),
-        encodeString("My Note"),
-        encodeString("Note content"),
-        encodeObjectId(authorId), // author is non-nullable ref
-        new Uint8Array([0]), // folder is null (nullable ref)
-        encodeI64(1000000n),
-        encodeI64(1000001n),
-        encodeBool(true)
-      );
+      const rowBuffer = encodeNoteRowBuffer({
+        id: noteId,
+        title: "My Note",
+        content: "Note content",
+        author: authorId,
+        folder: null,
+        createdAt: 1000000n,
+        updatedAt: 1000001n,
+        isPublic: true,
+      });
 
-      const buffer = concat(encodeU32(1), noteBytes).buffer;
+      const buffer = encodeBatch([rowBuffer]).buffer;
       const notes = decodeNoteRows(buffer);
 
       expect(notes).toHaveLength(1);
@@ -351,19 +512,18 @@ describe("Binary Decoders", () => {
       const authorId = makeObjectId(103);
       const folderId = makeObjectId(104);
 
-      const noteBytes = concat(
-        encodeObjectId(noteId),
-        encodeString("Note in folder"),
-        encodeString("Content"),
-        encodeObjectId(authorId),
-        new Uint8Array([1]), // Presence byte for non-null folder
-        encodeObjectId(folderId),
-        encodeI64(2000000n),
-        encodeI64(2000001n),
-        encodeBool(false)
-      );
+      const rowBuffer = encodeNoteRowBuffer({
+        id: noteId,
+        title: "Note in folder",
+        content: "Content",
+        author: authorId,
+        folder: folderId,
+        createdAt: 2000000n,
+        updatedAt: 2000001n,
+        isPublic: false,
+      });
 
-      const buffer = concat(encodeU32(1), noteBytes).buffer;
+      const buffer = encodeBatch([rowBuffer]).buffer;
       const notes = decodeNoteRows(buffer);
 
       expect(notes).toHaveLength(1);
@@ -377,14 +537,14 @@ describe("Binary Decoders", () => {
       const folderId = makeObjectId(200);
       const ownerId = makeObjectId(201);
 
-      const folderBytes = concat(
-        encodeObjectId(folderId),
-        encodeString("Root Folder"),
-        encodeObjectId(ownerId), // owner is non-nullable
-        new Uint8Array([0]) // parent is null
-      );
+      const rowBuffer = encodeFolderRowBuffer({
+        id: folderId,
+        name: "Root Folder",
+        owner: ownerId,
+        parent: null,
+      });
 
-      const buffer = concat(encodeU32(1), folderBytes).buffer;
+      const buffer = encodeBatch([rowBuffer]).buffer;
       const folders = decodeFolderRows(buffer);
 
       expect(folders).toHaveLength(1);
@@ -398,15 +558,14 @@ describe("Binary Decoders", () => {
       const ownerId = makeObjectId(203);
       const parentId = makeObjectId(204);
 
-      const folderBytes = concat(
-        encodeObjectId(folderId),
-        encodeString("Subfolder"),
-        encodeObjectId(ownerId),
-        new Uint8Array([1]), // Presence byte for non-null parent
-        encodeObjectId(parentId)
-      );
+      const rowBuffer = encodeFolderRowBuffer({
+        id: folderId,
+        name: "Subfolder",
+        owner: ownerId,
+        parent: parentId,
+      });
 
-      const buffer = concat(encodeU32(1), folderBytes).buffer;
+      const buffer = encodeBatch([rowBuffer]).buffer;
       const folders = decodeFolderRows(buffer);
 
       expect(folders).toHaveLength(1);
@@ -420,18 +579,18 @@ describe("Binary Decoders", () => {
       const noteId = makeObjectId(300);
       const authorId = makeObjectId(301);
 
-      const noteBytes = concat(
-        encodeObjectId(noteId),
-        encodeString("Delta Note"),
-        encodeString("Delta Content"),
-        encodeObjectId(authorId),
-        new Uint8Array([0]), // null folder
-        encodeI64(3000000n),
-        encodeI64(3000001n),
-        encodeBool(true)
-      );
+      const rowBuffer = encodeNoteRowBuffer({
+        id: noteId,
+        title: "Delta Note",
+        content: "Delta Content",
+        author: authorId,
+        folder: null,
+        createdAt: 3000000n,
+        updatedAt: 3000001n,
+        isPublic: true,
+      });
 
-      const buffer = concat(new Uint8Array([DELTA_ADDED]), noteBytes).buffer;
+      const buffer = concat(new Uint8Array([DELTA_ADDED]), rowBuffer).buffer;
       const delta = decodeNoteDelta(buffer);
 
       expect(delta.type).toBe("added");
@@ -441,180 +600,20 @@ describe("Binary Decoders", () => {
         expect(delta.row.folder).toBeNull();
       }
     });
-  });
 
-  describe("readUser (composable reader)", () => {
-    it("reads a user using BinaryReader", () => {
-      const id = makeObjectId(10);
-      const userBytes = concat(
-        encodeObjectId(id),
-        encodeString("Grace"),
-        encodeString("grace@example.com"),
-        new Uint8Array([1]),
-        encodeString("avatar.png"),
-        encodeI64(45n),
-        encodeF64(999.0),
-        encodeBool(true)
-      );
+    it("decodes removed note", () => {
+      const noteId = makeObjectId(302);
 
-      const reader = new BinaryReader(userBytes.buffer);
-      const user = readUser(reader);
+      const buffer = concat(
+        new Uint8Array([DELTA_REMOVED]),
+        encodeObjectId(noteId)
+      ).buffer;
+      const delta = decodeNoteDelta(buffer);
 
-      expect(user.id).toBe(id);
-      expect(user.name).toBe("Grace");
-      expect(user.email).toBe("grace@example.com");
-      expect(user.avatar).toBe("avatar.png");
-      expect(user.age).toBe(45n);
-      expect(user.score).toBe(999.0);
-      expect(user.isAdmin).toBe(true);
-    });
-
-    it("can compose readers for nested data", () => {
-      // Simulate nested data: array of users
-      const id1 = makeObjectId(11);
-      const id2 = makeObjectId(12);
-
-      const user1Bytes = concat(
-        encodeObjectId(id1),
-        encodeString("User1"),
-        encodeString("user1@example.com"),
-        new Uint8Array([0]),
-        encodeI64(20n),
-        encodeF64(100.0),
-        encodeBool(false)
-      );
-
-      const user2Bytes = concat(
-        encodeObjectId(id2),
-        encodeString("User2"),
-        encodeString("user2@example.com"),
-        new Uint8Array([0]),
-        encodeI64(30n),
-        encodeF64(200.0),
-        encodeBool(true)
-      );
-
-      const arrayData = concat(
-        encodeU32(2), // 2 elements
-        user1Bytes,
-        user2Bytes
-      );
-
-      const reader = new BinaryReader(arrayData.buffer);
-      const users = reader.readArray(() => readUser(reader));
-
-      expect(users).toHaveLength(2);
-      expect(users[0].name).toBe("User1");
-      expect(users[1].name).toBe("User2");
-    });
-  });
-
-  describe("readNullableRef", () => {
-    it("reads null ref (byte 0)", () => {
-      const data = new Uint8Array([0]); // null indicator
-      const reader = new BinaryReader(data.buffer);
-      expect(reader.readNullableRef()).toBeNull();
-      expect(reader.offset).toBe(1);
-    });
-
-    it("reads non-null ref (presence byte + 26 bytes)", () => {
-      const refId = makeObjectId(500);
-      const data = concat(
-        new Uint8Array([1]), // Presence byte
-        encodeObjectId(refId)
-      );
-      const reader = new BinaryReader(data.buffer);
-      expect(reader.readNullableRef()).toBe(refId);
-      expect(reader.offset).toBe(27); // 1 (presence) + 26 (ObjectId)
-    });
-  });
-
-  describe("readNote (with refs)", () => {
-    it("reads note with null folder", () => {
-      const noteId = makeObjectId(600);
-      const authorId = makeObjectId(601);
-
-      const noteBytes = concat(
-        encodeObjectId(noteId),
-        encodeString("Reader Note"),
-        encodeString("Content via reader"),
-        encodeObjectId(authorId),
-        new Uint8Array([0]), // null folder
-        encodeI64(6000000n),
-        encodeI64(6000001n),
-        encodeBool(false)
-      );
-
-      const reader = new BinaryReader(noteBytes.buffer);
-      const note = readNote(reader);
-
-      expect(note.id).toBe(noteId);
-      expect(note.title).toBe("Reader Note");
-      expect(note.author).toBe(authorId);
-      expect(note.folder).toBeNull();
-    });
-
-    it("reads note with non-null folder", () => {
-      const noteId = makeObjectId(602);
-      const authorId = makeObjectId(603);
-      const folderId = makeObjectId(604);
-
-      const noteBytes = concat(
-        encodeObjectId(noteId),
-        encodeString("Folder Note"),
-        encodeString("Content"),
-        encodeObjectId(authorId),
-        new Uint8Array([1]), // Presence byte for non-null folder
-        encodeObjectId(folderId),
-        encodeI64(6000002n),
-        encodeI64(6000003n),
-        encodeBool(true)
-      );
-
-      const reader = new BinaryReader(noteBytes.buffer);
-      const note = readNote(reader);
-
-      expect(note.folder).toBe(folderId);
-    });
-  });
-
-  describe("readFolder (with self-ref)", () => {
-    it("reads folder with null parent", () => {
-      const folderId = makeObjectId(700);
-      const ownerId = makeObjectId(701);
-
-      const folderBytes = concat(
-        encodeObjectId(folderId),
-        encodeString("Top Level"),
-        encodeObjectId(ownerId),
-        new Uint8Array([0])
-      );
-
-      const reader = new BinaryReader(folderBytes.buffer);
-      const folder = readFolder(reader);
-
-      expect(folder.name).toBe("Top Level");
-      expect(folder.owner).toBe(ownerId);
-      expect(folder.parent).toBeNull();
-    });
-
-    it("reads folder with parent", () => {
-      const folderId = makeObjectId(702);
-      const ownerId = makeObjectId(703);
-      const parentId = makeObjectId(704);
-
-      const folderBytes = concat(
-        encodeObjectId(folderId),
-        encodeString("Child"),
-        encodeObjectId(ownerId),
-        new Uint8Array([1]), // Presence byte for non-null parent
-        encodeObjectId(parentId)
-      );
-
-      const reader = new BinaryReader(folderBytes.buffer);
-      const folder = readFolder(reader);
-
-      expect(folder.parent).toBe(parentId);
+      expect(delta.type).toBe("removed");
+      if (delta.type === "removed") {
+        expect(delta.id).toBe(noteId);
+      }
     });
   });
 });

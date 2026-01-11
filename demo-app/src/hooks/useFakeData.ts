@@ -15,11 +15,17 @@ export function useFakeData(db: WasmDatabaseLike | null) {
     if (!db || initRef.current) return;
     initRef.current = true;
 
+    const params = new URLSearchParams(window.location.search);
+    const noFake = params.has("nofake");
+
     // Check if data already exists by subscribing to users
     let existingUsers: User[] = [];
     const unsubscribe = app.users.subscribeAll(db, (users) => {
       existingUsers = users;
     });
+
+    // Wait longer for sync data when nofake is set
+    const waitTime = noFake ? 3000 : 100;
 
     // Give it a moment to load existing data, then decide
     setTimeout(() => {
@@ -30,10 +36,13 @@ export function useFakeData(db: WasmDatabaseLike | null) {
         console.log(`Found ${existingUsers.length} existing users, skipping fake data generation`);
         setCurrentUserId(existingUsers[0].id);
         setInitialized(true);
+      } else if (noFake) {
+        // nofake mode - don't generate, just mark as initialized
+        console.log("No fake data mode - waiting for synced data");
+        setInitialized(true);
       } else {
         // No data - generate fake data
         console.log("No existing data, generating fake data...");
-        const params = new URLSearchParams(window.location.search);
         const itemCount = parseInt(params.get("items") || String(DEFAULT_ISSUE_COUNT), 10);
 
         generateFakeData(db, itemCount).then((userId) => {
@@ -41,7 +50,7 @@ export function useFakeData(db: WasmDatabaseLike | null) {
           setInitialized(true);
         });
       }
-    }, 100);
+    }, waitTime);
   }, [db]);
 
   return { initialized, currentUserId };

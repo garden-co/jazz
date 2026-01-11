@@ -156,6 +156,32 @@ impl LocalNode {
         id
     }
 
+    /// Create a new object with the given prefix and metadata. Returns the object ID.
+    pub fn create_object_with_meta(
+        &self,
+        prefix: impl Into<String>,
+        meta: std::collections::BTreeMap<String, String>,
+    ) -> ObjectId {
+        let id = generate_object_id();
+        let object = Object::new_with_meta(id, prefix, Some(meta));
+        self.objects.write().unwrap().insert(id, Arc::new(RwLock::new(object)));
+        id
+    }
+
+    /// Create or get an object with a specific ID.
+    /// If the object already exists, returns false. If created, returns true.
+    /// Useful for testing and sync scenarios where object IDs are known.
+    pub fn ensure_object(&self, id: ObjectId, prefix: impl Into<String>) -> bool {
+        let mut objects = self.objects.write().unwrap();
+        if objects.contains_key(&id) {
+            false
+        } else {
+            let object = Object::new(id, prefix);
+            objects.insert(id, Arc::new(RwLock::new(object)));
+            true
+        }
+    }
+
     /// Get an object by ID.
     pub fn get_object(&self, id: ObjectId) -> Option<Arc<RwLock<Object>>> {
         self.objects.read().unwrap().get(&id).cloned()
@@ -401,6 +427,114 @@ impl LocalNode {
         let branch = obj.branch(branch)?;
         let commit = branch.get_commit(commit_id)?;
         Some(Bytes::copy_from_slice(&commit.content))
+    }
+
+    // ========== Sync API ==========
+
+    /// Apply commits received from sync (from other peers).
+    ///
+    /// This method:
+    /// 1. Creates the object if it doesn't exist
+    /// 2. Adds all commits to the branch
+    /// 3. Persists commits and frontier to storage
+    /// 4. Notifies listeners
+    ///
+    /// Returns the new frontier after applying commits.
+    pub fn apply_commits(
+        &self,
+        object_id: ObjectId,
+        branch: &str,
+        commits: Vec<crate::commit::Commit>,
+    ) -> Vec<CommitId> {
+        use crate::commit::Commit;
+
+        if commits.is_empty() {
+            // Return current frontier if no commits to apply
+            return self.frontier(object_id, branch).ok().flatten().unwrap_or_default();
+        }
+
+        // Get or create the object
+        let obj_lock = {
+            let objects = self.objects.read().unwrap();
+            if let Some(obj) = objects.get(&object_id).cloned() {
+                obj
+            } else {
+                drop(objects);
+                // Create new object with empty prefix
+                let object = Object::new(object_id, "");
+                let arc = Arc::new(RwLock::new(object));
+                self.objects.write().unwrap().insert(object_id, arc.clone());
+                arc
+            }
+        };
+
+        let obj = obj_lock.read().unwrap();
+        let branch_ref = obj.branch_ref(branch).expect("branch should exist");
+
+        // Collect commits for persistence
+        let mut commits_to_persist: Vec<Commit> = Vec::new();
+
+        // Add all commits to the branch
+        {
+            let mut branch_guard = branch_ref.write().unwrap();
+            for commit in commits {
+                // Only add if we don't already have this commit
+                let commit_id = commit.compute_id();
+                if branch_guard.get_commit(&commit_id).is_none() {
+                    commits_to_persist.push(commit.clone());
+                    // Use add_commit to properly update frontier
+                    let _ = branch_guard.add_commit(commit);
+                }
+            }
+        }
+
+        // Get the new frontier
+        let frontier = {
+            let branch_guard = branch_ref.read().unwrap();
+            branch_guard.frontier().to_vec()
+        };
+
+        // Notify listeners synchronously
+        self.notify_listeners(object_id, branch, &obj);
+
+        // Persist asynchronously in background
+        if !commits_to_persist.is_empty() {
+            let env = self.env.clone();
+            let branch_name = branch.to_string();
+            let frontier_clone = frontier.clone();
+            spawn_persist(async move {
+                for commit in commits_to_persist {
+                    env.put_commit(&commit).await;
+                }
+                env.set_frontier(object_id.into(), &branch_name, &frontier_clone).await;
+            });
+        }
+
+        frontier
+    }
+
+    /// Check if we have a commit by ID.
+    pub fn has_commit(&self, object_id: ObjectId, branch: &str, commit_id: &CommitId) -> bool {
+        let obj_lock = match self.objects.read().unwrap().get(&object_id).cloned() {
+            Some(o) => o,
+            None => return false,
+        };
+        let obj = obj_lock.read().unwrap();
+        let branch_ref = match obj.branch_ref(branch) {
+            Some(b) => b,
+            None => return false,
+        };
+        let branch_guard = branch_ref.read().unwrap();
+        branch_guard.get_commit(commit_id).is_some()
+    }
+
+    /// Get a commit by ID.
+    pub fn get_commit(&self, object_id: ObjectId, branch: &str, commit_id: &CommitId) -> Option<crate::commit::Commit> {
+        let obj_lock = self.objects.read().unwrap().get(&object_id).cloned()?;
+        let obj = obj_lock.read().unwrap();
+        let branch_ref = obj.branch_ref(branch)?;
+        let branch_guard = branch_ref.read().unwrap();
+        branch_guard.get_commit(commit_id).cloned()
     }
 }
 

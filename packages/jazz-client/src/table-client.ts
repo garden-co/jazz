@@ -60,7 +60,7 @@ export abstract class TableClient<T extends { id: string }> {
 
     let currentRow: T | null = null;
 
-    const handle = db.subscribe_delta(sql, (deltas: Uint8Array[]) => {
+    const handle = db.subscribeDelta(sql, (deltas: Uint8Array[]) => {
       for (const deltaBuffer of deltas) {
         // Copy the buffer to avoid issues with WASM buffer reuse
         // The WASM module may reuse the underlying ArrayBuffer between callbacks
@@ -106,7 +106,7 @@ export abstract class TableClient<T extends { id: string }> {
 
     const rowsById = new Map<string, T>();
 
-    const handle = db.subscribe_delta(sql, (deltas: Uint8Array[]) => {
+    const handle = db.subscribeDelta(sql, (deltas: Uint8Array[]) => {
       for (const deltaBuffer of deltas) {
         // Copy the buffer to avoid issues with WASM buffer reuse
         // The WASM module may reuse the underlying ArrayBuffer between callbacks
@@ -170,13 +170,13 @@ export abstract class TableClient<T extends { id: string }> {
 
       // Use typed update methods based on value type
       if (typeof value === "string") {
-        db.update_row(this.tableName, id, column, value);
+        db.updateRow(this.tableName, id, column, value);
       } else if (typeof value === "bigint") {
-        db.update_row_i64(this.tableName, id, column, value);
+        db.updateRowI64(this.tableName, id, column, value);
       } else if (typeof value === "number") {
         // For integers, use i64 update. For floats, use SQL.
         if (Number.isInteger(value)) {
-          db.update_row_i64(this.tableName, id, column, BigInt(value));
+          db.updateRowI64(this.tableName, id, column, BigInt(value));
         } else {
           // F64 values need SQL update
           db.execute(

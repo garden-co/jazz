@@ -227,12 +227,12 @@ if (!('encodeInto' in cachedTextEncoder)) {
 
 let WASM_VECTOR_LEN = 0;
 
-function wasm_bindgen__convert__closures_____invoke__h76dfe62a3b69c085(arg0, arg1, arg2) {
-    wasm.wasm_bindgen__convert__closures_____invoke__h76dfe62a3b69c085(arg0, arg1, arg2);
+function wasm_bindgen__convert__closures_____invoke__h20bec3cca755663f(arg0, arg1, arg2) {
+    wasm.wasm_bindgen__convert__closures_____invoke__h20bec3cca755663f(arg0, arg1, arg2);
 }
 
-function wasm_bindgen__convert__closures_____invoke__haa2d63a01d602fe2(arg0, arg1, arg2) {
-    wasm.wasm_bindgen__convert__closures_____invoke__haa2d63a01d602fe2(arg0, arg1, arg2);
+function wasm_bindgen__convert__closures_____invoke__h76dfe62a3b69c085(arg0, arg1, arg2) {
+    wasm.wasm_bindgen__convert__closures_____invoke__h76dfe62a3b69c085(arg0, arg1, arg2);
 }
 
 function wasm_bindgen__convert__closures_____invoke__h3097c68d921a6b39(arg0, arg1, arg2, arg3) {
@@ -240,6 +240,12 @@ function wasm_bindgen__convert__closures_____invoke__h3097c68d921a6b39(arg0, arg
 }
 
 const __wbindgen_enum_IdbTransactionMode = ["readonly", "readwrite", "versionchange", "readwriteflush", "cleanup"];
+
+const __wbindgen_enum_RequestMode = ["same-origin", "no-cors", "cors", "navigate"];
+
+const SyncedQueryHandleFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_syncedqueryhandle_free(ptr >>> 0, 1));
 
 const WasmBlobWriterFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
@@ -260,6 +266,87 @@ const WasmQueryHandleBinaryFinalization = (typeof FinalizationRegistry === 'unde
 const WasmQueryHandleDeltaFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmqueryhandledelta_free(ptr >>> 0, 1));
+
+const WasmSyncClientFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmsyncclient_free(ptr >>> 0, 1));
+
+const WasmSyncedLocalNodeFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmsyncedlocalnode_free(ptr >>> 0, 1));
+
+/**
+ * Connection state for the sync client.
+ * @enum {0 | 1 | 2}
+ */
+export const ConnectionState = Object.freeze({
+    Disconnected: 0, "0": "Disconnected",
+    Connecting: 1, "1": "Connecting",
+    Connected: 2, "2": "Connected",
+});
+
+/**
+ * Connection state for the synced node.
+ * @enum {0 | 1 | 2 | 3}
+ */
+export const SyncState = Object.freeze({
+    Disconnected: 0, "0": "Disconnected",
+    Connecting: 1, "1": "Connecting",
+    Connected: 2, "2": "Connected",
+    Reconnecting: 3, "3": "Reconnecting",
+});
+
+/**
+ * Handle to an incremental query subscription.
+ */
+export class SyncedQueryHandle {
+    static __wrap(ptr) {
+        ptr = ptr >>> 0;
+        const obj = Object.create(SyncedQueryHandle.prototype);
+        obj.__wbg_ptr = ptr;
+        SyncedQueryHandleFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        SyncedQueryHandleFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_syncedqueryhandle_free(ptr, 0);
+    }
+    /**
+     * Unsubscribe from updates.
+     */
+    unsubscribe() {
+        wasm.syncedqueryhandle_unsubscribe(this.__wbg_ptr);
+    }
+    /**
+     * Get a text diagram of the query graph.
+     * @returns {string}
+     */
+    diagram() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.syncedqueryhandle_diagram(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * Free resources (no-op, but required by WasmQueryHandleLike interface).
+     */
+    free() {
+        wasm.syncedqueryhandle_free(this.__wbg_ptr);
+    }
+}
+if (Symbol.dispose) SyncedQueryHandle.prototype[Symbol.dispose] = SyncedQueryHandle.prototype.free;
 
 /**
  * Handle for streaming blob creation.
@@ -447,7 +534,7 @@ export class WasmDatabase {
      * @param {string} value
      * @returns {boolean}
      */
-    update_row(table, row_id, column, value) {
+    updateRow(table, row_id, column, value) {
         const ptr0 = passStringToWasm0(table, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(row_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -456,7 +543,7 @@ export class WasmDatabase {
         const len2 = WASM_VECTOR_LEN;
         const ptr3 = passStringToWasm0(value, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len3 = WASM_VECTOR_LEN;
-        const ret = wasm.wasmdatabase_update_row(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+        const ret = wasm.wasmdatabase_updateRow(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
@@ -471,14 +558,14 @@ export class WasmDatabase {
      * @param {bigint} value
      * @returns {boolean}
      */
-    update_row_i64(table, row_id, column, value) {
+    updateRowI64(table, row_id, column, value) {
         const ptr0 = passStringToWasm0(table, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(row_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
         const ptr2 = passStringToWasm0(column, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
-        const ret = wasm.wasmdatabase_update_row_i64(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, value);
+        const ret = wasm.wasmdatabase_updateRowI64(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, value);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
@@ -548,10 +635,10 @@ export class WasmDatabase {
      * @param {Function} callback
      * @returns {WasmQueryHandleDelta}
      */
-    subscribe_delta(sql, callback) {
+    subscribeDelta(sql, callback) {
         const ptr0 = passStringToWasm0(sql, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.wasmdatabase_subscribe_delta(this.__wbg_ptr, ptr0, len0, callback);
+        const ret = wasm.wasmdatabase_subscribeDelta(this.__wbg_ptr, ptr0, len0, callback);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
@@ -796,6 +883,377 @@ export class WasmQueryHandleDelta {
 if (Symbol.dispose) WasmQueryHandleDelta.prototype[Symbol.dispose] = WasmQueryHandleDelta.prototype.free;
 
 /**
+ * WASM sync client.
+ *
+ * Manages connection to a sync server from the browser.
+ * This is a JavaScript-friendly wrapper around `SyncClient<WasmClientEnv>`.
+ */
+export class WasmSyncClient {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmSyncClientFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmsyncclient_free(ptr, 0);
+    }
+    /**
+     * Create a new sync client.
+     *
+     * # Arguments
+     * * `base_url` - The sync server URL (e.g., "http://localhost:8080")
+     * * `auth_token` - Bearer token for authentication
+     * @param {string} base_url
+     * @param {string} auth_token
+     */
+    constructor(base_url, auth_token) {
+        const ptr0 = passStringToWasm0(base_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(auth_token, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsyncclient_new(ptr0, len0, ptr1, len1);
+        this.__wbg_ptr = ret >>> 0;
+        WasmSyncClientFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * Set callback for commit events.
+     *
+     * Callback receives: (object_id: string, commits: Uint8Array[], frontier: string[])
+     * @param {Function} callback
+     */
+    setOnCommits(callback) {
+        wasm.wasmsyncclient_setOnCommits(this.__wbg_ptr, callback);
+    }
+    /**
+     * Set callback for excluded events.
+     *
+     * Callback receives: (object_id: string)
+     * @param {Function} callback
+     */
+    setOnExcluded(callback) {
+        wasm.wasmsyncclient_setOnExcluded(this.__wbg_ptr, callback);
+    }
+    /**
+     * Set callback for error events.
+     *
+     * Callback receives: (code: number, message: string)
+     * @param {Function} callback
+     */
+    setOnError(callback) {
+        wasm.wasmsyncclient_setOnError(this.__wbg_ptr, callback);
+    }
+    /**
+     * Set callback for connection state changes.
+     *
+     * Callback receives: (state: string)
+     * @param {Function} callback
+     */
+    setOnStateChange(callback) {
+        wasm.wasmsyncclient_setOnStateChange(this.__wbg_ptr, callback);
+    }
+    /**
+     * Get current connection state.
+     * @returns {ConnectionState}
+     */
+    get connectionState() {
+        const ret = wasm.wasmsyncclient_connectionState(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * Subscribe to a query and start receiving updates.
+     *
+     * This opens an SSE connection to receive real-time updates.
+     * @param {string} query
+     * @returns {Promise<number>}
+     */
+    subscribe(query) {
+        const ptr0 = passStringToWasm0(query, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsyncclient_subscribe(this.__wbg_ptr, ptr0, len0);
+        return ret;
+    }
+    /**
+     * Push commits for an object to the server.
+     * @param {string} object_id
+     * @param {Array<any>} commits_data
+     * @returns {Promise<any>}
+     */
+    push(object_id, commits_data) {
+        const ptr0 = passStringToWasm0(object_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsyncclient_push(this.__wbg_ptr, ptr0, len0, commits_data);
+        return ret;
+    }
+    /**
+     * Request reconciliation for an object.
+     * @param {string} object_id
+     * @param {Array<any>} local_frontier
+     * @returns {Promise<any>}
+     */
+    reconcile(object_id, local_frontier) {
+        const ptr0 = passStringToWasm0(object_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsyncclient_reconcile(this.__wbg_ptr, ptr0, len0, local_frontier);
+        return ret;
+    }
+    /**
+     * Disconnect from the server.
+     */
+    disconnect() {
+        wasm.wasmsyncclient_disconnect(this.__wbg_ptr);
+    }
+}
+if (Symbol.dispose) WasmSyncClient.prototype[Symbol.dispose] = WasmSyncClient.prototype.free;
+
+/**
+ * A synced local database for browser environments.
+ *
+ * Combines SQL database operations with real-time sync to a server.
+ * All writes are automatically pushed to the server, and incoming
+ * changes from other clients are automatically applied.
+ */
+export class WasmSyncedLocalNode {
+    static __wrap(ptr) {
+        ptr = ptr >>> 0;
+        const obj = Object.create(WasmSyncedLocalNode.prototype);
+        obj.__wbg_ptr = ptr;
+        WasmSyncedLocalNodeFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmSyncedLocalNodeFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmsyncedlocalnode_free(ptr, 0);
+    }
+    /**
+     * Create a new synced local node with in-memory storage.
+     *
+     * @param server_url - The sync server URL (e.g., "http://localhost:8080")
+     * @param auth_token - Bearer token for authentication
+     * @param catalog_id - Optional shared catalog ID (for sync between multiple clients)
+     * @param {string} server_url
+     * @param {string} auth_token
+     * @param {string | null} [catalog_id]
+     */
+    constructor(server_url, auth_token, catalog_id) {
+        const ptr0 = passStringToWasm0(server_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(auth_token, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        var ptr2 = isLikeNone(catalog_id) ? 0 : passStringToWasm0(catalog_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len2 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsyncedlocalnode_new(ptr0, len0, ptr1, len1, ptr2, len2);
+        this.__wbg_ptr = ret >>> 0;
+        WasmSyncedLocalNodeFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * Create a synced local node with IndexedDB persistence.
+     *
+     * @param server_url - The sync server URL
+     * @param auth_token - Bearer token for authentication
+     * @param db_name - Optional database name (defaults to "groove")
+     * @param {string} server_url
+     * @param {string} auth_token
+     * @param {string | null} [db_name]
+     * @returns {Promise<any>}
+     */
+    static withIndexedDb(server_url, auth_token, db_name) {
+        const ptr0 = passStringToWasm0(server_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(auth_token, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        var ptr2 = isLikeNone(db_name) ? 0 : passStringToWasm0(db_name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len2 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsyncedlocalnode_withIndexedDb(ptr0, len0, ptr1, len1, ptr2, len2);
+        return ret;
+    }
+    /**
+     * Set callback for sync state changes.
+     *
+     * Callback receives: (state: string)
+     * @param {Function} callback
+     */
+    setOnStateChange(callback) {
+        wasm.wasmsyncedlocalnode_setOnStateChange(this.__wbg_ptr, callback);
+    }
+    /**
+     * Set callback for sync errors.
+     *
+     * Callback receives: (message: string)
+     * @param {Function} callback
+     */
+    setOnError(callback) {
+        wasm.wasmsyncedlocalnode_setOnError(this.__wbg_ptr, callback);
+    }
+    /**
+     * Set callback for data changes (called when sync applies remote changes).
+     *
+     * Callback receives: no arguments
+     * @param {Function} callback
+     */
+    setOnDataChange(callback) {
+        wasm.wasmsyncedlocalnode_setOnDataChange(this.__wbg_ptr, callback);
+    }
+    /**
+     * Get current sync state.
+     * @returns {SyncState}
+     */
+    get syncState() {
+        const ret = wasm.wasmsyncedlocalnode_syncState(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * Connect to the sync server and start receiving updates.
+     *
+     * This subscribes to the given query and starts an SSE stream
+     * to receive real-time updates from other clients.
+     * @param {string} query
+     * @returns {Promise<any>}
+     */
+    connect(query) {
+        const ptr0 = passStringToWasm0(query, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsyncedlocalnode_connect(this.__wbg_ptr, ptr0, len0);
+        return ret;
+    }
+    /**
+     * Execute a SQL statement.
+     * @param {string} sql
+     * @returns {any}
+     */
+    execute(sql) {
+        const ptr0 = passStringToWasm0(sql, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsyncedlocalnode_execute(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Execute a SELECT query and return results as binary Uint8Array.
+     * @param {string} sql
+     * @returns {Uint8Array}
+     */
+    selectBinary(sql) {
+        const ptr0 = passStringToWasm0(sql, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsyncedlocalnode_selectBinary(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Initialize the database schema from a SQL string.
+     * @param {string} schema
+     */
+    initSchema(schema) {
+        const ptr0 = passStringToWasm0(schema, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsyncedlocalnode_initSchema(this.__wbg_ptr, ptr0, len0);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Update a specific row's column with a string value.
+     * @param {string} table
+     * @param {string} row_id
+     * @param {string} column
+     * @param {string} value
+     * @returns {boolean}
+     */
+    updateRow(table, row_id, column, value) {
+        const ptr0 = passStringToWasm0(table, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(row_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(column, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(value, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsyncedlocalnode_updateRow(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] !== 0;
+    }
+    /**
+     * Update a specific row's column with an i64 value.
+     * @param {string} table
+     * @param {string} row_id
+     * @param {string} column
+     * @param {bigint} value
+     * @returns {boolean}
+     */
+    updateRowI64(table, row_id, column, value) {
+        const ptr0 = passStringToWasm0(table, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(row_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(column, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsyncedlocalnode_updateRowI64(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, value);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] !== 0;
+    }
+    /**
+     * List all tables in the database.
+     * @returns {any}
+     */
+    listTables() {
+        const ret = wasm.wasmsyncedlocalnode_listTables(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * Create an incremental query subscription (delta-based).
+     * @param {string} sql
+     * @param {Function} callback
+     * @returns {SyncedQueryHandle}
+     */
+    subscribeDelta(sql, callback) {
+        const ptr0 = passStringToWasm0(sql, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsyncedlocalnode_subscribeDelta(this.__wbg_ptr, ptr0, len0, callback);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return SyncedQueryHandle.__wrap(ret[0]);
+    }
+    /**
+     * Create an incremental query subscription that returns full row objects.
+     *
+     * The callback receives an Array of objects with column names as keys.
+     * This maintains an internal row map and provides the complete result set on each change.
+     * @param {string} sql
+     * @param {Function} callback
+     * @returns {SyncedQueryHandle}
+     */
+    subscribeRows(sql, callback) {
+        const ptr0 = passStringToWasm0(sql, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsyncedlocalnode_subscribeRows(this.__wbg_ptr, ptr0, len0, callback);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return SyncedQueryHandle.__wrap(ret[0]);
+    }
+}
+if (Symbol.dispose) WasmSyncedLocalNode.prototype[Symbol.dispose] = WasmSyncedLocalNode.prototype.free;
+
+/**
  * Create a ReadableStream that reads from a blob.
  * This is a convenience wrapper for JS interop.
  * @param {WasmDatabase} db
@@ -974,6 +1432,10 @@ function __wbg_get_imports() {
     imports.wbg.__wbg__wbg_cb_unref_87dfb5aaa0cbcea7 = function(arg0) {
         arg0._wbg_cb_unref();
     };
+    imports.wbg.__wbg_arrayBuffer_c04af4fce566092d = function() { return handleError(function (arg0) {
+        const ret = arg0.arrayBuffer();
+        return ret;
+    }, arguments) };
     imports.wbg.__wbg_call_3020136f7a2d6e44 = function() { return handleError(function (arg0, arg1, arg2) {
         const ret = arg0.call(arg1, arg2);
         return ret;
@@ -982,6 +1444,9 @@ function __wbg_get_imports() {
         const ret = arg0.call(arg1);
         return ret;
     }, arguments) };
+    imports.wbg.__wbg_close_d8fdbb14189a985f = function(arg0) {
+        arg0.close();
+    };
     imports.wbg.__wbg_contains_de2a27de1ed31877 = function(arg0, arg1, arg2) {
         const ret = arg0.contains(getStringFromWasm0(arg1, arg2));
         return ret;
@@ -990,6 +1455,10 @@ function __wbg_get_imports() {
         const ret = arg0.createObjectStore(getStringFromWasm0(arg1, arg2));
         return ret;
     }, arguments) };
+    imports.wbg.__wbg_data_8bf4ae669a78a688 = function(arg0) {
+        const ret = arg0.data;
+        return ret;
+    };
     imports.wbg.__wbg_deleteDatabase_19c91a8e3e6b92cf = function() { return handleError(function (arg0, arg1, arg2) {
         const ret = arg0.deleteDatabase(getStringFromWasm0(arg1, arg2));
         return ret;
@@ -1016,6 +1485,14 @@ function __wbg_get_imports() {
     imports.wbg.__wbg_error_ad02a286da74488a = function() { return handleError(function (arg0) {
         const ret = arg0.error;
         return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
+    }, arguments) };
+    imports.wbg.__wbg_fetch_8119fbf8d0e4f4d1 = function(arg0, arg1) {
+        const ret = arg0.fetch(arg1);
+        return ret;
+    };
+    imports.wbg.__wbg_getAllKeys_925405ffbd671e86 = function() { return handleError(function (arg0) {
+        const ret = arg0.getAllKeys();
+        return ret;
     }, arguments) };
     imports.wbg.__wbg_getRandomValues_9b655bdd369112f2 = function() { return handleError(function (arg0, arg1) {
         globalThis.crypto.getRandomValues(getArrayU8FromWasm0(arg0, arg1));
@@ -1066,6 +1543,16 @@ function __wbg_get_imports() {
         const ret = result;
         return ret;
     };
+    imports.wbg.__wbg_instanceof_Response_cd74d1c2ac92cb0b = function(arg0) {
+        let result;
+        try {
+            result = arg0 instanceof Response;
+        } catch (_) {
+            result = false;
+        }
+        const ret = result;
+        return ret;
+    };
     imports.wbg.__wbg_instanceof_Uint8Array_da54ccc9d3e09434 = function(arg0) {
         let result;
         try {
@@ -1106,14 +1593,25 @@ function __wbg_get_imports() {
         const ret = arg0.length;
         return ret;
     };
+    imports.wbg.__wbg_log_1d990106d99dacb7 = function(arg0) {
+        console.log(arg0);
+    };
     imports.wbg.__wbg_new_1ba21ce319a06297 = function() {
         const ret = new Object();
         return ret;
     };
+    imports.wbg.__wbg_new_2434a2653f675856 = function() { return handleError(function (arg0, arg1) {
+        const ret = new EventSource(getStringFromWasm0(arg0, arg1));
+        return ret;
+    }, arguments) };
     imports.wbg.__wbg_new_25f239778d6112b9 = function() {
         const ret = new Array();
         return ret;
     };
+    imports.wbg.__wbg_new_3c79b3bb1b32b7d3 = function() { return handleError(function () {
+        const ret = new Headers();
+        return ret;
+    }, arguments) };
     imports.wbg.__wbg_new_6421f6084cc5bc5a = function(arg0) {
         const ret = new Uint8Array(arg0);
         return ret;
@@ -1152,6 +1650,10 @@ function __wbg_get_imports() {
         const ret = new Uint8Array(arg0 >>> 0);
         return ret;
     };
+    imports.wbg.__wbg_new_with_str_and_init_c5748f76f5108934 = function() { return handleError(function (arg0, arg1, arg2) {
+        const ret = new Request(getStringFromWasm0(arg0, arg1), arg2);
+        return ret;
+    }, arguments) };
     imports.wbg.__wbg_next_138a17bbf04e926c = function(arg0) {
         const ret = arg0.next;
         return ret;
@@ -1172,6 +1674,10 @@ function __wbg_get_imports() {
         const ret = arg0.objectStore(getStringFromWasm0(arg1, arg2));
         return ret;
     }, arguments) };
+    imports.wbg.__wbg_ok_dd98ecb60d721e20 = function(arg0) {
+        const ret = arg0.ok;
+        return ret;
+    };
     imports.wbg.__wbg_open_0d7b85f4c0a38ffe = function() { return handleError(function (arg0, arg1, arg2, arg3) {
         const ret = arg0.open(getStringFromWasm0(arg1, arg2), arg3 >>> 0);
         return ret;
@@ -1202,14 +1708,42 @@ function __wbg_get_imports() {
         const ret = arg0.result;
         return ret;
     }, arguments) };
+    imports.wbg.__wbg_set_169e13b608078b7b = function(arg0, arg1, arg2) {
+        arg0.set(getArrayU8FromWasm0(arg1, arg2));
+    };
     imports.wbg.__wbg_set_3f1d0b984ed272ed = function(arg0, arg1, arg2) {
         arg0[arg1] = arg2;
     };
+    imports.wbg.__wbg_set_425eb8b710d5beee = function() { return handleError(function (arg0, arg1, arg2, arg3, arg4) {
+        arg0.set(getStringFromWasm0(arg1, arg2), getStringFromWasm0(arg3, arg4));
+    }, arguments) };
+    imports.wbg.__wbg_set_781438a03c0c3c81 = function() { return handleError(function (arg0, arg1, arg2) {
+        const ret = Reflect.set(arg0, arg1, arg2);
+        return ret;
+    }, arguments) };
     imports.wbg.__wbg_set_7df433eea03a5c14 = function(arg0, arg1, arg2) {
         arg0[arg1 >>> 0] = arg2;
     };
+    imports.wbg.__wbg_set_body_8e743242d6076a4f = function(arg0, arg1) {
+        arg0.body = arg1;
+    };
+    imports.wbg.__wbg_set_headers_5671cf088e114d2b = function(arg0, arg1) {
+        arg0.headers = arg1;
+    };
+    imports.wbg.__wbg_set_method_76c69e41b3570627 = function(arg0, arg1, arg2) {
+        arg0.method = getStringFromWasm0(arg1, arg2);
+    };
+    imports.wbg.__wbg_set_mode_611016a6818fc690 = function(arg0, arg1) {
+        arg0.mode = __wbindgen_enum_RequestMode[arg1];
+    };
     imports.wbg.__wbg_set_onerror_08fecec3bdc9d24d = function(arg0, arg1) {
         arg0.onerror = arg1;
+    };
+    imports.wbg.__wbg_set_onerror_392d7cfd4a6b674a = function(arg0, arg1) {
+        arg0.onerror = arg1;
+    };
+    imports.wbg.__wbg_set_onmessage_977ecf12c8015d49 = function(arg0, arg1) {
+        arg0.onmessage = arg1;
     };
     imports.wbg.__wbg_set_onsuccess_94332a00452de699 = function(arg0, arg1) {
         arg0.onsuccess = arg1;
@@ -1240,9 +1774,24 @@ function __wbg_get_imports() {
         const ret = typeof window === 'undefined' ? null : window;
         return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
     };
+    imports.wbg.__wbg_statusText_0eec2bbb2c8f22e2 = function(arg0, arg1) {
+        const ret = arg1.statusText;
+        const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
+        getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
+    };
+    imports.wbg.__wbg_status_9bfc680efca4bdfd = function(arg0) {
+        const ret = arg0.status;
+        return ret;
+    };
     imports.wbg.__wbg_target_0e3e05a6263c37a0 = function(arg0) {
         const ret = arg0.target;
         return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
+    };
+    imports.wbg.__wbg_then_429f7caf1026411d = function(arg0, arg1, arg2) {
+        const ret = arg0.then(arg1, arg2);
+        return ret;
     };
     imports.wbg.__wbg_then_4f95312d68691235 = function(arg0, arg1) {
         const ret = arg0.then(arg1);
@@ -1260,14 +1809,13 @@ function __wbg_get_imports() {
         const ret = WasmDatabase.__wrap(arg0);
         return ret;
     };
-    imports.wbg.__wbindgen_cast_068e29f6a3bbf711 = function(arg0, arg1) {
-        // Cast intrinsic for `Closure(Closure { dtor_idx: 387, function: Function { arguments: [Externref], shim_idx: 388, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h3d685ebc6ca20542, wasm_bindgen__convert__closures_____invoke__h76dfe62a3b69c085);
+    imports.wbg.__wbg_wasmsyncedlocalnode_new = function(arg0) {
+        const ret = WasmSyncedLocalNode.__wrap(arg0);
         return ret;
     };
-    imports.wbg.__wbindgen_cast_0cb2730462a9d33a = function(arg0, arg1) {
-        // Cast intrinsic for `Closure(Closure { dtor_idx: 160, function: Function { arguments: [NamedExternref("Event")], shim_idx: 161, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h9b930e98f1df4768, wasm_bindgen__convert__closures_____invoke__haa2d63a01d602fe2);
+    imports.wbg.__wbindgen_cast_12897f0a23a6f7e8 = function(arg0, arg1) {
+        // Cast intrinsic for `Closure(Closure { dtor_idx: 487, function: Function { arguments: [Externref], shim_idx: 488, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+        const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h3d685ebc6ca20542, wasm_bindgen__convert__closures_____invoke__h76dfe62a3b69c085);
         return ret;
     };
     imports.wbg.__wbindgen_cast_2241b6af4c4b2941 = function(arg0, arg1) {
@@ -1275,19 +1823,29 @@ function __wbg_get_imports() {
         const ret = getStringFromWasm0(arg0, arg1);
         return ret;
     };
+    imports.wbg.__wbindgen_cast_3ff0b02fe6edf934 = function(arg0, arg1) {
+        // Cast intrinsic for `Closure(Closure { dtor_idx: 185, function: Function { arguments: [NamedExternref("IDBVersionChangeEvent")], shim_idx: 184, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+        const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h4df8827c3765d533, wasm_bindgen__convert__closures_____invoke__h20bec3cca755663f);
+        return ret;
+    };
     imports.wbg.__wbindgen_cast_4625c577ab2ec9ee = function(arg0) {
         // Cast intrinsic for `U64 -> Externref`.
         const ret = BigInt.asUintN(64, arg0);
         return ret;
     };
-    imports.wbg.__wbindgen_cast_97813750027e8c9f = function(arg0, arg1) {
-        // Cast intrinsic for `Closure(Closure { dtor_idx: 160, function: Function { arguments: [NamedExternref("IDBVersionChangeEvent")], shim_idx: 161, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-        const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h9b930e98f1df4768, wasm_bindgen__convert__closures_____invoke__haa2d63a01d602fe2);
+    imports.wbg.__wbindgen_cast_c119005f0dd2e150 = function(arg0, arg1) {
+        // Cast intrinsic for `Closure(Closure { dtor_idx: 185, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 184, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+        const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h4df8827c3765d533, wasm_bindgen__convert__closures_____invoke__h20bec3cca755663f);
         return ret;
     };
     imports.wbg.__wbindgen_cast_d6cd19b81560fd6e = function(arg0) {
         // Cast intrinsic for `F64 -> Externref`.
         const ret = arg0;
+        return ret;
+    };
+    imports.wbg.__wbindgen_cast_ea4bae8792870e7a = function(arg0, arg1) {
+        // Cast intrinsic for `Closure(Closure { dtor_idx: 185, function: Function { arguments: [NamedExternref("Event")], shim_idx: 184, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+        const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h4df8827c3765d533, wasm_bindgen__convert__closures_____invoke__h20bec3cca755663f);
         return ret;
     };
     imports.wbg.__wbindgen_init_externref_table = function() {

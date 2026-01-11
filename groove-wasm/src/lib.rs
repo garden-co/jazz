@@ -16,7 +16,12 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 pub mod indexeddb;
+pub mod sync;
+pub mod synced_local_node;
+
 pub use indexeddb::IndexedDbEnvironment;
+pub use sync::WasmSyncClient;
+pub use synced_local_node::WasmSyncedLocalNode;
 
 // ==================== Blob Registry ====================
 
@@ -227,8 +232,8 @@ impl WasmDatabase {
                     ExecuteResult::PolicyCreated { table, action } => {
                         serde_wasm_bindgen::to_value(&format!("policy_created:{}:{}", table, action)).unwrap()
                     }
-                    ExecuteResult::Inserted(id) => {
-                        serde_wasm_bindgen::to_value(&format!("inserted:{}", id)).unwrap()
+                    ExecuteResult::Inserted { row_id, .. } => {
+                        serde_wasm_bindgen::to_value(&format!("inserted:{}", row_id)).unwrap()
                     }
                     ExecuteResult::Updated(count) => {
                         serde_wasm_bindgen::to_value(&format!("updated:{}", count)).unwrap()
@@ -271,7 +276,7 @@ impl WasmDatabase {
 
     /// Update a specific row's column with a string value.
     /// row_id should be a Base32 ObjectId string.
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = updateRow)]
     pub fn update_row(&self, table: &str, row_id: &str, column: &str, value: &str) -> Result<bool, JsValue> {
         let id: ObjectId = row_id.parse()
             .map_err(|e| JsValue::from_str(&format!("invalid row_id: {:?}", e)))?;
@@ -283,7 +288,7 @@ impl WasmDatabase {
 
     /// Update a specific row's column with an i64 value.
     /// row_id should be a Base32 ObjectId string.
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = updateRowI64)]
     pub fn update_row_i64(&self, table: &str, row_id: &str, column: &str, value: i64) -> Result<bool, JsValue> {
         let id: ObjectId = row_id.parse()
             .map_err(|e| JsValue::from_str(&format!("invalid row_id: {:?}", e)))?;
@@ -338,7 +343,7 @@ impl WasmDatabase {
     /// The callback receives an Array of Uint8Array, one per delta.
     /// Each delta is: u8 type (1=add, 2=update, 3=remove) + row data (or just id for removes).
     /// Returns a handle that must be kept alive to maintain the subscription.
-    #[wasm_bindgen]
+    #[wasm_bindgen(js_name = subscribeDelta)]
     pub fn subscribe_delta(&self, sql: &str, callback: js_sys::Function) -> Result<WasmQueryHandleDelta, JsValue> {
         let query = self.db
             .incremental_query(sql)

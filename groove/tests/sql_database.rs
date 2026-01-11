@@ -279,7 +279,7 @@ fn execute_insert() {
         .execute("INSERT INTO users (name, age) VALUES ('Alice', 30)")
         .unwrap();
     match result {
-        ExecuteResult::Inserted(id) => {
+        ExecuteResult::Inserted { row_id: id, .. } => {
             let row = db.get("users", id).unwrap().unwrap();
             assert_eq!(row.1.get_by_name("name"), Some(RowValue::String("Alice")));
             // age is optional (no NOT NULL), so it's stored as nullable
@@ -334,7 +334,7 @@ fn execute_update() {
         .execute("INSERT INTO users (name, age) VALUES ('Alice', 30)")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -367,7 +367,7 @@ fn execute_delete() {
         .execute("INSERT INTO users (name, active) VALUES ('Alice', true)")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -738,7 +738,7 @@ fn join_basic() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -789,7 +789,7 @@ fn join_with_where_on_primary_table() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -831,14 +831,14 @@ fn join_with_where_on_joined_table() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
     let bob_id = match db
         .execute("INSERT INTO users (name) VALUES ('Bob')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -919,7 +919,7 @@ fn join_table_star_projection() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -958,21 +958,21 @@ fn join_multiple_conditions_where() {
         .execute("INSERT INTO users (name, active) VALUES ('Alice', true)")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
     let bob_id = match db
         .execute("INSERT INTO users (name, active) VALUES ('Bob', false)")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
     let charlie_id = match db
         .execute("INSERT INTO users (name, active) VALUES ('Charlie', true)")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -1145,7 +1145,7 @@ fn incremental_query_auto_updates_on_update() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -1175,7 +1175,7 @@ fn incremental_query_auto_updates_on_delete() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -1245,7 +1245,7 @@ fn incremental_query_callback_on_delete() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
     db.execute("INSERT INTO users (name) VALUES ('Bob')")
@@ -1294,7 +1294,7 @@ fn incremental_join_basic() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -1328,7 +1328,7 @@ fn incremental_join_updates_on_post_insert() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -1379,7 +1379,7 @@ fn incremental_join_updates_on_user_change() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -1421,7 +1421,7 @@ fn incremental_join_delete_post() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -1432,7 +1432,7 @@ fn incremental_join_delete_post() {
         ))
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -1464,7 +1464,7 @@ fn incremental_join_delete_user() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -1519,14 +1519,14 @@ fn incremental_join_multiple_users() {
         .execute("INSERT INTO users (name) VALUES ('Alice')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
     let bob_id = match db
         .execute("INSERT INTO users (name) VALUES ('Bob')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -1582,14 +1582,14 @@ fn array_subquery_correlated() {
         .execute("INSERT INTO folders (name) VALUES ('Work')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
     let folder2_id = match db
         .execute("INSERT INTO folders (name) VALUES ('Personal')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -1653,7 +1653,7 @@ fn array_subquery_returns_whole_rows() {
         .execute("INSERT INTO folders (name) VALUES ('Work')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -1766,7 +1766,7 @@ fn test_note_with_i64_timestamps() {
     
     let user_result = db.execute("INSERT INTO User (name, email) VALUES ('Alice', 'alice@example.com')").unwrap();
     let user_id = match user_result {
-        ExecuteResult::Inserted(id) => id.to_string(),
+        ExecuteResult::Inserted { row_id: id, .. } => id.to_string(),
         _ => panic!("Expected Inserted"),
     };
     
@@ -1827,7 +1827,7 @@ fn hard_delete_via_sql() {
     // Insert a user
     let result = db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap();
     let id = match result {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -1855,7 +1855,7 @@ fn soft_delete_via_sql() {
     // Insert a user
     let result = db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap();
     let id = match result {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("Expected Inserted"),
     };
 
@@ -2104,7 +2104,7 @@ fn incremental_query_with_array_subquery() {
         .execute("INSERT INTO Issues (title) VALUES ('Test Issue')")
         .unwrap()
     {
-        ExecuteResult::Inserted(id) => id,
+        ExecuteResult::Inserted { row_id: id, .. } => id,
         _ => panic!("expected Inserted"),
     };
 
@@ -3082,6 +3082,337 @@ fn incremental_query_outer_join_with_inner_array_joins() {
         "IssueAssignees should be an array with 1 item, got: {:?}",
         assignees
     );
+}
+
+/// Test incremental updates to ARRAY subqueries with inner JOINs.
+/// This simulates the browser scenario where:
+/// 1. Query subscription is created BEFORE any data exists
+/// 2. Data is then added incrementally
+/// 3. Query should update correctly with resolved joins
+#[test]
+fn incremental_query_array_with_inner_join_empty_start() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let db = Database::in_memory();
+
+    // Create all tables (empty)
+    let labels_schema = TableSchema::new(
+        "Labels",
+        vec![
+            ColumnDef::required("name", ColumnType::String),
+            ColumnDef::required("color", ColumnType::String),
+        ],
+    );
+    db.create_table(labels_schema.clone()).unwrap();
+
+    let issues_schema = TableSchema::new(
+        "Issues",
+        vec![
+            ColumnDef::required("title", ColumnType::String),
+        ],
+    );
+    db.create_table(issues_schema.clone()).unwrap();
+
+    let issue_labels_schema = TableSchema::new(
+        "IssueLabels",
+        vec![
+            ColumnDef::required("issue", ColumnType::Ref("Issues".into())),
+            ColumnDef::required("label", ColumnType::Ref("Labels".into())),
+        ],
+    );
+    db.create_table(issue_labels_schema.clone()).unwrap();
+
+    // Create query BEFORE any data exists (simulates browser subscription)
+    let sql = "SELECT i.id, i.title, \
+               ARRAY(SELECT il.id, il.issue, Labels as label FROM IssueLabels il JOIN Labels ON il.label = Labels.id WHERE il.issue = i.id) as IssueLabels \
+               FROM Issues i";
+
+    eprintln!("SQL: {}", sql);
+    let query = db.incremental_query(sql).expect("should create incremental query");
+
+    // Initially should be empty
+    let rows = query.rows();
+    assert_eq!(rows.len(), 0, "Should start with 0 rows");
+
+    // Set up listener to track updates
+    let update_count = Arc::new(AtomicUsize::new(0));
+    let update_count_clone = update_count.clone();
+    query.subscribe(Box::new(move |_deltas| {
+        update_count_clone.fetch_add(1, Ordering::SeqCst);
+    }));
+
+    // Now add data incrementally (like fake data generation)
+
+    // Step 1: Add Labels
+    let label_bug = db.insert_with("Labels", |b| b
+        .set_string_by_name("name", "Bug")
+        .set_string_by_name("color", "#ff0000")
+        .build()).unwrap();
+    eprintln!("Created label: {:?}", label_bug);
+
+    // Step 2: Add Issue
+    let issue_id = db.insert_with("Issues", |b| b
+        .set_string_by_name("title", "Test Issue")
+        .build()).unwrap();
+    eprintln!("Created issue: {:?}", issue_id);
+
+    // After adding Issue, query should have 1 row with empty IssueLabels array
+    let rows = query.rows();
+    assert_eq!(rows.len(), 1, "Should have 1 issue");
+    eprintln!("After adding issue, rows: {:?}", rows.len());
+
+    // Step 3: Add IssueLabel (junction table with FK to Labels)
+    db.insert_with("IssueLabels", |b| b
+        .set_ref_by_name("issue", issue_id)
+        .set_ref_by_name("label", label_bug)
+        .build()).unwrap();
+    eprintln!("Created issue label link");
+
+    // Now query should have 1 issue with 1 IssueLabel that has resolved label
+    let rows = query.rows();
+    assert_eq!(rows.len(), 1, "Should still have 1 issue");
+
+    eprintln!("\n=== Final row inspection ===");
+    eprintln!("Row columns (len={}):", rows[0].1.descriptor.columns.len());
+    for col in &rows[0].1.descriptor.columns {
+        eprintln!("  {}: {:?} = {:?}", col.name, col.ty, rows[0].1.get_by_name(&col.name));
+    }
+
+    // Check array has items with resolved label
+    let labels = rows[0].1.get_by_name("IssueLabels");
+    eprintln!("\nIssueLabels value: {:?}", labels);
+
+    // This is the key assertion - the array item should have resolved Labels data
+    if let Some(RowValue::Array(arr)) = labels {
+        assert_eq!(arr.len(), 1, "Should have 1 IssueLabel item");
+
+        // The item should have a nested "label" field with the Labels row
+        let item = arr.get(0).expect("Should have item at index 0");
+        eprintln!("IssueLabel item descriptor: {:?}", item.descriptor.columns.iter().map(|c| &c.name).collect::<Vec<_>>());
+
+        let label_field = item.get_by_name("label");
+        eprintln!("label field: {:?}", label_field);
+
+        // Should be an array containing the Labels row (since we use ARRAY for nested objects)
+        match label_field {
+            Some(RowValue::Array(nested)) => {
+                assert_eq!(nested.len(), 1, "Should have 1 nested Label row");
+                let label_row = nested.get(0).expect("Should have nested Label row");
+                let name = label_row.get_by_name("name");
+                assert_eq!(name, Some(RowValue::String("Bug")),
+                    "Label name should be 'Bug', got: {:?}", name);
+            }
+            other => {
+                panic!("Expected label to be Array with resolved Labels row, got: {:?}", other);
+            }
+        }
+    } else {
+        panic!("Expected IssueLabels to be an array, got: {:?}", labels);
+    }
+
+    eprintln!("\nTest passed! Update count: {}", update_count.load(Ordering::SeqCst));
+}
+
+/// Test incremental updates matching exact demo app pattern:
+/// Outer JOIN + multiple ARRAY subqueries with inner JOINs.
+/// Query subscription is created BEFORE any data exists.
+#[test]
+fn incremental_query_outer_join_plus_array_inner_joins_empty_start() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let db = Database::in_memory();
+
+    // Create all tables matching demo app schema (empty)
+    let projects_schema = TableSchema::new(
+        "Projects",
+        vec![
+            ColumnDef::required("name", ColumnType::String),
+            ColumnDef::required("color", ColumnType::String),
+        ],
+    );
+    db.create_table(projects_schema.clone()).unwrap();
+
+    let labels_schema = TableSchema::new(
+        "Labels",
+        vec![
+            ColumnDef::required("name", ColumnType::String),
+            ColumnDef::required("color", ColumnType::String),
+        ],
+    );
+    db.create_table(labels_schema.clone()).unwrap();
+
+    let users_schema = TableSchema::new(
+        "Users",
+        vec![
+            ColumnDef::required("name", ColumnType::String),
+        ],
+    );
+    db.create_table(users_schema.clone()).unwrap();
+
+    let issues_schema = TableSchema::new(
+        "Issues",
+        vec![
+            ColumnDef::required("title", ColumnType::String),
+            ColumnDef::required("project", ColumnType::Ref("Projects".into())),
+        ],
+    );
+    db.create_table(issues_schema.clone()).unwrap();
+
+    let issue_labels_schema = TableSchema::new(
+        "IssueLabels",
+        vec![
+            ColumnDef::required("issue", ColumnType::Ref("Issues".into())),
+            ColumnDef::required("label", ColumnType::Ref("Labels".into())),
+        ],
+    );
+    db.create_table(issue_labels_schema.clone()).unwrap();
+
+    let issue_assignees_schema = TableSchema::new(
+        "IssueAssignees",
+        vec![
+            ColumnDef::required("issue", ColumnType::Ref("Issues".into())),
+            ColumnDef::required("user", ColumnType::Ref("Users".into())),
+        ],
+    );
+    db.create_table(issue_assignees_schema.clone()).unwrap();
+
+    // Create query BEFORE any data exists (simulates browser subscription)
+    let sql = "SELECT i.id, i.title, i.project, Projects as project, \
+               ARRAY(SELECT il.id, il.issue, Labels as label FROM IssueLabels il JOIN Labels ON il.label = Labels.id WHERE il.issue = i.id) as IssueLabels, \
+               ARRAY(SELECT ia.id, ia.issue, Users as user FROM IssueAssignees ia JOIN Users ON ia.user = Users.id WHERE ia.issue = i.id) as IssueAssignees \
+               FROM Issues i JOIN Projects ON i.project = Projects.id";
+
+    eprintln!("SQL: {}", sql);
+    let query = db.incremental_query(sql).expect("should create incremental query");
+
+    // Initially should be empty
+    let rows = query.rows();
+    assert_eq!(rows.len(), 0, "Should start with 0 rows");
+
+    // Set up listener to track updates
+    let update_count = Arc::new(AtomicUsize::new(0));
+    let update_count_clone = update_count.clone();
+    query.subscribe(Box::new(move |_deltas| {
+        update_count_clone.fetch_add(1, Ordering::SeqCst);
+    }));
+
+    // Now add data incrementally (matching fake data generation order)
+
+    // Step 1: Add Users (joined table inside IssueAssignees)
+    let user_alice = db.insert_with("Users", |b| b
+        .set_string_by_name("name", "Alice")
+        .build()).unwrap();
+    eprintln!("Created user: {:?}", user_alice);
+
+    // Step 2: Add Projects (outer JOIN table)
+    let project_id = db.insert_with("Projects", |b| b
+        .set_string_by_name("name", "Test Project")
+        .set_string_by_name("color", "#00ff00")
+        .build()).unwrap();
+    eprintln!("Created project: {:?}", project_id);
+
+    // Step 3: Add Labels (joined table inside IssueLabels)
+    let label_bug = db.insert_with("Labels", |b| b
+        .set_string_by_name("name", "Bug")
+        .set_string_by_name("color", "#ff0000")
+        .build()).unwrap();
+    eprintln!("Created label: {:?}", label_bug);
+
+    // Step 4: Add Issue (with FK to Projects - this should trigger outer JOIN)
+    let issue_id = db.insert_with("Issues", |b| b
+        .set_string_by_name("title", "Test Issue")
+        .set_ref_by_name("project", project_id)
+        .build()).unwrap();
+    eprintln!("Created issue: {:?}", issue_id);
+
+    // After adding Issue, query should have 1 row (outer JOIN satisfied)
+    let rows = query.rows();
+    eprintln!("After adding issue, rows: {:?}", rows.len());
+    assert_eq!(rows.len(), 1, "Should have 1 issue after adding issue with project");
+
+    // Step 5: Add IssueLabels (junction table with FK to Labels)
+    db.insert_with("IssueLabels", |b| b
+        .set_ref_by_name("issue", issue_id)
+        .set_ref_by_name("label", label_bug)
+        .build()).unwrap();
+    eprintln!("Created issue label link");
+
+    // Step 6: Add IssueAssignees (junction table with FK to Users)
+    db.insert_with("IssueAssignees", |b| b
+        .set_ref_by_name("issue", issue_id)
+        .set_ref_by_name("user", user_alice)
+        .build()).unwrap();
+    eprintln!("Created issue assignee link");
+
+    // Now query should have 1 issue with resolved data
+    let rows = query.rows();
+    assert_eq!(rows.len(), 1, "Should still have 1 issue");
+
+    eprintln!("\n=== Final row inspection ===");
+    eprintln!("Row columns (len={}):", rows[0].1.descriptor.columns.len());
+    for col in &rows[0].1.descriptor.columns {
+        eprintln!("  {}: {:?}", col.name, col.ty);
+    }
+
+    // Check project (outer JOIN) - column is qualified as "Projects.name" because of JOIN
+    let project_name = rows[0].1.get_by_name("Projects.name");
+    eprintln!("\nProjects.name value: {:?}", project_name);
+    assert_eq!(project_name, Some(RowValue::String("Test Project")),
+        "Project name should be 'Test Project', got: {:?}", project_name);
+
+    // Check IssueLabels array with resolved Labels
+    let labels = rows[0].1.get_by_name("IssueLabels");
+    eprintln!("\nIssueLabels value: {:?}", labels);
+    if let Some(RowValue::Array(arr)) = labels {
+        assert_eq!(arr.len(), 1, "Should have 1 IssueLabel item");
+
+        let item = arr.get(0).expect("Should have item at index 0");
+        eprintln!("IssueLabel item columns: {:?}", item.descriptor.columns.iter().map(|c| &c.name).collect::<Vec<_>>());
+
+        let label_field = item.get_by_name("label");
+        eprintln!("label field: {:?}", label_field);
+
+        if let Some(RowValue::Array(nested)) = label_field {
+            assert_eq!(nested.len(), 1, "Should have 1 nested Label row");
+            let label_row = nested.get(0).expect("Should have nested Label row");
+            let name = label_row.get_by_name("name");
+            assert_eq!(name, Some(RowValue::String("Bug")),
+                "Label name should be 'Bug', got: {:?}", name);
+        } else {
+            panic!("Expected label to be Array with resolved Labels row, got: {:?}", label_field);
+        }
+    } else {
+        panic!("Expected IssueLabels to be an array, got: {:?}", labels);
+    }
+
+    // Check IssueAssignees array with resolved Users
+    let assignees = rows[0].1.get_by_name("IssueAssignees");
+    eprintln!("\nIssueAssignees value: {:?}", assignees);
+    if let Some(RowValue::Array(arr)) = assignees {
+        assert_eq!(arr.len(), 1, "Should have 1 IssueAssignee item");
+
+        let item = arr.get(0).expect("Should have item at index 0");
+        eprintln!("IssueAssignee item columns: {:?}", item.descriptor.columns.iter().map(|c| &c.name).collect::<Vec<_>>());
+
+        let user_field = item.get_by_name("user");
+        eprintln!("user field: {:?}", user_field);
+
+        if let Some(RowValue::Array(nested)) = user_field {
+            assert_eq!(nested.len(), 1, "Should have 1 nested User row");
+            let user_row = nested.get(0).expect("Should have nested User row");
+            let name = user_row.get_by_name("name");
+            assert_eq!(name, Some(RowValue::String("Alice")),
+                "User name should be 'Alice', got: {:?}", name);
+        } else {
+            panic!("Expected user to be Array with resolved Users row, got: {:?}", user_field);
+        }
+    } else {
+        panic!("Expected IssueAssignees to be an array, got: {:?}", assignees);
+    }
+
+    eprintln!("\nTest passed! Update count: {}", update_count.load(Ordering::SeqCst));
 }
 
 /// Test that filter JOIN + ARRAY subqueries work together.
