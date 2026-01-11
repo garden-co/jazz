@@ -9,8 +9,8 @@ export const DELTA_ADDED = 1;
 export const DELTA_UPDATED = 2;
 export const DELTA_REMOVED = 3;
 
-// Crockford Base32 alphabet (matches Rust ObjectId encoding)
-const CROCKFORD_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+// Crockford Base32 alphabet (matches Rust ObjectId encoding - lowercase)
+const CROCKFORD_ALPHABET = '0123456789abcdefghjkmnpqrstvwxyz';
 
 /**
  * Convert a 16-byte binary ObjectId to Base32 string.
