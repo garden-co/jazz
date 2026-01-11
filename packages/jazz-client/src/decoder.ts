@@ -612,8 +612,6 @@ function decodeRowBuffer(
   // Total variable column count includes regular variable columns AND array columns
   const totalVarCount = layout.variableColumns.length + layout.arrayColumns.length;
 
-  // Debug: log once for Issues table
-
   // Track which table each column belongs to for building nested objects
   const mainTableColumns: Array<{ name: string; value: unknown }> = [];
   const joinedTableColumns: Map<string, Array<{ name: string; value: unknown }>> = new Map();
