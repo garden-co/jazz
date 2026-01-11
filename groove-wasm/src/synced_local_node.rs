@@ -628,15 +628,28 @@ fn handle_sse_event(state: &Rc<RefCell<SyncedState>>, event: &SseEvent) {
             let node = state_ref.db.node();
             node.apply_commits(*object_id, "main", commits.clone());
 
-            // If we received object metadata with a descriptor, register the row
+            // If we received object metadata with a table name, register the row
             if let Some(meta) = object_meta {
-                if let Some(descriptor_str) = meta.get("descriptor") {
+                if let Some(table_name) = meta.get("table") {
                     web_sys::console::log_1(&JsValue::from_str(&format!(
-                        "Row {} belongs to descriptor {}",
+                        "Row {} belongs to table {}",
+                        object_id, table_name
+                    )));
+
+                    // Register the synced row with the database using table name
+                    if let Err(e) = state_ref.db.register_synced_row_by_table(*object_id, table_name) {
+                        web_sys::console::log_1(&JsValue::from_str(&format!(
+                            "Failed to register synced row: {:?}",
+                            e
+                        )));
+                    }
+                } else if let Some(descriptor_str) = meta.get("descriptor") {
+                    // Legacy fallback: use descriptor ID lookup
+                    web_sys::console::log_1(&JsValue::from_str(&format!(
+                        "Row {} belongs to descriptor {} (legacy)",
                         object_id, descriptor_str
                     )));
 
-                    // Register the synced row with the database
                     if let Err(e) = state_ref.db.register_synced_row(*object_id, descriptor_str) {
                         web_sys::console::log_1(&JsValue::from_str(&format!(
                             "Failed to register synced row: {:?}",

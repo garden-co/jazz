@@ -2027,6 +2027,17 @@ impl Database {
                 .node
                 .create_object(&format!("row:{}:{}", table, generate_object_id()));
 
+        // Set object metadata with table name for sync purposes
+        {
+            let mut meta = std::collections::BTreeMap::new();
+            meta.insert("table".to_string(), table.to_string());
+            if let Some(obj) = self.state.node.get_object(row_id) {
+                if let Ok(mut obj_write) = obj.write() {
+                    obj_write.set_meta(meta);
+                }
+            }
+        }
+
         // Inject the id into the row buffer at column 0
         let row_with_id = row.with_id(row_id);
 
@@ -2219,6 +2230,56 @@ impl Database {
             self.state
                 .graph_registry
                 .notify_row_change(&table_name, delta, &*self.state);
+        }
+
+        Ok(())
+    }
+
+    /// Register a row received via sync, using the table name directly.
+    ///
+    /// This is the preferred method for sync registration as it doesn't require
+    /// descriptor IDs to match between clients. The table name is sent in object
+    /// metadata when rows are pushed.
+    pub fn register_synced_row_by_table(
+        &self,
+        row_id: ObjectId,
+        table_name: &str,
+    ) -> Result<(), DatabaseError> {
+        // Verify table exists locally
+        if self.get_table(table_name).is_none() {
+            return Err(DatabaseError::TableNotFound(table_name.to_string()));
+        }
+
+        // Add to row_table mapping
+        self.state
+            .row_table
+            .write()
+            .unwrap()
+            .insert(row_id, table_name.to_string());
+
+        // Add to table_rows object
+        let mut table_rows = self.read_table_rows(table_name)?;
+        let is_new = !table_rows.contains(row_id);
+        if is_new {
+            table_rows.add(row_id);
+            self.write_table_rows(table_name, &table_rows)?;
+        }
+
+        // Notify query graphs about the row change
+        // For new rows: Added, for existing rows: Updated
+        if let Some((_, row)) = self.get_row(table_name, row_id) {
+            let delta = if is_new {
+                RowDelta::Added { id: row_id, row }
+            } else {
+                RowDelta::Updated {
+                    id: row_id,
+                    row,
+                    prior: PriorState::empty(), // No prior state available from sync
+                }
+            };
+            self.state
+                .graph_registry
+                .notify_row_change(table_name, delta, &*self.state);
         }
 
         Ok(())
