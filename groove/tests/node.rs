@@ -1,6 +1,6 @@
 //! Integration tests for LocalNode.
 
-use groove::{generate_object_id, LocalNode, ObjectId};
+use groove::{LocalNode, ObjectId, generate_object_id};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -111,16 +111,14 @@ fn write_notifies_listener() {
     assert_eq!(*tip_counts.read().unwrap(), vec![0]); // empty initially
 
     // Write through node (auto-notifies)
-    node.write(id, "main", b"hello", "alice", 1000)
-        .unwrap();
+    node.write(id, "main", b"hello", "alice", 1000).unwrap();
 
     // Callback should be called synchronously
     assert_eq!(call_count.load(Ordering::SeqCst), 2);
     assert_eq!(*tip_counts.read().unwrap(), vec![0, 1]); // now has 1 tip
 
     // Write again
-    node.write(id, "main", b"world", "alice", 2000)
-        .unwrap();
+    node.write(id, "main", b"world", "alice", 2000).unwrap();
 
     assert_eq!(call_count.load(Ordering::SeqCst), 3);
     assert_eq!(*tip_counts.read().unwrap(), vec![0, 1, 1]); // still 1 tip
@@ -132,9 +130,7 @@ fn write_without_subscriber() {
     let id = node.create_object("test");
 
     // Write without subscribing - should not error
-    let commit_id = node
-        .write(id, "main", b"hello", "alice", 1000)
-        .unwrap();
+    let commit_id = node.write(id, "main", b"hello", "alice", 1000).unwrap();
 
     // Now subscribe and verify content in callback
     let received_tips = Arc::new(RwLock::new(Vec::new()));
@@ -229,8 +225,7 @@ fn multiple_subscribers_all_notified() {
     assert_eq!(count2.load(Ordering::SeqCst), 1);
 
     // Write
-    node.write(id, "main", b"hello", "alice", 1000)
-        .unwrap();
+    node.write(id, "main", b"hello", "alice", 1000).unwrap();
 
     // Both should be notified
     assert_eq!(count1.load(Ordering::SeqCst), 2);
@@ -269,16 +264,14 @@ fn unsubscribe_stops_notifications() {
 
     assert_eq!(call_count.load(Ordering::SeqCst), 1); // initial
 
-    node.write(id, "main", b"hello", "alice", 1000)
-        .unwrap();
+    node.write(id, "main", b"hello", "alice", 1000).unwrap();
     assert_eq!(call_count.load(Ordering::SeqCst), 2);
 
     // Unsubscribe
     assert!(node.unsubscribe(id, "main", listener_id));
 
     // Write again - should not notify
-    node.write(id, "main", b"world", "alice", 2000)
-        .unwrap();
+    node.write(id, "main", b"world", "alice", 2000).unwrap();
     assert_eq!(call_count.load(Ordering::SeqCst), 2); // still 2
 }
 

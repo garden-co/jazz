@@ -56,8 +56,8 @@ impl Default for SyncConfig {
             write_debounce_ms: 100,
             max_batch_size: 100,
             max_batch_age_ms: 1000,
-            session_timeout_ms: 60_000,       // 1 minute
-            heartbeat_interval_ms: 30_000,    // 30 seconds
+            session_timeout_ms: 60_000,    // 1 minute
+            heartbeat_interval_ms: 30_000, // 30 seconds
             reconnect: ReconnectConfig::default(),
         }
     }
@@ -166,8 +166,13 @@ impl<E: ClientEnv> UpstreamServer<E> {
         &mut self,
         query: String,
         options: SubscriptionOptions,
-    ) -> Result<(u32, futures::stream::BoxStream<'static, Result<SseEvent, ClientError>>), ClientError>
-    {
+    ) -> Result<
+        (
+            u32,
+            futures::stream::BoxStream<'static, Result<SseEvent, ClientError>>,
+        ),
+        ClientError,
+    > {
         let sub_id = self.next_subscription_id();
         let request = SubscribeRequest {
             query: query.clone(),
@@ -629,7 +634,10 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     #[cfg(feature = "sync-server")]
     /// Remove a client session.
     pub fn remove_client(&self, session_id: SessionId) {
-        self.connected_clients.write().unwrap().remove_session(session_id);
+        self.connected_clients
+            .write()
+            .unwrap()
+            .remove_session(session_id);
     }
 
     // ========== Write Buffer API ==========
@@ -641,10 +649,10 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
 
     /// Get objects ready to push.
     pub fn ready_to_push(&self) -> Vec<ObjectId> {
-        self.write_buffer.read().unwrap().ready_to_push(
-            self.config.write_debounce_ms,
-            self.config.max_batch_age_ms,
-        )
+        self.write_buffer
+            .read()
+            .unwrap()
+            .ready_to_push(self.config.write_debounce_ms, self.config.max_batch_age_ms)
     }
 
     /// Mark an object as pushed (remove from buffer).
@@ -702,7 +710,12 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
     #[cfg(feature = "sync-server")]
     /// Update last activity for a session (call on any client interaction).
     pub fn touch_session(&self, session_id: SessionId) {
-        if let Some(session) = self.connected_clients.write().unwrap().get_session_mut(&session_id) {
+        if let Some(session) = self
+            .connected_clients
+            .write()
+            .unwrap()
+            .get_session_mut(&session_id)
+        {
             session.touch();
         }
     }

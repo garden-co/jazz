@@ -88,7 +88,11 @@ impl std::fmt::Debug for ObjectState {
 
 impl ObjectState {
     /// Create a new state with no previous tips.
-    pub fn new(tips: Vec<CommitId>, branch: Arc<RwLock<Branch>>, env: Arc<dyn Environment>) -> Self {
+    pub fn new(
+        tips: Vec<CommitId>,
+        branch: Arc<RwLock<Branch>>,
+        env: Arc<dyn Environment>,
+    ) -> Self {
         ObjectState {
             previous_tips: None,
             tips,
@@ -138,13 +142,19 @@ impl ObjectState {
     }
 
     /// Compute merged content using a merge strategy.
-    pub fn merge(&self, strategy: &dyn crate::merge::MergeStrategy) -> Result<Bytes, ListenerError> {
+    pub fn merge(
+        &self,
+        strategy: &dyn crate::merge::MergeStrategy,
+    ) -> Result<Bytes, ListenerError> {
         let branch = self.branch.read().unwrap();
         merge_commit_ids(&self.tips, strategy, &branch)
     }
 
     /// Compute byte-level diff between previous and current merged content.
-    pub fn diff(&self, strategy: &dyn crate::merge::MergeStrategy) -> Result<ByteDiff, ListenerError> {
+    pub fn diff(
+        &self,
+        strategy: &dyn crate::merge::MergeStrategy,
+    ) -> Result<ByteDiff, ListenerError> {
         let branch = self.branch.read().unwrap();
         let current = merge_commit_ids(&self.tips, strategy, &branch)?;
 
@@ -176,7 +186,9 @@ impl ObjectState {
             return ByteDiff::Initial(Bytes::new());
         }
 
-        let current = self.tips.first()
+        let current = self
+            .tips
+            .first()
             .and_then(|id| branch.get_commit(id))
             .map(|c| Bytes::copy_from_slice(&c.content))
             .unwrap_or_else(Bytes::new);
@@ -187,7 +199,8 @@ impl ObjectState {
                 if prev_tips.is_empty() {
                     return ByteDiff::Initial(current);
                 }
-                let previous = prev_tips.first()
+                let previous = prev_tips
+                    .first()
                     .and_then(|id| branch.get_commit(id))
                     .map(|c| Bytes::copy_from_slice(&c.content))
                     .unwrap_or_else(Bytes::new);
@@ -208,7 +221,8 @@ impl ObjectState {
     /// Get the content of a specific tip by commit ID.
     pub fn get_tip_content(&self, commit_id: &CommitId) -> Option<Bytes> {
         let branch = self.branch.read().unwrap();
-        branch.get_commit(commit_id)
+        branch
+            .get_commit(commit_id)
             .map(|c| Bytes::copy_from_slice(&c.content))
     }
 
@@ -226,7 +240,8 @@ impl ObjectState {
 
     /// Load content for all current tips.
     pub fn load_all_tips(&self) -> Vec<(CommitId, Bytes)> {
-        self.tips.iter()
+        self.tips
+            .iter()
             .filter_map(|tip| self.get_tip_content(tip).map(|content| (*tip, content)))
             .collect()
     }
@@ -349,7 +364,12 @@ impl ObjectListenerState {
         let prev = self.previous_tips.take();
         self.previous_tips = Some(tips.clone());
 
-        let state = Arc::new(ObjectState::with_previous(prev, tips, branch, self.env.clone()));
+        let state = Arc::new(ObjectState::with_previous(
+            prev,
+            tips,
+            branch,
+            self.env.clone(),
+        ));
         self.current = Some(state.clone());
 
         // Notify all listeners synchronously
@@ -419,7 +439,9 @@ impl ObjectListenerRegistry {
         };
 
         let mut states = self.states.write().unwrap();
-        let state = states.entry(key).or_insert_with(|| ObjectListenerState::new(env));
+        let state = states
+            .entry(key)
+            .or_insert_with(|| ObjectListenerState::new(env));
         state.add_listener(id, callback);
         id
     }
@@ -436,11 +458,18 @@ impl ObjectListenerRegistry {
         branch: Arc<RwLock<Branch>>,
     ) {
         let mut states = self.states.write().unwrap();
-        let state = states.entry(key.clone()).or_insert_with(|| ObjectListenerState::new(env));
+        let state = states
+            .entry(key.clone())
+            .or_insert_with(|| ObjectListenerState::new(env));
         if state.current.is_none() {
             // Set initial state without notifying (there are no listeners yet)
             state.previous_tips = Some(tips.clone());
-            state.current = Some(Arc::new(ObjectState::with_previous(None, tips, branch, state.env.clone())));
+            state.current = Some(Arc::new(ObjectState::with_previous(
+                None,
+                tips,
+                branch,
+                state.env.clone(),
+            )));
         }
     }
 

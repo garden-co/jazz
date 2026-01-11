@@ -3,7 +3,14 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**", ".next/**", ".source/**", "*.wasm", "*.js", "*.d.ts"],
+      "outputs": [
+        "dist/**",
+        ".next/**",
+        ".source/**",
+        "*.wasm",
+        "*.js",
+        "*.d.ts"
+      ],
       "cache": true
     },
     "typecheck": {

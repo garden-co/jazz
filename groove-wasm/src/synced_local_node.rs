@@ -22,12 +22,12 @@ use js_sys::{Array, Function, Promise, Uint8Array};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 
-use groove::sql::{encode_rows, Database, ExecuteResult};
-use groove::sync::{
-    commits_to_send, ClientEnv, ClientEnvConfig, PushRequest, SseEvent, SubscribeRequest,
-    SubscriptionOptions,
-};
 use groove::ObjectId;
+use groove::sql::{Database, ExecuteResult, encode_rows};
+use groove::sync::{
+    ClientEnv, ClientEnvConfig, PushRequest, SseEvent, SubscribeRequest, SubscriptionOptions,
+    commits_to_send,
+};
 
 use crate::indexeddb::IndexedDbEnvironment;
 use crate::sync::WasmClientEnv;
@@ -268,7 +268,9 @@ impl WasmSyncedLocalNode {
                             }
                         }
 
-                        state_clone.borrow_mut().set_sync_state(SyncState::Disconnected);
+                        state_clone
+                            .borrow_mut()
+                            .set_sync_state(SyncState::Disconnected);
                     });
 
                     Ok(JsValue::TRUE)
@@ -293,13 +295,11 @@ impl WasmSyncedLocalNode {
         match state.db.execute(sql) {
             Ok(result) => {
                 let js_result = match result {
-                    ExecuteResult::Created(_) => {
-                        serde_wasm_bindgen::to_value(&"created").unwrap()
-                    }
-                    ExecuteResult::PolicyCreated { table, action } => {
-                        serde_wasm_bindgen::to_value(&format!("policy_created:{}:{}", table, action))
-                            .unwrap()
-                    }
+                    ExecuteResult::Created(_) => serde_wasm_bindgen::to_value(&"created").unwrap(),
+                    ExecuteResult::PolicyCreated { table, action } => serde_wasm_bindgen::to_value(
+                        &format!("policy_created:{}:{}", table, action),
+                    )
+                    .unwrap(),
                     ExecuteResult::Inserted { row_id, .. } => {
                         // Track only the row object for sync (table_rows is private per-node)
                         state.pending_objects.insert(row_id);
@@ -348,7 +348,11 @@ impl WasmSyncedLocalNode {
     #[wasm_bindgen(js_name = initSchema)]
     pub fn init_schema(&self, schema: &str) -> Result<(), JsValue> {
         let state = self.state.borrow();
-        for stmt in schema.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        for stmt in schema
+            .split(';')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
             state
                 .db
                 .execute(stmt)
@@ -359,15 +363,25 @@ impl WasmSyncedLocalNode {
 
     /// Update a specific row's column with a string value.
     #[wasm_bindgen(js_name = updateRow)]
-    pub fn update_row(&self, table: &str, row_id: &str, column: &str, value: &str) -> Result<bool, JsValue> {
-        let id: groove::ObjectId = row_id.parse()
+    pub fn update_row(
+        &self,
+        table: &str,
+        row_id: &str,
+        column: &str,
+        value: &str,
+    ) -> Result<bool, JsValue> {
+        let id: groove::ObjectId = row_id
+            .parse()
             .map_err(|e| JsValue::from_str(&format!("invalid row_id: {:?}", e)))?;
         let value_owned = value.to_string();
         let column_owned = column.to_string();
         let mut state = self.state.borrow_mut();
-        let result = state.db
+        let result = state
+            .db
             .update_with(table, id, |builder| {
-                builder.set_string_by_name(&column_owned, &value_owned).build()
+                builder
+                    .set_string_by_name(&column_owned, &value_owned)
+                    .build()
             })
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
@@ -384,12 +398,20 @@ impl WasmSyncedLocalNode {
 
     /// Update a specific row's column with an i64 value.
     #[wasm_bindgen(js_name = updateRowI64)]
-    pub fn update_row_i64(&self, table: &str, row_id: &str, column: &str, value: i64) -> Result<bool, JsValue> {
-        let id: groove::ObjectId = row_id.parse()
+    pub fn update_row_i64(
+        &self,
+        table: &str,
+        row_id: &str,
+        column: &str,
+        value: i64,
+    ) -> Result<bool, JsValue> {
+        let id: groove::ObjectId = row_id
+            .parse()
             .map_err(|e| JsValue::from_str(&format!("invalid row_id: {:?}", e)))?;
         let column_owned = column.to_string();
         let mut state = self.state.borrow_mut();
-        let result = state.db
+        let result = state
+            .db
             .update_with(table, id, |builder| {
                 builder.set_i64_by_name(&column_owned, value).build()
             })
@@ -469,7 +491,8 @@ impl WasmSyncedLocalNode {
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
         // Shared state for accumulating rows
-        let rows_map: Rc<RefCell<HashMap<ObjectId, JsValue>>> = Rc::new(RefCell::new(HashMap::new()));
+        let rows_map: Rc<RefCell<HashMap<ObjectId, JsValue>>> =
+            Rc::new(RefCell::new(HashMap::new()));
 
         let rust_callback = {
             let rows_map = Rc::clone(&rows_map);
@@ -528,9 +551,7 @@ impl WasmSyncedLocalNode {
                                     groove::sql::row_buffer::RowValue::Array(_) => {
                                         JsValue::from_str("[array]")
                                     }
-                                    groove::sql::row_buffer::RowValue::Null => {
-                                        JsValue::NULL
-                                    }
+                                    groove::sql::row_buffer::RowValue::Null => JsValue::NULL,
                                 }
                             } else {
                                 JsValue::NULL
@@ -567,7 +588,6 @@ impl WasmSyncedLocalNode {
             listener_id,
         })
     }
-
 }
 
 // ============================================================================
@@ -637,7 +657,10 @@ fn handle_sse_event(state: &Rc<RefCell<SyncedState>>, event: &SseEvent) {
                     )));
 
                     // Register the synced row with the database using table name
-                    if let Err(e) = state_ref.db.register_synced_row_by_table(*object_id, table_name) {
+                    if let Err(e) = state_ref
+                        .db
+                        .register_synced_row_by_table(*object_id, table_name)
+                    {
                         web_sys::console::log_1(&JsValue::from_str(&format!(
                             "Failed to register synced row: {:?}",
                             e
@@ -698,7 +721,9 @@ fn handle_sse_event(state: &Rc<RefCell<SyncedState>>, event: &SseEvent) {
             )));
         }
         SseEvent::Error { code, message } => {
-            state.borrow().report_error(&format!("SSE error {}: {}", code, message));
+            state
+                .borrow()
+                .report_error(&format!("SSE error {}: {}", code, message));
         }
     }
 }
@@ -806,7 +831,9 @@ async fn push_pending_objects(state: &Rc<RefCell<SyncedState>>) {
                 }
             }
             Err(e) => {
-                state.borrow().report_error(&format!("Push failed: {}", e.message));
+                state
+                    .borrow()
+                    .report_error(&format!("Push failed: {}", e.message));
             }
         }
     }

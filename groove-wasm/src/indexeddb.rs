@@ -149,16 +149,22 @@ impl IndexedDbEnvironment {
 
         rx.await
             .map_err(|_| JsValue::from_str("channel closed"))?
-            .map_err(|_| request.error().unwrap_or_else(|_| None).map_or_else(
-                || JsValue::from_str("unknown IDB error"),
-                |e| e.into(),
-            ))?;
+            .map_err(|_| {
+                request
+                    .error()
+                    .unwrap_or_else(|_| None)
+                    .map_or_else(|| JsValue::from_str("unknown IDB error"), |e| e.into())
+            })?;
 
         request.result()
     }
 
     /// Start a transaction on the given stores.
-    fn transaction(&self, stores: &[&str], mode: IdbTransactionMode) -> Result<IdbTransaction, JsValue> {
+    fn transaction(
+        &self,
+        stores: &[&str],
+        mode: IdbTransactionMode,
+    ) -> Result<IdbTransaction, JsValue> {
         let db = self.db();
         let store_names = Array::new();
         for store in stores {
@@ -301,14 +307,12 @@ fn base64_encode(data: &[u8]) -> String {
 
 fn base64_decode(s: &str) -> Option<Vec<u8>> {
     const DECODE: [i8; 128] = [
-        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 62, -1, -1, -1, 63,
-        52, 53, 54, 55, 56, 57, 58, 59, 60, 61, -1, -1, -1, -1, -1, -1,
-        -1,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14,
-        15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, -1, -1, -1, -1, -1,
-        -1, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
-        41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 62, -1, -1,
+        -1, 63, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, -1, -1, -1, -1, -1, -1, -1, 0, 1, 2, 3, 4,
+        5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, -1, -1, -1,
+        -1, -1, -1, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45,
+        46, 47, 48, 49, 50, 51, -1, -1, -1, -1, -1,
     ];
 
     let s = s.trim_end_matches('=');
@@ -418,7 +422,10 @@ impl CommitStore for IndexedDbEnvironment {
         let bytes = serialize_commit(commit);
 
         let tx = self
-            .transaction(&[COMMITS_STORE, OBJECTS_STORE], IdbTransactionMode::Readwrite)
+            .transaction(
+                &[COMMITS_STORE, OBJECTS_STORE],
+                IdbTransactionMode::Readwrite,
+            )
             .expect("failed to start transaction");
 
         // Store commit
@@ -465,7 +472,10 @@ impl CommitStore for IndexedDbEnvironment {
 
     async fn set_frontier(&self, object_id: u128, branch: &str, frontier: &[CommitId]) {
         let tx = self
-            .transaction(&[FRONTIERS_STORE, OBJECTS_STORE], IdbTransactionMode::Readwrite)
+            .transaction(
+                &[FRONTIERS_STORE, OBJECTS_STORE],
+                IdbTransactionMode::Readwrite,
+            )
             .expect("failed to start transaction");
 
         // Store frontier

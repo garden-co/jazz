@@ -6,13 +6,16 @@ use crate::node::{LocalNode, generate_object_id};
 use crate::object::ObjectId;
 use crate::sql::catalog::{Catalog, TableDescriptor};
 use crate::sql::index::RefIndex;
-use crate::sql::parser::{self, Condition, ConditionValue, Join, Projection, Select, SelectExpr, Statement};
+use crate::sql::parser::{
+    self, Condition, ConditionValue, Join, Projection, Select, SelectExpr, Statement,
+};
 use crate::sql::policy::{
     Policy, PolicyAction, PolicyError, PolicyExpr, PolicyValue, TablePolicies,
 };
 use crate::sql::query_graph::registry::{GraphRegistry, OutputCallback};
 use crate::sql::query_graph::{
-    DeltaBatch, GraphId, JoinGraphBuilder, Predicate, PredicateValue, PriorState, QueryGraphBuilder, RowDelta,
+    DeltaBatch, GraphId, JoinGraphBuilder, Predicate, PredicateValue, PriorState,
+    QueryGraphBuilder, RowDelta,
 };
 use crate::sql::row::RowError;
 use crate::sql::row_buffer::{OwnedRow, RowBuilder, RowDescriptor, RowValue};
@@ -78,7 +81,9 @@ impl JoinedRow {
             if let Some(table_name) = table {
                 return self.get_row_id(table_name).map(PredicateValue::Ref);
             } else {
-                return self.get_row_id(&self.primary_table).map(PredicateValue::Ref);
+                return self
+                    .get_row_id(&self.primary_table)
+                    .map(PredicateValue::Ref);
             }
         }
 
@@ -193,12 +198,15 @@ impl JoinedRow {
             Projection::Columns(cols) => {
                 // Specific columns - need to build a new row with just those columns
                 // Build descriptor from the column names
-                let col_defs: Vec<(String, ColumnType, bool)> = cols.iter()
+                let col_defs: Vec<(String, ColumnType, bool)> = cols
+                    .iter()
                     .filter_map(|qc| {
                         // Find the column in the appropriate table
                         let table_name = qc.table.as_deref().unwrap_or(&self.primary_table);
                         self.tables.get(table_name).and_then(|(_, row)| {
-                            row.descriptor.column(&qc.column).map(|c| (qc.column.clone(), c.ty.clone(), c.nullable))
+                            row.descriptor
+                                .column(&qc.column)
+                                .map(|c| (qc.column.clone(), c.ty.clone(), c.nullable))
                         })
                     })
                     .collect();
@@ -580,19 +588,15 @@ impl DatabaseState {
             // Simple case: no JOINs
             let filtered: Vec<(ObjectId, OwnedRow)> = primary_rows
                 .into_iter()
-                .filter(|(_, row)| {
-                    Self::matches_where_simple_buffer(&select.where_clause, row)
-                })
+                .filter(|(_, row)| Self::matches_where_simple_buffer(&select.where_clause, row))
                 .collect();
 
             // Check if we need to evaluate expressions (for ARRAY subqueries)
             match &select.projection {
                 Projection::Expressions(exprs) => {
                     // Build output descriptor from projection expressions
-                    let output_descriptor = Arc::new(self.build_projection_descriptor(
-                        exprs,
-                        &primary_schema,
-                    ));
+                    let output_descriptor =
+                        Arc::new(self.build_projection_descriptor(exprs, &primary_schema));
 
                     // Evaluate each expression for each row - write directly to buffer
                     filtered
@@ -642,7 +646,11 @@ impl DatabaseState {
     }
 
     /// Apply LIMIT and OFFSET to a result set.
-    fn apply_limit_offset(rows: Vec<(ObjectId, OwnedRow)>, limit: Option<u64>, offset: Option<u64>) -> Vec<(ObjectId, OwnedRow)> {
+    fn apply_limit_offset(
+        rows: Vec<(ObjectId, OwnedRow)>,
+        limit: Option<u64>,
+        offset: Option<u64>,
+    ) -> Vec<(ObjectId, OwnedRow)> {
         let offset = offset.unwrap_or(0) as usize;
         let rows: Vec<(ObjectId, OwnedRow)> = rows.into_iter().skip(offset).collect();
         match limit {
@@ -739,18 +747,28 @@ impl DatabaseState {
                                 if let SelectExpr::Column(qc) = &exprs[0] {
                                     if qc.table.is_none() {
                                         let col_name = &qc.column;
-                                        if inner_alias == Some(col_name.as_str()) || col_name == inner_table {
-                                            return (name, ColumnType::Array(
-                                                Arc::new(RowDescriptor::from_table_schema(&inner_schema))
-                                            ), false);
+                                        if inner_alias == Some(col_name.as_str())
+                                            || col_name == inner_table
+                                        {
+                                            return (
+                                                name,
+                                                ColumnType::Array(Arc::new(
+                                                    RowDescriptor::from_table_schema(&inner_schema),
+                                                )),
+                                                false,
+                                            );
                                         }
                                     }
                                 }
                                 if let SelectExpr::TableRow(alias) = &exprs[0] {
                                     if inner_alias == Some(alias.as_str()) || alias == inner_table {
-                                        return (name, ColumnType::Array(
-                                            Arc::new(RowDescriptor::from_table_schema(&inner_schema))
-                                        ), false);
+                                        return (
+                                            name,
+                                            ColumnType::Array(Arc::new(
+                                                RowDescriptor::from_table_schema(&inner_schema),
+                                            )),
+                                            false,
+                                        );
                                     }
                                 }
                             }
@@ -759,19 +777,27 @@ impl DatabaseState {
                         }
                         Projection::Columns(cols) => {
                             // Build descriptor from specific columns
-                            let col_defs: Vec<(String, ColumnType, bool)> = cols.iter().filter_map(|qc| {
-                                inner_schema.columns.iter().find(|c| c.name == qc.column)
-                                    .map(|c| (qc.column.clone(), c.ty.clone(), c.nullable))
-                            }).collect();
+                            let col_defs: Vec<(String, ColumnType, bool)> = cols
+                                .iter()
+                                .filter_map(|qc| {
+                                    inner_schema
+                                        .columns
+                                        .iter()
+                                        .find(|c| c.name == qc.column)
+                                        .map(|c| (qc.column.clone(), c.ty.clone(), c.nullable))
+                                })
+                                .collect();
                             Arc::new(RowDescriptor::new_ordered(col_defs))
                         }
                     };
                     (name, ColumnType::Array(item_descriptor), false)
                 } else {
                     // Fallback: couldn't find inner table schema
-                    let item_descriptor = Arc::new(RowDescriptor::new_ordered(vec![
-                        ("value".to_string(), ColumnType::String, false)
-                    ]));
+                    let item_descriptor = Arc::new(RowDescriptor::new_ordered(vec![(
+                        "value".to_string(),
+                        ColumnType::String,
+                        false,
+                    )]));
                     (name, ColumnType::Array(item_descriptor), false)
                 }
             }
@@ -868,7 +894,11 @@ impl DatabaseState {
             SelectExpr::ArraySubquery(subquery) => {
                 // Execute subquery with outer row context - returns Vec<OwnedRow>
                 let rows = self.execute_array_subquery_buffer(
-                    subquery, outer_id, outer_row, outer_table, outer_alias,
+                    subquery,
+                    outer_id,
+                    outer_row,
+                    outer_table,
+                    outer_alias,
                 );
                 builder.set_array(col_idx, &rows)
             }
@@ -876,7 +906,13 @@ impl DatabaseState {
             SelectExpr::Aliased { expr, .. } => {
                 // Alias doesn't affect the value, just evaluate the inner expression
                 self.evaluate_expr_into_builder(
-                    expr, builder, col_idx, outer_id, outer_row, outer_table, outer_alias,
+                    expr,
+                    builder,
+                    col_idx,
+                    outer_id,
+                    outer_row,
+                    outer_table,
+                    outer_alias,
                 )
             }
         }
@@ -980,7 +1016,9 @@ impl DatabaseState {
                         if qc.column == "id" {
                             Some(("id".to_string(), ColumnType::Ref("".to_string()), false))
                         } else {
-                            inner_schema.columns.iter()
+                            inner_schema
+                                .columns
+                                .iter()
                                 .find(|c| c.name == qc.column)
                                 .map(|c| (c.name.clone(), c.ty.clone(), c.nullable))
                         }
@@ -1478,12 +1516,18 @@ impl Database {
     ///
     /// This is async because loading objects from Environment may involve reading from
     /// IndexedDB or other async storage backends.
-    pub async fn from_env(env: Arc<dyn Environment>, catalog_object_id: ObjectId) -> Result<Self, DatabaseError> {
+    pub async fn from_env(
+        env: Arc<dyn Environment>,
+        catalog_object_id: ObjectId,
+    ) -> Result<Self, DatabaseError> {
         let node = LocalNode::new(env);
 
         // Load catalog object from Environment
-        node.load_object(catalog_object_id, "catalog", "main").await
-            .ok_or_else(|| DatabaseError::Storage("catalog not found in environment".to_string()))?;
+        node.load_object(catalog_object_id, "catalog", "main")
+            .await
+            .ok_or_else(|| {
+                DatabaseError::Storage("catalog not found in environment".to_string())
+            })?;
 
         // Read catalog content
         let catalog_bytes = node
@@ -1506,9 +1550,13 @@ impl Database {
         // Restore each table from its descriptor
         for (table_name, descriptor_id) in &catalog.tables {
             // Load descriptor object from Environment
-            node.load_object(*descriptor_id, format!("descriptor:{}", table_name), "main").await
+            node.load_object(*descriptor_id, format!("descriptor:{}", table_name), "main")
+                .await
                 .ok_or_else(|| {
-                    DatabaseError::Storage(format!("descriptor for {} not found in env", table_name))
+                    DatabaseError::Storage(format!(
+                        "descriptor for {} not found in env",
+                        table_name
+                    ))
                 })?;
 
             // Read descriptor content
@@ -1523,14 +1571,29 @@ impl Database {
                 .map_err(|e| DatabaseError::Storage(format!("descriptor parse error: {}", e)))?;
 
             // Load schema object
-            node.load_object(descriptor.schema_object_id, format!("schema:{}", table_name), "main").await;
+            node.load_object(
+                descriptor.schema_object_id,
+                format!("schema:{}", table_name),
+                "main",
+            )
+            .await;
 
             // Load rows object
-            node.load_object(descriptor.rows_object_id, format!("rows:{}", table_name), "main").await;
+            node.load_object(
+                descriptor.rows_object_id,
+                format!("rows:{}", table_name),
+                "main",
+            )
+            .await;
 
             // Load index objects
             for (col_name, index_id) in &descriptor.index_object_ids {
-                node.load_object(*index_id, format!("index:{}:{}", table_name, col_name), "main").await;
+                node.load_object(
+                    *index_id,
+                    format!("index:{}:{}", table_name, col_name),
+                    "main",
+                )
+                .await;
                 let key = IndexKey::new(table_name, col_name);
                 index_objects.insert(key, *index_id);
             }
@@ -1552,11 +1615,13 @@ impl Database {
                 .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
             if let Some(bytes) = rows_bytes {
-                let table_rows = TableRows::from_bytes(&bytes)
-                    .map_err(|e| DatabaseError::Storage(format!("table_rows parse error: {}", e)))?;
+                let table_rows = TableRows::from_bytes(&bytes).map_err(|e| {
+                    DatabaseError::Storage(format!("table_rows parse error: {}", e))
+                })?;
                 for row_id in table_rows.iter() {
                     // Load row object
-                    node.load_object(row_id, format!("row:{}:{}", table_name, row_id), "main").await;
+                    node.load_object(row_id, format!("row:{}:{}", table_name, row_id), "main")
+                        .await;
                     row_table.insert(row_id, table_name.clone());
                 }
             }
@@ -1788,7 +1853,9 @@ impl Database {
         // Create table descriptor object with deterministic ID
         let descriptor_key = format!("descriptor:{}", schema.name);
         let descriptor_id = crate::ObjectId::from_key(&descriptor_key);
-        self.state.node.ensure_object(descriptor_id, &descriptor_key);
+        self.state
+            .node
+            .ensure_object(descriptor_id, &descriptor_key);
 
         let descriptor = TableDescriptor {
             schema: schema.clone(),
@@ -1933,10 +2000,7 @@ impl Database {
 
         // Update policies from current in-memory state
         let policies = self.state.policies.read().unwrap();
-        descriptor.policies = policies
-            .get(table_name)
-            .cloned()
-            .unwrap_or_default();
+        descriptor.policies = policies.get(table_name).cloned().unwrap_or_default();
 
         // Write updated descriptor
         self.state
@@ -1971,11 +2035,7 @@ impl Database {
     ///     .build();
     /// db.insert_row("users", row)?;
     /// ```
-    pub fn insert_row(
-        &self,
-        table: &str,
-        row: OwnedRow,
-    ) -> Result<ObjectId, DatabaseError> {
+    pub fn insert_row(&self, table: &str, row: OwnedRow) -> Result<ObjectId, DatabaseError> {
         let (row_id, _table_rows_id) = self.insert_row_returning_both(table, row)?;
         Ok(row_id)
     }
@@ -2043,7 +2103,13 @@ impl Database {
         // Store row data (including the id column)
         self.state
             .node
-            .write(row_id, "main", &row_with_id.buffer, "system", timestamp_now())
+            .write(
+                row_id,
+                "main",
+                &row_with_id.buffer,
+                "system",
+                timestamp_now(),
+            )
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         // Track row -> table mapping
@@ -2073,9 +2139,14 @@ impl Database {
         }
 
         // Notify query graphs of the change
-        self.state
-            .graph_registry
-            .notify_row_change(table, RowDelta::Added { id: row_id, row: row_with_id }, &*self.state);
+        self.state.graph_registry.notify_row_change(
+            table,
+            RowDelta::Added {
+                id: row_id,
+                row: row_with_id,
+            },
+            &*self.state,
+        );
 
         // Get the table rows object ID for sync purposes
         let table_rows_id = self
@@ -2141,7 +2212,11 @@ impl Database {
     }
 
     /// Get a row by ID in buffer format.
-    pub fn get(&self, table: &str, id: ObjectId) -> Result<Option<(ObjectId, OwnedRow)>, DatabaseError> {
+    pub fn get(
+        &self,
+        table: &str,
+        id: ObjectId,
+    ) -> Result<Option<(ObjectId, OwnedRow)>, DatabaseError> {
         let schema = self
             .get_table(table)
             .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
@@ -2182,9 +2257,9 @@ impl Database {
         descriptor_id_str: &str,
     ) -> Result<(), DatabaseError> {
         // Parse descriptor ID
-        let descriptor_id: ObjectId = descriptor_id_str
-            .parse()
-            .map_err(|_| DatabaseError::Storage(format!("Invalid descriptor ID: {}", descriptor_id_str)))?;
+        let descriptor_id: ObjectId = descriptor_id_str.parse().map_err(|_| {
+            DatabaseError::Storage(format!("Invalid descriptor ID: {}", descriptor_id_str))
+        })?;
 
         // Find the table name by looking up which table has this descriptor ID
         let table_name = {
@@ -2196,7 +2271,10 @@ impl Database {
         };
 
         let table_name = table_name.ok_or_else(|| {
-            DatabaseError::Storage(format!("Descriptor {} not found in local catalog", descriptor_id_str))
+            DatabaseError::Storage(format!(
+                "Descriptor {} not found in local catalog",
+                descriptor_id_str
+            ))
         })?;
 
         // Add to row_table mapping
@@ -2388,7 +2466,13 @@ impl Database {
         // Write updated row
         self.state
             .node
-            .write(id, "main", &new_row_with_id.buffer, "system", timestamp_now())
+            .write(
+                id,
+                "main",
+                &new_row_with_id.buffer,
+                "system",
+                timestamp_now(),
+            )
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         // Update indexes for changed Ref columns
@@ -2494,7 +2578,8 @@ impl Database {
         meta.insert("deleted".to_string(), "true".to_string());
 
         // Write soft delete commit with metadata marker
-        let commit_id = self.state
+        let commit_id = self
+            .state
             .node
             .write_with_meta(id, "main", &[], "system", timestamp_now(), Some(meta))
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
@@ -2622,7 +2707,11 @@ impl Database {
     // ========== Policy-Filtered Queries ==========
 
     /// Select all rows from a table, filtered by policy for the given viewer.
-    pub fn select_all_as(&self, table: &str, viewer: ObjectId) -> Result<Vec<(ObjectId, OwnedRow)>, DatabaseError> {
+    pub fn select_all_as(
+        &self,
+        table: &str,
+        viewer: ObjectId,
+    ) -> Result<Vec<(ObjectId, OwnedRow)>, DatabaseError> {
         let rows = self.select_all(table)?;
         Ok(self.filter_rows_by_policy(table, rows, viewer))
     }
@@ -2640,7 +2729,12 @@ impl Database {
     }
 
     /// Filter a list of rows by SELECT policy for the given viewer.
-    fn filter_rows_by_policy(&self, table: &str, rows: Vec<(ObjectId, OwnedRow)>, viewer: ObjectId) -> Vec<(ObjectId, OwnedRow)> {
+    fn filter_rows_by_policy(
+        &self,
+        table: &str,
+        rows: Vec<(ObjectId, OwnedRow)>,
+        viewer: ObjectId,
+    ) -> Vec<(ObjectId, OwnedRow)> {
         use crate::sql::policy::{PolicyConfig, PolicyEvaluator};
 
         let config = PolicyConfig::default();
@@ -2720,7 +2814,12 @@ impl Database {
     }
 
     /// Insert a row using builder pattern, checking INSERT policy.
-    pub fn insert_with_as<F>(&self, table: &str, f: F, viewer: ObjectId) -> Result<ObjectId, DatabaseError>
+    pub fn insert_with_as<F>(
+        &self,
+        table: &str,
+        f: F,
+        viewer: ObjectId,
+    ) -> Result<ObjectId, DatabaseError>
     where
         F: FnOnce(RowBuilder) -> OwnedRow,
     {
@@ -2770,7 +2869,13 @@ impl Database {
     }
 
     /// Update a row using builder pattern, checking UPDATE policy.
-    pub fn update_with_as<F>(&self, table: &str, id: ObjectId, f: F, viewer: ObjectId) -> Result<bool, DatabaseError>
+    pub fn update_with_as<F>(
+        &self,
+        table: &str,
+        id: ObjectId,
+        f: F,
+        viewer: ObjectId,
+    ) -> Result<bool, DatabaseError>
     where
         F: FnOnce(RowBuilder) -> OwnedRow,
     {
@@ -2881,7 +2986,10 @@ impl Database {
                 let row = builder.build();
 
                 let (row_id, table_rows_id) = self.insert_row_returning_both(&ins.table, row)?;
-                Ok(ExecuteResult::Inserted { row_id, table_rows_id })
+                Ok(ExecuteResult::Inserted {
+                    row_id,
+                    table_rows_id,
+                })
             }
             Statement::Update(upd) => {
                 // Find rows matching where clause
@@ -2959,7 +3067,8 @@ impl Database {
                         } else {
                             value.clone()
                         };
-                        builder = builder.set_from_predicate_value_by_name(col_name, &coerced_value);
+                        builder =
+                            builder.set_from_predicate_value_by_name(col_name, &coerced_value);
                     }
 
                     let new_row = builder.build();
@@ -3195,11 +3304,7 @@ impl Database {
         };
 
         // Apply LIMIT/OFFSET if specified
-        let limited = builder.limit_offset(
-            after_policy,
-            select.limit,
-            select.offset.unwrap_or(0),
-        );
+        let limited = builder.limit_offset(after_policy, select.limit, select.offset.unwrap_or(0));
 
         Ok(builder.output(limited, GraphId(0)))
     }
@@ -3505,11 +3610,8 @@ impl Database {
 
             // Add source table's base predicate (if any)
             if let Some(ref base_expr) = inherits.base_predicate {
-                let base_pred = self.policy_expr_to_predicate_qualified(
-                    base_expr,
-                    viewer,
-                    left_table,
-                )?;
+                let base_pred =
+                    self.policy_expr_to_predicate_qualified(base_expr, viewer, left_table)?;
                 or_predicates.push(base_pred);
             }
 
@@ -3535,11 +3637,7 @@ impl Database {
         };
 
         // Apply LIMIT/OFFSET if specified
-        let limited = builder.limit_offset(
-            after_policy,
-            select.limit,
-            select.offset.unwrap_or(0),
-        );
+        let limited = builder.limit_offset(after_policy, select.limit, select.offset.unwrap_or(0));
 
         Ok(builder.output(limited, GraphId(0)))
     }
@@ -3669,11 +3767,7 @@ impl Database {
         }
 
         // Apply LIMIT/OFFSET if specified
-        let limited = builder.limit_offset(
-            current_node,
-            select.limit,
-            select.offset.unwrap_or(0),
-        );
+        let limited = builder.limit_offset(current_node, select.limit, select.offset.unwrap_or(0));
 
         Ok(builder.output(limited, GraphId(0)))
     }
@@ -3731,11 +3825,7 @@ impl Database {
             builder.recursive_filter(after_additional, base_predicate, &inherits.ref_column);
 
         // Apply LIMIT/OFFSET if specified
-        let limited = builder.limit_offset(
-            recursive,
-            select.limit,
-            select.offset.unwrap_or(0),
-        );
+        let limited = builder.limit_offset(recursive, select.limit, select.offset.unwrap_or(0));
 
         Ok(builder.output(limited, GraphId(0)))
     }
@@ -3805,12 +3895,14 @@ impl Database {
         table_prefix: &str,
     ) -> Result<(String, PredicateValue), DatabaseError> {
         match (left, right) {
-            (PolicyValue::Column(col), PolicyValue::Viewer) => {
-                Ok((format!("{}.{}", table_prefix, col), PredicateValue::Ref(viewer)))
-            }
-            (PolicyValue::Viewer, PolicyValue::Column(col)) => {
-                Ok((format!("{}.{}", table_prefix, col), PredicateValue::Ref(viewer)))
-            }
+            (PolicyValue::Column(col), PolicyValue::Viewer) => Ok((
+                format!("{}.{}", table_prefix, col),
+                PredicateValue::Ref(viewer),
+            )),
+            (PolicyValue::Viewer, PolicyValue::Column(col)) => Ok((
+                format!("{}.{}", table_prefix, col),
+                PredicateValue::Ref(viewer),
+            )),
             (PolicyValue::Column(col), PolicyValue::Literal(val)) => {
                 Ok((format!("{}.{}", table_prefix, col), val.clone()))
             }
@@ -3967,11 +4059,7 @@ impl Database {
         };
 
         // Apply LIMIT/OFFSET if specified
-        let limited = builder.limit_offset(
-            filtered,
-            select.limit,
-            select.offset.unwrap_or(0),
-        );
+        let limited = builder.limit_offset(filtered, select.limit, select.offset.unwrap_or(0));
 
         // Process ARRAY subqueries in projection
         let with_arrays = if let Projection::Expressions(exprs) = &select.projection {
@@ -4000,7 +4088,12 @@ impl Database {
             // The expression index doesn't correspond to the actual column position
             // because star expressions expand to multiple columns.
             current = self.add_array_aggregate_for_expr(
-                builder, current, expr, outer_table, outer_alias, -1,
+                builder,
+                current,
+                expr,
+                outer_table,
+                outer_alias,
+                -1,
             )?;
         }
 
@@ -4055,7 +4148,12 @@ impl Database {
             SelectExpr::Aliased { expr: inner, .. } => {
                 // Recurse into aliased expressions
                 self.add_array_aggregate_for_expr(
-                    builder, input, inner, outer_table, outer_alias, column_index,
+                    builder,
+                    input,
+                    inner,
+                    outer_table,
+                    outer_alias,
+                    column_index,
                 )
             }
             // Non-ARRAY expressions don't add nodes
@@ -4254,23 +4352,28 @@ impl Database {
 
         // For the graph builder, we need the table with the Ref to be "left"
         // If it's a reverse join (right table has Ref), we swap the roles
-        let (graph_left_table, graph_left_schema, graph_right_table, graph_right_schema, ref_column) =
-            match &first_join_direction {
-                JoinDirection::LeftToRight(col) => (
-                    sql_left_table.as_str(),
-                    sql_left_schema.clone(),
-                    sql_first_right_table.as_str(),
-                    sql_first_right_schema.clone(),
-                    col.clone(),
-                ),
-                JoinDirection::RightToLeft(col) => (
-                    sql_first_right_table.as_str(),
-                    sql_first_right_schema.clone(),
-                    sql_left_table.as_str(),
-                    sql_left_schema.clone(),
-                    col.clone(),
-                ),
-            };
+        let (
+            graph_left_table,
+            graph_left_schema,
+            graph_right_table,
+            graph_right_schema,
+            ref_column,
+        ) = match &first_join_direction {
+            JoinDirection::LeftToRight(col) => (
+                sql_left_table.as_str(),
+                sql_left_schema.clone(),
+                sql_first_right_table.as_str(),
+                sql_first_right_schema.clone(),
+                col.clone(),
+            ),
+            JoinDirection::RightToLeft(col) => (
+                sql_first_right_table.as_str(),
+                sql_first_right_schema.clone(),
+                sql_left_table.as_str(),
+                sql_left_schema.clone(),
+                col.clone(),
+            ),
+        };
 
         // Build the JOIN query graph
         let mut builder = JoinGraphBuilder::new(
@@ -4297,11 +4400,16 @@ impl Database {
         let from_alias = select.from.alias.as_deref();
         let mut all_tables: Vec<(&str, Option<&str>, TableSchema)> = vec![
             (sql_left_table.as_str(), from_alias, sql_left_schema.clone()),
-            (sql_first_right_table.as_str(), None, sql_first_right_schema.clone()),
+            (
+                sql_first_right_table.as_str(),
+                None,
+                sql_first_right_schema.clone(),
+            ),
         ];
 
         // Track reverse-joined tables to handle their WHERE conditions specially
-        let mut reverse_joined_tables: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut reverse_joined_tables: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         // Process additional JOINs (chain joins)
         for join in select.from.joins.iter().skip(1) {
@@ -4314,23 +4422,20 @@ impl Database {
             builder.add_schema(target_table.clone(), target_schema.clone());
 
             // Determine which table in the chain has the ref column
-            let join_info = self.find_chain_join_info(
-                &join.on,
-                &all_tables,
-                target_table,
-                &target_schema,
-            )?;
+            let join_info =
+                self.find_chain_join_info(&join.on, &all_tables, target_table, &target_schema)?;
 
             current_node = match join_info {
-                ChainJoinInfo::Forward { source_table, ref_column } => {
-                    builder.chain_join(
-                        current_node,
-                        source_table,
-                        ref_column,
-                        target_table.clone(),
-                    )
+                ChainJoinInfo::Forward {
+                    source_table,
+                    ref_column,
+                } => {
+                    builder.chain_join(current_node, source_table, ref_column, target_table.clone())
                 }
-                ChainJoinInfo::Reverse { existing_table, ref_column } => {
+                ChainJoinInfo::Reverse {
+                    existing_table,
+                    ref_column,
+                } => {
                     // For reverse chain joins, the target table has the ref column
                     // pointing to an existing table.
                     reverse_joined_tables.insert(target_table.clone());
@@ -4360,7 +4465,9 @@ impl Database {
             current_node
         } else {
             // Filter out conditions on reverse-joined tables (already handled)
-            let remaining_conditions: Vec<_> = select.where_clause.iter()
+            let remaining_conditions: Vec<_> = select
+                .where_clause
+                .iter()
                 .filter(|cond| !self.condition_on_table(cond, &reverse_joined_tables))
                 .cloned()
                 .collect();
@@ -4369,17 +4476,14 @@ impl Database {
                 current_node
             } else {
                 // Build predicate for remaining conditions only (with alias support)
-                let predicate = self.build_multi_join_predicate_with_aliases(&remaining_conditions, &all_tables)?;
+                let predicate = self
+                    .build_multi_join_predicate_with_aliases(&remaining_conditions, &all_tables)?;
                 builder.filter(current_node, predicate)
             }
         };
 
         // Apply LIMIT/OFFSET if specified
-        let limited = builder.limit_offset(
-            filtered,
-            select.limit,
-            select.offset.unwrap_or(0),
-        );
+        let limited = builder.limit_offset(filtered, select.limit, select.offset.unwrap_or(0));
 
         // Process ARRAY subqueries in projection (for reverse refs with includes)
         let outer_table = sql_left_table;
@@ -4505,33 +4609,38 @@ impl Database {
             let (table_name, _schema) = if let Some(t) = table_ref {
                 all_tables
                     .iter()
-                    .find(|(name, alias, _)| {
-                        *name == t || alias.map_or(false, |a| a == t)
-                    })
+                    .find(|(name, alias, _)| *name == t || alias.map_or(false, |a| a == t))
                     .map(|(name, _, schema)| (*name, schema))
-                    .ok_or_else(|| DatabaseError::Parse(parser::ParseError {
-                        message: format!("Unknown table {} in WHERE clause", t),
-                        position: 0,
-                    }))?
+                    .ok_or_else(|| {
+                        DatabaseError::Parse(parser::ParseError {
+                            message: format!("Unknown table {} in WHERE clause", t),
+                            position: 0,
+                        })
+                    })?
             } else {
                 // Unqualified column - search all schemas
                 // "id" is a special column that exists on every table
                 if col_name == "id" {
-                    all_tables.first()
+                    all_tables
+                        .first()
                         .map(|(name, _, schema)| (*name, schema))
-                        .ok_or_else(|| DatabaseError::Parse(parser::ParseError {
-                            message: "No tables in query".to_string(),
-                            position: 0,
-                        }))?
+                        .ok_or_else(|| {
+                            DatabaseError::Parse(parser::ParseError {
+                                message: "No tables in query".to_string(),
+                                position: 0,
+                            })
+                        })?
                 } else {
                     all_tables
                         .iter()
                         .find(|(_, _, s)| s.column(col_name).is_some())
                         .map(|(name, _, schema)| (*name, schema))
-                        .ok_or_else(|| DatabaseError::Parse(parser::ParseError {
-                            message: format!("Unknown column {} in WHERE clause", col_name),
-                            position: 0,
-                        }))?
+                        .ok_or_else(|| {
+                            DatabaseError::Parse(parser::ParseError {
+                                message: format!("Unknown column {} in WHERE clause", col_name),
+                                position: 0,
+                            })
+                        })?
                 }
             };
 
@@ -4666,7 +4775,12 @@ impl Database {
             // The expression index doesn't correspond to the actual column position
             // because star expressions expand to multiple columns and joins add more columns.
             current = self.add_join_array_aggregate_for_expr(
-                builder, current, expr, outer_table, outer_alias, -1,
+                builder,
+                current,
+                expr,
+                outer_table,
+                outer_alias,
+                -1,
             )?;
         }
 
@@ -4719,7 +4833,12 @@ impl Database {
             SelectExpr::Aliased { expr: inner, .. } => {
                 // Recurse into aliased expressions
                 self.add_join_array_aggregate_for_expr(
-                    builder, input, inner, outer_table, outer_alias, column_index,
+                    builder,
+                    input,
+                    inner,
+                    outer_table,
+                    outer_alias,
+                    column_index,
                 )
             }
             // Non-ARRAY expressions don't add nodes

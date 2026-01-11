@@ -61,9 +61,8 @@ impl TableRows {
             return Ok(Self::new());
         }
 
-        let count = u32::from_le_bytes(
-            data[0..4].try_into().map_err(|_| "invalid count")?
-        ) as usize;
+        let count =
+            u32::from_le_bytes(data[0..4].try_into().map_err(|_| "invalid count")?) as usize;
 
         let mut row_ids = HashSet::new();
         let mut pos = 4;
@@ -73,7 +72,9 @@ impl TableRows {
                 return Err("truncated row_id".to_string());
             }
             let row_id = ObjectId::from_le_bytes(
-                data[pos..pos + 16].try_into().map_err(|_| "invalid row_id")?
+                data[pos..pos + 16]
+                    .try_into()
+                    .map_err(|_| "invalid row_id")?,
             );
             pos += 16;
             row_ids.insert(row_id);

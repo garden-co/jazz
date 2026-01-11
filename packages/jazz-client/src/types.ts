@@ -68,19 +68,19 @@ export interface WasmDatabaseLike {
   execute(sql: string): unknown;
   subscribeDelta(
     sql: string,
-    callback: (deltas: Uint8Array[]) => void
+    callback: (deltas: Uint8Array[]) => void,
   ): WasmQueryHandleLike;
   updateRow(
     table: string,
     rowId: string,
     column: string,
-    value: string
+    value: string,
   ): boolean;
   updateRowI64(
     table: string,
     rowId: string,
     column: string,
-    value: bigint
+    value: bigint,
   ): boolean;
 }
 
@@ -106,7 +106,7 @@ export interface SubscribableAllWithDb<T, CreateInput, UpdateInput> {
   /** Subscribe to all matching rows */
   subscribeAll(
     db: WasmDatabaseLike,
-    callback: (rows: T[]) => void
+    callback: (rows: T[]) => void,
   ): UnsubscribeType;
   /** Create a new row */
   create(db: WasmDatabaseLike, values: CreateInput): string;
@@ -130,7 +130,7 @@ export interface SubscribableOneWithDb<T, UpdateInput> {
   subscribe(
     db: WasmDatabaseLike,
     id: string,
-    callback: (row: T | null) => void
+    callback: (row: T | null) => void,
   ): UnsubscribeType;
   /** Update an existing row */
   update(db: WasmDatabaseLike, id: string, values: UpdateInput): void;

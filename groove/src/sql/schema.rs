@@ -70,7 +70,8 @@ impl ColumnType {
     /// Returns the fixed size in bytes accounting for nullability.
     /// Nullable fixed-size types have an extra presence byte.
     pub fn fixed_size_nullable(&self, nullable: bool) -> Option<usize> {
-        self.fixed_size().map(|size| if nullable { size + 1 } else { size })
+        self.fixed_size()
+            .map(|size| if nullable { size + 1 } else { size })
     }
 }
 
@@ -218,20 +219,25 @@ impl TableSchema {
     ///
     /// This is used when projecting a single table from a JOIN result.
     pub fn qualify(&self, table_name: &str) -> TableSchema {
-        let qualified_columns = self.columns.iter().map(|col| {
-            ColumnDef {
+        let qualified_columns = self
+            .columns
+            .iter()
+            .map(|col| ColumnDef {
                 name: format!("{}.{}", table_name, col.name),
                 ty: col.ty.clone(),
                 nullable: col.nullable,
-            }
-        }).collect();
+            })
+            .collect();
 
         TableSchema::new_raw(table_name.to_string(), qualified_columns)
     }
 
     /// Count of variable-size columns (for header).
     pub fn variable_column_count(&self) -> usize {
-        self.columns.iter().filter(|c| !c.ty.is_fixed_size()).count()
+        self.columns
+            .iter()
+            .filter(|c| !c.ty.is_fixed_size())
+            .count()
     }
 
     /// Serialize schema to bytes.
@@ -266,7 +272,9 @@ impl TableSchema {
                 ColumnType::Blob => 8,
                 ColumnType::BlobArray => 9,
                 ColumnType::ObjectId => 10,
-                ColumnType::Array(_) => panic!("Array columns cannot be serialized in table schemas"),
+                ColumnType::Array(_) => {
+                    panic!("Array columns cannot be serialized in table schemas")
+                }
             };
             buf.push(type_tag);
 

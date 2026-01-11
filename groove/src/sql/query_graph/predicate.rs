@@ -69,9 +69,15 @@ pub enum Predicate {
     /// Always false.
     False,
     /// Column equals value.
-    Eq { column: String, value: PredicateValue },
+    Eq {
+        column: String,
+        value: PredicateValue,
+    },
     /// Column not equals value.
-    Ne { column: String, value: PredicateValue },
+    Ne {
+        column: String,
+        value: PredicateValue,
+    },
     /// Logical AND of predicates.
     And(Vec<Predicate>),
     /// Logical OR of predicates.
@@ -102,7 +108,12 @@ impl Predicate {
     /// This is the buffer-based equivalent of `matches`, working with `RowRef`
     /// instead of the legacy `Row` type. The row_id is passed separately since
     /// `RowRef` doesn't contain the ObjectId.
-    pub fn matches_buffer(&self, row_id: ObjectId, row: RowRef<'_>, descriptor: &RowDescriptor) -> bool {
+    pub fn matches_buffer(
+        &self,
+        row_id: ObjectId,
+        row: RowRef<'_>,
+        descriptor: &RowDescriptor,
+    ) -> bool {
         match self {
             Predicate::True => true,
             Predicate::False => false,
@@ -161,8 +172,12 @@ impl Predicate {
                 }
             }
 
-            Predicate::And(preds) => preds.iter().all(|p| p.matches_buffer(row_id, row, descriptor)),
-            Predicate::Or(preds) => preds.iter().any(|p| p.matches_buffer(row_id, row, descriptor)),
+            Predicate::And(preds) => preds
+                .iter()
+                .all(|p| p.matches_buffer(row_id, row, descriptor)),
+            Predicate::Or(preds) => preds
+                .iter()
+                .any(|p| p.matches_buffer(row_id, row, descriptor)),
             Predicate::Not(pred) => !pred.matches_buffer(row_id, row, descriptor),
         }
     }
@@ -253,14 +268,10 @@ impl Predicate {
             Predicate::Not(inner) => inner.selectivity() + 1,
 
             // AND - use min selectivity (will short-circuit on first failure)
-            Predicate::And(preds) => {
-                preds.iter().map(|p| p.selectivity()).min().unwrap_or(10)
-            }
+            Predicate::And(preds) => preds.iter().map(|p| p.selectivity()).min().unwrap_or(10),
 
             // OR - use max selectivity (must evaluate until first success)
-            Predicate::Or(preds) => {
-                preds.iter().map(|p| p.selectivity()).max().unwrap_or(10)
-            }
+            Predicate::Or(preds) => preds.iter().map(|p| p.selectivity()).max().unwrap_or(10),
         }
     }
 
@@ -302,7 +313,8 @@ impl Predicate {
                 if preds.is_empty() {
                     "TRUE".to_string()
                 } else {
-                    preds.iter()
+                    preds
+                        .iter()
                         .map(|p| p.to_display_string())
                         .collect::<Vec<_>>()
                         .join(" AND ")
@@ -312,10 +324,14 @@ impl Predicate {
                 if preds.is_empty() {
                     "FALSE".to_string()
                 } else {
-                    format!("({})", preds.iter()
-                        .map(|p| p.to_display_string())
-                        .collect::<Vec<_>>()
-                        .join(" OR "))
+                    format!(
+                        "({})",
+                        preds
+                            .iter()
+                            .map(|p| p.to_display_string())
+                            .collect::<Vec<_>>()
+                            .join(" OR ")
+                    )
                 }
             }
             Predicate::Not(inner) => {
@@ -362,9 +378,7 @@ impl Predicate {
             Predicate::And(preds) => {
                 Predicate::And(preds.iter().map(|p| p.qualify(table)).collect())
             }
-            Predicate::Or(preds) => {
-                Predicate::Or(preds.iter().map(|p| p.qualify(table)).collect())
-            }
+            Predicate::Or(preds) => Predicate::Or(preds.iter().map(|p| p.qualify(table)).collect()),
             Predicate::Not(inner) => Predicate::Not(Box::new(inner.qualify(table))),
         }
     }
@@ -426,22 +440,52 @@ mod tests {
         let row_id = ObjectId::new(1);
 
         // Match by string column
-        assert!(Predicate::eq("name", PredicateValue::String("Alice".to_string()))
-            .matches_buffer(row_id, row.as_ref(), &descriptor));
-        assert!(!Predicate::eq("name", PredicateValue::String("Bob".to_string()))
-            .matches_buffer(row_id, row.as_ref(), &descriptor));
+        assert!(
+            Predicate::eq("name", PredicateValue::String("Alice".to_string())).matches_buffer(
+                row_id,
+                row.as_ref(),
+                &descriptor
+            )
+        );
+        assert!(
+            !Predicate::eq("name", PredicateValue::String("Bob".to_string())).matches_buffer(
+                row_id,
+                row.as_ref(),
+                &descriptor
+            )
+        );
 
         // Match by bool column
-        assert!(Predicate::eq("active", PredicateValue::Bool(true))
-            .matches_buffer(row_id, row.as_ref(), &descriptor));
-        assert!(!Predicate::eq("active", PredicateValue::Bool(false))
-            .matches_buffer(row_id, row.as_ref(), &descriptor));
+        assert!(
+            Predicate::eq("active", PredicateValue::Bool(true)).matches_buffer(
+                row_id,
+                row.as_ref(),
+                &descriptor
+            )
+        );
+        assert!(
+            !Predicate::eq("active", PredicateValue::Bool(false)).matches_buffer(
+                row_id,
+                row.as_ref(),
+                &descriptor
+            )
+        );
 
         // Match by id
-        assert!(Predicate::eq("id", PredicateValue::Ref(ObjectId::new(1)))
-            .matches_buffer(row_id, row.as_ref(), &descriptor));
-        assert!(!Predicate::eq("id", PredicateValue::Ref(ObjectId::new(2)))
-            .matches_buffer(row_id, row.as_ref(), &descriptor));
+        assert!(
+            Predicate::eq("id", PredicateValue::Ref(ObjectId::new(1))).matches_buffer(
+                row_id,
+                row.as_ref(),
+                &descriptor
+            )
+        );
+        assert!(
+            !Predicate::eq("id", PredicateValue::Ref(ObjectId::new(2))).matches_buffer(
+                row_id,
+                row.as_ref(),
+                &descriptor
+            )
+        );
     }
 
     #[test]
@@ -450,10 +494,20 @@ mod tests {
         let row = make_buffer_row(&descriptor, "Alice", true, Some(30));
         let row_id = ObjectId::new(1);
 
-        assert!(!Predicate::ne("name", PredicateValue::String("Alice".to_string()))
-            .matches_buffer(row_id, row.as_ref(), &descriptor));
-        assert!(Predicate::ne("name", PredicateValue::String("Bob".to_string()))
-            .matches_buffer(row_id, row.as_ref(), &descriptor));
+        assert!(
+            !Predicate::ne("name", PredicateValue::String("Alice".to_string())).matches_buffer(
+                row_id,
+                row.as_ref(),
+                &descriptor
+            )
+        );
+        assert!(
+            Predicate::ne("name", PredicateValue::String("Bob".to_string())).matches_buffer(
+                row_id,
+                row.as_ref(),
+                &descriptor
+            )
+        );
     }
 
     #[test]
@@ -479,13 +533,15 @@ mod tests {
         let row = make_buffer_row(&descriptor, "Alice", true, Some(30));
         let row_id = ObjectId::new(1);
 
-        let pred = Predicate::eq("name", PredicateValue::String("Alice".to_string()))
-            .or(Predicate::eq("name", PredicateValue::String("Bob".to_string())));
+        let pred = Predicate::eq("name", PredicateValue::String("Alice".to_string())).or(
+            Predicate::eq("name", PredicateValue::String("Bob".to_string())),
+        );
 
         assert!(pred.matches_buffer(row_id, row.as_ref(), &descriptor));
 
-        let pred2 = Predicate::eq("name", PredicateValue::String("Bob".to_string()))
-            .or(Predicate::eq("name", PredicateValue::String("Carol".to_string())));
+        let pred2 = Predicate::eq("name", PredicateValue::String("Bob".to_string())).or(
+            Predicate::eq("name", PredicateValue::String("Carol".to_string())),
+        );
 
         assert!(!pred2.matches_buffer(row_id, row.as_ref(), &descriptor));
     }

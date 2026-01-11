@@ -229,8 +229,12 @@ impl fmt::Display for ObjectIdParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ObjectIdParseError::Empty => write!(f, "empty object ID string"),
-            ObjectIdParseError::TooLong => write!(f, "object ID string too long (max 26 characters)"),
-            ObjectIdParseError::InvalidChar(c) => write!(f, "invalid character '{}' in object ID", c),
+            ObjectIdParseError::TooLong => {
+                write!(f, "object ID string too long (max 26 characters)")
+            }
+            ObjectIdParseError::InvalidChar(c) => {
+                write!(f, "invalid character '{}' in object ID", c)
+            }
             ObjectIdParseError::Overflow => write!(f, "object ID value overflow"),
         }
     }
@@ -640,9 +644,18 @@ mod tests {
 
     #[test]
     fn object_id_parse_errors() {
-        assert!(matches!("".parse::<ObjectId>(), Err(ObjectIdParseError::Empty)));
-        assert!(matches!("000000000000000000000000000".parse::<ObjectId>(), Err(ObjectIdParseError::TooLong)));
-        assert!(matches!("hello!".parse::<ObjectId>(), Err(ObjectIdParseError::InvalidChar('!'))));
+        assert!(matches!(
+            "".parse::<ObjectId>(),
+            Err(ObjectIdParseError::Empty)
+        ));
+        assert!(matches!(
+            "000000000000000000000000000".parse::<ObjectId>(),
+            Err(ObjectIdParseError::TooLong)
+        ));
+        assert!(matches!(
+            "hello!".parse::<ObjectId>(),
+            Err(ObjectIdParseError::InvalidChar('!'))
+        ));
     }
 
     #[test]
@@ -681,8 +694,8 @@ mod tests {
             ObjectId::new(u128::MAX),
             ObjectId::new(0),
             ObjectId::new(500),
-            ObjectId::new(31),  // boundary: last single-char value
-            ObjectId::new(32),  // boundary: first two-char value
+            ObjectId::new(31), // boundary: last single-char value
+            ObjectId::new(32), // boundary: first two-char value
         ];
 
         // Sort by numeric value (uses derived Ord on u128)

@@ -13,9 +13,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::stream::BoxStream;
 use futures::StreamExt;
-use tokio::sync::{mpsc, RwLock};
+use futures::stream::BoxStream;
+use tokio::sync::{RwLock, mpsc};
 
 use crate::commit::CommitId;
 use crate::node::LocalNode;
@@ -333,10 +333,7 @@ impl ClientEnv for TestClientEnv {
         &self,
         request: SubscribeRequest,
     ) -> Result<BoxStream<'static, Result<SseEvent, ClientError>>, ClientError> {
-        let (_session_id, rx) = self
-            .transport
-            .subscribe(&self.auth_token, request)
-            .await?;
+        let (_session_id, rx) = self.transport.subscribe(&self.auth_token, request).await?;
 
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx)
             .map(Ok)

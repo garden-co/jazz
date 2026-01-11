@@ -4,9 +4,7 @@ import { app } from "../generated/client.js";
 //#region working-with-tables
 export function TaskListExample() {
   // Subscribe to all incomplete tasks
-  const [tasks, loading] = useAll(
-    app.tasks.where({ isCompleted: false })
-  );
+  const [tasks, loading] = useAll(app.tasks.where({ isCompleted: false }));
 
   const db = useJazz();
 
@@ -26,7 +24,7 @@ export function TaskListExample() {
 
   return (
     <ul>
-      {tasks.map(task => (
+      {tasks.map((task) => (
         <li key={task.id}>{task.title}</li>
       ))}
     </ul>

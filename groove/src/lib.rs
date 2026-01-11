@@ -11,13 +11,13 @@ pub mod sync;
 pub use branch::{Branch, BranchError};
 pub use commit::{Commit, CommitId};
 pub use listener::{
-    compute_change_ranges, ByteDiff, DiffRange, ListenerError, ListenerId, ObjectCallback,
-    ObjectKey, ObjectListenerRegistry, ObjectState,
+    ByteDiff, DiffRange, ListenerError, ListenerId, ObjectCallback, ObjectKey,
+    ObjectListenerRegistry, ObjectState, compute_change_ranges,
 };
 pub use merge::{LastWriterWins, MergeStrategy};
-pub use node::{generate_object_id, LocalNode};
+pub use node::{LocalNode, generate_object_id};
 pub use object::{Object, ObjectId, ObjectIdParseError, SchemaId};
 pub use storage::{
-    ChunkHash, ChunkStore, CommitMeta, CommitStore, ContentRef, Environment, MemoryContentStore,
-    MemoryEnvironment, Storage, SyncStateStore, INLINE_THRESHOLD,
+    ChunkHash, ChunkStore, CommitMeta, CommitStore, ContentRef, Environment, INLINE_THRESHOLD,
+    MemoryContentStore, MemoryEnvironment, Storage, SyncStateStore,
 };

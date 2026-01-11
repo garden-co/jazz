@@ -16,9 +16,9 @@ use axum::Router;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 
-use groove::sync::AcceptAllTokens;
 use groove::MemoryEnvironment;
-use groove_server::{sync_router, AppState};
+use groove::sync::AcceptAllTokens;
+use groove_server::{AppState, sync_router};
 
 #[tokio::main]
 async fn main() {

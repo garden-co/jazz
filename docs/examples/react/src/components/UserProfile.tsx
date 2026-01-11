@@ -1,4 +1,4 @@
-import { useOne, useMutate } from "@jazz/react";
+import { useMutate, useOne } from "@jazz/react";
 import { app } from "../generated/client.js";
 
 //#region user-profile
@@ -19,9 +19,7 @@ export function UserProfile({ userId }: UserProfileProps) {
       <button onClick={() => mutate.update({ name: "New Name" })}>
         Rename
       </button>
-      <button onClick={() => mutate.delete()}>
-        Delete
-      </button>
+      <button onClick={() => mutate.delete()}>Delete</button>
     </div>
   );
 }
@@ -32,16 +30,18 @@ export function CreateUserButton() {
   const mutate = useMutate(app.users);
 
   return (
-    <button onClick={() => {
-      const id = mutate.create({
-        name: "New User",
-        email: "user@example.com",
-        age: BigInt(25),
-        score: 0.0,
-        isAdmin: false,
-      });
-      console.log("Created user with id:", id);
-    }}>
+    <button
+      onClick={() => {
+        const id = mutate.create({
+          name: "New User",
+          email: "user@example.com",
+          age: BigInt(25),
+          score: 0.0,
+          isAdmin: false,
+        });
+        console.log("Created user with id:", id);
+      }}
+    >
       Create User
     </button>
   );

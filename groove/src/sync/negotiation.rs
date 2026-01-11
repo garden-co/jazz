@@ -28,7 +28,10 @@ pub enum FrontierComparison {
 ///
 /// This is a quick check that doesn't require access to the full commit graph.
 /// It only tells you IF sync is needed, not what commits to exchange.
-pub fn compare_frontiers(local_frontier: &[CommitId], remote_frontier: &[CommitId]) -> FrontierComparison {
+pub fn compare_frontiers(
+    local_frontier: &[CommitId],
+    remote_frontier: &[CommitId],
+) -> FrontierComparison {
     let local_set: HashSet<_> = local_frontier.iter().collect();
     let remote_set: HashSet<_> = remote_frontier.iter().collect();
 
@@ -136,8 +139,7 @@ fn topological_sort(commits: Vec<(CommitId, Commit)>) -> Vec<Commit> {
         return vec![];
     }
 
-    let commit_map: std::collections::HashMap<CommitId, Commit> =
-        commits.iter().cloned().collect();
+    let commit_map: std::collections::HashMap<CommitId, Commit> = commits.iter().cloned().collect();
     let ids: HashSet<CommitId> = commits.iter().map(|(id, _)| *id).collect();
 
     let mut result = Vec::with_capacity(commits.len());
@@ -178,7 +180,14 @@ fn topological_sort(commits: Vec<(CommitId, Commit)>) -> Vec<Commit> {
     }
 
     for (id, _) in &commits {
-        visit(id, &commit_map, &ids, &mut visited, &mut in_stack, &mut result);
+        visit(
+            id,
+            &commit_map,
+            &ids,
+            &mut visited,
+            &mut in_stack,
+            &mut result,
+        );
     }
 
     result
@@ -199,9 +208,9 @@ pub fn merged_frontier(
     // Remove any tip that is an ancestor of another tip
     let mut result: Vec<CommitId> = Vec::new();
     for &tip in &all_tips {
-        let is_ancestor_of_another = all_tips.iter().any(|&other| {
-            other != tip && branch.is_ancestor(&tip, &other)
-        });
+        let is_ancestor_of_another = all_tips
+            .iter()
+            .any(|&other| other != tip && branch.is_ancestor(&tip, &other));
         if !is_ancestor_of_another {
             result.push(tip);
         }

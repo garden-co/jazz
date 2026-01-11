@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
-import { Plus, Sun, Moon } from "lucide-react";
-import { useOne } from "@jazz/react";
-import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Button } from "@/components/ui/button";
 import { app } from "@/generated/client";
+import { useOne } from "@jazz/react";
+import { Moon, Plus, Sun } from "lucide-react";
+import { useEffect, useState } from "react";
 
 interface HeaderProps {
   currentUserId: string | null;
@@ -16,8 +16,11 @@ export function Header({ currentUserId, onCreateIssue }: HeaderProps) {
 
   const [isDark, setIsDark] = useState(() => {
     if (typeof window !== "undefined") {
-      return localStorage.getItem("theme") === "dark" ||
-        (!localStorage.getItem("theme") && window.matchMedia("(prefers-color-scheme: dark)").matches);
+      return (
+        localStorage.getItem("theme") === "dark" ||
+        (!localStorage.getItem("theme") &&
+          window.matchMedia("(prefers-color-scheme: dark)").matches)
+      );
     }
     return false;
   });
@@ -32,11 +35,12 @@ export function Header({ currentUserId, onCreateIssue }: HeaderProps) {
     }
   }, [isDark]);
 
-  const initials = currentUser?.name
-    .split(" ")
-    .map((n) => n[0])
-    .join("")
-    .toUpperCase() || "?";
+  const initials =
+    currentUser?.name
+      .split(" ")
+      .map((n) => n[0])
+      .join("")
+      .toUpperCase() || "?";
 
   return (
     <header className="flex items-center justify-between border-b px-4 py-3">

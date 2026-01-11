@@ -4,9 +4,7 @@ import { app } from "../generated/client.js";
 //#region incremental-query-hook
 export function useFilteredTasks(completed: boolean) {
   // Subscribe to query - automatically updates when tasks change
-  const [tasks, loading] = useAll(
-    app.tasks.where({ isCompleted: completed })
-  );
+  const [tasks, loading] = useAll(app.tasks.where({ isCompleted: completed }));
 
   return { tasks, loading };
 }
@@ -20,7 +18,7 @@ export function ActiveTasks() {
 
   return (
     <ul>
-      {tasks.map(task => (
+      {tasks.map((task) => (
         <li key={task.id}>{task.title}</li>
       ))}
     </ul>

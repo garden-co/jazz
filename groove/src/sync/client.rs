@@ -14,7 +14,7 @@ use crate::node::LocalNode;
 use crate::object::ObjectId;
 
 use super::env::{ClientEnv, ClientError};
-use super::negotiation::{commits_to_send, compare_frontiers, FrontierComparison};
+use super::negotiation::{FrontierComparison, commits_to_send, compare_frontiers};
 use super::protocol::{
     PushRequest, PushResponse, ReconcileRequest, SseEvent, SubscribeRequest, SubscriptionOptions,
 };
@@ -136,7 +136,11 @@ impl<E: ClientEnv> SyncClient<E> {
     }
 
     /// Create a new sync client with custom reconnection configuration.
-    pub fn with_reconnect_config(env: E, node: Arc<LocalNode>, reconnect_config: ReconnectConfig) -> Self {
+    pub fn with_reconnect_config(
+        env: E,
+        node: Arc<LocalNode>,
+        reconnect_config: ReconnectConfig,
+    ) -> Self {
         Self {
             env,
             node,
@@ -312,7 +316,10 @@ impl<E: ClientEnv> SyncClient<E> {
                 // Server is requesting commits we have
                 // TODO: Push these commits - would trigger a push request
             }
-            SseEvent::Error { code: _, message: _ } => {
+            SseEvent::Error {
+                code: _,
+                message: _,
+            } => {
                 // TODO: Handle error - log or surface to application
             }
         }

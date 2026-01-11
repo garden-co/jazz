@@ -86,9 +86,10 @@ pub struct RowDescriptor {
 impl RowDescriptor {
     /// Create a RowDescriptor from an existing TableSchema.
     pub fn from_table_schema(schema: &TableSchema) -> Self {
-        let columns = schema.columns.iter().map(|col| {
-            (col.name.clone(), col.ty.clone(), col.nullable)
-        });
+        let columns = schema
+            .columns
+            .iter()
+            .map(|col| (col.name.clone(), col.ty.clone(), col.nullable));
         Self::new(columns)
     }
 
@@ -97,7 +98,11 @@ impl RowDescriptor {
     /// This is used for JOIN operations where predicates use qualified names.
     pub fn from_table_schema_qualified(schema: &TableSchema, table_name: &str) -> Self {
         let columns = schema.columns.iter().map(|col| {
-            (format!("{}.{}", table_name, col.name), col.ty.clone(), col.nullable)
+            (
+                format!("{}.{}", table_name, col.name),
+                col.ty.clone(),
+                col.nullable,
+            )
         });
         Self::new(columns)
     }
@@ -147,7 +152,8 @@ impl RowDescriptor {
             });
         }
 
-        let variable_count = descriptors.len() - descriptors.iter().filter(|c| c.is_fixed_size()).count();
+        let variable_count =
+            descriptors.len() - descriptors.iter().filter(|c| c.is_fixed_size()).count();
 
         RowDescriptor {
             columns: descriptors,
@@ -291,7 +297,8 @@ impl RowDescriptor {
 
                 // Find this column's logical index by matching on original schema_index
                 // (schema_index is unique within a descriptor)
-                let logical_schema_idx = logical_order.iter()
+                let logical_schema_idx = logical_order
+                    .iter()
                     .find(|(d, _, c)| *d == desc_idx && c.schema_index == col.schema_index)
                     .map(|(_, idx, _)| *idx)
                     .unwrap_or(columns.len());
@@ -608,12 +615,10 @@ impl<'a> RowRef<'a> {
                 }
                 Some(RowValue::BlobArray(refs))
             }
-            ColumnType::Array(item_descriptor) => {
-                Some(RowValue::Array(ArrayValue {
-                    item_descriptor: item_descriptor.as_ref(),
-                    data: value_data,
-                }))
-            }
+            ColumnType::Array(item_descriptor) => Some(RowValue::Array(ArrayValue {
+                item_descriptor: item_descriptor.as_ref(),
+                data: value_data,
+            })),
             _ => None, // Not a variable-size type
         }
     }
@@ -653,7 +658,11 @@ impl<'a> RowRef<'a> {
         } else {
             // Read offset from table (0-indexed: offset for column i is at position i-1)
             let offset_pos = fixed_size + (var_idx - 1) * 4;
-            let bytes: [u8; 4] = self.buffer.get(offset_pos..offset_pos + 4)?.try_into().ok()?;
+            let bytes: [u8; 4] = self
+                .buffer
+                .get(offset_pos..offset_pos + 4)?
+                .try_into()
+                .ok()?;
             u32::from_le_bytes(bytes) as usize
         };
 
@@ -664,13 +673,16 @@ impl<'a> RowRef<'a> {
         } else {
             // Read next column's offset from table
             let offset_pos = fixed_size + var_idx * 4;
-            let bytes: [u8; 4] = self.buffer.get(offset_pos..offset_pos + 4)?.try_into().ok()?;
+            let bytes: [u8; 4] = self
+                .buffer
+                .get(offset_pos..offset_pos + 4)?
+                .try_into()
+                .ok()?;
             u32::from_le_bytes(bytes) as usize
         };
 
         Some((start, end - start))
     }
-
 }
 
 /// An owned row with its own buffer. For caching and WASM transfer.
@@ -801,7 +813,8 @@ impl OwnedRow {
     /// This is needed for JOIN queries where predicates use qualified names.
     pub fn qualify_columns(&self, table: &str, schema: &TableSchema) -> Self {
         // Create a new descriptor with qualified column names
-        let qualified_descriptor = Arc::new(RowDescriptor::from_table_schema_qualified(schema, table));
+        let qualified_descriptor =
+            Arc::new(RowDescriptor::from_table_schema_qualified(schema, table));
 
         // Build the new row with qualified column names
         let mut builder = RowBuilder::new(qualified_descriptor.clone());
@@ -837,12 +850,15 @@ impl OwnedRow {
             RowValue::Null => builder.set_null(idx),
             RowValue::Array(arr) => {
                 // Collect items into OwnedRows
-                let items: Vec<OwnedRow> = arr.iter().map(|row_ref| {
-                    OwnedRow::new(
-                        Arc::new(row_ref.descriptor.clone()),
-                        row_ref.buffer.to_vec(),
-                    )
-                }).collect();
+                let items: Vec<OwnedRow> = arr
+                    .iter()
+                    .map(|row_ref| {
+                        OwnedRow::new(
+                            Arc::new(row_ref.descriptor.clone()),
+                            row_ref.buffer.to_vec(),
+                        )
+                    })
+                    .collect();
                 builder.set_array(idx, &items)
             }
             RowValue::Blob(content_ref) => builder.set_blob(idx, content_ref),
@@ -869,7 +885,8 @@ impl OwnedRow {
 
         // Build combined descriptor preserving buffer order from sources
         let descriptors: Vec<&RowDescriptor> = rows.iter().map(|r| r.descriptor.as_ref()).collect();
-        let combined_descriptor = Arc::new(RowDescriptor::concat_preserving_buffer_order(&descriptors));
+        let combined_descriptor =
+            Arc::new(RowDescriptor::concat_preserving_buffer_order(&descriptors));
 
         // Build the combined row using RowBuilder
         let mut builder = RowBuilder::new(combined_descriptor.clone());
@@ -946,7 +963,8 @@ impl RowBuilder {
                 let offset = col.offset;
                 if col.nullable {
                     self.fixed_section[offset] = 1; // present
-                    self.fixed_section[offset + 1..offset + 5].copy_from_slice(&value.to_le_bytes());
+                    self.fixed_section[offset + 1..offset + 5]
+                        .copy_from_slice(&value.to_le_bytes());
                 } else {
                     self.fixed_section[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
                 }
@@ -962,7 +980,8 @@ impl RowBuilder {
                 let offset = col.offset;
                 if col.nullable {
                     self.fixed_section[offset] = 1; // present
-                    self.fixed_section[offset + 1..offset + 5].copy_from_slice(&value.to_le_bytes());
+                    self.fixed_section[offset + 1..offset + 5]
+                        .copy_from_slice(&value.to_le_bytes());
                 } else {
                     self.fixed_section[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
                 }
@@ -978,7 +997,8 @@ impl RowBuilder {
                 let offset = col.offset;
                 if col.nullable {
                     self.fixed_section[offset] = 1; // present
-                    self.fixed_section[offset + 1..offset + 9].copy_from_slice(&value.to_le_bytes());
+                    self.fixed_section[offset + 1..offset + 9]
+                        .copy_from_slice(&value.to_le_bytes());
                 } else {
                     self.fixed_section[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
                 }
@@ -994,7 +1014,8 @@ impl RowBuilder {
                 let offset = col.offset;
                 if col.nullable {
                     self.fixed_section[offset] = 1; // present
-                    self.fixed_section[offset + 1..offset + 9].copy_from_slice(&value.to_le_bytes());
+                    self.fixed_section[offset + 1..offset + 9]
+                        .copy_from_slice(&value.to_le_bytes());
                 } else {
                     self.fixed_section[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
                 }
@@ -1010,7 +1031,8 @@ impl RowBuilder {
                 let offset = col.offset;
                 if col.nullable {
                     self.fixed_section[offset] = 1; // present
-                    self.fixed_section[offset + 1..offset + 17].copy_from_slice(&value.0.to_le_bytes());
+                    self.fixed_section[offset + 1..offset + 17]
+                        .copy_from_slice(&value.0.to_le_bytes());
                 } else {
                     self.fixed_section[offset..offset + 16].copy_from_slice(&value.0.to_le_bytes());
                 }
@@ -1335,7 +1357,11 @@ impl RowBuilder {
 
         // Calculate where variable data starts (after fixed section + offset table)
         // We store N-1 offsets for N variable columns
-        let offset_table_size = if var_count > 1 { (var_count - 1) * 4 } else { 0 };
+        let offset_table_size = if var_count > 1 {
+            (var_count - 1) * 4
+        } else {
+            0
+        };
         let var_data_start = buffer.len() + offset_table_size;
 
         // Calculate absolute offsets for each variable column (except the first)
@@ -1406,7 +1432,8 @@ pub fn join_rows(
     // For each target column, find the value from left or right row by name
     for (target_idx, target_col) in target_descriptor.columns.iter().enumerate() {
         // Try left row first
-        let value = left.get_by_name(&target_col.name)
+        let value = left
+            .get_by_name(&target_col.name)
             .or_else(|| right.get_by_name(&target_col.name));
 
         if let Some(value) = value {

@@ -75,10 +75,7 @@ impl Branch {
 
         // Update parent->child relationships
         for parent_id in &commit.parents {
-            self.children
-                .entry(*parent_id)
-                .or_default()
-                .push(id);
+            self.children.entry(*parent_id).or_default().push(id);
         }
 
         self.commits.insert(id, commit);
@@ -111,10 +108,7 @@ impl Branch {
 
         // Update children index for each parent
         for parent_id in &commit.parents {
-            self.children
-                .entry(*parent_id)
-                .or_default()
-                .push(id);
+            self.children.entry(*parent_id).or_default().push(id);
 
             // Remove parent from frontier (it now has a child)
             self.frontier.retain(|f| f != parent_id);

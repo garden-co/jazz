@@ -177,7 +177,8 @@ pub trait Encode {
 
     fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
-        self.encode(&mut buf).expect("encoding to Vec should not fail");
+        self.encode(&mut buf)
+            .expect("encoding to Vec should not fail");
         buf
     }
 }

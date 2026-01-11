@@ -7,31 +7,27 @@
  * Run: pnpm test
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { buildQuery, buildQueryById } from "../src/runtime.js";
-import { schemaMeta, userMeta, folderMeta, noteMeta, tagMeta } from "./generated/meta.js";
+import {
+  folderMeta,
+  noteMeta,
+  schemaMeta,
+  tagMeta,
+  userMeta,
+} from "./generated/meta.js";
 import type {
+  FolderIncludes,
+  FolderInsert,
+  FolderLoaded,
+  Note,
+  NoteFilter,
+  NoteIncludes,
+  NoteLoaded,
   User,
-  UserLoaded,
-  UserIncludes,
   UserFilter,
   UserInsert,
-  Folder,
-  FolderLoaded,
-  FolderIncludes,
-  FolderFilter,
-  FolderInsert,
-  Note,
-  NoteLoaded,
-  NoteIncludes,
-  NoteFilter,
-  NoteInsert,
-  Tag,
-  TagLoaded,
-  TagIncludes,
-  TagFilter,
-  TagInsert,
-  ObjectId,
+  UserLoaded,
 } from "./generated/types.js";
 
 // === Metadata Tests ===
@@ -50,14 +46,40 @@ describe("Generated metadata", () => {
     });
 
     it("has all columns with correct types", () => {
-      const colMap = Object.fromEntries(userMeta.columns.map((c) => [c.name, c]));
+      const colMap = Object.fromEntries(
+        userMeta.columns.map((c) => [c.name, c]),
+      );
 
-      expect(colMap.name).toEqual({ name: "name", type: { kind: "string" }, nullable: false });
-      expect(colMap.email).toEqual({ name: "email", type: { kind: "string" }, nullable: false });
-      expect(colMap.avatar).toEqual({ name: "avatar", type: { kind: "string" }, nullable: true });
-      expect(colMap.age).toEqual({ name: "age", type: { kind: "i64" }, nullable: false });
-      expect(colMap.score).toEqual({ name: "score", type: { kind: "f64" }, nullable: false });
-      expect(colMap.isAdmin).toEqual({ name: "isAdmin", type: { kind: "bool" }, nullable: false });
+      expect(colMap.name).toEqual({
+        name: "name",
+        type: { kind: "string" },
+        nullable: false,
+      });
+      expect(colMap.email).toEqual({
+        name: "email",
+        type: { kind: "string" },
+        nullable: false,
+      });
+      expect(colMap.avatar).toEqual({
+        name: "avatar",
+        type: { kind: "string" },
+        nullable: true,
+      });
+      expect(colMap.age).toEqual({
+        name: "age",
+        type: { kind: "i64" },
+        nullable: false,
+      });
+      expect(colMap.score).toEqual({
+        name: "score",
+        type: { kind: "f64" },
+        nullable: false,
+      });
+      expect(colMap.isAdmin).toEqual({
+        name: "isAdmin",
+        type: { kind: "bool" },
+        nullable: false,
+      });
     });
 
     it("has no forward refs", () => {
@@ -81,9 +103,15 @@ describe("Generated metadata", () => {
 
   describe("Folders table metadata", () => {
     it("has correct columns including refs", () => {
-      const colMap = Object.fromEntries(folderMeta.columns.map((c) => [c.name, c]));
+      const colMap = Object.fromEntries(
+        folderMeta.columns.map((c) => [c.name, c]),
+      );
 
-      expect(colMap.name).toEqual({ name: "name", type: { kind: "string" }, nullable: false });
+      expect(colMap.name).toEqual({
+        name: "name",
+        type: { kind: "string" },
+        nullable: false,
+      });
       expect(colMap.owner).toEqual({
         name: "owner",
         type: { kind: "ref", table: "Users" },
@@ -229,7 +257,9 @@ describe("buildQuery", () => {
 
     it("builds comparison filters for bigint", () => {
       const sql = buildQuery(noteMeta, schemaMeta, {
-        where: { createdAt: { gte: BigInt(1000), lt: BigInt(2000) } } as NoteFilter,
+        where: {
+          createdAt: { gte: BigInt(1000), lt: BigInt(2000) },
+        } as NoteFilter,
       });
       expect(sql).toContain("FROM Notes n");
       expect(sql).toContain("n.createdAt >= 1000");
@@ -634,10 +664,7 @@ describe("Type correctness", () => {
 
     it("Filter accepts combinators", () => {
       const where: NoteFilter = {
-        OR: [
-          { isPublic: true },
-          { author: "special-user-id" },
-        ],
+        OR: [{ isPublic: true }, { author: "special-user-id" }],
         NOT: { title: { startsWith: "Draft" } },
       };
       expect(where.OR).toHaveLength(2);

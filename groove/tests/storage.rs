@@ -30,10 +30,7 @@ fn content_ref_inline() {
 
 #[test]
 fn content_ref_chunked() {
-    let hashes = vec![
-        ChunkHash::compute(b"chunk1"),
-        ChunkHash::compute(b"chunk2"),
-    ];
+    let hashes = vec![ChunkHash::compute(b"chunk1"), ChunkHash::compute(b"chunk2")];
     let content = ContentRef::chunked(hashes.clone());
     assert!(!content.is_inline());
     assert!(content.as_inline().is_none());
@@ -78,7 +75,8 @@ fn list_commits_returns_all_commits_not_just_frontier() {
     block_on(env.set_frontier(object_id, branch, &[id3]));
 
     // list_commits should return ALL commits, not just the frontier
-    let commits: Vec<CommitId> = block_on(async { env.list_commits(object_id, branch).collect().await });
+    let commits: Vec<CommitId> =
+        block_on(async { env.list_commits(object_id, branch).collect().await });
 
     assert_eq!(
         commits.len(),

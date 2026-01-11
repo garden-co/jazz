@@ -41,7 +41,10 @@ async fn test_chunk_store_has_chunk() {
 
     // Check non-existent chunk
     let fake_hash = ChunkHash::compute(b"nonexistent");
-    assert!(!env.has_chunk(&fake_hash).await, "should not have non-existent chunk");
+    assert!(
+        !env.has_chunk(&fake_hash).await,
+        "should not have non-existent chunk"
+    );
 
     // Put and check
     let data = Bytes::from_static(b"test data");
@@ -257,7 +260,10 @@ async fn test_persistence_across_reconnect() {
 
     // Verify commit persisted
     let retrieved = env2.get_commit(&id1).await;
-    assert!(retrieved.is_some(), "commit should persist across reconnect");
+    assert!(
+        retrieved.is_some(),
+        "commit should persist across reconnect"
+    );
     assert_eq!(retrieved.unwrap().content.as_ref(), b"persistent data");
 
     // Verify frontier persisted

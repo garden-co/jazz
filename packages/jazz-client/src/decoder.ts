@@ -6,7 +6,12 @@
  * - id is the first 16 bytes of every row buffer (ObjectId as u128 LE, converted to Base32 string)
  */
 
-import type { TableMeta, SchemaMeta, IncludeSpec, ColumnMeta } from "./types.js";
+import type {
+  ColumnMeta,
+  IncludeSpec,
+  SchemaMeta,
+  TableMeta,
+} from "./types.js";
 
 // Delta type constants (matching Rust)
 const DELTA_ADDED = 1;
@@ -14,7 +19,7 @@ const DELTA_UPDATED = 2;
 const DELTA_REMOVED = 3;
 
 // Crockford Base32 alphabet (matches Rust ObjectId encoding - lowercase)
-const CROCKFORD_ALPHABET = '0123456789abcdefghjkmnpqrstvwxyz';
+const CROCKFORD_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz";
 
 // Shared TextDecoder instance
 const textDecoder = new TextDecoder();
@@ -39,7 +44,7 @@ function objectIdToString(bytes: Uint8Array, offset: number): string {
     value >>= 5n;
   }
 
-  return chars.join('');
+  return chars.join("");
 }
 
 /**
@@ -48,13 +53,20 @@ function objectIdToString(bytes: Uint8Array, offset: number): string {
 function getColumnFixedSize(col: ColumnMeta): number | null {
   const baseSize = (() => {
     switch (col.type.kind) {
-      case "bool": return 1;
-      case "i64": return 8;
-      case "f64": return 8;
-      case "ref": return 16;
-      case "string": return null;
-      case "bytes": return null;
-      default: return null;
+      case "bool":
+        return 1;
+      case "i64":
+        return 8;
+      case "f64":
+        return 8;
+      case "ref":
+        return 16;
+      case "string":
+        return null;
+      case "bytes":
+        return null;
+      default:
+        return null;
     }
   })();
 
@@ -121,7 +133,7 @@ function computeLayout(
   tableMeta: TableMeta,
   schema: SchemaMeta,
   include?: IncludeSpec,
-  isArrayItemContext = false
+  isArrayItemContext = false,
 ): RowBufferLayoutExt {
   const fixedColumns: ColumnLayout[] = [];
   const variableColumns: ColumnLayout[] = [];
@@ -132,11 +144,16 @@ function computeLayout(
   // id column is always first (ObjectId, 16 bytes, non-nullable)
   const idCol: ColumnMeta = {
     name: "id",
-    type: { kind: "ref", table: "" },  // ObjectId is stored same as Ref (16 bytes)
+    type: { kind: "ref", table: "" }, // ObjectId is stored same as Ref (16 bytes)
     nullable: false,
   };
-  fixedColumns.push({ col: idCol, tableName: tableMeta.name, isFixed: true, offset: fixedOffset });
-  fixedOffset += 16;  // ObjectId is 16 bytes
+  fixedColumns.push({
+    col: idCol,
+    tableName: tableMeta.name,
+    isFixed: true,
+    offset: fixedOffset,
+  });
+  fixedOffset += 16; // ObjectId is 16 bytes
 
   // For array item context (nested includes), Groove excludes FK columns that are being
   // resolved by inner JOINs. For main query context, Groove includes both FK and expanded columns.
@@ -157,10 +174,20 @@ function computeLayout(
     }
     const fixedSize = getColumnFixedSize(col);
     if (fixedSize !== null) {
-      fixedColumns.push({ col, tableName: tableMeta.name, isFixed: true, offset: fixedOffset });
+      fixedColumns.push({
+        col,
+        tableName: tableMeta.name,
+        isFixed: true,
+        offset: fixedOffset,
+      });
       fixedOffset += fixedSize;
     } else {
-      variableColumns.push({ col, tableName: tableMeta.name, isFixed: false, offset: varIndex++ });
+      variableColumns.push({
+        col,
+        tableName: tableMeta.name,
+        isFixed: false,
+        offset: varIndex++,
+      });
     }
   }
 
@@ -190,20 +217,35 @@ function computeLayout(
             // First add the joined table's id (16 bytes)
             const joinedIdCol: ColumnMeta = {
               name: "id",
-              type: { kind: "ref", table: "" },  // ObjectId is stored same as Ref (16 bytes)
+              type: { kind: "ref", table: "" }, // ObjectId is stored same as Ref (16 bytes)
               nullable: false,
             };
-            fixedColumns.push({ col: joinedIdCol, tableName: targetTable.name, isFixed: true, offset: fixedOffset });
+            fixedColumns.push({
+              col: joinedIdCol,
+              tableName: targetTable.name,
+              isFixed: true,
+              offset: fixedOffset,
+            });
             fixedOffset += 16;
 
             // Then add the joined table's other columns
             for (const col of targetTable.columns) {
               const fixedSize = getColumnFixedSize(col);
               if (fixedSize !== null) {
-                fixedColumns.push({ col, tableName: targetTable.name, isFixed: true, offset: fixedOffset });
+                fixedColumns.push({
+                  col,
+                  tableName: targetTable.name,
+                  isFixed: true,
+                  offset: fixedOffset,
+                });
                 fixedOffset += fixedSize;
               } else {
-                variableColumns.push({ col, tableName: targetTable.name, isFixed: false, offset: varIndex++ });
+                variableColumns.push({
+                  col,
+                  tableName: targetTable.name,
+                  isFixed: false,
+                  offset: varIndex++,
+                });
               }
             }
           }
@@ -221,7 +263,10 @@ function computeLayout(
         const itemColumns = sourceTable?.columns ?? [];
 
         // Check if there's a nested include spec (e.g., { user: true } in IssueAssignees: { user: true })
-        const nestedInclude = typeof arrayInclude === 'object' ? arrayInclude as IncludeSpec : undefined;
+        const nestedInclude =
+          typeof arrayInclude === "object"
+            ? (arrayInclude as IncludeSpec)
+            : undefined;
 
         arrayColumns.push({
           name: reverseRef.name,
@@ -257,7 +302,7 @@ function readFixedValue(
   view: DataView,
   bufferStart: number,
   col: ColumnMeta,
-  colOffset: number
+  colOffset: number,
 ): unknown {
   const absOffset = bufferStart + colOffset;
 
@@ -266,19 +311,29 @@ function readFixedValue(
     // Value starts after presence byte
     const valueOffset = absOffset + 1;
     switch (col.type.kind) {
-      case "bool": return bytes[valueOffset] === 1;
-      case "i64": return view.getBigInt64(valueOffset, true);
-      case "f64": return view.getFloat64(valueOffset, true);
-      case "ref": return objectIdToString(bytes, valueOffset);
-      default: throw new Error(`Unknown fixed column type: ${col.type.kind}`);
+      case "bool":
+        return bytes[valueOffset] === 1;
+      case "i64":
+        return view.getBigInt64(valueOffset, true);
+      case "f64":
+        return view.getFloat64(valueOffset, true);
+      case "ref":
+        return objectIdToString(bytes, valueOffset);
+      default:
+        throw new Error(`Unknown fixed column type: ${col.type.kind}`);
     }
   } else {
     switch (col.type.kind) {
-      case "bool": return bytes[absOffset] === 1;
-      case "i64": return view.getBigInt64(absOffset, true);
-      case "f64": return view.getFloat64(absOffset, true);
-      case "ref": return objectIdToString(bytes, absOffset);
-      default: throw new Error(`Unknown fixed column type: ${col.type.kind}`);
+      case "bool":
+        return bytes[absOffset] === 1;
+      case "i64":
+        return view.getBigInt64(absOffset, true);
+      case "f64":
+        return view.getFloat64(absOffset, true);
+      case "ref":
+        return objectIdToString(bytes, absOffset);
+      default:
+        throw new Error(`Unknown fixed column type: ${col.type.kind}`);
     }
   }
 }
@@ -295,7 +350,7 @@ function readVariableValue(
   varIndex: number,
   rowEnd: number,
   col: ColumnMeta | null, // null for array columns
-  totalVarCount: number
+  totalVarCount: number,
 ): unknown {
   const offsetTableStart = bufferStart + layout.fixedSize;
   const varDataStart = offsetTableStart + layout.offsetTableSize;
@@ -306,7 +361,10 @@ function readVariableValue(
     start = varDataStart;
   } else {
     // Read offset from table (offset for column i is at position i-1)
-    const rawOffset = view.getUint32(offsetTableStart + (varIndex - 1) * 4, true);
+    const rawOffset = view.getUint32(
+      offsetTableStart + (varIndex - 1) * 4,
+      true,
+    );
     start = bufferStart + rawOffset;
   }
 
@@ -357,7 +415,7 @@ function readArrayData(
   layout: RowBufferLayoutExt,
   varIndex: number,
   rowEnd: number,
-  totalVarCount: number
+  totalVarCount: number,
 ): Uint8Array {
   const offsetTableStart = bufferStart + layout.fixedSize;
   const varDataStart = offsetTableStart + layout.offsetTableSize;
@@ -368,7 +426,10 @@ function readArrayData(
     start = varDataStart;
   } else {
     // Read offset from table (offset for column i is at position i-1)
-    const rawOffset = view.getUint32(offsetTableStart + (varIndex - 1) * 4, true);
+    const rawOffset = view.getUint32(
+      offsetTableStart + (varIndex - 1) * 4,
+      true,
+    );
     start = bufferStart + rawOffset;
   }
 
@@ -398,13 +459,17 @@ function decodeArrayItems(
   itemColumns: ColumnMeta[],
   schema: SchemaMeta,
   nestedInclude?: IncludeSpec,
-  sourceTableMeta?: TableMeta
+  sourceTableMeta?: TableMeta,
 ): Record<string, unknown>[] {
   if (arrayData.length < 4) {
     return [];
   }
 
-  const view = new DataView(arrayData.buffer, arrayData.byteOffset, arrayData.byteLength);
+  const view = new DataView(
+    arrayData.buffer,
+    arrayData.byteOffset,
+    arrayData.byteLength,
+  );
   const count = view.getUint32(0, true);
 
   if (count === 0) {
@@ -438,7 +503,11 @@ function decodeArrayItems(
 
     // Decode the item row buffer
     const itemBytes = arrayData.subarray(itemStart, itemEnd);
-    const itemView = new DataView(itemBytes.buffer, itemBytes.byteOffset, itemBytes.byteLength);
+    const itemView = new DataView(
+      itemBytes.buffer,
+      itemBytes.byteOffset,
+      itemBytes.byteLength,
+    );
 
     // If we have nested includes and source table metadata, use full row buffer decoding
     // to properly handle joined columns
@@ -446,14 +515,29 @@ function decodeArrayItems(
     if (nestedInclude && sourceTableMeta) {
       // Pass isArrayItemContext=true so the decoder knows to skip FK columns
       // that are resolved by inner JOINs in ARRAY subqueries
-      item = decodeRowBuffer(itemBytes, itemView, 0, itemBytes.length, sourceTableMeta, schema, nestedInclude, true);
+      item = decodeRowBuffer(
+        itemBytes,
+        itemView,
+        0,
+        itemBytes.length,
+        sourceTableMeta,
+        schema,
+        nestedInclude,
+        true,
+      );
     } else {
       // Fall back to simple layout for flat items
       const itemLayout = computeItemLayout(itemColumns);
-      const itemOffsetTableSize = itemLayout.variableColumns.length > 1
-        ? (itemLayout.variableColumns.length - 1) * 4
-        : 0;
-      item = decodeItemRowBuffer(itemBytes, itemView, itemLayout, itemOffsetTableSize);
+      const itemOffsetTableSize =
+        itemLayout.variableColumns.length > 1
+          ? (itemLayout.variableColumns.length - 1) * 4
+          : 0;
+      item = decodeItemRowBuffer(
+        itemBytes,
+        itemView,
+        itemLayout,
+        itemOffsetTableSize,
+      );
     }
     items.push(item);
   }
@@ -478,7 +562,7 @@ function computeItemLayout(columns: ColumnMeta[]): {
   // id column is always first (ObjectId, 16 bytes, non-nullable)
   const idCol: ColumnMeta = {
     name: "id",
-    type: { kind: "ref", table: "" },  // ObjectId is stored same as Ref (16 bytes)
+    type: { kind: "ref", table: "" }, // ObjectId is stored same as Ref (16 bytes)
     nullable: false,
   };
   fixedColumns.push({ col: idCol, offset: fixedOffset });
@@ -503,8 +587,12 @@ function computeItemLayout(columns: ColumnMeta[]): {
 function decodeItemRowBuffer(
   bytes: Uint8Array,
   view: DataView,
-  layout: { fixedSize: number; fixedColumns: Array<{ col: ColumnMeta; offset: number }>; variableColumns: Array<{ col: ColumnMeta; offset: number }> },
-  offsetTableSize: number
+  layout: {
+    fixedSize: number;
+    fixedColumns: Array<{ col: ColumnMeta; offset: number }>;
+    variableColumns: Array<{ col: ColumnMeta; offset: number }>;
+  },
+  offsetTableSize: number,
 ): Record<string, unknown> {
   const row: Record<string, unknown> = {};
   const varDataStart = layout.fixedSize + offsetTableSize;
@@ -523,7 +611,10 @@ function decodeItemRowBuffer(
     if (varIndex === 0) {
       start = varDataStart;
     } else {
-      const rawOffset = view.getUint32(layout.fixedSize + (varIndex - 1) * 4, true);
+      const rawOffset = view.getUint32(
+        layout.fixedSize + (varIndex - 1) * 4,
+        true,
+      );
       start = rawOffset;
     }
 
@@ -542,11 +633,17 @@ function decodeItemRowBuffer(
         row[col.name] = null;
       } else {
         const data = bytes.subarray(start + 1, end);
-        row[col.name] = col.type.kind === "string" ? textDecoder.decode(data) : new Uint8Array(data);
+        row[col.name] =
+          col.type.kind === "string"
+            ? textDecoder.decode(data)
+            : new Uint8Array(data);
       }
     } else {
       const data = bytes.subarray(start, end);
-      row[col.name] = col.type.kind === "string" ? textDecoder.decode(data) : new Uint8Array(data);
+      row[col.name] =
+        col.type.kind === "string"
+          ? textDecoder.decode(data)
+          : new Uint8Array(data);
     }
   }
 
@@ -560,25 +657,35 @@ function readFixedValueSimple(
   bytes: Uint8Array,
   view: DataView,
   col: ColumnMeta,
-  offset: number
+  offset: number,
 ): unknown {
   if (col.nullable) {
     if (bytes[offset] === 0) return null;
     const valueOffset = offset + 1;
     switch (col.type.kind) {
-      case "bool": return bytes[valueOffset] === 1;
-      case "i64": return view.getBigInt64(valueOffset, true);
-      case "f64": return view.getFloat64(valueOffset, true);
-      case "ref": return objectIdToString(bytes, valueOffset);
-      default: throw new Error(`Unknown fixed column type: ${col.type.kind}`);
+      case "bool":
+        return bytes[valueOffset] === 1;
+      case "i64":
+        return view.getBigInt64(valueOffset, true);
+      case "f64":
+        return view.getFloat64(valueOffset, true);
+      case "ref":
+        return objectIdToString(bytes, valueOffset);
+      default:
+        throw new Error(`Unknown fixed column type: ${col.type.kind}`);
     }
   } else {
     switch (col.type.kind) {
-      case "bool": return bytes[offset] === 1;
-      case "i64": return view.getBigInt64(offset, true);
-      case "f64": return view.getFloat64(offset, true);
-      case "ref": return objectIdToString(bytes, offset);
-      default: throw new Error(`Unknown fixed column type: ${col.type.kind}`);
+      case "bool":
+        return bytes[offset] === 1;
+      case "i64":
+        return view.getBigInt64(offset, true);
+      case "f64":
+        return view.getFloat64(offset, true);
+      case "ref":
+        return objectIdToString(bytes, offset);
+      default:
+        throw new Error(`Unknown fixed column type: ${col.type.kind}`);
     }
   }
 }
@@ -605,40 +712,63 @@ function decodeRowBuffer(
   tableMeta: TableMeta,
   schema: SchemaMeta,
   include?: IncludeSpec,
-  isArrayItemContext = false
+  isArrayItemContext = false,
 ): Record<string, unknown> {
   const row: Record<string, unknown> = {};
   const layout = computeLayout(tableMeta, schema, include, isArrayItemContext);
   // Total variable column count includes regular variable columns AND array columns
-  const totalVarCount = layout.variableColumns.length + layout.arrayColumns.length;
+  const totalVarCount =
+    layout.variableColumns.length + layout.arrayColumns.length;
 
   // Track which table each column belongs to for building nested objects
   const mainTableColumns: Array<{ name: string; value: unknown }> = [];
-  const joinedTableColumns: Map<string, Array<{ name: string; value: unknown }>> = new Map();
+  const joinedTableColumns: Map<
+    string,
+    Array<{ name: string; value: unknown }>
+  > = new Map();
 
   // Read fixed columns
   for (const colLayout of layout.fixedColumns) {
-    const value = readFixedValue(bytes, view, bufferStart, colLayout.col, colLayout.offset);
+    const value = readFixedValue(
+      bytes,
+      view,
+      bufferStart,
+      colLayout.col,
+      colLayout.offset,
+    );
     if (colLayout.tableName === tableMeta.name) {
       mainTableColumns.push({ name: colLayout.col.name, value });
     } else {
       if (!joinedTableColumns.has(colLayout.tableName)) {
         joinedTableColumns.set(colLayout.tableName, []);
       }
-      joinedTableColumns.get(colLayout.tableName)!.push({ name: colLayout.col.name, value });
+      joinedTableColumns
+        .get(colLayout.tableName)!
+        .push({ name: colLayout.col.name, value });
     }
   }
 
   // Read variable columns
   for (const colLayout of layout.variableColumns) {
-    const value = readVariableValue(bytes, view, bufferStart, layout, colLayout.offset, rowEnd, colLayout.col, totalVarCount);
+    const value = readVariableValue(
+      bytes,
+      view,
+      bufferStart,
+      layout,
+      colLayout.offset,
+      rowEnd,
+      colLayout.col,
+      totalVarCount,
+    );
     if (colLayout.tableName === tableMeta.name) {
       mainTableColumns.push({ name: colLayout.col.name, value });
-    } else if (colLayout.tableName !== '__internal__') {
+    } else if (colLayout.tableName !== "__internal__") {
       if (!joinedTableColumns.has(colLayout.tableName)) {
         joinedTableColumns.set(colLayout.tableName, []);
       }
-      joinedTableColumns.get(colLayout.tableName)!.push({ name: colLayout.col.name, value });
+      joinedTableColumns
+        .get(colLayout.tableName)!
+        .push({ name: colLayout.col.name, value });
     }
   }
 
@@ -672,8 +802,22 @@ function decodeRowBuffer(
     // Read and decode array columns (reverse refs and forward refs in array context)
     // Arrays ARE variable columns in the row buffer and ARE in the offset table
     for (const arrayCol of layout.arrayColumns) {
-      const arrayData = readArrayData(bytes, view, bufferStart, layout, arrayCol.varIndex, rowEnd, totalVarCount);
-      const items = decodeArrayItems(arrayData, arrayCol.itemColumns, schema, arrayCol.nestedInclude, arrayCol.sourceTableMeta);
+      const arrayData = readArrayData(
+        bytes,
+        view,
+        bufferStart,
+        layout,
+        arrayCol.varIndex,
+        rowEnd,
+        totalVarCount,
+      );
+      const items = decodeArrayItems(
+        arrayData,
+        arrayCol.itemColumns,
+        schema,
+        arrayCol.nestedInclude,
+        arrayCol.sourceTableMeta,
+      );
 
       // For forward refs in array context, Groove wraps the joined row in a single-item array
       // Extract the single item instead of keeping the array
@@ -700,33 +844,42 @@ export function decodeDeltaWithIncludes<T>(
   buffer: Uint8Array | ArrayBufferLike,
   tableMeta: TableMeta,
   schema: SchemaMeta,
-  include?: IncludeSpec
+  include?: IncludeSpec,
 ): { type: "added" | "updated"; row: T } | { type: "removed"; id: string } {
   try {
-  // Handle both Uint8Array (preserves byteOffset) and ArrayBuffer
-  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const deltaType = bytes[0];
+    // Handle both Uint8Array (preserves byteOffset) and ArrayBuffer
+    const bytes =
+      buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const deltaType = bytes[0];
 
-  if (deltaType === DELTA_REMOVED) {
-    const id = objectIdToString(bytes, 1);
-    return { type: "removed", id };
-  }
+    if (deltaType === DELTA_REMOVED) {
+      const id = objectIdToString(bytes, 1);
+      return { type: "removed", id };
+    }
 
-  // Row buffer starts at offset 1 (after delta type byte)
-  // id is the first 16 bytes inside the row buffer
-  const bufferStart = 1;
-  const rowEnd = bytes.length;
+    // Row buffer starts at offset 1 (after delta type byte)
+    // id is the first 16 bytes inside the row buffer
+    const bufferStart = 1;
+    const rowEnd = bytes.length;
 
-  // Decode the row buffer (id is read as first fixed column)
-  const row = decodeRowBuffer(bytes, view, bufferStart, rowEnd, tableMeta, schema, include);
+    // Decode the row buffer (id is read as first fixed column)
+    const row = decodeRowBuffer(
+      bytes,
+      view,
+      bufferStart,
+      rowEnd,
+      tableMeta,
+      schema,
+      include,
+    );
 
-  return {
-    type: deltaType === DELTA_ADDED ? "added" : "updated",
-    row: row as T
-  };
+    return {
+      type: deltaType === DELTA_ADDED ? "added" : "updated",
+      row: row as T,
+    };
   } catch (error) {
-    console.error('decodeDeltaWithIncludes error:', error);
+    console.error("decodeDeltaWithIncludes error:", error);
     throw error;
   }
 }

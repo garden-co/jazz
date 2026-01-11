@@ -8,7 +8,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use groove::sql::row_buffer::{OwnedRow, RowValue};
 use groove::sql::{Database, ExecuteResult};
-use groove::{ChunkStore, ContentRef, MemoryEnvironment, ObjectId, INLINE_THRESHOLD};
+use groove::{ChunkStore, ContentRef, INLINE_THRESHOLD, MemoryEnvironment, ObjectId};
 
 /// Helper to extract rows from ExecuteResult
 fn get_rows(result: ExecuteResult) -> Vec<(ObjectId, OwnedRow)> {
@@ -66,8 +66,12 @@ fn database_roundtrip_simple() {
     assert_eq!(rows.len(), 2, "should have 2 rows");
 
     // Check row values by name
-    let has_alice = rows.iter().any(|r| r.1.get_by_name("name") == Some(RowValue::String("Alice")));
-    let has_bob = rows.iter().any(|r| r.1.get_by_name("name") == Some(RowValue::String("Bob")));
+    let has_alice = rows
+        .iter()
+        .any(|r| r.1.get_by_name("name") == Some(RowValue::String("Alice")));
+    let has_bob = rows
+        .iter()
+        .any(|r| r.1.get_by_name("name") == Some(RowValue::String("Bob")));
     assert!(has_alice, "should contain Alice");
     assert!(has_bob, "should contain Bob");
 }
@@ -145,8 +149,10 @@ fn database_roundtrip_with_policies() {
         // Note: id columns are auto-added as ObjectId type
         db.execute("CREATE TABLE users (name STRING NOT NULL)")
             .unwrap();
-        db.execute("CREATE TABLE documents (title STRING NOT NULL, owner_id REFERENCES users NOT NULL)")
-            .unwrap();
+        db.execute(
+            "CREATE TABLE documents (title STRING NOT NULL, owner_id REFERENCES users NOT NULL)",
+        )
+        .unwrap();
 
         // Create users
         let alice_id = get_inserted_id(
@@ -245,7 +251,9 @@ fn database_roundtrip_after_delete() {
     let items = get_rows(db.execute("SELECT * FROM items").unwrap());
     assert_eq!(items.len(), 2, "delete should be persisted");
 
-    let has_item2 = items.iter().any(|r| r.1.get_by_name("name") == Some(RowValue::String("Item2")));
+    let has_item2 = items
+        .iter()
+        .any(|r| r.1.get_by_name("name") == Some(RowValue::String("Item2")));
     assert!(!has_item2, "Item2 should be deleted");
 }
 
@@ -361,11 +369,19 @@ fn database_roundtrip_with_inline_blob() {
 
         // Insert with blob - test row creation separately
         let schema = db.get_table("files").unwrap();
-        let descriptor = std::sync::Arc::new(groove::sql::row_buffer::RowDescriptor::from_table_schema(&schema));
-        eprintln!("Schema columns: {:?}", schema.columns.iter().map(|c| &c.name).collect::<Vec<_>>());
+        let descriptor = std::sync::Arc::new(
+            groove::sql::row_buffer::RowDescriptor::from_table_schema(&schema),
+        );
+        eprintln!(
+            "Schema columns: {:?}",
+            schema.columns.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
         eprintln!("Descriptor columns:");
         for (i, col) in descriptor.columns.iter().enumerate() {
-            eprintln!("  [{}]: name={}, ty={:?}, offset={}", i, col.name, col.ty, col.offset);
+            eprintln!(
+                "  [{}]: name={}, ty={:?}, offset={}",
+                i, col.name, col.ty, col.offset
+            );
         }
         let row = groove::sql::row_buffer::RowBuilder::new(descriptor.clone())
             .set_string_by_name("name", "small.bin")
@@ -393,7 +409,10 @@ fn database_roundtrip_with_inline_blob() {
 
     // Debug: print column names and types
     for (i, col) in rows[0].1.descriptor.columns.iter().enumerate() {
-        eprintln!("Col[{}]: name={}, ty={:?}, offset={}, nullable={}", i, col.name, col.ty, col.offset, col.nullable);
+        eprintln!(
+            "Col[{}]: name={}, ty={:?}, offset={}, nullable={}",
+            i, col.name, col.ty, col.offset, col.nullable
+        );
     }
     eprintln!("Row buffer len: {}", rows[0].1.buffer.len());
     eprintln!("Row buffer: {:?}", &rows[0].1.buffer);
@@ -406,7 +425,10 @@ fn database_roundtrip_with_inline_blob() {
         let data = content_ref.as_inline().expect("should be inline blob");
         assert_eq!(data, small_data.as_slice(), "blob data should match");
     } else {
-        panic!("expected Blob value, got {:?}", rows[0].1.get_by_name("data"));
+        panic!(
+            "expected Blob value, got {:?}",
+            rows[0].1.get_by_name("data")
+        );
     }
 }
 
@@ -439,10 +461,12 @@ fn database_roundtrip_with_chunked_blob() {
         let blob_ref = ContentRef::chunked(hashes);
 
         // Insert with blob
-        db.insert_with("files", |b| b
-            .set_string_by_name("name", "large.bin")
-            .set_blob_by_name("data", blob_ref)
-            .build()).unwrap();
+        db.insert_with("files", |b| {
+            b.set_string_by_name("name", "large.bin")
+                .set_blob_by_name("data", blob_ref)
+                .build()
+        })
+        .unwrap();
 
         db.catalog_object_id()
     };
@@ -466,9 +490,16 @@ fn database_roundtrip_with_chunked_blob() {
             restored_data.extend_from_slice(&chunk);
         }
 
-        assert_eq!(restored_data.len(), large_data.len(), "blob size should match");
+        assert_eq!(
+            restored_data.len(),
+            large_data.len(),
+            "blob size should match"
+        );
         assert_eq!(restored_data, large_data, "blob data should match");
     } else {
-        panic!("expected Blob value, got {:?}", rows[0].1.get_by_name("data"));
+        panic!(
+            "expected Blob value, got {:?}",
+            rows[0].1.get_by_name("data")
+        );
     }
 }

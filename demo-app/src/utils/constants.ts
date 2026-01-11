@@ -41,7 +41,11 @@ export const USER_COLORS = [
 ];
 
 export const PROJECT_DATA = [
-  { name: "Frontend", color: "#3B82F6", description: "Web application development" },
+  {
+    name: "Frontend",
+    color: "#3B82F6",
+    description: "Web application development",
+  },
   { name: "Backend", color: "#10B981", description: "API and services" },
   { name: "Infrastructure", color: "#F59E0B", description: "DevOps and cloud" },
 ];

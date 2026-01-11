@@ -1,0 +1,12 @@
+# Lefthook configuration
+# https://github.com/evilmartians/lefthook
+
+pre-commit:
+  parallel: true
+  commands:
+    rust-format:
+      glob: "*.rs"
+      run: cargo fmt --all
+    biome-format:
+      glob: "*.{js,ts,tsx,jsx,json}"
+      run: pnpm biome format --write {staged_files} && git add {staged_files}

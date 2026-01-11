@@ -9,22 +9,22 @@
 use std::sync::Arc;
 
 use axum::{
+    Router,
     body::Body,
     extract::State,
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Router,
 };
 use futures::stream::StreamExt;
 use tokio::sync::RwLock;
 
+use groove::Environment;
 use groove::sync::{
     ActiveQuery, ClientIdentity, Decode, Encode, PushRequest, PushResponse, QueryId,
     ReconcileRequest, ServerEnv, SseEvent, SubscribeRequest, SyncServer, TokenValidator,
     UnsubscribeRequest,
 };
-use groove::Environment;
 
 use crate::AxumServerEnv;
 
@@ -390,10 +390,7 @@ async fn handle_reconcile<E: Environment>(
 
     // Get server frontier and commits
     let server = state.server.read().await;
-    let server_frontier = server
-        .env
-        .get_frontier(request.object_id.0, "main")
-        .await;
+    let server_frontier = server.env.get_frontier(request.object_id.0, "main").await;
 
     // If server has no commits, return empty
     if server_frontier.is_empty() {
@@ -446,11 +443,7 @@ async fn handle_reconcile<E: Environment>(
             .next()
     } {
         let mut server = state.server.write().await;
-        server.update_client_known_state(
-            &session_id,
-            request.object_id,
-            server_frontier.clone(),
-        );
+        server.update_client_known_state(&session_id, request.object_id, server_frontier.clone());
     }
 
     let event = SseEvent::Commits {
@@ -608,10 +601,7 @@ mod tests {
         assert_eq!(extract_bearer_token(&headers), None);
 
         // Valid bearer
-        headers.insert(
-            header::AUTHORIZATION,
-            "Bearer mytoken123".parse().unwrap(),
-        );
+        headers.insert(header::AUTHORIZATION, "Bearer mytoken123".parse().unwrap());
         assert_eq!(extract_bearer_token(&headers), Some("mytoken123"));
     }
 

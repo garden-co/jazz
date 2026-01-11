@@ -3,13 +3,13 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::object::ObjectId;
 use crate::sql::query_graph::graph::{GraphId, QueryGraph};
 use crate::sql::query_graph::node::{NodeId, QueryNode};
 use crate::sql::query_graph::predicate::Predicate;
 use crate::sql::row_buffer::RowDescriptor;
 use crate::sql::schema::{ColumnType, TableSchema};
 use crate::sql::types::IndexKey;
-use crate::object::ObjectId;
 
 /// Builder for constructing `QueryGraph` instances.
 ///
@@ -159,10 +159,15 @@ impl QueryGraphBuilder {
         // Build output descriptor: start from current descriptor (or schema if first array)
         // This allows multiple array aggregates to accumulate their columns
         let mut output_cols: Vec<(String, ColumnType, bool)> = match &self.current_descriptor {
-            Some(desc) => desc.columns.iter()
+            Some(desc) => desc
+                .columns
+                .iter()
                 .map(|c| (c.name.clone(), c.ty.clone(), c.nullable))
                 .collect(),
-            None => self.schema.columns.iter()
+            None => self
+                .schema
+                .columns
+                .iter()
                 .map(|c| (c.name.clone(), c.ty.clone(), c.nullable))
                 .collect(),
         };
@@ -175,14 +180,15 @@ impl QueryGraphBuilder {
             false,
         );
         // Compute the actual array column index (may differ from requested if -1 or out of range)
-        let actual_array_index = if array_column_index < 0 || array_column_index as usize >= output_cols.len() {
-            let idx = output_cols.len() as i32;
-            output_cols.push(array_col);
-            idx
-        } else {
-            output_cols.insert(array_column_index as usize, array_col);
-            array_column_index
-        };
+        let actual_array_index =
+            if array_column_index < 0 || array_column_index as usize >= output_cols.len() {
+                let idx = output_cols.len() as i32;
+                output_cols.push(array_col);
+                idx
+            } else {
+                output_cols.insert(array_column_index as usize, array_col);
+                array_column_index
+            };
         let output_descriptor = Arc::new(RowDescriptor::new_ordered(output_cols));
 
         // Update current_descriptor so next array_aggregate builds on top of this
@@ -271,15 +277,24 @@ impl QueryGraphBuilder {
         }
 
         // Build columns, converting join ref columns to Array types
-        let cols: Vec<(String, ColumnType, bool)> = inner_schema.columns.iter()
+        let cols: Vec<(String, ColumnType, bool)> = inner_schema
+            .columns
+            .iter()
             .map(|col| {
                 // Check if this column is a join column
-                let join_info = inner_joins.iter().find(|(ref_col, _, _)| ref_col == &col.name);
+                let join_info = inner_joins
+                    .iter()
+                    .find(|(ref_col, _, _)| ref_col == &col.name);
 
                 if let Some((_, _, target_schema)) = join_info {
                     // This is a join column - convert to Array type containing target rows
-                    let target_descriptor = Arc::new(RowDescriptor::from_table_schema(target_schema));
-                    (col.name.clone(), ColumnType::Array(target_descriptor), false)
+                    let target_descriptor =
+                        Arc::new(RowDescriptor::from_table_schema(target_schema));
+                    (
+                        col.name.clone(),
+                        ColumnType::Array(target_descriptor),
+                        false,
+                    )
                 } else {
                     // Regular column - use normal type conversion
                     (col.name.clone(), col.ty.clone(), col.nullable)
@@ -387,11 +402,17 @@ impl JoinGraphBuilder {
         let mut table_descriptors = HashMap::new();
         table_descriptors.insert(
             self.left_table.clone(),
-            Arc::new(RowDescriptor::from_table_schema_qualified(&self.left_schema, &self.left_table)),
+            Arc::new(RowDescriptor::from_table_schema_qualified(
+                &self.left_schema,
+                &self.left_table,
+            )),
         );
         table_descriptors.insert(
             self.right_table.clone(),
-            Arc::new(RowDescriptor::from_table_schema_qualified(&self.right_schema, &self.right_table)),
+            Arc::new(RowDescriptor::from_table_schema_qualified(
+                &self.right_schema,
+                &self.right_table,
+            )),
         );
         self.nodes.push(QueryNode::Join {
             input_tables: vec![self.left_table.clone()],
@@ -443,7 +464,9 @@ impl JoinGraphBuilder {
         let target = target_table.into();
         let column = ref_column.into();
 
-        let target_schema = self.extra_schemas.get(&target)
+        let target_schema = self
+            .extra_schemas
+            .get(&target)
             .expect("chain_join: target schema not added via add_schema")
             .clone();
 
@@ -460,14 +483,23 @@ impl JoinGraphBuilder {
         let mut table_descriptors = HashMap::new();
         table_descriptors.insert(
             self.left_table.clone(),
-            Arc::new(RowDescriptor::from_table_schema_qualified(&self.left_schema, &self.left_table)),
+            Arc::new(RowDescriptor::from_table_schema_qualified(
+                &self.left_schema,
+                &self.left_table,
+            )),
         );
         for (t, schema) in &self.all_right_tables {
-            table_descriptors.insert(t.clone(), Arc::new(RowDescriptor::from_table_schema_qualified(schema, t)));
+            table_descriptors.insert(
+                t.clone(),
+                Arc::new(RowDescriptor::from_table_schema_qualified(schema, t)),
+            );
         }
         table_descriptors.insert(
             target.clone(),
-            Arc::new(RowDescriptor::from_table_schema_qualified(&target_schema, &target)),
+            Arc::new(RowDescriptor::from_table_schema_qualified(
+                &target_schema,
+                &target,
+            )),
         );
 
         let id = self.alloc_id();
@@ -483,7 +515,8 @@ impl JoinGraphBuilder {
         });
 
         // Track this as an additional right table for delta routing
-        self.all_right_tables.push((target.clone(), target_schema.clone()));
+        self.all_right_tables
+            .push((target.clone(), target_schema.clone()));
 
         // Extend the combined schema with the new table's columns
         // Use extend_with to preserve existing qualified column names
@@ -529,7 +562,9 @@ impl JoinGraphBuilder {
         let target = target_table.into();
         let column = ref_column.into();
 
-        let target_schema = self.extra_schemas.get(&target)
+        let target_schema = self
+            .extra_schemas
+            .get(&target)
             .expect("reverse_chain_join: target schema not added via add_schema")
             .clone();
 
@@ -548,14 +583,23 @@ impl JoinGraphBuilder {
         let mut table_descriptors = HashMap::new();
         table_descriptors.insert(
             self.left_table.clone(),
-            Arc::new(RowDescriptor::from_table_schema_qualified(&self.left_schema, &self.left_table)),
+            Arc::new(RowDescriptor::from_table_schema_qualified(
+                &self.left_schema,
+                &self.left_table,
+            )),
         );
         for (t, schema) in &self.all_right_tables {
-            table_descriptors.insert(t.clone(), Arc::new(RowDescriptor::from_table_schema_qualified(schema, t)));
+            table_descriptors.insert(
+                t.clone(),
+                Arc::new(RowDescriptor::from_table_schema_qualified(schema, t)),
+            );
         }
         table_descriptors.insert(
             target.clone(),
-            Arc::new(RowDescriptor::from_table_schema_qualified(&target_schema, &target)),
+            Arc::new(RowDescriptor::from_table_schema_qualified(
+                &target_schema,
+                &target,
+            )),
         );
 
         let id = self.alloc_id();
@@ -571,7 +615,8 @@ impl JoinGraphBuilder {
         });
 
         // Track this as an additional right table for delta routing
-        self.all_right_tables.push((target.clone(), target_schema.clone()));
+        self.all_right_tables
+            .push((target.clone(), target_schema.clone()));
 
         // Note: For reverse joins, we DON'T extend the combined schema because
         // the reverse join table's columns are NOT added to the output row.
@@ -627,26 +672,34 @@ impl JoinGraphBuilder {
         let inner_table = inner_table.into();
 
         // Track this inner table schema for the graph
-        self.extra_schemas.insert(inner_table.clone(), inner_schema.clone());
+        self.extra_schemas
+            .insert(inner_table.clone(), inner_schema.clone());
 
         // Track join target schemas too
         for (_, target_table, target_schema) in &inner_joins {
-            self.extra_schemas.insert(target_table.clone(), target_schema.clone());
+            self.extra_schemas
+                .insert(target_table.clone(), target_schema.clone());
         }
 
         let id = self.alloc_id();
 
         // Build inner descriptor from inner schema, accounting for inner joins
         // If inner_joins is non-empty, the join columns become nested Row/Array types
-        let inner_descriptor = QueryGraphBuilder::build_inner_descriptor_with_joins(&inner_schema, &inner_joins);
+        let inner_descriptor =
+            QueryGraphBuilder::build_inner_descriptor_with_joins(&inner_schema, &inner_joins);
 
         // Build output descriptor: start from current descriptor (or combined schema if first array)
         // This allows multiple array aggregates to accumulate their columns
         let mut output_cols: Vec<(String, ColumnType, bool)> = match &self.current_descriptor {
-            Some(desc) => desc.columns.iter()
+            Some(desc) => desc
+                .columns
+                .iter()
                 .map(|c| (c.name.clone(), c.ty.clone(), c.nullable))
                 .collect(),
-            None => self.combined_schema.columns.iter()
+            None => self
+                .combined_schema
+                .columns
+                .iter()
                 .map(|c| (c.name.clone(), c.ty.clone(), c.nullable))
                 .collect(),
         };
@@ -659,14 +712,15 @@ impl JoinGraphBuilder {
             false,
         );
         // Compute the actual array column index (may differ from requested if -1 or out of range)
-        let actual_array_index = if array_column_index < 0 || array_column_index as usize >= output_cols.len() {
-            let idx = output_cols.len() as i32;
-            output_cols.push(array_col);
-            idx
-        } else {
-            output_cols.insert(array_column_index as usize, array_col);
-            array_column_index
-        };
+        let actual_array_index =
+            if array_column_index < 0 || array_column_index as usize >= output_cols.len() {
+                let idx = output_cols.len() as i32;
+                output_cols.push(array_col);
+                idx
+            } else {
+                output_cols.insert(array_column_index as usize, array_col);
+                array_column_index
+            };
         let output_descriptor = Arc::new(RowDescriptor::new_ordered(output_cols));
 
         // Update current_descriptor so next array_aggregate builds on top of this
@@ -704,7 +758,8 @@ impl JoinGraphBuilder {
         }
 
         // Collect additional right tables (beyond the first one)
-        let additional_right_tables: Vec<_> = self.all_right_tables
+        let additional_right_tables: Vec<_> = self
+            .all_right_tables
             .into_iter()
             .skip(1) // Skip the first right table (it's passed separately)
             .collect();
@@ -771,7 +826,10 @@ mod tests {
 
         let scan = builder.table_scan();
         let f1 = builder.filter(scan, Predicate::eq("active", PredicateValue::Bool(true)));
-        let f2 = builder.filter(f1, Predicate::eq("name", PredicateValue::String("Alice".to_string())));
+        let f2 = builder.filter(
+            f1,
+            Predicate::eq("name", PredicateValue::String("Alice".to_string())),
+        );
         let graph = builder.output(f2, GraphId(1));
 
         assert_eq!(graph.node_count(), 4); // scan + filter + filter + output

@@ -50,9 +50,10 @@ fn object_branch_errors() {
     assert!(obj.create_branch("feature", "main", &fake_id).is_err());
 
     // Can't create branch from non-existent source branch
-    assert!(obj
-        .create_branch("feature", "nonexistent", &fake_id)
-        .is_err());
+    assert!(
+        obj.create_branch("feature", "nonexistent", &fake_id)
+            .is_err()
+    );
 
     // Add a commit and create a branch
     let commit = make_commit(b"test", vec![]);

@@ -8,12 +8,10 @@ use async_trait::async_trait;
 use futures::channel::mpsc;
 use futures::stream::{BoxStream, StreamExt};
 use js_sys::{Array, Function, Uint8Array};
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{
-    EventSource, Headers, MessageEvent, Request, RequestInit, RequestMode, Response,
-};
+use web_sys::{EventSource, Headers, MessageEvent, Request, RequestInit, RequestMode, Response};
 
 use groove::sync::{
     ClientEnv, ClientEnvConfig, ClientError, Decode, Encode, PushRequest, PushResponse,
@@ -128,8 +126,10 @@ impl ClientEnv for WasmClientEnv {
                             let _ = tx_clone.unbounded_send(Ok(sse_event));
                         }
                         Err(e) => {
-                            let _ = tx_clone
-                                .unbounded_send(Err(ClientError::internal(format!("Parse error: {}", e))));
+                            let _ = tx_clone.unbounded_send(Err(ClientError::internal(format!(
+                                "Parse error: {}",
+                                e
+                            ))));
                         }
                     }
                 }
@@ -408,8 +408,8 @@ impl WasmSyncClient {
                 .get(i)
                 .as_string()
                 .ok_or_else(|| JsValue::from_str("Frontier must be strings"))?;
-            let id_bytes = hex::decode(&id_str)
-                .map_err(|_| JsValue::from_str("Invalid hex in frontier"))?;
+            let id_bytes =
+                hex::decode(&id_str).map_err(|_| JsValue::from_str("Invalid hex in frontier"))?;
             if id_bytes.len() != 32 {
                 return Err(JsValue::from_str("Commit ID must be 32 bytes"));
             }
@@ -554,7 +554,11 @@ impl WasmSyncClient {
                     &JsValue::from_str("code"),
                     &JsValue::from_f64(*code as f64),
                 )?;
-                js_sys::Reflect::set(&result, &JsValue::from_str("message"), &JsValue::from_str(message))?;
+                js_sys::Reflect::set(
+                    &result,
+                    &JsValue::from_str("message"),
+                    &JsValue::from_str(message),
+                )?;
             }
         }
 

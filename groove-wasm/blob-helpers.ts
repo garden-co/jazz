@@ -4,7 +4,7 @@
  * These helpers wrap the WASM blob APIs to provide a more ergonomic JS interface.
  */
 
-import type { WasmDatabase, WasmBlobWriter } from "./pkg/groove_wasm.js";
+import type { WasmBlobWriter, WasmDatabase } from "./pkg/groove_wasm.js";
 
 /** Blob information returned from get_blob_info */
 export interface BlobInfo {
@@ -44,7 +44,10 @@ interface StreamConfig {
  * }
  * ```
  */
-export function blobToReadableStream(db: WasmDatabase, handleId: bigint): ReadableStream<Uint8Array> {
+export function blobToReadableStream(
+  db: WasmDatabase,
+  handleId: bigint,
+): ReadableStream<Uint8Array> {
   // Get blob configuration
   const config = db.get_blob_info(handleId) as unknown as BlobInfo;
   let chunkIndex = 0;
@@ -84,7 +87,7 @@ export function blobToReadableStream(db: WasmDatabase, handleId: bigint): Readab
  */
 export async function readableStreamToBlob(
   db: WasmDatabase,
-  stream: ReadableStream<Uint8Array>
+  stream: ReadableStream<Uint8Array>,
 ): Promise<bigint> {
   const writer = db.create_blob_writer();
   const reader = stream.getReader();
@@ -129,7 +132,7 @@ export async function readableStreamToBlob(
 export class GrooveBlob {
   constructor(
     private db: WasmDatabase,
-    public readonly handleId: bigint
+    public readonly handleId: bigint,
   ) {}
 
   /**
@@ -143,7 +146,10 @@ export class GrooveBlob {
   /**
    * Create a blob from a ReadableStream.
    */
-  static async fromStream(db: WasmDatabase, stream: ReadableStream<Uint8Array>): Promise<GrooveBlob> {
+  static async fromStream(
+    db: WasmDatabase,
+    stream: ReadableStream<Uint8Array>,
+  ): Promise<GrooveBlob> {
     const handleId = await readableStreamToBlob(db, stream);
     return new GrooveBlob(db, handleId);
   }

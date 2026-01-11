@@ -2,8 +2,8 @@
 
 use groove::ObjectId;
 use groove::sql::{
-    ColumnType, ConditionValue, PolicyAction, PolicyColumnRef, PolicyExpr, PolicyValue, Projection,
-    SelectExpr, Statement, parse, PredicateValue,
+    ColumnType, ConditionValue, PolicyAction, PolicyColumnRef, PolicyExpr, PolicyValue,
+    PredicateValue, Projection, SelectExpr, Statement, parse,
 };
 
 #[test]
@@ -69,7 +69,10 @@ fn parse_insert_with_null() {
 
     match stmt {
         Statement::Insert(ins) => {
-            assert_eq!(ins.values, vec![PredicateValue::String("Bob".into()), PredicateValue::Null]);
+            assert_eq!(
+                ins.values,
+                vec![PredicateValue::String("Bob".into()), PredicateValue::Null]
+            );
         }
         _ => panic!("expected Insert"),
     }
@@ -114,7 +117,10 @@ fn parse_update() {
             assert_eq!(upd.assignments.len(), 2);
             assert_eq!(
                 upd.assignments[0],
-                ("email".into(), PredicateValue::String("new@example.com".into()))
+                (
+                    "email".into(),
+                    PredicateValue::String("new@example.com".into())
+                )
             );
             assert_eq!(upd.assignments[1], ("age".into(), PredicateValue::I64(31)));
             assert_eq!(upd.where_clause.len(), 1);
@@ -245,9 +251,15 @@ fn parse_select_with_where() {
         Statement::Select(sel) => {
             assert_eq!(sel.where_clause.len(), 2);
             assert_eq!(sel.where_clause[0].column.column, "active");
-            assert_eq!(sel.where_clause[0].right, ConditionValue::Literal(PredicateValue::Bool(true)));
+            assert_eq!(
+                sel.where_clause[0].right,
+                ConditionValue::Literal(PredicateValue::Bool(true))
+            );
             assert_eq!(sel.where_clause[1].column.column, "age");
-            assert_eq!(sel.where_clause[1].right, ConditionValue::Literal(PredicateValue::I64(30)));
+            assert_eq!(
+                sel.where_clause[1].right,
+                ConditionValue::Literal(PredicateValue::I64(30))
+            );
         }
         _ => panic!("expected Select"),
     }
@@ -340,7 +352,10 @@ fn case_insensitive_keywords() {
 
     match stmt {
         Statement::Select(sel) => {
-            assert_eq!(sel.where_clause[0].right, ConditionValue::Literal(PredicateValue::Bool(true)));
+            assert_eq!(
+                sel.where_clause[0].right,
+                ConditionValue::Literal(PredicateValue::Bool(true))
+            );
         }
         _ => panic!("expected Select"),
     }
@@ -675,7 +690,10 @@ fn parse_policy_with_literal() {
                 match &exprs[0] {
                     PolicyExpr::Ne(left, right) => {
                         assert_eq!(*left, PolicyValue::Column("status".into()));
-                        assert_eq!(*right, PolicyValue::Literal(PredicateValue::String("draft".into())));
+                        assert_eq!(
+                            *right,
+                            PolicyValue::Literal(PredicateValue::String("draft".into()))
+                        );
                     }
                     _ => panic!("expected Ne"),
                 }
@@ -704,7 +722,10 @@ fn parse_policy_with_not_and_parens() {
             Some(PolicyExpr::Not(inner)) => match *inner {
                 PolicyExpr::Eq(left, right) => {
                     assert_eq!(left, PolicyValue::Column("status".into()));
-                    assert_eq!(right, PolicyValue::Literal(PredicateValue::String("deleted".into())));
+                    assert_eq!(
+                        right,
+                        PolicyValue::Literal(PredicateValue::String("deleted".into()))
+                    );
                 }
                 _ => panic!("expected Eq inside Not"),
             },

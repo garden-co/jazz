@@ -20,14 +20,19 @@ declare module "groove-wasm" {
     execute(sql: string): string;
     subscribe_delta(
       sql: string,
-      callback: (deltas: Uint8Array[]) => void
+      callback: (deltas: Uint8Array[]) => void,
     ): { diagram(): string; unsubscribe(): void; free(): void };
-    update_row(table: string, id: string, column: string, value: string): boolean;
+    update_row(
+      table: string,
+      id: string,
+      column: string,
+      value: string,
+    ): boolean;
     update_row_i64(
       table: string,
       id: string,
       column: string,
-      value: bigint
+      value: bigint,
     ): boolean;
     list_tables(): string[];
   }

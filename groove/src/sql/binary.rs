@@ -201,9 +201,7 @@ mod tests {
 
     #[test]
     fn encode_owned_rows_batch() {
-        let descriptor = make_descriptor_with_id([
-            ("value".to_string(), ColumnType::I32, false),
-        ]);
+        let descriptor = make_descriptor_with_id([("value".to_string(), ColumnType::I32, false)]);
 
         let id_idx = descriptor.column_index("id").unwrap();
         let value_idx = descriptor.column_index("value").unwrap();
@@ -244,9 +242,7 @@ mod tests {
 
     #[test]
     fn encode_owned_row_with_string() {
-        let descriptor = make_descriptor_with_id([
-            ("name".to_string(), ColumnType::String, false),
-        ]);
+        let descriptor = make_descriptor_with_id([("name".to_string(), ColumnType::String, false)]);
 
         let id_idx = descriptor.column_index("id").unwrap();
         let name_idx = descriptor.column_index("name").unwrap();
@@ -269,9 +265,8 @@ mod tests {
 
     #[test]
     fn encode_owned_row_with_nullable() {
-        let descriptor = make_descriptor_with_id([
-            ("maybe_num".to_string(), ColumnType::I32, true),
-        ]);
+        let descriptor =
+            make_descriptor_with_id([("maybe_num".to_string(), ColumnType::I32, true)]);
 
         let id_idx = descriptor.column_index("id").unwrap();
         let idx = descriptor.column_index("maybe_num").unwrap();

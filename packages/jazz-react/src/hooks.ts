@@ -2,23 +2,23 @@
  * React hooks for subscribing to Jazz database tables
  */
 
-import { useState, useEffect, useRef, useMemo } from "react";
 import type {
-  Unsubscribe,
-  WasmDatabaseLike,
-  SubscribableAllWithDb,
-  SubscribableOneWithDb,
   MutableWithDb,
   MutateAll,
   MutateOne,
+  SubscribableAllWithDb,
+  SubscribableOneWithDb,
 } from "@jazz/client";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useJazz } from "./context.js";
 
 /**
  * Get a stable key for a subscribable object.
  * QueryBuilders have _queryKey, table clients use object identity.
  */
-function getSubscribableKey(subscribable: { _queryKey?: string }): string | object {
+function getSubscribableKey(subscribable: { _queryKey?: string }):
+  | string
+  | object {
   return subscribable._queryKey ?? subscribable;
 }
 
@@ -60,7 +60,7 @@ function getSubscribableKey(subscribable: { _queryKey?: string }): string | obje
  */
 export function useOne<T, U>(
   subscribable: SubscribableOneWithDb<T, U>,
-  id: string | null | undefined
+  id: string | null | undefined,
 ): [T | null, boolean, MutateOne<U>] {
   const db = useJazz();
   const [data, setData] = useState<T | null>(null);
@@ -125,7 +125,7 @@ export function useOne<T, U>(
         }
       },
     }),
-    [db, stableSubscribable, id]
+    [db, stableSubscribable, id],
   );
 
   return [data, loading, mutate];
@@ -177,7 +177,7 @@ export function useOne<T, U>(
  * ```
  */
 export function useAll<T, C, U>(
-  subscribable: SubscribableAllWithDb<T, C, U>
+  subscribable: SubscribableAllWithDb<T, C, U>,
 ): [T[], boolean, MutateAll<C, U>] {
   const db = useJazz();
   const [data, setData] = useState<T[]>([]);
@@ -187,7 +187,9 @@ export function useAll<T, C, U>(
   const isFirstCallback = useRef(true);
 
   // Track the previous subscribable to avoid unnecessary re-subscriptions
-  const prevSubscribableRef = useRef<SubscribableAllWithDb<T, C, U> | null>(null);
+  const prevSubscribableRef = useRef<SubscribableAllWithDb<T, C, U> | null>(
+    null,
+  );
   const prevKeyRef = useRef<string | object | null>(null);
 
   // Get stable key for structural comparison
@@ -226,10 +228,11 @@ export function useAll<T, C, U>(
   const mutate = useMemo<MutateAll<C, U>>(
     () => ({
       create: (values: C) => stableSubscribable.create(db, values),
-      update: (id: string, values: U) => stableSubscribable.update(db, id, values),
+      update: (id: string, values: U) =>
+        stableSubscribable.update(db, id, values),
       delete: (id: string) => stableSubscribable.delete(db, id),
     }),
-    [db, stableSubscribable]
+    [db, stableSubscribable],
   );
 
   return [data, loading, mutate];
@@ -261,9 +264,7 @@ export function useAll<T, C, U>(
  * }
  * ```
  */
-export function useMutate<C, U>(
-  table: MutableWithDb<C, U>
-): MutateAll<C, U> {
+export function useMutate<C, U>(table: MutableWithDb<C, U>): MutateAll<C, U> {
   const db = useJazz();
 
   return useMemo<MutateAll<C, U>>(
@@ -272,6 +273,6 @@ export function useMutate<C, U>(
       update: (id: string, values: U) => table.update(db, id, values),
       delete: (id: string) => table.delete(db, id),
     }),
-    [db, table]
+    [db, table],
   );
 }

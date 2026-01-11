@@ -1,8 +1,8 @@
-import { useState, useEffect, useRef } from "react";
-import type { WasmDatabaseLike } from "@jazz/react";
-import type { ObjectId, User } from "@/generated/types";
 import { app } from "@/generated/client";
+import type { ObjectId, User } from "@/generated/types";
 import { generateFakeData } from "@/utils/fakeData";
+import type { WasmDatabaseLike } from "@jazz/react";
+import { useEffect, useRef, useState } from "react";
 
 const DEFAULT_ISSUE_COUNT = 50;
 
@@ -33,7 +33,9 @@ export function useFakeData(db: WasmDatabaseLike | null) {
 
       if (existingUsers.length > 0) {
         // Data already exists - use first user as current user
-        console.log(`Found ${existingUsers.length} existing users, skipping fake data generation`);
+        console.log(
+          `Found ${existingUsers.length} existing users, skipping fake data generation`,
+        );
         setCurrentUserId(existingUsers[0].id);
         setInitialized(true);
       } else if (noFake) {
@@ -43,7 +45,10 @@ export function useFakeData(db: WasmDatabaseLike | null) {
       } else {
         // No data - generate fake data
         console.log("No existing data, generating fake data...");
-        const itemCount = parseInt(params.get("items") || String(DEFAULT_ISSUE_COUNT), 10);
+        const itemCount = Number.parseInt(
+          params.get("items") || String(DEFAULT_ISSUE_COUNT),
+          10,
+        );
 
         generateFakeData(db, itemCount).then((userId) => {
           setCurrentUserId(userId);
