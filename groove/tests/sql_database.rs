@@ -762,9 +762,9 @@ fn join_basic() {
     match result {
         ExecuteResult::Selected(rows) => {
             assert_eq!(rows.len(), 2, "Should return 2 joined rows");
-            // Each row should have values from both tables (author, title, name)
+            // Each row should have values from both tables (posts.id, posts.author, posts.title, users.id, users.name)
             for row in &rows {
-                assert_eq!(row.1.descriptor.columns.len(), 3, "Should have 3 columns (2 from posts + 1 from users)");
+                assert_eq!(row.1.descriptor.columns.len(), 5, "Should have 5 columns (3 from posts + 2 from users)");
                 // All rows should have Alice as the author (via join)
                 assert_eq!(row.1.get_by_name("name"), Some(RowValue::String("Alice")));
             }
@@ -937,8 +937,8 @@ fn join_table_star_projection() {
     match result {
         ExecuteResult::Selected(rows) => {
             assert_eq!(rows.len(), 1);
-            // Should only have 1 column (name) from users table
-            assert_eq!(rows[0].1.descriptor.columns.len(), 1, "Should only have users columns");
+            // Should have 2 columns (id, name) from users table
+            assert_eq!(rows[0].1.descriptor.columns.len(), 2, "Should only have users columns (id + name)");
             assert_eq!(rows[0].1.get_by_name("name"), Some(RowValue::String("Alice")));
         }
         _ => panic!("Expected Selected"),
@@ -1679,8 +1679,8 @@ fn array_subquery_returns_whole_rows() {
 
                 // Each item is an OwnedRow - use iterator to get first item
                 let note_row = arr.iter().next().unwrap();
-                // Note row should have 2 values: folder (ref), title
-                assert_eq!(note_row.descriptor.columns.len(), 2);
+                // Note row should have 3 values: id, folder (ref), title
+                assert_eq!(note_row.descriptor.columns.len(), 3);
                 assert_eq!(note_row.get_by_name("title"), Some(RowValue::String("Meeting Notes")));
             } else {
                 panic!("Expected Array");
@@ -2141,8 +2141,8 @@ fn incremental_query_with_array_subquery() {
     assert_eq!(rows.len(), 1, "Should return 1 issue");
 
     // Verify the row has an array with 2 labels
-    // The row has: values[0]=title, values[1]=Array (id is stored separately in Row)
-    assert_eq!(rows[0].1.descriptor.columns.len(), 2, "Row should have 2 values (title, array)");
+    // The row has: id, title, Array
+    assert_eq!(rows[0].1.descriptor.columns.len(), 3, "Row should have 3 values (id, title, array)");
     assert_eq!(rows[0].1.get_by_name("title"), Some(RowValue::String("Test Issue")));
 
     // NOTE: SQL alias "labels" is not used - array columns are named after the inner table
@@ -2387,10 +2387,10 @@ fn incremental_query_sql_join_preserves_nullable_columns() {
     }
 
     // In a JOIN query, the row should contain:
-    // Issues: title, description, status, priority, project, createdAt, updatedAt = 7 columns
-    // Projects: name, color, description = 3 columns
-    // Total: 10 columns
-    assert_eq!(rows[0].1.descriptor.columns.len(), 10, "Should have 10 values (7 Issues + 3 Projects)");
+    // Issues: id, title, description, status, priority, project, createdAt, updatedAt = 8 columns
+    // Projects: id, name, color, description = 4 columns
+    // Total: 12 columns
+    assert_eq!(rows[0].1.descriptor.columns.len(), 12, "Should have 12 values (8 Issues + 4 Projects)");
 
     // Projects.description should be accessible by name
     let proj_desc = rows[0].1.get_by_name("Projects.description");
@@ -2492,11 +2492,11 @@ fn incremental_query_sql_join_with_array_preserves_nullable_columns() {
     }
 
     // Expected columns:
-    // Issues: title, description, status, priority, project, createdAt, updatedAt = 7
-    // Projects: name, color, description = 3
+    // Issues: id, project, createdAt, updatedAt, title, description, status, priority = 8
+    // Projects: id, name, color, description = 4
     // IssueLabels array = 1
-    // Total: 11
-    assert_eq!(rows[0].1.descriptor.columns.len(), 11, "Should have 11 values (7 Issues + 3 Projects + 1 array)");
+    // Total: 13
+    assert_eq!(rows[0].1.descriptor.columns.len(), 13, "Should have 13 values (8 Issues + 4 Projects + 1 array)");
 
     // Projects.description should be accessible by name
     let proj_desc = rows[0].1.get_by_name("Projects.description");
@@ -2588,13 +2588,13 @@ fn incremental_query_array_with_nested_join() {
     }
 
     // Expected columns:
-    // Issues: title = 1
+    // Issues: id, title = 2
     // IssueLabels array = 1
-    // Total: 2
-    assert_eq!(rows[0].1.descriptor.columns.len(), 2, "Should have 2 values (1 Issue column + 1 array)");
+    // Total: 3
+    assert_eq!(rows[0].1.descriptor.columns.len(), 3, "Should have 3 values (2 Issue columns + 1 array)");
 
     // The array should contain IssueLabel rows with resolved label (use alias from SQL)
-    let array = rows[0].1.get(1);  // Use index since we know it's second column
+    let array = rows[0].1.get_by_name("IssueLabels");
     eprintln!("\nIssueLabels array: {:?}", array);
 
     if let Some(RowValue::Array(arr)) = array {
@@ -2611,11 +2611,11 @@ fn incremental_query_array_with_nested_join() {
         }
 
         // The label should be a nested Row, not a Ref
-        // Expected: [Ref(issue_id), Row(Labels row)]
+        // Expected: [id, Ref(issue_id), Row(Labels row)]
         assert_eq!(
             issue_label_row.descriptor.columns.len(),
-            2,
-            "IssueLabel row should have 2 values (issue + label), got {}",
+            3,
+            "IssueLabel row should have 3 values (id + issue + label), got {}",
             issue_label_row.descriptor.columns.len()
         );
 
@@ -2638,11 +2638,11 @@ fn incremental_query_array_with_nested_join() {
                 eprintln!("  [{}]: {:?}", i, label_row.get(i));
             }
 
-            // Labels row should have 2 values: name, color
+            // Labels row should have 3 values: id, name, color
             assert_eq!(
                 label_row.descriptor.columns.len(),
-                2,
-                "Label row should have 2 values (name + color), got {}",
+                3,
+                "Label row should have 3 values (id + name + color), got {}",
                 label_row.descriptor.columns.len()
             );
 
@@ -2753,15 +2753,15 @@ fn incremental_query_table_row_plus_array_subquery() {
     }
 
     // Expected columns:
-    // Issues: project, createdAt, updatedAt = 3 fixed
+    // Issues: id, project, createdAt, updatedAt = 4 fixed
     // Issues: title, description, status, priority = 4 variable
-    // Projects (expanded): name, color, description = 3 variable
+    // Projects (expanded): id, name, color, description = 4 columns (1 fixed + 3 variable)
     // IssueLabels array = 1 variable
-    // Total: 11 (7 from Issues + 3 from Projects + 1 array)
+    // Total: 13 (8 from Issues + 4 from Projects + 1 array)
     // Note: Groove expands JOIN columns instead of bundling as TableRow
     assert_eq!(
-        rows[0].1.descriptor.columns.len(), 11,
-        "Should have 11 columns (7 Issues + 3 Projects expanded + 1 IssueLabels array)"
+        rows[0].1.descriptor.columns.len(), 13,
+        "Should have 13 columns (8 Issues + 4 Projects expanded + 1 IssueLabels array)"
     );
 
     // Check that IssueLabels array has 1 item

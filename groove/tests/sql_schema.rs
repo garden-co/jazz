@@ -31,12 +31,15 @@ fn schema_column_lookup() {
         ],
     );
 
+    // id is auto-prepended, so columns are: id, name, age
+    assert!(schema.column("id").is_some());
     assert!(schema.column("name").is_some());
     assert!(schema.column("age").is_some());
     assert!(schema.column("unknown").is_none());
 
-    assert_eq!(schema.column_index("name"), Some(0));
-    assert_eq!(schema.column_index("age"), Some(1));
+    assert_eq!(schema.column_index("id"), Some(0));
+    assert_eq!(schema.column_index("name"), Some(1));
+    assert_eq!(schema.column_index("age"), Some(2));
 }
 
 #[test]

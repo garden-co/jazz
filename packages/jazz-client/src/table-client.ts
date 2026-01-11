@@ -62,11 +62,14 @@ export abstract class TableClient<T extends { id: string }> {
 
     const handle = db.subscribe_delta(sql, (deltas: Uint8Array[]) => {
       for (const deltaBuffer of deltas) {
+        // Copy the buffer to avoid issues with WASM buffer reuse
+        // The WASM module may reuse the underlying ArrayBuffer between callbacks
+        const bufferCopy = new Uint8Array(deltaBuffer);
+
         // Use dynamic decoder when includes are specified, otherwise use generated decoder
-        // Note: Pass the Uint8Array directly to handle views with byteOffset correctly
         const delta = options.include
-          ? decodeDeltaWithIncludes<T>(deltaBuffer, this.tableMeta, this.schemaMeta, options.include)
-          : this.decoder.delta(deltaBuffer.buffer) as Delta<T>;
+          ? decodeDeltaWithIncludes<T>(bufferCopy, this.tableMeta, this.schemaMeta, options.include)
+          : this.decoder.delta(bufferCopy.buffer) as Delta<T>;
 
         if (delta.type === "added" || delta.type === "updated") {
           currentRow = delta.row;
@@ -105,11 +108,14 @@ export abstract class TableClient<T extends { id: string }> {
 
     const handle = db.subscribe_delta(sql, (deltas: Uint8Array[]) => {
       for (const deltaBuffer of deltas) {
+        // Copy the buffer to avoid issues with WASM buffer reuse
+        // The WASM module may reuse the underlying ArrayBuffer between callbacks
+        const bufferCopy = new Uint8Array(deltaBuffer);
+
         // Use dynamic decoder when includes are specified, otherwise use generated decoder
-        // Note: Pass the Uint8Array directly to handle views with byteOffset correctly
         const delta = options.include
-          ? decodeDeltaWithIncludes<T>(deltaBuffer, this.tableMeta, this.schemaMeta, options.include)
-          : this.decoder.delta(deltaBuffer.buffer) as Delta<T>;
+          ? decodeDeltaWithIncludes<T>(bufferCopy, this.tableMeta, this.schemaMeta, options.include)
+          : this.decoder.delta(bufferCopy.buffer) as Delta<T>;
 
         if (delta.type === "added" || delta.type === "updated") {
           rowsById.set(delta.row.id, delta.row);

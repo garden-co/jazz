@@ -1966,19 +1966,19 @@ impl Database {
             }
         }
 
-        // Store buffer directly (no Value conversion needed)
-        let row_bytes = row.buffer.clone();
-
-        // Create object for row
+        // Create object for row (generate id first so we can inject it)
         let row_id =
             self.state
                 .node
                 .create_object(&format!("row:{}:{}", table, generate_object_id()));
 
-        // Store row data
+        // Inject the id into the row buffer at column 0
+        let row_with_id = row.with_id(row_id);
+
+        // Store row data (including the id column)
         self.state
             .node
-            .write(row_id, "main", &row_bytes, "system", timestamp_now())
+            .write(row_id, "main", &row_with_id.buffer, "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         // Track row -> table mapping
@@ -1996,7 +1996,7 @@ impl Database {
         // Update indexes for Ref columns
         for col in schema.columns.iter() {
             if matches!(col.ty, ColumnType::Ref(_)) {
-                if let Some(RowValue::Ref(target_id)) = row.get_by_name(&col.name) {
+                if let Some(RowValue::Ref(target_id)) = row_with_id.get_by_name(&col.name) {
                     let key = IndexKey::new(table, &col.name);
                     if self.state.index_objects.read().unwrap().contains_key(&key) {
                         let mut index = self.read_index(&key)?;
@@ -2010,7 +2010,7 @@ impl Database {
         // Notify query graphs of the change
         self.state
             .graph_registry
-            .notify_row_change(table, RowDelta::Added { id: row_id, row: row.clone() }, &*self.state);
+            .notify_row_change(table, RowDelta::Added { id: row_id, row: row_with_id }, &*self.state);
 
         Ok(row_id)
     }
@@ -2166,13 +2166,13 @@ impl Database {
             }
         }
 
-        // Store buffer directly (no Value conversion needed)
-        let row_bytes = new_row.buffer.clone();
+        // Ensure the id column is set (preserve the original id)
+        let new_row_with_id = new_row.with_id(id);
 
         // Write updated row
         self.state
             .node
-            .write(id, "main", &row_bytes, "system", timestamp_now())
+            .write(id, "main", &new_row_with_id.buffer, "system", timestamp_now())
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
         // Update indexes for changed Ref columns
@@ -2182,7 +2182,7 @@ impl Database {
                     Some(RowValue::Ref(id)) => Some(id),
                     _ => None,
                 };
-                let new_ref = match new_row.get_by_name(&col.name) {
+                let new_ref = match new_row_with_id.get_by_name(&col.name) {
                     Some(RowValue::Ref(id)) => Some(id),
                     _ => None,
                 };
@@ -2210,7 +2210,7 @@ impl Database {
             table,
             RowDelta::Updated {
                 id,
-                row: new_row,
+                row: new_row_with_id,
                 prior: PriorState::empty(), // TODO: Get prior commit tips
             },
             &*self.state,

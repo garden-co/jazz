@@ -2,9 +2,8 @@
  * Dynamic binary decoder that handles includes using the row buffer format.
  *
  * Row buffer format:
- * - [16-byte ObjectId][row buffer]
- * - Row buffer: [fixed columns][offset table (N-1 u32s for N var cols)][variable data]
- * - ObjectId: 16 bytes binary (u128 LE), converted to Base32 string
+ * - [id (16 bytes)][fixed columns][offset table (N-1 u32s for N var cols)][variable data]
+ * - id is the first 16 bytes of every row buffer (ObjectId as u128 LE, converted to Base32 string)
  */
 
 import type { TableMeta, SchemaMeta, IncludeSpec, ColumnMeta } from "./types.js";
@@ -130,6 +129,15 @@ function computeLayout(
   let fixedOffset = 0;
   let varIndex = 0;
 
+  // id column is always first (ObjectId, 16 bytes, non-nullable)
+  const idCol: ColumnMeta = {
+    name: "id",
+    type: { kind: "ref", table: "" },  // ObjectId is stored same as Ref (16 bytes)
+    nullable: false,
+  };
+  fixedColumns.push({ col: idCol, tableName: tableMeta.name, isFixed: true, offset: fixedOffset });
+  fixedOffset += 16;  // ObjectId is 16 bytes
+
   // For array item context (nested includes), Groove excludes FK columns that are being
   // resolved by inner JOINs. For main query context, Groove includes both FK and expanded columns.
   const resolvedRefColumns = new Set<string>();
@@ -178,7 +186,17 @@ function computeLayout(
               isSingleItemUnwrap: true, // Extract single item, not array
             });
           } else {
-            // Main query context: add joined table's columns inline
+            // Main query context: add joined table's id and columns inline
+            // First add the joined table's id (16 bytes)
+            const joinedIdCol: ColumnMeta = {
+              name: "id",
+              type: { kind: "ref", table: "" },  // ObjectId is stored same as Ref (16 bytes)
+              nullable: false,
+            };
+            fixedColumns.push({ col: joinedIdCol, tableName: targetTable.name, isFixed: true, offset: fixedOffset });
+            fixedOffset += 16;
+
+            // Then add the joined table's other columns
             for (const col of targetTable.columns) {
               const fixedSize = getColumnFixedSize(col);
               if (fixedSize !== null) {
@@ -457,6 +475,15 @@ function computeItemLayout(columns: ColumnMeta[]): {
   let fixedOffset = 0;
   let varIndex = 0;
 
+  // id column is always first (ObjectId, 16 bytes, non-nullable)
+  const idCol: ColumnMeta = {
+    name: "id",
+    type: { kind: "ref", table: "" },  // ObjectId is stored same as Ref (16 bytes)
+    nullable: false,
+  };
+  fixedColumns.push({ col: idCol, offset: fixedOffset });
+  fixedOffset += 16;
+
   for (const col of columns) {
     const fixedSize = getColumnFixedSize(col);
     if (fixedSize !== null) {
@@ -668,7 +695,7 @@ function decodeRowBuffer(
  *
  * Delta format:
  * - [u8 delta_type (1=added, 2=updated, 3=removed)]
- * - For added/updated: [16-byte ObjectId][row buffer]
+ * - For added/updated: [row buffer with id as first 16 bytes]
  * - For removed: [16-byte ObjectId]
  */
 export function decodeDeltaWithIncludes<T>(
@@ -688,14 +715,13 @@ export function decodeDeltaWithIncludes<T>(
     return { type: "removed", id };
   }
 
-  // Read ObjectId (16 bytes starting at offset 1)
-  const id = objectIdToString(bytes, 1);
-  const bufferStart = 17; // 1 (delta type) + 16 (ObjectId)
+  // Row buffer starts at offset 1 (after delta type byte)
+  // id is the first 16 bytes inside the row buffer
+  const bufferStart = 1;
   const rowEnd = bytes.length;
 
-  // Decode the row buffer
+  // Decode the row buffer (id is read as first fixed column)
   const row = decodeRowBuffer(bytes, view, bufferStart, rowEnd, tableMeta, schema, include);
-  row.id = id;
 
   return {
     type: deltaType === DELTA_ADDED ? "added" : "updated",
