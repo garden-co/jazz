@@ -118,14 +118,11 @@ export function useOne<T, U>(
 
     // Don't subscribe if id is null/undefined
     if (!id) {
-      console.log("[useOne] No id provided, skipping subscription");
       setLoading(false);
       return;
     }
 
-    console.log("[useOne] Subscribing with id:", id);
     const unsubscribe = stableSubscribable.subscribe(db, id, (row) => {
-      console.log("[useOne] Callback received:", row);
       setData(row);
       if (isFirstCallback.current) {
         setLoading(false);
