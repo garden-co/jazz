@@ -15,7 +15,6 @@ export type LoadedIssue = IssueWith<{
   IssueAssignees: { user: true };
 }>;
 
-// @ts-ignore - vite handles ?raw imports
 import schema from "./schema.sql?raw";
 import "./index.css";
 

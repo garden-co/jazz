@@ -17,7 +17,6 @@ import {
   useMutate,
   useOne,
 } from "../src/index.js";
-// @ts-ignore - vite handles ?raw imports
 import schema from "./fixtures/app.sql?raw";
 import { type Database, app, createDatabase } from "./generated/client.js";
 

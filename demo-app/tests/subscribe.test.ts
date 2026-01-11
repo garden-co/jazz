@@ -4,7 +4,6 @@
 
 import { beforeAll, describe, expect, it } from "vitest";
 import { type Database, createDatabase } from "../src/generated/client";
-// @ts-ignore - vite handles ?raw imports
 import schema from "../src/schema.sql?raw";
 
 // We need to load the WASM module

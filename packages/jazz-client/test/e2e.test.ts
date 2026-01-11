@@ -8,7 +8,6 @@
  */
 
 import { beforeAll, describe, expect, it } from "vitest";
-// @ts-ignore - vite handles ?raw imports
 import schema from "./fixtures/app.sql?raw";
 import { type Database, createDatabase } from "./generated/client.js";
 

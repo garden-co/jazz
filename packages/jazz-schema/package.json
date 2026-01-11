@@ -19,6 +19,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
     "generate:test": "tsx test/generate.ts",
     "test": "pnpm generate:test && vitest run",
     "test:watch": "pnpm generate:test && vitest"
