@@ -6,11 +6,12 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use groove::sql::{Database, ExecuteResult, Row, Value};
-use groove::{ChunkStore, ContentRef, MemoryEnvironment, INLINE_THRESHOLD};
+use groove::sql::row_buffer::{OwnedRow, RowValue};
+use groove::sql::{Database, ExecuteResult};
+use groove::{ChunkStore, ContentRef, MemoryEnvironment, ObjectId, INLINE_THRESHOLD};
 
 /// Helper to extract rows from ExecuteResult
-fn get_rows(result: ExecuteResult) -> Vec<Row> {
+fn get_rows(result: ExecuteResult) -> Vec<(ObjectId, OwnedRow)> {
     match result {
         ExecuteResult::Selected(rows) => rows,
         other => panic!("expected Selected, got {:?}", other),
@@ -33,12 +34,13 @@ fn database_roundtrip_simple() {
     let catalog_id = {
         let db = Database::new(env.clone());
 
-        db.execute("CREATE TABLE users (id I64 NOT NULL, name STRING NOT NULL)")
+        // Note: id column is auto-added as ObjectId type
+        db.execute("CREATE TABLE users (name STRING NOT NULL)")
             .unwrap();
 
-        db.execute("INSERT INTO users (id, name) VALUES (1, 'Alice')")
+        db.execute("INSERT INTO users (name) VALUES ('Alice')")
             .unwrap();
-        db.execute("INSERT INTO users (id, name) VALUES (2, 'Bob')")
+        db.execute("INSERT INTO users (name) VALUES ('Bob')")
             .unwrap();
 
         db.catalog_object_id()
@@ -52,7 +54,7 @@ fn database_roundtrip_simple() {
     assert_eq!(tables.len(), 1);
     assert!(tables.contains(&"users".to_string()));
 
-    // Verify schema
+    // Verify schema (id is auto-added + name)
     let schema = db.get_table("users").unwrap();
     assert_eq!(schema.columns.len(), 2);
     assert_eq!(schema.columns[0].name, "id");
@@ -63,16 +65,11 @@ fn database_roundtrip_simple() {
     let rows = get_rows(result);
     assert_eq!(rows.len(), 2, "should have 2 rows");
 
-    // Check row values
-    let names: Vec<&Value> = rows.iter().map(|r| &r.values[1]).collect();
-    assert!(
-        names.contains(&&Value::String("Alice".to_string())),
-        "should contain Alice"
-    );
-    assert!(
-        names.contains(&&Value::String("Bob".to_string())),
-        "should contain Bob"
-    );
+    // Check row values by name
+    let has_alice = rows.iter().any(|r| r.1.get_by_name("name") == Some(RowValue::String("Alice")));
+    let has_bob = rows.iter().any(|r| r.1.get_by_name("name") == Some(RowValue::String("Bob")));
+    assert!(has_alice, "should contain Alice");
+    assert!(has_bob, "should contain Bob");
 }
 
 #[test]
@@ -83,27 +80,28 @@ fn database_roundtrip_multiple_tables() {
     let catalog_id = {
         let db = Database::new(env.clone());
 
-        db.execute("CREATE TABLE orgs (id I64 NOT NULL, name STRING NOT NULL)")
+        // Note: id columns are auto-added as ObjectId type
+        db.execute("CREATE TABLE orgs (name STRING NOT NULL)")
             .unwrap();
-        db.execute("CREATE TABLE users (id I64 NOT NULL, name STRING NOT NULL, org_id REFERENCES orgs NOT NULL)")
+        db.execute("CREATE TABLE users (name STRING NOT NULL, org_id REFERENCES orgs NOT NULL)")
             .unwrap();
 
         let acme_id = get_inserted_id(
-            db.execute("INSERT INTO orgs (id, name) VALUES (1, 'Acme')")
+            db.execute("INSERT INTO orgs (name) VALUES ('Acme')")
                 .unwrap(),
         );
         let globex_id = get_inserted_id(
-            db.execute("INSERT INTO orgs (id, name) VALUES (2, 'Globex')")
+            db.execute("INSERT INTO orgs (name) VALUES ('Globex')")
                 .unwrap(),
         );
 
         db.execute(&format!(
-            "INSERT INTO users (id, name, org_id) VALUES (1, 'Alice', '{}')",
+            "INSERT INTO users (name, org_id) VALUES ('Alice', '{}')",
             acme_id
         ))
         .unwrap();
         db.execute(&format!(
-            "INSERT INTO users (id, name, org_id) VALUES (2, 'Bob', '{}')",
+            "INSERT INTO users (name, org_id) VALUES ('Bob', '{}')",
             globex_id
         ))
         .unwrap();
@@ -128,7 +126,7 @@ fn database_roundtrip_multiple_tables() {
     let users = get_rows(db.execute("SELECT * FROM users").unwrap());
     assert_eq!(users.len(), 2);
 
-    // Verify ref column type was preserved
+    // Verify ref column type was preserved (org_id is now at index 2: id, name, org_id)
     let users_schema = db.get_table("users").unwrap();
     assert!(
         matches!(users_schema.columns[2].ty, groove::sql::ColumnType::Ref(_)),
@@ -144,29 +142,30 @@ fn database_roundtrip_with_policies() {
     let catalog_id = {
         let db = Database::new(env.clone());
 
-        db.execute("CREATE TABLE users (id I64 NOT NULL, name STRING NOT NULL)")
+        // Note: id columns are auto-added as ObjectId type
+        db.execute("CREATE TABLE users (name STRING NOT NULL)")
             .unwrap();
-        db.execute("CREATE TABLE documents (id I64 NOT NULL, title STRING NOT NULL, owner_id REFERENCES users NOT NULL)")
+        db.execute("CREATE TABLE documents (title STRING NOT NULL, owner_id REFERENCES users NOT NULL)")
             .unwrap();
 
         // Create users
         let alice_id = get_inserted_id(
-            db.execute("INSERT INTO users (id, name) VALUES (100, 'Alice')")
+            db.execute("INSERT INTO users (name) VALUES ('Alice')")
                 .unwrap(),
         );
         let bob_id = get_inserted_id(
-            db.execute("INSERT INTO users (id, name) VALUES (200, 'Bob')")
+            db.execute("INSERT INTO users (name) VALUES ('Bob')")
                 .unwrap(),
         );
 
         // Create documents
         db.execute(&format!(
-            "INSERT INTO documents (id, title, owner_id) VALUES (1, 'Doc1', '{}')",
+            "INSERT INTO documents (title, owner_id) VALUES ('Doc1', '{}')",
             alice_id
         ))
         .unwrap();
         db.execute(&format!(
-            "INSERT INTO documents (id, title, owner_id) VALUES (2, 'Doc2', '{}')",
+            "INSERT INTO documents (title, owner_id) VALUES ('Doc2', '{}')",
             bob_id
         ))
         .unwrap();
@@ -189,16 +188,16 @@ fn database_roundtrip_with_policies() {
     let users = get_rows(db.execute("SELECT * FROM users").unwrap());
     let alice_id = users
         .iter()
-        .find(|r| r.values[1] == Value::String("Alice".to_string()))
+        .find(|r| r.1.get_by_name("name") == Some(RowValue::String("Alice")))
         .unwrap()
-        .id;
+        .0;
 
     // Verify policy works (select_all_as should filter)
     let rows = db.select_all_as("documents", alice_id).unwrap();
     assert_eq!(rows.len(), 1, "policy should filter to owner's docs");
     assert_eq!(
-        rows[0].values[1],
-        Value::String("Doc1".to_string()),
+        rows[0].1.get_by_name("title"),
+        Some(RowValue::String("Doc1")),
         "should see Doc1"
     );
 }
@@ -211,23 +210,24 @@ fn database_roundtrip_after_delete() {
     let catalog_id = {
         let db = Database::new(env.clone());
 
-        db.execute("CREATE TABLE items (id I64 NOT NULL, name STRING NOT NULL)")
+        // Note: id column is auto-added as ObjectId type
+        db.execute("CREATE TABLE items (name STRING NOT NULL)")
             .unwrap();
 
-        db.execute("INSERT INTO items (id, name) VALUES (1, 'Item1')")
+        db.execute("INSERT INTO items (name) VALUES ('Item1')")
             .unwrap();
-        db.execute("INSERT INTO items (id, name) VALUES (2, 'Item2')")
+        db.execute("INSERT INTO items (name) VALUES ('Item2')")
             .unwrap();
-        db.execute("INSERT INTO items (id, name) VALUES (3, 'Item3')")
+        db.execute("INSERT INTO items (name) VALUES ('Item3')")
             .unwrap();
 
         // Get ID of Item2 to delete
         let items = get_rows(db.execute("SELECT * FROM items").unwrap());
         let item2_id = items
             .iter()
-            .find(|r| r.values[1] == Value::String("Item2".to_string()))
+            .find(|r| r.1.get_by_name("name") == Some(RowValue::String("Item2")))
             .unwrap()
-            .id;
+            .0;
 
         db.execute(&format!("DELETE FROM items WHERE id = '{}'", item2_id))
             .unwrap();
@@ -245,11 +245,8 @@ fn database_roundtrip_after_delete() {
     let items = get_rows(db.execute("SELECT * FROM items").unwrap());
     assert_eq!(items.len(), 2, "delete should be persisted");
 
-    let names: Vec<&Value> = items.iter().map(|r| &r.values[1]).collect();
-    assert!(
-        !names.contains(&&Value::String("Item2".to_string())),
-        "Item2 should be deleted"
-    );
+    let has_item2 = items.iter().any(|r| r.1.get_by_name("name") == Some(RowValue::String("Item2")));
+    assert!(!has_item2, "Item2 should be deleted");
 }
 
 #[test]
@@ -260,15 +257,15 @@ fn database_roundtrip_after_update() {
     let catalog_id = {
         let db = Database::new(env.clone());
 
-        db.execute("CREATE TABLE settings (id I64 NOT NULL, value STRING NOT NULL)")
+        db.execute("CREATE TABLE settings (value STRING NOT NULL)")
             .unwrap();
 
-        db.execute("INSERT INTO settings (id, value) VALUES (1, 'old_value')")
+        db.execute("INSERT INTO settings (value) VALUES ('old_value')")
             .unwrap();
 
         // Get ID of the row
         let settings = get_rows(db.execute("SELECT * FROM settings").unwrap());
-        let row_id = settings[0].id;
+        let row_id = settings[0].0;
 
         db.execute(&format!(
             "UPDATE settings SET value = 'new_value' WHERE id = '{}'",
@@ -279,8 +276,8 @@ fn database_roundtrip_after_update() {
         // Verify update worked
         let settings = get_rows(db.execute("SELECT * FROM settings").unwrap());
         assert_eq!(
-            settings[0].values[1],
-            Value::String("new_value".to_string())
+            settings[0].1.get_by_name("value"),
+            Some(RowValue::String("new_value"))
         );
 
         db.catalog_object_id()
@@ -292,8 +289,8 @@ fn database_roundtrip_after_update() {
     let settings = get_rows(db.execute("SELECT * FROM settings").unwrap());
     assert_eq!(settings.len(), 1);
     assert_eq!(
-        settings[0].values[1],
-        Value::String("new_value".to_string()),
+        settings[0].1.get_by_name("value"),
+        Some(RowValue::String("new_value")),
         "update should be persisted"
     );
 }
@@ -306,12 +303,12 @@ fn database_roundtrip_with_nullable() {
     let catalog_id = {
         let db = Database::new(env.clone());
 
-        db.execute("CREATE TABLE contacts (id I64 NOT NULL, name STRING NOT NULL, phone STRING)")
+        db.execute("CREATE TABLE contacts (name STRING NOT NULL, phone STRING)")
             .unwrap();
 
-        db.execute("INSERT INTO contacts (id, name, phone) VALUES (1, 'Alice', '555-1234')")
+        db.execute("INSERT INTO contacts (name, phone) VALUES ('Alice', '555-1234')")
             .unwrap();
-        db.execute("INSERT INTO contacts (id, name) VALUES (2, 'Bob')")
+        db.execute("INSERT INTO contacts (name) VALUES ('Bob')")
             .unwrap();
 
         db.catalog_object_id()
@@ -326,22 +323,22 @@ fn database_roundtrip_with_nullable() {
     // Find Alice and Bob
     let alice = contacts
         .iter()
-        .find(|r| r.values[1] == Value::String("Alice".to_string()))
+        .find(|r| r.1.get_by_name("name") == Some(RowValue::String("Alice")))
         .unwrap();
     let bob = contacts
         .iter()
-        .find(|r| r.values[1] == Value::String("Bob".to_string()))
+        .find(|r| r.1.get_by_name("name") == Some(RowValue::String("Bob")))
         .unwrap();
 
-    // Alice has phone
+    // Alice has phone (not null)
     assert!(
-        matches!(&alice.values[2], Value::NullableSome(_)),
+        !matches!(alice.1.get_by_name("phone"), Some(RowValue::Null) | None),
         "Alice should have phone"
     );
 
-    // Bob doesn't have phone (should be NullableNone)
+    // Bob doesn't have phone (should be Null)
     assert!(
-        matches!(&bob.values[2], Value::NullableNone),
+        matches!(bob.1.get_by_name("phone"), Some(RowValue::Null)),
         "Bob should have null phone"
     );
 }
@@ -356,23 +353,33 @@ fn database_roundtrip_with_inline_blob() {
     let catalog_id = {
         let db = Database::new(env.clone());
 
-        db.execute("CREATE TABLE files (id I64 NOT NULL, name STRING NOT NULL, data BLOB NOT NULL)")
+        db.execute("CREATE TABLE files (name STRING NOT NULL, data BLOB NOT NULL)")
             .unwrap();
 
         // Create inline blob
         let blob_ref = ContentRef::inline(small_data.clone());
 
-        // Insert with blob
-        db.insert(
-            "files",
-            &["id", "name", "data"],
-            vec![
-                Value::I64(1),
-                Value::String("small.bin".to_string()),
-                Value::Blob(blob_ref),
-            ],
-        )
-        .unwrap();
+        // Insert with blob - test row creation separately
+        let schema = db.get_table("files").unwrap();
+        let descriptor = std::sync::Arc::new(groove::sql::row_buffer::RowDescriptor::from_table_schema(&schema));
+        eprintln!("Schema columns: {:?}", schema.columns.iter().map(|c| &c.name).collect::<Vec<_>>());
+        eprintln!("Descriptor columns:");
+        for (i, col) in descriptor.columns.iter().enumerate() {
+            eprintln!("  [{}]: name={}, ty={:?}, offset={}", i, col.name, col.ty, col.offset);
+        }
+        let row = groove::sql::row_buffer::RowBuilder::new(descriptor.clone())
+            .set_string_by_name("name", "small.bin")
+            .set_blob_by_name("data", blob_ref)
+            .build();
+        eprintln!("Row buffer before insert: {} bytes", row.buffer.len());
+        eprintln!("Row data column: {:?}", row.get_by_name("data"));
+        db.insert_row("files", row).unwrap();
+
+        // Debug: check if blob was stored correctly
+        let rows_before = get_rows(db.execute("SELECT * FROM files").unwrap());
+        eprintln!("BEFORE RESTORE:");
+        eprintln!("Row buffer len: {}", rows_before[0].1.buffer.len());
+        eprintln!("Data value: {:?}", rows_before[0].1.get_by_name("data"));
 
         db.catalog_object_id()
     };
@@ -384,12 +391,22 @@ fn database_roundtrip_with_inline_blob() {
     let rows = get_rows(db.execute("SELECT * FROM files").unwrap());
     assert_eq!(rows.len(), 1, "should have 1 file");
 
+    // Debug: print column names and types
+    for (i, col) in rows[0].1.descriptor.columns.iter().enumerate() {
+        eprintln!("Col[{}]: name={}, ty={:?}, offset={}, nullable={}", i, col.name, col.ty, col.offset, col.nullable);
+    }
+    eprintln!("Row buffer len: {}", rows[0].1.buffer.len());
+    eprintln!("Row buffer: {:?}", &rows[0].1.buffer);
+
+    // Try getting by index
+    eprintln!("Value at index 2: {:?}", rows[0].1.get(2));
+
     // Check blob content
-    if let Value::Blob(content_ref) = &rows[0].values[2] {
+    if let Some(RowValue::Blob(content_ref)) = rows[0].1.get_by_name("data") {
         let data = content_ref.as_inline().expect("should be inline blob");
         assert_eq!(data, small_data.as_slice(), "blob data should match");
     } else {
-        panic!("expected Blob value, got {:?}", rows[0].values[2]);
+        panic!("expected Blob value, got {:?}", rows[0].1.get_by_name("data"));
     }
 }
 
@@ -407,7 +424,7 @@ fn database_roundtrip_with_chunked_blob() {
     let catalog_id = {
         let db = Database::new(env.clone());
 
-        db.execute("CREATE TABLE files (id I64 NOT NULL, name STRING NOT NULL, data BLOB NOT NULL)")
+        db.execute("CREATE TABLE files (name STRING NOT NULL, data BLOB NOT NULL)")
             .unwrap();
 
         // Manually chunk the data and store in environment
@@ -422,16 +439,10 @@ fn database_roundtrip_with_chunked_blob() {
         let blob_ref = ContentRef::chunked(hashes);
 
         // Insert with blob
-        db.insert(
-            "files",
-            &["id", "name", "data"],
-            vec![
-                Value::I64(1),
-                Value::String("large.bin".to_string()),
-                Value::Blob(blob_ref),
-            ],
-        )
-        .unwrap();
+        db.insert_with("files", |b| b
+            .set_string_by_name("name", "large.bin")
+            .set_blob_by_name("data", blob_ref)
+            .build()).unwrap();
 
         db.catalog_object_id()
     };
@@ -444,7 +455,7 @@ fn database_roundtrip_with_chunked_blob() {
     assert_eq!(rows.len(), 1, "should have 1 file");
 
     // Check blob content - need to read chunks from environment
-    if let Value::Blob(content_ref) = &rows[0].values[2] {
+    if let Some(RowValue::Blob(content_ref)) = rows[0].1.get_by_name("data") {
         let chunk_hashes = content_ref.as_chunks().expect("should be chunked blob");
         assert_eq!(chunk_hashes.len(), 2, "should have 2 chunks");
 
@@ -458,6 +469,6 @@ fn database_roundtrip_with_chunked_blob() {
         assert_eq!(restored_data.len(), large_data.len(), "blob size should match");
         assert_eq!(restored_data, large_data, "blob data should match");
     } else {
-        panic!("expected Blob value, got {:?}", rows[0].values[2]);
+        panic!("expected Blob value, got {:?}", rows[0].1.get_by_name("data"));
     }
 }

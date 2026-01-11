@@ -1,4 +1,5 @@
-use crate::sql::row::Row;
+use crate::object::ObjectId;
+use crate::sql::row_buffer::OwnedRow;
 
 // Re-export SchemaId from the object module
 pub use crate::object::{ObjectIdParseError, SchemaId};
@@ -24,8 +25,8 @@ impl IndexKey {
 pub enum QueryState {
     /// Query is loading.
     Loading,
-    /// Query has results.
-    Loaded(Vec<Row>),
+    /// Query has results. Each tuple is (ObjectId, OwnedRow).
+    Loaded(Vec<(ObjectId, OwnedRow)>),
     /// Query encountered an error.
     Error(String),
 }
@@ -47,7 +48,7 @@ impl QueryState {
     }
 
     /// Get rows if loaded.
-    pub fn rows(&self) -> Option<Vec<Row>> {
+    pub fn rows(&self) -> Option<Vec<(ObjectId, OwnedRow)>> {
         match self {
             QueryState::Loaded(rows) => Some(rows.clone()),
             _ => None,

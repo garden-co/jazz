@@ -22,7 +22,7 @@ use js_sys::{Array, Function, Promise, Uint8Array};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 
-use groove::sql::{encode_rows, Database, ExecuteResult, Row};
+use groove::sql::{encode_rows, Database, ExecuteResult};
 use groove::sync::{
     commits_to_send, ClientEnv, ClientEnvConfig, PushRequest, SseEvent, SubscribeRequest,
     SubscriptionOptions,
@@ -360,12 +360,15 @@ impl WasmSyncedLocalNode {
     /// Update a specific row's column with a string value.
     #[wasm_bindgen(js_name = updateRow)]
     pub fn update_row(&self, table: &str, row_id: &str, column: &str, value: &str) -> Result<bool, JsValue> {
-        use groove::sql::Value;
         let id: groove::ObjectId = row_id.parse()
             .map_err(|e| JsValue::from_str(&format!("invalid row_id: {:?}", e)))?;
+        let value_owned = value.to_string();
+        let column_owned = column.to_string();
         let mut state = self.state.borrow_mut();
         let result = state.db
-            .update(table, id, &[(column, Value::String(value.to_string()))])
+            .update_with(table, id, |builder| {
+                builder.set_string_by_name(&column_owned, &value_owned).build()
+            })
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
         // Track for sync if update succeeded
@@ -382,12 +385,14 @@ impl WasmSyncedLocalNode {
     /// Update a specific row's column with an i64 value.
     #[wasm_bindgen(js_name = updateRowI64)]
     pub fn update_row_i64(&self, table: &str, row_id: &str, column: &str, value: i64) -> Result<bool, JsValue> {
-        use groove::sql::Value;
         let id: groove::ObjectId = row_id.parse()
             .map_err(|e| JsValue::from_str(&format!("invalid row_id: {:?}", e)))?;
+        let column_owned = column.to_string();
         let mut state = self.state.borrow_mut();
         let result = state.db
-            .update(table, id, &[(column, Value::I64(value))])
+            .update_with(table, id, |builder| {
+                builder.set_i64_by_name(&column_owned, value).build()
+            })
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
         // Track for sync if update succeeded
@@ -436,69 +441,6 @@ impl WasmSyncedLocalNode {
             let _ = callback.call1(&JsValue::NULL, &js_deltas);
         });
 
-        let listener_id = query.subscribe_delta(rust_callback);
-
-        Ok(SyncedQueryHandle {
-            _query: query,
-            listener_id,
-        })
-    }
-
-    /// Subscribe to query results with full row data on each change.
-    ///
-    /// Callback receives: Array of row objects with {id, ...columns}
-    /// This is simpler than subscribeDelta - you get the complete result set each time.
-    #[wasm_bindgen(js_name = subscribeRows)]
-    pub fn subscribe_rows(
-        &self,
-        sql: &str,
-        callback: js_sys::Function,
-    ) -> Result<SyncedQueryHandle, JsValue> {
-        use groove::sql::{Row, Value};
-
-        let state = self.state.borrow();
-
-        // Get the schema for this query to know column names
-        let query = state
-            .db
-            .incremental_query(sql)
-            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
-
-        // Parse the SQL to get table name for schema lookup
-        let table_name = extract_table_name(sql);
-        let schema = table_name.and_then(|t| state.db.get_table(&t));
-        let column_names: Vec<String> = schema
-            .map(|s| s.columns.iter().map(|c| c.name.clone()).collect())
-            .unwrap_or_default();
-
-        let rust_callback = Box::new(move |rows: Vec<Row>| {
-            let js_rows = Array::new();
-
-            for row in rows {
-                let obj = js_sys::Object::new();
-
-                // Add row ID
-                let _ = js_sys::Reflect::set(
-                    &obj,
-                    &JsValue::from_str("id"),
-                    &JsValue::from_str(&row.id.to_string()),
-                );
-
-                // Add column values
-                for (i, value) in row.values.iter().enumerate() {
-                    let col_name = column_names.get(i)
-                        .map(|s: &String| s.as_str())
-                        .unwrap_or("col");
-                    let js_value = value_to_js_inner(value);
-                    let _ = js_sys::Reflect::set(&obj, &JsValue::from_str(col_name), &js_value);
-                }
-
-                js_rows.push(&obj);
-            }
-
-            let _ = callback.call1(&JsValue::NULL, &js_rows);
-        });
-
         let listener_id = query.subscribe(rust_callback);
 
         Ok(SyncedQueryHandle {
@@ -506,42 +448,7 @@ impl WasmSyncedLocalNode {
             listener_id,
         })
     }
-}
 
-/// Extract table name from a simple SELECT query.
-fn extract_table_name(sql: &str) -> Option<String> {
-    let sql_upper = sql.to_uppercase();
-    let from_idx = sql_upper.find("FROM")?;
-    let after_from = &sql[from_idx + 4..].trim_start();
-    let end = after_from.find(|c: char| c.is_whitespace() || c == ';').unwrap_or(after_from.len());
-    Some(after_from[..end].to_string())
-}
-
-/// Convert a groove Value to JsValue.
-fn value_to_js_inner(value: &groove::sql::Value) -> JsValue {
-    use groove::sql::Value;
-    match value {
-        Value::Bool(b) => JsValue::from_bool(*b),
-        Value::I32(i) => JsValue::from_f64(*i as f64),
-        Value::U32(u) => JsValue::from_f64(*u as f64),
-        Value::I64(i) => JsValue::from_f64(*i as f64),
-        Value::F64(f) => JsValue::from_f64(*f),
-        Value::String(s) => JsValue::from_str(s),
-        Value::Bytes(b) => JsValue::from_str(&format!("bytes:{}", b.len())),
-        Value::Ref(oid) => JsValue::from_str(&oid.to_string()),
-        Value::Row(row) => JsValue::from_str(&format!("row:{}", row.id)),
-        Value::Array(arr) => {
-            let js_arr = Array::new();
-            for v in arr {
-                js_arr.push(&value_to_js_inner(v));
-            }
-            js_arr.into()
-        }
-        Value::NullableSome(inner) => value_to_js_inner(inner),
-        Value::NullableNone => JsValue::NULL,
-        Value::Blob(_) => JsValue::from_str("[blob]"),
-        Value::BlobArray(arr) => JsValue::from_str(&format!("[blob_array:{}]", arr.len())),
-    }
 }
 
 // ============================================================================
@@ -773,6 +680,7 @@ async fn push_pending_objects(state: &Rc<RefCell<SyncedState>>) {
     }
 }
 
-fn row_to_strings(row: &Row) -> Vec<String> {
-    row.values.iter().map(|v| format!("{:?}", v)).collect()
+fn row_to_strings(row: &(groove::ObjectId, groove::sql::OwnedRow)) -> Vec<String> {
+    // Return id and a debug representation of the row buffer
+    vec![row.0.to_string(), format!("{} bytes", row.1.buffer.len())]
 }

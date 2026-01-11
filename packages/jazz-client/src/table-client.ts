@@ -54,29 +54,22 @@ export abstract class TableClient<T extends { id: string }> {
     options: { include?: IncludeSpec },
     callback: (row: T | null) => void
   ): Unsubscribe {
-    // Debug: log the query options
-    console.log(`[${this.tableName}] useOne options:`, {
-      id,
-      include: options.include,
-    });
-
     const sql = buildQueryById(this.tableMeta, this.schemaMeta, id, {
       include: options.include,
     });
 
-    // Debug: log the SQL query
-    console.log(`[${this.tableName}] useOne SQL:`, sql);
-
     let currentRow: T | null = null;
 
     const handle = db.subscribeDelta(sql, (deltas: Uint8Array[]) => {
-      // Debug: log when callback is invoked
-      console.log(`[${this.tableName}] useOne callback invoked with ${deltas.length} deltas`);
       for (const deltaBuffer of deltas) {
+        // Copy the buffer to avoid issues with WASM buffer reuse
+        // The WASM module may reuse the underlying ArrayBuffer between callbacks
+        const bufferCopy = new Uint8Array(deltaBuffer);
+
         // Use dynamic decoder when includes are specified, otherwise use generated decoder
         const delta = options.include
-          ? decodeDeltaWithIncludes<T>(deltaBuffer.buffer, this.tableMeta, this.schemaMeta, options.include)
-          : this.decoder.delta(deltaBuffer.buffer) as Delta<T>;
+          ? decodeDeltaWithIncludes<T>(bufferCopy, this.tableMeta, this.schemaMeta, options.include)
+          : this.decoder.delta(bufferCopy.buffer) as Delta<T>;
 
         if (delta.type === "added" || delta.type === "updated") {
           currentRow = delta.row;
@@ -86,9 +79,6 @@ export abstract class TableClient<T extends { id: string }> {
       }
       callback(currentRow);
     });
-
-    // Debug: log the query graph diagram
-    console.log(`[${this.tableName}] useOne Query Graph:\n${handle.diagram()}`);
 
     return () => {
       handle.unsubscribe();
@@ -109,52 +99,32 @@ export abstract class TableClient<T extends { id: string }> {
     options: { where?: BaseWhereInput; include?: IncludeSpec },
     callback: (rows: T[]) => void
   ): Unsubscribe {
-    // Debug: log the JS query options
-    console.log(`[${this.tableName}] useAll options:`, {
-      where: options.where,
-      include: options.include,
-    });
-
     const sql = buildQuery(this.tableMeta, this.schemaMeta, {
       where: options.where,
       include: options.include,
     });
 
-    // Debug: log the SQL query
-    console.log(`[${this.tableName}] useAll SQL:`, sql);
-
     const rowsById = new Map<string, T>();
 
     const handle = db.subscribeDelta(sql, (deltas: Uint8Array[]) => {
-      // Debug: log when callback is invoked
-      console.log(`[${this.tableName}] useAll callback invoked with ${deltas.length} deltas`);
-
       for (const deltaBuffer of deltas) {
-        try {
-          // Use dynamic decoder when includes are specified, otherwise use generated decoder
-          const delta = options.include
-            ? decodeDeltaWithIncludes<T>(deltaBuffer.buffer, this.tableMeta, this.schemaMeta, options.include)
-            : this.decoder.delta(deltaBuffer.buffer) as Delta<T>;
+        // Copy the buffer to avoid issues with WASM buffer reuse
+        // The WASM module may reuse the underlying ArrayBuffer between callbacks
+        const bufferCopy = new Uint8Array(deltaBuffer);
 
-          // Debug: log decoded delta
-          console.log(`[${this.tableName}] useAll delta:`, delta);
+        // Use dynamic decoder when includes are specified, otherwise use generated decoder
+        const delta = options.include
+          ? decodeDeltaWithIncludes<T>(bufferCopy, this.tableMeta, this.schemaMeta, options.include)
+          : this.decoder.delta(bufferCopy.buffer) as Delta<T>;
 
-          if (delta.type === "added" || delta.type === "updated") {
-            rowsById.set(delta.row.id, delta.row);
-          } else if (delta.type === "removed") {
-            rowsById.delete(delta.id);
-          }
-        } catch (error) {
-          console.error(`[${this.tableName}] Error decoding delta:`, error);
-          console.error(`[${this.tableName}] Delta buffer length:`, deltaBuffer.length);
-          console.error(`[${this.tableName}] Delta buffer (hex):`, Array.from(deltaBuffer).map(b => b.toString(16).padStart(2, '0')).join(' '));
+        if (delta.type === "added" || delta.type === "updated") {
+          rowsById.set(delta.row.id, delta.row);
+        } else if (delta.type === "removed") {
+          rowsById.delete(delta.id);
         }
       }
       callback(Array.from(rowsById.values()));
     });
-
-    // Debug: log the query graph diagram (after initial subscription sets up the graph)
-    console.log(`[${this.tableName}] Query Graph:\n${handle.diagram()}`);
 
     return () => {
       handle.unsubscribe();

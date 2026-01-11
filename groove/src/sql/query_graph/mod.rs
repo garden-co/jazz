@@ -27,7 +27,7 @@
 //! // Build a query graph
 //! let mut builder = QueryGraphBuilder::new("users", schema);
 //! let scan = builder.table_scan();
-//! let filter = builder.filter(scan, Predicate::eq("active", Value::Bool(true)));
+//! let filter = builder.filter(scan, Predicate::eq("active", PredicateValue::Bool(true)));
 //! let graph = builder.output(filter, GraphId(1));
 //!
 //! // Process a change
@@ -44,11 +44,11 @@ pub mod registry;
 
 // Re-export main types
 pub use builder::{JoinGraphBuilder, QueryGraphBuilder};
-pub use cache::RowCache;
-pub use delta::{DeltaBatch, PriorState, RowDelta};
+pub use cache::{BufferRowCache, RowCache};
+pub use delta::{BufferJoinedRow, DeltaBatch, PriorState, RowDelta};
 pub use graph::{GraphId, GraphState, QueryGraph};
 pub use node::{AccessReason, NodeId, QueryNode};
-pub use predicate::Predicate;
+pub use predicate::{Predicate, PredicateValue};
 
 // Re-export from parent for internal use
 use super::database::DatabaseState;

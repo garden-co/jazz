@@ -10,7 +10,8 @@ use crate::merge::MergeStrategy;
 // ========== ObjectId Type ==========
 
 /// Crockford Base32 alphabet (excludes I, L, O, U to avoid confusion).
-const CROCKFORD_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+/// Uses lowercase for output (parsing is case-insensitive).
+const CROCKFORD_ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
 
 /// Decode table for Crockford Base32 (maps ASCII byte to 5-bit value, or 0xFF for invalid).
 const CROCKFORD_DECODE: [u8; 128] = {
@@ -582,8 +583,8 @@ mod tests {
         // Max value
         let id = ObjectId::new(u128::MAX);
         // 128 bits = 26 * 5 - 2 = 128 bits with 2 padding bits
-        // So max is 0x3FFFFFFF... which in base32 is 7ZZZZZZZZZZZZZZZZZZZZZZZZZ
-        assert_eq!(id.to_string(), "7ZZZZZZZZZZZZZZZZZZZZZZZZZ");
+        // So max is 0x3FFFFFFF... which in base32 is 7zzzzzzzzzzzzzzzzzzzzzzzzz
+        assert_eq!(id.to_string(), "7zzzzzzzzzzzzzzzzzzzzzzzzz");
     }
 
     #[test]
@@ -642,6 +643,81 @@ mod tests {
         assert!(matches!("".parse::<ObjectId>(), Err(ObjectIdParseError::Empty)));
         assert!(matches!("000000000000000000000000000".parse::<ObjectId>(), Err(ObjectIdParseError::TooLong)));
         assert!(matches!("hello!".parse::<ObjectId>(), Err(ObjectIdParseError::InvalidChar('!'))));
+    }
+
+    #[test]
+    fn object_id_string_sortability() {
+        // Test that string representation maintains sort order.
+        // This is critical for database indices and range queries.
+        // Crockford Base32 alphabet (0-9, A-Z minus I,L,O,U) is in ASCII order,
+        // and MSB-first encoding ensures lexicographic ordering matches numeric ordering.
+        let values = [0u128, 1, 31, 32, 255, 256, 1000, u128::MAX / 2, u128::MAX];
+
+        for i in 0..values.len() - 1 {
+            let id1 = ObjectId::new(values[i]);
+            let id2 = ObjectId::new(values[i + 1]);
+
+            // Numeric ordering
+            assert!(id1 < id2);
+
+            // String ordering should match
+            assert!(
+                id1.to_string() < id2.to_string(),
+                "String ordering mismatch: {} ({}) vs {} ({})",
+                id1.to_string(),
+                values[i],
+                id2.to_string(),
+                values[i + 1]
+            );
+        }
+    }
+
+    #[test]
+    fn object_id_string_sort_matches_numeric_sort() {
+        // Verify that sorting a collection by string gives same order as sorting by value
+        let ids: Vec<ObjectId> = vec![
+            ObjectId::new(1000),
+            ObjectId::new(1),
+            ObjectId::new(u128::MAX),
+            ObjectId::new(0),
+            ObjectId::new(500),
+            ObjectId::new(31),  // boundary: last single-char value
+            ObjectId::new(32),  // boundary: first two-char value
+        ];
+
+        // Sort by numeric value (uses derived Ord on u128)
+        let mut numeric_sorted = ids.clone();
+        numeric_sorted.sort();
+
+        // Sort by string representation
+        let mut string_sorted = ids.clone();
+        string_sorted.sort_by_key(|id| id.to_string());
+
+        assert_eq!(numeric_sorted, string_sorted);
+    }
+
+    #[test]
+    fn object_id_boundary_values_sortability() {
+        // Test specific boundary cases where encoding "rolls over"
+
+        // 31 -> 32 boundary (Z -> 10 in least significant position)
+        let id31 = ObjectId::new(31);
+        let id32 = ObjectId::new(32);
+        assert!(id31 < id32);
+        assert!(id31.to_string() < id32.to_string());
+
+        // 1023 -> 1024 boundary (ZZ -> 100)
+        let id1023 = ObjectId::new(1023);
+        let id1024 = ObjectId::new(1024);
+        assert!(id1023 < id1024);
+        assert!(id1023.to_string() < id1024.to_string());
+
+        // First character differences (very large values)
+        // Value that starts with '0' vs value that starts with '1'
+        let small_first_char = ObjectId::new(1u128 << 125); // starts with low digit
+        let large_first_char = ObjectId::new(3u128 << 125); // starts with higher digit
+        assert!(small_first_char < large_first_char);
+        assert!(small_first_char.to_string() < large_first_char.to_string());
     }
 }
 

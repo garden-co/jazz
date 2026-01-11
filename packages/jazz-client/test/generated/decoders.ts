@@ -1,7 +1,7 @@
 // Generated from SQL schema by @jazz/schema
 // DO NOT EDIT MANUALLY
 
-// Shared decoder for UTF-8 strings (used for variable-length strings)
+// Shared decoder for UTF-8 strings
 const decoder = new TextDecoder();
 
 // Delta type constants
@@ -9,19 +9,30 @@ export const DELTA_ADDED = 1;
 export const DELTA_UPDATED = 2;
 export const DELTA_REMOVED = 3;
 
+// Crockford Base32 alphabet (matches Rust ObjectId encoding - lowercase)
+const CROCKFORD_ALPHABET = '0123456789abcdefghjkmnpqrstvwxyz';
+
 /**
- * Fast ObjectId decoding using String.fromCharCode.
- * Since Base32 is ASCII-only, this is faster than TextDecoder.
+ * Convert a 16-byte binary ObjectId to Base32 string.
+ * Matches the Rust ObjectId encoding format.
  */
-function decodeObjectId(bytes: Uint8Array, offset: number): string {
-  return String.fromCharCode(
-    bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3], bytes[offset+4],
-    bytes[offset+5], bytes[offset+6], bytes[offset+7], bytes[offset+8], bytes[offset+9],
-    bytes[offset+10], bytes[offset+11], bytes[offset+12], bytes[offset+13], bytes[offset+14],
-    bytes[offset+15], bytes[offset+16], bytes[offset+17], bytes[offset+18], bytes[offset+19],
-    bytes[offset+20], bytes[offset+21], bytes[offset+22], bytes[offset+23], bytes[offset+24],
-    bytes[offset+25]
-  );
+function objectIdToString(bytes: Uint8Array, offset: number): string {
+  // Read as two 64-bit values (little-endian)
+  const view = new DataView(bytes.buffer, bytes.byteOffset + offset, 16);
+  const lo = view.getBigUint64(0, true);
+  const hi = view.getBigUint64(8, true);
+
+  // Combine into 128-bit value
+  let value = (hi << 64n) | lo;
+
+  // Encode to Base32 (26 characters for 128 bits)
+  const chars = new Array(26);
+  for (let i = 25; i >= 0; i--) {
+    chars[i] = CROCKFORD_ALPHABET[Number(value & 0x1fn)];
+    value >>= 5n;
+  }
+
+  return chars.join('');
 }
 
 /** Delta type for incremental updates */
@@ -46,8 +57,8 @@ export class BinaryReader {
   }
 
   readObjectId(): string {
-    const id = decodeObjectId(this.bytes, this.offset);
-    this.offset += 26;
+    const id = objectIdToString(this.bytes, this.offset);
+    this.offset += 16;
     return id;
   }
 
@@ -79,21 +90,7 @@ export class BinaryReader {
     return this.bytes[this.offset++] === 1;
   }
 
-  readString(): string {
-    const len = this.readU32();
-    const str = decoder.decode(new Uint8Array(this.bytes.buffer, this.offset, len));
-    this.offset += len;
-    return str;
-  }
-
-  readBytes(): Uint8Array {
-    const len = this.readU32();
-    const bytes = new Uint8Array(this.bytes.buffer, this.offset, len);
-    this.offset += len;
-    return bytes;
-  }
-
-  /** Read nullable value. Returns null if not present. */
+  /** Read nullable value. Returns null if not present (presence byte = 0). */
   readNullable<T>(readValue: () => T): T | null {
     if (this.bytes[this.offset++] === 0) return null;
     return readValue();
@@ -101,34 +98,24 @@ export class BinaryReader {
 
   /**
    * Read a nullable ObjectId ref.
-   * Uses presence flag: 0x00 = null, 0x01 = present followed by 26-byte ObjectId.
+   * Nullable refs have a presence byte before the 16-byte ObjectId.
    */
   readNullableRef(): string | null {
-    const present = this.bytes[this.offset++];
-    if (present === 0) {
+    if (this.bytes[this.offset++] === 0) {
+      this.offset += 16; // Skip the zeroed ObjectId bytes
       return null;
     }
     return this.readObjectId();
-  }
-
-  /**
-   * Read an array of values.
-   * @param readElement Function to read each element
-   */
-  readArray<T>(readElement: () => T): T[] {
-    const count = this.readU32();
-    const arr = new Array(count);
-    for (let i = 0; i < count; i++) {
-      arr[i] = readElement();
-    }
-    return arr;
   }
 }
 
 /**
  * Decode binary rows for Users table (batch format)
- * @param buffer ArrayBuffer from WASM
- * @returns Array of User rows
+ *
+ * Row buffer layout:
+ * - Fixed size: 33 bytes
+ * - Variable columns: 3
+ * - Offset table: 8 bytes
  */
 export function decodeUserRows(buffer: ArrayBufferLike): Array<{ id: string; name: string; email: string; avatar: string | null; age: bigint; score: number; isAdmin: boolean }> {
   const bytes = new Uint8Array(buffer);
@@ -142,149 +129,93 @@ export function decodeUserRows(buffer: ArrayBufferLike): Array<{ id: string; nam
   const rows = new Array(rowCount);
 
   for (let i = 0; i < rowCount; i++) {
-    const row: any = {};
-
-    // Read ObjectId (26 bytes Base32)
-    row.id = decodeObjectId(bytes, offset);
-    offset += 26;
-
-    // name: string
-    const nameLen = view.getUint32(offset, true);
+    // Read row size (row buffer with id as first 16 bytes)
+    const rowSize = view.getUint32(offset, true);
     offset += 4;
-    row.name = decoder.decode(new Uint8Array(buffer, offset, nameLen));
-    offset += nameLen;
+    const rowStart = offset;
+    const rowEnd = rowStart + rowSize;
+    const bufferStart = rowStart; // Row buffer starts here (id is first 16 bytes)
 
-    // email: string
-    const emailLen = view.getUint32(offset, true);
-    offset += 4;
-    row.email = decoder.decode(new Uint8Array(buffer, offset, emailLen));
-    offset += emailLen;
+    // Fixed columns
+    const id = objectIdToString(bytes, bufferStart + 0);
+    const age = view.getBigInt64(bufferStart + 16, true);
+    const score = view.getFloat64(bufferStart + 24, true);
+    const isAdmin = bytes[bufferStart + 32] === 1;
 
-    // avatar: string (nullable)
-    const avatarPresent = view.getUint8(offset++);
-    if (avatarPresent === 0) {
-      row.avatar = null;
-    } else {
-      const avatarLen = view.getUint32(offset, true);
-      offset += 4;
-      row.avatar = decoder.decode(new Uint8Array(buffer, offset, avatarLen));
-      offset += avatarLen;
+    // Variable columns (using offset table)
+    const offsetTableStart = bufferStart + 33;
+    const varOffset1 = bufferStart + view.getUint32(offsetTableStart + 0, true);
+    const varOffset2 = bufferStart + view.getUint32(offsetTableStart + 4, true);
+    const varDataStart = bufferStart + 33 + 8;
+
+    const name = decoder.decode(bytes.subarray(varDataStart, varOffset1));
+    const email = decoder.decode(bytes.subarray(varOffset1, varOffset2));
+    let avatar: string | null = null;
+    if (bytes[varOffset2] === 1) {
+      avatar = decoder.decode(bytes.subarray(varOffset2 + 1, rowEnd));
     }
 
-    // age: i64
-    row.age = view.getBigInt64(offset, true);
-    offset += 8;
-
-    // score: f64
-    row.score = view.getFloat64(offset, true);
-    offset += 8;
-
-    // isAdmin: bool
-    row.isAdmin = view.getUint8(offset++) === 1;
-
-    rows[i] = row;
+    rows[i] = { id, name, email, avatar, age, score, isAdmin };
+    offset = rowEnd;
   }
 
   return rows;
 }
 
 /**
- * Decode a single User row from binary (no header)
- * @param buffer ArrayBuffer containing a single row
- * @param startOffset Byte offset to start reading from
- * @returns Decoded row and bytes consumed
- */
-export function decodeUserRow(buffer: ArrayBufferLike, startOffset = 0): { row: { id: string; name: string; email: string; avatar: string | null; age: bigint; score: number; isAdmin: boolean }; bytesRead: number } {
-  const bytes = new Uint8Array(buffer);
-  const view = new DataView(buffer as ArrayBuffer);
-  let offset = startOffset;
-
-  const row: any = {};
-
-  // Read ObjectId (26 bytes Base32)
-  row.id = decodeObjectId(bytes, offset);
-  offset += 26;
-
-  // name: string
-  const nameLen = view.getUint32(offset, true);
-  offset += 4;
-  row.name = decoder.decode(new Uint8Array(buffer, offset, nameLen));
-  offset += nameLen;
-
-  // email: string
-  const emailLen = view.getUint32(offset, true);
-  offset += 4;
-  row.email = decoder.decode(new Uint8Array(buffer, offset, emailLen));
-  offset += emailLen;
-
-  // avatar: string (nullable)
-  const avatarPresent = view.getUint8(offset++);
-  if (avatarPresent === 0) {
-    row.avatar = null;
-  } else {
-    const avatarLen = view.getUint32(offset, true);
-    offset += 4;
-    row.avatar = decoder.decode(new Uint8Array(buffer, offset, avatarLen));
-    offset += avatarLen;
-  }
-
-  // age: i64
-  row.age = view.getBigInt64(offset, true);
-  offset += 8;
-
-  // score: f64
-  row.score = view.getFloat64(offset, true);
-  offset += 8;
-
-  // isAdmin: bool
-  row.isAdmin = view.getUint8(offset++) === 1;
-
-  return { row, bytesRead: offset - startOffset };
-}
-
-/**
  * Decode a User delta from binary
- * Format: u8 type (1=added, 2=updated, 3=removed) + row data or id
- * @param buffer ArrayBuffer containing a single delta
- * @returns Decoded delta
+ * Format: u8 type (1=added, 2=updated, 3=removed) + [row buffer with id] or just ObjectId for removed
  */
 export function decodeUserDelta(buffer: ArrayBufferLike): Delta<{ id: string; name: string; email: string; avatar: string | null; age: bigint; score: number; isAdmin: boolean }> {
   const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer as ArrayBuffer);
   const deltaType = bytes[0];
 
   if (deltaType === DELTA_REMOVED) {
-    // Removed: just the ObjectId
-    const id = decodeObjectId(bytes, 1);
+    const id = objectIdToString(bytes, 1);
     return { type: 'removed', id };
   }
 
-  // Added or Updated: decode the full row
-  const { row } = decodeUserRow(buffer, 1);
+  // Added or Updated: decode the row buffer (id is first 16 bytes)
+  const bufferStart = 1; // After delta type byte
+  const rowEnd = bytes.length;
+
+  const id = objectIdToString(bytes, bufferStart + 0);
+  const age = view.getBigInt64(bufferStart + 16, true);
+  const score = view.getFloat64(bufferStart + 24, true);
+  const isAdmin = bytes[bufferStart + 32] === 1;
+  const offsetTableStart = bufferStart + 33;
+  const varOffset1 = bufferStart + view.getUint32(offsetTableStart + 0, true);
+  const varOffset2 = bufferStart + view.getUint32(offsetTableStart + 4, true);
+  const varDataStart = bufferStart + 33 + 8;
+  const name = decoder.decode(bytes.subarray(varDataStart, varOffset1));
+  const email = decoder.decode(bytes.subarray(varOffset1, varOffset2));
+  let avatar: string | null = null;
+  if (bytes[varOffset2] === 1) {
+    avatar = decoder.decode(bytes.subarray(varOffset2 + 1, rowEnd));
+  }
+
   return {
     type: deltaType === DELTA_ADDED ? 'added' : 'updated',
-    row
+    row: { id, name, email, avatar, age, score, isAdmin }
   };
 }
 
 /**
  * Read a User row using a BinaryReader.
- * Use this for nested/joined row decoding.
+ * NOTE: This table has variable columns - use decodeUserRows/decodeUserDelta instead.
  */
 export function readUser(reader: BinaryReader): { id: string; name: string; email: string; avatar: string | null; age: bigint; score: number; isAdmin: boolean } {
-  const id = reader.readObjectId();
-  const name = reader.readString();
-  const email = reader.readString();
-  const avatar = reader.readNullable(() => reader.readString());
-  const age = reader.readI64();
-  const score = reader.readF64();
-  const isAdmin = reader.readBool();
-  return { id, name, email, avatar, age, score, isAdmin };
+  throw new Error('readUser requires row boundary context - use decodeUserRows or decodeUserDelta instead');
 }
 
 /**
  * Decode binary rows for Projects table (batch format)
- * @param buffer ArrayBuffer from WASM
- * @returns Array of Project rows
+ *
+ * Row buffer layout:
+ * - Fixed size: 32 bytes
+ * - Variable columns: 3
+ * - Offset table: 8 bytes
  */
 export function decodeProjectRows(buffer: ArrayBufferLike): Array<{ id: string; name: string; description: string | null; owner: string; color: string }> {
   const bytes = new Uint8Array(buffer);
@@ -298,133 +229,89 @@ export function decodeProjectRows(buffer: ArrayBufferLike): Array<{ id: string; 
   const rows = new Array(rowCount);
 
   for (let i = 0; i < rowCount; i++) {
-    const row: any = {};
-
-    // Read ObjectId (26 bytes Base32)
-    row.id = decodeObjectId(bytes, offset);
-    offset += 26;
-
-    // name: string
-    const nameLen = view.getUint32(offset, true);
+    // Read row size (row buffer with id as first 16 bytes)
+    const rowSize = view.getUint32(offset, true);
     offset += 4;
-    row.name = decoder.decode(new Uint8Array(buffer, offset, nameLen));
-    offset += nameLen;
+    const rowStart = offset;
+    const rowEnd = rowStart + rowSize;
+    const bufferStart = rowStart; // Row buffer starts here (id is first 16 bytes)
 
-    // description: string (nullable)
-    const descriptionPresent = view.getUint8(offset++);
-    if (descriptionPresent === 0) {
-      row.description = null;
-    } else {
-      const descriptionLen = view.getUint32(offset, true);
-      offset += 4;
-      row.description = decoder.decode(new Uint8Array(buffer, offset, descriptionLen));
-      offset += descriptionLen;
+    // Fixed columns
+    const id = objectIdToString(bytes, bufferStart + 0);
+    const owner = objectIdToString(bytes, bufferStart + 16);
+
+    // Variable columns (using offset table)
+    const offsetTableStart = bufferStart + 32;
+    const varOffset1 = bufferStart + view.getUint32(offsetTableStart + 0, true);
+    const varOffset2 = bufferStart + view.getUint32(offsetTableStart + 4, true);
+    const varDataStart = bufferStart + 32 + 8;
+
+    const name = decoder.decode(bytes.subarray(varDataStart, varOffset1));
+    let description: string | null = null;
+    if (bytes[varOffset1] === 1) {
+      description = decoder.decode(bytes.subarray(varOffset1 + 1, varOffset2));
     }
+    const color = decoder.decode(bytes.subarray(varOffset2, rowEnd));
 
-    // owner: ref
-    row.owner = decodeObjectId(bytes, offset);
-    offset += 26;
-
-    // color: string
-    const colorLen = view.getUint32(offset, true);
-    offset += 4;
-    row.color = decoder.decode(new Uint8Array(buffer, offset, colorLen));
-    offset += colorLen;
-
-    rows[i] = row;
+    rows[i] = { id, name, description, owner, color };
+    offset = rowEnd;
   }
 
   return rows;
 }
 
 /**
- * Decode a single Project row from binary (no header)
- * @param buffer ArrayBuffer containing a single row
- * @param startOffset Byte offset to start reading from
- * @returns Decoded row and bytes consumed
- */
-export function decodeProjectRow(buffer: ArrayBufferLike, startOffset = 0): { row: { id: string; name: string; description: string | null; owner: string; color: string }; bytesRead: number } {
-  const bytes = new Uint8Array(buffer);
-  const view = new DataView(buffer as ArrayBuffer);
-  let offset = startOffset;
-
-  const row: any = {};
-
-  // Read ObjectId (26 bytes Base32)
-  row.id = decodeObjectId(bytes, offset);
-  offset += 26;
-
-  // name: string
-  const nameLen = view.getUint32(offset, true);
-  offset += 4;
-  row.name = decoder.decode(new Uint8Array(buffer, offset, nameLen));
-  offset += nameLen;
-
-  // description: string (nullable)
-  const descriptionPresent = view.getUint8(offset++);
-  if (descriptionPresent === 0) {
-    row.description = null;
-  } else {
-    const descriptionLen = view.getUint32(offset, true);
-    offset += 4;
-    row.description = decoder.decode(new Uint8Array(buffer, offset, descriptionLen));
-    offset += descriptionLen;
-  }
-
-  // owner: ref
-  row.owner = decodeObjectId(bytes, offset);
-  offset += 26;
-
-  // color: string
-  const colorLen = view.getUint32(offset, true);
-  offset += 4;
-  row.color = decoder.decode(new Uint8Array(buffer, offset, colorLen));
-  offset += colorLen;
-
-  return { row, bytesRead: offset - startOffset };
-}
-
-/**
  * Decode a Project delta from binary
- * Format: u8 type (1=added, 2=updated, 3=removed) + row data or id
- * @param buffer ArrayBuffer containing a single delta
- * @returns Decoded delta
+ * Format: u8 type (1=added, 2=updated, 3=removed) + [row buffer with id] or just ObjectId for removed
  */
 export function decodeProjectDelta(buffer: ArrayBufferLike): Delta<{ id: string; name: string; description: string | null; owner: string; color: string }> {
   const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer as ArrayBuffer);
   const deltaType = bytes[0];
 
   if (deltaType === DELTA_REMOVED) {
-    // Removed: just the ObjectId
-    const id = decodeObjectId(bytes, 1);
+    const id = objectIdToString(bytes, 1);
     return { type: 'removed', id };
   }
 
-  // Added or Updated: decode the full row
-  const { row } = decodeProjectRow(buffer, 1);
+  // Added or Updated: decode the row buffer (id is first 16 bytes)
+  const bufferStart = 1; // After delta type byte
+  const rowEnd = bytes.length;
+
+  const id = objectIdToString(bytes, bufferStart + 0);
+  const owner = objectIdToString(bytes, bufferStart + 16);
+  const offsetTableStart = bufferStart + 32;
+  const varOffset1 = bufferStart + view.getUint32(offsetTableStart + 0, true);
+  const varOffset2 = bufferStart + view.getUint32(offsetTableStart + 4, true);
+  const varDataStart = bufferStart + 32 + 8;
+  const name = decoder.decode(bytes.subarray(varDataStart, varOffset1));
+  let description: string | null = null;
+  if (bytes[varOffset1] === 1) {
+    description = decoder.decode(bytes.subarray(varOffset1 + 1, varOffset2));
+  }
+  const color = decoder.decode(bytes.subarray(varOffset2, rowEnd));
+
   return {
     type: deltaType === DELTA_ADDED ? 'added' : 'updated',
-    row
+    row: { id, name, description, owner, color }
   };
 }
 
 /**
  * Read a Project row using a BinaryReader.
- * Use this for nested/joined row decoding.
+ * NOTE: This table has variable columns - use decodeProjectRows/decodeProjectDelta instead.
  */
 export function readProject(reader: BinaryReader): { id: string; name: string; description: string | null; owner: string; color: string } {
-  const id = reader.readObjectId();
-  const name = reader.readString();
-  const description = reader.readNullable(() => reader.readString());
-  const owner = reader.readObjectId();
-  const color = reader.readString();
-  return { id, name, description, owner, color };
+  throw new Error('readProject requires row boundary context - use decodeProjectRows or decodeProjectDelta instead');
 }
 
 /**
  * Decode binary rows for Tasks table (batch format)
- * @param buffer ArrayBuffer from WASM
- * @returns Array of Task rows
+ *
+ * Row buffer layout:
+ * - Fixed size: 66 bytes
+ * - Variable columns: 4
+ * - Offset table: 12 bytes
  */
 export function decodeTaskRows(buffer: ArrayBufferLike): Array<{ id: string; title: string; description: string | null; status: string; priority: string; project: string; assignee: string | null; createdAt: bigint; updatedAt: bigint; isCompleted: boolean }> {
   const bytes = new Uint8Array(buffer);
@@ -438,190 +325,101 @@ export function decodeTaskRows(buffer: ArrayBufferLike): Array<{ id: string; tit
   const rows = new Array(rowCount);
 
   for (let i = 0; i < rowCount; i++) {
-    const row: any = {};
-
-    // Read ObjectId (26 bytes Base32)
-    row.id = decodeObjectId(bytes, offset);
-    offset += 26;
-
-    // title: string
-    const titleLen = view.getUint32(offset, true);
+    // Read row size (row buffer with id as first 16 bytes)
+    const rowSize = view.getUint32(offset, true);
     offset += 4;
-    row.title = decoder.decode(new Uint8Array(buffer, offset, titleLen));
-    offset += titleLen;
+    const rowStart = offset;
+    const rowEnd = rowStart + rowSize;
+    const bufferStart = rowStart; // Row buffer starts here (id is first 16 bytes)
 
-    // description: string (nullable)
-    const descriptionPresent = view.getUint8(offset++);
-    if (descriptionPresent === 0) {
-      row.description = null;
-    } else {
-      const descriptionLen = view.getUint32(offset, true);
-      offset += 4;
-      row.description = decoder.decode(new Uint8Array(buffer, offset, descriptionLen));
-      offset += descriptionLen;
+    // Fixed columns
+    const id = objectIdToString(bytes, bufferStart + 0);
+    const project = objectIdToString(bytes, bufferStart + 16);
+    const assignee = bytes[bufferStart + 32] === 0 ? null : objectIdToString(bytes, bufferStart + 32 + 1);
+    const createdAt = view.getBigInt64(bufferStart + 49, true);
+    const updatedAt = view.getBigInt64(bufferStart + 57, true);
+    const isCompleted = bytes[bufferStart + 65] === 1;
+
+    // Variable columns (using offset table)
+    const offsetTableStart = bufferStart + 66;
+    const varOffset1 = bufferStart + view.getUint32(offsetTableStart + 0, true);
+    const varOffset2 = bufferStart + view.getUint32(offsetTableStart + 4, true);
+    const varOffset3 = bufferStart + view.getUint32(offsetTableStart + 8, true);
+    const varDataStart = bufferStart + 66 + 12;
+
+    const title = decoder.decode(bytes.subarray(varDataStart, varOffset1));
+    let description: string | null = null;
+    if (bytes[varOffset1] === 1) {
+      description = decoder.decode(bytes.subarray(varOffset1 + 1, varOffset2));
     }
+    const status = decoder.decode(bytes.subarray(varOffset2, varOffset3));
+    const priority = decoder.decode(bytes.subarray(varOffset3, rowEnd));
 
-    // status: string
-    const statusLen = view.getUint32(offset, true);
-    offset += 4;
-    row.status = decoder.decode(new Uint8Array(buffer, offset, statusLen));
-    offset += statusLen;
-
-    // priority: string
-    const priorityLen = view.getUint32(offset, true);
-    offset += 4;
-    row.priority = decoder.decode(new Uint8Array(buffer, offset, priorityLen));
-    offset += priorityLen;
-
-    // project: ref
-    row.project = decodeObjectId(bytes, offset);
-    offset += 26;
-
-    // assignee: ref (nullable)
-    const assigneePresent = bytes[offset++];
-    if (assigneePresent === 0) {
-      row.assignee = null;
-    } else {
-      row.assignee = decodeObjectId(bytes, offset);
-      offset += 26;
-    }
-
-    // createdAt: i64
-    row.createdAt = view.getBigInt64(offset, true);
-    offset += 8;
-
-    // updatedAt: i64
-    row.updatedAt = view.getBigInt64(offset, true);
-    offset += 8;
-
-    // isCompleted: bool
-    row.isCompleted = view.getUint8(offset++) === 1;
-
-    rows[i] = row;
+    rows[i] = { id, title, description, status, priority, project, assignee, createdAt, updatedAt, isCompleted };
+    offset = rowEnd;
   }
 
   return rows;
 }
 
 /**
- * Decode a single Task row from binary (no header)
- * @param buffer ArrayBuffer containing a single row
- * @param startOffset Byte offset to start reading from
- * @returns Decoded row and bytes consumed
- */
-export function decodeTaskRow(buffer: ArrayBufferLike, startOffset = 0): { row: { id: string; title: string; description: string | null; status: string; priority: string; project: string; assignee: string | null; createdAt: bigint; updatedAt: bigint; isCompleted: boolean }; bytesRead: number } {
-  const bytes = new Uint8Array(buffer);
-  const view = new DataView(buffer as ArrayBuffer);
-  let offset = startOffset;
-
-  const row: any = {};
-
-  // Read ObjectId (26 bytes Base32)
-  row.id = decodeObjectId(bytes, offset);
-  offset += 26;
-
-  // title: string
-  const titleLen = view.getUint32(offset, true);
-  offset += 4;
-  row.title = decoder.decode(new Uint8Array(buffer, offset, titleLen));
-  offset += titleLen;
-
-  // description: string (nullable)
-  const descriptionPresent = view.getUint8(offset++);
-  if (descriptionPresent === 0) {
-    row.description = null;
-  } else {
-    const descriptionLen = view.getUint32(offset, true);
-    offset += 4;
-    row.description = decoder.decode(new Uint8Array(buffer, offset, descriptionLen));
-    offset += descriptionLen;
-  }
-
-  // status: string
-  const statusLen = view.getUint32(offset, true);
-  offset += 4;
-  row.status = decoder.decode(new Uint8Array(buffer, offset, statusLen));
-  offset += statusLen;
-
-  // priority: string
-  const priorityLen = view.getUint32(offset, true);
-  offset += 4;
-  row.priority = decoder.decode(new Uint8Array(buffer, offset, priorityLen));
-  offset += priorityLen;
-
-  // project: ref
-  row.project = decodeObjectId(bytes, offset);
-  offset += 26;
-
-  // assignee: ref (nullable)
-  const assigneePresent = bytes[offset++];
-  if (assigneePresent === 0) {
-    row.assignee = null;
-  } else {
-    row.assignee = decodeObjectId(bytes, offset);
-    offset += 26;
-  }
-
-  // createdAt: i64
-  row.createdAt = view.getBigInt64(offset, true);
-  offset += 8;
-
-  // updatedAt: i64
-  row.updatedAt = view.getBigInt64(offset, true);
-  offset += 8;
-
-  // isCompleted: bool
-  row.isCompleted = view.getUint8(offset++) === 1;
-
-  return { row, bytesRead: offset - startOffset };
-}
-
-/**
  * Decode a Task delta from binary
- * Format: u8 type (1=added, 2=updated, 3=removed) + row data or id
- * @param buffer ArrayBuffer containing a single delta
- * @returns Decoded delta
+ * Format: u8 type (1=added, 2=updated, 3=removed) + [row buffer with id] or just ObjectId for removed
  */
 export function decodeTaskDelta(buffer: ArrayBufferLike): Delta<{ id: string; title: string; description: string | null; status: string; priority: string; project: string; assignee: string | null; createdAt: bigint; updatedAt: bigint; isCompleted: boolean }> {
   const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer as ArrayBuffer);
   const deltaType = bytes[0];
 
   if (deltaType === DELTA_REMOVED) {
-    // Removed: just the ObjectId
-    const id = decodeObjectId(bytes, 1);
+    const id = objectIdToString(bytes, 1);
     return { type: 'removed', id };
   }
 
-  // Added or Updated: decode the full row
-  const { row } = decodeTaskRow(buffer, 1);
+  // Added or Updated: decode the row buffer (id is first 16 bytes)
+  const bufferStart = 1; // After delta type byte
+  const rowEnd = bytes.length;
+
+  const id = objectIdToString(bytes, bufferStart + 0);
+  const project = objectIdToString(bytes, bufferStart + 16);
+  const assignee = bytes[bufferStart + 32] === 0 ? null : objectIdToString(bytes, bufferStart + 32 + 1);
+  const createdAt = view.getBigInt64(bufferStart + 49, true);
+  const updatedAt = view.getBigInt64(bufferStart + 57, true);
+  const isCompleted = bytes[bufferStart + 65] === 1;
+  const offsetTableStart = bufferStart + 66;
+  const varOffset1 = bufferStart + view.getUint32(offsetTableStart + 0, true);
+  const varOffset2 = bufferStart + view.getUint32(offsetTableStart + 4, true);
+  const varOffset3 = bufferStart + view.getUint32(offsetTableStart + 8, true);
+  const varDataStart = bufferStart + 66 + 12;
+  const title = decoder.decode(bytes.subarray(varDataStart, varOffset1));
+  let description: string | null = null;
+  if (bytes[varOffset1] === 1) {
+    description = decoder.decode(bytes.subarray(varOffset1 + 1, varOffset2));
+  }
+  const status = decoder.decode(bytes.subarray(varOffset2, varOffset3));
+  const priority = decoder.decode(bytes.subarray(varOffset3, rowEnd));
+
   return {
     type: deltaType === DELTA_ADDED ? 'added' : 'updated',
-    row
+    row: { id, title, description, status, priority, project, assignee, createdAt, updatedAt, isCompleted }
   };
 }
 
 /**
  * Read a Task row using a BinaryReader.
- * Use this for nested/joined row decoding.
+ * NOTE: This table has variable columns - use decodeTaskRows/decodeTaskDelta instead.
  */
 export function readTask(reader: BinaryReader): { id: string; title: string; description: string | null; status: string; priority: string; project: string; assignee: string | null; createdAt: bigint; updatedAt: bigint; isCompleted: boolean } {
-  const id = reader.readObjectId();
-  const title = reader.readString();
-  const description = reader.readNullable(() => reader.readString());
-  const status = reader.readString();
-  const priority = reader.readString();
-  const project = reader.readObjectId();
-  const assignee = reader.readNullableRef();
-  const createdAt = reader.readI64();
-  const updatedAt = reader.readI64();
-  const isCompleted = reader.readBool();
-  return { id, title, description, status, priority, project, assignee, createdAt, updatedAt, isCompleted };
+  throw new Error('readTask requires row boundary context - use decodeTaskRows or decodeTaskDelta instead');
 }
 
 /**
  * Decode binary rows for Tags table (batch format)
- * @param buffer ArrayBuffer from WASM
- * @returns Array of Tag rows
+ *
+ * Row buffer layout:
+ * - Fixed size: 16 bytes
+ * - Variable columns: 2
+ * - Offset table: 4 bytes
  */
 export function decodeTagRows(buffer: ArrayBufferLike): Array<{ id: string; name: string; color: string }> {
   const bytes = new Uint8Array(buffer);
@@ -635,101 +433,77 @@ export function decodeTagRows(buffer: ArrayBufferLike): Array<{ id: string; name
   const rows = new Array(rowCount);
 
   for (let i = 0; i < rowCount; i++) {
-    const row: any = {};
-
-    // Read ObjectId (26 bytes Base32)
-    row.id = decodeObjectId(bytes, offset);
-    offset += 26;
-
-    // name: string
-    const nameLen = view.getUint32(offset, true);
+    // Read row size (row buffer with id as first 16 bytes)
+    const rowSize = view.getUint32(offset, true);
     offset += 4;
-    row.name = decoder.decode(new Uint8Array(buffer, offset, nameLen));
-    offset += nameLen;
+    const rowStart = offset;
+    const rowEnd = rowStart + rowSize;
+    const bufferStart = rowStart; // Row buffer starts here (id is first 16 bytes)
 
-    // color: string
-    const colorLen = view.getUint32(offset, true);
-    offset += 4;
-    row.color = decoder.decode(new Uint8Array(buffer, offset, colorLen));
-    offset += colorLen;
+    // Fixed columns
+    const id = objectIdToString(bytes, bufferStart + 0);
 
-    rows[i] = row;
+    // Variable columns (using offset table)
+    const offsetTableStart = bufferStart + 16;
+    const varOffset1 = bufferStart + view.getUint32(offsetTableStart + 0, true);
+    const varDataStart = bufferStart + 16 + 4;
+
+    const name = decoder.decode(bytes.subarray(varDataStart, varOffset1));
+    const color = decoder.decode(bytes.subarray(varOffset1, rowEnd));
+
+    rows[i] = { id, name, color };
+    offset = rowEnd;
   }
 
   return rows;
 }
 
 /**
- * Decode a single Tag row from binary (no header)
- * @param buffer ArrayBuffer containing a single row
- * @param startOffset Byte offset to start reading from
- * @returns Decoded row and bytes consumed
- */
-export function decodeTagRow(buffer: ArrayBufferLike, startOffset = 0): { row: { id: string; name: string; color: string }; bytesRead: number } {
-  const bytes = new Uint8Array(buffer);
-  const view = new DataView(buffer as ArrayBuffer);
-  let offset = startOffset;
-
-  const row: any = {};
-
-  // Read ObjectId (26 bytes Base32)
-  row.id = decodeObjectId(bytes, offset);
-  offset += 26;
-
-  // name: string
-  const nameLen = view.getUint32(offset, true);
-  offset += 4;
-  row.name = decoder.decode(new Uint8Array(buffer, offset, nameLen));
-  offset += nameLen;
-
-  // color: string
-  const colorLen = view.getUint32(offset, true);
-  offset += 4;
-  row.color = decoder.decode(new Uint8Array(buffer, offset, colorLen));
-  offset += colorLen;
-
-  return { row, bytesRead: offset - startOffset };
-}
-
-/**
  * Decode a Tag delta from binary
- * Format: u8 type (1=added, 2=updated, 3=removed) + row data or id
- * @param buffer ArrayBuffer containing a single delta
- * @returns Decoded delta
+ * Format: u8 type (1=added, 2=updated, 3=removed) + [row buffer with id] or just ObjectId for removed
  */
 export function decodeTagDelta(buffer: ArrayBufferLike): Delta<{ id: string; name: string; color: string }> {
   const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer as ArrayBuffer);
   const deltaType = bytes[0];
 
   if (deltaType === DELTA_REMOVED) {
-    // Removed: just the ObjectId
-    const id = decodeObjectId(bytes, 1);
+    const id = objectIdToString(bytes, 1);
     return { type: 'removed', id };
   }
 
-  // Added or Updated: decode the full row
-  const { row } = decodeTagRow(buffer, 1);
+  // Added or Updated: decode the row buffer (id is first 16 bytes)
+  const bufferStart = 1; // After delta type byte
+  const rowEnd = bytes.length;
+
+  const id = objectIdToString(bytes, bufferStart + 0);
+  const offsetTableStart = bufferStart + 16;
+  const varOffset1 = bufferStart + view.getUint32(offsetTableStart + 0, true);
+  const varDataStart = bufferStart + 16 + 4;
+  const name = decoder.decode(bytes.subarray(varDataStart, varOffset1));
+  const color = decoder.decode(bytes.subarray(varOffset1, rowEnd));
+
   return {
     type: deltaType === DELTA_ADDED ? 'added' : 'updated',
-    row
+    row: { id, name, color }
   };
 }
 
 /**
  * Read a Tag row using a BinaryReader.
- * Use this for nested/joined row decoding.
+ * NOTE: This table has variable columns - use decodeTagRows/decodeTagDelta instead.
  */
 export function readTag(reader: BinaryReader): { id: string; name: string; color: string } {
-  const id = reader.readObjectId();
-  const name = reader.readString();
-  const color = reader.readString();
-  return { id, name, color };
+  throw new Error('readTag requires row boundary context - use decodeTagRows or decodeTagDelta instead');
 }
 
 /**
  * Decode binary rows for TaskTags table (batch format)
- * @param buffer ArrayBuffer from WASM
- * @returns Array of TaskTag rows
+ *
+ * Row buffer layout:
+ * - Fixed size: 48 bytes
+ * - Variable columns: 0
+ * - Offset table: 0 bytes
  */
 export function decodeTaskTagRows(buffer: ArrayBufferLike): Array<{ id: string; task: string; tag: string }> {
   const bytes = new Uint8Array(buffer);
@@ -743,75 +517,50 @@ export function decodeTaskTagRows(buffer: ArrayBufferLike): Array<{ id: string; 
   const rows = new Array(rowCount);
 
   for (let i = 0; i < rowCount; i++) {
-    const row: any = {};
+    // Read row size (row buffer with id as first 16 bytes)
+    const rowSize = view.getUint32(offset, true);
+    offset += 4;
+    const rowStart = offset;
+    const rowEnd = rowStart + rowSize;
+    const bufferStart = rowStart; // Row buffer starts here (id is first 16 bytes)
 
-    // Read ObjectId (26 bytes Base32)
-    row.id = decodeObjectId(bytes, offset);
-    offset += 26;
+    // Fixed columns
+    const id = objectIdToString(bytes, bufferStart + 0);
+    const task = objectIdToString(bytes, bufferStart + 16);
+    const tag = objectIdToString(bytes, bufferStart + 32);
 
-    // task: ref
-    row.task = decodeObjectId(bytes, offset);
-    offset += 26;
-
-    // tag: ref
-    row.tag = decodeObjectId(bytes, offset);
-    offset += 26;
-
-    rows[i] = row;
+    rows[i] = { id, task, tag };
+    offset = rowEnd;
   }
 
   return rows;
 }
 
 /**
- * Decode a single TaskTag row from binary (no header)
- * @param buffer ArrayBuffer containing a single row
- * @param startOffset Byte offset to start reading from
- * @returns Decoded row and bytes consumed
- */
-export function decodeTaskTagRow(buffer: ArrayBufferLike, startOffset = 0): { row: { id: string; task: string; tag: string }; bytesRead: number } {
-  const bytes = new Uint8Array(buffer);
-  const view = new DataView(buffer as ArrayBuffer);
-  let offset = startOffset;
-
-  const row: any = {};
-
-  // Read ObjectId (26 bytes Base32)
-  row.id = decodeObjectId(bytes, offset);
-  offset += 26;
-
-  // task: ref
-  row.task = decodeObjectId(bytes, offset);
-  offset += 26;
-
-  // tag: ref
-  row.tag = decodeObjectId(bytes, offset);
-  offset += 26;
-
-  return { row, bytesRead: offset - startOffset };
-}
-
-/**
  * Decode a TaskTag delta from binary
- * Format: u8 type (1=added, 2=updated, 3=removed) + row data or id
- * @param buffer ArrayBuffer containing a single delta
- * @returns Decoded delta
+ * Format: u8 type (1=added, 2=updated, 3=removed) + [row buffer with id] or just ObjectId for removed
  */
 export function decodeTaskTagDelta(buffer: ArrayBufferLike): Delta<{ id: string; task: string; tag: string }> {
   const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer as ArrayBuffer);
   const deltaType = bytes[0];
 
   if (deltaType === DELTA_REMOVED) {
-    // Removed: just the ObjectId
-    const id = decodeObjectId(bytes, 1);
+    const id = objectIdToString(bytes, 1);
     return { type: 'removed', id };
   }
 
-  // Added or Updated: decode the full row
-  const { row } = decodeTaskTagRow(buffer, 1);
+  // Added or Updated: decode the row buffer (id is first 16 bytes)
+  const bufferStart = 1; // After delta type byte
+  const rowEnd = bytes.length;
+
+  const id = objectIdToString(bytes, bufferStart + 0);
+  const task = objectIdToString(bytes, bufferStart + 16);
+  const tag = objectIdToString(bytes, bufferStart + 32);
+
   return {
     type: deltaType === DELTA_ADDED ? 'added' : 'updated',
-    row
+    row: { id, task, tag }
   };
 }
 
@@ -828,8 +577,11 @@ export function readTaskTag(reader: BinaryReader): { id: string; task: string; t
 
 /**
  * Decode binary rows for Categories table (batch format)
- * @param buffer ArrayBuffer from WASM
- * @returns Array of Category rows
+ *
+ * Row buffer layout:
+ * - Fixed size: 33 bytes
+ * - Variable columns: 1
+ * - Offset table: 0 bytes
  */
 export function decodeCategoryRows(buffer: ArrayBufferLike): Array<{ id: string; name: string; parent: string | null }> {
   const bytes = new Uint8Array(buffer);
@@ -843,107 +595,75 @@ export function decodeCategoryRows(buffer: ArrayBufferLike): Array<{ id: string;
   const rows = new Array(rowCount);
 
   for (let i = 0; i < rowCount; i++) {
-    const row: any = {};
-
-    // Read ObjectId (26 bytes Base32)
-    row.id = decodeObjectId(bytes, offset);
-    offset += 26;
-
-    // name: string
-    const nameLen = view.getUint32(offset, true);
+    // Read row size (row buffer with id as first 16 bytes)
+    const rowSize = view.getUint32(offset, true);
     offset += 4;
-    row.name = decoder.decode(new Uint8Array(buffer, offset, nameLen));
-    offset += nameLen;
+    const rowStart = offset;
+    const rowEnd = rowStart + rowSize;
+    const bufferStart = rowStart; // Row buffer starts here (id is first 16 bytes)
 
-    // parent: ref (nullable)
-    const parentPresent = bytes[offset++];
-    if (parentPresent === 0) {
-      row.parent = null;
-    } else {
-      row.parent = decodeObjectId(bytes, offset);
-      offset += 26;
-    }
+    // Fixed columns
+    const id = objectIdToString(bytes, bufferStart + 0);
+    const parent = bytes[bufferStart + 16] === 0 ? null : objectIdToString(bytes, bufferStart + 16 + 1);
 
-    rows[i] = row;
+    // Variable columns (using offset table)
+    const offsetTableStart = bufferStart + 33;
+    const varDataStart = bufferStart + 33 + 0;
+
+    const name = decoder.decode(bytes.subarray(varDataStart, rowEnd));
+
+    rows[i] = { id, name, parent };
+    offset = rowEnd;
   }
 
   return rows;
 }
 
 /**
- * Decode a single Category row from binary (no header)
- * @param buffer ArrayBuffer containing a single row
- * @param startOffset Byte offset to start reading from
- * @returns Decoded row and bytes consumed
- */
-export function decodeCategoryRow(buffer: ArrayBufferLike, startOffset = 0): { row: { id: string; name: string; parent: string | null }; bytesRead: number } {
-  const bytes = new Uint8Array(buffer);
-  const view = new DataView(buffer as ArrayBuffer);
-  let offset = startOffset;
-
-  const row: any = {};
-
-  // Read ObjectId (26 bytes Base32)
-  row.id = decodeObjectId(bytes, offset);
-  offset += 26;
-
-  // name: string
-  const nameLen = view.getUint32(offset, true);
-  offset += 4;
-  row.name = decoder.decode(new Uint8Array(buffer, offset, nameLen));
-  offset += nameLen;
-
-  // parent: ref (nullable)
-  const parentPresent = bytes[offset++];
-  if (parentPresent === 0) {
-    row.parent = null;
-  } else {
-    row.parent = decodeObjectId(bytes, offset);
-    offset += 26;
-  }
-
-  return { row, bytesRead: offset - startOffset };
-}
-
-/**
  * Decode a Category delta from binary
- * Format: u8 type (1=added, 2=updated, 3=removed) + row data or id
- * @param buffer ArrayBuffer containing a single delta
- * @returns Decoded delta
+ * Format: u8 type (1=added, 2=updated, 3=removed) + [row buffer with id] or just ObjectId for removed
  */
 export function decodeCategoryDelta(buffer: ArrayBufferLike): Delta<{ id: string; name: string; parent: string | null }> {
   const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer as ArrayBuffer);
   const deltaType = bytes[0];
 
   if (deltaType === DELTA_REMOVED) {
-    // Removed: just the ObjectId
-    const id = decodeObjectId(bytes, 1);
+    const id = objectIdToString(bytes, 1);
     return { type: 'removed', id };
   }
 
-  // Added or Updated: decode the full row
-  const { row } = decodeCategoryRow(buffer, 1);
+  // Added or Updated: decode the row buffer (id is first 16 bytes)
+  const bufferStart = 1; // After delta type byte
+  const rowEnd = bytes.length;
+
+  const id = objectIdToString(bytes, bufferStart + 0);
+  const parent = bytes[bufferStart + 16] === 0 ? null : objectIdToString(bytes, bufferStart + 16 + 1);
+  const offsetTableStart = bufferStart + 33;
+  const varDataStart = bufferStart + 33 + 0;
+  const name = decoder.decode(bytes.subarray(varDataStart, rowEnd));
+
   return {
     type: deltaType === DELTA_ADDED ? 'added' : 'updated',
-    row
+    row: { id, name, parent }
   };
 }
 
 /**
  * Read a Category row using a BinaryReader.
- * Use this for nested/joined row decoding.
+ * NOTE: This table has variable columns - use decodeCategoryRows/decodeCategoryDelta instead.
  */
 export function readCategory(reader: BinaryReader): { id: string; name: string; parent: string | null } {
-  const id = reader.readObjectId();
-  const name = reader.readString();
-  const parent = reader.readNullableRef();
-  return { id, name, parent };
+  throw new Error('readCategory requires row boundary context - use decodeCategoryRows or decodeCategoryDelta instead');
 }
 
 /**
  * Decode binary rows for Comments table (batch format)
- * @param buffer ArrayBuffer from WASM
- * @returns Array of Comment rows
+ *
+ * Row buffer layout:
+ * - Fixed size: 74 bytes
+ * - Variable columns: 1
+ * - Offset table: 0 bytes
  */
 export function decodeCommentRows(buffer: ArrayBufferLike): Array<{ id: string; content: string; author: string; task: string | null; parentComment: string | null; createdAt: bigint }> {
   const bytes = new Uint8Array(buffer);
@@ -957,136 +677,70 @@ export function decodeCommentRows(buffer: ArrayBufferLike): Array<{ id: string; 
   const rows = new Array(rowCount);
 
   for (let i = 0; i < rowCount; i++) {
-    const row: any = {};
-
-    // Read ObjectId (26 bytes Base32)
-    row.id = decodeObjectId(bytes, offset);
-    offset += 26;
-
-    // content: string
-    const contentLen = view.getUint32(offset, true);
+    // Read row size (row buffer with id as first 16 bytes)
+    const rowSize = view.getUint32(offset, true);
     offset += 4;
-    row.content = decoder.decode(new Uint8Array(buffer, offset, contentLen));
-    offset += contentLen;
+    const rowStart = offset;
+    const rowEnd = rowStart + rowSize;
+    const bufferStart = rowStart; // Row buffer starts here (id is first 16 bytes)
 
-    // author: ref
-    row.author = decodeObjectId(bytes, offset);
-    offset += 26;
+    // Fixed columns
+    const id = objectIdToString(bytes, bufferStart + 0);
+    const author = objectIdToString(bytes, bufferStart + 16);
+    const task = bytes[bufferStart + 32] === 0 ? null : objectIdToString(bytes, bufferStart + 32 + 1);
+    const parentComment = bytes[bufferStart + 49] === 0 ? null : objectIdToString(bytes, bufferStart + 49 + 1);
+    const createdAt = view.getBigInt64(bufferStart + 66, true);
 
-    // task: ref (nullable)
-    const taskPresent = bytes[offset++];
-    if (taskPresent === 0) {
-      row.task = null;
-    } else {
-      row.task = decodeObjectId(bytes, offset);
-      offset += 26;
-    }
+    // Variable columns (using offset table)
+    const offsetTableStart = bufferStart + 74;
+    const varDataStart = bufferStart + 74 + 0;
 
-    // parentComment: ref (nullable)
-    const parentCommentPresent = bytes[offset++];
-    if (parentCommentPresent === 0) {
-      row.parentComment = null;
-    } else {
-      row.parentComment = decodeObjectId(bytes, offset);
-      offset += 26;
-    }
+    const content = decoder.decode(bytes.subarray(varDataStart, rowEnd));
 
-    // createdAt: i64
-    row.createdAt = view.getBigInt64(offset, true);
-    offset += 8;
-
-    rows[i] = row;
+    rows[i] = { id, content, author, task, parentComment, createdAt };
+    offset = rowEnd;
   }
 
   return rows;
 }
 
 /**
- * Decode a single Comment row from binary (no header)
- * @param buffer ArrayBuffer containing a single row
- * @param startOffset Byte offset to start reading from
- * @returns Decoded row and bytes consumed
- */
-export function decodeCommentRow(buffer: ArrayBufferLike, startOffset = 0): { row: { id: string; content: string; author: string; task: string | null; parentComment: string | null; createdAt: bigint }; bytesRead: number } {
-  const bytes = new Uint8Array(buffer);
-  const view = new DataView(buffer as ArrayBuffer);
-  let offset = startOffset;
-
-  const row: any = {};
-
-  // Read ObjectId (26 bytes Base32)
-  row.id = decodeObjectId(bytes, offset);
-  offset += 26;
-
-  // content: string
-  const contentLen = view.getUint32(offset, true);
-  offset += 4;
-  row.content = decoder.decode(new Uint8Array(buffer, offset, contentLen));
-  offset += contentLen;
-
-  // author: ref
-  row.author = decodeObjectId(bytes, offset);
-  offset += 26;
-
-  // task: ref (nullable)
-  const taskPresent = bytes[offset++];
-  if (taskPresent === 0) {
-    row.task = null;
-  } else {
-    row.task = decodeObjectId(bytes, offset);
-    offset += 26;
-  }
-
-  // parentComment: ref (nullable)
-  const parentCommentPresent = bytes[offset++];
-  if (parentCommentPresent === 0) {
-    row.parentComment = null;
-  } else {
-    row.parentComment = decodeObjectId(bytes, offset);
-    offset += 26;
-  }
-
-  // createdAt: i64
-  row.createdAt = view.getBigInt64(offset, true);
-  offset += 8;
-
-  return { row, bytesRead: offset - startOffset };
-}
-
-/**
  * Decode a Comment delta from binary
- * Format: u8 type (1=added, 2=updated, 3=removed) + row data or id
- * @param buffer ArrayBuffer containing a single delta
- * @returns Decoded delta
+ * Format: u8 type (1=added, 2=updated, 3=removed) + [row buffer with id] or just ObjectId for removed
  */
 export function decodeCommentDelta(buffer: ArrayBufferLike): Delta<{ id: string; content: string; author: string; task: string | null; parentComment: string | null; createdAt: bigint }> {
   const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer as ArrayBuffer);
   const deltaType = bytes[0];
 
   if (deltaType === DELTA_REMOVED) {
-    // Removed: just the ObjectId
-    const id = decodeObjectId(bytes, 1);
+    const id = objectIdToString(bytes, 1);
     return { type: 'removed', id };
   }
 
-  // Added or Updated: decode the full row
-  const { row } = decodeCommentRow(buffer, 1);
+  // Added or Updated: decode the row buffer (id is first 16 bytes)
+  const bufferStart = 1; // After delta type byte
+  const rowEnd = bytes.length;
+
+  const id = objectIdToString(bytes, bufferStart + 0);
+  const author = objectIdToString(bytes, bufferStart + 16);
+  const task = bytes[bufferStart + 32] === 0 ? null : objectIdToString(bytes, bufferStart + 32 + 1);
+  const parentComment = bytes[bufferStart + 49] === 0 ? null : objectIdToString(bytes, bufferStart + 49 + 1);
+  const createdAt = view.getBigInt64(bufferStart + 66, true);
+  const offsetTableStart = bufferStart + 74;
+  const varDataStart = bufferStart + 74 + 0;
+  const content = decoder.decode(bytes.subarray(varDataStart, rowEnd));
+
   return {
     type: deltaType === DELTA_ADDED ? 'added' : 'updated',
-    row
+    row: { id, content, author, task, parentComment, createdAt }
   };
 }
 
 /**
  * Read a Comment row using a BinaryReader.
- * Use this for nested/joined row decoding.
+ * NOTE: This table has variable columns - use decodeCommentRows/decodeCommentDelta instead.
  */
 export function readComment(reader: BinaryReader): { id: string; content: string; author: string; task: string | null; parentComment: string | null; createdAt: bigint } {
-  const id = reader.readObjectId();
-  const content = reader.readString();
-  const author = reader.readObjectId();
-  const task = reader.readNullableRef();
-  const parentComment = reader.readNullableRef();
-  const createdAt = reader.readI64();
-  return { id, content, author, task, parentComment, createdAt };
+  throw new Error('readComment requires row boundary context - use decodeCommentRows or decodeCommentDelta instead');
 }

@@ -3,6 +3,96 @@
 
 use super::*;
 
+// ========== Tests for Buffer-Based Row APIs ==========
+
+#[test]
+fn insert_row_basic() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL, age I32 NOT NULL)").unwrap();
+
+    let schema = db.get_table("users").unwrap();
+    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+
+    let row = RowBuilder::new(desc)
+        .set_string_by_name("name", "Alice")
+        .set_i32_by_name("age", 30)
+        .build();
+
+    let id = db.insert_row("users", row).unwrap();
+
+    // Verify we can retrieve the row
+    let (retrieved_id, retrieved_row) = db.get("users", id).unwrap().unwrap();
+    assert_eq!(retrieved_id, id);
+    assert_eq!(
+        retrieved_row.get_by_name("name").map(|v| format!("{:?}", v)),
+        Some("String(\"Alice\")".to_string())
+    );
+    assert_eq!(
+        retrieved_row.get_by_name("age").map(|v| format!("{:?}", v)),
+        Some("I32(30)".to_string())
+    );
+}
+
+#[test]
+fn update_row_basic() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL, age I32 NOT NULL)").unwrap();
+
+    // Insert using builder API
+    let id = db.insert_with("users", |b| b.set_string_by_name("name", "Alice").set_i32_by_name("age", 30).build()).unwrap();
+
+    // Update using new API
+    let schema = db.get_table("users").unwrap();
+    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+
+    let new_row = RowBuilder::new(desc)
+        .set_string_by_name("name", "Bob")
+        .set_i32_by_name("age", 35)
+        .build();
+
+    let updated = db.update_row("users", id, new_row).unwrap();
+    assert!(updated);
+
+    // Verify the update
+    let (_, retrieved_row) = db.get("users", id).unwrap().unwrap();
+    assert_eq!(
+        retrieved_row.get_by_name("name").map(|v| format!("{:?}", v)),
+        Some("String(\"Bob\")".to_string())
+    );
+    assert_eq!(
+        retrieved_row.get_by_name("age").map(|v| format!("{:?}", v)),
+        Some("I32(35)".to_string())
+    );
+}
+
+#[test]
+fn insert_row_with_ref() {
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL)").unwrap();
+    db.execute("CREATE TABLE posts (author REFERENCES users NOT NULL, title STRING NOT NULL)").unwrap();
+
+    // Insert user using builder API
+    let user_id = db.insert_with("users", |b| b.set_string_by_name("name", "Alice").build()).unwrap();
+
+    // Insert post using new API
+    let schema = db.get_table("posts").unwrap();
+    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+
+    let post = RowBuilder::new(desc)
+        .set_ref_by_name("author", user_id)
+        .set_string_by_name("title", "Hello World")
+        .build();
+
+    let post_id = db.insert_row("posts", post).unwrap();
+
+    // Verify we can retrieve the post with correct reference
+    let (_, retrieved_post) = db.get("posts", post_id).unwrap().unwrap();
+    assert_eq!(
+        retrieved_post.get_by_name("author"),
+        Some(RowValue::Ref(user_id))
+    );
+}
+
 // ========== Tests Using Internal APIs ==========
 // These tests use private methods or #[cfg(test)] methods and must remain as unit tests.
 
@@ -89,10 +179,11 @@ fn incremental_query_basic() {
 
     // Query should now return both rows
     let rows = query.rows();
+    eprintln!("DEBUG: rows = {:?}", rows);
     assert_eq!(rows.len(), 2);
-    let names: Vec<_> = rows.iter().map(|r| &r.values[0]).collect();
-    assert!(names.contains(&&Value::String("Alice".into())));
-    assert!(names.contains(&&Value::String("Bob".into())));
+    let names: Vec<_> = rows.iter().map(|(_id, row)| row.get_by_name("name")).collect();
+    assert!(names.contains(&Some(RowValue::String("Alice"))));
+    assert!(names.contains(&Some(RowValue::String("Bob"))));
 }
 
 #[test]
@@ -111,10 +202,10 @@ fn incremental_query_with_filter() {
     // Query should only return active users
     let rows = query.rows();
     assert_eq!(rows.len(), 2);
-    let names: Vec<_> = rows.iter().map(|r| &r.values[0]).collect();
-    assert!(names.contains(&&Value::String("Alice".into())));
-    assert!(names.contains(&&Value::String("Carol".into())));
-    assert!(!names.contains(&&Value::String("Bob".into())));
+    let names: Vec<_> = rows.iter().map(|(_id, row)| row.get_by_name("name")).collect();
+    assert!(names.contains(&Some(RowValue::String("Alice"))));
+    assert!(names.contains(&Some(RowValue::String("Carol"))));
+    assert!(!names.contains(&Some(RowValue::String("Bob"))));
 }
 
 #[test]
@@ -135,13 +226,13 @@ fn incremental_query_update_enters_filter() {
     assert!(query.rows().is_empty());
 
     // Activate the user
-    db.update("users", id, &[("active", Value::Bool(true))]).unwrap();
+    db.update_with("users", id, |b| b.set_bool_by_name("active", true).build()).unwrap();
 
     // Should now appear in results
     let rows = query.rows();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].values[0], Value::String("Alice".into()));
-    assert_eq!(rows[0].values[1], Value::Bool(true));
+    assert_eq!(rows[0].1.get_by_name("name"), Some(RowValue::String("Alice")));
+    assert_eq!(rows[0].1.get_by_name("active"), Some(RowValue::Bool(true)));
 }
 
 #[test]
@@ -161,11 +252,11 @@ fn incremental_query_update_leaves_filter() {
     // Should be in results
     let rows = query.rows();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].values[0], Value::String("Alice".into()));
-    assert_eq!(rows[0].values[1], Value::Bool(true));
+    assert_eq!(rows[0].1.get_by_name("name"), Some(RowValue::String("Alice")));
+    assert_eq!(rows[0].1.get_by_name("active"), Some(RowValue::Bool(true)));
 
     // Deactivate the user
-    db.update("users", id, &[("active", Value::Bool(false))]).unwrap();
+    db.update_with("users", id, |b| b.set_bool_by_name("active", false).build()).unwrap();
 
     // Should no longer be in results
     assert!(query.rows().is_empty());
@@ -185,8 +276,8 @@ fn incremental_query_delete() {
 
     let rows = query.rows();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].values[0], Value::String("Alice".into()));
-    assert_eq!(rows[0].id, id);
+    assert_eq!(rows[0].1.get_by_name("name"), Some(RowValue::String("Alice")));
+    assert_eq!(rows[0].0, id);
 
     db.delete("users", id).unwrap();
 
@@ -194,7 +285,7 @@ fn incremental_query_delete() {
 }
 
 #[test]
-fn incremental_query_subscribe_delta() {
+fn incremental_query_subscribe() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let db = Database::in_memory();
@@ -205,7 +296,7 @@ fn incremental_query_subscribe_delta() {
     let delta_count = Arc::new(AtomicUsize::new(0));
     let delta_count_clone = delta_count.clone();
 
-    let _listener_id = query.subscribe_delta(Box::new(move |delta| {
+    let _listener_id = query.subscribe(Box::new(move |delta| {
         delta_count_clone.fetch_add(delta.len(), Ordering::SeqCst);
     }));
 
@@ -227,19 +318,22 @@ fn incremental_query_subscribe_rows() {
 
     let query = db.incremental_query("SELECT * FROM users").unwrap();
 
-    let row_count = Arc::new(AtomicUsize::new(0));
-    let row_count_clone = row_count.clone();
+    let delta_count = Arc::new(AtomicUsize::new(0));
+    let delta_count_clone = delta_count.clone();
 
-    let _listener_id = query.subscribe(move |rows| {
-        row_count_clone.store(rows.len(), Ordering::SeqCst);
-    });
+    let _listener_id = query.subscribe(Box::new(move |deltas| {
+        delta_count_clone.fetch_add(deltas.len(), Ordering::SeqCst);
+    }));
 
-    // Insert triggers callback with full row set
+    // Initial state callback has 0 rows (no data yet)
+    assert_eq!(delta_count.load(Ordering::SeqCst), 0);
+
+    // Insert triggers callback with 1 delta (Added)
     db.execute("INSERT INTO users (name) VALUES ('Alice')").unwrap();
-    assert_eq!(row_count.load(Ordering::SeqCst), 1);
+    assert_eq!(delta_count.load(Ordering::SeqCst), 1);
 
     db.execute("INSERT INTO users (name) VALUES ('Bob')").unwrap();
-    assert_eq!(row_count.load(Ordering::SeqCst), 2);
+    assert_eq!(delta_count.load(Ordering::SeqCst), 2);
 }
 
 #[test]
@@ -262,13 +356,13 @@ fn incremental_query_join_basic() {
     assert!(query.rows().is_empty());
 
     // Insert a post by Alice
-    db.insert("posts", &["author", "title"], vec![Value::Ref(user_id), Value::String("Hello World".to_string())]).unwrap();
+    db.insert_with("posts", |b| b.set_ref_by_name("author", user_id).set_string_by_name("title", "Hello World").build()).unwrap();
 
     // Now we should have one joined row
     let rows = query.rows();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].values[1], Value::String("Hello World".to_string()));
-    assert_eq!(rows[0].values[2], Value::String("Alice".to_string()));
+    assert_eq!(rows[0].1.get_by_name("posts.title"), Some(RowValue::String("Hello World")));
+    assert_eq!(rows[0].1.get_by_name("users.name"), Some(RowValue::String("Alice")));
 }
 
 #[test]
@@ -287,18 +381,22 @@ fn incremental_query_join_left_table_change() {
     let query = db.incremental_query("SELECT * FROM posts JOIN users ON posts.author = users.id").unwrap();
 
     // Insert multiple posts
-    db.insert("posts", &["author", "title"], vec![Value::Ref(user_id), Value::String("Post 1".to_string())]).unwrap();
-    db.insert("posts", &["author", "title"], vec![Value::Ref(user_id), Value::String("Post 2".to_string())]).unwrap();
+    db.insert_with("posts", |b| b.set_ref_by_name("author", user_id).set_string_by_name("title", "Post 1").build()).unwrap();
+    db.insert_with("posts", |b| b.set_ref_by_name("author", user_id).set_string_by_name("title", "Post 2").build()).unwrap();
 
     let rows = query.rows();
     assert_eq!(rows.len(), 2);
     // Both rows should have Alice as author
     for row in &rows {
-        assert_eq!(row.values[2], Value::String("Alice".to_string()));
+        assert_eq!(row.1.get_by_name("users.name"), Some(RowValue::String("Alice")));
     }
-    let titles: Vec<_> = rows.iter().map(|r| &r.values[1]).collect();
-    assert!(titles.contains(&&Value::String("Post 1".to_string())));
-    assert!(titles.contains(&&Value::String("Post 2".to_string())));
+    let titles: Vec<_> = rows.iter().filter_map(|r| {
+        if let Some(RowValue::String(s)) = r.1.get_by_name("posts.title") {
+            Some(s.to_string())
+        } else { None }
+    }).collect();
+    assert!(titles.contains(&"Post 1".to_string()));
+    assert!(titles.contains(&"Post 2".to_string()));
 }
 
 #[test]
@@ -316,7 +414,7 @@ fn incremental_query_join_right_table_change() {
     };
 
     // Insert a post
-    db.insert("posts", &["author", "title"], vec![Value::Ref(user_id), Value::String("Hello".to_string())]).unwrap();
+    db.insert_with("posts", |b| b.set_ref_by_name("author", user_id).set_string_by_name("title", "Hello").build()).unwrap();
 
     // Create JOIN query after initial data
     let query = db.incremental_query("SELECT * FROM posts JOIN users ON posts.author = users.id").unwrap();
@@ -325,13 +423,13 @@ fn incremental_query_join_right_table_change() {
     let delta_count = Arc::new(AtomicUsize::new(0));
     let delta_count_clone = delta_count.clone();
 
-    let _listener = query.subscribe_delta(Box::new(move |delta| {
+    let _listener = query.subscribe(Box::new(move |delta| {
         delta_count_clone.fetch_add(delta.len(), Ordering::SeqCst);
     }));
 
     // Updating the right table (users) should trigger notification
     // because the joined row contains data from that table
-    db.update("users", user_id, &[("name", Value::String("Alice Updated".to_string()))]).unwrap();
+    db.update_with("users", user_id, |b| b.set_string_by_name("name", "Alice Updated").build()).unwrap();
 
     // The join should have been notified of the right table change
     assert!(delta_count.load(Ordering::SeqCst) > 0);
@@ -380,21 +478,17 @@ fn select_all_as_filters_by_policy() {
     };
 
     // Create documents
-    db.insert("documents", &["title", "owner_id"], vec![
-        Value::String("Alice's Doc".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
-    db.insert("documents", &["title", "owner_id"], vec![
-        Value::String("Bob's Doc".into()),
-        Value::Ref(bob_id),
-    ]).unwrap();
+    db.insert_with("documents", |b| b.set_string_by_name("title", "Alice's Doc").set_ref_by_name("owner_id", alice_id).build()).unwrap();
+    db.insert_with("documents", |b| b.set_string_by_name("title", "Bob's Doc").set_ref_by_name("owner_id", bob_id).build()).unwrap();
 
     // Without policy: both users see all documents
     let all_docs = db.select_all("documents").unwrap();
     assert_eq!(all_docs.len(), 2);
-    let all_titles: Vec<_> = all_docs.iter().map(|r| &r.values[0]).collect();
-    assert!(all_titles.contains(&&Value::String("Alice's Doc".into())));
-    assert!(all_titles.contains(&&Value::String("Bob's Doc".into())));
+    let all_titles: Vec<_> = all_docs.iter().filter_map(|r| {
+        if let Some(RowValue::String(s)) = r.1.get_by_name("title") { Some(s.to_string()) } else { None }
+    }).collect();
+    assert!(all_titles.contains(&"Alice's Doc".to_string()));
+    assert!(all_titles.contains(&"Bob's Doc".to_string()));
 
     // Add policy: owner can read their own documents
     db.execute("CREATE POLICY ON documents FOR SELECT WHERE owner_id = @viewer").unwrap();
@@ -402,12 +496,12 @@ fn select_all_as_filters_by_policy() {
     // Alice can only see her document
     let alice_docs = db.select_all_as("documents", alice_id).unwrap();
     assert_eq!(alice_docs.len(), 1);
-    assert_eq!(alice_docs[0].values[0], Value::String("Alice's Doc".into()));
+    assert_eq!(alice_docs[0].1.get_by_name("title"), Some(RowValue::String("Alice's Doc")));
 
     // Bob can only see his document
     let bob_docs = db.select_all_as("documents", bob_id).unwrap();
     assert_eq!(bob_docs.len(), 1);
-    assert_eq!(bob_docs[0].values[0], Value::String("Bob's Doc".into()));
+    assert_eq!(bob_docs[0].1.get_by_name("title"), Some(RowValue::String("Bob's Doc")));
 }
 
 #[test]
@@ -432,16 +526,16 @@ fn select_all_as_with_inheritance() {
     };
 
     // Create folders
-    let alice_folder = db.insert("folders", &["name", "owner_id"], vec![
-        Value::String("Alice's Folder".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let alice_folder = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "Alice's Folder")
+        .set_ref_by_name("owner_id", alice_id)
+        .build()).unwrap();
 
     // Create document in Alice's folder
-    db.insert("documents", &["title", "folder_id"], vec![
-        Value::String("Secret Doc".into()),
-        Value::Ref(alice_folder),
-    ]).unwrap();
+    db.insert_with("documents", |b| b
+        .set_string_by_name("title", "Secret Doc")
+        .set_ref_by_name("folder_id", alice_folder)
+        .build()).unwrap();
 
     // Add policies
     db.execute("CREATE POLICY ON folders FOR SELECT WHERE owner_id = @viewer").unwrap();
@@ -450,7 +544,7 @@ fn select_all_as_with_inheritance() {
     // Alice can see the document (via folder ownership)
     let alice_docs = db.select_all_as("documents", alice_id).unwrap();
     assert_eq!(alice_docs.len(), 1);
-    assert_eq!(alice_docs[0].values[0], Value::String("Secret Doc".into()));
+    assert_eq!(alice_docs[0].1.get_by_name("title"), Some(RowValue::String("Secret Doc")));
 
     // Bob cannot see the document
     let bob_docs = db.select_all_as("documents", bob_id).unwrap();
@@ -483,19 +577,17 @@ fn insert_as_checks_policy() {
     db.execute("CREATE POLICY ON documents FOR INSERT CHECK (@new.author_id = @viewer)").unwrap();
 
     // Alice can insert doc with herself as author
-    let result = db.insert_as(
+    let result = db.insert_with_as(
         "documents",
-        &["title", "author_id"],
-        vec![Value::String("Alice's Doc".into()), Value::Ref(alice_id)],
+        |b| b.set_string_by_name("title", "Alice's Doc").set_ref_by_name("author_id", alice_id).build(),
         alice_id,
     );
     assert!(result.is_ok(), "owner should be able to insert: {:?}", result);
 
     // Alice cannot insert doc with Bob as author
-    let result = db.insert_as(
+    let result = db.insert_with_as(
         "documents",
-        &["title", "author_id"],
-        vec![Value::String("Forged Doc".into()), Value::Ref(bob_id)],
+        |b| b.set_string_by_name("title", "Forged Doc").set_ref_by_name("author_id", bob_id).build(),
         alice_id,
     );
     assert!(matches!(result, Err(DatabaseError::PolicyDenied { .. })),
@@ -523,20 +615,17 @@ fn update_as_checks_policy() {
     };
 
     // Create a document owned by Alice
-    let doc_id = db.insert("documents", &["title", "owner_id"], vec![
-        Value::String("Original".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let doc_id = db.insert_with("documents", |b| b.set_string_by_name("title", "Original").set_ref_by_name("owner_id", alice_id).build()).unwrap();
 
     // Add UPDATE policy: owner can update
     db.execute("CREATE POLICY ON documents FOR UPDATE WHERE owner_id = @viewer").unwrap();
 
     // Alice can update
-    let result = db.update_as("documents", doc_id, &[("title", Value::String("Updated".into()))], alice_id);
+    let result = db.update_with_as("documents", doc_id, |b| b.set_string_by_name("title", "Updated").build(), alice_id);
     assert!(result.is_ok(), "owner should be able to update: {:?}", result);
 
     // Bob cannot update
-    let result = db.update_as("documents", doc_id, &[("title", Value::String("Hacked".into()))], bob_id);
+    let result = db.update_with_as("documents", doc_id, |b| b.set_string_by_name("title", "Hacked").build(), bob_id);
     assert!(matches!(result, Err(DatabaseError::PolicyDenied { .. })),
         "non-owner should not be able to update: {:?}", result);
 }
@@ -560,20 +649,17 @@ fn update_as_checks_both_where_and_check() {
         _ => panic!("expected Inserted"),
     };
 
-    let doc_id = db.insert("documents", &["title", "owner_id"], vec![
-        Value::String("Original".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let doc_id = db.insert_with("documents", |b| b.set_string_by_name("title", "Original").set_ref_by_name("owner_id", alice_id).build()).unwrap();
 
     // Add UPDATE policy: owner can update, but cannot change owner
     db.execute("CREATE POLICY ON documents FOR UPDATE WHERE owner_id = @viewer CHECK (@new.owner_id = @old.owner_id)").unwrap();
 
     // Alice can update title
-    let result = db.update_as("documents", doc_id, &[("title", Value::String("New Title".into()))], alice_id);
+    let result = db.update_with_as("documents", doc_id, |b| b.set_string_by_name("title", "New Title").build(), alice_id);
     assert!(result.is_ok(), "should allow updating title: {:?}", result);
 
     // Alice cannot change owner
-    let result = db.update_as("documents", doc_id, &[("owner_id", Value::Ref(bob_id))], alice_id);
+    let result = db.update_with_as("documents", doc_id, |b| b.set_ref_by_name("owner_id", bob_id).build(), alice_id);
     assert!(matches!(result, Err(DatabaseError::PolicyDenied { .. })),
         "should deny changing owner: {:?}", result);
 }
@@ -597,10 +683,7 @@ fn delete_as_checks_policy() {
         _ => panic!("expected Inserted"),
     };
 
-    let doc_id = db.insert("documents", &["title", "owner_id"], vec![
-        Value::String("To Delete".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let doc_id = db.insert_with("documents", |b| b.set_string_by_name("title", "To Delete").set_ref_by_name("owner_id", alice_id).build()).unwrap();
 
     // Add DELETE policy: owner can delete
     db.execute("CREATE POLICY ON documents FOR DELETE WHERE owner_id = @viewer").unwrap();
@@ -634,10 +717,7 @@ fn delete_as_falls_back_to_update_policy() {
         _ => panic!("expected Inserted"),
     };
 
-    let doc_id = db.insert("documents", &["title", "owner_id"], vec![
-        Value::String("Deletable".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let doc_id = db.insert_with("documents", |b| b.set_string_by_name("title", "Deletable").set_ref_by_name("owner_id", alice_id).build()).unwrap();
 
     // Only add UPDATE policy (no DELETE policy)
     db.execute("CREATE POLICY ON documents FOR UPDATE WHERE owner_id = @viewer").unwrap();
@@ -675,14 +755,8 @@ fn incremental_query_as_filters_by_policy() {
     };
 
     // Create documents
-    db.insert("documents", &["title", "owner_id"], vec![
-        Value::String("Alice's Doc".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
-    db.insert("documents", &["title", "owner_id"], vec![
-        Value::String("Bob's Doc".into()),
-        Value::Ref(bob_id),
-    ]).unwrap();
+    db.insert_with("documents", |b| b.set_string_by_name("title", "Alice's Doc").set_ref_by_name("owner_id", alice_id).build()).unwrap();
+    db.insert_with("documents", |b| b.set_string_by_name("title", "Bob's Doc").set_ref_by_name("owner_id", bob_id).build()).unwrap();
 
     // Add SELECT policy: owner can read
     db.execute("CREATE POLICY ON documents FOR SELECT WHERE owner_id = @viewer").unwrap();
@@ -691,13 +765,13 @@ fn incremental_query_as_filters_by_policy() {
     let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id).unwrap();
     let alice_rows = alice_query.rows();
     assert_eq!(alice_rows.len(), 1);
-    assert_eq!(alice_rows[0].values[0], Value::String("Alice's Doc".into()));
+    assert_eq!(alice_rows[0].1.get_by_name("title"), Some(RowValue::String("Alice's Doc")));
 
     // Bob's incremental query should only see his document
     let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id).unwrap();
     let bob_rows = bob_query.rows();
     assert_eq!(bob_rows.len(), 1);
-    assert_eq!(bob_rows[0].values[0], Value::String("Bob's Doc".into()));
+    assert_eq!(bob_rows[0].1.get_by_name("title"), Some(RowValue::String("Bob's Doc")));
 }
 
 #[test]
@@ -727,26 +801,20 @@ fn incremental_query_as_updates_on_insert() {
     assert!(alice_query.rows().is_empty());
 
     // Insert document for Alice
-    db.insert("documents", &["title", "owner_id"], vec![
-        Value::String("Alice's Doc".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    db.insert_with("documents", |b| b.set_string_by_name("title", "Alice's Doc").set_ref_by_name("owner_id", alice_id).build()).unwrap();
 
     // Alice should see it
     let alice_rows = alice_query.rows();
     assert_eq!(alice_rows.len(), 1);
-    assert_eq!(alice_rows[0].values[0], Value::String("Alice's Doc".into()));
+    assert_eq!(alice_rows[0].1.get_by_name("title"), Some(RowValue::String("Alice's Doc")));
 
     // Insert document for Bob
-    db.insert("documents", &["title", "owner_id"], vec![
-        Value::String("Bob's Doc".into()),
-        Value::Ref(bob_id),
-    ]).unwrap();
+    db.insert_with("documents", |b| b.set_string_by_name("title", "Bob's Doc").set_ref_by_name("owner_id", bob_id).build()).unwrap();
 
     // Alice should still only see 1 document (her own)
     let alice_rows_after = alice_query.rows();
     assert_eq!(alice_rows_after.len(), 1);
-    assert_eq!(alice_rows_after[0].values[0], Value::String("Alice's Doc".into()));
+    assert_eq!(alice_rows_after[0].1.get_by_name("title"), Some(RowValue::String("Alice's Doc")));
 }
 
 #[test]
@@ -768,16 +836,8 @@ fn incremental_query_as_combines_with_where_clause() {
     db.execute("CREATE POLICY ON documents FOR SELECT WHERE owner_id = @viewer").unwrap();
 
     // Insert multiple documents for Alice
-    db.insert("documents", &["title", "owner_id", "published"], vec![
-        Value::String("Draft".into()),
-        Value::Ref(alice_id),
-        Value::Bool(false),
-    ]).unwrap();
-    db.insert("documents", &["title", "owner_id", "published"], vec![
-        Value::String("Published".into()),
-        Value::Ref(alice_id),
-        Value::Bool(true),
-    ]).unwrap();
+    db.insert_with("documents", |b| b.set_string_by_name("title", "Draft").set_ref_by_name("owner_id", alice_id).set_bool_by_name("published", false).build()).unwrap();
+    db.insert_with("documents", |b| b.set_string_by_name("title", "Published").set_ref_by_name("owner_id", alice_id).set_bool_by_name("published", true).build()).unwrap();
 
     // Query with user WHERE clause combined with policy
     let query = db.incremental_query_as("SELECT * FROM documents WHERE published = true", alice_id).unwrap();
@@ -785,7 +845,7 @@ fn incremental_query_as_combines_with_where_clause() {
 
     // Should only see published documents owned by Alice
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].values[0], Value::String("Published".into()));
+    assert_eq!(rows[0].1.get_by_name("title"), Some(RowValue::String("Published")));
 }
 
 #[test]
@@ -797,16 +857,18 @@ fn incremental_query_as_no_policy_allows_all() {
 
     db.execute("CREATE TABLE items (name STRING NOT NULL)").unwrap();
 
-    db.insert("items", &["name"], vec![Value::String("Item 1".into())]).unwrap();
-    db.insert("items", &["name"], vec![Value::String("Item 2".into())]).unwrap();
+    db.insert_with("items", |b| b.set_string_by_name("name", "Item 1").build()).unwrap();
+    db.insert_with("items", |b| b.set_string_by_name("name", "Item 2").build()).unwrap();
 
     // No policy - should see all items (with warning)
     let query = db.incremental_query_as("SELECT * FROM items", ObjectId::new(999)).unwrap();
     let rows = query.rows();
     assert_eq!(rows.len(), 2);
-    let names: Vec<_> = rows.iter().map(|r| &r.values[0]).collect();
-    assert!(names.contains(&&Value::String("Item 1".into())));
-    assert!(names.contains(&&Value::String("Item 2".into())));
+    let names: Vec<_> = rows.iter().filter_map(|r| {
+        if let Some(RowValue::String(s)) = r.1.get_by_name("name") { Some(s.to_string()) } else { None }
+    }).collect();
+    assert!(names.contains(&"Item 1".to_string()));
+    assert!(names.contains(&"Item 2".to_string()));
 }
 
 #[test]
@@ -832,21 +894,9 @@ fn incremental_query_as_or_policy() {
     db.execute("CREATE POLICY ON documents FOR SELECT WHERE owner_id = @viewer OR public = true").unwrap();
 
     // Create documents
-    db.insert("documents", &["title", "owner_id", "public"], vec![
-        Value::String("Alice Private".into()),
-        Value::Ref(alice_id),
-        Value::Bool(false),
-    ]).unwrap();
-    db.insert("documents", &["title", "owner_id", "public"], vec![
-        Value::String("Alice Public".into()),
-        Value::Ref(alice_id),
-        Value::Bool(true),
-    ]).unwrap();
-    db.insert("documents", &["title", "owner_id", "public"], vec![
-        Value::String("Bob Private".into()),
-        Value::Ref(bob_id),
-        Value::Bool(false),
-    ]).unwrap();
+    db.insert_with("documents", |b| b.set_string_by_name("title", "Alice Private").set_ref_by_name("owner_id", alice_id).set_bool_by_name("public", false).build()).unwrap();
+    db.insert_with("documents", |b| b.set_string_by_name("title", "Alice Public").set_ref_by_name("owner_id", alice_id).set_bool_by_name("public", true).build()).unwrap();
+    db.insert_with("documents", |b| b.set_string_by_name("title", "Bob Private").set_ref_by_name("owner_id", bob_id).set_bool_by_name("public", false).build()).unwrap();
 
     // Alice can see: her private, her public (but not bob's private)
     // With "owner_id = @viewer OR public = true":
@@ -856,10 +906,12 @@ fn incremental_query_as_or_policy() {
     let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id).unwrap();
     let alice_rows = alice_query.rows();
     assert_eq!(alice_rows.len(), 2);
-    let alice_titles: Vec<_> = alice_rows.iter().map(|r| &r.values[0]).collect();
-    assert!(alice_titles.contains(&&Value::String("Alice Private".into())));
-    assert!(alice_titles.contains(&&Value::String("Alice Public".into())));
-    assert!(!alice_titles.contains(&&Value::String("Bob Private".into())));
+    let alice_titles: Vec<_> = alice_rows.iter().filter_map(|r| {
+        if let Some(RowValue::String(s)) = r.1.get_by_name("title") { Some(s.to_string()) } else { None }
+    }).collect();
+    assert!(alice_titles.contains(&"Alice Private".to_string()));
+    assert!(alice_titles.contains(&"Alice Public".to_string()));
+    assert!(!alice_titles.contains(&"Bob Private".to_string()));
 
     // Bob can see: his private, alice's public
     // - Alice Private: owner=alice, public=false ✗
@@ -868,10 +920,12 @@ fn incremental_query_as_or_policy() {
     let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id).unwrap();
     let bob_rows = bob_query.rows();
     assert_eq!(bob_rows.len(), 2);
-    let bob_titles: Vec<_> = bob_rows.iter().map(|r| &r.values[0]).collect();
-    assert!(bob_titles.contains(&&Value::String("Alice Public".into())));
-    assert!(bob_titles.contains(&&Value::String("Bob Private".into())));
-    assert!(!bob_titles.contains(&&Value::String("Alice Private".into())));
+    let bob_titles: Vec<_> = bob_rows.iter().filter_map(|r| {
+        if let Some(RowValue::String(s)) = r.1.get_by_name("title") { Some(s.to_string()) } else { None }
+    }).collect();
+    assert!(bob_titles.contains(&"Alice Public".to_string()));
+    assert!(bob_titles.contains(&"Bob Private".to_string()));
+    assert!(!bob_titles.contains(&"Alice Private".to_string()));
 }
 
 #[test]
@@ -896,24 +950,12 @@ fn incremental_query_as_inherits_flattened_to_join() {
     };
 
     // Create folders
-    let alice_folder = db.insert("folders", &["name", "owner_id"], vec![
-        Value::String("Alice's Folder".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
-    let bob_folder = db.insert("folders", &["name", "owner_id"], vec![
-        Value::String("Bob's Folder".into()),
-        Value::Ref(bob_id),
-    ]).unwrap();
+    let alice_folder = db.insert_with("folders", |b| b.set_string_by_name("name", "Alice's Folder").set_ref_by_name("owner_id", alice_id).build()).unwrap();
+    let bob_folder = db.insert_with("folders", |b| b.set_string_by_name("name", "Bob's Folder").set_ref_by_name("owner_id", bob_id).build()).unwrap();
 
     // Create documents
-    db.insert("documents", &["title", "folder_id"], vec![
-        Value::String("Alice's Doc".into()),
-        Value::Ref(alice_folder),
-    ]).unwrap();
-    db.insert("documents", &["title", "folder_id"], vec![
-        Value::String("Bob's Doc".into()),
-        Value::Ref(bob_folder),
-    ]).unwrap();
+    db.insert_with("documents", |b| b.set_string_by_name("title", "Alice's Doc").set_ref_by_name("folder_id", alice_folder).build()).unwrap();
+    db.insert_with("documents", |b| b.set_string_by_name("title", "Bob's Doc").set_ref_by_name("folder_id", bob_folder).build()).unwrap();
 
     // Add policies:
     // - folders: owner can read
@@ -925,13 +967,13 @@ fn incremental_query_as_inherits_flattened_to_join() {
     let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id).unwrap();
     let alice_rows = alice_query.rows();
     assert_eq!(alice_rows.len(), 1, "Alice should see 1 doc: {:?}", alice_rows);
-    assert_eq!(alice_rows[0].values[0], Value::String("Alice's Doc".into()));
+    assert_eq!(alice_rows[0].1.get_by_name("documents.title"), Some(RowValue::String("Alice's Doc")));
 
     // Bob can only see his document
     let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id).unwrap();
     let bob_rows = bob_query.rows();
     assert_eq!(bob_rows.len(), 1, "Bob should see 1 doc: {:?}", bob_rows);
-    assert_eq!(bob_rows[0].values[0], Value::String("Bob's Doc".into()));
+    assert_eq!(bob_rows[0].1.get_by_name("documents.title"), Some(RowValue::String("Bob's Doc")));
 }
 
 #[test]
@@ -953,10 +995,7 @@ fn incremental_query_as_inherits_incremental_updates() {
     };
 
     // Create folder and policy before documents
-    let alice_folder = db.insert("folders", &["name", "owner_id"], vec![
-        Value::String("Alice's Folder".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let alice_folder = db.insert_with("folders", |b| b.set_string_by_name("name", "Alice's Folder").set_ref_by_name("owner_id", alice_id).build()).unwrap();
 
     db.execute("CREATE POLICY ON folders FOR SELECT WHERE owner_id = @viewer").unwrap();
     db.execute("CREATE POLICY ON documents FOR SELECT WHERE INHERITS SELECT FROM folder_id").unwrap();
@@ -968,20 +1007,17 @@ fn incremental_query_as_inherits_incremental_updates() {
     // Track changes via subscription
     let change_count = Arc::new(AtomicUsize::new(0));
     let change_count_clone = change_count.clone();
-    let _listener = alice_query.subscribe_delta(Box::new(move |delta| {
+    let _listener = alice_query.subscribe(Box::new(move |delta| {
         change_count_clone.fetch_add(delta.len(), Ordering::SeqCst);
     }));
 
     // Insert document into Alice's folder - should trigger update
-    db.insert("documents", &["title", "folder_id"], vec![
-        Value::String("New Doc".into()),
-        Value::Ref(alice_folder),
-    ]).unwrap();
+    db.insert_with("documents", |b| b.set_string_by_name("title", "New Doc").set_ref_by_name("folder_id", alice_folder).build()).unwrap();
 
     // Query should now have one row
     let rows = alice_query.rows();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].values[0], Value::String("New Doc".into()));
+    assert_eq!(rows[0].1.get_by_name("documents.title"), Some(RowValue::String("New Doc")));
     // And we should have received a delta
     assert!(change_count.load(Ordering::SeqCst) > 0, "Should have received delta notification");
 }
@@ -1008,16 +1044,10 @@ fn incremental_query_as_inherits_folder_ownership_change() {
     };
 
     // Create folder owned by Alice
-    let folder_id = db.insert("folders", &["name", "owner_id"], vec![
-        Value::String("Shared Folder".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let folder_id = db.insert_with("folders", |b| b.set_string_by_name("name", "Shared Folder").set_ref_by_name("owner_id", alice_id).build()).unwrap();
 
     // Create document in that folder
-    db.insert("documents", &["title", "folder_id"], vec![
-        Value::String("Important Doc".into()),
-        Value::Ref(folder_id),
-    ]).unwrap();
+    db.insert_with("documents", |b| b.set_string_by_name("title", "Important Doc").set_ref_by_name("folder_id", folder_id).build()).unwrap();
 
     db.execute("CREATE POLICY ON folders FOR SELECT WHERE owner_id = @viewer").unwrap();
     db.execute("CREATE POLICY ON documents FOR SELECT WHERE INHERITS SELECT FROM folder_id").unwrap();
@@ -1026,14 +1056,14 @@ fn incremental_query_as_inherits_folder_ownership_change() {
     let alice_query = db.incremental_query_as("SELECT * FROM documents", alice_id).unwrap();
     let alice_rows = alice_query.rows();
     assert_eq!(alice_rows.len(), 1);
-    assert_eq!(alice_rows[0].values[0], Value::String("Important Doc".into()));
+    assert_eq!(alice_rows[0].1.get_by_name("documents.title"), Some(RowValue::String("Important Doc")));
 
     // Bob cannot see the document
     let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id).unwrap();
     assert_eq!(bob_query.rows().len(), 0);
 
     // Transfer folder ownership to Bob
-    db.update("folders", folder_id, &[("owner_id", Value::Ref(bob_id))]).unwrap();
+    db.update_with("folders", folder_id, |b| b.set_ref_by_name("owner_id", bob_id).build()).unwrap();
 
     // Now Alice should NOT see the document (folder no longer hers)
     // NOTE: This tests incremental propagation through the JOIN
@@ -1043,7 +1073,7 @@ fn incremental_query_as_inherits_folder_ownership_change() {
     // Bob should now see the document
     let bob_rows_after = bob_query.rows();
     assert_eq!(bob_rows_after.len(), 1, "Bob should now see doc after folder transfer");
-    assert_eq!(bob_rows_after[0].values[0], Value::String("Important Doc".into()));
+    assert_eq!(bob_rows_after[0].1.get_by_name("documents.title"), Some(RowValue::String("Important Doc")));
 }
 
 #[test]
@@ -1075,36 +1105,36 @@ fn incremental_query_as_nested_inherits_chain() {
     };
 
     // Alice's workspace with a folder and document
-    let alice_workspace_id = db.insert("workspaces", &["name", "owner_id"], vec![
-        Value::String("Alice's Workspace".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let alice_workspace_id = db.insert_with("workspaces", |b| b
+        .set_string_by_name("name", "Alice's Workspace")
+        .set_ref_by_name("owner_id", alice_id)
+        .build()).unwrap();
 
-    let alice_folder_id = db.insert("folders", &["name", "workspace_id"], vec![
-        Value::String("Alice's Folder".into()),
-        Value::Ref(alice_workspace_id),
-    ]).unwrap();
+    let alice_folder_id = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "Alice's Folder")
+        .set_ref_by_name("workspace_id", alice_workspace_id)
+        .build()).unwrap();
 
-    let alice_doc_id = db.insert("documents", &["title", "folder_id"], vec![
-        Value::String("Alice's Doc".into()),
-        Value::Ref(alice_folder_id),
-    ]).unwrap();
+    let alice_doc_id = db.insert_with("documents", |b| b
+        .set_string_by_name("title", "Alice's Doc")
+        .set_ref_by_name("folder_id", alice_folder_id)
+        .build()).unwrap();
 
     // Bob's workspace with a folder and document
-    let bob_workspace_id = db.insert("workspaces", &["name", "owner_id"], vec![
-        Value::String("Bob's Workspace".into()),
-        Value::Ref(bob_id),
-    ]).unwrap();
+    let bob_workspace_id = db.insert_with("workspaces", |b| b
+        .set_string_by_name("name", "Bob's Workspace")
+        .set_ref_by_name("owner_id", bob_id)
+        .build()).unwrap();
 
-    let bob_folder_id = db.insert("folders", &["name", "workspace_id"], vec![
-        Value::String("Bob's Folder".into()),
-        Value::Ref(bob_workspace_id),
-    ]).unwrap();
+    let bob_folder_id = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "Bob's Folder")
+        .set_ref_by_name("workspace_id", bob_workspace_id)
+        .build()).unwrap();
 
-    let _bob_doc_id = db.insert("documents", &["title", "folder_id"], vec![
-        Value::String("Bob's Doc".into()),
-        Value::Ref(bob_folder_id),
-    ]).unwrap();
+    let _bob_doc_id = db.insert_with("documents", |b| b
+        .set_string_by_name("title", "Bob's Doc")
+        .set_ref_by_name("folder_id", bob_folder_id)
+        .build()).unwrap();
 
     // Set up 2-hop chain: documents -> folders -> workspaces -> owner_id
     db.execute("CREATE POLICY ON workspaces FOR SELECT WHERE owner_id = @viewer").unwrap();
@@ -1117,8 +1147,8 @@ fn incremental_query_as_nested_inherits_chain() {
     let alice_docs = alice_query.rows();
 
     assert_eq!(alice_docs.len(), 1, "Alice should see 1 document through the chain");
-    assert_eq!(alice_docs[0].id, alice_doc_id, "Alice should see her own document");
-    assert_eq!(alice_docs[0].values[0], Value::String("Alice's Doc".into()));
+    assert_eq!(alice_docs[0].0, alice_doc_id, "Alice should see her own document");
+    assert_eq!(alice_docs[0].1.get_by_name("documents.title"), Some(RowValue::String("Alice's Doc")));
 
     // Bob should only see his document
     let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id)
@@ -1126,7 +1156,7 @@ fn incremental_query_as_nested_inherits_chain() {
     let bob_docs = bob_query.rows();
 
     assert_eq!(bob_docs.len(), 1, "Bob should see 1 document through the chain");
-    assert_eq!(bob_docs[0].values[0], Value::String("Bob's Doc".into()));
+    assert_eq!(bob_docs[0].1.get_by_name("documents.title"), Some(RowValue::String("Bob's Doc")));
 }
 
 #[test]
@@ -1146,24 +1176,24 @@ fn incremental_query_as_inherits_multiple_docs_same_folder() {
         _ => panic!("expected Inserted"),
     };
 
-    let folder_id = db.insert("folders", &["name", "owner_id"], vec![
-        Value::String("Alice's Folder".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let folder_id = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "Alice's Folder")
+        .set_ref_by_name("owner_id", alice_id)
+        .build()).unwrap();
 
     // Insert multiple documents
-    db.insert("documents", &["title", "folder_id"], vec![
-        Value::String("Doc 1".into()),
-        Value::Ref(folder_id),
-    ]).unwrap();
-    db.insert("documents", &["title", "folder_id"], vec![
-        Value::String("Doc 2".into()),
-        Value::Ref(folder_id),
-    ]).unwrap();
-    db.insert("documents", &["title", "folder_id"], vec![
-        Value::String("Doc 3".into()),
-        Value::Ref(folder_id),
-    ]).unwrap();
+    db.insert_with("documents", |b| b
+        .set_string_by_name("title", "Doc 1")
+        .set_ref_by_name("folder_id", folder_id)
+        .build()).unwrap();
+    db.insert_with("documents", |b| b
+        .set_string_by_name("title", "Doc 2")
+        .set_ref_by_name("folder_id", folder_id)
+        .build()).unwrap();
+    db.insert_with("documents", |b| b
+        .set_string_by_name("title", "Doc 3")
+        .set_ref_by_name("folder_id", folder_id)
+        .build()).unwrap();
 
     db.execute("CREATE POLICY ON folders FOR SELECT WHERE owner_id = @viewer").unwrap();
     db.execute("CREATE POLICY ON documents FOR SELECT WHERE INHERITS SELECT FROM folder_id").unwrap();
@@ -1172,10 +1202,10 @@ fn incremental_query_as_inherits_multiple_docs_same_folder() {
     let rows = alice_query.rows();
 
     assert_eq!(rows.len(), 3, "Alice should see all 3 documents in her folder");
-    let titles: Vec<_> = rows.iter().map(|r| &r.values[0]).collect();
-    assert!(titles.contains(&&Value::String("Doc 1".into())));
-    assert!(titles.contains(&&Value::String("Doc 2".into())));
-    assert!(titles.contains(&&Value::String("Doc 3".into())));
+    let titles: Vec<_> = rows.iter().map(|r| r.1.get_by_name("documents.title")).collect();
+    assert!(titles.contains(&Some(RowValue::String("Doc 1"))));
+    assert!(titles.contains(&Some(RowValue::String("Doc 2"))));
+    assert!(titles.contains(&Some(RowValue::String("Doc 3"))));
 }
 
 #[test]
@@ -1195,15 +1225,15 @@ fn incremental_query_as_inherits_delete_propagates() {
         _ => panic!("expected Inserted"),
     };
 
-    let folder_id = db.insert("folders", &["name", "owner_id"], vec![
-        Value::String("Temp Folder".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let folder_id = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "Temp Folder")
+        .set_ref_by_name("owner_id", alice_id)
+        .build()).unwrap();
 
-    db.insert("documents", &["title", "folder_id"], vec![
-        Value::String("Orphan Doc".into()),
-        Value::Ref(folder_id),
-    ]).unwrap();
+    db.insert_with("documents", |b| b
+        .set_string_by_name("title", "Orphan Doc")
+        .set_ref_by_name("folder_id", folder_id)
+        .build()).unwrap();
 
     db.execute("CREATE POLICY ON folders FOR SELECT WHERE owner_id = @viewer").unwrap();
     db.execute("CREATE POLICY ON documents FOR SELECT WHERE INHERITS SELECT FROM folder_id").unwrap();
@@ -1213,7 +1243,7 @@ fn incremental_query_as_inherits_delete_propagates() {
     // Initially Alice can see the document
     let initial_rows = alice_query.rows();
     assert_eq!(initial_rows.len(), 1);
-    assert_eq!(initial_rows[0].values[0], Value::String("Orphan Doc".into()));
+    assert_eq!(initial_rows[0].1.get_by_name("documents.title"), Some(RowValue::String("Orphan Doc")));
 
     // Delete the folder
     db.delete("folders", folder_id).unwrap();
@@ -1253,25 +1283,25 @@ fn incremental_query_as_self_referential_recursive_inherits() {
 
     // Create folder hierarchy owned by Alice:
     // root (owned by Alice) -> child -> grandchild -> great_grandchild
-    let root_id = db.insert("folders", &["name", "owner_id"], vec![
-        Value::String("Root".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let root_id = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "Root")
+        .set_ref_by_name("owner_id", alice_id)
+        .build()).unwrap();
 
-    let child_id = db.insert("folders", &["name", "parent_id"], vec![
-        Value::String("Child".into()),
-        Value::Ref(root_id),
-    ]).unwrap();
+    let child_id = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "Child")
+        .set_ref_by_name("parent_id", root_id)
+        .build()).unwrap();
 
-    let grandchild_id = db.insert("folders", &["name", "parent_id"], vec![
-        Value::String("Grandchild".into()),
-        Value::Ref(child_id),
-    ]).unwrap();
+    let grandchild_id = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "Grandchild")
+        .set_ref_by_name("parent_id", child_id)
+        .build()).unwrap();
 
-    let great_grandchild_id = db.insert("folders", &["name", "parent_id"], vec![
-        Value::String("GreatGrandchild".into()),
-        Value::Ref(grandchild_id),
-    ]).unwrap();
+    let great_grandchild_id = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "GreatGrandchild")
+        .set_ref_by_name("parent_id", grandchild_id)
+        .build()).unwrap();
 
     // Policy: owner OR inherit from parent (recursive!)
     db.execute("CREATE POLICY ON folders FOR SELECT WHERE owner_id = @viewer OR INHERITS SELECT FROM parent_id").unwrap();
@@ -1285,7 +1315,7 @@ fn incremental_query_as_self_referential_recursive_inherits() {
     assert_eq!(alice_rows.len(), 4, "Alice should see all 4 folders through recursive inheritance");
 
     // Verify specific folders are visible
-    let folder_ids: Vec<_> = alice_rows.iter().map(|r| r.id).collect();
+    let folder_ids: Vec<_> = alice_rows.iter().map(|r| r.0).collect();
     assert!(folder_ids.contains(&root_id), "Root should be visible (owned by Alice)");
     assert!(folder_ids.contains(&child_id), "Child should be visible (inherits from root)");
     assert!(folder_ids.contains(&grandchild_id), "Grandchild should be visible (inherits from child)");
@@ -1298,15 +1328,15 @@ fn incremental_query_as_self_referential_recursive_inherits() {
     assert_eq!(bob_rows.len(), 0, "Bob should see no folders");
 
     // Test incremental update: create a new folder under grandchild
-    let new_folder_id = db.insert("folders", &["name", "parent_id"], vec![
-        Value::String("NewFolder".into()),
-        Value::Ref(grandchild_id),
-    ]).unwrap();
+    let new_folder_id = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "NewFolder")
+        .set_ref_by_name("parent_id", grandchild_id)
+        .build()).unwrap();
 
     // Alice should now see 5 folders
     let alice_rows_after = query.rows();
     assert_eq!(alice_rows_after.len(), 5, "Alice should now see 5 folders after insert");
-    let folder_ids_after: Vec<_> = alice_rows_after.iter().map(|r| r.id).collect();
+    let folder_ids_after: Vec<_> = alice_rows_after.iter().map(|r| r.0).collect();
     assert!(folder_ids_after.contains(&new_folder_id), "New folder should be visible via inheritance");
 }
 
@@ -1332,15 +1362,15 @@ fn incremental_query_as_pure_recursive_inherits_returns_nothing() {
     };
 
     // Create root folder with owner
-    let root_id = db.insert("folders", &["name", "owner_id"], vec![
-        Value::String("Root".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let root_id = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "Root")
+        .set_ref_by_name("owner_id", alice_id)
+        .build()).unwrap();
 
-    db.insert("folders", &["name", "parent_id"], vec![
-        Value::String("Child".into()),
-        Value::Ref(root_id),
-    ]).unwrap();
+    db.insert_with("folders", |b| b
+        .set_string_by_name("name", "Child")
+        .set_ref_by_name("parent_id", root_id)
+        .build()).unwrap();
 
     // Pure INHERITS policy (no simple predicate fallback)
     db.execute("CREATE POLICY ON folders FOR SELECT WHERE INHERITS SELECT FROM parent_id").unwrap();
@@ -1383,46 +1413,46 @@ fn incremental_query_as_3_hop_inherits_chain() {
     };
 
     // Alice's hierarchy: org → workspace → folder → document
-    let alice_org_id = db.insert("organizations", &["name", "owner_id"], vec![
-        Value::String("Alice's Org".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let alice_org_id = db.insert_with("organizations", |b| b
+        .set_string_by_name("name", "Alice's Org")
+        .set_ref_by_name("owner_id", alice_id)
+        .build()).unwrap();
 
-    let alice_workspace_id = db.insert("workspaces", &["name", "org_id"], vec![
-        Value::String("Alice's Workspace".into()),
-        Value::Ref(alice_org_id),
-    ]).unwrap();
+    let alice_workspace_id = db.insert_with("workspaces", |b| b
+        .set_string_by_name("name", "Alice's Workspace")
+        .set_ref_by_name("org_id", alice_org_id)
+        .build()).unwrap();
 
-    let alice_folder_id = db.insert("folders", &["name", "workspace_id"], vec![
-        Value::String("Alice's Folder".into()),
-        Value::Ref(alice_workspace_id),
-    ]).unwrap();
+    let alice_folder_id = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "Alice's Folder")
+        .set_ref_by_name("workspace_id", alice_workspace_id)
+        .build()).unwrap();
 
-    let alice_doc_id = db.insert("documents", &["title", "folder_id"], vec![
-        Value::String("Alice's Doc".into()),
-        Value::Ref(alice_folder_id),
-    ]).unwrap();
+    let alice_doc_id = db.insert_with("documents", |b| b
+        .set_string_by_name("title", "Alice's Doc")
+        .set_ref_by_name("folder_id", alice_folder_id)
+        .build()).unwrap();
 
     // Bob's hierarchy: org → workspace → folder → document
-    let bob_org_id = db.insert("organizations", &["name", "owner_id"], vec![
-        Value::String("Bob's Org".into()),
-        Value::Ref(bob_id),
-    ]).unwrap();
+    let bob_org_id = db.insert_with("organizations", |b| b
+        .set_string_by_name("name", "Bob's Org")
+        .set_ref_by_name("owner_id", bob_id)
+        .build()).unwrap();
 
-    let bob_workspace_id = db.insert("workspaces", &["name", "org_id"], vec![
-        Value::String("Bob's Workspace".into()),
-        Value::Ref(bob_org_id),
-    ]).unwrap();
+    let bob_workspace_id = db.insert_with("workspaces", |b| b
+        .set_string_by_name("name", "Bob's Workspace")
+        .set_ref_by_name("org_id", bob_org_id)
+        .build()).unwrap();
 
-    let bob_folder_id = db.insert("folders", &["name", "workspace_id"], vec![
-        Value::String("Bob's Folder".into()),
-        Value::Ref(bob_workspace_id),
-    ]).unwrap();
+    let bob_folder_id = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "Bob's Folder")
+        .set_ref_by_name("workspace_id", bob_workspace_id)
+        .build()).unwrap();
 
-    let _bob_doc_id = db.insert("documents", &["title", "folder_id"], vec![
-        Value::String("Bob's Doc".into()),
-        Value::Ref(bob_folder_id),
-    ]).unwrap();
+    let _bob_doc_id = db.insert_with("documents", |b| b
+        .set_string_by_name("title", "Bob's Doc")
+        .set_ref_by_name("folder_id", bob_folder_id)
+        .build()).unwrap();
 
     // Set up 3-hop chain: documents -> folders -> workspaces -> organizations -> owner_id
     db.execute("CREATE POLICY ON organizations FOR SELECT WHERE owner_id = @viewer").unwrap();
@@ -1436,8 +1466,8 @@ fn incremental_query_as_3_hop_inherits_chain() {
     let alice_docs = alice_query.rows();
 
     assert_eq!(alice_docs.len(), 1, "Alice should see 1 document through 3-hop chain");
-    assert_eq!(alice_docs[0].id, alice_doc_id, "Alice should see her own document");
-    assert_eq!(alice_docs[0].values[0], Value::String("Alice's Doc".into()));
+    assert_eq!(alice_docs[0].0, alice_doc_id, "Alice should see her own document");
+    assert_eq!(alice_docs[0].1.get_by_name("documents.title"), Some(RowValue::String("Alice's Doc")));
 
     // Bob should only see his document
     let bob_query = db.incremental_query_as("SELECT * FROM documents", bob_id)
@@ -1445,7 +1475,7 @@ fn incremental_query_as_3_hop_inherits_chain() {
     let bob_docs = bob_query.rows();
 
     assert_eq!(bob_docs.len(), 1, "Bob should see 1 document through 3-hop chain");
-    assert_eq!(bob_docs[0].values[0], Value::String("Bob's Doc".into()));
+    assert_eq!(bob_docs[0].1.get_by_name("documents.title"), Some(RowValue::String("Bob's Doc")));
 }
 
 #[test]
@@ -1473,25 +1503,25 @@ fn incremental_query_as_3_hop_chain_delta_from_org_update() {
     };
 
     // Start with Alice owning the org
-    let org_id = db.insert("organizations", &["name", "owner_id"], vec![
-        Value::String("Test Org".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let org_id = db.insert_with("organizations", |b| b
+        .set_string_by_name("name", "Test Org")
+        .set_ref_by_name("owner_id", alice_id)
+        .build()).unwrap();
 
-    let workspace_id = db.insert("workspaces", &["name", "org_id"], vec![
-        Value::String("Test Workspace".into()),
-        Value::Ref(org_id),
-    ]).unwrap();
+    let workspace_id = db.insert_with("workspaces", |b| b
+        .set_string_by_name("name", "Test Workspace")
+        .set_ref_by_name("org_id", org_id)
+        .build()).unwrap();
 
-    let folder_id = db.insert("folders", &["name", "workspace_id"], vec![
-        Value::String("Test Folder".into()),
-        Value::Ref(workspace_id),
-    ]).unwrap();
+    let folder_id = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "Test Folder")
+        .set_ref_by_name("workspace_id", workspace_id)
+        .build()).unwrap();
 
-    let doc_id = db.insert("documents", &["title", "folder_id"], vec![
-        Value::String("Test Doc".into()),
-        Value::Ref(folder_id),
-    ]).unwrap();
+    let doc_id = db.insert_with("documents", |b| b
+        .set_string_by_name("title", "Test Doc")
+        .set_ref_by_name("folder_id", folder_id)
+        .build()).unwrap();
 
     // Set up 3-hop chain policies
     db.execute("CREATE POLICY ON organizations FOR SELECT WHERE owner_id = @viewer").unwrap();
@@ -1505,11 +1535,13 @@ fn incremental_query_as_3_hop_chain_delta_from_org_update() {
 
     // Initially, Alice sees the document, Bob doesn't
     assert_eq!(alice_query.rows().len(), 1, "Alice should see doc initially");
-    assert_eq!(alice_query.rows()[0].id, doc_id);
+    assert_eq!(alice_query.rows()[0].0, doc_id);
     assert_eq!(bob_query.rows().len(), 0, "Bob should not see doc initially");
 
     // Transfer org ownership from Alice to Bob
-    db.update("organizations", org_id, &[("owner_id", Value::Ref(bob_id))]).unwrap();
+    db.update_with("organizations", org_id, |b| b
+        .set_ref_by_name("owner_id", bob_id)
+        .build()).unwrap();
 
     // Now Bob should see it, Alice shouldn't
     let alice_rows_after = alice_query.rows();
@@ -1517,8 +1549,8 @@ fn incremental_query_as_3_hop_chain_delta_from_org_update() {
 
     assert_eq!(alice_rows_after.len(), 0, "Alice should not see doc after org transfer");
     assert_eq!(bob_rows_after.len(), 1, "Bob should see doc after org transfer");
-    assert_eq!(bob_rows_after[0].id, doc_id);
-    assert_eq!(bob_rows_after[0].values[0], Value::String("Test Doc".into()));
+    assert_eq!(bob_rows_after[0].0, doc_id);
+    assert_eq!(bob_rows_after[0].1.get_by_name("documents.title"), Some(RowValue::String("Test Doc")));
 }
 
 #[test]
@@ -1546,32 +1578,32 @@ fn incremental_query_as_3_hop_chain_delta_from_workspace_update() {
     };
 
     // Alice's org
-    let alice_org_id = db.insert("organizations", &["name", "owner_id"], vec![
-        Value::String("Alice's Org".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let alice_org_id = db.insert_with("organizations", |b| b
+        .set_string_by_name("name", "Alice's Org")
+        .set_ref_by_name("owner_id", alice_id)
+        .build()).unwrap();
 
     // Bob's org
-    let bob_org_id = db.insert("organizations", &["name", "owner_id"], vec![
-        Value::String("Bob's Org".into()),
-        Value::Ref(bob_id),
-    ]).unwrap();
+    let bob_org_id = db.insert_with("organizations", |b| b
+        .set_string_by_name("name", "Bob's Org")
+        .set_ref_by_name("owner_id", bob_id)
+        .build()).unwrap();
 
     // Workspace starts in Alice's org
-    let workspace_id = db.insert("workspaces", &["name", "org_id"], vec![
-        Value::String("Movable Workspace".into()),
-        Value::Ref(alice_org_id),
-    ]).unwrap();
+    let workspace_id = db.insert_with("workspaces", |b| b
+        .set_string_by_name("name", "Movable Workspace")
+        .set_ref_by_name("org_id", alice_org_id)
+        .build()).unwrap();
 
-    let folder_id = db.insert("folders", &["name", "workspace_id"], vec![
-        Value::String("Test Folder".into()),
-        Value::Ref(workspace_id),
-    ]).unwrap();
+    let folder_id = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "Test Folder")
+        .set_ref_by_name("workspace_id", workspace_id)
+        .build()).unwrap();
 
-    let doc_id = db.insert("documents", &["title", "folder_id"], vec![
-        Value::String("Test Doc".into()),
-        Value::Ref(folder_id),
-    ]).unwrap();
+    let doc_id = db.insert_with("documents", |b| b
+        .set_string_by_name("title", "Test Doc")
+        .set_ref_by_name("folder_id", folder_id)
+        .build()).unwrap();
 
     // Set up 3-hop chain policies
     db.execute("CREATE POLICY ON organizations FOR SELECT WHERE owner_id = @viewer").unwrap();
@@ -1587,7 +1619,9 @@ fn incremental_query_as_3_hop_chain_delta_from_workspace_update() {
     assert_eq!(bob_query.rows().len(), 0, "Bob should not see doc initially");
 
     // Move workspace from Alice's org to Bob's org
-    db.update("workspaces", workspace_id, &[("org_id", Value::Ref(bob_org_id))]).unwrap();
+    db.update_with("workspaces", workspace_id, |b| b
+        .set_ref_by_name("org_id", bob_org_id)
+        .build()).unwrap();
 
     // Now Bob should see it, Alice shouldn't
     let alice_rows_after = alice_query.rows();
@@ -1595,8 +1629,8 @@ fn incremental_query_as_3_hop_chain_delta_from_workspace_update() {
 
     assert_eq!(alice_rows_after.len(), 0, "Alice should not see doc after workspace move");
     assert_eq!(bob_rows_after.len(), 1, "Bob should see doc after workspace move");
-    assert_eq!(bob_rows_after[0].id, doc_id);
-    assert_eq!(bob_rows_after[0].values[0], Value::String("Test Doc".into()));
+    assert_eq!(bob_rows_after[0].0, doc_id);
+    assert_eq!(bob_rows_after[0].1.get_by_name("documents.title"), Some(RowValue::String("Test Doc")));
 }
 
 #[test]
@@ -1624,37 +1658,37 @@ fn incremental_query_as_3_hop_chain_delta_from_folder_update() {
     };
 
     // Alice's full hierarchy
-    let alice_org_id = db.insert("organizations", &["name", "owner_id"], vec![
-        Value::String("Alice's Org".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let alice_org_id = db.insert_with("organizations", |b| b
+        .set_string_by_name("name", "Alice's Org")
+        .set_ref_by_name("owner_id", alice_id)
+        .build()).unwrap();
 
-    let alice_workspace_id = db.insert("workspaces", &["name", "org_id"], vec![
-        Value::String("Alice's Workspace".into()),
-        Value::Ref(alice_org_id),
-    ]).unwrap();
+    let alice_workspace_id = db.insert_with("workspaces", |b| b
+        .set_string_by_name("name", "Alice's Workspace")
+        .set_ref_by_name("org_id", alice_org_id)
+        .build()).unwrap();
 
     // Bob's full hierarchy
-    let bob_org_id = db.insert("organizations", &["name", "owner_id"], vec![
-        Value::String("Bob's Org".into()),
-        Value::Ref(bob_id),
-    ]).unwrap();
+    let bob_org_id = db.insert_with("organizations", |b| b
+        .set_string_by_name("name", "Bob's Org")
+        .set_ref_by_name("owner_id", bob_id)
+        .build()).unwrap();
 
-    let bob_workspace_id = db.insert("workspaces", &["name", "org_id"], vec![
-        Value::String("Bob's Workspace".into()),
-        Value::Ref(bob_org_id),
-    ]).unwrap();
+    let bob_workspace_id = db.insert_with("workspaces", |b| b
+        .set_string_by_name("name", "Bob's Workspace")
+        .set_ref_by_name("org_id", bob_org_id)
+        .build()).unwrap();
 
     // Folder starts in Alice's workspace
-    let folder_id = db.insert("folders", &["name", "workspace_id"], vec![
-        Value::String("Movable Folder".into()),
-        Value::Ref(alice_workspace_id),
-    ]).unwrap();
+    let folder_id = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "Movable Folder")
+        .set_ref_by_name("workspace_id", alice_workspace_id)
+        .build()).unwrap();
 
-    let doc_id = db.insert("documents", &["title", "folder_id"], vec![
-        Value::String("Test Doc".into()),
-        Value::Ref(folder_id),
-    ]).unwrap();
+    let doc_id = db.insert_with("documents", |b| b
+        .set_string_by_name("title", "Test Doc")
+        .set_ref_by_name("folder_id", folder_id)
+        .build()).unwrap();
 
     // Set up 3-hop chain policies
     db.execute("CREATE POLICY ON organizations FOR SELECT WHERE owner_id = @viewer").unwrap();
@@ -1670,7 +1704,9 @@ fn incremental_query_as_3_hop_chain_delta_from_folder_update() {
     assert_eq!(bob_query.rows().len(), 0, "Bob should not see doc initially");
 
     // Move folder from Alice's workspace to Bob's workspace
-    db.update("folders", folder_id, &[("workspace_id", Value::Ref(bob_workspace_id))]).unwrap();
+    db.update_with("folders", folder_id, |b| b
+        .set_ref_by_name("workspace_id", bob_workspace_id)
+        .build()).unwrap();
 
     // Now Bob should see it, Alice shouldn't
     let alice_rows_after = alice_query.rows();
@@ -1678,8 +1714,8 @@ fn incremental_query_as_3_hop_chain_delta_from_folder_update() {
 
     assert_eq!(alice_rows_after.len(), 0, "Alice should not see doc after folder move");
     assert_eq!(bob_rows_after.len(), 1, "Bob should see doc after folder move");
-    assert_eq!(bob_rows_after[0].id, doc_id);
-    assert_eq!(bob_rows_after[0].values[0], Value::String("Test Doc".into()));
+    assert_eq!(bob_rows_after[0].0, doc_id);
+    assert_eq!(bob_rows_after[0].1.get_by_name("documents.title"), Some(RowValue::String("Test Doc")));
 }
 
 #[test]
@@ -1706,20 +1742,20 @@ fn incremental_query_as_3_hop_chain_new_document_insert() {
     };
 
     // Alice's hierarchy (no documents yet)
-    let alice_org_id = db.insert("organizations", &["name", "owner_id"], vec![
-        Value::String("Alice's Org".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let alice_org_id = db.insert_with("organizations", |b| b
+        .set_string_by_name("name", "Alice's Org")
+        .set_ref_by_name("owner_id", alice_id)
+        .build()).unwrap();
 
-    let alice_workspace_id = db.insert("workspaces", &["name", "org_id"], vec![
-        Value::String("Alice's Workspace".into()),
-        Value::Ref(alice_org_id),
-    ]).unwrap();
+    let alice_workspace_id = db.insert_with("workspaces", |b| b
+        .set_string_by_name("name", "Alice's Workspace")
+        .set_ref_by_name("org_id", alice_org_id)
+        .build()).unwrap();
 
-    let alice_folder_id = db.insert("folders", &["name", "workspace_id"], vec![
-        Value::String("Alice's Folder".into()),
-        Value::Ref(alice_workspace_id),
-    ]).unwrap();
+    let alice_folder_id = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "Alice's Folder")
+        .set_ref_by_name("workspace_id", alice_workspace_id)
+        .build()).unwrap();
 
     // Set up 3-hop chain policies
     db.execute("CREATE POLICY ON organizations FOR SELECT WHERE owner_id = @viewer").unwrap();
@@ -1735,18 +1771,18 @@ fn incremental_query_as_3_hop_chain_new_document_insert() {
     assert_eq!(bob_query.rows().len(), 0, "Bob should see 0 docs initially");
 
     // Insert a document in Alice's folder
-    let new_doc_id = db.insert("documents", &["title", "folder_id"], vec![
-        Value::String("New Alice Doc".into()),
-        Value::Ref(alice_folder_id),
-    ]).unwrap();
+    let new_doc_id = db.insert_with("documents", |b| b
+        .set_string_by_name("title", "New Alice Doc")
+        .set_ref_by_name("folder_id", alice_folder_id)
+        .build()).unwrap();
 
     // Alice should see the new document, Bob shouldn't
     let alice_rows_after = alice_query.rows();
     let bob_rows_after = bob_query.rows();
 
     assert_eq!(alice_rows_after.len(), 1, "Alice should see new doc after insert");
-    assert_eq!(alice_rows_after[0].id, new_doc_id);
-    assert_eq!(alice_rows_after[0].values[0], Value::String("New Alice Doc".into()));
+    assert_eq!(alice_rows_after[0].0, new_doc_id);
+    assert_eq!(alice_rows_after[0].1.get_by_name("documents.title"), Some(RowValue::String("New Alice Doc")));
     assert_eq!(bob_rows_after.len(), 0, "Bob should still see 0 docs");
 }
 
@@ -1771,33 +1807,33 @@ fn incremental_query_as_3_hop_chain_with_filter() {
     };
 
     // Alice's hierarchy
-    let alice_org_id = db.insert("organizations", &["name", "owner_id"], vec![
-        Value::String("Alice's Org".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let alice_org_id = db.insert_with("organizations", |b| b
+        .set_string_by_name("name", "Alice's Org")
+        .set_ref_by_name("owner_id", alice_id)
+        .build()).unwrap();
 
-    let alice_workspace_id = db.insert("workspaces", &["name", "org_id"], vec![
-        Value::String("Alice's Workspace".into()),
-        Value::Ref(alice_org_id),
-    ]).unwrap();
+    let alice_workspace_id = db.insert_with("workspaces", |b| b
+        .set_string_by_name("name", "Alice's Workspace")
+        .set_ref_by_name("org_id", alice_org_id)
+        .build()).unwrap();
 
-    let alice_folder_id = db.insert("folders", &["name", "workspace_id"], vec![
-        Value::String("Alice's Folder".into()),
-        Value::Ref(alice_workspace_id),
-    ]).unwrap();
+    let alice_folder_id = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "Alice's Folder")
+        .set_ref_by_name("workspace_id", alice_workspace_id)
+        .build()).unwrap();
 
     // Create active and archived documents
-    let active_doc_id = db.insert("documents", &["title", "archived", "folder_id"], vec![
-        Value::String("Active Doc".into()),
-        Value::Bool(false),
-        Value::Ref(alice_folder_id),
-    ]).unwrap();
+    let active_doc_id = db.insert_with("documents", |b| b
+        .set_string_by_name("title", "Active Doc")
+        .set_bool_by_name("archived", false)
+        .set_ref_by_name("folder_id", alice_folder_id)
+        .build()).unwrap();
 
-    let _archived_doc_id = db.insert("documents", &["title", "archived", "folder_id"], vec![
-        Value::String("Archived Doc".into()),
-        Value::Bool(true),
-        Value::Ref(alice_folder_id),
-    ]).unwrap();
+    let _archived_doc_id = db.insert_with("documents", |b| b
+        .set_string_by_name("title", "Archived Doc")
+        .set_bool_by_name("archived", true)
+        .set_ref_by_name("folder_id", alice_folder_id)
+        .build()).unwrap();
 
     // Set up 3-hop chain policies
     db.execute("CREATE POLICY ON organizations FOR SELECT WHERE owner_id = @viewer").unwrap();
@@ -1811,9 +1847,9 @@ fn incremental_query_as_3_hop_chain_with_filter() {
 
     // Alice should only see the active document (filter applied)
     assert_eq!(rows.len(), 1, "Alice should see only 1 non-archived doc");
-    assert_eq!(rows[0].id, active_doc_id);
-    assert_eq!(rows[0].values[0], Value::String("Active Doc".into()));
-    assert_eq!(rows[0].values[1], Value::Bool(false));
+    assert_eq!(rows[0].0, active_doc_id);
+    assert_eq!(rows[0].1.get_by_name("documents.title"), Some(RowValue::String("Active Doc")));
+    assert_eq!(rows[0].1.get_by_name("documents.archived"), Some(RowValue::Bool(false)));
 }
 
 #[test]
@@ -1846,54 +1882,54 @@ fn policy_chain_or_condition_with_inherits() {
     };
 
     // Alice's workspace
-    let alice_ws_id = db.insert("workspaces", &["name", "owner_id"], vec![
-        Value::String("Alice's Workspace".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let alice_ws_id = db.insert_with("workspaces", |b| b
+        .set_string_by_name("name", "Alice's Workspace")
+        .set_ref_by_name("owner_id", alice_id)
+        .build()).unwrap();
 
     // Bob's workspace
-    let bob_ws_id = db.insert("workspaces", &["name", "owner_id"], vec![
-        Value::String("Bob's Workspace".into()),
-        Value::Ref(bob_id),
-    ]).unwrap();
+    let bob_ws_id = db.insert_with("workspaces", |b| b
+        .set_string_by_name("name", "Bob's Workspace")
+        .set_ref_by_name("owner_id", bob_id)
+        .build()).unwrap();
 
     // Folder in Alice's workspace (no direct owner)
-    let folder_in_alice_ws = db.insert("folders", &["name", "workspace_id"], vec![
-        Value::String("Folder in Alice WS".into()),
-        Value::Ref(alice_ws_id),
-    ]).unwrap();
+    let folder_in_alice_ws = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "Folder in Alice WS")
+        .set_ref_by_name("workspace_id", alice_ws_id)
+        .build()).unwrap();
 
     // Folder owned by Alice but in Bob's workspace
-    let alice_folder_in_bob_ws = db.insert("folders", &["name", "owner_id", "workspace_id"], vec![
-        Value::String("Alice's Folder in Bob WS".into()),
-        Value::Ref(alice_id),
-        Value::Ref(bob_ws_id),
-    ]).unwrap();
+    let alice_folder_in_bob_ws = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "Alice's Folder in Bob WS")
+        .set_ref_by_name("owner_id", alice_id)
+        .set_ref_by_name("workspace_id", bob_ws_id)
+        .build()).unwrap();
 
     // Folder owned by Bob in Bob's workspace
-    let bob_folder = db.insert("folders", &["name", "owner_id", "workspace_id"], vec![
-        Value::String("Bob's Folder".into()),
-        Value::Ref(bob_id),
-        Value::Ref(bob_ws_id),
-    ]).unwrap();
+    let bob_folder = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "Bob's Folder")
+        .set_ref_by_name("owner_id", bob_id)
+        .set_ref_by_name("workspace_id", bob_ws_id)
+        .build()).unwrap();
 
     // Documents in each folder
-    let doc_in_alice_ws = db.insert("documents", &["title", "folder_id"], vec![
-        Value::String("Doc in Alice WS".into()),
-        Value::Ref(folder_in_alice_ws),
-    ]).unwrap();
+    let doc_in_alice_ws = db.insert_with("documents", |b| b
+        .set_string_by_name("title", "Doc in Alice WS")
+        .set_ref_by_name("folder_id", folder_in_alice_ws)
+        .build()).unwrap();
 
     // This doc is in a folder Alice owns but in Bob's workspace.
     // Alice can see it via the OR condition: folders.owner_id = @viewer
-    let doc_in_alice_folder = db.insert("documents", &["title", "folder_id"], vec![
-        Value::String("Doc in Alice's Folder".into()),
-        Value::Ref(alice_folder_in_bob_ws),
-    ]).unwrap();
+    let doc_in_alice_folder = db.insert_with("documents", |b| b
+        .set_string_by_name("title", "Doc in Alice's Folder")
+        .set_ref_by_name("folder_id", alice_folder_in_bob_ws)
+        .build()).unwrap();
 
-    let _doc_in_bob_folder = db.insert("documents", &["title", "folder_id"], vec![
-        Value::String("Doc in Bob's Folder".into()),
-        Value::Ref(bob_folder),
-    ]).unwrap();
+    let _doc_in_bob_folder = db.insert_with("documents", |b| b
+        .set_string_by_name("title", "Doc in Bob's Folder")
+        .set_ref_by_name("folder_id", bob_folder)
+        .build()).unwrap();
 
     // Set up policies
     db.execute("CREATE POLICY ON workspaces FOR SELECT WHERE owner_id = @viewer").unwrap();
@@ -1911,7 +1947,7 @@ fn policy_chain_or_condition_with_inherits() {
     // - Doc in her workspace (via INHERITS to workspace owner)
     // - Doc in folder she owns (via OR condition on folder owner)
     assert_eq!(alice_docs.len(), 2, "Alice should see 2 documents");
-    let alice_doc_ids: std::collections::HashSet<_> = alice_docs.iter().map(|r| r.id).collect();
+    let alice_doc_ids: std::collections::HashSet<_> = alice_docs.iter().map(|r| r.0).collect();
     assert!(alice_doc_ids.contains(&doc_in_alice_ws), "Alice should see doc in her workspace");
     assert!(alice_doc_ids.contains(&doc_in_alice_folder), "Alice should see doc in folder she owns");
 }
@@ -1943,26 +1979,26 @@ fn policy_chain_multiple_viewers_concurrent() {
     };
 
     // Each user has their own org
-    let alice_org = db.insert("orgs", &["name", "owner_id"], vec![
-        Value::String("Alice Org".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let alice_org = db.insert_with("orgs", |b| b
+        .set_string_by_name("name", "Alice Org")
+        .set_ref_by_name("owner_id", alice_id)
+        .build()).unwrap();
 
-    let bob_org = db.insert("orgs", &["name", "owner_id"], vec![
-        Value::String("Bob Org".into()),
-        Value::Ref(bob_id),
-    ]).unwrap();
+    let bob_org = db.insert_with("orgs", |b| b
+        .set_string_by_name("name", "Bob Org")
+        .set_ref_by_name("owner_id", bob_id)
+        .build()).unwrap();
 
     // Projects in each org
-    let alice_project = db.insert("projects", &["name", "org_id"], vec![
-        Value::String("Alice Project".into()),
-        Value::Ref(alice_org),
-    ]).unwrap();
+    let alice_project = db.insert_with("projects", |b| b
+        .set_string_by_name("name", "Alice Project")
+        .set_ref_by_name("org_id", alice_org)
+        .build()).unwrap();
 
-    let bob_project = db.insert("projects", &["name", "org_id"], vec![
-        Value::String("Bob Project".into()),
-        Value::Ref(bob_org),
-    ]).unwrap();
+    let bob_project = db.insert_with("projects", |b| b
+        .set_string_by_name("name", "Bob Project")
+        .set_ref_by_name("org_id", bob_org)
+        .build()).unwrap();
 
     // Set up 2-hop chain policies
     db.execute("CREATE POLICY ON orgs FOR SELECT WHERE owner_id = @viewer").unwrap();
@@ -1975,30 +2011,32 @@ fn policy_chain_multiple_viewers_concurrent() {
 
     // Initially: Alice sees 1, Bob sees 1, Charlie sees 0
     assert_eq!(alice_query.rows().len(), 1, "Alice should see her project");
-    assert_eq!(alice_query.rows()[0].id, alice_project);
+    assert_eq!(alice_query.rows()[0].0, alice_project);
     assert_eq!(bob_query.rows().len(), 1, "Bob should see his project");
-    assert_eq!(bob_query.rows()[0].id, bob_project);
+    assert_eq!(bob_query.rows()[0].0, bob_project);
     assert_eq!(charlie_query.rows().len(), 0, "Charlie should see no projects");
 
     // Transfer Alice's org to Charlie
-    db.update("orgs", alice_org, &[("owner_id", Value::Ref(charlie_id))]).unwrap();
+    db.update_with("orgs", alice_org, |b| b
+        .set_ref_by_name("owner_id", charlie_id)
+        .build()).unwrap();
 
     // Now: Alice sees 0, Bob sees 1, Charlie sees 1
     assert_eq!(alice_query.rows().len(), 0, "Alice should no longer see her project");
     assert_eq!(bob_query.rows().len(), 1, "Bob should still see his project");
     assert_eq!(charlie_query.rows().len(), 1, "Charlie should now see Alice's project");
-    assert_eq!(charlie_query.rows()[0].id, alice_project);
+    assert_eq!(charlie_query.rows()[0].0, alice_project);
 
     // Add a new project to Bob's org
-    let new_bob_project = db.insert("projects", &["name", "org_id"], vec![
-        Value::String("New Bob Project".into()),
-        Value::Ref(bob_org),
-    ]).unwrap();
+    let new_bob_project = db.insert_with("projects", |b| b
+        .set_string_by_name("name", "New Bob Project")
+        .set_ref_by_name("org_id", bob_org)
+        .build()).unwrap();
 
     // Bob should now see 2 projects
     let bob_rows = bob_query.rows();
     assert_eq!(bob_rows.len(), 2, "Bob should now see 2 projects");
-    let bob_project_ids: Vec<_> = bob_rows.iter().map(|r| r.id).collect();
+    let bob_project_ids: Vec<_> = bob_rows.iter().map(|r| r.0).collect();
     assert!(bob_project_ids.contains(&bob_project));
     assert!(bob_project_ids.contains(&new_bob_project));
 
@@ -2026,10 +2064,10 @@ fn policy_chain_insert_intermediate_row() {
     };
 
     // Alice's workspace
-    let alice_ws = db.insert("workspaces", &["name", "owner_id"], vec![
-        Value::String("Alice WS".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let alice_ws = db.insert_with("workspaces", |b| b
+        .set_string_by_name("name", "Alice WS")
+        .set_ref_by_name("owner_id", alice_id)
+        .build()).unwrap();
 
     // Set up policies before creating folder/docs
     db.execute("CREATE POLICY ON workspaces FOR SELECT WHERE owner_id = @viewer").unwrap();
@@ -2041,25 +2079,25 @@ fn policy_chain_insert_intermediate_row() {
     assert_eq!(alice_query.rows().len(), 0, "No documents yet");
 
     // Now create a folder
-    let folder = db.insert("folders", &["name", "workspace_id"], vec![
-        Value::String("New Folder".into()),
-        Value::Ref(alice_ws),
-    ]).unwrap();
+    let folder = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "New Folder")
+        .set_ref_by_name("workspace_id", alice_ws)
+        .build()).unwrap();
 
     // Still no documents
     assert_eq!(alice_query.rows().len(), 0, "Still no documents");
 
     // Add a document to the new folder
-    let doc = db.insert("documents", &["title", "folder_id"], vec![
-        Value::String("New Doc".into()),
-        Value::Ref(folder),
-    ]).unwrap();
+    let doc = db.insert_with("documents", |b| b
+        .set_string_by_name("title", "New Doc")
+        .set_ref_by_name("folder_id", folder)
+        .build()).unwrap();
 
     // Now Alice should see the document
     let rows = alice_query.rows();
     assert_eq!(rows.len(), 1, "Alice should see the new document");
-    assert_eq!(rows[0].id, doc);
-    assert_eq!(rows[0].values[0], Value::String("New Doc".into()));
+    assert_eq!(rows[0].0, doc);
+    assert_eq!(rows[0].1.get_by_name("documents.title"), Some(RowValue::String("New Doc")));
 }
 
 #[test]
@@ -2080,20 +2118,20 @@ fn policy_chain_delete_intermediate_row() {
         _ => panic!("expected Inserted"),
     };
 
-    let alice_ws = db.insert("workspaces", &["name", "owner_id"], vec![
-        Value::String("Alice WS".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let alice_ws = db.insert_with("workspaces", |b| b
+        .set_string_by_name("name", "Alice WS")
+        .set_ref_by_name("owner_id", alice_id)
+        .build()).unwrap();
 
-    let folder = db.insert("folders", &["name", "workspace_id"], vec![
-        Value::String("Folder".into()),
-        Value::Ref(alice_ws),
-    ]).unwrap();
+    let folder = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "Folder")
+        .set_ref_by_name("workspace_id", alice_ws)
+        .build()).unwrap();
 
-    let doc = db.insert("documents", &["title", "folder_id"], vec![
-        Value::String("Doc".into()),
-        Value::Ref(folder),
-    ]).unwrap();
+    let doc = db.insert_with("documents", |b| b
+        .set_string_by_name("title", "Doc")
+        .set_ref_by_name("folder_id", folder)
+        .build()).unwrap();
 
     // Set up policies
     db.execute("CREATE POLICY ON workspaces FOR SELECT WHERE owner_id = @viewer").unwrap();
@@ -2104,7 +2142,7 @@ fn policy_chain_delete_intermediate_row() {
 
     // Initially Alice sees the document
     assert_eq!(alice_query.rows().len(), 1, "Alice should see doc initially");
-    assert_eq!(alice_query.rows()[0].id, doc);
+    assert_eq!(alice_query.rows()[0].0, doc);
 
     // Delete the folder (this should cascade to make doc invisible)
     db.delete("folders", folder).unwrap();
@@ -2140,46 +2178,46 @@ fn policy_chain_4_hop_deep() {
     };
 
     // Alice's hierarchy
-    let alice_org = db.insert("orgs", &["name", "owner_id"], vec![
-        Value::String("Alice Org".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let alice_org = db.insert_with("orgs", |b| b
+        .set_string_by_name("name", "Alice Org")
+        .set_ref_by_name("owner_id", alice_id)
+        .build()).unwrap();
 
-    let alice_project = db.insert("projects", &["name", "org_id"], vec![
-        Value::String("Alice Project".into()),
-        Value::Ref(alice_org),
-    ]).unwrap();
+    let alice_project = db.insert_with("projects", |b| b
+        .set_string_by_name("name", "Alice Project")
+        .set_ref_by_name("org_id", alice_org)
+        .build()).unwrap();
 
-    let alice_folder = db.insert("folders", &["name", "project_id"], vec![
-        Value::String("Alice Folder".into()),
-        Value::Ref(alice_project),
-    ]).unwrap();
+    let alice_folder = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "Alice Folder")
+        .set_ref_by_name("project_id", alice_project)
+        .build()).unwrap();
 
-    let alice_file = db.insert("files", &["name", "folder_id"], vec![
-        Value::String("Alice File".into()),
-        Value::Ref(alice_folder),
-    ]).unwrap();
+    let alice_file = db.insert_with("files", |b| b
+        .set_string_by_name("name", "Alice File")
+        .set_ref_by_name("folder_id", alice_folder)
+        .build()).unwrap();
 
     // Bob's hierarchy
-    let bob_org = db.insert("orgs", &["name", "owner_id"], vec![
-        Value::String("Bob Org".into()),
-        Value::Ref(bob_id),
-    ]).unwrap();
+    let bob_org = db.insert_with("orgs", |b| b
+        .set_string_by_name("name", "Bob Org")
+        .set_ref_by_name("owner_id", bob_id)
+        .build()).unwrap();
 
-    let bob_project = db.insert("projects", &["name", "org_id"], vec![
-        Value::String("Bob Project".into()),
-        Value::Ref(bob_org),
-    ]).unwrap();
+    let bob_project = db.insert_with("projects", |b| b
+        .set_string_by_name("name", "Bob Project")
+        .set_ref_by_name("org_id", bob_org)
+        .build()).unwrap();
 
-    let bob_folder = db.insert("folders", &["name", "project_id"], vec![
-        Value::String("Bob Folder".into()),
-        Value::Ref(bob_project),
-    ]).unwrap();
+    let bob_folder = db.insert_with("folders", |b| b
+        .set_string_by_name("name", "Bob Folder")
+        .set_ref_by_name("project_id", bob_project)
+        .build()).unwrap();
 
-    let _bob_file = db.insert("files", &["name", "folder_id"], vec![
-        Value::String("Bob File".into()),
-        Value::Ref(bob_folder),
-    ]).unwrap();
+    let _bob_file = db.insert_with("files", |b| b
+        .set_string_by_name("name", "Bob File")
+        .set_ref_by_name("folder_id", bob_folder)
+        .build()).unwrap();
 
     // Set up 4-hop chain policies
     db.execute("CREATE POLICY ON orgs FOR SELECT WHERE owner_id = @viewer").unwrap();
@@ -2193,15 +2231,17 @@ fn policy_chain_4_hop_deep() {
     let alice_files = alice_query.rows();
 
     assert_eq!(alice_files.len(), 1, "Alice should see 1 file");
-    assert_eq!(alice_files[0].id, alice_file);
-    assert_eq!(alice_files[0].values[0], Value::String("Alice File".into()));
+    assert_eq!(alice_files[0].0, alice_file);
+    assert_eq!(alice_files[0].1.get_by_name("files.name"), Some(RowValue::String("Alice File")));
 
     // Bob should only see his file
     let bob_query = db.incremental_query_as("SELECT * FROM files", bob_id).unwrap();
     assert_eq!(bob_query.rows().len(), 1, "Bob should see 1 file");
 
     // Transfer org from Alice to Bob
-    db.update("orgs", alice_org, &[("owner_id", Value::Ref(bob_id))]).unwrap();
+    db.update_with("orgs", alice_org, |b| b
+        .set_ref_by_name("owner_id", bob_id)
+        .build()).unwrap();
 
     // Alice should see nothing now
     assert_eq!(alice_query.rows().len(), 0, "Alice should see no files after org transfer");
@@ -2210,10 +2250,10 @@ fn policy_chain_4_hop_deep() {
     let bob_files = bob_query.rows();
     assert_eq!(bob_files.len(), 2, "Bob should see 2 files after org transfer");
     let bob_file_names: Vec<_> = bob_files.iter()
-        .map(|r| r.values[0].clone())
+        .map(|r| r.1.get_by_name("files.name"))
         .collect();
-    assert!(bob_file_names.contains(&Value::String("Alice File".into())));
-    assert!(bob_file_names.contains(&Value::String("Bob File".into())));
+    assert!(bob_file_names.contains(&Some(RowValue::String("Alice File"))));
+    assert!(bob_file_names.contains(&Some(RowValue::String("Bob File"))));
 }
 
 #[test]
@@ -2239,28 +2279,28 @@ fn policy_chain_update_at_each_level() {
     };
 
     // Alice's hierarchy
-    let alice_org = db.insert("orgs", &["name", "owner_id"], vec![
-        Value::String("Alice Org".into()),
-        Value::Ref(alice_id),
-    ]).unwrap();
+    let alice_org = db.insert_with("orgs", |b| b
+        .set_string_by_name("name", "Alice Org")
+        .set_ref_by_name("owner_id", alice_id)
+        .build()).unwrap();
 
     // Bob's hierarchy
-    let bob_org = db.insert("orgs", &["name", "owner_id"], vec![
-        Value::String("Bob Org".into()),
-        Value::Ref(bob_id),
-    ]).unwrap();
+    let bob_org = db.insert_with("orgs", |b| b
+        .set_string_by_name("name", "Bob Org")
+        .set_ref_by_name("owner_id", bob_id)
+        .build()).unwrap();
 
     // Team starts in Alice's org
-    let team = db.insert("teams", &["name", "org_id"], vec![
-        Value::String("The Team".into()),
-        Value::Ref(alice_org),
-    ]).unwrap();
+    let team = db.insert_with("teams", |b| b
+        .set_string_by_name("name", "The Team")
+        .set_ref_by_name("org_id", alice_org)
+        .build()).unwrap();
 
     // Task in the team
-    let task = db.insert("tasks", &["title", "team_id"], vec![
-        Value::String("The Task".into()),
-        Value::Ref(team),
-    ]).unwrap();
+    let task = db.insert_with("tasks", |b| b
+        .set_string_by_name("title", "The Task")
+        .set_ref_by_name("team_id", team)
+        .build()).unwrap();
 
     // Set up policies
     db.execute("CREATE POLICY ON orgs FOR SELECT WHERE owner_id = @viewer").unwrap();
@@ -2272,33 +2312,41 @@ fn policy_chain_update_at_each_level() {
 
     // Initially Alice sees the task
     assert_eq!(alice_query.rows().len(), 1);
-    assert_eq!(alice_query.rows()[0].id, task);
+    assert_eq!(alice_query.rows()[0].0, task);
     assert_eq!(bob_query.rows().len(), 0);
 
     // Update 1: Move team to Bob's org
-    db.update("teams", team, &[("org_id", Value::Ref(bob_org))]).unwrap();
+    db.update_with("teams", team, |b| b
+        .set_ref_by_name("org_id", bob_org)
+        .build()).unwrap();
 
     assert_eq!(alice_query.rows().len(), 0, "Alice should not see task after team moved");
     assert_eq!(bob_query.rows().len(), 1, "Bob should see task after team moved");
-    assert_eq!(bob_query.rows()[0].id, task);
+    assert_eq!(bob_query.rows()[0].0, task);
 
     // Update 2: Move team back to Alice's org
-    db.update("teams", team, &[("org_id", Value::Ref(alice_org))]).unwrap();
+    db.update_with("teams", team, |b| b
+        .set_ref_by_name("org_id", alice_org)
+        .build()).unwrap();
 
     assert_eq!(alice_query.rows().len(), 1, "Alice should see task again");
     assert_eq!(bob_query.rows().len(), 0, "Bob should not see task anymore");
 
     // Update 3: Transfer org ownership
-    db.update("orgs", alice_org, &[("owner_id", Value::Ref(bob_id))]).unwrap();
+    db.update_with("orgs", alice_org, |b| b
+        .set_ref_by_name("owner_id", bob_id)
+        .build()).unwrap();
 
     assert_eq!(alice_query.rows().len(), 0, "Alice should not see task after org transfer");
     assert_eq!(bob_query.rows().len(), 1, "Bob should see task after org transfer");
 
     // Update 4: Update the task itself (should not change visibility)
-    db.update("tasks", task, &[("title", Value::String("Updated Task".into()))]).unwrap();
+    db.update_with("tasks", task, |b| b
+        .set_string_by_name("title", "Updated Task")
+        .build()).unwrap();
 
     assert_eq!(bob_query.rows().len(), 1);
-    assert_eq!(bob_query.rows()[0].values[0], Value::String("Updated Task".into()));
+    assert_eq!(bob_query.rows()[0].1.get_by_name("tasks.title"), Some(RowValue::String("Updated Task")));
 }
 
 // ========== Reverse JOIN Tests ==========
@@ -2333,7 +2381,10 @@ fn incremental_query_reverse_join_basic() {
     };
 
     // Assign Alice to issue1 only (issue2 is unassigned)
-    db.insert("IssueAssignees", &["issue", "user"], vec![Value::Ref(issue1_id), Value::Ref(alice_id)]).unwrap();
+    db.insert_with("IssueAssignees", |b| b
+        .set_ref_by_name("issue", issue1_id)
+        .set_ref_by_name("user", alice_id)
+        .build()).unwrap();
 
     // Create reverse JOIN query: find issues assigned to Alice
     let query = db.incremental_query(
@@ -2345,10 +2396,11 @@ fn incremental_query_reverse_join_basic() {
     // Should return issue1 only (assigned to Alice)
     let rows = query.rows();
     assert_eq!(rows.len(), 1, "Should find 1 issue assigned to Alice");
-    // The output should be Issues columns: title, priority
-    assert_eq!(rows[0].values.len(), 2, "Should have 2 columns from Issues");
-    assert_eq!(rows[0].values[0], Value::String("Bug 1".to_string()));
-    assert_eq!(rows[0].values[1], Value::String("high".to_string()));
+    // The output should be Issues columns: id, title, priority
+    assert_eq!(rows[0].1.descriptor.columns.len(), 3, "Should have 3 columns from Issues (id, title, priority)");
+    assert_eq!(rows[0].1.get_by_name("Issues.id"), Some(RowValue::Ref(issue1_id)));
+    assert_eq!(rows[0].1.get_by_name("Issues.title"), Some(RowValue::String("Bug 1")));
+    assert_eq!(rows[0].1.get_by_name("Issues.priority"), Some(RowValue::String("high")));
 }
 
 #[test]
@@ -2374,7 +2426,10 @@ fn incremental_query_reverse_join_no_filter() {
     };
 
     // Assign Alice to issue1
-    db.insert("IssueAssignees", &["issue", "user"], vec![Value::Ref(issue1_id), Value::Ref(alice_id)]).unwrap();
+    db.insert_with("IssueAssignees", |b| b
+        .set_ref_by_name("issue", issue1_id)
+        .set_ref_by_name("user", alice_id)
+        .build()).unwrap();
 
     // Query without WHERE - should return all issues that have ANY assignee
     let query = db.incremental_query(
@@ -2383,7 +2438,7 @@ fn incremental_query_reverse_join_no_filter() {
 
     let rows = query.rows();
     assert_eq!(rows.len(), 1, "Should find 1 issue (the one with an assignee)");
-    assert_eq!(rows[0].values[0], Value::String("Bug 1".to_string()));
+    assert_eq!(rows[0].1.get_by_name("Issues.title"), Some(RowValue::String("Bug 1")));
 }
 
 #[test]
@@ -2409,8 +2464,14 @@ fn incremental_query_reverse_join_with_from_table_filter() {
     };
 
     // Assign Alice to both issues
-    db.insert("IssueAssignees", &["issue", "user"], vec![Value::Ref(issue1_id), Value::Ref(alice_id)]).unwrap();
-    db.insert("IssueAssignees", &["issue", "user"], vec![Value::Ref(issue2_id), Value::Ref(alice_id)]).unwrap();
+    db.insert_with("IssueAssignees", |b| b
+        .set_ref_by_name("issue", issue1_id)
+        .set_ref_by_name("user", alice_id)
+        .build()).unwrap();
+    db.insert_with("IssueAssignees", |b| b
+        .set_ref_by_name("issue", issue2_id)
+        .set_ref_by_name("user", alice_id)
+        .build()).unwrap();
 
     // Filter by priority on Issues table
     let query = db.incremental_query(
@@ -2419,8 +2480,8 @@ fn incremental_query_reverse_join_with_from_table_filter() {
 
     let rows = query.rows();
     assert_eq!(rows.len(), 1, "Should find 1 low priority issue");
-    assert_eq!(rows[0].values[0], Value::String("Bug 2".to_string()));
-    assert_eq!(rows[0].values[1], Value::String("low".to_string()));
+    assert_eq!(rows[0].1.get_by_name("Issues.title"), Some(RowValue::String("Bug 2")));
+    assert_eq!(rows[0].1.get_by_name("Issues.priority"), Some(RowValue::String("low")));
 }
 
 #[test]
@@ -2454,10 +2515,19 @@ fn incremental_query_reverse_join_combined_filters() {
     };
 
     // Alice assigned to issue1 (high) and issue2 (low)
-    db.insert("IssueAssignees", &["issue", "user"], vec![Value::Ref(issue1_id), Value::Ref(alice_id)]).unwrap();
-    db.insert("IssueAssignees", &["issue", "user"], vec![Value::Ref(issue2_id), Value::Ref(alice_id)]).unwrap();
+    db.insert_with("IssueAssignees", |b| b
+        .set_ref_by_name("issue", issue1_id)
+        .set_ref_by_name("user", alice_id)
+        .build()).unwrap();
+    db.insert_with("IssueAssignees", |b| b
+        .set_ref_by_name("issue", issue2_id)
+        .set_ref_by_name("user", alice_id)
+        .build()).unwrap();
     // Bob assigned to issue3 (low)
-    db.insert("IssueAssignees", &["issue", "user"], vec![Value::Ref(issue3_id), Value::Ref(bob_id)]).unwrap();
+    db.insert_with("IssueAssignees", |b| b
+        .set_ref_by_name("issue", issue3_id)
+        .set_ref_by_name("user", bob_id)
+        .build()).unwrap();
 
     // Find low priority issues assigned to Alice
     let query = db.incremental_query(
@@ -2469,7 +2539,7 @@ fn incremental_query_reverse_join_combined_filters() {
 
     let rows = query.rows();
     assert_eq!(rows.len(), 1, "Should find 1 low priority issue assigned to Alice");
-    assert_eq!(rows[0].values[0], Value::String("Bug 2".to_string()));
+    assert_eq!(rows[0].1.get_by_name("Issues.title"), Some(RowValue::String("Bug 2")));
 }
 
 #[test]
@@ -2491,7 +2561,10 @@ fn incremental_query_reverse_join_with_alias() {
     };
 
     // Assign Alice to issue1
-    db.insert("IssueAssignees", &["issue", "user"], vec![Value::Ref(issue1_id), Value::Ref(alice_id)]).unwrap();
+    db.insert_with("IssueAssignees", |b| b
+        .set_ref_by_name("issue", issue1_id)
+        .set_ref_by_name("user", alice_id)
+        .build()).unwrap();
 
     // Query with alias "i" for Issues table (matches app pattern)
     let query = db.incremental_query(
@@ -2503,13 +2576,13 @@ fn incremental_query_reverse_join_with_alias() {
 
     let rows = query.rows();
     assert_eq!(rows.len(), 1, "Should find 1 issue assigned to Alice");
-    assert_eq!(rows[0].values[0], Value::String("Bug 1".to_string()));
-    assert_eq!(rows[0].values[1], Value::String("high".to_string()));
+    assert_eq!(rows[0].1.get_by_name("Issues.title"), Some(RowValue::String("Bug 1")));
+    assert_eq!(rows[0].1.get_by_name("Issues.priority"), Some(RowValue::String("high")));
 }
 
 #[test]
-fn incremental_query_reverse_join_subscribe_delta() {
-    // Test that subscribe_delta works for reverse JOINs - this mirrors what the WASM layer does
+fn incremental_query_reverse_join_subscribe() {
+    // Test that subscribe works for reverse JOINs - this mirrors what the WASM layer does
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let db = Database::in_memory();
@@ -2528,7 +2601,10 @@ fn incremental_query_reverse_join_subscribe_delta() {
     };
 
     // Assign Alice to issue1
-    db.insert("IssueAssignees", &["issue", "user"], vec![Value::Ref(issue1_id), Value::Ref(alice_id)]).unwrap();
+    db.insert_with("IssueAssignees", |b| b
+        .set_ref_by_name("issue", issue1_id)
+        .set_ref_by_name("user", alice_id)
+        .build()).unwrap();
 
     // Create query with alias
     let query = db.incremental_query(
@@ -2544,7 +2620,7 @@ fn incremental_query_reverse_join_subscribe_delta() {
     let initial_count = Arc::new(AtomicUsize::new(0));
     let initial_count_clone = initial_count.clone();
 
-    let _listener = query.subscribe_delta(Box::new(move |delta| {
+    let _listener = query.subscribe(Box::new(move |delta| {
         callback_count_clone.fetch_add(1, Ordering::SeqCst);
         initial_count_clone.fetch_add(delta.len(), Ordering::SeqCst);
     }));

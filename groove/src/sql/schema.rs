@@ -1,3 +1,7 @@
+use std::sync::Arc;
+
+use super::row_buffer::RowDescriptor;
+
 /// Column type definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColumnType {
@@ -15,6 +19,9 @@ pub enum ColumnType {
     String,
     /// Raw bytes: varint length in header, data in body
     Bytes,
+    /// Primary key ObjectId: 16 bytes (u128 object ID).
+    /// Unlike Ref, this doesn't reference another table - it's the row's own identity.
+    ObjectId,
     /// Reference to another table: 16 bytes (u128 object ID)
     Ref(String),
     /// Large binary data, potentially chunked via ContentRef.
@@ -23,6 +30,9 @@ pub enum ColumnType {
     Blob,
     /// Array of blobs.
     BlobArray,
+    /// Array of rows (used for ARRAY_AGG and array subqueries).
+    /// Contains the descriptor for each item in the array.
+    Array(Arc<RowDescriptor>),
 }
 
 impl ColumnType {
@@ -35,6 +45,7 @@ impl ColumnType {
                 | ColumnType::U32
                 | ColumnType::I64
                 | ColumnType::F64
+                | ColumnType::ObjectId
                 | ColumnType::Ref(_)
         )
     }
@@ -46,11 +57,20 @@ impl ColumnType {
             ColumnType::I32 | ColumnType::U32 => Some(4),
             ColumnType::I64 => Some(8),
             ColumnType::F64 => Some(8),
+            ColumnType::ObjectId => Some(16),
             ColumnType::Ref(_) => Some(16),
-            ColumnType::String | ColumnType::Bytes | ColumnType::Blob | ColumnType::BlobArray => {
-                None
-            }
+            ColumnType::String
+            | ColumnType::Bytes
+            | ColumnType::Blob
+            | ColumnType::BlobArray
+            | ColumnType::Array(_) => None,
         }
+    }
+
+    /// Returns the fixed size in bytes accounting for nullability.
+    /// Nullable fixed-size types have an extra presence byte.
+    pub fn fixed_size_nullable(&self, nullable: bool) -> Option<usize> {
+        self.fixed_size().map(|size| if nullable { size + 1 } else { size })
     }
 }
 
@@ -81,10 +101,17 @@ impl ColumnDef {
     pub fn optional(name: impl Into<String>, ty: ColumnType) -> Self {
         Self::new(name, ty, true)
     }
+
+    /// Create the standard `id` column (ObjectId primary key).
+    /// This is a non-nullable ObjectId column.
+    pub fn id() -> Self {
+        Self::new("id", ColumnType::ObjectId, false)
+    }
 }
 
 /// Table schema definition.
-/// Each table implicitly has an `id` column (Object ID / UUIDv7).
+/// Every table has an explicit `id` column (ObjectId / UUIDv7) as the first column.
+/// This is automatically prepended by `TableSchema::new()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableSchema {
     pub name: String,
@@ -93,7 +120,20 @@ pub struct TableSchema {
 
 impl TableSchema {
     /// Create a new table schema.
+    /// Automatically prepends the `id` column as the first column.
     pub fn new(name: impl Into<String>, columns: Vec<ColumnDef>) -> Self {
+        let mut all_columns = Vec::with_capacity(columns.len() + 1);
+        all_columns.push(ColumnDef::id());
+        all_columns.extend(columns);
+        TableSchema {
+            name: name.into(),
+            columns: all_columns,
+        }
+    }
+
+    /// Create a table schema without auto-prepending the `id` column.
+    /// Used internally for combined/qualified schemas from JOINs.
+    pub fn new_raw(name: impl Into<String>, columns: Vec<ColumnDef>) -> Self {
         TableSchema {
             name: name.into(),
             columns,
@@ -129,11 +169,11 @@ impl TableSchema {
     /// Create a combined schema by joining this schema with another.
     ///
     /// The resulting schema has columns from both tables, prefixed with their
-    /// table names (e.g., "documents.title", "folders.name").
+    /// table names (e.g., "documents.id", "documents.title", "folders.id", "folders.name").
     pub fn combine(&self, other: &TableSchema) -> TableSchema {
         let mut combined_columns = Vec::new();
 
-        // Add columns from this table with qualified names
+        // Add columns from this table with qualified names (including id)
         for col in &self.columns {
             combined_columns.push(ColumnDef {
                 name: format!("{}.{}", self.name, col.name),
@@ -142,7 +182,7 @@ impl TableSchema {
             });
         }
 
-        // Add columns from other table with qualified names
+        // Add columns from other table with qualified names (including id)
         for col in &other.columns {
             combined_columns.push(ColumnDef {
                 name: format!("{}.{}", other.name, col.name),
@@ -151,10 +191,42 @@ impl TableSchema {
             });
         }
 
-        TableSchema {
-            name: format!("{}+{}", self.name, other.name),
-            columns: combined_columns,
+        TableSchema::new_raw(format!("{}+{}", self.name, other.name), combined_columns)
+    }
+
+    /// Extend this schema with columns from another table.
+    ///
+    /// Unlike `combine()`, this preserves existing column names unchanged and
+    /// only qualifies the new table's columns. This is used for chain joins
+    /// where the input already has qualified column names.
+    pub fn extend_with(&self, other: &TableSchema) -> TableSchema {
+        let mut combined_columns = self.columns.clone();
+
+        // Add columns from other table with qualified names (including id)
+        for col in &other.columns {
+            combined_columns.push(ColumnDef {
+                name: format!("{}.{}", other.name, col.name),
+                ty: col.ty.clone(),
+                nullable: col.nullable,
+            });
         }
+
+        TableSchema::new_raw(format!("{}+{}", self.name, other.name), combined_columns)
+    }
+
+    /// Create a schema with qualified column names (table.column format).
+    ///
+    /// This is used when projecting a single table from a JOIN result.
+    pub fn qualify(&self, table_name: &str) -> TableSchema {
+        let qualified_columns = self.columns.iter().map(|col| {
+            ColumnDef {
+                name: format!("{}.{}", table_name, col.name),
+                ty: col.ty.clone(),
+                nullable: col.nullable,
+            }
+        }).collect();
+
+        TableSchema::new_raw(table_name.to_string(), qualified_columns)
     }
 
     /// Count of variable-size columns (for header).
@@ -193,6 +265,8 @@ impl TableSchema {
                 ColumnType::U32 => 7,
                 ColumnType::Blob => 8,
                 ColumnType::BlobArray => 9,
+                ColumnType::ObjectId => 10,
+                ColumnType::Array(_) => panic!("Array columns cannot be serialized in table schemas"),
             };
             buf.push(type_tag);
 
@@ -289,6 +363,7 @@ impl TableSchema {
                 7 => ColumnType::U32,
                 8 => ColumnType::Blob,
                 9 => ColumnType::BlobArray,
+                10 => ColumnType::ObjectId,
                 _ => return Err(SchemaError::InvalidTypeTag(type_tag)),
             };
 
@@ -306,7 +381,7 @@ impl TableSchema {
             });
         }
 
-        Ok(TableSchema { name, columns })
+        Ok(TableSchema::new_raw(name, columns))
     }
 }
 

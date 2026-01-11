@@ -1,272 +1,468 @@
 import { test, expect } from '@playwright/test';
 
-test.describe('Groove Demo App', () => {
+test.describe('Issue Tracker App', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('/');
-    // Wait for app to initialize (should see "Users (0)" not "Loading...")
-    await expect(page.getByRole('heading', { name: /Users \(\d+\)/ })).toBeVisible({ timeout: 10000 });
+    // Capture all console output and errors
+    page.on('console', msg => console.log('CONSOLE:', msg.type(), msg.text().substring(0, 200)));
+    page.on('pageerror', err => console.log('PAGE ERROR:', err.message));
+    // Use non-persistent mode to start fresh each test
+    await page.goto('/?persist=false');
+    // Wait for app to initialize and fake data to load
+    await expect(page.getByRole('heading', { name: 'Issue Tracker' })).toBeVisible({ timeout: 15000 });
+    // Wait for issues to load
+    await expect(page.getByRole('button', { name: /All Issues/ })).toBeVisible();
   });
 
-  test('displays initial empty state', async ({ page }) => {
-    await expect(page.getByRole('heading', { name: 'Groove Demo' })).toBeVisible();
-    await expect(page.getByText('Real-time reactive database')).toBeVisible();
+  test('displays initial state with fake data', async ({ page }) => {
+    // Sidebar should be visible
+    await expect(page.getByRole('heading', { name: 'Issue Tracker' })).toBeVisible();
 
-    // Check all panels are empty initially
-    await expect(page.getByRole('heading', { name: 'Users (0)' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Folders (0)' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Notes (0)' })).toBeVisible();
+    // All Issues and My Issues buttons should exist
+    await expect(page.getByRole('button', { name: /All Issues/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'My Issues' })).toBeVisible();
 
-    await expect(page.getByText('No users yet')).toBeVisible();
-    await expect(page.getByText('No notes yet. Create one!')).toBeVisible();
+    // Projects section should be visible
+    await expect(page.getByText('Projects')).toBeVisible();
+
+    // Filter bar should be visible
+    await expect(page.getByText('Filters:')).toBeVisible();
+
+    // New Issue button in header
+    await expect(page.getByRole('button', { name: 'New Issue' })).toBeVisible();
   });
 
-  test('creates a user', async ({ page }) => {
-    const userInput = page.getByPlaceholder('New user name...');
-    const addButton = page.getByRole('button', { name: 'Add' }).first();
-
-    await userInput.fill('Alice');
-    await addButton.click();
-
-    // Verify user was created
-    await expect(page.getByRole('heading', { name: 'Users (1)' })).toBeVisible();
-    // Use locator within the users panel to avoid matching debug section
-    await expect(page.locator('strong').getByText('Alice', { exact: true })).toBeVisible();
-    await expect(page.locator('small').getByText('alice@example.com')).toBeVisible();
-
-    // Input should be cleared
-    await expect(userInput).toHaveValue('');
+  test('shows projects in sidebar', async ({ page }) => {
+    // Default projects from fake data
+    await expect(page.getByRole('button', { name: /Frontend/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Backend/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Infrastructure/ })).toBeVisible();
   });
 
-  test('creates multiple users', async ({ page }) => {
-    const userInput = page.getByPlaceholder('New user name...');
-    const addButton = page.getByRole('button', { name: 'Add' }).first();
+  test('filters by project when clicking sidebar', async ({ page }) => {
+    // Click on Frontend project
+    await page.getByRole('button', { name: /Frontend/ }).click();
 
-    // Create first user
-    await userInput.fill('Alice');
-    await addButton.click();
-    await expect(page.getByRole('heading', { name: 'Users (1)' })).toBeVisible();
-
-    // Create second user
-    await userInput.fill('Bob');
-    await addButton.click();
-    await expect(page.getByRole('heading', { name: 'Users (2)' })).toBeVisible();
-
-    // Both should be visible
-    await expect(page.locator('strong').getByText('Alice', { exact: true })).toBeVisible();
-    await expect(page.locator('strong').getByText('Bob', { exact: true })).toBeVisible();
+    // Button should now be selected (secondary variant)
+    await expect(page.getByRole('button', { name: /Frontend/ })).toHaveClass(/secondary/);
   });
 
-  test('creates a folder for selected user', async ({ page }) => {
-    // First create a user
-    await page.getByPlaceholder('New user name...').fill('Alice');
-    await page.getByRole('button', { name: 'Add' }).first().click();
-    await expect(page.getByRole('heading', { name: 'Users (1)' })).toBeVisible();
+  test('toggles My Issues view', async ({ page }) => {
+    // Click My Issues
+    await page.getByRole('button', { name: 'My Issues' }).click();
 
-    // User should be auto-selected, so folder input should be enabled
-    const folderInput = page.getByPlaceholder('New folder...');
-    await expect(folderInput).toBeEnabled();
-
-    // Create a folder
-    await folderInput.fill('Work');
-    await page.getByRole('button', { name: 'Add' }).nth(1).click();
-
-    // Verify folder was created
-    await expect(page.getByRole('heading', { name: 'Folders (1)' })).toBeVisible();
-    await expect(page.locator('strong').getByText('Work', { exact: true })).toBeVisible();
-    await expect(page.getByText('Owner: Alice')).toBeVisible();
+    // Button should be selected
+    await expect(page.getByRole('button', { name: 'My Issues' })).toHaveClass(/secondary/);
   });
 
-  test('creates a note for selected user', async ({ page }) => {
-    // First create a user
-    await page.getByPlaceholder('New user name...').fill('Alice');
-    await page.getByRole('button', { name: 'Add' }).first().click();
-    await expect(page.getByRole('heading', { name: 'Users (1)' })).toBeVisible();
+  test('creates a new issue', async ({ page }) => {
+    // Get initial issue count
+    const allIssuesButton = page.getByRole('button', { name: /All Issues/ });
+    const initialCount = await allIssuesButton.textContent();
+    const initialNumber = parseInt(initialCount?.match(/\d+/)?.[0] || '0');
 
-    // Create a note
-    const noteInput = page.getByPlaceholder('New note title...');
-    await expect(noteInput).toBeEnabled();
-    await noteInput.fill('My First Note');
-    await page.getByRole('button', { name: 'Add Note' }).click();
+    // Open the issue form
+    await page.getByRole('button', { name: 'New Issue' }).click();
 
-    // Verify note was created
-    await expect(page.getByRole('heading', { name: 'Notes (1)' })).toBeVisible();
-    await expect(page.locator('strong').getByText('My First Note', { exact: true })).toBeVisible();
-    await expect(page.getByText('By: Alice')).toBeVisible();
+    // Form dialog should appear
+    await expect(page.getByRole('dialog', { name: 'New Issue' })).toBeVisible({ timeout: 5000 });
+
+    // Fill in the title
+    await page.getByPlaceholder('Issue title...').fill('Test Issue from E2E');
+    await page.getByPlaceholder('Describe the issue...').fill('This is a test description');
+
+    // Submit
+    await page.getByRole('button', { name: 'Create Issue' }).click();
+
+    // Wait for dialog to close
+    await expect(page.getByRole('dialog', { name: 'New Issue' })).not.toBeVisible({ timeout: 5000 });
+
+    // Verify issue was created by checking count increased
+    await expect(allIssuesButton).toContainText(String(initialNumber + 1), { timeout: 5000 });
   });
 
-  test('updates note content', async ({ page }) => {
-    // Create user and note
-    await page.getByPlaceholder('New user name...').fill('Alice');
-    await page.getByRole('button', { name: 'Add' }).first().click();
-    await page.getByPlaceholder('New note title...').fill('Test Note');
-    await page.getByRole('button', { name: 'Add Note' }).click();
+  test('cancels issue creation', async ({ page }) => {
+    await page.getByRole('button', { name: 'New Issue' }).click();
+    await expect(page.getByRole('dialog', { name: 'New Issue' })).toBeVisible({ timeout: 5000 });
 
-    // Find and update the note content
-    const textarea = page.getByPlaceholder('Write something...');
-    await textarea.fill('This is my updated content');
+    await page.getByPlaceholder('Issue title...').fill('Should not be created');
+    await page.getByRole('button', { name: 'Cancel' }).click();
 
-    // Content should be persisted (check debug section)
-    await page.getByText('Debug: Raw Data').click();
-    await expect(page.locator('pre').getByText('This is my updated content')).toBeVisible();
+    // Dialog should close
+    await expect(page.getByRole('dialog', { name: 'New Issue' })).not.toBeVisible({ timeout: 5000 });
+
+    // Issue should not exist
+    await expect(page.getByText('Should not be created')).not.toBeVisible();
+  });
+});
+
+test.describe('Filter Bar', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/?persist=false');
+    await expect(page.getByRole('heading', { name: 'Issue Tracker' })).toBeVisible({ timeout: 15000 });
+    await expect(page.getByRole('button', { name: /All Issues/ })).toBeVisible();
   });
 
-  test('deletes a note', async ({ page }) => {
-    // Create user and notes
-    await page.getByPlaceholder('New user name...').fill('Alice');
-    await page.getByRole('button', { name: 'Add' }).first().click();
-    await expect(page.getByRole('heading', { name: 'Users (1)' })).toBeVisible();
+  test('filters by status', async ({ page }) => {
+    // Get all comboboxes - status is the first one
+    const comboboxes = page.getByRole('combobox');
+    const statusTrigger = comboboxes.nth(0);
 
-    await page.getByPlaceholder('New note title...').fill('Note 1');
-    await page.getByRole('button', { name: 'Add Note' }).click();
-    await expect(page.getByRole('heading', { name: 'Notes (1)' })).toBeVisible();
+    // Verify initial state
+    await expect(statusTrigger).toContainText('All Statuses');
 
-    await page.getByPlaceholder('New note title...').fill('Note 2');
-    await page.getByRole('button', { name: 'Add Note' }).click();
-    await expect(page.getByRole('heading', { name: 'Notes (2)' })).toBeVisible();
+    await statusTrigger.click();
+    await page.getByRole('option', { name: 'In Progress' }).click();
 
-    // Delete the first note
-    const deleteButtons = page.getByRole('button', { name: 'Delete' });
-    await deleteButtons.first().click();
-
-    // Should have 1 note remaining
-    await expect(page.getByRole('heading', { name: 'Notes (1)' })).toBeVisible();
-    await expect(page.locator('strong').getByText('Note 2', { exact: true })).toBeVisible();
+    // The trigger should now show "In Progress"
+    await expect(statusTrigger).toContainText('In Progress');
   });
 
-  test('filters notes by "My Notes" tab', async ({ page }) => {
-    // Create two users
-    await page.getByPlaceholder('New user name...').fill('Alice');
-    await page.getByRole('button', { name: 'Add' }).first().click();
-    await expect(page.getByRole('heading', { name: 'Users (1)' })).toBeVisible();
+  test('filters by priority', async ({ page }) => {
+    // Priority is the second combobox
+    const comboboxes = page.getByRole('combobox');
+    const priorityTrigger = comboboxes.nth(1);
 
-    // Create note for Alice
-    await page.getByPlaceholder('New note title...').fill('Alice Note');
-    await page.getByRole('button', { name: 'Add Note' }).click();
-    await expect(page.getByRole('heading', { name: 'Notes (1)' })).toBeVisible();
+    await expect(priorityTrigger).toContainText('All Priorities');
 
-    // Create second user
-    await page.getByPlaceholder('New user name...').fill('Bob');
-    await page.getByRole('button', { name: 'Add' }).first().click();
-    await expect(page.getByRole('heading', { name: 'Users (2)' })).toBeVisible();
+    await priorityTrigger.click();
+    await page.getByRole('option', { name: 'High' }).click();
 
-    // Select Bob
-    await page.locator('strong').getByText('Bob', { exact: true }).click();
-
-    // Create note for Bob
-    await page.getByPlaceholder('New note title...').fill('Bob Note');
-    await page.getByRole('button', { name: 'Add Note' }).click();
-    await expect(page.getByRole('heading', { name: 'Notes (2)' })).toBeVisible();
-
-    // Both notes visible in "All Notes"
-    await expect(page.locator('strong').getByText('Alice Note', { exact: true })).toBeVisible();
-    await expect(page.locator('strong').getByText('Bob Note', { exact: true })).toBeVisible();
-
-    // Filter to "My Notes" (Bob's)
-    await page.getByRole('button', { name: 'My Notes' }).click();
-
-    // Should only see Bob's note
-    await expect(page.locator('strong').getByText('Bob Note', { exact: true })).toBeVisible();
-    await expect(page.locator('strong').getByText('Alice Note', { exact: true })).not.toBeVisible();
+    await expect(priorityTrigger).toContainText('High');
   });
 
-  test('creates note with folder reference', async ({ page }) => {
-    // Create user
-    await page.getByPlaceholder('New user name...').fill('Alice');
-    await page.getByRole('button', { name: 'Add' }).first().click();
-    await expect(page.getByRole('heading', { name: 'Users (1)' })).toBeVisible();
+  test('filters by assignee', async ({ page }) => {
+    // Assignee is the third combobox
+    const comboboxes = page.getByRole('combobox');
+    const assigneeTrigger = comboboxes.nth(2);
 
-    // Create folder
-    await page.getByPlaceholder('New folder...').fill('Work');
-    await page.getByRole('button', { name: 'Add' }).nth(1).click();
-    await expect(page.getByRole('heading', { name: 'Folders (1)' })).toBeVisible();
+    await expect(assigneeTrigger).toContainText('All Assignees');
 
-    // Create note without folder (root is selected by default)
-    await page.getByPlaceholder('New note title...').fill('Root Note');
-    await page.getByRole('button', { name: 'Add Note' }).click();
-    await expect(page.getByRole('heading', { name: 'Notes (1)' })).toBeVisible();
+    await assigneeTrigger.click();
+    await page.getByRole('option', { name: 'Alice Chen' }).click();
 
-    // Select the Work folder
-    await page.locator('strong').getByText('Work', { exact: true }).click();
-    await expect(page.getByRole('button', { name: 'In Folder' })).toBeEnabled();
-
-    // Create note with folder reference
-    await page.getByPlaceholder('New note title...').fill('Work Note');
-    await page.getByRole('button', { name: 'Add Note' }).click();
-    await expect(page.getByRole('heading', { name: 'Notes (2)' })).toBeVisible();
-
-    // Verify both notes exist with correct folder associations
-    await expect(page.locator('strong').getByText('Root Note', { exact: true })).toBeVisible();
-    await expect(page.locator('strong').getByText('Work Note', { exact: true })).toBeVisible();
-
-    // Check debug section shows both notes with correct folder values
-    await page.getByText('Debug: Raw Data').click();
-    const debugText = await page.locator('pre').textContent();
-    expect(debugText).toContain('"title": "Root Note"');
-    expect(debugText).toContain('"folder": null');
-    expect(debugText).toContain('"title": "Work Note"');
-    // The Work Note should have a folder ID (not null)
-    expect(debugText).toMatch(/"folder": "01[A-Z0-9]+"/);
+    await expect(assigneeTrigger).toContainText('Alice Chen');
   });
 
-  test('folder inputs are disabled without user selected', async ({ page }) => {
-    // Initially no user is selected
-    const folderInput = page.getByPlaceholder('New folder...');
-    const noteInput = page.getByPlaceholder('New note title...');
+  test('filters by label', async ({ page }) => {
+    // Label is the fourth combobox
+    const comboboxes = page.getByRole('combobox');
+    const labelTrigger = comboboxes.nth(3);
 
-    // These should be disabled
-    await expect(folderInput).toBeDisabled();
-    await expect(noteInput).toBeDisabled();
+    await expect(labelTrigger).toContainText('All Labels');
+
+    await labelTrigger.click();
+    await page.getByRole('option', { name: 'bug' }).click();
+
+    await expect(labelTrigger).toContainText('bug');
   });
 
-  test('user can be selected by clicking', async ({ page }) => {
-    // Create two users
-    await page.getByPlaceholder('New user name...').fill('Alice');
-    await page.getByRole('button', { name: 'Add' }).first().click();
+  test('clears all filters', async ({ page }) => {
+    const comboboxes = page.getByRole('combobox');
 
-    await page.getByPlaceholder('New user name...').fill('Bob');
-    await page.getByRole('button', { name: 'Add' }).first().click();
+    // Apply a status filter
+    await comboboxes.nth(0).click();
+    await page.getByRole('option', { name: 'Done' }).click();
 
-    // Click Alice to select her
-    await page.locator('strong').getByText('Alice', { exact: true }).click();
+    // Apply a priority filter
+    await comboboxes.nth(1).click();
+    await page.getByRole('option', { name: 'Urgent' }).click();
 
-    // Alice's card should be highlighted (selected)
-    // Create a note to verify Alice is selected
-    await page.getByPlaceholder('New note title...').fill('Test');
-    await page.getByRole('button', { name: 'Add Note' }).click();
+    // Clear button should appear
+    await expect(page.getByRole('button', { name: 'Clear' })).toBeVisible();
 
-    await expect(page.getByText('By: Alice')).toBeVisible();
+    // Click clear
+    await page.getByRole('button', { name: 'Clear' }).click();
+
+    // Filters should be reset
+    await expect(comboboxes.nth(0)).toContainText('All Statuses');
+    await expect(comboboxes.nth(1)).toContainText('All Priorities');
+
+    // Clear button should be hidden
+    await expect(page.getByRole('button', { name: 'Clear' })).not.toBeVisible();
   });
 
-  test('debug section shows raw data', async ({ page }) => {
-    // Create a user
-    await page.getByPlaceholder('New user name...').fill('Alice');
-    await page.getByRole('button', { name: 'Add' }).first().click();
+  test('combines multiple filters', async ({ page }) => {
+    const comboboxes = page.getByRole('combobox');
 
-    // Open debug section
-    await page.getByText('Debug: Raw Data').click();
+    // Apply status filter
+    await comboboxes.nth(0).click();
+    await page.getByRole('option', { name: 'Todo' }).click();
 
-    // Should show JSON data in the pre element
-    const debugPre = page.locator('pre');
-    await expect(debugPre).toContainText('"name": "Alice"');
-    await expect(debugPre).toContainText('"email": "alice@example.com"');
+    // Apply priority filter
+    await comboboxes.nth(1).click();
+    await page.getByRole('option', { name: 'Medium' }).click();
+
+    // Both should be applied
+    await expect(comboboxes.nth(0)).toContainText('Todo');
+    await expect(comboboxes.nth(1)).toContainText('Medium');
+
+    // Clear should appear
+    await expect(page.getByRole('button', { name: 'Clear' })).toBeVisible();
+  });
+});
+
+test.describe('Issue List', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/?persist=false&items=50');
+    await expect(page.getByRole('heading', { name: 'Issue Tracker' })).toBeVisible({ timeout: 15000 });
+    await expect(page.getByRole('button', { name: /All Issues/ })).toBeVisible();
   });
 
-  test('creates user with Enter key', async ({ page }) => {
-    const userInput = page.getByPlaceholder('New user name...');
-
-    await userInput.fill('Alice');
-    await userInput.press('Enter');
-
-    await expect(page.getByRole('heading', { name: 'Users (1)' })).toBeVisible();
-    await expect(page.locator('strong').getByText('Alice', { exact: true })).toBeVisible();
+  test('shows pagination for many issues', async ({ page }) => {
+    // With 50 items and default page size of 20, should show pagination
+    await expect(page.getByText(/Showing \d+-\d+ of \d+/)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Next' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Previous' })).toBeVisible();
   });
 
-  test('features section is visible', async ({ page }) => {
-    await expect(page.getByRole('heading', { name: 'Features Demonstrated' })).toBeVisible();
-    await expect(page.getByText('Real-time Subscriptions:')).toBeVisible();
-    await expect(page.getByText('Binary Encoding:')).toBeVisible();
-    await expect(page.getByText('Relations:')).toBeVisible();
-    await expect(page.getByText('Client-side Filters:')).toBeVisible();
-    await expect(page.getByText('Type-safe API:')).toBeVisible();
+  test('navigates between pages', async ({ page }) => {
+    // Initial state: Previous disabled, Next enabled
+    await expect(page.getByRole('button', { name: 'Previous' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Next' })).toBeEnabled();
+
+    // Click Next
+    await page.getByRole('button', { name: 'Next' }).click();
+
+    // Now Previous should be enabled
+    await expect(page.getByRole('button', { name: 'Previous' })).toBeEnabled();
+
+    // Text should show different range
+    await expect(page.getByText(/Showing 21-/)).toBeVisible();
+
+    // Go back
+    await page.getByRole('button', { name: 'Previous' }).click();
+    await expect(page.getByText(/Showing 1-/)).toBeVisible();
+  });
+
+  test('resets pagination when filter changes', async ({ page }) => {
+    // Go to page 2
+    await page.getByRole('button', { name: 'Next' }).click();
+    await expect(page.getByText(/Showing 21-/)).toBeVisible();
+
+    // Apply a filter - clicking any filter option should reset pagination
+    const statusTrigger = page.getByRole('combobox').nth(0);
+    await statusTrigger.click();
+    await page.getByRole('option', { name: 'In Progress' }).click();
+
+    // Wait for filter to apply
+    await page.waitForTimeout(500);
+
+    // After filtering, either:
+    // 1. Shows "Showing 1-X of Y" (results exist, page reset to 1)
+    // 2. Shows "No issues found" (filter eliminated all results)
+    // 3. No pagination shown at all (fewer than 20 results)
+    // The key test is that we're no longer on page 2 (showing 21-)
+    await expect(page.getByText(/Showing 21-/)).not.toBeVisible();
+  });
+});
+
+test.describe('Issue Detail', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/?persist=false');
+    await expect(page.getByRole('heading', { name: 'Issue Tracker' })).toBeVisible({ timeout: 15000 });
+    await expect(page.getByRole('button', { name: /All Issues/ })).toBeVisible();
+    // Wait for issues to render
+    await page.waitForTimeout(1000);
+  });
+
+  test('opens issue detail when clicking an issue', async ({ page }) => {
+    // Look for issue rows containing issue titles from the fake data
+    // Issues have text like "Fix...", "Add...", etc.
+    const issueText = page.getByText(/Fix login button|Add dark mode|Optimize database/);
+    await issueText.first().click();
+
+    // Wait for dialog to open
+    await expect(page.getByRole('dialog')).toBeVisible({ timeout: 5000 });
+  });
+});
+
+test.describe('Theme Toggle', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/?persist=false');
+    await expect(page.getByRole('heading', { name: 'Issue Tracker' })).toBeVisible({ timeout: 15000 });
+  });
+
+  test('toggles dark mode', async ({ page }) => {
+    // Find the theme toggle button in header (icon-only button without text)
+    const header = page.locator('header');
+    // The theme button is an icon-only button in the header's right section
+    const buttons = header.getByRole('button');
+    // It's one of the buttons that's not "New Issue"
+    const themeButton = buttons.filter({ hasNot: page.getByText('New Issue') }).first();
+
+    // Get initial state
+    const htmlElement = page.locator('html');
+    const initialIsDark = await htmlElement.evaluate(el => el.classList.contains('dark'));
+
+    // Click to toggle
+    await themeButton.click();
+
+    // State should be opposite
+    const newIsDark = await htmlElement.evaluate(el => el.classList.contains('dark'));
+    expect(newIsDark).toBe(!initialIsDark);
+
+    // Toggle back
+    await themeButton.click();
+    const finalIsDark = await htmlElement.evaluate(el => el.classList.contains('dark'));
+    expect(finalIsDark).toBe(initialIsDark);
+  });
+});
+
+test.describe('Sidebar Navigation', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/?persist=false');
+    await expect(page.getByRole('heading', { name: 'Issue Tracker' })).toBeVisible({ timeout: 15000 });
+    await expect(page.getByRole('button', { name: /All Issues/ })).toBeVisible();
+  });
+
+  test('selects All Issues by default', async ({ page }) => {
+    await expect(page.getByRole('button', { name: /All Issues/ })).toHaveClass(/secondary/);
+  });
+
+  test('switches between All Issues and My Issues', async ({ page }) => {
+    // Click My Issues
+    await page.getByRole('button', { name: 'My Issues' }).click();
+    await expect(page.getByRole('button', { name: 'My Issues' })).toHaveClass(/secondary/);
+    await expect(page.getByRole('button', { name: /All Issues/ })).not.toHaveClass(/secondary/);
+
+    // Click back to All Issues
+    await page.getByRole('button', { name: /All Issues/ }).click();
+    await expect(page.getByRole('button', { name: /All Issues/ })).toHaveClass(/secondary/);
+    await expect(page.getByRole('button', { name: 'My Issues' })).not.toHaveClass(/secondary/);
+  });
+
+  test('selects a project and deselects All Issues', async ({ page }) => {
+    // Click Frontend project
+    await page.getByRole('button', { name: /Frontend/ }).click();
+
+    // Frontend should be selected
+    await expect(page.getByRole('button', { name: /Frontend/ })).toHaveClass(/secondary/);
+
+    // All Issues should no longer be selected
+    await expect(page.getByRole('button', { name: /All Issues/ })).not.toHaveClass(/secondary/);
+  });
+
+  test('clicking All Issues deselects project', async ({ page }) => {
+    // First select a project
+    await page.getByRole('button', { name: /Backend/ }).click();
+    await expect(page.getByRole('button', { name: /Backend/ })).toHaveClass(/secondary/);
+
+    // Click All Issues
+    await page.getByRole('button', { name: /All Issues/ }).click();
+
+    // All Issues should be selected, Backend should not
+    await expect(page.getByRole('button', { name: /All Issues/ })).toHaveClass(/secondary/);
+    await expect(page.getByRole('button', { name: /Backend/ })).not.toHaveClass(/secondary/);
+  });
+});
+
+test.describe('Current User', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/?persist=false');
+    await expect(page.getByRole('heading', { name: 'Issue Tracker' })).toBeVisible({ timeout: 15000 });
+    // Wait longer for fake data including user to load
+    await page.waitForTimeout(1000);
+  });
+
+  test('displays current user in header', async ({ page }) => {
+    // Header should show a user name (one of the fake users)
+    // The fake data picks the first user which could be any of: Alice Chen, Bob Smith, Carol Williams, David Jones, Eve Brown
+    const header = page.locator('header');
+    const userNames = ['Alice Chen', 'Bob Smith', 'Carol Williams', 'David Jones', 'Eve Brown'];
+    const userNameRegex = new RegExp(userNames.join('|'));
+    await expect(header.getByText(userNameRegex)).toBeVisible({ timeout: 10000 });
+  });
+});
+
+test.describe('Issue Data Integrity', () => {
+  test.beforeEach(async ({ page }) => {
+    // Capture console logs
+    page.on('console', msg => {
+      const text = msg.text();
+      if (text.includes('DEBUG')) {
+        console.log('BROWSER:', text);
+      }
+    });
+
+    await page.goto('/?persist=false');
+    await expect(page.getByRole('heading', { name: 'Issue Tracker' })).toBeVisible({ timeout: 15000 });
+    // Wait for issues to fully load
+    await page.waitForTimeout(1000);
+  });
+
+  test('issue titles are not truncated in the data', async ({ page }) => {
+    // Check that issue titles from ISSUE_TITLES constant are fully displayed
+    // These are known titles from the fake data
+    const expectedTitles = [
+      'Fix login button not responding on mobile',
+      'Add dark mode support',
+      'Optimize database queries for dashboard',
+      'Implement user avatar upload',
+      'Update API documentation',
+    ];
+
+    // At least one of these full titles should be visible
+    let foundFullTitle = false;
+    for (const title of expectedTitles) {
+      const titleLocator = page.getByText(title, { exact: false });
+      const count = await titleLocator.count();
+      if (count > 0) {
+        foundFullTitle = true;
+        break;
+      }
+    }
+    expect(foundFullTitle).toBe(true);
+  });
+
+  test('issues display labels when they have them', async ({ page }) => {
+    // Labels from the fake data: bug, feature, enhancement, documentation, design, testing, performance, security, refactor, blocked
+    const labelNames = ['bug', 'feature', 'enhancement', 'documentation', 'design', 'testing', 'performance', 'security', 'refactor', 'blocked'];
+    const labelRegex = new RegExp(labelNames.join('|'), 'i');
+
+    // Some issues should have labels visible
+    // Labels are shown as small badges below the issue title
+    const labelsFound = await page.getByText(labelRegex).count();
+    expect(labelsFound).toBeGreaterThan(0);
+  });
+
+  test('issues display assignee avatars', async ({ page }) => {
+    // Collect ALL console logs for debugging
+    page.on('console', msg => {
+      console.log(`BROWSER [${msg.type()}]:`, msg.text());
+    });
+
+    // Also capture errors
+    page.on('pageerror', err => {
+      console.log('BROWSER ERROR:', err.message);
+    });
+
+    // Navigate again to capture logs from the start
+    await page.goto('/?persist=false');
+    await expect(page.getByRole('heading', { name: 'Issue Tracker' })).toBeVisible({ timeout: 15000 });
+
+    // Wait a bit for data to load and logs to appear
+    await page.waitForTimeout(3000);
+
+    // Assignees are displayed as avatar circles with initials
+    // Check for avatar elements with initials like "AC", "BS", "CW", "DJ", "EB"
+    const initials = ['AC', 'BS', 'CW', 'DJ', 'EB'];
+    const initialsRegex = new RegExp(`^(${initials.join('|')})$`);
+
+    // Look for avatar fallback elements containing these initials
+    const avatarsFound = await page.locator('[class*="avatar"]').filter({ hasText: initialsRegex }).count();
+    expect(avatarsFound).toBeGreaterThan(0);
+  });
+
+  test('issues display project names', async ({ page }) => {
+    // Projects: Frontend, Backend, Infrastructure
+    // Each issue row should show its project name
+    const issueList = page.locator('[class*="border-b"]'); // Issue rows have border-b
+
+    // At least some issues should show project names
+    const frontendCount = await issueList.filter({ hasText: 'Frontend' }).count();
+    const backendCount = await issueList.filter({ hasText: 'Backend' }).count();
+    const infraCount = await issueList.filter({ hasText: 'Infrastructure' }).count();
+
+    expect(frontendCount + backendCount + infraCount).toBeGreaterThan(0);
   });
 });

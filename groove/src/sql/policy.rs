@@ -4,7 +4,8 @@
 //! Permissions can be inherited through foreign key references using INHERITS clauses.
 
 use crate::object::ObjectId;
-use crate::sql::row::Value;
+use crate::sql::query_graph::PredicateValue;
+use crate::sql::row_buffer::OwnedRow;
 use std::collections::HashMap;
 
 /// Policy action type.
@@ -166,7 +167,7 @@ pub enum PolicyValue {
     /// The viewer's user ID (@viewer)
     Viewer,
     /// A literal value
-    Literal(Value),
+    Literal(PredicateValue),
 }
 
 impl PolicyValue {
@@ -186,7 +187,7 @@ impl PolicyValue {
     }
 
     /// Create a literal value.
-    pub fn literal(value: Value) -> Self {
+    pub fn literal(value: PredicateValue) -> Self {
         PolicyValue::Literal(value)
     }
 }
@@ -463,47 +464,41 @@ fn serialize_string(buf: &mut Vec<u8>, s: &str) {
     buf.extend_from_slice(bytes);
 }
 
-fn serialize_literal(buf: &mut Vec<u8>, val: &Value) {
+fn serialize_literal(buf: &mut Vec<u8>, val: &PredicateValue) {
     match val {
-        Value::NullableNone => buf.push(0),
-        Value::Bool(b) => {
+        PredicateValue::Null => buf.push(0),
+        PredicateValue::Bool(b) => {
             buf.push(1);
             buf.push(if *b { 1 } else { 0 });
         }
-        Value::I64(n) => {
+        PredicateValue::I64(n) => {
             buf.push(2);
             buf.extend_from_slice(&n.to_le_bytes());
         }
-        Value::F64(n) => {
+        PredicateValue::F64(n) => {
             buf.push(3);
             buf.extend_from_slice(&n.to_le_bytes());
         }
-        Value::String(s) => {
+        PredicateValue::String(s) => {
             buf.push(4);
             serialize_string(buf, s);
         }
-        Value::Bytes(b) => {
+        PredicateValue::Bytes(b) => {
             buf.push(5);
             buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
             buf.extend_from_slice(b);
         }
-        Value::Ref(id) => {
+        PredicateValue::Ref(id) => {
             buf.push(6);
             buf.extend_from_slice(&id.inner().to_le_bytes());
         }
-        Value::I32(n) => {
+        PredicateValue::I32(n) => {
             buf.push(7);
             buf.extend_from_slice(&n.to_le_bytes());
         }
-        Value::U32(n) => {
+        PredicateValue::U32(n) => {
             buf.push(8);
             buf.extend_from_slice(&n.to_le_bytes());
-        }
-        // NullableSome: serialize the inner value
-        Value::NullableSome(inner) => serialize_literal(buf, inner),
-        // Row, Array, Blob, BlobArray are not valid in policy literals - they're only for query results
-        Value::Row(_) | Value::Array(_) | Value::Blob(_) | Value::BlobArray(_) => {
-            panic!("Row, Array, Blob, and BlobArray values cannot be used in policy literals");
         }
     }
 }
@@ -714,7 +709,7 @@ fn deserialize_string(data: &[u8], pos: usize) -> Result<(String, usize), Policy
     Ok((s, pos + len))
 }
 
-fn deserialize_literal(data: &[u8], pos: usize) -> Result<(Value, usize), PolicyError> {
+fn deserialize_literal(data: &[u8], pos: usize) -> Result<(PredicateValue, usize), PolicyError> {
     if pos >= data.len() {
         return Err(PolicyError::DeserializationError(
             "unexpected end of data".into(),
@@ -725,14 +720,14 @@ fn deserialize_literal(data: &[u8], pos: usize) -> Result<(Value, usize), Policy
     let pos = pos + 1;
 
     match tag {
-        0 => Ok((Value::NullableNone, pos)),
+        0 => Ok((PredicateValue::Null, pos)),
         1 => {
             if pos >= data.len() {
                 return Err(PolicyError::DeserializationError(
                     "unexpected end of data".into(),
                 ));
             }
-            Ok((Value::Bool(data[pos] != 0), pos + 1))
+            Ok((PredicateValue::Bool(data[pos] != 0), pos + 1))
         }
         2 => {
             if pos + 8 > data.len() {
@@ -741,7 +736,7 @@ fn deserialize_literal(data: &[u8], pos: usize) -> Result<(Value, usize), Policy
                 ));
             }
             let n = i64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
-            Ok((Value::I64(n), pos + 8))
+            Ok((PredicateValue::I64(n), pos + 8))
         }
         3 => {
             if pos + 8 > data.len() {
@@ -750,11 +745,11 @@ fn deserialize_literal(data: &[u8], pos: usize) -> Result<(Value, usize), Policy
                 ));
             }
             let n = f64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
-            Ok((Value::F64(n), pos + 8))
+            Ok((PredicateValue::F64(n), pos + 8))
         }
         4 => {
             let (s, new_pos) = deserialize_string(data, pos)?;
-            Ok((Value::String(s), new_pos))
+            Ok((PredicateValue::String(s), new_pos))
         }
         5 => {
             if pos + 4 > data.len() {
@@ -769,7 +764,7 @@ fn deserialize_literal(data: &[u8], pos: usize) -> Result<(Value, usize), Policy
                     "unexpected end of data".into(),
                 ));
             }
-            Ok((Value::Bytes(data[pos..pos + len].to_vec()), pos + len))
+            Ok((PredicateValue::Bytes(data[pos..pos + len].to_vec()), pos + len))
         }
         6 => {
             if pos + 16 > data.len() {
@@ -778,7 +773,7 @@ fn deserialize_literal(data: &[u8], pos: usize) -> Result<(Value, usize), Policy
                 ));
             }
             let id = u128::from_le_bytes(data[pos..pos + 16].try_into().unwrap());
-            Ok((Value::Ref(ObjectId::from(id)), pos + 16))
+            Ok((PredicateValue::Ref(ObjectId::from(id)), pos + 16))
         }
         7 => {
             if pos + 4 > data.len() {
@@ -787,7 +782,7 @@ fn deserialize_literal(data: &[u8], pos: usize) -> Result<(Value, usize), Policy
                 ));
             }
             let n = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
-            Ok((Value::I32(n), pos + 4))
+            Ok((PredicateValue::I32(n), pos + 4))
         }
         8 => {
             if pos + 4 > data.len() {
@@ -796,7 +791,7 @@ fn deserialize_literal(data: &[u8], pos: usize) -> Result<(Value, usize), Policy
                 ));
             }
             let n = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
-            Ok((Value::U32(n), pos + 4))
+            Ok((PredicateValue::U32(n), pos + 4))
         }
         _ => Err(PolicyError::DeserializationError(format!(
             "invalid literal tag: {}",
@@ -807,7 +802,6 @@ fn deserialize_literal(data: &[u8], pos: usize) -> Result<(Value, usize), Policy
 
 // ========== Policy Evaluation ==========
 
-use crate::sql::row::Row;
 use crate::sql::schema::TableSchema;
 use std::collections::HashSet;
 
@@ -831,8 +825,8 @@ impl Default for PolicyConfig {
 
 /// Trait for looking up rows by table and ID.
 pub trait RowLookup {
-    /// Get a row by table name and ID.
-    fn get_row(&self, table: &str, id: ObjectId) -> Option<Row>;
+    /// Get a row by table name and ID (buffer format).
+    fn get_row(&self, table: &str, id: ObjectId) -> Option<(ObjectId, OwnedRow)>;
 
     /// Get a table schema by name.
     fn get_schema(&self, table: &str) -> Option<TableSchema>;
@@ -847,66 +841,83 @@ pub trait PolicyLookup {
 /// Context for evaluating a policy expression.
 #[derive(Debug)]
 pub struct EvalContext<'a> {
+    /// The current row ID (for WHERE clauses).
+    pub row_id: Option<ObjectId>,
     /// The current row (for WHERE clauses).
-    pub row: Option<&'a Row>,
+    pub row: Option<&'a OwnedRow>,
+    /// The new row ID (for INSERT/UPDATE CHECK).
+    pub new_row_id: Option<ObjectId>,
     /// The new row data (for INSERT/UPDATE CHECK).
-    pub new_row: Option<&'a Row>,
+    pub new_row: Option<&'a OwnedRow>,
+    /// The old row ID (for UPDATE CHECK).
+    pub old_row_id: Option<ObjectId>,
     /// The old row data (for UPDATE CHECK).
-    pub old_row: Option<&'a Row>,
+    pub old_row: Option<&'a OwnedRow>,
     /// The table schema (for column lookups).
     pub schema: &'a TableSchema,
 }
 
 impl<'a> EvalContext<'a> {
     /// Create context for SELECT/DELETE (just current row).
-    pub fn for_select(row: &'a Row, schema: &'a TableSchema) -> Self {
+    pub fn for_select(row_id: ObjectId, row: &'a OwnedRow, schema: &'a TableSchema) -> Self {
         EvalContext {
+            row_id: Some(row_id),
             row: Some(row),
+            new_row_id: None,
             new_row: None,
+            old_row_id: None,
             old_row: None,
             schema,
         }
     }
 
     /// Create context for INSERT (just new row).
-    pub fn for_insert(new_row: &'a Row, schema: &'a TableSchema) -> Self {
+    pub fn for_insert(new_row_id: ObjectId, new_row: &'a OwnedRow, schema: &'a TableSchema) -> Self {
         EvalContext {
+            row_id: None,
             row: None,
+            new_row_id: Some(new_row_id),
             new_row: Some(new_row),
+            old_row_id: None,
             old_row: None,
             schema,
         }
     }
 
     /// Create context for UPDATE (old row, new row, and current = old for WHERE).
-    pub fn for_update(old_row: &'a Row, new_row: &'a Row, schema: &'a TableSchema) -> Self {
+    pub fn for_update(old_row_id: ObjectId, old_row: &'a OwnedRow, new_row_id: ObjectId, new_row: &'a OwnedRow, schema: &'a TableSchema) -> Self {
         EvalContext {
-            row: Some(old_row), // WHERE evaluates against existing row
+            row_id: Some(old_row_id), // WHERE evaluates against existing row
+            row: Some(old_row),
+            new_row_id: Some(new_row_id),
             new_row: Some(new_row),
+            old_row_id: Some(old_row_id),
             old_row: Some(old_row),
             schema,
         }
     }
 
     /// Get column value from current row.
-    fn get_column(&self, name: &str) -> Option<&Value> {
+    fn get_column(&self, name: &str) -> Option<PredicateValue> {
         let row = self.row?;
-        let idx = self.schema.column_index(name)?;
-        row.values.get(idx)
+        row.get_by_name(name).map(|v| v.to_predicate_value())
     }
 
     /// Get column value from @old row.
-    fn get_old_column(&self, name: &str) -> Option<&Value> {
+    fn get_old_column(&self, name: &str) -> Option<PredicateValue> {
         let row = self.old_row?;
-        let idx = self.schema.column_index(name)?;
-        row.values.get(idx)
+        row.get_by_name(name).map(|v| v.to_predicate_value())
     }
 
     /// Get column value from @new row.
-    fn get_new_column(&self, name: &str) -> Option<&Value> {
+    fn get_new_column(&self, name: &str) -> Option<PredicateValue> {
         let row = self.new_row?;
-        let idx = self.schema.column_index(name)?;
-        row.values.get(idx)
+        row.get_by_name(name).map(|v| v.to_predicate_value())
+    }
+
+    /// Get the row ID (current row).
+    fn get_row_id(&self) -> Option<ObjectId> {
+        self.row_id
     }
 }
 
@@ -974,7 +985,7 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
     }
 
     /// Check if viewer can SELECT the given row.
-    pub fn check_select(&mut self, table: &str, row: &Row) -> PolicyResult {
+    pub fn check_select(&mut self, table: &str, row_id: ObjectId, row: &OwnedRow) -> PolicyResult {
         let schema = match self.row_lookup.get_schema(table) {
             Some(s) => s,
             None => {
@@ -989,7 +1000,7 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
 
         match policy {
             Some(p) => {
-                let ctx = EvalContext::for_select(row, &schema);
+                let ctx = EvalContext::for_select(row_id, row, &schema);
                 self.eval_where_clause(table, &p.where_clause, &ctx)
             }
             None => self.default_allow(table, PolicyAction::Select),
@@ -997,7 +1008,7 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
     }
 
     /// Check if viewer can INSERT the given row.
-    pub fn check_insert(&mut self, table: &str, new_row: &Row) -> PolicyResult {
+    pub fn check_insert(&mut self, table: &str, new_row_id: ObjectId, new_row: &OwnedRow) -> PolicyResult {
         let schema = match self.row_lookup.get_schema(table) {
             Some(s) => s,
             None => {
@@ -1012,7 +1023,7 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
 
         match policy {
             Some(p) => {
-                let ctx = EvalContext::for_insert(new_row, &schema);
+                let ctx = EvalContext::for_insert(new_row_id, new_row, &schema);
                 self.eval_check_clause(table, &p.check_clause, &ctx)
             }
             None => self.default_allow(table, PolicyAction::Insert),
@@ -1020,7 +1031,7 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
     }
 
     /// Check if viewer can UPDATE the given row with new values.
-    pub fn check_update(&mut self, table: &str, old_row: &Row, new_row: &Row) -> PolicyResult {
+    pub fn check_update(&mut self, table: &str, old_row_id: ObjectId, old_row: &OwnedRow, new_row_id: ObjectId, new_row: &OwnedRow) -> PolicyResult {
         let schema = match self.row_lookup.get_schema(table) {
             Some(s) => s,
             None => {
@@ -1035,7 +1046,7 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
 
         match policy {
             Some(p) => {
-                let ctx = EvalContext::for_update(old_row, new_row, &schema);
+                let ctx = EvalContext::for_update(old_row_id, old_row, new_row_id, new_row, &schema);
 
                 // Check WHERE clause first (which rows can be modified)
                 let where_result = self.eval_where_clause(table, &p.where_clause, &ctx);
@@ -1051,7 +1062,7 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
     }
 
     /// Check if viewer can DELETE the given row.
-    pub fn check_delete(&mut self, table: &str, row: &Row) -> PolicyResult {
+    pub fn check_delete(&mut self, table: &str, row_id: ObjectId, row: &OwnedRow) -> PolicyResult {
         let schema = match self.row_lookup.get_schema(table) {
             Some(s) => s,
             None => {
@@ -1071,7 +1082,7 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
 
         match policy {
             Some(p) => {
-                let ctx = EvalContext::for_select(row, &schema);
+                let ctx = EvalContext::for_select(row_id, row, &schema);
                 self.eval_where_clause(table, &p.where_clause, &ctx)
             }
             None => self.default_allow(table, PolicyAction::Delete),
@@ -1180,13 +1191,13 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
         }
     }
 
-    /// Resolve a PolicyValue to an actual Value.
-    fn resolve_value<'b>(&self, pv: &'b PolicyValue, ctx: &'b EvalContext) -> Option<Value> {
+    /// Resolve a PolicyValue to a PredicateValue for comparison.
+    fn resolve_value(&self, pv: &PolicyValue, ctx: &EvalContext) -> Option<PredicateValue> {
         match pv {
-            PolicyValue::Column(name) => ctx.get_column(name).cloned(),
-            PolicyValue::OldColumn(name) => ctx.get_old_column(name).cloned(),
-            PolicyValue::NewColumn(name) => ctx.get_new_column(name).cloned(),
-            PolicyValue::Viewer => Some(Value::Ref(self.viewer)),
+            PolicyValue::Column(name) => ctx.get_column(name),
+            PolicyValue::OldColumn(name) => ctx.get_old_column(name),
+            PolicyValue::NewColumn(name) => ctx.get_new_column(name),
+            PolicyValue::Viewer => Some(PredicateValue::Ref(self.viewer)),
             PolicyValue::Literal(v) => Some(v.clone()),
         }
     }
@@ -1200,7 +1211,7 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
         pred: F,
     ) -> bool
     where
-        F: Fn(&Value, &Value) -> bool,
+        F: Fn(&PredicateValue, &PredicateValue) -> bool,
     {
         match (
             self.resolve_value(left, ctx),
@@ -1226,11 +1237,12 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
         let r = self.resolve_value(right, ctx);
 
         match (l, r) {
-            (Some(Value::I64(a)), Some(Value::I64(b))) => pred(a.cmp(&b)),
-            (Some(Value::F64(a)), Some(Value::F64(b))) => {
+            (Some(PredicateValue::I32(a)), Some(PredicateValue::I32(b))) => pred(a.cmp(&b)),
+            (Some(PredicateValue::I64(a)), Some(PredicateValue::I64(b))) => pred(a.cmp(&b)),
+            (Some(PredicateValue::F64(a)), Some(PredicateValue::F64(b))) => {
                 a.partial_cmp(&b).map(|o| pred(o)).unwrap_or(false)
             }
-            (Some(Value::String(a)), Some(Value::String(b))) => pred(a.cmp(&b)),
+            (Some(PredicateValue::String(ref a)), Some(PredicateValue::String(ref b))) => pred(a.cmp(b)),
             _ => false,
         }
     }
@@ -1254,8 +1266,12 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
 
         // Get the referenced ID from the column
         let ref_id = match column {
-            PolicyColumnRef::Current(name) => ctx.get_column(name).and_then(|v| v.as_ref()),
-            PolicyColumnRef::New(name) => ctx.get_new_column(name).and_then(|v| v.as_ref()),
+            PolicyColumnRef::Current(name) => ctx.get_column(name).and_then(|v| {
+                if let PredicateValue::Ref(id) = v { Some(id) } else { None }
+            }),
+            PolicyColumnRef::New(name) => ctx.get_new_column(name).and_then(|v| {
+                if let PredicateValue::Ref(id) = v { Some(id) } else { None }
+            }),
         };
 
         let ref_id = match ref_id {
@@ -1279,7 +1295,7 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
             eprintln!(
                 "WARNING: Cycle detected in policy inheritance: {}:{} -> {}:{}",
                 current_table,
-                ctx.row.map(|r| r.id).unwrap_or_default(),
+                ctx.row_id.unwrap_or_default(),
                 target_table,
                 ref_id
             );
@@ -1287,7 +1303,7 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
         }
 
         // Look up the referenced row
-        let ref_row = match self.row_lookup.get_row(&target_table, ref_id) {
+        let (ref_row_id, ref_row) = match self.row_lookup.get_row(&target_table, ref_id) {
             Some(r) => r,
             None => return false, // Referenced row doesn't exist
         };
@@ -1307,7 +1323,7 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
                 self.visited.insert(visit_key.clone());
                 self.depth += 1;
 
-                let ref_ctx = EvalContext::for_select(&ref_row, &ref_schema);
+                let ref_ctx = EvalContext::for_select(ref_row_id, &ref_row, &ref_schema);
                 let result = match &p.where_clause {
                     Some(expr) => self.eval_expr(expr, &ref_ctx, &target_table),
                     None => true, // No WHERE = allow
@@ -1462,15 +1478,15 @@ mod tests {
         let policy = Policy::new("test", PolicyAction::Select).with_where(PolicyExpr::And(vec![
             PolicyExpr::Eq(
                 PolicyValue::Column("status".into()),
-                PolicyValue::Literal(Value::String("active".into())),
+                PolicyValue::Literal(PredicateValue::String("active".into())),
             ),
             PolicyExpr::Eq(
                 PolicyValue::Column("count".into()),
-                PolicyValue::Literal(Value::I64(42)),
+                PolicyValue::Literal(PredicateValue::I64(42)),
             ),
             PolicyExpr::Eq(
                 PolicyValue::Column("enabled".into()),
-                PolicyValue::Literal(Value::Bool(true)),
+                PolicyValue::Literal(PredicateValue::Bool(true)),
             ),
         ]));
 
@@ -1486,10 +1502,13 @@ mod tests {
 
     use crate::sql::schema::{ColumnDef, ColumnType};
 
+    use crate::sql::row_buffer::{OwnedRow, RowBuilder, RowDescriptor};
+    use std::sync::Arc;
+
     /// Mock implementation for testing.
     struct MockLookup {
         schemas: HashMap<String, TableSchema>,
-        rows: HashMap<(String, ObjectId), Row>,
+        rows: HashMap<(String, ObjectId), OwnedRow>,
         policies: HashMap<String, TablePolicies>,
     }
 
@@ -1511,8 +1530,14 @@ mod tests {
                 .insert(name.to_string(), TableSchema::new(name.to_string(), cols));
         }
 
-        fn add_row(&mut self, table: &str, row: Row) {
-            self.rows.insert((table.to_string(), row.id), row);
+        fn add_row_with<F>(&mut self, table: &str, id: ObjectId, f: F)
+        where
+            F: FnOnce(RowBuilder) -> OwnedRow,
+        {
+            let schema = self.schemas.get(table).expect("schema must exist");
+            let descriptor = Arc::new(RowDescriptor::from_table_schema(schema));
+            let row = f(RowBuilder::new(descriptor));
+            self.rows.insert((table.to_string(), id), row);
         }
 
         fn add_policy(&mut self, policy: Policy) {
@@ -1526,8 +1551,8 @@ mod tests {
     }
 
     impl RowLookup for MockLookup {
-        fn get_row(&self, table: &str, id: ObjectId) -> Option<Row> {
-            self.rows.get(&(table.to_string(), id)).cloned()
+        fn get_row(&self, table: &str, id: ObjectId) -> Option<(ObjectId, OwnedRow)> {
+            self.rows.get(&(table.to_string(), id)).map(|row| (id, row.clone()))
         }
 
         fn get_schema(&self, table: &str) -> Option<TableSchema> {
@@ -1562,31 +1587,26 @@ mod tests {
         // Create a user
         let user_id = ObjectId::new(1);
         let other_user_id = ObjectId::new(2);
-        lookup.add_row(
-            "users",
-            Row::new(user_id, vec![Value::String("Alice".into())]),
-        );
-        lookup.add_row(
-            "users",
-            Row::new(other_user_id, vec![Value::String("Bob".into())]),
-        );
+        lookup.add_row_with("users", user_id, |b| b
+            .set_string_by_name("name", "Alice")
+            .build());
+        lookup.add_row_with("users", other_user_id, |b| b
+            .set_string_by_name("name", "Bob")
+            .build());
 
         // Create a document owned by user 1
         let doc_id = ObjectId::new(100);
-        lookup.add_row(
-            "documents",
-            Row::new(
-                doc_id,
-                vec![Value::String("My Doc".into()), Value::Ref(user_id)],
-            ),
-        );
+        lookup.add_row_with("documents", doc_id, |b| b
+            .set_string_by_name("title", "My Doc")
+            .set_ref_by_name("owner_id", user_id)
+            .build());
 
         // Add policy: owner can read
         lookup.add_policy(Policy::new("documents", PolicyAction::Select).with_where(
             PolicyExpr::Eq(PolicyValue::Column("owner_id".into()), PolicyValue::Viewer),
         ));
 
-        let doc = lookup.get_row("documents", doc_id).unwrap();
+        let (doc_row_id, doc_row) = lookup.get_row("documents", doc_id).unwrap();
         let config = PolicyConfig {
             warn_on_missing_policy: false,
             ..Default::default()
@@ -1594,7 +1614,7 @@ mod tests {
 
         // User 1 (owner) can read
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, user_id, config.clone());
-        let result = eval.check_select("documents", &doc);
+        let result = eval.check_select("documents", doc_row_id, &doc_row);
         assert!(
             result.is_allowed(),
             "owner should be able to read: {:?}",
@@ -1603,7 +1623,7 @@ mod tests {
 
         // User 2 (not owner) cannot read
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, other_user_id, config);
-        let result = eval.check_select("documents", &doc);
+        let result = eval.check_select("documents", doc_row_id, &doc_row);
         assert!(
             result.is_denied(),
             "non-owner should not be able to read: {:?}",
@@ -1641,31 +1661,26 @@ mod tests {
         // Create users
         let alice_id = ObjectId::new(1);
         let bob_id = ObjectId::new(2);
-        lookup.add_row(
-            "users",
-            Row::new(alice_id, vec![Value::String("Alice".into())]),
-        );
-        lookup.add_row("users", Row::new(bob_id, vec![Value::String("Bob".into())]));
+        lookup.add_row_with("users", alice_id, |b| b
+            .set_string_by_name("name", "Alice")
+            .build());
+        lookup.add_row_with("users", bob_id, |b| b
+            .set_string_by_name("name", "Bob")
+            .build());
 
         // Create a folder owned by Alice
         let folder_id = ObjectId::new(10);
-        lookup.add_row(
-            "folders",
-            Row::new(
-                folder_id,
-                vec![Value::String("Alice's Folder".into()), Value::Ref(alice_id)],
-            ),
-        );
+        lookup.add_row_with("folders", folder_id, |b| b
+            .set_string_by_name("name", "Alice's Folder")
+            .set_ref_by_name("owner_id", alice_id)
+            .build());
 
         // Create a document in that folder
         let doc_id = ObjectId::new(100);
-        lookup.add_row(
-            "documents",
-            Row::new(
-                doc_id,
-                vec![Value::String("Doc in Folder".into()), Value::Ref(folder_id)],
-            ),
-        );
+        lookup.add_row_with("documents", doc_id, |b| b
+            .set_string_by_name("title", "Doc in Folder")
+            .set_ref_by_name("folder_id", folder_id)
+            .build());
 
         // Add folder policy: owner can read
         lookup.add_policy(
@@ -1683,7 +1698,7 @@ mod tests {
             },
         ));
 
-        let doc = lookup.get_row("documents", doc_id).unwrap();
+        let (doc_row_id, doc_row) = lookup.get_row("documents", doc_id).unwrap();
         let config = PolicyConfig {
             warn_on_missing_policy: false,
             ..Default::default()
@@ -1691,7 +1706,7 @@ mod tests {
 
         // Alice (folder owner) can read the document
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, alice_id, config.clone());
-        let result = eval.check_select("documents", &doc);
+        let result = eval.check_select("documents", doc_row_id, &doc_row);
         assert!(
             result.is_allowed(),
             "folder owner should be able to read doc: {:?}",
@@ -1700,7 +1715,7 @@ mod tests {
 
         // Bob cannot read the document
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, bob_id, config);
-        let result = eval.check_select("documents", &doc);
+        let result = eval.check_select("documents", doc_row_id, &doc_row);
         assert!(
             result.is_denied(),
             "non-owner should not be able to read doc: {:?}",
@@ -1730,53 +1745,36 @@ mod tests {
         // Create user
         let alice_id = ObjectId::new(1);
         let bob_id = ObjectId::new(2);
-        lookup.add_row(
-            "users",
-            Row::new(alice_id, vec![Value::String("Alice".into())]),
-        );
-        lookup.add_row("users", Row::new(bob_id, vec![Value::String("Bob".into())]));
+        lookup.add_row_with("users", alice_id, |b| b
+            .set_string_by_name("name", "Alice")
+            .build());
+        lookup.add_row_with("users", bob_id, |b| b
+            .set_string_by_name("name", "Bob")
+            .build());
 
         // Create root folder owned by Alice
         let root_folder_id = ObjectId::new(10);
-        lookup.add_row(
-            "folders",
-            Row::new(
-                root_folder_id,
-                vec![
-                    Value::String("Root".into()),
-                    Value::NullableNone, // no parent
-                    Value::Ref(alice_id),
-                ],
-            ),
-        );
+        lookup.add_row_with("folders", root_folder_id, |b| b
+            .set_string_by_name("name", "Root")
+            .set_null_by_name("parent_id") // no parent
+            .set_ref_by_name("owner_id", alice_id)
+            .build());
 
         // Create child folder
         let child_folder_id = ObjectId::new(11);
-        lookup.add_row(
-            "folders",
-            Row::new(
-                child_folder_id,
-                vec![
-                    Value::String("Child".into()),
-                    Value::Ref(root_folder_id), // parent is root
-                    Value::NullableNone,                // no direct owner
-                ],
-            ),
-        );
+        lookup.add_row_with("folders", child_folder_id, |b| b
+            .set_string_by_name("name", "Child")
+            .set_ref_by_name("parent_id", root_folder_id) // parent is root
+            .set_null_by_name("owner_id") // no direct owner
+            .build());
 
         // Create grandchild folder
         let grandchild_folder_id = ObjectId::new(12);
-        lookup.add_row(
-            "folders",
-            Row::new(
-                grandchild_folder_id,
-                vec![
-                    Value::String("Grandchild".into()),
-                    Value::Ref(child_folder_id), // parent is child
-                    Value::NullableNone,                 // no direct owner
-                ],
-            ),
-        );
+        lookup.add_row_with("folders", grandchild_folder_id, |b| b
+            .set_string_by_name("name", "Grandchild")
+            .set_ref_by_name("parent_id", child_folder_id) // parent is child
+            .set_null_by_name("owner_id") // no direct owner
+            .build());
 
         // Add folder policy: owner OR inherit from parent
         lookup.add_policy(
@@ -1789,7 +1787,7 @@ mod tests {
             ])),
         );
 
-        let grandchild = lookup.get_row("folders", grandchild_folder_id).unwrap();
+        let (grandchild_id, grandchild_row) = lookup.get_row("folders", grandchild_folder_id).unwrap();
         let config = PolicyConfig {
             warn_on_missing_policy: false,
             ..Default::default()
@@ -1797,7 +1795,7 @@ mod tests {
 
         // Alice can read grandchild (via root -> child -> grandchild)
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, alice_id, config.clone());
-        let result = eval.check_select("folders", &grandchild);
+        let result = eval.check_select("folders", grandchild_id, &grandchild_row);
         assert!(
             result.is_allowed(),
             "root owner should be able to read grandchild: {:?}",
@@ -1806,7 +1804,7 @@ mod tests {
 
         // Bob cannot read grandchild
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, bob_id, config);
-        let result = eval.check_select("folders", &grandchild);
+        let result = eval.check_select("folders", grandchild_id, &grandchild_row);
         assert!(
             result.is_denied(),
             "non-owner should not be able to read grandchild: {:?}",
@@ -1834,11 +1832,12 @@ mod tests {
 
         let alice_id = ObjectId::new(1);
         let bob_id = ObjectId::new(2);
-        lookup.add_row(
-            "users",
-            Row::new(alice_id, vec![Value::String("Alice".into())]),
-        );
-        lookup.add_row("users", Row::new(bob_id, vec![Value::String("Bob".into())]));
+        lookup.add_row_with("users", alice_id, |b| b
+            .set_string_by_name("name", "Alice")
+            .build());
+        lookup.add_row_with("users", bob_id, |b| b
+            .set_string_by_name("name", "Bob")
+            .build());
 
         // Add INSERT policy: author must be viewer
         lookup.add_policy(Policy::new("documents", PolicyAction::Insert).with_check(
@@ -1854,12 +1853,15 @@ mod tests {
         };
 
         // Alice can insert doc with herself as author
-        let new_doc = Row::new(
-            ObjectId::new(100),
-            vec![Value::String("Alice's Doc".into()), Value::Ref(alice_id)],
-        );
+        let doc_schema = lookup.schemas.get("documents").unwrap();
+        let new_doc_desc = Arc::new(RowDescriptor::from_table_schema(doc_schema));
+        let new_doc_id = ObjectId::new(100);
+        let new_doc = RowBuilder::new(new_doc_desc.clone())
+            .set_string_by_name("title", "Alice's Doc")
+            .set_ref_by_name("author_id", alice_id)
+            .build();
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, alice_id, config.clone());
-        let result = eval.check_insert("documents", &new_doc);
+        let result = eval.check_insert("documents", new_doc_id, &new_doc);
         assert!(
             result.is_allowed(),
             "should allow insert with self as author: {:?}",
@@ -1867,12 +1869,13 @@ mod tests {
         );
 
         // Alice cannot insert doc with Bob as author
-        let new_doc = Row::new(
-            ObjectId::new(101),
-            vec![Value::String("Forged Doc".into()), Value::Ref(bob_id)],
-        );
+        let new_doc_id = ObjectId::new(101);
+        let new_doc = RowBuilder::new(new_doc_desc)
+            .set_string_by_name("title", "Forged Doc")
+            .set_ref_by_name("author_id", bob_id)
+            .build();
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, alice_id, config);
-        let result = eval.check_insert("documents", &new_doc);
+        let result = eval.check_insert("documents", new_doc_id, &new_doc);
         assert!(
             result.is_denied(),
             "should deny insert with other as author: {:?}",
@@ -1900,20 +1903,18 @@ mod tests {
 
         let alice_id = ObjectId::new(1);
         let bob_id = ObjectId::new(2);
-        lookup.add_row(
-            "users",
-            Row::new(alice_id, vec![Value::String("Alice".into())]),
-        );
-        lookup.add_row("users", Row::new(bob_id, vec![Value::String("Bob".into())]));
+        lookup.add_row_with("users", alice_id, |b| b
+            .set_string_by_name("name", "Alice")
+            .build());
+        lookup.add_row_with("users", bob_id, |b| b
+            .set_string_by_name("name", "Bob")
+            .build());
 
         let doc_id = ObjectId::new(100);
-        lookup.add_row(
-            "documents",
-            Row::new(
-                doc_id,
-                vec![Value::String("Original".into()), Value::Ref(alice_id)],
-            ),
-        );
+        lookup.add_row_with("documents", doc_id, |b| b
+            .set_string_by_name("title", "Original")
+            .set_ref_by_name("author_id", alice_id)
+            .build());
 
         // Add UPDATE policy: author can update, but cannot change author
         lookup.add_policy(
@@ -1928,22 +1929,22 @@ mod tests {
                 )),
         );
 
-        let old_doc = lookup.get_row("documents", doc_id).unwrap();
+        let (old_doc_id, old_doc_row) = lookup.get_row("documents", doc_id).unwrap();
         let config = PolicyConfig {
             warn_on_missing_policy: false,
             ..Default::default()
         };
 
+        let doc_schema = lookup.schemas.get("documents").unwrap();
+        let doc_desc = Arc::new(RowDescriptor::from_table_schema(doc_schema));
+
         // Alice can update title
-        let new_doc = Row::new(
-            doc_id,
-            vec![
-                Value::String("Updated".into()),
-                Value::Ref(alice_id), // same author
-            ],
-        );
+        let new_doc = RowBuilder::new(doc_desc.clone())
+            .set_string_by_name("title", "Updated")
+            .set_ref_by_name("author_id", alice_id) // same author
+            .build();
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, alice_id, config.clone());
-        let result = eval.check_update("documents", &old_doc, &new_doc);
+        let result = eval.check_update("documents", old_doc_id, &old_doc_row, old_doc_id, &new_doc);
         assert!(
             result.is_allowed(),
             "author should be able to update title: {:?}",
@@ -1951,15 +1952,12 @@ mod tests {
         );
 
         // Alice cannot change author to Bob
-        let new_doc = Row::new(
-            doc_id,
-            vec![
-                Value::String("Updated".into()),
-                Value::Ref(bob_id), // changed author!
-            ],
-        );
+        let new_doc = RowBuilder::new(doc_desc.clone())
+            .set_string_by_name("title", "Updated")
+            .set_ref_by_name("author_id", bob_id) // changed author!
+            .build();
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, alice_id, config.clone());
-        let result = eval.check_update("documents", &old_doc, &new_doc);
+        let result = eval.check_update("documents", old_doc_id, &old_doc_row, old_doc_id, &new_doc);
         assert!(
             result.is_denied(),
             "should deny changing author: {:?}",
@@ -1967,12 +1965,12 @@ mod tests {
         );
 
         // Bob cannot update at all
-        let new_doc = Row::new(
-            doc_id,
-            vec![Value::String("Hacked".into()), Value::Ref(alice_id)],
-        );
+        let new_doc = RowBuilder::new(doc_desc)
+            .set_string_by_name("title", "Hacked")
+            .set_ref_by_name("author_id", alice_id)
+            .build();
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, bob_id, config);
-        let result = eval.check_update("documents", &old_doc, &new_doc);
+        let result = eval.check_update("documents", old_doc_id, &old_doc_row, old_doc_id, &new_doc);
         assert!(
             result.is_denied(),
             "non-author should not be able to update: {:?}",
@@ -1989,20 +1987,19 @@ mod tests {
         lookup.add_table("items", vec![("name", ColumnType::String)]);
 
         let item_id = ObjectId::new(1);
-        lookup.add_row(
-            "items",
-            Row::new(item_id, vec![Value::String("Item".into())]),
-        );
+        lookup.add_row_with("items", item_id, |b| b
+            .set_string_by_name("name", "Item")
+            .build());
 
         // No policy defined
-        let item = lookup.get_row("items", item_id).unwrap();
+        let (item_row_id, item_row) = lookup.get_row("items", item_id).unwrap();
         let config = PolicyConfig {
             warn_on_missing_policy: false,
             ..Default::default()
         };
 
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, ObjectId::new(999), config);
-        let result = eval.check_select("items", &item);
+        let result = eval.check_select("items", item_row_id, &item_row);
 
         // Default allow
         assert!(result.is_allowed(), "should allow by default: {:?}", result);
@@ -2026,19 +2023,15 @@ mod tests {
 
         let alice_id = ObjectId::new(1);
         let bob_id = ObjectId::new(2);
-        lookup.add_row(
-            "users",
-            Row::new(alice_id, vec![Value::String("Alice".into())]),
-        );
+        lookup.add_row_with("users", alice_id, |b| b
+            .set_string_by_name("name", "Alice")
+            .build());
 
         let item_id = ObjectId::new(100);
-        lookup.add_row(
-            "items",
-            Row::new(
-                item_id,
-                vec![Value::String("Item".into()), Value::Ref(alice_id)],
-            ),
-        );
+        lookup.add_row_with("items", item_id, |b| b
+            .set_string_by_name("name", "Item")
+            .set_ref_by_name("owner_id", alice_id)
+            .build());
 
         // Only add UPDATE policy, no DELETE policy
         lookup.add_policy(
@@ -2048,7 +2041,7 @@ mod tests {
             )),
         );
 
-        let item = lookup.get_row("items", item_id).unwrap();
+        let (item_row_id, item_row) = lookup.get_row("items", item_id).unwrap();
         let config = PolicyConfig {
             warn_on_missing_policy: false,
             ..Default::default()
@@ -2056,7 +2049,7 @@ mod tests {
 
         // Alice can delete (falls back to UPDATE policy)
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, alice_id, config.clone());
-        let result = eval.check_delete("items", &item);
+        let result = eval.check_delete("items", item_row_id, &item_row);
         assert!(
             result.is_allowed(),
             "owner should be able to delete via UPDATE fallback: {:?}",
@@ -2065,7 +2058,7 @@ mod tests {
 
         // Bob cannot delete
         let mut eval = PolicyEvaluator::new(&lookup, &lookup, bob_id, config);
-        let result = eval.check_delete("items", &item);
+        let result = eval.check_delete("items", item_row_id, &item_row);
         assert!(
             result.is_denied(),
             "non-owner should not be able to delete: {:?}",
