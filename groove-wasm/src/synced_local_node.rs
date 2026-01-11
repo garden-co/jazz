@@ -449,6 +449,125 @@ impl WasmSyncedLocalNode {
         })
     }
 
+    /// Create an incremental query subscription that returns full row objects.
+    ///
+    /// The callback receives an Array of objects with column names as keys.
+    /// This maintains an internal row map and provides the complete result set on each change.
+    #[wasm_bindgen(js_name = subscribeRows)]
+    pub fn subscribe_rows(
+        &self,
+        sql: &str,
+        callback: js_sys::Function,
+    ) -> Result<SyncedQueryHandle, JsValue> {
+        use groove::sql::query_graph::DeltaBatch;
+        use std::collections::HashMap;
+
+        let state = self.state.borrow();
+        let query = state
+            .db
+            .incremental_query(sql)
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+
+        // Shared state for accumulating rows
+        let rows_map: Rc<RefCell<HashMap<ObjectId, JsValue>>> = Rc::new(RefCell::new(HashMap::new()));
+
+        let rust_callback = {
+            let rows_map = Rc::clone(&rows_map);
+
+            Box::new(move |delta_batch: &DeltaBatch| {
+                let mut map = rows_map.borrow_mut();
+
+                for delta in delta_batch.iter() {
+                    let row_id = delta.row_id();
+
+                    if let Some(row) = delta.new_row() {
+                        // Added or Updated - convert row to JS object
+                        let js_obj = js_sys::Object::new();
+
+                        // Always add the ID
+                        let _ = js_sys::Reflect::set(
+                            &js_obj,
+                            &JsValue::from_str("id"),
+                            &JsValue::from_str(&row_id.to_string()),
+                        );
+
+                        // Add all columns from the row descriptor
+                        for (i, col) in row.descriptor.columns.iter().enumerate() {
+                            let value = if let Some(val) = row.get(i) {
+                                match val {
+                                    groove::sql::row_buffer::RowValue::String(s) => {
+                                        JsValue::from_str(s)
+                                    }
+                                    groove::sql::row_buffer::RowValue::I64(n) => {
+                                        JsValue::from_str(&n.to_string())
+                                    }
+                                    groove::sql::row_buffer::RowValue::F64(n) => {
+                                        JsValue::from_f64(n)
+                                    }
+                                    groove::sql::row_buffer::RowValue::Bool(b) => {
+                                        JsValue::from_bool(b)
+                                    }
+                                    groove::sql::row_buffer::RowValue::Ref(id) => {
+                                        JsValue::from_str(&id.to_string())
+                                    }
+                                    groove::sql::row_buffer::RowValue::I32(n) => {
+                                        JsValue::from_f64(n as f64)
+                                    }
+                                    groove::sql::row_buffer::RowValue::U32(n) => {
+                                        JsValue::from_f64(n as f64)
+                                    }
+                                    groove::sql::row_buffer::RowValue::Bytes(_) => {
+                                        JsValue::from_str("[bytes]")
+                                    }
+                                    groove::sql::row_buffer::RowValue::BlobArray(_) => {
+                                        JsValue::from_str("[blob_array]")
+                                    }
+                                    groove::sql::row_buffer::RowValue::Blob(_) => {
+                                        JsValue::from_str("[blob]")
+                                    }
+                                    groove::sql::row_buffer::RowValue::Array(_) => {
+                                        JsValue::from_str("[array]")
+                                    }
+                                    groove::sql::row_buffer::RowValue::Null => {
+                                        JsValue::NULL
+                                    }
+                                }
+                            } else {
+                                JsValue::NULL
+                            };
+
+                            let _ = js_sys::Reflect::set(
+                                &js_obj,
+                                &JsValue::from_str(&col.name),
+                                &value,
+                            );
+                        }
+
+                        map.insert(row_id, js_obj.into());
+                    } else {
+                        // Removed
+                        map.remove(&row_id);
+                    }
+                }
+
+                // Convert map to JS array
+                let js_rows = Array::new();
+                for row in map.values() {
+                    js_rows.push(row);
+                }
+
+                let _ = callback.call1(&JsValue::NULL, &js_rows);
+            })
+        };
+
+        let listener_id = query.subscribe(rust_callback);
+
+        Ok(SyncedQueryHandle {
+            _query: query,
+            listener_id,
+        })
+    }
+
 }
 
 // ============================================================================

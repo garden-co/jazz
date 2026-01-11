@@ -361,6 +361,13 @@ export class WasmSyncedLocalNode {
    */
   subscribeDelta(sql: string, callback: Function): SyncedQueryHandle;
   /**
+   * Create an incremental query subscription that returns full row objects.
+   *
+   * The callback receives an Array of objects with column names as keys.
+   * This maintains an internal row map and provides the complete result set on each change.
+   */
+  subscribeRows(sql: string, callback: Function): SyncedQueryHandle;
+  /**
    * Get current sync state.
    */
   readonly syncState: SyncState;
@@ -434,17 +441,6 @@ export interface InitOutput {
   readonly init: () => void;
   readonly object_id_to_string: (a: number, b: number) => [number, number, number, number];
   readonly object_id_from_string: (a: number, b: number) => [number, number, number];
-  readonly __wbg_wasmsyncclient_free: (a: number, b: number) => void;
-  readonly wasmsyncclient_new: (a: number, b: number, c: number, d: number) => number;
-  readonly wasmsyncclient_setOnCommits: (a: number, b: any) => void;
-  readonly wasmsyncclient_setOnExcluded: (a: number, b: any) => void;
-  readonly wasmsyncclient_setOnError: (a: number, b: any) => void;
-  readonly wasmsyncclient_setOnStateChange: (a: number, b: any) => void;
-  readonly wasmsyncclient_connectionState: (a: number) => number;
-  readonly wasmsyncclient_subscribe: (a: number, b: number, c: number) => any;
-  readonly wasmsyncclient_push: (a: number, b: number, c: number, d: any) => any;
-  readonly wasmsyncclient_reconcile: (a: number, b: number, c: number, d: any) => any;
-  readonly wasmsyncclient_disconnect: (a: number) => void;
   readonly __wbg_wasmsyncedlocalnode_free: (a: number, b: number) => void;
   readonly wasmsyncedlocalnode_new: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
   readonly wasmsyncedlocalnode_withIndexedDb: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
@@ -460,10 +456,22 @@ export interface InitOutput {
   readonly wasmsyncedlocalnode_updateRowI64: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: bigint) => [number, number, number];
   readonly wasmsyncedlocalnode_listTables: (a: number) => any;
   readonly wasmsyncedlocalnode_subscribeDelta: (a: number, b: number, c: number, d: any) => [number, number, number];
+  readonly wasmsyncedlocalnode_subscribeRows: (a: number, b: number, c: number, d: any) => [number, number, number];
   readonly __wbg_syncedqueryhandle_free: (a: number, b: number) => void;
   readonly syncedqueryhandle_unsubscribe: (a: number) => void;
   readonly syncedqueryhandle_diagram: (a: number) => [number, number];
   readonly syncedqueryhandle_free: (a: number) => void;
+  readonly __wbg_wasmsyncclient_free: (a: number, b: number) => void;
+  readonly wasmsyncclient_new: (a: number, b: number, c: number, d: number) => number;
+  readonly wasmsyncclient_setOnCommits: (a: number, b: any) => void;
+  readonly wasmsyncclient_setOnExcluded: (a: number, b: any) => void;
+  readonly wasmsyncclient_setOnError: (a: number, b: any) => void;
+  readonly wasmsyncclient_setOnStateChange: (a: number, b: any) => void;
+  readonly wasmsyncclient_connectionState: (a: number) => number;
+  readonly wasmsyncclient_subscribe: (a: number, b: number, c: number) => any;
+  readonly wasmsyncclient_push: (a: number, b: number, c: number, d: any) => any;
+  readonly wasmsyncclient_reconcile: (a: number, b: number, c: number, d: any) => any;
+  readonly wasmsyncclient_disconnect: (a: number) => void;
   readonly wasm_bindgen__convert__closures_____invoke__h20bec3cca755663f: (a: number, b: number, c: any) => void;
   readonly wasm_bindgen__closure__destroy__h4df8827c3765d533: (a: number, b: number) => void;
   readonly wasm_bindgen__convert__closures_____invoke__h76dfe62a3b69c085: (a: number, b: number, c: any) => void;
