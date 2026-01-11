@@ -2,6 +2,7 @@ import { useSyncExternalStoreWithSelector } from "use-sync-external-store/shim/w
 import React, {
   useCallback,
   useContext,
+  useMemo,
   useRef,
   useSyncExternalStore,
 } from "react";
@@ -90,23 +91,6 @@ export function useIsAuthenticated() {
   );
 }
 
-/**
- * Tracked subscription state. If any of the dependencies change, the subscription will be recreated.
- */
-interface SubscriptionState<
-  S extends CoValueClassOrSchema,
-  R extends ResolveQuery<S>,
-> {
-  value: CoValueSubscription<S, R> | null;
-  contextManager: ReturnType<typeof useJazzContextManager>;
-  id: string | undefined | null;
-  Schema: S;
-  resolve?: R;
-  branchName?: string;
-  branchOwnerId?: string;
-  agent?: AnonymousJazzAgent | Loaded<any, true>;
-}
-
 export function useCoValueSubscription<
   S extends CoValueClassOrSchema,
   // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
@@ -119,92 +103,123 @@ export function useCoValueSubscription<
     unstable_branch?: BranchDefinition;
   },
 ): CoValueSubscription<S, R> | null {
+  const resolve = getResolveQuery(Schema, options?.resolve);
+  const subscriptions = useCoValueSubscriptions(
+    Schema,
+    [id],
+    resolve,
+    options?.unstable_branch,
+  );
+  return (subscriptions[0] ?? null) as CoValueSubscription<S, R> | null;
+}
+
+/**
+ * Tracked state for the entire subscriptions array.
+ * If any of the dependencies change, the subscriptions are recreated.
+ */
+interface SubscriptionsState {
+  subscriptions: (SubscriptionScope<CoValue> | null)[];
+  schema: CoValueClassOrSchema;
+  ids: readonly (string | undefined | null)[];
+  resolve: ResolveQuery<any>;
+  contextManager: ReturnType<typeof useJazzContextManager>;
+  agent: AnonymousJazzAgent | Loaded<any, true>;
+  branchName?: string;
+  branchOwnerId?: string;
+}
+
+/**
+ * Internal hook that manages an array of SubscriptionScope instances.
+ *
+ * - Uses a ref to track subscriptions by index
+ * - Detects changes by comparing schema/ids/resolve/branch
+ * - Creates new subscriptions via SubscriptionScopeCache.getOrCreate()
+ * - Returns null for entries with undefined/null IDs or invalid branches
+ */
+function useCoValueSubscriptions(
+  schema: CoValueClassOrSchema,
+  ids: readonly (string | undefined | null)[],
+  resolve: ResolveQuery<any>,
+  branch?: BranchDefinition,
+): (SubscriptionScope<CoValue> | null)[] {
   const contextManager = useJazzContextManager();
   const agent = useAgent();
 
-  const callerStack = React.useRef<Error | undefined>(undefined);
-  if (!callerStack.current) {
-    callerStack.current = captureStack();
-  }
+  const callerStack = useMemo(() => captureStack(), []);
 
-  const createSubscription = (): SubscriptionState<S, R> => {
-    if (!id) {
-      return {
-        value: null,
-        contextManager,
-        id,
-        Schema,
-      };
-    }
-
-    if (options?.unstable_branch?.owner === null) {
-      return {
-        value: null,
-        contextManager,
-        id,
-        Schema,
-      };
-    }
-
-    const resolve = getResolveQuery(Schema, options?.resolve);
-
+  const createAllSubscriptions = (): SubscriptionsState => {
     const node = contextManager.getCurrentValue()!.node;
     const cache = contextManager.getSubscriptionScopeCache();
-    const subscription = cache.getOrCreate(
-      node,
-      Schema,
-      id,
-      resolve,
-      false,
-      false,
-      options?.unstable_branch,
-    );
 
-    // Set callerStack on returned subscription after retrieval
-    if (callerStack.current) {
-      subscription.callerStack = callerStack.current;
-    }
+    const subscriptions = ids.map((id) => {
+      if (!id) {
+        return null;
+      }
+
+      if (branch?.owner === null) {
+        return null;
+      }
+
+      const subscription = cache.getOrCreate(
+        node,
+        schema,
+        id,
+        resolve,
+        false,
+        false,
+        branch,
+      );
+
+      if (callerStack) {
+        subscription.callerStack = callerStack;
+      }
+
+      return subscription;
+    });
 
     return {
-      value: subscription as CoValueSubscription<S, R>,
+      subscriptions,
+      schema,
+      ids,
+      resolve,
       contextManager,
-      id,
-      Schema,
-      branchName: options?.unstable_branch?.name,
-      branchOwnerId: options?.unstable_branch?.owner?.$jazz.id,
       agent,
+      branchName: branch?.name,
+      branchOwnerId: branch?.owner?.$jazz.id,
     };
   };
 
-  const subscriptionRef = React.useRef<null | ReturnType<
-    typeof createSubscription
-  >>(null);
-
-  if (!subscriptionRef.current) {
-    subscriptionRef.current = createSubscription();
+  const stateRef = React.useRef<SubscriptionsState | null>(null);
+  if (!stateRef.current) {
+    stateRef.current = createAllSubscriptions();
   }
 
-  const branchName = options?.unstable_branch?.name;
-  const branchOwnerId = options?.unstable_branch?.owner?.$jazz.id;
+  const state = stateRef.current;
 
-  let subscription = subscriptionRef.current;
+  const branchName = branch?.name;
+  const branchOwnerId = branch?.owner?.$jazz.id;
 
-  // Check if the subscription needs to be updated
-  // because one of the dependencies has changed
-  if (
-    subscription.contextManager !== contextManager ||
-    subscription.id !== id ||
-    subscription.Schema !== Schema ||
-    subscription.branchName !== branchName ||
-    subscription.branchOwnerId !== branchOwnerId ||
-    subscription.agent !== agent
-  ) {
-    subscriptionRef.current = createSubscription();
-    subscription = subscriptionRef.current;
+  const contextChanged =
+    state.contextManager !== contextManager || state.agent !== agent;
+
+  const paramsChanged =
+    state.schema !== schema ||
+    state.resolve !== resolve ||
+    state.branchName !== branchName ||
+    state.branchOwnerId !== branchOwnerId ||
+    state.subscriptions.length !== ids.length ||
+    state.subscriptions.some((subscription, index) => {
+      const id = ids[index];
+      if (!subscription && !id) return false;
+      if (!subscription || !id) return true;
+      return subscription.id !== id;
+    });
+
+  if (contextChanged || paramsChanged) {
+    stateRef.current = createAllSubscriptions();
   }
 
-  // Subscribe to the context manager to react to auth changes
-  return subscription.value;
+  return stateRef.current.subscriptions;
 }
 
 function useImportCoValueContent<V>(
@@ -485,6 +500,13 @@ export function useSuspenseCoState<
   return useSubscriptionSelector(subscription, options);
 }
 
+/**
+ * Returns a subscription's current value.
+ * Allows to optionally select a subset of the subscription's value.
+ *
+ * This is the single-value counterpart to {@link useSubscriptionsSelector}.
+ * Keeping it separate for performance reasons.
+ */
 export function useSubscriptionSelector<
   S extends CoValueClassOrSchema,
   // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
@@ -534,10 +556,7 @@ export function useAccountSubscription<
   const contextManager = useJazzContextManager();
 
   // Capture stack trace at hook call time
-  const callerStack = React.useRef<Error | undefined>(undefined);
-  if (!callerStack.current) {
-    callerStack.current = captureStack();
-  }
+  const callerStack = useMemo(() => captureStack(), []);
 
   const createSubscription = () => {
     const agent = getCurrentAccountFromContextManager(contextManager);
@@ -565,8 +584,8 @@ export function useAccountSubscription<
     );
 
     // Set callerStack on returned subscription after retrieval
-    if (callerStack.current) {
-      subscription.callerStack = callerStack.current;
+    if (callerStack) {
+      subscription.callerStack = callerStack;
     }
 
     return {
@@ -897,8 +916,206 @@ function getResolveQuery(
   return true;
 }
 
-// Re-export multi-state hooks
-export {
-  useCoStates,
-  useSuspenseCoStates,
-} from "./useCoStates.js";
+/**
+ * Internal hook that suspends until all values are loaded.
+ *
+ * - Creates a Promise.all from individual getCachedPromise() calls
+ * - Returns Promise.resolve(null) for null subscriptions (undefined/null IDs)
+ * - Suspends via the use() hook until all values are loaded
+ */
+function useSuspendUntilLoaded(
+  subscriptions: (SubscriptionScope<CoValue> | null)[],
+): void {
+  const subscriptionIds = subscriptions
+    .map((sub) => sub?.id ?? "null")
+    .join(",");
+
+  const combinedPromise = useMemo(() => {
+    const promises = subscriptions.map((sub) => {
+      if (!sub) {
+        // For null subscriptions (undefined/null IDs), resolve immediately with null
+        return Promise.resolve(null);
+      }
+      return sub.getCachedPromise();
+    });
+
+    return Promise.all(promises);
+  }, [subscriptionIds]);
+
+  use(combinedPromise);
+}
+
+/**
+ * Internal hook that uses useSyncExternalStore to subscribe to multiple SubscriptionScopes.
+ *
+ * - Creates a combined subscribe function that subscribes to all scopes
+ * - Returns an array of current values from each scope
+ * - Maintains stable references for unchanged values
+ *
+ * @param subscriptions - Array of SubscriptionScope instances (or null for skipped entries)
+ * @returns Array of loaded CoValues (or null for skipped entries)
+ */
+function useSubscriptionsSelector<T extends CoValue[] | MaybeLoaded<CoValue>[]>(
+  subscriptions: (SubscriptionScope<CoValue> | null)[],
+): T {
+  const subscriptionIds = subscriptions
+    .map((sub) => sub?.id ?? "null")
+    .join(",");
+
+  // Combined subscribe function that subscribes to all scopes
+  const subscribe = useCallback(
+    (callback: () => void) => {
+      const unsubscribes = subscriptions.map((sub) => {
+        if (!sub) {
+          return () => {};
+        }
+        return sub.subscribe(callback);
+      });
+
+      return () => {
+        unsubscribes.forEach((unsub) => unsub());
+      };
+    },
+    [subscriptionIds],
+  );
+
+  // Cache current values to avoid infinite loops
+  const cachedCurrentValuesRef = useRef<T>([] as unknown as T);
+  const getCurrentValues = useCallback(() => {
+    const newValues = subscriptions.map((sub) => {
+      if (!sub) {
+        return null;
+      }
+      return sub.getCurrentValue();
+    });
+
+    // Check if values have changed by comparing each element
+    const cached = cachedCurrentValuesRef.current;
+    const hasChanged =
+      cached.length !== newValues.length ||
+      newValues.some((value, index) => value !== cached[index]);
+
+    if (hasChanged) {
+      cachedCurrentValuesRef.current = newValues as T;
+    }
+
+    return cachedCurrentValuesRef.current;
+  }, [subscriptionIds]);
+
+  return useSyncExternalStore(subscribe, getCurrentValues, getCurrentValues);
+}
+
+/**
+ * Subscribe to multiple CoValues with unified Suspense handling.
+ *
+ * This hook accepts a list of CoValue IDs and returns an array of loaded values,
+ * suspending until all values are available.
+ *
+ * @param Schema - The CoValue schema or class constructor
+ * @param ids - Array of CoValue IDs to subscribe to
+ * @param options - Optional configuration, including resolve query
+ * @returns An array of loaded CoValues in the same order as the input IDs
+ */
+export function useSuspenseCoStates<
+  S extends CoValueClassOrSchema,
+  // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+  const R extends ResolveQuery<S> = SchemaResolveQuery<S>,
+>(
+  Schema: S,
+  ids: readonly string[],
+  options?: {
+    /** Resolve query to specify which nested CoValues to load */
+    resolve?: ResolveQueryStrict<S, R>;
+    /**
+     * Create or load a branch for isolated editing.
+     *
+     * Branching lets you take a snapshot of the current state and start modifying it without affecting the canonical/shared version.
+     * It's a fork of your data graph: the same schema, but with diverging values.
+     *
+     * The checkout of the branch is applied on all the resolved values.
+     *
+     * @param name - A unique name for the branch. This identifies the branch
+     *   and can be used to switch between different branches of the same CoValue.
+     * @param owner - The owner of the branch. Determines who can access and modify
+     *   the branch. If not provided, the branch is owned by the current user.
+     *
+     * For more info see the [branching](https://jazz.tools/docs/react/using-covalues/version-control) documentation.
+     */
+    unstable_branch?: BranchDefinition;
+  },
+): Loaded<S, R>[] {
+  const resolve = getResolveQuery(Schema, options?.resolve);
+  const subscriptionScopes = useCoValueSubscriptions(
+    Schema,
+    ids,
+    resolve,
+    options?.unstable_branch,
+  );
+  useSuspendUntilLoaded(subscriptionScopes);
+  return useSubscriptionsSelector<Loaded<S, R>[]>(subscriptionScopes);
+}
+
+/**
+ * Subscribe to multiple CoValues without Suspense.
+ *
+ * This hook accepts a list of CoValue IDs and returns an array of maybe-loaded values.
+ * Unlike `useSuspenseCoStates`, this hook does not suspend and returns loading/unavailable
+ * states that can be checked via the `$isLoaded` property.
+ *
+ * @param Schema - The CoValue schema or class constructor
+ * @param ids - Array of CoValue IDs to subscribe to
+ * @param options - Optional configuration, including resolve query
+ * @returns An array of MaybeLoaded CoValues in the same order as the input IDs
+ *
+ * @example
+ * ```typescript
+ * const [project1, project2] = useCoStates(
+ *   ProjectSchema,
+ *   [projectId1, projectId2],
+ *   { resolve: { assignee: true } }
+ * );
+ *
+ * if (!project1.$isLoaded || !project2.$isLoaded) {
+ *   return <Loading />;
+ * }
+ * ```
+ */
+export function useCoStates<
+  S extends CoValueClassOrSchema,
+  // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+  const R extends ResolveQuery<S> = SchemaResolveQuery<S>,
+>(
+  Schema: S,
+  ids: readonly string[],
+  options?: {
+    /** Resolve query to specify which nested CoValues to load */
+    resolve?: ResolveQueryStrict<S, R>;
+    /**
+     * Create or load a branch for isolated editing.
+     *
+     * Branching lets you take a snapshot of the current state and start modifying it without affecting the canonical/shared version.
+     * It's a fork of your data graph: the same schema, but with diverging values.
+     *
+     * The checkout of the branch is applied on all the resolved values.
+     *
+     * @param name - A unique name for the branch. This identifies the branch
+     *   and can be used to switch between different branches of the same CoValue.
+     * @param owner - The owner of the branch. Determines who can access and modify
+     *   the branch. If not provided, the branch is owned by the current user.
+     *
+     * For more info see the [branching](https://jazz.tools/docs/react/using-covalues/version-control) documentation.
+     */
+    unstable_branch?: BranchDefinition;
+  },
+): MaybeLoaded<Loaded<S, R>>[] {
+  const resolve = getResolveQuery(Schema, options?.resolve);
+  const subscriptionScopes = useCoValueSubscriptions(
+    Schema,
+    ids,
+    resolve,
+    options?.unstable_branch,
+  );
+  return useSubscriptionsSelector<MaybeLoaded<Loaded<S, R>>[]>(
+    subscriptionScopes,
+  );
+}
