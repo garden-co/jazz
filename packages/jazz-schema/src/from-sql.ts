@@ -632,6 +632,15 @@ function analyzeTableLayout(table: ParsedTable): TableLayout {
   const variableColumns: ParsedColumn[] = [];
   let fixedOffset = 0;
 
+  // id column is always first (ObjectId, 16 bytes, non-nullable)
+  const idCol: ParsedColumn = {
+    name: "id",
+    sqlType: { kind: "ref", table: "" },  // ObjectId is stored same as Ref (16 bytes)
+    nullable: false,
+  };
+  fixedColumns.push({ col: idCol, offset: fixedOffset });
+  fixedOffset += 16;  // ObjectId is 16 bytes
+
   for (const col of table.columns) {
     const fixedSize = getColumnFixedSize(col.sqlType, col.nullable);
     if (fixedSize !== null) {
@@ -672,9 +681,9 @@ function generateRowType(table: ParsedTable): string {
  * Generate binary decoders for all tables using the row buffer format.
  *
  * Row buffer format:
- * - Batch: [u32 count][u32 size₁][16-byte ObjectId][row buffer]...
- * - Row buffer: [fixed columns][offset table (N-1 u32s for N var cols)][variable data]
- * - ObjectId: 16 bytes binary (u128 LE), converted to Base32 string
+ * - Batch: [u32 count][u32 size₁][row buffer₁]...
+ * - Row buffer: [id (16 bytes)][fixed columns][offset table (N-1 u32s for N var cols)][variable data]
+ * - id is the first 16 bytes of every row buffer (ObjectId as u128 LE, converted to Base32 string)
  */
 function generateDecoders(tables: ParsedTable[]): string {
   const lines: string[] = [
@@ -689,8 +698,8 @@ function generateDecoders(tables: ParsedTable[]): string {
     "export const DELTA_UPDATED = 2;",
     "export const DELTA_REMOVED = 3;",
     "",
-    "// Crockford Base32 alphabet (matches Rust ObjectId encoding)",
-    "const CROCKFORD_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';",
+    "// Crockford Base32 alphabet (matches Rust ObjectId encoding - lowercase)",
+    "const CROCKFORD_ALPHABET = '0123456789abcdefghjkmnpqrstvwxyz';",
     "",
     "/**",
     " * Convert a 16-byte binary ObjectId to Base32 string.",
@@ -817,16 +826,12 @@ function generateDecoders(tables: ParsedTable[]): string {
     lines.push(`  const rows = new Array(rowCount);`);
     lines.push(``);
     lines.push(`  for (let i = 0; i < rowCount; i++) {`);
-    lines.push(`    // Read row size (includes 16-byte ObjectId + row buffer)`);
+    lines.push(`    // Read row size (row buffer with id as first 16 bytes)`);
     lines.push(`    const rowSize = view.getUint32(offset, true);`);
     lines.push(`    offset += 4;`);
     lines.push(`    const rowStart = offset;`);
     lines.push(`    const rowEnd = rowStart + rowSize;`);
-    lines.push(``);
-    lines.push(`    // Read ObjectId (16 bytes binary -> Base32 string)`);
-    lines.push(`    const id = objectIdToString(bytes, offset);`);
-    lines.push(`    offset += 16;`);
-    lines.push(`    const bufferStart = offset; // Start of row buffer (after ObjectId)`);
+    lines.push(`    const bufferStart = rowStart; // Row buffer starts here (id is first 16 bytes)`);
     lines.push(``);
 
     // Generate fixed column reads
@@ -892,7 +897,7 @@ function generateDecoders(tables: ParsedTable[]): string {
     // Generate delta decoder
     lines.push(`/**`);
     lines.push(` * Decode a ${typeName} delta from binary`);
-    lines.push(` * Format: u8 type (1=added, 2=updated, 3=removed) + [16-byte ObjectId][row buffer] or just ObjectId`);
+    lines.push(` * Format: u8 type (1=added, 2=updated, 3=removed) + [row buffer with id] or just ObjectId for removed`);
     lines.push(` */`);
     lines.push(`export function decode${typeName}Delta(buffer: ArrayBufferLike): Delta<${rowType}> {`);
     lines.push(`  const bytes = new Uint8Array(buffer);`);
@@ -904,9 +909,8 @@ function generateDecoders(tables: ParsedTable[]): string {
     lines.push(`    return { type: 'removed', id };`);
     lines.push(`  }`);
     lines.push(``);
-    lines.push(`  // Added or Updated: decode the row`);
-    lines.push(`  const id = objectIdToString(bytes, 1);`);
-    lines.push(`  const bufferStart = 17; // 1 (delta type) + 16 (ObjectId)`);
+    lines.push(`  // Added or Updated: decode the row buffer (id is first 16 bytes)`);
+    lines.push(`  const bufferStart = 1; // After delta type byte`);
     lines.push(`  const rowEnd = bytes.length;`);
     lines.push(``);
 

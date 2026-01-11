@@ -2396,8 +2396,9 @@ fn incremental_query_reverse_join_basic() {
     // Should return issue1 only (assigned to Alice)
     let rows = query.rows();
     assert_eq!(rows.len(), 1, "Should find 1 issue assigned to Alice");
-    // The output should be Issues columns: title, priority
-    assert_eq!(rows[0].1.descriptor.columns.len(), 2, "Should have 2 columns from Issues");
+    // The output should be Issues columns: id, title, priority
+    assert_eq!(rows[0].1.descriptor.columns.len(), 3, "Should have 3 columns from Issues (id, title, priority)");
+    assert_eq!(rows[0].1.get_by_name("Issues.id"), Some(RowValue::Ref(issue1_id)));
     assert_eq!(rows[0].1.get_by_name("Issues.title"), Some(RowValue::String("Bug 1")));
     assert_eq!(rows[0].1.get_by_name("Issues.priority"), Some(RowValue::String("high")));
 }
