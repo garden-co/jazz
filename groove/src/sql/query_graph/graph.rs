@@ -72,6 +72,10 @@ pub struct QueryGraph {
 
     /// The output node.
     output_node: NodeId,
+
+    /// Entry points for each table: table name → node indices where deltas should enter.
+    /// A table can have multiple entry points if joined multiple times.
+    entry_points: HashMap<String, Vec<usize>>,
 }
 
 impl std::fmt::Debug for QueryGraph {
@@ -86,6 +90,41 @@ impl std::fmt::Debug for QueryGraph {
 }
 
 impl QueryGraph {
+    /// Build entry points map from nodes.
+    ///
+    /// Maps each table to the node indices where its deltas should enter.
+    /// - Primary table enters at node 0
+    /// - Join tables enter at their Join node
+    /// - ArrayAggregate inner tables enter at the ArrayAggregate node
+    fn build_entry_points(nodes: &[QueryNode], primary_table: &str) -> HashMap<String, Vec<usize>> {
+        let mut entry_points: HashMap<String, Vec<usize>> = HashMap::new();
+
+        // Primary table always enters at node 0
+        entry_points.insert(primary_table.to_string(), vec![0]);
+
+        // Join tables enter at their Join node (may have multiple entries for same table)
+        for (idx, node) in nodes.iter().enumerate() {
+            if let QueryNode::Join { join_table, .. } = node {
+                entry_points
+                    .entry(join_table.clone())
+                    .or_default()
+                    .push(idx);
+            }
+        }
+
+        // ArrayAggregate inner tables enter at the ArrayAggregate node
+        for (idx, node) in nodes.iter().enumerate() {
+            if let QueryNode::ArrayAggregate { inner_table, .. } = node {
+                entry_points
+                    .entry(inner_table.clone())
+                    .or_default()
+                    .push(idx);
+            }
+        }
+
+        entry_points
+    }
+
     /// Create a new single-table query graph.
     ///
     /// This is typically called by `QueryGraphBuilder::output()`.
@@ -115,6 +154,9 @@ impl QueryGraph {
             }
         }
 
+        // Build entry points for multi-entry routing
+        let entry_points = Self::build_entry_points(&nodes, &table);
+
         Self {
             id,
             state: GraphState::Uninitialized,
@@ -126,6 +168,7 @@ impl QueryGraph {
             nodes,
             node_indices,
             output_node,
+            entry_points,
         }
     }
 
@@ -211,6 +254,9 @@ impl QueryGraph {
             }
         }
 
+        // Build entry points for multi-entry routing
+        let entry_points = Self::build_entry_points(&nodes, &left_table);
+
         Self {
             id,
             state: GraphState::Uninitialized,
@@ -222,6 +268,7 @@ impl QueryGraph {
             nodes,
             node_indices,
             output_node,
+            entry_points,
         }
     }
 
@@ -594,6 +641,10 @@ impl QueryGraph {
     }
 
     /// Process a delta through all nodes, handling JOIN and RecursiveFilter nodes specially.
+    ///
+    /// Uses multi-entry routing: deltas enter at the node that needs them.
+    /// A table can have multiple entry points (e.g., if joined twice), and
+    /// each path is processed independently.
     fn process_delta_through_nodes(
         &mut self,
         delta: RowDelta,
@@ -601,188 +652,174 @@ impl QueryGraph {
         cache: &mut RowCache,
         db: &DatabaseState,
     ) -> DeltaBatch {
-        let mut current = DeltaBatch::new();
-        current.push(delta);
+        // Find all entry points for this table
+        let entry_indices = self
+            .entry_points
+            .get(source_table)
+            .cloned()
+            .unwrap_or_else(|| vec![0]);
 
-        // Track tables that are "contained" in the current deltas.
-        // For chain joins, after the first Join, deltas contain combined rows
-        // with data from multiple tables.
-        let mut contained_tables: Vec<String> = vec![source_table.to_string()];
+        let mut all_output = DeltaBatch::new();
 
-        // Track whether we've processed a Join for this delta.
-        // Join table rows should skip non-Join nodes until they reach their destination Join.
-        let mut processed_any_join = false;
+        // Process each entry point path independently
+        for start_idx in entry_indices {
+            let mut current = DeltaBatch::new();
+            current.push(delta.clone());
 
-        // Collect all join tables from Join nodes to identify join table deltas
-        let join_tables: Vec<String> = self
-            .nodes
-            .iter()
-            .filter_map(|n| match n {
-                QueryNode::Join { join_table, .. } => Some(join_table.clone()),
-                _ => None,
-            })
-            .collect();
+            // Track tables that are "contained" in the current deltas.
+            // For chain joins, after the first Join, deltas contain combined rows
+            // with data from multiple tables.
+            let mut contained_tables: Vec<String> = vec![source_table.to_string()];
 
-        // Check if source_table is specifically a join table (not just any non-primary table)
-        let is_join_table_source = join_tables.contains(&source_table.to_string());
+            for node in self.nodes[start_idx..].iter_mut() {
+                if current.is_empty() {
+                    break; // Early cutoff
+                }
 
-        for node in self.nodes.iter_mut() {
-            if current.is_empty() {
-                break; // Early cutoff
-            }
+                match node {
+                    QueryNode::Join {
+                        input_tables,
+                        join_table,
+                        ..
+                    } => {
+                        // Clone values we need before borrowing node mutably
+                        let input_tables_cloned = input_tables.clone();
+                        let join_table_str = join_table.clone();
 
-            // Skip non-Join nodes when processing a raw join table row.
-            // Join table rows (e.g., workspaces) should only be indexed in their destination Join,
-            // not pass through Filters or other nodes until they've been joined with left rows.
-            if is_join_table_source
-                && !processed_any_join
-                && !matches!(node, QueryNode::Join { .. })
-            {
-                continue;
-            }
+                        // Check if this delta is for this Join node
+                        let is_input_delta = input_tables_cloned
+                            .iter()
+                            .any(|t| contained_tables.contains(t));
+                        let is_join_table_delta = source_table == join_table_str && !is_input_delta;
+                        let is_for_this_node = is_input_delta || is_join_table_delta;
 
-            match node {
-                QueryNode::Join {
-                    input_tables,
-                    join_table,
-                    ..
-                } => {
-                    // Clone values we need before borrowing node mutably
-                    let input_tables_cloned = input_tables.clone();
-                    let join_table_str = join_table.clone();
-
-                    // Check if this delta is for this Join node
-                    let is_input_delta = input_tables_cloned
-                        .iter()
-                        .any(|t| contained_tables.contains(t));
-                    let is_join_table_delta = source_table == join_table_str && !is_input_delta;
-                    let is_for_this_node = is_input_delta || is_join_table_delta;
-
-                    if !is_for_this_node {
-                        // Delta is for a downstream node - pass through unchanged
-                        // Don't update contained_tables since we didn't process anything
-                        continue;
-                    }
-
-                    // Check if this delta came from input (prior join output or raw input table)
-                    let is_from_input = contained_tables.len() > 1 || is_input_delta;
-
-                    let mut output = DeltaBatch::new();
-                    for d in current.into_iter() {
-                        // Use streaming join - no on-demand lookups
-                        let batch = node.evaluate_join(d, source_table, is_from_input);
-                        output.extend(batch);
-                    }
-                    current = output;
-                    processed_any_join = true;
-
-                    // After a Join, the delta now contains data from all input tables plus join_table
-                    for table in input_tables_cloned {
-                        if !contained_tables.contains(&table) {
-                            contained_tables.push(table);
+                        if !is_for_this_node {
+                            // Delta is for a downstream node - pass through unchanged
+                            // Don't update contained_tables since we didn't process anything
+                            continue;
                         }
-                    }
-                    if !contained_tables.contains(&join_table_str) {
-                        contained_tables.push(join_table_str);
-                    }
-                }
-                QueryNode::RecursiveFilter { .. } => {
-                    // RecursiveFilter needs special evaluation for fixpoint iteration
-                    current = node.evaluate_recursive(current);
-                }
-                QueryNode::ArrayAggregate {
-                    outer_table,
-                    inner_table,
-                    inner_ref_column,
-                    outer_rows,
-                    inner_joins,
-                    ..
-                } => {
-                    // Clone values before borrowing node mutably
-                    let outer_tbl = outer_table.clone();
-                    let inner_tbl = inner_table.clone();
-                    let inner_ref = inner_ref_column.clone();
-                    let join_tables: Vec<String> =
-                        inner_joins.iter().map(|(_, t, _)| t.clone()).collect();
 
-                    // Check if this delta is for this node
-                    let is_outer_delta =
-                        source_table == outer_tbl || contained_tables.contains(&outer_tbl);
-                    let is_inner_delta = source_table == inner_tbl;
-                    // Check if delta is for a table in inner joins (e.g., Users in IssueAssignees JOIN Users)
-                    let is_inner_join_delta = join_tables.contains(&source_table.to_string());
-
-                    if is_outer_delta || is_inner_delta {
-                        // Process deltas through ArrayAggregate
-                        let outer_schema = self
-                            .all_schemas
-                            .get(&outer_tbl)
-                            .cloned()
-                            .unwrap_or_else(|| self.schema.clone());
+                        // Check if this delta came from input (prior join output or raw input table)
+                        let is_from_input = contained_tables.len() > 1 || is_input_delta;
 
                         let mut output = DeltaBatch::new();
                         for d in current.into_iter() {
-                            let batch = node.evaluate_array_aggregate(
-                                d,
-                                source_table,
-                                is_outer_delta,
-                                is_inner_delta,
-                                &outer_schema,
-                                |outer_id| {
-                                    // Look up all inner rows that reference this outer id
-                                    db.find_referencing(&inner_tbl, &inner_ref, outer_id)
-                                },
-                                |table_name, id| {
-                                    // Look up a row by table and id (for resolving inner joins)
-                                    db.get_row(table_name, id).map(|(_, row)| row)
-                                },
-                            );
+                            // Use streaming join - no on-demand lookups
+                            let batch = node.evaluate_join(d, source_table, is_from_input);
                             output.extend(batch);
                         }
                         current = output;
 
-                        // After processing, output deltas represent outer table rows (Issues, not IssueLabels)
-                        // Update contained_tables so downstream ArrayAggregates know this
-                        if is_inner_delta && !contained_tables.contains(&outer_tbl) {
-                            contained_tables.push(outer_tbl.clone());
+                        // After a Join, the delta now contains data from all input tables plus join_table
+                        for table in input_tables_cloned {
+                            if !contained_tables.contains(&table) {
+                                contained_tables.push(table);
+                            }
                         }
-                    } else if is_inner_join_delta {
-                        // Delta from inner join table (e.g., Users change)
-                        // TODO: Ideally we should find affected IssueAssignees and update those Issues
-                        // For now, clear current to prevent unrelated rows from flowing through
-                        current = DeltaBatch::new();
-                    } else {
-                        // Not for this node - update outer_rows cache if this is a pass-through
-                        // from an upstream ArrayAggregate that added an array to the row
-                        // Only update if the delta contains outer table data
-                        if contained_tables.contains(&outer_tbl) {
-                            for d in current.iter() {
-                                match d {
-                                    RowDelta::Added { id, row }
-                                    | RowDelta::Updated { id, row, .. } => {
-                                        // Update our cached outer_row so subsequent inner deltas use fresh data
-                                        outer_rows.insert(*id, row.clone());
-                                    }
-                                    RowDelta::Removed { id, .. } => {
-                                        outer_rows.remove(id);
+                        if !contained_tables.contains(&join_table_str) {
+                            contained_tables.push(join_table_str);
+                        }
+                    }
+                    QueryNode::RecursiveFilter { .. } => {
+                        // RecursiveFilter needs special evaluation for fixpoint iteration
+                        current = node.evaluate_recursive(current);
+                    }
+                    QueryNode::ArrayAggregate {
+                        outer_table,
+                        inner_table,
+                        inner_ref_column,
+                        outer_rows,
+                        inner_joins,
+                        ..
+                    } => {
+                        // Clone values before borrowing node mutably
+                        let outer_tbl = outer_table.clone();
+                        let inner_tbl = inner_table.clone();
+                        let inner_ref = inner_ref_column.clone();
+                        let join_tables: Vec<String> =
+                            inner_joins.iter().map(|(_, t, _)| t.clone()).collect();
+
+                        // Check if this delta is for this node
+                        let is_outer_delta =
+                            source_table == outer_tbl || contained_tables.contains(&outer_tbl);
+                        let is_inner_delta = source_table == inner_tbl;
+                        // Check if delta is for a table in inner joins (e.g., Users in IssueAssignees JOIN Users)
+                        let is_inner_join_delta = join_tables.contains(&source_table.to_string());
+
+                        if is_outer_delta || is_inner_delta {
+                            // Process deltas through ArrayAggregate
+                            let outer_schema = self
+                                .all_schemas
+                                .get(&outer_tbl)
+                                .cloned()
+                                .unwrap_or_else(|| self.schema.clone());
+
+                            let mut output = DeltaBatch::new();
+                            for d in current.into_iter() {
+                                let batch = node.evaluate_array_aggregate(
+                                    d,
+                                    source_table,
+                                    is_outer_delta,
+                                    is_inner_delta,
+                                    &outer_schema,
+                                    |outer_id| {
+                                        // Look up all inner rows that reference this outer id
+                                        db.find_referencing(&inner_tbl, &inner_ref, outer_id)
+                                    },
+                                    |table_name, id| {
+                                        // Look up a row by table and id (for resolving inner joins)
+                                        db.get_row(table_name, id).map(|(_, row)| row)
+                                    },
+                                );
+                                output.extend(batch);
+                            }
+                            current = output;
+
+                            // After processing, output deltas represent outer table rows (Issues, not IssueLabels)
+                            // Update contained_tables so downstream ArrayAggregates know this
+                            if is_inner_delta && !contained_tables.contains(&outer_tbl) {
+                                contained_tables.push(outer_tbl.clone());
+                            }
+                        } else if is_inner_join_delta {
+                            // Delta from inner join table (e.g., Users change)
+                            // TODO: Ideally we should find affected IssueAssignees and update those Issues
+                            // For now, clear current to prevent unrelated rows from flowing through
+                            current = DeltaBatch::new();
+                        } else {
+                            // Not for this node - update outer_rows cache if this is a pass-through
+                            // from an upstream ArrayAggregate that added an array to the row
+                            // Only update if the delta contains outer table data
+                            if contained_tables.contains(&outer_tbl) {
+                                for d in current.iter() {
+                                    match d {
+                                        RowDelta::Added { id, row }
+                                        | RowDelta::Updated { id, row, .. } => {
+                                            // Update our cached outer_row so subsequent inner deltas use fresh data
+                                            outer_rows.insert(*id, row.clone());
+                                        }
+                                        RowDelta::Removed { id, .. } => {
+                                            outer_rows.remove(id);
+                                        }
                                     }
                                 }
                             }
+                            // Pass through unchanged
                         }
-                        // Pass through unchanged
+                    }
+                    QueryNode::LimitOffset { .. } => {
+                        // LimitOffset needs special evaluation with cache access
+                        current = node.evaluate_limit_offset(current, &self.schema, cache);
+                    }
+                    _ => {
+                        current = node.evaluate(current, cache);
                     }
                 }
-                QueryNode::LimitOffset { .. } => {
-                    // LimitOffset needs special evaluation with cache access
-                    current = node.evaluate_limit_offset(current, &self.schema, cache);
-                }
-                _ => {
-                    current = node.evaluate(current, cache);
-                }
             }
+
+            all_output.extend(current);
         }
 
-        current
+        all_output
     }
 
     /// Collect output rows in buffer format from the final cached set.
