@@ -362,6 +362,42 @@ impl QueryGraphBuilder {
         id
     }
 
+    /// Add a projection node to qualify column names.
+    ///
+    /// Used before JOINs to convert unqualified column names to qualified.
+    /// (e.g., "title" → "documents.title")
+    pub fn projection_qualify(
+        &mut self,
+        input: NodeId,
+        table: &str,
+        source_schema: &TableSchema,
+    ) -> NodeId {
+        let id = self.alloc_id();
+
+        // Build column map: "title" → "documents.title"
+        let column_map: HashMap<String, String> = source_schema
+            .columns
+            .iter()
+            .map(|col| (col.name.clone(), format!("{}.{}", table, col.name)))
+            .collect();
+
+        // Output descriptor uses qualified column names
+        let output_descriptor = Arc::new(RowDescriptor::from_table_schema_qualified(
+            source_schema,
+            table,
+        ));
+
+        self.nodes.push(QueryNode::Projection {
+            table: table.to_string(),
+            input,
+            column_map,
+            output_descriptor,
+            cached_rows: HashMap::new(),
+        });
+
+        id
+    }
+
     /// Add the output node and build the graph.
     ///
     /// This consumes the builder and returns the constructed graph.
@@ -525,6 +561,9 @@ impl QueryGraphBuilder {
             join_column,
             join_schema: right_schema,
             table_descriptors,
+            left_index: HashMap::new(),
+            right_index: HashMap::new(),
+            right_by_ref: HashMap::new(),
             cached_rows: HashMap::new(),
             reverse_index: HashMap::new(),
             reverse_filter: None,
@@ -625,6 +664,9 @@ impl QueryGraphBuilder {
             join_column: qualified_column,
             join_schema: target_schema,
             table_descriptors,
+            left_index: HashMap::new(),
+            right_index: HashMap::new(),
+            right_by_ref: HashMap::new(),
             cached_rows: HashMap::new(),
             reverse_index: HashMap::new(),
             reverse_filter: None,
@@ -746,6 +788,9 @@ impl QueryGraphBuilder {
             join_column: qualified_column,
             join_schema: target_schema,
             table_descriptors,
+            left_index: HashMap::new(),
+            right_index: HashMap::new(),
+            right_by_ref: HashMap::new(),
             cached_rows: HashMap::new(),
             reverse_index: HashMap::new(),
             reverse_filter: filter,

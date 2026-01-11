@@ -91,6 +91,16 @@ pub enum QueryNode {
         /// Descriptors for each table (input tables + join table).
         /// Used for buffer format conversion.
         table_descriptors: HashMap<String, Arc<RowDescriptor>>,
+        /// Left index: join_key → left rows waiting for that key.
+        /// For forward joins: join_key = referenced right row ID
+        /// For reverse joins: join_key = left row's own ID
+        left_index: HashMap<ObjectId, HashMap<ObjectId, OwnedRow>>,
+        /// Right index: right_row_id → OwnedRow (all right rows seen so far).
+        right_index: HashMap<ObjectId, OwnedRow>,
+        /// For reverse joins: maps referenced_left_id → right rows that reference it.
+        /// When a right row has ref_column = X, it's stored in right_by_ref[X][right_id].
+        /// Empty for forward joins.
+        right_by_ref: HashMap<ObjectId, HashMap<ObjectId, OwnedRow>>,
         /// Cached rows: primary_id → BufferJoinedRow.
         /// primary_id is always the leftmost table's row ID.
         /// Uses buffer format for efficient storage.
@@ -893,23 +903,15 @@ impl QueryNode {
     /// - Join table deltas: Use reverse_index to find affected combined rows
     ///
     /// `source_table` indicates which table the delta came from.
-    /// `input_schema` is the combined schema of input tables (for column lookup).
     /// `is_from_input` indicates if this delta came from a prior node in the chain.
-    /// `lookup_row` is a function to look up a row by table and ID.
-    /// `lookup_by_ref` is a function to find rows referencing a given ID (DB-level).
-    pub fn evaluate_join<F, G>(
+    ///
+    /// Uses streaming indexes (left_index, right_index, right_by_ref) instead of on-demand lookups.
+    pub fn evaluate_join(
         &mut self,
         delta: RowDelta,
         source_table: &str,
-        input_schema: &TableSchema,
         is_from_input: bool,
-        lookup_row: F,
-        lookup_by_ref: G,
-    ) -> DeltaBatch
-    where
-        F: Fn(&str, ObjectId) -> Option<OwnedRow>,
-        G: Fn(&str, &str, ObjectId) -> Vec<(ObjectId, OwnedRow)>,
-    {
+    ) -> DeltaBatch {
         match self {
             QueryNode::Join {
                 input_tables,
@@ -920,6 +922,9 @@ impl QueryNode {
                 cached_rows,
                 reverse_index,
                 reverse_filter,
+                left_index,
+                right_index,
+                right_by_ref,
             } => {
                 let mut output = DeltaBatch::new();
 
@@ -928,46 +933,39 @@ impl QueryNode {
                 let is_input_delta =
                     is_from_input || input_tables.iter().any(|t| t == source_table);
 
-                // Build combined schema for output conversion
-                // The combined schema has qualified column names in order
-                // For chain joins (input already combined), use extend_with to preserve
-                // existing column names and only qualify the new join table's columns.
-                // For first joins (single table input), use combine to qualify both.
-                let is_chain_join = input_tables.len() > 1 || input_schema.name.contains('+');
-                let combined_schema = if is_chain_join {
-                    input_schema.extend_with(join_schema)
-                } else {
-                    input_schema.combine(join_schema)
-                };
-
                 if is_input_delta && !is_join_table_delta {
-                    // Delta from input (either raw table or combined row from prior join)
+                    // Delta from input (left side) - use streaming indexes
                     Self::eval_join_input_delta(
                         &delta,
                         input_tables,
                         join_table,
                         join_column,
-                        input_schema,
                         join_schema,
-                        &combined_schema,
                         table_descriptors,
                         cached_rows,
                         reverse_index,
                         reverse_filter.as_ref(),
+                        left_index,
+                        right_index,
+                        right_by_ref,
                         &mut output,
-                        &lookup_row,
-                        &lookup_by_ref,
                     );
                 } else if is_join_table_delta {
-                    // Delta from join_table - use reverse_index
+                    // Delta from join_table (right side) - use streaming indexes
                     Self::eval_join_table_delta(
                         &delta,
+                        input_tables,
                         join_table,
+                        join_column,
                         join_schema,
+                        table_descriptors,
                         cached_rows,
                         reverse_index,
+                        reverse_filter.as_ref(),
+                        left_index,
+                        right_index,
+                        right_by_ref,
                         &mut output,
-                        &lookup_row,
                     );
                 }
                 // Note: If neither condition matches, the delta is for a downstream node.
@@ -979,50 +977,48 @@ impl QueryNode {
         }
     }
 
-    /// Handle a delta from the input side (prior tables in chain or single left table).
+    /// Handle a delta from the input (left) side using streaming indexes.
+    ///
+    /// For forward joins: extract join key (referenced right ID), index in left_index,
+    /// check right_index for immediate join.
+    ///
+    /// For reverse joins: index by left row's own ID, check right_by_ref for right rows
+    /// that reference this left row.
     #[allow(clippy::too_many_arguments)]
-    fn eval_join_input_delta<F, G>(
+    fn eval_join_input_delta(
         delta: &RowDelta,
         input_tables: &[String],
         join_table: &str,
         join_column: &str,
-        _input_schema: &TableSchema,
         join_schema: &TableSchema,
-        _combined_schema: &TableSchema,
         table_descriptors: &HashMap<String, Arc<RowDescriptor>>,
         cached_rows: &mut HashMap<ObjectId, BufferJoinedRow>,
         reverse_index: &mut HashMap<ObjectId, HashSet<ObjectId>>,
         reverse_filter: Option<&Predicate>,
+        left_index: &mut HashMap<ObjectId, HashMap<ObjectId, OwnedRow>>,
+        right_index: &HashMap<ObjectId, OwnedRow>,
+        right_by_ref: &HashMap<ObjectId, HashMap<ObjectId, OwnedRow>>,
         output: &mut DeltaBatch,
-        lookup_row: F,
-        find_referencing: G,
-    ) where
-        F: Fn(&str, ObjectId) -> Option<OwnedRow>,
-        G: Fn(&str, &str, ObjectId) -> Vec<(ObjectId, OwnedRow)>,
-    {
+    ) {
         let primary_table = input_tables.first().map(|s| s.as_str()).unwrap_or("");
-
-        // Check if this is a reverse chain join (format: "target@existing.column")
         let is_reverse = join_column.contains('@');
+        let is_chain_join = input_tables.len() > 1;
 
         match delta {
             RowDelta::Added {
-                id: primary_id,
-                row: input_row,
+                id: left_id,
+                row: left_row,
             } => {
                 if is_reverse {
-                    // Reverse join: find join_table rows where ref_column = primary_id
-                    // Format: "target@existing.column"
-                    // We include the join table's columns in the output so downstream
-                    // Filter nodes can filter on them (e.g., for INHERITS policy checks).
-                    // An explicit Projection node handles final output projection.
-                    if let Some(ref_col) = join_column
-                        .split('@')
-                        .nth(1)
-                        .and_then(|s| s.split('.').nth(1))
-                    {
-                        let all_join_rows = find_referencing(join_table, ref_col, *primary_id);
+                    // Reverse join: left row's ID is the key that right rows reference
+                    // Index in left_index[left_id]
+                    left_index
+                        .entry(*left_id)
+                        .or_default()
+                        .insert(*left_id, left_row.clone());
 
+                    // Check right_by_ref for right rows referencing this left row
+                    if let Some(right_rows) = right_by_ref.get(left_id) {
                         // Get descriptor for filter matching
                         let join_descriptor = table_descriptors
                             .get(join_table)
@@ -1031,120 +1027,129 @@ impl QueryNode {
                                 Arc::new(RowDescriptor::from_table_schema(join_schema))
                             });
 
-                        // Filter join rows if a reverse_filter predicate is provided
-                        let join_rows: Vec<_> = if let Some(filter) = reverse_filter {
-                            all_join_rows
-                                .into_iter()
+                        // Filter and collect matching right rows
+                        let matching_rows: Vec<_> = if let Some(filter) = reverse_filter {
+                            right_rows
+                                .iter()
                                 .filter(|(id, row)| {
-                                    filter.matches_buffer(*id, row.as_ref(), &join_descriptor)
+                                    filter.matches_buffer(**id, row.as_ref(), &join_descriptor)
                                 })
                                 .collect()
                         } else {
-                            all_join_rows
+                            right_rows.iter().collect()
                         };
 
-                        // For reverse joins, output once if there's at least one matching join row.
-                        // Include the first matching join row's columns so downstream filters can
-                        // check predicates on the join table (e.g., folders.owner_id = @viewer).
-                        if !join_rows.is_empty() {
-                            // Start with the primary table's row
+                        if !matching_rows.is_empty() {
+                            // Create joined output with first matching right row
                             let mut joined = BufferJoinedRow::from_single(
                                 primary_table,
-                                *primary_id,
-                                input_row.clone(),
+                                *left_id,
+                                left_row.clone(),
                             );
 
-                            // Add the first matching join row (qualified) for downstream filtering
-                            let (first_join_id, first_join_row) = &join_rows[0];
-                            let qualified_join_row =
-                                first_join_row.qualify_columns(join_table, join_schema);
-                            joined.add_joined(join_table, *first_join_id, qualified_join_row);
+                            let (first_right_id, first_right_row) = matching_rows[0];
+                            let qualified_right_row = first_right_row.clone();
+                            joined.add_joined(join_table, *first_right_id, qualified_right_row);
 
-                            // Cache the joined row
-                            cached_rows.insert(*primary_id, joined.clone());
+                            cached_rows.insert(*left_id, joined.clone());
 
-                            // Track all reverse join row IDs for this primary row
-                            for (join_id, _) in &join_rows {
+                            // Track all matching right rows in reverse_index (keyed by left_id for reverse joins)
+                            for (right_id, _) in &matching_rows {
                                 reverse_index
-                                    .entry(*primary_id)
+                                    .entry(*left_id)
                                     .or_default()
-                                    .insert(*join_id);
+                                    .insert(**right_id);
                             }
 
-                            // Output the joined row (includes both tables' columns)
                             output.push(RowDelta::Added {
-                                id: *primary_id,
+                                id: *left_id,
                                 row: joined.to_output_row(),
                             });
                         }
-                        // If no join rows match, don't output anything (filtered out)
+                        // No matching right rows → left row stays pending in left_index
                     }
+                    // No right rows at all → left row stays pending in left_index
                 } else {
-                    // Forward join: look up join_table row by ref value
-                    if let Some(join_id) =
-                        Self::get_ref_value_buffer(input_row, join_column, Some(primary_table))
-                        && let Some(join_row) = lookup_row(join_table, join_id)
-                    {
-                        // Qualify the join row's columns (lookup returns unqualified names)
-                        let qualified_join_row = join_row.qualify_columns(join_table, join_schema);
+                    // Forward join: extract join key (referenced right row ID)
+                    let join_key =
+                        Self::get_ref_value_buffer(left_row, join_column, Some(primary_table));
 
-                        // Check if this is a chain join (input contains multiple tables)
-                        let is_chain_join = input_tables.len() > 1;
-
-                        let mut joined = if is_chain_join {
-                            // Chain join: input row contains combined data from all input_tables
-                            // The input OwnedRow already has all the data, create BufferJoinedRow from it
-                            let mut jr = BufferJoinedRow::new(primary_table, *primary_id);
-
-                            // For chain joins, we need to split the combined input_row back into per-table rows
-                            // This is complex - for now, use a single entry with the combined data
-                            // TODO: Properly track per-table rows in chain joins
-                            jr.add_joined(primary_table, *primary_id, input_row.clone());
-                            jr
-                        } else {
-                            // Single table input: simple case - input_row is already in buffer format
-                            BufferJoinedRow::from_single(
-                                primary_table,
-                                *primary_id,
-                                input_row.clone(),
-                            )
-                        };
-
-                        // Add the join row with qualified column names
-                        joined.add_joined(join_table, join_id, qualified_join_row);
-
-                        // Update caches
-                        cached_rows.insert(*primary_id, joined.clone());
-                        reverse_index
-                            .entry(join_id)
+                    if let Some(join_key) = join_key {
+                        // Index the left row by join key
+                        left_index
+                            .entry(join_key)
                             .or_default()
-                            .insert(*primary_id);
+                            .insert(*left_id, left_row.clone());
 
-                        output.push(RowDelta::Added {
-                            id: *primary_id,
-                            row: joined.to_output_row(),
-                        });
+                        // Check if right row exists
+                        if let Some(right_row) = right_index.get(&join_key) {
+                            let qualified_right_row = right_row.clone();
+
+                            let mut joined = if is_chain_join {
+                                let mut jr = BufferJoinedRow::new(primary_table, *left_id);
+                                jr.add_joined(primary_table, *left_id, left_row.clone());
+                                jr
+                            } else {
+                                BufferJoinedRow::from_single(
+                                    primary_table,
+                                    *left_id,
+                                    left_row.clone(),
+                                )
+                            };
+
+                            joined.add_joined(join_table, join_key, qualified_right_row);
+                            cached_rows.insert(*left_id, joined.clone());
+                            reverse_index.entry(join_key).or_default().insert(*left_id);
+
+                            output.push(RowDelta::Added {
+                                id: *left_id,
+                                row: joined.to_output_row(),
+                            });
+                        }
+                        // No right row → left row stays pending in left_index
                     }
+                    // No join key (null ref) → don't index, no output
                 }
             }
 
-            RowDelta::Removed {
-                id: primary_id,
-                prior,
-            } => {
-                // Remove from cached_rows
-                if cached_rows.remove(primary_id).is_some() {
-                    // Remove from reverse_index
+            RowDelta::Removed { id: left_id, prior } => {
+                // Remove from left_index
+                if is_reverse {
+                    // For reverse joins, key is left_id
+                    if let Some(pending) = left_index.get_mut(left_id) {
+                        pending.remove(left_id);
+                        if pending.is_empty() {
+                            left_index.remove(left_id);
+                        }
+                    }
+                } else {
+                    // For forward joins, find the join_key by scanning left_index
+                    let mut found_key = None;
+                    for (key, rows) in left_index.iter() {
+                        if rows.contains_key(left_id) {
+                            found_key = Some(*key);
+                            break;
+                        }
+                    }
+                    if let Some(key) = found_key
+                        && let Some(pending) = left_index.get_mut(&key)
+                    {
+                        pending.remove(left_id);
+                        if pending.is_empty() {
+                            left_index.remove(&key);
+                        }
+                    }
+                }
+
+                // Remove from cached_rows and reverse_index, emit Removed
+                if cached_rows.remove(left_id).is_some() {
                     if is_reverse {
-                        // For reverse joins, reverse_index is keyed by primary_id
-                        reverse_index.remove(primary_id);
+                        reverse_index.remove(left_id);
                     } else {
-                        // For forward joins, reverse_index is keyed by join_id
-                        // We need to find which join_id this primary_id was in
-                        // Iterate to find and clean up (this is O(n) but Removed is rare)
+                        // Find and remove from reverse_index (keyed by join_id)
                         let mut found_join_id = None;
                         for (join_id, set) in reverse_index.iter_mut() {
-                            if set.remove(primary_id) {
+                            if set.remove(left_id) {
                                 if set.is_empty() {
                                     found_join_id = Some(*join_id);
                                 }
@@ -1156,30 +1161,33 @@ impl QueryNode {
                         }
                     }
                     output.push(RowDelta::Removed {
-                        id: *primary_id,
+                        id: *left_id,
                         prior: prior.clone(),
                     });
                 }
             }
 
             RowDelta::Updated {
-                id: primary_id,
-                row: input_row,
+                id: left_id,
+                row: left_row,
                 prior,
             } => {
+                // For updates, we need to handle the case where the join key changed
+                let existed = cached_rows.contains_key(left_id);
+
                 if is_reverse {
-                    // Reverse join: check if updated row still has matching join rows
-                    if let Some(ref_col) = join_column
-                        .split('@')
-                        .nth(1)
-                        .and_then(|s| s.split('.').nth(1))
-                    {
-                        let existed = cached_rows.remove(primary_id).is_some();
-                        reverse_index.remove(primary_id);
+                    // Reverse join: left row's ID is the key, so key doesn't change on update
+                    // Update in left_index
+                    left_index
+                        .entry(*left_id)
+                        .or_default()
+                        .insert(*left_id, left_row.clone());
 
-                        let all_join_rows = find_referencing(join_table, ref_col, *primary_id);
+                    // Re-evaluate join with right_by_ref
+                    cached_rows.remove(left_id);
+                    reverse_index.remove(left_id);
 
-                        // Get descriptor for filter matching
+                    if let Some(right_rows) = right_by_ref.get(left_id) {
                         let join_descriptor = table_descriptors
                             .get(join_table)
                             .cloned()
@@ -1187,133 +1195,152 @@ impl QueryNode {
                                 Arc::new(RowDescriptor::from_table_schema(join_schema))
                             });
 
-                        // Filter join rows if a reverse_filter predicate is provided
-                        let join_rows: Vec<_> = if let Some(filter) = reverse_filter {
-                            all_join_rows
-                                .into_iter()
+                        let matching_rows: Vec<_> = if let Some(filter) = reverse_filter {
+                            right_rows
+                                .iter()
                                 .filter(|(id, row)| {
-                                    filter.matches_buffer(*id, row.as_ref(), &join_descriptor)
+                                    filter.matches_buffer(**id, row.as_ref(), &join_descriptor)
                                 })
                                 .collect()
                         } else {
-                            all_join_rows
+                            right_rows.iter().collect()
                         };
 
-                        if !join_rows.is_empty() {
-                            // Still has matching rows - update or add
-                            // Include the first matching join row for downstream filtering
+                        if !matching_rows.is_empty() {
                             let mut joined = BufferJoinedRow::from_single(
                                 primary_table,
-                                *primary_id,
-                                input_row.clone(),
+                                *left_id,
+                                left_row.clone(),
                             );
 
-                            // Add the first matching join row (qualified) for downstream filtering
-                            let (first_join_id, first_join_row) = &join_rows[0];
-                            let qualified_join_row =
-                                first_join_row.qualify_columns(join_table, join_schema);
-                            joined.add_joined(join_table, *first_join_id, qualified_join_row);
+                            let (first_right_id, first_right_row) = matching_rows[0];
+                            let qualified_right_row = first_right_row.clone();
+                            joined.add_joined(join_table, *first_right_id, qualified_right_row);
 
-                            cached_rows.insert(*primary_id, joined.clone());
-                            for (join_id, _) in &join_rows {
+                            cached_rows.insert(*left_id, joined.clone());
+                            for (right_id, _) in &matching_rows {
                                 reverse_index
-                                    .entry(*primary_id)
+                                    .entry(*left_id)
                                     .or_default()
-                                    .insert(*join_id);
+                                    .insert(**right_id);
                             }
 
                             let output_row = joined.to_output_row();
                             if existed {
                                 output.push(RowDelta::Updated {
-                                    id: *primary_id,
+                                    id: *left_id,
                                     row: output_row,
                                     prior: prior.clone(),
                                 });
                             } else {
                                 output.push(RowDelta::Added {
-                                    id: *primary_id,
+                                    id: *left_id,
                                     row: output_row,
                                 });
                             }
                         } else if existed {
-                            // No more matching rows - remove from output
                             output.push(RowDelta::Removed {
-                                id: *primary_id,
-                                prior: prior.clone(),
-                            });
-                        }
-                    }
-                } else {
-                    // Forward join
-                    // Get old join_id to update reverse_index
-                    let old_join_id = cached_rows
-                        .get(primary_id)
-                        .and_then(|jr| jr.get_row_id(join_table));
-
-                    // Get new join_id from buffer row
-                    let new_join_id =
-                        Self::get_ref_value_buffer(input_row, join_column, Some(primary_table));
-
-                    // Update reverse_index if join_id changed
-                    if old_join_id != new_join_id
-                        && let Some(old_id) = old_join_id
-                        && let Some(set) = reverse_index.get_mut(&old_id)
-                    {
-                        set.remove(primary_id);
-                        if set.is_empty() {
-                            reverse_index.remove(&old_id);
-                        }
-                    }
-
-                    // Remove old entry
-                    let existed = cached_rows.remove(primary_id).is_some();
-
-                    // Add new entry if join succeeds
-                    if let Some(join_id) = new_join_id {
-                        if let Some(join_row) = lookup_row(join_table, join_id) {
-                            // Qualify the join row's columns (lookup returns unqualified names)
-                            let qualified_join_row =
-                                join_row.qualify_columns(join_table, join_schema);
-
-                            // Input row is already in buffer format
-                            let mut joined = BufferJoinedRow::from_single(
-                                primary_table,
-                                *primary_id,
-                                input_row.clone(),
-                            );
-                            // Add the join row with qualified column names
-                            joined.add_joined(join_table, join_id, qualified_join_row);
-
-                            cached_rows.insert(*primary_id, joined.clone());
-                            reverse_index
-                                .entry(join_id)
-                                .or_default()
-                                .insert(*primary_id);
-
-                            let output_row = joined.to_output_row();
-                            if existed {
-                                output.push(RowDelta::Updated {
-                                    id: *primary_id,
-                                    row: output_row,
-                                    prior: prior.clone(),
-                                });
-                            } else {
-                                output.push(RowDelta::Added {
-                                    id: *primary_id,
-                                    row: output_row,
-                                });
-                            }
-                        } else if existed {
-                            // Join failed but row existed before
-                            output.push(RowDelta::Removed {
-                                id: *primary_id,
+                                id: *left_id,
                                 prior: prior.clone(),
                             });
                         }
                     } else if existed {
-                        // No join reference, row is removed from output
                         output.push(RowDelta::Removed {
-                            id: *primary_id,
+                            id: *left_id,
+                            prior: prior.clone(),
+                        });
+                    }
+                } else {
+                    // Forward join: join key might have changed
+                    // Get old join key from cached_rows or by scanning left_index
+                    let old_join_key = cached_rows
+                        .get(left_id)
+                        .and_then(|jr| jr.get_row_id(join_table))
+                        .or_else(|| {
+                            // Not cached (was pending), find in left_index
+                            for (key, rows) in left_index.iter() {
+                                if rows.contains_key(left_id) {
+                                    return Some(*key);
+                                }
+                            }
+                            None
+                        });
+                    let new_join_key =
+                        Self::get_ref_value_buffer(left_row, join_column, Some(primary_table));
+
+                    // Update left_index: remove from old key, add to new key
+                    if let Some(old_key) = old_join_key
+                        && let Some(pending) = left_index.get_mut(&old_key)
+                    {
+                        pending.remove(left_id);
+                        if pending.is_empty() {
+                            left_index.remove(&old_key);
+                        }
+                    }
+                    if let Some(new_key) = new_join_key {
+                        left_index
+                            .entry(new_key)
+                            .or_default()
+                            .insert(*left_id, left_row.clone());
+                    }
+
+                    // Update reverse_index if join_id changed
+                    if old_join_key != new_join_key
+                        && let Some(old_key) = old_join_key
+                        && let Some(set) = reverse_index.get_mut(&old_key)
+                    {
+                        set.remove(left_id);
+                        if set.is_empty() {
+                            reverse_index.remove(&old_key);
+                        }
+                    }
+
+                    // Remove old cached entry
+                    cached_rows.remove(left_id);
+
+                    // Try to join with new key
+                    if let Some(join_key) = new_join_key {
+                        if let Some(right_row) = right_index.get(&join_key) {
+                            let qualified_right_row = right_row.clone();
+
+                            let mut joined = if is_chain_join {
+                                let mut jr = BufferJoinedRow::new(primary_table, *left_id);
+                                jr.add_joined(primary_table, *left_id, left_row.clone());
+                                jr
+                            } else {
+                                BufferJoinedRow::from_single(
+                                    primary_table,
+                                    *left_id,
+                                    left_row.clone(),
+                                )
+                            };
+
+                            joined.add_joined(join_table, join_key, qualified_right_row);
+                            cached_rows.insert(*left_id, joined.clone());
+                            reverse_index.entry(join_key).or_default().insert(*left_id);
+
+                            let output_row = joined.to_output_row();
+                            if existed {
+                                output.push(RowDelta::Updated {
+                                    id: *left_id,
+                                    row: output_row,
+                                    prior: prior.clone(),
+                                });
+                            } else {
+                                output.push(RowDelta::Added {
+                                    id: *left_id,
+                                    row: output_row,
+                                });
+                            }
+                        } else if existed {
+                            output.push(RowDelta::Removed {
+                                id: *left_id,
+                                prior: prior.clone(),
+                            });
+                        }
+                    } else if existed {
+                        output.push(RowDelta::Removed {
+                            id: *left_id,
                             prior: prior.clone(),
                         });
                     }
@@ -1322,79 +1349,371 @@ impl QueryNode {
         }
     }
 
-    /// Handle a delta from the join_table side using reverse_index.
-    fn eval_join_table_delta<F>(
+    /// Handle a delta from the join_table (right) side using streaming indexes.
+    ///
+    /// For forward joins: index in right_index, check left_index for pending left rows.
+    /// For reverse joins: also index in right_by_ref by the referenced left ID.
+    #[allow(clippy::too_many_arguments)]
+    fn eval_join_table_delta(
         delta: &RowDelta,
+        input_tables: &[String],
         join_table: &str,
+        join_column: &str,
         join_schema: &TableSchema,
+        table_descriptors: &HashMap<String, Arc<RowDescriptor>>,
         cached_rows: &mut HashMap<ObjectId, BufferJoinedRow>,
         reverse_index: &mut HashMap<ObjectId, HashSet<ObjectId>>,
+        reverse_filter: Option<&Predicate>,
+        left_index: &HashMap<ObjectId, HashMap<ObjectId, OwnedRow>>,
+        right_index: &mut HashMap<ObjectId, OwnedRow>,
+        right_by_ref: &mut HashMap<ObjectId, HashMap<ObjectId, OwnedRow>>,
         output: &mut DeltaBatch,
-        lookup_row: F,
-    ) where
-        F: Fn(&str, ObjectId) -> Option<OwnedRow>,
-    {
-        let join_id = delta.row_id();
+    ) {
+        let primary_table = input_tables.first().map(|s| s.as_str()).unwrap_or("");
+        let is_reverse = join_column.contains('@');
+        let is_chain_join = input_tables.len() > 1;
+        let right_id = delta.row_id();
+
+        // For reverse joins, extract the reference column name
+        let ref_col = if is_reverse {
+            join_column
+                .split('@')
+                .nth(1)
+                .and_then(|s| s.split('.').nth(1))
+        } else {
+            None
+        };
 
         match delta {
-            RowDelta::Added { row: _join_row, .. } => {
-                // Find all cached rows that reference this join_id
-                // (They wouldn't have joined before if the row didn't exist)
-                // Actually, for Added, the reverse_index wouldn't have entries yet
-                // unless we pre-populated it. For now, Added from join_table is a no-op
-                // because input deltas would have already tried to join and failed.
-                //
-                // However, if the join_table row is added AFTER input rows were processed,
-                // we need to re-check. This requires iterating cached_rows or having
-                // pre-populated the reverse_index with "pending" entries.
-                //
-                // For simplicity, we rely on the fact that initialization processes
-                // join_table rows before input rows. For true incrementality, we'd
-                // need more sophisticated handling.
-            }
+            RowDelta::Added {
+                id: right_id,
+                row: right_row,
+            } => {
+                // Index the right row
+                right_index.insert(*right_id, right_row.clone());
 
-            RowDelta::Removed { prior, .. } => {
-                // Find all primary_ids that were joined with this join_id
-                if let Some(affected_ids) = reverse_index.remove(&join_id) {
-                    for primary_id in affected_ids {
-                        if cached_rows.remove(&primary_id).is_some() {
-                            output.push(RowDelta::Removed {
-                                id: primary_id,
-                                prior: prior.clone(),
+                if is_reverse {
+                    // Reverse join: index by the reference column value
+                    if let Some(ref_col) = ref_col
+                        && let Some(ref_value) =
+                            Self::get_ref_value_buffer(right_row, ref_col, Some(join_table))
+                    {
+                        // Store in right_by_ref[ref_value][right_id]
+                        right_by_ref
+                            .entry(ref_value)
+                            .or_default()
+                            .insert(*right_id, right_row.clone());
+
+                        // Check if left row exists and is waiting
+                        if let Some(left_rows) = left_index.get(&ref_value) {
+                            // Get descriptor for filter matching
+                            let join_descriptor = table_descriptors
+                                .get(join_table)
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    Arc::new(RowDescriptor::from_table_schema(join_schema))
+                                });
+
+                            // Check if this right row passes the filter
+                            let passes_filter = if let Some(filter) = reverse_filter {
+                                filter.matches_buffer(
+                                    *right_id,
+                                    right_row.as_ref(),
+                                    &join_descriptor,
+                                )
+                            } else {
+                                true
+                            };
+
+                            if passes_filter {
+                                // For each pending left row, produce joined output if not already cached
+                                for (left_id, left_row) in left_rows {
+                                    if !cached_rows.contains_key(left_id) {
+                                        let mut joined = BufferJoinedRow::from_single(
+                                            primary_table,
+                                            *left_id,
+                                            left_row.clone(),
+                                        );
+
+                                        let qualified_right_row = right_row.clone();
+                                        joined.add_joined(
+                                            join_table,
+                                            *right_id,
+                                            qualified_right_row,
+                                        );
+
+                                        cached_rows.insert(*left_id, joined.clone());
+                                        reverse_index
+                                            .entry(*left_id)
+                                            .or_default()
+                                            .insert(*right_id);
+
+                                        output.push(RowDelta::Added {
+                                            id: *left_id,
+                                            row: joined.to_output_row(),
+                                        });
+                                    } else {
+                                        // Already cached, just add to reverse_index
+                                        reverse_index
+                                            .entry(*left_id)
+                                            .or_default()
+                                            .insert(*right_id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Forward join: check left_index for pending left rows waiting for this right_id
+                    if let Some(pending_lefts) = left_index.get(right_id) {
+                        let qualified_right_row = right_row.clone();
+
+                        for (left_id, left_row) in pending_lefts {
+                            // Skip if already cached (shouldn't happen, but be safe)
+                            if cached_rows.contains_key(left_id) {
+                                continue;
+                            }
+
+                            let mut joined = if is_chain_join {
+                                let mut jr = BufferJoinedRow::new(primary_table, *left_id);
+                                jr.add_joined(primary_table, *left_id, left_row.clone());
+                                jr
+                            } else {
+                                BufferJoinedRow::from_single(
+                                    primary_table,
+                                    *left_id,
+                                    left_row.clone(),
+                                )
+                            };
+
+                            joined.add_joined(join_table, *right_id, qualified_right_row.clone());
+                            cached_rows.insert(*left_id, joined.clone());
+                            reverse_index.entry(*right_id).or_default().insert(*left_id);
+
+                            output.push(RowDelta::Added {
+                                id: *left_id,
+                                row: joined.to_output_row(),
                             });
                         }
                     }
                 }
             }
 
+            RowDelta::Removed { prior, .. } => {
+                // Remove from right_index
+                right_index.remove(&right_id);
+
+                if is_reverse {
+                    // Remove from right_by_ref - find by scanning
+                    let mut found_ref_value = None;
+                    for (ref_value, ref_map) in right_by_ref.iter() {
+                        if ref_map.contains_key(&right_id) {
+                            found_ref_value = Some(*ref_value);
+                            break;
+                        }
+                    }
+                    if let Some(ref_value) = found_ref_value
+                        && let Some(ref_map) = right_by_ref.get_mut(&ref_value)
+                    {
+                        ref_map.remove(&right_id);
+                        if ref_map.is_empty() {
+                            right_by_ref.remove(&ref_value);
+                        }
+                    }
+
+                    // For reverse joins, reverse_index is keyed by left_id
+                    // Find affected left rows and potentially remove them from output
+                    let mut affected_left_ids = Vec::new();
+                    for (left_id, right_ids) in reverse_index.iter_mut() {
+                        if right_ids.remove(&right_id) {
+                            affected_left_ids.push(*left_id);
+                        }
+                    }
+
+                    for left_id in affected_left_ids {
+                        if let Some(right_ids) = reverse_index.get(&left_id)
+                            && right_ids.is_empty()
+                        {
+                            // No more right rows for this left row
+                            reverse_index.remove(&left_id);
+                            if cached_rows.remove(&left_id).is_some() {
+                                output.push(RowDelta::Removed {
+                                    id: left_id,
+                                    prior: prior.clone(),
+                                });
+                            }
+                        }
+                        // Else: still has other right rows, keep the cached output
+                    }
+                } else {
+                    // Forward join: reverse_index is keyed by right_id
+                    if let Some(affected_left_ids) = reverse_index.remove(&right_id) {
+                        for left_id in affected_left_ids {
+                            if cached_rows.remove(&left_id).is_some() {
+                                output.push(RowDelta::Removed {
+                                    id: left_id,
+                                    prior: prior.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
             RowDelta::Updated {
-                id: delta_join_id,
-                row: _join_row,
+                id: right_id,
+                row: right_row,
                 prior,
             } => {
-                // Find all primary_ids joined with this join_id and update them
-                if let Some(affected_ids) = reverse_index.get(&join_id) {
-                    for &primary_id in affected_ids.clone().iter() {
-                        if let Some(old_joined) = cached_rows.get(&primary_id) {
-                            // Rebuild the joined row with updated join_table data
-                            let mut new_joined = old_joined.clone();
+                // Update right_index
+                right_index.insert(*right_id, right_row.clone());
 
-                            // Look up the fresh row data and update
-                            if let Some(fresh_join_row) = lookup_row(join_table, join_id) {
-                                // Qualify the join row's columns (lookup returns unqualified names)
-                                let qualified_join_row =
-                                    fresh_join_row.qualify_columns(join_table, join_schema);
+                if is_reverse {
+                    // Handle reference value change
+                    if let Some(ref_col) = ref_col {
+                        // Find old ref_value by scanning right_by_ref
+                        let old_ref_value = {
+                            let mut found = None;
+                            for (ref_value, ref_map) in right_by_ref.iter() {
+                                if ref_map.contains_key(right_id) {
+                                    found = Some(*ref_value);
+                                    break;
+                                }
+                            }
+                            found
+                        };
+                        let new_ref_value =
+                            Self::get_ref_value_buffer(right_row, ref_col, Some(join_table));
 
-                                // Update the join_table row in the BufferJoinedRow
+                        // Update right_by_ref
+                        if let Some(old_ref) = old_ref_value
+                            && let Some(ref_map) = right_by_ref.get_mut(&old_ref)
+                        {
+                            ref_map.remove(right_id);
+                            if ref_map.is_empty() {
+                                right_by_ref.remove(&old_ref);
+                            }
+                        }
+                        if let Some(new_ref) = new_ref_value {
+                            right_by_ref
+                                .entry(new_ref)
+                                .or_default()
+                                .insert(*right_id, right_row.clone());
+                        }
+
+                        // Handle reference change affecting joins
+                        if old_ref_value != new_ref_value {
+                            // Remove old joins
+                            if let Some(old_ref) = old_ref_value
+                                && let Some(right_ids) = reverse_index.get_mut(&old_ref)
+                                && right_ids.remove(right_id)
+                                && right_ids.is_empty()
+                            {
+                                reverse_index.remove(&old_ref);
+                                if cached_rows.remove(&old_ref).is_some() {
+                                    output.push(RowDelta::Removed {
+                                        id: old_ref,
+                                        prior: prior.clone(),
+                                    });
+                                }
+                            }
+
+                            // Add new joins if left row exists
+                            if let Some(new_ref) = new_ref_value
+                                && let Some(left_rows) = left_index.get(&new_ref)
+                            {
+                                let join_descriptor =
+                                    table_descriptors.get(join_table).cloned().unwrap_or_else(
+                                        || Arc::new(RowDescriptor::from_table_schema(join_schema)),
+                                    );
+
+                                let passes_filter = if let Some(filter) = reverse_filter {
+                                    filter.matches_buffer(
+                                        *right_id,
+                                        right_row.as_ref(),
+                                        &join_descriptor,
+                                    )
+                                } else {
+                                    true
+                                };
+
+                                if passes_filter {
+                                    for (left_id, left_row) in left_rows {
+                                        if !cached_rows.contains_key(left_id) {
+                                            let mut joined = BufferJoinedRow::from_single(
+                                                primary_table,
+                                                *left_id,
+                                                left_row.clone(),
+                                            );
+
+                                            let qualified_right_row = right_row.clone();
+                                            joined.add_joined(
+                                                join_table,
+                                                *right_id,
+                                                qualified_right_row,
+                                            );
+
+                                            cached_rows.insert(*left_id, joined.clone());
+                                            reverse_index
+                                                .entry(*left_id)
+                                                .or_default()
+                                                .insert(*right_id);
+
+                                            output.push(RowDelta::Added {
+                                                id: *left_id,
+                                                row: joined.to_output_row(),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            // Reference didn't change, update existing joins
+                            // Find affected left rows via reverse_index
+                            let mut affected_left_ids = Vec::new();
+                            for (left_id, right_ids) in reverse_index.iter() {
+                                if right_ids.contains(right_id) {
+                                    affected_left_ids.push(*left_id);
+                                }
+                            }
+
+                            for left_id in affected_left_ids {
+                                if let Some(old_joined) = cached_rows.get(&left_id) {
+                                    let mut new_joined = old_joined.clone();
+                                    let qualified_right_row = right_row.clone();
+                                    new_joined.add_joined(
+                                        join_table,
+                                        *right_id,
+                                        qualified_right_row,
+                                    );
+
+                                    cached_rows.insert(left_id, new_joined.clone());
+                                    output.push(RowDelta::Updated {
+                                        id: left_id,
+                                        row: new_joined.to_output_row(),
+                                        prior: prior.clone(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Forward join: update all cached rows that used this right row
+                    if let Some(affected_left_ids) = reverse_index.get(right_id) {
+                        let qualified_right_row = right_row.clone();
+
+                        for left_id in affected_left_ids.clone() {
+                            if let Some(old_joined) = cached_rows.get(&left_id) {
+                                let mut new_joined = old_joined.clone();
                                 new_joined.add_joined(
                                     join_table,
-                                    *delta_join_id,
-                                    qualified_join_row,
+                                    *right_id,
+                                    qualified_right_row.clone(),
                                 );
 
-                                cached_rows.insert(primary_id, new_joined.clone());
+                                cached_rows.insert(left_id, new_joined.clone());
                                 output.push(RowDelta::Updated {
-                                    id: primary_id,
+                                    id: left_id,
                                     row: new_joined.to_output_row(),
                                     prior: prior.clone(),
                                 });
@@ -1412,8 +1731,13 @@ impl QueryNode {
     fn get_ref_value_buffer(row: &OwnedRow, column: &str, table: Option<&str>) -> Option<ObjectId> {
         use crate::sql::row_buffer::RowValue;
 
-        // Try qualified name first if table is provided
-        let value = if let Some(tbl) = table {
+        // If column is already qualified (contains '.'), use it directly
+        // Otherwise, try qualified name (with table prefix) first, then unqualified
+        let value = if column.contains('.') {
+            // Already qualified (e.g., "folders.workspace_id")
+            row.get_by_name(column)
+        } else if let Some(tbl) = table {
+            // Try qualified name first, then fall back to unqualified
             let qualified = format!("{}.{}", tbl, column);
             row.get_by_name(&qualified)
                 .or_else(|| row.get_by_name(column))

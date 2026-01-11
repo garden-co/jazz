@@ -384,6 +384,10 @@ impl QueryGraph {
     }
 
     /// Initialize a JOIN query by loading and joining all rows.
+    ///
+    /// With streaming joins, we must load tables in the right order:
+    /// 1. Load right (join) table rows first - populates right_index
+    /// 2. Load left (input) table rows - finds matches in right_index
     fn init_join_query(
         &mut self,
         cache: &mut RowCache,
@@ -393,10 +397,45 @@ impl QueryGraph {
     ) {
         let table = self.table.clone();
 
-        // Load all rows from the primary (left) table
-        let left_rows = db.read_all_rows(&table);
+        // Collect all join tables from Join nodes
+        let mut join_tables: Vec<String> = Vec::new();
+        for node in &self.nodes {
+            if let QueryNode::Join { join_table, .. } = node
+                && !join_tables.contains(join_table)
+            {
+                join_tables.push(join_table.clone());
+            }
+        }
 
-        // Get the schema for qualification
+        // 1. Load right (join) table rows first - populates right_index
+        for join_table in &join_tables {
+            let right_rows = db.read_all_rows(join_table);
+            let right_schema = self
+                .all_schemas
+                .get(join_table)
+                .cloned()
+                .unwrap_or_else(|| self.schema.clone());
+
+            for (id, owned) in right_rows {
+                if skip_table == Some(join_table.as_str()) && skip_id == Some(id) {
+                    continue;
+                }
+
+                cache.insert(join_table, id, owned.clone());
+
+                // Qualify column names for the right table
+                let qualified_row = owned.qualify_columns(join_table, &right_schema);
+                let delta = RowDelta::Added {
+                    id,
+                    row: qualified_row,
+                };
+                // Process through nodes - this populates right_index in Join nodes
+                self.process_delta_through_nodes(delta, join_table, cache, db);
+            }
+        }
+
+        // 2. Load left (input) table rows - finds matches in right_index
+        let left_rows = db.read_all_rows(&table);
         let table_schema = self
             .all_schemas
             .get(&table)
@@ -404,7 +443,6 @@ impl QueryGraph {
             .unwrap_or_else(|| self.schema.clone());
 
         for (id, owned) in left_rows {
-            // Skip if this is the triggering row
             if skip_table == Some(table.as_str()) && skip_id == Some(id) {
                 continue;
             }
@@ -571,9 +609,36 @@ impl QueryGraph {
         // with data from multiple tables.
         let mut contained_tables: Vec<String> = vec![source_table.to_string()];
 
+        // Track whether we've processed a Join for this delta.
+        // Join table rows should skip non-Join nodes until they reach their destination Join.
+        let mut processed_any_join = false;
+
+        // Collect all join tables from Join nodes to identify join table deltas
+        let join_tables: Vec<String> = self
+            .nodes
+            .iter()
+            .filter_map(|n| match n {
+                QueryNode::Join { join_table, .. } => Some(join_table.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // Check if source_table is specifically a join table (not just any non-primary table)
+        let is_join_table_source = join_tables.contains(&source_table.to_string());
+
         for node in self.nodes.iter_mut() {
             if current.is_empty() {
                 break; // Early cutoff
+            }
+
+            // Skip non-Join nodes when processing a raw join table row.
+            // Join table rows (e.g., workspaces) should only be indexed in their destination Join,
+            // not pass through Filters or other nodes until they've been joined with left rows.
+            if is_join_table_source
+                && !processed_any_join
+                && !matches!(node, QueryNode::Join { .. })
+            {
+                continue;
             }
 
             match node {
@@ -602,33 +667,14 @@ impl QueryGraph {
                     // Check if this delta came from input (prior join output or raw input table)
                     let is_from_input = contained_tables.len() > 1 || is_input_delta;
 
-                    // Use combined schema for chain joins (contains qualified column names)
-                    let input_schema =
-                        if contained_tables.len() > 1 || input_tables_cloned.len() > 1 {
-                            self.schema.clone()
-                        } else {
-                            // First join - use the input table's schema
-                            input_tables_cloned
-                                .first()
-                                .and_then(|t| self.all_schemas.get(t).cloned())
-                                .unwrap_or_else(|| self.schema.clone())
-                        };
-
                     let mut output = DeltaBatch::new();
                     for d in current.into_iter() {
-                        let batch = node.evaluate_join(
-                            d,
-                            source_table,
-                            &input_schema,
-                            is_from_input,
-                            |table, id| db.get_row(table, id).map(|(_, row)| row),
-                            |table, column, target_id| {
-                                db.find_referencing(table, column, target_id)
-                            },
-                        );
+                        // Use streaming join - no on-demand lookups
+                        let batch = node.evaluate_join(d, source_table, is_from_input);
                         output.extend(batch);
                     }
                     current = output;
+                    processed_any_join = true;
 
                     // After a Join, the delta now contains data from all input tables plus join_table
                     for table in input_tables_cloned {

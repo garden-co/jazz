@@ -215,8 +215,34 @@ impl RowDescriptor {
     }
 
     /// Find column index by name.
+    ///
+    /// Supports both qualified (table.column) and unqualified (column) names.
+    /// First tries exact match, then:
+    /// - If searching for "column", tries to find "*.column" (any table prefix)
+    /// - If searching for "table.column", tries to find "column" (unqualified)
     pub fn column_index(&self, name: &str) -> Option<usize> {
-        self.columns.iter().position(|c| c.name == name)
+        // First try exact match
+        if let Some(idx) = self.columns.iter().position(|c| c.name == name) {
+            return Some(idx);
+        }
+
+        // If the search name is unqualified, try to find a qualified match
+        if !name.contains('.') {
+            // Search for any column ending with ".{name}"
+            let suffix = format!(".{}", name);
+            if let Some(idx) = self.columns.iter().position(|c| c.name.ends_with(&suffix)) {
+                return Some(idx);
+            }
+        } else {
+            // If the search name is qualified, try to find an unqualified match
+            if let Some(col_name) = name.split('.').next_back()
+                && let Some(idx) = self.columns.iter().position(|c| c.name == col_name)
+            {
+                return Some(idx);
+            }
+        }
+
+        None
     }
 
     /// Get column descriptor by name.
