@@ -15,28 +15,6 @@ import type {
 import { useJazz } from "./context.js";
 
 /**
- * Interface for objects that can subscribe to a single row by ID.
- * Both table clients and query builders implement this.
- * @deprecated Use SubscribableOneWithDb instead - the new pattern passes db at subscription time
- */
-export interface SubscribableOne<T> {
-  subscribe(id: string, callback: (row: T | null) => void): Unsubscribe;
-  /** Optional query key for structural equality comparison */
-  _queryKey?: string;
-}
-
-/**
- * Interface for objects that can subscribe to all matching rows.
- * Both table clients and query builders implement this.
- * @deprecated Use SubscribableAllWithDb instead - the new pattern passes db at subscription time
- */
-export interface SubscribableAll<T> {
-  subscribeAll(callback: (rows: T[]) => void): Unsubscribe;
-  /** Optional query key for structural equality comparison */
-  _queryKey?: string;
-}
-
-/**
  * Get a stable key for a subscribable object.
  * QueryBuilders have _queryKey, table clients use object identity.
  */
@@ -297,8 +275,3 @@ export function useMutate<C, U>(
     [db, table]
   );
 }
-
-/**
- * @deprecated Use useMutate instead
- */
-export const useCreate = useMutate;
