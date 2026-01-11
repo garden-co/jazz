@@ -95,7 +95,8 @@ impl QueryGraph {
     /// Maps each table to the node indices where its deltas should enter.
     /// - Primary table enters at node 0
     /// - Join tables enter at their Join node
-    /// - ArrayAggregate inner tables enter at the ArrayAggregate node
+    /// - For Join nodes with input_tables_need_entry, input_tables also get entry points
+    /// - ArrayAggregate inner tables enter at the ArrayAggregate node (unless handled by Join)
     fn build_entry_points(nodes: &[QueryNode], primary_table: &str) -> HashMap<String, Vec<usize>> {
         let mut entry_points: HashMap<String, Vec<usize>> = HashMap::new();
 
@@ -103,22 +104,45 @@ impl QueryGraph {
         entry_points.insert(primary_table.to_string(), vec![0]);
 
         // Join tables enter at their Join node (may have multiple entries for same table)
+        // For inner joins (input_tables_need_entry), input_tables also get entry points
         for (idx, node) in nodes.iter().enumerate() {
-            if let QueryNode::Join { join_table, .. } = node {
+            if let QueryNode::Join {
+                join_table,
+                input_tables,
+                input_tables_need_entry,
+                ..
+            } = node
+            {
                 entry_points
                     .entry(join_table.clone())
                     .or_default()
                     .push(idx);
+
+                // For ARRAY inner joins, input_tables also need entry points
+                if *input_tables_need_entry {
+                    for table in input_tables {
+                        entry_points.entry(table.clone()).or_default().push(idx);
+                    }
+                }
             }
         }
 
         // ArrayAggregate inner tables enter at the ArrayAggregate node
+        // Skip if already handled by a Join node (for ARRAY subqueries with inner joins)
         for (idx, node) in nodes.iter().enumerate() {
-            if let QueryNode::ArrayAggregate { inner_table, .. } = node {
-                entry_points
-                    .entry(inner_table.clone())
-                    .or_default()
-                    .push(idx);
+            if let QueryNode::ArrayAggregate {
+                inner_table,
+                inner_joins,
+                ..
+            } = node
+            {
+                // Only add entry point if no inner joins (otherwise Join handles it)
+                if inner_joins.is_empty() {
+                    entry_points
+                        .entry(inner_table.clone())
+                        .or_default()
+                        .push(idx);
+                }
             }
         }
 
@@ -151,6 +175,20 @@ impl QueryGraph {
             {
                 all_tables.push(inner_table.clone());
                 all_schemas.insert(inner_table.clone(), inner_schema.clone());
+            }
+        }
+
+        // Check for Join nodes (e.g., from ARRAY inner joins) and add their join_table
+        for node in &nodes {
+            if let QueryNode::Join {
+                join_table,
+                join_schema,
+                ..
+            } = node
+                && !all_tables.contains(join_table)
+            {
+                all_tables.push(join_table.clone());
+                all_schemas.insert(join_table.clone(), join_schema.clone());
             }
         }
 
@@ -560,9 +598,106 @@ impl QueryGraph {
         }
     }
 
+    /// Initialize Join nodes that are for ARRAY inner joins.
+    ///
+    /// These nodes have `input_tables_need_entry = true` and need their tables loaded
+    /// before the main query can process incremental updates.
+    fn init_inner_join_nodes(
+        &mut self,
+        cache: &mut RowCache,
+        db: &DatabaseState,
+        skip_id: Option<ObjectId>,
+        skip_table: Option<&str>,
+    ) {
+        // Find Join nodes with input_tables_need_entry = true
+        // Collect info first to avoid borrow issues
+        let inner_join_info: Vec<(usize, String, Vec<String>)> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, node)| {
+                if let QueryNode::Join {
+                    join_table,
+                    input_tables,
+                    input_tables_need_entry: true,
+                    ..
+                } = node
+                {
+                    Some((idx, join_table.clone(), input_tables.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (node_idx, join_table, input_tables) in inner_join_info {
+            // Get schema for the join table (unused for now, may be useful for validation)
+            let _join_schema = self
+                .all_schemas
+                .get(&join_table)
+                .cloned()
+                .unwrap_or_else(|| self.schema.clone());
+
+            // 1. Load join table rows (e.g., Labels) - populates right_index
+            let join_rows = db.read_all_rows(&join_table);
+            for (id, owned) in join_rows {
+                if skip_table == Some(join_table.as_str()) && skip_id == Some(id) {
+                    continue;
+                }
+
+                cache.insert(&join_table, id, owned.clone());
+
+                // Process directly through the Join node
+                let delta = RowDelta::Added {
+                    id,
+                    row: owned.clone(),
+                };
+
+                // Evaluate just this Join node to populate its indexes
+                if let QueryNode::Join { .. } = &mut self.nodes[node_idx] {
+                    // For join table deltas, is_from_input = false
+                    self.nodes[node_idx].evaluate_join(delta, &join_table, false);
+                }
+            }
+
+            // 2. Load input table rows (e.g., IssueLabels) - populates left_index
+            for input_table in &input_tables {
+                let input_schema = self
+                    .all_schemas
+                    .get(input_table)
+                    .cloned()
+                    .unwrap_or_else(|| self.schema.clone());
+
+                let input_rows = db.read_all_rows(input_table);
+                for (id, owned) in input_rows {
+                    if skip_table == Some(input_table.as_str()) && skip_id == Some(id) {
+                        continue;
+                    }
+
+                    cache.insert(input_table, id, owned.clone());
+
+                    let delta = RowDelta::Added {
+                        id,
+                        row: owned.clone(),
+                    };
+
+                    // Evaluate just this Join node to populate its indexes
+                    if let QueryNode::Join { .. } = &mut self.nodes[node_idx] {
+                        // For input table deltas, is_from_input = true
+                        self.nodes[node_idx].evaluate_join(delta, input_table, true);
+                    }
+                }
+
+                // Don't add this to all_schemas since it's handled by the Join node
+                let _ = input_schema;
+            }
+        }
+    }
+
     /// Initialize a query with ArrayAggregate nodes.
     ///
     /// ArrayAggregate needs database access to look up inner rows for each outer row.
+    /// For ArrayAggregates with inner joins, we must initialize the Join nodes first.
     fn init_array_aggregate_query(
         &mut self,
         cache: &mut RowCache,
@@ -571,6 +706,10 @@ impl QueryGraph {
         skip_table: Option<&str>,
     ) {
         let table = self.table.clone();
+
+        // First, initialize any Join nodes that are for ARRAY inner joins.
+        // These need their join tables (e.g., Labels) loaded before processing inner table deltas.
+        self.init_inner_join_nodes(cache, db, skip_id, skip_table);
 
         // Load all rows from the outer (primary) table
         let rows = db.read_all_rows(&table);
@@ -592,6 +731,28 @@ impl QueryGraph {
                 }
 
                 match node {
+                    QueryNode::Join {
+                        input_tables,
+                        join_table: node_join_table,
+                        ..
+                    } => {
+                        // For ARRAY inner join nodes, outer table deltas should pass through
+                        // Check if this delta is for the Join node
+                        let is_input_delta = input_tables.iter().any(|t| t == &table);
+                        let is_join_table_delta = &table == node_join_table;
+
+                        if is_input_delta || is_join_table_delta {
+                            // This Join processes this delta - evaluate it
+                            let is_from_input = is_input_delta;
+                            let mut output = DeltaBatch::new();
+                            for d in delta.into_iter() {
+                                let batch = node.evaluate_join(d, &table, is_from_input);
+                                output.extend(batch);
+                            }
+                            delta = output;
+                        }
+                        // Otherwise, delta passes through unchanged (delta = delta)
+                    }
                     QueryNode::ArrayAggregate {
                         outer_table,
                         inner_table,
@@ -740,9 +901,11 @@ impl QueryGraph {
                             inner_joins.iter().map(|(_, t, _)| t.clone()).collect();
 
                         // Check if this delta is for this node
+                        // After Join processing, contained_tables includes all joined tables
                         let is_outer_delta =
                             source_table == outer_tbl || contained_tables.contains(&outer_tbl);
-                        let is_inner_delta = source_table == inner_tbl;
+                        let is_inner_delta =
+                            source_table == inner_tbl || contained_tables.contains(&inner_tbl);
                         // Check if delta is for a table in inner joins (e.g., Users in IssueAssignees JOIN Users)
                         let is_inner_join_delta = join_tables.contains(&source_table.to_string());
 

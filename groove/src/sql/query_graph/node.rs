@@ -111,6 +111,10 @@ pub enum QueryNode {
         /// Optional filter predicate for reverse joins.
         /// Applied to join_table rows during lookup.
         reverse_filter: Option<Predicate>,
+        /// When true, input_tables also need entry points (for ARRAY inner joins).
+        /// Normally only join_table gets an entry point, but for inner joins within
+        /// ARRAY subqueries, the inner table (in input_tables) also needs one.
+        input_tables_need_entry: bool,
     },
 
     /// Terminal: marks the output of the graph.
@@ -180,8 +184,9 @@ pub enum QueryNode {
         /// Index in output row where the array should be placed.
         /// -1 means append at end.
         array_column_index: i32,
-        /// Cached arrays: outer_id → Vec<OwnedRow> (inner rows).
-        cached_arrays: HashMap<ObjectId, Vec<OwnedRow>>,
+        /// Cached arrays: outer_id → (inner_id → OwnedRow).
+        /// Using HashMap for inner rows allows proper update/remove by inner_id.
+        cached_arrays: HashMap<ObjectId, HashMap<ObjectId, OwnedRow>>,
         /// Reverse index: inner_id → outer_id (for propagating inner changes).
         inner_to_outer: HashMap<ObjectId, ObjectId>,
         /// Cached outer rows (needed to emit Updated deltas with full row data).
@@ -348,7 +353,7 @@ impl QueryNode {
     }
 
     /// Get the cached arrays for ArrayAggregate nodes.
-    pub fn cached_arrays(&self) -> Option<&HashMap<ObjectId, Vec<OwnedRow>>> {
+    pub fn cached_arrays(&self) -> Option<&HashMap<ObjectId, HashMap<ObjectId, OwnedRow>>> {
         match self {
             QueryNode::ArrayAggregate { cached_arrays, .. } => Some(cached_arrays),
             _ => None,
@@ -925,6 +930,7 @@ impl QueryNode {
                 left_index,
                 right_index,
                 right_by_ref,
+                ..
             } => {
                 let mut output = DeltaBatch::new();
 
@@ -1842,7 +1848,7 @@ impl QueryNode {
         inner_schema: &TableSchema,
         inner_joins: &[(String, String, TableSchema)],
         array_column_index: i32,
-        cached_arrays: &mut HashMap<ObjectId, Vec<OwnedRow>>,
+        cached_arrays: &mut HashMap<ObjectId, HashMap<ObjectId, OwnedRow>>,
         inner_to_outer: &mut HashMap<ObjectId, ObjectId>,
         outer_rows: &mut HashMap<ObjectId, OwnedRow>,
         output: &mut DeltaBatch,
@@ -1866,13 +1872,21 @@ impl QueryNode {
                 }
 
                 // Resolve inner joins (e.g., replace label ref with full Labels row)
-                let inner_rows = Self::resolve_inner_joins_buffer(
+                let resolved_rows = Self::resolve_inner_joins_buffer(
                     &raw_inner_rows,
                     inner_joins,
                     inner_schema,
                     &lookup_row_by_id,
                 );
-                cached_arrays.insert(*outer_id, inner_rows.clone());
+
+                // Store as HashMap<inner_id, OwnedRow>
+                let inner_map: HashMap<ObjectId, OwnedRow> = raw_inner_rows
+                    .iter()
+                    .zip(resolved_rows.iter())
+                    .map(|((inner_id, _), resolved)| (*inner_id, resolved.clone()))
+                    .collect();
+                let inner_rows: Vec<OwnedRow> = inner_map.values().cloned().collect();
+                cached_arrays.insert(*outer_id, inner_map);
 
                 // Build output row with array
                 let output_row = Self::build_output_row_with_array_buffer(
@@ -1894,12 +1908,11 @@ impl QueryNode {
             RowDelta::Removed { id, prior } => {
                 let outer_id = *id;
 
-                // Clean up inner_to_outer index
-                if let Some(inner_rows) = cached_arrays.remove(&outer_id) {
-                    // We don't have inner IDs stored in OwnedRow, but that's ok
-                    // The inner_to_outer index was populated when we added
-                    inner_to_outer.retain(|_, v| *v != outer_id);
-                    let _ = inner_rows; // suppress unused warning
+                // Clean up inner_to_outer index (remove all entries for this outer)
+                if let Some(inner_map) = cached_arrays.remove(&outer_id) {
+                    for inner_id in inner_map.keys() {
+                        inner_to_outer.remove(inner_id);
+                    }
                 }
 
                 outer_rows.remove(&outer_id);
@@ -1921,19 +1934,31 @@ impl QueryNode {
                 let raw_inner_rows = lookup_inner_rows(outer_id);
 
                 // Update inner_to_outer index
-                inner_to_outer.retain(|_, v| *v != outer_id);
+                if let Some(inner_map) = cached_arrays.get(&outer_id) {
+                    for inner_id in inner_map.keys() {
+                        inner_to_outer.remove(inner_id);
+                    }
+                }
                 for (inner_id, _) in &raw_inner_rows {
                     inner_to_outer.insert(*inner_id, outer_id);
                 }
 
                 // Resolve inner joins
-                let inner_rows = Self::resolve_inner_joins_buffer(
+                let resolved_rows = Self::resolve_inner_joins_buffer(
                     &raw_inner_rows,
                     inner_joins,
                     inner_schema,
                     &lookup_row_by_id,
                 );
-                cached_arrays.insert(outer_id, inner_rows.clone());
+
+                // Store as HashMap<inner_id, OwnedRow>
+                let inner_map: HashMap<ObjectId, OwnedRow> = raw_inner_rows
+                    .iter()
+                    .zip(resolved_rows.iter())
+                    .map(|((inner_id, _), resolved)| (*inner_id, resolved.clone()))
+                    .collect();
+                let inner_rows: Vec<OwnedRow> = inner_map.values().cloned().collect();
+                cached_arrays.insert(outer_id, inner_map);
 
                 let output_row = Self::build_output_row_with_array_buffer(
                     owned_row,
@@ -2060,7 +2085,7 @@ impl QueryNode {
         inner_descriptor: &Arc<RowDescriptor>,
         output_descriptor: &Arc<RowDescriptor>,
         array_column_index: i32,
-        cached_arrays: &mut HashMap<ObjectId, Vec<OwnedRow>>,
+        cached_arrays: &mut HashMap<ObjectId, HashMap<ObjectId, OwnedRow>>,
         inner_to_outer: &mut HashMap<ObjectId, ObjectId>,
         outer_rows: &mut HashMap<ObjectId, OwnedRow>,
         output: &mut DeltaBatch,
@@ -2082,15 +2107,17 @@ impl QueryNode {
             );
             resolved.into_iter().next().unwrap_or_else(|| row.clone())
         };
-        // Helper to rebuild output row with updated array
+
+        // Helper to rebuild output row with updated array (from HashMap values)
         let rebuild_output = |base_row: &OwnedRow,
-                              array: &[OwnedRow],
+                              inner_map: &HashMap<ObjectId, OwnedRow>,
                               out_desc: Arc<RowDescriptor>,
                               inner_desc: Arc<RowDescriptor>|
          -> OwnedRow {
+            let array: Vec<OwnedRow> = inner_map.values().cloned().collect();
             Self::build_output_row_with_array_buffer(
                 base_row,
-                array,
+                &array,
                 array_column_index,
                 out_desc,
                 inner_desc,
@@ -2109,16 +2136,16 @@ impl QueryNode {
                     // Update inner_to_outer index
                     inner_to_outer.insert(*inner_id, outer_id);
 
-                    // Add resolved row to cached array
+                    // Add resolved row to cached array (keyed by inner_id)
                     let resolved_row = resolve_inner_row(inner_row);
-                    let array = cached_arrays.entry(outer_id).or_default();
-                    array.push(resolved_row);
+                    let inner_map = cached_arrays.entry(outer_id).or_default();
+                    inner_map.insert(*inner_id, resolved_row);
 
                     // Emit updated delta for outer row
                     if let Some(base_outer_row) = outer_rows.get(&outer_id) {
                         let output_row = rebuild_output(
                             base_outer_row,
-                            array,
+                            inner_map,
                             output_descriptor.clone(),
                             inner_descriptor.clone(),
                         );
@@ -2139,20 +2166,15 @@ impl QueryNode {
             } => {
                 // Find which outer row this belonged to
                 if let Some(outer_id) = inner_to_outer.remove(inner_id) {
-                    // Remove from cached array (we don't have inner_id in OwnedRow, so use index)
-                    // The cached_arrays entries were added with the OwnedRow, so just clear the one at this outer_id
-                    // Actually, we need to track which row to remove - let's keep the array and filter
-                    if let Some(array) = cached_arrays.get_mut(&outer_id) {
-                        // We can't easily identify which OwnedRow corresponds to inner_id
-                        // For now, we'll need to track this differently or rebuild the array
-                        // TODO: Track inner_id -> array index mapping
-                        // For now, just leave the array as-is and rely on re-fetch
+                    // Remove from cached array by inner_id
+                    if let Some(inner_map) = cached_arrays.get_mut(&outer_id) {
+                        inner_map.remove(inner_id);
 
                         // Emit updated delta for outer row
                         if let Some(base_outer_row) = outer_rows.get(&outer_id) {
                             let output_row = rebuild_output(
                                 base_outer_row,
-                                array,
+                                inner_map,
                                 output_descriptor.clone(),
                                 inner_descriptor.clone(),
                             );
@@ -2179,39 +2201,41 @@ impl QueryNode {
 
                 if old_outer_id != new_outer_id {
                     // Inner row moved to different outer row
-                    // Remove from old (update with current array)
+                    // Remove from old outer
                     if let Some(old_id) = old_outer_id {
                         inner_to_outer.remove(inner_id);
-                        if let Some(array) = cached_arrays.get(&old_id)
-                            && let Some(base_outer_row) = outer_rows.get(&old_id)
-                        {
-                            let output_row = rebuild_output(
-                                base_outer_row,
-                                array,
-                                output_descriptor.clone(),
-                                inner_descriptor.clone(),
-                            );
-                            outer_rows.insert(old_id, output_row.clone());
+                        if let Some(inner_map) = cached_arrays.get_mut(&old_id) {
+                            inner_map.remove(inner_id);
 
-                            output.push(RowDelta::Updated {
-                                id: old_id,
-                                row: output_row,
-                                prior: prior.clone(),
-                            });
+                            if let Some(base_outer_row) = outer_rows.get(&old_id) {
+                                let output_row = rebuild_output(
+                                    base_outer_row,
+                                    inner_map,
+                                    output_descriptor.clone(),
+                                    inner_descriptor.clone(),
+                                );
+                                outer_rows.insert(old_id, output_row.clone());
+
+                                output.push(RowDelta::Updated {
+                                    id: old_id,
+                                    row: output_row,
+                                    prior: prior.clone(),
+                                });
+                            }
                         }
                     }
 
-                    // Add to new
+                    // Add to new outer
                     if let Some(new_id) = new_outer_id {
                         inner_to_outer.insert(*inner_id, new_id);
                         let resolved_row = resolve_inner_row(inner_row);
-                        let array = cached_arrays.entry(new_id).or_default();
-                        array.push(resolved_row);
+                        let inner_map = cached_arrays.entry(new_id).or_default();
+                        inner_map.insert(*inner_id, resolved_row);
 
                         if let Some(base_outer_row) = outer_rows.get(&new_id) {
                             let output_row = rebuild_output(
                                 base_outer_row,
-                                array,
+                                inner_map,
                                 output_descriptor.clone(),
                                 inner_descriptor.clone(),
                             );
@@ -2225,15 +2249,15 @@ impl QueryNode {
                         }
                     }
                 } else if let Some(outer_id) = new_outer_id {
-                    // Same outer row - update in place
+                    // Same outer row - update in place (replace old entry with new)
                     let resolved_row = resolve_inner_row(inner_row);
-                    let array = cached_arrays.entry(outer_id).or_default();
-                    array.push(resolved_row); // Add updated row (old one still there - TODO: track properly)
+                    let inner_map = cached_arrays.entry(outer_id).or_default();
+                    inner_map.insert(*inner_id, resolved_row); // Replaces existing entry
 
                     if let Some(base_outer_row) = outer_rows.get(&outer_id) {
                         let output_row = rebuild_output(
                             base_outer_row,
-                            array,
+                            inner_map,
                             output_descriptor.clone(),
                             inner_descriptor.clone(),
                         );
@@ -2251,11 +2275,19 @@ impl QueryNode {
     }
 
     /// Get a Ref value from an OwnedRow by column name.
+    /// Tries looking up by name directly on the row first (handles joined rows with their own descriptors),
+    /// then falls back to using the passed descriptor's index.
     fn get_ref_value_from_buffer(
         row: &OwnedRow,
         column: &str,
         descriptor: &RowDescriptor,
     ) -> Option<ObjectId> {
+        // First try direct name lookup on the row (handles joined rows)
+        if let Some(RowValue::Ref(id)) = row.get_by_name(column) {
+            return Some(id);
+        }
+
+        // Fall back to descriptor-based index lookup
         if let Some(idx) = descriptor.column_index(column)
             && let Some(RowValue::Ref(id)) = row.get(idx)
         {

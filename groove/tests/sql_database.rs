@@ -3513,6 +3513,147 @@ fn incremental_query_array_with_inner_join_empty_start() {
     );
 }
 
+/// Test that updating an inner join table (Labels) correctly updates the output.
+/// This was previously broken - inner join deltas were silently dropped.
+#[test]
+fn incremental_query_array_inner_join_update() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let db = Database::in_memory();
+
+    // Create tables
+    let labels_schema = TableSchema::new(
+        "Labels",
+        vec![
+            ColumnDef::required("name", ColumnType::String),
+            ColumnDef::required("color", ColumnType::String),
+        ],
+    );
+    db.create_table(labels_schema.clone()).unwrap();
+
+    let issues_schema = TableSchema::new(
+        "Issues",
+        vec![ColumnDef::required("title", ColumnType::String)],
+    );
+    db.create_table(issues_schema.clone()).unwrap();
+
+    let issue_labels_schema = TableSchema::new(
+        "IssueLabels",
+        vec![
+            ColumnDef::required("issue", ColumnType::Ref("Issues".into())),
+            ColumnDef::required("label", ColumnType::Ref("Labels".into())),
+        ],
+    );
+    db.create_table(issue_labels_schema.clone()).unwrap();
+
+    // Add initial data BEFORE creating query
+    let label_id = db
+        .insert_with("Labels", |b| {
+            b.set_string_by_name("name", "Bug")
+                .set_string_by_name("color", "#ff0000")
+                .build()
+        })
+        .unwrap();
+
+    let issue_id = db
+        .insert_with("Issues", |b| {
+            b.set_string_by_name("title", "Test Issue").build()
+        })
+        .unwrap();
+
+    db.insert_with("IssueLabels", |b| {
+        b.set_ref_by_name("issue", issue_id)
+            .set_ref_by_name("label", label_id)
+            .build()
+    })
+    .unwrap();
+
+    // Create query AFTER data exists
+    let sql = "SELECT i.id, i.title, \
+               ARRAY(SELECT il.id, il.issue, Labels as label FROM IssueLabels il JOIN Labels ON il.label = Labels.id WHERE il.issue = i.id) as IssueLabels \
+               FROM Issues i";
+
+    let query = db
+        .incremental_query(sql)
+        .expect("should create incremental query");
+
+    // Verify initial state - Label name should be "Bug"
+    let rows = query.rows();
+    assert_eq!(rows.len(), 1);
+
+    let labels = rows[0].1.get_by_name("IssueLabels");
+    if let Some(RowValue::Array(arr)) = labels {
+        let item = arr.get(0).unwrap();
+        let label_field = item.get_by_name("label");
+        if let Some(RowValue::Array(nested)) = label_field {
+            let label_row = nested.get(0).unwrap();
+            assert_eq!(
+                label_row.get_by_name("name"),
+                Some(RowValue::String("Bug")),
+                "Initial label name should be 'Bug'"
+            );
+        }
+    }
+
+    // Track updates
+    let update_count = Arc::new(AtomicUsize::new(0));
+    let update_count_clone = update_count.clone();
+    query.subscribe(Box::new(move |_deltas| {
+        update_count_clone.fetch_add(1, Ordering::SeqCst);
+    }));
+
+    // NOW UPDATE THE LABEL - this was the broken case!
+    db.update_with("Labels", label_id, |b| {
+        b.set_string_by_name("name", "Critical Bug")
+            .set_string_by_name("color", "#ff0000")
+            .build()
+    })
+    .unwrap();
+
+    // Verify the query output was updated
+    let rows = query.rows();
+    assert_eq!(rows.len(), 1);
+
+    let labels = rows[0].1.get_by_name("IssueLabels");
+    if let Some(RowValue::Array(arr)) = labels {
+        assert_eq!(
+            arr.len(),
+            1,
+            "Expected 1 IssueLabel item after update, got {}",
+            arr.len()
+        );
+        let item = arr.get(0).unwrap();
+        let label_field = item.get_by_name("label");
+        match label_field {
+            Some(RowValue::Array(nested)) => {
+                let label_row = nested.get(0).unwrap();
+                let name = label_row.get_by_name("name");
+                assert_eq!(
+                    name,
+                    Some(RowValue::String("Critical Bug")),
+                    "Label name should be updated to 'Critical Bug', got: {:?}",
+                    name
+                );
+            }
+            other => {
+                panic!(
+                    "Expected label to be Array with resolved Labels row, got: {:?}",
+                    other
+                );
+            }
+        }
+    } else {
+        panic!("Expected IssueLabels to be an array");
+    }
+
+    // Should have received at least 1 update
+    assert!(
+        update_count.load(Ordering::SeqCst) >= 1,
+        "Should have received update when Label changed"
+    );
+}
+
 /// Test incremental updates matching exact demo app pattern:
 /// Outer JOIN + multiple ARRAY subqueries with inner JOINs.
 /// Query subscription is created BEFORE any data exists.

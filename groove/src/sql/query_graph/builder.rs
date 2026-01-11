@@ -188,6 +188,7 @@ impl QueryGraphBuilder {
         array_column_index: i32,
     ) -> NodeId {
         let inner_table = inner_table.into();
+        let inner_ref_column = inner_ref_column.into();
 
         // Track inner table schema in join state if present (for graph creation)
         if let Some(js) = &mut self.join_state {
@@ -197,6 +198,18 @@ impl QueryGraphBuilder {
                 js.extra_schemas
                     .insert(target_table.clone(), target_schema.clone());
             }
+        }
+
+        // Create Join nodes for inner joins BEFORE the ArrayAggregate
+        // These handle deltas from both inner_table and the joined tables
+        for (ref_column, target_table, target_schema) in &inner_joins {
+            self.inner_join_for_array(
+                &inner_table,
+                &inner_schema,
+                ref_column,
+                target_table,
+                target_schema,
+            );
         }
 
         let id = self.alloc_id();
@@ -247,7 +260,7 @@ impl QueryGraphBuilder {
             outer_table: self.primary_table.clone(),
             input,
             inner_table,
-            inner_ref_column: inner_ref_column.into(),
+            inner_ref_column,
             inner_schema,
             inner_descriptor,
             output_descriptor,
@@ -257,6 +270,50 @@ impl QueryGraphBuilder {
             inner_to_outer: HashMap::new(),
             outer_rows: HashMap::new(),
         });
+        id
+    }
+
+    /// Create a Join node for an inner join within an ARRAY subquery.
+    ///
+    /// This Join node handles deltas from both the inner table (e.g., IssueAssignees)
+    /// and the join table (e.g., Users). Both tables get entry points since neither
+    /// is the primary table of the main query.
+    fn inner_join_for_array(
+        &mut self,
+        inner_table: &str,
+        inner_schema: &TableSchema,
+        ref_column: &str,
+        target_table: &str,
+        target_schema: &TableSchema,
+    ) -> NodeId {
+        let id = self.alloc_id();
+
+        // Build table descriptors for buffer format
+        let mut table_descriptors = HashMap::new();
+        table_descriptors.insert(
+            inner_table.to_string(),
+            Arc::new(RowDescriptor::from_table_schema(inner_schema)),
+        );
+        table_descriptors.insert(
+            target_table.to_string(),
+            Arc::new(RowDescriptor::from_table_schema(target_schema)),
+        );
+
+        self.nodes.push(QueryNode::Join {
+            input_tables: vec![inner_table.to_string()],
+            join_table: target_table.to_string(),
+            join_column: ref_column.to_string(),
+            join_schema: target_schema.clone(),
+            table_descriptors,
+            left_index: HashMap::new(),
+            right_index: HashMap::new(),
+            right_by_ref: HashMap::new(),
+            cached_rows: HashMap::new(),
+            reverse_index: HashMap::new(),
+            reverse_filter: None,
+            input_tables_need_entry: true,
+        });
+
         id
     }
 
@@ -567,6 +624,7 @@ impl QueryGraphBuilder {
             cached_rows: HashMap::new(),
             reverse_index: HashMap::new(),
             reverse_filter: None,
+            input_tables_need_entry: false,
         });
         id
     }
@@ -670,6 +728,7 @@ impl QueryGraphBuilder {
             cached_rows: HashMap::new(),
             reverse_index: HashMap::new(),
             reverse_filter: None,
+            input_tables_need_entry: false,
         });
 
         id
@@ -794,6 +853,7 @@ impl QueryGraphBuilder {
             cached_rows: HashMap::new(),
             reverse_index: HashMap::new(),
             reverse_filter: filter,
+            input_tables_need_entry: false,
         });
 
         id
