@@ -435,7 +435,6 @@ impl QueryNode {
     pub fn evaluate(
         &mut self,
         input: DeltaBatch,
-        schema: &TableSchema,
         _cache: &RowCache,
     ) -> DeltaBatch {
         match self {
@@ -447,10 +446,9 @@ impl QueryNode {
 
             QueryNode::Filter {
                 predicate,
-                descriptor,
                 cached_ids,
                 ..
-            } => Self::eval_filter(predicate, descriptor, cached_ids, input),
+            } => Self::eval_filter(predicate, cached_ids, input),
 
             QueryNode::Join { .. } => {
                 // Join nodes need special handling with database access
@@ -490,7 +488,6 @@ impl QueryNode {
     pub fn evaluate_recursive(
         &mut self,
         input: DeltaBatch,
-        schema: &TableSchema,
     ) -> DeltaBatch {
         match self {
             QueryNode::RecursiveFilter {
@@ -840,8 +837,6 @@ impl QueryNode {
                         &delta,
                         join_table,
                         join_schema,
-                        &combined_schema,
-                        table_descriptors,
                         cached_rows,
                         reverse_index,
                         &mut output,
@@ -1140,13 +1135,10 @@ impl QueryNode {
     }
 
     /// Handle a delta from the join_table side using reverse_index.
-    #[allow(clippy::too_many_arguments)]
     fn eval_join_table_delta<F>(
         delta: &RowDelta,
         join_table: &str,
         join_schema: &TableSchema,
-        _combined_schema: &TableSchema,
-        table_descriptors: &HashMap<String, Arc<RowDescriptor>>,
         cached_rows: &mut HashMap<ObjectId, BufferJoinedRow>,
         reverse_index: &mut HashMap<ObjectId, HashSet<ObjectId>>,
         output: &mut DeltaBatch,
@@ -1550,8 +1542,7 @@ impl QueryNode {
             resolved.into_iter().next().unwrap_or_else(|| row.clone())
         };
         // Helper to rebuild output row with updated array
-        let rebuild_output = |outer_id: ObjectId,
-                              base_row: &OwnedRow,
+        let rebuild_output = |base_row: &OwnedRow,
                               array: &[OwnedRow],
                               out_desc: Arc<RowDescriptor>,
                               inner_desc: Arc<RowDescriptor>| -> OwnedRow {
@@ -1579,7 +1570,6 @@ impl QueryNode {
                     // Emit updated delta for outer row
                     if let Some(base_outer_row) = outer_rows.get(&outer_id) {
                         let output_row = rebuild_output(
-                            outer_id,
                             base_outer_row,
                             array,
                             output_descriptor.clone(),
@@ -1611,7 +1601,6 @@ impl QueryNode {
                         // Emit updated delta for outer row
                         if let Some(base_outer_row) = outer_rows.get(&outer_id) {
                             let output_row = rebuild_output(
-                                outer_id,
                                 base_outer_row,
                                 array,
                                 output_descriptor.clone(),
@@ -1641,7 +1630,6 @@ impl QueryNode {
                         if let Some(array) = cached_arrays.get(&old_id) {
                             if let Some(base_outer_row) = outer_rows.get(&old_id) {
                                 let output_row = rebuild_output(
-                                    old_id,
                                     base_outer_row,
                                     array,
                                     output_descriptor.clone(),
@@ -1667,7 +1655,6 @@ impl QueryNode {
 
                         if let Some(base_outer_row) = outer_rows.get(&new_id) {
                             let output_row = rebuild_output(
-                                new_id,
                                 base_outer_row,
                                 array,
                                 output_descriptor.clone(),
@@ -1690,7 +1677,6 @@ impl QueryNode {
 
                     if let Some(base_outer_row) = outer_rows.get(&outer_id) {
                         let output_row = rebuild_output(
-                            outer_id,
                             base_outer_row,
                             array,
                             output_descriptor.clone(),
@@ -1789,7 +1775,6 @@ impl QueryNode {
     /// Evaluate a filter node using buffer format directly.
     fn eval_filter(
         predicate: &Predicate,
-        descriptor: &Arc<RowDescriptor>,
         cached_ids: &mut HashSet<ObjectId>,
         input: DeltaBatch,
     ) -> DeltaBatch {
@@ -2078,7 +2063,7 @@ mod tests {
         let (id, row) = make_owned_row(1, "Alice", true);
         let delta = DeltaBatch::added(id, row);
 
-        let output = node.evaluate(delta, &schema, &cache);
+        let output = node.evaluate(delta, &cache);
 
         assert_eq!(output.len(), 1);
         assert!(node.cached_ids().unwrap().contains(&ObjectId::new(1)));
@@ -2096,7 +2081,7 @@ mod tests {
 
         let delta = DeltaBatch::removed(ObjectId::new(1), vec![]);
 
-        let output = node.evaluate(delta, &schema, &cache);
+        let output = node.evaluate(delta, &cache);
 
         assert_eq!(output.len(), 1);
         assert!(!node.cached_ids().unwrap().contains(&ObjectId::new(1)));
@@ -2114,7 +2099,7 @@ mod tests {
 
         let delta = DeltaBatch::removed(ObjectId::new(1), vec![]);
 
-        let output = node.evaluate(delta, &schema, &cache);
+        let output = node.evaluate(delta, &cache);
 
         // Should produce no output since ID wasn't in set
         assert!(output.is_empty());
@@ -2136,7 +2121,7 @@ mod tests {
         let (id, row) = make_owned_row(1, "Alice", true);
         let delta = DeltaBatch::added(id, row);
 
-        let output = node.evaluate(delta, &schema, &cache);
+        let output = node.evaluate(delta, &cache);
 
         assert_eq!(output.len(), 1);
         assert!(node.cached_ids().unwrap().contains(&ObjectId::new(1)));
@@ -2158,7 +2143,7 @@ mod tests {
         let (id, row) = make_owned_row(1, "Alice", false); // active = false
         let delta = DeltaBatch::added(id, row);
 
-        let output = node.evaluate(delta, &schema, &cache);
+        let output = node.evaluate(delta, &cache);
 
         // Early cutoff - no output
         assert!(output.is_empty());
@@ -2182,7 +2167,7 @@ mod tests {
         let (_, new_row) = make_owned_row(1, "Alice", true);
         let delta = DeltaBatch::updated(ObjectId::new(1), new_row, vec![]);
 
-        let output = node.evaluate(delta, &schema, &cache);
+        let output = node.evaluate(delta, &cache);
 
         assert_eq!(output.len(), 1);
         // Should be Added since it entered the filtered set
@@ -2207,7 +2192,7 @@ mod tests {
         let (_, new_row) = make_owned_row(1, "Alice", false);
         let delta = DeltaBatch::updated(ObjectId::new(1), new_row, vec![]);
 
-        let output = node.evaluate(delta, &schema, &cache);
+        let output = node.evaluate(delta, &cache);
 
         assert_eq!(output.len(), 1);
         // Should be Removed since it left the filtered set
@@ -2235,7 +2220,7 @@ mod tests {
         let (_, new_row) = make_owned_row(1, "Alicia", true);
         let delta = DeltaBatch::updated(ObjectId::new(1), new_row, vec![]);
 
-        let output = node.evaluate(delta, &schema, &cache);
+        let output = node.evaluate(delta, &cache);
 
         assert_eq!(output.len(), 1);
         // Should be Updated since it stayed in the set
@@ -2262,7 +2247,7 @@ mod tests {
         let (_, new_row) = make_owned_row(1, "Alicia", false);
         let delta = DeltaBatch::updated(ObjectId::new(1), new_row, vec![]);
 
-        let output = node.evaluate(delta, &schema, &cache);
+        let output = node.evaluate(delta, &cache);
 
         // Early cutoff - no output since row never matched
         assert!(output.is_empty());
@@ -2303,7 +2288,6 @@ mod tests {
     #[test]
     fn recursive_filter_base_access() {
         // Test: root folder owned by viewer is accessible
-        let schema = folder_schema();
         let viewer = ObjectId::new(ALICE);
 
         let mut node = QueryNode::RecursiveFilter {
@@ -2321,7 +2305,7 @@ mod tests {
         let (id, row) = make_owned_folder(1, "root", ALICE, None);
         let delta = DeltaBatch::added(id, row);
 
-        let output = node.evaluate_recursive(delta, &schema);
+        let output = node.evaluate_recursive(delta);
 
         assert_eq!(output.len(), 1);
         assert!(matches!(output.iter().next(), Some(RowDelta::Added { id, .. }) if id.0 == 1));
@@ -2332,7 +2316,6 @@ mod tests {
     #[test]
     fn recursive_filter_no_base_access() {
         // Test: folder owned by someone else is not accessible
-        let schema = folder_schema();
         let viewer = ObjectId::new(ALICE);
 
         let mut node = QueryNode::RecursiveFilter {
@@ -2350,7 +2333,7 @@ mod tests {
         let (id, row) = make_owned_folder(1, "bobs-folder", BOB, None);
         let delta = DeltaBatch::added(id, row);
 
-        let output = node.evaluate_recursive(delta, &schema);
+        let output = node.evaluate_recursive(delta);
 
         assert!(output.is_empty());
         assert!(!node.accessible().unwrap().contains_key(&ObjectId::new(1)));
@@ -2359,7 +2342,6 @@ mod tests {
     #[test]
     fn recursive_filter_inherited_access() {
         // Test: child folder inherits access from parent
-        let schema = folder_schema();
         let viewer = ObjectId::new(ALICE);
 
         let mut node = QueryNode::RecursiveFilter {
@@ -2376,12 +2358,12 @@ mod tests {
         // Add root folder owned by Alice
         let (id, row) = make_owned_folder(1, "root", ALICE, None);
         let delta = DeltaBatch::added(id, row);
-        node.evaluate_recursive(delta, &schema);
+        node.evaluate_recursive(delta);
 
         // Add child folder owned by Bob but parented to Alice's folder
         let (id, row) = make_owned_folder(2, "child", BOB, Some(1));
         let delta = DeltaBatch::added(id, row);
-        let output = node.evaluate_recursive(delta, &schema);
+        let output = node.evaluate_recursive(delta);
 
         assert_eq!(output.len(), 1);
         assert!(node.accessible().unwrap().contains_key(&ObjectId::new(2)));
@@ -2394,7 +2376,6 @@ mod tests {
     #[test]
     fn recursive_filter_cascading_access() {
         // Test: grandchild becomes accessible when parent is added
-        let schema = folder_schema();
         let viewer = ObjectId::new(ALICE);
 
         let mut node = QueryNode::RecursiveFilter {
@@ -2411,19 +2392,19 @@ mod tests {
         // Add grandchild first (parent doesn't exist yet)
         let (id, row) = make_owned_folder(3, "grandchild", BOB, Some(2));
         let delta = DeltaBatch::added(id, row);
-        let output = node.evaluate_recursive(delta, &schema);
+        let output = node.evaluate_recursive(delta);
         assert!(output.is_empty()); // Not yet accessible
 
         // Add child (parent doesn't exist yet)
         let (id, row) = make_owned_folder(2, "child", BOB, Some(1));
         let delta = DeltaBatch::added(id, row);
-        let output = node.evaluate_recursive(delta, &schema);
+        let output = node.evaluate_recursive(delta);
         assert!(output.is_empty()); // Still not accessible
 
         // Add root owned by Alice - should cascade to child and grandchild
         let (id, row) = make_owned_folder(1, "root", ALICE, None);
         let delta = DeltaBatch::added(id, row);
-        let output = node.evaluate_recursive(delta, &schema);
+        let output = node.evaluate_recursive(delta);
 
         // Should have 3 added deltas: root + child + grandchild
         assert_eq!(output.len(), 3);
@@ -2435,7 +2416,6 @@ mod tests {
     #[test]
     fn recursive_filter_removal_cascades() {
         // Test: removing parent cascades removal to children
-        let schema = folder_schema();
         let viewer = ObjectId::new(ALICE);
 
         let mut node = QueryNode::RecursiveFilter {
@@ -2451,17 +2431,17 @@ mod tests {
 
         // Set up: root -> child -> grandchild
         let (id, row) = make_owned_folder(1, "root", ALICE, None);
-        node.evaluate_recursive(DeltaBatch::added(id, row), &schema);
+        node.evaluate_recursive(DeltaBatch::added(id, row));
         let (id, row) = make_owned_folder(2, "child", BOB, Some(1));
-        node.evaluate_recursive(DeltaBatch::added(id, row), &schema);
+        node.evaluate_recursive(DeltaBatch::added(id, row));
         let (id, row) = make_owned_folder(3, "grandchild", BOB, Some(2));
-        node.evaluate_recursive(DeltaBatch::added(id, row), &schema);
+        node.evaluate_recursive(DeltaBatch::added(id, row));
 
         assert_eq!(node.accessible().unwrap().len(), 3);
 
         // Remove root - should cascade to child and grandchild
         let delta = DeltaBatch::removed(ObjectId::new(1), vec![]);
-        let output = node.evaluate_recursive(delta, &schema);
+        let output = node.evaluate_recursive(delta);
 
         // Should have 3 removed deltas
         assert_eq!(output.len(), 3);
@@ -2471,7 +2451,6 @@ mod tests {
     #[test]
     fn recursive_filter_child_keeps_base_access_after_parent_removal() {
         // Test: child with base access keeps it when parent is removed
-        let schema = folder_schema();
         let viewer = ObjectId::new(ALICE);
 
         let mut node = QueryNode::RecursiveFilter {
@@ -2487,10 +2466,10 @@ mod tests {
 
         // Root owned by Alice
         let (id, row) = make_owned_folder(1, "root", ALICE, None);
-        node.evaluate_recursive(DeltaBatch::added(id, row), &schema);
+        node.evaluate_recursive(DeltaBatch::added(id, row));
         // Child also owned by Alice (Both access)
         let (id, row) = make_owned_folder(2, "child", ALICE, Some(1));
-        node.evaluate_recursive(DeltaBatch::added(id, row), &schema);
+        node.evaluate_recursive(DeltaBatch::added(id, row));
 
         assert_eq!(
             node.accessible().unwrap().get(&ObjectId::new(2)),
@@ -2499,7 +2478,7 @@ mod tests {
 
         // Remove root
         let delta = DeltaBatch::removed(ObjectId::new(1), vec![]);
-        let output = node.evaluate_recursive(delta, &schema);
+        let output = node.evaluate_recursive(delta);
 
         // Only root should be removed, child keeps access
         assert_eq!(output.len(), 1);

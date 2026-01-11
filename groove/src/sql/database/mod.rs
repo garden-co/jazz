@@ -572,7 +572,6 @@ impl DatabaseState {
             Some(s) => s,
             None => return vec![],
         };
-        let primary_descriptor = Arc::new(RowDescriptor::from_table_schema(&primary_schema));
 
         // Read all rows from primary table
         let primary_rows = self.read_all_rows(primary_table);
@@ -4487,84 +4486,6 @@ impl Database {
         }))
     }
 
-    /// Build predicate for multi-join queries.
-    fn build_multi_join_predicate(
-        &self,
-        conditions: &[Condition],
-        all_schemas: &[(&str, TableSchema)],
-    ) -> Result<Predicate, DatabaseError> {
-        let mut predicates = Vec::new();
-
-        for cond in conditions {
-            let table = cond.column.table.as_deref();
-            let col_name = &cond.column.column;
-
-            // Find the schema for this column
-            let (table_name, schema) = if let Some(t) = table {
-                all_schemas
-                    .iter()
-                    .find(|(name, _)| *name == t)
-                    .ok_or_else(|| DatabaseError::Parse(parser::ParseError {
-                        message: format!("Unknown table {} in WHERE clause", t),
-                        position: 0,
-                    }))?
-            } else {
-                // Unqualified column - search all schemas
-                // "id" is a special column that exists on every table
-                if col_name == "id" {
-                    all_schemas.first().ok_or_else(|| DatabaseError::Parse(parser::ParseError {
-                        message: "No tables in query".to_string(),
-                        position: 0,
-                    }))?
-                } else {
-                    all_schemas
-                        .iter()
-                        .find(|(_, s)| s.column(col_name).is_some())
-                        .ok_or_else(|| DatabaseError::Parse(parser::ParseError {
-                            message: format!("Unknown column {} in WHERE clause", col_name),
-                            position: 0,
-                        }))?
-                }
-            };
-
-            // "id" is a special column (ObjectId/String type) that exists on every table
-            let column_type = if col_name == "id" {
-                ColumnType::String
-            } else {
-                let column = schema.column(col_name).ok_or_else(|| {
-                    DatabaseError::Parse(parser::ParseError {
-                        message: format!("Column {} not found in table {}", col_name, table_name),
-                        position: 0,
-                    })
-                })?;
-                column.ty.clone()
-            };
-
-            // Only handle literal values in predicates for now
-            let literal_value = match cond.value() {
-                Some(v) => v.clone(),
-                None => {
-                    // Column references not yet supported in predicate building
-                    continue;
-                }
-            };
-
-            let value = coerce_predicate_value(&literal_value, &column_type);
-
-            // Use qualified column name for multi-table queries
-            let qualified_col = format!("{}.{}", table_name, col_name);
-            predicates.push(Predicate::eq(qualified_col, value));
-        }
-
-        if predicates.is_empty() {
-            Ok(Predicate::True)
-        } else if predicates.len() == 1 {
-            Ok(predicates.pop().unwrap())
-        } else {
-            Ok(Predicate::And(predicates))
-        }
-    }
-
     /// Build predicate for multi-join queries with alias support.
     ///
     /// This version takes the full table info including aliases, allowing
@@ -4924,73 +4845,6 @@ impl Database {
             ),
             position: 0,
         }))
-    }
-
-    /// Build a Predicate from SQL WHERE conditions for JOIN queries.
-    /// Handles qualified column names (table.column) and resolves aliases.
-    fn build_join_predicate(
-        &self,
-        conditions: &[parser::Condition],
-        left_schema: &TableSchema,
-        right_schema: &TableSchema,
-    ) -> Result<Predicate, DatabaseError> {
-        if conditions.is_empty() {
-            return Ok(Predicate::True);
-        }
-
-        let mut predicates = Vec::new();
-
-        for cond in conditions {
-            let column = &cond.column.column;
-
-            // Determine which schema has the column and get the qualified name
-            // The combined schema uses qualified names like "Issues.priority"
-            let (qualified_column, col_type) = if column == "id" {
-                // Special case: id exists in both tables
-                // Use the table qualifier to determine which one
-                if let Some(_table) = &cond.column.table {
-                    // Try to match the qualifier (might be alias) to a schema
-                    if left_schema.column_index(column).is_some() {
-                        (format!("{}.id", left_schema.name), ColumnType::Ref("".to_string()))
-                    } else {
-                        (format!("{}.id", right_schema.name), ColumnType::Ref("".to_string()))
-                    }
-                } else {
-                    // Default to left schema for unqualified id
-                    (format!("{}.id", left_schema.name), ColumnType::Ref("".to_string()))
-                }
-            } else if let Some(idx) = left_schema.column_index(column) {
-                // Column found in left schema - use qualified name
-                let qualified = format!("{}.{}", left_schema.name, column);
-                (qualified, left_schema.columns[idx].ty.clone())
-            } else if let Some(idx) = right_schema.column_index(column) {
-                // Column found in right schema - use qualified name
-                let qualified = format!("{}.{}", right_schema.name, column);
-                (qualified, right_schema.columns[idx].ty.clone())
-            } else {
-                return Err(DatabaseError::ColumnNotFound(column.clone()));
-            };
-
-            // Only handle literal values in predicates for now
-            let literal_value = match cond.value() {
-                Some(v) => v.clone(),
-                None => {
-                    // Column references not yet supported in predicate building
-                    return Err(DatabaseError::ColumnNotFound(
-                        "column references not supported in join predicate building".to_string(),
-                    ));
-                }
-            };
-            let value = coerce_predicate_value(&literal_value, &col_type);
-            predicates.push(Predicate::eq(qualified_column, value));
-        }
-
-        // AND all conditions together and optimize
-        let combined = predicates
-            .into_iter()
-            .reduce(|a, b| a.and(b))
-            .unwrap_or(Predicate::True);
-        Ok(combined.optimize())
     }
 
     /// Build a Predicate from SQL WHERE conditions.

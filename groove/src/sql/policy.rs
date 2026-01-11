@@ -914,11 +914,6 @@ impl<'a> EvalContext<'a> {
         let row = self.new_row?;
         row.get_by_name(name).map(|v| v.to_predicate_value())
     }
-
-    /// Get the row ID (current row).
-    fn get_row_id(&self) -> Option<ObjectId> {
-        self.row_id
-    }
 }
 
 /// Result of policy evaluation with explanation.

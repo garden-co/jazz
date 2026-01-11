@@ -579,26 +579,6 @@ mod tests {
         ]))
     }
 
-    fn make_users_schema() -> TableSchema {
-        TableSchema::new(
-            "users",
-            vec![
-                ColumnDef::required("name", ColumnType::String),
-                ColumnDef::required("age", ColumnType::I32),
-            ],
-        )
-    }
-
-    fn make_posts_schema() -> TableSchema {
-        TableSchema::new(
-            "posts",
-            vec![
-                ColumnDef::required("title", ColumnType::String),
-                ColumnDef::required("author_id", ColumnType::Ref("users".to_string())),
-            ],
-        )
-    }
-
     fn make_user_row(descriptor: &Arc<RowDescriptor>, name: &str, age: i32) -> OwnedRow {
         let name_idx = descriptor.column_index("name").unwrap();
         let age_idx = descriptor.column_index("age").unwrap();

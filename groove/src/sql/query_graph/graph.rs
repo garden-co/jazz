@@ -345,7 +345,7 @@ impl QueryGraph {
                         if delta.is_empty() {
                             break;
                         }
-                        delta = node.evaluate(delta, &self.schema, cache);
+                        delta = node.evaluate(delta, cache);
                     }
                 }
             }
@@ -399,7 +399,6 @@ impl QueryGraph {
         skip_table: Option<&str>,
     ) {
         let table = self.table.clone();
-        let schema = self.schema.clone();
 
         // Load all rows
         let rows = db.read_all_rows(&table);
@@ -430,10 +429,10 @@ impl QueryGraph {
                     QueryNode::RecursiveFilter { .. } => {
                         // RecursiveFilter handles its own fixpoint iteration internally
                         // via propagate_access_to_children
-                        delta = node.evaluate_recursive(delta, &schema);
+                        delta = node.evaluate_recursive(delta);
                     }
                     _ => {
-                        delta = node.evaluate(delta, &schema, cache);
+                        delta = node.evaluate(delta, cache);
                     }
                 }
             }
@@ -506,7 +505,7 @@ impl QueryGraph {
                         delta = node.evaluate_limit_offset(delta, &self.schema, cache);
                     }
                     _ => {
-                        delta = node.evaluate(delta, &self.schema, cache);
+                        delta = node.evaluate(delta, cache);
                     }
                 }
             }
@@ -592,7 +591,7 @@ impl QueryGraph {
                 }
                 QueryNode::RecursiveFilter { .. } => {
                     // RecursiveFilter needs special evaluation for fixpoint iteration
-                    current = node.evaluate_recursive(current, &self.schema);
+                    current = node.evaluate_recursive(current);
                 }
                 QueryNode::ArrayAggregate { outer_table, inner_table, inner_ref_column, outer_rows, inner_joins, .. } => {
                     // Clone values before borrowing node mutably
@@ -669,7 +668,7 @@ impl QueryGraph {
                     current = node.evaluate_limit_offset(current, &self.schema, cache);
                 }
                 _ => {
-                    current = node.evaluate(current, &self.schema, cache);
+                    current = node.evaluate(current, cache);
                 }
             }
         }
