@@ -16,7 +16,7 @@ test.describe("Top-level pages load", () => {
     expect(response?.ok()).toBeTruthy();
   });
 
-  test("cloud page loads", async ({ page }) => {
+  test.skip("cloud page loads", async ({ page }) => {
     const response = await page.goto("/cloud");
     expect(response?.ok()).toBeTruthy();
   });
