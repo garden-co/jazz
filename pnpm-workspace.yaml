@@ -1,6 +1,7 @@
 packages:
   - "packages/*"
   - "demo-app"
+  - "sync-demo"
   - "groove-wasm/pkg"
   - "docs"
   - "docs/examples/react"

@@ -27,3 +27,6 @@ dist/
 # Test output
 test-results/
 __screenshots__/
+
+# Turborepo
+.turbo

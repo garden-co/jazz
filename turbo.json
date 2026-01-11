@@ -24,6 +24,23 @@
     "test": {
       "dependsOn": ["^build"],
       "cache": true
+    },
+    "test:e2e": {
+      "dependsOn": ["^build"],
+      "cache": false
+    },
+    "generate": {
+      "dependsOn": ["^build"],
+      "outputs": ["src/generated/**"],
+      "cache": true
+    },
+    "generate:test": {
+      "dependsOn": ["^build"],
+      "outputs": ["test/generated/**"],
+      "cache": true
+    },
+    "lint": {
+      "cache": true
     }
   }
 }

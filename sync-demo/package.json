@@ -11,7 +11,7 @@
     "test:ui": "playwright test --ui"
   },
   "dependencies": {
-    "groove-wasm": "file:../groove-wasm/pkg",
+    "groove-wasm": "workspace:*",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
