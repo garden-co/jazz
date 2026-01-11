@@ -12,12 +12,19 @@
     "enabled": true,
     "rules": {
       "recommended": true,
+      "a11y": {
+        "recommended": false
+      },
       "correctness": {
         "noUnusedVariables": "warn",
         "noUnusedImports": "warn"
       },
       "suspicious": {
         "noExplicitAny": "warn"
+      },
+      "style": {
+        "noNonNullAssertion": "off",
+        "useConst": "warn"
       }
     }
   },
@@ -35,7 +42,8 @@
       "pkg",
       "target",
       "**/generated/**",
-      "pnpm-lock.yaml"
+      "pnpm-lock.yaml",
+      "docs/.source/**"
     ]
   }
 }

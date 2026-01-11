@@ -2,11 +2,23 @@
 # https://github.com/evilmartians/lefthook
 
 pre-commit:
-  parallel: true
   commands:
+    # Formatting (runs first, in parallel)
     rust-format:
       glob: "*.rs"
       run: cargo fmt --all
+      priority: 1
     biome-format:
       glob: "*.{js,ts,tsx,jsx,json}"
       run: pnpm biome format --write {staged_files} && git add {staged_files}
+      priority: 1
+
+    # Linting (runs after formatting)
+    rust-lint:
+      glob: "*.rs"
+      run: cargo clippy --all-targets --all-features -- -D warnings
+      priority: 2
+    biome-lint:
+      glob: "*.{js,ts,tsx,jsx}"
+      run: pnpm biome check {staged_files}
+      priority: 2

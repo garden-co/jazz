@@ -346,7 +346,7 @@ impl QueryNode {
 
     /// Check if this node handles a specific table.
     pub fn handles_table(&self, table: &str) -> bool {
-        self.tables().iter().any(|&t| t == table)
+        self.tables().contains(&table)
     }
 
     /// Get diagram information for this node.
@@ -646,7 +646,6 @@ impl QueryNode {
                 row_id,
                 &descriptor,
                 base_predicate,
-                recursive_column,
                 accessible,
                 children_index,
                 all_rows,
@@ -665,7 +664,6 @@ impl QueryNode {
         parent_id: ObjectId,
         descriptor: &Arc<RowDescriptor>,
         base_predicate: &Predicate,
-        recursive_column: &str,
         accessible: &mut HashMap<ObjectId, AccessReason>,
         children_index: &HashMap<ObjectId, HashSet<ObjectId>>,
         all_rows: &HashMap<ObjectId, OwnedRow>,
@@ -699,7 +697,6 @@ impl QueryNode {
                         child_id,
                         descriptor,
                         base_predicate,
-                        recursive_column,
                         accessible,
                         children_index,
                         all_rows,
@@ -725,13 +722,11 @@ impl QueryNode {
         let removed_row = all_rows.remove(&row_id);
 
         // Remove from children_index (this row as a child of its parent)
-        if let Some(owned_row) = &removed_row {
-            if let Some(parent_id) = Self::get_ref_value_buffer(owned_row, recursive_column, None) {
-                if let Some(siblings) = children_index.get_mut(&parent_id) {
+        if let Some(owned_row) = &removed_row
+            && let Some(parent_id) = Self::get_ref_value_buffer(owned_row, recursive_column, None)
+                && let Some(siblings) = children_index.get_mut(&parent_id) {
                     siblings.remove(&row_id);
                 }
-            }
-        }
 
         // If row was accessible, remove it and cascade to children
         if accessible.remove(&row_id).is_some() {
@@ -998,8 +993,7 @@ impl QueryNode {
                     // Forward join: look up join_table row by ref value
                     if let Some(join_id) =
                         Self::get_ref_value_buffer(input_row, join_column, Some(primary_table))
-                    {
-                        if let Some(join_row) = lookup_row(join_table, join_id) {
+                        && let Some(join_row) = lookup_row(join_table, join_id) {
                             // Qualify the join row's columns (lookup returns unqualified names)
                             let qualified_join_row =
                                 join_row.qualify_columns(join_table, join_schema);
@@ -1041,7 +1035,6 @@ impl QueryNode {
                                 row: joined.to_output_row(),
                             });
                         }
-                    }
                 }
             }
 
@@ -1172,16 +1165,14 @@ impl QueryNode {
                         Self::get_ref_value_buffer(input_row, join_column, Some(primary_table));
 
                     // Update reverse_index if join_id changed
-                    if old_join_id != new_join_id {
-                        if let Some(old_id) = old_join_id {
-                            if let Some(set) = reverse_index.get_mut(&old_id) {
+                    if old_join_id != new_join_id
+                        && let Some(old_id) = old_join_id
+                            && let Some(set) = reverse_index.get_mut(&old_id) {
                                 set.remove(primary_id);
                                 if set.is_empty() {
                                     reverse_index.remove(&old_id);
                                 }
                             }
-                        }
-                    }
 
                     // Remove old entry
                     let existed = cached_rows.remove(primary_id).is_some();
@@ -1357,6 +1348,7 @@ impl QueryNode {
     /// (considering contained_tables from upstream ArrayAggregates).
     /// `lookup_inner_rows` is a function to find all inner rows matching an outer id.
     /// `lookup_row_by_id` is a function to look up a row from any table by (table_name, id).
+    #[allow(clippy::too_many_arguments)]
     pub fn evaluate_array_aggregate<F, G>(
         &mut self,
         delta: RowDelta,
@@ -1590,13 +1582,11 @@ impl QueryNode {
 
                 for (ref_column, target_table, _) in inner_joins {
                     // Try to find the column (might be qualified like "IssueLabels.label")
-                    if let Some(actual_col_name) = find_column_name(row, ref_column) {
-                        if let Some(RowValue::Ref(target_id)) = row.get_by_name(actual_col_name) {
-                            if let Some(target_row) = lookup_row_by_id(target_table, target_id) {
+                    if let Some(actual_col_name) = find_column_name(row, ref_column)
+                        && let Some(RowValue::Ref(target_id)) = row.get_by_name(actual_col_name)
+                            && let Some(target_row) = lookup_row_by_id(target_table, target_id) {
                                 resolved_targets.insert(ref_column.as_str(), target_row);
                             }
-                        }
-                    }
                 }
 
                 // Build the resolved descriptor with Array types for joined columns
@@ -1629,7 +1619,7 @@ impl QueryNode {
 
                     if let Some(target_row) = resolved_targets.get(col.name.as_str()) {
                         // Set as single-item array containing the resolved row
-                        builder = builder.set_array(col_idx, &[target_row.clone()]);
+                        builder = builder.set_array(col_idx, std::slice::from_ref(target_row));
                     } else if let Some(actual_col_name) = find_column_name(row, &col.name) {
                         // Copy the value directly (using flexible lookup for qualified names)
                         if let Some(rv) = row.get_by_name(actual_col_name) {
@@ -1776,8 +1766,8 @@ impl QueryNode {
                     // Remove from old (update with current array)
                     if let Some(old_id) = old_outer_id {
                         inner_to_outer.remove(inner_id);
-                        if let Some(array) = cached_arrays.get(&old_id) {
-                            if let Some(base_outer_row) = outer_rows.get(&old_id) {
+                        if let Some(array) = cached_arrays.get(&old_id)
+                            && let Some(base_outer_row) = outer_rows.get(&old_id) {
                                 let output_row = rebuild_output(
                                     base_outer_row,
                                     array,
@@ -1792,7 +1782,6 @@ impl QueryNode {
                                     prior: prior.clone(),
                                 });
                             }
-                        }
                     }
 
                     // Add to new
@@ -1850,11 +1839,10 @@ impl QueryNode {
         column: &str,
         descriptor: &RowDescriptor,
     ) -> Option<ObjectId> {
-        if let Some(idx) = descriptor.column_index(column) {
-            if let Some(RowValue::Ref(id)) = row.get(idx) {
+        if let Some(idx) = descriptor.column_index(column)
+            && let Some(RowValue::Ref(id)) = row.get(idx) {
                 return Some(id);
             }
-        }
         None
     }
 
@@ -2030,8 +2018,8 @@ impl QueryNode {
                         }
                         RowDelta::Updated { id, row, prior } => {
                             // Update the stored row if it exists
-                            if all_rows.contains_key(&id) {
-                                all_rows.insert(id, row.clone());
+                            if let std::collections::btree_map::Entry::Occupied(mut e) = all_rows.entry(id) {
+                                e.insert(row.clone());
                                 // If the row is visible, emit the update
                                 if visible_ids.contains(&id) {
                                     output.push(RowDelta::Updated { id, row, prior });
@@ -2218,7 +2206,6 @@ mod tests {
             cached_ids: HashSet::new(),
         };
 
-        let schema = test_schema();
         let cache = RowCache::new();
 
         let (id, row) = make_owned_row(1, "Alice", true);
@@ -2237,7 +2224,6 @@ mod tests {
             cached_ids: HashSet::from([ObjectId::new(1)]),
         };
 
-        let schema = test_schema();
         let cache = RowCache::new();
 
         let delta = DeltaBatch::removed(ObjectId::new(1), vec![]);
@@ -2255,7 +2241,6 @@ mod tests {
             cached_ids: HashSet::new(),
         };
 
-        let schema = test_schema();
         let cache = RowCache::new();
 
         let delta = DeltaBatch::removed(ObjectId::new(1), vec![]);
@@ -2276,7 +2261,6 @@ mod tests {
             cached_ids: HashSet::new(),
         };
 
-        let schema = test_schema();
         let cache = RowCache::new();
 
         let (id, row) = make_owned_row(1, "Alice", true);
@@ -2298,7 +2282,6 @@ mod tests {
             cached_ids: HashSet::new(),
         };
 
-        let schema = test_schema();
         let cache = RowCache::new();
 
         let (id, row) = make_owned_row(1, "Alice", false); // active = false
@@ -2321,7 +2304,6 @@ mod tests {
             cached_ids: HashSet::new(), // Not in set initially
         };
 
-        let schema = test_schema();
         let cache = RowCache::new();
 
         // Update: was inactive, now active
@@ -2346,7 +2328,6 @@ mod tests {
             cached_ids: HashSet::from([ObjectId::new(1)]), // In set initially
         };
 
-        let schema = test_schema();
         let cache = RowCache::new();
 
         // Update: was active, now inactive
@@ -2374,7 +2355,6 @@ mod tests {
             cached_ids: HashSet::from([ObjectId::new(1)]),
         };
 
-        let schema = test_schema();
         let cache = RowCache::new();
 
         // Update: still active, just name change
@@ -2401,7 +2381,6 @@ mod tests {
             cached_ids: HashSet::new(),
         };
 
-        let schema = test_schema();
         let cache = RowCache::new();
 
         // Update: still inactive

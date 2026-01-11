@@ -129,7 +129,7 @@ impl ObjectId {
 
     /// Encode as Crockford Base32 string.
     /// Returns a 26-character string (128 bits = 26 * 5 bits, with 2 bits padding).
-    fn to_base32(&self) -> String {
+    fn to_base32(self) -> String {
         let mut result = [0u8; 26];
         let mut value = self.0;
 
@@ -677,9 +677,9 @@ mod tests {
             assert!(
                 id1.to_string() < id2.to_string(),
                 "String ordering mismatch: {} ({}) vs {} ({})",
-                id1.to_string(),
+                id1,
                 values[i],
-                id2.to_string(),
+                id2,
                 values[i + 1]
             );
         }

@@ -364,7 +364,7 @@ impl ConnectedClients {
             }
 
             // Remove from object index
-            for (_, sessions) in &mut self.object_sessions {
+            for sessions in self.object_sessions.values_mut() {
                 sessions.remove(&id);
             }
 

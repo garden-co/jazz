@@ -112,12 +112,10 @@ impl QueryGraph {
                 inner_schema,
                 ..
             } = node
-            {
-                if !all_tables.contains(inner_table) {
+                && !all_tables.contains(inner_table) {
                     all_tables.push(inner_table.clone());
                     all_schemas.insert(inner_table.clone(), inner_schema.clone());
                 }
-            }
         }
 
         Self {
@@ -142,6 +140,7 @@ impl QueryGraph {
     ///
     /// `projection_table` specifies which table's columns to output (for reverse JOINs
     /// where we SELECT Table.* but swapped the tables for the graph builder).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_chain_join(
         id: GraphId,
         left_table: String,
@@ -295,12 +294,11 @@ impl QueryGraph {
     /// For JOIN queries with projection, returns a qualified version of the projected table's schema.
     pub fn output_schema(&self) -> Option<TableSchema> {
         // If there's a projection, return that table's schema with qualified column names
-        if let Some(proj_table) = &self.projection_table {
-            if let Some(proj_schema) = self.all_schemas.get(proj_table) {
+        if let Some(proj_table) = &self.projection_table
+            && let Some(proj_schema) = self.all_schemas.get(proj_table) {
                 // Create a schema with qualified column names to match the OwnedRow
                 return Some(proj_schema.qualify(proj_table));
             }
-        }
         Some(self.schema.clone())
     }
 
@@ -559,7 +557,7 @@ impl QueryGraph {
         // with data from multiple tables.
         let mut contained_tables: Vec<String> = vec![source_table.to_string()];
 
-        for (_node_idx, node) in self.nodes.iter_mut().enumerate() {
+        for node in self.nodes.iter_mut() {
             if current.is_empty() {
                 break; // Early cutoff
             }
@@ -578,7 +576,7 @@ impl QueryGraph {
                     let is_input_delta = input_tables_cloned
                         .iter()
                         .any(|t| contained_tables.contains(t));
-                    let is_join_table_delta = source_table == &join_table_str && !is_input_delta;
+                    let is_join_table_delta = source_table == join_table_str && !is_input_delta;
                     let is_for_this_node = is_input_delta || is_join_table_delta;
 
                     if !is_for_this_node {
@@ -749,8 +747,8 @@ impl QueryGraph {
                 // Find the Join node (it has cached_rows with JoinedRow data)
                 let join_node = self.nodes.iter().find(|n| n.cached_joined().is_some());
 
-                if let Some(join_node) = join_node {
-                    if let Some(joined_rows) = join_node.cached_joined() {
+                if let Some(join_node) = join_node
+                    && let Some(joined_rows) = join_node.cached_joined() {
                         // Get IDs to filter by from downstream Filter node (if any)
                         let filter_ids = self.nodes[input_idx].cached_ids();
 
@@ -759,17 +757,15 @@ impl QueryGraph {
                             .iter()
                             .filter(|(id, _)| {
                                 // If there's a filter, only include matching IDs
-                                filter_ids.map_or(true, |ids| ids.contains(id))
+                                filter_ids.is_none_or(|ids| ids.contains(id))
                             })
                             .map(|(primary_id, jr)| {
                                 // Apply projection if set
-                                if let Some(proj_table) = &self.projection_table {
-                                    if self.all_schemas.contains_key(proj_table) {
-                                        if let Some((_, row)) = jr.table_rows.get(proj_table) {
+                                if let Some(proj_table) = &self.projection_table
+                                    && self.all_schemas.contains_key(proj_table)
+                                        && let Some((_, row)) = jr.table_rows.get(proj_table) {
                                             return (*primary_id, row.clone());
                                         }
-                                    }
-                                }
                                 // Default: return all joined columns as OwnedRow
                                 (*primary_id, jr.to_output_row())
                             })
@@ -777,19 +773,17 @@ impl QueryGraph {
 
                         return rows;
                     }
-                }
             }
 
             // For RecursiveFilter queries, get rows from accessible set
             // OwnedRow is already in buffer format
-            if let Some(accessible) = self.nodes[input_idx].accessible() {
-                if let Some(all_rows) = self.nodes[input_idx].all_rows() {
+            if let Some(accessible) = self.nodes[input_idx].accessible()
+                && let Some(all_rows) = self.nodes[input_idx].all_rows() {
                     return accessible
                         .keys()
                         .filter_map(|id| all_rows.get(id).map(|owned_row| (*id, owned_row.clone())))
                         .collect();
                 }
-            }
 
             // For ArrayAggregate queries, get rows from outer_rows
             if let Some(outer_rows) = self.nodes[input_idx].outer_rows() {
@@ -1033,14 +1027,14 @@ mod tests {
 
         // Process an active user - should appear in output
         let (id, row) = make_owned_row(1, "Alice", true);
-        let delta = graph.process_change(RowDelta::Added { id, row }, &mut cache, &db.state());
+        let delta = graph.process_change(RowDelta::Added { id, row }, &mut cache, db.state());
 
         assert_eq!(delta.len(), 1);
         assert!(matches!(delta.iter().next(), Some(RowDelta::Added { .. })));
 
         // Process an inactive user - should be filtered out
         let (id, row) = make_owned_row(2, "Bob", false);
-        let delta = graph.process_change(RowDelta::Added { id, row }, &mut cache, &db.state());
+        let delta = graph.process_change(RowDelta::Added { id, row }, &mut cache, db.state());
 
         // Early cutoff - no output
         assert!(delta.is_empty());
@@ -1070,21 +1064,21 @@ mod tests {
         graph.process_change(
             RowDelta::Added { id: id1, row: row1 },
             &mut cache,
-            &db.state(),
+            db.state(),
         );
         graph.process_change(
             RowDelta::Added { id: id2, row: row2 },
             &mut cache,
-            &db.state(),
+            db.state(),
         );
         graph.process_change(
             RowDelta::Added { id: id3, row: row3 },
             &mut cache,
-            &db.state(),
+            db.state(),
         );
 
         // Get output - should only have active users
-        let output = graph.get_output(&mut cache, &db.state());
+        let output = graph.get_output(&mut cache, db.state());
 
         assert_eq!(output.len(), 2);
         let ids: Vec<_> = output.iter().map(|(id, _)| id.0).collect();
@@ -1160,7 +1154,7 @@ mod tests {
 
         // Add a folder
         let (id, row) = make_owned_folder(1, "Work");
-        let delta = graph.process_change(RowDelta::Added { id, row }, &mut cache, &db.state());
+        let delta = graph.process_change(RowDelta::Added { id, row }, &mut cache, db.state());
 
         // Should emit Added delta
         assert_eq!(delta.len(), 1);
@@ -1186,7 +1180,7 @@ mod tests {
 
         // Add a folder first
         let (id, row) = make_owned_folder(1, "Work");
-        graph.process_change(RowDelta::Added { id, row }, &mut cache, &db.state());
+        graph.process_change(RowDelta::Added { id, row }, &mut cache, db.state());
 
         // Now add a note to that folder
         let (id, row) = make_owned_note(100, 1, "Meeting Notes");
@@ -1194,7 +1188,7 @@ mod tests {
             RowDelta::Added { id, row },
             "notes",
             &mut cache,
-            &db.state(),
+            db.state(),
         );
 
         // Should emit Updated delta for the folder
@@ -1221,7 +1215,7 @@ mod tests {
 
         // Add a folder
         let (id, row) = make_owned_folder(1, "Work");
-        graph.process_change(RowDelta::Added { id, row }, &mut cache, &db.state());
+        graph.process_change(RowDelta::Added { id, row }, &mut cache, db.state());
 
         // Add two notes
         let (id, row) = make_owned_note(100, 1, "Note 1");
@@ -1229,18 +1223,18 @@ mod tests {
             RowDelta::Added { id, row },
             "notes",
             &mut cache,
-            &db.state(),
+            db.state(),
         );
         let (id, row) = make_owned_note(101, 1, "Note 2");
         graph.process_change_from_table(
             RowDelta::Added { id, row },
             "notes",
             &mut cache,
-            &db.state(),
+            db.state(),
         );
 
         // Get output
-        let output = graph.get_output(&mut cache, &db.state());
+        let output = graph.get_output(&mut cache, db.state());
         assert_eq!(output.len(), 1);
 
         // Remove one note
@@ -1251,7 +1245,7 @@ mod tests {
             },
             "notes",
             &mut cache,
-            &db.state(),
+            db.state(),
         );
 
         // Should emit Updated delta
@@ -1325,7 +1319,7 @@ mod tests {
         let mut cache = RowCache::new();
 
         // Get output - this should initialize and find the existing notes
-        let output = graph.get_output(&mut cache, &db.state());
+        let output = graph.get_output(&mut cache, db.state());
 
         eprintln!("[TEST] output.len() = {}", output.len());
         assert_eq!(output.len(), 1);

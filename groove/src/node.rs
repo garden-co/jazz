@@ -114,34 +114,37 @@ impl LocalNode {
             return None;
         }
 
-        // Create a new Object
-        let object = Object::new(id, prefix);
+        // Load all commits from the Environment first (without holding any locks)
+        let mut to_load = frontier.clone();
+        let mut loaded_ids = std::collections::HashSet::new();
+        let mut commits = Vec::new();
 
-        // Load all commits from the Environment and add them to the Object
+        while let Some(commit_id) = to_load.pop() {
+            if loaded_ids.contains(&commit_id) {
+                continue;
+            }
+            loaded_ids.insert(commit_id);
+
+            if let Some(commit) = self.env.get_commit(&commit_id).await {
+                // Add parent commits to load queue
+                for parent_id in &commit.parents {
+                    if !loaded_ids.contains(parent_id) {
+                        to_load.push(*parent_id);
+                    }
+                }
+                commits.push(commit);
+            }
+        }
+
+        // Create a new Object and add all commits (now synchronously)
+        let object = Object::new(id, prefix);
         let branch_ref = object.branch_ref(branch)?;
         {
             let mut branch_guard = branch_ref.write().unwrap();
 
-            // Walk the commit graph starting from frontier
-            let mut to_load = frontier.clone();
-            let mut loaded = std::collections::HashSet::new();
-
-            while let Some(commit_id) = to_load.pop() {
-                if loaded.contains(&commit_id) {
-                    continue;
-                }
-                loaded.insert(commit_id);
-
-                if let Some(commit) = self.env.get_commit(&commit_id).await {
-                    // Add parent commits to load queue
-                    for parent_id in &commit.parents {
-                        if !loaded.contains(parent_id) {
-                            to_load.push(*parent_id);
-                        }
-                    }
-                    // Restore commit without updating frontier
-                    branch_guard.restore_commit(commit);
-                }
+            // Restore all commits
+            for commit in commits {
+                branch_guard.restore_commit(commit);
             }
 
             // Set frontier explicitly from Environment
@@ -189,12 +192,12 @@ impl LocalNode {
     /// Useful for testing and sync scenarios where object IDs are known.
     pub fn ensure_object(&self, id: ObjectId, prefix: impl Into<String>) -> bool {
         let mut objects = self.objects.write().unwrap();
-        if objects.contains_key(&id) {
-            false
-        } else {
+        if let std::collections::btree_map::Entry::Vacant(e) = objects.entry(id) {
             let object = Object::new(id, prefix);
-            objects.insert(id, Arc::new(RwLock::new(object)));
+            e.insert(Arc::new(RwLock::new(object)));
             true
+        } else {
+            false
         }
     }
 
@@ -376,6 +379,7 @@ impl LocalNode {
     /// After truncation:
     /// - All commits before the truncation point are removed from memory
     /// - Future commits with parents before the truncation point will be rejected
+    ///
     /// Returns the number of commits pruned.
     pub fn truncate_at(
         &self,

@@ -102,6 +102,7 @@ function App() {
   );
 
   // Reset page when filters change
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally reset page when any filter changes
   useEffect(() => {
     setCurrentPage(0);
   }, [

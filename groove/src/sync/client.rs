@@ -286,13 +286,11 @@ impl<E: ClientEnv> SyncClient<E> {
                 self.node.apply_commits(*object_id, branch, commits.clone());
 
                 // If we received object metadata, store it on the object
-                if let Some(meta) = object_meta {
-                    if let Some(obj) = self.node.get_object(*object_id) {
-                        if let Ok(mut obj_write) = obj.write() {
+                if let Some(meta) = object_meta
+                    && let Some(obj) = self.node.get_object(*object_id)
+                        && let Ok(mut obj_write) = obj.write() {
                             obj_write.set_meta(meta.clone());
                         }
-                    }
-                }
 
                 // Update server known state
                 self.update_server_known_state(*object_id, frontier.clone());
@@ -526,7 +524,7 @@ mod tests {
         // Remove
         let removed = client.remove_subscription(id);
         assert!(removed.is_some());
-        assert!(client.subscriptions.get(&id).is_none());
+        assert!(!client.subscriptions.contains_key(&id));
     }
 
     #[test]

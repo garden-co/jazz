@@ -15,7 +15,7 @@ import type {
 
 // Delta type constants (matching Rust)
 const DELTA_ADDED = 1;
-const DELTA_UPDATED = 2;
+const _DELTA_UPDATED = 2;
 const DELTA_REMOVED = 3;
 
 // Crockford Base32 alphabet (matches Rust ObjectId encoding - lowercase)
@@ -322,19 +322,18 @@ function readFixedValue(
       default:
         throw new Error(`Unknown fixed column type: ${col.type.kind}`);
     }
-  } else {
-    switch (col.type.kind) {
-      case "bool":
-        return bytes[absOffset] === 1;
-      case "i64":
-        return view.getBigInt64(absOffset, true);
-      case "f64":
-        return view.getFloat64(absOffset, true);
-      case "ref":
-        return objectIdToString(bytes, absOffset);
-      default:
-        throw new Error(`Unknown fixed column type: ${col.type.kind}`);
-    }
+  }
+  switch (col.type.kind) {
+    case "bool":
+      return bytes[absOffset] === 1;
+    case "i64":
+      return view.getBigInt64(absOffset, true);
+    case "f64":
+      return view.getFloat64(absOffset, true);
+    case "ref":
+      return objectIdToString(bytes, absOffset);
+    default:
+      throw new Error(`Unknown fixed column type: ${col.type.kind}`);
   }
 }
 
@@ -389,14 +388,16 @@ function readVariableValue(
     const data = bytes.subarray(start + 1, end);
     if (col.type.kind === "string") {
       return textDecoder.decode(data);
-    } else if (col.type.kind === "bytes") {
+    }
+    if (col.type.kind === "bytes") {
       return new Uint8Array(data);
     }
   } else {
     const data = bytes.subarray(start, end);
     if (col.type.kind === "string") {
       return textDecoder.decode(data);
-    } else if (col.type.kind === "bytes") {
+    }
+    if (col.type.kind === "bytes") {
       return new Uint8Array(data);
     }
   }
@@ -674,19 +675,18 @@ function readFixedValueSimple(
       default:
         throw new Error(`Unknown fixed column type: ${col.type.kind}`);
     }
-  } else {
-    switch (col.type.kind) {
-      case "bool":
-        return bytes[offset] === 1;
-      case "i64":
-        return view.getBigInt64(offset, true);
-      case "f64":
-        return view.getFloat64(offset, true);
-      case "ref":
-        return objectIdToString(bytes, offset);
-      default:
-        throw new Error(`Unknown fixed column type: ${col.type.kind}`);
-    }
+  }
+  switch (col.type.kind) {
+    case "bool":
+      return bytes[offset] === 1;
+    case "i64":
+      return view.getBigInt64(offset, true);
+    case "f64":
+      return view.getFloat64(offset, true);
+    case "ref":
+      return objectIdToString(bytes, offset);
+    default:
+      throw new Error(`Unknown fixed column type: ${col.type.kind}`);
   }
 }
 

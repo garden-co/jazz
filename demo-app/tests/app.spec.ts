@@ -548,13 +548,13 @@ test.describe("Issue Data Integrity", () => {
     // Check that at least one avatar shows initials (two capital letters)
     // The initials are in span elements with text-[10px] class inside the avatar circles
     const initialsPattern = /^[A-Z]{2}$/;
-    let foundInitials = false;
+    let _foundInitials = false;
 
     for (let i = 0; i < Math.min(containerCount, 10); i++) {
       const container = avatarContainers.nth(i);
       const text = await container.textContent();
       if (text && initialsPattern.test(text.trim().substring(0, 2))) {
-        foundInitials = true;
+        _foundInitials = true;
         break;
       }
     }

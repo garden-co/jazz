@@ -21,7 +21,7 @@ export async function generateFakeData(
     const name = USER_NAMES[i];
     const id = app.users.create(db, {
       name,
-      email: name.toLowerCase().replace(" ", ".") + "@example.com",
+      email: `${name.toLowerCase().replace(" ", ".")}@example.com`,
       avatarColor: USER_COLORS[i],
     });
     userIds.push(id);

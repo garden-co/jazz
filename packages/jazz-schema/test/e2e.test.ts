@@ -542,7 +542,7 @@ describe("Type correctness", () => {
 
   describe("Loaded types with includes", () => {
     it("UserLoaded without includes has no relations", () => {
-      const user: UserLoaded<{}> = {
+      const user: UserLoaded<Record<string, never>> = {
         id: "user-id",
         name: "Alice",
         email: "alice@example.com",

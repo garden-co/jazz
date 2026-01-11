@@ -1,7 +1,7 @@
-import { Circle, CheckCircle2, XCircle, Timer } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { STATUS_LABELS, STATUS_COLORS, type Status } from "@/utils/constants";
 import { cn } from "@/lib/utils";
+import { STATUS_COLORS, STATUS_LABELS, type Status } from "@/utils/constants";
+import { CheckCircle2, Circle, Timer, XCircle } from "lucide-react";
 
 interface StatusBadgeProps {
   status: string;

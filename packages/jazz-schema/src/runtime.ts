@@ -391,7 +391,7 @@ function buildIncludeProjection(
     const sourceTable = schema.tables[reverseRef.sourceTable];
     if (!sourceTable) return null;
 
-    const innerAlias = reverseRef.sourceTable.toLowerCase()[0] + "_inner";
+    const innerAlias = `${reverseRef.sourceTable.toLowerCase()[0]}_inner`;
 
     // Build base columns for inner query (Groove doesn't support .*)
     const innerBaseColumns = [
@@ -407,7 +407,7 @@ function buildIncludeProjection(
       // Track which columns are resolved as refs (to skip from base columns)
       const nestedResolvedRefs = new Set<string>();
 
-      for (const [nestedKey, nestedValue] of Object.entries(includeValue)) {
+      for (const [nestedKey, _nestedValue] of Object.entries(includeValue)) {
         const nestedForwardRef = sourceTable.refs.find(
           (r) => r.column === nestedKey,
         );
@@ -448,7 +448,7 @@ function buildIncludeProjection(
  */
 function buildJoins(
   table: TableMeta,
-  schema: SchemaMeta,
+  _schema: SchemaMeta,
   alias: string,
   include: IncludeSpec,
 ): string[] {

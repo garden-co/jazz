@@ -299,12 +299,12 @@ fn parse_select_table_star() {
 
 #[test]
 fn parse_float() {
-    let sql = "INSERT INTO data (value) VALUES (3.14)";
+    let sql = "INSERT INTO data (value) VALUES (1.234)";
     let stmt = parse(sql).unwrap();
 
     match stmt {
         Statement::Insert(ins) => {
-            assert_eq!(ins.values[0], PredicateValue::F64(3.14));
+            assert_eq!(ins.values[0], PredicateValue::F64(1.234));
         }
         _ => panic!("expected Insert"),
     }

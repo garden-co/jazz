@@ -195,15 +195,15 @@ function pluralize(str: string): string {
     str.endsWith("ch") ||
     str.endsWith("sh")
   ) {
-    return str + "es";
+    return `${str}es`;
   }
   if (
     str.endsWith("y") &&
     !["a", "e", "i", "o", "u"].includes(str[str.length - 2])
   ) {
-    return str.slice(0, -1) + "ies";
+    return `${str.slice(0, -1)}ies`;
   }
-  return str + "s";
+  return `${str}s`;
 }
 
 /**
@@ -211,7 +211,7 @@ function pluralize(str: string): string {
  */
 function singularize(str: string): string {
   if (str.endsWith("ies")) {
-    return str.slice(0, -3) + "y";
+    return `${str.slice(0, -3)}y`;
   }
   if (
     str.endsWith("es") &&
@@ -337,36 +337,36 @@ function generateMeta(
     lines.push(`      name: "${table.name}",`);
 
     // Columns
-    lines.push(`      columns: [`);
+    lines.push("      columns: [");
     for (const col of table.columns) {
       const typeJson = JSON.stringify(col.sqlType);
       lines.push(
         `        { name: "${col.name}", type: ${typeJson}, nullable: ${col.nullable} },`,
       );
     }
-    lines.push(`      ],`);
+    lines.push("      ],");
 
     // Forward refs
     const refCols = table.columns.filter((c) => c.sqlType.kind === "ref");
-    lines.push(`      refs: [`);
+    lines.push("      refs: [");
     for (const col of refCols) {
       const targetTable = (col.sqlType as { kind: "ref"; table: string }).table;
       lines.push(
         `        { column: "${col.name}", targetTable: "${targetTable}", nullable: ${col.nullable} },`,
       );
     }
-    lines.push(`      ],`);
+    lines.push("      ],");
 
     // Reverse refs
-    lines.push(`      reverseRefs: [`);
+    lines.push("      reverseRefs: [");
     for (const rev of tableReverseRefs) {
       lines.push(
         `        { name: "${rev.name}", sourceTable: "${rev.sourceTable}", sourceColumn: "${rev.sourceColumn}" },`,
       );
     }
-    lines.push(`      ],`);
+    lines.push("      ],");
 
-    lines.push(`    },`);
+    lines.push("    },");
   }
 
   lines.push("  },");
@@ -377,7 +377,7 @@ function generateMeta(
   lines.push("// Individual table metadata exports");
   for (const table of tables) {
     const typeName = singularize(toPascalCase(table.name));
-    const varName = typeName.toLowerCase() + "Meta";
+    const varName = `${typeName.toLowerCase()}Meta`;
     lines.push(`export const ${varName} = schemaMeta.tables.${table.name};`);
   }
   lines.push("");
@@ -467,7 +467,7 @@ function generateTypes(
     lines.push(`  NOT?: ${typeName}Filter | ${typeName}Filter[];`);
 
     // id field (always string/ObjectId)
-    lines.push(`  id?: string | StringFilter;`);
+    lines.push("  id?: string | StringFilter;");
 
     // All columns
     for (const col of table.columns) {
@@ -496,7 +496,7 @@ function generateTypes(
     const typeName = singularize(toPascalCase(table.name));
     const hasRefs = tablesWithRefs.has(table.name);
     const hasReverseRefs = tablesWithReverseRefs.has(table.name);
-    const refColumns = table.columns.filter((c) => c.sqlType.kind === "ref");
+    const _refColumns = table.columns.filter((c) => c.sqlType.kind === "ref");
     const tableReverseRefs = reverseRefs.get(table.name) ?? [];
 
     // Base interface
@@ -589,13 +589,13 @@ function generateTypes(
           lines.push(
             `        ? { ${rev.name}: ${refTypeName}With<I['${rev.name}'] & ${refTypeName}Includes>[] }`,
           );
-          lines.push(`        : {}`);
+          lines.push("        : {}");
         } else {
           lines.push(`      : I['${rev.name}'] extends object`);
           lines.push(`        ? { ${rev.name}: ${refTypeName}[] }`);
-          lines.push(`        : {}`);
+          lines.push("        : {}");
         }
-        lines.push(`    : {})`);
+        lines.push("    : {})");
       }
 
       lines.push(";");
@@ -704,8 +704,8 @@ function analyzeTableLayout(table: ParsedTable): TableLayout {
  * Generate the row type definition for a table
  */
 function generateRowType(table: ParsedTable): string {
-  const typeName = singularize(toPascalCase(table.name));
-  const fields = [`id: string`];
+  const _typeName = singularize(toPascalCase(table.name));
+  const fields = ["id: string"];
   for (const col of table.columns) {
     const tsType =
       col.sqlType.kind === "ref"
@@ -847,41 +847,41 @@ function generateDecoders(tables: ParsedTable[]): string {
     const layout = analyzeTableLayout(table);
 
     // Generate batch decoder (with row count and size headers)
-    lines.push(`/**`);
+    lines.push("/**");
     lines.push(` * Decode binary rows for ${table.name} table (batch format)`);
-    lines.push(` *`);
-    lines.push(` * Row buffer layout:`);
+    lines.push(" *");
+    lines.push(" * Row buffer layout:");
     lines.push(` * - Fixed size: ${layout.fixedSize} bytes`);
     lines.push(` * - Variable columns: ${layout.variableColumns.length}`);
     lines.push(` * - Offset table: ${layout.offsetTableSize} bytes`);
-    lines.push(` */`);
+    lines.push(" */");
     lines.push(
       `export function decode${typeName}Rows(buffer: ArrayBufferLike): Array<${rowType}> {`,
     );
-    lines.push(`  const bytes = new Uint8Array(buffer);`);
-    lines.push(`  const view = new DataView(buffer as ArrayBuffer);`);
-    lines.push(`  let offset = 0;`);
-    lines.push(``);
-    lines.push(`  // Read row count`);
-    lines.push(`  const rowCount = view.getUint32(offset, true);`);
-    lines.push(`  offset += 4;`);
-    lines.push(``);
-    lines.push(`  const rows = new Array(rowCount);`);
-    lines.push(``);
-    lines.push(`  for (let i = 0; i < rowCount; i++) {`);
-    lines.push(`    // Read row size (row buffer with id as first 16 bytes)`);
-    lines.push(`    const rowSize = view.getUint32(offset, true);`);
-    lines.push(`    offset += 4;`);
-    lines.push(`    const rowStart = offset;`);
-    lines.push(`    const rowEnd = rowStart + rowSize;`);
+    lines.push("  const bytes = new Uint8Array(buffer);");
+    lines.push("  const view = new DataView(buffer as ArrayBuffer);");
+    lines.push("  let offset = 0;");
+    lines.push("");
+    lines.push("  // Read row count");
+    lines.push("  const rowCount = view.getUint32(offset, true);");
+    lines.push("  offset += 4;");
+    lines.push("");
+    lines.push("  const rows = new Array(rowCount);");
+    lines.push("");
+    lines.push("  for (let i = 0; i < rowCount; i++) {");
+    lines.push("    // Read row size (row buffer with id as first 16 bytes)");
+    lines.push("    const rowSize = view.getUint32(offset, true);");
+    lines.push("    offset += 4;");
+    lines.push("    const rowStart = offset;");
+    lines.push("    const rowEnd = rowStart + rowSize;");
     lines.push(
-      `    const bufferStart = rowStart; // Row buffer starts here (id is first 16 bytes)`,
+      "    const bufferStart = rowStart; // Row buffer starts here (id is first 16 bytes)",
     );
-    lines.push(``);
+    lines.push("");
 
     // Generate fixed column reads
     if (layout.fixedColumns.length > 0) {
-      lines.push(`    // Fixed columns`);
+      lines.push("    // Fixed columns");
       for (const { col, offset: colOffset } of layout.fixedColumns) {
         const absOffset = `bufferStart + ${colOffset}`;
         if (col.nullable) {
@@ -894,7 +894,7 @@ function generateDecoders(tables: ParsedTable[]): string {
           );
         }
       }
-      lines.push(``);
+      lines.push("");
     }
 
     // Generate variable column reads
@@ -902,7 +902,7 @@ function generateDecoders(tables: ParsedTable[]): string {
       const offsetTableStart = `bufferStart + ${layout.fixedSize}`;
       const varDataStart = `${offsetTableStart} + ${layout.offsetTableSize}`;
 
-      lines.push(`    // Variable columns (using offset table)`);
+      lines.push("    // Variable columns (using offset table)");
       lines.push(`    const offsetTableStart = ${offsetTableStart};`);
 
       // Read offset table entries (N-1 for N variable columns)
@@ -915,7 +915,7 @@ function generateDecoders(tables: ParsedTable[]): string {
         }
       }
       lines.push(`    const varDataStart = ${varDataStart};`);
-      lines.push(``);
+      lines.push("");
 
       // Generate variable column reads
       for (let i = 0; i < layout.variableColumns.length; i++) {
@@ -932,51 +932,51 @@ function generateDecoders(tables: ParsedTable[]): string {
           lines.push(
             `      ${col.name} = decoder.decode(bytes.subarray(${startExpr} + 1, ${endExpr}));`,
           );
-          lines.push(`    }`);
+          lines.push("    }");
         } else {
           lines.push(
             `    const ${col.name} = decoder.decode(bytes.subarray(${startExpr}, ${endExpr}));`,
           );
         }
       }
-      lines.push(``);
+      lines.push("");
     }
 
     // Build row object
     const fieldNames = ["id", ...table.columns.map((c) => c.name)];
     lines.push(`    rows[i] = { ${fieldNames.join(", ")} };`);
-    lines.push(`    offset = rowEnd;`);
-    lines.push(`  }`);
-    lines.push(``);
-    lines.push(`  return rows;`);
-    lines.push(`}`);
-    lines.push(``);
+    lines.push("    offset = rowEnd;");
+    lines.push("  }");
+    lines.push("");
+    lines.push("  return rows;");
+    lines.push("}");
+    lines.push("");
 
     // Generate delta decoder
-    lines.push(`/**`);
+    lines.push("/**");
     lines.push(` * Decode a ${typeName} delta from binary`);
     lines.push(
-      ` * Format: u8 type (1=added, 2=updated, 3=removed) + [row buffer with id] or just ObjectId for removed`,
+      " * Format: u8 type (1=added, 2=updated, 3=removed) + [row buffer with id] or just ObjectId for removed",
     );
-    lines.push(` */`);
+    lines.push(" */");
     lines.push(
       `export function decode${typeName}Delta(buffer: ArrayBufferLike): Delta<${rowType}> {`,
     );
-    lines.push(`  const bytes = new Uint8Array(buffer);`);
-    lines.push(`  const view = new DataView(buffer as ArrayBuffer);`);
-    lines.push(`  const deltaType = bytes[0];`);
-    lines.push(``);
-    lines.push(`  if (deltaType === DELTA_REMOVED) {`);
-    lines.push(`    const id = objectIdToString(bytes, 1);`);
+    lines.push("  const bytes = new Uint8Array(buffer);");
+    lines.push("  const view = new DataView(buffer as ArrayBuffer);");
+    lines.push("  const deltaType = bytes[0];");
+    lines.push("");
+    lines.push("  if (deltaType === DELTA_REMOVED) {");
+    lines.push("    const id = objectIdToString(bytes, 1);");
     lines.push(`    return { type: 'removed', id };`);
-    lines.push(`  }`);
-    lines.push(``);
+    lines.push("  }");
+    lines.push("");
     lines.push(
-      `  // Added or Updated: decode the row buffer (id is first 16 bytes)`,
+      "  // Added or Updated: decode the row buffer (id is first 16 bytes)",
     );
-    lines.push(`  const bufferStart = 1; // After delta type byte`);
-    lines.push(`  const rowEnd = bytes.length;`);
-    lines.push(``);
+    lines.push("  const bufferStart = 1; // After delta type byte");
+    lines.push("  const rowEnd = bytes.length;");
+    lines.push("");
 
     // Generate fixed column reads for delta
     if (layout.fixedColumns.length > 0) {
@@ -1023,7 +1023,7 @@ function generateDecoders(tables: ParsedTable[]): string {
           lines.push(
             `    ${col.name} = decoder.decode(bytes.subarray(${startExpr} + 1, ${endExpr}));`,
           );
-          lines.push(`  }`);
+          lines.push("  }");
         } else {
           lines.push(
             `  const ${col.name} = decoder.decode(bytes.subarray(${startExpr}, ${endExpr}));`,
@@ -1032,37 +1032,37 @@ function generateDecoders(tables: ParsedTable[]): string {
       }
     }
 
-    lines.push(``);
-    lines.push(`  return {`);
+    lines.push("");
+    lines.push("  return {");
     lines.push(`    type: deltaType === DELTA_ADDED ? 'added' : 'updated',`);
     lines.push(`    row: { ${fieldNames.join(", ")} }`);
-    lines.push(`  };`);
-    lines.push(`}`);
-    lines.push(``);
+    lines.push("  };");
+    lines.push("}");
+    lines.push("");
 
     // Generate reader function for BinaryReader (for nested rows)
     // Note: Tables with variable columns can't use BinaryReader directly
-    lines.push(`/**`);
+    lines.push("/**");
     lines.push(` * Read a ${typeName} row using a BinaryReader.`);
     if (layout.variableColumns.length > 0) {
       lines.push(
         ` * NOTE: This table has variable columns - use decode${typeName}Rows/decode${typeName}Delta instead.`,
       );
-      lines.push(` */`);
+      lines.push(" */");
       lines.push(
         `export function read${typeName}(reader: BinaryReader): ${rowType} {`,
       );
       lines.push(
         `  throw new Error('read${typeName} requires row boundary context - use decode${typeName}Rows or decode${typeName}Delta instead');`,
       );
-      lines.push(`}`);
+      lines.push("}");
     } else {
-      lines.push(` * Use this for nested/joined row decoding.`);
-      lines.push(` */`);
+      lines.push(" * Use this for nested/joined row decoding.");
+      lines.push(" */");
       lines.push(
         `export function read${typeName}(reader: BinaryReader): ${rowType} {`,
       );
-      lines.push(`  const id = reader.readObjectId();`);
+      lines.push("  const id = reader.readObjectId();");
 
       for (const col of table.columns) {
         if (col.nullable && col.sqlType.kind === "ref") {
@@ -1079,9 +1079,9 @@ function generateDecoders(tables: ParsedTable[]): string {
       }
 
       lines.push(`  return { ${fieldNames.join(", ")} };`);
-      lines.push(`}`);
+      lines.push("}");
     }
-    lines.push(``);
+    lines.push("");
   }
 
   return lines.join("\n");
@@ -1147,7 +1147,7 @@ function generateReaderCall(sqlType: SqlColumnType): string {
  */
 function generateClient(
   tables: ParsedTable[],
-  reverseRefs: Map<string, ReverseRef[]>,
+  _reverseRefs: Map<string, ReverseRef[]>,
 ): string {
   const lines: string[] = [
     "// Generated from SQL schema by @jazz/schema",
@@ -1197,12 +1197,12 @@ function generateClient(
     const descriptorName = `${table.name}Descriptor`;
     const builderName = `${table.name}QueryBuilder`;
 
-    lines.push(`/**`);
+    lines.push("/**");
     lines.push(
       ` * Query builder for ${table.name} with chainable where/with methods`,
     );
     lines.push(` * @generated from schema table: ${table.name}`);
-    lines.push(` */`);
+    lines.push(" */");
     lines.push(
       `export class ${builderName}<I extends ${typeName}Includes = {}>`,
     );
@@ -1214,110 +1214,110 @@ function generateClient(
     );
     lines.push(`  private _descriptor: ${descriptorName};`);
     lines.push(`  private _where?: ${typeName}Filter;`);
-    lines.push(`  private _include?: I;`);
-    lines.push(``);
+    lines.push("  private _include?: I;");
+    lines.push("");
     lines.push(
       `  constructor(descriptor: ${descriptorName}, where?: ${typeName}Filter, include?: I) {`,
     );
-    lines.push(`    this._descriptor = descriptor;`);
-    lines.push(`    this._where = where;`);
-    lines.push(`    this._include = include;`);
-    lines.push(`  }`);
-    lines.push(``);
-    lines.push(`  /**`);
+    lines.push("    this._descriptor = descriptor;");
+    lines.push("    this._where = where;");
+    lines.push("    this._include = include;");
+    lines.push("  }");
+    lines.push("");
+    lines.push("  /**");
     lines.push(
       `   * Get a stable key representing this query's options (for React hook deduplication)`,
     );
     lines.push(`   * @generated from schema table: ${table.name}`);
-    lines.push(`   */`);
-    lines.push(`  get _queryKey(): string {`);
+    lines.push("   */");
+    lines.push("  get _queryKey(): string {");
     lines.push(
       `    return JSON.stringify({ t: "${table.name}", w: this._where, i: this._include });`,
     );
-    lines.push(`  }`);
-    lines.push(``);
-    lines.push(`  /**`);
-    lines.push(`   * Add a filter condition`);
+    lines.push("  }");
+    lines.push("");
+    lines.push("  /**");
+    lines.push("   * Add a filter condition");
     lines.push(`   * @generated from schema table: ${table.name}`);
-    lines.push(`   */`);
+    lines.push("   */");
     lines.push(`  where(filter: ${typeName}Filter): ${builderName}<I> {`);
     lines.push(
       `    return new ${builderName}(this._descriptor, filter, this._include);`,
     );
-    lines.push(`  }`);
-    lines.push(``);
-    lines.push(`  /**`);
-    lines.push(`   * Specify which refs to include`);
+    lines.push("  }");
+    lines.push("");
+    lines.push("  /**");
+    lines.push("   * Specify which refs to include");
     lines.push(`   * @generated from schema table: ${table.name}`);
-    lines.push(`   */`);
+    lines.push("   */");
     lines.push(
       `  with<NewI extends ${typeName}Includes>(include: NewI): ${builderName}<NewI> {`,
     );
     lines.push(
       `    return new ${builderName}(this._descriptor, this._where, include);`,
     );
-    lines.push(`  }`);
-    lines.push(``);
-    lines.push(`  /**`);
+    lines.push("  }");
+    lines.push("");
+    lines.push("  /**");
     lines.push(`   * Subscribe to all matching ${table.name}`);
     lines.push(`   * @generated from schema table: ${table.name}`);
-    lines.push(`   */`);
+    lines.push("   */");
     lines.push(
       `  subscribeAll(db: WasmDatabaseLike, callback: (rows: ${typeName}With<I>[]) => void): Unsubscribe {`,
     );
-    lines.push(`    return this._descriptor._subscribeAllInternal(`);
-    lines.push(`      db,`);
+    lines.push("    return this._descriptor._subscribeAllInternal(");
+    lines.push("      db,");
     lines.push(
-      `      { where: this._where as BaseWhereInput | undefined, include: this._include as IncludeSpec | undefined },`,
+      "      { where: this._where as BaseWhereInput | undefined, include: this._include as IncludeSpec | undefined },",
     );
     lines.push(`      callback as (rows: ${typeName}[]) => void`);
-    lines.push(`    );`);
-    lines.push(`  }`);
-    lines.push(``);
-    lines.push(`  /**`);
+    lines.push("    );");
+    lines.push("  }");
+    lines.push("");
+    lines.push("  /**");
     lines.push(`   * Subscribe to a single ${typeName} by ID`);
     lines.push(`   * @generated from schema table: ${table.name}`);
-    lines.push(`   */`);
+    lines.push("   */");
     lines.push(
       `  subscribe(db: WasmDatabaseLike, id: ObjectId, callback: (row: ${typeName}With<I> | null) => void): Unsubscribe {`,
     );
-    lines.push(`    return this._descriptor._subscribeInternal(`);
-    lines.push(`      db,`);
-    lines.push(`      id,`);
-    lines.push(`      { include: this._include as IncludeSpec | undefined },`);
+    lines.push("    return this._descriptor._subscribeInternal(");
+    lines.push("      db,");
+    lines.push("      id,");
+    lines.push("      { include: this._include as IncludeSpec | undefined },");
     lines.push(`      callback as (row: ${typeName} | null) => void`);
-    lines.push(`    );`);
-    lines.push(`  }`);
-    lines.push(``);
-    lines.push(`  /**`);
+    lines.push("    );");
+    lines.push("  }");
+    lines.push("");
+    lines.push("  /**");
     lines.push(`   * Create a new ${typeName}`);
     lines.push(`   * @generated from schema table: ${table.name}`);
-    lines.push(`   */`);
+    lines.push("   */");
     lines.push(
       `  create(db: WasmDatabaseLike, data: ${typeName}Insert): ObjectId {`,
     );
-    lines.push(`    return this._descriptor.create(db, data);`);
-    lines.push(`  }`);
-    lines.push(``);
-    lines.push(`  /**`);
+    lines.push("    return this._descriptor.create(db, data);");
+    lines.push("  }");
+    lines.push("");
+    lines.push("  /**");
     lines.push(`   * Update a ${typeName}`);
     lines.push(`   * @generated from schema table: ${table.name}`);
-    lines.push(`   */`);
+    lines.push("   */");
     lines.push(
       `  update(db: WasmDatabaseLike, id: ObjectId, data: Partial<${typeName}Insert>): void {`,
     );
-    lines.push(`    return this._descriptor.update(db, id, data);`);
-    lines.push(`  }`);
-    lines.push(``);
-    lines.push(`  /**`);
+    lines.push("    return this._descriptor.update(db, id, data);");
+    lines.push("  }");
+    lines.push("");
+    lines.push("  /**");
     lines.push(`   * Delete a ${typeName}`);
     lines.push(`   * @generated from schema table: ${table.name}`);
-    lines.push(`   */`);
-    lines.push(`  delete(db: WasmDatabaseLike, id: ObjectId): void {`);
-    lines.push(`    return this._descriptor.delete(db, id);`);
-    lines.push(`  }`);
-    lines.push(`}`);
-    lines.push(``);
+    lines.push("   */");
+    lines.push("  delete(db: WasmDatabaseLike, id: ObjectId): void {");
+    lines.push("    return this._descriptor.delete(db, id);");
+    lines.push("  }");
+    lines.push("}");
+    lines.push("");
   }
 
   // Generate table descriptor classes
@@ -1326,12 +1326,12 @@ function generateClient(
     const descriptorName = `${table.name}Descriptor`;
     const builderName = `${table.name}QueryBuilder`;
 
-    lines.push(`/**`);
+    lines.push("/**");
     lines.push(
       ` * Descriptor for the ${table.name} table (no db instance, db passed at method call time)`,
     );
     lines.push(` * @generated from schema table: ${table.name}`);
-    lines.push(` */`);
+    lines.push(" */");
     lines.push(
       `export class ${descriptorName} extends TableClient<${typeName}>`,
     );
@@ -1344,24 +1344,24 @@ function generateClient(
     lines.push(
       `             MutableWithDb<${typeName}Insert, Partial<${typeName}Insert>> {`,
     );
-    lines.push(`  constructor() {`);
+    lines.push("  constructor() {");
     lines.push(`    super(schemaMeta.tables.${table.name}, schemaMeta, {`);
     lines.push(`      rows: decode${typeName}Rows,`);
     lines.push(`      delta: decode${typeName}Delta,`);
-    lines.push(`    });`);
-    lines.push(`  }`);
+    lines.push("    });");
+    lines.push("  }");
     lines.push("");
 
     // create method
-    lines.push(`  /**`);
+    lines.push("  /**");
     lines.push(`   * Create a new ${typeName}`);
-    lines.push(`   * @returns The ObjectId of the created row`);
+    lines.push("   * @returns The ObjectId of the created row");
     lines.push(`   * @generated from schema table: ${table.name}`);
-    lines.push(`   */`);
+    lines.push("   */");
     lines.push(
       `  create(db: WasmDatabaseLike, data: ${typeName}Insert): ObjectId {`,
     );
-    lines.push(`    const values: Record<string, unknown> = {};`);
+    lines.push("    const values: Record<string, unknown> = {};");
     for (const col of table.columns) {
       if (col.nullable) {
         lines.push(
@@ -1371,139 +1371,139 @@ function generateClient(
         lines.push(`    values.${col.name} = data.${col.name};`);
       }
     }
-    lines.push(`    return this._create(db, values);`);
-    lines.push(`  }`);
+    lines.push("    return this._create(db, values);");
+    lines.push("  }");
     lines.push("");
 
     // update method
-    lines.push(`  /**`);
+    lines.push("  /**");
     lines.push(`   * Update an existing ${typeName}`);
     lines.push(`   * @generated from schema table: ${table.name}`);
-    lines.push(`   */`);
+    lines.push("   */");
     lines.push(
       `  update(db: WasmDatabaseLike, id: ObjectId, data: Partial<${typeName}Insert>): void {`,
     );
-    lines.push(`    this._update(db, id, data as Record<string, unknown>);`);
-    lines.push(`  }`);
+    lines.push("    this._update(db, id, data as Record<string, unknown>);");
+    lines.push("  }");
     lines.push("");
 
     // delete method
-    lines.push(`  /**`);
+    lines.push("  /**");
     lines.push(`   * Delete a ${typeName}`);
     lines.push(`   * @generated from schema table: ${table.name}`);
-    lines.push(`   */`);
-    lines.push(`  delete(db: WasmDatabaseLike, id: ObjectId): void {`);
-    lines.push(`    this._delete(db, id);`);
-    lines.push(`  }`);
+    lines.push("   */");
+    lines.push("  delete(db: WasmDatabaseLike, id: ObjectId): void {");
+    lines.push("    this._delete(db, id);");
+    lines.push("  }");
     lines.push("");
 
     // Builder entry point: where()
-    lines.push(`  /**`);
-    lines.push(`   * Start a query with a filter condition`);
+    lines.push("  /**");
+    lines.push("   * Start a query with a filter condition");
     lines.push(`   * @generated from schema table: ${table.name}`);
-    lines.push(`   */`);
+    lines.push("   */");
     lines.push(`  where(filter: ${typeName}Filter): ${builderName}<{}> {`);
     lines.push(`    return new ${builderName}(this, filter, undefined);`);
-    lines.push(`  }`);
+    lines.push("  }");
     lines.push("");
 
     // Builder entry point: with()
-    lines.push(`  /**`);
-    lines.push(`   * Start a query with includes`);
+    lines.push("  /**");
+    lines.push("   * Start a query with includes");
     lines.push(`   * @generated from schema table: ${table.name}`);
-    lines.push(`   */`);
+    lines.push("   */");
     lines.push(
       `  with<I extends ${typeName}Includes>(include: I): ${builderName}<I> {`,
     );
     lines.push(`    return new ${builderName}(this, undefined, include);`);
-    lines.push(`  }`);
+    lines.push("  }");
     lines.push("");
 
     // subscribeAll method (direct, no filters/includes)
-    lines.push(`  /**`);
+    lines.push("  /**");
     lines.push(`   * Subscribe to all ${table.name}`);
     lines.push(`   * @generated from schema table: ${table.name}`);
-    lines.push(`   */`);
+    lines.push("   */");
     lines.push(
       `  subscribeAll(db: WasmDatabaseLike, callback: (rows: ${typeName}[]) => void): Unsubscribe {`,
     );
-    lines.push(`    return this._subscribeAll(db, {}, callback);`);
-    lines.push(`  }`);
+    lines.push("    return this._subscribeAll(db, {}, callback);");
+    lines.push("  }");
     lines.push("");
 
     // subscribe method (direct, no includes)
-    lines.push(`  /**`);
+    lines.push("  /**");
     lines.push(`   * Subscribe to a single ${typeName} by ID`);
     lines.push(`   * @generated from schema table: ${table.name}`);
-    lines.push(`   */`);
+    lines.push("   */");
     lines.push(
       `  subscribe(db: WasmDatabaseLike, id: ObjectId, callback: (row: ${typeName} | null) => void): Unsubscribe {`,
     );
-    lines.push(`    return this._subscribe(db, id, {}, callback);`);
-    lines.push(`  }`);
+    lines.push("    return this._subscribe(db, id, {}, callback);");
+    lines.push("  }");
     lines.push("");
 
     // Internal methods for query builder to call
-    lines.push(`  /** @internal Used by query builder */`);
+    lines.push("  /** @internal Used by query builder */");
     lines.push(
       `  _subscribeAllInternal(db: WasmDatabaseLike, options: { where?: BaseWhereInput; include?: IncludeSpec }, callback: (rows: ${typeName}[]) => void): Unsubscribe {`,
     );
-    lines.push(`    return this._subscribeAll(db, options, callback);`);
-    lines.push(`  }`);
+    lines.push("    return this._subscribeAll(db, options, callback);");
+    lines.push("  }");
     lines.push("");
 
-    lines.push(`  /** @internal Used by query builder */`);
+    lines.push("  /** @internal Used by query builder */");
     lines.push(
       `  _subscribeInternal(db: WasmDatabaseLike, id: ObjectId, options: { include?: IncludeSpec }, callback: (row: ${typeName} | null) => void): Unsubscribe {`,
     );
-    lines.push(`    return this._subscribe(db, id, options, callback);`);
-    lines.push(`  }`);
+    lines.push("    return this._subscribe(db, id, options, callback);");
+    lines.push("  }");
 
-    lines.push(`}`);
+    lines.push("}");
     lines.push("");
   }
 
   // Generate app object (typed schema descriptor)
-  lines.push(`/**`);
-  lines.push(` * Typed schema descriptor for use with React hooks.`);
+  lines.push("/**");
+  lines.push(" * Typed schema descriptor for use with React hooks.");
   lines.push(
-    ` * Pass queries to useAll/useOne, which inject the db from context.`,
+    " * Pass queries to useAll/useOne, which inject the db from context.",
   );
-  lines.push(` *`);
-  lines.push(` * @example`);
-  lines.push(` * \`\`\`typescript`);
+  lines.push(" *");
+  lines.push(" * @example");
+  lines.push(" * ```typescript");
   lines.push(` * import { app } from './generated/client';`);
   lines.push(` * import { useAll, useOne, useMutate } from '@jazz/react';`);
-  lines.push(` *`);
-  lines.push(` * function UserList() {`);
-  lines.push(` *   const [users, loading, mutate] = useAll(app.users);`);
-  lines.push(` *   return users.map(u => <li key={u.id}>{u.name}</li>);`);
-  lines.push(` * }`);
-  lines.push(` *`);
-  lines.push(` * function UserProfile({ userId }) {`);
-  lines.push(` *   const [user, loading, mutate] = useOne(app.users, userId);`);
-  lines.push(` *   return <div>{user?.name}</div>;`);
-  lines.push(` * }`);
-  lines.push(` * \`\`\``);
-  lines.push(` */`);
-  lines.push(`export const app = {`);
+  lines.push(" *");
+  lines.push(" * function UserList() {");
+  lines.push(" *   const [users, loading, mutate] = useAll(app.users);");
+  lines.push(" *   return users.map(u => <li key={u.id}>{u.name}</li>);");
+  lines.push(" * }");
+  lines.push(" *");
+  lines.push(" * function UserProfile({ userId }) {");
+  lines.push(" *   const [user, loading, mutate] = useOne(app.users, userId);");
+  lines.push(" *   return <div>{user?.name}</div>;");
+  lines.push(" * }");
+  lines.push(" * ```");
+  lines.push(" */");
+  lines.push("export const app = {");
   for (const table of tables) {
     const descriptorName = `${table.name}Descriptor`;
     const propName = table.name.toLowerCase();
     lines.push(`  ${propName}: new ${descriptorName}(),`);
   }
-  lines.push(`};`);
+  lines.push("};");
   lines.push("");
 
-  lines.push(`export type App = typeof app;`);
+  lines.push("export type App = typeof app;");
   lines.push("");
 
   // Generate Database interface and createDatabase function
-  lines.push(`/**`);
-  lines.push(` * Database interface with bound WASM instance.`);
-  lines.push(` * Created by calling createDatabase(wasmDb).`);
-  lines.push(` */`);
-  lines.push(`export interface Database {`);
+  lines.push("/**");
+  lines.push(" * Database interface with bound WASM instance.");
+  lines.push(" * Created by calling createDatabase(wasmDb).");
+  lines.push(" */");
+  lines.push("export interface Database {");
   for (const table of tables) {
     const typeName = singularize(toPascalCase(table.name));
     const propName = table.name.toLowerCase();
@@ -1511,109 +1511,109 @@ function generateClient(
       `  ${propName}: BoundTableClient<${typeName}, ${typeName}Insert, ${typeName}Includes>;`,
     );
   }
-  lines.push(`}`);
+  lines.push("}");
   lines.push("");
 
   // Generate BoundTableClient interface
-  lines.push(`/**`);
+  lines.push("/**");
   lines.push(
-    ` * A table client with the WASM database bound, allowing direct method calls.`,
+    " * A table client with the WASM database bound, allowing direct method calls.",
   );
-  lines.push(` */`);
-  lines.push(`export interface BoundTableClient<T, TInsert, TIncludes> {`);
-  lines.push(`  create(data: TInsert): ObjectId;`);
-  lines.push(`  update(id: ObjectId, data: Partial<TInsert>): void;`);
-  lines.push(`  delete(id: ObjectId): void;`);
-  lines.push(`  subscribeAll(callback: (rows: T[]) => void): Unsubscribe;`);
+  lines.push(" */");
+  lines.push("export interface BoundTableClient<T, TInsert, TIncludes> {");
+  lines.push("  create(data: TInsert): ObjectId;");
+  lines.push("  update(id: ObjectId, data: Partial<TInsert>): void;");
+  lines.push("  delete(id: ObjectId): void;");
+  lines.push("  subscribeAll(callback: (rows: T[]) => void): Unsubscribe;");
   lines.push(
-    `  subscribe(id: ObjectId, callback: (row: T | null) => void): Unsubscribe;`,
+    "  subscribe(id: ObjectId, callback: (row: T | null) => void): Unsubscribe;",
   );
-  lines.push(`  where(filter: any): BoundQueryBuilder<T, TInsert, TIncludes>;`);
+  lines.push("  where(filter: any): BoundQueryBuilder<T, TInsert, TIncludes>;");
   lines.push(
-    `  with<I extends TIncludes>(include: I): BoundQueryBuilder<any, TInsert, TIncludes>;`,
+    "  with<I extends TIncludes>(include: I): BoundQueryBuilder<any, TInsert, TIncludes>;",
   );
-  lines.push(`}`);
+  lines.push("}");
   lines.push("");
 
   // Generate BoundQueryBuilder interface
-  lines.push(`/**`);
-  lines.push(` * A query builder with the WASM database bound.`);
-  lines.push(` */`);
-  lines.push(`export interface BoundQueryBuilder<T, TInsert, TIncludes> {`);
-  lines.push(`  subscribeAll(callback: (rows: T[]) => void): Unsubscribe;`);
+  lines.push("/**");
+  lines.push(" * A query builder with the WASM database bound.");
+  lines.push(" */");
+  lines.push("export interface BoundQueryBuilder<T, TInsert, TIncludes> {");
+  lines.push("  subscribeAll(callback: (rows: T[]) => void): Unsubscribe;");
   lines.push(
-    `  subscribe(id: ObjectId, callback: (row: T | null) => void): Unsubscribe;`,
+    "  subscribe(id: ObjectId, callback: (row: T | null) => void): Unsubscribe;",
   );
-  lines.push(`  where(filter: any): BoundQueryBuilder<T, TInsert, TIncludes>;`);
+  lines.push("  where(filter: any): BoundQueryBuilder<T, TInsert, TIncludes>;");
   lines.push(
-    `  with<I extends TIncludes>(include: I): BoundQueryBuilder<any, TInsert, TIncludes>;`,
+    "  with<I extends TIncludes>(include: I): BoundQueryBuilder<any, TInsert, TIncludes>;",
   );
-  lines.push(`  create(data: TInsert): ObjectId;`);
-  lines.push(`  update(id: ObjectId, data: Partial<TInsert>): void;`);
-  lines.push(`  delete(id: ObjectId): void;`);
-  lines.push(`}`);
+  lines.push("  create(data: TInsert): ObjectId;");
+  lines.push("  update(id: ObjectId, data: Partial<TInsert>): void;");
+  lines.push("  delete(id: ObjectId): void;");
+  lines.push("}");
   lines.push("");
 
   // Generate createDatabase function
-  lines.push(`/**`);
-  lines.push(` * Create a database client with the WASM database bound.`);
+  lines.push("/**");
+  lines.push(" * Create a database client with the WASM database bound.");
   lines.push(
-    ` * This allows calling methods directly without passing the db instance.`,
+    " * This allows calling methods directly without passing the db instance.",
   );
-  lines.push(` *`);
-  lines.push(` * @example`);
-  lines.push(` * \`\`\`typescript`);
-  lines.push(` * const db = createDatabase(wasmDb);`);
+  lines.push(" *");
+  lines.push(" * @example");
+  lines.push(" * ```typescript");
+  lines.push(" * const db = createDatabase(wasmDb);");
   lines.push(` * const userId = db.users.create({ name: "Alice", ... });`);
-  lines.push(` * db.users.subscribeAll((users) => console.log(users));`);
-  lines.push(` * \`\`\``);
-  lines.push(` */`);
+  lines.push(" * db.users.subscribeAll((users) => console.log(users));");
+  lines.push(" * ```");
+  lines.push(" */");
   lines.push(
-    `export function createDatabase(wasmDb: WasmDatabaseLike): Database {`,
+    "export function createDatabase(wasmDb: WasmDatabaseLike): Database {",
   );
   lines.push(
-    `  function bindQueryBuilder<T, TInsert, TIncludes>(builder: any): BoundQueryBuilder<T, TInsert, TIncludes> {`,
+    "  function bindQueryBuilder<T, TInsert, TIncludes>(builder: any): BoundQueryBuilder<T, TInsert, TIncludes> {",
   );
-  lines.push(`    return {`);
-  lines.push(`      subscribeAll: (cb) => builder.subscribeAll(wasmDb, cb),`);
-  lines.push(`      subscribe: (id, cb) => builder.subscribe(wasmDb, id, cb),`);
+  lines.push("    return {");
+  lines.push("      subscribeAll: (cb) => builder.subscribeAll(wasmDb, cb),");
+  lines.push("      subscribe: (id, cb) => builder.subscribe(wasmDb, id, cb),");
   lines.push(
-    `      where: (filter) => bindQueryBuilder(builder.where(filter)),`,
+    "      where: (filter) => bindQueryBuilder(builder.where(filter)),",
   );
   lines.push(
-    `      with: (include) => bindQueryBuilder(builder.with(include)),`,
+    "      with: (include) => bindQueryBuilder(builder.with(include)),",
   );
-  lines.push(`      create: (data) => builder.create(wasmDb, data),`);
-  lines.push(`      update: (id, data) => builder.update(wasmDb, id, data),`);
-  lines.push(`      delete: (id) => builder.delete(wasmDb, id),`);
-  lines.push(`    };`);
-  lines.push(`  }`);
+  lines.push("      create: (data) => builder.create(wasmDb, data),");
+  lines.push("      update: (id, data) => builder.update(wasmDb, id, data),");
+  lines.push("      delete: (id) => builder.delete(wasmDb, id),");
+  lines.push("    };");
+  lines.push("  }");
   lines.push("");
   lines.push(
-    `  function bindTableClient<T, TInsert, TIncludes>(client: any): BoundTableClient<T, TInsert, TIncludes> {`,
+    "  function bindTableClient<T, TInsert, TIncludes>(client: any): BoundTableClient<T, TInsert, TIncludes> {",
   );
-  lines.push(`    return {`);
-  lines.push(`      create: (data) => client.create(wasmDb, data),`);
-  lines.push(`      update: (id, data) => client.update(wasmDb, id, data),`);
-  lines.push(`      delete: (id) => client.delete(wasmDb, id),`);
-  lines.push(`      subscribeAll: (cb) => client.subscribeAll(wasmDb, cb),`);
-  lines.push(`      subscribe: (id, cb) => client.subscribe(wasmDb, id, cb),`);
+  lines.push("    return {");
+  lines.push("      create: (data) => client.create(wasmDb, data),");
+  lines.push("      update: (id, data) => client.update(wasmDb, id, data),");
+  lines.push("      delete: (id) => client.delete(wasmDb, id),");
+  lines.push("      subscribeAll: (cb) => client.subscribeAll(wasmDb, cb),");
+  lines.push("      subscribe: (id, cb) => client.subscribe(wasmDb, id, cb),");
   lines.push(
-    `      where: (filter) => bindQueryBuilder(client.where(filter)),`,
+    "      where: (filter) => bindQueryBuilder(client.where(filter)),",
   );
   lines.push(
-    `      with: (include) => bindQueryBuilder(client.with(include)),`,
+    "      with: (include) => bindQueryBuilder(client.with(include)),",
   );
-  lines.push(`    };`);
-  lines.push(`  }`);
+  lines.push("    };");
+  lines.push("  }");
   lines.push("");
-  lines.push(`  return {`);
+  lines.push("  return {");
   for (const table of tables) {
     const propName = table.name.toLowerCase();
     lines.push(`    ${propName}: bindTableClient(app.${propName}),`);
   }
-  lines.push(`  };`);
-  lines.push(`}`);
+  lines.push("  };");
+  lines.push("}");
   lines.push("");
 
   return lines.join("\n");
@@ -1647,7 +1647,7 @@ export function generateFromSql(
   // Parse tables
   const tables = parseSqlSchema(sql);
   if (tables.length === 0) {
-    console.error(pc.red("No CREATE TABLE statements found in " + sqlPath));
+    console.error(pc.red(`No CREATE TABLE statements found in ${sqlPath}`));
     process.exit(1);
   }
 
@@ -1676,8 +1676,7 @@ export function generateFromSql(
   const elapsed = Date.now() - startTime;
 
   console.log(
-    pc.green("✓") +
-      ` Generated types, metadata, decoders, and client from ${pc.bold(tables.length)} table(s) in ${elapsed}ms`,
+    `${pc.green("✓")} Generated types, metadata, decoders, and client from ${pc.bold(tables.length)} table(s) in ${elapsed}ms`,
   );
   console.log(`  ${pc.dim("→")} ${typesPath}`);
   console.log(`  ${pc.dim("→")} ${metaPath}`);

@@ -191,7 +191,7 @@ impl ObjectState {
             .first()
             .and_then(|id| branch.get_commit(id))
             .map(|c| Bytes::copy_from_slice(&c.content))
-            .unwrap_or_else(Bytes::new);
+            .unwrap_or_default();
 
         match &self.previous_tips {
             None => ByteDiff::Initial(current),
@@ -407,6 +407,12 @@ impl std::fmt::Debug for ObjectListenerRegistry {
         f.debug_struct("ObjectListenerRegistry")
             .field("key_count", &states.len())
             .finish()
+    }
+}
+
+impl Default for ObjectListenerRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

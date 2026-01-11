@@ -70,7 +70,7 @@ describe("useJazz", () => {
       try {
         useJazz();
         return createElement("div", null, "no-error");
-      } catch (e) {
+      } catch (_e) {
         return createElement("div", { "data-testid": "result" }, "error");
       }
     }
@@ -186,7 +186,7 @@ describe("useAll", () => {
     let deleteFn: any;
 
     function TestComponent() {
-      const [users, loading, mutate] = useAll(app.users);
+      const [_users, loading, mutate] = useAll(app.users);
       createFn = mutate.create;
       updateFn = mutate.update;
       deleteFn = mutate.delete;
@@ -210,13 +210,13 @@ describe("useAll", () => {
 
   it("creates new rows via mutate.create", async () => {
     let createdId: string | undefined;
-    let userCount = 0;
+    let _userCount = 0;
 
     function TestComponent() {
       const [users, loading, mutate] = useAll(
         app.users.where({ name: "MutateCreateTest" }),
       );
-      userCount = users.length;
+      _userCount = users.length;
 
       useEffect(() => {
         if (!loading && !createdId) {
@@ -364,7 +364,7 @@ describe("useOne", () => {
     let deleteFn: any;
 
     function TestComponent() {
-      const [user, loading, mutate] = useOne(app.users, testUserId);
+      const [_user, loading, mutate] = useOne(app.users, testUserId);
       updateFn = mutate.update;
       deleteFn = mutate.delete;
       return createElement(
@@ -451,14 +451,14 @@ describe("Reactivity", () => {
   // Skip: Groove parser doesn't support LIKE operator (startsWith) yet
   it.skip("updates when data changes", async () => {
     let mutate: any;
-    let lastCount = 0;
+    let _lastCount = 0;
 
     function TestComponent() {
-      const [users, loading, m] = useAll(
+      const [users, _loading, m] = useAll(
         app.users.where({ name: { startsWith: "Reactivity" } }),
       );
       mutate = m;
-      lastCount = users.length;
+      _lastCount = users.length;
 
       return createElement(
         "div",
@@ -498,7 +498,7 @@ describe("Reactivity", () => {
 describe("Includes with hooks", () => {
   let testProjectId: string;
   let testOwnerId: string;
-  let testTaskId: string;
+  let _testTaskId: string;
 
   beforeAll(() => {
     testOwnerId = db.users.create({
@@ -516,7 +516,7 @@ describe("Includes with hooks", () => {
       color: "#123456",
     });
 
-    testTaskId = db.tasks.create({
+    _testTaskId = db.tasks.create({
       title: "IncludesTask",
       status: "open",
       priority: "high",
@@ -612,10 +612,10 @@ describe("Includes with hooks", () => {
 describe("Query key stability", () => {
   it("useAll does not resubscribe on rerender with same query", async () => {
     let renderCount = 0;
-    const subscribeCount = 0;
+    const _subscribeCount = 0;
 
     // Create a test-specific filter to count subscriptions
-    const originalSubscribeAll = app.users.subscribeAll;
+    const _originalSubscribeAll = app.users.subscribeAll;
 
     function TestComponent() {
       renderCount++;

@@ -146,6 +146,15 @@ impl FromIterator<RowDelta> for DeltaBatch {
     }
 }
 
+impl IntoIterator for DeltaBatch {
+    type Item = RowDelta;
+    type IntoIter = std::vec::IntoIter<RowDelta>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.deltas.into_iter()
+    }
+}
+
 impl DeltaBatch {
     /// Create an empty batch.
     pub fn new() -> Self {
@@ -203,11 +212,6 @@ impl DeltaBatch {
     /// Iterate over deltas by reference.
     pub fn iter(&self) -> impl Iterator<Item = &RowDelta> {
         self.deltas.iter()
-    }
-
-    /// Consume the batch and iterate over deltas.
-    pub fn into_iter(self) -> impl Iterator<Item = RowDelta> {
-        self.deltas.into_iter()
     }
 
     /// Compact the batch by removing redundant changes.
@@ -411,8 +415,8 @@ impl BufferJoinedRow {
 
         for (col_idx, col_def) in combined_schema.columns.iter().enumerate() {
             // col_def.name is qualified like "folders.owner_id"
-            if let Some((table, col_name)) = col_def.name.split_once('.') {
-                if let Some((_, owned_row)) = self.table_rows.get(table) {
+            if let Some((table, col_name)) = col_def.name.split_once('.')
+                && let Some((_, owned_row)) = self.table_rows.get(table) {
                     // The individual owned_row has unqualified column names, so use col_name
                     if let Some(rv) = owned_row.get_by_name(col_name) {
                         // Get the buffer column index for this schema column index
@@ -425,7 +429,6 @@ impl BufferJoinedRow {
                         }
                     }
                 }
-            }
         }
 
         builder.build()
@@ -466,7 +469,7 @@ impl BufferJoinedRow {
 mod tests {
     use super::*;
     use crate::sql::row_buffer::{RowBuilder, RowDescriptor, RowValue};
-    use crate::sql::schema::{ColumnDef, ColumnType};
+    use crate::sql::schema::ColumnType;
 
     fn make_test_descriptor() -> Arc<RowDescriptor> {
         Arc::new(RowDescriptor::new([(

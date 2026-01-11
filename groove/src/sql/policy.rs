@@ -145,7 +145,7 @@ impl PolicyExpr {
     }
 
     /// Create a logical NOT.
-    pub fn not(expr: PolicyExpr) -> Self {
+    pub fn negate(expr: PolicyExpr) -> Self {
         PolicyExpr::Not(Box::new(expr))
     }
 
@@ -1261,7 +1261,7 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
             (Some(PredicateValue::I32(a)), Some(PredicateValue::I32(b))) => pred(a.cmp(&b)),
             (Some(PredicateValue::I64(a)), Some(PredicateValue::I64(b))) => pred(a.cmp(&b)),
             (Some(PredicateValue::F64(a)), Some(PredicateValue::F64(b))) => {
-                a.partial_cmp(&b).map(|o| pred(o)).unwrap_or(false)
+                a.partial_cmp(&b).map(&pred).unwrap_or(false)
             }
             (Some(PredicateValue::String(ref a)), Some(PredicateValue::String(ref b))) => {
                 pred(a.cmp(b))
@@ -1348,7 +1348,9 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
         let policies = self.policy_lookup.get_policies(&target_table);
         let policy = policies.as_ref().and_then(|p| p.get(action));
 
-        let result = match policy {
+        
+
+        match policy {
             Some(p) => {
                 // Mark as visited and increment depth
                 self.visited.insert(visit_key.clone());
@@ -1381,9 +1383,7 @@ impl<'a, R: RowLookup, P: PolicyLookup> PolicyEvaluator<'a, R, P> {
                 }
                 true
             }
-        };
-
-        result
+        }
     }
 }
 
@@ -1575,7 +1575,7 @@ mod tests {
             let table = policy.table.clone();
             self.policies
                 .entry(table)
-                .or_insert_with(TablePolicies::new)
+                .or_default()
                 .add(policy)
                 .unwrap();
         }

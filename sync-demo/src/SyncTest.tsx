@@ -28,6 +28,7 @@ export function SyncTest() {
     console.log(`[${time}] ${msg}`);
   };
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: log is stable (only uses setLogs)
   useEffect(() => {
     async function init() {
       try {
@@ -168,7 +169,7 @@ export function SyncTest() {
         <strong>Log:</strong>
         <pre data-testid="log" style={{ color: "#000" }}>
           {logs.map((entry, i) => (
-            <div key={i}>
+            <div key={`${entry.time}-${i}`}>
               [{entry.time}] {entry.message}
             </div>
           ))}

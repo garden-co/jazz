@@ -1,10 +1,10 @@
-import { useMemo } from "react";
-import { Layers, User, Users } from "lucide-react";
-import { useAll } from "@jazz/react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { app } from "@/generated/client";
+import { useAll } from "@jazz/react";
+import { Layers, User, Users } from "lucide-react";
+import { useMemo } from "react";
 
 interface SidebarProps {
   selectedProjectId: string | null;

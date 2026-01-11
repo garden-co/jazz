@@ -458,7 +458,7 @@ describe("Binary Decoders", () => {
       const data = concat(
         encodeObjectId(makeObjectId(1)),
         encodeI64(123456789n),
-        encodeF64(3.14159),
+        encodeF64(Math.PI),
         encodeBool(true),
         encodeU32(42),
       );
@@ -467,7 +467,7 @@ describe("Binary Decoders", () => {
 
       expect(reader.readObjectId()).toBe(makeObjectId(1));
       expect(reader.readI64()).toBe(123456789n);
-      expect(reader.readF64()).toBeCloseTo(3.14159);
+      expect(reader.readF64()).toBeCloseTo(Math.PI);
       expect(reader.readBool()).toBe(true);
       expect(reader.readU32()).toBe(42);
     });

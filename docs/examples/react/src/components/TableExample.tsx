@@ -8,7 +8,7 @@ export function TaskListExample() {
 
   const db = useJazz();
 
-  const createTask = (projectId: string) => {
+  const _createTask = (projectId: string) => {
     app.tasks.create(db, {
       title: "New task",
       status: "open",

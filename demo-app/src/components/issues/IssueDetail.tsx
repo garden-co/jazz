@@ -54,7 +54,7 @@ export function IssueDetail({ issueId, open, onOpenChange }: IssueDetailProps) {
   const issueLabels = useMutate(app.issuelabels);
   const [editingTitle, setEditingTitle] = useState(false);
   const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
+  const [_description, setDescription] = useState("");
 
   // Extract labels and assignees from the included data
   const labels = issue?.IssueLabels.map((il) => il.label) ?? [];

@@ -89,10 +89,10 @@ impl JoinedRow {
 
         if let Some(table_name) = table {
             // Qualified column: look in specific table
-            if let Some((_, row)) = self.tables.get(table_name) {
-                if let Some(value) = row.get_by_name(column) {
-                    return Some(value.to_predicate_value());
-                }
+            if let Some((_, row)) = self.tables.get(table_name)
+                && let Some(value) = row.get_by_name(column)
+            {
+                return Some(value.to_predicate_value());
             }
             None
         } else {
@@ -166,12 +166,12 @@ impl JoinedRow {
 
     /// Convert to output (ObjectId, OwnedRow) with combined values from all tables.
     /// Uses primary table's row ID as the output row ID.
-    fn to_output_row(self, projection: &Projection) -> (ObjectId, OwnedRow) {
+    fn into_output_row(self, projection: &Projection) -> (ObjectId, OwnedRow) {
         let row_id = self
             .tables
             .get(&self.primary_table)
             .map(|(id, _)| *id)
-            .unwrap_or(ObjectId::default());
+            .unwrap_or_default();
 
         let owned = match projection {
             Projection::All => {
@@ -634,10 +634,10 @@ impl DatabaseState {
             }
 
             // Apply projection and convert to output
-            // The to_output_row method handles building the combined descriptor
+            // The into_output_row method handles building the combined descriptor
             joined_rows
                 .into_iter()
-                .map(|jr| jr.to_output_row(&select.projection))
+                .map(|jr| jr.into_output_row(&select.projection))
                 .collect()
         };
 
@@ -744,8 +744,8 @@ impl DatabaseState {
                         Projection::Expressions(exprs) => {
                             // Check if selecting whole table via alias
                             if exprs.len() == 1 {
-                                if let SelectExpr::Column(qc) = &exprs[0] {
-                                    if qc.table.is_none() {
+                                if let SelectExpr::Column(qc) = &exprs[0]
+                                    && qc.table.is_none() {
                                         let col_name = &qc.column;
                                         if inner_alias == Some(col_name.as_str())
                                             || col_name == inner_table
@@ -759,9 +759,8 @@ impl DatabaseState {
                                             );
                                         }
                                     }
-                                }
-                                if let SelectExpr::TableRow(alias) = &exprs[0] {
-                                    if inner_alias == Some(alias.as_str()) || alias == inner_table {
+                                if let SelectExpr::TableRow(alias) = &exprs[0]
+                                    && (inner_alias == Some(alias.as_str()) || alias == inner_table) {
                                         return (
                                             name,
                                             ColumnType::Array(Arc::new(
@@ -770,7 +769,6 @@ impl DatabaseState {
                                             false,
                                         );
                                     }
-                                }
                             }
                             // Build descriptor from expressions
                             Arc::new(self.build_projection_descriptor(exprs, &inner_schema))
@@ -845,6 +843,7 @@ impl DatabaseState {
     }
 
     /// Evaluate a single SELECT expression directly into a RowBuilder.
+    #[allow(clippy::too_many_arguments)]
     fn evaluate_expr_into_builder(
         &self,
         expr: &SelectExpr,
@@ -860,15 +859,14 @@ impl DatabaseState {
                 // Check if this is a reference to the outer table alias (composite row)
                 if qc.table.is_none() {
                     // Bare identifier - check if it matches outer table alias
-                    if let Some(alias) = outer_alias {
-                        if qc.column == alias {
+                    if let Some(alias) = outer_alias
+                        && qc.column == alias {
                             // Return the whole row as a single-item array
-                            return builder.set_array(col_idx, &[outer_row.clone()]);
+                            return builder.set_array(col_idx, std::slice::from_ref(outer_row));
                         }
-                    }
                     // Also check if it matches the table name
                     if qc.column == outer_table {
-                        return builder.set_array(col_idx, &[outer_row.clone()]);
+                        return builder.set_array(col_idx, std::slice::from_ref(outer_row));
                     }
                 }
 
@@ -885,7 +883,7 @@ impl DatabaseState {
             SelectExpr::TableRow(alias) => {
                 // Direct table row reference - return the whole row as single-item array
                 if outer_alias == Some(alias.as_str()) || alias == outer_table {
-                    builder.set_array(col_idx, &[outer_row.clone()])
+                    builder.set_array(col_idx, std::slice::from_ref(outer_row))
                 } else {
                     builder.set_null(col_idx)
                 }
@@ -967,22 +965,20 @@ impl DatabaseState {
                 // Check if it's just the table alias (returns whole row)
                 if exprs.len() == 1 {
                     // Check for SelectExpr::Column variant
-                    if let SelectExpr::Column(qc) = &exprs[0] {
-                        if qc.table.is_none() {
+                    if let SelectExpr::Column(qc) = &exprs[0]
+                        && qc.table.is_none() {
                             let name = &qc.column;
                             if inner_alias == Some(name.as_str()) || name == inner_table {
                                 // Table alias - return whole rows
                                 return filtered.into_iter().map(|(_, row)| row).collect();
                             }
                         }
-                    }
                     // Check for SelectExpr::TableRow variant
-                    if let SelectExpr::TableRow(alias) = &exprs[0] {
-                        if inner_alias == Some(alias.as_str()) || alias == inner_table {
+                    if let SelectExpr::TableRow(alias) = &exprs[0]
+                        && (inner_alias == Some(alias.as_str()) || alias == inner_table) {
                             // Table alias - return whole rows
                             return filtered.into_iter().map(|(_, row)| row).collect();
                         }
-                    }
                 }
 
                 // Evaluate expressions for each row - write directly to buffer
@@ -1487,6 +1483,7 @@ enum ChainJoinInfo {
 
 impl Database {
     /// Create a new database with the given environment.
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(env: Arc<dyn Environment>) -> Self {
         Database {
             state: Arc::new(DatabaseState::new(env)),
@@ -1494,6 +1491,7 @@ impl Database {
     }
 
     /// Create a new in-memory database (for testing).
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn in_memory() -> Self {
         Database {
             state: Arc::new(DatabaseState::in_memory()),
@@ -1503,6 +1501,7 @@ impl Database {
     /// Create an in-memory database with a specific catalog ID.
     /// All clients using the same catalog ID will share schema definitions
     /// when synced, allowing INSERT/SELECT to work across clients.
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn in_memory_with_catalog(catalog_id: ObjectId) -> Self {
         Database {
             state: Arc::new(DatabaseState::in_memory_with_catalog(catalog_id)),
@@ -1516,6 +1515,7 @@ impl Database {
     ///
     /// This is async because loading objects from Environment may involve reading from
     /// IndexedDB or other async storage backends.
+    #[allow(clippy::arc_with_non_send_sync)]
     pub async fn from_env(
         env: Arc<dyn Environment>,
         catalog_object_id: ObjectId,
@@ -1964,7 +1964,7 @@ impl Database {
             let mut policies = self.state.policies.write().unwrap();
             let table_policies = policies
                 .entry(table_name.clone())
-                .or_insert_with(TablePolicies::new);
+                .or_default();
 
             table_policies.add(policy)?;
         }
@@ -2084,17 +2084,16 @@ impl Database {
         let row_id =
             self.state
                 .node
-                .create_object(&format!("row:{}:{}", table, generate_object_id()));
+                .create_object(format!("row:{}:{}", table, generate_object_id()));
 
         // Set object metadata with table name for sync purposes
         {
             let mut meta = std::collections::BTreeMap::new();
             meta.insert("table".to_string(), table.to_string());
-            if let Some(obj) = self.state.node.get_object(row_id) {
-                if let Ok(mut obj_write) = obj.write() {
+            if let Some(obj) = self.state.node.get_object(row_id)
+                && let Ok(mut obj_write) = obj.write() {
                     obj_write.set_meta(meta);
                 }
-            }
         }
 
         // Inject the id into the row buffer at column 0
@@ -2126,8 +2125,8 @@ impl Database {
 
         // Update indexes for Ref columns
         for col in schema.columns.iter() {
-            if matches!(col.ty, ColumnType::Ref(_)) {
-                if let Some(RowValue::Ref(target_id)) = row_with_id.get_by_name(&col.name) {
+            if matches!(col.ty, ColumnType::Ref(_))
+                && let Some(RowValue::Ref(target_id)) = row_with_id.get_by_name(&col.name) {
                     let key = IndexKey::new(table, &col.name);
                     if self.state.index_objects.read().unwrap().contains_key(&key) {
                         let mut index = self.read_index(&key)?;
@@ -2135,7 +2134,6 @@ impl Database {
                         self.write_index(&key, &index)?;
                     }
                 }
-            }
         }
 
         // Notify query graphs of the change
@@ -2145,7 +2143,7 @@ impl Database {
                 id: row_id,
                 row: row_with_id,
             },
-            &*self.state,
+            &self.state,
         );
 
         // Get the table rows object ID for sync purposes
@@ -2306,7 +2304,7 @@ impl Database {
             };
             self.state
                 .graph_registry
-                .notify_row_change(&table_name, delta, &*self.state);
+                .notify_row_change(&table_name, delta, &self.state);
         }
 
         Ok(())
@@ -2356,7 +2354,7 @@ impl Database {
             };
             self.state
                 .graph_registry
-                .notify_row_change(table_name, delta, &*self.state);
+                .notify_row_change(table_name, delta, &self.state);
         }
 
         Ok(())
@@ -2388,7 +2386,7 @@ impl Database {
             };
             self.state
                 .graph_registry
-                .notify_row_change(&table_name, delta, &*self.state);
+                .notify_row_change(&table_name, delta, &self.state);
         }
 
         Ok(true)
@@ -2439,8 +2437,8 @@ impl Database {
         {
             let row_table = self.state.row_table.read().unwrap();
             for col in schema.columns.iter() {
-                if let ColumnType::Ref(target_table) = &col.ty {
-                    if let Some(RowValue::Ref(target_id)) = new_row.get_by_name(&col.name) {
+                if let ColumnType::Ref(target_table) = &col.ty
+                    && let Some(RowValue::Ref(target_id)) = new_row.get_by_name(&col.name) {
                         if !row_table.contains_key(&target_id) {
                             return Err(DatabaseError::InvalidReference {
                                 column: col.name.clone(),
@@ -2456,7 +2454,6 @@ impl Database {
                             });
                         }
                     }
-                }
             }
         }
 
@@ -2513,7 +2510,7 @@ impl Database {
                 row: new_row_with_id,
                 prior: PriorState::empty(), // TODO: Get prior commit tips
             },
-            &*self.state,
+            &self.state,
         );
 
         Ok(true)
@@ -2560,8 +2557,8 @@ impl Database {
             let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
             let row = OwnedRow::new(descriptor, data);
             for col in schema.columns.iter() {
-                if matches!(col.ty, ColumnType::Ref(_)) {
-                    if let Some(RowValue::Ref(target_id)) = row.get_by_name(&col.name) {
+                if matches!(col.ty, ColumnType::Ref(_))
+                    && let Some(RowValue::Ref(target_id)) = row.get_by_name(&col.name) {
                         let key = IndexKey::new(table, &col.name);
                         if self.state.index_objects.read().unwrap().contains_key(&key) {
                             let mut index = self.read_index(&key)?;
@@ -2569,7 +2566,6 @@ impl Database {
                             self.write_index(&key, &index)?;
                         }
                     }
-                }
             }
         }
 
@@ -2607,7 +2603,7 @@ impl Database {
                 id,
                 prior: PriorState::empty(), // TODO: Get prior commit tips
             },
-            &*self.state,
+            &self.state,
         );
 
         Ok(true)
@@ -2694,11 +2690,10 @@ impl Database {
             // Create OwnedRow directly from buffer
             let owned = OwnedRow::new(descriptor.clone(), data);
             // Check if the column value matches using PredicateValue::matches
-            if let Some(row_value) = owned.get_by_name(column) {
-                if coerced.matches(&row_value) {
+            if let Some(row_value) = owned.get_by_name(column)
+                && coerced.matches(&row_value) {
                     rows.push((row_id, owned));
                 }
-            }
         }
 
         Ok(rows)
@@ -3239,9 +3234,9 @@ impl Database {
         let select_policy = policies.as_ref().and_then(|p| p.get(PolicyAction::Select));
 
         // Check if policy contains INHERITS
-        if let Some(policy) = select_policy {
-            if let Some(ref where_expr) = policy.where_clause {
-                if let Some(inherits_info) = self.extract_inherits(where_expr, table, &schema)? {
+        if let Some(policy) = select_policy
+            && let Some(ref where_expr) = policy.where_clause
+                && let Some(inherits_info) = self.extract_inherits(where_expr, table, &schema)? {
                     if inherits_info.is_self_referential {
                         // Self-referential INHERITS: use RecursiveFilter
                         return self.build_recursive_filter_graph(
@@ -3269,8 +3264,6 @@ impl Database {
                         }
                     }
                 }
-            }
-        }
 
         // No INHERITS - build a simple single-table graph
         let mut builder = QueryGraphBuilder::new(table, schema.clone());
@@ -3471,8 +3464,8 @@ impl Database {
             .as_ref()
             .and_then(|p| p.get(PolicyAction::Select));
 
-        if let Some(policy) = target_select {
-            if let Some(ref where_expr) = policy.where_clause {
+        if let Some(policy) = target_select
+            && let Some(ref where_expr) = policy.where_clause {
                 // Check if target policy also has INHERITS
                 if let Some(nested_inherits) = self.extract_inherits(
                     where_expr,
@@ -3533,7 +3526,6 @@ impl Database {
                     terminal_table: initial_inherits.target_table.clone(),
                 });
             }
-        }
 
         // No policy on target table = allow all (terminal with no predicate)
         let first_hop = ChainHop {
@@ -3714,7 +3706,7 @@ impl Database {
         // The predicate must use qualified column names since we're in a JOIN context
         if !select.where_clause.is_empty() {
             let predicate = self.build_predicate(&select.where_clause, source_schema)?;
-            let qualified_pred = predicate.qualify(&left_table);
+            let qualified_pred = predicate.qualify(left_table);
             current_node = builder.filter(current_node, qualified_pred);
         }
 
@@ -3871,7 +3863,7 @@ impl Database {
             }
             PolicyExpr::Not(inner) => Ok(self
                 .policy_expr_to_predicate_qualified(inner, viewer, table_prefix)?
-                .not()),
+                .negate()),
             PolicyExpr::Inherits { .. } => {
                 // Nested INHERITS - would need recursive flattening
                 Err(DatabaseError::Parse(parser::ParseError {
@@ -3956,7 +3948,7 @@ impl Database {
             }
             PolicyExpr::Not(inner) => {
                 let pred = self.policy_expr_to_predicate(inner, viewer)?;
-                Ok(pred.not())
+                Ok(pred.negate())
             }
             // These require runtime evaluation
             PolicyExpr::Inherits { .. } => Err(DatabaseError::Parse(parser::ParseError {
@@ -4276,11 +4268,10 @@ impl Database {
         if left_is_inner && right_is_target && on.right.column == "id" {
             // Verify it's actually a Ref column to the target
             let col_name = &on.left.column;
-            if let Some(col) = inner_schema.column(col_name) {
-                if matches!(&col.ty, ColumnType::Ref(t) if t == target_table) {
+            if let Some(col) = inner_schema.column(col_name)
+                && matches!(&col.ty, ColumnType::Ref(t) if t == target_table) {
                     return Ok(col_name.clone());
                 }
-            }
         }
 
         // Check reverse: target.id = inner.col
@@ -4299,11 +4290,10 @@ impl Database {
 
         if left_is_target && right_is_inner && on.left.column == "id" {
             let col_name = &on.right.column;
-            if let Some(col) = inner_schema.column(col_name) {
-                if matches!(&col.ty, ColumnType::Ref(t) if t == target_table) {
+            if let Some(col) = inner_schema.column(col_name)
+                && matches!(&col.ty, ColumnType::Ref(t) if t == target_table) {
                     return Ok(col_name.clone());
                 }
-            }
         }
 
         Err(DatabaseError::Parse(parser::ParseError {
@@ -4518,14 +4508,13 @@ impl Database {
 
             if left_is_existing && right_is_target && on.right.column == "id" {
                 let col_name = &on.left.column;
-                if let Some(col) = schema.column(col_name) {
-                    if matches!(&col.ty, ColumnType::Ref(t) if t == target_table) {
+                if let Some(col) = schema.column(col_name)
+                    && matches!(&col.ty, ColumnType::Ref(t) if t == target_table) {
                         return Ok(ChainJoinInfo::Forward {
                             source_table: table_name.to_string(),
                             ref_column: col_name.clone(),
                         });
                     }
-                }
             }
 
             // Check reverse: target.id = existing.col (forward ref, swapped)
@@ -4534,14 +4523,13 @@ impl Database {
 
             if left_is_target && right_is_existing && on.left.column == "id" {
                 let col_name = &on.right.column;
-                if let Some(col) = schema.column(col_name) {
-                    if matches!(&col.ty, ColumnType::Ref(t) if t == target_table) {
+                if let Some(col) = schema.column(col_name)
+                    && matches!(&col.ty, ColumnType::Ref(t) if t == target_table) {
                         return Ok(ChainJoinInfo::Forward {
                             source_table: table_name.to_string(),
                             ref_column: col_name.clone(),
                         });
                     }
-                }
             }
         }
 
@@ -4552,15 +4540,14 @@ impl Database {
 
             if left_is_target && right_is_existing && on.right.column == "id" {
                 let col_name = &on.left.column;
-                if let Some(col) = target_schema.column(col_name) {
-                    if matches!(&col.ty, ColumnType::Ref(t) if t == *table_name) {
+                if let Some(col) = target_schema.column(col_name)
+                    && matches!(&col.ty, ColumnType::Ref(t) if t == *table_name) {
                         // This is a reverse join - the target table has the ref
                         return Ok(ChainJoinInfo::Reverse {
                             existing_table: table_name.to_string(),
                             ref_column: col_name.clone(),
                         });
                     }
-                }
             }
 
             // Also check: existing.id = target.col (swapped)
@@ -4569,15 +4556,14 @@ impl Database {
 
             if left_is_existing && right_is_target && on.left.column == "id" {
                 let col_name = &on.right.column;
-                if let Some(col) = target_schema.column(col_name) {
-                    if matches!(&col.ty, ColumnType::Ref(t) if t == *table_name) {
+                if let Some(col) = target_schema.column(col_name)
+                    && matches!(&col.ty, ColumnType::Ref(t) if t == *table_name) {
                         // This is a reverse join - the target table has the ref
                         return Ok(ChainJoinInfo::Reverse {
                             existing_table: table_name.to_string(),
                             ref_column: col_name.clone(),
                         });
                     }
-                }
             }
         }
 
@@ -4609,7 +4595,7 @@ impl Database {
             let (table_name, _schema) = if let Some(t) = table_ref {
                 all_tables
                     .iter()
-                    .find(|(name, alias, _)| *name == t || alias.map_or(false, |a| a == t))
+                    .find(|(name, alias, _)| *name == t || alias.is_some_and(|a| a == t))
                     .map(|(name, _, schema)| (*name, schema))
                     .ok_or_else(|| {
                         DatabaseError::Parse(parser::ParseError {
@@ -4879,11 +4865,10 @@ impl Database {
             // ON left_table.col = right_table.id pattern
             // Check if left column is a Ref to right table
             let col_name = &on.left.column;
-            if let Some(col) = left_schema.column(col_name) {
-                if matches!(&col.ty, ColumnType::Ref(target) if target == right_table) {
+            if let Some(col) = left_schema.column(col_name)
+                && matches!(&col.ty, ColumnType::Ref(target) if target == right_table) {
                     return Ok(JoinDirection::LeftToRight(col_name.clone()));
                 }
-            }
         }
 
         let right_is_from_left = on
@@ -4902,11 +4887,10 @@ impl Database {
         if right_is_from_left && left_is_from_right {
             // ON right_table.id = left_table.col pattern
             let col_name = &on.right.column;
-            if let Some(col) = left_schema.column(col_name) {
-                if matches!(&col.ty, ColumnType::Ref(target) if target == right_table) {
+            if let Some(col) = left_schema.column(col_name)
+                && matches!(&col.ty, ColumnType::Ref(target) if target == right_table) {
                     return Ok(JoinDirection::LeftToRight(col_name.clone()));
                 }
-            }
         }
 
         // Try to find any Ref column in left_schema that points to right_table
@@ -4933,21 +4917,19 @@ impl Database {
 
         if left_is_from_right_2 && right_is_from_left_2 {
             let col_name = &on.left.column;
-            if let Some(col) = right_schema.column(col_name) {
-                if matches!(&col.ty, ColumnType::Ref(target) if target == left_table) {
+            if let Some(col) = right_schema.column(col_name)
+                && matches!(&col.ty, ColumnType::Ref(target) if target == left_table) {
                     return Ok(JoinDirection::RightToLeft(col_name.clone()));
                 }
-            }
         }
 
         // Also check: ON left_table.id = right_table.col
         if left_is_from_left && right_is_from_right {
             let col_name = &on.right.column;
-            if let Some(col) = right_schema.column(col_name) {
-                if matches!(&col.ty, ColumnType::Ref(target) if target == left_table) {
+            if let Some(col) = right_schema.column(col_name)
+                && matches!(&col.ty, ColumnType::Ref(target) if target == left_table) {
                     return Ok(JoinDirection::RightToLeft(col_name.clone()));
                 }
-            }
         }
 
         // Try to find any Ref column in right_schema that points to left_table

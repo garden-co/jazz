@@ -115,7 +115,7 @@ impl GraphRegistry {
         graph.set_id(id);
 
         // Get all tables this graph depends on (for JOIN queries)
-        let tables: Vec<String> = graph.all_tables().iter().cloned().collect();
+        let tables: Vec<String> = graph.all_tables().to_vec();
 
         // Add to queries
         self.queries

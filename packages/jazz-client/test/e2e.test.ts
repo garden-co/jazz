@@ -498,7 +498,7 @@ describe("Filter Operations", () => {
     });
 
     it("filters by notIn array", async () => {
-      const usersAll = await subscribeOnce((cb) =>
+      const _usersAll = await subscribeOnce((cb) =>
         db.users.where({ name: { contains: "FilterUser" } }).subscribeAll(cb),
       );
       const usersFiltered = await subscribeOnce((cb) =>
@@ -642,7 +642,7 @@ describe("Self-referential Tables", () => {
   // Skip: Parent include in self-referential tables has issues
   it.skip("includes parent category", async () => {
     const rootId = db.categories.create({ name: "IncludeRoot" });
-    const childId = db.categories.create({
+    const _childId = db.categories.create({
       name: "IncludeChild",
       parent: rootId,
     });
@@ -789,7 +789,7 @@ describe("Junction Table Filters", () => {
   let filterTestTask1: string; // Has tag1, assigned to user1
   let filterTestTask2: string; // Has tag1 and tag2, assigned to user2
   let filterTestTask3: string; // Has tag2 and tag3, no assignee
-  let filterTestTask4: string; // No tags, assigned to user1
+  let _filterTestTask4: string; // No tags, assigned to user1
 
   beforeAll(() => {
     // Create test users
@@ -867,7 +867,7 @@ describe("Junction Table Filters", () => {
       isCompleted: true,
     });
 
-    filterTestTask4 = db.tasks.create({
+    _filterTestTask4 = db.tasks.create({
       title: "JunctionTask4",
       status: "open",
       priority: "high",
@@ -996,15 +996,15 @@ describe("Junction Table Filters", () => {
       expect(tasks.length).toBe(2);
 
       // Each task should have TaskTags array
-      tasks.forEach((task) => {
+      for (const task of tasks) {
         expect(Array.isArray(task.TaskTags)).toBe(true);
         // Each TaskTag should have tag as object
-        task.TaskTags.forEach((tt: any) => {
+        for (const tt of task.TaskTags as any[]) {
           expect(typeof tt.tag).toBe("object");
           expect(tt.tag.name).toBeDefined();
           expect(tt.tag.color).toBeDefined();
-        });
-      });
+        }
+      }
 
       // Verify specific tags are included
       const task2 = tasks.find((t) => t.title === "JunctionTask2");
@@ -1033,14 +1033,14 @@ describe("Junction Table Filters", () => {
       expect(titles).toEqual(["JunctionTask2", "JunctionTask3"]);
 
       // Verify includes
-      tasks.forEach((task) => {
+      for (const task of tasks) {
         expect(typeof task.project).toBe("object");
         expect(task.project.name).toBe("JunctionFilterProject");
         expect(Array.isArray(task.TaskTags)).toBe(true);
         expect(
           task.TaskTags.every((tt: any) => typeof tt.tag === "object"),
         ).toBe(true);
-      });
+      }
     });
 
     it("complex query mirroring demo app pattern", async () => {

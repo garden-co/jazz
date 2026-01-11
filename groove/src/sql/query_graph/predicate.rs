@@ -233,7 +233,7 @@ impl Predicate {
     }
 
     /// Negate this predicate.
-    pub fn not(self) -> Predicate {
+    pub fn negate(self) -> Predicate {
         match self {
             Predicate::True => Predicate::False,
             Predicate::False => Predicate::True,
@@ -552,10 +552,10 @@ mod tests {
         let row = make_buffer_row(&descriptor, "Alice", true, Some(30));
         let row_id = ObjectId::new(1);
 
-        let pred = Predicate::eq("active", PredicateValue::Bool(false)).not();
+        let pred = Predicate::eq("active", PredicateValue::Bool(false)).negate();
         assert!(pred.matches_buffer(row_id, row.as_ref(), &descriptor));
 
-        let pred2 = Predicate::eq("active", PredicateValue::Bool(true)).not();
+        let pred2 = Predicate::eq("active", PredicateValue::Bool(true)).negate();
         assert!(!pred2.matches_buffer(row_id, row.as_ref(), &descriptor));
     }
 

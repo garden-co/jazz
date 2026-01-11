@@ -2325,9 +2325,7 @@ fn incremental_query_with_array_subquery() {
     .unwrap();
 
     // Create incremental query with ARRAY subquery
-    let sql = format!(
-        "SELECT i.id, i.title, ARRAY(SELECT il.id, il.issue, il.name FROM IssueLabels il WHERE il.issue = i.id) AS labels FROM Issues i"
-    );
+    let sql = "SELECT i.id, i.title, ARRAY(SELECT il.id, il.issue, il.name FROM IssueLabels il WHERE il.issue = i.id) AS labels FROM Issues i".to_string();
     eprintln!("SQL: {}", sql);
 
     let query = db.incremental_query(&sql).unwrap();
@@ -2532,7 +2530,7 @@ fn incremental_query_join_plus_array_aggregate_preserves_nullable_columns() {
 
     // Initialize and get output
     let mut cache = groove::sql::query_graph::RowCache::new();
-    let rows = graph.get_output(&mut cache, &db.state());
+    let rows = graph.get_output(&mut cache, db.state());
 
     eprintln!("Rows count: {}", rows.len());
     assert_eq!(rows.len(), 1, "Should return 1 issue");

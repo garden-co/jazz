@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 test.describe("Groove Sync", () => {
-  test.beforeEach(async ({ browser }) => {
+  test.beforeEach(async () => {
     // Wait for server to be ready
     await new Promise((resolve) => setTimeout(resolve, 1000));
   });

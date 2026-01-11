@@ -1,5 +1,5 @@
-import { createContext, useContext, useState, type ReactNode } from "react";
 import type { ObjectId } from "@/generated/types";
+import { type ReactNode, createContext, useContext, useState } from "react";
 
 interface CurrentUserContextValue {
   currentUserId: ObjectId | null;
