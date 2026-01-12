@@ -105,6 +105,49 @@ impl Lens {
         self.apply_backward(row.as_ref())
     }
 
+    /// Transform a raw buffer from source schema to target schema.
+    ///
+    /// This is a convenience method for cross-branch queries where commits
+    /// store raw buffers that need to be transformed before merging.
+    ///
+    /// # Arguments
+    ///
+    /// * `source_buffer` - The raw buffer bytes (e.g., from commit.content)
+    /// * `source_descriptor` - The descriptor for the source schema
+    ///
+    /// # Returns
+    ///
+    /// The transformed buffer bytes, or an error if transformation fails.
+    pub fn transform_buffer_forward(
+        &self,
+        source_buffer: &[u8],
+        source_descriptor: &RowDescriptor,
+    ) -> Result<Vec<u8>, LensError> {
+        let row_ref = RowRef::new(source_descriptor, source_buffer);
+        let transformed = self.apply_forward(row_ref)?;
+        Ok(transformed.buffer)
+    }
+
+    /// Transform a raw buffer from target schema back to source schema.
+    ///
+    /// # Arguments
+    ///
+    /// * `target_buffer` - The raw buffer bytes in target schema
+    /// * `target_descriptor` - The descriptor for the target schema
+    ///
+    /// # Returns
+    ///
+    /// The transformed buffer bytes, or an error if transformation fails.
+    pub fn transform_buffer_backward(
+        &self,
+        target_buffer: &[u8],
+        target_descriptor: &RowDescriptor,
+    ) -> Result<Vec<u8>, LensError> {
+        let row_ref = RowRef::new(target_descriptor, target_buffer);
+        let transformed = self.apply_backward(row_ref)?;
+        Ok(transformed.buffer)
+    }
+
     /// Compute the target descriptor after applying forward transforms.
     ///
     /// Given a source descriptor, returns what the descriptor would look like

@@ -16,7 +16,10 @@ pub use binary::{
     DELTA_ADDED, DELTA_REMOVED, DELTA_UPDATED, encode_delta, encode_delta_batch, encode_owned_rows,
     encode_rows, encode_single_owned_row, encode_single_row,
 };
-pub use catalog::{Catalog, CatalogError, DescriptorId, TableDescriptor};
+pub use catalog::{
+    Catalog, CatalogError, DescriptorId, SchemaConflictError, TableDescriptor, find_target_schema,
+    get_lens_path,
+};
 pub use database::{
     Database, DatabaseError, DatabaseState, ExecuteResult, IncrementalQuery, MigrationError,
     MigrationResult,

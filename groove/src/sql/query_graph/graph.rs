@@ -101,6 +101,11 @@ pub struct QueryGraph {
     /// Lens context for transforming rows from different schema versions.
     /// Contains lenses for all known schema version pairs for this table.
     lens_context: Option<QueryLensContext>,
+
+    /// Branches to read from for branch-aware queries.
+    /// When set, rows are read from all specified branches and merged using per-column LWW.
+    /// If empty, defaults to reading from "main" only.
+    branches: Vec<String>,
 }
 
 impl std::fmt::Debug for QueryGraph {
@@ -288,6 +293,7 @@ impl QueryGraph {
     /// Create a new single-table query graph.
     ///
     /// This is typically called by `QueryGraphBuilder::output()`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         id: GraphId,
         table: String,
@@ -295,6 +301,7 @@ impl QueryGraph {
         nodes: Vec<QueryNode>,
         node_indices: HashMap<NodeId, usize>,
         output_node: NodeId,
+        branches: Vec<String>,
     ) -> Self {
         let mut all_schemas = HashMap::new();
         all_schemas.insert(table.clone(), schema.clone());
@@ -349,6 +356,7 @@ impl QueryGraph {
             successors,
             target_descriptor: None,
             lens_context: None,
+            branches,
         }
     }
 
@@ -367,6 +375,7 @@ impl QueryGraph {
         nodes: Vec<QueryNode>,
         node_indices: HashMap<NodeId, usize>,
         output_node: NodeId,
+        branches: Vec<String>,
     ) -> Self {
         use crate::sql::schema::ColumnDef;
 
@@ -455,6 +464,7 @@ impl QueryGraph {
             successors,
             target_descriptor: None,
             lens_context: None,
+            branches,
         }
     }
 
@@ -532,6 +542,18 @@ impl QueryGraph {
     /// Check if this graph has lens context for schema transformations.
     pub fn has_lens_context(&self) -> bool {
         self.lens_context.is_some()
+    }
+
+    /// Get the branches this query reads from.
+    ///
+    /// Returns an empty slice if no branches specified (defaults to "main").
+    pub fn branches(&self) -> &[String] {
+        &self.branches
+    }
+
+    /// Check if this graph is branch-aware (reads from multiple branches).
+    pub fn is_branch_aware(&self) -> bool {
+        !self.branches.is_empty()
     }
 
     /// Get current output rows in buffer format, initializing lazily if needed.

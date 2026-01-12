@@ -583,6 +583,122 @@ impl Object {
         Some(merged.buffer)
     }
 
+    /// Read content from multiple branches, applying schema transformations
+    /// and merging using per-column LWW.
+    ///
+    /// This is the main entry point for branch-aware queries. It:
+    /// 1. Gathers commits from all specified branches
+    /// 2. Transforms each commit's content to the target schema
+    /// 3. Finds the LCA across all commits
+    /// 4. Merges using per-column LWW
+    ///
+    /// # Arguments
+    ///
+    /// * `branch_names` - Names of branches to read from
+    /// * `branch_schemas` - Map from branch name to (DescriptorId, RowDescriptor)
+    /// * `target_descriptor` - The target schema to transform all content to
+    /// * `lenses` - Map from source DescriptorId to Lens for transformation
+    ///
+    /// # Returns
+    ///
+    /// The merged row content in the target schema, or None if no commits found.
+    pub fn read_across_branches(
+        &self,
+        branch_names: &[String],
+        branch_schemas: &std::collections::HashMap<
+            String,
+            (
+                crate::sql::DescriptorId,
+                crate::sql::row_buffer::RowDescriptor,
+            ),
+        >,
+        target_descriptor: &crate::sql::row_buffer::RowDescriptor,
+        lenses: &std::collections::HashMap<crate::sql::DescriptorId, crate::sql::Lens>,
+    ) -> Option<Vec<u8>> {
+        use crate::sql::row_buffer::{MergeCandidate, merge_per_column_lww};
+
+        // Step 1: Gather all commits from all branches
+        // Clone the data we need to avoid holding branch locks
+        struct CommitData {
+            content: Vec<u8>,
+            timestamp: u64,
+            commit_id: [u8; 32],
+            branch: String,
+        }
+
+        let mut all_commits: Vec<CommitData> = Vec::new();
+
+        for branch_name in branch_names {
+            if let Some(branch_lock) = self.branches.get(branch_name) {
+                let branch = branch_lock.read().unwrap();
+                for commit_id in branch.frontier() {
+                    if let Some(commit) = branch.get_commit(commit_id) {
+                        all_commits.push(CommitData {
+                            content: commit.content.to_vec(),
+                            timestamp: commit.timestamp,
+                            commit_id: *commit_id.as_bytes(),
+                            branch: branch_name.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        if all_commits.is_empty() {
+            return None;
+        }
+
+        // Step 2: Transform each commit's content to target schema
+        let mut transformed_candidates: Vec<(Vec<u8>, u64, [u8; 32])> = Vec::new();
+
+        for commit_data in &all_commits {
+            // Get the source schema for this branch
+            let (source_desc_id, source_descriptor) = branch_schemas.get(&commit_data.branch)?;
+
+            // Transform content to target schema
+            let transformed_content = if let Some(lens) = lenses.get(source_desc_id) {
+                // Apply lens transformation
+                lens.transform_buffer_forward(&commit_data.content, source_descriptor)
+                    .ok()?
+            } else {
+                // No lens means same schema version, use content as-is
+                commit_data.content.clone()
+            };
+
+            transformed_candidates.push((
+                transformed_content,
+                commit_data.timestamp,
+                commit_data.commit_id,
+            ));
+        }
+
+        // Step 3: Find LCA content
+        // For cross-branch merges, we need to find a common ancestor
+        // For now, use the earliest commit as a simple approximation
+        // TODO: Proper multi-branch LCA computation
+        let lca_content = if transformed_candidates.len() == 1 {
+            // Single commit, return it directly
+            return Some(transformed_candidates[0].0.clone());
+        } else {
+            // Use the earliest commit as base for diffing
+            // This is a simplification - proper LCA would need full DAG traversal
+            let earliest = transformed_candidates.iter().min_by_key(|(_, ts, _)| *ts)?;
+            earliest.0.clone()
+        };
+
+        // Step 4: Build MergeCandidates and perform per-column LWW merge
+        let candidates: Vec<MergeCandidate<'_>> = transformed_candidates
+            .iter()
+            .map(|(content, timestamp, commit_id)| {
+                MergeCandidate::new(content, *timestamp, *commit_id)
+            })
+            .collect();
+
+        let merged = merge_per_column_lww(&candidates, &lca_content, target_descriptor);
+
+        Some(merged.buffer)
+    }
+
     /// Write content to a branch (sync).
     /// Returns the new commit ID.
     pub fn write_sync(

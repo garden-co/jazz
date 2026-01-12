@@ -62,6 +62,8 @@ pub struct QueryGraphBuilder {
     current_descriptor: Option<Arc<RowDescriptor>>,
     /// JOIN state (lazily populated when join() is called)
     join_state: Option<JoinState>,
+    /// Branches to read from for branch-aware queries.
+    branches: Vec<String>,
 }
 
 impl QueryGraphBuilder {
@@ -74,7 +76,26 @@ impl QueryGraphBuilder {
             next_id: 0,
             current_descriptor: None,
             join_state: None,
+            branches: vec![],
         }
+    }
+
+    /// Set the branches to read from for branch-aware queries.
+    ///
+    /// When branches are specified, rows are read from all branches and
+    /// merged using per-column LWW before predicate evaluation.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let graph = QueryGraphBuilder::new("users", schema)
+    ///     .with_branches(vec!["prod-v1-main".into(), "staging-v2-feature".into()])
+    ///     .table_scan()
+    ///     ...
+    /// ```
+    pub fn with_branches(mut self, branches: Vec<String>) -> Self {
+        self.branches = branches;
+        self
     }
 
     /// Allocate a new node ID.
@@ -481,6 +502,7 @@ impl QueryGraphBuilder {
                 self.nodes,
                 node_indices,
                 output_id,
+                self.branches,
             ),
             Some(js) => QueryGraph::new_chain_join(
                 graph_id,
@@ -492,6 +514,7 @@ impl QueryGraphBuilder {
                 self.nodes,
                 node_indices,
                 output_id,
+                self.branches,
             ),
         }
     }

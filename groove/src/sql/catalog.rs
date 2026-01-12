@@ -425,6 +425,211 @@ impl std::fmt::Display for CatalogError {
 
 impl std::error::Error for CatalogError {}
 
+// =============================================================================
+// Schema Relationship Resolution
+// =============================================================================
+
+/// Error when schemas from different branches cannot be resolved to a target.
+#[derive(Debug, Clone)]
+pub enum SchemaConflictError {
+    /// No schemas provided to resolve.
+    Empty,
+    /// A required descriptor was not found in the provided set.
+    DescriptorNotFound(DescriptorId),
+    /// Schemas have diverged - no schema is a descendant of all others.
+    /// Contains the diverged descriptor IDs.
+    Diverged(Vec<DescriptorId>),
+}
+
+impl std::fmt::Display for SchemaConflictError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SchemaConflictError::Empty => write!(f, "no schemas to resolve"),
+            SchemaConflictError::DescriptorNotFound(id) => {
+                write!(f, "descriptor not found: {}", id)
+            }
+            SchemaConflictError::Diverged(ids) => {
+                write!(f, "schemas have diverged, no common descendant: {:?}", ids)
+            }
+        }
+    }
+}
+
+impl std::error::Error for SchemaConflictError {}
+
+/// Find the "target" schema from a set of descriptors.
+///
+/// The target schema is the one that is a descendant of all others. This is
+/// used when querying across branches with different schema versions - the
+/// result should use the "newest" schema.
+///
+/// # Arguments
+///
+/// * `descriptor_ids` - The descriptor IDs to consider (typically from branch names)
+/// * `descriptors` - All available descriptors indexed by ID (for DAG traversal)
+///
+/// # Returns
+///
+/// The DescriptorId that is a descendant of all others, or an error if:
+/// - No descriptors provided
+/// - Descriptors have diverged (no common descendant)
+///
+/// # Algorithm
+///
+/// For each candidate, check if it's a descendant of all others by traversing
+/// the parent chain. The candidate that is a descendant of all others wins.
+///
+/// Note: For now, we don't support schema merges (multiple parents). If a
+/// descriptor has multiple parents, we follow all paths.
+pub fn find_target_schema(
+    descriptor_ids: &[DescriptorId],
+    descriptors: &HashMap<DescriptorId, TableDescriptor>,
+) -> Result<DescriptorId, SchemaConflictError> {
+    if descriptor_ids.is_empty() {
+        return Err(SchemaConflictError::Empty);
+    }
+
+    if descriptor_ids.len() == 1 {
+        return Ok(descriptor_ids[0]);
+    }
+
+    // For each candidate, check if it's a descendant of all others
+    for &candidate in descriptor_ids {
+        let mut is_descendant_of_all = true;
+
+        for &other in descriptor_ids {
+            if candidate == other {
+                continue;
+            }
+
+            // Check if candidate is a descendant of other
+            if !is_descendant(candidate, other, descriptors) {
+                is_descendant_of_all = false;
+                break;
+            }
+        }
+
+        if is_descendant_of_all {
+            return Ok(candidate);
+        }
+    }
+
+    // No single descriptor is a descendant of all others - schemas have diverged
+    Err(SchemaConflictError::Diverged(descriptor_ids.to_vec()))
+}
+
+/// Check if `descendant` is a descendant of `ancestor` in the descriptor DAG.
+///
+/// Traverses the parent chain from `descendant` looking for `ancestor`.
+fn is_descendant(
+    descendant: DescriptorId,
+    ancestor: DescriptorId,
+    descriptors: &HashMap<DescriptorId, TableDescriptor>,
+) -> bool {
+    if descendant == ancestor {
+        return true;
+    }
+
+    // BFS through parent chain
+    let mut queue = std::collections::VecDeque::new();
+    let mut visited = std::collections::HashSet::new();
+
+    queue.push_back(descendant);
+    visited.insert(descendant);
+
+    while let Some(current) = queue.pop_front() {
+        if let Some(desc) = descriptors.get(&current) {
+            for &parent in &desc.parent_descriptors {
+                if parent == ancestor {
+                    return true;
+                }
+                if !visited.contains(&parent) {
+                    visited.insert(parent);
+                    queue.push_back(parent);
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Get the lens to transform data from `source` schema to `target` schema.
+///
+/// Finds the path from source to target in the descriptor DAG and composes
+/// the lenses along that path.
+///
+/// # Arguments
+///
+/// * `source` - The source descriptor ID (older schema)
+/// * `target` - The target descriptor ID (newer schema, must be descendant of source)
+/// * `descriptors` - All available descriptors indexed by ID
+///
+/// # Returns
+///
+/// The composed lens for the transformation, or None if no path exists.
+pub fn get_lens_path(
+    source: DescriptorId,
+    target: DescriptorId,
+    descriptors: &HashMap<DescriptorId, TableDescriptor>,
+) -> Option<Lens> {
+    if source == target {
+        return Some(Lens::identity());
+    }
+
+    // Find path from target back to source (following parent chain)
+    // Then compose lenses in reverse order
+    let mut path = Vec::new();
+
+    // BFS to find path
+    let mut parent_map: HashMap<DescriptorId, (DescriptorId, usize)> = HashMap::new();
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back(target);
+
+    while let Some(id) = queue.pop_front() {
+        if id == source {
+            // Reconstruct path
+            let mut cur = source;
+            while cur != target {
+                if let Some(&(child, lens_idx)) = parent_map.get(&cur) {
+                    path.push((child, lens_idx));
+                    cur = child;
+                } else {
+                    break;
+                }
+            }
+            break;
+        }
+
+        if let Some(desc) = descriptors.get(&id) {
+            for (idx, &parent) in desc.parent_descriptors.iter().enumerate() {
+                if let std::collections::hash_map::Entry::Vacant(e) = parent_map.entry(parent) {
+                    e.insert((id, idx));
+                    queue.push_back(parent);
+                }
+            }
+        }
+    }
+
+    if path.is_empty() && source != target {
+        return None;
+    }
+
+    // Compose lenses from source to target
+    // Path is in order from source toward target, each entry is (child_id, lens_index)
+    // The lens at child[lens_index] transforms from parent to child
+    let mut composed = Lens::identity();
+    for (child_id, lens_idx) in path {
+        if let Some(child_desc) = descriptors.get(&child_id)
+            && let Some(lens) = child_desc.lenses.get(lens_idx)
+        {
+            composed = composed.compose(lens);
+        }
+    }
+
+    Some(composed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,5 +770,146 @@ mod tests {
 
         // New IDs should be different
         assert_ne!(id1, id2);
+    }
+
+    // =============================================================================
+    // Schema Resolution Tests
+    // =============================================================================
+
+    fn make_test_schema(name: &str) -> TableSchema {
+        TableSchema {
+            name: name.to_string(),
+            columns: vec![ColumnDef {
+                name: "id".to_string(),
+                ty: ColumnType::I32,
+                nullable: false,
+            }],
+        }
+    }
+
+    fn make_test_descriptor(parents: Vec<DescriptorId>, lenses: Vec<Lens>) -> TableDescriptor {
+        TableDescriptor {
+            schema: make_test_schema("test"),
+            policies: TablePolicies::default(),
+            parent_descriptors: parents,
+            lenses,
+            rows_object_id: ObjectId::new(100),
+            schema_object_id: ObjectId::new(200),
+            index_object_ids: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn find_target_schema_single_descriptor() {
+        let id = DescriptorId::from_object_id(ObjectId::new(1));
+        let mut descriptors = HashMap::new();
+        descriptors.insert(id, make_test_descriptor(vec![], vec![]));
+
+        let result = find_target_schema(&[id], &descriptors);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), id);
+    }
+
+    #[test]
+    fn find_target_schema_empty_returns_error() {
+        let descriptors = HashMap::new();
+        let result = find_target_schema(&[], &descriptors);
+        assert!(matches!(result, Err(SchemaConflictError::Empty)));
+    }
+
+    #[test]
+    fn find_target_schema_linear_chain() {
+        // v1 <- v2 <- v3
+        // v3 is the target (descendant of all)
+        let v1 = DescriptorId::from_object_id(ObjectId::new(1));
+        let v2 = DescriptorId::from_object_id(ObjectId::new(2));
+        let v3 = DescriptorId::from_object_id(ObjectId::new(3));
+
+        let mut descriptors = HashMap::new();
+        descriptors.insert(v1, make_test_descriptor(vec![], vec![]));
+        descriptors.insert(v2, make_test_descriptor(vec![v1], vec![Lens::identity()]));
+        descriptors.insert(v3, make_test_descriptor(vec![v2], vec![Lens::identity()]));
+
+        // v3 should be the target
+        let result = find_target_schema(&[v1, v2, v3], &descriptors);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), v3);
+
+        // Order shouldn't matter
+        let result2 = find_target_schema(&[v3, v1, v2], &descriptors);
+        assert!(result2.is_ok());
+        assert_eq!(result2.unwrap(), v3);
+    }
+
+    #[test]
+    fn find_target_schema_diverged_returns_error() {
+        // v1 <- v2
+        // v1 <- v3
+        // v2 and v3 are siblings (neither is ancestor of the other)
+        let v1 = DescriptorId::from_object_id(ObjectId::new(1));
+        let v2 = DescriptorId::from_object_id(ObjectId::new(2));
+        let v3 = DescriptorId::from_object_id(ObjectId::new(3));
+
+        let mut descriptors = HashMap::new();
+        descriptors.insert(v1, make_test_descriptor(vec![], vec![]));
+        descriptors.insert(v2, make_test_descriptor(vec![v1], vec![Lens::identity()]));
+        descriptors.insert(v3, make_test_descriptor(vec![v1], vec![Lens::identity()]));
+
+        // v2 and v3 are diverged
+        let result = find_target_schema(&[v2, v3], &descriptors);
+        assert!(matches!(result, Err(SchemaConflictError::Diverged(_))));
+    }
+
+    #[test]
+    fn get_lens_path_identity() {
+        let id = DescriptorId::from_object_id(ObjectId::new(1));
+        let mut descriptors = HashMap::new();
+        descriptors.insert(id, make_test_descriptor(vec![], vec![]));
+
+        // Same source and target should return identity lens
+        let lens = get_lens_path(id, id, &descriptors);
+        assert!(lens.is_some());
+        assert!(lens.unwrap().forward.is_empty());
+    }
+
+    #[test]
+    fn get_lens_path_linear_chain() {
+        use crate::sql::lens::ColumnTransform;
+
+        let v1 = DescriptorId::from_object_id(ObjectId::new(1));
+        let v2 = DescriptorId::from_object_id(ObjectId::new(2));
+        let v3 = DescriptorId::from_object_id(ObjectId::new(3));
+
+        // v1 -> v2 (rename a -> b)
+        // v2 -> v3 (rename b -> c)
+        let lens1 = Lens::from_forward(vec![ColumnTransform::rename("a", "b")]);
+        let lens2 = Lens::from_forward(vec![ColumnTransform::rename("b", "c")]);
+
+        let mut descriptors = HashMap::new();
+        descriptors.insert(v1, make_test_descriptor(vec![], vec![]));
+        descriptors.insert(v2, make_test_descriptor(vec![v1], vec![lens1]));
+        descriptors.insert(v3, make_test_descriptor(vec![v2], vec![lens2]));
+
+        // Path from v1 to v3 should exist
+        let lens = get_lens_path(v1, v3, &descriptors);
+        assert!(lens.is_some());
+
+        // The composed lens should have 2 transforms
+        let composed = lens.unwrap();
+        assert_eq!(composed.forward.len(), 2);
+    }
+
+    #[test]
+    fn get_lens_path_no_path() {
+        let v1 = DescriptorId::from_object_id(ObjectId::new(1));
+        let v2 = DescriptorId::from_object_id(ObjectId::new(2));
+
+        let mut descriptors = HashMap::new();
+        descriptors.insert(v1, make_test_descriptor(vec![], vec![]));
+        descriptors.insert(v2, make_test_descriptor(vec![], vec![]));
+
+        // No path between unrelated descriptors
+        let lens = get_lens_path(v1, v2, &descriptors);
+        assert!(lens.is_none());
     }
 }
