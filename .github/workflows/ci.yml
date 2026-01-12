@@ -147,7 +147,7 @@ jobs:
           path: .
 
       - name: Install Playwright browsers
-        run: pnpm exec playwright install --with-deps chromium
+        run: pnpm --filter="@jazz/client" exec playwright install --with-deps chromium
 
       - name: Run lib tests
         run: pnpm test --filter="@jazz/*"
