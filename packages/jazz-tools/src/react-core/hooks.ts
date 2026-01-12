@@ -156,10 +156,6 @@ function useCoValueSubscriptions(
         return null;
       }
 
-      if (branch?.owner === null) {
-        return null;
-      }
-
       const subscription = cache.getOrCreate(
         node,
         schema,
@@ -970,7 +966,7 @@ function useSubscriptionsSelector<
   TSelectorInput = T[number],
   TSelectorReturn = TSelectorInput,
 >(
-  subscriptions: (SubscriptionScope<CoValue> | null)[],
+  subscriptions: SubscriptionScope<CoValue>[],
   options?: {
     select?: (value: TSelectorInput) => TSelectorReturn;
     equalityFn?: (a: TSelectorReturn, b: TSelectorReturn) => boolean;
@@ -979,12 +975,7 @@ function useSubscriptionsSelector<
   // Combined subscribe function that subscribes to all scopes
   const subscribe = useCallback(
     (callback: () => void) => {
-      const unsubscribes = subscriptions.map((sub) => {
-        if (!sub) {
-          return () => {};
-        }
-        return sub.subscribe(callback);
-      });
+      const unsubscribes = subscriptions.map((sub) => sub.subscribe(callback));
 
       return () => {
         unsubscribes.forEach((unsub) => unsub());
@@ -1094,7 +1085,7 @@ export function useSuspenseCoStates<
     ids,
     resolve,
     options?.unstable_branch,
-  );
+  ) as SubscriptionScope<CoValue>[];
   useSuspendUntilLoaded(subscriptionScopes);
   return useSubscriptionsSelector(subscriptionScopes, options);
 }
@@ -1163,6 +1154,6 @@ export function useCoStates<
     ids,
     resolve,
     options?.unstable_branch,
-  );
+  ) as SubscriptionScope<CoValue>[];
   return useSubscriptionsSelector(subscriptionScopes, options);
 }
