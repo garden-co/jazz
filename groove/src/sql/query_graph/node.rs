@@ -15,6 +15,24 @@ use crate::sql::types::IndexKey;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct NodeId(pub u32);
 
+/// Input port on a node - specifies which logical input an edge connects to.
+///
+/// Most nodes have a single input (Default), but Join and ArrayAggregate have
+/// two logical inputs that need to be distinguished for correct delta routing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputPort {
+    /// Default/only input (for single-input nodes like Filter, Projection, etc.)
+    Default,
+    /// Left/upstream input for Join nodes
+    Left,
+    /// Right/join_table input for Join nodes (from entry point)
+    Right,
+    /// Outer table input for ArrayAggregate (upstream rows to add arrays to)
+    Outer,
+    /// Inner table input for ArrayAggregate (rows to aggregate into arrays)
+    Inner,
+}
+
 /// Reason why a row is accessible in a RecursiveFilter.
 ///
 /// This is crucial for correctly handling removals - if a row is only
@@ -901,22 +919,13 @@ impl QueryNode {
         }
     }
 
-    /// Evaluate a join node with the given delta and database access.
+    /// Evaluate a join node using port-based routing.
     ///
-    /// For chain joins, this handles:
-    /// - Input deltas (from tables in input_tables): Look up join_table row
-    /// - Join table deltas: Use reverse_index to find affected combined rows
-    ///
-    /// `source_table` indicates which table the delta came from.
-    /// `is_from_input` indicates if this delta came from a prior node in the chain.
-    ///
-    /// Uses streaming indexes (left_index, right_index, right_by_ref) instead of on-demand lookups.
-    pub fn evaluate_join(
-        &mut self,
-        delta: RowDelta,
-        source_table: &str,
-        is_from_input: bool,
-    ) -> DeltaBatch {
+    /// This is the simplified version of `evaluate_join` for use with typed edges.
+    /// The `is_from_input` flag is determined by the input port:
+    /// - Left/Default port: `is_from_input = true` (upstream delta)
+    /// - Right port: `is_from_input = false` (join_table entry delta)
+    pub fn evaluate_join_by_port(&mut self, delta: RowDelta, is_from_input: bool) -> DeltaBatch {
         match self {
             QueryNode::Join {
                 input_tables,
@@ -934,12 +943,7 @@ impl QueryNode {
             } => {
                 let mut output = DeltaBatch::new();
 
-                // Determine if this is an input delta or a join_table delta
-                let is_join_table_delta = source_table == join_table && !is_from_input;
-                let is_input_delta =
-                    is_from_input || input_tables.iter().any(|t| t == source_table);
-
-                if is_input_delta && !is_join_table_delta {
+                if is_from_input {
                     // Delta from input (left side) - use streaming indexes
                     Self::eval_join_input_delta(
                         &delta,
@@ -956,7 +960,7 @@ impl QueryNode {
                         right_by_ref,
                         &mut output,
                     );
-                } else if is_join_table_delta {
+                } else {
                     // Delta from join_table (right side) - use streaming indexes
                     Self::eval_join_table_delta(
                         &delta,
@@ -974,8 +978,6 @@ impl QueryNode {
                         &mut output,
                     );
                 }
-                // Note: If neither condition matches, the delta is for a downstream node.
-                // The graph layer handles pass-through by skipping this node entirely.
 
                 output
             }
@@ -1788,22 +1790,21 @@ impl QueryNode {
         }
     }
 
-    /// Evaluate an ArrayAggregate node.
+    /// Evaluate an ArrayAggregate node using port-based routing.
     ///
     /// Handles two types of deltas:
     /// - Outer table deltas (from input node): Add/remove/update outer rows
     /// - Inner table deltas: Update the arrays for affected outer rows
     ///
-    /// `source_table` indicates which table the delta came from.
-    /// `is_outer_delta` and `is_inner_delta` indicate which type of delta this is
-    /// (considering contained_tables from upstream ArrayAggregates).
-    /// `lookup_inner_rows` is a function to find all inner rows matching an outer id.
-    /// `lookup_row_by_id` is a function to look up a row from any table by (table_name, id).
-    #[allow(clippy::too_many_arguments)]
-    pub fn evaluate_array_aggregate<F, G>(
+    /// The `is_outer_delta`/`is_inner_delta` flags are determined by the input port:
+    /// - Outer/Default port: `is_outer_delta = true` (upstream delta)
+    /// - Inner port: `is_inner_delta = true` (inner_table entry delta)
+    ///
+    /// `lookup_inner_rows` finds all inner rows matching an outer id.
+    /// `lookup_row_by_id` looks up a row from any table by (table_name, id).
+    pub fn evaluate_array_aggregate_by_port<F, G>(
         &mut self,
         delta: RowDelta,
-        _source_table: &str,
         is_outer_delta: bool,
         is_inner_delta: bool,
         _outer_schema: &TableSchema,
