@@ -1,5 +1,5 @@
 import { createAuthClient } from "better-auth/client";
-import type { Account, AuthSecretStorage } from "jazz-tools";
+import { Account, AuthSecretStorage } from "jazz-tools";
 import {
   TestJazzContextManager,
   createJazzTestAccount,
@@ -9,7 +9,6 @@ import {
 import { assert, beforeEach, describe, expect, it, vi } from "vitest";
 import { jazzPluginClient } from "../client.js";
 import { emailOTPClient, genericOAuthClient } from "better-auth/client/plugins";
-
 describe("Better-Auth client plugin", () => {
   let account: Account;
   let jazzContextManager: TestJazzContextManager<Account>;
@@ -153,6 +152,71 @@ describe("Better-Auth client plugin", () => {
       accountID: credentials!.accountID,
       provider: "better-auth",
     });
+  });
+
+  it("should preserve secretSeed over signup", async () => {
+    const secretSeed = new Uint8Array([1, 2, 3]);
+    await authSecretStorage.set({
+      accountID: account.$jazz.id,
+      secretSeed: secretSeed,
+      accountSecret: account.$jazz.localNode.getCurrentAgent().agentSecret,
+      provider: "test",
+    });
+    const credentials = await authSecretStorage.get();
+    assert(credentials, "Jazz credentials are not available");
+    expect(credentials.secretSeed).toBeInstanceOf(Uint8Array);
+
+    customFetchImpl.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          token: "6diDScDDcLJLl3sxAEestZz63mrw9Azy",
+          user: {
+            id: "S6SDKApdnh746gUnP3zujzsEY53tjuTm",
+            email: "test@jazz.dev",
+            name: "Matteo",
+            image: null,
+            emailVerified: false,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+          jazzAuth: {
+            accountID: credentials.accountID,
+            secretSeed: credentials.secretSeed,
+            accountSecret: credentials.accountSecret,
+          },
+        }),
+      ),
+    );
+
+    // Sign up
+    await authClient.signUp.email({
+      email: "test@jazz.dev",
+      password: "12345678",
+      name: "Matteo",
+    });
+
+    expect(customFetchImpl).toHaveBeenCalledTimes(1);
+    expect(customFetchImpl.mock.calls[0]![0].toString()).toBe(
+      "http://localhost:3000/api/auth/sign-up/email",
+    );
+
+    // Verify the credentials have been injected in the request body
+    expect(
+      customFetchImpl.mock.calls[0]![1].headers.get("x-jazz-auth")!,
+    ).toEqual(
+      JSON.stringify({
+        accountID: credentials!.accountID,
+        secretSeed: Array.from(credentials.secretSeed!),
+        accountSecret: credentials!.accountSecret,
+      }),
+    );
+
+    expect(authSecretStorage.isAuthenticated).toBe(true);
+
+    // Verify the profile name has been updated
+    const context = jazzContextManager.getCurrentValue();
+    assert(context && "me" in context);
+    expect(context.me.$jazz.id).toBe(credentials!.accountID);
   });
 
   it("should logout from Jazz after BetterAuth sign-out", async () => {
