@@ -1,5 +1,5 @@
 import { PeerKnownState } from "./coValueCore/PeerKnownState.js";
-import { RawCoID, SessionID } from "./ids.js";
+import { RawCoID } from "./ids.js";
 import { CoValueKnownState } from "./knownState.js";
 import { logger } from "./logger.js";
 import { Peer, SyncMessage } from "./sync.js";
@@ -181,7 +181,7 @@ export class PeerState {
     this.closeListeners.clear();
   }
 
-  gracefulShutdown() {
+  gracefulShutdown(): void {
     if (this.closed) {
       return;
     }

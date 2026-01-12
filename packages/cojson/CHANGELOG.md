@@ -1,5 +1,22 @@
 # cojson
 
+## 0.19.19
+
+### Patch Changes
+
+- 83f84ca: Resume interrupted CoValue sync on app restart (without requiring CoValues to be manually reloaded)
+  - cojson-core-wasm@0.19.19
+  - cojson-core-rn@0.19.19
+  - cojson-core-napi@0.19.19
+
+## 0.19.18
+
+### Patch Changes
+
+- cojson-core-wasm@0.19.18
+- cojson-core-rn@0.19.18
+- cojson-core-napi@0.19.18
+
 ## 0.19.17
 
 ### Patch Changes

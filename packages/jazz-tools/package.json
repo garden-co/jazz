@@ -177,6 +177,12 @@
       "types": "./dist/better-auth/auth/react.d.ts",
       "default": "./dist/better-auth/auth/react.js"
     },
+    "./better-auth/auth/svelte": {
+      "svelte": "./dist/better-auth/auth/svelte.svelte",
+      "@jazz-tools/source": "./src/better-auth/auth/svelte.svelte",
+      "types": "./dist/better-auth/auth/svelte.d.ts",
+      "default": "./dist/better-auth/auth/svelte.svelte"
+    },
     "./better-auth/auth/server": {
       "@jazz-tools/source": "./src/better-auth/auth/server.ts",
       "types": "./dist/better-auth/auth/server.d.ts",
@@ -205,7 +211,7 @@
   },
   "type": "module",
   "license": "MIT",
-  "version": "0.19.17",
+  "version": "0.19.19",
   "dependencies": {
     "@manuscripts/prosemirror-recreate-steps": "^0.1.4",
     "@scure/base": "1.2.1",
@@ -236,7 +242,8 @@
     "test:watch": "vitest --watch --root ../../ --project jazz-tools",
     "types": "tsc --outDir dist",
     "build:svelte": "rm -rf dist/svelte && svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json",
-    "build": "tsup && pnpm types && pnpm build:svelte"
+    "build:better-auth-svelte": "mkdir -p dist/better-auth/auth && svelte-package -i src/better-auth/auth -o dist/better-auth/auth-temp --tsconfig tsconfig.svelte.json && cp dist/better-auth/auth-temp/svelte.svelte dist/better-auth/auth/svelte.svelte && cp dist/better-auth/auth-temp/svelte.svelte.d.ts dist/better-auth/auth/svelte.d.ts && rm -rf dist/better-auth/auth-temp",
+    "build": "tsup && pnpm types && pnpm build:svelte && pnpm build:better-auth-svelte"
   },
   "devDependencies": {
     "@scure/bip39": "^1.3.0",
@@ -264,7 +271,7 @@
     "@bam.tech/react-native-image-resizer": "*",
     "@op-engineering/op-sqlite": "*",
     "@react-native-community/netinfo": "*",
-    "better-auth": "^1.3.2",
+    "better-auth": "^1.4.7",
     "expo-file-system": "*",
     "expo-image-manipulator": "*",
     "expo-secure-store": "*",
@@ -275,6 +282,7 @@
     "react-native-fast-encoder": "^0.3.1",
     "react-native-mmkv": "^3.3.0",
     "react-native-nitro-modules": "^0.26.4",
+    "react-native-passkey": "^3.0.0",
     "react-native-quick-crypto": "^1.0.0-beta.21",
     "sharp": "^0.33.5",
     "svelte": "^5.0.0"
@@ -320,6 +328,9 @@
       "optional": true
     },
     "react-native-nitro-modules": {
+      "optional": true
+    },
+    "react-native-passkey": {
       "optional": true
     },
     "react-native-quick-crypto": {

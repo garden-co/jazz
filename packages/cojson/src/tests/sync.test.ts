@@ -1,12 +1,4 @@
-import {
-  assert,
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  test,
-  vi,
-} from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { expectMap } from "../coValue.js";
 import { RawCoMap } from "../coValues/coMap.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";

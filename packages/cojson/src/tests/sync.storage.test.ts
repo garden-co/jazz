@@ -8,7 +8,7 @@ import {
   vi,
 } from "vitest";
 
-import { emptyKnownState } from "../exports";
+import { cojsonInternals, emptyKnownState } from "../exports";
 import {
   SyncMessagesLog,
   TEST_NODE_CONFIG,
@@ -23,6 +23,10 @@ import { stableStringify } from "../jsonStringify";
 
 // We want to simulate a real world communication that happens asynchronously
 TEST_NODE_CONFIG.withAsyncPeers = true;
+
+beforeEach(() => {
+  cojsonInternals.setIncomingMessagesTimeBudget(10_000);
+});
 
 describe("client with storage syncs with server", () => {
   let jazzCloud: ReturnType<typeof setupTestNode>;
@@ -356,13 +360,6 @@ describe("client syncs with a server with storage", () => {
 
     await largeMap.core.waitForSync();
 
-    // Test streaming counter during initial sync
-    // The streaming counter should be 0 after the sync is complete
-    const streamingCounterAfterSync = await metricReader.getMetricValue(
-      "jazz.storage.streaming",
-    );
-    expect(streamingCounterAfterSync).toBe(0);
-
     expect(
       SyncMessagesLog.getMessages({
         Group: group.core,
@@ -403,30 +400,10 @@ describe("client syncs with a server with storage", () => {
       storage,
     });
 
-    // Test streaming counter before loading the large coValue
-    const streamingCounterBeforeLoad = await metricReader.getMetricValue(
-      "jazz.storage.streaming",
-    );
-    expect(streamingCounterBeforeLoad).toBe(0);
-
     const promise = loadCoValueOrFail(client.node, largeMap.id);
-
-    // Test streaming counter during loading (should be 1 during streaming)
-    const streamingCounterDuringLoad = await metricReader.getMetricValue(
-      "jazz.storage.streaming",
-    );
-    expect(streamingCounterDuringLoad).toBe(1);
 
     const mapOnClient2 = await promise;
     await mapOnClient2.core.waitForFullStreaming();
-
-    // Test streaming counter after loading is complete (should be 0)
-    await waitFor(async () => {
-      const streamingCounterAfterLoad = await metricReader.getMetricValue(
-        "jazz.storage.streaming",
-      );
-      expect(streamingCounterAfterLoad).toBe(0);
-    });
 
     expect(
       SyncMessagesLog.getMessages({
@@ -440,8 +417,6 @@ describe("client syncs with a server with storage", () => {
         "client -> server | LOAD Group sessions: header/5",
         "storage -> client | CONTENT Map header: true new: After: 0 New: 73 expectContentUntil: header/200",
         "client -> server | LOAD Map sessions: header/200",
-        "server -> client | KNOWN Group sessions: header/5",
-        "server -> client | KNOWN Map sessions: header/200",
         "storage -> client | CONTENT Map header: true new: After: 73 New: 73",
         "storage -> client | CONTENT Map header: true new: After: 146 New: 54",
       ]
@@ -830,16 +805,233 @@ describe("client syncs with a server with storage", () => {
         "server -> bob | CONTENT Map header: true new: After: 0 New: 1",
         "storage -> syncServer | CONTENT ParentGroup header: true new: After: 76 New: 73",
         "server -> bob | CONTENT ParentGroup header: false new: After: 76 New: 73 expectContentUntil: header/205",
+        "storage -> syncServer | CONTENT ParentGroup header: true new: After: 149 New: 56",
+        "server -> bob | CONTENT ParentGroup header: false new: After: 149 New: 56",
         "bob -> server | KNOWN ParentGroup sessions: header/76",
         "bob -> server | KNOWN Group sessions: header/5",
         "bob -> server | KNOWN Map sessions: header/1",
         "bob -> server | KNOWN ParentGroup sessions: header/149",
-        "storage -> syncServer | CONTENT ParentGroup header: true new: After: 149 New: 56",
-        "server -> bob | CONTENT ParentGroup header: false new: After: 149 New: 56",
         "bob -> server | KNOWN ParentGroup sessions: header/205",
       ]
     `);
 
     expect(mapOnBob.get("hello")).toEqual("world");
+  });
+
+  describe("storage content streaming queue", () => {
+    test("multiple CoValues can stream concurrently", async () => {
+      cojsonInternals.setIncomingMessagesTimeBudget(0); // Should force the queue processing to be async
+
+      const client = setupTestNode();
+      client.connectToSyncServer();
+      const { storage } = client.addStorage();
+
+      const group = jazzCloud.node.createGroup();
+      const map1 = group.createMap();
+      const map2 = group.createMap();
+      const map3 = group.createMap();
+
+      fillCoMapWithLargeData(map1);
+      fillCoMapWithLargeData(map2);
+      fillCoMapWithLargeData(map3);
+
+      // Load all and sync to storage
+      await Promise.all([
+        loadCoValueOrFail(client.node, map1.id),
+        loadCoValueOrFail(client.node, map2.id),
+        loadCoValueOrFail(client.node, map3.id),
+      ]);
+      await Promise.all([
+        map1.core.waitForSync(),
+        map2.core.waitForSync(),
+        map3.core.waitForSync(),
+      ]);
+
+      // Restart to load from storage
+      client.restart();
+      client.addStorage({ storage });
+
+      // Load all maps concurrently from storage
+      const [loadedMap1, loadedMap2, loadedMap3] = await Promise.all([
+        loadCoValueOrFail(client.node, map1.id),
+        loadCoValueOrFail(client.node, map2.id),
+        loadCoValueOrFail(client.node, map3.id),
+      ]);
+
+      // Wait for all to complete streaming
+      await Promise.all([
+        loadedMap1.core.waitForAsync((value) => value.isCompletelyDownloaded()),
+        loadedMap2.core.waitForAsync((value) => value.isCompletelyDownloaded()),
+        loadedMap3.core.waitForAsync((value) => value.isCompletelyDownloaded()),
+      ]);
+
+      // All content should be loaded
+      expect(loadedMap1.core.isCompletelyDownloaded()).toBe(true);
+      expect(loadedMap2.core.isCompletelyDownloaded()).toBe(true);
+      expect(loadedMap3.core.isCompletelyDownloaded()).toBe(true);
+
+      // Queue should be empty
+      expect(storage.streamingQueue?.isEmpty()).toBe(true);
+    });
+
+    test("large content streaming interleaved with incoming messages", async () => {
+      cojsonInternals.setIncomingMessagesTimeBudget(0); // Should force the queue processing to be async
+
+      const client = setupTestNode();
+      client.connectToSyncServer();
+      const { storage } = client.addStorage();
+
+      // Create a large map on the server and sync to client storage
+      const group = jazzCloud.node.createGroup();
+      const largeMap = group.createMap();
+      fillCoMapWithLargeData(largeMap);
+
+      await loadCoValueOrFail(client.node, largeMap.id);
+      await largeMap.core.waitForSync();
+
+      SyncMessagesLog.clear();
+
+      // Restart client with storage
+      client.restart();
+      client.connectToSyncServer();
+      client.addStorage({ storage });
+
+      // Create a new small map on the server (will come as incoming message)
+      const smallMap = group.createMap();
+      smallMap.set("hello", "world", "trusting");
+
+      // Load both simultaneously - large from storage, small from server
+      const [loadedLargeMap, loadedSmallMap] = await Promise.all([
+        loadCoValueOrFail(client.node, largeMap.id),
+        loadCoValueOrFail(client.node, smallMap.id),
+      ]);
+
+      // Wait for complete download
+      await Promise.all([
+        loadedLargeMap.core.waitForAsync((value) =>
+          value.isCompletelyDownloaded(),
+        ),
+        loadedSmallMap.core.waitForAsync((value) =>
+          value.isCompletelyDownloaded(),
+        ),
+      ]);
+
+      // Both should be loaded correctly
+      expect(loadedLargeMap.core.isCompletelyDownloaded()).toBe(true);
+      expect(loadedSmallMap.get("hello")).toEqual("world");
+    });
+
+    test("large parent group streaming from storage", async () => {
+      cojsonInternals.setIncomingMessagesTimeBudget(0);
+
+      const syncServer = setupTestNode({
+        isSyncServer: true,
+      });
+      const { storage } = syncServer.addStorage({
+        ourName: "syncServer",
+      });
+
+      const alice = setupTestNode();
+      alice.connectToSyncServer({
+        syncServer: syncServer.node,
+      });
+
+      const parentGroup = alice.node.createGroup();
+      const group = alice.node.createGroup();
+      group.extend(parentGroup);
+
+      const map = group.createMap();
+
+      fillCoMapWithLargeData(parentGroup);
+
+      parentGroup.addMember("everyone", "reader");
+
+      map.set("hello", "world");
+
+      await map.core.waitForSync();
+      await parentGroup.core.waitForSync();
+
+      expect(
+        SyncMessagesLog.getMessages({
+          Group: group.core,
+          ParentGroup: parentGroup.core,
+          Map: map.core,
+        }),
+      ).toMatchInlineSnapshot(`
+      [
+        "client -> server | CONTENT ParentGroup header: true new: After: 0 New: 3",
+        "client -> server | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server | CONTENT Map header: true new: ",
+        "client -> server | CONTENT ParentGroup header: false new: After: 3 New: 73 expectContentUntil: header/205",
+        "client -> server | CONTENT ParentGroup header: false new: After: 76 New: 73",
+        "client -> server | CONTENT ParentGroup header: false new: After: 149 New: 56",
+        "client -> server | CONTENT Map header: false new: After: 0 New: 1",
+        "server -> client | KNOWN ParentGroup sessions: header/3",
+        "syncServer -> storage | CONTENT ParentGroup header: true new: After: 0 New: 3",
+        "server -> client | KNOWN Group sessions: header/5",
+        "syncServer -> storage | CONTENT Group header: true new: After: 0 New: 5",
+        "server -> client | KNOWN Map sessions: header/0",
+        "syncServer -> storage | CONTENT Map header: true new: ",
+        "server -> client | KNOWN ParentGroup sessions: header/76",
+        "syncServer -> storage | CONTENT ParentGroup header: false new: After: 3 New: 73",
+        "server -> client | KNOWN ParentGroup sessions: header/149",
+        "syncServer -> storage | CONTENT ParentGroup header: false new: After: 76 New: 73",
+        "server -> client | KNOWN ParentGroup sessions: header/205",
+        "syncServer -> storage | CONTENT ParentGroup header: false new: After: 149 New: 56",
+        "server -> client | KNOWN Map sessions: header/1",
+        "syncServer -> storage | CONTENT Map header: false new: After: 0 New: 1",
+      ]
+    `);
+
+      SyncMessagesLog.clear();
+
+      syncServer.restart();
+      syncServer.addStorage({
+        ourName: "syncServer",
+        storage,
+      });
+
+      const bob = setupTestNode();
+      bob.connectToSyncServer({
+        syncServer: syncServer.node,
+        ourName: "bob",
+      });
+
+      let mapOnBob = await loadCoValueOrFail(bob.node, map.id);
+
+      await mapOnBob.core.waitForAsync((value) =>
+        value.isCompletelyDownloaded(),
+      );
+
+      expect(
+        SyncMessagesLog.getMessages({
+          ParentGroup: parentGroup.core,
+          Group: group.core,
+          Map: map.core,
+        }),
+      ).toMatchInlineSnapshot(`
+        [
+          "bob -> server | LOAD Map sessions: empty",
+          "syncServer -> storage | LOAD Map sessions: empty",
+          "storage -> syncServer | CONTENT ParentGroup header: true new: After: 0 New: 76 expectContentUntil: header/205",
+          "storage -> syncServer | CONTENT Group header: true new: After: 0 New: 5",
+          "storage -> syncServer | CONTENT Map header: true new: After: 0 New: 1",
+          "server -> bob | CONTENT ParentGroup header: true new: After: 0 New: 76 expectContentUntil: header/205",
+          "server -> bob | CONTENT Group header: true new: After: 0 New: 5",
+          "server -> bob | CONTENT Map header: true new: After: 0 New: 1",
+          "storage -> syncServer | CONTENT ParentGroup header: true new: After: 76 New: 73",
+          "server -> bob | CONTENT ParentGroup header: false new: After: 76 New: 73 expectContentUntil: header/205",
+          "bob -> server | KNOWN ParentGroup sessions: header/76",
+          "storage -> syncServer | CONTENT ParentGroup header: true new: After: 149 New: 56",
+          "server -> bob | CONTENT ParentGroup header: false new: After: 149 New: 56",
+          "bob -> server | KNOWN Group sessions: header/5",
+          "bob -> server | KNOWN Map sessions: header/1",
+          "bob -> server | KNOWN ParentGroup sessions: header/149",
+          "bob -> server | KNOWN ParentGroup sessions: header/205",
+        ]
+      `);
+
+      expect(mapOnBob.get("hello")).toEqual("world");
+    });
   });
 });

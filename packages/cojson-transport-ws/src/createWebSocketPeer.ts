@@ -87,32 +87,42 @@ export function createWebSocketPeer({
   const incoming = new ConnectedPeerChannel();
   const emitClosedEvent = createClosedEventEmitter(onClose);
 
+  function cleanup() {
+    websocket.removeEventListener("message", handleIncomingMsg);
+    websocket.removeEventListener("close", handleClose);
+    // Only some WebSocket implementations emit the error event, so we need to do casting to any to avoid type errors
+    websocket.removeEventListener("error" as any, handleError);
+    pingTimeoutListener.clear();
+    outgoing.drain();
+  }
+
   function handleClose() {
     incoming.push("Disconnected");
     emitClosedEvent();
+    cleanup();
   }
 
-  websocket.addEventListener("close", handleClose);
-  // TODO (#1537): Remove this any once the WebSocket error event type is fixed
-  // biome-ignore lint/suspicious/noExplicitAny: WebSocket error event type
-  websocket.addEventListener("error" as any, (err) => {
-    if (err.message) {
+  function handleError(err: unknown) {
+    if (err instanceof Error && err.message) {
       logger.warn("WebSocket error", { err });
     }
 
     handleClose();
-  });
+  }
+
+  websocket.addEventListener("close", handleClose);
+  // Only some WebSocket implementations emit the error event, so we need to do casting to any to avoid type errors
+  websocket.addEventListener("error" as any, handleError);
 
   const pingTimeoutListener = createPingTimeoutListener(
     expectPings,
     pingTimeout,
     () => {
-      incoming.push("Disconnected");
+      handleClose();
       logger.warn("Ping timeout from peer", {
         peerId: id,
         peerRole: role,
       });
-      emitClosedEvent();
     },
   );
 
@@ -167,9 +177,7 @@ export function createWebSocketPeer({
   websocket.addEventListener("message", handleIncomingMsg);
 
   outgoing.onClose(() => {
-    websocket.removeEventListener("message", handleIncomingMsg);
-    websocket.removeEventListener("close", handleClose);
-    pingTimeoutListener.clear();
+    cleanup();
     emitClosedEvent();
 
     if (websocket.readyState === 0) {

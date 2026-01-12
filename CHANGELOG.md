@@ -1,3 +1,23 @@
+Released Jazz 0.19.20:
+- Added React Native passkey (WebAuthn) authentication support with new exports from `jazz-tools/react-native-core`:
+  - `ReactNativePasskeyAuth`: Core auth class for passkey authentication
+  - `usePasskeyAuth`: React hook for passkey auth state management
+  - `PasskeyAuthBasicUI`: Ready-to-use auth UI component with dark/light mode support
+  - `isPasskeySupported`: Helper to check device passkey support
+  - Uses `react-native-passkey` as an optional peer dependency. Requires domain configuration (AASA for iOS, assetlinks.json for Android) for passkey verification.
+- `createAs` now accepts `waitForSync`'s timeout option, and returns credentials in `onCreate` callback
+- Improved storage content streaming by introducing a priority-based streaming queue, reducing main-thread blocking and prioritizing important CoValues during heavy streaming
+- Bugfix: fixed serialisation of secret seed in Better Auth
+
+Released Jazz 0.19.19:
+- Added Svelte Better Auth support and upgraded Better Auth compatibility to version 1.4.7
+- Added `getJazzErrorType` helper function to identify the type of Jazz error from an Error object thrown by suspense hooks. This enables error boundaries to display appropriate UI based on whether the error is "unauthorized", "unavailable", or "unknown"
+- Resume interrupted CoValue sync on app restart (without requiring CoValues to be manually reloaded)
+- Bugfix: Context.authenticate now doesn't replace the context if the same AccountID is already logged in
+
+Released Jazz 0.19.18:
+- Bugfix: fixed Clerk metadata schema to correctly parse the Jazz credentials. Bug introduced in 0.19.17
+
 Released Jazz 0.19.17:
 - Bugfix: fixed an issue where calling logOut multiple times concurrently could trigger duplicate logout operations
 

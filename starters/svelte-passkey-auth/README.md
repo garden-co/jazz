@@ -41,6 +41,6 @@ If you have feedback, let us know on [Discord](https://discord.gg/utDMjHYg42) or
 
 ## Configuration: sync server
 
-By default, the Svelte starter app uses [Jazz Cloud](https://jazz.tools/cloud) (`wss://cloud.jazz.tools`) - so cross-device use, invites and collaboration should just work.
+By default, the Svelte starter app uses [Jazz Cloud](https://dashboard.jazz.tools) (`wss://cloud.jazz.tools`) - so cross-device use, invites and collaboration should just work.
 
 You can also run a local sync server by running `npx jazz-run sync`, and setting the `sync` parameter of `JazzSvelteProvider` in [./src/routes/+layout.svelte](./src/routes/+layout.svelte) to `{ peer: "ws://localhost:4200" }`.

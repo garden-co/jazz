@@ -24,6 +24,7 @@ import {
   setupJazzTestSync,
 } from "../testing";
 import { assertLoaded, loadCoValueOrFail } from "./utils";
+import { createAsyncStorage } from "./testStorage";
 const Crypto = await WasmCrypto.create();
 
 let randomSessionProvider = new MockSessionProvider();
@@ -162,8 +163,40 @@ describe("createContext methods", () => {
         asActiveAccount: true,
       });
 
-      context.logOut();
+      await context.logOut();
       expect(onLogOut).toHaveBeenCalled();
+    });
+
+    test("waits for all storage operations to complete before logging out", async () => {
+      const account = await createJazzTestAccount({
+        isCurrentActiveAccount: true,
+      });
+
+      const context = await createJazzContextFromExistingCredentials({
+        credentials: {
+          accountID: account.$jazz.id,
+          secret: account.$jazz.localNode.getCurrentAgent().agentSecret,
+        },
+        peers: [getPeerConnectedToTestSyncServer()],
+        crypto: Crypto,
+        sessionProvider: randomSessionProvider,
+        storage: await createAsyncStorage({}),
+        asActiveAccount: true,
+      });
+
+      // Create a coValue (and a group as its owner)
+      const coValue = co.plainText().create("test");
+
+      // Wait for local transaction to trigger sync
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+      await context.logOut();
+
+      const unsyncedCoValueIDs = await new Promise<string[]>((resolve) =>
+        context.node.storage!.getUnsyncedCoValueIDs(resolve),
+      );
+      expect(unsyncedCoValueIDs).toHaveLength(2);
+      expect(unsyncedCoValueIDs).toContain(coValue.$jazz.id);
     });
 
     test("connects to provided peers", async () => {

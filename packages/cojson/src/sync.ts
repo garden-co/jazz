@@ -2,6 +2,8 @@ import { md5 } from "@noble/hashes/legacy";
 import { Histogram, ValueType, metrics } from "@opentelemetry/api";
 import { PeerState } from "./PeerState.js";
 import { SyncStateManager } from "./SyncStateManager.js";
+import { UnsyncedCoValuesTracker } from "./UnsyncedCoValuesTracker.js";
+import { SYNC_SCHEDULER_CONFIG } from "./config.js";
 import {
   getContenDebugInfo,
   getNewTransactionsFromContentMessage,
@@ -18,11 +20,13 @@ import { logger } from "./logger.js";
 import { CoValuePriority } from "./priority.js";
 import { IncomingMessagesQueue } from "./queue/IncomingMessagesQueue.js";
 import { LocalTransactionsSyncQueue } from "./queue/LocalTransactionsSyncQueue.js";
+import type { StorageStreamingQueue } from "./queue/StorageStreamingQueue.js";
 import {
   CoValueKnownState,
   knownStateFrom,
   KnownStateSessions,
 } from "./knownState.js";
+import { StorageAPI } from "./storage/index.js";
 
 export type SyncMessage =
   | LoadMessage
@@ -62,6 +66,15 @@ export type DoneMessage = {
   action: "done";
   id: RawCoID;
 };
+
+/**
+ * Determines when network sync is enabled.
+ * - "always": sync is enabled for both Anonymous Authentication and Authenticated Account
+ * - "signedUp": sync is enabled when the user is authenticated
+ * - "never": sync is disabled, content stays local
+ * Can be dynamically modified to control sync behavior at runtime.
+ */
+export type SyncWhen = "always" | "signedUp" | "never";
 
 export type PeerID = string;
 
@@ -121,6 +134,7 @@ export class SyncManager {
   constructor(local: LocalNode) {
     this.local = local;
     this.syncState = new SyncStateManager(this);
+    this.unsyncedTracker = new UnsyncedCoValuesTracker();
 
     this.transactionsSizeHistogram = metrics
       .getMeter("cojson")
@@ -132,6 +146,7 @@ export class SyncManager {
   }
 
   syncState: SyncStateManager;
+  unsyncedTracker: UnsyncedCoValuesTracker;
 
   disableTransactionVerification() {
     this.skipVerify = true;
@@ -152,6 +167,10 @@ export class SyncManager {
     return this.serverPeerSelector
       ? this.serverPeerSelector(id, serverPeers)
       : serverPeers;
+  }
+
+  getPersistentServerPeers(id: RawCoID): PeerState[] {
+    return this.getServerPeers(id).filter((peer) => peer.persistent);
   }
 
   handleSyncMessage(msg: SyncMessage, peer: PeerState) {
@@ -259,7 +278,88 @@ export class SyncManager {
     }
   }
 
+  async resumeUnsyncedCoValues(): Promise<void> {
+    if (!this.local.storage) {
+      // No storage available, skip resumption
+      return;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      // Load all persisted unsynced CoValues from storage
+      this.local.storage?.getUnsyncedCoValueIDs((unsyncedCoValueIDs) => {
+        const coValuesToLoad = unsyncedCoValueIDs.filter(
+          (coValueId) => !this.local.hasCoValue(coValueId),
+        );
+        if (coValuesToLoad.length === 0) {
+          resolve();
+          return;
+        }
+
+        const BATCH_SIZE = 10;
+        let processed = 0;
+
+        const processBatch = async () => {
+          const batch = coValuesToLoad.slice(processed, processed + BATCH_SIZE);
+
+          await Promise.all(
+            batch.map(
+              async (coValueId) =>
+                new Promise<void>((resolve) => {
+                  try {
+                    // Clear previous tracking (as it may include outdated peers)
+                    this.local.storage?.stopTrackingSyncState(coValueId);
+
+                    // Resume tracking sync state for this CoValue
+                    // This will add it back to the tracker and set up subscriptions
+                    this.trackSyncState(coValueId);
+
+                    // Load the CoValue from storage (this will trigger sync if peers are connected)
+                    const coValue = this.local.getCoValue(coValueId);
+                    coValue.loadFromStorage((found) => {
+                      if (!found) {
+                        // CoValue could not be loaded from storage, stop tracking
+                        this.unsyncedTracker.removeAll(coValueId);
+                      }
+                      resolve();
+                    });
+                  } catch (error) {
+                    // Handle errors gracefully - log but don't fail the entire resumption
+                    logger.warn(
+                      `Failed to resume sync for CoValue ${coValueId}:`,
+                      {
+                        err: error,
+                        coValueId,
+                      },
+                    );
+                    this.unsyncedTracker.removeAll(coValueId);
+                    resolve();
+                  }
+                }),
+            ),
+          );
+
+          processed += batch.length;
+
+          if (processed < coValuesToLoad.length) {
+            processBatch().catch(reject);
+          } else {
+            resolve();
+          }
+        };
+
+        processBatch().catch(reject);
+      });
+    });
+  }
+
   startPeerReconciliation(peer: PeerState) {
+    if (peer.role === "server" && peer.persistent) {
+      // Resume syncing unsynced CoValues asynchronously
+      this.resumeUnsyncedCoValues().catch((error) => {
+        logger.warn("Failed to resume unsynced CoValues:", error);
+      });
+    }
+
     const coValuesOrderedByDependency: CoValueCore[] = [];
 
     const seen = new Set<string>();
@@ -328,17 +428,87 @@ export class SyncManager {
     }
   }
 
-  messagesQueue = new IncomingMessagesQueue();
+  messagesQueue = new IncomingMessagesQueue(() => this.processQueues());
+  private processing = false;
+
   pushMessage(incoming: SyncMessage, peer: PeerState) {
     this.messagesQueue.push(incoming, peer);
+  }
 
-    if (this.messagesQueue.processing) {
+  /**
+   * Get the storage streaming queue if available.
+   * Returns undefined if storage doesn't have a streaming queue.
+   */
+  private getStorageStreamingQueue(): StorageStreamingQueue | undefined {
+    const storage = this.local.storage;
+    if (storage && "streamingQueue" in storage) {
+      return storage.streamingQueue as StorageStreamingQueue;
+    }
+    return undefined;
+  }
+
+  /**
+   * Unified queue processing that coordinates both incoming messages
+   * and storage streaming entries.
+   *
+   * Processes items from both queues with priority ordering:
+   * - Incoming messages are processed via round-robin across peers
+   * - Storage streaming entries are processed by priority (MEDIUM before LOW)
+   *
+   * Implements time budget scheduling to avoid blocking the main thread.
+   */
+  private async processQueues() {
+    if (this.processing) {
       return;
     }
 
-    this.messagesQueue.processQueue((msg, peer) => {
-      this.handleSyncMessage(msg, peer);
-    });
+    this.processing = true;
+    let lastTimer = performance.now();
+
+    const streamingQueue = this.getStorageStreamingQueue();
+
+    while (true) {
+      // First, try to pull from incoming messages queue
+      const messageEntry = this.messagesQueue.pull();
+      if (messageEntry) {
+        try {
+          this.handleSyncMessage(messageEntry.msg, messageEntry.peer);
+        } catch (err) {
+          logger.error("Error processing message", { err });
+        }
+      }
+
+      // Then, try to pull from storage streaming queue
+      const pushStreamingContent = streamingQueue?.pull();
+      if (pushStreamingContent) {
+        try {
+          // Invoke the pushContent callback to stream the content
+          pushStreamingContent();
+        } catch (err) {
+          logger.error("Error processing storage streaming entry", {
+            err,
+          });
+        }
+      }
+
+      // If both queues are empty, we're done
+      if (!messageEntry && !pushStreamingContent) {
+        break;
+      }
+
+      // Check if we have blocked the main thread for too long
+      // and if so, yield to the event loop
+      const currentTimer = performance.now();
+      if (
+        currentTimer - lastTimer >
+        SYNC_SCHEDULER_CONFIG.INCOMING_MESSAGES_TIME_BUDGET
+      ) {
+        await new Promise<void>((resolve) => setTimeout(resolve));
+        lastTimer = performance.now();
+      }
+    }
+
+    this.processing = false;
   }
 
   addPeer(peer: Peer, skipReconciliation: boolean = false) {
@@ -732,6 +902,9 @@ export class SyncManager {
 
     if (from !== "storage" && hasNewContent) {
       this.storeContent(validNewContent);
+      if (from === "import") {
+        this.trackSyncState(coValue.id);
+      }
     }
 
     for (const peer of this.getPeers(coValue.id)) {
@@ -787,6 +960,8 @@ export class SyncManager {
 
     this.storeContent(content);
 
+    this.trackSyncState(coValue.id);
+
     const contentKnownState = knownStateFromContent(content);
 
     for (const peer of this.getPeers(coValue.id)) {
@@ -808,6 +983,37 @@ export class SyncManager {
       this.trySendToPeer(peer, content);
       peer.combineOptimisticWith(coValue.id, contentKnownState);
       peer.trackToldKnownState(coValue.id);
+    }
+  }
+
+  private trackSyncState(coValueId: RawCoID): void {
+    const peers = this.getPersistentServerPeers(coValueId);
+
+    const isSyncRequired = this.local.syncWhen !== "never";
+    if (isSyncRequired && peers.length === 0) {
+      this.unsyncedTracker.add(coValueId);
+      return;
+    }
+
+    for (const peer of peers) {
+      if (this.syncState.isSynced(peer, coValueId)) {
+        continue;
+      }
+      const alreadyTracked = this.unsyncedTracker.add(coValueId, peer.id);
+      if (alreadyTracked) {
+        continue;
+      }
+
+      const unsubscribe = this.syncState.subscribeToPeerUpdates(
+        peer.id,
+        coValueId,
+        (_knownState, syncState) => {
+          if (syncState.uploaded) {
+            this.unsyncedTracker.remove(coValueId, peer.id);
+            unsubscribe();
+          }
+        },
+      );
     }
   }
 
@@ -860,8 +1066,9 @@ export class SyncManager {
     return new Promise((resolve, reject) => {
       const unsubscribe = this.syncState.subscribeToPeerUpdates(
         peerId,
-        (knownState, syncState) => {
-          if (syncState.uploaded && knownState.id === id) {
+        id,
+        (_knownState, syncState) => {
+          if (syncState.uploaded) {
             resolve(true);
             unsubscribe?.();
             clearTimeout(timeoutId);
@@ -916,10 +1123,30 @@ export class SyncManager {
     );
   }
 
-  gracefulShutdown() {
+  setStorage(storage: StorageAPI) {
+    this.unsyncedTracker.setStorage(storage);
+
+    const storageStreamingQueue = this.getStorageStreamingQueue();
+    if (storageStreamingQueue) {
+      storageStreamingQueue.setListener(() => {
+        this.processQueues();
+      });
+    }
+  }
+
+  removeStorage() {
+    this.unsyncedTracker.removeStorage();
+  }
+
+  /**
+   * Closes all the peer connections and ensures the list of unsynced coValues is persisted to storage.
+   * @returns Promise of the current pending store operation, if any.
+   */
+  gracefulShutdown(): Promise<void> | undefined {
     for (const peer of Object.values(this.peers)) {
       peer.gracefulShutdown();
     }
+    return this.unsyncedTracker.forcePersist();
   }
 }
 
