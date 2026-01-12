@@ -6,6 +6,31 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { type Database, createDatabase } from "../src/generated/client";
 import schema from "../src/schema.sql?raw";
 
+/**
+ * Helper to wait for non-empty subscription results.
+ * Complex queries with JOINs may fire an initial empty callback before data is ready.
+ */
+function waitForResults<T>(
+  subscribe: (callback: (rows: T[]) => void) => () => void,
+  timeout = 5000,
+): Promise<T[]> {
+  return new Promise((resolve, reject) => {
+    let unsubscribe: (() => void) | undefined;
+    const timer = setTimeout(() => {
+      unsubscribe?.();
+      reject(new Error(`Timeout waiting for results after ${timeout}ms`));
+    }, timeout);
+
+    unsubscribe = subscribe((rows) => {
+      if (rows.length > 0) {
+        clearTimeout(timer);
+        setTimeout(() => unsubscribe?.(), 0);
+        resolve(rows);
+      }
+    });
+  });
+}
+
 // We need to load the WASM module
 let db: Database;
 
@@ -240,9 +265,10 @@ describe("subscribeAll with filter and includes", () => {
     expect(bugLabel).toBeDefined();
 
     // Now filter issues by that label
-    const issues = await new Promise<any[]>((resolve) => {
-      let unsubscribe: (() => void) | undefined;
-      unsubscribe = db.issues
+    // Use waitForResults because complex queries with JOINs may fire
+    // an initial empty callback before data is ready
+    const issues = await waitForResults<any>((callback) =>
+      db.issues
         .with({
           project: true,
           IssueLabels: { label: true },
@@ -251,11 +277,8 @@ describe("subscribeAll with filter and includes", () => {
         .where({
           IssueLabels: { some: { label: bugLabel.id } },
         })
-        .subscribeAll((rows) => {
-          setTimeout(() => unsubscribe?.(), 0);
-          resolve(rows);
-        });
-    });
+        .subscribeAll(callback),
+    );
 
     console.log(
       "Issues filtered by label:",
@@ -297,9 +320,10 @@ describe("subscribeAll with filter and includes", () => {
     expect(alice).toBeDefined();
 
     // Filter by primary table field + junction tables
-    const issues = await new Promise<any[]>((resolve) => {
-      let unsubscribe: (() => void) | undefined;
-      unsubscribe = db.issues
+    // Use waitForResults because complex queries with multiple JOINs may fire
+    // an initial empty callback before data is ready
+    const issues = await waitForResults<any>((callback) =>
+      db.issues
         .with({
           project: true,
           IssueLabels: { label: true },
@@ -310,11 +334,8 @@ describe("subscribeAll with filter and includes", () => {
           IssueLabels: { some: { label: bugLabel.id } },
           IssueAssignees: { some: { user: alice.id } },
         })
-        .subscribeAll((rows) => {
-          setTimeout(() => unsubscribe?.(), 0);
-          resolve(rows);
-        });
-    });
+        .subscribeAll(callback),
+    );
 
     console.log(
       "Issues with combined filters:",
