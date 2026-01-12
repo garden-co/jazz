@@ -22,6 +22,10 @@
 //! ```
 
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use crate::sql::row_buffer::{OwnedRow, RowBuilder, RowDescriptor, RowRef, RowValue};
+use crate::sql::schema::ColumnType;
 
 /// A lens defines bidirectional transformations between two schema versions.
 ///
@@ -72,6 +76,49 @@ impl Lens {
         backward.extend(self.backward.iter().cloned());
 
         Lens { forward, backward }
+    }
+
+    /// Apply the forward transformation to a row.
+    ///
+    /// Transforms a row from the parent schema to this schema.
+    /// Returns `LensError::Incompatible` if the row cannot be transformed
+    /// (e.g., required column missing or SQL expression fails).
+    pub fn apply_forward(&self, row: RowRef<'_>) -> Result<OwnedRow, LensError> {
+        apply_transforms(row, &self.forward)
+    }
+
+    /// Apply the backward transformation to a row.
+    ///
+    /// Transforms a row from this schema to the parent schema.
+    /// Returns `LensError::Incompatible` if the row cannot be transformed.
+    pub fn apply_backward(&self, row: RowRef<'_>) -> Result<OwnedRow, LensError> {
+        apply_transforms(row, &self.backward)
+    }
+
+    /// Apply forward transformation to an owned row.
+    pub fn apply_forward_owned(&self, row: &OwnedRow) -> Result<OwnedRow, LensError> {
+        self.apply_forward(row.as_ref())
+    }
+
+    /// Apply backward transformation to an owned row.
+    pub fn apply_backward_owned(&self, row: &OwnedRow) -> Result<OwnedRow, LensError> {
+        self.apply_backward(row.as_ref())
+    }
+
+    /// Compute the target descriptor after applying forward transforms.
+    ///
+    /// Given a source descriptor, returns what the descriptor would look like
+    /// after applying the forward transforms.
+    pub fn target_descriptor(&self, source: &RowDescriptor) -> RowDescriptor {
+        compute_target_descriptor(source, &self.forward)
+    }
+
+    /// Compute the source descriptor after applying backward transforms.
+    ///
+    /// Given a target descriptor, returns what the descriptor would look like
+    /// after applying the backward transforms (i.e., the original source).
+    pub fn source_descriptor(&self, target: &RowDescriptor) -> RowDescriptor {
+        compute_target_descriptor(target, &self.backward)
     }
 
     /// Serialize the lens to bytes.
@@ -587,11 +634,26 @@ impl ColumnMapping {
     }
 
     /// Build a mapping from a list of transforms.
+    ///
+    /// This properly chains renames: if we have a→b followed by b→c,
+    /// the final mapping will be a→c.
     pub fn from_transforms(transforms: &[ColumnTransform]) -> Self {
         let mut mapping = Self::new();
         for transform in transforms {
             if let ColumnTransform::Rename { from, to } = transform {
-                mapping.add_rename(from, to);
+                // Check if 'from' is already the target of a previous rename
+                // If so, update that previous mapping to point to the new 'to'
+                let original_from = mapping.backward.get(from).cloned();
+                if let Some(original) = original_from {
+                    // Chain: original → from → to becomes original → to
+                    mapping.forward.insert(original.clone(), to.to_string());
+                    mapping.backward.remove(from);
+                    mapping.backward.insert(to.to_string(), original);
+                } else {
+                    // Direct mapping
+                    mapping.forward.insert(from.to_string(), to.to_string());
+                    mapping.backward.insert(to.to_string(), from.to_string());
+                }
             }
         }
         mapping
@@ -599,10 +661,232 @@ impl ColumnMapping {
 }
 
 // =============================================================================
+// Row Transformation Functions
+// =============================================================================
+
+/// Apply a list of transforms to a row, producing a new row.
+///
+/// This is the core transformation logic used by both forward and backward
+/// lens application. The transforms are applied in order.
+fn apply_transforms(
+    row: RowRef<'_>,
+    transforms: &[ColumnTransform],
+) -> Result<OwnedRow, LensError> {
+    // Build the target descriptor from source + transforms
+    let target_descriptor = compute_target_descriptor(row.descriptor, transforms);
+    let target_descriptor = Arc::new(target_descriptor);
+
+    // Build column mapping for renames
+    let mapping = ColumnMapping::from_transforms(transforms);
+
+    // Track which columns should be removed
+    let removed_columns: std::collections::HashSet<&str> = transforms
+        .iter()
+        .filter_map(|t| match t {
+            ColumnTransform::Remove { name } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    // Track added columns with their defaults
+    let added_columns: HashMap<&str, Option<&DefaultValue>> = transforms
+        .iter()
+        .filter_map(|t| match t {
+            ColumnTransform::Add { name, default } => Some((name.as_str(), default.as_ref())),
+            _ => None,
+        })
+        .collect();
+
+    // Track transform expressions (not yet implemented - will error)
+    let transform_exprs: HashMap<&str, &SqlExpr> = transforms
+        .iter()
+        .filter_map(|t| match t {
+            ColumnTransform::Transform { column, expr, .. } => Some((column.as_str(), expr)),
+            _ => None,
+        })
+        .collect();
+
+    // Build the target row
+    let mut builder = RowBuilder::new(target_descriptor.clone());
+
+    // Process each column in the source row
+    for (col_idx, col) in row.descriptor.columns.iter().enumerate() {
+        // Skip removed columns
+        if removed_columns.contains(col.name.as_str()) {
+            continue;
+        }
+
+        // Check if this column has a transform expression
+        if let Some(expr) = transform_exprs.get(col.name.as_str()) {
+            // SQL expression transforms not yet implemented
+            // For now, return an error if the expression looks like a TODO
+            if expr.text.contains("TODO") {
+                return Err(LensError::EvaluationError {
+                    column: col.name.clone(),
+                    reason: format!("Transform expression not implemented: {}", expr.text),
+                });
+            }
+            // For other expressions, we'd need to evaluate them
+            // For now, just copy the original value (placeholder behavior)
+        }
+
+        // Get the value from source row
+        if let Some(value) = row.get(col_idx) {
+            // Determine target column name (may be renamed)
+            let target_name = mapping.map_forward(&col.name);
+
+            // Find target column index
+            if let Some(target_idx) = target_descriptor.column_index(target_name) {
+                builder = set_builder_value(builder, target_idx, value);
+            }
+        }
+    }
+
+    // Process added columns with their defaults
+    for (col_name, default) in added_columns {
+        if let Some(target_idx) = target_descriptor.column_index(col_name) {
+            let col = &target_descriptor.columns[target_idx];
+
+            match default {
+                Some(DefaultValue::Null) => {
+                    if col.nullable {
+                        builder = builder.set_null(target_idx);
+                    } else {
+                        return Err(LensError::Incompatible {
+                            reason: format!(
+                                "Column '{}' is non-nullable but default is NULL",
+                                col_name
+                            ),
+                        });
+                    }
+                }
+                Some(DefaultValue::Bool(v)) => {
+                    builder = builder.set_bool(target_idx, *v);
+                }
+                Some(DefaultValue::Int(v)) => {
+                    // Try to set as appropriate integer type
+                    match &col.ty {
+                        ColumnType::I32 => builder = builder.set_i32(target_idx, *v as i32),
+                        ColumnType::I64 => builder = builder.set_i64(target_idx, *v),
+                        _ => {}
+                    }
+                }
+                Some(DefaultValue::Float(v)) => {
+                    builder = builder.set_f64(target_idx, *v);
+                }
+                Some(DefaultValue::String(v)) => {
+                    builder = builder.set_string(target_idx, v);
+                }
+                Some(DefaultValue::Expr(expr)) => {
+                    // SQL expression defaults not yet implemented
+                    return Err(LensError::EvaluationError {
+                        column: col_name.to_string(),
+                        reason: format!("Default expression not implemented: {}", expr.text),
+                    });
+                }
+                None => {
+                    // No default - column must be nullable
+                    if col.nullable {
+                        builder = builder.set_null(target_idx);
+                    } else {
+                        return Err(LensError::Incompatible {
+                            reason: format!(
+                                "Column '{}' is non-nullable but has no default value",
+                                col_name
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(builder.build())
+}
+
+/// Helper to set a builder value from a RowValue.
+fn set_builder_value(builder: RowBuilder, idx: usize, value: RowValue<'_>) -> RowBuilder {
+    match value {
+        RowValue::Bool(v) => builder.set_bool(idx, v),
+        RowValue::I32(v) => builder.set_i32(idx, v),
+        RowValue::U32(v) => builder.set_u32(idx, v),
+        RowValue::I64(v) => builder.set_i64(idx, v),
+        RowValue::F64(v) => builder.set_f64(idx, v),
+        RowValue::Ref(v) => builder.set_ref(idx, v),
+        RowValue::String(v) => builder.set_string(idx, v),
+        RowValue::Bytes(v) => builder.set_bytes(idx, v),
+        RowValue::Null => builder.set_null(idx),
+        RowValue::Blob(content_ref) => builder.set_blob(idx, content_ref),
+        RowValue::BlobArray(refs) => builder.set_blob_array(idx, &refs),
+        RowValue::Array(arr) => {
+            // Collect items into OwnedRows
+            let items: Vec<OwnedRow> = arr
+                .iter()
+                .map(|row_ref| {
+                    OwnedRow::new(
+                        Arc::new(row_ref.descriptor.clone()),
+                        row_ref.buffer.to_vec(),
+                    )
+                })
+                .collect();
+            builder.set_array(idx, &items)
+        }
+    }
+}
+
+/// Compute the target descriptor after applying transforms to a source descriptor.
+fn compute_target_descriptor(
+    source: &RowDescriptor,
+    transforms: &[ColumnTransform],
+) -> RowDescriptor {
+    let mapping = ColumnMapping::from_transforms(transforms);
+
+    // Track which columns should be removed
+    let removed_columns: std::collections::HashSet<&str> = transforms
+        .iter()
+        .filter_map(|t| match t {
+            ColumnTransform::Remove { name } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    // Start with source columns (renamed and excluding removed)
+    let mut columns: Vec<(String, ColumnType, bool)> = source
+        .columns
+        .iter()
+        .filter(|c| !removed_columns.contains(c.name.as_str()))
+        .map(|c| {
+            let name = mapping.map_forward(&c.name).to_string();
+            (name, c.ty.clone(), c.nullable)
+        })
+        .collect();
+
+    // Add new columns from Add transforms
+    for transform in transforms {
+        if let ColumnTransform::Add { name, default } = transform {
+            // Determine type and nullability from default
+            // For now, assume String type and nullable based on default presence
+            let (ty, nullable) = match default {
+                Some(DefaultValue::Null) => (ColumnType::String, true),
+                Some(DefaultValue::Bool(_)) => (ColumnType::Bool, false),
+                Some(DefaultValue::Int(_)) => (ColumnType::I64, false),
+                Some(DefaultValue::Float(_)) => (ColumnType::F64, false),
+                Some(DefaultValue::String(_)) => (ColumnType::String, false),
+                Some(DefaultValue::Expr(_)) => (ColumnType::String, false), // Assume string for expressions
+                None => (ColumnType::String, true), // No default means nullable
+            };
+            columns.push((name.clone(), ty, nullable));
+        }
+    }
+
+    RowDescriptor::new(columns)
+}
+
+// =============================================================================
 // Schema Diff and Lens Generation
 // =============================================================================
 
-use crate::sql::schema::{ColumnDef, ColumnType, TableSchema};
+use crate::sql::schema::{ColumnDef, TableSchema};
 
 /// The result of diffing two schemas.
 #[derive(Debug, Clone)]
@@ -1430,5 +1714,259 @@ mod tests {
 
         // No warnings
         assert!(result.warnings.is_empty());
+    }
+
+    // =========================================================================
+    // Lens Application Tests (Phase 5)
+    // =========================================================================
+
+    #[test]
+    fn test_apply_rename_forward() {
+        // Create a row with 'title' column
+        let source_desc = Arc::new(RowDescriptor::new([(
+            "title".to_string(),
+            ColumnType::String,
+            false,
+        )]));
+
+        let title_idx = source_desc.column_index("title").unwrap();
+        let row = RowBuilder::new(source_desc.clone())
+            .set_string(title_idx, "Hello World")
+            .build();
+
+        // Create lens that renames title → name
+        let lens = Lens::from_forward(vec![ColumnTransform::rename("title", "name")]);
+
+        // Apply forward transformation
+        let result = lens.apply_forward_owned(&row).unwrap();
+
+        // Should have 'name' column with the value
+        assert_eq!(
+            result.get_by_name("name"),
+            Some(RowValue::String("Hello World"))
+        );
+        // 'title' should not exist in target
+        assert_eq!(result.get_by_name("title"), None);
+    }
+
+    #[test]
+    fn test_apply_rename_backward() {
+        // Create a row with 'name' column
+        let source_desc = Arc::new(RowDescriptor::new([(
+            "name".to_string(),
+            ColumnType::String,
+            false,
+        )]));
+
+        let name_idx = source_desc.column_index("name").unwrap();
+        let row = RowBuilder::new(source_desc.clone())
+            .set_string(name_idx, "Hello World")
+            .build();
+
+        // Create lens that renames title → name (backward: name → title)
+        let lens = Lens::from_forward(vec![ColumnTransform::rename("title", "name")]);
+
+        // Apply backward transformation
+        let result = lens.apply_backward_owned(&row).unwrap();
+
+        // Should have 'title' column with the value
+        assert_eq!(
+            result.get_by_name("title"),
+            Some(RowValue::String("Hello World"))
+        );
+    }
+
+    #[test]
+    fn test_apply_add_column_with_default() {
+        // Create a row with just 'id' column
+        let source_desc = Arc::new(RowDescriptor::new([(
+            "id".to_string(),
+            ColumnType::I32,
+            false,
+        )]));
+
+        let id_idx = source_desc.column_index("id").unwrap();
+        let row = RowBuilder::new(source_desc.clone())
+            .set_i32(id_idx, 42)
+            .build();
+
+        // Create lens that adds 'status' with default value
+        let lens = Lens::new(
+            vec![ColumnTransform::add_with_default(
+                "status",
+                DefaultValue::String("active".into()),
+            )],
+            vec![ColumnTransform::remove("status")],
+        );
+
+        // Apply forward transformation
+        let result = lens.apply_forward_owned(&row).unwrap();
+
+        // Should have both 'id' and 'status'
+        assert_eq!(result.get_by_name("id"), Some(RowValue::I32(42)));
+        assert_eq!(
+            result.get_by_name("status"),
+            Some(RowValue::String("active"))
+        );
+    }
+
+    #[test]
+    fn test_apply_remove_column() {
+        // Create a row with 'id' and 'deprecated' columns
+        let source_desc = Arc::new(RowDescriptor::new([
+            ("id".to_string(), ColumnType::I32, false),
+            ("deprecated".to_string(), ColumnType::String, false),
+        ]));
+
+        let id_idx = source_desc.column_index("id").unwrap();
+        let deprecated_idx = source_desc.column_index("deprecated").unwrap();
+        let row = RowBuilder::new(source_desc.clone())
+            .set_i32(id_idx, 42)
+            .set_string(deprecated_idx, "old_value")
+            .build();
+
+        // Create lens that removes 'deprecated'
+        let lens = Lens::new(
+            vec![ColumnTransform::remove("deprecated")],
+            vec![ColumnTransform::add_nullable("deprecated")],
+        );
+
+        // Apply forward transformation
+        let result = lens.apply_forward_owned(&row).unwrap();
+
+        // Should have only 'id'
+        assert_eq!(result.get_by_name("id"), Some(RowValue::I32(42)));
+        assert_eq!(result.get_by_name("deprecated"), None);
+    }
+
+    #[test]
+    fn test_apply_nullable_add_without_default() {
+        // Create a row with just 'id' column
+        let source_desc = Arc::new(RowDescriptor::new([(
+            "id".to_string(),
+            ColumnType::I32,
+            false,
+        )]));
+
+        let id_idx = source_desc.column_index("id").unwrap();
+        let row = RowBuilder::new(source_desc.clone())
+            .set_i32(id_idx, 42)
+            .build();
+
+        // Create lens that adds nullable 'optional' without default
+        let lens = Lens::new(
+            vec![ColumnTransform::add_nullable("optional")],
+            vec![ColumnTransform::remove("optional")],
+        );
+
+        // Apply forward transformation - should succeed (nullable gets NULL)
+        let result = lens.apply_forward_owned(&row).unwrap();
+
+        // Should have 'id' and 'optional' (NULL)
+        assert_eq!(result.get_by_name("id"), Some(RowValue::I32(42)));
+        assert_eq!(result.get_by_name("optional"), Some(RowValue::Null));
+    }
+
+    #[test]
+    fn test_target_descriptor() {
+        let source_desc = RowDescriptor::new([
+            ("title".to_string(), ColumnType::String, false),
+            ("count".to_string(), ColumnType::I32, false),
+        ]);
+
+        let lens = Lens::from_forward(vec![
+            ColumnTransform::rename("title", "name"),
+            ColumnTransform::remove("count"),
+            ColumnTransform::add_with_default("status", DefaultValue::String("active".into())),
+        ]);
+
+        let target_desc = lens.target_descriptor(&source_desc);
+
+        // Should have 'name' (renamed from title) and 'status' (added)
+        assert!(target_desc.column("name").is_some());
+        assert!(target_desc.column("status").is_some());
+        // Should not have 'title' (renamed) or 'count' (removed)
+        assert!(target_desc.column("title").is_none());
+        assert!(target_desc.column("count").is_none());
+    }
+
+    #[test]
+    fn test_demo_scenario_bidirectional() {
+        // Demo scenario: rename `title` → `name` with bidirectional transforms
+
+        // V1 row with title
+        let v1_desc = Arc::new(RowDescriptor::new([
+            ("id".to_string(), ColumnType::I32, false),
+            ("title".to_string(), ColumnType::String, false),
+        ]));
+
+        let id_idx = v1_desc.column_index("id").unwrap();
+        let title_idx = v1_desc.column_index("title").unwrap();
+        let v1_row = RowBuilder::new(v1_desc.clone())
+            .set_i32(id_idx, 1)
+            .set_string(title_idx, "My Document")
+            .build();
+
+        // Generate lens from schema diff
+        let v1_schema = TableSchema::new(
+            "documents",
+            vec![ColumnDef::required("title", ColumnType::String)],
+        );
+        let v2_schema = TableSchema::new(
+            "documents",
+            vec![ColumnDef::required("name", ColumnType::String)],
+        );
+
+        let diff = diff_schemas(&v1_schema, &v2_schema);
+        let options = LensGenerationOptions {
+            confirmed_renames: vec![("title".into(), "name".into())],
+        };
+        let result = generate_lens(&diff, &options);
+        let lens = result.lens;
+
+        // Forward: v1 → v2 (title → name)
+        let v2_row = lens.apply_forward_owned(&v1_row).unwrap();
+        assert_eq!(v2_row.get_by_name("id"), Some(RowValue::I32(1)));
+        assert_eq!(
+            v2_row.get_by_name("name"),
+            Some(RowValue::String("My Document"))
+        );
+        assert_eq!(v2_row.get_by_name("title"), None);
+
+        // Backward: v2 → v1 (name → title)
+        let v1_restored = lens.apply_backward_owned(&v2_row).unwrap();
+        assert_eq!(v1_restored.get_by_name("id"), Some(RowValue::I32(1)));
+        assert_eq!(
+            v1_restored.get_by_name("title"),
+            Some(RowValue::String("My Document"))
+        );
+        assert_eq!(v1_restored.get_by_name("name"), None);
+    }
+
+    #[test]
+    fn test_compose_and_apply() {
+        // Test composing lenses: a → b → c
+        let lens1 = Lens::from_forward(vec![ColumnTransform::rename("a", "b")]);
+        let lens2 = Lens::from_forward(vec![ColumnTransform::rename("b", "c")]);
+        let composed = lens1.compose(&lens2);
+
+        // Create row with 'a'
+        let source_desc = Arc::new(RowDescriptor::new([(
+            "a".to_string(),
+            ColumnType::String,
+            false,
+        )]));
+        let a_idx = source_desc.column_index("a").unwrap();
+        let row = RowBuilder::new(source_desc)
+            .set_string(a_idx, "value")
+            .build();
+
+        // Apply composed lens
+        let result = composed.apply_forward_owned(&row).unwrap();
+
+        // Should have 'c' (not 'a' or 'b')
+        assert_eq!(result.get_by_name("c"), Some(RowValue::String("value")));
+        assert_eq!(result.get_by_name("a"), None);
+        assert_eq!(result.get_by_name("b"), None);
     }
 }
