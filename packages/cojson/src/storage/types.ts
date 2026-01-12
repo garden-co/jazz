@@ -7,6 +7,7 @@ import type { CoValueCore, RawCoID, SessionID } from "../exports.js";
 import { NewContentMessage } from "../sync.js";
 import type { PeerID } from "../sync.js";
 import { CoValueKnownState } from "../knownState.js";
+import { StorageStreamingQueue } from "../queue/StorageStreamingQueue.js";
 
 export type CorrectionCallback = (
   correction: CoValueKnownState,
@@ -56,6 +57,8 @@ export interface StorageAPI {
     done?: (found: boolean) => void,
   ): void;
   store(data: NewContentMessage, handleCorrection: CorrectionCallback): void;
+
+  streamingQueue?: StorageStreamingQueue;
 
   getKnownState(id: string): CoValueKnownState;
 

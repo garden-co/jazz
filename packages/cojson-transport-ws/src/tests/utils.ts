@@ -60,9 +60,12 @@ class TestMetricReader extends MetricReader {
     attributes: { [key: string]: string | number } = {},
   ) {
     await this.collectAndExport();
-    const metric = this._exporter
-      .getMetrics()[0]
-      ?.scopeMetrics[0]?.metrics.find((m) => m.descriptor.name === name);
+    const resourceMetrics = this._exporter.getMetrics();
+
+    const metric = resourceMetrics
+      .flatMap((rm) => rm.scopeMetrics)
+      .flatMap((sm) => sm.metrics)
+      .find((m) => m.descriptor.name === name);
 
     const dp = metric?.dataPoints.find(
       (dp) => JSON.stringify(dp.attributes) === JSON.stringify(attributes),

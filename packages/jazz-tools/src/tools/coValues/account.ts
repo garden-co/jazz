@@ -271,7 +271,12 @@ export class Account extends CoValueBase implements CoValue {
     worker: Account,
     options: {
       creationProps: { name: string };
-      onCreate?: (account: A, worker: Account) => Promise<void>;
+      onCreate?: (
+        account: A,
+        worker: Account,
+        credentials: { accountID: string; accountSecret: AgentSecret },
+      ) => Promise<void>;
+      waitForSyncTimeout?: number;
     },
   ): Promise<{
     credentials: {
@@ -311,9 +316,12 @@ export class Account extends CoValueBase implements CoValue {
       throw new Error("Unable to load the worker account");
 
     // The onCreate hook can be helpful to define inline logic, such as querying the DB
-    if (options.onCreate) await options.onCreate(account, loadedWorker);
+    if (options.onCreate)
+      await options.onCreate(account, loadedWorker, credentials);
 
-    await account.$jazz.waitForAllCoValuesSync();
+    await account.$jazz.waitForAllCoValuesSync({
+      timeout: options.waitForSyncTimeout,
+    });
 
     const createdAccount = await this.load(account.$jazz.id, {
       loadAs: worker,

@@ -5,13 +5,6 @@ export function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unknown error";
 }
 
-export function addMessageToBacklog(backlog: string, message: SyncMessage) {
-  if (!backlog) {
-    return JSON.stringify(message);
-  }
-  return `${backlog}\n${JSON.stringify(message)}`;
-}
-
 export function deserializeMessages(messages: unknown) {
   if (typeof messages !== "string") {
     return {
