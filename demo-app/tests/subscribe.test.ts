@@ -319,6 +319,47 @@ describe("subscribeAll with filter and includes", () => {
     const alice = users.find((u) => u.name === "Alice");
     expect(alice).toBeDefined();
 
+    console.log("bugLabel.id:", bugLabel.id);
+    console.log("alice.id:", alice.id);
+
+    // First, verify the issue exists and matches our filters
+    const allIssues = await new Promise<any[]>((resolve) => {
+      let unsubscribe: (() => void) | undefined;
+      unsubscribe = db.issues.subscribeAll((rows) => {
+        setTimeout(() => unsubscribe?.(), 0);
+        resolve(rows);
+      });
+    });
+    console.log(
+      "All issues:",
+      allIssues.map((i) => ({
+        id: i.id,
+        priority: i.priority,
+        project: i.project,
+      })),
+    );
+
+    const allIssueLabels = await new Promise<any[]>((resolve) => {
+      let unsubscribe: (() => void) | undefined;
+      unsubscribe = db.issuelabels.subscribeAll((rows) => {
+        setTimeout(() => unsubscribe?.(), 0);
+        resolve(rows);
+      });
+    });
+    console.log("All IssueLabels:", allIssueLabels);
+
+    const allIssueAssignees = await new Promise<any[]>((resolve) => {
+      let unsubscribe: (() => void) | undefined;
+      unsubscribe = db.issueassignees.subscribeAll((rows) => {
+        setTimeout(() => unsubscribe?.(), 0);
+        resolve(rows);
+      });
+    });
+    console.log("All IssueAssignees:", allIssueAssignees);
+
+    // Track all callbacks to debug timing issues
+    let callbackCount = 0;
+
     // Filter by primary table field + junction tables
     // Use waitForResults because complex queries with multiple JOINs may fire
     // an initial empty callback before data is ready
@@ -334,7 +375,11 @@ describe("subscribeAll with filter and includes", () => {
           IssueLabels: { some: { label: bugLabel.id } },
           IssueAssignees: { some: { user: alice.id } },
         })
-        .subscribeAll(callback),
+        .subscribeAll((rows) => {
+          callbackCount++;
+          console.log(`Callback #${callbackCount}: ${rows.length} rows`);
+          callback(rows);
+        }),
     );
 
     console.log(
