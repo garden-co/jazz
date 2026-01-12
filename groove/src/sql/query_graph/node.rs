@@ -15,6 +15,24 @@ use crate::sql::types::IndexKey;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct NodeId(pub u32);
 
+/// Input port on a node - specifies which logical input an edge connects to.
+///
+/// Most nodes have a single input (Default), but Join and ArrayAggregate have
+/// two logical inputs that need to be distinguished for correct delta routing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputPort {
+    /// Default/only input (for single-input nodes like Filter, Projection, etc.)
+    Default,
+    /// Left/upstream input for Join nodes
+    Left,
+    /// Right/join_table input for Join nodes (from entry point)
+    Right,
+    /// Outer table input for ArrayAggregate (upstream rows to add arrays to)
+    Outer,
+    /// Inner table input for ArrayAggregate (rows to aggregate into arrays)
+    Inner,
+}
+
 /// Reason why a row is accessible in a RecursiveFilter.
 ///
 /// This is crucial for correctly handling removals - if a row is only
@@ -983,6 +1001,72 @@ impl QueryNode {
         }
     }
 
+    /// Evaluate a join node using port-based routing (no source_table needed).
+    ///
+    /// This is the simplified version of `evaluate_join` for use with typed edges.
+    /// The `is_from_input` flag is determined by the input port:
+    /// - Left/Default port: `is_from_input = true` (upstream delta)
+    /// - Right port: `is_from_input = false` (join_table entry delta)
+    pub fn evaluate_join_by_port(&mut self, delta: RowDelta, is_from_input: bool) -> DeltaBatch {
+        match self {
+            QueryNode::Join {
+                input_tables,
+                join_table,
+                join_column,
+                join_schema,
+                table_descriptors,
+                cached_rows,
+                reverse_index,
+                reverse_filter,
+                left_index,
+                right_index,
+                right_by_ref,
+                ..
+            } => {
+                let mut output = DeltaBatch::new();
+
+                if is_from_input {
+                    // Delta from input (left side) - use streaming indexes
+                    Self::eval_join_input_delta(
+                        &delta,
+                        input_tables,
+                        join_table,
+                        join_column,
+                        join_schema,
+                        table_descriptors,
+                        cached_rows,
+                        reverse_index,
+                        reverse_filter.as_ref(),
+                        left_index,
+                        right_index,
+                        right_by_ref,
+                        &mut output,
+                    );
+                } else {
+                    // Delta from join_table (right side) - use streaming indexes
+                    Self::eval_join_table_delta(
+                        &delta,
+                        input_tables,
+                        join_table,
+                        join_column,
+                        join_schema,
+                        table_descriptors,
+                        cached_rows,
+                        reverse_index,
+                        reverse_filter.as_ref(),
+                        left_index,
+                        right_index,
+                        right_by_ref,
+                        &mut output,
+                    );
+                }
+
+                output
+            }
+            _ => DeltaBatch::new(),
+        }
+    }
+
     /// Handle a delta from the input (left) side using streaming indexes.
     ///
     /// For forward joins: extract join key (referenced right ID), index in left_index,
@@ -1804,6 +1888,80 @@ impl QueryNode {
         &mut self,
         delta: RowDelta,
         _source_table: &str,
+        is_outer_delta: bool,
+        is_inner_delta: bool,
+        _outer_schema: &TableSchema,
+        lookup_inner_rows: F,
+        lookup_row_by_id: G,
+    ) -> DeltaBatch
+    where
+        F: Fn(ObjectId) -> Vec<(ObjectId, OwnedRow)>,
+        G: Fn(&str, ObjectId) -> Option<OwnedRow>,
+    {
+        match self {
+            QueryNode::ArrayAggregate {
+                inner_ref_column,
+                inner_schema,
+                inner_descriptor,
+                inner_joins,
+                output_descriptor,
+                array_column_index,
+                cached_arrays,
+                inner_to_outer,
+                outer_rows,
+                ..
+            } => {
+                let mut output = DeltaBatch::new();
+
+                if is_outer_delta {
+                    // Delta from outer table - add/remove/update outer rows
+                    Self::array_aggregate_handle_outer_delta(
+                        &delta,
+                        output_descriptor,
+                        inner_descriptor,
+                        inner_schema,
+                        inner_joins,
+                        *array_column_index,
+                        cached_arrays,
+                        inner_to_outer,
+                        outer_rows,
+                        &mut output,
+                        &lookup_inner_rows,
+                        &lookup_row_by_id,
+                    );
+                } else if is_inner_delta {
+                    // Delta from inner table - update arrays for affected outer rows
+                    Self::array_aggregate_handle_inner_delta(
+                        &delta,
+                        inner_ref_column,
+                        inner_schema,
+                        inner_joins,
+                        inner_descriptor,
+                        output_descriptor,
+                        *array_column_index,
+                        cached_arrays,
+                        inner_to_outer,
+                        outer_rows,
+                        &mut output,
+                        &lookup_row_by_id,
+                    );
+                }
+
+                output
+            }
+            _ => DeltaBatch::new(),
+        }
+    }
+
+    /// Evaluate an ArrayAggregate node using port-based routing (no source_table needed).
+    ///
+    /// This is the simplified version of `evaluate_array_aggregate` for use with typed edges.
+    /// The `is_outer`/`is_inner` flags are determined by the input port:
+    /// - Outer/Default port: `is_outer = true` (upstream delta)
+    /// - Inner port: `is_inner = true` (inner_table entry delta)
+    pub fn evaluate_array_aggregate_by_port<F, G>(
+        &mut self,
+        delta: RowDelta,
         is_outer_delta: bool,
         is_inner_delta: bool,
         _outer_schema: &TableSchema,
