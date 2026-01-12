@@ -790,7 +790,7 @@ impl QueryGraph {
                 // Evaluate just this Join node to populate its indexes
                 if let QueryNode::Join { .. } = &mut self.nodes[node_idx] {
                     // For join table deltas, is_from_input = false
-                    self.nodes[node_idx].evaluate_join(delta, &join_table, false);
+                    self.nodes[node_idx].evaluate_join_by_port(delta, false);
                 }
             }
 
@@ -818,7 +818,7 @@ impl QueryGraph {
                     // Evaluate just this Join node to populate its indexes
                     if let QueryNode::Join { .. } = &mut self.nodes[node_idx] {
                         // For input table deltas, is_from_input = true
-                        self.nodes[node_idx].evaluate_join(delta, input_table, true);
+                        self.nodes[node_idx].evaluate_join_by_port(delta, true);
                     }
                 }
 
@@ -880,7 +880,7 @@ impl QueryGraph {
                             let is_from_input = is_input_delta;
                             let mut output = DeltaBatch::new();
                             for d in delta.into_iter() {
-                                let batch = node.evaluate_join(d, &table, is_from_input);
+                                let batch = node.evaluate_join_by_port(d, is_from_input);
                                 output.extend(batch);
                             }
                             delta = output;
@@ -905,11 +905,10 @@ impl QueryGraph {
 
                         let mut output = DeltaBatch::new();
                         for d in delta.into_iter() {
-                            let batch = node.evaluate_array_aggregate(
+                            let batch = node.evaluate_array_aggregate_by_port(
                                 d,
-                                &table, // source is outer table
-                                true,   // is_outer_delta = true (initialization is always outer)
-                                false,  // is_inner_delta = false
+                                true,  // is_outer_delta = true (initialization is always outer)
+                                false, // is_inner_delta = false
                                 &outer_schema,
                                 |outer_id| {
                                     // Look up all inner rows that reference this outer id
