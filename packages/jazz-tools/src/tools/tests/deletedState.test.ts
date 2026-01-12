@@ -1,9 +1,18 @@
-import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import {
+  assert,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  onTestFinished,
+  vi,
+} from "vitest";
 import { cojsonInternals } from "cojson";
 
 import { Account, Group, z } from "../index.js";
 import {
   CoValueLoadingState,
+  Settled,
   co,
   coValueClassFromCoValueClassOrSchema,
   subscribeToCoValue,
@@ -31,7 +40,7 @@ describe("deleted loading state", () => {
     const map = TestMap.create({ value: "hello" }, me);
 
     let loadedCallCount = 0;
-    let deletedValue: unknown = null;
+    let deletedValue = null as Settled<co.loaded<typeof TestMap>> | null;
 
     const listener = vi.fn().mockImplementation((value) => {
       if (value.$isLoaded) {
@@ -65,10 +74,9 @@ describe("deleted loading state", () => {
       expect(deletedValue).not.toBeNull();
     });
 
-    // @ts-expect-error - we know deletedValue is not null here
-    expect(deletedValue?.$isLoaded).toBe(false);
-    // @ts-expect-error - we know deletedValue is not null here
-    expect(deletedValue?.$jazz.loadingState).toBe(CoValueLoadingState.DELETED);
+    assert(deletedValue);
+    expect(deletedValue.$isLoaded).toBe(false);
+    expect(deletedValue.$jazz.loadingState).toBe(CoValueLoadingState.DELETED);
 
     // Give the system a moment; we should not emit additional loaded updates after deletion.
     await new Promise((resolve) => setTimeout(resolve, 50));
