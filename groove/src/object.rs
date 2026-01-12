@@ -498,6 +498,9 @@ impl Object {
 
     /// Read content from the frontier of a branch (sync).
     /// Returns None if the branch is empty or has multiple tips.
+    ///
+    /// For automatic per-column LWW merge when there are multiple tips,
+    /// use `read_sync_merged` with a RowDescriptor.
     pub fn read_sync(&self, branch_name: &str) -> Option<Vec<u8>> {
         let branch = self.branches.get(branch_name)?.read().unwrap();
         let frontier = branch.frontier();
@@ -509,6 +512,75 @@ impl Object {
 
         let commit = branch.get_commit(&frontier[0])?;
         Some(commit.content.to_vec())
+    }
+
+    /// Read content from the frontier of a branch, automatically merging
+    /// concurrent commits using per-column LWW (Last-Write-Wins).
+    ///
+    /// Unlike `read_sync`, this method handles multiple frontier tips by
+    /// finding the LCA (Lowest Common Ancestor) and performing a per-column
+    /// merge where each column's value comes from the commit that most
+    /// recently modified it.
+    ///
+    /// # Arguments
+    ///
+    /// * `branch_name` - The branch to read from
+    /// * `descriptor` - The row schema (required for per-column merge)
+    ///
+    /// # Returns
+    ///
+    /// - `Some(Vec<u8>)` - The merged row content
+    /// - `None` - If the branch is empty or doesn't exist
+    ///
+    /// # Algorithm
+    ///
+    /// 1. If single tip: return content directly (no merge needed)
+    /// 2. If multiple tips:
+    ///    - Find LCA of all frontier commits
+    ///    - For each column, pick value from commit with highest timestamp
+    ///    - Tie-breaker: lexicographically higher CommitId wins
+    pub fn read_sync_merged(
+        &self,
+        branch_name: &str,
+        descriptor: &crate::sql::row_buffer::RowDescriptor,
+    ) -> Option<Vec<u8>> {
+        use crate::sql::row_buffer::{MergeCandidate, merge_per_column_lww};
+
+        let branch = self.branches.get(branch_name)?.read().unwrap();
+        let frontier = branch.frontier();
+
+        if frontier.is_empty() {
+            return None;
+        }
+
+        // Single tip: no merge needed
+        if frontier.len() == 1 {
+            let commit = branch.get_commit(&frontier[0])?;
+            return Some(commit.content.to_vec());
+        }
+
+        // Multiple tips: need per-column LWW merge
+        // Step 1: Find LCA of all frontier commits
+        let lca_id = branch.find_frontier_lca()?;
+        let lca_commit = branch.get_commit(&lca_id)?;
+
+        // Step 2: Build merge candidates from frontier commits
+        let candidates: Vec<MergeCandidate<'_>> = frontier
+            .iter()
+            .filter_map(|commit_id| {
+                let commit = branch.get_commit(commit_id)?;
+                Some(MergeCandidate::new(
+                    &commit.content,
+                    commit.timestamp,
+                    *commit_id.as_bytes(),
+                ))
+            })
+            .collect();
+
+        // Step 3: Perform per-column LWW merge
+        let merged = merge_per_column_lww(&candidates, &lca_commit.content, descriptor);
+
+        Some(merged.buffer)
     }
 
     /// Write content to a branch (sync).

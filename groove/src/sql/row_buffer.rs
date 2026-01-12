@@ -1511,6 +1511,214 @@ pub fn join_rows(
     builder.build()
 }
 
+/// Compare two row buffers and return the names of columns that differ.
+///
+/// This is used for per-column LWW merge to determine which columns
+/// each commit modified relative to the LCA (lowest common ancestor).
+///
+/// # Arguments
+///
+/// * `base` - The base row buffer (e.g., LCA content)
+/// * `derived` - The derived row buffer (e.g., a commit's content)
+/// * `descriptor` - The row descriptor defining the schema
+///
+/// # Returns
+///
+/// A vector of column names where the values differ between base and derived.
+/// Returns an empty vector if the rows are identical.
+pub fn diff_columns(base: &[u8], derived: &[u8], descriptor: &RowDescriptor) -> Vec<String> {
+    let base_ref = RowRef::new(descriptor, base);
+    let derived_ref = RowRef::new(descriptor, derived);
+
+    let mut changed_columns = Vec::new();
+
+    for col in &descriptor.columns {
+        let base_val = base_ref.get_by_name(&col.name);
+        let derived_val = derived_ref.get_by_name(&col.name);
+
+        // Compare values - if different, column was changed
+        if !values_equal(&base_val, &derived_val) {
+            changed_columns.push(col.name.clone());
+        }
+    }
+
+    changed_columns
+}
+
+/// Compare two RowValue options for equality.
+///
+/// Handles the special case where both are None (column not found) as equal.
+fn values_equal(a: &Option<RowValue<'_>>, b: &Option<RowValue<'_>>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a_val), Some(b_val)) => row_values_equal(a_val, b_val),
+        _ => false,
+    }
+}
+
+/// Compare two RowValues for equality.
+fn row_values_equal(a: &RowValue<'_>, b: &RowValue<'_>) -> bool {
+    match (a, b) {
+        (RowValue::Bool(a), RowValue::Bool(b)) => a == b,
+        (RowValue::I32(a), RowValue::I32(b)) => a == b,
+        (RowValue::U32(a), RowValue::U32(b)) => a == b,
+        (RowValue::I64(a), RowValue::I64(b)) => a == b,
+        (RowValue::F64(a), RowValue::F64(b)) => a == b,
+        (RowValue::Ref(a), RowValue::Ref(b)) => a == b,
+        (RowValue::String(a), RowValue::String(b)) => a == b,
+        (RowValue::Bytes(a), RowValue::Bytes(b)) => a == b,
+        (RowValue::Null, RowValue::Null) => true,
+        (RowValue::Blob(a), RowValue::Blob(b)) => a == b,
+        (RowValue::BlobArray(a), RowValue::BlobArray(b)) => a == b,
+        (RowValue::Array(a), RowValue::Array(b)) => {
+            // Compare arrays by comparing their raw data
+            a.data == b.data
+        }
+        _ => false, // Different types are not equal
+    }
+}
+
+// =============================================================================
+// Per-Column LWW Merge
+// =============================================================================
+
+/// A candidate commit for per-column LWW merge.
+///
+/// Contains the row content, timestamp, and commit ID for determining
+/// which value wins for each column.
+#[derive(Debug, Clone)]
+pub struct MergeCandidate<'a> {
+    /// The row content buffer from this commit.
+    pub content: &'a [u8],
+    /// The timestamp of this commit (milliseconds since epoch).
+    pub timestamp: u64,
+    /// The commit ID (for deterministic tie-breaking when timestamps are equal).
+    pub commit_id: [u8; 32],
+}
+
+impl<'a> MergeCandidate<'a> {
+    /// Create a new merge candidate.
+    pub fn new(content: &'a [u8], timestamp: u64, commit_id: [u8; 32]) -> Self {
+        Self {
+            content,
+            timestamp,
+            commit_id,
+        }
+    }
+}
+
+/// Merge multiple commits using per-column LWW (Last-Write-Wins) strategy.
+///
+/// This is different from whole-row LWW: instead of picking the entire row
+/// from the latest commit, we pick each column's value from the commit that
+/// most recently modified that specific column.
+///
+/// # Arguments
+///
+/// * `candidates` - The commits to merge, each with content, timestamp, and commit_id
+/// * `lca_content` - The LCA (Lowest Common Ancestor) row content for diffing
+/// * `descriptor` - The row descriptor defining the schema
+///
+/// # Algorithm
+///
+/// 1. For each candidate, diff against LCA to find which columns it changed
+/// 2. For each column in the schema:
+///    - Collect all candidates that changed this column
+///    - Pick the value from the candidate with highest timestamp
+///    - Tie-breaker: lexicographically higher commit_id wins
+/// 3. For columns unchanged by any candidate, use LCA value
+///
+/// # Example
+///
+/// ```text
+/// LCA: {name: "Original", status: "draft", count: 0}
+///
+/// Candidate A (t=100): {name: "Alice", status: "draft", count: 0}
+///   → Changed: name
+///
+/// Candidate B (t=150): {name: "Original", status: "active", count: 0}
+///   → Changed: status
+///
+/// Result: {name: "Alice", status: "active", count: 0}
+///   → name from A (only A changed it)
+///   → status from B (only B changed it)
+///   → count from LCA (nobody changed it)
+/// ```
+///
+/// # Returns
+///
+/// The merged row as an OwnedRow.
+pub fn merge_per_column_lww(
+    candidates: &[MergeCandidate<'_>],
+    lca_content: &[u8],
+    descriptor: &RowDescriptor,
+) -> OwnedRow {
+    // Handle edge cases
+    if candidates.is_empty() {
+        // No candidates, return LCA as-is
+        return OwnedRow::new(Arc::new(descriptor.clone()), lca_content.to_vec());
+    }
+
+    if candidates.len() == 1 {
+        // Single candidate, just return it (no merge needed)
+        return OwnedRow::new(Arc::new(descriptor.clone()), candidates[0].content.to_vec());
+    }
+
+    // Step 1: For each candidate, compute which columns it changed relative to LCA
+    let changes: Vec<(usize, std::collections::HashSet<String>)> = candidates
+        .iter()
+        .enumerate()
+        .map(|(idx, candidate)| {
+            let changed = diff_columns(lca_content, candidate.content, descriptor);
+            (idx, changed.into_iter().collect())
+        })
+        .collect();
+
+    // Step 2: For each column, determine which candidate wins
+    // Build the merged row using RowBuilder
+    let desc_arc = Arc::new(descriptor.clone());
+    let mut builder = RowBuilder::new(desc_arc.clone());
+
+    for (col_idx, col) in descriptor.columns.iter().enumerate() {
+        // Find all candidates that changed this column
+        let mut changers: Vec<(usize, u64, &[u8; 32])> = Vec::new();
+        for (candidate_idx, changed_cols) in &changes {
+            if changed_cols.contains(&col.name) {
+                let candidate = &candidates[*candidate_idx];
+                changers.push((*candidate_idx, candidate.timestamp, &candidate.commit_id));
+            }
+        }
+
+        let source_content = if changers.is_empty() {
+            // No candidate changed this column, use LCA value
+            lca_content
+        } else {
+            // Pick winner: highest timestamp, then highest commit_id
+            let winner_idx = changers
+                .iter()
+                .max_by(|(_, ts_a, id_a), (_, ts_b, id_b)| {
+                    // Primary: timestamp (higher wins)
+                    // Secondary: commit_id (lexicographically higher wins)
+                    ts_a.cmp(ts_b).then_with(|| id_a.cmp(id_b))
+                })
+                .map(|(idx, _, _)| *idx)
+                .unwrap();
+
+            candidates[winner_idx].content
+        };
+
+        // Copy the column value from source to builder
+        let source_row = RowRef::new(descriptor, source_content);
+        if let Some(value) = source_row.get(col_idx) {
+            builder = builder.set_from_row_value(col_idx, value);
+        }
+        // If value is None, the column remains at its default (zero bytes for fixed,
+        // empty for variable), which represents NULL for nullable columns
+    }
+
+    builder.build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1746,5 +1954,202 @@ mod tests {
         );
         assert_eq!(projected.get_by_name("folder_id"), Some(RowValue::I64(123)));
         assert_eq!(projected.get_by_name("documents.title"), None);
+    }
+
+    // =============================================================================
+    // Per-Column LWW Merge Tests
+    // =============================================================================
+
+    fn make_test_descriptor() -> RowDescriptor {
+        RowDescriptor::new([
+            ("name".to_string(), ColumnType::String, false),
+            ("status".to_string(), ColumnType::String, false),
+            ("count".to_string(), ColumnType::I32, false),
+        ])
+    }
+
+    fn make_test_row(desc: &Arc<RowDescriptor>, name: &str, status: &str, count: i32) -> Vec<u8> {
+        let name_idx = desc.column_index("name").unwrap();
+        let status_idx = desc.column_index("status").unwrap();
+        let count_idx = desc.column_index("count").unwrap();
+
+        RowBuilder::new(desc.clone())
+            .set_string(name_idx, name)
+            .set_string(status_idx, status)
+            .set_i32(count_idx, count)
+            .build()
+            .buffer
+    }
+
+    #[test]
+    fn test_diff_columns_no_changes() {
+        let desc = Arc::new(make_test_descriptor());
+        let row = make_test_row(&desc, "Alice", "active", 10);
+
+        // Same row should have no differences
+        let changes = diff_columns(&row, &row, &desc);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_diff_columns_single_change() {
+        let desc = Arc::new(make_test_descriptor());
+        let base = make_test_row(&desc, "Alice", "active", 10);
+        let derived = make_test_row(&desc, "Bob", "active", 10);
+
+        let changes = diff_columns(&base, &derived, &desc);
+        assert_eq!(changes.len(), 1);
+        assert!(changes.contains(&"name".to_string()));
+    }
+
+    #[test]
+    fn test_diff_columns_multiple_changes() {
+        let desc = Arc::new(make_test_descriptor());
+        let base = make_test_row(&desc, "Alice", "active", 10);
+        let derived = make_test_row(&desc, "Bob", "inactive", 20);
+
+        let changes = diff_columns(&base, &derived, &desc);
+        assert_eq!(changes.len(), 3);
+        assert!(changes.contains(&"name".to_string()));
+        assert!(changes.contains(&"status".to_string()));
+        assert!(changes.contains(&"count".to_string()));
+    }
+
+    #[test]
+    fn test_merge_per_column_lww_empty_candidates() {
+        let desc = Arc::new(make_test_descriptor());
+        let lca = make_test_row(&desc, "Original", "draft", 0);
+
+        // Empty candidates should return LCA
+        let merged = merge_per_column_lww(&[], &lca, &desc);
+        assert_eq!(
+            merged.get_by_name("name"),
+            Some(RowValue::String("Original"))
+        );
+        assert_eq!(
+            merged.get_by_name("status"),
+            Some(RowValue::String("draft"))
+        );
+        assert_eq!(merged.get_by_name("count"), Some(RowValue::I32(0)));
+    }
+
+    #[test]
+    fn test_merge_per_column_lww_single_candidate() {
+        let desc = Arc::new(make_test_descriptor());
+        let lca = make_test_row(&desc, "Original", "draft", 0);
+        let candidate_a = make_test_row(&desc, "Alice", "active", 5);
+
+        let candidates = vec![MergeCandidate::new(&candidate_a, 100, [1u8; 32])];
+
+        let merged = merge_per_column_lww(&candidates, &lca, &desc);
+
+        // Single candidate wins for all changed columns
+        assert_eq!(merged.get_by_name("name"), Some(RowValue::String("Alice")));
+        assert_eq!(
+            merged.get_by_name("status"),
+            Some(RowValue::String("active"))
+        );
+        assert_eq!(merged.get_by_name("count"), Some(RowValue::I32(5)));
+    }
+
+    #[test]
+    fn test_merge_per_column_lww_disjoint_changes() {
+        // Test case from the plan:
+        // LCA: {name: "Original", status: "draft", count: 0}
+        // Candidate A (t=100): changes name to "Alice"
+        // Candidate B (t=150): changes status to "active"
+        // Result: {name: "Alice", status: "active", count: 0}
+
+        let desc = Arc::new(make_test_descriptor());
+        let lca = make_test_row(&desc, "Original", "draft", 0);
+        let candidate_a = make_test_row(&desc, "Alice", "draft", 0); // Only name changed
+        let candidate_b = make_test_row(&desc, "Original", "active", 0); // Only status changed
+
+        let candidates = vec![
+            MergeCandidate::new(&candidate_a, 100, [1u8; 32]),
+            MergeCandidate::new(&candidate_b, 150, [2u8; 32]),
+        ];
+
+        let merged = merge_per_column_lww(&candidates, &lca, &desc);
+
+        // name from A (only A changed it)
+        assert_eq!(merged.get_by_name("name"), Some(RowValue::String("Alice")));
+        // status from B (only B changed it)
+        assert_eq!(
+            merged.get_by_name("status"),
+            Some(RowValue::String("active"))
+        );
+        // count from LCA (nobody changed it)
+        assert_eq!(merged.get_by_name("count"), Some(RowValue::I32(0)));
+    }
+
+    #[test]
+    fn test_merge_per_column_lww_conflicting_changes_timestamp_wins() {
+        // Both candidates change the same column, later timestamp wins
+        let desc = Arc::new(make_test_descriptor());
+        let lca = make_test_row(&desc, "Original", "draft", 0);
+        let candidate_a = make_test_row(&desc, "Alice", "draft", 0);
+        let candidate_b = make_test_row(&desc, "Bob", "draft", 0);
+
+        let candidates = vec![
+            MergeCandidate::new(&candidate_a, 100, [1u8; 32]),
+            MergeCandidate::new(&candidate_b, 200, [2u8; 32]), // Later timestamp wins
+        ];
+
+        let merged = merge_per_column_lww(&candidates, &lca, &desc);
+
+        // Bob wins because of later timestamp
+        assert_eq!(merged.get_by_name("name"), Some(RowValue::String("Bob")));
+    }
+
+    #[test]
+    fn test_merge_per_column_lww_conflicting_changes_commit_id_tiebreaker() {
+        // Both candidates change the same column with same timestamp
+        // Higher commit ID wins as tiebreaker
+        let desc = Arc::new(make_test_descriptor());
+        let lca = make_test_row(&desc, "Original", "draft", 0);
+        let candidate_a = make_test_row(&desc, "Alice", "draft", 0);
+        let candidate_b = make_test_row(&desc, "Bob", "draft", 0);
+
+        let mut id_a = [0u8; 32];
+        id_a[0] = 0x10; // Lower ID
+
+        let mut id_b = [0u8; 32];
+        id_b[0] = 0xFF; // Higher ID (lexicographically greater)
+
+        let candidates = vec![
+            MergeCandidate::new(&candidate_a, 100, id_a),
+            MergeCandidate::new(&candidate_b, 100, id_b), // Same timestamp, higher commit ID
+        ];
+
+        let merged = merge_per_column_lww(&candidates, &lca, &desc);
+
+        // Bob wins because of higher commit ID (deterministic tiebreaker)
+        assert_eq!(merged.get_by_name("name"), Some(RowValue::String("Bob")));
+    }
+
+    #[test]
+    fn test_merge_per_column_lww_three_way_merge() {
+        // Three candidates changing different columns
+        let desc = Arc::new(make_test_descriptor());
+        let lca = make_test_row(&desc, "Original", "draft", 0);
+        let candidate_a = make_test_row(&desc, "Alice", "draft", 0); // name
+        let candidate_b = make_test_row(&desc, "Original", "active", 0); // status
+        let candidate_c = make_test_row(&desc, "Original", "draft", 99); // count
+
+        let candidates = vec![
+            MergeCandidate::new(&candidate_a, 100, [1u8; 32]),
+            MergeCandidate::new(&candidate_b, 150, [2u8; 32]),
+            MergeCandidate::new(&candidate_c, 200, [3u8; 32]),
+        ];
+
+        let merged = merge_per_column_lww(&candidates, &lca, &desc);
+
+        assert_eq!(merged.get_by_name("name"), Some(RowValue::String("Alice")));
+        assert_eq!(
+            merged.get_by_name("status"),
+            Some(RowValue::String("active"))
+        );
+        assert_eq!(merged.get_by_name("count"), Some(RowValue::I32(99)));
     }
 }

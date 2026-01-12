@@ -9,6 +9,8 @@ use std::sync::{Arc, RwLock};
 use crate::listener::ListenerId;
 use crate::object::ObjectId;
 use crate::sql::DatabaseState;
+use crate::sql::catalog::DescriptorId;
+use crate::sql::lens::QueryLensContext;
 use crate::sql::query_graph::cache::RowCache;
 use crate::sql::query_graph::delta::{DeltaBatch, RowDelta};
 use crate::sql::query_graph::graph::{GraphId, QueryGraph};
@@ -251,6 +253,27 @@ impl GraphRegistry {
     /// Invalidate a cached row (e.g., when synced from server).
     pub fn invalidate_row(&self, table: &str, id: crate::object::ObjectId) {
         self.cache.write().unwrap().invalidate(table, id);
+    }
+
+    /// Set the lens context for a registered query graph.
+    ///
+    /// This enables schema-aware query evaluation, where rows from older
+    /// schema versions are transformed before predicate evaluation.
+    ///
+    /// Returns true if the graph was found and updated.
+    pub fn set_lens_context(
+        &self,
+        graph_id: GraphId,
+        target_descriptor: DescriptorId,
+        lens_ctx: QueryLensContext,
+    ) -> bool {
+        if let Some(query) = self.queries.write().unwrap().get_mut(&graph_id) {
+            query.graph.set_target_descriptor(target_descriptor);
+            query.graph.set_lens_context(lens_ctx);
+            true
+        } else {
+            false
+        }
     }
 
     /// Get a text diagram of a query graph.

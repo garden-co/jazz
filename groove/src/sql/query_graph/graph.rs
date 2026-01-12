@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 
 use crate::object::ObjectId;
+use crate::sql::catalog::DescriptorId;
+use crate::sql::lens::QueryLensContext;
 use crate::sql::query_graph::cache::RowCache;
 use crate::sql::query_graph::delta::{DeltaBatch, RowDelta};
 use crate::sql::query_graph::node::{InputPort, NodeId, QueryNode};
@@ -91,6 +93,14 @@ pub struct QueryGraph {
     /// Each edge specifies the target node and which input port to use.
     /// Empty list means terminal node (Output).
     successors: Vec<Vec<Edge>>,
+
+    /// Target descriptor ID for schema-aware queries.
+    /// When set, rows from older schema versions will be transformed before predicate evaluation.
+    target_descriptor: Option<DescriptorId>,
+
+    /// Lens context for transforming rows from different schema versions.
+    /// Contains lenses for all known schema version pairs for this table.
+    lens_context: Option<QueryLensContext>,
 }
 
 impl std::fmt::Debug for QueryGraph {
@@ -337,6 +347,8 @@ impl QueryGraph {
             output_node,
             entry_points,
             successors,
+            target_descriptor: None,
+            lens_context: None,
         }
     }
 
@@ -441,6 +453,8 @@ impl QueryGraph {
             output_node,
             entry_points,
             successors,
+            target_descriptor: None,
+            lens_context: None,
         }
     }
 
@@ -487,6 +501,37 @@ impl QueryGraph {
     /// Check if the graph is initialized.
     pub fn is_ready(&self) -> bool {
         self.state == GraphState::Ready
+    }
+
+    /// Set the target descriptor for schema-aware queries.
+    ///
+    /// When set, rows from older schema versions will be transformed
+    /// before predicate evaluation using the lens context.
+    pub fn set_target_descriptor(&mut self, descriptor_id: DescriptorId) {
+        self.target_descriptor = Some(descriptor_id);
+    }
+
+    /// Get the target descriptor ID.
+    pub fn target_descriptor(&self) -> Option<&DescriptorId> {
+        self.target_descriptor.as_ref()
+    }
+
+    /// Set the lens context for schema transformations.
+    ///
+    /// The lens context contains lenses for transforming rows between
+    /// different schema versions during query evaluation.
+    pub fn set_lens_context(&mut self, ctx: QueryLensContext) {
+        self.lens_context = Some(ctx);
+    }
+
+    /// Get the lens context for schema transformations.
+    pub fn lens_context(&self) -> Option<&QueryLensContext> {
+        self.lens_context.as_ref()
+    }
+
+    /// Check if this graph has lens context for schema transformations.
+    pub fn has_lens_context(&self) -> bool {
+        self.lens_context.is_some()
     }
 
     /// Get current output rows in buffer format, initializing lazily if needed.
@@ -1102,6 +1147,22 @@ impl QueryGraph {
             QueryNode::LimitOffset { .. } => {
                 let schema = self.schema.clone();
                 node.evaluate_limit_offset(current, &schema, cache)
+            }
+            QueryNode::Filter { .. } => {
+                // Use lens-aware evaluation if lens context is available
+                if let Some(lens_ctx) = &self.lens_context {
+                    // For now, use a simple descriptor lookup that returns the target descriptor
+                    // for all rows. This means no transformation will occur unless we have
+                    // row-specific descriptor tracking.
+                    //
+                    // TODO(GCO-1091): Implement row-specific descriptor tracking.
+                    // When a row is created/updated, store its source descriptor ID.
+                    // Then look it up here to enable proper lens transformation.
+                    let target = self.target_descriptor;
+                    node.evaluate_with_lens(current, cache, Some(lens_ctx), move |_id| target)
+                } else {
+                    node.evaluate(current, cache)
+                }
             }
             _ => node.evaluate(current, cache),
         }

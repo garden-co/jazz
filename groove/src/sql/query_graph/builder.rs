@@ -4,6 +4,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::object::ObjectId;
+use crate::sql::catalog::DescriptorId;
+use crate::sql::lens::QueryLensContext;
 use crate::sql::query_graph::graph::{GraphId, QueryGraph};
 use crate::sql::query_graph::node::{NodeId, QueryNode};
 use crate::sql::query_graph::predicate::Predicate;
@@ -492,6 +494,31 @@ impl QueryGraphBuilder {
                 output_id,
             ),
         }
+    }
+
+    /// Finalize the graph with the given output node and lens context.
+    ///
+    /// Similar to `output`, but also configures the graph with a lens context
+    /// for schema-aware query evaluation. This enables queries to work with
+    /// rows from different schema versions.
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - The node to use as the final output
+    /// * `graph_id` - The ID to assign to the graph
+    /// * `target_descriptor` - The target schema version for this query
+    /// * `lens_ctx` - Lens context containing transformations between schema versions
+    pub fn output_with_lens(
+        self,
+        input: NodeId,
+        graph_id: GraphId,
+        target_descriptor: DescriptorId,
+        lens_ctx: QueryLensContext,
+    ) -> QueryGraph {
+        let mut graph = self.output(input, graph_id);
+        graph.set_target_descriptor(target_descriptor);
+        graph.set_lens_context(lens_ctx);
+        graph
     }
 
     /// Build an inner descriptor that accounts for inner joins.

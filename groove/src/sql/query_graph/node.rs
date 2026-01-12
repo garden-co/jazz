@@ -4,6 +4,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::object::ObjectId;
+use crate::sql::catalog::DescriptorId;
+use crate::sql::lens::QueryLensContext;
 use crate::sql::query_graph::cache::RowCache;
 use crate::sql::query_graph::delta::{BufferJoinedRow, DeltaBatch, PriorState, RowDelta};
 use crate::sql::query_graph::predicate::Predicate;
@@ -588,6 +590,80 @@ impl QueryNode {
             QueryNode::LimitOffset { .. } => {
                 // LimitOffset nodes need special handling
                 // This should be called via evaluate_limit_offset instead
+                DeltaBatch::new()
+            }
+
+            QueryNode::Projection {
+                column_map,
+                output_descriptor,
+                cached_rows,
+                ..
+            } => Self::eval_projection(column_map, output_descriptor, cached_rows, input),
+        }
+    }
+
+    /// Evaluate this node with optional lens transformation.
+    ///
+    /// Similar to `evaluate`, but accepts a lens context for transforming rows
+    /// from older schema versions before predicate evaluation.
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - Batch of row deltas to process
+    /// * `_cache` - Row cache (currently unused for most node types)
+    /// * `lens_ctx` - Optional lens context for schema transformation
+    /// * `get_row_descriptor` - Function to get the source descriptor ID for a row
+    pub fn evaluate_with_lens<F>(
+        &mut self,
+        input: DeltaBatch,
+        _cache: &RowCache,
+        lens_ctx: Option<&QueryLensContext>,
+        get_row_descriptor: F,
+    ) -> DeltaBatch
+    where
+        F: Fn(&ObjectId) -> Option<DescriptorId>,
+    {
+        match self {
+            QueryNode::TableScan { cached_ids, .. } => Self::eval_id_passthrough(cached_ids, input),
+
+            QueryNode::IndexLookup { cached_ids, .. } => {
+                Self::eval_id_passthrough(cached_ids, input)
+            }
+
+            QueryNode::Filter {
+                predicate,
+                cached_ids,
+                ..
+            } => {
+                // Use lens-aware filter evaluation
+                Self::eval_filter_with_lens(
+                    predicate,
+                    cached_ids,
+                    input,
+                    lens_ctx,
+                    get_row_descriptor,
+                )
+            }
+
+            QueryNode::Join { .. } => {
+                // Join nodes need special handling with database access
+                DeltaBatch::new()
+            }
+
+            QueryNode::Output { .. } => input, // Passthrough
+
+            QueryNode::RecursiveFilter { .. } => {
+                // RecursiveFilter nodes need special handling
+                DeltaBatch::new()
+            }
+
+            QueryNode::ArrayAggregate { .. } => {
+                // ArrayAggregate nodes need special handling with database access
+                DeltaBatch::new()
+            }
+
+            QueryNode::LimitOffset { .. } => {
+                // LimitOffset nodes need special handling
                 DeltaBatch::new()
             }
 
@@ -2453,6 +2529,142 @@ impl QueryNode {
         output
     }
 
+    /// Evaluate a Filter node with optional lens transformation.
+    ///
+    /// When a lens context is provided, rows from older schema versions are
+    /// transformed to the target schema before predicate evaluation. Rows that
+    /// cannot be transformed (incompatible) are excluded from results.
+    ///
+    /// # Arguments
+    ///
+    /// * `predicate` - The filter predicate to evaluate
+    /// * `cached_ids` - Set of row IDs that currently match the filter
+    /// * `input` - Batch of row deltas to process
+    /// * `lens_ctx` - Optional lens context for schema transformation
+    /// * `get_row_descriptor` - Function to get the source descriptor ID for a row
+    ///
+    /// # Schema Transformation Flow
+    ///
+    /// 1. For each row, get its source schema version (descriptor ID)
+    /// 2. If source != target and lens_ctx is available, transform the row
+    /// 3. Evaluate predicate on the (possibly transformed) row
+    /// 4. If transformation fails, treat as non-matching (exclude from results)
+    pub fn eval_filter_with_lens<F>(
+        predicate: &Predicate,
+        cached_ids: &mut HashSet<ObjectId>,
+        input: DeltaBatch,
+        lens_ctx: Option<&QueryLensContext>,
+        get_row_descriptor: F,
+    ) -> DeltaBatch
+    where
+        F: Fn(&ObjectId) -> Option<DescriptorId>,
+    {
+        let mut output = DeltaBatch::new();
+
+        for delta in input.into_iter() {
+            match delta {
+                RowDelta::Added { id, row } => {
+                    // Try to transform the row if lens context is available
+                    let (eval_row, transformed) = match lens_ctx {
+                        Some(ctx) => {
+                            // Get the source descriptor for this row
+                            if let Some(source_desc) = get_row_descriptor(&id) {
+                                // Try to transform to target schema
+                                match ctx.transform_to_target(&row, &source_desc) {
+                                    Ok(transformed_row) => (transformed_row, true),
+                                    Err(_) => {
+                                        // Row is incompatible - exclude from results
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                // No source descriptor info - use row as-is
+                                (row.clone(), false)
+                            }
+                        }
+                        None => (row.clone(), false),
+                    };
+
+                    // Evaluate predicate on the (possibly transformed) row
+                    let row_descriptor = &eval_row.descriptor;
+                    if predicate.matches_buffer(id, eval_row.as_ref(), row_descriptor) {
+                        cached_ids.insert(id);
+                        // Output the original row (not transformed) to preserve original data
+                        // The transformation is only for predicate evaluation
+                        output.push(RowDelta::Added {
+                            id,
+                            row: if transformed { eval_row } else { row },
+                        });
+                    }
+                }
+
+                RowDelta::Removed { id, prior } => {
+                    // Only emit removal if it was in our cached set
+                    if cached_ids.remove(&id) {
+                        output.push(RowDelta::Removed { id, prior });
+                    }
+                }
+
+                RowDelta::Updated { id, row, prior } => {
+                    let was_in_set = cached_ids.contains(&id);
+
+                    // Try to transform the row if lens context is available
+                    let (eval_row, transformed) = match lens_ctx {
+                        Some(ctx) => {
+                            if let Some(source_desc) = get_row_descriptor(&id) {
+                                match ctx.transform_to_target(&row, &source_desc) {
+                                    Ok(transformed_row) => (transformed_row, true),
+                                    Err(_) => {
+                                        // Row is now incompatible
+                                        if was_in_set {
+                                            // Was in set but now incompatible - remove it
+                                            cached_ids.remove(&id);
+                                            output.push(RowDelta::Removed { id, prior });
+                                        }
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                (row.clone(), false)
+                            }
+                        }
+                        None => (row.clone(), false),
+                    };
+
+                    let row_descriptor = &eval_row.descriptor;
+                    let is_match = predicate.matches_buffer(id, eval_row.as_ref(), row_descriptor);
+                    let output_row = if transformed { eval_row } else { row };
+
+                    match (was_in_set, is_match) {
+                        (false, true) => {
+                            cached_ids.insert(id);
+                            output.push(RowDelta::Added {
+                                id,
+                                row: output_row,
+                            });
+                        }
+                        (true, false) => {
+                            cached_ids.remove(&id);
+                            output.push(RowDelta::Removed { id, prior });
+                        }
+                        (true, true) => {
+                            output.push(RowDelta::Updated {
+                                id,
+                                row: output_row,
+                                prior,
+                            });
+                        }
+                        (false, false) => {
+                            // Row still doesn't match - no output (early cutoff)
+                        }
+                    }
+                }
+            }
+        }
+
+        output
+    }
+
     /// Evaluate a LimitOffset node.
     ///
     /// Maintains the full set of qualifying rows and emits deltas
@@ -3121,5 +3333,155 @@ mod tests {
             node.accessible().unwrap().get(&ObjectId::new(2)),
             Some(&AccessReason::Base)
         );
+    }
+
+    // --- Lens-aware filter tests ---
+
+    #[test]
+    fn filter_with_lens_transforms_row() {
+        use crate::sql::lens::{ColumnTransform, Lens, LensContext, QueryLensContext};
+
+        // Create two schema versions:
+        // v1: { name: String, active: Bool }
+        // v2: { title: String, active: Bool }  (name renamed to title)
+        let v1_desc = Arc::new(RowDescriptor::new([
+            ("name".to_string(), ColumnType::String, false),
+            ("active".to_string(), ColumnType::Bool, false),
+        ]));
+
+        let _v2_desc = Arc::new(RowDescriptor::new([
+            ("title".to_string(), ColumnType::String, false),
+            ("active".to_string(), ColumnType::Bool, false),
+        ]));
+
+        // Create lens for v1 -> v2 (rename name -> title)
+        let lens = Lens::from_forward(vec![ColumnTransform::rename("name", "title")]);
+
+        // Create descriptor IDs
+        let desc_v1 = DescriptorId::from_object_id(ObjectId::new(100));
+        let desc_v2 = DescriptorId::from_object_id(ObjectId::new(200));
+
+        // Build lens context
+        let mut lens_ctx_inner = LensContext::new();
+        lens_ctx_inner.register_lens(desc_v1, desc_v2, lens);
+        let lens_ctx = QueryLensContext::with_lenses(desc_v2, lens_ctx_inner);
+
+        // Create filter predicate that filters by title = "Alice"
+        // This won't match v1 rows directly (they have 'name' not 'title')
+        let predicate = Predicate::eq("title", PredicateValue::String("Alice".to_string()));
+        let mut cached_ids = HashSet::new();
+
+        // Create a v1 row with name="Alice"
+        let row = RowBuilder::new(v1_desc)
+            .set_string_by_name("name", "Alice")
+            .set_bool_by_name("active", true)
+            .build();
+        let id = ObjectId::new(1);
+
+        // Without lens, the row doesn't match (no 'title' column)
+        let input_no_lens = DeltaBatch::added(id, row.clone());
+        let output_no_lens = QueryNode::eval_filter_with_lens(
+            &predicate,
+            &mut cached_ids,
+            input_no_lens,
+            None,
+            |_| None,
+        );
+        assert!(
+            output_no_lens.is_empty(),
+            "Without lens, v1 row shouldn't match v2 predicate"
+        );
+
+        // With lens, the row should be transformed and match
+        cached_ids.clear();
+        let input_with_lens = DeltaBatch::added(id, row);
+        let output_with_lens = QueryNode::eval_filter_with_lens(
+            &predicate,
+            &mut cached_ids,
+            input_with_lens,
+            Some(&lens_ctx),
+            |_| Some(desc_v1), // All rows are at v1
+        );
+
+        assert_eq!(
+            output_with_lens.len(),
+            1,
+            "With lens, transformed row should match"
+        );
+        assert!(cached_ids.contains(&id));
+
+        // Verify the output row has 'title' (transformed)
+        if let Some(RowDelta::Added {
+            row: output_row, ..
+        }) = output_with_lens.iter().next()
+        {
+            assert_eq!(
+                output_row.get_by_name("title"),
+                Some(RowValue::String("Alice"))
+            );
+        } else {
+            panic!("Expected Added delta");
+        }
+    }
+
+    #[test]
+    fn filter_with_lens_excludes_incompatible_rows() {
+        use crate::sql::lens::{LensContext, QueryLensContext};
+
+        // Create a row and predicate
+        let predicate = Predicate::eq("active", PredicateValue::Bool(true));
+        let mut cached_ids = HashSet::new();
+
+        // Create descriptor IDs with no lens between them
+        let desc_v1 = DescriptorId::from_object_id(ObjectId::new(100));
+        let desc_v2 = DescriptorId::from_object_id(ObjectId::new(200));
+
+        // Build lens context with no lenses (incompatible schemas)
+        let lens_ctx = QueryLensContext::with_lenses(desc_v2, LensContext::new());
+
+        let (id, row) = make_owned_row(1, "Alice", true);
+        let input = DeltaBatch::added(id, row);
+
+        // Row is at v1, target is v2, no lens -> should be excluded
+        let output = QueryNode::eval_filter_with_lens(
+            &predicate,
+            &mut cached_ids,
+            input,
+            Some(&lens_ctx),
+            |_| Some(desc_v1), // All rows are at v1, but no lens to v2
+        );
+
+        // Row is incompatible (no lens) so excluded
+        assert!(output.is_empty());
+        assert!(!cached_ids.contains(&id));
+    }
+
+    #[test]
+    fn filter_with_lens_passes_through_same_version() {
+        use crate::sql::lens::{LensContext, QueryLensContext};
+
+        // Create a row at the target version (no transformation needed)
+        let predicate = Predicate::eq("active", PredicateValue::Bool(true));
+        let mut cached_ids = HashSet::new();
+
+        let desc_v2 = DescriptorId::from_object_id(ObjectId::new(200));
+
+        // Build lens context - target is v2
+        let lens_ctx = QueryLensContext::with_lenses(desc_v2, LensContext::new());
+
+        let (id, row) = make_owned_row(1, "Alice", true);
+        let input = DeltaBatch::added(id, row);
+
+        // Row is at v2, target is v2 -> no transformation, just evaluate
+        let output = QueryNode::eval_filter_with_lens(
+            &predicate,
+            &mut cached_ids,
+            input,
+            Some(&lens_ctx),
+            |_| Some(desc_v2), // Row is at target version
+        );
+
+        assert_eq!(output.len(), 1, "Same version row should pass through");
+        assert!(cached_ids.contains(&id));
     }
 }

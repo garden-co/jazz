@@ -1372,9 +1372,15 @@ impl LensContext {
 /// Used during query evaluation to know the target schema version and
 /// available lenses for row transformation.
 ///
-/// TODO(GCO-1091): This struct exists but is not yet integrated into query_graph/.
-/// Query execution should use this to transform rows from different schema versions
-/// before predicate evaluation.
+/// This is integrated into the query graph system:
+/// - `QueryGraph` stores optional `target_descriptor` and `lens_context`
+/// - `QueryNode::eval_filter_with_lens` transforms rows before predicate evaluation
+/// - `QueryGraphBuilder::output_with_lens` creates graphs with lens context
+/// - `GraphRegistry::set_lens_context` sets lens context on registered graphs
+///
+/// Note: Row-level descriptor tracking is not yet implemented. Currently, the
+/// lens context is used when set, but rows are assumed to be at the target
+/// descriptor version unless explicit tracking is added.
 #[derive(Debug, Clone)]
 pub struct QueryLensContext {
     /// The target schema version for this query.
