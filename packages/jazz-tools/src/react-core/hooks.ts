@@ -219,10 +219,12 @@ function useCoValueSubscriptions(
   if (contextChanged || paramsChanged) {
     const newSubscriptions = createAllSubscriptions();
     // Avoid recreating the subscriptions array if all subscriptions are already cached
-    const anySubscriptionChanged = newSubscriptions.subscriptions.some(
-      (newSubscriptions, index) =>
-        newSubscriptions !== state.subscriptions[index],
-    );
+    const anySubscriptionChanged =
+      newSubscriptions.subscriptions.length !== state.subscriptions.length ||
+      newSubscriptions.subscriptions.some(
+        (newSubscriptions, index) =>
+          newSubscriptions !== state.subscriptions[index],
+      );
     if (anySubscriptionChanged) {
       stateRef.current = newSubscriptions;
     }
@@ -1031,7 +1033,7 @@ function useSubscriptionsSelector<
     return (a: TSelectorReturn[], b: TSelectorReturn[]) =>
       a.length === b.length &&
       a.every((value, index) => elementEqualityFn(value, b[index]));
-  }, [options?.equalityFn]);
+  }, [elementEqualityFn]);
 
   return useSyncExternalStoreWithSelector(
     subscribe,
