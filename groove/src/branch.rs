@@ -361,6 +361,10 @@ pub const DEFAULT_USER_BRANCH: &str = "main";
 /// - `main` (legacy format, interpreted as dev-<no-schema>-main)
 ///
 /// The schema version is the full DescriptorId (26-char Crockford Base32 ObjectId).
+///
+/// TODO(GCO-1090): This struct provides the naming convention, but branch forking is not yet
+/// wired to row operations. When a schema migration deploys, existing rows should be forked
+/// to the new schema branch (applying lenses to transform data).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SchemaBranchName {
     /// Environment (e.g., "dev", "staging", "prod")

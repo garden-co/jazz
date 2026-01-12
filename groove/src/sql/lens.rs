@@ -998,6 +998,10 @@ pub fn diff_schemas(old: &TableSchema, new: &TableSchema) -> SchemaDiff {
 }
 
 /// Detect potential renames by matching removed and added columns by type.
+///
+/// TODO(GCO-1087): This heuristic can give false positives when columns of the same type
+/// are removed and added (e.g., removing `created_at` and adding `updated_at`, both I64).
+/// Consider adding name similarity heuristics or requiring explicit confirmation.
 fn detect_potential_renames(removed: &[ColumnDef], added: &[ColumnDef]) -> Vec<PotentialRename> {
     let mut potential_renames = Vec::new();
 
@@ -1179,6 +1183,8 @@ pub fn generate_lens(diff: &SchemaDiff, options: &LensGenerationOptions) -> Lens
     }
 
     // Process type changes
+    // TODO(GCO-1092): Currently just emits warnings and placeholder transforms.
+    // Should auto-generate transforms for safe coercions (e.g., I64 -> String).
     for change in &diff.type_changes {
         warnings.push(LensWarning {
             kind: LensWarningKind::TypeChangeRequiresTransform,
@@ -1365,6 +1371,10 @@ impl LensContext {
 ///
 /// Used during query evaluation to know the target schema version and
 /// available lenses for row transformation.
+///
+/// TODO(GCO-1091): This struct exists but is not yet integrated into query_graph/.
+/// Query execution should use this to transform rows from different schema versions
+/// before predicate evaluation.
 #[derive(Debug, Clone)]
 pub struct QueryLensContext {
     /// The target schema version for this query.

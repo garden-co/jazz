@@ -623,6 +623,10 @@ pub struct SchemaDeployResult {
 /// - Tracks schema history (DAG of descriptors)
 /// - Manages the current schema version per table
 /// - Validates API key permissions for schema deployment
+///
+/// TODO(GCO-1089): The SchemaRegistry provides the data structures, but actual HTTP endpoints
+/// are not implemented. Need to add: GET /api/schema/:table, POST /api/schema/:table/deploy,
+/// and integrate with an HTTP framework (e.g., axum) in groove-server.
 pub struct SchemaRegistry {
     /// Current catalog (table name → descriptor ID)
     catalog: Catalog,

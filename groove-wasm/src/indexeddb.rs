@@ -2,6 +2,12 @@
 //!
 //! This module provides an Environment implementation that stores all data
 //! in the browser's IndexedDB, enabling persistent local-first storage.
+//!
+//! TODO(GCO-1088): The `#[async_trait(?Send)]` annotations here indicate this code is not
+//! Send+Sync safe. This is fine for single-threaded WASM, but causes compilation errors when
+//! groove-wasm is built with features that expect Send+Sync bounds. Need to either:
+//! - Feature-gate the Send+Sync bounds in groove's trait definitions, or
+//! - Use a different async runtime pattern for WASM.
 
 use async_trait::async_trait;
 use bytes::Bytes;
