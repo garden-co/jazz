@@ -99,9 +99,6 @@ export class CoState<
             // @ts-expect-error The resolve query type isn't compatible with the coValueClassFromCoValueClassOrSchema conversion
             resolve,
             loadAs: agent,
-            onError: (value) => {
-              this.update(value);
-            },
             syncResolution: true,
             unstable_branch: options?.unstable_branch,
           },
@@ -178,9 +175,6 @@ export class AccountCoState<
           {
             resolve,
             loadAs: me,
-            onError: (value) => {
-              this.update(value);
-            },
             syncResolution: true,
             unstable_branch: options?.unstable_branch,
           },

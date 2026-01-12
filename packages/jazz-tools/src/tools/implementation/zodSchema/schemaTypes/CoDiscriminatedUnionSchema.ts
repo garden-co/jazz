@@ -108,23 +108,85 @@ export class CoDiscriminatedUnionSchema<
     > = DefaultResolveQuery,
   >(
     id: string,
+    listener: (
+      value: Settled<
+        Resolved<
+          CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> &
+            SchemaUnion,
+          R
+        >
+      >,
+      unsubscribe: () => void,
+    ) => void,
+  ): () => void;
+  subscribe<
+    const R extends RefsToResolve<
+      CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion
+      // @ts-expect-error
+    > = DefaultResolveQuery,
+  >(
+    id: string,
     options: SubscribeListenerOptions<
       CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion,
       R
     >,
     listener: (
-      value: Resolved<
-        CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion,
-        R
+      value: Settled<
+        Resolved<
+          CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> &
+            SchemaUnion,
+          R
+        >
+      >,
+      unsubscribe: () => void,
+    ) => void,
+  ): () => void;
+  subscribe<
+    const R extends RefsToResolve<
+      CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion
+    >,
+  >(
+    id: string,
+    optionsOrListener:
+      | SubscribeListenerOptions<
+          CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> &
+            SchemaUnion,
+          R
+        >
+      | ((
+          value: Settled<
+            Resolved<
+              CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> &
+                SchemaUnion,
+              R
+            >
+          >,
+          unsubscribe: () => void,
+        ) => void),
+    maybeListener?: (
+      value: Settled<
+        Resolved<
+          CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> &
+            SchemaUnion,
+          R
+        >
       >,
       unsubscribe: () => void,
     ) => void,
   ): () => void {
-    // @ts-expect-error
+    if (typeof optionsOrListener === "function") {
+      return this.coValueClass.subscribe(
+        id,
+        withSchemaResolveQuery({}, this.resolveQuery),
+        // @ts-expect-error
+        optionsOrListener,
+      );
+    }
     return this.coValueClass.subscribe(
       id,
-      withSchemaResolveQuery(options, this.resolveQuery),
-      listener,
+      // @ts-expect-error
+      withSchemaResolveQuery(optionsOrListener, this.resolveQuery),
+      maybeListener,
     );
   }
 

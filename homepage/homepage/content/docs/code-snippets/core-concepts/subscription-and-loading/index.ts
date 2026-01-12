@@ -4,8 +4,9 @@ const taskId = "";
 // #region ManualSubscription
 // Subscribe by ID
 // @ts-expect-error Redeclared
-const unsubscribe = Task.subscribe(taskId, {}, (updatedTask) => {
-  console.log("Updated task:", updatedTask);
+const unsubscribe = Task.subscribe(taskId, (task) => {
+  if (!task.$isLoaded) return; // Handle loading/error states
+  console.log("Updated task:", task);
 });
 
 // Always clean up when finished
@@ -19,8 +20,9 @@ const myTask = Task.create({
 
 // Subscribe using $jazz.subscribe
 // @ts-expect-error Redeclared
-const unsubscribe = myTask.$jazz.subscribe((updatedTask) => {
-  console.log("Updated task:", updatedTask);
+const unsubscribe = myTask.$jazz.subscribe((task) => {
+  if (!task.$isLoaded) return; // Handle loading/error states
+  console.log("Updated task:", task);
 });
 
 // Always clean up when finished

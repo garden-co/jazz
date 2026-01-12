@@ -79,6 +79,7 @@ export class WebhookRegistry {
     // wait for registration to become visible in the registry
     return new Promise((resolve) => {
       this.state.$jazz.subscribe((state, unsubscribe) => {
+        if (!state.$isLoaded) return;
         if (state.$jazz.refs[registrationId]) {
           resolve(registrationId);
           unsubscribe();
@@ -131,8 +132,11 @@ export class WebhookRegistry {
 
     // TODO: this would be much more efficient with subscription diffs
     const createAndDeleteSubscriptions = (
-      registry: co.loaded<typeof RegistryState, { $each: true }>,
+      registry: import("jazz-tools").Settled<
+        co.loaded<typeof RegistryState, { $each: true }>
+      >,
     ) => {
+      if (!registry.$isLoaded) return;
       for (const webhook of Object.values(registry)) {
         const exists = this.activeSubscriptions.has(webhook.$jazz.id);
         if (webhook.active && !exists) {
@@ -196,6 +200,7 @@ class WebhookEmitter {
     private options: JazzWebhookOptions = {},
   ) {
     const unsubscribeWebhook = this.webhook.$jazz.subscribe((webhook) => {
+      if (!webhook.$isLoaded) return;
       this.webhook = webhook;
     });
     const unsubscribeValue = this.webhook.$jazz.localNode.subscribe(

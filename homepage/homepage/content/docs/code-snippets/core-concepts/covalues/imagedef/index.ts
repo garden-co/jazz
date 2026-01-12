@@ -139,7 +139,9 @@ if (progressiveImage.placeholderDataURL) {
 }
 
 // then listen to the image changes
-progressiveImage.$jazz.subscribe({}, (image) => {
+progressiveImage.$jazz.subscribe((image) => {
+  if (!image.$isLoaded) return; // Handle loading/error states
+
   // @ts-expect-error Issue with typing for catch-all. No runtime impact.
   const bestImage = highestResAvailable(image, 600, 600);
 

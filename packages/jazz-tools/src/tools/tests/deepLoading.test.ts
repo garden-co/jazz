@@ -609,6 +609,7 @@ describe("Deep loading with unauthorized account", async () => {
     const result: MaybeLoaded<Loaded<typeof InnermostMap>> | undefined =
       await new Promise((resolve) => {
         const unsub = mapOnAlice.$jazz.subscribe((value) => {
+          if (!value.$isLoaded) return;
           resolve(value.optionalRef);
           unsub();
         });

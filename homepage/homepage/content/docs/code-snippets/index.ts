@@ -74,6 +74,8 @@ const unsubscribe = ToDoList.subscribe(
   listId,
   { resolve: { $each: true } },
   (toDoList) => {
+    if (!toDoList.$isLoaded) return; // Handle loading/error states
+
     const addForm = newToDoFormElement(toDoList);
     listContainer.replaceChildren(
       ...toDoList.map((todo) => {

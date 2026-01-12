@@ -24,6 +24,7 @@ This also helps us speed up the migration of Jazz Core to Rust which will help u
 **NB**: if you use WASM crypto on Edge runtimes, you need to ensure that WASM is available and initialized. See more details at [WASM on Edge runtimes](/docs/react/server-side/setup#wasm-on-edge-runtimes).
 - We have intruduced a way to permanently [delete CoValues](/docs/core-concepts/covalues/deleting). This brings a new `deleted` loading state.
 - You can now only use strings or records of strings as [`unique` parameters](/docs/react/core-concepts/covalues/comaps#uniqueness). This ensures that serialisation is deterministic.
+- The `subscribe` API has been simplified: error callbacks (`onError`, `onUnauthorized`, `onUnavailable`) have been removed, and the listener now receives a `Settled` value that includes both loaded and error states.
 
 ## Breaking changes
 
@@ -197,5 +198,62 @@ export function MyJazzProvider({ children }: { children: React.ReactNode }) {
     </JazzReactNativeProvider>
   );
 }
+```
+</CodeGroup>
+
+### Simplified subscribe API
+
+The `subscribe` API has been simplified. The error callbacks (`onError`, `onUnauthorized`, `onUnavailable`) have been removed, and the listener now receives a `Settled` value that includes both loaded and error states.
+
+A `Settled` value represents a CoValue that has reached a terminal state - either successfully loaded or in an error state (deleted, unavailable, or unauthorized). You can check if the value is loaded using the `$isLoaded` property.
+
+<CodeGroup>
+```ts
+// Before - Using separate error callbacks
+MyCoMap.subscribe(id, {
+  onUnavailable: (value) => {
+    console.log("Value is unavailable");
+  },
+  onUnauthorized: (value) => {
+    console.log("Not authorized to access this value");
+  },
+}, (value) => {
+  // Only called when loaded
+  console.log(value.field);
+});
+
+// After - Using Settled value with $isLoaded check
+MyCoMap.subscribe(id, (value) => {
+  if (!value.$isLoaded) {
+    // Handle error states
+    switch (value.$jazz.loadingState) {
+      case "deleted":
+        console.log("Value was deleted");
+        break;
+      case "unavailable":
+        console.log("Value is unavailable");
+        break;
+      case "unauthorized":
+        console.log("Not authorized to access this value");
+        break;
+    }
+    return;
+  }
+  // Value is loaded
+  console.log(value.field);
+});
+```
+</CodeGroup>
+
+For most use cases, you can simply return early when the value is not loaded:
+
+<CodeGroup>
+```ts
+MyCoMap.subscribe(id, (value) => {
+  if (!value.$isLoaded) return; // Handle loading/error states
+
+  // Work with the loaded value
+  console.log(value.field);
+});
 ```
 </CodeGroup>

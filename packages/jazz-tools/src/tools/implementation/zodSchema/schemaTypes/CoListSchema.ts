@@ -131,16 +131,49 @@ export class CoListSchema<
     > = DefaultResolveQuery,
   >(
     id: string,
+    listener: (
+      value: Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>,
+      unsubscribe: () => void,
+    ) => void,
+  ): () => void;
+  subscribe<
+    const R extends RefsToResolve<
+      CoListInstanceCoValuesMaybeLoaded<T>
+    > = DefaultResolveQuery,
+  >(
+    id: string,
     options: SubscribeListenerOptions<CoListInstanceCoValuesMaybeLoaded<T>, R>,
     listener: (
-      value: Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>,
+      value: Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>,
+      unsubscribe: () => void,
+    ) => void,
+  ): () => void;
+  subscribe<
+    const R extends RefsToResolve<CoListInstanceCoValuesMaybeLoaded<T>>,
+  >(
+    id: string,
+    optionsOrListener:
+      | SubscribeListenerOptions<CoListInstanceCoValuesMaybeLoaded<T>, R>
+      | ((
+          value: Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>,
+          unsubscribe: () => void,
+        ) => void),
+    maybeListener?: (
+      value: Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>,
       unsubscribe: () => void,
     ) => void,
   ): () => void {
+    if (typeof optionsOrListener === "function") {
+      return this.coValueClass.subscribe(
+        id,
+        withSchemaResolveQuery({}, this.resolveQuery),
+        optionsOrListener,
+      );
+    }
     return this.coValueClass.subscribe(
       id,
-      withSchemaResolveQuery(options, this.resolveQuery),
-      listener,
+      withSchemaResolveQuery(optionsOrListener, this.resolveQuery),
+      maybeListener!,
     );
   }
 

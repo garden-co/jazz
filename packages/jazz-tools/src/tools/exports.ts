@@ -123,6 +123,7 @@ export {
   type MaybeLoaded,
   type NotLoaded,
   type Loaded,
+  type Settled,
   type BaseAccountShape,
   type DefaultAccountShape,
   type CoreAccountSchema as AnyAccountSchema,

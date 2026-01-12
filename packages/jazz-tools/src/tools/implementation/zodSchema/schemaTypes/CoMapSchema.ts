@@ -155,23 +155,71 @@ export class CoMapSchema<
     > = DefaultResolveQuery,
   >(
     id: string,
+    listener: (
+      value: Settled<
+        Resolved<Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap, R>
+      >,
+      unsubscribe: () => void,
+    ) => void,
+  ): () => void;
+  subscribe<
+    const R extends RefsToResolve<
+      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
+      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+    > = DefaultResolveQuery,
+  >(
+    id: string,
     options: SubscribeListenerOptions<
       Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
       R
     >,
     listener: (
-      value: Resolved<
-        Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
-        R
+      value: Settled<
+        Resolved<Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap, R>
+      >,
+      unsubscribe: () => void,
+    ) => void,
+  ): () => void;
+  subscribe<
+    const R extends RefsToResolve<
+      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
+    >,
+  >(
+    id: string,
+    optionsOrListener:
+      | SubscribeListenerOptions<
+          Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
+          R
+        >
+      | ((
+          value: Settled<
+            Resolved<
+              Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
+              R
+            >
+          >,
+          unsubscribe: () => void,
+        ) => void),
+    maybeListener?: (
+      value: Settled<
+        Resolved<Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap, R>
       >,
       unsubscribe: () => void,
     ) => void,
   ): () => void {
+    if (typeof optionsOrListener === "function") {
+      // @ts-expect-error
+      return this.coValueClass.subscribe(
+        id,
+        withSchemaResolveQuery({}, this.resolveQuery),
+        optionsOrListener,
+      );
+    }
     // @ts-expect-error
     return this.coValueClass.subscribe(
       id,
-      withSchemaResolveQuery(options, this.resolveQuery),
-      listener,
+      withSchemaResolveQuery(optionsOrListener, this.resolveQuery),
+      maybeListener,
     );
   }
 

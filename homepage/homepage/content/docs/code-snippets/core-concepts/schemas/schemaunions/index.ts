@@ -33,7 +33,8 @@ const widgetId = "";
 const widget = await WidgetUnion.load(widgetId);
 
 // Subscribe to updates
-const unsubscribe = WidgetUnion.subscribe(widgetId, {}, (widget) => {
+const unsubscribe = WidgetUnion.subscribe(widgetId, (widget) => {
+  if (!widget.$isLoaded) return; // Handle loading/error states
   console.log("Widget updated:", widget);
 });
 // #endregion

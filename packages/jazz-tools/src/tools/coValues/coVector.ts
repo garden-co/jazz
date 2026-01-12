@@ -241,12 +241,16 @@ export class CoVector
      * we can wait for the stream to be complete before returning the vector
      */
     if (!coVector.$isLoaded || !coVector.$jazz.raw.isBinaryStreamEnded()) {
-      return new Promise((resolve) => {
+      return new Promise((resolve, reject) => {
         subscribeToCoValueWithoutMe(
           this,
           id,
           options || {},
-          (value, unsubscribe) => {
+          (value, unsubscribe, subscriptionScope) => {
+            if (!value.$isLoaded) {
+              return reject(subscriptionScope.getPromise());
+            }
+
             if (value.$jazz.raw.isBinaryStreamEnded()) {
               unsubscribe();
               resolve(value);
@@ -341,7 +345,7 @@ export class CoVectorJazzApi<V extends CoVector> extends CoValueJazzApi<V> {
    */
   subscribe<B extends CoVector>(
     this: CoVectorJazzApi<B>,
-    listener: (value: Resolved<B, true>) => void,
+    listener: (value: Settled<Resolved<B, true>>) => void,
   ): () => void {
     return subscribeToExistingCoValue(this.coVector, {}, listener);
   }

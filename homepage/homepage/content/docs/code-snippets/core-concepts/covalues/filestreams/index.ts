@@ -171,7 +171,9 @@ if (fileStream.$isLoaded) {
 // #region SubscribeById
 const unsubscribe = co
   .fileStream()
-  .subscribe(fileStreamId, (fileStream: FileStream) => {
+  .subscribe(fileStreamId, (fileStream) => {
+    if (!fileStream.$isLoaded) return; // Handle loading/error states
+
     // Called whenever the FileStream changes
     console.log("FileStream updated");
 

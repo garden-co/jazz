@@ -4,6 +4,7 @@ import {
   Account,
   CryptoProvider,
   Loaded,
+  Settled,
   co,
   coValueClassFromCoValueClassOrSchema,
   subscribeToCoValue,
@@ -106,7 +107,10 @@ describe("SchemaUnion", () => {
       coValueClassFromCoValueClassOrSchema(WidgetUnion),
       buttonWidget.$jazz.id,
       { loadAs: me, syncResolution: true },
-      (value: Loaded<typeof WidgetUnion>) => {
+      (value: Settled<Loaded<typeof WidgetUnion>>) => {
+        if (!value.$isLoaded) {
+          throw new Error("Expected loaded value");
+        }
         if (value.type === "button") {
           expect(value.label).toBe(currentValue);
           assert(value.color === "blue");

@@ -75,8 +75,9 @@ You can use the `$isLoaded` field to check whether a CoValue is loaded. For more
 - `"loading"` → The CoValue is still being fetched
 - `"unauthorized"` → The current user doesn't have permission to access this CoValue
 - `"unavailable"` → The CoValue couldn't be found or an error (e.g. a network timeout) occurred while loading
+- `"deleted"` → The CoValue has been permanently deleted
 
-See the examples above for practical demonstrations of how to handle these three states in your application.
+See the examples above for practical demonstrations of how to handle these states in your application.
 
 <ContentByFramework framework={["react", "react-native", "react-native-expo"]}>
 ### Suspense Hooks [!framework=react,react-native,react-native-expo]
@@ -288,7 +289,8 @@ You can also subscribe to an existing CoValue instance using the `$jazz.subscrib
 </CodeGroup>
 
 ### Error handling for manual subscriptions
-You can also pass `onUnauthorized` and `onUnavailable` handlers as options to your subscription which will run reactively whenever the CoValue you're subscribing to is unavailable, or you do not have the appropriate permissions to read it.
+
+The subscription listener receives a `Settled` value that can be either loaded or in an error state. You can check `$isLoaded` to see if the value is ready, and `$jazz.loadingState` for details about why it might not be loaded (e.g., `"unauthorized"`, `"unavailable"`, or `"deleted"`).
 
 <CodeGroup preferWrap>
 ```ts error-handling-in-manual.ts#ErrorHandling

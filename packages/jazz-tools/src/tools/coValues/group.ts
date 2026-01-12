@@ -296,13 +296,13 @@ export class Group extends CoValueBase implements CoValue {
   static subscribe<G extends Group, const R extends RefsToResolve<G>>(
     this: CoValueClass<G>,
     id: ID<G>,
-    listener: (value: Resolved<G, R>, unsubscribe: () => void) => void,
+    listener: (value: Settled<Resolved<G, R>>, unsubscribe: () => void) => void,
   ): () => void;
   static subscribe<G extends Group, const R extends RefsToResolve<G>>(
     this: CoValueClass<G>,
     id: ID<G>,
     options: SubscribeListenerOptions<G, R>,
-    listener: (value: Resolved<G, R>, unsubscribe: () => void) => void,
+    listener: (value: Settled<Resolved<G, R>>, unsubscribe: () => void) => void,
   ): () => void;
   static subscribe<G extends Group, const R extends RefsToResolve<G>>(
     this: CoValueClass<G>,
@@ -371,12 +371,12 @@ export class GroupJazzApi<G extends Group> extends CoValueJazzApi<G> {
   /** @category Subscription & Loading */
   subscribe<G extends Group, const R extends RefsToResolve<G>>(
     this: GroupJazzApi<G>,
-    listener: (value: Resolved<G, R>, unsubscribe: () => void) => void,
+    listener: (value: Settled<Resolved<G, R>>, unsubscribe: () => void) => void,
   ): () => void;
   subscribe<G extends Group, const R extends RefsToResolve<G>>(
     this: GroupJazzApi<G>,
     options: { resolve?: RefsToResolveStrict<G, R> },
-    listener: (value: Resolved<G, R>, unsubscribe: () => void) => void,
+    listener: (value: Settled<Resolved<G, R>>, unsubscribe: () => void) => void,
   ): () => void;
   subscribe<G extends Group, const R extends RefsToResolve<G>>(
     this: GroupJazzApi<G>,

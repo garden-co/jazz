@@ -402,13 +402,13 @@ export class Account extends CoValueBase implements CoValue {
   static subscribe<A extends Account, const R extends RefsToResolve<A> = true>(
     this: CoValueClass<A>,
     id: ID<A>,
-    listener: (value: Resolved<A, R>, unsubscribe: () => void) => void,
+    listener: (value: Settled<Resolved<A, R>>, unsubscribe: () => void) => void,
   ): () => void;
   static subscribe<A extends Account, const R extends RefsToResolve<A> = true>(
     this: CoValueClass<A>,
     id: ID<A>,
     options: SubscribeListenerOptions<A, R>,
-    listener: (value: Resolved<A, R>, unsubscribe: () => void) => void,
+    listener: (value: Settled<Resolved<A, R>>, unsubscribe: () => void) => void,
   ): () => void;
   static subscribe<A extends Account, const R extends RefsToResolve<A>>(
     this: CoValueClass<A>,
@@ -557,7 +557,7 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
   /** @category Subscription & Loading */
   subscribe<A extends Account, const R extends RefsToResolve<A>>(
     this: AccountJazzApi<A>,
-    listener: (value: Resolved<A, R>, unsubscribe: () => void) => void,
+    listener: (value: Settled<Resolved<A, R>>, unsubscribe: () => void) => void,
   ): () => void;
   subscribe<A extends Account, const R extends RefsToResolve<A>>(
     this: AccountJazzApi<A>,
@@ -565,7 +565,7 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
       resolve?: RefsToResolveStrict<A, R>;
       unstable_branch?: BranchDefinition;
     },
-    listener: (value: Resolved<A, R>, unsubscribe: () => void) => void,
+    listener: (value: Settled<Resolved<A, R>>, unsubscribe: () => void) => void,
   ): () => void;
   subscribe<A extends Account, const R extends RefsToResolve<A>>(
     this: AccountJazzApi<A>,

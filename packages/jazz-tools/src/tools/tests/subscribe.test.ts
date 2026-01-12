@@ -11,6 +11,7 @@ import { Account, Group, cojsonInternals, z } from "../index.js";
 import {
   CoValueLoadingState,
   Loaded,
+  Settled,
   co,
   coValueClassFromCoValueClassOrSchema,
   subscribeToCoValue,
@@ -68,7 +69,7 @@ describe("subscribeToCoValue", () => {
     const chatRoom = createChatRoom(me, "General");
     const updateFn = vi.fn();
 
-    let result = null as Loaded<typeof ChatRoom, true> | null;
+    let result = null as Settled<Loaded<typeof ChatRoom, true>> | null;
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(ChatRoom),
@@ -87,10 +88,11 @@ describe("subscribeToCoValue", () => {
     });
 
     expect(result?.$jazz.id).toBe(chatRoom.$jazz.id);
-    expect(result?.messages.$jazz.loadingState).toEqual(
+    assert(result?.$isLoaded);
+    expect(result.messages.$jazz.loadingState).toEqual(
       CoValueLoadingState.LOADING,
     );
-    expect(result?.name).toBe("General");
+    expect(result.name).toBe("General");
 
     updateFn.mockClear();
 
@@ -116,7 +118,7 @@ describe("subscribeToCoValue", () => {
     const chatRoom = createChatRoom(me, "General");
     const updateFn = vi.fn();
 
-    let result = null as Loaded<typeof ChatRoom, {}> | null;
+    let result = null as Settled<Loaded<typeof ChatRoom, {}>> | null;
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(ChatRoom),
@@ -140,6 +142,7 @@ describe("subscribeToCoValue", () => {
     });
 
     expect(updateFn).toHaveBeenCalledTimes(1);
+    assert(result?.$isLoaded);
     expect(result).toMatchObject({
       $jazz: expect.objectContaining({ id: chatRoom.$jazz.id }),
       name: "General",
@@ -168,7 +171,7 @@ describe("subscribeToCoValue", () => {
           messages: { $each: true },
         },
       },
-      updateFn,
+      (value) => updateFn(value.$jazz.id),
     );
 
     await waitFor(() => {
@@ -182,12 +185,7 @@ describe("subscribeToCoValue", () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     expect(updateFn).toHaveBeenCalledTimes(1);
-    expect(updateFn).toHaveBeenCalledWith(
-      expect.objectContaining({
-        $jazz: expect.objectContaining({ id: chatRoom.$jazz.id }),
-      }),
-      expect.any(Function),
-    );
+    expect(updateFn).toHaveBeenCalledWith(chatRoom.$jazz.id);
   });
 
   it("should fire updates when a ref entity is updates", async () => {
@@ -251,15 +249,17 @@ describe("subscribeToCoValue", () => {
 
     const updateFn = vi.fn();
 
-    const updates = [] as Loaded<
-      typeof ChatRoom,
-      {
-        messages: {
-          $each: {
-            reactions: true;
+    const updates = [] as Settled<
+      Loaded<
+        typeof ChatRoom,
+        {
+          messages: {
+            $each: {
+              reactions: true;
+            };
           };
-        };
-      }
+        }
+      >
     >[];
 
     const unsubscribe = subscribeToCoValue(
@@ -285,11 +285,12 @@ describe("subscribeToCoValue", () => {
 
     await waitFor(() => {
       const lastValue = updates.at(-1);
-
-      expect(lastValue?.messages?.[0]?.text).toBe(message.text);
+      assert(lastValue?.$isLoaded);
+      expect(lastValue.messages[0]?.text).toBe(message.text);
     });
 
     const initialValue = updates.at(0);
+    assert(initialValue?.$isLoaded);
     const initialMessagesList = initialValue?.messages;
     const initialMessage1 = initialValue?.messages[0];
     const initialMessage2 = initialValue?.messages[1];
@@ -304,6 +305,7 @@ describe("subscribeToCoValue", () => {
     });
 
     const lastValue = updates.at(-1)!;
+    assert(lastValue?.$isLoaded);
     expect(lastValue).not.toBe(initialValue);
     expect(lastValue.messages).not.toBe(initialMessagesList);
     expect(lastValue.messages[0]).not.toBe(initialMessage1);
@@ -451,12 +453,17 @@ describe("subscribeToCoValue", () => {
       everyone,
     );
 
-    let result = null as Loaded<typeof TestList, { $each: true }> | null;
+    let result = null as Settled<
+      Loaded<typeof TestList, { $each: true }>
+    > | null;
+    let receivedUnauthorized = false;
 
     const updateFn = vi.fn().mockImplementation((value) => {
       result = value;
+      if (!value.$isLoaded && value.$jazz.loadingState === "unauthorized") {
+        receivedUnauthorized = true;
+      }
     });
-    const onUnauthorized = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(TestList),
@@ -466,7 +473,6 @@ describe("subscribeToCoValue", () => {
         resolve: {
           $each: true,
         },
-        onUnauthorized,
       },
       updateFn,
     );
@@ -474,20 +480,18 @@ describe("subscribeToCoValue", () => {
     onTestFinished(unsubscribe);
 
     await waitFor(() => {
-      expect(onUnauthorized).toHaveBeenCalled();
+      expect(receivedUnauthorized).toBe(true);
     });
 
     group.addMember("everyone", "reader");
 
     await waitFor(() => {
-      expect(updateFn).toHaveBeenCalled();
+      expect(result?.$isLoaded).toBe(true);
     });
 
-    assert(result);
+    assert(result?.$isLoaded);
 
     expect(result[0]?.value).toBe("1");
-
-    expect(updateFn).toHaveBeenCalledTimes(1);
   });
 
   it("should emit when all the items become available", async () => {
@@ -523,13 +527,17 @@ describe("subscribeToCoValue", () => {
       everyone,
     );
 
-    let result = null as Loaded<typeof TestList, { $each: true }> | null;
+    let result = null as Settled<
+      Loaded<typeof TestList, { $each: true }>
+    > | null;
+    let receivedUnavailable = false;
 
     const updateFn = vi.fn().mockImplementation((value) => {
       result = value;
+      if (!value.$isLoaded && value.$jazz.loadingState === "unavailable") {
+        receivedUnavailable = true;
+      }
     });
-    const onUnauthorized = vi.fn();
-    const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(TestList),
@@ -539,8 +547,6 @@ describe("subscribeToCoValue", () => {
         resolve: {
           $each: true,
         },
-        onUnauthorized,
-        onUnavailable,
       },
       updateFn,
     );
@@ -548,7 +554,7 @@ describe("subscribeToCoValue", () => {
     onTestFinished(unsubscribe);
 
     await waitFor(() => {
-      expect(onUnavailable).toHaveBeenCalled();
+      expect(receivedUnavailable).toBe(true);
     });
 
     creator.$jazz.localNode.syncManager.addPeer(
@@ -556,13 +562,12 @@ describe("subscribeToCoValue", () => {
     );
 
     await waitFor(() => {
-      expect(updateFn).toHaveBeenCalled();
+      expect(result?.$isLoaded).toBe(true);
     });
 
-    assert(result);
+    assert(result?.$isLoaded);
 
     expect(result[0]?.value).toBe("1");
-    expect(updateFn).toHaveBeenCalledTimes(1);
   });
 
   it("should handle undefined values in lists with required refs", async () => {
@@ -595,13 +600,20 @@ describe("subscribeToCoValue", () => {
       everyone,
     );
 
-    let result = null as Loaded<typeof TestList, { $each: true }> | null;
+    let result = null as Settled<
+      Loaded<typeof TestList, { $each: true }>
+    > | null;
+    let receivedUnavailable = false;
 
     const updateFn = vi.fn().mockImplementation((value) => {
       result = value;
+      if (
+        !value.$isLoaded &&
+        value.$jazz.loadingState === CoValueLoadingState.UNAVAILABLE
+      ) {
+        receivedUnavailable = true;
+      }
     });
-    const onUnauthorized = vi.fn();
-    const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(TestList),
@@ -611,8 +623,6 @@ describe("subscribeToCoValue", () => {
         resolve: {
           $each: true,
         },
-        onUnauthorized,
-        onUnavailable,
       },
       updateFn,
     );
@@ -620,20 +630,18 @@ describe("subscribeToCoValue", () => {
     onTestFinished(unsubscribe);
 
     await waitFor(() => {
-      expect(onUnavailable).toHaveBeenCalled();
+      expect(receivedUnavailable).toBe(true);
     });
 
     list.$jazz.set(0, TestMap.create({ value: "1" }, everyone));
 
     await waitFor(() => {
-      expect(updateFn).toHaveBeenCalled();
+      expect(result?.$isLoaded).toBe(true);
     });
 
-    assert(result);
+    assert(result?.$isLoaded);
 
     expect(result[0]?.value).toBe("1");
-
-    expect(updateFn).toHaveBeenCalledTimes(1);
   });
 
   it("should handle undefined values in lists with optional refs", async () => {
@@ -665,13 +673,13 @@ describe("subscribeToCoValue", () => {
       everyone,
     );
 
-    let result = null as Loaded<typeof TestList, { $each: true }> | null;
+    let result = null as Settled<
+      Loaded<typeof TestList, { $each: true }>
+    > | null;
 
     const updateFn = vi.fn().mockImplementation((value) => {
       result = value;
     });
-    const onUnauthorized = vi.fn();
-    const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(TestList),
@@ -681,8 +689,6 @@ describe("subscribeToCoValue", () => {
         resolve: {
           $each: true,
         },
-        onUnauthorized,
-        onUnavailable,
       },
       updateFn,
     );
@@ -693,7 +699,7 @@ describe("subscribeToCoValue", () => {
       expect(updateFn).toHaveBeenCalled();
     });
 
-    assert(result);
+    assert(result?.$isLoaded);
 
     expect(result[0]).toBeUndefined();
 
@@ -962,13 +968,13 @@ describe("subscribeToCoValue", () => {
       everyone,
     );
 
-    let result = null as Loaded<typeof TestList, { $each: true }> | null;
+    let result = null as Settled<
+      Loaded<typeof TestList, { $each: true }>
+    > | null;
 
     const updateFn = vi.fn().mockImplementation((value) => {
       result = value;
     });
-    const onUnauthorized = vi.fn();
-    const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(TestList),
@@ -976,8 +982,6 @@ describe("subscribeToCoValue", () => {
       {
         loadAs: reader,
         resolve: true,
-        onUnauthorized,
-        onUnavailable,
       },
       updateFn,
     );
@@ -989,11 +993,11 @@ describe("subscribeToCoValue", () => {
     });
 
     await waitFor(() => {
-      assert(result);
+      assert(result?.$isLoaded);
       expect(result[1]?.value).toBe("2");
     });
 
-    assert(result);
+    assert(result?.$isLoaded);
     expect(result[0]?.$jazz.loadingState).toBe(CoValueLoadingState.LOADING);
 
     updateFn.mockClear();
@@ -1001,11 +1005,9 @@ describe("subscribeToCoValue", () => {
     list.$jazz.set(1, TestMap.create({ value: "updated" }, everyone));
 
     await waitFor(() => {
-      expect(result?.[1]?.value).toBe("updated");
+      assert(result?.$isLoaded);
+      expect(result[1]?.value).toBe("updated");
     });
-
-    expect(onUnavailable).not.toHaveBeenCalled();
-    expect(onUnauthorized).not.toHaveBeenCalled();
   });
 
   it("errors on autoloaded values shouldn't block updates, even when the error comes from a new ref", async () => {
@@ -1049,13 +1051,13 @@ describe("subscribeToCoValue", () => {
       everyone,
     );
 
-    let result = null as Loaded<typeof PersonList, { $each: true }> | null;
+    let result = null as Settled<
+      Loaded<typeof PersonList, { $each: true }>
+    > | null;
 
     const updateFn = vi.fn().mockImplementation((value) => {
       result = value;
     });
-    const onUnauthorized = vi.fn();
-    const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(PersonList),
@@ -1065,8 +1067,6 @@ describe("subscribeToCoValue", () => {
         resolve: {
           $each: true,
         },
-        onUnauthorized,
-        onUnavailable,
       },
       updateFn,
     );
@@ -1074,21 +1074,21 @@ describe("subscribeToCoValue", () => {
     onTestFinished(unsubscribe);
 
     await waitFor(() => {
-      assert(result?.[0]);
+      assert(result?.$isLoaded && result?.[0]);
       expect(result[0].name).toBe("Guido");
       assertLoaded(result[0].dog);
       expect(result[0].dog.name).toBe("Giggino");
     });
 
     await waitFor(() => {
-      assert(result?.[1]);
+      assert(result?.$isLoaded && result?.[1]);
       expect(result[1].name).toBe("John");
       assertLoaded(result[1].dog);
       expect(result[1].dog.name).toBe("Rex");
     });
 
     await waitFor(() => {
-      assert(result?.[2]);
+      assert(result?.$isLoaded && result?.[2]);
       expect(result[2].name).toBe("Jane");
       assertLoaded(result[2].dog);
       expect(result[2].dog.name).toBe("Bella");
@@ -1097,7 +1097,8 @@ describe("subscribeToCoValue", () => {
     list[0]!.$jazz.set("dog", Dog.create({ name: "Ninja" }));
 
     await waitFor(() => {
-      expect(result?.[0]?.dog.$jazz.loadingState).toBe(
+      assert(result?.$isLoaded);
+      expect(result[0]?.dog.$jazz.loadingState).toBe(
         CoValueLoadingState.UNAUTHORIZED,
       );
     });
@@ -1105,13 +1106,10 @@ describe("subscribeToCoValue", () => {
     list[1]!.$jazz.set("dog", Dog.create({ name: "Pinkie" }, everyone));
 
     await waitFor(() => {
-      assert(result?.[1]);
+      assert(result?.$isLoaded && result?.[1]);
       assertLoaded(result[1].dog);
       expect(result[1].dog.name).toBe("Pinkie");
     });
-
-    expect(onUnavailable).not.toHaveBeenCalled();
-    expect(onUnauthorized).not.toHaveBeenCalled();
   });
 
   it("autoload on $each resolve should work on all items", async () => {
@@ -1155,13 +1153,13 @@ describe("subscribeToCoValue", () => {
       everyone,
     );
 
-    let result = null as Loaded<typeof PersonList, { $each: true }> | null;
+    let result = null as Settled<
+      Loaded<typeof PersonList, { $each: true }>
+    > | null;
 
     const updateFn = vi.fn().mockImplementation((value) => {
       result = value;
     });
-    const onUnauthorized = vi.fn();
-    const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(PersonList),
@@ -1171,8 +1169,6 @@ describe("subscribeToCoValue", () => {
         resolve: {
           $each: true,
         },
-        onUnauthorized,
-        onUnavailable,
       },
       updateFn,
     );
@@ -1180,28 +1176,25 @@ describe("subscribeToCoValue", () => {
     onTestFinished(unsubscribe);
 
     await waitFor(() => {
-      assert(result?.[0]);
+      assert(result?.$isLoaded && result?.[0]);
       expect(result[0].name).toBe("Guido");
       assertLoaded(result[0].dog);
       expect(result[0].dog.name).toBe("Giggino");
     });
 
     await waitFor(() => {
-      assert(result?.[1]);
+      assert(result?.$isLoaded && result?.[1]);
       expect(result[1].name).toBe("John");
       assertLoaded(result[1].dog);
       expect(result[1].dog.name).toBe("Rex");
     });
 
     await waitFor(() => {
-      assert(result?.[2]);
+      assert(result?.$isLoaded && result?.[2]);
       expect(result[2].name).toBe("Jane");
       assertLoaded(result[2].dog);
       expect(result[2].dog.name).toBe("Bella");
     });
-
-    expect(onUnavailable).not.toHaveBeenCalled();
-    expect(onUnauthorized).not.toHaveBeenCalled();
   });
 
   it("should subscribe to a large coValue", async () => {

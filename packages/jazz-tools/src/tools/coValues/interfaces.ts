@@ -13,7 +13,6 @@ import {
   NotLoadedCoValueState,
   Group,
   Loaded,
-  Inaccessible,
   MaybeLoaded,
   OnCreateCallback,
   Settled,
@@ -178,9 +177,6 @@ export function loadCoValue<
         loadAs: options.loadAs,
         syncResolution: true,
         skipRetry: options.skipRetry,
-        onUnavailable: resolve,
-        onError: resolve,
-        onUnauthorized: resolve,
         unstable_branch: options.unstable_branch,
       },
       (value, unsubscribe) => {
@@ -221,8 +217,9 @@ export async function ensureCoValueLoaded<
 }
 
 type SubscribeListener<V extends CoValue, R extends RefsToResolve<V>> = (
-  value: Resolved<V, R>,
+  value: Settled<Resolved<V, R>>,
   unsubscribe: () => void,
+  subscriptionScope: SubscriptionScope<V>,
 ) => void;
 
 export type SubscribeListenerOptions<
@@ -231,9 +228,6 @@ export type SubscribeListenerOptions<
 > = {
   resolve?: RefsToResolveStrict<V, R>;
   loadAs?: Account | AnonymousJazzAgent;
-  onError?: (value: NotLoaded<V>) => void;
-  onUnauthorized?: (value: NotLoaded<V>) => void;
-  onUnavailable?: (value: NotLoaded<V>) => void;
   unstable_branch?: BranchDefinition;
 };
 
@@ -260,9 +254,6 @@ export function parseSubscribeRestArgs<
         options: {
           resolve: args[0].resolve,
           loadAs: args[0].loadAs,
-          onError: args[0].onError,
-          onUnauthorized: args[0].onUnauthorized,
-          onUnavailable: args[0].onUnavailable,
           unstable_branch: args[0].unstable_branch,
         },
         listener: args[1],
@@ -308,9 +299,6 @@ export function subscribeToCoValue<
   options: {
     resolve?: RefsToResolveStrict<V, R>;
     loadAs: Account | AnonymousJazzAgent;
-    onError?: (value: Inaccessible<V>) => void;
-    onUnavailable?: (value: Inaccessible<V>) => void;
-    onUnauthorized?: (value: Inaccessible<V>) => void;
     syncResolution?: boolean;
     skipRetry?: boolean;
     unstable_branch?: BranchDefinition;
@@ -342,21 +330,12 @@ export function subscribeToCoValue<
 
     const value = rootNode.getCurrentValue();
 
-    if (value.$isLoaded) {
-      listener(value as Resolved<V, R>, unsubscribe);
-      return;
-    }
-
-    options.onError?.(value as Inaccessible<V>);
-
-    // Backward compatibility, going to remove this in the next minor release
-    switch (value.$jazz.loadingState) {
-      case CoValueLoadingState.UNAVAILABLE:
-        options.onUnavailable?.(value as Inaccessible<V>);
-        break;
-      case CoValueLoadingState.UNAUTHORIZED:
-        options.onUnauthorized?.(value as Inaccessible<V>);
-        break;
+    // Only call listener for settled states (not LOADING)
+    if (
+      value.$isLoaded ||
+      value.$jazz.loadingState !== CoValueLoadingState.LOADING
+    ) {
+      listener(value as Settled<Resolved<V, R>>, unsubscribe, rootNode);
     }
   };
 
@@ -389,9 +368,6 @@ export function subscribeToExistingCoValue<
   options:
     | {
         resolve?: RefsToResolveStrict<V, R>;
-        onError?: (value: NotLoaded<V>) => void;
-        onUnavailable?: (value: NotLoaded<V>) => void;
-        onUnauthorized?: (value: NotLoaded<V>) => void;
         unstable_branch?: BranchDefinition;
       }
     | undefined,
@@ -403,9 +379,6 @@ export function subscribeToExistingCoValue<
     {
       loadAs: existing.$jazz.loadedAs,
       resolve: options?.resolve,
-      onError: options?.onError,
-      onUnavailable: options?.onUnavailable,
-      onUnauthorized: options?.onUnauthorized,
       unstable_branch: options?.unstable_branch,
     },
     listener,

@@ -1,6 +1,6 @@
 import { cojsonInternals } from "cojson";
 import { assert, beforeEach, describe, expect, test, vi } from "vitest";
-import { Group, co, z } from "../exports.js";
+import { Group, Settled, co, z } from "../exports.js";
 
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { assertLoaded, waitFor } from "./utils.js";
@@ -598,6 +598,7 @@ describe("CoList Branching", async () => {
       branch.$jazz.subscribe(
         { resolve: { $each: true } },
         (taskList, unsubscribe) => {
+          if (!taskList.$isLoaded) return;
           expect(taskList.$jazz.branchName).not.toBe("subscribe-branch");
           expect(taskList.$jazz.isBranched).toBe(false);
           expect(taskList[0]?.$jazz.branchName).not.toBe("subscribe-branch");
@@ -613,6 +614,7 @@ describe("CoList Branching", async () => {
           unstable_branch: { name: "subscribe-branch" },
         },
         (taskList, unsubscribe) => {
+          if (!taskList.$isLoaded) return;
           expect(taskList.$jazz.branchName).toBe("subscribe-branch");
           expect(taskList.$jazz.isBranched).toBe(true);
           expect(taskList[0]?.$jazz.branchName).toBe("subscribe-branch");
@@ -751,7 +753,8 @@ describe("CoList Branching", async () => {
       });
 
       // Subscribe using Schema.subscribe with branch
-      const updates: co.loaded<typeof TaskList, { $each: true }>[] = [];
+      const updates: Settled<co.loaded<typeof TaskList, { $each: true }>>[] =
+        [];
       const unsubscribe = TaskList.subscribe(
         originalTaskList.$jazz.id,
         {
@@ -761,6 +764,7 @@ describe("CoList Branching", async () => {
           unstable_branch: { name: "schema-subscribe-branch" },
         },
         (taskList) => {
+          if (!taskList.$isLoaded) return;
           expect(taskList.$jazz.branchName).toBe("schema-subscribe-branch");
           expect(taskList.$jazz.isBranched).toBe(true);
           updates.push(taskList);
@@ -768,10 +772,12 @@ describe("CoList Branching", async () => {
       );
 
       await waitFor(() => expect(updates).toHaveLength(1));
-      expect(updates[0]?.[0]?.title).toBe("Buy organic groceries");
-      expect(updates[0]?.[0]?.priority).toBe("high");
-      expect(updates[0]?.[3]?.title).toBe("Call mom");
-      expect(updates[0]?.[3]?.priority).toBe("low");
+      const first = updates[0];
+      assert(first?.$isLoaded);
+      expect(first[0]?.title).toBe("Buy organic groceries");
+      expect(first[0]?.priority).toBe("high");
+      expect(first[3]?.title).toBe("Call mom");
+      expect(first[3]?.priority).toBe("low");
 
       // Make additional changes to the branch
       branch.$jazz.set(1, {
@@ -781,8 +787,10 @@ describe("CoList Branching", async () => {
       });
 
       // Verify we get the updated branch data
-      expect(updates[1]?.[1]?.title).toBe("Walk the cat");
-      expect(updates[1]?.[1]?.priority).toBe("medium");
+      const second = updates[1];
+      assert(second?.$isLoaded);
+      expect(second[1]?.title).toBe("Walk the cat");
+      expect(second[1]?.priority).toBe("medium");
 
       // Verify original is still unchanged
       expect(originalTaskList[0]?.title).toBe("Buy groceries");

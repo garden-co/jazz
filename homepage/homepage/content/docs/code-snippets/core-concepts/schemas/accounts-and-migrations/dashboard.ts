@@ -10,6 +10,7 @@ const unsubscribe = MyAppAccount.getMe().$jazz.subscribe(
     },
   },
   (account) => {
+    if (!account.$isLoaded) return; // Handle loading/error states
     const myNameElement = document.getElementById("my-name");
     if (myNameElement) {
       myNameElement.textContent = account.profile.name;

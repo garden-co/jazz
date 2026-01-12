@@ -12,6 +12,7 @@ import {
   CoPlainText,
   CoValueLoadingState,
   Group,
+  Settled,
   z,
 } from "../exports";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing";
@@ -315,20 +316,22 @@ describe("Schema.resolved()", () => {
 
         const map = TestMapWithName.create({ name: "Test" }, publicGroup);
 
-        const updates: co.loaded<typeof TestMapWithName>[] = [];
+        const updates: Settled<co.loaded<typeof TestMapWithName>>[] = [];
         TestMapWithName.subscribe(
           map.$jazz.id,
           {
             loadAs: clientAccount,
           },
           (map) => {
-            expectTypeOf<typeof map.name>().toEqualTypeOf<CoPlainText>();
             updates.push(map);
           },
         );
 
         await waitFor(() => expect(updates.length).toBe(1));
-        expect(updates[0]?.name.toUpperCase()).toEqual("TEST");
+        const loaded = updates[0];
+        assert(loaded?.$isLoaded);
+        expectTypeOf<typeof loaded.name>().toEqualTypeOf<CoPlainText>();
+        expect(loaded.name.toUpperCase()).toEqual("TEST");
       });
 
       test("for CoRecord", async () => {
@@ -361,20 +364,22 @@ describe("Schema.resolved()", () => {
 
         const list = TestListWithItems.create(["Test"], publicGroup);
 
-        const updates: co.loaded<typeof TestListWithItems>[] = [];
+        const updates: Settled<co.loaded<typeof TestListWithItems>>[] = [];
         TestListWithItems.subscribe(
           list.$jazz.id,
           {
             loadAs: clientAccount,
           },
           (list) => {
-            expectTypeOf<(typeof list)[0]>().toEqualTypeOf<CoPlainText>();
             updates.push(list);
           },
         );
 
         await waitFor(() => expect(updates.length).toBe(1));
-        expect(updates[0]?.[0]?.toUpperCase()).toEqual("TEST");
+        const loaded = updates[0];
+        assert(loaded?.$isLoaded);
+        expectTypeOf<(typeof loaded)[0]>().toEqualTypeOf<CoPlainText>();
+        expect(loaded[0]?.toUpperCase()).toEqual("TEST");
       });
 
       // TODO fix - `$each` does not load nested CoValues when providing an explicit resolve query either
@@ -415,7 +420,7 @@ describe("Schema.resolved()", () => {
           },
         });
 
-        const updates: co.loaded<typeof AccountWithProfile>[] = [];
+        const updates: Settled<co.loaded<typeof AccountWithProfile>>[] = [];
         AccountWithProfile.subscribe(
           account.$jazz.id,
           {
@@ -427,7 +432,9 @@ describe("Schema.resolved()", () => {
         );
 
         await waitFor(() => expect(updates.length).toBe(1));
-        expect(updates[0]?.profile.name).toBe("Hermes Puggington");
+        const loaded = updates[0];
+        assert(loaded?.$isLoaded);
+        expect(loaded.profile.name).toBe("Hermes Puggington");
       });
     });
 

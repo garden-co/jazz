@@ -21,7 +21,7 @@ export function waitForCoValue<
     resolve?: RefsToResolveStrict<T, R>;
   },
 ) {
-  return new Promise<T>((resolve, reject) => {
+  return new Promise<T>((resolve) => {
     function subscribe() {
       subscribeToCoValue(
         coMap,
@@ -29,15 +29,9 @@ export function waitForCoValue<
         {
           loadAs: options.loadAs,
           resolve: options.resolve,
-          onUnavailable: () => {
-            setTimeout(subscribe, 100);
-          },
-          onUnauthorized: () => {
-            reject(new Error("Unauthorized"));
-          },
         },
         (value, unsubscribe) => {
-          if (predicate(value)) {
+          if (value.$isLoaded && predicate(value)) {
             resolve(value);
             unsubscribe();
           }

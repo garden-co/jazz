@@ -142,17 +142,50 @@ export class AccountSchema<
     > = DefaultResolveQuery,
   >(
     id: string,
+    listener: (
+      value: Settled<Resolved<Simplify<AccountInstance<Shape>>, R>>,
+      unsubscribe: () => void,
+    ) => void,
+  ): () => void;
+  subscribe<
+    const R extends RefsToResolve<
+      Simplify<AccountInstance<Shape>>
+      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+    > = DefaultResolveQuery,
+  >(
+    id: string,
     options: SubscribeListenerOptions<Simplify<AccountInstance<Shape>>, R>,
     listener: (
-      value: Resolved<Simplify<AccountInstance<Shape>>, R>,
+      value: Settled<Resolved<Simplify<AccountInstance<Shape>>, R>>,
+      unsubscribe: () => void,
+    ) => void,
+  ): () => void;
+  subscribe<const R extends RefsToResolve<Simplify<AccountInstance<Shape>>>>(
+    id: string,
+    optionsOrListener:
+      | SubscribeListenerOptions<Simplify<AccountInstance<Shape>>, R>
+      | ((
+          value: Settled<Resolved<Simplify<AccountInstance<Shape>>, R>>,
+          unsubscribe: () => void,
+        ) => void),
+    maybeListener?: (
+      value: Settled<Resolved<Simplify<AccountInstance<Shape>>, R>>,
       unsubscribe: () => void,
     ) => void,
   ): () => void {
+    if (typeof optionsOrListener === "function") {
+      return this.coValueClass.subscribe(
+        id,
+        withSchemaResolveQuery({}, this.resolveQuery),
+        // @ts-expect-error
+        optionsOrListener,
+      );
+    }
     return this.coValueClass.subscribe(
       id,
       // @ts-expect-error
-      withSchemaResolveQuery(options, this.resolveQuery),
-      listener,
+      withSchemaResolveQuery(optionsOrListener, this.resolveQuery),
+      maybeListener,
     );
   }
 

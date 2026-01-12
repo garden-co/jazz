@@ -302,13 +302,13 @@ export class CoList<out Item = any>
   static subscribe<L extends CoList, const R extends RefsToResolve<L> = true>(
     this: CoValueClass<L>,
     id: ID<L>,
-    listener: (value: Resolved<L, R>, unsubscribe: () => void) => void,
+    listener: (value: Settled<Resolved<L, R>>, unsubscribe: () => void) => void,
   ): () => void;
   static subscribe<L extends CoList, const R extends RefsToResolve<L> = true>(
     this: CoValueClass<L>,
     id: ID<L>,
     options: SubscribeListenerOptions<L, R>,
-    listener: (value: Resolved<L, R>, unsubscribe: () => void) => void,
+    listener: (value: Settled<Resolved<L, R>>, unsubscribe: () => void) => void,
   ): () => void;
   static subscribe<L extends CoList, const R extends RefsToResolve<L>>(
     this: CoValueClass<L>,
@@ -790,7 +790,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    **/
   subscribe<L extends CoList, const R extends RefsToResolve<L> = true>(
     this: CoListJazzApi<L>,
-    listener: (value: Resolved<L, R>, unsubscribe: () => void) => void,
+    listener: (value: Settled<Resolved<L, R>>, unsubscribe: () => void) => void,
   ): () => void;
   subscribe<L extends CoList, const R extends RefsToResolve<L> = true>(
     this: CoListJazzApi<L>,
@@ -798,7 +798,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       resolve?: RefsToResolveStrict<L, R>;
       unstable_branch?: BranchDefinition;
     },
-    listener: (value: Resolved<L, R>, unsubscribe: () => void) => void,
+    listener: (value: Settled<Resolved<L, R>>, unsubscribe: () => void) => void,
   ): () => void;
   subscribe<L extends CoList, const R extends RefsToResolve<L>>(
     this: CoListJazzApi<L>,

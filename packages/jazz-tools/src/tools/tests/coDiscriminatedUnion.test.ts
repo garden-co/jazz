@@ -350,6 +350,7 @@ describe("co.discriminatedUnion", () => {
     const spy = vi.fn((pet) => updates.push(pet));
 
     Pet.subscribe(dog.$jazz.id, {}, (pet) => {
+      if (!pet.$isLoaded) return;
       expect(pet.type).toEqual("dog");
       spy(pet);
     });
@@ -386,6 +387,7 @@ describe("co.discriminatedUnion", () => {
 
     const spy = vi.fn();
     Pet.subscribe(dog.$jazz.id, { resolve: { owner: true } }, (pet) => {
+      if (!pet.$isLoaded) return;
       expect(pet.owner.name).toEqual("John Doe");
       spy(pet);
     });

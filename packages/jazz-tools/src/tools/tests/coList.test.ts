@@ -1131,6 +1131,7 @@ describe("CoList subscription", async () => {
         },
       },
       (update) => {
+        if (!update.$isLoaded) return;
         spy(update);
 
         // The update should be triggered only when the new item is loaded

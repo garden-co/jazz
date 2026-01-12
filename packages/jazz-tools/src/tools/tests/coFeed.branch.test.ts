@@ -485,6 +485,7 @@ describe("CoFeed Branching", async () => {
 
       const spy = vi.fn();
       const unsubscribe = branch.$jazz.subscribe((feed, unsubscribe) => {
+        if (!feed.$isLoaded) return;
         expect(feed.$jazz.branchName).not.toBe("subscribe-branch");
         expect(feed.$jazz.isBranched).toBe(false);
         spy();
@@ -496,6 +497,7 @@ describe("CoFeed Branching", async () => {
           unstable_branch: { name: "subscribe-branch" },
         },
         (feed, unsubscribe) => {
+          if (!feed.$isLoaded) return;
           expect(feed.$jazz.branchName).toBe("subscribe-branch");
           expect(feed.$jazz.isBranched).toBe(true);
           spy();

@@ -215,9 +215,6 @@ export function useCoState<
           {
             resolve: options?.resolve as any,
             loadAs: safeLoadAsAgent,
-            onError: (value) => {
-              updateState(value);
-            },
             syncResolution: true,
           },
           (value: any) => {

@@ -21,7 +21,7 @@ describe("deleted loading state", () => {
     cojsonInternals.CO_VALUE_LOADING_CONFIG.TIMEOUT = 50;
   });
 
-  it("subscribeToCoValue calls onError and stops emitting loaded updates", async () => {
+  it("subscribeToCoValue calls listener with deleted state and stops emitting loaded updates", async () => {
     const TestMap = co.map({
       value: z.string(),
     });
@@ -30,47 +30,49 @@ describe("deleted loading state", () => {
 
     const map = TestMap.create({ value: "hello" }, me);
 
-    const onLoaded = vi.fn();
-    const onError = vi.fn();
-    const onUnavailable = vi.fn();
-    const onUnauthorized = vi.fn();
+    let loadedCallCount = 0;
+    let deletedValue: unknown = null;
+
+    const listener = vi.fn().mockImplementation((value) => {
+      if (value.$isLoaded) {
+        loadedCallCount++;
+      } else if (value.$jazz.loadingState === CoValueLoadingState.DELETED) {
+        deletedValue = value;
+      }
+    });
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(TestMap),
       map.$jazz.id,
       {
         loadAs: meOnSecondPeer,
-        onError,
-        onUnavailable,
-        onUnauthorized,
       },
-      onLoaded,
+      listener,
     );
 
     onTestFinished(unsubscribe);
 
     await waitFor(() => {
-      expect(onLoaded).toHaveBeenCalled();
+      expect(loadedCallCount).toBeGreaterThan(0);
     });
 
-    const loadedCallCountBeforeDelete = onLoaded.mock.calls.length;
+    const loadedCallCountBeforeDelete = loadedCallCount;
 
     map.$jazz.raw.core.deleteCoValue();
     await map.$jazz.raw.core.waitForSync();
 
     await waitFor(() => {
-      expect(onError).toHaveBeenCalled();
+      expect(deletedValue).not.toBeNull();
     });
 
-    const deletedValue = onError.mock.calls[0]?.[0];
+    // @ts-expect-error - we know deletedValue is not null here
     expect(deletedValue?.$isLoaded).toBe(false);
+    // @ts-expect-error - we know deletedValue is not null here
     expect(deletedValue?.$jazz.loadingState).toBe(CoValueLoadingState.DELETED);
 
     // Give the system a moment; we should not emit additional loaded updates after deletion.
     await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(onLoaded).toHaveBeenCalledTimes(loadedCallCountBeforeDelete);
-    expect(onUnavailable).not.toHaveBeenCalled();
-    expect(onUnauthorized).not.toHaveBeenCalled();
+    expect(loadedCallCount).toBe(loadedCallCountBeforeDelete);
   });
 
   it("loadCoValue resolves a NotLoaded(DELETED) value for deleted coValues", async () => {

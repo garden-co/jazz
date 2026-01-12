@@ -1,7 +1,7 @@
 import { cojsonInternals } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { assert, beforeEach, describe, expect, test, vi } from "vitest";
-import { Group, co, subscribeToCoValue, z } from "../exports.js";
+import { Group, Settled, co, subscribeToCoValue, z } from "../exports.js";
 
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { assertLoaded, waitFor } from "./utils.js";
@@ -708,6 +708,7 @@ describe("CoMap Branching", async () => {
       branch.$jazz.subscribe(
         { resolve: { dog: true } },
         (person, unsubscribe) => {
+          if (!person.$isLoaded) return;
           expect(person.$jazz.branchName).not.toBe("subscribe-branch");
           expect(person.$jazz.isBranched).toBe(false);
           expect(person.dog.$jazz.branchName).not.toBe("subscribe-branch");
@@ -723,6 +724,7 @@ describe("CoMap Branching", async () => {
           unstable_branch: { name: "subscribe-branch" },
         },
         (person, unsubscribe) => {
+          if (!person.$isLoaded) return;
           expect(person.$jazz.branchName).toBe("subscribe-branch");
           expect(person.$jazz.isBranched).toBe(true);
           expect(person.dog.$jazz.branchName).toBe("subscribe-branch");
@@ -842,13 +844,14 @@ describe("CoMap Branching", async () => {
       });
 
       // Subscribe using Schema.subscribe with branch
-      const updates: co.loaded<typeof Person, true>[] = [];
+      const updates: Settled<co.loaded<typeof Person, true>>[] = [];
       const unsubscribe = Person.subscribe(
         originalPerson.$jazz.id,
         {
           unstable_branch: { name: "schema-subscribe-branch" },
         },
         (person) => {
+          if (!person.$isLoaded) return;
           expect(person.$jazz.branchName).toBe("schema-subscribe-branch");
           expect(person.$jazz.isBranched).toBe(true);
           updates.push(person);
@@ -856,9 +859,11 @@ describe("CoMap Branching", async () => {
       );
 
       await waitFor(() => expect(updates).toHaveLength(1));
-      expect(updates[0]?.name).toBe("John Smith");
-      expect(updates[0]?.age).toBe(31);
-      expect(updates[0]?.email).toBe("john.smith@example.com");
+      const first = updates[0];
+      assert(first?.$isLoaded);
+      expect(first.name).toBe("John Smith");
+      expect(first.age).toBe(31);
+      expect(first.email).toBe("john.smith@example.com");
 
       // Make additional changes to the branch
       branch.$jazz.applyDiff({
@@ -867,9 +872,11 @@ describe("CoMap Branching", async () => {
 
       // Verify we get the updated branch data
       expect(updates).toHaveLength(2);
-      expect(updates[1]?.name).toBe("John Updated");
-      expect(updates[1]?.age).toBe(31);
-      expect(updates[1]?.email).toBe("john.smith@example.com");
+      const second = updates[1];
+      assert(second?.$isLoaded);
+      expect(second.name).toBe("John Updated");
+      expect(second.age).toBe(31);
+      expect(second.email).toBe("john.smith@example.com");
 
       // Verify original is still unchanged
       expect(originalPerson.name).toBe("John Doe");

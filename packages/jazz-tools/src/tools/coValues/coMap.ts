@@ -418,13 +418,13 @@ export class CoMap extends CoValueBase implements CoValue {
   static subscribe<M extends CoMap, const R extends RefsToResolve<M> = true>(
     this: CoValueClass<M>,
     id: ID<M>,
-    listener: (value: Resolved<M, R>, unsubscribe: () => void) => void,
+    listener: (value: Settled<Resolved<M, R>>, unsubscribe: () => void) => void,
   ): () => void;
   static subscribe<M extends CoMap, const R extends RefsToResolve<M> = true>(
     this: CoValueClass<M>,
     id: ID<M>,
     options: SubscribeListenerOptions<M, R>,
-    listener: (value: Resolved<M, R>, unsubscribe: () => void) => void,
+    listener: (value: Settled<Resolved<M, R>>, unsubscribe: () => void) => void,
   ): () => void;
   static subscribe<M extends CoMap, const R extends RefsToResolve<M>>(
     this: CoValueClass<M>,
@@ -715,7 +715,10 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
    **/
   subscribe<Map extends CoMap, const R extends RefsToResolve<Map> = true>(
     this: CoMapJazzApi<Map>,
-    listener: (value: Resolved<Map, R>, unsubscribe: () => void) => void,
+    listener: (
+      value: Settled<Resolved<Map, R>>,
+      unsubscribe: () => void,
+    ) => void,
   ): () => void;
   subscribe<Map extends CoMap, const R extends RefsToResolve<Map> = true>(
     this: CoMapJazzApi<Map>,
@@ -723,7 +726,10 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
       resolve?: RefsToResolveStrict<Map, R>;
       unstable_branch?: BranchDefinition;
     },
-    listener: (value: Resolved<Map, R>, unsubscribe: () => void) => void,
+    listener: (
+      value: Settled<Resolved<Map, R>>,
+      unsubscribe: () => void,
+    ) => void,
   ): () => void;
   subscribe<Map extends CoMap, const R extends RefsToResolve<Map>>(
     this: CoMapJazzApi<Map>,
