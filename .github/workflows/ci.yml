@@ -159,6 +159,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: groove-server
+
       - name: Install pnpm
         uses: pnpm/action-setup@v4
 
@@ -176,6 +184,14 @@ jobs:
         with:
           name: build-artifacts
           path: .
+
+      - name: Build groove-server
+        run: cargo build --release -p groove-server
+
+      - name: Start groove-server
+        run: |
+          ./target/release/groove-server &
+          sleep 2
 
       - name: Install Playwright browsers
         run: cd sync-demo && pnpm exec playwright install --with-deps
