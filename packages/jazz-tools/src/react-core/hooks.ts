@@ -987,12 +987,7 @@ function useSubscriptionsSelector<
   // Cache current values to avoid infinite loops
   const cachedCurrentValuesRef = useRef<T>([] as unknown as T);
   const getCurrentValues = useCallback(() => {
-    const newValues = subscriptions.map((sub) => {
-      if (!sub) {
-        return null;
-      }
-      return sub.getCurrentValue();
-    });
+    const newValues = subscriptions.map((sub) => sub.getCurrentValue());
 
     // Check if values have changed by comparing each element
     const cached = cachedCurrentValuesRef.current;
