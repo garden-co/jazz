@@ -102,7 +102,9 @@ export const jazzPluginClient = () => {
                 "x-jazz-auth",
                 JSON.stringify({
                   accountID: credentials.accountID,
-                  secretSeed: credentials.secretSeed,
+                  secretSeed: credentials.secretSeed
+                    ? Array.from(credentials.secretSeed)
+                    : undefined,
                   accountSecret: credentials.accountSecret,
                 }),
               );
