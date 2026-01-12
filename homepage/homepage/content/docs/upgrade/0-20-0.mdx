@@ -67,7 +67,7 @@ Task.create({ text: "X" }, { unique: 123 }); // SUPPORTED (but use string instea
 
 ### Edge runtimes
 
-If you use WASM crypto on Edge runtimes, you need to ensure that WASM is available and initialized, there is no more fallback to Javascript crypto. 
+If you use WASM crypto on Edge runtimes, you need to ensure that WASM is available and initialized, there is no more fallback to Javascript crypto.
 See more details at [WASM on Edge runtimes](/docs/react/server-side/setup#wasm-on-edge-runtimes).
 
 <CodeGroup>
@@ -196,6 +196,27 @@ export function MyJazzProvider({ children }: { children: React.ReactNode }) {
       {children}
     </JazzReactNativeProvider>
   );
+}
+```
+</CodeGroup>
+
+### New `deleted` loading state
+
+With the introduction of [CoValue deletion](/docs/core-concepts/covalues/deleting), there's a new `deleted` loading state. If you're handling loading states explicitly, you should add a case for `deleted`:
+
+<CodeGroup>
+```tsx
+if (!project.$isLoaded) {
+  switch (project.$jazz.loadingState) {
+    case "loading":
+      return "Loading project...";
+    case "unavailable":
+      return "Project not found";
+    case "unauthorized":
+      return "Project not accessible";
+    case "deleted":
+      return "Project deleted";
+  }
 }
 ```
 </CodeGroup>
