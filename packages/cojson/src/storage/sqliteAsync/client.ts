@@ -187,7 +187,7 @@ export class SQLiteClientAsync
        WHERE ses IN (
          SELECT rowID FROM sessions
          WHERE coValue = ?
-           AND sessionID NOT LIKE '%_deleted'
+           AND sessionID NOT LIKE '%$'
        )`,
       [coValueRow.rowID],
     );
@@ -197,7 +197,7 @@ export class SQLiteClientAsync
        WHERE ses IN (
          SELECT rowID FROM sessions
          WHERE coValue = ?
-           AND sessionID NOT LIKE '%_deleted'
+           AND sessionID NOT LIKE '%$'
        )`,
       [coValueRow.rowID],
     );
@@ -205,7 +205,7 @@ export class SQLiteClientAsync
     await this.db.run(
       `DELETE FROM sessions
        WHERE coValue = ?
-         AND sessionID NOT LIKE '%_deleted'`,
+         AND sessionID NOT LIKE '%$'`,
       [coValueRow.rowID],
     );
   }

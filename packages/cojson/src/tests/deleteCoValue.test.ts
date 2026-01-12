@@ -1,6 +1,6 @@
 import { assert, beforeEach, expect, test } from "vitest";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
-import { type SessionID, isDeletedSessionID } from "../ids.js";
+import { type SessionID, isDeleteSessionID } from "../ids.js";
 import type { CoValueCore } from "../exports.js";
 import {
   fillCoMapWithLargeData,
@@ -19,7 +19,7 @@ const Crypto = await WasmCrypto.create();
 function makeDeleteMarkerTransaction(core: CoValueCore, madeAt?: number) {
   core.makeTransaction([], "trusting", { deleted: true }, madeAt);
   const deleteSessionID = Object.keys(core.knownState().sessions).find(
-    (sessionID) => isDeletedSessionID(sessionID as SessionID),
+    (sessionID) => isDeleteSessionID(sessionID as SessionID),
   ) as SessionID;
   assert(deleteSessionID);
   const log = core.verified?.sessions.get(deleteSessionID);
@@ -90,7 +90,7 @@ test("deleteCoValue creates a trusting {deleted:true} tombstone tx, marks the se
   expect(last!.tx.privacy).toBe("trusting");
   expect(last!.changes).toEqual([]);
   expect(last!.meta).toMatchObject({ deleted: true });
-  expect(last!.txID.sessionID.endsWith("_deleted")).toBe(true);
+  expect(last!.txID.sessionID).toMatch(/_session_d[1-9A-HJ-NP-Za-km-z]+\$$/); // Delete session format
 });
 
 test("rejects delete marker ingestion from non-admin (ownedByGroup, skipVerify=false)", async () => {
@@ -385,7 +385,7 @@ test("deleted coValues return only the deleted session/transaction on the knownS
   const knownState = map.core.knownState();
   expect(
     Object.keys(knownState.sessions).every((sessionID) =>
-      isDeletedSessionID(sessionID as SessionID),
+      isDeleteSessionID(sessionID as SessionID),
     ),
   ).toBe(true);
   expect(Object.keys(knownState.sessions)).toHaveLength(1);
@@ -417,7 +417,7 @@ test("deleted coValues return only the deleted session/transaction on the knownS
 
   expect(
     Object.keys(streamingSessions).every((sessionID) =>
-      isDeletedSessionID(sessionID as SessionID),
+      isDeleteSessionID(sessionID as SessionID),
     ),
   ).toBe(true);
   expect(Object.keys(streamingSessions)).toHaveLength(1);
@@ -465,7 +465,7 @@ test("waitForSync should wait only for the delete session/transaction even if th
 
   expect(
     Object.keys(mapOnSyncServer.knownState().sessions).every((sessionID) =>
-      isDeletedSessionID(sessionID as SessionID),
+      isDeleteSessionID(sessionID as SessionID),
     ),
   ).toBe(true);
   expect(jazzCloud.node.expectCoValueLoaded(map.id).isDeleted).toBe(true);

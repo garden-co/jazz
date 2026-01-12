@@ -19,7 +19,7 @@ import {
 } from "../crypto/crypto.js";
 import {
   AgentID,
-  isDeletedSessionID,
+  isDeleteSessionID,
   RawCoID,
   SessionID,
   TransactionID,
@@ -687,12 +687,12 @@ export class CoValueCore {
 
     // Detect + validate delete transactions during ingestion
     // Delete transactions are:
-    // - in a delete session (sessionID ends with `_deleted`)
+    // - in a delete session (sessionID ends with `$`)
     // - trusting (unencrypted)
     // - have meta `{ deleted: true }`
     let deleteTransaction: Transaction | undefined = undefined;
 
-    if (isDeletedSessionID(sessionID)) {
+    if (isDeleteSessionID(sessionID)) {
       const txCount =
         this.verified.sessions.get(sessionID)?.transactions.length ?? 0;
       if (txCount > 0 || newTransactions.length > 1) {
@@ -778,7 +778,7 @@ export class CoValueCore {
 
     // sync should never try to add transactions to a deleted coValue
     // this can only happen if `tryAddTransactions` is called directly, without going through `handleNewContent`
-    if (this.isDeleted && !isDeletedSessionID(sessionID)) {
+    if (this.isDeleted && !isDeleteSessionID(sessionID)) {
       return {
         type: "CoValueDeleted",
         id: this.id,

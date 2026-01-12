@@ -13,7 +13,7 @@ import {
 import { CoValueCore } from "./coValueCore/coValueCore.js";
 import { CoValueHeader, Transaction } from "./coValueCore/verifiedState.js";
 import { Signature } from "./crypto/crypto.js";
-import { isDeletedSessionID, RawCoID, SessionID, isRawCoID } from "./ids.js";
+import { isDeleteSessionID, RawCoID, SessionID, isRawCoID } from "./ids.js";
 import { LocalNode } from "./localNode.js";
 import { logger } from "./logger.js";
 import { CoValuePriority } from "./priority.js";
@@ -731,7 +731,7 @@ export class SyncManager {
       sessionID,
       newContentForSession,
     ] of getSessionEntriesFromContentMessage(msg)) {
-      if (wasAlreadyDeleted && !isDeletedSessionID(sessionID)) {
+      if (wasAlreadyDeleted && !isDeleteSessionID(sessionID)) {
         continue;
       }
 

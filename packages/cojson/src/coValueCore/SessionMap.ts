@@ -7,7 +7,7 @@ import type {
   Signature,
   SignerID,
 } from "../crypto/crypto.js";
-import { isDeletedSessionID, RawCoID, SessionID } from "../ids.js";
+import { isDeleteSessionID, RawCoID, SessionID } from "../ids.js";
 import { parseJSON, Stringified } from "../jsonStringify.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { TryAddTransactionsError } from "./coValueCore.js";
@@ -74,7 +74,7 @@ export class SessionMap {
     this.invalidateKnownStateCache();
 
     for (const [sessionID, sessionLog] of this.sessions.entries()) {
-      if (!isDeletedSessionID(sessionID)) {
+      if (!isDeleteSessionID(sessionID)) {
         continue;
       }
 
@@ -174,7 +174,7 @@ export class SessionMap {
     newSignature: Signature,
     skipVerify: boolean = false,
   ) {
-    if (this.isDeleted && !isDeletedSessionID(sessionID)) {
+    if (this.isDeleted && !isDeleteSessionID(sessionID)) {
       throw new Error("Cannot add transactions to a deleted coValue");
     }
 

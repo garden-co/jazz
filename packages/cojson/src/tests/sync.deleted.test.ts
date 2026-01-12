@@ -8,7 +8,7 @@ import {
   setupTestNode,
   waitFor,
 } from "./testUtils";
-import { isDeletedSessionID, SessionID } from "../ids";
+import { isDeleteSessionID, SessionID } from "../ids";
 
 let jazzCloud: ReturnType<typeof setupTestNode>;
 
@@ -287,7 +287,7 @@ describe("syncing deleted coValues", () => {
     expect(Object.keys(sessions)).toHaveLength(2);
     expect(
       Object.keys(sessions).every((sessionID) =>
-        isDeletedSessionID(sessionID as SessionID),
+        isDeleteSessionID(sessionID as SessionID),
       ),
     ).toBe(true);
   });

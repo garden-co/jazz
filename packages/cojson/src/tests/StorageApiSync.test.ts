@@ -668,7 +668,7 @@ describe("StorageApiSync", () => {
       const sessionIDs = await getCoValueStoredSessions(storage, map.id);
 
       expect(sessionIDs).toHaveLength(1);
-      expect(sessionIDs[0]).toMatch(/_deleted$/);
+      expect(sessionIDs[0]).toMatch(/_session_d[1-9A-HJ-NP-Za-km-z]+\$$/); // Delete session format
     });
 
     test("eraseAllDeletedCoValues deletes history but preserves tombstone", async () => {
@@ -721,7 +721,7 @@ describe("StorageApiSync", () => {
       const sessionIDs = await getCoValueStoredSessions(clientStorage, map.id);
 
       expect(sessionIDs).toHaveLength(1);
-      expect(sessionIDs[0]).toMatch(/_deleted$/);
+      expect(sessionIDs[0]).toMatch(/_session_d[1-9A-HJ-NP-Za-km-z]+\$$/); // Delete session format
     });
 
     test("eraseAllDeletedCoValues does not break when called while a coValue is streaming from storage", async () => {

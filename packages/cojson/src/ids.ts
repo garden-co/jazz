@@ -36,13 +36,16 @@ export function isAgentID(id: string): id is AgentID {
   );
 }
 
-export type SessionID = `${RawAccountID | AgentID}_session_z${string}`;
-export type DeletedSessionID = `${SessionID}_deleted`;
+export type ActiveSessionID = `${RawAccountID | AgentID}_session_z${string}`;
+export type DeleteSessionID = `${RawAccountID | AgentID}_session_d${string}$`;
+export type SessionID = ActiveSessionID | DeleteSessionID;
 
-export function isDeletedSessionID(
-  sessionID: SessionID | DeletedSessionID,
-): sessionID is DeletedSessionID {
-  return sessionID.endsWith("_deleted");
+const CHAR_DOLLAR = "$".charCodeAt(0);
+
+export function isDeleteSessionID(
+  sessionID: SessionID,
+): sessionID is DeleteSessionID {
+  return sessionID.charCodeAt(sessionID.length - 1) === CHAR_DOLLAR;
 }
 
 export function isParentGroupReference(

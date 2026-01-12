@@ -92,7 +92,7 @@ export class IDBTransaction implements DBTransactionInterfaceAsync {
     const sessionsToDelete = (
       sessions as { rowID: number; sessionID: string }[]
     )
-      .filter((s) => !s.sessionID.endsWith("_deleted"))
+      .filter((s) => !s.sessionID.endsWith("$"))
       .map((s) => s.rowID);
 
     for (const sessionRowID of sessionsToDelete) {

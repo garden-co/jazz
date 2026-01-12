@@ -17,7 +17,7 @@ import {
   emptyKnownState,
   setSessionCounter,
 } from "../knownState.js";
-import { isDeletedSessionID } from "../ids.js";
+import { isDeleteSessionID } from "../ids.js";
 import {
   collectNewTxs,
   getDependedOnCoValues,
@@ -273,7 +273,7 @@ export class StorageApiSync implements StorageAPI {
 
     for (const sessionID of Object.keys(msg.new) as SessionID[]) {
       this.dbClient.transaction((tx) => {
-        if (this.deletedValues.has(id) && isDeletedSessionID(sessionID)) {
+        if (this.deletedValues.has(id) && isDeleteSessionID(sessionID)) {
           tx.markCoValueAsDeleted(id);
         }
 

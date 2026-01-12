@@ -15,7 +15,7 @@ import {
   SignerID,
 } from "../crypto/crypto.js";
 import {
-  isDeletedSessionID,
+  isDeleteSessionID,
   RawCoID,
   SessionID,
   TransactionID,
@@ -218,7 +218,7 @@ export class VerifiedState {
     const sessionSent = knownState?.sessions;
 
     for (const [sessionID, log] of this.sessions.sessions) {
-      if (this.isDeleted && !isDeletedSessionID(sessionID)) {
+      if (this.isDeleted && !isDeleteSessionID(sessionID)) {
         continue;
       }
 

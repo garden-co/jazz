@@ -31,7 +31,7 @@ import type {
   StoredCoValueRow,
   StoredSessionRow,
 } from "./types.js";
-import { isDeletedSessionID } from "../ids.js";
+import { isDeleteSessionID } from "../ids.js";
 
 export class StorageApiAsync implements StorageAPI {
   private readonly dbClient: DBClientInterfaceAsync;
@@ -323,7 +323,7 @@ export class StorageApiAsync implements StorageAPI {
           sessionID,
         );
 
-        if (this.deletedValues.has(id) && isDeletedSessionID(sessionID)) {
+        if (this.deletedValues.has(id) && isDeleteSessionID(sessionID)) {
           await tx.markCoValueAsDeleted(id);
         }
 
