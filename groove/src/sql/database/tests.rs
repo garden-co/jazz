@@ -4289,7 +4289,7 @@ fn migration_descriptor_chain() {
 
     // Get initial descriptor
     let desc_v1 = db.get_descriptor("notes").unwrap();
-    let id_v1 = desc_v1.compute_id();
+    let id_v1 = db.get_descriptor_id("notes").unwrap();
     assert!(desc_v1.parent_descriptors.is_empty());
 
     // Migrate: add optional column

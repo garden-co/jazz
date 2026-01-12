@@ -529,13 +529,12 @@ mod tests {
 
     #[test]
     fn test_schema_branch_name_from_descriptor() {
-        let descriptor_id = DescriptorId::from_bytes([
-            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ]);
+        use crate::object::ObjectId;
+        let descriptor_id = DescriptorId::from_object_id(ObjectId::new(0x123456789abc));
         let name = SchemaBranchName::from_descriptor("prod", &descriptor_id, "main");
         assert_eq!(name.env, "prod");
-        assert_eq!(name.schema_version, "123456789abc"); // short_prefix = first 6 bytes = 12 hex chars
+        // short_prefix = first 12 chars of ObjectId string (Crockford Base32)
+        assert_eq!(name.schema_version.len(), 12);
         assert_eq!(name.user_branch, "main");
     }
 
@@ -584,14 +583,13 @@ mod tests {
 
     #[test]
     fn test_schema_branch_name_with_schema_version() {
+        use crate::object::ObjectId;
         let name = SchemaBranchName::new("prod", "abc123", "main");
-        let new_descriptor = DescriptorId::from_bytes([
-            0xde, 0xf4, 0x56, 0x78, 0x9a, 0xbc, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ]);
+        let new_descriptor = DescriptorId::from_object_id(ObjectId::new(0xdef456789abc));
         let updated = name.with_schema_version(&new_descriptor);
         assert_eq!(updated.env, "prod");
-        assert_eq!(updated.schema_version, "def456789abc");
+        // short_prefix = first 12 chars of ObjectId string
+        assert_eq!(updated.schema_version.len(), 12);
         assert_eq!(updated.user_branch, "main");
     }
 

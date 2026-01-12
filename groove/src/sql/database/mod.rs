@@ -750,7 +750,7 @@ impl Database {
         let mut policies = HashMap::new();
 
         // Restore each table from its descriptor
-        for (table_name, expected_descriptor_id) in &catalog.tables {
+        for table_name in catalog.tables.keys() {
             // Derive the ObjectId where the descriptor is stored (deterministic from table name)
             let descriptor_key = format!("descriptor:{}", table_name);
             let descriptor_object_id = crate::ObjectId::from_key(&descriptor_key);
@@ -775,17 +775,6 @@ impl Database {
 
             let descriptor = TableDescriptor::from_bytes(&descriptor_bytes)
                 .map_err(|e| DatabaseError::Storage(format!("descriptor parse error: {}", e)))?;
-
-            // Verify content hash matches expected (optional integrity check)
-            let actual_descriptor_id = descriptor.compute_id();
-            if actual_descriptor_id != *expected_descriptor_id {
-                // Log warning but continue - the descriptor may have been updated
-                // In the future, this could be a hard error for strict verification
-                eprintln!(
-                    "Warning: Descriptor hash mismatch for table '{}': expected {}, got {}",
-                    table_name, expected_descriptor_id, actual_descriptor_id
-                );
-            }
 
             // Load schema object
             node.load_object(
@@ -1084,8 +1073,8 @@ impl Database {
             index_object_ids,
         };
 
-        // Compute content-addressed descriptor ID
-        let content_hash = descriptor.compute_id();
+        // Generate a new descriptor ID
+        let desc_id = DescriptorId::new();
 
         self.state
             .node
@@ -1104,8 +1093,8 @@ impl Database {
             .unwrap()
             .insert(schema.name.clone(), descriptor_id);
 
-        // Update catalog with the new table (using content-addressed ID)
-        self.update_catalog_add_table(&schema.name, content_hash)?;
+        // Update catalog with the new table
+        self.update_catalog_add_table(&schema.name, desc_id)?;
 
         // Cache schema
         self.state
@@ -4136,26 +4125,40 @@ impl Database {
         let lens = lens_result.lens;
         let warnings = lens_result.warnings;
 
-        // Get the current descriptor
-        let old_descriptor = {
+        // Get the current descriptor and its ID from the catalog
+        let (old_descriptor, old_descriptor_id) = {
             let descriptor_objects = self.state.descriptor_objects.read().unwrap();
-            let descriptor_id = descriptor_objects
+            let descriptor_object_id = descriptor_objects
                 .get(table)
                 .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
             let data = self
                 .state
                 .node
-                .read(*descriptor_id, "main")
+                .read(*descriptor_object_id, "main")
                 .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
                 .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
-            TableDescriptor::from_bytes(&data)
-                .map_err(|e| MigrationError::CatalogError(e.to_string()))?
+            let descriptor = TableDescriptor::from_bytes(&data)
+                .map_err(|e| MigrationError::CatalogError(e.to_string()))?;
+
+            // Get the descriptor ID from the catalog
+            let catalog_bytes = self
+                .state
+                .node
+                .read(self.state.catalog_object_id, "main")
+                .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
+                .ok_or_else(|| DatabaseError::Storage("catalog not found".to_string()))?;
+            let catalog = Catalog::from_bytes(&catalog_bytes)
+                .map_err(|e| DatabaseError::Storage(e.to_string()))?;
+            let old_id = catalog
+                .get_descriptor_id(table)
+                .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+
+            (descriptor, old_id)
         };
 
         // Create new descriptor with parent pointer and lens
-        let old_descriptor_id = old_descriptor.compute_id();
         let new_descriptor = TableDescriptor {
             schema: new_schema.clone(),
             policies: old_descriptor.policies.clone(),
@@ -4165,7 +4168,7 @@ impl Database {
             schema_object_id: old_descriptor.schema_object_id,
             index_object_ids: old_descriptor.index_object_ids.clone(),
         };
-        let new_descriptor_id = new_descriptor.compute_id();
+        let new_descriptor_id = DescriptorId::new();
 
         // Read all current rows
         let rows = self.state.read_all_rows(table);
@@ -4255,7 +4258,7 @@ impl Database {
         let mut catalog = Catalog::from_bytes(&catalog_data)
             .map_err(|e| DatabaseError::Storage(e.to_string()))?;
 
-        catalog.update_table(table.to_string(), new_descriptor);
+        catalog.update_table(table.to_string(), new_descriptor_id);
 
         self.state
             .node
@@ -4307,6 +4310,23 @@ impl Database {
 
         let data = self.state.node.read(*descriptor_id, "main").ok()??;
         TableDescriptor::from_bytes(&data).ok()
+    }
+
+    /// Get the current descriptor ID for a table from the catalog.
+    pub fn get_descriptor_id(&self, table: &str) -> Result<DescriptorId, DatabaseError> {
+        let catalog_bytes = self
+            .state
+            .node
+            .read(self.state.catalog_object_id, "main")
+            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
+            .ok_or_else(|| DatabaseError::Storage("catalog not found".to_string()))?;
+
+        let catalog = Catalog::from_bytes(&catalog_bytes)
+            .map_err(|e| DatabaseError::Storage(e.to_string()))?;
+
+        catalog
+            .get_descriptor_id(table)
+            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))
     }
 }
 

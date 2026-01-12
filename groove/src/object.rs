@@ -95,6 +95,11 @@ impl ObjectId {
         ObjectId(value)
     }
 
+    /// Create a new random ObjectId using UUID v7 (timestamp + random).
+    pub fn new_random() -> Self {
+        ObjectId(uuid::Uuid::now_v7().as_u128())
+    }
+
     /// Create a deterministic ObjectId from a string key.
     /// Uses FNV-1a hash to generate a reproducible ID.
     /// This is useful when multiple clients need to reference the same object

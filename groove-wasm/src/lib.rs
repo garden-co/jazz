@@ -624,8 +624,8 @@ impl WasmDatabase {
             .map_err(|e| JsValue::from_str(&format!("serialization error: {:?}", e)))
     }
 
-    /// Get the descriptor ID (content hash) for a table.
-    /// Returns the hex-encoded BLAKE3 hash of the table descriptor.
+    /// Get the descriptor ID for a table.
+    /// Returns the ObjectId string (Crockford Base32 encoded).
     #[wasm_bindgen(js_name = getDescriptorId)]
     pub fn get_descriptor_id(&self, table: &str) -> Result<String, JsValue> {
         let descriptor_id = self
@@ -633,7 +633,7 @@ impl WasmDatabase {
             .get_descriptor_id(table)
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
-        Ok(hex::encode(descriptor_id.as_bytes()))
+        Ok(descriptor_id.to_string())
     }
 
     /// Diff two schemas and return the changes.
@@ -759,7 +759,7 @@ impl WasmDatabase {
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
 
         let js_result = JsMigrationResult {
-            new_descriptor_id: hex::encode(result.new_descriptor_id.as_bytes()),
+            new_descriptor_id: result.new_descriptor_id.to_string(),
             rows_migrated: result.rows_migrated as u32,
             lens: lens_to_js(&result.lens),
             warnings: result

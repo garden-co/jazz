@@ -3,18 +3,14 @@
 //! The catalog stores metadata about tables, allowing a Database to be
 //! restored from an Environment after being thrown away.
 //!
-//! ## Content-Addressed Descriptors
+//! ## Schema Descriptors
 //!
-//! Table descriptors are content-addressed using BLAKE3 hashes. Each descriptor
-//! contains:
+//! Table descriptors are identified by ObjectIds (like other objects in Jazz).
+//! Each descriptor contains:
 //! - The table schema (columns, types)
 //! - Access control policies
 //! - Parent descriptor IDs (for schema history/migration DAG)
 //! - References to associated objects (rows, indexes)
-//!
-//! The `DescriptorId` is computed from the canonical serialization of all
-//! descriptor content, making it a unique identifier for a specific schema
-//! version including its migration history.
 
 use std::collections::HashMap;
 
@@ -23,46 +19,64 @@ use crate::sql::lens::Lens;
 use crate::sql::policy::TablePolicies;
 use crate::sql::schema::TableSchema;
 
-/// A descriptor ID is the BLAKE3 hash of the descriptor's canonical representation.
-/// This makes descriptors content-addressed, enabling schema version tracking.
+/// A descriptor ID wraps an ObjectId for type safety.
+/// Schema descriptors are identified by ObjectIds just like other Jazz objects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DescriptorId([u8; 32]);
+pub struct DescriptorId(ObjectId);
 
 impl DescriptorId {
-    /// Create a DescriptorId from raw bytes.
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
-        DescriptorId(bytes)
+    /// Create a new DescriptorId with a fresh ObjectId.
+    pub fn new() -> Self {
+        DescriptorId(ObjectId::new_random())
     }
 
-    /// Get the raw bytes of the descriptor ID.
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
+    /// Create a DescriptorId from an ObjectId.
+    pub fn from_object_id(id: ObjectId) -> Self {
+        DescriptorId(id)
     }
 
-    /// Get the first N bytes as a hash prefix (for branch naming).
-    pub fn prefix(&self, len: usize) -> String {
-        let len = len.min(32);
-        hex::encode(&self.0[..len])
+    /// Get the underlying ObjectId.
+    pub fn as_object_id(&self) -> ObjectId {
+        self.0
     }
 
-    /// Get the default prefix length (6 bytes = 12 hex chars).
+    /// Get a short prefix for branch naming (first 12 chars of the ObjectId string).
     pub fn short_prefix(&self) -> String {
-        self.prefix(6)
+        let s = self.0.to_string();
+        s.chars().take(12).collect()
+    }
+}
+
+impl Default for DescriptorId {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl std::fmt::Display for DescriptorId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex::encode(self.0))
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<ObjectId> for DescriptorId {
+    fn from(id: ObjectId) -> Self {
+        DescriptorId(id)
+    }
+}
+
+impl From<DescriptorId> for ObjectId {
+    fn from(id: DescriptorId) -> Self {
+        id.0
     }
 }
 
 /// Database catalog - stored in a well-known object.
 ///
-/// Maps table names to their current descriptor IDs (content-addressed).
+/// Maps table names to their current descriptor IDs.
 #[derive(Debug, Clone, Default)]
 pub struct Catalog {
-    /// Table name → current descriptor ID (content-addressed hash)
+    /// Table name → current descriptor ID
     pub tables: HashMap<String, DescriptorId>,
 }
 
@@ -71,14 +85,14 @@ impl Catalog {
         Self::default()
     }
 
-    /// Register a table with its descriptor.
-    pub fn register_table(&mut self, name: String, descriptor: &TableDescriptor) {
-        self.tables.insert(name, descriptor.compute_id());
+    /// Register a table with its descriptor ID.
+    pub fn register_table(&mut self, name: String, descriptor_id: DescriptorId) {
+        self.tables.insert(name, descriptor_id);
     }
 
-    /// Update a table's descriptor (for migrations).
-    pub fn update_table(&mut self, name: String, descriptor: TableDescriptor) {
-        self.tables.insert(name, descriptor.compute_id());
+    /// Update a table's descriptor ID (for migrations).
+    pub fn update_table(&mut self, name: String, descriptor_id: DescriptorId) {
+        self.tables.insert(name, descriptor_id);
     }
 
     /// Get the current descriptor ID for a table.
@@ -93,7 +107,7 @@ impl Catalog {
     /// - For each table:
     ///   - u32: name length
     ///   - bytes: name (UTF-8)
-    ///   - 32 bytes: DescriptorId (BLAKE3 hash)
+    ///   - 16 bytes: DescriptorId (ObjectId)
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
 
@@ -106,8 +120,8 @@ impl Catalog {
             buf.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
             buf.extend_from_slice(name_bytes);
 
-            // DescriptorId (32 bytes)
-            buf.extend_from_slice(id.as_bytes());
+            // DescriptorId (16 bytes - ObjectId)
+            buf.extend_from_slice(&u128::from(id.as_object_id()).to_le_bytes());
         }
 
         buf
@@ -143,13 +157,14 @@ impl Catalog {
                 .map_err(|_| CatalogError::InvalidUtf8)?;
             pos += name_len;
 
-            // DescriptorId (32 bytes)
-            if data.len() < pos + 32 {
+            // DescriptorId (16 bytes - ObjectId)
+            if data.len() < pos + 16 {
                 return Err(CatalogError::UnexpectedEof);
             }
-            let id_bytes: [u8; 32] = data[pos..pos + 32].try_into().unwrap();
-            let id = DescriptorId::from_bytes(id_bytes);
-            pos += 32;
+            let id_bytes: [u8; 16] = data[pos..pos + 16].try_into().unwrap();
+            let object_id = ObjectId::new(u128::from_le_bytes(id_bytes));
+            let id = DescriptorId::from_object_id(object_id);
+            pos += 16;
 
             tables.insert(name, id);
         }
@@ -160,8 +175,8 @@ impl Catalog {
 
 /// Per-table descriptor - stored in descriptor object.
 ///
-/// Contains all metadata needed to restore a table. Descriptors are
-/// content-addressed: their ID is computed from the hash of their content.
+/// Contains all metadata needed to restore a table. Descriptors are identified
+/// by ObjectIds (wrapped in DescriptorId for type safety).
 ///
 /// ## Schema History (DAG)
 ///
@@ -202,59 +217,6 @@ pub struct TableDescriptor {
 }
 
 impl TableDescriptor {
-    /// Compute the content-addressed descriptor ID.
-    ///
-    /// The ID is a BLAKE3 hash of the descriptor's canonical representation,
-    /// which includes schema, policies, parent pointers, lenses, and all metadata.
-    /// This ensures that any change to the descriptor produces a different ID.
-    pub fn compute_id(&self) -> DescriptorId {
-        let mut hasher = blake3::Hasher::new();
-
-        // Hash schema (canonical form)
-        let schema_bytes = self.schema.to_bytes();
-        hasher.update(&(schema_bytes.len() as u64).to_le_bytes());
-        hasher.update(&schema_bytes);
-
-        // Hash policies (canonical form)
-        let policies_bytes = self.policies.to_bytes();
-        hasher.update(&(policies_bytes.len() as u64).to_le_bytes());
-        hasher.update(&policies_bytes);
-
-        // Hash parent descriptors with their lenses (sorted by parent ID for determinism)
-        // Each parent has a corresponding lens at the same index
-        let mut parent_lens_pairs: Vec<_> = self
-            .parent_descriptors
-            .iter()
-            .zip(self.lenses.iter())
-            .collect();
-        parent_lens_pairs.sort_by_key(|(p, _)| p.as_bytes());
-        hasher.update(&(parent_lens_pairs.len() as u64).to_le_bytes());
-        for (parent, lens) in parent_lens_pairs {
-            hasher.update(parent.as_bytes());
-            let lens_bytes = lens.to_bytes();
-            hasher.update(&(lens_bytes.len() as u64).to_le_bytes());
-            hasher.update(&lens_bytes);
-        }
-
-        // Hash rows_object_id
-        hasher.update(&u128::from(self.rows_object_id).to_le_bytes());
-
-        // Hash schema_object_id
-        hasher.update(&u128::from(self.schema_object_id).to_le_bytes());
-
-        // Hash index objects (sorted by column name for determinism)
-        let mut sorted_indexes: Vec<_> = self.index_object_ids.iter().collect();
-        sorted_indexes.sort_by_key(|(name, _)| *name);
-        hasher.update(&(sorted_indexes.len() as u64).to_le_bytes());
-        for (col_name, id) in sorted_indexes {
-            hasher.update(&(col_name.len() as u64).to_le_bytes());
-            hasher.update(col_name.as_bytes());
-            hasher.update(&u128::from(*id).to_le_bytes());
-        }
-
-        DescriptorId(*hasher.finalize().as_bytes())
-    }
-
     /// Serialize descriptor to bytes.
     ///
     /// Format:
@@ -262,7 +224,7 @@ impl TableDescriptor {
     /// - policies bytes (with length prefix)
     /// - u32: number of parent descriptors (and lenses)
     /// - For each parent:
-    ///   - 32 bytes: DescriptorId
+    ///   - 16 bytes: DescriptorId (ObjectId)
     ///   - u32: lens length
     ///   - bytes: lens
     /// - 16 bytes: rows_object_id
@@ -288,7 +250,7 @@ impl TableDescriptor {
         // Parent descriptors with their lenses
         buf.extend_from_slice(&(self.parent_descriptors.len() as u32).to_le_bytes());
         for (parent, lens) in self.parent_descriptors.iter().zip(self.lenses.iter()) {
-            buf.extend_from_slice(parent.as_bytes());
+            buf.extend_from_slice(&u128::from(parent.as_object_id()).to_le_bytes());
             let lens_bytes = lens.to_bytes();
             buf.extend_from_slice(&(lens_bytes.len() as u32).to_le_bytes());
             buf.extend_from_slice(&lens_bytes);
@@ -356,13 +318,14 @@ impl TableDescriptor {
         let mut parent_descriptors = Vec::with_capacity(num_parents);
         let mut lenses = Vec::with_capacity(num_parents);
         for _ in 0..num_parents {
-            // DescriptorId
-            if data.len() < pos + 32 {
+            // DescriptorId (16 bytes - ObjectId)
+            if data.len() < pos + 16 {
                 return Err(CatalogError::UnexpectedEof);
             }
-            let parent_bytes: [u8; 32] = data[pos..pos + 32].try_into().unwrap();
-            parent_descriptors.push(DescriptorId::from_bytes(parent_bytes));
-            pos += 32;
+            let parent_bytes: [u8; 16] = data[pos..pos + 16].try_into().unwrap();
+            let parent_object_id = ObjectId::new(u128::from_le_bytes(parent_bytes));
+            parent_descriptors.push(DescriptorId::from_object_id(parent_object_id));
+            pos += 16;
 
             // Lens length
             if data.len() < pos + 4 {
@@ -477,8 +440,8 @@ mod tests {
     fn catalog_roundtrip() {
         let mut catalog = Catalog::new();
         // Create some test descriptor IDs
-        let desc_id1 = DescriptorId::from_bytes([1u8; 32]);
-        let desc_id2 = DescriptorId::from_bytes([2u8; 32]);
+        let desc_id1 = DescriptorId::from_object_id(ObjectId::new(1));
+        let desc_id2 = DescriptorId::from_object_id(ObjectId::new(2));
 
         catalog.tables.insert("users".to_string(), desc_id1);
         catalog.tables.insert("posts".to_string(), desc_id2);
@@ -550,8 +513,8 @@ mod tests {
             }],
         };
 
-        let parent1 = DescriptorId::from_bytes([1u8; 32]);
-        let parent2 = DescriptorId::from_bytes([2u8; 32]);
+        let parent1 = DescriptorId::from_object_id(ObjectId::new(1));
+        let parent2 = DescriptorId::from_object_id(ObjectId::new(2));
 
         // Create a lens for each parent
         let lens1 = Lens::from_forward(vec![ColumnTransform::rename("old_name", "new_name")]);
@@ -581,113 +544,35 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_id_computation() {
-        let schema = TableSchema {
-            name: "users".to_string(),
-            columns: vec![ColumnDef {
-                name: "id".to_string(),
-                ty: ColumnType::I32,
-                nullable: false,
-            }],
-        };
+    fn descriptor_id_basics() {
+        // DescriptorId wraps ObjectId
+        let obj_id = ObjectId::new(12345);
+        let desc_id = DescriptorId::from_object_id(obj_id);
 
-        let descriptor = TableDescriptor {
-            schema: schema.clone(),
-            policies: TablePolicies::default(),
-            parent_descriptors: vec![],
-            lenses: vec![],
-            rows_object_id: ObjectId::new(100),
-            schema_object_id: ObjectId::new(200),
-            index_object_ids: HashMap::new(),
-        };
+        assert_eq!(desc_id.as_object_id(), obj_id);
 
-        // Compute ID twice - should be identical
-        let id1 = descriptor.compute_id();
-        let id2 = descriptor.compute_id();
-        assert_eq!(id1, id2);
-
-        // Different descriptor should have different ID
-        let descriptor2 = TableDescriptor {
-            schema: schema.clone(),
-            policies: TablePolicies::default(),
-            parent_descriptors: vec![],
-            lenses: vec![],
-            rows_object_id: ObjectId::new(999), // different!
-            schema_object_id: ObjectId::new(200),
-            index_object_ids: HashMap::new(),
-        };
-
-        let id3 = descriptor2.compute_id();
-        assert_ne!(id1, id3);
-    }
-
-    #[test]
-    fn descriptor_id_with_parents_differs() {
-        let schema = TableSchema {
-            name: "users".to_string(),
-            columns: vec![ColumnDef {
-                name: "id".to_string(),
-                ty: ColumnType::I32,
-                nullable: false,
-            }],
-        };
-
-        let descriptor_no_parents = TableDescriptor {
-            schema: schema.clone(),
-            policies: TablePolicies::default(),
-            parent_descriptors: vec![],
-            lenses: vec![],
-            rows_object_id: ObjectId::new(100),
-            schema_object_id: ObjectId::new(200),
-            index_object_ids: HashMap::new(),
-        };
-
-        let parent = DescriptorId::from_bytes([1u8; 32]);
-        let descriptor_with_parent = TableDescriptor {
-            schema: schema.clone(),
-            policies: TablePolicies::default(),
-            parent_descriptors: vec![parent],
-            lenses: vec![Lens::identity()],
-            rows_object_id: ObjectId::new(100),
-            schema_object_id: ObjectId::new(200),
-            index_object_ids: HashMap::new(),
-        };
-
-        let id1 = descriptor_no_parents.compute_id();
-        let id2 = descriptor_with_parent.compute_id();
-
-        // Parent pointers should affect the hash
-        assert_ne!(id1, id2);
-    }
-
-    #[test]
-    fn descriptor_id_prefix() {
-        let schema = TableSchema {
-            name: "test".to_string(),
-            columns: vec![],
-        };
-
-        let descriptor = TableDescriptor {
-            schema,
-            policies: TablePolicies::default(),
-            parent_descriptors: vec![],
-            lenses: vec![],
-            rows_object_id: ObjectId::new(1),
-            schema_object_id: ObjectId::new(2),
-            index_object_ids: HashMap::new(),
-        };
-
-        let id = descriptor.compute_id();
-        let short = id.short_prefix();
-
-        // 6 bytes = 12 hex chars
+        // Short prefix for branch naming
+        let short = desc_id.short_prefix();
         assert_eq!(short.len(), 12);
 
-        // Full display should be 64 hex chars
-        let full = id.to_string();
-        assert_eq!(full.len(), 64);
+        // Full display matches ObjectId display
+        let full = desc_id.to_string();
+        assert_eq!(full, obj_id.to_string());
 
-        // Short prefix should be prefix of full
-        assert!(full.starts_with(&short));
+        // From/Into conversions
+        let desc_id2: DescriptorId = obj_id.into();
+        assert_eq!(desc_id, desc_id2);
+
+        let obj_id2: ObjectId = desc_id.into();
+        assert_eq!(obj_id, obj_id2);
+    }
+
+    #[test]
+    fn descriptor_id_new_generates_unique() {
+        let id1 = DescriptorId::new();
+        let id2 = DescriptorId::new();
+
+        // New IDs should be different
+        assert_ne!(id1, id2);
     }
 }

@@ -1412,6 +1412,7 @@ impl QueryLensContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object::ObjectId;
 
     #[test]
     fn test_rename_roundtrip() {
@@ -2145,8 +2146,8 @@ mod tests {
         let mut ctx = LensContext::new();
 
         // Create descriptor IDs
-        let id1 = DescriptorId::from_bytes([1; 32]);
-        let id2 = DescriptorId::from_bytes([2; 32]);
+        let id1 = DescriptorId::from_object_id(ObjectId::new(1));
+        let id2 = DescriptorId::from_object_id(ObjectId::new(2));
 
         // Register a lens
         let lens = Lens::from_forward(vec![ColumnTransform::rename("a", "b")]);
@@ -2165,8 +2166,8 @@ mod tests {
         let mut ctx = LensContext::new();
 
         // Create descriptor IDs
-        let id_v1 = DescriptorId::from_bytes([1; 32]);
-        let id_v2 = DescriptorId::from_bytes([2; 32]);
+        let id_v1 = DescriptorId::from_object_id(ObjectId::new(1));
+        let id_v2 = DescriptorId::from_object_id(ObjectId::new(2));
 
         // Register rename lens (title → name)
         let lens = Lens::from_forward(vec![ColumnTransform::rename("title", "name")]);
@@ -2192,7 +2193,7 @@ mod tests {
     fn test_lens_context_transform_same_version() {
         let ctx = LensContext::new();
 
-        let id = DescriptorId::from_bytes([1; 32]);
+        let id = DescriptorId::from_object_id(ObjectId::new(1));
 
         // Create a row
         let desc = Arc::new(RowDescriptor::new([(
@@ -2214,8 +2215,8 @@ mod tests {
         let mut ctx = LensContext::new();
 
         // Create descriptor IDs
-        let id_v1 = DescriptorId::from_bytes([1; 32]);
-        let id_v2 = DescriptorId::from_bytes([2; 32]);
+        let id_v1 = DescriptorId::from_object_id(ObjectId::new(1));
+        let id_v2 = DescriptorId::from_object_id(ObjectId::new(2));
 
         // Register rename lens (title → name), only v1→v2
         let lens = Lens::from_forward(vec![ColumnTransform::rename("title", "name")]);
@@ -2242,8 +2243,8 @@ mod tests {
         let mut lenses = LensContext::new();
 
         // Create descriptor IDs
-        let id_v1 = DescriptorId::from_bytes([1; 32]);
-        let id_v2 = DescriptorId::from_bytes([2; 32]);
+        let id_v1 = DescriptorId::from_object_id(ObjectId::new(1));
+        let id_v2 = DescriptorId::from_object_id(ObjectId::new(2));
 
         // Register lens
         let lens = Lens::from_forward(vec![ColumnTransform::rename("old", "new")]);

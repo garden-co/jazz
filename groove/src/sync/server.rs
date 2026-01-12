@@ -688,7 +688,7 @@ impl SchemaRegistry {
     ///
     /// This is used when creating a new table (no parent schema).
     pub fn register_table(&mut self, table_name: String, descriptor: TableDescriptor) {
-        let id = descriptor.compute_id();
+        let id = DescriptorId::new();
         self.descriptors.insert(id, descriptor);
         self.catalog.tables.insert(table_name.clone(), id);
         self.schema_history.entry(table_name).or_default().push(id);
@@ -738,7 +738,7 @@ impl SchemaRegistry {
             index_object_ids: current_descriptor.index_object_ids.clone(),
         };
 
-        let new_id = new_descriptor.compute_id();
+        let new_id = DescriptorId::new();
 
         // Store new descriptor
         self.descriptors.insert(new_id, new_descriptor);
@@ -790,7 +790,7 @@ impl SchemaRegistry {
     /// - Catalog bytes (length-prefixed)
     /// - Number of descriptors (u32)
     /// - For each descriptor:
-    ///   - DescriptorId (32 bytes)
+    ///   - DescriptorId (16 bytes - ObjectId)
     ///   - Descriptor bytes (length-prefixed)
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -803,7 +803,7 @@ impl SchemaRegistry {
         // Descriptors
         buf.extend_from_slice(&(self.descriptors.len() as u32).to_le_bytes());
         for (id, descriptor) in &self.descriptors {
-            buf.extend_from_slice(id.as_bytes());
+            buf.extend_from_slice(&u128::from(id.as_object_id()).to_le_bytes());
             let desc_bytes = descriptor.to_bytes();
             buf.extend_from_slice(&(desc_bytes.len() as u32).to_le_bytes());
             buf.extend_from_slice(&desc_bytes);
@@ -817,7 +817,7 @@ impl SchemaRegistry {
             buf.extend_from_slice(name_bytes);
             buf.extend_from_slice(&(history.len() as u32).to_le_bytes());
             for id in history {
-                buf.extend_from_slice(id.as_bytes());
+                buf.extend_from_slice(&u128::from(id.as_object_id()).to_le_bytes());
             }
         }
 
@@ -857,15 +857,16 @@ impl SchemaRegistry {
 
         let mut descriptors = HashMap::with_capacity(num_descriptors);
         for _ in 0..num_descriptors {
-            // DescriptorId
-            if data.len() < pos + 32 {
+            // DescriptorId (16 bytes - ObjectId)
+            if data.len() < pos + 16 {
                 return Err(SchemaRegistryError::StorageError(
                     "unexpected EOF".to_string(),
                 ));
             }
-            let id_bytes: [u8; 32] = data[pos..pos + 32].try_into().unwrap();
-            let id = DescriptorId::from_bytes(id_bytes);
-            pos += 32;
+            let id_bytes: [u8; 16] = data[pos..pos + 16].try_into().unwrap();
+            let object_id = ObjectId::new(u128::from_le_bytes(id_bytes));
+            let id = DescriptorId::from_object_id(object_id);
+            pos += 16;
 
             // Descriptor length
             if data.len() < pos + 4 {
@@ -929,14 +930,15 @@ impl SchemaRegistry {
 
             let mut history = Vec::with_capacity(history_len);
             for _ in 0..history_len {
-                if data.len() < pos + 32 {
+                if data.len() < pos + 16 {
                     return Err(SchemaRegistryError::StorageError(
                         "unexpected EOF".to_string(),
                     ));
                 }
-                let id_bytes: [u8; 32] = data[pos..pos + 32].try_into().unwrap();
-                history.push(DescriptorId::from_bytes(id_bytes));
-                pos += 32;
+                let id_bytes: [u8; 16] = data[pos..pos + 16].try_into().unwrap();
+                let object_id = ObjectId::new(u128::from_le_bytes(id_bytes));
+                history.push(DescriptorId::from_object_id(object_id));
+                pos += 16;
             }
 
             schema_history.insert(table_name, history);
