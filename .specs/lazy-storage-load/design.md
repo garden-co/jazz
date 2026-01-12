@@ -347,7 +347,7 @@ private handleLoadNotFound(id: RawCoID, peer: PeerState) {
 
 **Location:** `packages/cojson/src/sync.ts`
 
-The current implementation already partially handles loading from storage for garbage-collected values. We update it to use `getKnownStateFromStorage` for efficiency:
+The current implementation handles loading from storage for garbage-collected values. We use `loadFromStorage` directly since it already returns whether the CoValue was found:
 
 ```typescript
 handleNewContent(
@@ -363,19 +363,11 @@ handleNewContent(
     if (!msg.header) {
       // Only check storage if content came from a peer or import (not storage itself - would be circular)
       if (from !== "storage") {
-        // Use getKnownStateFromStorage to check if CoValue exists in storage
-        // This is more efficient than getKnownState as it queries the DB if not cached
-        coValue.getKnownStateFromStorage((storageKnownState) => {
-          if (storageKnownState) {
-            // CoValue exists in storage but was garbage collected from memory
-            // Do full load before processing the new content
-            coValue.loadFromStorage((found) => {
-              if (found) {
-                this.handleNewContent(msg, from);
-              } else {
-                logger.error("Known CoValue not found in storage", { id: msg.id });
-              }
-            });
+        // Try to load from storage - the CoValue might have been garbage collected from memory
+        coValue.loadFromStorage((found) => {
+          if (found) {
+            // CoValue was in storage, process the new content
+            this.handleNewContent(msg, from);
           } else {
             // CoValue not in storage, ask peer for full content
             this.requestFullContent(msg.id, peer);
@@ -494,8 +486,8 @@ SELECT sessionID, lastIdx FROM sessions WHERE coValue = ?;
 1. Test `handleLoad` skips full load when peer has all content
 2. Test `handleLoad` does full load when peer needs content
 3. Test `handleLoad` falls back to peers when not in storage
-4. Test `handleNewContent` loads from storage for garbage-collected CoValues
-5. Test `handleNewContent` requests full content when not in storage
+4. Test `handleNewContent` loads from storage for garbage-collected CoValues and processes new content
+5. Test `handleNewContent` requests full content from peer when not in storage
 6. Test full flow: client with up-to-date state → no DB transaction queries
 7. Test full flow: client with stale state → full load occurs
 

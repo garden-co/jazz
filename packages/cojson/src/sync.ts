@@ -774,21 +774,11 @@ export class SyncManager {
       if (!msg.header) {
         // Only check storage if content came from a peer or import (not storage itself - would be circular)
         if (from !== "storage") {
-          // Use getKnownStateFromStorage to check if CoValue exists in storage
-          // This is more efficient than getKnownState as it queries the DB if not cached
-          coValue.getKnownStateFromStorage((storageKnownState) => {
-            if (storageKnownState) {
-              // CoValue exists in storage but was garbage collected from memory
-              // Do full load before processing the new content
-              coValue.loadFromStorage((found) => {
-                if (found) {
-                  this.handleNewContent(msg, from);
-                } else {
-                  logger.error("Known CoValue not found in storage", {
-                    id: msg.id,
-                  });
-                }
-              });
+          // Try to load from storage - the CoValue might have been garbage collected from memory
+          coValue.loadFromStorage((found) => {
+            if (found) {
+              // CoValue was in storage, process the new content
+              this.handleNewContent(msg, from);
             } else {
               // CoValue not in storage, ask peer for full content
               this.requestFullContent(msg.id, peer);
