@@ -225,6 +225,8 @@ type SubscribeListener<V extends CoValue, R extends RefsToResolve<V>> = (
   unsubscribe: () => void,
 ) => void;
 
+export type SubscribeCallback<V> = (value: V, unsubscribe: () => void) => void;
+
 export type SubscribeListenerOptions<
   V extends CoValue,
   R extends RefsToResolve<V>,
