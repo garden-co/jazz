@@ -24,7 +24,7 @@ This also helps us speed up the migration of Jazz Core to Rust which will help u
 **NB**: if you use WASM crypto on Edge runtimes, you need to ensure that WASM is available and initialized. See more details at [WASM on Edge runtimes](/docs/react/server-side/setup#wasm-on-edge-runtimes).
 - We have intruduced a way to permanently [delete CoValues](/docs/core-concepts/covalues/deleting). This brings a new `deleted` loading state.
 - You can now only use strings or records of strings as [`unique` parameters](/docs/react/core-concepts/covalues/comaps#uniqueness). This ensures that serialisation is deterministic.
-- The `subscribe` API has been simplified: error callbacks (`onError`, `onUnauthorized`, `onUnavailable`) have been removed, and the listener now receives a `Settled` value that includes both loaded and error states.
+- The errors ins `subscribe` API has been made more explicit: error callbacks (`onError`, `onUnauthorized`, `onUnavailable`) have been removed, and the listener now receives a `Settled` value that includes both loaded and error states.
 
 ## Breaking changes
 
@@ -201,7 +201,7 @@ export function MyJazzProvider({ children }: { children: React.ReactNode }) {
 ```
 </CodeGroup>
 
-### Simplified subscribe API
+### More explicit errors in subscribe API
 
 The `subscribe` API has been simplified. The error callbacks (`onError`, `onUnauthorized`, `onUnavailable`) have been removed, and the listener now receives a `Settled` value that includes both loaded and error states.
 
