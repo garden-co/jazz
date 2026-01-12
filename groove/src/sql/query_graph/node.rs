@@ -1010,21 +1010,51 @@ impl QueryNode {
         let is_reverse = join_column.contains('@');
         let is_chain_join = input_tables.len() > 1;
 
+        // For chain reverse joins, extract the target table name from join_column
+        // Format: "SourceTable@TargetTable.column" -> target_table = "TargetTable"
+        // (The source table has a column that references the target table's id)
+        let chain_target_table = if is_chain_join && is_reverse {
+            join_column
+                .split('@')
+                .nth(1)
+                .and_then(|s| s.split('.').next())
+        } else {
+            None
+        };
+
         match delta {
             RowDelta::Added {
                 id: left_id,
                 row: left_row,
             } => {
                 if is_reverse {
-                    // Reverse join: left row's ID is the key that right rows reference
-                    // Index in left_index[left_id]
+                    // Reverse join: need the ID of the table that right rows reference
+                    // For chain joins, look up "{TargetTable}.id" from the row
+                    // For simple joins, use left_id directly
+                    let lookup_id = if let Some(target_table) = chain_target_table {
+                        let id_col = format!("{}.id", target_table);
+                        left_row
+                            .get_by_name(&id_col)
+                            .and_then(|v| {
+                                if let crate::sql::row_buffer::RowValue::Ref(id) = v {
+                                    Some(id)
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or(*left_id)
+                    } else {
+                        *left_id
+                    };
+
+                    // Index in left_index[lookup_id]
                     left_index
-                        .entry(*left_id)
+                        .entry(lookup_id)
                         .or_default()
                         .insert(*left_id, left_row.clone());
 
-                    // Check right_by_ref for right rows referencing this left row
-                    if let Some(right_rows) = right_by_ref.get(left_id) {
+                    // Check right_by_ref for right rows referencing the existing table's ID
+                    if let Some(right_rows) = right_by_ref.get(&lookup_id) {
                         // Get descriptor for filter matching
                         let join_descriptor = table_descriptors
                             .get(join_table)
