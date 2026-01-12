@@ -823,4 +823,90 @@ describe("StorageApiAsync", () => {
       expect(() => storage.close()).not.toThrow();
     });
   });
+
+  describe("loadKnownState", () => {
+    test("should return cached knownState if available", async () => {
+      const { fixturesNode, dbPath } = await createFixturesNode();
+      const { storage } = await createTestNode(dbPath);
+
+      // Create a group to have data in the database
+      const group = fixturesNode.createGroup();
+      group.addMember("everyone", "reader");
+      await group.core.waitForSync();
+
+      // First call should hit the database and cache the result
+      const result1 = await new Promise<CoValueKnownState | undefined>(
+        (resolve) => {
+          storage.loadKnownState(group.id, resolve);
+        },
+      );
+
+      expect(result1).toBeDefined();
+      expect(result1?.id).toBe(group.id);
+      expect(result1?.header).toBe(true);
+
+      // Second call should return from cache
+      const result2 = await new Promise<CoValueKnownState | undefined>(
+        (resolve) => {
+          storage.loadKnownState(group.id, resolve);
+        },
+      );
+
+      expect(result2).toEqual(result1);
+    });
+
+    test("should return undefined for non-existent CoValue", async () => {
+      const { storage } = await createTestNode();
+
+      const result = await new Promise<CoValueKnownState | undefined>(
+        (resolve) => {
+          storage.loadKnownState("co_nonexistent" as any, resolve);
+        },
+      );
+
+      expect(result).toBeUndefined();
+    });
+
+    test("should deduplicate concurrent requests for the same ID", async () => {
+      const { fixturesNode, dbPath } = await createFixturesNode();
+      const { storage } = await createTestNode(dbPath);
+
+      // Create a group to have data in the database
+      const group = fixturesNode.createGroup();
+      group.addMember("everyone", "reader");
+      await group.core.waitForSync();
+
+      // Clear the cache to force database access
+      storage.knownStates.knownStates.clear();
+
+      // Spy on the database client to track how many times it's called
+      const dbClientSpy = vi.spyOn(
+        (storage as any).dbClient,
+        "getCoValueKnownState",
+      );
+
+      // Make multiple concurrent requests for the same ID
+      const promises = [
+        new Promise<CoValueKnownState | undefined>((resolve) => {
+          storage.loadKnownState(group.id, resolve);
+        }),
+        new Promise<CoValueKnownState | undefined>((resolve) => {
+          storage.loadKnownState(group.id, resolve);
+        }),
+        new Promise<CoValueKnownState | undefined>((resolve) => {
+          storage.loadKnownState(group.id, resolve);
+        }),
+      ];
+
+      const results = await Promise.all(promises);
+
+      // All results should be the same
+      expect(results[0]).toEqual(results[1]);
+      expect(results[1]).toEqual(results[2]);
+      expect(results[0]?.id).toBe(group.id);
+
+      // Database should only be called once due to deduplication
+      expect(dbClientSpy).toHaveBeenCalledTimes(1);
+    });
+  });
 });

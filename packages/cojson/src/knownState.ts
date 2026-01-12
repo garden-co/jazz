@@ -158,16 +158,10 @@ export function peerHasAllContent(
   }
 
   // Check all sessions - peer must have at least as many transactions as storage
-  for (const [sessionId, storageCount] of Object.entries(
+  return isKnownStateSubsetOf(
     storageKnownState.sessions,
-  ) as [SessionID, number][]) {
-    const peerCount = peerKnownState.sessions[sessionId] ?? 0;
-    if (peerCount < storageCount) {
-      return false;
-    }
-  }
-
-  return true;
+    peerKnownState.sessions,
+  );
 }
 
 /**

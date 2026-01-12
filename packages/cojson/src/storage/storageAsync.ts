@@ -36,6 +36,12 @@ export class StorageApiAsync implements StorageAPI {
 
   private loadedCoValues = new Set<RawCoID>();
 
+  // Track pending loads to deduplicate concurrent requests
+  private pendingKnownStateLoads = new Map<
+    string,
+    Promise<CoValueKnownState | undefined>
+  >();
+
   constructor(dbClient: DBClientInterfaceAsync) {
     this.dbClient = dbClient;
   }
@@ -57,15 +63,28 @@ export class StorageApiAsync implements StorageAPI {
       return;
     }
 
-    // Load from database asynchronously
-    this.dbClient.getCoValueKnownState(id).then((knownState) => {
-      if (knownState) {
-        // Cache for future use
-        this.knownStates.setKnownState(id, knownState);
-      }
+    // Check if there's already a pending load for this ID (deduplication)
+    const pending = this.pendingKnownStateLoads.get(id);
+    if (pending) {
+      pending.then(callback);
+      return;
+    }
 
-      callback(knownState);
-    });
+    // Start new load and track it for deduplication
+    const loadPromise = this.dbClient
+      .getCoValueKnownState(id)
+      .then((knownState) => {
+        if (knownState) {
+          // Cache for future use
+          this.knownStates.setKnownState(id, knownState);
+        }
+        // Remove from pending map after completion
+        this.pendingKnownStateLoads.delete(id);
+        return knownState;
+      });
+
+    this.pendingKnownStateLoads.set(id, loadPromise);
+    loadPromise.then(callback);
   }
 
   async load(

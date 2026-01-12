@@ -32,8 +32,12 @@
   - Call callback with result
 
 - [ ] **Task 7**: Implement `loadKnownState` in `StorageApiAsync`
-  - Implement async method in `packages/cojson/src/storage/storageAsync.ts`
-  - Same logic as Task 6 but with `async/await`
+  - Implement method in `packages/cojson/src/storage/storageAsync.ts`
+  - Check in-memory `knownStates` cache first
+  - If not cached, check for pending load (deduplication)
+  - If pending load exists, attach callback to existing promise
+  - If no pending load, start new load and track in `pendingKnownStateLoads` map
+  - Cache the result if found, then remove from pending map
 
 ## Phase 2: CoValueCore Methods (US-1, US-3)
 
@@ -42,68 +46,55 @@
   - Compare storage knownState with peer knownState
   - Return `true` if peer has header (when storage has it) AND peer has >= transactions for all sessions
 
-- [ ] **Task 9**: Implement `lazyLoadFromStorage` method in `CoValueCore`
+- [ ] **Task 9**: Implement `getKnownStateFromStorage` method in `CoValueCore`
   - Add method to `packages/cojson/src/coValueCore/coValueCore.ts`
   - Handle case: no storage → return `undefined`
   - Handle case: already available in memory → return current `knownState()`
-  - Handle case: loading state is "pending" → subscribe and wait for result
-  - Handle case: loading state is "available" → return `knownState()`
-  - Handle case: loading state is "unavailable" or "errored" → return `undefined`
-  - Handle case: loading state is "unknown" → call `storage.loadKnownState()`
-
-- [ ] **Task 10**: Implement `lazyLoad` method in `CoValueCore`
-  - Add method to `packages/cojson/src/coValueCore/coValueCore.ts`
-  - Accept `peerKnownState` and callbacks object `{ onNeedsContent, onUpToDate, onNotFound }`
-  - If already available → call `onNeedsContent`
-  - Call `lazyLoadFromStorage` to get storage knownState
-  - If not found → call `onNotFound`
-  - If found and `peerHasAllContent` returns true → call `onUpToDate(storageKnownState)`
-  - If found and peer needs content → call `loadFromStorage`, then `onNeedsContent`
+  - Otherwise → delegate to `storage.loadKnownState()` (caching handled at storage level)
 
 ## Phase 3: SyncManager Integration (US-1, US-2)
 
-- [ ] **Task 11**: Modify `handleLoad` to use `lazyLoad`
+- [ ] **Task 10**: Modify `handleLoad` to use lazy storage loading
   - Update `handleLoad` method in `packages/cojson/src/sync.ts`
   - Keep existing fast path for CoValue already in memory
-  - Replace storage/peer loading logic with `coValue.lazyLoad()`
-  - Map callbacks to appropriate responses:
-    - `onNeedsContent` → `sendNewContent()`
-    - `onUpToDate` → send "known" message with storageKnownState
-    - `onNotFound` → `loadFromPeersAndRespond()`
+  - Use `coValue.getKnownStateFromStorage()` to check storage before full load
+  - If not found in storage → call `loadFromPeersAndRespond()`
+  - If found and `peerHasAllContent` returns true → send "known" message with storageKnownState
+  - If found and peer needs content → call `loadFromStorage`, then `sendNewContent()`
 
-- [ ] **Task 12**: Add `loadFromPeersAndRespond` helper method
+- [ ] **Task 11**: Add `loadFromPeersAndRespond` helper method
   - Add private method to `SyncManager` in `packages/cojson/src/sync.ts`
   - Get server peers, call `loadFromPeers`
   - Wait for result, then `sendNewContent` or `handleLoadNotFound`
 
-- [ ] **Task 13**: Add `handleLoadNotFound` helper method
+- [ ] **Task 12**: Add `handleLoadNotFound` helper method
   - Add private method to `SyncManager` in `packages/cojson/src/sync.ts`
   - Send "known" message with `header: false` and empty sessions
 
-- [ ] **Task 14**: Modify `handleNewContent` to use `lazyLoadFromStorage`
+- [ ] **Task 13**: Modify `handleNewContent` to use `getKnownStateFromStorage`
   - Update `handleNewContent` method in `packages/cojson/src/sync.ts`
   - In the section handling CoValue not in memory with no header:
-  - Replace `storage.getKnownState()` check with `coValue.lazyLoadFromStorage()`
+  - Replace `storage.getKnownState()` check with `coValue.getKnownStateFromStorage()`
   - If storageKnownState found → load from storage, then re-call `handleNewContent`
   - If not found → request full content from peer
 
 ## Phase 4: Testing
 
-- [ ] **Task 15**: Write unit tests for `getCoValueKnownState` (DB clients)
+- [ ] **Task 14**: Write unit tests for `getCoValueKnownState` (DB clients)
   - Test returns correct knownState structure for existing CoValue
   - Test returns `undefined` for non-existent CoValue
   - Test handles CoValue with no sessions (header only)
   - Test handles CoValue with multiple sessions
   - Add tests to `packages/cojson/src/tests/` for SQLite clients
 
-- [ ] **Task 16**: Write unit tests for `loadKnownState` (StorageAPI)
+- [ ] **Task 15**: Write unit tests for `loadKnownState` (StorageAPI)
   - Test uses cache when knownState is cached with `header: true`
   - Test queries DB when not cached
   - Test caches result after DB query
   - Test returns `undefined` for non-existent CoValue
   - Add tests to `packages/cojson/src/tests/`
 
-- [ ] **Task 17**: Write unit tests for `peerHasAllContent`
+- [ ] **Task 16**: Write unit tests for `peerHasAllContent`
   - Test returns `true` when peer has everything
   - Test returns `false` when peer is missing header
   - Test returns `false` when peer is missing sessions
@@ -112,22 +103,14 @@
   - Test returns `false` when peerKnownState is `undefined`
   - Add tests to `packages/cojson/src/tests/`
 
-- [ ] **Task 18**: Write unit tests for `lazyLoadFromStorage`
+- [ ] **Task 17**: Write unit tests for `getKnownStateFromStorage`
   - Test returns `undefined` when no storage
   - Test returns knownState when CoValue is already in memory
-  - Test waits for pending load if already in progress
-  - Test returns based on loading state (available/unavailable/errored)
-  - Test calls `storage.loadKnownState` when state is unknown
-  - Add tests to `packages/cojson/src/tests/coValueCore.test.ts`
+  - Test calls `storage.loadKnownState` when CoValue not in memory
+  - Test returns `undefined` when storage does not have the CoValue
+  - Add tests to `packages/cojson/src/tests/coValueCore.lazyLoading.test.ts`
 
-- [ ] **Task 19**: Write unit tests for `lazyLoad`
-  - Test calls `onNeedsContent` when CoValue already in memory
-  - Test calls `onNotFound` when not in storage
-  - Test calls `onUpToDate` when peer has all content
-  - Test calls `onNeedsContent` after full load when peer needs content
-  - Add tests to `packages/cojson/src/tests/coValueCore.test.ts`
-
-- [ ] **Task 20**: Write integration tests for lazy load flow
+- [ ] **Task 18**: Write integration tests for lazy load flow
   - Test `handleLoad` skips full load when peer has all content
   - Test `handleLoad` does full load when peer needs content
   - Test `handleLoad` falls back to peers when not in storage
@@ -135,7 +118,7 @@
   - Test full flow: verify no transaction table queries when peer is up-to-date
   - Add tests to `packages/cojson/src/tests/sync.load.test.ts`
 
-- [ ] **Task 21**: Write performance tests
+- [ ] **Task 19**: Write performance tests
   - Benchmark `loadKnownState` vs `load` for CoValue with many transactions
   - Measure memory usage difference
   - Test with high volume of load requests

@@ -107,19 +107,21 @@ Same implementation but with `async/await`.
 
 **Location:** `packages/cojson/src/storage/storageSync.ts`
 
+The sync implementation doesn't need deduplication since calls complete synchronously before another can start.
+
 ```typescript
 loadKnownState(
   id: string,
   callback: (knownState: CoValueKnownState | undefined) => void,
 ): void {
   // Check in-memory cache first
-  const cached = this.get(id);
-  if (cached && cached.header) {
+  const cached = this.knownStates.getCachedKnownState(id);
+  if (cached) {
     callback(cached);
     return;
   }
 
-  // Load from database
+  // Load from database (synchronous - no deduplication needed)
   const knownState = this.dbClient.getCoValueKnownState(id);
   
   if (knownState) {
@@ -135,27 +137,43 @@ loadKnownState(
 
 **Location:** `packages/cojson/src/storage/storageAsync.ts`
 
+The async implementation includes deduplication to prevent multiple parallel database queries for the same CoValue ID.
+
 ```typescript
-async loadKnownState(
+// Track pending loads to deduplicate concurrent requests
+private pendingKnownStateLoads = new Map<string, Promise<CoValueKnownState | undefined>>();
+
+loadKnownState(
   id: string,
   callback: (knownState: CoValueKnownState | undefined) => void,
-): Promise<void> {
+): void {
   // Check in-memory cache first
   const cached = this.knownStates.getCachedKnownState(id);
-  if (cached && cached.header) {
+  if (cached) {
     callback(cached);
     return;
   }
 
-  // Load from database
-  const knownState = await this.dbClient.getCoValueKnownState(id);
-  
-  if (knownState) {
-    // Cache for future use
-    this.knownStates.setKnownState(id, knownState);
+  // Check if there's already a pending load for this ID (deduplication)
+  const pending = this.pendingKnownStateLoads.get(id);
+  if (pending) {
+    pending.then(callback);
+    return;
   }
 
-  callback(knownState);
+  // Start new load and track it for deduplication
+  const loadPromise = this.dbClient.getCoValueKnownState(id).then((knownState) => {
+    if (knownState) {
+      // Cache for future use
+      this.knownStates.setKnownState(id, knownState);
+    }
+    // Remove from pending map after completion
+    this.pendingKnownStateLoads.delete(id);
+    return knownState;
+  });
+
+  this.pendingKnownStateLoads.set(id, loadPromise);
+  loadPromise.then(callback);
 }
 ```
 
@@ -170,12 +188,12 @@ Add a new method that loads only the knownState from storage, enabling callers t
  * Lazily load only the knownState from storage without loading full transaction data.
  * This is useful for checking if a peer needs new content before committing to a full load.
  * 
+ * Caching and deduplication are handled at the storage layer (see StorageApiSync/StorageApiAsync).
+ * 
  * @param done - Callback with the storage knownState, or undefined if not found in storage
  */
-lazyLoadFromStorage(done: (knownState: CoValueKnownState | undefined) => void) {
-  const node = this.node;
-
-  if (!node.storage) {
+getKnownStateFromStorage(done: (knownState: CoValueKnownState | undefined) => void) {
+  if (!this.node.storage) {
     done(undefined);
     return;
   }
@@ -186,92 +204,19 @@ lazyLoadFromStorage(done: (knownState: CoValueKnownState | undefined) => void) {
     return;
   }
 
-  // Check loading state to avoid redundant operations
-  const currentState = this.getLoadingStateForPeer("storage");
-
-  // If we're already doing a full load, wait for it
-  if (currentState === "pending") {
-    this.subscribe((state, unsubscribe) => {
-      const updatedState = state.getLoadingStateForPeer("storage");
-      if (updatedState === "available" || state.isAvailable()) {
-        unsubscribe();
-        done(state.knownState());
-      } else if (updatedState === "errored" || updatedState === "unavailable") {
-        unsubscribe();
-        done(undefined);
-      }
-    });
-    return;
-  }
-
-  // If already loaded/errored from storage, return based on state
-  if (currentState === "available") {
-    done(this.knownState());
-    return;
-  }
-
-  if (currentState === "unavailable" || currentState === "errored") {
-    done(undefined);
-    return;
-  }
-
-  // Load only the knownState from storage (not full content)
-  node.storage.loadKnownState(this.id, done);
-}
-
-/**
- * Perform lazy load check, then full load if needed.
- * 
- * @param peerKnownState - The peer's known state to compare against
- * @param onNeedsContent - Called if peer needs new content (after full load completes)
- * @param onUpToDate - Called if peer already has all content (no full load needed)
- * @param onNotFound - Called if CoValue not found in storage
- */
-lazyLoad(
-  peerKnownState: CoValueKnownState | undefined,
-  callbacks: {
-    onNeedsContent: () => void;
-    onUpToDate: (storageKnownState: CoValueKnownState) => void;
-    onNotFound: () => void;
-  },
-) {
-  // If already available in memory, use existing behavior
-  if (this.isAvailable()) {
-    callbacks.onNeedsContent();
-    return;
-  }
-
-  this.lazyLoadFromStorage((storageKnownState) => {
-    if (!storageKnownState) {
-      callbacks.onNotFound();
-      return;
-    }
-
-    // Check if peer already has all content
-    if (peerHasAllContent(storageKnownState, peerKnownState)) {
-      callbacks.onUpToDate(storageKnownState);
-      return;
-    }
-
-    // Peer needs content - do full load from storage
-    this.loadFromStorage((found) => {
-      if (found && this.isAvailable()) {
-        callbacks.onNeedsContent();
-      } else {
-        callbacks.onNotFound();
-      }
-    });
-  });
+  // Delegate to storage - caching is handled at storage level
+  this.node.storage.loadKnownState(this.id, done);
 }
 ```
 
-**Helper function** (can be in `knownState.ts` or as a method):
+**Helper function** (in `knownState.ts`, reuses existing `isKnownStateSubsetOf`):
 
 ```typescript
 /**
  * Check if the peer already has all the content from storage.
+ * Returns true if the peer has at least as many transactions as storage for all sessions.
  */
-function peerHasAllContent(
+export function peerHasAllContent(
   storageKnownState: CoValueKnownState,
   peerKnownState: CoValueKnownState | undefined,
 ): boolean {
@@ -285,14 +230,10 @@ function peerHasAllContent(
   }
 
   // Check all sessions - peer must have at least as many transactions as storage
-  for (const [sessionId, storageCount] of Object.entries(storageKnownState.sessions)) {
-    const peerCount = peerKnownState.sessions[sessionId] ?? 0;
-    if (peerCount < storageCount) {
-      return false;
-    }
-  }
-
-  return true;
+  return isKnownStateSubsetOf(
+    storageKnownState.sessions,
+    peerKnownState.sessions,
+  );
 }
 ```
 
@@ -300,7 +241,7 @@ function peerHasAllContent(
 
 **Location:** `packages/cojson/src/sync.ts`
 
-The `handleLoad` method becomes much cleaner by delegating to `CoValueCore.lazyLoad`:
+The `handleLoad` method uses `getKnownStateFromStorage` to check storage before doing a full load. The lazy load logic lives in `SyncManager` since it's sync-related:
 
 ```typescript
 handleLoad(msg: LoadMessage, peer: PeerState) {
@@ -315,24 +256,33 @@ handleLoad(msg: LoadMessage, peer: PeerState) {
 
   const peerKnownState = peer.getOptimisticKnownState(msg.id);
 
-  // NEW: Use lazyLoad to check storage before doing full load
-  coValue.lazyLoad(peerKnownState, {
-    onNeedsContent: () => {
-      // CoValue loaded (or was already in memory), send new content
-      this.sendNewContent(msg.id, peer);
-    },
-    onUpToDate: (storageKnownState) => {
+  // Check storage knownState before doing full load
+  coValue.getKnownStateFromStorage((storageKnownState) => {
+    if (!storageKnownState) {
+      // Not in storage, try loading from peers
+      this.loadFromPeersAndRespond(msg.id, peer, coValue);
+      return;
+    }
+
+    // Check if peer already has all content
+    if (peerHasAllContent(storageKnownState, peerKnownState)) {
       // Peer already has everything - reply with known message, no full load needed
       peer.trackToldKnownState(msg.id);
       this.trySendToPeer(peer, {
         action: "known",
         ...storageKnownState,
       });
-    },
-    onNotFound: () => {
-      // Not in storage, try loading from peers
-      this.loadFromPeersAndRespond(msg.id, peer, coValue);
-    },
+      return;
+    }
+
+    // Peer needs content - do full load from storage
+    coValue.loadFromStorage((found) => {
+      if (found && coValue.isAvailable()) {
+        this.sendNewContent(msg.id, peer);
+      } else {
+        this.loadFromPeersAndRespond(msg.id, peer, coValue);
+      }
+    });
   });
 }
 
@@ -380,7 +330,7 @@ private handleLoadNotFound(id: RawCoID, peer: PeerState) {
 
 **Location:** `packages/cojson/src/sync.ts`
 
-The current implementation already partially handles loading from storage for garbage-collected values. We update it to use `lazyLoadFromStorage` for efficiency:
+The current implementation already partially handles loading from storage for garbage-collected values. We update it to use `getKnownStateFromStorage` for efficiency:
 
 ```typescript
 handleNewContent(
@@ -394,23 +344,29 @@ handleNewContent(
 
   if (!coValue.hasVerifiedContent()) {
     if (!msg.header) {
-      // NEW: Use lazyLoadFromStorage to check if CoValue exists in storage
-      coValue.lazyLoadFromStorage((storageKnownState) => {
-        if (storageKnownState) {
-          // CoValue exists in storage but was garbage collected from memory
-          // Do full load before processing the new content
-          coValue.loadFromStorage((found) => {
-            if (found) {
-              this.handleNewContent(msg, from);
-            } else {
-              logger.error("Known CoValue not found in storage", { id: msg.id });
-            }
-          });
-        } else {
-          // CoValue not in storage, ask peer for full content
-          this.requestFullContent(msg.id, peer);
-        }
-      });
+      // Only check storage if content came from a peer or import (not storage itself - would be circular)
+      if (from !== "storage") {
+        // Use getKnownStateFromStorage to check if CoValue exists in storage
+        // This is more efficient than getKnownState as it queries the DB if not cached
+        coValue.getKnownStateFromStorage((storageKnownState) => {
+          if (storageKnownState) {
+            // CoValue exists in storage but was garbage collected from memory
+            // Do full load before processing the new content
+            coValue.loadFromStorage((found) => {
+              if (found) {
+                this.handleNewContent(msg, from);
+              } else {
+                logger.error("Known CoValue not found in storage", { id: msg.id });
+              }
+            });
+          } else {
+            // CoValue not in storage, ask peer for full content
+            this.requestFullContent(msg.id, peer);
+          }
+        });
+        return;
+      }
+      // Content from storage without header - shouldn't happen normally
       return;
     }
 
@@ -506,7 +462,7 @@ SELECT sessionID, lastIdx FROM sessions WHERE coValue = ?;
    - Peer missing header → returns false
    - Peer missing sessions → returns false
    - Peer has more than storage → returns true
-6. Test `CoValueCore.lazyLoadFromStorage`:
+6. Test `CoValueCore.getKnownStateFromStorage`:
    - Returns knownState when CoValue exists in storage
    - Returns undefined when CoValue doesn't exist
    - Returns current knownState when CoValue is already in memory

@@ -25,6 +25,7 @@ import {
   CoValueKnownState,
   knownStateFrom,
   KnownStateSessions,
+  peerHasAllContent,
 } from "./knownState.js";
 import { StorageAPI } from "./storage/index.js";
 
@@ -591,24 +592,33 @@ export class SyncManager {
 
     const peerKnownState = peer.getOptimisticKnownState(msg.id);
 
-    // Use lazyLoad to check storage before doing full load
-    coValue.lazyLoad(peerKnownState, {
-      onNeedsContent: () => {
-        // CoValue loaded (or was already in memory), send new content
-        this.sendNewContent(msg.id, peer);
-      },
-      onUpToDate: (storageKnownState) => {
+    // Check storage knownState before doing full load
+    coValue.getKnownStateFromStorage((storageKnownState) => {
+      if (!storageKnownState) {
+        // Not in storage, try loading from peers
+        this.loadFromPeersAndRespond(msg.id, peer, coValue);
+        return;
+      }
+
+      // Check if peer already has all content
+      if (peerHasAllContent(storageKnownState, peerKnownState)) {
         // Peer already has everything - reply with known message, no full load needed
         peer.trackToldKnownState(msg.id);
         this.trySendToPeer(peer, {
           action: "known",
           ...storageKnownState,
         });
-      },
-      onNotFound: () => {
-        // Not in storage, try loading from peers
-        this.loadFromPeersAndRespond(msg.id, peer, coValue);
-      },
+        return;
+      }
+
+      // Peer needs content - do full load from storage
+      coValue.loadFromStorage((found) => {
+        if (found && coValue.isAvailable()) {
+          this.sendNewContent(msg.id, peer);
+        } else {
+          this.loadFromPeersAndRespond(msg.id, peer, coValue);
+        }
+      });
     });
   }
 
@@ -753,29 +763,35 @@ export class SyncManager {
      */
     if (!coValue.hasVerifiedContent()) {
       /**
-       * The peer has assumed we already have the CoValue
+       * The peer/import has assumed we already have the CoValue
        */
       if (!msg.header) {
-        // Use lazyLoadFromStorage to check if CoValue exists in storage
-        // This is more efficient than getKnownState as it queries the DB if not cached
-        coValue.lazyLoadFromStorage((storageKnownState) => {
-          if (storageKnownState) {
-            // CoValue exists in storage but was garbage collected from memory
-            // Do full load before processing the new content
-            coValue.loadFromStorage((found) => {
-              if (found) {
-                this.handleNewContent(msg, from);
-              } else {
-                logger.error("Known CoValue not found in storage", {
-                  id: msg.id,
-                });
-              }
-            });
-          } else {
-            // CoValue not in storage, ask peer for full content
-            this.requestFullContent(msg.id, peer);
-          }
-        });
+        // Only check storage if content came from a peer or import (not storage itself - would be circular)
+        if (from !== "storage") {
+          // Use getKnownStateFromStorage to check if CoValue exists in storage
+          // This is more efficient than getKnownState as it queries the DB if not cached
+          coValue.getKnownStateFromStorage((storageKnownState) => {
+            if (storageKnownState) {
+              // CoValue exists in storage but was garbage collected from memory
+              // Do full load before processing the new content
+              coValue.loadFromStorage((found) => {
+                if (found) {
+                  this.handleNewContent(msg, from);
+                } else {
+                  logger.error("Known CoValue not found in storage", {
+                    id: msg.id,
+                  });
+                }
+              });
+            } else {
+              // CoValue not in storage, ask peer for full content
+              this.requestFullContent(msg.id, peer);
+            }
+          });
+          return;
+        }
+        // Content from storage without header - this shouldn't happen normally
+        // as storage loads should include headers
         return;
       }
 

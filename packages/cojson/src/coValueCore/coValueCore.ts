@@ -48,7 +48,6 @@ import {
   CoValueKnownState,
   emptyKnownState,
   KnownStateSessions,
-  peerHasAllContent,
 } from "../knownState.js";
 import { safeParseJSON } from "../jsonStringify.js";
 
@@ -1511,14 +1510,14 @@ export class CoValueCore {
    * Lazily load only the knownState from storage without loading full transaction data.
    * This is useful for checking if a peer needs new content before committing to a full load.
    *
+   * Caching and deduplication are handled at the storage layer.
+   *
    * @param done - Callback with the storage knownState, or undefined if not found in storage
    */
-  lazyLoadFromStorage(
+  getKnownStateFromStorage(
     done: (knownState: CoValueKnownState | undefined) => void,
   ) {
-    const node = this.node;
-
-    if (!node.storage) {
+    if (!this.node.storage) {
       done(undefined);
       return;
     }
@@ -1529,86 +1528,8 @@ export class CoValueCore {
       return;
     }
 
-    // Check loading state to avoid redundant operations
-    const currentState = this.getLoadingStateForPeer("storage");
-
-    // If we're already doing a full load, wait for it
-    if (currentState === "pending") {
-      this.subscribe((state, unsubscribe) => {
-        const updatedState = state.getLoadingStateForPeer("storage");
-        if (updatedState === "available" || state.isAvailable()) {
-          unsubscribe();
-          done(state.knownState());
-        } else if (
-          updatedState === "errored" ||
-          updatedState === "unavailable"
-        ) {
-          unsubscribe();
-          done(undefined);
-        }
-      });
-      return;
-    }
-
-    // If already loaded/errored from storage, return based on state
-    if (currentState === "available") {
-      done(this.knownState());
-      return;
-    }
-
-    if (currentState === "unavailable" || currentState === "errored") {
-      done(undefined);
-      return;
-    }
-
-    // Load only the knownState from storage (not full content)
-    node.storage.loadKnownState(this.id, done);
-  }
-
-  /**
-   * Perform lazy load check, then full load if needed.
-   *
-   * @param peerKnownState - The peer's known state to compare against
-   * @param callbacks - Object with three callbacks:
-   *   - onNeedsContent: Called if peer needs new content (after full load completes)
-   *   - onUpToDate: Called if peer already has all content (no full load needed)
-   *   - onNotFound: Called if CoValue not found in storage
-   */
-  lazyLoad(
-    peerKnownState: CoValueKnownState | undefined,
-    callbacks: {
-      onNeedsContent: () => void;
-      onUpToDate: (storageKnownState: CoValueKnownState) => void;
-      onNotFound: () => void;
-    },
-  ) {
-    // If already available in memory, use existing behavior
-    if (this.isAvailable()) {
-      callbacks.onNeedsContent();
-      return;
-    }
-
-    this.lazyLoadFromStorage((storageKnownState) => {
-      if (!storageKnownState) {
-        callbacks.onNotFound();
-        return;
-      }
-
-      // Check if peer already has all content
-      if (peerHasAllContent(storageKnownState, peerKnownState)) {
-        callbacks.onUpToDate(storageKnownState);
-        return;
-      }
-
-      // Peer needs content - do full load from storage
-      this.loadFromStorage((found) => {
-        if (found && this.isAvailable()) {
-          callbacks.onNeedsContent();
-        } else {
-          callbacks.onNotFound();
-        }
-      });
-    });
+    // Delegate to storage - caching is handled at storage level
+    this.node.storage.loadKnownState(this.id, done);
   }
 
   loadFromPeers(peers: PeerState[]) {
