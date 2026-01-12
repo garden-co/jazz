@@ -6,7 +6,7 @@
   "scripts": {
     "seed": "node --experimental-strip-types ./src/cli.ts seed",
     "query": "node --experimental-strip-types ./src/cli.ts query",
-    "run": "node --experimental-strip-types ./src/cli.ts run",
+    "run": "node --inspect --experimental-strip-types ./src/cli.ts run",
     "all": "node --experimental-strip-types ./src/cli.ts all"
   },
   "dependencies": {

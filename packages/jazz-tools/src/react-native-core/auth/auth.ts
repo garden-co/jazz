@@ -1,6 +1,9 @@
 import { KvStoreContext } from "../storage/kv-store-context.js";
 
 export * from "./DemoAuthUI.js";
+export * from "./PasskeyAuth.js";
+export * from "./usePasskeyAuth.js";
+export * from "./PasskeyAuthBasicUI.js";
 
 export function clearUserCredentials() {
   const kvStore = KvStoreContext.getInstance().getStorage();

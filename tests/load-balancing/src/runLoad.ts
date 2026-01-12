@@ -1,6 +1,7 @@
 import { Worker } from "node:worker_threads";
 
 import type { CoValueHeader } from "cojson";
+import { NapiCrypto } from "cojson/crypto/NapiCrypto";
 import { startSyncServer } from "jazz-run/startSyncServer";
 
 import type { ParsedArgs } from "./utils/args.ts";
@@ -84,6 +85,7 @@ export async function runLoad(args: ParsedArgs): Promise<void> {
     port,
     inMemory: false,
     db: dbPath,
+    crypto: await NapiCrypto.create(),
   });
 
   const addr = server.address();

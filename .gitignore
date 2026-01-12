@@ -32,5 +32,6 @@ test-results
 
 .cursorrules
 .windsurfrules
+.claude/settings.local.json
 
 playwright-report
