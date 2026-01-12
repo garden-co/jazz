@@ -201,10 +201,11 @@ async function renderWaveform(props: WaveformCanvasProps) {
 
   const unsubscribeFromWaveform = MusicTrackWaveform.subscribe(
     waveformId,
-    {},
     (newResult) => {
-      waveformData = newResult.data;
-      draw();
+      if (newResult.$isLoaded) {
+        waveformData = newResult.data;
+        draw();
+      }
     },
   );
 
