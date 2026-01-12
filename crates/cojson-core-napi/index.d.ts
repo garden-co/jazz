@@ -11,6 +11,7 @@ export declare class SessionLog {
   constructor(coId: string, sessionId: string, signerId?: string | undefined | null)
   clone(): SessionLog
   tryAdd(transactionsJson: Array<string>, newSignatureStr: string, skipVerify: boolean): void
+  tryAddFfi(transactions: Array<NapiFfiTransaction>, newSignatureStr: string, skipVerify: boolean): void
   addNewPrivateTransaction(changesJson: string, signerSecret: string, encryptionKey: string, keyId: string, madeAt: number, meta?: string | undefined | null): string
   addNewTrustingTransaction(changesJson: string, signerSecret: string, madeAt: number, meta?: string | undefined | null): string
   decryptNextTransactionChangesJson(txIndex: number, encryptionKey: string): string
@@ -153,6 +154,21 @@ export declare function getSealerId(secret: Uint8Array): string
  * Returns base58-encoded verifying key with "signer_z" prefix or throws JsError if derivation fails.
  */
 export declare function getSignerId(secret: Uint8Array): string
+
+export interface NapiFfiTransaction {
+  /** "private" or "trusting" */
+  privacy: string
+  /** For private transactions */
+  encryptedChanges?: string
+  /** For private transactions */
+  keyUsed?: string
+  /** For trusting transactions */
+  changes?: string
+  /** Timestamp (milliseconds) - BigInt for full u64 support */
+  madeAt: bigint
+  /** Optional meta (encrypted or stringified) */
+  meta?: string
+}
 
 /**
  * Generate a new Ed25519 signing key using secure random number generation.

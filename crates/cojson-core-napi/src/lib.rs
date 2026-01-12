@@ -1,9 +1,12 @@
 use cojson_core::core::{
-  CoID, CoJsonCoreError, KeyID, KeySecret, SessionID, SessionLogInternal, Signature, SignerID,
-  SignerSecret, Transaction, TransactionMode,
+  CoID, CoJsonCoreError, Encrypted, KeyID, KeySecret, PrivateTransaction, SessionID,
+  SessionLogInternal, Signature, SignerID, SignerSecret, Transaction, TransactionMode,
+  TrustingTransaction,
 };
+use napi::bindgen_prelude::BigInt;
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
+use serde_json::Number;
 use thiserror::Error;
 
 pub mod hash {
@@ -57,6 +60,71 @@ struct PrivateTransactionResult {
   meta: Option<String>,
 }
 
+#[napi(object)]
+pub struct NapiFfiTransaction {
+  /// "private" or "trusting"
+  pub privacy: String,
+  /// For private transactions
+  pub encrypted_changes: Option<String>,
+  /// For private transactions
+  pub key_used: Option<String>,
+  /// For trusting transactions
+  pub changes: Option<String>,
+  /// Timestamp (milliseconds) - BigInt for full u64 support
+  pub made_at: BigInt,
+  /// Optional meta (encrypted or stringified)
+  pub meta: Option<String>,
+}
+
+fn to_transaction(tx: NapiFfiTransaction) -> napi::Result<Transaction> {
+  // Extract u64 from BigInt (returns (sign, value) tuple, we take the value)
+  let made_at = tx.made_at.get_u64().1;
+
+  match tx.privacy.as_str() {
+    "private" => {
+      let encrypted_changes = tx.encrypted_changes.ok_or_else(|| {
+        napi::Error::new(
+          napi::Status::InvalidArg,
+          "Missing encrypted_changes for private transaction".to_string(),
+        )
+      })?;
+      let key_used = tx.key_used.ok_or_else(|| {
+        napi::Error::new(
+          napi::Status::InvalidArg,
+          "Missing key_used for private transaction".to_string(),
+        )
+      })?;
+
+      Ok(Transaction::Private(PrivateTransaction {
+        encrypted_changes: Encrypted::new(encrypted_changes),
+        key_used: KeyID(key_used),
+        made_at: Number::from(made_at),
+        meta: tx.meta.map(Encrypted::new),
+        privacy: "private".to_string(),
+      }))
+    }
+    "trusting" => {
+      let changes = tx.changes.ok_or_else(|| {
+        napi::Error::new(
+          napi::Status::InvalidArg,
+          "Missing changes for trusting transaction".to_string(),
+        )
+      })?;
+
+      Ok(Transaction::Trusting(TrustingTransaction {
+        changes,
+        made_at: Number::from(made_at),
+        meta: tx.meta,
+        privacy: "trusting".to_string(),
+      }))
+    }
+    other => Err(napi::Error::new(
+      napi::Status::InvalidArg,
+      format!("Invalid privacy type: {other}"),
+    )),
+  }
+}
+
 #[napi]
 impl SessionLog {
   #[napi(constructor)]
@@ -87,6 +155,28 @@ impl SessionLog {
     self
       .internal
       .try_add(transactions_json, &new_signature, skip_verify)
+      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
+
+    Ok(())
+  }
+
+  #[napi(js_name = "tryAddFfi")]
+  pub fn try_add_ffi(
+    &mut self,
+    transactions: Vec<NapiFfiTransaction>,
+    new_signature_str: String,
+    skip_verify: bool,
+  ) -> napi::Result<()> {
+    let new_signature = Signature(new_signature_str);
+
+    let transactions: Vec<Transaction> = transactions
+      .into_iter()
+      .map(to_transaction)
+      .collect::<napi::Result<_>>()?;
+
+    self
+      .internal
+      .try_add_transactions(transactions, &new_signature, skip_verify)
       .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
 
     Ok(())

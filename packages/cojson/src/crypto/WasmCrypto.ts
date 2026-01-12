@@ -21,6 +21,7 @@ import { RawCoID, SessionID, TransactionID } from "../ids.js";
 import { Stringified, stableStringify } from "../jsonStringify.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { logger } from "../logger.js";
+import { toWasmFfiTransaction } from "./ffiTransaction.js";
 import {
   CryptoProvider,
   Encrypted,
@@ -234,10 +235,9 @@ class SessionLogAdapter {
     newSignature: Signature,
     skipVerify: boolean,
   ): void {
-    this.sessionLog.tryAdd(
-      // We can avoid stableStringify because in rust we will parse and stringify the transactions again.
-      // And the changes are in a string format already.
-      transactions.map((tx) => JSON.stringify(tx)),
+    // Backward-compatible fallback (older wasm package without tryAddFfi)
+    this.sessionLog.tryAddFfi(
+      transactions.map((tx) => toWasmFfiTransaction(tx)),
       newSignature,
       skipVerify,
     );

@@ -11,6 +11,7 @@ import { TransactionID } from "../ids.js";
 import { stableStringify } from "../jsonStringify.js";
 import { JsonObject } from "../jsonValue.js";
 import { logger } from "../logger.js";
+import { toFfiTransactionObject } from "./ffiTransaction.js";
 import { ControlledAccountOrAgent } from "../coValues/account.js";
 import {
   PrivateTransaction,
@@ -222,11 +223,9 @@ class SessionLogAdapter implements SessionLogImpl {
     newSignature: Signature,
     skipVerify: boolean,
   ): void {
-    this.sessionLog.tryAdd(
-      transactions.map((tx) => JSON.stringify(tx)),
-      newSignature,
-      skipVerify,
-    );
+    const data = transactions.map(toFfiTransactionObject);
+
+    (this.sessionLog as any).tryAddFfi(data, newSignature, skipVerify);
   }
 
   addNewPrivateTransaction(

@@ -1,8 +1,10 @@
 use cojson_core::core::{
-    CoID, CoJsonCoreError, KeyID, KeySecret, SessionID, SessionLogInternal, Signature, SignerID,
-    SignerSecret, Transaction, TransactionMode,
+    CoID, CoJsonCoreError, Encrypted, KeyID, KeySecret, PrivateTransaction, SessionID,
+    SessionLogInternal, Signature, SignerID, SignerSecret, Transaction, TransactionMode,
+    TrustingTransaction,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Number;
 use thiserror::Error;
 use wasm_bindgen::prelude::*;
 
@@ -42,6 +44,91 @@ pub enum CojsonCoreWasmError {
 impl From<CojsonCoreWasmError> for JsValue {
     fn from(err: CojsonCoreWasmError) -> Self {
         JsValue::from_str(&err.to_string())
+    }
+}
+
+/// WASM-compatible FFI Transaction struct.
+/// Can be passed directly from JavaScript without JSON serialization.
+#[wasm_bindgen(getter_with_clone)]
+pub struct WasmFfiTransaction {
+    /// "private" or "trusting"
+    pub privacy: String,
+    /// For private transactions: the encrypted changes string (e.g., "encrypted_U...")
+    pub encrypted_changes: Option<String>,
+    /// For private transactions: the key ID used for encryption
+    pub key_used: Option<String>,
+    /// For trusting transactions: the stringified changes JSON
+    pub changes: Option<String>,
+    /// Timestamp when the transaction was made (milliseconds)
+    pub made_at: u64,
+    /// Optional meta (encrypted for private, stringified for trusting)
+    pub meta: Option<String>,
+}
+
+#[wasm_bindgen]
+impl WasmFfiTransaction {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        privacy: String,
+        encrypted_changes: Option<String>,
+        key_used: Option<String>,
+        changes: Option<String>,
+        made_at: u64,
+        meta: Option<String>,
+    ) -> WasmFfiTransaction {
+        WasmFfiTransaction {
+            privacy,
+            encrypted_changes,
+            key_used,
+            changes,
+            made_at,
+            meta,
+        }
+    }
+}
+
+/// Convert WasmFfiTransaction to internal Transaction type.
+/// Maps directly to PrivateTransaction or TrustingTransaction based on privacy field.
+fn to_transaction(wasm: WasmFfiTransaction) -> Result<Transaction, CojsonCoreWasmError> {
+    match wasm.privacy.as_str() {
+        "private" => {
+            let encrypted_changes = wasm.encrypted_changes.ok_or_else(|| {
+                CojsonCoreWasmError::Js(JsValue::from_str(
+                    "Missing encrypted_changes for private transaction",
+                ))
+            })?;
+            let key_used = wasm.key_used.ok_or_else(|| {
+                CojsonCoreWasmError::Js(JsValue::from_str(
+                    "Missing key_used for private transaction",
+                ))
+            })?;
+
+            Ok(Transaction::Private(PrivateTransaction {
+                encrypted_changes: Encrypted::new(encrypted_changes),
+                key_used: KeyID(key_used),
+                made_at: Number::from(wasm.made_at),
+                meta: wasm.meta.map(Encrypted::new),
+                privacy: "private".to_string(),
+            }))
+        }
+        "trusting" => {
+            let changes = wasm.changes.ok_or_else(|| {
+                CojsonCoreWasmError::Js(JsValue::from_str(
+                    "Missing changes for trusting transaction",
+                ))
+            })?;
+
+            Ok(Transaction::Trusting(TrustingTransaction {
+                changes,
+                made_at: Number::from(wasm.made_at),
+                meta: wasm.meta,
+                privacy: "trusting".to_string(),
+            }))
+        }
+        _ => Err(CojsonCoreWasmError::Js(JsValue::from_str(&format!(
+            "Invalid privacy type: {}",
+            wasm.privacy
+        )))),
     }
 }
 
@@ -88,6 +175,29 @@ impl SessionLog {
 
         self.internal
             .try_add(transactions_json, &new_signature, skip_verify)?;
+
+        Ok(())
+    }
+
+    /// FFI-optimized version of tryAdd that accepts typed transaction structs.
+    /// Avoids JSON.stringify on the JavaScript side by accepting WasmFfiTransaction objects.
+    #[wasm_bindgen(js_name = tryAddFfi)]
+    pub fn try_add_ffi(
+        &mut self,
+        transactions: Vec<WasmFfiTransaction>,
+        new_signature_str: String,
+        skip_verify: bool,
+    ) -> Result<(), CojsonCoreWasmError> {
+        let new_signature = Signature(new_signature_str);
+
+        // Convert WasmFfiTransaction objects directly to internal Transaction type
+        let transactions: Vec<Transaction> = transactions
+            .into_iter()
+            .map(to_transaction)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        self.internal
+            .try_add_transactions(transactions, &new_signature, skip_verify)?;
 
         Ok(())
     }

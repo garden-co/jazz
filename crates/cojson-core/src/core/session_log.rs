@@ -28,6 +28,16 @@ pub struct Encrypted<T> {
     _phantom: std::marker::PhantomData<T>,
 }
 
+impl<T> Encrypted<T> {
+    /// Create a new Encrypted wrapper with the given value.
+    pub fn new(value: String) -> Self {
+        Encrypted {
+            value,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivateTransaction {
     #[serde(rename = "encryptedChanges")]
@@ -142,7 +152,7 @@ impl SessionLogInternal {
         skip_verify: bool,
     ) -> Result<(), CoJsonCoreError> {
         // Parsing the transactions and serializing them back to JSON (To have a stable stringified representation).
-        let transactions = transactions
+        let transactions_json = transactions
             .iter()
             .map(|tx| {
                 let transaction: Transaction = serde_json::from_str(tx)?;
@@ -150,9 +160,38 @@ impl SessionLogInternal {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        self.try_add_internal(transactions_json, new_signature, skip_verify)
+    }
+
+    /// Try to add a batch of already-parsed Transaction objects.
+    /// This avoids JSON parsing overhead when transactions are constructed directly.
+    /// Each binding layer converts their FFI types to Transaction before calling this.
+    pub fn try_add_transactions(
+        &mut self,
+        transactions: Vec<Transaction>,
+        new_signature: &Signature,
+        skip_verify: bool,
+    ) -> Result<(), CoJsonCoreError> {
+        // Serialize transactions to JSON for hashing (required for signature verification).
+        let transactions_json = transactions
+            .iter()
+            .map(|tx| serde_json::to_string(tx))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        self.try_add_internal(transactions_json, new_signature, skip_verify)
+    }
+
+    /// Internal method that handles signature verification and storage.
+    /// Both try_add and try_add_transactions delegate to this.
+    fn try_add_internal(
+        &mut self,
+        transactions_json: Vec<String>,
+        new_signature: &Signature,
+        skip_verify: bool,
+    ) -> Result<(), CoJsonCoreError> {
         if !skip_verify {
             // Compute the hash after adding the new transactions.
-            let hasher = self.expected_hash_after(&transactions);
+            let hasher = self.expected_hash_after(&transactions_json);
             let new_hash_encoded_stringified = format!(
                 "\"hash_z{}\"",
                 bs58::encode(hasher.finalize().as_bytes()).into_string()
@@ -183,7 +222,7 @@ impl SessionLogInternal {
         }
 
         // Add new transactions to the session log.
-        self.transactions_json.extend(transactions);
+        self.transactions_json.extend(transactions_json);
 
         // Update the last signature.
         self.last_signature = Some(new_signature.clone());

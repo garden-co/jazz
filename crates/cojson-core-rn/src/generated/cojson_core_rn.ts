@@ -54,6 +54,7 @@ import {
   destructorGuardSymbol,
   pointerLiteralSymbol,
   uniffiCreateFfiConverterString,
+  uniffiCreateRecord,
   uniffiTypeNameSymbol,
   variantOrdinalSymbol,
 } from 'uniffi-bindgen-react-native';
@@ -687,6 +688,99 @@ export function x25519PublicKey(
     )
   );
 }
+
+export type UniffiFfiTransaction = {
+  /**
+   * "private" or "trusting"
+   */
+  privacy: string;
+  /**
+   * For private transactions
+   */
+  encryptedChanges: string | undefined;
+  /**
+   * For private transactions
+   */
+  keyUsed: string | undefined;
+  /**
+   * For trusting transactions
+   */
+  changes: string | undefined;
+  /**
+   * Timestamp
+   */
+  madeAt: /*f64*/ number;
+  /**
+   * Optional meta (encrypted or stringified)
+   */
+  meta: string | undefined;
+};
+
+/**
+ * Generated factory for {@link UniffiFfiTransaction} record objects.
+ */
+export const UniffiFfiTransaction = (() => {
+  const defaults = () => ({});
+  const create = (() => {
+    return uniffiCreateRecord<
+      UniffiFfiTransaction,
+      ReturnType<typeof defaults>
+    >(defaults);
+  })();
+  return Object.freeze({
+    /**
+     * Create a frozen instance of {@link UniffiFfiTransaction}, with defaults specified
+     * in Rust, in the {@link cojson_core_rn} crate.
+     */
+    create,
+
+    /**
+     * Create a frozen instance of {@link UniffiFfiTransaction}, with defaults specified
+     * in Rust, in the {@link cojson_core_rn} crate.
+     */
+    new: create,
+
+    /**
+     * Defaults specified in the {@link cojson_core_rn} crate.
+     */
+    defaults: () => Object.freeze(defaults()) as Partial<UniffiFfiTransaction>,
+  });
+})();
+
+const FfiConverterTypeUniffiFfiTransaction = (() => {
+  type TypeName = UniffiFfiTransaction;
+  class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+    read(from: RustBuffer): TypeName {
+      return {
+        privacy: FfiConverterString.read(from),
+        encryptedChanges: FfiConverterOptionalString.read(from),
+        keyUsed: FfiConverterOptionalString.read(from),
+        changes: FfiConverterOptionalString.read(from),
+        madeAt: FfiConverterFloat64.read(from),
+        meta: FfiConverterOptionalString.read(from),
+      };
+    }
+    write(value: TypeName, into: RustBuffer): void {
+      FfiConverterString.write(value.privacy, into);
+      FfiConverterOptionalString.write(value.encryptedChanges, into);
+      FfiConverterOptionalString.write(value.keyUsed, into);
+      FfiConverterOptionalString.write(value.changes, into);
+      FfiConverterFloat64.write(value.madeAt, into);
+      FfiConverterOptionalString.write(value.meta, into);
+    }
+    allocationSize(value: TypeName): number {
+      return (
+        FfiConverterString.allocationSize(value.privacy) +
+        FfiConverterOptionalString.allocationSize(value.encryptedChanges) +
+        FfiConverterOptionalString.allocationSize(value.keyUsed) +
+        FfiConverterOptionalString.allocationSize(value.changes) +
+        FfiConverterFloat64.allocationSize(value.madeAt) +
+        FfiConverterOptionalString.allocationSize(value.meta)
+      );
+    }
+  }
+  return new FFIConverter();
+})();
 
 const stringConverter = {
   stringToBytes: (s: string) =>
@@ -1765,6 +1859,11 @@ export interface SessionLogInterface {
     newSignatureStr: string,
     skipVerify: boolean
   ) /*throws*/ : void;
+  tryAddFfi(
+    transactions: Array<UniffiFfiTransaction>,
+    newSignatureStr: string,
+    skipVerify: boolean
+  ) /*throws*/ : void;
 }
 
 export class SessionLog
@@ -1931,6 +2030,28 @@ export class SessionLog
     );
   }
 
+  public tryAddFfi(
+    transactions: Array<UniffiFfiTransaction>,
+    newSignatureStr: string,
+    skipVerify: boolean
+  ): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeSessionLogError.lift.bind(
+        FfiConverterTypeSessionLogError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionlog_try_add_ffi(
+          uniffiTypeSessionLogObjectFactory.clonePointer(this),
+          FfiConverterArrayTypeUniffiFfiTransaction.lower(transactions),
+          FfiConverterString.lower(newSignatureStr),
+          FfiConverterBool.lower(skipVerify),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    );
+  }
+
   /**
    * {@inheritDoc uniffi-bindgen-react-native#UniffiAbstractObject.uniffiDestroy}
    */
@@ -2020,6 +2141,11 @@ const FfiConverterTypeSessionLog = new FfiConverterObject(
 
 // FfiConverter for string | undefined
 const FfiConverterOptionalString = new FfiConverterOptional(FfiConverterString);
+
+// FfiConverter for Array<UniffiFfiTransaction>
+const FfiConverterArrayTypeUniffiFfiTransaction = new FfiConverterArray(
+  FfiConverterTypeUniffiFfiTransaction
+);
 
 // FfiConverter for Array<string>
 const FfiConverterArrayString = new FfiConverterArray(FfiConverterString);
@@ -2313,6 +2439,14 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionlog_try_add_ffi() !==
+    61205
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_method_sessionlog_try_add_ffi'
+    );
+  }
+  if (
     nativeModule().ubrn_uniffi_cojson_core_rn_checksum_constructor_blake3hasher_new() !==
     24312
   ) {
@@ -2338,5 +2472,6 @@ export default Object.freeze({
     FfiConverterTypeCryptoErrorUniffi,
     FfiConverterTypeSessionLog,
     FfiConverterTypeSessionLogError,
+    FfiConverterTypeUniffiFfiTransaction,
   },
 });

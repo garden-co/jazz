@@ -102,6 +102,13 @@ interface NativeModuleInterface {
     skipVerify: number,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
+  ubrn_uniffi_cojson_core_rn_fn_method_sessionlog_try_add_ffi(
+    ptr: bigint,
+    transactions: Uint8Array,
+    newSignatureStr: Uint8Array,
+    skipVerify: number,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
   ubrn_uniffi_cojson_core_rn_fn_func_blake3_hash_once(
     data: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
@@ -257,6 +264,7 @@ interface NativeModuleInterface {
   ubrn_uniffi_cojson_core_rn_checksum_method_sessionlog_decrypt_next_transaction_changes_json(): number;
   ubrn_uniffi_cojson_core_rn_checksum_method_sessionlog_decrypt_next_transaction_meta_json(): number;
   ubrn_uniffi_cojson_core_rn_checksum_method_sessionlog_try_add(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_method_sessionlog_try_add_ffi(): number;
   ubrn_uniffi_cojson_core_rn_checksum_constructor_blake3hasher_new(): number;
   ubrn_uniffi_cojson_core_rn_checksum_constructor_sessionlog_new(): number;
   ubrn_ffi_cojson_core_rn_uniffi_contract_version(): number;

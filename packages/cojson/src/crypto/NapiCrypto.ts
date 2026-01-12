@@ -19,6 +19,7 @@ import { RawCoID, SessionID, TransactionID } from "../ids.js";
 import { Stringified, stableStringify } from "../jsonStringify.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { logger } from "../logger.js";
+import { toNapiFfiTransaction } from "./ffiTransaction.js";
 import {
   CryptoProvider,
   Encrypted,
@@ -189,8 +190,9 @@ class SessionLogAdapter {
     newSignature: Signature,
     skipVerify: boolean,
   ): void {
-    this.sessionLog.tryAdd(
-      transactions.map((tx) => JSON.stringify(tx)),
+    // Backward-compatible fallback (older napi package without tryAddFfi)
+    this.sessionLog.tryAddFfi(
+      transactions.map(toNapiFfiTransaction),
       newSignature,
       skipVerify,
     );

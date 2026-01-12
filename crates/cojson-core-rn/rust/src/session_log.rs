@@ -1,8 +1,10 @@
 use cojson_core::core::{
-    CoID, CoJsonCoreError, KeyID, KeySecret, SessionID, SessionLogInternal, Signature, SignerID,
-    SignerSecret, Transaction, TransactionMode,
+    CoID, CoJsonCoreError, Encrypted, KeyID, KeySecret, PrivateTransaction, SessionID,
+    SessionLogInternal, Signature, SignerID, SignerSecret, Transaction, TransactionMode,
+    TrustingTransaction,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Number;
 use thiserror::Error;
 
 #[derive(Error, Debug, uniffi::Error)]
@@ -35,6 +37,60 @@ struct PrivateTransactionResult {
     encrypted_changes: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     meta: Option<String>,
+}
+
+#[derive(uniffi::Record)]
+pub struct UniffiFfiTransaction {
+    /// "private" or "trusting"
+    pub privacy: String,
+    /// For private transactions
+    pub encrypted_changes: Option<String>,
+    /// For private transactions
+    pub key_used: Option<String>,
+    /// For trusting transactions
+    pub changes: Option<String>,
+    /// Timestamp (milliseconds)
+    pub made_at: u64,
+    /// Optional meta (encrypted or stringified)
+    pub meta: Option<String>,
+}
+
+fn to_transaction(tx: UniffiFfiTransaction) -> Result<Transaction, SessionLogError> {
+    match tx.privacy.as_str() {
+        "private" => {
+            let encrypted_changes = tx.encrypted_changes.ok_or_else(|| {
+                SessionLogError::Generic(
+                    "Missing encrypted_changes for private transaction".to_string(),
+                )
+            })?;
+            let key_used = tx.key_used.ok_or_else(|| {
+                SessionLogError::Generic("Missing key_used for private transaction".to_string())
+            })?;
+
+            Ok(Transaction::Private(PrivateTransaction {
+                encrypted_changes: Encrypted::new(encrypted_changes),
+                key_used: KeyID(key_used),
+                made_at: Number::from(tx.made_at),
+                meta: tx.meta.map(Encrypted::new),
+                privacy: "private".to_string(),
+            }))
+        }
+        "trusting" => {
+            let changes = tx.changes.ok_or_else(|| {
+                SessionLogError::Generic("Missing changes for trusting transaction".to_string())
+            })?;
+
+            Ok(Transaction::Trusting(TrustingTransaction {
+                changes,
+                made_at: Number::from(tx.made_at),
+                meta: tx.meta,
+                privacy: "trusting".to_string(),
+            }))
+        }
+        other => Err(SessionLogError::Generic(format!(
+            "Invalid privacy type: {other}"
+        ))),
+    }
 }
 
 #[derive(uniffi::Object)]
@@ -73,12 +129,33 @@ impl SessionLog {
         new_signature_str: String,
         skip_verify: bool,
     ) -> Result<(), SessionLogError> {
-
         let new_signature = Signature(new_signature_str);
 
         if let Ok(mut internal) = self.internal.lock() {
             internal
                 .try_add(transactions_json, &new_signature, skip_verify)
+                .map_err(Into::into)
+        } else {
+            Err(SessionLogError::LockError)
+        }
+    }
+
+    pub fn try_add_ffi(
+        &self,
+        transactions: Vec<UniffiFfiTransaction>,
+        new_signature_str: String,
+        skip_verify: bool,
+    ) -> Result<(), SessionLogError> {
+        let new_signature = Signature(new_signature_str);
+
+        let transactions: Vec<Transaction> = transactions
+            .into_iter()
+            .map(to_transaction)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if let Ok(mut internal) = self.internal.lock() {
+            internal
+                .try_add_transactions(transactions, &new_signature, skip_verify)
                 .map_err(Into::into)
         } else {
             Err(SessionLogError::LockError)
@@ -178,4 +255,3 @@ impl SessionLog {
         }
     }
 }
-
