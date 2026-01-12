@@ -23,9 +23,9 @@ pub use database::{
 };
 pub use index::RefIndex;
 pub use lens::{
-    ColumnTransform, DefaultValue, Lens, LensError, LensGenerationOptions, LensGenerationResult,
-    LensWarning, LensWarningKind, PotentialRename, RenameConfidence, SchemaDiff, SqlExpr,
-    TypeChange, diff_schemas, generate_lens,
+    ColumnTransform, DefaultValue, Lens, LensContext, LensError, LensGenerationOptions,
+    LensGenerationResult, LensWarning, LensWarningKind, PotentialRename, QueryLensContext,
+    RenameConfidence, SchemaDiff, SqlExpr, TypeChange, diff_schemas, generate_lens,
 };
 pub use parser::{
     Condition, ConditionValue, CreateTable, FromClause, Insert, Join, JoinCondition, ParseError,

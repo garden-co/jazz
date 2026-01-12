@@ -1243,6 +1243,172 @@ pub fn generate_lens(diff: &SchemaDiff, options: &LensGenerationOptions) -> Lens
     }
 }
 
+// =============================================================================
+// Lens Context for Query Evaluation (Phase 7)
+// =============================================================================
+
+use crate::sql::catalog::DescriptorId;
+
+/// A lens context holds lenses for transforming rows between schema versions
+/// during query evaluation.
+///
+/// During sync, the server may need to evaluate queries against rows that are
+/// stored in different schema versions. The LensContext provides a registry
+/// of lenses that can be looked up by (source, target) descriptor pair.
+///
+/// # Example
+///
+/// ```ignore
+/// // Create context with lenses from descriptor chain
+/// let mut ctx = LensContext::new();
+/// ctx.register_lens(old_descriptor_id, new_descriptor_id, lens);
+///
+/// // Transform a row for query evaluation
+/// if let Some(transformed) = ctx.transform_row(&row, row_descriptor_id, target_descriptor_id) {
+///     // Use transformed row for predicate evaluation
+/// }
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct LensContext {
+    /// Registry of lenses: (source_descriptor_id, target_descriptor_id) → Lens
+    lenses: HashMap<(DescriptorId, DescriptorId), Lens>,
+    /// Cached composed lenses for multi-hop transformations
+    composed_cache: HashMap<(DescriptorId, DescriptorId), Lens>,
+}
+
+impl LensContext {
+    /// Create an empty lens context.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a lens for transforming from source to target descriptor.
+    pub fn register_lens(&mut self, source: DescriptorId, target: DescriptorId, lens: Lens) {
+        // Clear composed cache when adding new lenses
+        self.composed_cache.clear();
+        self.lenses.insert((source, target), lens);
+    }
+
+    /// Get the direct lens from source to target (if registered).
+    pub fn get_lens(&self, source: &DescriptorId, target: &DescriptorId) -> Option<&Lens> {
+        self.lenses.get(&(*source, *target))
+    }
+
+    /// Get the reverse lens from target to source.
+    ///
+    /// Uses the backward transforms of the forward lens.
+    pub fn get_reverse_lens(&self, target: &DescriptorId, source: &DescriptorId) -> Option<Lens> {
+        self.lenses.get(&(*source, *target)).map(|lens| {
+            // Create reverse lens by swapping forward/backward
+            Lens::new(lens.backward.clone(), lens.forward.clone())
+        })
+    }
+
+    /// Transform a row from source schema to target schema.
+    ///
+    /// Returns None if the row is incompatible (lens cannot be applied).
+    pub fn transform_row(
+        &self,
+        row: &OwnedRow,
+        source: &DescriptorId,
+        target: &DescriptorId,
+    ) -> Result<OwnedRow, LensError> {
+        if source == target {
+            // Same schema version - no transformation needed
+            return Ok(row.clone());
+        }
+
+        // Look up direct lens
+        if let Some(lens) = self.get_lens(source, target) {
+            return lens.apply_forward_owned(row);
+        }
+
+        // Try reverse lens
+        if let Some(lens) = self.get_reverse_lens(source, target) {
+            return lens.apply_forward_owned(row);
+        }
+
+        // TODO: Build composed lens for multi-hop transformations
+        // For now, return error if no direct lens exists
+        Err(LensError::Incompatible {
+            reason: format!(
+                "No lens found for transformation from {} to {}",
+                source, target
+            ),
+        })
+    }
+
+    /// Check if a lens exists for the given source/target pair.
+    pub fn has_lens(&self, source: &DescriptorId, target: &DescriptorId) -> bool {
+        source == target
+            || self.lenses.contains_key(&(*source, *target))
+            || self.lenses.contains_key(&(*target, *source))
+    }
+
+    /// Get all registered lenses.
+    pub fn all_lenses(&self) -> impl Iterator<Item = (&(DescriptorId, DescriptorId), &Lens)> {
+        self.lenses.iter()
+    }
+
+    /// Number of registered lenses.
+    pub fn len(&self) -> usize {
+        self.lenses.len()
+    }
+
+    /// Whether the context is empty.
+    pub fn is_empty(&self) -> bool {
+        self.lenses.is_empty()
+    }
+}
+
+/// A query context that includes lens information for cross-schema queries.
+///
+/// Used during query evaluation to know the target schema version and
+/// available lenses for row transformation.
+#[derive(Debug, Clone)]
+pub struct QueryLensContext {
+    /// The target schema version for this query.
+    pub target_descriptor: DescriptorId,
+    /// Available lenses for transformation.
+    pub lenses: LensContext,
+}
+
+impl QueryLensContext {
+    /// Create a new query lens context.
+    pub fn new(target_descriptor: DescriptorId) -> Self {
+        QueryLensContext {
+            target_descriptor,
+            lenses: LensContext::new(),
+        }
+    }
+
+    /// Create from a target descriptor with the given lenses.
+    pub fn with_lenses(target_descriptor: DescriptorId, lenses: LensContext) -> Self {
+        QueryLensContext {
+            target_descriptor,
+            lenses,
+        }
+    }
+
+    /// Transform a row to the target schema version.
+    ///
+    /// Returns None if the row is incompatible.
+    pub fn transform_to_target(
+        &self,
+        row: &OwnedRow,
+        source_descriptor: &DescriptorId,
+    ) -> Result<OwnedRow, LensError> {
+        self.lenses
+            .transform_row(row, source_descriptor, &self.target_descriptor)
+    }
+
+    /// Check if a row at the given schema version can be transformed to target.
+    pub fn can_transform(&self, source_descriptor: &DescriptorId) -> bool {
+        self.lenses
+            .has_lens(source_descriptor, &self.target_descriptor)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1968,5 +2134,140 @@ mod tests {
         assert_eq!(result.get_by_name("c"), Some(RowValue::String("value")));
         assert_eq!(result.get_by_name("a"), None);
         assert_eq!(result.get_by_name("b"), None);
+    }
+
+    // =========================================================================
+    // Lens Context Tests (Phase 7)
+    // =========================================================================
+
+    #[test]
+    fn test_lens_context_register_and_get() {
+        let mut ctx = LensContext::new();
+
+        // Create descriptor IDs
+        let id1 = DescriptorId::from_bytes([1; 32]);
+        let id2 = DescriptorId::from_bytes([2; 32]);
+
+        // Register a lens
+        let lens = Lens::from_forward(vec![ColumnTransform::rename("a", "b")]);
+        ctx.register_lens(id1, id2, lens.clone());
+
+        // Should be able to get it
+        assert!(ctx.get_lens(&id1, &id2).is_some());
+        assert!(ctx.has_lens(&id1, &id2));
+
+        // Reverse should also work
+        assert!(ctx.has_lens(&id2, &id1));
+    }
+
+    #[test]
+    fn test_lens_context_transform_row() {
+        let mut ctx = LensContext::new();
+
+        // Create descriptor IDs
+        let id_v1 = DescriptorId::from_bytes([1; 32]);
+        let id_v2 = DescriptorId::from_bytes([2; 32]);
+
+        // Register rename lens (title → name)
+        let lens = Lens::from_forward(vec![ColumnTransform::rename("title", "name")]);
+        ctx.register_lens(id_v1, id_v2, lens);
+
+        // Create a v1 row with 'title'
+        let v1_desc = Arc::new(RowDescriptor::new([(
+            "title".to_string(),
+            ColumnType::String,
+            false,
+        )]));
+        let row = RowBuilder::new(v1_desc)
+            .set_string_by_name("title", "Hello")
+            .build();
+
+        // Transform to v2
+        let result = ctx.transform_row(&row, &id_v1, &id_v2).unwrap();
+        assert_eq!(result.get_by_name("name"), Some(RowValue::String("Hello")));
+        assert_eq!(result.get_by_name("title"), None);
+    }
+
+    #[test]
+    fn test_lens_context_transform_same_version() {
+        let ctx = LensContext::new();
+
+        let id = DescriptorId::from_bytes([1; 32]);
+
+        // Create a row
+        let desc = Arc::new(RowDescriptor::new([(
+            "name".to_string(),
+            ColumnType::String,
+            false,
+        )]));
+        let row = RowBuilder::new(desc)
+            .set_string_by_name("name", "Test")
+            .build();
+
+        // Transform to same version - should return clone
+        let result = ctx.transform_row(&row, &id, &id).unwrap();
+        assert_eq!(result.get_by_name("name"), Some(RowValue::String("Test")));
+    }
+
+    #[test]
+    fn test_lens_context_reverse_transform() {
+        let mut ctx = LensContext::new();
+
+        // Create descriptor IDs
+        let id_v1 = DescriptorId::from_bytes([1; 32]);
+        let id_v2 = DescriptorId::from_bytes([2; 32]);
+
+        // Register rename lens (title → name), only v1→v2
+        let lens = Lens::from_forward(vec![ColumnTransform::rename("title", "name")]);
+        ctx.register_lens(id_v1, id_v2, lens);
+
+        // Create a v2 row with 'name'
+        let v2_desc = Arc::new(RowDescriptor::new([(
+            "name".to_string(),
+            ColumnType::String,
+            false,
+        )]));
+        let row = RowBuilder::new(v2_desc)
+            .set_string_by_name("name", "Hello")
+            .build();
+
+        // Transform back to v1 (using reverse)
+        let result = ctx.transform_row(&row, &id_v2, &id_v1).unwrap();
+        assert_eq!(result.get_by_name("title"), Some(RowValue::String("Hello")));
+        assert_eq!(result.get_by_name("name"), None);
+    }
+
+    #[test]
+    fn test_query_lens_context() {
+        let mut lenses = LensContext::new();
+
+        // Create descriptor IDs
+        let id_v1 = DescriptorId::from_bytes([1; 32]);
+        let id_v2 = DescriptorId::from_bytes([2; 32]);
+
+        // Register lens
+        let lens = Lens::from_forward(vec![ColumnTransform::rename("old", "new")]);
+        lenses.register_lens(id_v1, id_v2, lens);
+
+        // Create query context targeting v2
+        let query_ctx = QueryLensContext::with_lenses(id_v2, lenses);
+
+        // Should be able to transform v1 rows to v2
+        assert!(query_ctx.can_transform(&id_v1));
+        assert!(query_ctx.can_transform(&id_v2)); // Same version
+
+        // Create a v1 row
+        let v1_desc = Arc::new(RowDescriptor::new([(
+            "old".to_string(),
+            ColumnType::String,
+            false,
+        )]));
+        let row = RowBuilder::new(v1_desc)
+            .set_string_by_name("old", "value")
+            .build();
+
+        // Transform to target
+        let result = query_ctx.transform_to_target(&row, &id_v1).unwrap();
+        assert_eq!(result.get_by_name("new"), Some(RowValue::String("value")));
     }
 }
