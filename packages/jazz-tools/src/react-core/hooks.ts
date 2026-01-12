@@ -152,7 +152,7 @@ function useCoValueSubscriptions(
     const cache = contextManager.getSubscriptionScopeCache();
 
     const subscriptions = ids.map((id) => {
-      if (!id) {
+      if (id === undefined || id === null) {
         return null;
       }
 
@@ -186,48 +186,23 @@ function useCoValueSubscriptions(
   };
 
   const stateRef = React.useRef<SubscriptionsState | null>(null);
-  if (!stateRef.current) {
-    stateRef.current = createAllSubscriptions();
-  }
+  const newSubscriptions = createAllSubscriptions();
 
   const state = stateRef.current;
 
-  const branchName = branch?.name;
-  const branchOwnerId = branch?.owner?.$jazz.id;
+  // Avoid recreating the subscriptions array if all subscriptions are already cached
+  const anySubscriptionChanged =
+    newSubscriptions.subscriptions.length !== state?.subscriptions.length ||
+    newSubscriptions.subscriptions.some(
+      (newSubscriptions, index) =>
+        newSubscriptions !== state.subscriptions[index],
+    );
 
-  const contextChanged =
-    state.contextManager !== contextManager || state.agent !== agent;
-
-  // Quick checks to avoid going through the subscription cache
-  const paramsChanged =
-    state.schema !== schema ||
-    state.resolve !== resolve ||
-    state.branchName !== branchName ||
-    state.branchOwnerId !== branchOwnerId ||
-    state.subscriptions.length !== ids.length ||
-    state.subscriptions.some((subscription, index) => {
-      const id = ids[index];
-      if (!subscription && !id) return false;
-      if (!subscription || !id) return true;
-      return subscription.id !== id;
-    });
-
-  if (contextChanged || paramsChanged) {
-    const newSubscriptions = createAllSubscriptions();
-    // Avoid recreating the subscriptions array if all subscriptions are already cached
-    const anySubscriptionChanged =
-      newSubscriptions.subscriptions.length !== state.subscriptions.length ||
-      newSubscriptions.subscriptions.some(
-        (newSubscriptions, index) =>
-          newSubscriptions !== state.subscriptions[index],
-      );
-    if (anySubscriptionChanged) {
-      stateRef.current = newSubscriptions;
-    }
-    return stateRef.current.subscriptions;
+  if (anySubscriptionChanged) {
+    stateRef.current = newSubscriptions;
   }
 
-  return stateRef.current.subscriptions;
+  return stateRef.current!.subscriptions;
 }
 
 function useImportCoValueContent<V>(
