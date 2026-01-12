@@ -6,10 +6,11 @@ import {
   DiscriminableCoValueSchemaDefinition,
   DiscriminableCoreCoValueSchema,
   Group,
-  Settled,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
+  Settled,
+  SubscribeCallback,
   Simplify,
   SubscribeListenerOptions,
   coMapDefiner,
@@ -32,6 +33,11 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
+
+type CoMapSchemaInstance<Shape extends z.core.$ZodLooseShape> = Simplify<
+  CoMapInstanceCoValuesMaybeLoaded<Shape>
+> &
+  CoMap;
 
 export class CoMapSchema<
   Shape extends z.core.$ZodLooseShape,
@@ -97,25 +103,18 @@ export class CoMapSchema<
 
   load<
     const R extends RefsToResolve<
-      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
+      CoMapSchemaInstance<Shape>
       // @ts-expect-error
     > = DefaultResolveQuery,
   >(
     id: string,
     options?: {
-      resolve?: RefsToResolveStrict<
-        Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
-        R
-      >;
+      resolve?: RefsToResolveStrict<CoMapSchemaInstance<Shape>, R>;
       loadAs?: Account | AnonymousJazzAgent;
       skipRetry?: boolean;
       unstable_branch?: BranchDefinition;
     },
-  ): Promise<
-    Settled<
-      Resolved<Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap, R>
-    >
-  > {
+  ): Promise<Settled<Resolved<CoMapSchemaInstance<Shape>, R>>> {
     // @ts-expect-error
     return this.coValueClass.load(
       id,
@@ -126,16 +125,13 @@ export class CoMapSchema<
 
   unstable_merge<
     const R extends RefsToResolve<
-      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
+      CoMapSchemaInstance<Shape>
       // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
     > = DefaultResolveQuery,
   >(
     id: string,
     options: {
-      resolve?: RefsToResolveStrict<
-        Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
-        R
-      >;
+      resolve?: RefsToResolveStrict<CoMapSchemaInstance<Shape>, R>;
       loadAs?: Account | AnonymousJazzAgent;
       branch: BranchDefinition;
     },
@@ -150,62 +146,29 @@ export class CoMapSchema<
 
   subscribe<
     const R extends RefsToResolve<
-      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
+      CoMapSchemaInstance<Shape>
       // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
     > = DefaultResolveQuery,
   >(
     id: string,
-    listener: (
-      value: Settled<
-        Resolved<Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap, R>
-      >,
-      unsubscribe: () => void,
-    ) => void,
+    listener: SubscribeCallback<Resolved<CoMapSchemaInstance<Shape>, R>>,
   ): () => void;
   subscribe<
     const R extends RefsToResolve<
-      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
+      CoMapSchemaInstance<Shape>
       // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
     > = DefaultResolveQuery,
   >(
     id: string,
-    options: SubscribeListenerOptions<
-      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
-      R
-    >,
-    listener: (
-      value: Settled<
-        Resolved<Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap, R>
-      >,
-      unsubscribe: () => void,
-    ) => void,
+    options: SubscribeListenerOptions<CoMapSchemaInstance<Shape>, R>,
+    listener: SubscribeCallback<Resolved<CoMapSchemaInstance<Shape>, R>>,
   ): () => void;
-  subscribe<
-    const R extends RefsToResolve<
-      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
-    >,
-  >(
+  subscribe<const R extends RefsToResolve<CoMapSchemaInstance<Shape>>>(
     id: string,
     optionsOrListener:
-      | SubscribeListenerOptions<
-          Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
-          R
-        >
-      | ((
-          value: Settled<
-            Resolved<
-              Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
-              R
-            >
-          >,
-          unsubscribe: () => void,
-        ) => void),
-    maybeListener?: (
-      value: Settled<
-        Resolved<Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap, R>
-      >,
-      unsubscribe: () => void,
-    ) => void,
+      | SubscribeListenerOptions<CoMapSchemaInstance<Shape>, R>
+      | SubscribeCallback<Resolved<CoMapSchemaInstance<Shape>, R>>,
+    maybeListener?: SubscribeCallback<Resolved<CoMapSchemaInstance<Shape>, R>>,
   ): () => void {
     if (typeof optionsOrListener === "function") {
       // @ts-expect-error
@@ -234,22 +197,15 @@ export class CoMapSchema<
 
   upsertUnique<
     const R extends RefsToResolve<
-      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
+      CoMapSchemaInstance<Shape>
       // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
     > = DefaultResolveQuery,
   >(options: {
     value: Simplify<CoMapSchemaInit<Shape>>;
     unique: CoValueUniqueness["uniqueness"];
     owner: Owner;
-    resolve?: RefsToResolveStrict<
-      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
-      R
-    >;
-  }): Promise<
-    Settled<
-      Resolved<Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap, R>
-    >
-  > {
+    resolve?: RefsToResolveStrict<CoMapSchemaInstance<Shape>, R>;
+  }): Promise<Settled<Resolved<CoMapSchemaInstance<Shape>, R>>> {
     // @ts-expect-error
     return this.coValueClass.upsertUnique(
       // @ts-expect-error
@@ -259,24 +215,17 @@ export class CoMapSchema<
 
   loadUnique<
     const R extends RefsToResolve<
-      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
+      CoMapSchemaInstance<Shape>
       // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
     > = DefaultResolveQuery,
   >(
     unique: CoValueUniqueness["uniqueness"],
     ownerID: string,
     options?: {
-      resolve?: RefsToResolveStrict<
-        Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
-        R
-      >;
+      resolve?: RefsToResolveStrict<CoMapSchemaInstance<Shape>, R>;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<
-    Settled<
-      Resolved<Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap, R>
-    >
-  > {
+  ): Promise<Settled<Resolved<CoMapSchemaInstance<Shape>, R>>> {
     // @ts-expect-error
     return this.coValueClass.loadUnique(
       unique,
@@ -311,12 +260,7 @@ export class CoMapSchema<
   }
 
   withMigration(
-    migration: (
-      value: Resolved<
-        Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
-        true
-      >,
-    ) => undefined,
+    migration: (value: Resolved<CoMapSchemaInstance<Shape>, true>) => undefined,
   ): this {
     // @ts-expect-error avoid exposing 'migrate' at the type level
     this.coValueClass.prototype.migrate = migration;
@@ -393,15 +337,8 @@ export class CoMapSchema<
    * Adds a default resolve query to be used when loading instances of this schema.
    * This resolve query will be used when no resolve query is provided to the load method.
    */
-  resolved<
-    const R extends RefsToResolve<
-      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
-    > = true,
-  >(
-    resolveQuery: RefsToResolveStrict<
-      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
-      R
-    >,
+  resolved<const R extends RefsToResolve<CoMapSchemaInstance<Shape>> = true>(
+    resolveQuery: RefsToResolveStrict<CoMapSchemaInstance<Shape>, R>,
   ): CoMapSchema<Shape, CatchAll, Owner, R> {
     return this.copy({ resolveQuery: resolveQuery as R });
   }

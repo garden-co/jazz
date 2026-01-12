@@ -1,16 +1,17 @@
 import {
   Account,
   AnonymousJazzAgent,
-  LoadedAndRequired,
   BranchDefinition,
   InstanceOfSchema,
   InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded,
-  Settled,
+  LoadedAndRequired,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
   SchemaUnion,
   SchemaUnionConcreteSubclass,
+  Settled,
+  SubscribeCallback,
   SubscribeListenerOptions,
   coOptionalDefiner,
 } from "../../../internal.js";
@@ -38,6 +39,10 @@ export type DiscriminableCoValueSchemas = [
   DiscriminableCoreCoValueSchema,
   ...DiscriminableCoreCoValueSchema[],
 ];
+
+type CoDiscriminatedUnionSchemaInstance<
+  Options extends DiscriminableCoValueSchemas,
+> = CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion;
 
 export interface CoreCoDiscriminatedUnionSchema<
   Options extends DiscriminableCoValueSchemas = DiscriminableCoValueSchemas,
@@ -108,16 +113,9 @@ export class CoDiscriminatedUnionSchema<
     > = DefaultResolveQuery,
   >(
     id: string,
-    listener: (
-      value: Settled<
-        Resolved<
-          CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> &
-            SchemaUnion,
-          R
-        >
-      >,
-      unsubscribe: () => void,
-    ) => void,
+    listener: SubscribeCallback<
+      Resolved<CoDiscriminatedUnionSchemaInstance<Options>, R>
+    >,
   ): () => void;
   subscribe<
     const R extends RefsToResolve<
@@ -130,16 +128,9 @@ export class CoDiscriminatedUnionSchema<
       CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion,
       R
     >,
-    listener: (
-      value: Settled<
-        Resolved<
-          CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> &
-            SchemaUnion,
-          R
-        >
-      >,
-      unsubscribe: () => void,
-    ) => void,
+    listener: SubscribeCallback<
+      Resolved<CoDiscriminatedUnionSchemaInstance<Options>, R>
+    >,
   ): () => void;
   subscribe<
     const R extends RefsToResolve<
@@ -153,26 +144,12 @@ export class CoDiscriminatedUnionSchema<
             SchemaUnion,
           R
         >
-      | ((
-          value: Settled<
-            Resolved<
-              CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> &
-                SchemaUnion,
-              R
-            >
-          >,
-          unsubscribe: () => void,
-        ) => void),
-    maybeListener?: (
-      value: Settled<
-        Resolved<
-          CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> &
-            SchemaUnion,
-          R
-        >
-      >,
-      unsubscribe: () => void,
-    ) => void,
+      | SubscribeCallback<
+          Resolved<CoDiscriminatedUnionSchemaInstance<Options>, R>
+        >,
+    maybeListener?: SubscribeCallback<
+      Resolved<CoDiscriminatedUnionSchemaInstance<Options>, R>
+    >,
   ): () => void {
     if (typeof optionsOrListener === "function") {
       return this.coValueClass.subscribe(

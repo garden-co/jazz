@@ -19,6 +19,7 @@ import {
   Group,
   ID,
   Settled,
+  SubscribeCallback,
   PartialOnUndefined,
   RefEncoded,
   RefIfCoValue,
@@ -418,13 +419,13 @@ export class CoMap extends CoValueBase implements CoValue {
   static subscribe<M extends CoMap, const R extends RefsToResolve<M> = true>(
     this: CoValueClass<M>,
     id: ID<M>,
-    listener: (value: Settled<Resolved<M, R>>, unsubscribe: () => void) => void,
+    listener: SubscribeCallback<Resolved<M, R>>,
   ): () => void;
   static subscribe<M extends CoMap, const R extends RefsToResolve<M> = true>(
     this: CoValueClass<M>,
     id: ID<M>,
     options: SubscribeListenerOptions<M, R>,
-    listener: (value: Settled<Resolved<M, R>>, unsubscribe: () => void) => void,
+    listener: SubscribeCallback<Resolved<M, R>>,
   ): () => void;
   static subscribe<M extends CoMap, const R extends RefsToResolve<M>>(
     this: CoValueClass<M>,

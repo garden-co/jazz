@@ -29,6 +29,7 @@ import {
   InstanceOrPrimitiveOfSchema,
   MaybeLoaded,
   Settled,
+  SubscribeCallback,
   Profile,
   Ref,
   type RefEncoded,
@@ -402,13 +403,13 @@ export class Account extends CoValueBase implements CoValue {
   static subscribe<A extends Account, const R extends RefsToResolve<A> = true>(
     this: CoValueClass<A>,
     id: ID<A>,
-    listener: (value: Settled<Resolved<A, R>>, unsubscribe: () => void) => void,
+    listener: SubscribeCallback<Resolved<A, R>>,
   ): () => void;
   static subscribe<A extends Account, const R extends RefsToResolve<A> = true>(
     this: CoValueClass<A>,
     id: ID<A>,
     options: SubscribeListenerOptions<A, R>,
-    listener: (value: Settled<Resolved<A, R>>, unsubscribe: () => void) => void,
+    listener: SubscribeCallback<Resolved<A, R>>,
   ): () => void;
   static subscribe<A extends Account, const R extends RefsToResolve<A>>(
     this: CoValueClass<A>,
@@ -557,7 +558,7 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
   /** @category Subscription & Loading */
   subscribe<A extends Account, const R extends RefsToResolve<A>>(
     this: AccountJazzApi<A>,
-    listener: (value: Settled<Resolved<A, R>>, unsubscribe: () => void) => void,
+    listener: SubscribeCallback<Resolved<A, R>>,
   ): () => void;
   subscribe<A extends Account, const R extends RefsToResolve<A>>(
     this: AccountJazzApi<A>,
@@ -565,7 +566,7 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
       resolve?: RefsToResolveStrict<A, R>;
       unstable_branch?: BranchDefinition;
     },
-    listener: (value: Settled<Resolved<A, R>>, unsubscribe: () => void) => void,
+    listener: SubscribeCallback<Resolved<A, R>>,
   ): () => void;
   subscribe<A extends Account, const R extends RefsToResolve<A>>(
     this: AccountJazzApi<A>,

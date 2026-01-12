@@ -12,6 +12,7 @@ import {
   ID,
   AsLoaded,
   Settled,
+  SubscribeCallback,
   unstable_mergeBranch,
   RefEncoded,
   RefsToResolve,
@@ -302,13 +303,13 @@ export class CoList<out Item = any>
   static subscribe<L extends CoList, const R extends RefsToResolve<L> = true>(
     this: CoValueClass<L>,
     id: ID<L>,
-    listener: (value: Settled<Resolved<L, R>>, unsubscribe: () => void) => void,
+    listener: SubscribeCallback<Resolved<L, R>>,
   ): () => void;
   static subscribe<L extends CoList, const R extends RefsToResolve<L> = true>(
     this: CoValueClass<L>,
     id: ID<L>,
     options: SubscribeListenerOptions<L, R>,
-    listener: (value: Settled<Resolved<L, R>>, unsubscribe: () => void) => void,
+    listener: SubscribeCallback<Resolved<L, R>>,
   ): () => void;
   static subscribe<L extends CoList, const R extends RefsToResolve<L>>(
     this: CoValueClass<L>,
@@ -790,7 +791,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    **/
   subscribe<L extends CoList, const R extends RefsToResolve<L> = true>(
     this: CoListJazzApi<L>,
-    listener: (value: Settled<Resolved<L, R>>, unsubscribe: () => void) => void,
+    listener: SubscribeCallback<Resolved<L, R>>,
   ): () => void;
   subscribe<L extends CoList, const R extends RefsToResolve<L> = true>(
     this: CoListJazzApi<L>,
@@ -798,7 +799,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       resolve?: RefsToResolveStrict<L, R>;
       unstable_branch?: BranchDefinition;
     },
-    listener: (value: Settled<Resolved<L, R>>, unsubscribe: () => void) => void,
+    listener: SubscribeCallback<Resolved<L, R>>,
   ): () => void;
   subscribe<L extends CoList, const R extends RefsToResolve<L>>(
     this: CoListJazzApi<L>,

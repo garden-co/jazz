@@ -5,10 +5,11 @@ import {
   Group,
   hydrateCoreCoValueSchema,
   ID,
-  Settled,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
+  Settled,
+  SubscribeCallback,
   SubscribeListenerOptions,
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
@@ -131,10 +132,9 @@ export class CoListSchema<
     > = DefaultResolveQuery,
   >(
     id: string,
-    listener: (
-      value: Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>,
-      unsubscribe: () => void,
-    ) => void,
+    listener: SubscribeCallback<
+      Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>
+    >,
   ): () => void;
   subscribe<
     const R extends RefsToResolve<
@@ -143,10 +143,9 @@ export class CoListSchema<
   >(
     id: string,
     options: SubscribeListenerOptions<CoListInstanceCoValuesMaybeLoaded<T>, R>,
-    listener: (
-      value: Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>,
-      unsubscribe: () => void,
-    ) => void,
+    listener: SubscribeCallback<
+      Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>
+    >,
   ): () => void;
   subscribe<
     const R extends RefsToResolve<CoListInstanceCoValuesMaybeLoaded<T>>,
@@ -154,14 +153,10 @@ export class CoListSchema<
     id: string,
     optionsOrListener:
       | SubscribeListenerOptions<CoListInstanceCoValuesMaybeLoaded<T>, R>
-      | ((
-          value: Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>,
-          unsubscribe: () => void,
-        ) => void),
-    maybeListener?: (
-      value: Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>,
-      unsubscribe: () => void,
-    ) => void,
+      | SubscribeCallback<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>,
+    maybeListener?: SubscribeCallback<
+      Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>
+    >,
   ): () => void {
     if (typeof optionsOrListener === "function") {
       return this.coValueClass.subscribe(

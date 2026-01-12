@@ -222,6 +222,15 @@ type SubscribeListener<V extends CoValue, R extends RefsToResolve<V>> = (
   subscriptionScope: SubscriptionScope<V>,
 ) => void;
 
+/**
+ * A listener callback that receives a Settled value (either loaded or in an error state).
+ * Use `$isLoaded` to check if the value is loaded.
+ */
+export type SubscribeCallback<V> = (
+  value: Settled<V>,
+  unsubscribe: () => void,
+) => void;
+
 export type SubscribeListenerOptions<
   V extends CoValue,
   R extends RefsToResolve<V>,

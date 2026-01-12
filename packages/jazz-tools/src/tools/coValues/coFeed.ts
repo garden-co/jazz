@@ -21,6 +21,7 @@ import {
   ID,
   MaybeLoaded,
   Settled,
+  SubscribeCallback,
   LoadedAndRequired,
   unstable_mergeBranch,
   RefsToResolve,
@@ -308,13 +309,13 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   static subscribe<F extends CoFeed, const R extends RefsToResolve<F> = true>(
     this: CoValueClass<F>,
     id: ID<F>,
-    listener: (value: Settled<Resolved<F, R>>, unsubscribe: () => void) => void,
+    listener: SubscribeCallback<Resolved<F, R>>,
   ): () => void;
   static subscribe<F extends CoFeed, const R extends RefsToResolve<F> = true>(
     this: CoValueClass<F>,
     id: ID<F>,
     options: SubscribeListenerOptions<F, R>,
-    listener: (value: Settled<Resolved<F, R>>, unsubscribe: () => void) => void,
+    listener: SubscribeCallback<Resolved<F, R>>,
   ): () => void;
   static subscribe<F extends CoFeed, const R extends RefsToResolve<F>>(
     this: CoValueClass<F>,
@@ -417,7 +418,7 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
    */
   subscribe<F extends CoFeed, const R extends RefsToResolve<F>>(
     this: CoFeedJazzApi<F>,
-    listener: (value: Settled<Resolved<F, R>>, unsubscribe: () => void) => void,
+    listener: SubscribeCallback<Resolved<F, R>>,
   ): () => void;
   subscribe<F extends CoFeed, const R extends RefsToResolve<F>>(
     this: CoFeedJazzApi<F>,
@@ -425,7 +426,7 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
       resolve?: RefsToResolveStrict<F, R>;
       unstable_branch?: BranchDefinition;
     },
-    listener: (value: Settled<Resolved<F, R>>, unsubscribe: () => void) => void,
+    listener: SubscribeCallback<Resolved<F, R>>,
   ): () => void;
   subscribe<F extends CoFeed, const R extends RefsToResolve<F>>(
     this: CoFeedJazzApi<F>,
@@ -1031,13 +1032,13 @@ export class FileStream extends CoValueBase implements CoValue {
   static subscribe<F extends FileStream, const R extends RefsToResolve<F>>(
     this: CoValueClass<F>,
     id: ID<F>,
-    listener: (value: Settled<Resolved<F, R>>, unsubscribe: () => void) => void,
+    listener: SubscribeCallback<Resolved<F, R>>,
   ): () => void;
   static subscribe<F extends FileStream, const R extends RefsToResolve<F>>(
     this: CoValueClass<F>,
     id: ID<F>,
     options: SubscribeListenerOptions<F, R>,
-    listener: (value: Settled<Resolved<F, R>>, unsubscribe: () => void) => void,
+    listener: SubscribeCallback<Resolved<F, R>>,
   ): () => void;
   static subscribe<F extends FileStream, const R extends RefsToResolve<F>>(
     this: CoValueClass<F>,

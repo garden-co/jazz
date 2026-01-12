@@ -12,6 +12,7 @@ import {
   Simplify,
   SubscribeListenerOptions,
   unstable_mergeBranchWithResolve,
+  SubscribeCallback,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
@@ -43,6 +44,10 @@ export type DefaultAccountShape = {
   profile: CoMapSchema<BaseProfileShape>;
   root: CoMapSchema<{}>;
 };
+
+type AccountSchemaInstance<Shape extends BaseAccountShape> = Simplify<
+  AccountInstance<Shape>
+>;
 
 export class AccountSchema<
   Shape extends BaseAccountShape = DefaultAccountShape,
@@ -137,41 +142,31 @@ export class AccountSchema<
 
   subscribe<
     const R extends RefsToResolve<
-      Simplify<AccountInstance<Shape>>
+      AccountSchemaInstance<Shape>
       // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
     > = DefaultResolveQuery,
   >(
     id: string,
-    listener: (
-      value: Settled<Resolved<Simplify<AccountInstance<Shape>>, R>>,
-      unsubscribe: () => void,
-    ) => void,
+    listener: SubscribeCallback<Resolved<AccountSchemaInstance<Shape>, R>>,
   ): () => void;
   subscribe<
     const R extends RefsToResolve<
-      Simplify<AccountInstance<Shape>>
+      AccountSchemaInstance<Shape>
       // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
     > = DefaultResolveQuery,
   >(
     id: string,
-    options: SubscribeListenerOptions<Simplify<AccountInstance<Shape>>, R>,
-    listener: (
-      value: Settled<Resolved<Simplify<AccountInstance<Shape>>, R>>,
-      unsubscribe: () => void,
-    ) => void,
+    options: SubscribeListenerOptions<AccountSchemaInstance<Shape>, R>,
+    listener: SubscribeCallback<Resolved<AccountSchemaInstance<Shape>, R>>,
   ): () => void;
-  subscribe<const R extends RefsToResolve<Simplify<AccountInstance<Shape>>>>(
+  subscribe<const R extends RefsToResolve<AccountSchemaInstance<Shape>>>(
     id: string,
     optionsOrListener:
-      | SubscribeListenerOptions<Simplify<AccountInstance<Shape>>, R>
-      | ((
-          value: Settled<Resolved<Simplify<AccountInstance<Shape>>, R>>,
-          unsubscribe: () => void,
-        ) => void),
-    maybeListener?: (
-      value: Settled<Resolved<Simplify<AccountInstance<Shape>>, R>>,
-      unsubscribe: () => void,
-    ) => void,
+      | SubscribeListenerOptions<AccountSchemaInstance<Shape>, R>
+      | SubscribeCallback<Resolved<AccountSchemaInstance<Shape>, R>>,
+    maybeListener?: SubscribeCallback<
+      Resolved<AccountSchemaInstance<Shape>, R>
+    >,
   ): () => void {
     if (typeof optionsOrListener === "function") {
       return this.coValueClass.subscribe(
