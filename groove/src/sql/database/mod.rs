@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use crate::listener::ListenerId;
 use crate::node::{LocalNode, generate_object_id};
 use crate::object::ObjectId;
-use crate::sql::catalog::{Catalog, TableDescriptor};
+use crate::sql::catalog::{Catalog, DescriptorId, TableDescriptor};
 use crate::sql::index::RefIndex;
 use crate::sql::parser::{
     self, Condition, ConditionValue, Projection, Select, SelectExpr, Statement,
@@ -679,9 +679,13 @@ impl Database {
         let mut policies = HashMap::new();
 
         // Restore each table from its descriptor
-        for (table_name, descriptor_id) in &catalog.tables {
+        for (table_name, expected_descriptor_id) in &catalog.tables {
+            // Derive the ObjectId where the descriptor is stored (deterministic from table name)
+            let descriptor_key = format!("descriptor:{}", table_name);
+            let descriptor_object_id = crate::ObjectId::from_key(&descriptor_key);
+
             // Load descriptor object from Environment
-            node.load_object(*descriptor_id, format!("descriptor:{}", table_name), "main")
+            node.load_object(descriptor_object_id, descriptor_key, "main")
                 .await
                 .ok_or_else(|| {
                     DatabaseError::Storage(format!(
@@ -692,7 +696,7 @@ impl Database {
 
             // Read descriptor content
             let descriptor_bytes = node
-                .read(*descriptor_id, "main")
+                .read(descriptor_object_id, "main")
                 .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
                 .ok_or_else(|| {
                     DatabaseError::Storage(format!("descriptor for {} not found", table_name))
@@ -700,6 +704,17 @@ impl Database {
 
             let descriptor = TableDescriptor::from_bytes(&descriptor_bytes)
                 .map_err(|e| DatabaseError::Storage(format!("descriptor parse error: {}", e)))?;
+
+            // Verify content hash matches expected (optional integrity check)
+            let actual_descriptor_id = descriptor.compute_id();
+            if actual_descriptor_id != *expected_descriptor_id {
+                // Log warning but continue - the descriptor may have been updated
+                // In the future, this could be a hard error for strict verification
+                eprintln!(
+                    "Warning: Descriptor hash mismatch for table '{}': expected {}, got {}",
+                    table_name, expected_descriptor_id, actual_descriptor_id
+                );
+            }
 
             // Load schema object
             node.load_object(
@@ -733,7 +748,7 @@ impl Database {
             tables.insert(table_name.clone(), descriptor.schema_object_id);
             schemas.insert(descriptor.schema_object_id, descriptor.schema.clone());
             table_rows_objects.insert(table_name.clone(), descriptor.rows_object_id);
-            descriptor_objects.insert(table_name.clone(), *descriptor_id);
+            descriptor_objects.insert(table_name.clone(), descriptor_object_id);
 
             // Restore policies
             if !descriptor.policies.is_empty() {
@@ -991,10 +1006,16 @@ impl Database {
         let descriptor = TableDescriptor {
             schema: schema.clone(),
             policies: TablePolicies::default(),
+            parent_descriptors: vec![], // Initial schema has no parents
+            lenses: vec![],             // No lenses for root schema
             rows_object_id: rows_id,
             schema_object_id: schema_id,
             index_object_ids,
         };
+
+        // Compute content-addressed descriptor ID
+        let content_hash = descriptor.compute_id();
+
         self.state
             .node
             .write(
@@ -1012,8 +1033,8 @@ impl Database {
             .unwrap()
             .insert(schema.name.clone(), descriptor_id);
 
-        // Update catalog with the new table
-        self.update_catalog_add_table(&schema.name, descriptor_id)?;
+        // Update catalog with the new table (using content-addressed ID)
+        self.update_catalog_add_table(&schema.name, content_hash)?;
 
         // Cache schema
         self.state
@@ -1034,7 +1055,7 @@ impl Database {
     fn update_catalog_add_table(
         &self,
         table_name: &str,
-        descriptor_id: ObjectId,
+        descriptor_id: DescriptorId,
     ) -> Result<(), DatabaseError> {
         // Read current catalog
         let catalog_bytes = self
