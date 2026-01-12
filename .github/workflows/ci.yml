@@ -69,7 +69,7 @@ jobs:
             groove-wasm
 
       - name: Run Rust tests (all features)
-        run: cargo test --all-features --workspace
+        run: cargo test --all-features --workspace --exclude groove-wasm
 
   ts-build:
     name: TypeScript Build
@@ -147,7 +147,7 @@ jobs:
           path: .
 
       - name: Install Playwright browsers
-        run: pnpm exec playwright install --with-deps chromium
+        run: pnpm --filter="@jazz/client" exec playwright install --with-deps chromium
 
       - name: Run lib tests
         run: pnpm test --filter="@jazz/*"
@@ -158,6 +158,14 @@ jobs:
     needs: ts-build
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: groove-server
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -176,6 +184,14 @@ jobs:
         with:
           name: build-artifacts
           path: .
+
+      - name: Build groove-server
+        run: cargo build --release -p groove-server
+
+      - name: Start groove-server
+        run: |
+          ./target/release/groove-server &
+          sleep 2
 
       - name: Install Playwright browsers
         run: cd sync-demo && pnpm exec playwright install --with-deps
@@ -219,11 +235,11 @@ jobs:
       - name: Generate schema
         run: cd demo-app && pnpm generate
 
+      - name: Install Playwright browsers
+        run: cd demo-app && pnpm exec playwright install --with-deps chromium
+
       - name: Run unit tests
         run: cd demo-app && pnpm test
-
-      - name: Install Playwright browsers
-        run: cd demo-app && pnpm exec playwright install --with-deps
 
       - name: Run E2E tests
         run: cd demo-app && pnpm test:e2e

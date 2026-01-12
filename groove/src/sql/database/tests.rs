@@ -4310,3 +4310,738 @@ fn migration_descriptor_chain() {
     assert_eq!(desc_v2.parent_descriptors[0], id_v1);
     assert_eq!(desc_v2.lenses.len(), 1);
 }
+
+#[test]
+fn incremental_query_two_reverse_joins_combined_filters() {
+    // Test that queries with TWO reverse joins work correctly
+    // This reproduces the exact scenario that fails in CI but passes locally
+    // Now includes a forward join to Projects, matching the TypeScript-generated query
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE Projects (name STRING NOT NULL, color STRING NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE Issues (title STRING NOT NULL, priority STRING NOT NULL, project REFERENCES Projects NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE Users (name STRING NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE Labels (name STRING NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE IssueAssignees (issue REFERENCES Issues NOT NULL, user REFERENCES Users NOT NULL)").unwrap();
+    db.execute(
+        "CREATE TABLE IssueLabels (issue REFERENCES Issues NOT NULL, label REFERENCES Labels NOT NULL)",
+    )
+    .unwrap();
+
+    let project_id = match db
+        .execute("INSERT INTO Projects (name, color) VALUES ('Test Project', '#00ff00')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted { row_id: id, .. } => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    let alice_id = match db
+        .execute("INSERT INTO Users (name) VALUES ('Alice')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted { row_id: id, .. } => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    let bug_label_id = match db
+        .execute("INSERT INTO Labels (name) VALUES ('Bug')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted { row_id: id, .. } => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    // Insert issue with project reference
+    let issue1_id = db
+        .insert_with("Issues", |b| {
+            b.set_string_by_name("title", "Test Issue")
+                .set_string_by_name("priority", "high")
+                .set_ref_by_name("project", project_id)
+                .build()
+        })
+        .unwrap();
+
+    // Create junction table entries
+    db.insert_with("IssueLabels", |b| {
+        b.set_ref_by_name("issue", issue1_id)
+            .set_ref_by_name("label", bug_label_id)
+            .build()
+    })
+    .unwrap();
+
+    db.insert_with("IssueAssignees", |b| {
+        b.set_ref_by_name("issue", issue1_id)
+            .set_ref_by_name("user", alice_id)
+            .build()
+    })
+    .unwrap();
+
+    // Test with the EXACT TypeScript-generated SQL pattern including aliases
+    // This matches what packages/jazz-schema/src/runtime.ts buildQuery() produces
+    let sql_ts_style = format!(
+        "SELECT i.id, i.title, i.priority, i.project, \
+         Projects as project, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.label FROM IssueLabels i_inner WHERE i_inner.issue = i.id) as IssueLabels, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.user FROM IssueAssignees i_inner WHERE i_inner.issue = i.id) as IssueAssignees \
+         FROM Issues i \
+         JOIN Projects ON i.project = Projects.id \
+         JOIN IssueLabels ON IssueLabels.issue = i.id \
+         JOIN IssueAssignees ON IssueAssignees.issue = i.id \
+         WHERE i.priority = 'high' AND IssueLabels.label = '{}' AND IssueAssignees.user = '{}'",
+        bug_label_id, alice_id
+    );
+    eprintln!("TypeScript-style SQL: {}", sql_ts_style);
+
+    // Also test without aliases (simpler case that should also work)
+    let sql = format!(
+        "SELECT Issues.id, Issues.title, Issues.priority, Issues.project, \
+         Projects as project \
+         FROM Issues \
+         JOIN Projects ON Issues.project = Projects.id \
+         JOIN IssueLabels ON IssueLabels.issue = Issues.id \
+         JOIN IssueAssignees ON IssueAssignees.issue = Issues.id \
+         WHERE Issues.priority = 'high' AND IssueLabels.label = '{}' AND IssueAssignees.user = '{}'",
+        bug_label_id, alice_id
+    );
+    eprintln!("SQL: {}", sql);
+
+    // First, let's verify the simpler queries work
+    let query_issues_only = db.incremental_query("SELECT Issues.* FROM Issues").unwrap();
+    eprintln!("Issues only: {} rows", query_issues_only.rows().len());
+
+    // Forward join only
+    let query_forward_join = db
+        .incremental_query(
+            "SELECT Issues.*, Projects FROM Issues \
+         JOIN Projects ON Issues.project = Projects.id",
+        )
+        .unwrap();
+    eprintln!(
+        "Forward join (Projects): {} rows",
+        query_forward_join.rows().len()
+    );
+
+    let query_one_join = db
+        .incremental_query(&format!(
+            "SELECT Issues.* FROM Issues \
+             JOIN IssueLabels ON IssueLabels.issue = Issues.id \
+             WHERE IssueLabels.label = '{}'",
+            bug_label_id
+        ))
+        .unwrap();
+    eprintln!(
+        "One reverse join (IssueLabels): {} rows",
+        query_one_join.rows().len()
+    );
+
+    let query_other_join = db
+        .incremental_query(&format!(
+            "SELECT Issues.* FROM Issues \
+             JOIN IssueAssignees ON IssueAssignees.issue = Issues.id \
+             WHERE IssueAssignees.user = '{}'",
+            alice_id
+        ))
+        .unwrap();
+    eprintln!(
+        "One reverse join (IssueAssignees): {} rows",
+        query_other_join.rows().len()
+    );
+
+    // Query with two reverse joins and combined filters
+    let query = db.incremental_query(&sql).unwrap();
+
+    let rows = query.rows();
+    eprintln!("Two joins query: {} rows", rows.len());
+    assert_eq!(
+        rows.len(),
+        1,
+        "Should find 1 issue with high priority, Bug label, and assigned to Alice. Got {} rows instead.",
+        rows.len()
+    );
+    // Print column names to debug
+    eprintln!("Row columns:");
+    for (i, col) in rows[0].1.descriptor.columns.iter().enumerate() {
+        eprintln!("  {}: {:?} = {:?}", i, col.name, rows[0].1.get(i));
+    }
+    // The column name might be "title" without the alias prefix
+    let title = rows[0]
+        .1
+        .get_by_name("title")
+        .or_else(|| rows[0].1.get_by_name("i.title"))
+        .or_else(|| rows[0].1.get_by_name("Issues.title"));
+    assert_eq!(
+        title,
+        Some(RowValue::String("Test Issue")),
+        "Expected to find title column with value 'Test Issue'"
+    );
+
+    // Also test with subscribe to match TypeScript behavior
+    // The initial delta should contain all existing matching rows
+    use std::sync::{Arc, Mutex};
+    let delta_count = Arc::new(Mutex::new(0usize));
+    let delta_count_clone = Arc::clone(&delta_count);
+    let _listener = query.subscribe(Box::new(move |delta_batch| {
+        eprintln!("Delta callback with {} deltas", delta_batch.len());
+        for delta in delta_batch.iter() {
+            eprintln!("  Delta: {:?}", delta);
+        }
+        *delta_count_clone.lock().unwrap() = delta_batch.len();
+    }));
+    // Subscribe callback should be called synchronously with existing data
+    assert_eq!(
+        *delta_count.lock().unwrap(),
+        1,
+        "Initial delta should contain 1 row for the matching issue"
+    );
+
+    // Also test the TypeScript-style SQL with aliases
+    let query_ts = db.incremental_query(&sql_ts_style).unwrap();
+    let rows_ts = query_ts.rows();
+    eprintln!("TypeScript-style query: {} rows", rows_ts.len());
+    assert_eq!(
+        rows_ts.len(),
+        1,
+        "TypeScript-style SQL should find 1 issue. Got {} rows instead.",
+        rows_ts.len()
+    );
+}
+
+#[test]
+fn incremental_query_two_reverse_joins_combined_filters_run_100_times() {
+    // Run the same test 100 times to check for non-determinism
+    for i in 0..100 {
+        let db = Database::in_memory();
+        db.execute("CREATE TABLE Issues (title STRING NOT NULL, priority STRING NOT NULL)")
+            .unwrap();
+        db.execute("CREATE TABLE Users (name STRING NOT NULL)")
+            .unwrap();
+        db.execute("CREATE TABLE Labels (name STRING NOT NULL)")
+            .unwrap();
+        db.execute("CREATE TABLE IssueAssignees (issue REFERENCES Issues NOT NULL, user REFERENCES Users NOT NULL)").unwrap();
+        db.execute(
+            "CREATE TABLE IssueLabels (issue REFERENCES Issues NOT NULL, label REFERENCES Labels NOT NULL)",
+        )
+        .unwrap();
+
+        let alice_id = match db
+            .execute("INSERT INTO Users (name) VALUES ('Alice')")
+            .unwrap()
+        {
+            ExecuteResult::Inserted { row_id: id, .. } => id,
+            _ => panic!("expected Inserted"),
+        };
+
+        let bug_label_id = match db
+            .execute("INSERT INTO Labels (name) VALUES ('Bug')")
+            .unwrap()
+        {
+            ExecuteResult::Inserted { row_id: id, .. } => id,
+            _ => panic!("expected Inserted"),
+        };
+
+        let issue1_id = match db
+            .execute("INSERT INTO Issues (title, priority) VALUES ('Test Issue', 'high')")
+            .unwrap()
+        {
+            ExecuteResult::Inserted { row_id: id, .. } => id,
+            _ => panic!("expected Inserted"),
+        };
+
+        db.insert_with("IssueLabels", |b| {
+            b.set_ref_by_name("issue", issue1_id)
+                .set_ref_by_name("label", bug_label_id)
+                .build()
+        })
+        .unwrap();
+
+        db.insert_with("IssueAssignees", |b| {
+            b.set_ref_by_name("issue", issue1_id)
+                .set_ref_by_name("user", alice_id)
+                .build()
+        })
+        .unwrap();
+
+        let sql = format!(
+            "SELECT Issues.* FROM Issues \
+             JOIN IssueLabels ON IssueLabels.issue = Issues.id \
+             JOIN IssueAssignees ON IssueAssignees.issue = Issues.id \
+             WHERE Issues.priority = 'high' AND IssueLabels.label = '{}' AND IssueAssignees.user = '{}'",
+            bug_label_id, alice_id
+        );
+
+        // For debugging on first iteration only
+        if i == 0 {
+            eprintln!("=== Iteration 0 Debug ===");
+            eprintln!("SQL: {}", sql);
+
+            // Test simpler queries first
+            let q_issues = db.incremental_query("SELECT Issues.* FROM Issues").unwrap();
+            eprintln!("Issues only: {} rows", q_issues.rows().len());
+
+            let q_one = db.incremental_query(&format!(
+                "SELECT Issues.* FROM Issues JOIN IssueLabels ON IssueLabels.issue = Issues.id WHERE IssueLabels.label = '{}'",
+                bug_label_id
+            )).unwrap();
+            eprintln!("One join: {} rows", q_one.rows().len());
+            // Print row columns from one join
+            if let Some(row) = q_one.rows().first() {
+                eprintln!("One join row columns:");
+                for (i, col) in row.1.descriptor.columns.iter().enumerate() {
+                    eprintln!("  {}: {} = {:?}", i, col.name, row.1.get(i));
+                }
+            }
+        }
+
+        let query = db.incremental_query(&sql).unwrap();
+
+        let rows = query.rows();
+        assert_eq!(
+            rows.len(),
+            1,
+            "Iteration {}: Should find 1 issue. Got {} rows instead.",
+            i,
+            rows.len()
+        );
+    }
+}
+
+#[test]
+fn incremental_query_exact_typescript_sql_pattern() {
+    // Test the exact SQL pattern generated by TypeScript, which has 3 JOINs:
+    // 1. Forward join: Projects ON i.project = Projects.id
+    // 2. Reverse join: IssueLabels ON IssueLabels.issue = i.id
+    // 3. Reverse join: IssueAssignees ON IssueAssignees.issue = i.id
+    let db = Database::in_memory();
+
+    // Create tables matching the TypeScript schema
+    db.execute("CREATE TABLE Projects (name STRING NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE Users (name STRING NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE Labels (name STRING NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE Issues (title STRING NOT NULL, priority STRING NOT NULL, project REFERENCES Projects NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE IssueLabels (issue REFERENCES Issues NOT NULL, label REFERENCES Labels NOT NULL)")
+        .unwrap();
+    db.execute("CREATE TABLE IssueAssignees (issue REFERENCES Issues NOT NULL, user REFERENCES Users NOT NULL)")
+        .unwrap();
+
+    // Insert test data
+    let user_id = match db
+        .execute("INSERT INTO Users (name) VALUES ('Alice')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted { row_id: id, .. } => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    let project_id = match db
+        .execute("INSERT INTO Projects (name) VALUES ('Test Project')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted { row_id: id, .. } => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    let label_id = match db
+        .execute("INSERT INTO Labels (name) VALUES ('Bug')")
+        .unwrap()
+    {
+        ExecuteResult::Inserted { row_id: id, .. } => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    let issue_id = match db
+        .execute(&format!(
+            "INSERT INTO Issues (title, priority, project) VALUES ('Test Issue', 'high', '{}')",
+            project_id
+        ))
+        .unwrap()
+    {
+        ExecuteResult::Inserted { row_id: id, .. } => id,
+        _ => panic!("expected Inserted"),
+    };
+
+    db.insert_with("IssueLabels", |b| {
+        b.set_ref_by_name("issue", issue_id)
+            .set_ref_by_name("label", label_id)
+            .build()
+    })
+    .unwrap();
+
+    db.insert_with("IssueAssignees", |b| {
+        b.set_ref_by_name("issue", issue_id)
+            .set_ref_by_name("user", user_id)
+            .build()
+    })
+    .unwrap();
+
+    eprintln!("=== IDs ===");
+    eprintln!("user_id: {}", user_id);
+    eprintln!("project_id: {}", project_id);
+    eprintln!("label_id: {}", label_id);
+    eprintln!("issue_id: {}", issue_id);
+
+    // Build the exact SQL pattern from TypeScript (copied from debug output)
+    // Key difference from previous test: this uses "Projects as project" syntax
+    // for including full rows, and ARRAY subqueries for reverse refs
+    let sql = format!(
+        "SELECT i.id, i.title, i.priority, i.project, \
+         Projects as project, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.label, Labels as label \
+               FROM IssueLabels i_inner JOIN Labels ON i_inner.label = Labels.id WHERE i_inner.issue = i.id) as IssueLabels, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.user, Users as user \
+               FROM IssueAssignees i_inner JOIN Users ON i_inner.user = Users.id WHERE i_inner.issue = i.id) as IssueAssignees \
+         FROM Issues i \
+         JOIN Projects ON i.project = Projects.id \
+         JOIN IssueLabels ON IssueLabels.issue = i.id \
+         JOIN IssueAssignees ON IssueAssignees.issue = i.id \
+         WHERE i.priority = 'high' AND IssueLabels.label = '{}' AND IssueAssignees.user = '{}'",
+        label_id, user_id
+    );
+
+    eprintln!("=== SQL ===");
+    eprintln!("{}", sql);
+
+    // Test progressively more complex queries to find which part fails
+
+    // Step 1: Simple query
+    let q1 = db.incremental_query("SELECT Issues.* FROM Issues").unwrap();
+    eprintln!("Step 1 (Issues only): {} rows", q1.rows().len());
+
+    // Step 2: With alias
+    let q2 = db.incremental_query("SELECT i.* FROM Issues i").unwrap();
+    eprintln!("Step 2 (with alias): {} rows", q2.rows().len());
+
+    // Step 3: With forward join (Projects)
+    let q3 = db
+        .incremental_query("SELECT i.* FROM Issues i JOIN Projects ON i.project = Projects.id")
+        .unwrap();
+    eprintln!("Step 3 (+ Projects join): {} rows", q3.rows().len());
+
+    // Step 4: With one reverse join (IssueLabels) and filter
+    let q4 = db.incremental_query(&format!(
+        "SELECT i.* FROM Issues i JOIN IssueLabels ON IssueLabels.issue = i.id WHERE IssueLabels.label = '{}'",
+        label_id
+    )).unwrap();
+    eprintln!("Step 4 (+ IssueLabels filter): {} rows", q4.rows().len());
+
+    // Step 5: With forward join + one reverse join filter
+    let q5 = db
+        .incremental_query(&format!(
+            "SELECT i.* FROM Issues i \
+         JOIN Projects ON i.project = Projects.id \
+         JOIN IssueLabels ON IssueLabels.issue = i.id \
+         WHERE IssueLabels.label = '{}'",
+            label_id
+        ))
+        .unwrap();
+    eprintln!("Step 5 (Projects + IssueLabels): {} rows", q5.rows().len());
+
+    // Step 6: With two reverse joins but no forward join
+    let q6 = db
+        .incremental_query(&format!(
+            "SELECT i.* FROM Issues i \
+         JOIN IssueLabels ON IssueLabels.issue = i.id \
+         JOIN IssueAssignees ON IssueAssignees.issue = i.id \
+         WHERE IssueLabels.label = '{}' AND IssueAssignees.user = '{}'",
+            label_id, user_id
+        ))
+        .unwrap();
+    eprintln!(
+        "Step 6 (two reverse joins, no forward): {} rows",
+        q6.rows().len()
+    );
+
+    // Step 7: With all three joins
+    let q7 = db
+        .incremental_query(&format!(
+            "SELECT i.* FROM Issues i \
+         JOIN Projects ON i.project = Projects.id \
+         JOIN IssueLabels ON IssueLabels.issue = i.id \
+         JOIN IssueAssignees ON IssueAssignees.issue = i.id \
+         WHERE IssueLabels.label = '{}' AND IssueAssignees.user = '{}'",
+            label_id, user_id
+        ))
+        .unwrap();
+    eprintln!("Step 7 (all three joins): {} rows", q7.rows().len());
+
+    // Step 8: Adding "Projects as project" syntax
+    let q8 = db
+        .incremental_query(&format!(
+            "SELECT i.*, Projects as project FROM Issues i \
+         JOIN Projects ON i.project = Projects.id \
+         JOIN IssueLabels ON IssueLabels.issue = i.id \
+         JOIN IssueAssignees ON IssueAssignees.issue = i.id \
+         WHERE IssueLabels.label = '{}' AND IssueAssignees.user = '{}'",
+            label_id, user_id
+        ))
+        .unwrap();
+    eprintln!("Step 8 (+ Projects as project): {} rows", q8.rows().len());
+
+    // Step 9: Adding just one ARRAY subquery (no nested "as label")
+    let q9 = db
+        .incremental_query(&format!(
+            "SELECT i.*, Projects as project, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.label \
+               FROM IssueLabels i_inner WHERE i_inner.issue = i.id) as IssueLabels \
+         FROM Issues i \
+         JOIN Projects ON i.project = Projects.id \
+         JOIN IssueLabels ON IssueLabels.issue = i.id \
+         JOIN IssueAssignees ON IssueAssignees.issue = i.id \
+         WHERE IssueLabels.label = '{}' AND IssueAssignees.user = '{}'",
+            label_id, user_id
+        ))
+        .unwrap();
+    eprintln!("Step 9 (+ simple ARRAY): {} rows", q9.rows().len());
+
+    // Step 10: Adding ARRAY subquery with nested join
+    let q10 = db.incremental_query(&format!(
+        "SELECT i.*, Projects as project, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.label, Labels as label \
+               FROM IssueLabels i_inner JOIN Labels ON i_inner.label = Labels.id WHERE i_inner.issue = i.id) as IssueLabels \
+         FROM Issues i \
+         JOIN Projects ON i.project = Projects.id \
+         JOIN IssueLabels ON IssueLabels.issue = i.id \
+         JOIN IssueAssignees ON IssueAssignees.issue = i.id \
+         WHERE IssueLabels.label = '{}' AND IssueAssignees.user = '{}'",
+        label_id, user_id
+    )).unwrap();
+    eprintln!("Step 10 (+ ARRAY with join): {} rows", q10.rows().len());
+
+    // Step 11: Two ARRAY subqueries (this fails!)
+    let q11 = db.incremental_query(&format!(
+        "SELECT i.*, Projects as project, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.label, Labels as label \
+               FROM IssueLabels i_inner JOIN Labels ON i_inner.label = Labels.id WHERE i_inner.issue = i.id) as IssueLabels, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.user, Users as user \
+               FROM IssueAssignees i_inner JOIN Users ON i_inner.user = Users.id WHERE i_inner.issue = i.id) as IssueAssignees \
+         FROM Issues i \
+         JOIN Projects ON i.project = Projects.id \
+         JOIN IssueLabels ON IssueLabels.issue = i.id \
+         JOIN IssueAssignees ON IssueAssignees.issue = i.id \
+         WHERE IssueLabels.label = '{}' AND IssueAssignees.user = '{}'",
+        label_id, user_id
+    )).unwrap();
+    eprintln!("Step 11 (+ two ARRAYs): {} rows", q11.rows().len());
+
+    // Step 11a: Two ARRAY subqueries WITHOUT the filter joins (just to test ARRAY)
+    let q11a = db.incremental_query(
+        "SELECT i.*, Projects as project, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.label, Labels as label \
+               FROM IssueLabels i_inner JOIN Labels ON i_inner.label = Labels.id WHERE i_inner.issue = i.id) as IssueLabels, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.user, Users as user \
+               FROM IssueAssignees i_inner JOIN Users ON i_inner.user = Users.id WHERE i_inner.issue = i.id) as IssueAssignees \
+         FROM Issues i \
+         JOIN Projects ON i.project = Projects.id"
+    ).unwrap();
+    eprintln!(
+        "Step 11a (two ARRAYs, no filter joins): {} rows",
+        q11a.rows().len()
+    );
+
+    // Step 11b: Two ARRAY subqueries WITH filter joins but NO WHERE clause
+    let q11b = db.incremental_query(
+        "SELECT i.*, Projects as project, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.label, Labels as label \
+               FROM IssueLabels i_inner JOIN Labels ON i_inner.label = Labels.id WHERE i_inner.issue = i.id) as IssueLabels, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.user, Users as user \
+               FROM IssueAssignees i_inner JOIN Users ON i_inner.user = Users.id WHERE i_inner.issue = i.id) as IssueAssignees \
+         FROM Issues i \
+         JOIN Projects ON i.project = Projects.id \
+         JOIN IssueLabels ON IssueLabels.issue = i.id \
+         JOIN IssueAssignees ON IssueAssignees.issue = i.id"
+    ).unwrap();
+    eprintln!(
+        "Step 11b (two ARRAYs + joins, no WHERE): {} rows",
+        q11b.rows().len()
+    );
+
+    // Step 11c: Two ARRAY subqueries WITH filter joins and only label filter
+    let q11c = db.incremental_query(&format!(
+        "SELECT i.*, Projects as project, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.label, Labels as label \
+               FROM IssueLabels i_inner JOIN Labels ON i_inner.label = Labels.id WHERE i_inner.issue = i.id) as IssueLabels, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.user, Users as user \
+               FROM IssueAssignees i_inner JOIN Users ON i_inner.user = Users.id WHERE i_inner.issue = i.id) as IssueAssignees \
+         FROM Issues i \
+         JOIN Projects ON i.project = Projects.id \
+         JOIN IssueLabels ON IssueLabels.issue = i.id \
+         JOIN IssueAssignees ON IssueAssignees.issue = i.id \
+         WHERE IssueLabels.label = '{}'",
+        label_id
+    )).unwrap();
+    eprintln!(
+        "Step 11c (two ARRAYs + only label filter): {} rows",
+        q11c.rows().len()
+    );
+
+    // Step 11d: Two ARRAY subqueries WITH filter joins and only user filter
+    let q11d = db.incremental_query(&format!(
+        "SELECT i.*, Projects as project, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.label, Labels as label \
+               FROM IssueLabels i_inner JOIN Labels ON i_inner.label = Labels.id WHERE i_inner.issue = i.id) as IssueLabels, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.user, Users as user \
+               FROM IssueAssignees i_inner JOIN Users ON i_inner.user = Users.id WHERE i_inner.issue = i.id) as IssueAssignees \
+         FROM Issues i \
+         JOIN Projects ON i.project = Projects.id \
+         JOIN IssueLabels ON IssueLabels.issue = i.id \
+         JOIN IssueAssignees ON IssueAssignees.issue = i.id \
+         WHERE IssueAssignees.user = '{}'",
+        user_id
+    )).unwrap();
+    eprintln!(
+        "Step 11d (two ARRAYs + only user filter): {} rows",
+        q11d.rows().len()
+    );
+
+    // Step 11e: Two ARRAYs + only one filter join (IssueLabels)
+    let q11e = db.incremental_query(
+        "SELECT i.*, Projects as project, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.label, Labels as label \
+               FROM IssueLabels i_inner JOIN Labels ON i_inner.label = Labels.id WHERE i_inner.issue = i.id) as IssueLabels, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.user, Users as user \
+               FROM IssueAssignees i_inner JOIN Users ON i_inner.user = Users.id WHERE i_inner.issue = i.id) as IssueAssignees \
+         FROM Issues i \
+         JOIN Projects ON i.project = Projects.id \
+         JOIN IssueLabels ON IssueLabels.issue = i.id"
+    ).unwrap();
+    eprintln!(
+        "Step 11e (two ARRAYs + only IssueLabels join): {} rows",
+        q11e.rows().len()
+    );
+
+    // Step 11f: Two ARRAYs + only one filter join (IssueAssignees)
+    let q11f = db.incremental_query(
+        "SELECT i.*, Projects as project, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.label, Labels as label \
+               FROM IssueLabels i_inner JOIN Labels ON i_inner.label = Labels.id WHERE i_inner.issue = i.id) as IssueLabels, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.user, Users as user \
+               FROM IssueAssignees i_inner JOIN Users ON i_inner.user = Users.id WHERE i_inner.issue = i.id) as IssueAssignees \
+         FROM Issues i \
+         JOIN Projects ON i.project = Projects.id \
+         JOIN IssueAssignees ON IssueAssignees.issue = i.id"
+    ).unwrap();
+    eprintln!(
+        "Step 11f (two ARRAYs + only IssueAssignees join): {} rows",
+        q11f.rows().len()
+    );
+
+    // Step 11g: Swap ARRAY order - IssueAssignees first, IssueLabels second
+    let q11g = db.incremental_query(
+        "SELECT i.*, Projects as project, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.user, Users as user \
+               FROM IssueAssignees i_inner JOIN Users ON i_inner.user = Users.id WHERE i_inner.issue = i.id) as IssueAssignees, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.label, Labels as label \
+               FROM IssueLabels i_inner JOIN Labels ON i_inner.label = Labels.id WHERE i_inner.issue = i.id) as IssueLabels \
+         FROM Issues i \
+         JOIN Projects ON i.project = Projects.id \
+         JOIN IssueAssignees ON IssueAssignees.issue = i.id"
+    ).unwrap();
+    eprintln!(
+        "Step 11g (SWAPPED ARRAY order + IssueAssignees join): {} rows",
+        q11g.rows().len()
+    );
+
+    // Step 11h: Swap ARRAY order - IssueAssignees first, IssueLabels second + IssueLabels join
+    let q11h = db.incremental_query(
+        "SELECT i.*, Projects as project, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.user, Users as user \
+               FROM IssueAssignees i_inner JOIN Users ON i_inner.user = Users.id WHERE i_inner.issue = i.id) as IssueAssignees, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.label, Labels as label \
+               FROM IssueLabels i_inner JOIN Labels ON i_inner.label = Labels.id WHERE i_inner.issue = i.id) as IssueLabels \
+         FROM Issues i \
+         JOIN Projects ON i.project = Projects.id \
+         JOIN IssueLabels ON IssueLabels.issue = i.id"
+    ).unwrap();
+    eprintln!(
+        "Step 11h (SWAPPED ARRAY order + IssueLabels join): {} rows",
+        q11h.rows().len()
+    );
+
+    // Step 11i: Swap JOIN order but keep ARRAY order same
+    let q11i = db.incremental_query(
+        "SELECT i.*, Projects as project, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.label, Labels as label \
+               FROM IssueLabels i_inner JOIN Labels ON i_inner.label = Labels.id WHERE i_inner.issue = i.id) as IssueLabels, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.user, Users as user \
+               FROM IssueAssignees i_inner JOIN Users ON i_inner.user = Users.id WHERE i_inner.issue = i.id) as IssueAssignees \
+         FROM Issues i \
+         JOIN Projects ON i.project = Projects.id \
+         JOIN IssueAssignees ON IssueAssignees.issue = i.id \
+         JOIN IssueLabels ON IssueLabels.issue = i.id"
+    ).unwrap();
+    eprintln!(
+        "Step 11i (two joins, IssueAssignees first): {} rows",
+        q11i.rows().len()
+    );
+
+    // Step 12: Same as full SQL but with i.* instead of specific columns
+    let q12 = db.incremental_query(&format!(
+        "SELECT i.*, Projects as project, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.label, Labels as label \
+               FROM IssueLabels i_inner JOIN Labels ON i_inner.label = Labels.id WHERE i_inner.issue = i.id) as IssueLabels, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.user, Users as user \
+               FROM IssueAssignees i_inner JOIN Users ON i_inner.user = Users.id WHERE i_inner.issue = i.id) as IssueAssignees \
+         FROM Issues i \
+         JOIN Projects ON i.project = Projects.id \
+         JOIN IssueLabels ON IssueLabels.issue = i.id \
+         JOIN IssueAssignees ON IssueAssignees.issue = i.id \
+         WHERE i.priority = 'high' AND IssueLabels.label = '{}' AND IssueAssignees.user = '{}'",
+        label_id, user_id
+    )).unwrap();
+    eprintln!("Step 12 (i.* + priority filter): {} rows", q12.rows().len());
+
+    // Step 13: Full SQL but with explicit columns
+    let q13 = db.incremental_query(&format!(
+        "SELECT i.id, i.title, i.priority, i.project, Projects as project, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.label, Labels as label \
+               FROM IssueLabels i_inner JOIN Labels ON i_inner.label = Labels.id WHERE i_inner.issue = i.id) as IssueLabels, \
+         ARRAY(SELECT i_inner.id, i_inner.issue, i_inner.user, Users as user \
+               FROM IssueAssignees i_inner JOIN Users ON i_inner.user = Users.id WHERE i_inner.issue = i.id) as IssueAssignees \
+         FROM Issues i \
+         JOIN Projects ON i.project = Projects.id \
+         JOIN IssueLabels ON IssueLabels.issue = i.id \
+         JOIN IssueAssignees ON IssueAssignees.issue = i.id \
+         WHERE i.priority = 'high' AND IssueLabels.label = '{}' AND IssueAssignees.user = '{}'",
+        label_id, user_id
+    )).unwrap();
+    eprintln!("Step 13 (explicit columns): {} rows", q13.rows().len());
+
+    // Test rows() first
+    let query = db.incremental_query(&sql).unwrap();
+    let rows = query.rows();
+
+    eprintln!("=== Query Result ===");
+    eprintln!("rows.len() = {}", rows.len());
+    for (i, row) in rows.iter().enumerate() {
+        eprintln!("  row {}: id={}", i, row.0);
+    }
+
+    assert_eq!(
+        rows.len(),
+        1,
+        "TypeScript SQL pattern should return 1 row. Got {} rows instead.",
+        rows.len()
+    );
+
+    // Test subscribe() as well (this is what TypeScript uses)
+    use std::sync::{Arc, Mutex};
+    let delta_count = Arc::new(Mutex::new(0usize));
+    let delta_count_clone = Arc::clone(&delta_count);
+    let _listener = query.subscribe(Box::new(move |delta_batch| {
+        eprintln!("Delta callback: {} deltas", delta_batch.len());
+        *delta_count_clone.lock().unwrap() = delta_batch.len();
+    }));
+
+    assert_eq!(
+        *delta_count.lock().unwrap(),
+        1,
+        "Initial delta should contain 1 row"
+    );
+}
