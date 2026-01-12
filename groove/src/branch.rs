@@ -356,16 +356,16 @@ pub const DEFAULT_USER_BRANCH: &str = "main";
 /// A schema-aware branch name with the format `[env]-[schemaVersion]-[userBranch]`.
 ///
 /// Examples:
-/// - `prod-abc123-main` (production, schema abc123, main branch)
-/// - `dev-def456-feature-x` (development, schema def456, feature-x branch)
+/// - `prod-01JGXYZ123ABC456DEF789GHIJ-main` (production, full schema ID, main branch)
+/// - `dev-01JGXYZ123ABC456DEF789GHIJ-feature-x` (development, full schema ID, feature-x branch)
 /// - `main` (legacy format, interpreted as dev-<no-schema>-main)
 ///
-/// The schema version is the hex prefix of the DescriptorId hash.
+/// The schema version is the full DescriptorId (26-char Crockford Base32 ObjectId).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SchemaBranchName {
     /// Environment (e.g., "dev", "staging", "prod")
     pub env: String,
-    /// Schema version hash prefix (hex encoded, typically 12 chars = 6 bytes)
+    /// Schema version (full 26-char Crockford Base32 ObjectId)
     pub schema_version: String,
     /// User-visible branch name (e.g., "main", "feature-x")
     pub user_branch: String,
@@ -393,7 +393,7 @@ impl SchemaBranchName {
     ) -> Self {
         SchemaBranchName {
             env: env.into(),
-            schema_version: descriptor_id.short_prefix(),
+            schema_version: descriptor_id.to_string(),
             user_branch: user_branch.into(),
         }
     }
@@ -460,7 +460,7 @@ impl SchemaBranchName {
     pub fn with_schema_version(&self, descriptor_id: &DescriptorId) -> Self {
         SchemaBranchName {
             env: self.env.clone(),
-            schema_version: descriptor_id.short_prefix(),
+            schema_version: descriptor_id.to_string(),
             user_branch: self.user_branch.clone(),
         }
     }
@@ -533,8 +533,8 @@ mod tests {
         let descriptor_id = DescriptorId::from_object_id(ObjectId::new(0x123456789abc));
         let name = SchemaBranchName::from_descriptor("prod", &descriptor_id, "main");
         assert_eq!(name.env, "prod");
-        // short_prefix = first 12 chars of ObjectId string (Crockford Base32)
-        assert_eq!(name.schema_version.len(), 12);
+        // Full 26-char Crockford Base32 ObjectId
+        assert_eq!(name.schema_version.len(), 26);
         assert_eq!(name.user_branch, "main");
     }
 
@@ -588,8 +588,8 @@ mod tests {
         let new_descriptor = DescriptorId::from_object_id(ObjectId::new(0xdef456789abc));
         let updated = name.with_schema_version(&new_descriptor);
         assert_eq!(updated.env, "prod");
-        // short_prefix = first 12 chars of ObjectId string
-        assert_eq!(updated.schema_version.len(), 12);
+        // Full 26-char Crockford Base32 ObjectId
+        assert_eq!(updated.schema_version.len(), 26);
         assert_eq!(updated.user_branch, "main");
     }
 

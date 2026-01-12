@@ -39,12 +39,6 @@ impl DescriptorId {
     pub fn as_object_id(&self) -> ObjectId {
         self.0
     }
-
-    /// Get a short prefix for branch naming (first 12 chars of the ObjectId string).
-    pub fn short_prefix(&self) -> String {
-        let s = self.0.to_string();
-        s.chars().take(12).collect()
-    }
 }
 
 impl Default for DescriptorId {
@@ -551,13 +545,10 @@ mod tests {
 
         assert_eq!(desc_id.as_object_id(), obj_id);
 
-        // Short prefix for branch naming
-        let short = desc_id.short_prefix();
-        assert_eq!(short.len(), 12);
-
-        // Full display matches ObjectId display
+        // Full display matches ObjectId display (26-char Crockford Base32)
         let full = desc_id.to_string();
         assert_eq!(full, obj_id.to_string());
+        assert_eq!(full.len(), 26);
 
         // From/Into conversions
         let desc_id2: DescriptorId = obj_id.into();
