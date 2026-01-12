@@ -344,6 +344,7 @@ dependencies = [
  "console_error_panic_hook",
  "futures",
  "groove",
+ "hex",
  "js-sys",
  "serde",
  "serde-wasm-bindgen",

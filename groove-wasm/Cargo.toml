@@ -45,6 +45,7 @@ console_error_panic_hook = "0.1"
 bytes = "1"
 futures = "0.3"
 async-trait = "0.1"
+hex = "0.4"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

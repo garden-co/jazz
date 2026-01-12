@@ -1,7 +1,8 @@
 use bytes::Bytes;
 use groove::ListenerId;
 use groove::sql::{
-    Database, ExecuteResult, IncrementalQuery, encode_delta, encode_rows,
+    ColumnDef, ColumnTransform, ColumnType, Database, ExecuteResult, IncrementalQuery, Lens,
+    LensGenerationOptions, TableSchema, diff_schemas, encode_delta, encode_rows, generate_lens,
     query_graph::DeltaBatch,
     row_buffer::{OwnedRow, RowBuilder, RowDescriptor},
 };
@@ -596,6 +597,228 @@ impl WasmDatabase {
             })
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))
     }
+
+    // ==================== Lens/Migration APIs ====================
+
+    /// Get the current schema for a table.
+    /// Returns a JS object with column definitions.
+    #[wasm_bindgen(js_name = getTableSchema)]
+    pub fn get_table_schema(&self, table: &str) -> Result<JsValue, JsValue> {
+        let schema = self
+            .db
+            .get_table(table)
+            .ok_or_else(|| JsValue::from_str(&format!("table not found: {}", table)))?;
+
+        let columns: Vec<JsColumnDef> = schema
+            .columns
+            .iter()
+            .map(|col| JsColumnDef {
+                name: col.name.clone(),
+                column_type: format!("{:?}", col.column_type),
+                nullable: col.nullable,
+                unique: col.unique,
+            })
+            .collect();
+
+        serde_wasm_bindgen::to_value(&columns)
+            .map_err(|e| JsValue::from_str(&format!("serialization error: {:?}", e)))
+    }
+
+    /// Get the descriptor ID (content hash) for a table.
+    /// Returns the hex-encoded BLAKE3 hash of the table descriptor.
+    #[wasm_bindgen(js_name = getDescriptorId)]
+    pub fn get_descriptor_id(&self, table: &str) -> Result<String, JsValue> {
+        let descriptor_id = self
+            .db
+            .get_descriptor_id(table)
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+
+        Ok(hex::encode(descriptor_id.as_bytes()))
+    }
+
+    /// Diff two schemas and return the changes.
+    /// old_schema and new_schema are arrays of column definitions.
+    /// Returns a JS object describing the diff.
+    #[wasm_bindgen(js_name = diffSchemas)]
+    pub fn diff_schemas_js(
+        &self,
+        old_schema: JsValue,
+        new_schema: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let old_cols: Vec<JsColumnDef> = serde_wasm_bindgen::from_value(old_schema)
+            .map_err(|e| JsValue::from_str(&format!("invalid old_schema: {:?}", e)))?;
+        let new_cols: Vec<JsColumnDef> = serde_wasm_bindgen::from_value(new_schema)
+            .map_err(|e| JsValue::from_str(&format!("invalid new_schema: {:?}", e)))?;
+
+        let old_table_schema = js_cols_to_table_schema(&old_cols)?;
+        let new_table_schema = js_cols_to_table_schema(&new_cols)?;
+
+        let diff = diff_schemas(&old_table_schema, &new_table_schema);
+
+        let js_diff = JsSchemaDiff {
+            added_columns: diff.added_columns.iter().map(|c| c.name.clone()).collect(),
+            removed_columns: diff
+                .removed_columns
+                .iter()
+                .map(|c| c.name.clone())
+                .collect(),
+            potential_renames: diff
+                .potential_renames
+                .iter()
+                .map(|r| JsPotentialRename {
+                    old_name: r.old_column.name.clone(),
+                    new_name: r.new_column.name.clone(),
+                    confidence: format!("{:?}", r.confidence),
+                })
+                .collect(),
+            type_changes: diff
+                .type_changes
+                .iter()
+                .map(|tc| JsTypeChange {
+                    column: tc.column_name.clone(),
+                    old_type: format!("{:?}", tc.old_type),
+                    new_type: format!("{:?}", tc.new_type),
+                })
+                .collect(),
+        };
+
+        serde_wasm_bindgen::to_value(&js_diff)
+            .map_err(|e| JsValue::from_str(&format!("serialization error: {:?}", e)))
+    }
+
+    /// Generate a lens from a schema diff.
+    /// Returns the lens and any warnings about manual intervention needed.
+    #[wasm_bindgen(js_name = generateLens)]
+    pub fn generate_lens_js(
+        &self,
+        table: &str,
+        new_schema: JsValue,
+        options: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        // Get current schema
+        let old_schema = self
+            .db
+            .get_table(table)
+            .ok_or_else(|| JsValue::from_str(&format!("table not found: {}", table)))?;
+
+        // Parse new schema
+        let new_cols: Vec<JsColumnDef> = serde_wasm_bindgen::from_value(new_schema)
+            .map_err(|e| JsValue::from_str(&format!("invalid new_schema: {:?}", e)))?;
+        let new_table_schema = js_cols_to_table_schema(&new_cols)?;
+
+        // Parse options
+        let opts: JsLensOptions = serde_wasm_bindgen::from_value(options).unwrap_or_default();
+        let lens_opts = LensGenerationOptions {
+            auto_rename: opts.auto_rename,
+        };
+
+        // Generate lens
+        let result = generate_lens(&old_schema, &new_table_schema, lens_opts);
+
+        let js_result = JsLensGenerationResult {
+            lens: lens_to_js(&result.lens),
+            warnings: result
+                .warnings
+                .iter()
+                .map(|w| JsLensWarning {
+                    kind: format!("{:?}", w.kind),
+                    message: w.message.clone(),
+                    column: w.column.clone(),
+                })
+                .collect(),
+        };
+
+        serde_wasm_bindgen::to_value(&js_result)
+            .map_err(|e| JsValue::from_str(&format!("serialization error: {:?}", e)))
+    }
+
+    /// Execute a schema migration on a table.
+    /// Returns the migration result including the new descriptor ID.
+    #[wasm_bindgen(js_name = executeMigration)]
+    pub fn execute_migration_js(
+        &self,
+        table: &str,
+        new_schema: JsValue,
+        options: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        // Parse new schema
+        let new_cols: Vec<JsColumnDef> = serde_wasm_bindgen::from_value(new_schema)
+            .map_err(|e| JsValue::from_str(&format!("invalid new_schema: {:?}", e)))?;
+        let new_table_schema = js_cols_to_table_schema(&new_cols)?;
+
+        // Parse options
+        let opts: JsLensOptions = serde_wasm_bindgen::from_value(options).unwrap_or_default();
+        let lens_opts = LensGenerationOptions {
+            auto_rename: opts.auto_rename,
+        };
+
+        // Execute migration
+        let result = self
+            .db
+            .execute_migration(table, new_table_schema, lens_opts)
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+
+        let js_result = JsMigrationResult {
+            new_descriptor_id: hex::encode(result.new_descriptor_id.as_bytes()),
+            rows_migrated: result.rows_migrated as u32,
+            lens: lens_to_js(&result.lens),
+            warnings: result
+                .warnings
+                .iter()
+                .map(|w| JsLensWarning {
+                    kind: format!("{:?}", w.kind),
+                    message: w.message.clone(),
+                    column: w.column.clone(),
+                })
+                .collect(),
+        };
+
+        serde_wasm_bindgen::to_value(&js_result)
+            .map_err(|e| JsValue::from_str(&format!("serialization error: {:?}", e)))
+    }
+
+    /// Preview a migration without executing it.
+    /// Returns what would happen if the migration were executed.
+    #[wasm_bindgen(js_name = previewMigration)]
+    pub fn preview_migration_js(
+        &self,
+        table: &str,
+        new_schema: JsValue,
+        options: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        // Parse new schema
+        let new_cols: Vec<JsColumnDef> = serde_wasm_bindgen::from_value(new_schema)
+            .map_err(|e| JsValue::from_str(&format!("invalid new_schema: {:?}", e)))?;
+        let new_table_schema = js_cols_to_table_schema(&new_cols)?;
+
+        // Parse options
+        let opts: JsLensOptions = serde_wasm_bindgen::from_value(options).unwrap_or_default();
+        let lens_opts = LensGenerationOptions {
+            auto_rename: opts.auto_rename,
+        };
+
+        // Preview migration
+        let result = self
+            .db
+            .preview_migration(table, new_table_schema, lens_opts)
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+
+        let js_result = JsLensGenerationResult {
+            lens: lens_to_js(&result.lens),
+            warnings: result
+                .warnings
+                .iter()
+                .map(|w| JsLensWarning {
+                    kind: format!("{:?}", w.kind),
+                    message: w.message.clone(),
+                    column: w.column.clone(),
+                })
+                .collect(),
+        };
+
+        serde_wasm_bindgen::to_value(&js_result)
+            .map_err(|e| JsValue::from_str(&format!("serialization error: {:?}", e)))
+    }
 }
 
 fn row_to_strings(row: &OwnedRow) -> Vec<String> {
@@ -611,6 +834,191 @@ fn row_to_strings(row: &OwnedRow) -> Vec<String> {
             }
         })
         .collect()
+}
+
+// ==================== Lens/Migration Helper Types ====================
+
+/// Column definition for JS interop.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JsColumnDef {
+    name: String,
+    column_type: String,
+    nullable: bool,
+    unique: bool,
+}
+
+/// Schema diff result for JS interop.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsSchemaDiff {
+    added_columns: Vec<String>,
+    removed_columns: Vec<String>,
+    potential_renames: Vec<JsPotentialRename>,
+    type_changes: Vec<JsTypeChange>,
+}
+
+/// Potential column rename for JS interop.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsPotentialRename {
+    old_name: String,
+    new_name: String,
+    confidence: String,
+}
+
+/// Type change for JS interop.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsTypeChange {
+    column: String,
+    old_type: String,
+    new_type: String,
+}
+
+/// Lens generation options for JS interop.
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct JsLensOptions {
+    #[serde(default = "default_auto_rename")]
+    auto_rename: bool,
+}
+
+fn default_auto_rename() -> bool {
+    true
+}
+
+/// Lens warning for JS interop.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsLensWarning {
+    kind: String,
+    message: String,
+    column: Option<String>,
+}
+
+/// Lens generation result for JS interop.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsLensGenerationResult {
+    lens: JsLens,
+    warnings: Vec<JsLensWarning>,
+}
+
+/// Migration result for JS interop.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsMigrationResult {
+    new_descriptor_id: String,
+    rows_migrated: u32,
+    lens: JsLens,
+    warnings: Vec<JsLensWarning>,
+}
+
+/// Lens representation for JS interop.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsLens {
+    forward: Vec<JsColumnTransform>,
+    backward: Vec<JsColumnTransform>,
+}
+
+/// Column transform for JS interop.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsColumnTransform {
+    transform_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    column: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expr: Option<String>,
+}
+
+/// Convert JS column definitions to a TableSchema.
+fn js_cols_to_table_schema(cols: &[JsColumnDef]) -> Result<TableSchema, JsValue> {
+    let columns: Result<Vec<ColumnDef>, JsValue> = cols
+        .iter()
+        .map(|col| {
+            let column_type = parse_column_type(&col.column_type)?;
+            Ok(ColumnDef {
+                name: col.name.clone(),
+                column_type,
+                nullable: col.nullable,
+                unique: col.unique,
+            })
+        })
+        .collect();
+
+    Ok(TableSchema { columns: columns? })
+}
+
+/// Parse a column type string to ColumnType enum.
+fn parse_column_type(s: &str) -> Result<ColumnType, JsValue> {
+    match s.to_uppercase().as_str() {
+        "TEXT" => Ok(ColumnType::Text),
+        "INTEGER" | "INT" | "I64" => Ok(ColumnType::I64),
+        "BOOLEAN" | "BOOL" => Ok(ColumnType::Bool),
+        "BLOB" => Ok(ColumnType::Blob),
+        "JSON" => Ok(ColumnType::Json),
+        _ => Err(JsValue::from_str(&format!("unknown column type: {}", s))),
+    }
+}
+
+/// Convert a Lens to JS representation.
+fn lens_to_js(lens: &Lens) -> JsLens {
+    let transform_to_js = |t: &ColumnTransform| -> JsColumnTransform {
+        match t {
+            ColumnTransform::Rename { from, to } => JsColumnTransform {
+                transform_type: "rename".to_string(),
+                from: Some(from.clone()),
+                to: Some(to.clone()),
+                name: None,
+                default_value: None,
+                column: None,
+                expr: None,
+            },
+            ColumnTransform::Add { name, default } => JsColumnTransform {
+                transform_type: "add".to_string(),
+                from: None,
+                to: None,
+                name: Some(name.clone()),
+                default_value: default.as_ref().map(|d| format!("{:?}", d)),
+                column: None,
+                expr: None,
+            },
+            ColumnTransform::Remove { name } => JsColumnTransform {
+                transform_type: "remove".to_string(),
+                from: None,
+                to: None,
+                name: Some(name.clone()),
+                default_value: None,
+                column: None,
+                expr: None,
+            },
+            ColumnTransform::Transform { column, expr } => JsColumnTransform {
+                transform_type: "transform".to_string(),
+                from: None,
+                to: None,
+                name: None,
+                default_value: None,
+                column: Some(column.clone()),
+                expr: Some(format!("{:?}", expr)),
+            },
+        }
+    };
+
+    JsLens {
+        forward: lens.forward.iter().map(transform_to_js).collect(),
+        backward: lens.backward.iter().map(transform_to_js).collect(),
+    }
 }
 
 /// Handle to an incremental query subscription.
