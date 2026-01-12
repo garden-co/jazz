@@ -146,6 +146,11 @@ export const docNavigationItems = [
             done: 100,
           },
           {
+            name: "API Reference",
+            href: "/docs/core-concepts/covalues/api-reference",
+            done: 100,
+          },
+          {
             name: "CoMaps",
             href: "/docs/core-concepts/covalues/comaps",
             done: 100,

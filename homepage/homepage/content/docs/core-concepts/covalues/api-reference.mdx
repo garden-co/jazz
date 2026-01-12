@@ -1,0 +1,601 @@
+import { Alert, CodeGroup, FileName } from "@/components/forMdx";
+
+export const metadata = {
+  title: "API Reference",
+  description: "API reference for Jazz CoValues and shared properties and methods across different CoValue types."
+};
+
+# CoValues API Reference
+
+Understanding how to work with CoValues is critical to building apps with Jazz. This reference guide is intended to help you get up and running by quickly demonstrating the most common use cases. For more in depth detail, you should review the linked dedicated pages. 
+
+If you have any questions, we'd be happy to chat on our [Discord server](https://discord.gg/utDMjHYg42)!
+
+<table>
+  <thead>
+    <tr>
+      <th>TypeScript Type</th>
+      <th>Corresponding CoValue</th>
+      <th>Usage</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>object</code></td>
+      <td><strong>CoMap</strong></td>
+      <td>Key-value stores with pre-defined keys (struct-like)</td>
+    </tr>
+    <tr>
+      <td><code>Record&lt;string, T&gt;</code></td>
+      <td><strong>CoRecord</strong></td>
+      <td>Key-value stores with arbitrary string keys (dict-like)</td>
+    </tr>
+    <tr>
+      <td><code>T[]</code></td>
+      <td><strong>CoList</strong></td>
+      <td>Lists</td>
+    </tr>
+    <tr>
+      <td><code>T[]</code> (append-only)</td>
+      <td><strong>CoFeed</strong></td>
+      <td>Session-based append-only lists</td>
+    </tr>
+    <tr>
+      <td><code>string</code></td>
+      <td><strong>CoText</strong></td>
+      <td>Collaborative text</td>
+    </tr>
+    <tr>
+      <td><code>Blob | File</code></td>
+      <td><strong>FileStream</strong></td>
+      <td>Files</td>
+    </tr>
+    <tr>
+      <td><code>Blob | File</code> (image)</td>
+      <td><strong>ImageDefinition</strong></td>
+      <td>Images</td>
+    </tr>
+    <tr>
+      <td><code>number[] | Float32Array</code></td>
+      <td><strong>CoVector</strong></td>
+      <td>Embeddings</td>
+    </tr>
+    <tr>
+      <td><code>T | U</code> (discriminated)</td>
+      <td><strong>DiscriminatedUnion</strong></td>
+      <td>Lists of different types of items</td>
+    </tr>
+  </tbody>
+</table>
+
+## Defining Schemas
+CoValues are defined using schemas which combine CoValue types with Zod schemas. You can find out more about schemas in the [schemas](/core-concepts/covalues/overview#start-your-app-with-a-schema) section of the overview guide.
+
+<FileName>schema.ts</FileName>
+<CodeGroup preferWrap>
+```ts index.ts#DefiningSchemas
+```
+</CodeGroup>
+
+You can use the following Zod types to describe primitive data types:
+
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Usage</th>
+      <th>Comment</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>z.string()</code></td>
+      <td><code>string</code></td>
+      <td>For simple strings which don't need character-level collaboration</td>
+    </tr>
+    <tr>
+      <td><code>z.number()</code></td>
+      <td><code>number</code></td>
+      <td> </td>
+    </tr>
+    <tr>
+      <td><code>z.boolean()</code></td>
+      <td><code>boolean</code></td>
+      <td></td>
+    </tr>
+    <tr>
+      <td><code>z.date()</code></td>
+      <td><code>Date</code></td>
+      <td></td>
+    </tr>
+    <tr>
+      <td><code>z.literal()</code></td>
+      <td><code>literal</code></td>
+      <td>For enums&hairsp;—&hairsp;pass possible values as an array</td>
+    </tr>
+    <tr>
+      <td><code>z.object()</code></td>
+      <td><code>object</code></td>
+      <td>An immutable, **non-collaborative** object</td>
+    </tr>
+    <tr>
+      <td><code>z.tuple()</code></td>
+      <td><code>tuple</code></td>
+      <td>An immutable, **non-collaborative** array</td>
+    </tr>
+    <tr>
+      <td><code>z.optional(schema)</code></td>
+      <td><code>optional</code></td>
+      <td>Pass a Zod schema for an optional property with that schema type</td>
+    </tr>
+  </tbody>
+</table>
+
+<Alert variant="info" title="Tip">
+ You can also use the `.optional()` method on both CoValue and Zod schemas to mark them as optional.
+</Alert>
+
+There are three additional purpose-specific variants of the `CoMap` type you are likely to need while building Jazz applications.
+
+- `co.account()`&hairsp;—&hairsp;a Jazz account
+- `co.profile()`&hairsp;—&hairsp;a user profile
+- `co.group()`&hairsp;—&hairsp;a group of users
+
+## Creating CoValues
+
+### Explicit Creation
+Once you have a schema, you can create new CoValue instances using that schema using the `.create()` static method. You should pass an initial value as the first argument to this method.
+
+<table>
+  <thead>
+    <tr>
+      <th>CoValue Type</th>
+      <th>Example</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>CoMap</strong></td>
+      <td><code>Task.create(&#123; task: "Check out Jazz", completed: false &#125;)</code></td>
+    </tr>
+    <tr>
+      <td><strong>CoRecord</strong></td>
+      <td><code>PhoneBook.create(&#123; "Jenny": "867-5309" &#125;)</code></td>
+    </tr>
+    <tr>
+      <td><strong>CoList</strong></td>
+      <td><code>TaskList.create([task1, task2])</code></td>
+    </tr>
+    <tr>
+      <td><strong>CoText</strong></td>
+      <td><code>Description.create("Hello World")</code></td>
+    </tr>
+    <tr>
+      <td><strong>CoFeed</strong></td>
+      <td><code>ChatMessages.create([&#123; message: "Hello world!" &#125;])</code></td>
+    </tr>
+    <tr>
+      <td><strong>FileStream</strong></td>
+      <td><code>UploadedPDF.createFromBlob(myFile)</code></td>
+    </tr>
+    <tr>
+      <td><strong>ImageDefinition</strong></td>
+      <td><code>createImage(myFile)</code><br /> *note that [using the helper](/docs/core-concepts/covalues/imagedef#creating-images) is the preferred way to create an ImageDefinition*</td>
+    </tr>
+    <tr>
+      <td><strong>CoVector</strong></td>
+      <td><code>Embedding.create([0.1, 0.2, ...])</code></td>
+    </tr>
+    <tr>
+      <td><strong>DiscriminatedUnion</strong></td>
+      <td><code>MyThis.create(&#123; type: "this", ... &#125;)</code><br />*note that you can only instantiate one of the schemas in the union*</td>
+    </tr>
+  </tbody>
+</table>
+
+<Alert variant="info" title="create vs. createFromBlob">
+  `FileStream` CoValues *can* be created using the `.create()` method. This will create an empty `FileStream` for you to push chunks into (useful for advanced streaming cases). However, in many cases, using `.createFromBlob(blobOrFile)` to create a `FileStream` directly from a `File` or `Blob` will be more convenient.
+</Alert>
+
+### Inline Creation
+Where a schema has references, you can create nested CoValues one by one and attach them, but Jazz also allows you to create them inline by specifying their initial values.
+
+<CodeGroup preferWrap>
+```ts index.ts#InlineCreation
+```
+</CodeGroup>
+
+### Permissions
+When creating any CoValue, the `.create` method accepts an optional options object as the second argument, which allows you to specify the `owner` of the CoValue.
+
+<CodeGroup preferWrap>
+```ts index.ts#Permissions
+```
+</CodeGroup>
+
+If you don't pass an `options` object, or if `owner` is omitted, Jazz will check if there are [permissions configured at a schema level](/docs/permissions-and-sharing/overview#defining-permissions-at-the-schema-level).
+
+If no permissions are set at a schema level when creating CoValues inline, a new group will be created extending the **containing CoValue's ownership group**. In the "Inline Creation" example above, a new group would be created for each task, each extending the ownership group of the `taskList` CoList.
+
+It is a good idea to read through the [permissions](/docs/permissions-and-sharing/overview) section to understand how to manage permissions on CoValues, as unlike in other databases, permissions are fundamental to how Jazz works at a low level, rather than a supporting feature.
+
+## Loading and Reading CoValues
+In order to read data, you need to [load a CoValue instance](/docs/core-concepts/subscription-and-loading). There are several ways to do this. We recommend using Jazz with a framework, as this allows you to create reactive subscriptions to CoValues easily, but it is also possible to load a CoValue instance using the `.load()` static method on the schema.
+
+Once you have a loaded CoValue instance, you can normally read it similarly to the corresponding TypeScript type.
+
+### CoMap (and the CoRecord sub-type)
+Behaves like a TypeScript object **when reading**.
+
+<CodeGroup preferWrap>
+```ts index.ts#CoMapReading
+```
+</CodeGroup>
+
+[Read more &rarr;](/docs/core-concepts/covalues/comaps)
+
+### CoList
+Behaves like a TypeScript array **when reading**. 
+
+<CodeGroup preferWrap>
+```ts index.ts#CoListReading
+```
+</CodeGroup>
+
+[Read more &rarr;](/docs/core-concepts/covalues/colists)
+
+### CoText
+Behaves like a TypeScript string **when reading**.
+
+<CodeGroup preferWrap>
+```ts index.ts#CoTextReading
+```
+</CodeGroup>
+
+[Read more &rarr;](/docs/core-concepts/covalues/cotexts)
+
+**Note**: Although CoTexts behave the same as strings in most circumstances, they are not strings. If you need an actual string type, you can use the `toString()` method.
+
+### CoFeed
+CoFeeds do not correspond neatly to a TypeScript type. They are collaborative streams of entries split by session/account, and so there are various ways to access the underlying data.
+
+<CodeGroup preferWrap className="mb-4">
+```ts index.ts#CoFeedReading
+```
+</CodeGroup>
+
+The `.all` property allows you to iterate over all entries in a per-session or per-account feed. If you need to convert a feed to an array, you can use `Array.from()` or the spread operator.
+
+[Read more &rarr;](/docs/core-concepts/covalues/cofeeds)
+
+<details>
+<summary>CoFeed Structure</summary>
+<CodeGroup>
+```text
+┌────────┐
+│ CoFeed └────────────────────────────────────────────────────────────┐ 
+│ ┌────────┐                                                          │
+│ │ userA  └────────────────────────────────────────────────────────┐ │
+│ │ ┌───────────┐                                                   │ │
+│ │ │ Session 1 └─────────────────────────────────────────────────┐ │ │
+│ │ │ ┌────────────────┐  ┌─────────────────┐ ┌─────────────────┐ │ │ │
+│ │ │ │ value: someVal │  │ value: someVal2 │ │ value: someVal3 │ │ │ │
+│ │ │ │ by: userA      │  │ by: userA       │ │ by: userA       │ │ │ │
+│ │ │ │ madeAt: 10:00  │  │ madeAt: 10:01   │ │ madeAt: 10:02   │ │ │ │
+│ │ │ └────────────────┘  └─────────────────┘ └─────────────────┘ │ │ │
+│ │ └─────────────────────────────────────────────────────────────┘ │ │
+│ │ ┌───────────┐                                                   │ │
+│ │ │ Session 2 └─────────────────────────────────────────────────┐ │ │
+│ │ │ ┌─────────────────┐                                         │ │ │
+│ │ │ │ value: someVal3 │                                         │ │ │
+│ │ │ │ by: userA       │                                         │ │ │
+│ │ │ │ madeAt: 12:00   │                                         │ │ │
+│ │ │ └─────────────────┘                                         │ │ │
+│ │ └─────────────────────────────────────────────────────────────┘ │ │
+│ └─────────────────────────────────────────────────────────────────┘ │
+│ ┌───────┐                                                           │
+│ │ userB └─────────────────────────────────────────────────────────┐ │
+│ │ ┌───────────┐                                                   │ │
+│ │ │ Session 1 └─────────────────────────────────────────────────┐ │ │
+│ │ │ ┌─────────────────┐                                         │ │ │
+│ │ │ │ value: someVal4 │                                         │ │ │
+│ │ │ │ by: userB       │                                         │ │ │
+│ │ │ │ madeAt: 10:05   │                                         │ │ │
+│ │ │ └─────────────────┘                                         │ │ │
+│ │ └─────────────────────────────────────────────────────────────┘ │ │
+│ └─────────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────┘
+```
+</CodeGroup>
+</details>
+
+### FileStream
+FileStreams can be converted to `Blob` types or read as binary chunks.
+
+<CodeGroup preferWrap>
+```ts index.ts#FileStreamReading
+```
+</CodeGroup>
+
+[Read more &rarr;](/docs/core-concepts/covalues/filestreams)
+
+### ImageDefinition
+Although you can read an `ImageDefinition` as a CoMap, Jazz provides an `<Image />` component for front-end frameworks which vastly simplifies their use.
+
+If you want to use the `ImageDefinition` type without a framework, or you need access to the image itself you can use the `loadImageBySize` helper.
+
+<CodeGroup preferWrap>
+```tsx
+// Component-based usage (recommended)
+<Image image={productImage} width = {300} />
+```
+```ts index.ts#ImageDefinitionReading
+```
+</CodeGroup>
+
+Once you have a loaded image, you can convert it to a blob with the `.toBlob()` method, as you would with any other FileStream. You can then use this to create a URL to use as an `<img>` source.
+
+<CodeGroup preferWrap>
+```ts index.ts#ImageDefinitionBlob
+```
+</CodeGroup>
+
+[Read more &rarr;](/docs/core-concepts/covalues/imagedef)
+
+### CoVector
+You can read a `CoVector` in the same way as you'd read an array, but in most cases, you'll want to use the `cosineSimilarity` helper.
+
+<CodeGroup preferWrap>
+```ts index.ts#CoVectorReading
+```
+</CodeGroup>
+
+[Read more &rarr;](/docs/core-concepts/covalues/covectors)
+
+### DiscriminatedUnion
+After loading a `DiscriminatedUnion`, you will be able to read any property that is common to all members, otherwise, you will need to narrow the type to be able to access properties which are only on some subset of members of the union.
+
+<CodeGroup preferWrap>
+```ts index.ts#DiscriminatedUnionReading
+```
+</CodeGroup>
+
+[Read more &rarr;](/docs/core-concepts/schemas/schemaunions)
+
+## Updating CoValues
+Most CoValues are updated using mutation methods in the `.$jazz` namespace. Some CoValues, such as `CoText`, have methods available directly on the instance itself.
+
+### Updating CoMaps (and the CoRecord sub-type)
+CoRecords will allow you to arbitrarily set and delete keys, while CoMaps will only allow you to set and delete keys defined in the schema.
+*   **`.$jazz.set(key, value): void`**
+*   **`.$jazz.delete(key): void`**
+*   **`.$jazz.applyDiff(diff): void`**
+
+<CodeGroup preferWrap>
+```ts index.ts#UpdatingCoMaps
+```
+</CodeGroup>
+
+[Read more &rarr;](/docs/core-concepts/covalues/comaps)
+
+### Updating CoLists
+CoLists implement most of the usual array mutation methods under the `.$jazz` namespace (except `sort` and `reverse`).
+
+*   **`.$jazz.push(...items: T[]): number`**
+*   **`.$jazz.unshift(...items: T[]): number`**
+*   **`.$jazz.pop(): T | undefined`**
+*   **`.$jazz.shift(): T | undefined`**
+*   **`.$jazz.remove(...indexes: number[]): T[]`**
+*   **`.$jazz.remove(predicate: (item: T, index: number, coList: L) => boolean): T[]`**
+    - Removes elements by index(es) or predicate. Returns the removed elements.
+*   **`.$jazz.retain(predicate: (item: T, index: number, coList: L) => boolean): T[]`**
+    - Retains only elements matching the predicate. Returns the removed elements.
+*   **`.$jazz.splice(start: number, deleteCount: number, ...items: T[]): T[]`**
+*   **`.$jazz.applyDiff(result: T[]): L`**
+    - Updates the list to match another list, efficiently calculated
+
+<CodeGroup preferWrap>
+```ts index.ts#UpdatingCoLists
+```
+</CodeGroup>
+
+[Read more &rarr;](/docs/core-concepts/covalues/colists)
+
+### Updating CoTexts
+CoText methods are mostly available directly on the instance.
+
+*   **`insertAfter(after: number, text: string): void`**
+*   **`insertBefore(before: number, text: string): void`**
+*   **`deleteRange(range: { from: number, to: number }): void`**
+*   **`.$jazz.applyDiff(newText: string): void`**
+
+<CodeGroup preferWrap>
+```ts index.ts#UpdatingCoTexts
+```
+
+```tsx
+// Use directly with templating languages (e.g. React, Svelte)
+<span>{message}</span>
+```
+</CodeGroup>
+
+[Read more &rarr;](/docs/core-concepts/covalues/cotexts)
+
+### Updating CoFeeds
+CoFeeds are append-only. The only mutation you can perform is `push()` (in the `.$jazz` namespace), which adds a new entry to the feed.
+<CodeGroup preferWrap>
+```ts index.ts#UpdatingCoFeeds
+```
+</CodeGroup>
+
+[Read more &rarr;](/docs/core-concepts/covalues/cofeeds)
+
+### Updating FileStreams
+If you wish to push binary data into an existing `FileStream`, you can `start` it with metadata, then `push` chunks of data, and finally `end` it.
+
+*   **`start(metadata: {
+  mimeType: string;
+  fileName?: string;
+  totalSizeBytes?: number;
+}): void`**
+*   **`push(chunk: Uint8Array): void`**
+*   **`end(): void`**
+
+<CodeGroup preferWrap>
+```ts index.ts#UpdatingFileStreams
+```
+</CodeGroup>
+
+[Read more &rarr;](/docs/core-concepts/covalues/filestreams)
+
+### Updating ImageDefinitions
+If you would like to update an `ImageDefinition`, you will need to create a new `FileStream` and set it on the `ImageDefinition`. The `ImageDefinition` behaves like a `CoRecord` with keys for each image resolution as `<width>x<height>`, and the values are `FileStream` instances. You can replace resolutions or add new ones.
+
+<CodeGroup preferWrap>
+```ts index.ts#UpdatingImageDefinitions
+```
+</CodeGroup>
+
+[Read more &rarr;](/docs/core-concepts/covalues/imagedef)
+
+### Updating CoVectors
+CoVectors are immutable. You cannot update them. You should create a new CoVector to replace the old one.
+
+[Read more &rarr;](/docs/core-concepts/covalues/covectors)
+
+### Updating DiscriminatedUnions
+When updating a discriminated union, you should first narrow the type using the discriminator. After that, you'll be able to update it using the `$jazz.set`, `$jazz.applyDiff`, or `$jazz.delete` methods.
+
+<CodeGroup preferWrap>
+```ts index.ts#UpdatingDiscriminatedUnions
+```
+</CodeGroup>
+
+[Read more &rarr;](/docs/core-concepts/schemas/schemaunions)
+
+## Shared Properties and Methods
+
+### Universal CoValue Interface
+These properties and methods are available directly on every CoValue instance.
+
+<table>
+  <thead>
+    <tr>
+      <th>Feature</th>
+      <th>Property/Method</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Loading</strong></td>
+      <td><code>$isLoaded</code></td>
+      <td>Check if the CoValue is fully loaded and ready to read.</td>
+    </tr>
+    <tr>
+      <td><strong>Inspection</strong></td>
+      <td><code>.toJSON()</code></td>
+      <td>Get a plain JS representation of the CoValue.</td>
+    </tr>
+  </tbody>
+</table>
+
+### Common `$jazz` Interface
+Every CoValue instance has a `.$jazz` namespace with the following common utilities (some are only available on specific CoValue types).
+
+<table>
+  <thead>
+    <tr>
+      <th>Feature</th>
+      <th>Property/Method</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Basics</strong></td>
+      <td><code>id</code>, <code>owner</code></td>
+      <td>Key metadata.</td>
+    </tr>
+    <tr>
+      <td><strong>Life-cycle</strong></td>
+      <td><code>createdAt</code>, <code>lastUpdatedAt</code>, <code>createdBy</code></td>
+      <td>Audit trails and creation timestamps.</td>
+    </tr>
+    <tr>
+      <td><strong>Reactivity</strong></td>
+      <td><code>subscribe()</code>, <code>waitForSync()</code></td>
+      <td>Listen for changes or wait for network persistence.</td>
+    </tr>
+    <tr>
+      <td><strong>Loading</strong></td>
+      <td><code>loadingState</code>, <code>ensureLoaded()</code></td>
+      <td>Check loading state or load a copy of the CoValue with a different resolution depth.</td>
+    </tr>
+    <tr>
+      <td><strong>Inspection</strong></td>
+      <td><code>refs</code>, <code>has</code></td>
+      <td>Available on CoMaps, check for the existence of references/specific keys.</td>
+    </tr>
+    <tr>
+      <td><strong>Version Control</strong></td>
+      <td><code>isBranched</code>, <code>branchName</code>, <code>unstable_merge()</code></td>
+      <td>Utilities for local branching and merging.</td>
+    </tr>
+  </tbody>
+</table>
+
+### Metadata 
+*   **`.$jazz.id`**: `ID<CoValue>` 
+    - The definitive, globally unique ID (e.g., `co_zXy...`).
+*   **`.$jazz.owner`**: `Group` 
+    - The `group` that this CoValue is owned by.
+*   **`.$jazz.createdAt`**: `number`
+    - The time that this CoValue was created (in milliseconds since the Unix epoch).
+*   **`.$jazz.createdBy`**: `ID<Account> | undefined` 
+    - The ID of the account that originally created this CoValue (`undefined` for accounts themselves).
+*   **`.$jazz.lastUpdatedAt`**: `number` 
+    - The time that this CoValue was last updated (in milliseconds since the Unix epoch).
+*   **`.$jazz.refs`**: `Record<key, Ref> | undefined` (CoMap/CoRecord only)
+    - Access nested CoValues as references (with IDs) without loading them. Useful for checking if a reference exists or getting its ID without triggering a network fetch.
+    <CodeGroup>
+    ```ts index.ts#Refs
+    ```
+    </CodeGroup>
+*   **`.$jazz.has(key): boolean`** (CoMap/CoRecord only)
+    - Checks if a key exists in the CoValue.
+
+### Loading
+*   **`$isLoaded`**: `boolean` 
+    - True if the CoValue is fully loaded and ready to read.
+*   **`.$jazz.loadingState`**: `"loading" | "loaded" | "unavailable" | "unauthorized"` 
+    - Current state of the CoValue. See [Loading States](/docs/core-concepts/subscription-and-loading#loading-states) for details on handling each case.
+*   **`.$jazz.ensureLoaded<T>(resolveQuery: { resolve: ResolveQuery<T> }): Promise<Resolved<T>>`**
+    - Waits for nested references to load to the specified depth. 
+    - **Returns**: A **new** typed instance `Resolved<T>` where specified properties are guaranteed to be fully loaded.
+    <CodeGroup>
+    ```ts index.ts#EnsureLoaded
+    ```
+    </CodeGroup>    
+    **Note:** When calling `.$jazz.ensureLoaded()` on a discriminated union, you must first narrow the type using the discriminator property. If any nested reference cannot be loaded, the entire operation may fail (see [Loading Errors](/docs/core-concepts/subscription-and-loading#loading-errors)).
+    <Alert variant="info" title="Mental Model" className="mt-4">`ensureLoaded` returns a copy of the CoValue where the specific fields you requested in the resolve query are guaranteed to be present and non-null.</Alert>
+
+### Subscription & Sync
+*   **`.$jazz.subscribe(listener: (updated: this) => void): () => void`** 
+    -  Listen for any changes to this CoValue. Only needed if you are manually handling your subscriptions. 
+    -  Returns an `unsubscribe` function for manual teardown. 
+    -  For error handling in manual subscriptions, see [Manual Subscriptions](/docs/core-concepts/subscription-and-loading#error-handling-for-manual-subscriptions).
+    <CodeGroup>
+    ```ts index.ts#Subscribe
+    ```
+    </CodeGroup>
+*   **`.$jazz.waitForSync()`**: `Promise<void>`
+    - Waits until changes are synced to other peers (useful for tests or critical saves).
+
+### Version Control
+*   **`.$jazz.branchName`**: `string | undefined` 
+    - If this CoValue is branched, the name of the branch, otherwise `undefined`.
+*   **`.$jazz.isBranched`**: `boolean` 
+    - Whether this CoValue is branched.
+*   **`.$jazz.unstable_merge()`**: `void`
+    - Merges this branched CoValue back into the main branch. Only works when the CoValue is branched.
