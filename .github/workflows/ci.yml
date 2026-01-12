@@ -235,11 +235,11 @@ jobs:
       - name: Generate schema
         run: cd demo-app && pnpm generate
 
+      - name: Install Playwright browsers
+        run: cd demo-app && pnpm exec playwright install --with-deps chromium
+
       - name: Run unit tests
         run: cd demo-app && pnpm test
-
-      - name: Install Playwright browsers
-        run: cd demo-app && pnpm exec playwright install --with-deps
 
       - name: Run E2E tests
         run: cd demo-app && pnpm test:e2e
