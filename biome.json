@@ -43,7 +43,8 @@
       "target",
       "**/generated/**",
       "pnpm-lock.yaml",
-      "docs/.source/**"
+      "docs/.source/**",
+      ".pnpm-store"
     ]
   }
 }

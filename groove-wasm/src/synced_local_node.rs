@@ -318,11 +318,6 @@ impl WasmSyncedLocalNode {
                         // TODO: Track deleted objects for sync
                         serde_wasm_bindgen::to_value(&format!("deleted:{}", count)).unwrap()
                     }
-                    ExecuteResult::Selected(rows) => {
-                        let row_data: Vec<Vec<String>> =
-                            rows.iter().map(|row| row_to_strings(row)).collect();
-                        serde_wasm_bindgen::to_value(&row_data).unwrap()
-                    }
                 };
                 Ok(js_result)
             }
@@ -334,12 +329,11 @@ impl WasmSyncedLocalNode {
     #[wasm_bindgen(js_name = selectBinary)]
     pub fn select_binary(&self, sql: &str) -> Result<Uint8Array, JsValue> {
         let state = self.state.borrow();
-        match state.db.execute(sql) {
-            Ok(ExecuteResult::Selected(rows)) => {
+        match state.db.query(sql) {
+            Ok(rows) => {
                 let binary = encode_rows(&rows);
                 Ok(Uint8Array::from(binary.as_slice()))
             }
-            Ok(_) => Err(JsValue::from_str("expected SELECT query")),
             Err(e) => Err(JsValue::from_str(&format!("{:?}", e))),
         }
     }

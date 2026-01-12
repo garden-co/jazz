@@ -841,11 +841,13 @@ impl QueryGraph {
                     QueryNode::Join {
                         input_tables,
                         join_table,
+                        input_tables_need_entry,
                         ..
                     } => {
                         // Clone values we need before borrowing node mutably
                         let input_tables_cloned = input_tables.clone();
                         let join_table_str = join_table.clone();
+                        let is_array_inner_join = *input_tables_need_entry;
 
                         // Check if this delta is for this Join node
                         let is_input_delta = input_tables_cloned
@@ -853,6 +855,22 @@ impl QueryGraph {
                             .any(|t| contained_tables.contains(t));
                         let is_join_table_delta = source_table == join_table_str && !is_input_delta;
                         let is_for_this_node = is_input_delta || is_join_table_delta;
+
+                        // For ARRAY inner joins (input_tables_need_entry = true), only process
+                        // deltas that are DIRECTLY from the input table, not deltas that happen
+                        // to contain data from that table due to upstream filter joins.
+                        // ARRAY inner joins are initialized separately via init_inner_join_nodes.
+                        if is_array_inner_join {
+                            // Only process if source_table directly matches input_table OR join_table
+                            let is_direct_input =
+                                input_tables_cloned.contains(&source_table.to_string());
+                            let is_direct_join = source_table == join_table_str;
+                            if !is_direct_input && !is_direct_join {
+                                // This delta is from the outer query flow - let it pass through
+                                // to downstream ArrayAggregate nodes
+                                continue;
+                            }
+                        }
 
                         if !is_for_this_node {
                             // Delta is for a downstream node - pass through unchanged

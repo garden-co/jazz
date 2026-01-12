@@ -17,20 +17,20 @@ declare module "groove-wasm" {
   export class WasmDatabase {
     constructor();
     init_schema(sql: string): void;
-    execute(sql: string): string;
-    subscribe_delta(
+    execute(sql: string): unknown;
+    subscribeDelta(
       sql: string,
       callback: (deltas: Uint8Array[]) => void,
     ): { diagram(): string; unsubscribe(): void; free(): void };
-    update_row(
+    updateRow(
       table: string,
-      id: string,
+      row_id: string,
       column: string,
       value: string,
     ): boolean;
-    update_row_i64(
+    updateRowI64(
       table: string,
-      id: string,
+      row_id: string,
       column: string,
       value: bigint,
     ): boolean;

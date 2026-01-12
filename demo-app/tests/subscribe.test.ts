@@ -6,6 +6,31 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { type Database, createDatabase } from "../src/generated/client";
 import schema from "../src/schema.sql?raw";
 
+/**
+ * Helper to wait for non-empty subscription results.
+ * Complex queries with JOINs may fire an initial empty callback before data is ready.
+ */
+function waitForResults<T>(
+  subscribe: (callback: (rows: T[]) => void) => () => void,
+  timeout = 5000,
+): Promise<T[]> {
+  return new Promise((resolve, reject) => {
+    let unsubscribe: (() => void) | undefined;
+    const timer = setTimeout(() => {
+      unsubscribe?.();
+      reject(new Error(`Timeout waiting for results after ${timeout}ms`));
+    }, timeout);
+
+    unsubscribe = subscribe((rows) => {
+      if (rows.length > 0) {
+        clearTimeout(timer);
+        setTimeout(() => unsubscribe?.(), 0);
+        resolve(rows);
+      }
+    });
+  });
+}
+
 // We need to load the WASM module
 let db: Database;
 
@@ -240,9 +265,10 @@ describe("subscribeAll with filter and includes", () => {
     expect(bugLabel).toBeDefined();
 
     // Now filter issues by that label
-    const issues = await new Promise<any[]>((resolve) => {
-      let unsubscribe: (() => void) | undefined;
-      unsubscribe = db.issues
+    // Use waitForResults because complex queries with JOINs may fire
+    // an initial empty callback before data is ready
+    const issues = await waitForResults<any>((callback) =>
+      db.issues
         .with({
           project: true,
           IssueLabels: { label: true },
@@ -251,11 +277,8 @@ describe("subscribeAll with filter and includes", () => {
         .where({
           IssueLabels: { some: { label: bugLabel.id } },
         })
-        .subscribeAll((rows) => {
-          setTimeout(() => unsubscribe?.(), 0);
-          resolve(rows);
-        });
-    });
+        .subscribeAll(callback),
+    );
 
     console.log(
       "Issues filtered by label:",
@@ -296,10 +319,52 @@ describe("subscribeAll with filter and includes", () => {
     const alice = users.find((u) => u.name === "Alice");
     expect(alice).toBeDefined();
 
-    // Filter by primary table field + junction tables
-    const issues = await new Promise<any[]>((resolve) => {
+    console.log("bugLabel.id:", bugLabel.id);
+    console.log("alice.id:", alice.id);
+
+    // First, verify the issue exists and matches our filters
+    const allIssues = await new Promise<any[]>((resolve) => {
       let unsubscribe: (() => void) | undefined;
-      unsubscribe = db.issues
+      unsubscribe = db.issues.subscribeAll((rows) => {
+        setTimeout(() => unsubscribe?.(), 0);
+        resolve(rows);
+      });
+    });
+    console.log(
+      "All issues:",
+      allIssues.map((i) => ({
+        id: i.id,
+        priority: i.priority,
+        project: i.project,
+      })),
+    );
+
+    const allIssueLabels = await new Promise<any[]>((resolve) => {
+      let unsubscribe: (() => void) | undefined;
+      unsubscribe = db.issuelabels.subscribeAll((rows) => {
+        setTimeout(() => unsubscribe?.(), 0);
+        resolve(rows);
+      });
+    });
+    console.log("All IssueLabels:", allIssueLabels);
+
+    const allIssueAssignees = await new Promise<any[]>((resolve) => {
+      let unsubscribe: (() => void) | undefined;
+      unsubscribe = db.issueassignees.subscribeAll((rows) => {
+        setTimeout(() => unsubscribe?.(), 0);
+        resolve(rows);
+      });
+    });
+    console.log("All IssueAssignees:", allIssueAssignees);
+
+    // Track all callbacks to debug timing issues
+    let callbackCount = 0;
+
+    // Filter by primary table field + junction tables
+    // Use waitForResults because complex queries with multiple JOINs may fire
+    // an initial empty callback before data is ready
+    const issues = await waitForResults<any>((callback) =>
+      db.issues
         .with({
           project: true,
           IssueLabels: { label: true },
@@ -311,10 +376,11 @@ describe("subscribeAll with filter and includes", () => {
           IssueAssignees: { some: { user: alice.id } },
         })
         .subscribeAll((rows) => {
-          setTimeout(() => unsubscribe?.(), 0);
-          resolve(rows);
-        });
-    });
+          callbackCount++;
+          console.log(`Callback #${callbackCount}: ${rows.length} rows`);
+          callback(rows);
+        }),
+    );
 
     console.log(
       "Issues with combined filters:",
