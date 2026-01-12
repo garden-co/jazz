@@ -4140,3 +4140,173 @@ fn incremental_query_reverse_join_subscribe() {
         "Initial delta should contain 1 row"
     );
 }
+
+// ========== Migration Execution Tests ==========
+
+#[test]
+fn migration_rename_column() {
+    use crate::sql::lens::LensGenerationOptions;
+    use crate::sql::schema::{ColumnDef, ColumnType, TableSchema};
+
+    let db = Database::in_memory();
+
+    // Create table with 'title' column
+    db.execute("CREATE TABLE documents (title STRING NOT NULL)")
+        .unwrap();
+
+    // Insert a row
+    let schema = db.get_table("documents").unwrap();
+    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let row = RowBuilder::new(desc)
+        .set_string_by_name("title", "My Document")
+        .build();
+    let row_id = db.insert_row("documents", row).unwrap();
+
+    // Create new schema with 'name' instead of 'title'
+    let new_schema = TableSchema::new(
+        "documents",
+        vec![ColumnDef::required("name", ColumnType::String)],
+    );
+
+    // Execute migration with confirmed rename
+    let options = LensGenerationOptions {
+        confirmed_renames: vec![("title".into(), "name".into())],
+    };
+    let result = db
+        .execute_migration("documents", new_schema.clone(), options)
+        .unwrap();
+
+    // Verify migration results
+    assert_eq!(result.migrated_count, 1);
+    assert_eq!(result.invisible_count, 0);
+    assert!(result.warnings.is_empty());
+
+    // Verify the row has the new column name
+    let (_, migrated_row) = db.get("documents", row_id).unwrap().unwrap();
+    assert_eq!(
+        migrated_row.get_by_name("name"),
+        Some(RowValue::String("My Document"))
+    );
+    // Old column should not exist
+    assert_eq!(migrated_row.get_by_name("title"), None);
+
+    // Verify the schema was updated
+    let updated_schema = db.get_table("documents").unwrap();
+    assert!(updated_schema.column("name").is_some());
+    assert!(updated_schema.column("title").is_none());
+}
+
+#[test]
+fn migration_add_column() {
+    use crate::sql::lens::LensGenerationOptions;
+    use crate::sql::schema::{ColumnDef, ColumnType, TableSchema};
+
+    let db = Database::in_memory();
+
+    // Create table with 'name' column
+    db.execute("CREATE TABLE users (name STRING NOT NULL)")
+        .unwrap();
+
+    // Insert a row
+    let schema = db.get_table("users").unwrap();
+    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let row = RowBuilder::new(desc)
+        .set_string_by_name("name", "Alice")
+        .build();
+    let row_id = db.insert_row("users", row).unwrap();
+
+    // Create new schema with added 'email' column (nullable)
+    let new_schema = TableSchema::new(
+        "users",
+        vec![
+            ColumnDef::required("name", ColumnType::String),
+            ColumnDef::optional("email", ColumnType::String),
+        ],
+    );
+
+    // Execute migration
+    let result = db
+        .execute_migration("users", new_schema, LensGenerationOptions::default())
+        .unwrap();
+
+    // Verify migration results
+    assert_eq!(result.migrated_count, 1);
+    assert_eq!(result.invisible_count, 0);
+
+    // Verify the row has the new column (with NULL default)
+    let (_, migrated_row) = db.get("users", row_id).unwrap().unwrap();
+    assert_eq!(
+        migrated_row.get_by_name("name"),
+        Some(RowValue::String("Alice"))
+    );
+    assert_eq!(migrated_row.get_by_name("email"), Some(RowValue::Null));
+}
+
+#[test]
+fn migration_preview() {
+    use crate::sql::lens::{ColumnTransform, LensGenerationOptions};
+    use crate::sql::schema::{ColumnDef, ColumnType, TableSchema};
+
+    let db = Database::in_memory();
+
+    // Create table
+    db.execute("CREATE TABLE items (title STRING NOT NULL)")
+        .unwrap();
+
+    // Create new schema
+    let new_schema = TableSchema::new(
+        "items",
+        vec![ColumnDef::required("name", ColumnType::String)],
+    );
+
+    // Preview without executing
+    let options = LensGenerationOptions {
+        confirmed_renames: vec![("title".into(), "name".into())],
+    };
+    let (lens, warnings) = db
+        .preview_migration("items", &new_schema, &options)
+        .unwrap();
+
+    // Verify lens was generated correctly
+    assert_eq!(lens.forward.len(), 1);
+    assert!(matches!(
+        &lens.forward[0],
+        ColumnTransform::Rename { from, to } if from == "title" && to == "name"
+    ));
+    assert!(warnings.is_empty());
+}
+
+#[test]
+fn migration_descriptor_chain() {
+    use crate::sql::lens::LensGenerationOptions;
+    use crate::sql::schema::{ColumnDef, ColumnType, TableSchema};
+
+    let db = Database::in_memory();
+
+    // Create table
+    db.execute("CREATE TABLE notes (text STRING NOT NULL)")
+        .unwrap();
+
+    // Get initial descriptor
+    let desc_v1 = db.get_descriptor("notes").unwrap();
+    let id_v1 = desc_v1.compute_id();
+    assert!(desc_v1.parent_descriptors.is_empty());
+
+    // Migrate: add optional column
+    let new_schema = TableSchema::new(
+        "notes",
+        vec![
+            ColumnDef::required("text", ColumnType::String),
+            ColumnDef::optional("color", ColumnType::String),
+        ],
+    );
+
+    db.execute_migration("notes", new_schema, LensGenerationOptions::default())
+        .unwrap();
+
+    // Get new descriptor - should have parent pointer
+    let desc_v2 = db.get_descriptor("notes").unwrap();
+    assert_eq!(desc_v2.parent_descriptors.len(), 1);
+    assert_eq!(desc_v2.parent_descriptors[0], id_v1);
+    assert_eq!(desc_v2.lenses.len(), 1);
+}

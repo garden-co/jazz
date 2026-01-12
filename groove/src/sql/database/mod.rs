@@ -6,6 +6,9 @@ use crate::node::{LocalNode, generate_object_id};
 use crate::object::ObjectId;
 use crate::sql::catalog::{Catalog, DescriptorId, TableDescriptor};
 use crate::sql::index::RefIndex;
+use crate::sql::lens::{
+    Lens, LensError, LensGenerationOptions, LensWarning, diff_schemas, generate_lens,
+};
 use crate::sql::parser::{
     self, Condition, ConditionValue, Projection, Select, SelectExpr, Statement,
 };
@@ -489,6 +492,73 @@ pub enum DatabaseError {
         action: PolicyAction,
         reason: String,
     },
+    /// Migration error.
+    Migration(MigrationError),
+}
+
+/// Errors that can occur during schema migration.
+#[derive(Debug, Clone)]
+pub enum MigrationError {
+    /// Lens transformation failed for a row.
+    LensError { row_id: ObjectId, error: LensError },
+    /// Row was incompatible with the new schema.
+    IncompatibleRow { row_id: ObjectId, reason: String },
+    /// Catalog error during migration.
+    CatalogError(String),
+    /// Migration was partially completed.
+    PartialFailure {
+        migrated_count: usize,
+        failed_count: usize,
+        first_error: String,
+    },
+}
+
+impl std::fmt::Display for MigrationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MigrationError::LensError { row_id, error } => {
+                write!(f, "lens error for row {}: {}", row_id, error)
+            }
+            MigrationError::IncompatibleRow { row_id, reason } => {
+                write!(f, "row {} incompatible with new schema: {}", row_id, reason)
+            }
+            MigrationError::CatalogError(msg) => write!(f, "catalog error: {}", msg),
+            MigrationError::PartialFailure {
+                migrated_count,
+                failed_count,
+                first_error,
+            } => {
+                write!(
+                    f,
+                    "migration partially failed: {} migrated, {} failed, first error: {}",
+                    migrated_count, failed_count, first_error
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for MigrationError {}
+
+/// Result of a successful migration.
+#[derive(Debug, Clone)]
+pub struct MigrationResult {
+    /// The new descriptor ID.
+    pub new_descriptor_id: DescriptorId,
+    /// The generated lens.
+    pub lens: Lens,
+    /// Number of rows successfully migrated.
+    pub migrated_count: usize,
+    /// Number of rows that became invisible (incompatible with new schema).
+    pub invisible_count: usize,
+    /// Warnings from lens generation.
+    pub warnings: Vec<LensWarning>,
+}
+
+impl From<MigrationError> for DatabaseError {
+    fn from(e: MigrationError) -> Self {
+        DatabaseError::Migration(e)
+    }
 }
 
 impl std::fmt::Display for DatabaseError {
@@ -537,6 +607,7 @@ impl std::fmt::Display for DatabaseError {
             DatabaseError::PolicyDenied { action, reason } => {
                 write!(f, "{} denied: {}", action, reason)
             }
+            DatabaseError::Migration(e) => write!(f, "migration error: {}", e),
         }
     }
 }
@@ -4023,6 +4094,219 @@ impl Database {
             .reduce(|a, b| a.and(b))
             .unwrap_or(Predicate::True);
         Ok(combined.optimize())
+    }
+
+    // =========================================================================
+    // Migration Execution
+    // =========================================================================
+
+    /// Execute a schema migration on a table.
+    ///
+    /// This transforms all rows from the old schema to the new schema using
+    /// a lens generated from the schema diff. The migration is executed eagerly,
+    /// transforming all existing data immediately.
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table to migrate
+    /// * `new_schema` - The new schema to migrate to
+    /// * `options` - Lens generation options (e.g., confirmed renames)
+    ///
+    /// # Returns
+    ///
+    /// A `MigrationResult` containing the new descriptor ID, lens, and statistics.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DatabaseError::Migration` if migration fails.
+    pub fn execute_migration(
+        &self,
+        table: &str,
+        new_schema: TableSchema,
+        options: LensGenerationOptions,
+    ) -> Result<MigrationResult, DatabaseError> {
+        // Get the current schema
+        let old_schema = self
+            .get_table(table)
+            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+
+        // Generate lens from schema diff
+        let diff = diff_schemas(&old_schema, &new_schema);
+        let lens_result = generate_lens(&diff, &options);
+        let lens = lens_result.lens;
+        let warnings = lens_result.warnings;
+
+        // Get the current descriptor
+        let old_descriptor = {
+            let descriptor_objects = self.state.descriptor_objects.read().unwrap();
+            let descriptor_id = descriptor_objects
+                .get(table)
+                .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+
+            let data = self
+                .state
+                .node
+                .read(*descriptor_id, "main")
+                .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
+                .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+
+            TableDescriptor::from_bytes(&data)
+                .map_err(|e| MigrationError::CatalogError(e.to_string()))?
+        };
+
+        // Create new descriptor with parent pointer and lens
+        let old_descriptor_id = old_descriptor.compute_id();
+        let new_descriptor = TableDescriptor {
+            schema: new_schema.clone(),
+            policies: old_descriptor.policies.clone(),
+            parent_descriptors: vec![old_descriptor_id],
+            lenses: vec![lens.clone()],
+            rows_object_id: old_descriptor.rows_object_id,
+            schema_object_id: old_descriptor.schema_object_id,
+            index_object_ids: old_descriptor.index_object_ids.clone(),
+        };
+        let new_descriptor_id = new_descriptor.compute_id();
+
+        // Read all current rows
+        let rows = self.state.read_all_rows(table);
+
+        // Transform each row
+        let new_descriptor_arc = Arc::new(RowDescriptor::from_table_schema(&new_schema));
+        let mut migrated_count = 0;
+        let mut invisible_count = 0;
+
+        for (row_id, old_row) in rows {
+            // Apply lens forward transformation
+            match lens.apply_forward_owned(&old_row) {
+                Ok(mut new_row) => {
+                    // Ensure the new row has the correct descriptor
+                    new_row = OwnedRow::new(new_descriptor_arc.clone(), new_row.buffer);
+
+                    // Write the transformed row back
+                    self.state
+                        .node
+                        .write(
+                            row_id,
+                            "main",
+                            &new_row.buffer,
+                            "migration",
+                            timestamp_now(),
+                        )
+                        .map_err(|e| {
+                            DatabaseError::Storage(format!(
+                                "failed to write migrated row {}: {:?}",
+                                row_id, e
+                            ))
+                        })?;
+
+                    migrated_count += 1;
+                }
+                Err(LensError::Incompatible { .. }) => {
+                    // Row is incompatible with new schema - mark as invisible
+                    // For now, we just count it. In the future, we might want to:
+                    // - Move it to a separate branch
+                    // - Mark it with metadata
+                    // - Delete it
+                    invisible_count += 1;
+                }
+                Err(e) => {
+                    // Other lens errors are fatal
+                    return Err(MigrationError::LensError { row_id, error: e }.into());
+                }
+            }
+        }
+
+        // Update the schema in our caches
+        {
+            let tables = self.state.tables.read().unwrap();
+            if let Some(schema_id) = tables.get(table) {
+                let mut schemas = self.state.schemas.write().unwrap();
+                schemas.insert(*schema_id, new_schema.clone());
+            }
+        }
+
+        // Store the new descriptor
+        {
+            let descriptor_objects = self.state.descriptor_objects.read().unwrap();
+            if let Some(descriptor_obj_id) = descriptor_objects.get(table) {
+                self.state
+                    .node
+                    .write(
+                        *descriptor_obj_id,
+                        "main",
+                        &new_descriptor.to_bytes(),
+                        "migration",
+                        timestamp_now(),
+                    )
+                    .map_err(|e| {
+                        DatabaseError::Storage(format!("failed to write descriptor: {:?}", e))
+                    })?;
+            }
+        }
+
+        // Update the catalog
+        let catalog_data = self
+            .state
+            .node
+            .read(self.state.catalog_object_id, "main")
+            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
+            .ok_or_else(|| DatabaseError::Storage("catalog not found".to_string()))?;
+
+        let mut catalog = Catalog::from_bytes(&catalog_data)
+            .map_err(|e| DatabaseError::Storage(e.to_string()))?;
+
+        catalog.update_table(table.to_string(), new_descriptor);
+
+        self.state
+            .node
+            .write(
+                self.state.catalog_object_id,
+                "main",
+                &catalog.to_bytes(),
+                "migration",
+                timestamp_now(),
+            )
+            .map_err(|e| DatabaseError::Storage(format!("failed to write catalog: {:?}", e)))?;
+
+        // TODO: Notify query graphs about the schema change
+        // This would invalidate queries and require re-building with new schema
+
+        Ok(MigrationResult {
+            new_descriptor_id,
+            lens,
+            migrated_count,
+            invisible_count,
+            warnings,
+        })
+    }
+
+    /// Preview a migration without executing it.
+    ///
+    /// Returns the lens that would be generated and any warnings,
+    /// without actually transforming any data.
+    pub fn preview_migration(
+        &self,
+        table: &str,
+        new_schema: &TableSchema,
+        options: &LensGenerationOptions,
+    ) -> Result<(Lens, Vec<LensWarning>), DatabaseError> {
+        let old_schema = self
+            .get_table(table)
+            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+
+        let diff = diff_schemas(&old_schema, new_schema);
+        let result = generate_lens(&diff, options);
+
+        Ok((result.lens, result.warnings))
+    }
+
+    /// Get the current descriptor for a table.
+    pub fn get_descriptor(&self, table: &str) -> Option<TableDescriptor> {
+        let descriptor_objects = self.state.descriptor_objects.read().unwrap();
+        let descriptor_id = descriptor_objects.get(table)?;
+
+        let data = self.state.node.read(*descriptor_id, "main").ok()??;
+        TableDescriptor::from_bytes(&data).ok()
     }
 }
 

@@ -17,7 +17,10 @@ pub use binary::{
     encode_rows, encode_single_owned_row, encode_single_row,
 };
 pub use catalog::{Catalog, CatalogError, DescriptorId, TableDescriptor};
-pub use database::{Database, DatabaseError, DatabaseState, ExecuteResult, IncrementalQuery};
+pub use database::{
+    Database, DatabaseError, DatabaseState, ExecuteResult, IncrementalQuery, MigrationError,
+    MigrationResult,
+};
 pub use index::RefIndex;
 pub use lens::{
     ColumnTransform, DefaultValue, Lens, LensError, LensGenerationOptions, LensGenerationResult,

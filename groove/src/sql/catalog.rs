@@ -71,6 +71,21 @@ impl Catalog {
         Self::default()
     }
 
+    /// Register a table with its descriptor.
+    pub fn register_table(&mut self, name: String, descriptor: &TableDescriptor) {
+        self.tables.insert(name, descriptor.compute_id());
+    }
+
+    /// Update a table's descriptor (for migrations).
+    pub fn update_table(&mut self, name: String, descriptor: TableDescriptor) {
+        self.tables.insert(name, descriptor.compute_id());
+    }
+
+    /// Get the current descriptor ID for a table.
+    pub fn get_descriptor_id(&self, name: &str) -> Option<DescriptorId> {
+        self.tables.get(name).copied()
+    }
+
     /// Serialize catalog to bytes.
     ///
     /// Format:
