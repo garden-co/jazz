@@ -1,5 +1,5 @@
 import { createAuthClient } from "better-auth/client";
-import { Account, AuthSecretStorage, co, createJazzContext } from "jazz-tools";
+import { Account, AuthSecretStorage } from "jazz-tools";
 import {
   TestJazzContextManager,
   createJazzTestAccount,
