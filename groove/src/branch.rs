@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::commit::{Commit, CommitId};
+use crate::sql::DescriptorId;
 
 /// Error type for branch operations.
 #[derive(Debug, Clone, PartialEq)]
@@ -339,6 +340,274 @@ impl Branch {
     /// Does NOT validate - use truncate_at() for validated truncation.
     pub fn set_truncation(&mut self, truncation: Option<CommitId>) {
         self.truncation = truncation;
+    }
+}
+
+// =============================================================================
+// Schema-Aware Branch Naming
+// =============================================================================
+
+/// Default environment for local development.
+pub const DEFAULT_ENV: &str = "dev";
+
+/// Default user branch name.
+pub const DEFAULT_USER_BRANCH: &str = "main";
+
+/// A schema-aware branch name with the format `[env]-[schemaVersion]-[userBranch]`.
+///
+/// Examples:
+/// - `prod-abc123-main` (production, schema abc123, main branch)
+/// - `dev-def456-feature-x` (development, schema def456, feature-x branch)
+/// - `main` (legacy format, interpreted as dev-<no-schema>-main)
+///
+/// The schema version is the hex prefix of the DescriptorId hash.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SchemaBranchName {
+    /// Environment (e.g., "dev", "staging", "prod")
+    pub env: String,
+    /// Schema version hash prefix (hex encoded, typically 12 chars = 6 bytes)
+    pub schema_version: String,
+    /// User-visible branch name (e.g., "main", "feature-x")
+    pub user_branch: String,
+}
+
+impl SchemaBranchName {
+    /// Create a new schema branch name.
+    pub fn new(
+        env: impl Into<String>,
+        schema_version: impl Into<String>,
+        user_branch: impl Into<String>,
+    ) -> Self {
+        SchemaBranchName {
+            env: env.into(),
+            schema_version: schema_version.into(),
+            user_branch: user_branch.into(),
+        }
+    }
+
+    /// Create a schema branch name from a DescriptorId.
+    pub fn from_descriptor(
+        env: impl Into<String>,
+        descriptor_id: &DescriptorId,
+        user_branch: impl Into<String>,
+    ) -> Self {
+        SchemaBranchName {
+            env: env.into(),
+            schema_version: descriptor_id.short_prefix(),
+            user_branch: user_branch.into(),
+        }
+    }
+
+    /// Create the default branch for a given environment and schema.
+    pub fn default_for_env(env: impl Into<String>, descriptor_id: &DescriptorId) -> Self {
+        Self::from_descriptor(env, descriptor_id, DEFAULT_USER_BRANCH)
+    }
+
+    /// Parse a branch name string into a SchemaBranchName.
+    ///
+    /// Handles both new format (`env-schema-branch`) and legacy format (`branch`).
+    /// Legacy format is interpreted as `dev-<empty>-<branch>`.
+    pub fn parse(name: &str) -> Self {
+        let parts: Vec<&str> = name.splitn(3, '-').collect();
+
+        match parts.len() {
+            3 => SchemaBranchName {
+                env: parts[0].to_string(),
+                schema_version: parts[1].to_string(),
+                user_branch: parts[2].to_string(),
+            },
+            2 => {
+                // Could be "env-branch" (no schema) or "schema-branch" (no env)
+                // We assume "env-branch" format for backwards compat
+                SchemaBranchName {
+                    env: parts[0].to_string(),
+                    schema_version: String::new(),
+                    user_branch: parts[1].to_string(),
+                }
+            }
+            _ => {
+                // Legacy format: just a branch name
+                SchemaBranchName {
+                    env: DEFAULT_ENV.to_string(),
+                    schema_version: String::new(),
+                    user_branch: name.to_string(),
+                }
+            }
+        }
+    }
+
+    /// Format as the full branch name string.
+    fn format_name(&self) -> String {
+        if self.schema_version.is_empty() {
+            if self.env == DEFAULT_ENV {
+                // Legacy format for backwards compat
+                self.user_branch.clone()
+            } else {
+                format!("{}-{}", self.env, self.user_branch)
+            }
+        } else {
+            format!("{}-{}-{}", self.env, self.schema_version, self.user_branch)
+        }
+    }
+
+    /// Check if this is a legacy branch name (no schema version).
+    pub fn is_legacy(&self) -> bool {
+        self.schema_version.is_empty()
+    }
+
+    /// Create a new branch name for a different schema version.
+    /// Preserves the environment and user branch.
+    pub fn with_schema_version(&self, descriptor_id: &DescriptorId) -> Self {
+        SchemaBranchName {
+            env: self.env.clone(),
+            schema_version: descriptor_id.short_prefix(),
+            user_branch: self.user_branch.clone(),
+        }
+    }
+
+    /// Create a new branch name for a different user branch.
+    /// Preserves the environment and schema version.
+    pub fn with_user_branch(&self, user_branch: impl Into<String>) -> Self {
+        SchemaBranchName {
+            env: self.env.clone(),
+            schema_version: self.schema_version.clone(),
+            user_branch: user_branch.into(),
+        }
+    }
+
+    /// Create a new branch name for a different environment.
+    /// Preserves the schema version and user branch.
+    pub fn with_env(&self, env: impl Into<String>) -> Self {
+        SchemaBranchName {
+            env: env.into(),
+            schema_version: self.schema_version.clone(),
+            user_branch: self.user_branch.clone(),
+        }
+    }
+
+    /// Check if this branch matches a given environment.
+    pub fn matches_env(&self, env: &str) -> bool {
+        self.env == env
+    }
+
+    /// Check if this branch matches a given schema version (prefix match).
+    pub fn matches_schema(&self, schema_prefix: &str) -> bool {
+        self.schema_version.starts_with(schema_prefix)
+            || schema_prefix.starts_with(&self.schema_version)
+    }
+}
+
+impl std::fmt::Display for SchemaBranchName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.format_name())
+    }
+}
+
+impl From<&str> for SchemaBranchName {
+    fn from(s: &str) -> Self {
+        Self::parse(s)
+    }
+}
+
+impl From<String> for SchemaBranchName {
+    fn from(s: String) -> Self {
+        Self::parse(&s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_schema_branch_name_new() {
+        let name = SchemaBranchName::new("prod", "abc123def456", "main");
+        assert_eq!(name.env, "prod");
+        assert_eq!(name.schema_version, "abc123def456");
+        assert_eq!(name.user_branch, "main");
+    }
+
+    #[test]
+    fn test_schema_branch_name_from_descriptor() {
+        let descriptor_id = DescriptorId::from_bytes([
+            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]);
+        let name = SchemaBranchName::from_descriptor("prod", &descriptor_id, "main");
+        assert_eq!(name.env, "prod");
+        assert_eq!(name.schema_version, "123456789abc"); // short_prefix = first 6 bytes = 12 hex chars
+        assert_eq!(name.user_branch, "main");
+    }
+
+    #[test]
+    fn test_schema_branch_name_parse_full() {
+        let name = SchemaBranchName::parse("prod-abc123-feature-x");
+        assert_eq!(name.env, "prod");
+        assert_eq!(name.schema_version, "abc123");
+        assert_eq!(name.user_branch, "feature-x");
+    }
+
+    #[test]
+    fn test_schema_branch_name_parse_legacy() {
+        let name = SchemaBranchName::parse("main");
+        assert_eq!(name.env, "dev");
+        assert_eq!(name.schema_version, "");
+        assert_eq!(name.user_branch, "main");
+        assert!(name.is_legacy());
+    }
+
+    #[test]
+    fn test_schema_branch_name_to_string_full() {
+        let name = SchemaBranchName::new("prod", "abc123", "main");
+        assert_eq!(name.to_string(), "prod-abc123-main");
+    }
+
+    #[test]
+    fn test_schema_branch_name_to_string_legacy() {
+        let name = SchemaBranchName::new("dev", "", "main");
+        assert_eq!(name.to_string(), "main");
+    }
+
+    #[test]
+    fn test_schema_branch_name_to_string_env_no_schema() {
+        let name = SchemaBranchName::new("prod", "", "main");
+        assert_eq!(name.to_string(), "prod-main");
+    }
+
+    #[test]
+    fn test_schema_branch_name_roundtrip() {
+        let original = SchemaBranchName::new("staging", "def456", "feature-branch");
+        let serialized = original.to_string();
+        let parsed = SchemaBranchName::parse(&serialized);
+        assert_eq!(original, parsed);
+    }
+
+    #[test]
+    fn test_schema_branch_name_with_schema_version() {
+        let name = SchemaBranchName::new("prod", "abc123", "main");
+        let new_descriptor = DescriptorId::from_bytes([
+            0xde, 0xf4, 0x56, 0x78, 0x9a, 0xbc, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]);
+        let updated = name.with_schema_version(&new_descriptor);
+        assert_eq!(updated.env, "prod");
+        assert_eq!(updated.schema_version, "def456789abc");
+        assert_eq!(updated.user_branch, "main");
+    }
+
+    #[test]
+    fn test_schema_branch_name_matches_env() {
+        let name = SchemaBranchName::new("prod", "abc123", "main");
+        assert!(name.matches_env("prod"));
+        assert!(!name.matches_env("dev"));
+    }
+
+    #[test]
+    fn test_schema_branch_name_matches_schema() {
+        let name = SchemaBranchName::new("prod", "abc123def456", "main");
+        assert!(name.matches_schema("abc123"));
+        assert!(name.matches_schema("abc123def456"));
+        assert!(!name.matches_schema("xyz"));
     }
 }
 

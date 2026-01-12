@@ -8,7 +8,7 @@ pub mod sql;
 mod storage;
 pub mod sync;
 
-pub use branch::{Branch, BranchError};
+pub use branch::{Branch, BranchError, DEFAULT_ENV, DEFAULT_USER_BRANCH, SchemaBranchName};
 pub use commit::{Commit, CommitId};
 pub use listener::{
     ByteDiff, DiffRange, ListenerError, ListenerId, ObjectCallback, ObjectKey,
