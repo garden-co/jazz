@@ -297,11 +297,11 @@ describe("subscribeAll with filter and includes", () => {
     expect(issues[0].IssueAssignees[0].user.name).toBe("Alice");
   });
 
-  // TODO: This test reveals a bug where combining primary table filters (priority: "high")
+  // TODO(GCO-1084): This test reveals a bug where combining primary table filters (priority: "high")
   // with junction table filters (IssueLabels, IssueAssignees) returns no results.
   // The junction-table-only filter works fine (previous test), but adding a primary table
-  // filter causes the query to return nothing. This needs investigation.
-  // See: Linear issue to be created for tracking
+  // filter causes the query to return nothing.
+  // https://linear.app/garden-co/issue/GCO-1084
   it.skip("should filter by primary table AND junction tables combined", async () => {
     // Get the label and user IDs
     const labels = await new Promise<any[]>((resolve) => {
