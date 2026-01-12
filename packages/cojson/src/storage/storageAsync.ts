@@ -66,7 +66,8 @@ export class StorageApiAsync implements StorageAPI {
     // Check if there's already a pending load for this ID (deduplication)
     const pending = this.pendingKnownStateLoads.get(id);
     if (pending) {
-      pending.then(callback);
+      // Ensure callback is always called, even if pending fails unexpectedly
+      pending.then(callback, () => callback(undefined));
       return;
     }
 
@@ -78,9 +79,18 @@ export class StorageApiAsync implements StorageAPI {
           // Cache for future use
           this.knownStates.setKnownState(id, knownState);
         }
-        // Remove from pending map after completion
-        this.pendingKnownStateLoads.delete(id);
         return knownState;
+      })
+      .catch((err) => {
+        // Error handling contract:
+        // - Log warning
+        // - Behave like "not found" so callers can fall back (full load / load from peers)
+        logger.warn("Failed to load knownState from storage", { id, err });
+        return undefined;
+      })
+      .finally(() => {
+        // Remove from pending map after completion (success or failure)
+        this.pendingKnownStateLoads.delete(id);
       });
 
     this.pendingKnownStateLoads.set(id, loadPromise);

@@ -37,7 +37,10 @@
   - If not cached, check for pending load (deduplication)
   - If pending load exists, attach callback to existing promise
   - If no pending load, start new load and track in `pendingKnownStateLoads` map
-  - Cache the result if found, then remove from pending map
+  - Cache the result if found
+  - **Error handling contract**: on DB error, log warning and behave like "not found" (`undefined`) so callers can fall back
+  - **Dedup safety**: remove from pending map in a `finally` so it is cleared on both success and failure
+  - Ensure the callback is always called (even on failure)
 
 ## Phase 2: CoValueCore Methods (US-1, US-3)
 
@@ -58,6 +61,7 @@
   - Update `handleLoad` method in `packages/cojson/src/sync.ts`
   - Keep existing fast path for CoValue already in memory
   - Use `coValue.getKnownStateFromStorage()` to check storage before full load
+  - **Race safety**: inside the `getKnownStateFromStorage` callback, re-check `coValue.isAvailable()` and send new content if it became available while waiting
   - If not found in storage → call `loadFromPeersAndRespond()`
   - If found and `peerHasAllContent` returns true → send "known" message with storageKnownState
   - If found and peer needs content → call `loadFromStorage`, then `sendNewContent()`
@@ -92,6 +96,7 @@
   - Test queries DB when not cached
   - Test caches result after DB query
   - Test returns `undefined` for non-existent CoValue
+  - Test async error path: DB rejects → callback is called with `undefined` and pending dedupe entry is cleared
   - Add tests to `packages/cojson/src/tests/`
 
 - [ ] **Task 16**: Write unit tests for `peerHasAllContent`
@@ -114,6 +119,7 @@
   - Test `handleLoad` skips full load when peer has all content
   - Test `handleLoad` does full load when peer needs content
   - Test `handleLoad` falls back to peers when not in storage
+  - Test race case: CoValue becomes available while waiting for storage knownState → `sendNewContent` is used
   - Test `handleNewContent` loads from storage for garbage-collected CoValues
   - Test full flow: verify no transaction table queries when peer is up-to-date
   - Add tests to `packages/cojson/src/tests/sync.load.test.ts`

@@ -162,22 +162,33 @@ loadKnownState(
   }
 
   // Start new load and track it for deduplication
-  const loadPromise = this.dbClient.getCoValueKnownState(id).then((knownState) => {
-    if (knownState) {
-      // Cache for future use
-      this.knownStates.setKnownState(id, knownState);
-    }
-    // Remove from pending map after completion
-    this.pendingKnownStateLoads.delete(id);
-    return knownState;
-  });
+  const loadPromise = this.dbClient
+    .getCoValueKnownState(id)
+    .then((knownState) => {
+      if (knownState) {
+        // Cache for future use
+        this.knownStates.setKnownState(id, knownState);
+      }
+      return knownState;
+    })
+    .catch((err) => {
+      // Error handling contract:
+      // - Log warning
+      // - Behave like "not found" so callers can fall back (full load / load from peers)
+      logger.warn("Failed to load knownState from storage", { id, err });
+      return undefined;
+    })
+    .finally(() => {
+      // Remove from pending map after completion (success or failure)
+      this.pendingKnownStateLoads.delete(id);
+    });
 
   this.pendingKnownStateLoads.set(id, loadPromise);
   loadPromise.then(callback);
 }
 ```
 
-### 6. New `lazyLoad` Method in CoValueCore
+### 6. New `getKnownStateFromStorage` Method in CoValueCore
 
 **Location:** `packages/cojson/src/coValueCore/coValueCore.ts`
 
@@ -258,6 +269,12 @@ handleLoad(msg: LoadMessage, peer: PeerState) {
 
   // Check storage knownState before doing full load
   coValue.getKnownStateFromStorage((storageKnownState) => {
+    // Race condition: CoValue might have been loaded while we were waiting for storage
+    if (coValue.isAvailable()) {
+      this.sendNewContent(msg.id, peer);
+      return;
+    }
+
     if (!storageKnownState) {
       // Not in storage, try loading from peers
       this.loadFromPeersAndRespond(msg.id, peer, coValue);
@@ -439,8 +456,8 @@ SELECT sessionID, lastIdx FROM sessions WHERE coValue = ?;
    - Don't block or fail the load request
 
 2. **KnownState Load Fails:**
-   - Treat as "not found" and fall back to full load or peer loading
-   - Log warning but continue operation
+   - The storage `loadKnownState` callback must always be called (even on failure)
+   - On failure: log warning, clear any pending dedupe entry, and behave like "not found" (`undefined`) so callers can fall back
 
 3. **Race Conditions:**
    - Handle case where CoValue becomes available in memory while waiting for storage callback
@@ -448,7 +465,8 @@ SELECT sessionID, lastIdx FROM sessions WHERE coValue = ?;
 
 4. **Stale KnownState Cache:**
    - The in-memory `StorageKnownState` cache is updated after full loads
-   - If cache is stale, the comparison might be incorrect, but this only results in unnecessary full loads (no data loss)
+   - Assumption: storage is only written by the current process, so cached knownState cannot be "behind" the actual DB state
+   - If this assumption does not hold (e.g. multiple writers / externally modified DB), `loadKnownState` must bypass cache or validate freshness; otherwise we could incorrectly skip sending content
 
 ### Testing Strategy
 
@@ -467,10 +485,10 @@ SELECT sessionID, lastIdx FROM sessions WHERE coValue = ?;
    - Returns undefined when CoValue doesn't exist
    - Returns current knownState when CoValue is already in memory
    - Waits for pending load if already in progress
-7. Test `CoValueCore.lazyLoad`:
-   - Calls `onUpToDate` when peer has all content
-   - Calls `onNeedsContent` after full load when peer needs content
-   - Calls `onNotFound` when CoValue not in storage
+7. Test `handleLoad` lazy-storage fast path behavior:
+   - When peer already has all content per storage knownState → replies with `known` and does not load from storage
+   - When peer needs content per storage knownState → loads from storage and sends new content
+   - When CoValue not in storage → falls back to loading from peers (or not-found handling)
 
 **Integration Tests:**
 1. Test `handleLoad` skips full load when peer has all content

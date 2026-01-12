@@ -594,6 +594,12 @@ export class SyncManager {
 
     // Check storage knownState before doing full load
     coValue.getKnownStateFromStorage((storageKnownState) => {
+      // Race condition: CoValue might have been loaded while we were waiting for storage
+      if (coValue.isAvailable()) {
+        this.sendNewContent(msg.id, peer);
+        return;
+      }
+
       if (!storageKnownState) {
         // Not in storage, try loading from peers
         this.loadFromPeersAndRespond(msg.id, peer, coValue);
