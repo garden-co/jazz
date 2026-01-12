@@ -6,7 +6,7 @@ use groove::sql::Database;
 /// Execute a basic query
 pub fn basic_query(db: &Database) {
     // Simple SELECT all rows from a table
-    let rows = db.select_all("tasks").unwrap();
+    let rows = db.query("SELECT * FROM tasks").unwrap();
     println!("Found {} tasks", rows.len());
 
     // For filtered queries, use incremental_query
