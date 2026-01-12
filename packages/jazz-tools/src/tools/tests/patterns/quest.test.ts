@@ -36,8 +36,8 @@ beforeEach(async () => {
 describe("QuestSchema", () => {
   test("should fill categories array with category when categories is undefined", async () => {
     // Create a quest without categories
-    // @ts-expect-error -  (simulating old data)
     const quest = QuestSchema.create(
+      // @ts-expect-error - (simulating old data)
       {
         title: "Test Quest",
         description: "A test quest description",
