@@ -592,7 +592,10 @@ describe("subscribeToCoValue", () => {
         TestMap.create({ value: "4" }, everyone),
         TestMap.create({ value: "5" }, everyone),
       ],
-      everyone,
+      {
+        owner: everyone,
+        validation: "loose",
+      },
     );
 
     let result = null as Loaded<typeof TestList, { $each: true }> | null;

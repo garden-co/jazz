@@ -54,10 +54,12 @@ export class AccountSchema<
   getDefinition: () => CoMapSchemaDefinition;
 
   getValidationSchema = () => {
-    return z.object({
-      profile: this.shape.profile.getValidationSchema(),
-      root: z.optional(this.shape.root.getValidationSchema()),
-    });
+    return z.instanceof(Account).or(
+      z.object({
+        profile: this.shape.profile.getValidationSchema(),
+        root: z.optional(this.shape.root.getValidationSchema()),
+      }),
+    );
   };
 
   /**

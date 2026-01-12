@@ -30,7 +30,10 @@ export function createCoreCoVectorSchema(
     dimensions,
     resolveQuery: true as const,
     getValidationSchema: () => {
-      return z.instanceof(CoVector).or(z.array(z.number()));
+      return z
+        .instanceof(CoVector)
+        .or(z.instanceof(Float32Array))
+        .or(z.array(z.number()));
     },
   };
 }
@@ -42,7 +45,10 @@ export class CoVectorSchema implements CoreCoVectorSchema {
 
   #permissions: SchemaPermissions | null = null;
   getValidationSchema = () => {
-    return z.instanceof(CoVector).or(z.array(z.number()));
+    return z
+      .instanceof(CoVector)
+      .or(z.instanceof(Float32Array))
+      .or(z.array(z.number()));
   };
 
   /**

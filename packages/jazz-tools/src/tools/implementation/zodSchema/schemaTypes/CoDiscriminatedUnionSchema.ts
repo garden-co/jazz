@@ -56,13 +56,8 @@ export class CoDiscriminatedUnionSchema<
   readonly getDefinition: () => CoDiscriminatedUnionSchemaDefinition<Options>;
 
   getValidationSchema = () => {
-    return z.discriminatedUnion(
-      this.getDefinition().discriminator,
-      // @ts-expect-error we can't statically enforce the schema's discriminator is a valid discriminator, but in practice it is
-      this.getDefinition().options.map((option) =>
-        option.getValidationSchema(),
-      ),
-    );
+    // Discriminated union schema can apply only if data are plain objects.
+    return z.any();
   };
 
   /**
@@ -235,10 +230,7 @@ export function createCoreCoDiscriminatedUnionSchema<
     collaborative: true as const,
     builtin: "CoDiscriminatedUnion" as const,
     getValidationSchema: () => {
-      return z.discriminatedUnion(
-        discriminator,
-        schemas.map((option) => option.getValidationSchema()) as any,
-      );
+      return z.any();
     },
     getDefinition: () => ({
       discriminator,
