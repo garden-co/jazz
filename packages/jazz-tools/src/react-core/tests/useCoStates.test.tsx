@@ -123,10 +123,8 @@ describe("useSuspenseCoStates", () => {
       project1.$jazz.set("name", "updated1");
     });
 
-    await waitFor(() => {
-      assert(result.current[0]);
-      expect(result.current[0].name).toBe("updated1");
-    });
+    assert(result.current[0]);
+    expect(result.current[0].name).toBe("updated1");
   });
 
   it("should handle empty subscription array", async () => {
@@ -145,6 +143,44 @@ describe("useSuspenseCoStates", () => {
     });
 
     expect(result.current).toEqual([]);
+  });
+
+  it("supports branching CoValues", async () => {
+    const project = ProjectSchema.create({ name: "My Project" });
+
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <Suspense fallback={<div>Loading...</div>}>{children}</Suspense>
+    );
+
+    const branchName = "feature-branch";
+    const { result } = await act(async () => {
+      return renderHook(
+        () =>
+          useSuspenseCoStates(ProjectSchema, [project.$jazz.id], {
+            unstable_branch: { name: branchName },
+          }),
+        {
+          wrapper,
+        },
+      );
+    });
+
+    assert(result.current[0]);
+    expect(result.current[0].name).toBe("My Project");
+
+    // Updates on changes to the branched CoValue
+    act(() => {
+      result.current[0]!.$jazz.set("name", "My Project Updated");
+    });
+    assert(result.current[0]);
+    expect(result.current[0].name).toBe("My Project Updated");
+
+    // Does not update when changes are made to another branch
+    act(() => {
+      project.$jazz.set("name", "My Project Updated 2");
+    });
+    assert(result.current[0]);
+    expect(result.current[0].name).toBe("My Project Updated");
   });
 });
 
@@ -280,6 +316,39 @@ describe("useCoStates", () => {
     expect(result.current).toBe(firstResult);
     expect(result.current[0]).toBe(firstResult[0]);
     expect(result.current[1]).toBe(firstResult[1]);
+  });
+
+  it("supports branching CoValues", async () => {
+    const project = ProjectSchema.create({ name: "My Project" });
+
+    const { result } = renderHook(() =>
+      useCoStates(ProjectSchema, [project.$jazz.id], {
+        unstable_branch: { name: "feature-branch" },
+      }),
+    );
+
+    const loadedProject = result.current[0];
+    assert(loadedProject);
+    assertLoaded(loadedProject);
+    expect(loadedProject.name).toBe("My Project");
+
+    // Updates on changes to the branched CoValue
+    act(() => {
+      loadedProject.$jazz.set("name", "My Project Updated");
+    });
+    const loadedProject2 = result.current[0];
+    assert(loadedProject2);
+    assertLoaded(loadedProject2);
+    expect(loadedProject2.name).toBe("My Project Updated");
+
+    // Does not update when changes are made to another branch
+    act(() => {
+      project.$jazz.set("name", "My Project Updated 2");
+    });
+    const loadedProject3 = result.current[0];
+    assert(loadedProject3);
+    assertLoaded(loadedProject3);
+    expect(loadedProject3.name).toBe("My Project Updated");
   });
 
   it("should remove subscriptions for removed ids", async () => {

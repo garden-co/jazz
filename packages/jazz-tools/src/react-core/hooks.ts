@@ -202,6 +202,7 @@ function useCoValueSubscriptions(
   const contextChanged =
     state.contextManager !== contextManager || state.agent !== agent;
 
+  // Quick checks to avoid going through the subscription cache
   const paramsChanged =
     state.schema !== schema ||
     state.resolve !== resolve ||
@@ -216,7 +217,16 @@ function useCoValueSubscriptions(
     });
 
   if (contextChanged || paramsChanged) {
-    stateRef.current = createAllSubscriptions();
+    const newSubscriptions = createAllSubscriptions();
+    // Avoid recreating the subscriptions array if all subscriptions are already cached
+    const anySubscriptionChanged = newSubscriptions.subscriptions.some(
+      (newSubscriptions, index) =>
+        newSubscriptions !== state.subscriptions[index],
+    );
+    if (anySubscriptionChanged) {
+      stateRef.current = newSubscriptions;
+    }
+    return stateRef.current.subscriptions;
   }
 
   return stateRef.current.subscriptions;
@@ -926,10 +936,6 @@ function getResolveQuery(
 function useSuspendUntilLoaded(
   subscriptions: (SubscriptionScope<CoValue> | null)[],
 ): void {
-  const subscriptionIds = subscriptions
-    .map((sub) => sub?.id ?? "null")
-    .join(",");
-
   const combinedPromise = useMemo(() => {
     const promises = subscriptions.map((sub) => {
       if (!sub) {
@@ -940,7 +946,7 @@ function useSuspendUntilLoaded(
     });
 
     return Promise.all(promises);
-  }, [subscriptionIds]);
+  }, [subscriptions]);
 
   use(combinedPromise);
 }
@@ -968,10 +974,6 @@ function useSubscriptionsSelector<
     equalityFn?: (a: TSelectorReturn, b: TSelectorReturn) => boolean;
   },
 ): TSelectorReturn[] {
-  const subscriptionIds = subscriptions
-    .map((sub) => sub?.id ?? "null")
-    .join(",");
-
   // Combined subscribe function that subscribes to all scopes
   const subscribe = useCallback(
     (callback: () => void) => {
@@ -986,7 +988,7 @@ function useSubscriptionsSelector<
         unsubscribes.forEach((unsub) => unsub());
       };
     },
-    [subscriptionIds],
+    [subscriptions],
   );
 
   // Cache current values to avoid infinite loops
@@ -1010,7 +1012,7 @@ function useSubscriptionsSelector<
     }
 
     return cachedCurrentValuesRef.current as unknown as TSelectorInput[];
-  }, [subscriptionIds]);
+  }, [subscriptions]);
 
   const selectFn = useMemo(() => {
     if (!options?.select) {
@@ -1028,7 +1030,7 @@ function useSubscriptionsSelector<
   const equalityFn = useMemo(() => {
     return (a: TSelectorReturn[], b: TSelectorReturn[]) =>
       a.length === b.length &&
-      a.every((value, index) => b[index] && elementEqualityFn(value, b[index]));
+      a.every((value, index) => elementEqualityFn(value, b[index]));
   }, [options?.equalityFn]);
 
   return useSyncExternalStoreWithSelector(
