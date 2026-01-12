@@ -241,11 +241,6 @@ impl WasmDatabase {
                     ExecuteResult::Deleted(count) => {
                         serde_wasm_bindgen::to_value(&format!("deleted:{}", count)).unwrap()
                     }
-                    ExecuteResult::Selected(rows) => {
-                        let row_data: Vec<Vec<String>> =
-                            rows.iter().map(|(_id, row)| row_to_strings(row)).collect();
-                        serde_wasm_bindgen::to_value(&row_data).unwrap()
-                    }
                 };
                 Ok(js_result)
             }
@@ -262,12 +257,11 @@ impl WasmDatabase {
     ///   - Column values in schema order
     #[wasm_bindgen]
     pub fn select_binary(&self, sql: &str) -> Result<Uint8Array, JsValue> {
-        match self.db.execute(sql) {
-            Ok(ExecuteResult::Selected(rows)) => {
+        match self.db.query(sql) {
+            Ok(rows) => {
                 let binary = encode_rows(&rows);
                 Ok(Uint8Array::from(binary.as_slice()))
             }
-            Ok(_) => Err(JsValue::from_str("expected SELECT query")),
             Err(e) => Err(JsValue::from_str(&format!("{:?}", e))),
         }
     }
