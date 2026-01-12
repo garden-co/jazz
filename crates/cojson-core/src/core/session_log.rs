@@ -8,6 +8,7 @@ use salsa20::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value as JsonValue};
+use crate::core::config::MAX_TX_SIZE_BYTES;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionID(pub String);
@@ -74,6 +75,14 @@ pub struct SessionLogInternal {
     nonce_generator: NonceGenerator,
     crypto_cache: CryptoCache,
 }
+
+fn validate_tx_size_limit_in_bytes(changes_len: &str) -> Result<(), CoJsonCoreError> {
+    if changes_len.len() > MAX_TX_SIZE_BYTES {
+        return Err(CoJsonCoreError::TransactionTooLarge(changes_len.len(), MAX_TX_SIZE_BYTES));
+    }
+    Ok(())
+}
+
 
 impl SessionLogInternal {
     /// Create a new session log, optionally with a public key for signature verification.
@@ -192,6 +201,7 @@ impl SessionLogInternal {
         made_at: u64,
         meta: Option<String>,
     ) -> Result<(Signature, Transaction), CoJsonCoreError> {
+        validate_tx_size_limit_in_bytes(changes_json)?;
         // Build the transaction object depending on the mode.
         let new_tx = match mode {
             TransactionMode::Private { key_id, key_secret } => {

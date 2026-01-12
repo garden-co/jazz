@@ -26,7 +26,6 @@ import {
   waitFor,
 } from "./testUtils.js";
 import { CO_VALUE_PRIORITY } from "../priority.js";
-import { setMaxTxSizeBytes } from "../config.js";
 import { JsonValue } from "../jsonValue.js";
 
 const Crypto = await WasmCrypto.create();
@@ -91,14 +90,6 @@ test("transactions with wrong signature are rejected", () => {
 });
 
 describe("transactions that exceed the byte size limit are rejected", () => {
-  beforeEach(() => {
-    setMaxTxSizeBytes(1 * 1024);
-  });
-
-  afterEach(() => {
-    setMaxTxSizeBytes(1 * 1024 * 1024);
-  });
-
   test("makeTransaction should throw error when transaction exceeds byte size limit", () => {
     const [agent, sessionID] = randomAgentAndSessionID();
     const node = new LocalNode(agent.agentSecret, sessionID, Crypto);
@@ -110,7 +101,7 @@ describe("transactions that exceed the byte size limit are rejected", () => {
       ...Crypto.createdNowUnique(),
     });
 
-    const largeBinaryData = "x".repeat(1024 + 100);
+    const largeBinaryData = "x".repeat(1024 * 1024 + 100);
 
     expect(() => {
       coValue.makeTransaction(
@@ -121,7 +112,9 @@ describe("transactions that exceed the byte size limit are rejected", () => {
         ],
         "trusting",
       );
-    }).toThrow(/Transaction is too large to be synced/);
+    }).toThrow(
+      /Transaction too large to be synced: 1048689 bytes > 1048576 bytes limit/,
+    );
   });
 
   test("makeTransaction should work for transactions under byte size limit", () => {
