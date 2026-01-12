@@ -438,8 +438,8 @@ describe("CoMap", async () => {
         age: z.number(),
       });
 
-      // @ts-expect-error - x is not a valid property
       const john = Person.create(
+        // @ts-expect-error - x is not a valid property
         { name: "John", age: 30, x: 1 },
         { validation: "loose" },
       );
@@ -556,12 +556,12 @@ describe("CoMap", async () => {
       expect(() =>
         Person.create({ group: Group.create(), group2: Group.create() }),
       ).not.toThrow();
-      // @ts-expect-error - group should be a Group
       expect(() =>
+        // @ts-expect-error - group should be a Group
         Person.create({ group: "Test", group2: Group.create() }),
       ).toThrow();
-      // @ts-expect-error - group should be a Group
       expect(() =>
+        // @ts-expect-error - group should be a Group
         Person.create({ group: Group.create(), group2: "Test" }),
       ).toThrow();
     });
@@ -572,6 +572,7 @@ describe("CoMap", async () => {
         age: z.number().default(20),
       });
 
+      // @ts-expect-error - name and age are required but have defaults
       const person = Person.create({});
       expect(person.name).toEqual("John");
       expect(person.age).toEqual(20);
@@ -615,8 +616,8 @@ describe("CoMap", async () => {
 
       const john = Person.create({ name: "John", age: 20 });
 
-      // @ts-expect-error - age should be a number
       expect(() =>
+        // @ts-expect-error - age should be a number
         john.$jazz.set("age", "21", { validation: "loose" }),
       ).not.toThrow();
 
