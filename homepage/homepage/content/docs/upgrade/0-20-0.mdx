@@ -22,7 +22,7 @@ This also helps us speed up the migration of Jazz Core to Rust which will help u
 - We dropped support for `RNQuickCrypto`. RNCrypto is now the default crypto provider on React Native.
 - There is no more fallback to Javascript crypto. If the crypto fails to initialize, it will throw an error. 
 **NB**: if you use WASM crypto on Edge runtimes, you need to ensure that WASM is available and initialized. See more details at [WASM on Edge runtimes](/docs/react/server-side/setup#wasm-on-edge-runtimes).
-- We have intruduced a way to permanently [delete CoValues](/docs/core-concepts/covalues/deleting). This brings a new `deleted` loading state.
+- We have introduced a way to permanently [delete CoValues](/docs/core-concepts/covalues/deleting). This brings a new `deleted` loading state.
 - You can now only use strings or records of strings as [`unique` parameters](/docs/react/core-concepts/covalues/comaps#uniqueness). This ensures that serialisation is deterministic.
 
 ## Breaking changes
