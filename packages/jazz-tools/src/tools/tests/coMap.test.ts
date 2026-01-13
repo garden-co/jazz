@@ -1694,6 +1694,56 @@ describe("CoMap applyDiff", async () => {
     expect(map.nested?.value).toEqual("original");
   });
 
+  test("Basic applyDiff should validate", () => {
+    const map = TestMap.create(
+      {
+        name: "Alice",
+        age: 30,
+        isActive: true,
+        birthday: new Date("1990-01-01"),
+        nested: NestedMap.create({ value: "original" }, { owner: me }),
+      },
+      { owner: me },
+    );
+
+    const newValues = {
+      age: "35",
+    };
+
+    // @ts-expect-error - age should be a number
+    expect(() => map.$jazz.applyDiff(newValues)).toThrow();
+
+    expect(map.name).toEqual("Alice");
+    expect(map.age).toEqual(30);
+    expect(map.isActive).toEqual(true);
+    expect(map.birthday).toEqual(new Date("1990-01-01"));
+    expect(map.nested?.value).toEqual("original");
+  });
+
+  test("Basic applyDiff should not validate if validation is loose", () => {
+    const map = TestMap.create(
+      {
+        name: "Alice",
+        age: 30,
+        isActive: true,
+        birthday: new Date("1990-01-01"),
+        nested: NestedMap.create({ value: "original" }, { owner: me }),
+      },
+      { owner: me },
+    );
+
+    const newValues = {
+      age: "35",
+    };
+
+    // @ts-expect-error - age should be a number
+    expect(() =>
+      map.$jazz.applyDiff(newValues, { validation: "loose" }),
+    ).not.toThrow();
+
+    expect(map.age).toEqual("35");
+  });
+
   test("applyDiff with nested changes", () => {
     const originalNestedMap = NestedMap.create(
       { value: "original" },
@@ -1850,9 +1900,7 @@ describe("CoMap applyDiff", async () => {
       nested: undefined,
     };
 
-    expect(() => map.$jazz.applyDiff(newValues)).toThrowError(
-      "Cannot set required reference nested to undefined",
-    );
+    expect(() => map.$jazz.applyDiff(newValues)).toThrow();
   });
 
   test("applyDiff from JSON", () => {

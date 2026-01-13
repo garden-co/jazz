@@ -20,6 +20,7 @@ import {
   isCoValueClass,
   Group,
   CoVector,
+  CoreCoMapSchema,
 } from "../../../internal.js";
 import { coField } from "../../schema.js";
 
@@ -81,7 +82,11 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
     const ClassToExtend = schema.builtin === "Account" ? Account : CoMap;
 
     const coValueClass = class ZCoMap extends ClassToExtend {
-      constructor(options: { fromRaw: RawCoMap } | undefined) {
+      constructor(
+        options:
+          | { fromRaw: RawCoMap; validationSchema?: CoreCoMapSchema }
+          | undefined,
+      ) {
         super(options);
         for (const [fieldName, fieldType] of Object.entries(def.shape)) {
           (this as any)[fieldName] = schemaFieldToCoFieldDef(
@@ -93,6 +98,13 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
             def.catchall as SchemaField,
           );
         }
+      }
+
+      static fromRaw(raw: RawCoMap) {
+        return new this({
+          fromRaw: raw,
+          validationSchema: schema as CoreCoMapSchema,
+        });
       }
     };
 

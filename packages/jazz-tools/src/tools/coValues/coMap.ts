@@ -54,7 +54,10 @@ import {
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
+  AnyCoreCoValueSchema,
+  CoreCoMapSchema,
 } from "../internal.js";
+import { z } from "../implementation/zodSchema/zodReExport.js";
 
 export type CoMapEdit<V> = {
   value?: V;
@@ -110,6 +113,7 @@ type CoMapFieldSchema = {
 export class CoMap extends CoValueBase implements CoValue {
   /** @category Type Helpers */
   declare [TypeSym]: "CoMap";
+  coMapSchema: CoreCoMapSchema | undefined;
   static {
     this.prototype[TypeSym] = "CoMap";
   }
@@ -127,7 +131,9 @@ export class CoMap extends CoValueBase implements CoValue {
   static _schema: CoMapFieldSchema;
 
   /** @internal */
-  constructor(options: { fromRaw: RawCoMap } | undefined) {
+  constructor(
+    options: { fromRaw: RawCoMap; coMapSchema?: CoreCoMapSchema } | undefined,
+  ) {
     super();
 
     const proxy = new Proxy(this, CoMapProxyHandler as ProxyHandler<this>);
@@ -136,7 +142,11 @@ export class CoMap extends CoValueBase implements CoValue {
       if ("fromRaw" in options) {
         Object.defineProperties(this, {
           $jazz: {
-            value: new CoMapJazzApi(proxy, () => options.fromRaw),
+            value: new CoMapJazzApi(
+              proxy,
+              () => options.fromRaw,
+              options.coMapSchema,
+            ),
             enumerable: false,
           },
         });
@@ -175,6 +185,7 @@ export class CoMap extends CoValueBase implements CoValue {
       | {
           owner?: Account | Group;
           unique?: CoValueUniqueness["uniqueness"];
+          coMapSchema?: CoreCoMapSchema;
         }
       | Account
       | Group,
@@ -248,6 +259,7 @@ export class CoMap extends CoValueBase implements CoValue {
       | {
           owner?: Account | Group;
           unique?: CoValueUniqueness["uniqueness"];
+          coMapSchema?: CoreCoMapSchema | undefined;
         }
       | Account
       | Group,
@@ -256,7 +268,11 @@ export class CoMap extends CoValueBase implements CoValue {
 
     Object.defineProperties(instance, {
       $jazz: {
-        value: new CoMapJazzApi(instance, () => raw),
+        value: new CoMapJazzApi(
+          instance,
+          () => raw,
+          options && "coMapSchema" in options ? options.coMapSchema : undefined,
+        ),
         enumerable: false,
       },
     });
@@ -513,6 +529,7 @@ export class CoMap extends CoValueBase implements CoValue {
         (this as any).create(options.value, {
           owner: options.owner,
           unique: options.unique,
+          coMapSchema: this,
         });
       },
       onUpdateWhenFound(value) {
@@ -562,15 +579,46 @@ export class CoMap extends CoValueBase implements CoValue {
  * Contains CoMap Jazz methods that are part of the {@link CoMap.$jazz`} property.
  */
 class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
+  private cachedSchema: z.core.$ZodTypeDef | undefined;
   constructor(
     private coMap: M,
     private getRaw: () => RawCoMap,
+    private coMapSchema?: CoreCoMapSchema,
   ) {
     super(coMap);
+    this.cachedSchema = this.coMapSchema?.getValidationSchema?.()._zod.def;
   }
 
   get owner(): Group {
     return getCoValueOwner(this.coMap);
+  }
+
+  private getPropertySchema(key: string): z.core.$ZodTypes {
+    if (this.cachedSchema === undefined) {
+      return z.any();
+    }
+
+    if (this.cachedSchema?.type !== "union") {
+      throw new Error("Cached schema is not a union");
+    }
+
+    // @ts-expect-error as union, it has options fields and 2nd is the plain shape
+    const fieldSchema = this.cachedSchema.options[1]?.shape?.[key] as
+      | z.core.$ZodTypes
+      | undefined;
+
+    // ignore codecs/pipes
+    // even if they are optional and nullable
+    // @ts-expect-error
+    if (
+      fieldSchema?._def?.type === "pipe" ||
+      fieldSchema?._def?.innerType?._def?.type === "pipe" ||
+      fieldSchema?._def?.innerType?._def?.innerType?._def?.type === "pipe"
+    ) {
+      return z.any();
+    }
+
+    return fieldSchema ?? z.any();
   }
 
   /**
@@ -592,14 +640,26 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
    *
    * @param key The key to set
    * @param value The value to set
+   * @param options Optional options for setting the value
    *
    * @category Content
    */
-  set<K extends CoKeys<M>>(key: K, value: CoFieldInit<M[K]>): void {
+  set<K extends CoKeys<M>>(
+    key: K,
+    value: CoFieldInit<M[K]>,
+    options?: { validation?: "strict" | "loose" },
+  ): void {
     const descriptor = this.getDescriptor(key as string);
 
     if (!descriptor) {
       throw Error(`Cannot set unknown key ${key}`);
+    }
+
+    // Validate the value if validation is not loose and we have a schema
+    if (options?.validation !== "loose" && this.coMapSchema) {
+      // Get the field schema for this specific key from the shape
+      const fieldSchema = this.getPropertySchema(key);
+      value = z.parse(fieldSchema, value) as CoFieldInit<M[K]>;
     }
 
     let refId = (value as CoValue)?.$jazz?.id;
@@ -656,11 +716,16 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
    *
    * @param newValues - The new values to apply to the CoMap. For collaborative values,
    * both CoValues and JSON values are supported.
+   * @param options Optional options for applying the diff.
+   * @param options.validation The validation mode to use. Defaults to "strict".
    * @returns The modified CoMap.
    *
    * @category Content
    */
-  applyDiff(newValues: Partial<CoMapInit<M>>): M {
+  applyDiff(
+    newValues: Partial<CoMapInit<M>>,
+    options?: { validation?: "strict" | "loose" },
+  ): M {
     for (const key in newValues) {
       if (Object.prototype.hasOwnProperty.call(newValues, key)) {
         const tKey = key as keyof typeof newValues & keyof this;
@@ -673,13 +738,13 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
 
         if (descriptor === "json" || "encoded" in descriptor) {
           if (currentValue !== newValue) {
-            this.set(tKey as any, newValue as CoFieldInit<M[keyof M]>);
+            this.set(tKey as any, newValue as CoFieldInit<M[keyof M]>, options);
           }
         } else if (isRefEncoded(descriptor)) {
           const currentId = (currentValue as CoValue | undefined)?.$jazz.id;
           let newId = (newValue as CoValue | undefined)?.$jazz?.id;
           if (currentId !== newId) {
-            this.set(tKey as any, newValue as CoFieldInit<M[keyof M]>);
+            this.set(tKey as any, newValue as CoFieldInit<M[keyof M]>, options);
           }
         }
       }
