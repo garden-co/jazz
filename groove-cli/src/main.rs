@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use groove::sql::{
     diff_schemas, generate_lens, parse, ColumnDef, ColumnTransform, ColumnType, CreateTable, Lens,
-    LensGenerationOptions, Statement, TableSchema,
+    LensGenerationOptions, PotentialRename, Statement, TableSchema,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -272,6 +272,46 @@ fn parse_column_type(s: &str) -> ColumnType {
     }
 }
 
+/// Prompt the user to confirm each potential rename.
+/// Returns a vector of (old_name, new_name) tuples for confirmed renames.
+fn prompt_rename_confirmations(
+    potential_renames: &[PotentialRename],
+) -> Result<Vec<(String, String)>> {
+    use std::io::Write;
+
+    if potential_renames.is_empty() {
+        return Ok(vec![]);
+    }
+
+    println!(
+        "\n{}",
+        "The following columns may have been renamed:".yellow()
+    );
+
+    let mut confirmed = Vec::new();
+
+    for rename in potential_renames {
+        print!(
+            "  {} -> {} — Is this a rename? [y/N] ",
+            rename.old_name.red(),
+            rename.new_name.green()
+        );
+        std::io::stdout().flush()?;
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+
+        if input.trim().eq_ignore_ascii_case("y") {
+            confirmed.push((rename.old_name.clone(), rename.new_name.clone()));
+            println!("    {} Confirmed as rename", "✓".green());
+        } else {
+            println!("    {} Treating as separate add/remove", "✗".red());
+        }
+    }
+
+    Ok(confirmed)
+}
+
 /// Preview schema changes between local file and server
 fn migrate_diff(table: &str, file: &PathBuf, server: &str) -> Result<()> {
     println!(
@@ -326,7 +366,7 @@ fn migrate_diff(table: &str, file: &PathBuf, server: &str) -> Result<()> {
 
     if !diff.potential_renames.is_empty() {
         has_changes = true;
-        println!("\n  {}:", "Potential Renames".yellow());
+        println!("\n  {}:", "Potential Renames (detected)".yellow());
         for rename in &diff.potential_renames {
             println!(
                 "    {} -> {} ({})",
@@ -351,8 +391,12 @@ fn migrate_diff(table: &str, file: &PathBuf, server: &str) -> Result<()> {
     if !has_changes {
         println!("  {}", "No changes detected".dimmed());
     } else {
-        // Generate and show lens
-        let result = generate_lens(&diff, &LensGenerationOptions::default());
+        // Prompt user to confirm potential renames
+        let confirmed_renames = prompt_rename_confirmations(&diff.potential_renames)?;
+
+        // Generate and show lens with confirmed renames
+        let options = LensGenerationOptions { confirmed_renames };
+        let result = generate_lens(&diff, &options);
 
         if !result.lens.forward.is_empty() {
             println!("\n  {}:", "Generated Lens".blue());
@@ -407,11 +451,8 @@ fn migrate_push(table: &str, file: &PathBuf, env: &str, server: &str, yes: bool)
     // Parse local schema
     let new_schema = parse_schema_from_file(file, table)?;
 
-    // Compute diff and generate lens locally
+    // Compute diff
     let diff = diff_schemas(&old_schema, &new_schema);
-    let result = generate_lens(&diff, &LensGenerationOptions::default());
-    let lens = result.lens;
-    let warnings = result.warnings;
 
     // Show preview
     println!("\n{}", "Migration Preview:".bold());
@@ -425,14 +466,33 @@ fn migrate_push(table: &str, file: &PathBuf, env: &str, server: &str, yes: bool)
         println!("  Removed: {}", names.join(", ").red());
     }
     if !diff.potential_renames.is_empty() {
+        println!("\n  {}:", "Potential Renames (detected)".yellow());
         for rename in &diff.potential_renames {
             println!(
-                "  Rename: {} -> {}",
+                "    {} -> {} ({})",
                 rename.old_name.red(),
-                rename.new_name.green()
+                rename.new_name.green(),
+                format!("{:?}", rename.confidence).dimmed()
             );
         }
     }
+
+    // Prompt user to confirm potential renames (unless --yes flag is used)
+    let confirmed_renames = if yes {
+        // With --yes, treat all potential renames as confirmed
+        diff.potential_renames
+            .iter()
+            .map(|r| (r.old_name.clone(), r.new_name.clone()))
+            .collect()
+    } else {
+        prompt_rename_confirmations(&diff.potential_renames)?
+    };
+
+    // Generate lens with confirmed renames
+    let options = LensGenerationOptions { confirmed_renames };
+    let result = generate_lens(&diff, &options);
+    let lens = result.lens;
+    let warnings = result.warnings;
 
     if !warnings.is_empty() {
         println!("\n{}:", "Warnings".yellow());
@@ -441,7 +501,7 @@ fn migrate_push(table: &str, file: &PathBuf, env: &str, server: &str, yes: bool)
         }
     }
 
-    // Confirmation
+    // Final confirmation
     if !yes {
         println!(
             "\n{}",
