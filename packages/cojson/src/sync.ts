@@ -772,20 +772,6 @@ export class SyncManager {
        * The peer/import has assumed we already have the CoValue
        */
       if (!msg.header) {
-        // Only check storage if content came from a peer or import (not storage itself - would be circular)
-        if (from !== "storage") {
-          // Try to load from storage - the CoValue might have been garbage collected from memory
-          coValue.loadFromStorage((found) => {
-            if (found) {
-              // CoValue was in storage, process the new content
-              this.handleNewContent(msg, from);
-            } else {
-              // CoValue not in storage, ask peer for full content
-              this.requestFullContent(msg.id, peer);
-            }
-          });
-          return;
-        }
         // Content from storage without header - this can happen if:
         // 1. Storage is streaming a large CoValue in chunks
         // 2. Server is under heavy load, so a chunk isn't processed for a long time
@@ -793,13 +779,27 @@ export class SyncManager {
         // 4. The chunk is finally processed, but the CoValue is no longer available
         // TODO: Fix this by either not unmounting CoValues with active streaming,
         // or by cleaning up the streaming queue on unmount
-        logger.warn(
-          "Received content from storage without header - CoValue may have been garbage collected mid-stream",
-          {
-            id: msg.id,
-            from,
-          },
-        );
+        if (from === "storage") {
+          logger.warn(
+            "Received content from storage without header - CoValue may have been garbage collected mid-stream",
+            {
+              id: msg.id,
+              from,
+            },
+          );
+          return;
+        }
+
+        // Try to load from storage - the CoValue might have been garbage collected from memory
+        coValue.loadFromStorage((found) => {
+          if (found) {
+            // CoValue was in storage, process the new content
+            this.handleNewContent(msg, from);
+          } else {
+            // CoValue not in storage, ask peer for full content
+            this.requestFullContent(msg.id, peer);
+          }
+        });
         return;
       }
 
