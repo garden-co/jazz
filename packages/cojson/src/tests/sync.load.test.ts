@@ -4,7 +4,7 @@ import {
   CO_VALUE_LOADING_CONFIG,
   setCoValueLoadingRetryDelay,
 } from "../config";
-import { RawCoMap } from "../exports";
+import { CojsonInternalTypes, RawCoMap, SessionID } from "../exports";
 import {
   SyncMessagesLog,
   TEST_NODE_CONFIG,
@@ -1876,5 +1876,64 @@ describe("lazy storage load optimization", () => {
         "storage -> server | CONTENT ParentGroup header: true new: After: 151 New: 54",
       ]
     `);
+  });
+
+  test("handles gracefully when CoValue is garbage collected mid-stream from storage", async () => {
+    // This test verifies the edge case where:
+    // 1. Storage is streaming a large CoValue in chunks
+    // 2. The CoValue is garbage collected mid-stream
+    // 3. Subsequent chunks from storage (without header) should be handled gracefully
+
+    // Setup server with storage
+    jazzCloud.addStorage({ ourName: "server" });
+
+    // Create a large CoValue that will stream
+    const group = jazzCloud.node.createGroup();
+    group.addMember("everyone", "writer");
+    const largeMap = group.createMap();
+    fillCoMapWithLargeData(largeMap);
+    await largeMap.core.waitForSync();
+
+    // Get the sessions from the largeMap to create a realistic streaming chunk
+    const sessions = Object.entries(largeMap.core.knownState().sessions);
+    const [sessionId, txCount] = sessions[0]!;
+
+    // Simulate receiving a streaming chunk from storage for a non-existent CoValue
+    // This happens when:
+    // 1. A large CoValue starts streaming from storage
+    // 2. The CoValue gets garbage collected mid-stream
+    // 3. Remaining chunks arrive with no header (they're continuation chunks)
+
+    // First, ensure the CoValue doesn't exist in server memory
+    jazzCloud.node.internalDeleteCoValue(largeMap.id);
+    expect(jazzCloud.node.hasCoValue(largeMap.id)).toBe(false);
+
+    // Now simulate a streaming chunk arriving from storage without a header
+    // This is what happens when GC runs between streaming chunks
+    const streamingChunk = {
+      action: "content" as const,
+      id: largeMap.id,
+      header: undefined, // No header - it's a continuation chunk
+      priority: 0 as const,
+      new: {
+        [sessionId as SessionID]: {
+          after: Math.floor(txCount / 2), // Middle of the stream
+          newTransactions: [],
+          lastSignature: "test" as CojsonInternalTypes.Signature,
+        },
+      },
+    };
+
+    // Call handleNewContent directly with the storage message
+    // This should NOT crash, just log a warning and return early
+    jazzCloud.node.syncManager.handleNewContent(streamingChunk, "storage");
+
+    // The CoValue entry gets created by getOrCreateCoValue, but it should
+    // NOT be available (the chunk was ignored because it had no header)
+    const coValue = jazzCloud.node.getCoValue(largeMap.id);
+    expect(coValue).toBeDefined();
+    expect(coValue?.isAvailable()).toBe(false);
+
+    // Test passes if we reach here without crashing
   });
 });

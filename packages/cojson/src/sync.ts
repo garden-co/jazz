@@ -786,8 +786,20 @@ export class SyncManager {
           });
           return;
         }
-        // Content from storage without header - this shouldn't happen normally
-        // as storage loads should include headers
+        // Content from storage without header - this can happen if:
+        // 1. Storage is streaming a large CoValue in chunks
+        // 2. Server is under heavy load, so a chunk isn't processed for a long time
+        // 3. GC cleanup unmounts the CoValue while streaming is in progress
+        // 4. The chunk is finally processed, but the CoValue is no longer available
+        // TODO: Fix this by either not unmounting CoValues with active streaming,
+        // or by cleaning up the streaming queue on unmount
+        logger.warn(
+          "Received content from storage without header - CoValue may have been garbage collected mid-stream",
+          {
+            id: msg.id,
+            from,
+          },
+        );
         return;
       }
 
