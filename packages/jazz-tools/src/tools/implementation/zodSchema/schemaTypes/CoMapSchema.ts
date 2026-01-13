@@ -161,7 +161,10 @@ export class CoMapSchema<
       init = this.getValidationSchema().parse(init);
     }
 
-    return this.coValueClass.create(init, optionsWithPermissions);
+    return this.coValueClass.create(init, {
+      ...optionsWithPermissions,
+      coMapSchema: this,
+    });
   }
 
   load<
