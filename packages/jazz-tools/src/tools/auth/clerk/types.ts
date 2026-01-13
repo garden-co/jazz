@@ -47,7 +47,7 @@ type PermissiveClerkUser = Omit<ClerkUser, "unsafeMetadata" | "update"> & {
 export type MinimalClerkClient = {
   user: PermissiveClerkUser | null | undefined;
   signOut: () => Promise<void>;
-  addListener: (listener: (data: unknown) => void) => void;
+  addListener: (listener: (data: unknown) => void) => (() => void) | void;
 };
 
 export type ClerkCredentials = {
