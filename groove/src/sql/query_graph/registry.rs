@@ -720,4 +720,489 @@ mod tests {
             "Expected callback to be invoked when branch change is notified"
         );
     }
+
+    // ========== Multi-Branch Integration Tests ==========
+
+    /// Helper to create an Object with commits on multiple branches.
+    ///
+    /// Creates an object with:
+    /// - "main" branch with an initial commit
+    /// - Additional branches forked from main with their own commits
+    fn make_multi_branch_object(
+        id: u128,
+        initial_name: &str,
+        initial_active: bool,
+    ) -> crate::object::Object {
+        use crate::commit::Commit;
+        use crate::object::Object;
+
+        let descriptor = test_descriptor();
+        let object_id = ObjectId::new(id);
+        let object = Object::new(object_id, "users");
+
+        // Add initial commit to main
+        let initial_row = RowBuilder::new(descriptor.clone())
+            .set_string_by_name("name", initial_name)
+            .set_bool_by_name("active", initial_active)
+            .build();
+
+        {
+            let mut main_branch = object.branch_mut("main").unwrap();
+            main_branch
+                .add_commit_with_tracking(
+                    Commit {
+                        parents: vec![],
+                        content: initial_row.buffer.into_boxed_slice(),
+                        timestamp: 1000,
+                        author: "setup".to_string(),
+                        meta: None,
+                    },
+                    &descriptor,
+                )
+                .unwrap();
+        }
+
+        object
+    }
+
+    /// Test: Two branches with disjoint column edits -> merge combines both
+    ///
+    /// Branch A modifies "name" at t=2000
+    /// Branch B modifies "active" at t=3000
+    /// Result should have name from A and active from B
+    #[test]
+    fn multi_branch_disjoint_edits_merge() {
+        use crate::branch::SchemaBranchName;
+        use crate::commit::Commit;
+        use crate::sql::catalog::DescriptorId;
+
+        let schema = test_schema();
+        let descriptor = test_descriptor();
+        let desc_id = DescriptorId::from_object_id(ObjectId::new(0x100));
+
+        // Create object with initial state: name="Initial", active=false
+        let mut object = make_multi_branch_object(1, "Initial", false);
+
+        // Create two branches from main
+        let branch_a_name = SchemaBranchName::from_descriptor("dev", &desc_id, "branch-a");
+        let branch_b_name = SchemaBranchName::from_descriptor("dev", &desc_id, "branch-b");
+
+        let main_tip = object.branch("main").unwrap().frontier()[0];
+        object
+            .create_branch(branch_a_name.to_string(), "main", &main_tip)
+            .unwrap();
+        object
+            .create_branch(branch_b_name.to_string(), "main", &main_tip)
+            .unwrap();
+
+        // Branch A: change name to "Alice" at t=2000
+        let row_a = RowBuilder::new(descriptor.clone())
+            .set_string_by_name("name", "Alice")
+            .set_bool_by_name("active", false) // unchanged
+            .build();
+
+        {
+            let mut branch_a = object.branch_mut(&branch_a_name.to_string()).unwrap();
+            let parent = branch_a.frontier()[0];
+            branch_a
+                .add_commit_with_tracking(
+                    Commit {
+                        parents: vec![parent],
+                        content: row_a.buffer.into_boxed_slice(),
+                        timestamp: 2000,
+                        author: "alice".to_string(),
+                        meta: None,
+                    },
+                    &descriptor,
+                )
+                .unwrap();
+        }
+
+        // Branch B: change active to true at t=3000
+        let row_b = RowBuilder::new(descriptor.clone())
+            .set_string_by_name("name", "Initial") // unchanged
+            .set_bool_by_name("active", true)
+            .build();
+
+        {
+            let mut branch_b = object.branch_mut(&branch_b_name.to_string()).unwrap();
+            let parent = branch_b.frontier()[0];
+            branch_b
+                .add_commit_with_tracking(
+                    Commit {
+                        parents: vec![parent],
+                        content: row_b.buffer.into_boxed_slice(),
+                        timestamp: 3000,
+                        author: "bob".to_string(),
+                        meta: None,
+                    },
+                    &descriptor,
+                )
+                .unwrap();
+        }
+
+        // Create a query that reads from both branches
+        let builder = QueryGraphBuilder::new("users", schema.clone()).with_branches(
+            vec![branch_a_name.to_string(), branch_b_name.to_string()],
+            desc_id,
+        );
+        let graph = builder.build_branch_merge_query(GraphId(0));
+
+        // Create database for state reference
+        let db = Database::in_memory();
+        db.create_table(schema.clone()).unwrap();
+
+        let registry = GraphRegistry::new();
+        let graph_id = registry.register(graph);
+
+        // Notify to trigger evaluation
+        registry.notify_object_changed("users", ObjectId::new(1), &object, db.state());
+
+        // Get the output from the registry cache
+        let output = registry
+            .get_output(graph_id, db.state())
+            .expect("should have output");
+
+        assert_eq!(output.len(), 1, "Should have exactly one merged row");
+
+        let (id, row) = &output[0];
+        assert_eq!(*id, ObjectId::new(1));
+
+        // Verify: name from branch A (changed), active from branch B (changed)
+        let name = row.get_by_name("name");
+        let active = row.get_by_name("active");
+
+        assert_eq!(
+            name,
+            Some(crate::sql::row_buffer::RowValue::String("Alice")),
+            "name should be 'Alice' from branch A"
+        );
+        assert_eq!(
+            active,
+            Some(crate::sql::row_buffer::RowValue::Bool(true)),
+            "active should be true from branch B"
+        );
+    }
+
+    /// Test: Two branches with conflicting edits -> LWW picks latest timestamp
+    ///
+    /// Branch A sets name="Alice" at t=2000
+    /// Branch B sets name="Bob" at t=3000
+    /// Result should have name="Bob" (later timestamp wins)
+    #[test]
+    fn multi_branch_conflicting_edits_lww() {
+        use crate::branch::SchemaBranchName;
+        use crate::commit::Commit;
+        use crate::sql::catalog::DescriptorId;
+
+        let schema = test_schema();
+        let descriptor = test_descriptor();
+        let desc_id = DescriptorId::from_object_id(ObjectId::new(0x200));
+
+        // Create object with initial state
+        let mut object = make_multi_branch_object(2, "Initial", false);
+
+        // Create two branches from main
+        let branch_a_name = SchemaBranchName::from_descriptor("dev", &desc_id, "branch-a");
+        let branch_b_name = SchemaBranchName::from_descriptor("dev", &desc_id, "branch-b");
+
+        let main_tip = object.branch("main").unwrap().frontier()[0];
+        object
+            .create_branch(branch_a_name.to_string(), "main", &main_tip)
+            .unwrap();
+        object
+            .create_branch(branch_b_name.to_string(), "main", &main_tip)
+            .unwrap();
+
+        // Branch A: set name="Alice" at t=2000 (earlier)
+        let row_a = RowBuilder::new(descriptor.clone())
+            .set_string_by_name("name", "Alice")
+            .set_bool_by_name("active", false)
+            .build();
+
+        {
+            let mut branch_a = object.branch_mut(&branch_a_name.to_string()).unwrap();
+            let parent = branch_a.frontier()[0];
+            branch_a
+                .add_commit_with_tracking(
+                    Commit {
+                        parents: vec![parent],
+                        content: row_a.buffer.into_boxed_slice(),
+                        timestamp: 2000,
+                        author: "alice".to_string(),
+                        meta: None,
+                    },
+                    &descriptor,
+                )
+                .unwrap();
+        }
+
+        // Branch B: set name="Bob" at t=3000 (later - should win)
+        let row_b = RowBuilder::new(descriptor.clone())
+            .set_string_by_name("name", "Bob")
+            .set_bool_by_name("active", false)
+            .build();
+
+        {
+            let mut branch_b = object.branch_mut(&branch_b_name.to_string()).unwrap();
+            let parent = branch_b.frontier()[0];
+            branch_b
+                .add_commit_with_tracking(
+                    Commit {
+                        parents: vec![parent],
+                        content: row_b.buffer.into_boxed_slice(),
+                        timestamp: 3000,
+                        author: "bob".to_string(),
+                        meta: None,
+                    },
+                    &descriptor,
+                )
+                .unwrap();
+        }
+
+        // Create a query that reads from both branches
+        let builder = QueryGraphBuilder::new("users", schema.clone()).with_branches(
+            vec![branch_a_name.to_string(), branch_b_name.to_string()],
+            desc_id,
+        );
+        let graph = builder.build_branch_merge_query(GraphId(0));
+
+        let db = Database::in_memory();
+        db.create_table(schema.clone()).unwrap();
+
+        let registry = GraphRegistry::new();
+        let graph_id = registry.register(graph);
+
+        registry.notify_object_changed("users", ObjectId::new(2), &object, db.state());
+
+        let output = registry
+            .get_output(graph_id, db.state())
+            .expect("should have output");
+
+        assert_eq!(output.len(), 1);
+
+        let (_, row) = &output[0];
+        let name = row.get_by_name("name");
+
+        // Bob's change at t=3000 should win over Alice's at t=2000
+        assert_eq!(
+            name,
+            Some(crate::sql::row_buffer::RowValue::String("Bob")),
+            "name should be 'Bob' (later timestamp wins)"
+        );
+    }
+
+    /// Test: Multi-branch query with Filter predicate
+    ///
+    /// Create two objects, each with commits on multiple branches.
+    /// Query with WHERE active=true should only return matching rows.
+    #[test]
+    fn multi_branch_with_filter_predicate() {
+        use crate::branch::SchemaBranchName;
+        use crate::commit::Commit;
+        use crate::sql::catalog::DescriptorId;
+
+        let schema = test_schema();
+        let descriptor = test_descriptor();
+        let desc_id = DescriptorId::from_object_id(ObjectId::new(0x300));
+
+        let branch_name = SchemaBranchName::from_descriptor("dev", &desc_id, "feature");
+        let branch_str = branch_name.to_string();
+
+        // Object 1: ends up with active=true after merge
+        let mut object1 = make_multi_branch_object(3, "Alice", false);
+        let main_tip1 = object1.branch("main").unwrap().frontier()[0];
+        object1
+            .create_branch(&branch_str, "main", &main_tip1)
+            .unwrap();
+
+        // Set active=true on the branch
+        let row1 = RowBuilder::new(descriptor.clone())
+            .set_string_by_name("name", "Alice")
+            .set_bool_by_name("active", true)
+            .build();
+
+        {
+            let mut branch = object1.branch_mut(&branch_str).unwrap();
+            let parent = branch.frontier()[0];
+            branch
+                .add_commit_with_tracking(
+                    Commit {
+                        parents: vec![parent],
+                        content: row1.buffer.into_boxed_slice(),
+                        timestamp: 2000,
+                        author: "test".to_string(),
+                        meta: None,
+                    },
+                    &descriptor,
+                )
+                .unwrap();
+        }
+
+        // Object 2: ends up with active=false after merge
+        let mut object2 = make_multi_branch_object(4, "Bob", false);
+        let main_tip2 = object2.branch("main").unwrap().frontier()[0];
+        object2
+            .create_branch(&branch_str, "main", &main_tip2)
+            .unwrap();
+
+        // Keep active=false on the branch (just update name to trigger change tracking)
+        let row2 = RowBuilder::new(descriptor.clone())
+            .set_string_by_name("name", "Bob Updated")
+            .set_bool_by_name("active", false)
+            .build();
+
+        {
+            let mut branch = object2.branch_mut(&branch_str).unwrap();
+            let parent = branch.frontier()[0];
+            branch
+                .add_commit_with_tracking(
+                    Commit {
+                        parents: vec![parent],
+                        content: row2.buffer.into_boxed_slice(),
+                        timestamp: 2000,
+                        author: "test".to_string(),
+                        meta: None,
+                    },
+                    &descriptor,
+                )
+                .unwrap();
+        }
+
+        // Create a filtered query: SELECT * FROM users WHERE active = true
+        let mut builder = QueryGraphBuilder::new("users", schema.clone())
+            .with_branches(vec![branch_str], desc_id);
+        let scan = builder.table_scan();
+        let filtered = builder.filter(scan, Predicate::eq("active", PredicateValue::Bool(true)));
+        let graph = builder.output(filtered, GraphId(0));
+
+        let db = Database::in_memory();
+        db.create_table(schema.clone()).unwrap();
+
+        let registry = GraphRegistry::new();
+        let graph_id = registry.register(graph);
+
+        // Notify both objects
+        registry.notify_object_changed("users", ObjectId::new(3), &object1, db.state());
+        registry.notify_object_changed("users", ObjectId::new(4), &object2, db.state());
+
+        let output = registry
+            .get_output(graph_id, db.state())
+            .expect("should have output");
+
+        // Only object1 (Alice with active=true) should be in output
+        assert_eq!(output.len(), 1, "Should have exactly one row after filter");
+
+        let (id, row) = &output[0];
+        assert_eq!(*id, ObjectId::new(3), "Should be object 3 (Alice)");
+
+        let name = row.get_by_name("name");
+        assert_eq!(
+            name,
+            Some(crate::sql::row_buffer::RowValue::String("Alice")),
+            "Filtered row should be Alice"
+        );
+    }
+
+    /// Test: Concurrent edits on same branch (multiple frontier tips)
+    ///
+    /// When a single branch has multiple concurrent commits (forked frontier),
+    /// merge should combine them using per-column LWW.
+    #[test]
+    fn single_branch_concurrent_edits() {
+        use crate::commit::Commit;
+
+        let schema = test_schema();
+        let descriptor = test_descriptor();
+
+        // Create object with initial commit
+        let object = make_multi_branch_object(5, "Initial", false);
+        let main_tip = object.branch("main").unwrap().frontier()[0];
+
+        // Create two concurrent commits (both have main_tip as parent)
+        // Commit A: changes name at t=2000
+        let row_a = RowBuilder::new(descriptor.clone())
+            .set_string_by_name("name", "ConcurrentA")
+            .set_bool_by_name("active", false)
+            .build();
+
+        // Commit B: changes active at t=3000
+        let row_b = RowBuilder::new(descriptor.clone())
+            .set_string_by_name("name", "Initial")
+            .set_bool_by_name("active", true)
+            .build();
+
+        {
+            let mut main_branch = object.branch_mut("main").unwrap();
+            // Add commit A
+            main_branch
+                .add_commit_with_tracking(
+                    Commit {
+                        parents: vec![main_tip],
+                        content: row_a.buffer.into_boxed_slice(),
+                        timestamp: 2000,
+                        author: "alice".to_string(),
+                        meta: None,
+                    },
+                    &descriptor,
+                )
+                .unwrap();
+
+            // Add commit B with same parent (creates concurrent tips)
+            main_branch
+                .add_commit_with_tracking(
+                    Commit {
+                        parents: vec![main_tip],
+                        content: row_b.buffer.into_boxed_slice(),
+                        timestamp: 3000,
+                        author: "bob".to_string(),
+                        meta: None,
+                    },
+                    &descriptor,
+                )
+                .unwrap();
+        }
+
+        // Verify we have concurrent tips
+        assert_eq!(
+            object.branch("main").unwrap().frontier().len(),
+            2,
+            "Should have 2 concurrent frontier tips"
+        );
+
+        // Create a simple query on main branch
+        let mut builder = QueryGraphBuilder::new("users", schema.clone());
+        let scan = builder.table_scan();
+        let graph = builder.output(scan, GraphId(0));
+
+        let db = Database::in_memory();
+        db.create_table(schema.clone()).unwrap();
+
+        let registry = GraphRegistry::new();
+        let graph_id = registry.register(graph);
+
+        registry.notify_object_changed("users", ObjectId::new(5), &object, db.state());
+
+        let output = registry
+            .get_output(graph_id, db.state())
+            .expect("should have output");
+
+        assert_eq!(output.len(), 1);
+
+        let (_, row) = &output[0];
+        let name = row.get_by_name("name");
+        let active = row.get_by_name("active");
+
+        // Merge should combine: name from A (t=2000), active from B (t=3000)
+        assert_eq!(
+            name,
+            Some(crate::sql::row_buffer::RowValue::String("ConcurrentA")),
+            "name should be from commit A"
+        );
+        assert_eq!(
+            active,
+            Some(crate::sql::row_buffer::RowValue::Bool(true)),
+            "active should be from commit B"
+        );
+    }
 }
