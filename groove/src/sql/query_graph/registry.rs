@@ -234,9 +234,9 @@ impl GraphRegistry {
             return;
         }
 
-        // Use empty lens context - cross-schema transforms require explicit setup
-        // via notify_branch_change_with_lenses
-        let lens_context = LensContext::new();
+        // Build lens context for cross-schema transforms
+        // This traverses the descriptor chain and collects all lenses for this table
+        let lens_context = db.build_lens_context_for_table(table);
 
         // Phase 1: Process graphs and collect output deltas + callbacks
         let pending: Vec<(DeltaBatch, Vec<ArcCallback>)> = {
@@ -264,7 +264,7 @@ impl GraphRegistry {
                                     object_id,
                                     object,
                                     &lens_context,
-                                    |_desc_id| None, // No descriptor lookup without explicit lens context
+                                    |desc_id| db.load_row_descriptor_by_id(desc_id),
                                 );
                                 branch_delta.extend(row_deltas);
                                 break;

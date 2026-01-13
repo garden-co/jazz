@@ -5045,3 +5045,90 @@ fn incremental_query_exact_typescript_sql_pattern() {
         "Initial delta should contain 1 row"
     );
 }
+
+#[test]
+fn build_lens_context_for_table_after_migration() {
+    // GCO-1096: Test that lens context is properly built after migration
+    use crate::sql::lens::LensGenerationOptions;
+    use crate::sql::schema::{ColumnDef, ColumnType, TableSchema};
+
+    let db = Database::in_memory();
+
+    // Create table with 'title' column
+    db.execute("CREATE TABLE documents (title STRING NOT NULL)")
+        .unwrap();
+
+    // Insert a row
+    let schema = db.get_table("documents").unwrap();
+    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let row = RowBuilder::new(desc)
+        .set_string_by_name("title", "My Document")
+        .build();
+    let _row_id = db.insert_row("documents", row).unwrap();
+
+    // Get initial descriptor ID
+    let desc_v1_id = db.get_descriptor_id("documents").unwrap();
+
+    // Verify lens context is empty before migration (no parents)
+    let ctx_before = db.state().build_lens_context_for_table("documents");
+    assert!(
+        ctx_before.get_lens(&desc_v1_id, &desc_v1_id).is_none(),
+        "No lens should exist for same schema version"
+    );
+
+    // Create new schema with 'name' instead of 'title'
+    let new_schema = TableSchema::new(
+        "documents",
+        vec![ColumnDef::required("name", ColumnType::String)],
+    );
+
+    // Execute migration with confirmed rename
+    let options = LensGenerationOptions {
+        confirmed_renames: vec![("title".into(), "name".into())],
+    };
+    db.execute_migration("documents", new_schema.clone(), options)
+        .unwrap();
+
+    // Get new descriptor ID
+    let desc_v2_id = db.get_descriptor_id("documents").unwrap();
+    assert_ne!(
+        desc_v1_id, desc_v2_id,
+        "New descriptor should have different ID"
+    );
+
+    // Verify lens context now has the lens from v1 → v2
+    let ctx_after = db.state().build_lens_context_for_table("documents");
+    let lens = ctx_after.get_lens(&desc_v1_id, &desc_v2_id);
+    assert!(
+        lens.is_some(),
+        "Lens should exist from old schema to new schema"
+    );
+
+    // Verify the descriptor parent chain is correct
+    let desc_v2 = db.get_descriptor("documents").unwrap();
+    assert_eq!(desc_v2.parent_descriptors.len(), 1);
+    assert_eq!(desc_v2.parent_descriptors[0], desc_v1_id);
+
+    // Verify we can also load row descriptors by ID
+    let row_desc_v1 = db.state().load_row_descriptor_by_id(desc_v1_id);
+    let row_desc_v2 = db.state().load_row_descriptor_by_id(desc_v2_id);
+
+    assert!(
+        row_desc_v1.is_some(),
+        "Should be able to load v1 row descriptor"
+    );
+    assert!(
+        row_desc_v2.is_some(),
+        "Should be able to load v2 row descriptor"
+    );
+
+    // v1 should have 'title', v2 should have 'name'
+    assert!(
+        row_desc_v1.unwrap().column("title").is_some(),
+        "v1 descriptor should have 'title' column"
+    );
+    assert!(
+        row_desc_v2.unwrap().column("name").is_some(),
+        "v2 descriptor should have 'name' column"
+    );
+}

@@ -389,6 +389,88 @@ impl DatabaseState {
             })
             .collect()
     }
+
+    /// Load a TableDescriptor by its DescriptorId.
+    ///
+    /// The DescriptorId is an ObjectId, so we can read the descriptor content
+    /// directly from the underlying LocalNode.
+    pub fn load_descriptor_by_id(&self, descriptor_id: DescriptorId) -> Option<TableDescriptor> {
+        let object_id = descriptor_id.as_object_id();
+        let data = self.node.read(object_id, "main").ok()??;
+        TableDescriptor::from_bytes(&data).ok()
+    }
+
+    /// Load a RowDescriptor by its DescriptorId.
+    ///
+    /// Convenience method that loads the TableDescriptor and extracts
+    /// a RowDescriptor from its schema.
+    pub fn load_row_descriptor_by_id(
+        &self,
+        descriptor_id: DescriptorId,
+    ) -> Option<Arc<RowDescriptor>> {
+        let table_descriptor = self.load_descriptor_by_id(descriptor_id)?;
+        Some(Arc::new(RowDescriptor::from_table_schema(
+            &table_descriptor.schema,
+        )))
+    }
+
+    /// Build a LensContext containing lenses for transforming between schema versions.
+    ///
+    /// This traverses the descriptor chain for a table, collecting lenses
+    /// from each descriptor's parent relationships.
+    ///
+    /// Returns an empty context if the table has no migrations.
+    pub fn build_lens_context_for_table(&self, table: &str) -> crate::sql::lens::LensContext {
+        use crate::sql::lens::LensContext;
+
+        let mut ctx = LensContext::new();
+
+        // Get current descriptor ID from the catalog
+        let catalog_bytes = match self.node.read(self.catalog_object_id, "main") {
+            Ok(Some(data)) => data,
+            _ => return ctx,
+        };
+        let catalog = match Catalog::from_bytes(&catalog_bytes) {
+            Ok(c) => c,
+            Err(_) => return ctx,
+        };
+        let Some(current_desc_id) = catalog.get_descriptor_id(table) else {
+            return ctx;
+        };
+
+        // Load current descriptor
+        let Some(current_descriptor) = self.load_descriptor_by_id(current_desc_id) else {
+            return ctx;
+        };
+
+        // Build lens context by traversing parent chain
+        let mut visited = std::collections::HashSet::new();
+        let mut to_process = vec![(current_desc_id, current_descriptor)];
+
+        while let Some((desc_id, descriptor)) = to_process.pop() {
+            if visited.contains(&desc_id) {
+                continue;
+            }
+            visited.insert(desc_id);
+
+            // Register lenses from this descriptor to its parents
+            for (i, parent_id) in descriptor.parent_descriptors.iter().enumerate() {
+                if let Some(lens) = descriptor.lenses.get(i) {
+                    // Register forward lens: parent → this descriptor
+                    ctx.register_lens(*parent_id, desc_id, lens.clone());
+                }
+
+                // Load parent descriptor to continue traversal
+                if !visited.contains(parent_id)
+                    && let Some(parent_desc) = self.load_descriptor_by_id(*parent_id)
+                {
+                    to_process.push((*parent_id, parent_desc));
+                }
+            }
+        }
+
+        ctx
+    }
 }
 
 /// Database providing SQL operations on top of LocalNode.
@@ -1068,11 +1150,14 @@ impl Database {
         }
 
         // Create table descriptor object with deterministic ID
+        // The DescriptorId uses the same ObjectId so catalog and storage are consistent
         let descriptor_key = format!("descriptor:{}", schema.name);
-        let descriptor_id = crate::ObjectId::from_key(&descriptor_key);
+        let descriptor_object_id = crate::ObjectId::from_key(&descriptor_key);
+        let desc_id = DescriptorId::from_object_id(descriptor_object_id);
+
         self.state
             .node
-            .ensure_object(descriptor_id, &descriptor_key);
+            .ensure_object(descriptor_object_id, &descriptor_key);
 
         let descriptor = TableDescriptor {
             schema: schema.clone(),
@@ -1084,13 +1169,10 @@ impl Database {
             index_object_ids,
         };
 
-        // Generate a new descriptor ID
-        let desc_id = DescriptorId::new();
-
         self.state
             .node
             .write(
-                descriptor_id,
+                descriptor_object_id,
                 "main",
                 &descriptor.to_bytes(),
                 "system",
@@ -1102,9 +1184,9 @@ impl Database {
             .descriptor_objects
             .write()
             .unwrap()
-            .insert(schema.name.clone(), descriptor_id);
+            .insert(schema.name.clone(), descriptor_object_id);
 
-        // Update catalog with the new table
+        // Update catalog with the same descriptor ID
         self.update_catalog_add_table(&schema.name, desc_id)?;
 
         // Cache schema
@@ -4229,23 +4311,32 @@ impl Database {
             }
         }
 
-        // Store the new descriptor
+        // Store the new descriptor at its new object ID
         {
-            let descriptor_objects = self.state.descriptor_objects.read().unwrap();
-            if let Some(descriptor_obj_id) = descriptor_objects.get(table) {
-                self.state
-                    .node
-                    .write(
-                        *descriptor_obj_id,
-                        "main",
-                        &new_descriptor.to_bytes(),
-                        "migration",
-                        timestamp_now(),
-                    )
-                    .map_err(|e| {
-                        DatabaseError::Storage(format!("failed to write descriptor: {:?}", e))
-                    })?;
-            }
+            let new_desc_object_id = new_descriptor_id.as_object_id();
+
+            // Ensure the object exists
+            self.state
+                .node
+                .ensure_object(new_desc_object_id, "descriptor");
+
+            // Write the descriptor content
+            self.state
+                .node
+                .write(
+                    new_desc_object_id,
+                    "main",
+                    &new_descriptor.to_bytes(),
+                    "migration",
+                    timestamp_now(),
+                )
+                .map_err(|e| {
+                    DatabaseError::Storage(format!("failed to write descriptor: {:?}", e))
+                })?;
+
+            // Update descriptor_objects to point to the new object
+            let mut descriptor_objects = self.state.descriptor_objects.write().unwrap();
+            descriptor_objects.insert(table.to_string(), new_desc_object_id);
         }
 
         // Update the catalog
