@@ -174,49 +174,6 @@ export function fillCoMapWithLargeData(map: RawCoMap) {
   return map;
 }
 
-export async function clearObjectStore(
-  dbName: string,
-  storeName: string,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const openReq = indexedDB.open(dbName);
-
-    openReq.onerror = () => reject(openReq.error);
-
-    openReq.onsuccess = () => {
-      const db = openReq.result;
-
-      if (!db.objectStoreNames.contains(storeName)) {
-        db.close();
-        resolve();
-        return;
-      }
-
-      const tx = db.transaction(storeName, "readwrite");
-      const store = tx.objectStore(storeName);
-
-      const clearReq = store.clear();
-
-      clearReq.onerror = () => reject(clearReq.error);
-
-      tx.oncomplete = () => {
-        db.close();
-        resolve();
-      };
-
-      tx.onerror = () => {
-        db.close();
-        reject(tx.error);
-      };
-
-      tx.onabort = () => {
-        db.close();
-        reject(tx.error || new Error("Transaction aborted"));
-      };
-    };
-  });
-}
-
 const Crypto = await WasmCrypto.create();
 
 export function getAgentAndSessionID(
