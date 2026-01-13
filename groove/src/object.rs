@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock};
 use crate::branch::Branch;
 use crate::commit::{Commit, CommitId};
 use crate::merge::MergeStrategy;
+use crate::sql::row_buffer::RowDescriptor;
 
 // ========== ObjectId Type ==========
 
@@ -627,6 +628,45 @@ impl Object {
         };
 
         branch.add_commit(commit)
+    }
+
+    /// Write content to a branch with per-column change tracking.
+    ///
+    /// When a descriptor is provided, this method uses `add_commit_with_tracking`
+    /// to compute and store per-column LWW metadata. This enables proper per-column
+    /// merge behavior when the branch has concurrent writes.
+    ///
+    /// Returns the new commit ID.
+    pub fn write_sync_with_tracking(
+        &self,
+        branch_name: &str,
+        content: &[u8],
+        author: &str,
+        timestamp: u64,
+        meta: Option<std::collections::BTreeMap<String, String>>,
+        descriptor: &RowDescriptor,
+    ) -> CommitId {
+        let mut branch = self
+            .branches
+            .get(branch_name)
+            .expect("branch not found")
+            .write()
+            .unwrap();
+
+        let parents = branch.frontier().to_vec();
+
+        let commit = Commit {
+            parents,
+            content: content.to_vec().into_boxed_slice(),
+            author: author.to_string(),
+            timestamp,
+            meta,
+        };
+
+        // Use add_commit_with_tracking to compute per-column change metadata
+        branch
+            .add_commit_with_tracking(commit, descriptor)
+            .unwrap_or_else(|e| panic!("add_commit_with_tracking failed: {:?}", e))
     }
 
     /// Get the frontier commit IDs for a branch.

@@ -1403,15 +1403,20 @@ impl Database {
         // Inject the id into the row buffer at column 0
         let row_with_id = row.with_id(row_id);
 
-        // Store row data (including the id column)
+        // Create descriptor for per-column change tracking
+        let descriptor = RowDescriptor::from_table_schema(&schema);
+
+        // Store row data with per-column change tracking
+        // This enables proper per-column LWW merge for concurrent writes
         self.state
             .node
-            .write(
+            .write_with_tracking(
                 row_id,
                 "main",
                 &row_with_id.buffer,
                 "system",
                 timestamp_now(),
+                &descriptor,
             )
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
@@ -1696,6 +1701,20 @@ impl Database {
         // Apply commits to the object's branch via LocalNode
         let frontier = self.state.node.apply_commits(object_id, branch, commits);
 
+        // Rebuild column change metadata for per-column LWW merge
+        // The low-level apply_commits doesn't track column changes, so we need to rebuild
+        // the metadata after syncing commits.
+        if let Some(schema) = self.get_table(table) {
+            let descriptor = RowDescriptor::from_table_schema(&schema);
+            if let Some(obj_lock) = self.state.node.get_object(object_id)
+                && let Ok(obj) = obj_lock.read()
+                && let Some(branch_ref) = obj.branch_ref(branch)
+                && let Ok(mut branch_guard) = branch_ref.write()
+            {
+                branch_guard.rebuild_column_changes(&descriptor);
+            }
+        }
+
         // Notify queries about the change
         self.notify_object_changed_internal(table, object_id);
 
@@ -1733,12 +1752,13 @@ impl Database {
             }
         }
 
+        // Create descriptor for row operations and per-column change tracking
+        let descriptor = RowDescriptor::from_table_schema(&schema);
+        let descriptor_arc = Arc::new(descriptor.clone());
+
         // Read current row data for index updates (directly as OwnedRow)
         let old_row = match self.state.node.read(id, "main") {
-            Ok(Some(data)) => {
-                let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
-                OwnedRow::new(descriptor, data)
-            }
+            Ok(Some(data)) => OwnedRow::new(descriptor_arc, data),
             Ok(None) => return Ok(false),
             Err(e) => return Err(DatabaseError::Storage(format!("{:?}", e))),
         };
@@ -1771,15 +1791,17 @@ impl Database {
         // Ensure the id column is set (preserve the original id)
         let new_row_with_id = new_row.with_id(id);
 
-        // Write updated row
+        // Write updated row with per-column change tracking
+        // This enables proper per-column LWW merge for concurrent writes
         self.state
             .node
-            .write(
+            .write_with_tracking(
                 id,
                 "main",
                 &new_row_with_id.buffer,
                 "system",
                 timestamp_now(),
+                &descriptor,
             )
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 

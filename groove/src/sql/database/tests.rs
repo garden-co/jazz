@@ -5132,3 +5132,200 @@ fn build_lens_context_for_table_after_migration() {
         "v2 descriptor should have 'name' column"
     );
 }
+
+#[test]
+fn insert_row_populates_column_change_metadata() {
+    // GCO-1097: Verify that insert_row populates per-column LWW metadata
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL, age I32 NOT NULL)")
+        .unwrap();
+
+    let schema = db.get_table("users").unwrap();
+    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+
+    let row = RowBuilder::new(desc)
+        .set_string_by_name("name", "Alice")
+        .set_i32_by_name("age", 30)
+        .build();
+
+    let row_id = db.insert_row("users", row).unwrap();
+
+    // Get the object and check its branch has column change metadata
+    let obj_lock = db
+        .state()
+        .node
+        .get_object(row_id)
+        .expect("object should exist");
+    let obj = obj_lock.read().unwrap();
+    let branch = obj.branch("main").expect("main branch should exist");
+    let frontier_changes = branch.frontier_changes();
+
+    // Should have exactly one frontier commit with metadata
+    assert_eq!(frontier_changes.len(), 1, "Should have one frontier commit");
+
+    let (commit_id, changes) = frontier_changes.iter().next().unwrap();
+
+    // Verify the commit is in the frontier
+    assert!(
+        branch.frontier().contains(commit_id),
+        "Commit should be in frontier"
+    );
+
+    // Should have metadata for all columns (id, name, age)
+    assert!(
+        changes.contains_key("id"),
+        "Should have change metadata for 'id' column"
+    );
+    assert!(
+        changes.contains_key("name"),
+        "Should have change metadata for 'name' column"
+    );
+    assert!(
+        changes.contains_key("age"),
+        "Should have change metadata for 'age' column"
+    );
+
+    // Metadata should have non-zero timestamps
+    assert!(
+        changes["id"].timestamp > 0,
+        "id column should have non-zero timestamp"
+    );
+    assert!(
+        changes["name"].timestamp > 0,
+        "name column should have non-zero timestamp"
+    );
+    assert!(
+        changes["age"].timestamp > 0,
+        "age column should have non-zero timestamp"
+    );
+}
+
+#[test]
+fn update_row_populates_column_change_metadata() {
+    // GCO-1097: Verify that update_row populates per-column LWW metadata
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL, age I32 NOT NULL)")
+        .unwrap();
+
+    // Insert initial row
+    let row_id = db
+        .insert_with("users", |b| {
+            b.set_string_by_name("name", "Alice")
+                .set_i32_by_name("age", 30)
+                .build()
+        })
+        .unwrap();
+
+    // Get initial timestamp
+    let initial_ts = {
+        let obj_lock = db
+            .state()
+            .node
+            .get_object(row_id)
+            .expect("object should exist");
+        let obj = obj_lock.read().unwrap();
+        let branch = obj.branch("main").expect("main branch should exist");
+        let frontier_changes = branch.frontier_changes();
+        let (_, changes) = frontier_changes.iter().next().unwrap();
+        changes["name"].timestamp
+    };
+
+    // Small delay to ensure different timestamp
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
+    // Update the row
+    let schema = db.get_table("users").unwrap();
+    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let updated_row = RowBuilder::new(desc)
+        .set_string_by_name("name", "Bob")
+        .set_i32_by_name("age", 30) // age unchanged
+        .build();
+
+    db.update_row("users", row_id, updated_row).unwrap();
+
+    // Check metadata after update
+    let obj_lock = db
+        .state()
+        .node
+        .get_object(row_id)
+        .expect("object should exist");
+    let obj = obj_lock.read().unwrap();
+    let branch = obj.branch("main").expect("main branch should exist");
+    let frontier_changes = branch.frontier_changes();
+
+    // Should still have one frontier commit (update creates child of previous)
+    assert_eq!(frontier_changes.len(), 1, "Should have one frontier commit");
+
+    let (_, changes) = frontier_changes.iter().next().unwrap();
+
+    // Name should have newer timestamp (it was changed)
+    assert!(
+        changes["name"].timestamp > initial_ts,
+        "name column should have newer timestamp after update (got {}, expected > {})",
+        changes["name"].timestamp,
+        initial_ts
+    );
+}
+
+#[test]
+fn apply_synced_commits_rebuilds_column_metadata() {
+    // GCO-1097: Verify that apply_synced_commits rebuilds column change metadata
+    use crate::commit::Commit;
+
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL)")
+        .unwrap();
+
+    // Create a row object manually to simulate sync
+    let row_id = ObjectId::new(12345);
+    db.state().node.ensure_object(row_id, "row:documents");
+
+    // Build a commit manually (simulating received from sync)
+    let schema = db.get_table("documents").unwrap();
+    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let row = RowBuilder::new(desc.clone())
+        .set_string_by_name("title", "Test Doc")
+        .build()
+        .with_id(row_id);
+
+    let commit = Commit {
+        parents: vec![],
+        content: row.buffer.clone().into(),
+        author: "sync".to_string(),
+        timestamp: 1000,
+        meta: None,
+    };
+
+    // Apply via the Database method (not directly to LocalNode)
+    db.apply_synced_commits("documents", row_id, "main", vec![commit]);
+
+    // Verify column change metadata was rebuilt
+    let obj_lock = db
+        .state()
+        .node
+        .get_object(row_id)
+        .expect("object should exist");
+    let obj = obj_lock.read().unwrap();
+    let branch = obj.branch("main").expect("main branch should exist");
+    let frontier_changes = branch.frontier_changes();
+
+    assert_eq!(
+        frontier_changes.len(),
+        1,
+        "Should have one frontier commit with metadata"
+    );
+
+    let (_, changes) = frontier_changes.iter().next().unwrap();
+    assert!(
+        changes.contains_key("id"),
+        "Should have metadata for 'id' column"
+    );
+    assert!(
+        changes.contains_key("title"),
+        "Should have metadata for 'title' column"
+    );
+    assert_eq!(
+        changes["title"].timestamp, 1000,
+        "Timestamp should match commit timestamp"
+    );
+}

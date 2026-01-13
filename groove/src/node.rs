@@ -8,6 +8,7 @@ use crate::listener::{
     ListenerError, ListenerId, ObjectCallback, ObjectKey, ObjectListenerRegistry, ObjectState,
 };
 use crate::object::{Object, ObjectId};
+use crate::sql::row_buffer::RowDescriptor;
 use crate::storage::{Environment, MemoryEnvironment};
 
 /// Spawn an async task for background persistence.
@@ -328,6 +329,61 @@ impl LocalNode {
 
         let obj = obj_lock.read().unwrap();
         let commit_id = obj.write_sync_with_meta(branch, content, author, timestamp, meta);
+
+        // Collect data for async persist
+        let persist_data = if let Some(branch_ref) = obj.branch_ref(branch) {
+            let branch_guard = branch_ref.read().unwrap();
+            branch_guard.get_commit(&commit_id).map(|commit| {
+                let frontier = branch_guard.frontier().to_vec();
+                (commit.clone(), frontier)
+            })
+        } else {
+            None
+        };
+
+        // Notify listeners synchronously (before persist, so UI updates immediately)
+        self.notify_listeners(object_id, branch, &obj);
+
+        // Persist asynchronously in background
+        if let Some((commit, frontier)) = persist_data {
+            let env = self.env.clone();
+            let branch = branch.to_string();
+            spawn_persist(async move {
+                env.put_commit(&commit).await;
+                env.set_frontier(object_id.into(), &branch, &frontier).await;
+            });
+        }
+
+        Ok(commit_id)
+    }
+
+    /// Write content to an object's branch with per-column change tracking.
+    ///
+    /// This is like `write_with_meta` but also computes and stores per-column LWW
+    /// metadata for proper merge behavior. The descriptor is used to determine
+    /// which columns changed between the parent commit(s) and this new commit.
+    ///
+    /// Returns the new commit ID.
+    pub fn write_with_tracking(
+        &self,
+        object_id: ObjectId,
+        branch: &str,
+        content: &[u8],
+        author: &str,
+        timestamp: u64,
+        descriptor: &RowDescriptor,
+    ) -> Result<CommitId, ListenerError> {
+        let obj_lock = self
+            .objects
+            .read()
+            .unwrap()
+            .get(&object_id)
+            .cloned()
+            .ok_or(ListenerError::NotFound)?;
+
+        let obj = obj_lock.read().unwrap();
+        let commit_id =
+            obj.write_sync_with_tracking(branch, content, author, timestamp, None, descriptor);
 
         // Collect data for async persist
         let persist_data = if let Some(branch_ref) = obj.branch_ref(branch) {
