@@ -340,12 +340,9 @@ impl GraphRegistry {
                             return None;
                         }
 
-                        // Route each delta through the graph using process_change_from_table
-                        // This uses entry_points for correct ARRAY/JOIN routing
-                        let mut all_output = DeltaBatch::new();
-                        for delta in branch_delta.into_iter() {
-                            // Update cache with the new row data
-                            match &delta {
+                        // Update cache with new row data
+                        for delta in branch_delta.iter() {
+                            match delta {
                                 RowDelta::Added { id, row } => {
                                     cache.insert(table, *id, row.clone());
                                 }
@@ -356,13 +353,27 @@ impl GraphRegistry {
                                     cache.insert(table, *id, row.clone());
                                 }
                             }
-
-                            // Route through the graph (will use entry_points for inner tables)
-                            let output = query
-                                .graph
-                                .process_change_from_table(delta, table, &mut cache, db);
-                            all_output.extend(output);
                         }
+
+                        // Route through downstream nodes (Filter, Projection, Output)
+                        // using route_from_branch_merge which skips the BranchMerge node
+                        // (since we already evaluated it above)
+                        let all_output = if found_branch_merge {
+                            query
+                                .graph
+                                .route_from_branch_merge(branch_delta, &mut cache, db)
+                        } else {
+                            // For non-BranchMerge queries (e.g., inner tables in ARRAY subquery),
+                            // use standard routing through entry points
+                            let mut output = DeltaBatch::new();
+                            for delta in branch_delta.into_iter() {
+                                let routed = query
+                                    .graph
+                                    .process_change_from_table(delta, table, &mut cache, db);
+                                output.extend(routed);
+                            }
+                            output
+                        };
 
                         if all_output.is_empty() {
                             return None;
