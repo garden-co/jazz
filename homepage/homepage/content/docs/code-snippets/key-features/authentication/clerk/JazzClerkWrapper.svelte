@@ -1,4 +1,5 @@
 <script lang="ts">
+  // @ts-ignore svelte-clerk is not installed in the homepage project but it is in the monorepo
   import { useClerkContext } from "svelte-clerk";
   import { JazzSvelteProviderWithClerk } from "jazz-tools/svelte";
 
