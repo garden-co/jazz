@@ -17,7 +17,7 @@ use crate::sql::policy::{
 };
 use crate::sql::query_graph::registry::{GraphRegistry, OutputCallback};
 use crate::sql::query_graph::{
-    DeltaBatch, GraphId, Predicate, PredicateValue, PriorState, QueryGraphBuilder, RowDelta,
+    DeltaBatch, GraphId, Predicate, PredicateValue, QueryGraphBuilder, RowDelta,
 };
 use crate::sql::row::RowError;
 use crate::sql::row_buffer::{OwnedRow, RowBuilder, RowDescriptor, RowValue};
@@ -275,6 +275,17 @@ impl DatabaseState {
         let schema_id = tables.get(table)?;
         let schemas = self.schemas.read().unwrap();
         schemas.get(schema_id).cloned()
+    }
+
+    /// Get an Object by ID from the underlying LocalNode.
+    ///
+    /// This provides access to objects for branch-aware queries that need
+    /// to read from the object's branches and perform per-column merging.
+    pub fn get_object(
+        &self,
+        id: ObjectId,
+    ) -> Option<std::sync::Arc<std::sync::RwLock<crate::object::Object>>> {
+        self.node.get_object(id)
     }
 
     /// Read all rows from a table in buffer format.
@@ -1349,14 +1360,7 @@ impl Database {
         }
 
         // Notify query graphs of the change
-        self.state.graph_registry.notify_row_change(
-            table,
-            RowDelta::Added {
-                id: row_id,
-                row: row_with_id,
-            },
-            &self.state,
-        );
+        self.notify_object_changed_internal(table, row_id);
 
         // Get the table rows object ID for sync purposes
         let table_rows_id = self
@@ -1503,21 +1507,7 @@ impl Database {
         }
 
         // Notify query graphs about the row change
-        // For new rows: Added, for existing rows: Updated
-        if let Some((_, row)) = self.get_row(&table_name, row_id) {
-            let delta = if is_new {
-                RowDelta::Added { id: row_id, row }
-            } else {
-                RowDelta::Updated {
-                    id: row_id,
-                    row,
-                    prior: PriorState::empty(), // No prior state available from sync
-                }
-            };
-            self.state
-                .graph_registry
-                .notify_row_change(&table_name, delta, &self.state);
-        }
+        self.notify_object_changed_internal(&table_name, row_id);
 
         Ok(())
     }
@@ -1553,21 +1543,7 @@ impl Database {
         }
 
         // Notify query graphs about the row change
-        // For new rows: Added, for existing rows: Updated
-        if let Some((_, row)) = self.get_row(table_name, row_id) {
-            let delta = if is_new {
-                RowDelta::Added { id: row_id, row }
-            } else {
-                RowDelta::Updated {
-                    id: row_id,
-                    row,
-                    prior: PriorState::empty(), // No prior state available from sync
-                }
-            };
-            self.state
-                .graph_registry
-                .notify_row_change(table_name, delta, &self.state);
-        }
+        self.notify_object_changed_internal(table_name, row_id);
 
         Ok(())
     }
@@ -1589,19 +1565,59 @@ impl Database {
             None => return Ok(false), // Row not known to us
         };
 
-        // Get the updated row and notify query graphs
-        if let Some((_, row)) = self.get_row(&table_name, row_id) {
-            let delta = RowDelta::Updated {
-                id: row_id,
-                row,
-                prior: PriorState::empty(), // No prior state available from sync
-            };
-            self.state
-                .graph_registry
-                .notify_row_change(&table_name, delta, &self.state);
-        }
+        // Notify query graphs about the update
+        self.notify_object_changed_internal(&table_name, row_id);
 
         Ok(true)
+    }
+
+    /// Internal helper to notify the registry after an object change.
+    ///
+    /// This is the unified notification method that should be called after any
+    /// write operation (insert, update, delete, sync) modifies an object.
+    fn notify_object_changed_internal(&self, table: &str, object_id: ObjectId) {
+        if let Some(obj) = self.state.node.get_object(object_id)
+            && let Ok(obj_guard) = obj.read()
+        {
+            self.state.graph_registry.notify_object_changed(
+                table,
+                object_id,
+                &obj_guard,
+                &self.state,
+            );
+        }
+    }
+
+    /// Apply synced commits to an object and notify branch-aware queries.
+    ///
+    /// This should be used by the sync layer when receiving commits for objects
+    /// that have branch-aware queries registered. It applies the commits to the
+    /// object's branch and notifies the GraphRegistry.
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table the object belongs to
+    /// * `object_id` - The object to apply commits to
+    /// * `branch` - The branch to apply commits to
+    /// * `commits` - The commits to apply
+    ///
+    /// # Returns
+    ///
+    /// The new frontier after applying commits.
+    pub fn apply_synced_commits(
+        &self,
+        table: &str,
+        object_id: ObjectId,
+        branch: &str,
+        commits: Vec<crate::commit::Commit>,
+    ) -> Vec<crate::commit::CommitId> {
+        // Apply commits to the object's branch via LocalNode
+        let frontier = self.state.node.apply_commits(object_id, branch, commits);
+
+        // Notify queries about the change
+        self.notify_object_changed_internal(table, object_id);
+
+        frontier
     }
 
     /// Update a row by ID.
@@ -1716,15 +1732,7 @@ impl Database {
         }
 
         // Notify query graphs of the change
-        self.state.graph_registry.notify_row_change(
-            table,
-            RowDelta::Updated {
-                id,
-                row: new_row_with_id,
-                prior: PriorState::empty(), // TODO: Get prior commit tips
-            },
-            &self.state,
-        );
+        self.notify_object_changed_internal(table, id);
 
         Ok(true)
     }
@@ -1811,14 +1819,7 @@ impl Database {
         self.write_table_rows(table, &table_rows)?;
 
         // Notify query graphs of the change
-        self.state.graph_registry.notify_row_change(
-            table,
-            RowDelta::Removed {
-                id,
-                prior: PriorState::empty(), // TODO: Get prior commit tips
-            },
-            &self.state,
-        );
+        self.notify_object_changed_internal(table, id);
 
         Ok(true)
     }

@@ -1,6 +1,7 @@
 //! Query graph - the main computation DAG.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::object::ObjectId;
 use crate::sql::catalog::DescriptorId;
@@ -8,7 +9,7 @@ use crate::sql::lens::QueryLensContext;
 use crate::sql::query_graph::cache::RowCache;
 use crate::sql::query_graph::delta::{DeltaBatch, RowDelta};
 use crate::sql::query_graph::node::{InputPort, NodeId, QueryNode};
-use crate::sql::row_buffer::OwnedRow;
+use crate::sql::row_buffer::{OwnedRow, RowDescriptor};
 use crate::sql::schema::TableSchema;
 
 use super::DatabaseState;
@@ -504,6 +505,16 @@ impl QueryGraph {
         self.all_schemas.get(table)
     }
 
+    /// Get schema and row descriptor for a specific table.
+    ///
+    /// Returns both the table schema and an Arc<RowDescriptor> for creating rows.
+    pub fn get_table_schema(&self, table: &str) -> Option<(&TableSchema, Arc<RowDescriptor>)> {
+        self.all_schemas.get(table).map(|schema| {
+            let descriptor = Arc::new(RowDescriptor::from_table_schema(schema));
+            (schema, descriptor)
+        })
+    }
+
     /// Check if this is a join query.
     pub fn is_join(&self) -> bool {
         self.is_join
@@ -637,14 +648,24 @@ impl QueryGraph {
                 .iter()
                 .any(|n| matches!(n, QueryNode::ArrayAggregate { .. }));
 
+            // Check if this graph has a BranchMerge node (unified architecture)
+            let has_branch_merge = self
+                .nodes
+                .iter()
+                .any(|n| matches!(n, QueryNode::BranchMerge { .. }));
+
             if has_recursive {
                 // RecursiveFilter requires fixpoint iteration
                 self.init_recursive_query(cache, db, skip_id, skip_table);
             } else if has_array_aggregate {
                 // ArrayAggregate needs database access to look up inner rows
                 self.init_array_aggregate_query(cache, db, skip_id, skip_table);
+            } else if has_branch_merge {
+                // BranchMerge query: evaluate BranchMerge for each object
+                self.init_branch_merge_query(cache, db, skip_id, skip_table);
             } else {
-                // Single-table query: load all rows from the primary table
+                // Legacy single-table query: load all rows from the primary table
+                // (This branch should rarely be used with the unified architecture)
                 let rows = db.read_all_rows(&self.table);
                 let schema = self.schema.clone();
 
@@ -804,6 +825,86 @@ impl QueryGraph {
                     }
                 }
             }
+        }
+    }
+
+    /// Initialize a BranchMerge query by evaluating BranchMerge for each object.
+    ///
+    /// This is the unified initialization path for all queries in the new architecture.
+    /// For each row (object) in the table:
+    /// 1. Get the Object from LocalNode
+    /// 2. Evaluate BranchMerge node to get the merged row
+    /// 3. Route through downstream nodes (Filter, Projection, etc.)
+    fn init_branch_merge_query(
+        &mut self,
+        cache: &mut RowCache,
+        db: &DatabaseState,
+        skip_id: Option<ObjectId>,
+        skip_table: Option<&str>,
+    ) {
+        use crate::sql::lens::LensContext;
+
+        let table = self.table.clone();
+
+        // Get all row IDs for this table
+        let row_ids: Vec<ObjectId> = db
+            .read_all_rows(&table)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+
+        // Use empty lens context (no cross-schema transforms during init)
+        let lens_context = LensContext::new();
+
+        for row_id in row_ids {
+            // Skip the triggering row - it will be processed as a delta
+            if skip_table == Some(&table) && skip_id == Some(row_id) {
+                continue;
+            }
+
+            // Get the Object from DatabaseState
+            let object = match db.get_object(row_id) {
+                Some(obj) => obj,
+                None => continue,
+            };
+
+            let obj_guard = match object.read() {
+                Ok(guard) => guard,
+                Err(_) => continue,
+            };
+
+            // Find BranchMerge node and evaluate
+            let mut branch_delta = DeltaBatch::new();
+            for node in &mut self.nodes {
+                if let QueryNode::BranchMerge {
+                    table: node_table, ..
+                } = node
+                    && node_table == &table
+                {
+                    let row_deltas = node.evaluate_branch_merge_with_lenses(
+                        row_id,
+                        &obj_guard,
+                        &lens_context,
+                        |_desc_id| None, // No descriptor lookup during init
+                    );
+                    branch_delta.extend(row_deltas);
+                    break;
+                }
+            }
+
+            if branch_delta.is_empty() {
+                continue;
+            }
+
+            // Cache the merged row
+            for delta in branch_delta.iter() {
+                if let RowDelta::Added { id, row } = delta {
+                    cache.insert(&table, *id, row.clone());
+                }
+            }
+
+            // Route through downstream nodes (Filter, Projection, Output)
+            let _ = self.route_from_branch_merge(branch_delta, cache, db);
         }
     }
 
@@ -1297,8 +1398,62 @@ impl QueryGraph {
                     })
                     .collect();
             }
+
+            // For BranchMerge queries, use object_states from the BranchMerge node
+            if let QueryNode::BranchMerge { object_states, .. } = &self.nodes[input_idx] {
+                return object_states
+                    .iter()
+                    .filter_map(|(id, state)| {
+                        state.cached_merged.as_ref().map(|row| (*id, row.clone()))
+                    })
+                    .collect();
+            }
         }
         vec![]
+    }
+
+    /// Route a delta batch from a BranchMerge node through downstream nodes.
+    ///
+    /// This is used by the registry to process BranchMerge output through
+    /// Filter, Projection, and Output nodes.
+    ///
+    /// Returns the final output delta after processing through all downstream nodes.
+    pub fn route_from_branch_merge(
+        &mut self,
+        delta: DeltaBatch,
+        cache: &mut RowCache,
+        db: &DatabaseState,
+    ) -> DeltaBatch {
+        // Find the BranchMerge node
+        let branch_merge_idx = self
+            .nodes
+            .iter()
+            .position(|n| matches!(n, QueryNode::BranchMerge { .. }));
+
+        let Some(branch_merge_idx) = branch_merge_idx else {
+            return DeltaBatch::new();
+        };
+
+        if delta.is_empty() {
+            return DeltaBatch::new();
+        }
+
+        // Get successors for the BranchMerge node
+        let successors = self.successors[branch_merge_idx].clone();
+
+        // If no successors, return the delta directly (it's the output)
+        if successors.is_empty() {
+            return delta;
+        }
+
+        // Route through successor nodes
+        let mut result = DeltaBatch::new();
+        for edge in successors {
+            let output = self.process_from_node(edge.to, delta.clone(), edge.port, cache, db);
+            result.extend(output);
+        }
+
+        result
     }
 
     /// Process a row change, returning the output delta.
@@ -2136,7 +2291,7 @@ mod tests {
         assert!(diagram.contains("Query Graph"));
         assert!(diagram.contains("42")); // graph id
         assert!(diagram.contains("users")); // table name
-        assert!(diagram.contains("TableScan")); // node type
+        assert!(diagram.contains("BranchMerge")); // node type (unified architecture)
         assert!(diagram.contains("Filter")); // node type
         assert!(diagram.contains("Output")); // node type
         assert!(diagram.contains("active = TRUE")); // predicate

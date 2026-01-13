@@ -64,6 +64,8 @@ pub struct QueryGraphBuilder {
     join_state: Option<JoinState>,
     /// Branches to read from for branch-aware queries.
     branches: Vec<String>,
+    /// Target schema descriptor ID for branch-aware queries.
+    target_descriptor_id: Option<DescriptorId>,
 }
 
 impl QueryGraphBuilder {
@@ -77,6 +79,7 @@ impl QueryGraphBuilder {
             current_descriptor: None,
             join_state: None,
             branches: vec![],
+            target_descriptor_id: None,
         }
     }
 
@@ -85,16 +88,27 @@ impl QueryGraphBuilder {
     /// When branches are specified, rows are read from all branches and
     /// merged using per-column LWW before predicate evaluation.
     ///
+    /// Branch names must follow the `[env]-[schemaVersion]-[userBranch]` format.
+    /// The target descriptor ID specifies which schema version to merge into.
+    ///
     /// # Example
     ///
     /// ```ignore
     /// let graph = QueryGraphBuilder::new("users", schema)
-    ///     .with_branches(vec!["prod-v1-main".into(), "staging-v2-feature".into()])
+    ///     .with_branches(
+    ///         vec!["prod-v1-main".into(), "staging-v2-feature".into()],
+    ///         target_descriptor_id,
+    ///     )
     ///     .table_scan()
     ///     ...
     /// ```
-    pub fn with_branches(mut self, branches: Vec<String>) -> Self {
+    pub fn with_branches(
+        mut self,
+        branches: Vec<String>,
+        target_descriptor_id: DescriptorId,
+    ) -> Self {
         self.branches = branches;
+        self.target_descriptor_id = Some(target_descriptor_id);
         self
     }
 
@@ -115,31 +129,33 @@ impl QueryGraphBuilder {
 
     /// Add a table scan source node.
     ///
-    /// This reads all rows from the table.
+    /// This reads all rows from the table using BranchMerge as the unified
+    /// entry point. When no branches are specified via `with_branches()`,
+    /// defaults to `["main"]` with no lens transforms.
     ///
-    /// If branches have been set via `with_branches()`, this creates
-    /// CommitSource + BranchMerge nodes instead for incremental multi-branch merging.
+    /// This architecture ensures all queries use the same notification
+    /// mechanism (`notify_object_changed`) regardless of branch configuration.
     pub fn table_scan(&mut self) -> NodeId {
-        if !self.branches.is_empty() {
-            return self.branch_merge_scan();
+        // Always use BranchMerge - default to ["main"] if no branches specified
+        if self.branches.is_empty() {
+            self.branches = vec!["main".to_string()];
+            // Note: target_descriptor_id stays None for simple single-branch queries
         }
-
-        let id = self.alloc_id();
-        self.nodes.push(QueryNode::TableScan {
-            table: self.primary_table.clone(),
-            cached_ids: HashSet::new(),
-        });
-        id
+        self.branch_merge_scan()
     }
 
     /// Create a BranchMerge node for branch-aware queries.
     ///
     /// Creates a BranchMerge entry point that reads from multiple branches
     /// and performs per-column LWW merge using pre-computed metadata.
+    ///
+    /// When `target_descriptor_id` is None, no lens transforms are attempted.
+    /// This is the common case for single-branch queries (like reading from "main").
     fn branch_merge_scan(&mut self) -> NodeId {
         let descriptor = Arc::new(RowDescriptor::from_table_schema(&self.primary_schema));
         let table = self.primary_table.clone();
         let branches: Vec<String> = self.branches.clone();
+        let target_descriptor_id = self.target_descriptor_id;
 
         // Create BranchMerge node (entry point, no separate CommitSource nodes needed)
         let merge_id = self.alloc_id();
@@ -147,6 +163,7 @@ impl QueryGraphBuilder {
             table,
             branch_names: branches,
             descriptor,
+            target_descriptor_id,
             object_states: HashMap::new(),
         });
 
@@ -504,6 +521,24 @@ impl QueryGraphBuilder {
         });
 
         id
+    }
+
+    /// Build a simple branch-aware query graph (BranchMerge → Output).
+    ///
+    /// This is a convenience method that creates a branch-merge query without
+    /// any filters or projections. Useful for tests and simple queries that
+    /// just want to read from multiple branches.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `with_branches` was not called to set up the branches.
+    pub fn build_branch_merge_query(mut self, graph_id: GraphId) -> QueryGraph {
+        assert!(
+            !self.branches.is_empty(),
+            "build_branch_merge_query requires branches to be set via with_branches"
+        );
+        let scan = self.branch_merge_scan();
+        self.output(scan, graph_id)
     }
 
     /// Add the output node and build the graph.

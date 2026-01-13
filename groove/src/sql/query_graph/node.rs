@@ -3,11 +3,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::branch::ColumnChanges;
+use crate::branch::{ColumnChanges, SchemaBranchName};
 use crate::commit::CommitId;
 use crate::object::{Object, ObjectId};
 use crate::sql::catalog::DescriptorId;
-use crate::sql::lens::QueryLensContext;
+use crate::sql::lens::{ColumnMapping, Lens, LensContext, QueryLensContext};
 use crate::sql::query_graph::cache::RowCache;
 use crate::sql::query_graph::delta::{BufferJoinedRow, DeltaBatch, PriorState, RowDelta};
 use crate::sql::query_graph::predicate::Predicate;
@@ -280,8 +280,11 @@ pub enum QueryNode {
         table: String,
         /// Branch names to merge from.
         branch_names: Vec<String>,
-        /// Row descriptor for merged output rows.
+        /// Row descriptor for merged output rows (target schema).
         descriptor: Arc<RowDescriptor>,
+        /// Target schema descriptor ID for lens lookups.
+        /// When None, no lens transforms are attempted (single-schema queries).
+        target_descriptor_id: Option<DescriptorId>,
         /// Per-object merge state.
         object_states: HashMap<ObjectId, MergedObjectState>,
     },
@@ -648,9 +651,10 @@ impl QueryNode {
                 ..
             } => Self::eval_projection(column_map, output_descriptor, cached_rows, input),
 
-            QueryNode::BranchMerge { .. } => {
-                // BranchMerge is an entry point - use evaluate_branch_merge_with_metadata
-                DeltaBatch::new()
+            QueryNode::BranchMerge { object_states, .. } => {
+                // Pass through deltas and cache state, similar to TableScan
+                // This enables routing through the graph for ARRAY/JOIN queries
+                Self::eval_branch_merge_passthrough(object_states, input)
             }
         }
     }
@@ -727,9 +731,10 @@ impl QueryNode {
                 ..
             } => Self::eval_projection(column_map, output_descriptor, cached_rows, input),
 
-            QueryNode::BranchMerge { .. } => {
-                // BranchMerge is an entry point - use evaluate_branch_merge_with_metadata
-                DeltaBatch::new()
+            QueryNode::BranchMerge { object_states, .. } => {
+                // Pass through deltas and cache state, similar to TableScan
+                // This enables routing through the graph for ARRAY/JOIN queries
+                Self::eval_branch_merge_passthrough(object_states, input)
             }
         }
     }
@@ -2528,6 +2533,52 @@ impl QueryNode {
         output
     }
 
+    /// Evaluate BranchMerge as a passthrough node, updating object_states.
+    ///
+    /// This enables BranchMerge to participate in delta routing through the graph
+    /// (for ARRAY/JOIN queries) while maintaining per-object state tracking.
+    fn eval_branch_merge_passthrough(
+        object_states: &mut HashMap<ObjectId, MergedObjectState>,
+        input: DeltaBatch,
+    ) -> DeltaBatch {
+        let mut output = DeltaBatch::new();
+
+        for delta in input.into_iter() {
+            match &delta {
+                RowDelta::Added { id, row } => {
+                    // Track new object
+                    object_states.insert(
+                        *id,
+                        MergedObjectState {
+                            cached_merged: Some(row.clone()),
+                        },
+                    );
+                    output.push(delta);
+                }
+                RowDelta::Removed { id, .. } => {
+                    // Remove tracked object
+                    if object_states.remove(id).is_some() {
+                        output.push(delta);
+                    }
+                }
+                RowDelta::Updated { id, row, .. } => {
+                    // Update tracked object
+                    if object_states.contains_key(id) {
+                        object_states.insert(
+                            *id,
+                            MergedObjectState {
+                                cached_merged: Some(row.clone()),
+                            },
+                        );
+                        output.push(delta);
+                    }
+                }
+            }
+        }
+
+        output
+    }
+
     /// Evaluate a filter node using buffer format directly.
     fn eval_filter(
         predicate: &Predicate,
@@ -2916,9 +2967,8 @@ impl QueryNode {
 
     /// Evaluate a BranchMerge node using pre-computed per-column metadata.
     ///
-    /// This is the new metadata-based merge that replaces the old CommitDelta-based flow.
-    /// Instead of computing LCA at merge time, it uses the `frontier_changes` metadata
-    /// that each branch maintains for its frontier commits.
+    /// This is the legacy version without lens support. Use `evaluate_branch_merge_with_lenses`
+    /// for cross-schema branch merges.
     ///
     /// # Algorithm
     ///
@@ -3043,6 +3093,214 @@ impl QueryNode {
             }
             _ => DeltaBatch::new(),
         }
+    }
+
+    /// Evaluate a BranchMerge node with lens support for cross-schema merges.
+    ///
+    /// Similar to `evaluate_branch_merge_with_metadata`, but transforms row content
+    /// and column change metadata through lenses when branches have different schemas.
+    ///
+    /// # Arguments
+    ///
+    /// * `object_id` - The object to evaluate
+    /// * `object` - Reference to the Object (for reading branch data)
+    /// * `lens_context` - Registry of lenses for schema transformations
+    /// * `descriptor_lookup` - Function to look up RowDescriptor by DescriptorId
+    ///
+    /// # Algorithm
+    ///
+    /// 1. For each branch, parse name to extract source schema (DescriptorId)
+    /// 2. If source schema differs from target, transform content and metadata through lens
+    /// 3. Merge using per-column LWW on transformed data
+    pub fn evaluate_branch_merge_with_lenses<F>(
+        &mut self,
+        object_id: ObjectId,
+        object: &Object,
+        lens_context: &LensContext,
+        descriptor_lookup: F,
+    ) -> DeltaBatch
+    where
+        F: Fn(DescriptorId) -> Option<Arc<RowDescriptor>>,
+    {
+        match self {
+            QueryNode::BranchMerge {
+                branch_names,
+                descriptor,
+                target_descriptor_id,
+                object_states,
+                ..
+            } => {
+                let mut output = DeltaBatch::new();
+
+                // Collect frontier data from all branches, transforming through lenses as needed
+                let mut frontier_data: Vec<(CommitId, Vec<u8>, ColumnChanges)> = vec![];
+
+                for branch_name in branch_names.iter() {
+                    // Parse branch name to get source schema (if available)
+                    let parsed = SchemaBranchName::parse(branch_name);
+                    let source_desc_id = parsed.descriptor_id();
+
+                    if let Some(branch) = object.branch(branch_name) {
+                        let frontier_changes = branch.frontier_changes();
+
+                        for commit_id in branch.frontier() {
+                            if let Some(commit) = branch.get_commit(commit_id) {
+                                // Get column changes if available, otherwise use empty
+                                // (simple branches like "main" may not have metadata tracking)
+                                let changes =
+                                    frontier_changes.get(commit_id).cloned().unwrap_or_default();
+
+                                // Skip empty content (deleted objects)
+                                if commit.content.is_empty() {
+                                    continue;
+                                }
+
+                                // Determine if transformation needed
+                                // No transform needed when:
+                                // - target_descriptor_id is None (single-schema query)
+                                // - source_desc_id is None (simple branch like "main")
+                                // - source == target
+                                let needs_transform = matches!(
+                                    (source_desc_id, target_descriptor_id.as_ref()),
+                                    (Some(src), Some(tgt)) if src != *tgt
+                                );
+
+                                let (transformed_content, transformed_changes) = if needs_transform
+                                {
+                                    let source_id = source_desc_id.unwrap();
+                                    let target_id = target_descriptor_id.as_ref().unwrap();
+
+                                    // Different schema: transform through lens
+                                    let lens = match lens_context.get_lens(&source_id, target_id) {
+                                        Some(l) => l,
+                                        None => continue, // No lens available - skip commit
+                                    };
+
+                                    let src_desc = match descriptor_lookup(source_id) {
+                                        Some(d) => d,
+                                        None => continue, // Descriptor not found - skip commit
+                                    };
+
+                                    let content = match lens
+                                        .transform_buffer_forward(&commit.content, &src_desc)
+                                    {
+                                        Ok(c) => c,
+                                        Err(_) => continue, // Incompatible - skip commit
+                                    };
+
+                                    let changes = Self::transform_column_changes(&changes, lens);
+                                    (content, changes)
+                                } else {
+                                    // Same schema or no schema info: no transform needed
+                                    (commit.content.to_vec(), changes)
+                                };
+
+                                frontier_data.push((
+                                    *commit_id,
+                                    transformed_content,
+                                    transformed_changes,
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                if frontier_data.is_empty() {
+                    // No data from any branch - object might have been removed
+                    if let Some(state) = object_states.get(&object_id)
+                        && state.cached_merged.is_some()
+                    {
+                        output.push(RowDelta::Removed {
+                            id: object_id,
+                            prior: PriorState::empty(),
+                        });
+                    }
+                    object_states.remove(&object_id);
+                    return output;
+                }
+
+                // Single frontier commit: no merge needed, just use it directly
+                if frontier_data.len() == 1 {
+                    let (_, content, _) = &frontier_data[0];
+                    let row = OwnedRow::new(descriptor.clone(), content.to_vec());
+
+                    let state = object_states.entry(object_id).or_default();
+
+                    // Early cutoff: check if result changed
+                    if let Some(prev) = &state.cached_merged
+                        && prev.buffer == row.buffer
+                    {
+                        return output;
+                    }
+
+                    let was_new = state.cached_merged.is_none();
+                    state.cached_merged = Some(row.clone());
+
+                    if was_new {
+                        output.push(RowDelta::Added { id: object_id, row });
+                    } else {
+                        output.push(RowDelta::Updated {
+                            id: object_id,
+                            row,
+                            prior: PriorState::empty(),
+                        });
+                    }
+
+                    return output;
+                }
+
+                // Multiple frontier commits: merge using per-column LWW based on metadata
+                let merged = Self::merge_with_metadata(&frontier_data, descriptor);
+
+                let state = object_states.entry(object_id).or_default();
+
+                // Early cutoff: check if result changed
+                if let Some(prev) = &state.cached_merged
+                    && prev.buffer == merged.buffer
+                {
+                    return output;
+                }
+
+                let was_new = state.cached_merged.is_none();
+                state.cached_merged = Some(merged.clone());
+
+                if was_new {
+                    output.push(RowDelta::Added {
+                        id: object_id,
+                        row: merged,
+                    });
+                } else {
+                    output.push(RowDelta::Updated {
+                        id: object_id,
+                        row: merged,
+                        prior: PriorState::empty(),
+                    });
+                }
+
+                output
+            }
+            _ => DeltaBatch::new(),
+        }
+    }
+
+    /// Transform column change metadata through a lens.
+    ///
+    /// When merging across schema versions, the column names in the metadata
+    /// need to be transformed to match the target schema. This uses the lens's
+    /// rename mappings to translate column names.
+    ///
+    /// For example, if a lens renames "title" → "name", metadata for "title"
+    /// becomes metadata for "name".
+    fn transform_column_changes(changes: &ColumnChanges, lens: &Lens) -> ColumnChanges {
+        let mapping = ColumnMapping::from_transforms(&lens.forward);
+
+        changes
+            .iter()
+            .map(|(col_name, change)| {
+                let new_name = mapping.map_forward(col_name).to_string();
+                (new_name, change.clone())
+            })
+            .collect()
     }
 
     /// Merge frontier commits using per-column LWW based on metadata.
@@ -3714,5 +3972,143 @@ mod tests {
 
         assert_eq!(output.len(), 1, "Same version row should pass through");
         assert!(cached_ids.contains(&id));
+    }
+
+    #[test]
+    fn transform_column_changes_with_rename() {
+        use crate::branch::ColumnChange;
+        use crate::sql::lens::{ColumnTransform, Lens};
+
+        // Create a lens that renames "title" → "name"
+        let lens = Lens::new(
+            vec![ColumnTransform::rename("title", "name")],
+            vec![ColumnTransform::rename("name", "title")],
+        );
+
+        // Create column changes with "title"
+        let mut changes = ColumnChanges::new();
+        changes.insert(
+            "title".to_string(),
+            ColumnChange {
+                timestamp: 1000,
+                author: "alice".to_string(),
+            },
+        );
+        changes.insert(
+            "status".to_string(),
+            ColumnChange {
+                timestamp: 2000,
+                author: "bob".to_string(),
+            },
+        );
+
+        // Transform
+        let transformed = QueryNode::transform_column_changes(&changes, &lens);
+
+        // "title" should become "name", "status" unchanged
+        assert_eq!(transformed.len(), 2);
+        assert!(
+            transformed.contains_key("name"),
+            "title should be renamed to name"
+        );
+        assert!(
+            !transformed.contains_key("title"),
+            "title should no longer exist"
+        );
+        assert!(
+            transformed.contains_key("status"),
+            "status should be unchanged"
+        );
+
+        // Verify metadata preserved
+        let name_change = transformed.get("name").unwrap();
+        assert_eq!(name_change.timestamp, 1000);
+        assert_eq!(name_change.author, "alice");
+
+        let status_change = transformed.get("status").unwrap();
+        assert_eq!(status_change.timestamp, 2000);
+        assert_eq!(status_change.author, "bob");
+    }
+
+    #[test]
+    fn transform_column_changes_with_identity_lens() {
+        use crate::branch::ColumnChange;
+        use crate::sql::lens::Lens;
+
+        // Create an identity lens (no transforms)
+        let lens = Lens::identity();
+
+        // Create column changes
+        let mut changes = ColumnChanges::new();
+        changes.insert(
+            "name".to_string(),
+            ColumnChange {
+                timestamp: 500,
+                author: "carol".to_string(),
+            },
+        );
+
+        // Transform
+        let transformed = QueryNode::transform_column_changes(&changes, &lens);
+
+        // Should be unchanged
+        assert_eq!(transformed.len(), 1);
+        assert!(transformed.contains_key("name"));
+        let name_change = transformed.get("name").unwrap();
+        assert_eq!(name_change.timestamp, 500);
+        assert_eq!(name_change.author, "carol");
+    }
+
+    #[test]
+    fn transform_column_changes_multiple_renames() {
+        use crate::branch::ColumnChange;
+        use crate::sql::lens::{ColumnTransform, Lens};
+
+        // Create a lens with multiple renames
+        let lens = Lens::new(
+            vec![
+                ColumnTransform::rename("old_name", "new_name"),
+                ColumnTransform::rename("old_status", "new_status"),
+            ],
+            vec![
+                ColumnTransform::rename("new_name", "old_name"),
+                ColumnTransform::rename("new_status", "old_status"),
+            ],
+        );
+
+        // Create column changes
+        let mut changes = ColumnChanges::new();
+        changes.insert(
+            "old_name".to_string(),
+            ColumnChange {
+                timestamp: 100,
+                author: "user1".to_string(),
+            },
+        );
+        changes.insert(
+            "old_status".to_string(),
+            ColumnChange {
+                timestamp: 200,
+                author: "user2".to_string(),
+            },
+        );
+        changes.insert(
+            "unchanged".to_string(),
+            ColumnChange {
+                timestamp: 300,
+                author: "user3".to_string(),
+            },
+        );
+
+        // Transform
+        let transformed = QueryNode::transform_column_changes(&changes, &lens);
+
+        // Check results
+        assert_eq!(transformed.len(), 3);
+        assert!(transformed.contains_key("new_name"));
+        assert!(transformed.contains_key("new_status"));
+        assert!(transformed.contains_key("unchanged"));
+        assert!(!transformed.contains_key("old_name"));
+        assert!(!transformed.contains_key("old_status"));
     }
 }

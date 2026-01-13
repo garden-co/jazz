@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::str::FromStr;
 
 use crate::commit::{Commit, CommitId};
+use crate::object::ObjectId;
 use crate::sql::DescriptorId;
 use crate::sql::row_buffer::{RowDescriptor, diff_columns};
 
@@ -728,6 +730,18 @@ impl SchemaBranchName {
     /// Check if this is a legacy branch name (no schema version).
     pub fn is_legacy(&self) -> bool {
         self.schema_version.is_empty()
+    }
+
+    /// Get the descriptor ID for this branch's schema version.
+    ///
+    /// Returns None for legacy branches without a schema version.
+    pub fn descriptor_id(&self) -> Option<DescriptorId> {
+        if self.schema_version.is_empty() {
+            return None;
+        }
+        ObjectId::from_str(&self.schema_version)
+            .ok()
+            .map(DescriptorId::from_object_id)
     }
 
     /// Create a new branch name for a different schema version.

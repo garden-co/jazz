@@ -10,9 +10,9 @@ use crate::listener::ListenerId;
 use crate::object::ObjectId;
 use crate::sql::DatabaseState;
 use crate::sql::catalog::DescriptorId;
-use crate::sql::lens::QueryLensContext;
+use crate::sql::lens::{LensContext, QueryLensContext};
 use crate::sql::query_graph::cache::RowCache;
-use crate::sql::query_graph::delta::{DeltaBatch, RowDelta};
+use crate::sql::query_graph::delta::{DeltaBatch, PriorState, RowDelta};
 use crate::sql::query_graph::graph::{GraphId, QueryGraph};
 use crate::sql::row_buffer::{OwnedRow, RowDescriptor};
 use crate::sql::schema::TableSchema;
@@ -201,10 +201,196 @@ impl GraphRegistry {
         })
     }
 
+    /// Unified notification when an object changes.
+    ///
+    /// This is the single notification entry point for all queries.
+    /// Creates RowDeltas from the Object's current state (via BranchMerge
+    /// evaluation) and routes through the graph using process_change_from_table.
+    /// This maintains compatibility with ARRAY/JOIN queries which use entry_points
+    /// for routing.
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table the object belongs to
+    /// * `object_id` - The object that changed
+    /// * `object` - Reference to the Object (for reading branch data)
+    /// * `db` - Database state for routing through downstream nodes
+    pub fn notify_object_changed(
+        &self,
+        table: &str,
+        object_id: ObjectId,
+        object: &crate::object::Object,
+        db: &DatabaseState,
+    ) {
+        use crate::sql::query_graph::node::QueryNode;
+
+        // Find all graphs that depend on this table
+        let graph_ids: Vec<GraphId> = {
+            let index = self.table_index.read().unwrap();
+            index.get(table).cloned().unwrap_or_default()
+        };
+
+        if graph_ids.is_empty() {
+            return;
+        }
+
+        // Use empty lens context - cross-schema transforms require explicit setup
+        // via notify_branch_change_with_lenses
+        let lens_context = LensContext::new();
+
+        // Phase 1: Process graphs and collect output deltas + callbacks
+        let pending: Vec<(DeltaBatch, Vec<ArcCallback>)> = {
+            let mut cache = self.cache.write().unwrap();
+            let mut queries = self.queries.write().unwrap();
+
+            graph_ids
+                .into_iter()
+                .filter_map(|graph_id| {
+                    queries.get_mut(&graph_id).and_then(|query| {
+                        // First try to find a BranchMerge node for this table
+                        let mut branch_delta = DeltaBatch::new();
+                        let mut found_branch_merge = false;
+
+                        for node in query.graph.nodes_mut() {
+                            if let QueryNode::BranchMerge {
+                                table: node_table, ..
+                            } = node
+                                && node_table == table
+                            {
+                                found_branch_merge = true;
+                                // Use evaluate_branch_merge_with_lenses to get row deltas
+                                // from Object branches with proper merging
+                                let row_deltas = node.evaluate_branch_merge_with_lenses(
+                                    object_id,
+                                    object,
+                                    &lens_context,
+                                    |_desc_id| None, // No descriptor lookup without explicit lens context
+                                );
+                                branch_delta.extend(row_deltas);
+                                break;
+                            }
+                        }
+
+                        // If no BranchMerge found (e.g., inner table in ARRAY subquery),
+                        // read the Object's main branch directly to create the delta
+                        if !found_branch_merge {
+                            // Get schema for this table to create the row descriptor
+                            if let Some((_schema, descriptor)) = query.graph.get_table_schema(table)
+                            {
+                                // Read from Object's "main" branch - get tip content
+                                if let Some(branch) = object.branch("main")
+                                    && let Some(tip_id) = branch.frontier().first()
+                                    && let Some(commit) = branch.get_commit(tip_id)
+                                {
+                                    // Check if content is empty (deleted object)
+                                    if commit.content.is_empty() {
+                                        // Object was deleted - emit Removed if it was in cache
+                                        if cache.get(table, object_id).is_some() {
+                                            branch_delta.push(RowDelta::Removed {
+                                                id: object_id,
+                                                prior: PriorState::empty(),
+                                            });
+                                        }
+                                    } else {
+                                        let row =
+                                            OwnedRow::new(descriptor, commit.content.to_vec());
+                                        // Check if this is Add vs Update based on cache
+                                        let prev = cache.get(table, object_id);
+                                        let delta = if prev.is_some() {
+                                            RowDelta::Updated {
+                                                id: object_id,
+                                                row,
+                                                prior: PriorState::empty(),
+                                            }
+                                        } else {
+                                            RowDelta::Added { id: object_id, row }
+                                        };
+                                        branch_delta.push(delta);
+                                    }
+                                }
+                            } else {
+                                // No schema found - try to get row from db state
+                                if let Some((_, row)) = db.get_row(table, object_id) {
+                                    // Check if this is Add vs Update based on cache
+                                    let prev = cache.get(table, object_id);
+                                    let delta = if prev.is_some() {
+                                        RowDelta::Updated {
+                                            id: object_id,
+                                            row,
+                                            prior: PriorState::empty(),
+                                        }
+                                    } else {
+                                        RowDelta::Added { id: object_id, row }
+                                    };
+                                    branch_delta.push(delta);
+                                } else {
+                                    // Row not found in db state - might be deleted
+                                    // Emit Removed if it was in cache
+                                    if cache.get(table, object_id).is_some() {
+                                        branch_delta.push(RowDelta::Removed {
+                                            id: object_id,
+                                            prior: PriorState::empty(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+
+                        if branch_delta.is_empty() {
+                            return None;
+                        }
+
+                        // Route each delta through the graph using process_change_from_table
+                        // This uses entry_points for correct ARRAY/JOIN routing
+                        let mut all_output = DeltaBatch::new();
+                        for delta in branch_delta.into_iter() {
+                            // Update cache with the new row data
+                            match &delta {
+                                RowDelta::Added { id, row } => {
+                                    cache.insert(table, *id, row.clone());
+                                }
+                                RowDelta::Removed { id, .. } => {
+                                    cache.mark_deleted(table, *id);
+                                }
+                                RowDelta::Updated { id, row, .. } => {
+                                    cache.insert(table, *id, row.clone());
+                                }
+                            }
+
+                            // Route through the graph (will use entry_points for inner tables)
+                            let output = query
+                                .graph
+                                .process_change_from_table(delta, table, &mut cache, db);
+                            all_output.extend(output);
+                        }
+
+                        if all_output.is_empty() {
+                            return None;
+                        }
+
+                        let callbacks = query.get_callbacks();
+                        Some((all_output, callbacks))
+                    })
+                })
+                .collect()
+        };
+
+        // Phase 2: Call callbacks without holding locks
+        for (output_delta, callbacks) in pending {
+            for callback in callbacks {
+                callback(&output_delta);
+            }
+        }
+    }
+
     /// Notify all relevant graphs of a row change.
+    ///
+    /// DEPRECATED: Use `notify_object_changed` instead. This method is kept
+    /// for backwards compatibility during the transition to unified notifications.
     ///
     /// This is called by the database after insert/update/delete operations.
     /// For JOIN queries, the graph will process the delta from the source table.
+    #[deprecated(note = "Use notify_object_changed instead")]
     pub fn notify_row_change(&self, table: &str, delta: RowDelta, db: &DatabaseState) {
         // Find all graphs that depend on this table
         let graph_ids: Vec<GraphId> = {
@@ -339,6 +525,130 @@ impl GraphRegistry {
         }
     }
 
+    /// Notify that a branch changed, applying lenses for cross-schema merges.
+    ///
+    /// This is the full-featured notification method that supports:
+    /// - Per-column metadata-based LWW merge
+    /// - Lens-based transformation for cross-schema branches
+    /// - Routing through downstream nodes (Filter, Projection, Output)
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table the object belongs to
+    /// * `object_id` - The object whose branch changed
+    /// * `object` - Reference to the Object (for reading branch data)
+    /// * `lens_context` - For looking up lenses between schema versions
+    /// * `descriptor_lookup` - Callback to get RowDescriptor by DescriptorId
+    /// * `db` - Database state for routing through downstream nodes
+    pub fn notify_branch_change_with_lenses<F>(
+        &self,
+        table: &str,
+        object_id: ObjectId,
+        object: &crate::object::Object,
+        lens_context: &LensContext,
+        descriptor_lookup: F,
+        db: &DatabaseState,
+    ) where
+        F: Fn(DescriptorId) -> Option<Arc<RowDescriptor>> + Copy,
+    {
+        use crate::sql::query_graph::node::QueryNode;
+
+        // Find all graphs that depend on this table
+        let graph_ids: Vec<GraphId> = {
+            let index = self.table_index.read().unwrap();
+            index.get(table).cloned().unwrap_or_default()
+        };
+
+        if graph_ids.is_empty() {
+            return;
+        }
+
+        // Phase 1: Process graphs and collect output deltas + callbacks
+        let pending: Vec<(DeltaBatch, Vec<ArcCallback>)> = {
+            let mut cache = self.cache.write().unwrap();
+            let mut queries = self.queries.write().unwrap();
+
+            graph_ids
+                .into_iter()
+                .filter_map(|graph_id| {
+                    queries.get_mut(&graph_id).and_then(|query| {
+                        // Only process branch-aware graphs
+                        if !query.graph.is_branch_aware() {
+                            return None;
+                        }
+
+                        // Find BranchMerge node and evaluate with lenses
+                        let mut branch_delta = DeltaBatch::new();
+
+                        for node in query.graph.nodes_mut() {
+                            if let QueryNode::BranchMerge {
+                                table: node_table, ..
+                            } = node
+                                && node_table == table
+                            {
+                                let row_deltas = node.evaluate_branch_merge_with_lenses(
+                                    object_id,
+                                    object,
+                                    lens_context,
+                                    descriptor_lookup,
+                                );
+                                branch_delta.extend(row_deltas);
+                                break;
+                            }
+                        }
+
+                        if branch_delta.is_empty() {
+                            return None;
+                        }
+
+                        // Route through downstream nodes (Filter, Projection, Output)
+                        let output_delta =
+                            query
+                                .graph
+                                .route_from_branch_merge(branch_delta, &mut cache, db);
+
+                        if output_delta.is_empty() {
+                            return None;
+                        }
+
+                        let callbacks = query.get_callbacks();
+                        Some((output_delta, callbacks))
+                    })
+                })
+                .collect()
+        };
+
+        // Phase 2: Call callbacks without holding locks
+        for (output_delta, callbacks) in pending {
+            for callback in callbacks {
+                callback(&output_delta);
+            }
+        }
+    }
+
+    /// Notify the registry that a commit was added to an object's branch.
+    ///
+    /// DEPRECATED: Use `notify_object_changed` instead. This method is kept
+    /// for backwards compatibility during the transition to unified notifications.
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table the object belongs to
+    /// * `object_id` - The object that received the new commit
+    /// * `object` - Reference to the Object (for reading branch data)
+    /// * `db` - Database state for evaluating downstream nodes
+    #[deprecated(note = "Use notify_object_changed instead")]
+    pub fn notify_object_commit_added(
+        &self,
+        table: &str,
+        object_id: ObjectId,
+        object: &crate::object::Object,
+        db: &DatabaseState,
+    ) {
+        // Delegate to the unified method
+        self.notify_object_changed(table, object_id, object, db);
+    }
+
     /// Set the lens context for a registered query graph.
     ///
     /// This enables schema-aware query evaluation, where rows from older
@@ -443,6 +753,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn registry_notify_change() {
         let registry = GraphRegistry::new();
         let schema = test_schema();
@@ -485,6 +796,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn registry_get_output() {
         let registry = GraphRegistry::new();
         let schema = test_schema();
@@ -512,5 +824,129 @@ mod tests {
         let output = registry.get_output(graph_id, db.state()).unwrap();
 
         assert_eq!(output.len(), 2);
+    }
+
+    /// Test that branch-aware queries get notified when commits are added.
+    ///
+    /// This test verifies the full flow:
+    /// 1. Create a branch-aware query (using BranchMerge node)
+    /// 2. Add a commit to an object's branch
+    /// 3. Notify the registry
+    /// 4. Verify subscribers receive the update
+    #[test]
+    #[allow(deprecated)]
+    fn branch_merge_notified_on_commit() {
+        use crate::branch::SchemaBranchName;
+        use crate::commit::Commit;
+        use crate::object::Object;
+        use crate::sql::catalog::DescriptorId;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let schema = test_schema();
+        let descriptor = test_descriptor();
+
+        // Create descriptor ID for the schema version
+        let desc_id = DescriptorId::from_object_id(ObjectId::new(0x123456));
+
+        // Create branch name with schema version
+        let branch_name = SchemaBranchName::from_descriptor("dev", &desc_id, "main");
+        let branch_name_str = branch_name.to_string();
+
+        // Create an Object
+        let object_id = ObjectId::new(1);
+        let mut object = Object::new(object_id, "users");
+
+        // Add a commit to "main" first so we have something to branch from
+        let initial_row = RowBuilder::new(descriptor.clone())
+            .set_string_by_name("name", "Initial")
+            .set_bool_by_name("active", false)
+            .build();
+
+        let initial_commit_id = {
+            let mut main_branch = object.branch_mut("main").unwrap();
+            main_branch
+                .add_commit_with_tracking(
+                    Commit {
+                        parents: vec![],
+                        content: initial_row.buffer.clone().into_boxed_slice(),
+                        timestamp: 500,
+                        author: "setup".to_string(),
+                        meta: None,
+                    },
+                    &descriptor,
+                )
+                .unwrap()
+        };
+
+        // Create the schema-aware branch from the initial commit
+        object
+            .create_branch(&branch_name_str, "main", &initial_commit_id)
+            .unwrap();
+
+        // Create database for state reference
+        let db = Database::in_memory();
+        db.create_table(schema.clone()).unwrap();
+
+        // Create a branch-aware query using BranchMerge
+        let builder = QueryGraphBuilder::new("users", schema.clone())
+            .with_branches(vec![branch_name_str.clone()], desc_id);
+        let graph = builder.build_branch_merge_query(GraphId(0));
+
+        // Register with registry
+        let registry = GraphRegistry::new();
+        let graph_id = registry.register(graph);
+
+        // Track callback invocations
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = call_count.clone();
+
+        registry.subscribe(
+            graph_id,
+            Box::new(move |delta| {
+                eprintln!("[TEST] Callback received delta with {} items", delta.len());
+                count_clone.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+
+        // Initial state: no callbacks yet
+        assert_eq!(call_count.load(Ordering::SeqCst), 0);
+
+        // Add a NEW commit to the schema-aware branch
+        let new_row = RowBuilder::new(descriptor.clone())
+            .set_string_by_name("name", "Alice")
+            .set_bool_by_name("active", true)
+            .build();
+
+        {
+            let mut branch = object.branch_mut(&branch_name_str).unwrap();
+            let parent_id = branch.frontier()[0]; // Get the current frontier commit
+            let _new_commit_id = branch
+                .add_commit_with_tracking(
+                    Commit {
+                        parents: vec![parent_id],
+                        content: new_row.buffer.clone().into_boxed_slice(),
+                        timestamp: 1000,
+                        author: "test".to_string(),
+                        meta: None,
+                    },
+                    &descriptor,
+                )
+                .unwrap();
+        }
+
+        // Notify the registry that a commit was added.
+        // In a real system, this would be called automatically by:
+        // - The sync layer when receiving commits from the server
+        // - The Database when local writes create commits
+        //
+        // For now, we call it explicitly to demonstrate the notification works.
+        registry.notify_object_commit_added("users", object_id, &object, db.state());
+
+        // Verify the callback was invoked
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "Expected callback to be invoked when branch change is notified"
+        );
     }
 }
