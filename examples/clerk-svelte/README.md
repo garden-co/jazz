@@ -1,6 +1,6 @@
 # Clerk authentication example with Jazz and Svelte
 
-This is an example of how to use clerk authentication with Jazz using SvelteKit.
+This is an example of how to use Clerk authentication with Jazz using SvelteKit.
 
 ## Getting started
 
@@ -82,4 +82,3 @@ Open [http://localhost:5173](http://localhost:5173) with your browser to see the
 ## Questions / problems / feedback
 
 If you have feedback, let us know on [Discord](https://discord.gg/utDMjHYg42) or open an issue or PR to fix something that seems wrong.
-
