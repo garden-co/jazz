@@ -19,23 +19,19 @@ import { useCoStates } from "jazz-tools/react-core";
 
 const INITIAL_MESSAGES_TO_SHOW = 30;
 
-const ChatWithMessages = Chat.resolved({
-  $each: true,
-});
-
 export function ChatScreen(props: { chatID: string }) {
-  const chat = useSuspenseCoState(ChatWithMessages, props.chatID);
+  const chat = useSuspenseCoState(Chat, props.chatID);
   const me = useSuspenseAccount();
   const [showNLastMessages, setShowNLastMessages] = useState(
     INITIAL_MESSAGES_TO_SHOW,
   );
 
-  const messageIds = chat
+  const messageIds = Array.from(chat.$jazz.refs)
     // We call slice before reverse to avoid mutating the original array
     .slice(-showNLastMessages)
     // Reverse plus flex-col-reverse on ChatBody gives us scroll-to-bottom behavior
     .reverse()
-    .map((msg) => msg.$jazz.id);
+    .map((msgRef) => msgRef.id);
 
   const messages = useCoStates(Message, messageIds);
 
