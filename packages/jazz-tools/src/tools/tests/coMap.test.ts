@@ -1736,8 +1736,8 @@ describe("CoMap applyDiff", async () => {
       age: "35",
     };
 
-    // @ts-expect-error - age should be a number
     expect(() =>
+      // @ts-expect-error - age should be a number
       map.$jazz.applyDiff(newValues, { validation: "loose" }),
     ).not.toThrow();
 
