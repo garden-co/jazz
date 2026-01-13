@@ -110,7 +110,7 @@ describe("syncing deleted coValues", () => {
     });
   });
 
-  test("outbound blocking: post-delete normal writes throw and do not produce content uploads", async () => {
+  test("outbound blocking: post-delete normal writes are ignored and do not produce content uploads", async () => {
     const client = setupTestNode({ connected: true });
 
     const group = jazzCloud.node.createGroup();
