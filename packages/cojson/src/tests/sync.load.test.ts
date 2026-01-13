@@ -1498,11 +1498,11 @@ describe("lazy storage load optimization", () => {
       [
         "client -> server | LOAD Group sessions: header/3",
         "client -> server | LOAD Map sessions: header/1",
-        "server -> storage | LAZY_LOAD Group",
-        "storage -> server | LAZY_LOAD_RESULT Group sessions: header/3",
+        "server -> storage | GET_KNOWN_STATE Group",
+        "storage -> server | GET_KNOWN_STATE_RESULT Group sessions: header/3",
         "server -> client | KNOWN Group sessions: header/3",
-        "server -> storage | LAZY_LOAD Map",
-        "storage -> server | LAZY_LOAD_RESULT Map sessions: header/1",
+        "server -> storage | GET_KNOWN_STATE Map",
+        "storage -> server | GET_KNOWN_STATE_RESULT Map sessions: header/1",
         "server -> client | KNOWN Map sessions: header/1",
       ]
     `);

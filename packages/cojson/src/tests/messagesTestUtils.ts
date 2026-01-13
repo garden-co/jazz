@@ -57,9 +57,9 @@ export function toSimplifiedMessages(
       case "content":
         return `${from} -> ${to} | CONTENT ${getCoValue(msg.id)} header: ${Boolean(msg.header)} new: ${simplifyNewContent(msg.new)}${msg.expectContentUntil ? ` expectContentUntil: ${simplifySessions({ sessions: msg.expectContentUntil, header: true })}` : ""}`;
       case "lazyLoad":
-        return `${from} -> ${to} | LAZY_LOAD ${getCoValue(msg.id)}`;
+        return `${from} -> ${to} | GET_KNOWN_STATE ${getCoValue(msg.id)}`;
       case "lazyLoadResult":
-        return `${from} -> ${to} | LAZY_LOAD_RESULT ${getCoValue(msg.id)} sessions: ${simplifySessions(msg)}`;
+        return `${from} -> ${to} | GET_KNOWN_STATE_RESULT ${getCoValue(msg.id)} sessions: ${simplifySessions(msg)}`;
     }
   }
 

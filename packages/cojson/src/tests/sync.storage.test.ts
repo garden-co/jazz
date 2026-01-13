@@ -1012,8 +1012,6 @@ describe("client syncs with a server with storage", () => {
       ).toMatchInlineSnapshot(`
         [
           "bob -> server | LOAD Map sessions: empty",
-          "syncServer -> storage | LAZY_LOAD Map",
-          "storage -> syncServer | LAZY_LOAD_RESULT Map sessions: header/1",
           "syncServer -> storage | LOAD Map sessions: empty",
           "storage -> syncServer | CONTENT ParentGroup header: true new: After: 0 New: 76 expectContentUntil: header/205",
           "storage -> syncServer | CONTENT Group header: true new: After: 0 New: 5",

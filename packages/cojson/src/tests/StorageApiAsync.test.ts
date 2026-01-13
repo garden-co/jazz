@@ -908,5 +908,55 @@ describe("StorageApiAsync", () => {
       // Database should only be called once due to deduplication
       expect(dbClientSpy).toHaveBeenCalledTimes(1);
     });
+
+    test("should use cache and not query database when cache is populated", async () => {
+      const { fixturesNode, dbPath } = await createFixturesNode();
+      const { storage } = await createTestNode(dbPath);
+
+      // Create a group to have data in the database
+      const group = fixturesNode.createGroup();
+      group.addMember("everyone", "reader");
+      await group.core.waitForSync();
+
+      // Spy on the database client to track calls
+      const dbClientSpy = vi.spyOn(
+        (storage as any).dbClient,
+        "getCoValueKnownState",
+      );
+
+      // First call - should hit the database
+      const result1 = await new Promise<CoValueKnownState | undefined>(
+        (resolve) => {
+          storage.loadKnownState(group.id, resolve);
+        },
+      );
+
+      expect(result1).toBeDefined();
+      expect(dbClientSpy).toHaveBeenCalledTimes(1);
+
+      // Clear the spy to reset call count
+      dbClientSpy.mockClear();
+
+      // Second call - should use cache, not database
+      const result2 = await new Promise<CoValueKnownState | undefined>(
+        (resolve) => {
+          storage.loadKnownState(group.id, resolve);
+        },
+      );
+
+      expect(result2).toEqual(result1);
+      // Database should NOT be called since cache was hit
+      expect(dbClientSpy).toHaveBeenCalledTimes(0);
+
+      // Third call - also from cache
+      const result3 = await new Promise<CoValueKnownState | undefined>(
+        (resolve) => {
+          storage.loadKnownState(group.id, resolve);
+        },
+      );
+
+      expect(result3).toEqual(result1);
+      expect(dbClientSpy).toHaveBeenCalledTimes(0);
+    });
   });
 });
