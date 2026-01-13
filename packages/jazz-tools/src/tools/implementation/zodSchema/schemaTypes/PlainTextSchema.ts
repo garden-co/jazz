@@ -16,6 +16,7 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
+import { z } from "../zodReExport.js";
 
 export interface CorePlainTextSchema extends CoreCoValueSchema {
   builtin: "CoPlainText";
@@ -26,6 +27,7 @@ export function createCoreCoPlainTextSchema(): CorePlainTextSchema {
     collaborative: true as const,
     builtin: "CoPlainText" as const,
     resolveQuery: true as const,
+    getValidationSchema: () => z.string(),
   };
 }
 
@@ -33,6 +35,8 @@ export class PlainTextSchema implements CorePlainTextSchema {
   readonly collaborative = true as const;
   readonly builtin = "CoPlainText" as const;
   readonly resolveQuery = true as const;
+
+  getValidationSchema = () => z.string().or(z.instanceof(CoPlainText));
 
   /**
    * Permissions to be used when creating or composing CoValues

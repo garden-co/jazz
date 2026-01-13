@@ -26,6 +26,7 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
+import { z } from "../zodReExport.js";
 
 export class CoFeedSchema<
   T extends AnyZodOrCoValueSchema,
@@ -47,6 +48,14 @@ export class CoFeedSchema<
    * @internal
    */
   permissions: SchemaPermissions = DEFAULT_SCHEMA_PERMISSIONS;
+
+  getValidationSchema = () => {
+    return z.array(
+      this.element instanceof z.core.$ZodType
+        ? this.element
+        : this.element.getValidationSchema(),
+    );
+  };
 
   constructor(
     public element: T,
@@ -203,6 +212,12 @@ export function createCoreCoFeedSchema<T extends AnyZodOrCoValueSchema>(
     builtin: "CoFeed" as const,
     element,
     resolveQuery: true as const,
+    getValidationSchema: () =>
+      z.array(
+        element instanceof z.core.$ZodType
+          ? element
+          : element.getValidationSchema(),
+      ),
   };
 }
 

@@ -1096,7 +1096,7 @@ test("throw when calling ensureLoaded on a ref that's required but missing", asy
   const root = JazzRoot.create(
     // @ts-expect-error missing required ref
     {},
-    { owner: me },
+    { owner: me, validation: "loose" },
   );
 
   await expect(

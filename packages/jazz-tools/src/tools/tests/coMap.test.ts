@@ -438,8 +438,11 @@ describe("CoMap", async () => {
         age: z.number(),
       });
 
-      // @ts-expect-error - x is not a valid property
-      const john = Person.create({ name: "John", age: 30, x: 1 });
+      const john = Person.create(
+        // @ts-expect-error - x is not a valid property
+        { name: "John", age: 30, x: 1 },
+        { validation: "loose" },
+      );
 
       expect(john.toJSON()).toEqual({
         $jazz: { id: john.$jazz.id },
@@ -515,6 +518,65 @@ describe("CoMap", async () => {
 
       expect(personB.friend?.pet.name).toEqual("Rex");
     });
+
+    it("should throw when creating with invalid properties", () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number(),
+      });
+
+      // @ts-expect-error - age should be a number
+      expect(() => Person.create({ name: "John", age: "20" })).toThrow();
+    });
+
+    it("should not throw when creating with invalid properties with loose validation", () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number(),
+      });
+
+      expect(() =>
+        Person.create(
+          {
+            name: "John",
+            // @ts-expect-error - age should be a number
+            age: "20",
+          },
+          { validation: "loose" },
+        ),
+      ).not.toThrow();
+    });
+
+    it("should validate Group schemas", async () => {
+      const Person = co.map({
+        group: co.group(),
+        group2: Group,
+      });
+
+      expect(() =>
+        Person.create({ group: Group.create(), group2: Group.create() }),
+      ).not.toThrow();
+      expect(() =>
+        // @ts-expect-error - group should be a Group
+        Person.create({ group: "Test", group2: Group.create() }),
+      ).toThrow();
+      expect(() =>
+        // @ts-expect-error - group should be a Group
+        Person.create({ group: Group.create(), group2: "Test" }),
+      ).toThrow();
+    });
+
+    it("should use zod defaults for plain items", async () => {
+      const Person = co.map({
+        name: z.string().default("John"),
+        age: z.number().default(20),
+      });
+
+      // @ts-expect-error - name and age are required but have defaults
+      const person = Person.create({});
+      expect(person.name).toEqual("John");
+      expect(person.age).toEqual(20);
+    });
   });
 
   describe("Mutation", () => {
@@ -530,6 +592,36 @@ describe("CoMap", async () => {
 
       expect(john.name).toEqual("Jane");
       expect(john.age).toEqual(20);
+    });
+
+    test("change a primitive value should be validated", () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number(),
+      });
+
+      const john = Person.create({ name: "John", age: 20 });
+
+      // @ts-expect-error - age should be a number
+      expect(() => john.$jazz.set("age", "21")).toThrow();
+
+      expect(john.age).toEqual(20);
+    });
+
+    test("change a primitive value should not throw if validation is loose", () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number(),
+      });
+
+      const john = Person.create({ name: "John", age: 20 });
+
+      expect(() =>
+        // @ts-expect-error - age should be a number
+        john.$jazz.set("age", "21", { validation: "loose" }),
+      ).not.toThrow();
+
+      expect(john.age).toEqual("21");
     });
 
     test("delete an optional value by setting it to undefined", () => {
@@ -1533,6 +1625,26 @@ describe("CoMap resolution", async () => {
 
     expect(spy).toHaveBeenCalledTimes(2);
   });
+
+  test("loading a locally available map with invalid data", async () => {
+    const Person1 = co.map({
+      name: z.string(),
+      age: z.number(),
+    });
+
+    const Person2 = co.map({
+      name: z.string(),
+      age: z.string(),
+    });
+
+    const person1 = Person1.create({ name: "John", age: 20 });
+    person1.$jazz.waitForSync();
+
+    const person2 = await Person2.load(person1.$jazz.id);
+
+    assertLoaded(person2);
+    expect(person2.age).toStrictEqual(20);
+  });
 });
 
 describe("CoMap applyDiff", async () => {
@@ -1580,6 +1692,56 @@ describe("CoMap applyDiff", async () => {
     expect(map.isActive).toEqual(false);
     expect(map.birthday).toEqual(new Date("1990-01-01"));
     expect(map.nested?.value).toEqual("original");
+  });
+
+  test("Basic applyDiff should validate", () => {
+    const map = TestMap.create(
+      {
+        name: "Alice",
+        age: 30,
+        isActive: true,
+        birthday: new Date("1990-01-01"),
+        nested: NestedMap.create({ value: "original" }, { owner: me }),
+      },
+      { owner: me },
+    );
+
+    const newValues = {
+      age: "35",
+    };
+
+    // @ts-expect-error - age should be a number
+    expect(() => map.$jazz.applyDiff(newValues)).toThrow();
+
+    expect(map.name).toEqual("Alice");
+    expect(map.age).toEqual(30);
+    expect(map.isActive).toEqual(true);
+    expect(map.birthday).toEqual(new Date("1990-01-01"));
+    expect(map.nested?.value).toEqual("original");
+  });
+
+  test("Basic applyDiff should not validate if validation is loose", () => {
+    const map = TestMap.create(
+      {
+        name: "Alice",
+        age: 30,
+        isActive: true,
+        birthday: new Date("1990-01-01"),
+        nested: NestedMap.create({ value: "original" }, { owner: me }),
+      },
+      { owner: me },
+    );
+
+    const newValues = {
+      age: "35",
+    };
+
+    expect(() =>
+      // @ts-expect-error - age should be a number
+      map.$jazz.applyDiff(newValues, { validation: "loose" }),
+    ).not.toThrow();
+
+    expect(map.age).toEqual("35");
   });
 
   test("applyDiff with nested changes", () => {
@@ -1738,9 +1900,7 @@ describe("CoMap applyDiff", async () => {
       nested: undefined,
     };
 
-    expect(() => map.$jazz.applyDiff(newValues)).toThrowError(
-      "Cannot set required reference nested to undefined",
-    );
+    expect(() => map.$jazz.applyDiff(newValues)).toThrow();
   });
 
   test("applyDiff from JSON", () => {

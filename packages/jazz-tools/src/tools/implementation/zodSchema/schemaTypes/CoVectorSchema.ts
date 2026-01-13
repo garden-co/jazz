@@ -14,6 +14,7 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
+import { z } from "../zodReExport.js";
 
 export interface CoreCoVectorSchema extends CoreCoValueSchema {
   builtin: "CoVector";
@@ -28,6 +29,12 @@ export function createCoreCoVectorSchema(
     builtin: "CoVector" as const,
     dimensions,
     resolveQuery: true as const,
+    getValidationSchema: () => {
+      return z
+        .instanceof(CoVector)
+        .or(z.instanceof(Float32Array))
+        .or(z.array(z.number()));
+    },
   };
 }
 
@@ -35,6 +42,13 @@ export class CoVectorSchema implements CoreCoVectorSchema {
   readonly collaborative = true as const;
   readonly builtin = "CoVector" as const;
   readonly resolveQuery = true as const;
+
+  getValidationSchema = () => {
+    return z
+      .instanceof(CoVector)
+      .or(z.instanceof(Float32Array))
+      .or(z.array(z.number()));
+  };
 
   /**
    * Permissions to be used when creating or composing CoValues

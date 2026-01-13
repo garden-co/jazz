@@ -18,6 +18,7 @@ import {
   isAnyCoValueSchema,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
+  TypeSym,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { removeGetters, withSchemaResolveQuery } from "../../schemaUtils.js";
@@ -32,6 +33,7 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
+import { isAnyCoValue, isCoValueSchema } from "./schemaValidators.js";
 
 export class CoMapSchema<
   Shape extends z.core.$ZodLooseShape,
@@ -45,6 +47,57 @@ export class CoMapSchema<
   shape: Shape;
   catchAll?: CatchAll;
   getDefinition: () => CoMapSchemaDefinition;
+
+  getValidationSchema = () => {
+    const plainShape: Record<string, AnyZodSchema> = {};
+
+    for (const key in this.shape) {
+      const item = this.shape[key];
+      // item is a Group
+      if (item?.prototype?.[TypeSym] === "Group") {
+        plainShape[key] = z.instanceof(Group);
+      } else if (
+        item?.prototype?.[TypeSym] === "Account" ||
+        (isCoValueSchema(item) && item.builtin === "Account")
+      ) {
+        plainShape[key] = isAnyCoValue;
+      } else if (isCoValueSchema(item)) {
+        // Inject as getter to avoid circularity issues
+        Object.defineProperty(plainShape, key, {
+          get: () => isAnyCoValue.or(item.getValidationSchema()),
+          enumerable: true,
+          configurable: true,
+        });
+      } else if ((item as any) instanceof z.core.$ZodType) {
+        // the following zod types are not supported:
+        if (
+          // codecs are managed lower level
+          item._def.type === "pipe"
+        ) {
+          plainShape[key] = z.any();
+        } else {
+          plainShape[key] = item;
+        }
+      } else {
+        throw new Error(`Unsupported schema type: ${item}`);
+      }
+    }
+
+    let validationSchema = z.strictObject(plainShape);
+    if (this.catchAll) {
+      if (isCoValueSchema(this.catchAll)) {
+        validationSchema = validationSchema.catchall(
+          this.catchAll.getValidationSchema(),
+        );
+      } else if ((this.catchAll as any) instanceof z.core.$ZodType) {
+        validationSchema = validationSchema.catchall(
+          this.catchAll as unknown as z.core.$ZodType,
+        );
+      }
+    }
+
+    return z.instanceof(CoMap).or(validationSchema);
+  };
 
   /**
    * Default resolve query to be used when loading instances of this schema.
@@ -74,6 +127,7 @@ export class CoMapSchema<
       | {
           owner?: Group;
           unique?: CoValueUniqueness["uniqueness"];
+          validation?: "strict" | "loose";
         }
       | Group,
   ): CoMapInstanceShape<Shape, CatchAll> & CoMap;
@@ -84,6 +138,7 @@ export class CoMapSchema<
       | {
           owner?: Owner;
           unique?: CoValueUniqueness["uniqueness"];
+          validation?: "strict" | "loose";
         }
       | Owner,
   ): CoMapInstanceShape<Shape, CatchAll> & CoMap;
@@ -92,7 +147,15 @@ export class CoMapSchema<
       options,
       this.permissions,
     );
-    return this.coValueClass.create(init, optionsWithPermissions);
+
+    if (options?.validation !== "loose") {
+      init = this.getValidationSchema().parse(init);
+    }
+
+    return this.coValueClass.create(init, {
+      ...optionsWithPermissions,
+      coMapSchema: this,
+    });
   }
 
   load<
@@ -425,6 +488,7 @@ export function createCoreCoMapSchema<
       },
     }),
     resolveQuery: true as const,
+    getValidationSchema: () => z.object(shape),
   };
 }
 

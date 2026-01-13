@@ -27,6 +27,7 @@ import {
   DEFAULT_SCHEMA_PERMISSIONS,
   SchemaPermissions,
 } from "../schemaPermissions.js";
+import { z } from "../zodReExport.js";
 
 export class CoListSchema<
   T extends AnyZodOrCoValueSchema,
@@ -49,6 +50,18 @@ export class CoListSchema<
    */
   permissions: SchemaPermissions = DEFAULT_SCHEMA_PERMISSIONS;
 
+  getValidationSchema = () => {
+    return z
+      .instanceof(CoList)
+      .or(
+        z.array(
+          this.element instanceof z.core.$ZodType
+            ? this.element
+            : this.element.getValidationSchema(),
+        ),
+      );
+  };
+
   constructor(
     public element: T,
     private coValueClass: typeof CoList,
@@ -57,24 +70,41 @@ export class CoListSchema<
   create(
     items: CoListSchemaInit<T>,
     options?:
-      | { owner: Group; unique?: CoValueUniqueness["uniqueness"] }
+      | {
+          owner: Group;
+          unique?: CoValueUniqueness["uniqueness"];
+          validation?: "strict" | "loose";
+        }
       | Group,
   ): CoListInstance<T>;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
   create(
     items: CoListSchemaInit<T>,
     options?:
-      | { owner: Account | Group; unique?: CoValueUniqueness["uniqueness"] }
+      | {
+          owner: Account | Group;
+          unique?: CoValueUniqueness["uniqueness"];
+          validation?: "strict" | "loose";
+        }
       | Account
       | Group,
   ): CoListInstance<T>;
   create(
     items: CoListSchemaInit<T>,
     options?:
-      | { owner: Account | Group; unique?: CoValueUniqueness["uniqueness"] }
+      | {
+          owner: Account | Group;
+          unique?: CoValueUniqueness["uniqueness"];
+          validation?: "strict" | "loose";
+        }
       | Account
       | Group,
-  ): CoListInstance<T> {
+  ): CoListInstance<T>;
+  create(items: any, options?: any): CoListInstance<T> {
+    if (options?.validation !== "loose") {
+      items = this.getValidationSchema().parse(items) as CoListSchemaInit<T>;
+    }
+
     const optionsWithPermissions = withSchemaPermissions(
       options,
       this.permissions,
@@ -246,6 +276,16 @@ export function createCoreCoListSchema<T extends AnyZodOrCoValueSchema>(
     builtin: "CoList" as const,
     element,
     resolveQuery: true as const,
+    getValidationSchema: () =>
+      z
+        .instanceof(CoList)
+        .or(
+          z.array(
+            element instanceof z.core.$ZodType
+              ? element
+              : element.getValidationSchema(),
+          ),
+        ),
   };
 }
 

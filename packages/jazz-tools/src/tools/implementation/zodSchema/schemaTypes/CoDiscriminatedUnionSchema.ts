@@ -54,6 +54,11 @@ export class CoDiscriminatedUnionSchema<
   readonly builtin = "CoDiscriminatedUnion" as const;
   readonly getDefinition: () => CoDiscriminatedUnionSchemaDefinition<Options>;
 
+  getValidationSchema = () => {
+    // Discriminated union schema can apply only if data are plain objects.
+    return z.any();
+  };
+
   /**
    * Default resolve query to be used when loading instances of this schema.
    * This resolve query will be used when no resolve query is provided to the load method.
@@ -176,6 +181,9 @@ export function createCoreCoDiscriminatedUnionSchema<
   return {
     collaborative: true as const,
     builtin: "CoDiscriminatedUnion" as const,
+    getValidationSchema: () => {
+      return z.any();
+    },
     getDefinition: () => ({
       discriminator,
       get discriminatorMap() {
