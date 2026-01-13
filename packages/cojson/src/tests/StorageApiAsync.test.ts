@@ -81,7 +81,7 @@ async function createTestNode(dbPath?: string) {
   });
 
   onTestFinished(async () => {
-    node.gracefulShutdown();
+    await node.gracefulShutdown();
     await storage.close();
   });
 

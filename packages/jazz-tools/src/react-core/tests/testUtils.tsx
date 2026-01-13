@@ -111,8 +111,8 @@ export async function createAsyncStorage() {
     new LibSQLSqliteAsyncDriver(":memory:"),
   );
 
-  onTestFinished(() => {
-    storage.close();
+  onTestFinished(async () => {
+    await storage.close();
   });
 
   return storage;
