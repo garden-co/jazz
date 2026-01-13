@@ -168,8 +168,9 @@ export const jazzPlugin: () => JazzPlugin = () => {
         {
           matcher: (context) => {
             return (
-              context.path.startsWith("/callback") ||
-              context.path.startsWith("/oauth2/callback")
+              context.path?.startsWith("/callback") ||
+              context.path?.startsWith("/oauth2/callback") ||
+              false
             );
           },
           handler: createAuthMiddleware(async (ctx) => {
@@ -212,7 +213,7 @@ export const jazzPlugin: () => JazzPlugin = () => {
          */
         {
           matcher: (context) => {
-            return context.path.startsWith("/sign-in/email-otp");
+            return context.path?.startsWith("/sign-in/email-otp") || false;
           },
           handler: createAuthMiddleware(async (ctx) => {
             const email = ctx.body.email;
@@ -256,9 +257,10 @@ export const jazzPlugin: () => JazzPlugin = () => {
         {
           matcher: (context) => {
             return (
-              context.path.startsWith("/sign-up") ||
-              context.path.startsWith("/sign-in") ||
-              context.path.startsWith("/get-session")
+              context.path?.startsWith("/sign-up") ||
+              context.path?.startsWith("/sign-in") ||
+              context.path?.startsWith("/get-session") ||
+              false
             );
           },
           handler: createAuthMiddleware({}, async (ctx) => {
@@ -281,7 +283,7 @@ export const jazzPlugin: () => JazzPlugin = () => {
          */
         {
           matcher: (context) => {
-            return context.path.startsWith("/sign-in/social");
+            return context.path?.startsWith("/sign-in/social") || false;
           },
           handler: createAuthMiddleware(async (ctx) => {
             if (!contextContainsJazzAuth(ctx)) {

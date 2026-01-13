@@ -1,4 +1,4 @@
-import { BetterAuthDbSchema, FieldAttribute } from "better-auth/db";
+import { BetterAuthDBSchema, DBFieldAttribute } from "better-auth/db";
 import { Group, co, z } from "jazz-tools";
 
 type TableRow = co.Map<any>;
@@ -20,7 +20,7 @@ type WorkerAccount = co.Account<{
 type JazzSchema = {
   WorkerAccount: WorkerAccount;
   DatabaseRoot: Database;
-  betterAuthSchema: BetterAuthDbSchema;
+  betterAuthSchema: BetterAuthDBSchema;
   loadDatabase: (
     account: co.loaded<co.Account>,
     options?: Parameters<Database["loadUnique"]>[2],
@@ -29,7 +29,7 @@ type JazzSchema = {
 
 const DATABASE_ROOT_ID = "better-auth-root";
 
-export function createJazzSchema(schema: BetterAuthDbSchema): JazzSchema {
+export function createJazzSchema(schema: BetterAuthDBSchema): JazzSchema {
   const tablesSchema = generateSchemaFromBetterAuthSchema(schema);
 
   const DatabaseRoot: Database = co.map({
@@ -134,7 +134,7 @@ type ZodPrimitiveSchema =
   | z.z.ZodLiteral;
 type ZodOptionalPrimitiveSchema = z.z.ZodOptional<ZodPrimitiveSchema>;
 
-function generateSchemaFromBetterAuthSchema(schema: BetterAuthDbSchema) {
+function generateSchemaFromBetterAuthSchema(schema: BetterAuthDBSchema) {
   const tablesSchema: Record<string, Table> = {};
 
   for (const [key, value] of Object.entries(schema)) {
@@ -178,7 +178,7 @@ function generateSchemaFromBetterAuthSchema(schema: BetterAuthDbSchema) {
   return tablesSchema;
 }
 
-function convertFieldToCoValue(field: FieldAttribute) {
+function convertFieldToCoValue(field: DBFieldAttribute) {
   let zodType: ZodPrimitiveSchema | ZodOptionalPrimitiveSchema;
 
   switch (field.type) {
