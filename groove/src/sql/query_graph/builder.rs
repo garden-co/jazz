@@ -155,7 +155,7 @@ impl QueryGraphBuilder {
         let descriptor = Arc::new(RowDescriptor::from_table_schema(&self.primary_schema));
         let table = self.primary_table.clone();
         let branches: Vec<String> = self.branches.clone();
-        let target_descriptor_id = self.target_descriptor_id;
+        let target_descriptor_id = self.target_descriptor_id.clone();
 
         // Create BranchMerge node (entry point, no separate CommitSource nodes needed)
         let merge_id = self.alloc_id();

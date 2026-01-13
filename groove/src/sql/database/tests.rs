@@ -4290,7 +4290,9 @@ fn migration_descriptor_chain() {
     // Get initial descriptor
     let desc_v1 = db.get_descriptor("notes").unwrap();
     let id_v1 = db.get_descriptor_id("notes").unwrap();
-    assert!(desc_v1.parent_descriptors.is_empty());
+    // v1 has no parent (initial schema version)
+    assert!(desc_v1.lens_from_parent.is_none());
+    assert_eq!(id_v1.version, "v1");
 
     // Migrate: add optional column
     let new_schema = TableSchema::new(
@@ -4304,11 +4306,13 @@ fn migration_descriptor_chain() {
     db.execute_migration("notes", new_schema, LensGenerationOptions::default())
         .unwrap();
 
-    // Get new descriptor - should have parent pointer
+    // Get new descriptor - should have lens from parent
     let desc_v2 = db.get_descriptor("notes").unwrap();
-    assert_eq!(desc_v2.parent_descriptors.len(), 1);
-    assert_eq!(desc_v2.parent_descriptors[0], id_v1);
-    assert_eq!(desc_v2.lenses.len(), 1);
+    let id_v2 = db.get_descriptor_id("notes").unwrap();
+    assert!(desc_v2.lens_from_parent.is_some());
+    // Same object_id for both versions, different version strings
+    assert_eq!(id_v2.object_id, id_v1.object_id);
+    assert_eq!(id_v2.version, "v2");
 }
 
 #[test]
@@ -5104,14 +5108,20 @@ fn build_lens_context_for_table_after_migration() {
         "Lens should exist from old schema to new schema"
     );
 
-    // Verify the descriptor parent chain is correct
+    // Verify the descriptor has lens from parent
     let desc_v2 = db.get_descriptor("documents").unwrap();
-    assert_eq!(desc_v2.parent_descriptors.len(), 1);
-    assert_eq!(desc_v2.parent_descriptors[0], desc_v1_id);
+    assert!(
+        desc_v2.lens_from_parent.is_some(),
+        "v2 descriptor should have lens from parent"
+    );
+    // Same object_id, different version
+    assert_eq!(desc_v2_id.object_id, desc_v1_id.object_id);
+    assert_eq!(desc_v2_id.version, "v2");
+    assert_eq!(desc_v1_id.version, "v1");
 
     // Verify we can also load row descriptors by ID
-    let row_desc_v1 = db.state().load_row_descriptor_by_id(desc_v1_id);
-    let row_desc_v2 = db.state().load_row_descriptor_by_id(desc_v2_id);
+    let row_desc_v1 = db.state().load_row_descriptor_by_id(desc_v1_id.clone());
+    let row_desc_v2 = db.state().load_row_descriptor_by_id(desc_v2_id.clone());
 
     assert!(
         row_desc_v1.is_some(),

@@ -1289,8 +1289,10 @@ impl QueryGraph {
                     // TODO(GCO-1091): Implement row-specific descriptor tracking.
                     // When a row is created/updated, store its source descriptor ID.
                     // Then look it up here to enable proper lens transformation.
-                    let target = self.target_descriptor;
-                    node.evaluate_with_lens(current, cache, Some(lens_ctx), move |_id| target)
+                    let target = self.target_descriptor.clone();
+                    node.evaluate_with_lens(current, cache, Some(lens_ctx), move |_id| {
+                        target.clone()
+                    })
                 } else {
                     node.evaluate(current, cache)
                 }

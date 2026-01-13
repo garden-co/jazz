@@ -735,13 +735,19 @@ impl SchemaBranchName {
     /// Get the descriptor ID for this branch's schema version.
     ///
     /// Returns None for legacy branches without a schema version.
+    /// The schema_version is stored as "object_id@version" format.
     pub fn descriptor_id(&self) -> Option<DescriptorId> {
         if self.schema_version.is_empty() {
             return None;
         }
-        ObjectId::from_str(&self.schema_version)
-            .ok()
-            .map(DescriptorId::from_object_id)
+        // Parse "object_id@version" format
+        let parts: Vec<&str> = self.schema_version.split('@').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+        let object_id = ObjectId::from_str(parts[0]).ok()?;
+        let version = parts[1].to_string();
+        Some(DescriptorId::new(object_id, version))
     }
 
     /// Create a new branch name for a different schema version.
@@ -819,11 +825,12 @@ mod tests {
     #[test]
     fn test_schema_branch_name_from_descriptor() {
         use crate::object::ObjectId;
-        let descriptor_id = DescriptorId::from_object_id(ObjectId::new(0x123456789abc));
+        let descriptor_id = DescriptorId::new_v1(ObjectId::new(0x123456789abc));
         let name = SchemaBranchName::from_descriptor("prod", &descriptor_id, "main");
         assert_eq!(name.env, "prod");
-        // Full 26-char Crockford Base32 ObjectId
-        assert_eq!(name.schema_version.len(), 26);
+        // Format: object_id@version (26-char Base32 + "@v1" = 29 chars)
+        assert!(name.schema_version.contains('@'));
+        assert!(name.schema_version.ends_with("@v1"));
         assert_eq!(name.user_branch, "main");
     }
 
@@ -874,11 +881,12 @@ mod tests {
     fn test_schema_branch_name_with_schema_version() {
         use crate::object::ObjectId;
         let name = SchemaBranchName::new("prod", "abc123", "main");
-        let new_descriptor = DescriptorId::from_object_id(ObjectId::new(0xdef456789abc));
+        let new_descriptor = DescriptorId::new_v1(ObjectId::new(0xdef456789abc));
         let updated = name.with_schema_version(&new_descriptor);
         assert_eq!(updated.env, "prod");
-        // Full 26-char Crockford Base32 ObjectId
-        assert_eq!(updated.schema_version.len(), 26);
+        // Format: object_id@version
+        assert!(updated.schema_version.contains('@'));
+        assert!(updated.schema_version.ends_with("@v1"));
         assert_eq!(updated.user_branch, "main");
     }
 

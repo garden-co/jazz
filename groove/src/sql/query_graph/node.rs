@@ -3167,13 +3167,13 @@ impl QueryNode {
                                 // - source_desc_id is None (simple branch like "main")
                                 // - source == target
                                 let needs_transform = matches!(
-                                    (source_desc_id, target_descriptor_id.as_ref()),
-                                    (Some(src), Some(tgt)) if src != *tgt
+                                    (source_desc_id.as_ref(), target_descriptor_id.as_ref()),
+                                    (Some(src), Some(tgt)) if src != tgt
                                 );
 
                                 let (transformed_content, transformed_changes) = if needs_transform
                                 {
-                                    let source_id = source_desc_id.unwrap();
+                                    let source_id = source_desc_id.clone().unwrap();
                                     let target_id = target_descriptor_id.as_ref().unwrap();
 
                                     // Different schema: transform through lens
@@ -3190,7 +3190,7 @@ impl QueryNode {
                                         }
                                     };
 
-                                    let src_desc = match descriptor_lookup(source_id) {
+                                    let src_desc = match descriptor_lookup(source_id.clone()) {
                                         Some(d) => d,
                                         None => {
                                             #[cfg(debug_assertions)]
@@ -3877,13 +3877,13 @@ mod tests {
         let lens = Lens::from_forward(vec![ColumnTransform::rename("name", "title")]);
 
         // Create descriptor IDs
-        let desc_v1 = DescriptorId::from_object_id(ObjectId::new(100));
-        let desc_v2 = DescriptorId::from_object_id(ObjectId::new(200));
+        let desc_v1 = DescriptorId::new_v1(ObjectId::new(100));
+        let desc_v2 = DescriptorId::new_v1(ObjectId::new(200));
 
         // Build lens context
         let mut lens_ctx_inner = LensContext::new();
-        lens_ctx_inner.register_lens(desc_v1, desc_v2, lens);
-        let lens_ctx = QueryLensContext::with_lenses(desc_v2, lens_ctx_inner);
+        lens_ctx_inner.register_lens(desc_v1.clone(), desc_v2.clone(), lens);
+        let lens_ctx = QueryLensContext::with_lenses(desc_v2.clone(), lens_ctx_inner);
 
         // Create filter predicate that filters by title = "Alice"
         // This won't match v1 rows directly (they have 'name' not 'title')
@@ -3919,7 +3919,7 @@ mod tests {
             &mut cached_ids,
             input_with_lens,
             Some(&lens_ctx),
-            |_| Some(desc_v1), // All rows are at v1
+            |_| Some(desc_v1.clone()), // All rows are at v1
         );
 
         assert_eq!(
@@ -3952,8 +3952,8 @@ mod tests {
         let mut cached_ids = HashSet::new();
 
         // Create descriptor IDs with no lens between them
-        let desc_v1 = DescriptorId::from_object_id(ObjectId::new(100));
-        let desc_v2 = DescriptorId::from_object_id(ObjectId::new(200));
+        let desc_v1 = DescriptorId::new_v1(ObjectId::new(100));
+        let desc_v2 = DescriptorId::new_v1(ObjectId::new(200));
 
         // Build lens context with no lenses (incompatible schemas)
         let lens_ctx = QueryLensContext::with_lenses(desc_v2, LensContext::new());
@@ -3967,7 +3967,7 @@ mod tests {
             &mut cached_ids,
             input,
             Some(&lens_ctx),
-            |_| Some(desc_v1), // All rows are at v1, but no lens to v2
+            |_| Some(desc_v1.clone()), // All rows are at v1, but no lens to v2
         );
 
         // Row is incompatible (no lens) so excluded
@@ -3983,10 +3983,10 @@ mod tests {
         let predicate = Predicate::eq("active", PredicateValue::Bool(true));
         let mut cached_ids = HashSet::new();
 
-        let desc_v2 = DescriptorId::from_object_id(ObjectId::new(200));
+        let desc_v2 = DescriptorId::new_v1(ObjectId::new(200));
 
         // Build lens context - target is v2
-        let lens_ctx = QueryLensContext::with_lenses(desc_v2, LensContext::new());
+        let lens_ctx = QueryLensContext::with_lenses(desc_v2.clone(), LensContext::new());
 
         let (id, row) = make_owned_row(1, "Alice", true);
         let input = DeltaBatch::added(id, row);
@@ -3997,7 +3997,7 @@ mod tests {
             &mut cached_ids,
             input,
             Some(&lens_ctx),
-            |_| Some(desc_v2), // Row is at target version
+            |_| Some(desc_v2.clone()), // Row is at target version
         );
 
         assert_eq!(output.len(), 1, "Same version row should pass through");
@@ -4165,14 +4165,14 @@ mod tests {
             vec![ColumnDef::required("title", ColumnType::String)],
         );
         let desc_v1 = Arc::new(RowDescriptor::from_table_schema(&schema_v1));
-        let desc_v1_id = DescriptorId::from_object_id(ObjectId::new(0x100));
+        let desc_v1_id = DescriptorId::new_v1(ObjectId::new(0x100));
 
         let schema_v2 = TableSchema::new(
             "documents",
             vec![ColumnDef::required("name", ColumnType::String)],
         );
         let desc_v2 = Arc::new(RowDescriptor::from_table_schema(&schema_v2));
-        let desc_v2_id = DescriptorId::from_object_id(ObjectId::new(0x200));
+        let desc_v2_id = DescriptorId::new_v1(ObjectId::new(0x200));
 
         // Create object with two branches (different schemas)
         let branch_v1_name = SchemaBranchName::from_descriptor("dev", &desc_v1_id, "branch-v1");
@@ -4258,7 +4258,7 @@ mod tests {
             table: "documents".to_string(),
             branch_names: vec![branch_v1_name.to_string(), branch_v2_name.to_string()],
             descriptor: desc_v2.clone(),
-            target_descriptor_id: Some(desc_v2_id),
+            target_descriptor_id: Some(desc_v2_id.clone()),
             object_states: HashMap::new(),
         };
 

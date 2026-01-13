@@ -622,7 +622,7 @@ mod tests {
         let descriptor = test_descriptor();
 
         // Create descriptor ID for the schema version
-        let desc_id = DescriptorId::from_object_id(ObjectId::new(0x123456));
+        let desc_id = DescriptorId::new_v1(ObjectId::new(0x123456));
 
         // Create branch name with schema version
         let branch_name = SchemaBranchName::from_descriptor("dev", &desc_id, "main");
@@ -783,7 +783,7 @@ mod tests {
 
         let schema = test_schema();
         let descriptor = test_descriptor();
-        let desc_id = DescriptorId::from_object_id(ObjectId::new(0x100));
+        let desc_id = DescriptorId::new_v1(ObjectId::new(0x100));
 
         // Create object with initial state: name="Initial", active=false
         let mut object = make_multi_branch_object(1, "Initial", false);
@@ -902,7 +902,7 @@ mod tests {
 
         let schema = test_schema();
         let descriptor = test_descriptor();
-        let desc_id = DescriptorId::from_object_id(ObjectId::new(0x200));
+        let desc_id = DescriptorId::new_v1(ObjectId::new(0x200));
 
         // Create object with initial state
         let mut object = make_multi_branch_object(2, "Initial", false);
@@ -1009,7 +1009,7 @@ mod tests {
 
         let schema = test_schema();
         let descriptor = test_descriptor();
-        let desc_id = DescriptorId::from_object_id(ObjectId::new(0x300));
+        let desc_id = DescriptorId::new_v1(ObjectId::new(0x300));
 
         let branch_name = SchemaBranchName::from_descriptor("dev", &desc_id, "feature");
         let branch_str = branch_name.to_string();

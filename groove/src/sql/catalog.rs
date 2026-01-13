@@ -19,49 +19,66 @@ use crate::sql::lens::Lens;
 use crate::sql::policy::TablePolicies;
 use crate::sql::schema::TableSchema;
 
-/// A descriptor ID wraps an ObjectId for type safety.
-/// Schema descriptors are identified by ObjectIds just like other Jazz objects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DescriptorId(ObjectId);
+/// A descriptor ID identifies a specific schema version for a table.
+///
+/// With branch-based versioning, each table has a single descriptor object,
+/// and each schema version is a branch on that object.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DescriptorId {
+    /// The descriptor object for this table.
+    pub object_id: ObjectId,
+    /// The schema version (branch name), e.g., "v1", "v2".
+    pub version: String,
+}
 
 impl DescriptorId {
-    /// Create a new DescriptorId with a fresh ObjectId.
-    pub fn new() -> Self {
-        DescriptorId(ObjectId::new_random())
+    /// Create a new DescriptorId for the first version of a table.
+    pub fn new_v1(object_id: ObjectId) -> Self {
+        DescriptorId {
+            object_id,
+            version: "v1".to_string(),
+        }
     }
 
-    /// Create a DescriptorId from an ObjectId.
-    pub fn from_object_id(id: ObjectId) -> Self {
-        DescriptorId(id)
+    /// Create a DescriptorId with a specific version.
+    pub fn new(object_id: ObjectId, version: impl Into<String>) -> Self {
+        DescriptorId {
+            object_id,
+            version: version.into(),
+        }
     }
 
     /// Get the underlying ObjectId.
     pub fn as_object_id(&self) -> ObjectId {
-        self.0
+        self.object_id
     }
-}
 
-impl Default for DescriptorId {
-    fn default() -> Self {
-        Self::new()
+    /// Get the version (branch name).
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// Create the next version (e.g., v1 -> v2).
+    pub fn next_version(&self) -> Self {
+        let next = if let Some(num) = self.version.strip_prefix('v') {
+            if let Ok(n) = num.parse::<u32>() {
+                format!("v{}", n + 1)
+            } else {
+                format!("{}_next", self.version)
+            }
+        } else {
+            format!("{}_next", self.version)
+        };
+        DescriptorId {
+            object_id: self.object_id,
+            version: next,
+        }
     }
 }
 
 impl std::fmt::Display for DescriptorId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl From<ObjectId> for DescriptorId {
-    fn from(id: ObjectId) -> Self {
-        DescriptorId(id)
-    }
-}
-
-impl From<DescriptorId> for ObjectId {
-    fn from(id: DescriptorId) -> Self {
-        id.0
+        write!(f, "{}@{}", self.object_id, self.version)
     }
 }
 
@@ -91,7 +108,7 @@ impl Catalog {
 
     /// Get the current descriptor ID for a table.
     pub fn get_descriptor_id(&self, name: &str) -> Option<DescriptorId> {
-        self.tables.get(name).copied()
+        self.tables.get(name).cloned()
     }
 
     /// Serialize catalog to bytes.
@@ -101,7 +118,9 @@ impl Catalog {
     /// - For each table:
     ///   - u32: name length
     ///   - bytes: name (UTF-8)
-    ///   - 16 bytes: DescriptorId (ObjectId)
+    ///   - 16 bytes: ObjectId
+    ///   - u32: version length
+    ///   - bytes: version (UTF-8)
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
 
@@ -114,8 +133,13 @@ impl Catalog {
             buf.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
             buf.extend_from_slice(name_bytes);
 
-            // DescriptorId (16 bytes - ObjectId)
-            buf.extend_from_slice(&u128::from(id.as_object_id()).to_le_bytes());
+            // ObjectId (16 bytes)
+            buf.extend_from_slice(&u128::from(id.object_id).to_le_bytes());
+
+            // Version length + version
+            let version_bytes = id.version.as_bytes();
+            buf.extend_from_slice(&(version_bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(version_bytes);
         }
 
         buf
@@ -151,15 +175,30 @@ impl Catalog {
                 .map_err(|_| CatalogError::InvalidUtf8)?;
             pos += name_len;
 
-            // DescriptorId (16 bytes - ObjectId)
+            // ObjectId (16 bytes)
             if data.len() < pos + 16 {
                 return Err(CatalogError::UnexpectedEof);
             }
             let id_bytes: [u8; 16] = data[pos..pos + 16].try_into().unwrap();
             let object_id = ObjectId::new(u128::from_le_bytes(id_bytes));
-            let id = DescriptorId::from_object_id(object_id);
             pos += 16;
 
+            // Version length
+            if data.len() < pos + 4 {
+                return Err(CatalogError::UnexpectedEof);
+            }
+            let version_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+            pos += 4;
+
+            // Version
+            if data.len() < pos + version_len {
+                return Err(CatalogError::UnexpectedEof);
+            }
+            let version = String::from_utf8(data[pos..pos + version_len].to_vec())
+                .map_err(|_| CatalogError::InvalidUtf8)?;
+            pos += version_len;
+
+            let id = DescriptorId::new(object_id, version);
             tables.insert(name, id);
         }
 
@@ -169,21 +208,21 @@ impl Catalog {
 
 /// Per-table descriptor - stored in descriptor object.
 ///
-/// Contains all metadata needed to restore a table. Descriptors are identified
-/// by ObjectIds (wrapped in DescriptorId for type safety).
+/// Contains all metadata needed to restore a table. Each schema version is
+/// stored as a branch on the descriptor object.
 ///
-/// ## Schema History (DAG)
+/// ## Schema History
 ///
-/// Descriptors form a DAG through `parent_descriptors`. This enables:
-/// - Tracking schema evolution over time
-/// - Supporting schema branches (multiple children of one parent)
-/// - Supporting schema merges (multiple parents for one descriptor)
-/// - Computing migration paths between any two schema versions
+/// Schema versions form a DAG through the commit graph. Each branch represents
+/// a schema version, and the commit parents track lineage:
+/// - v1 branch: initial schema (no parent commit)
+/// - v2 branch: migration from v1 (parent commit is v1's tip)
+/// - etc.
 ///
 /// ## Lenses
 ///
-/// Each parent descriptor has a corresponding lens that describes how to
-/// transform data between schema versions:
+/// Each version (except v1) has a `lens_from_parent` that describes how to
+/// transform data from the parent version to this version:
 /// - `forward`: transforms data from parent schema to this schema
 /// - `backward`: transforms data from this schema to parent schema
 ///
@@ -195,13 +234,9 @@ pub struct TableDescriptor {
     pub schema: TableSchema,
     /// Access control policies for this table.
     pub policies: TablePolicies,
-    /// Parent descriptor IDs (empty for root/initial schema).
-    /// Multiple parents indicate a schema merge.
-    pub parent_descriptors: Vec<DescriptorId>,
-    /// Lenses for transforming data between parent schemas and this schema.
-    /// Parallel to `parent_descriptors` - one lens per parent.
-    /// `lenses[i]` describes the transform for `parent_descriptors[i]`.
-    pub lenses: Vec<Lens>,
+    /// Lens to transform data from the parent schema version.
+    /// None for the initial schema (v1).
+    pub lens_from_parent: Option<Lens>,
     /// Object ID for the TableRows (set of row IDs).
     pub rows_object_id: ObjectId,
     /// Schema object ID (where schema is stored).
@@ -216,9 +251,8 @@ impl TableDescriptor {
     /// Format:
     /// - schema bytes (with length prefix)
     /// - policies bytes (with length prefix)
-    /// - u32: number of parent descriptors (and lenses)
-    /// - For each parent:
-    ///   - 16 bytes: DescriptorId (ObjectId)
+    /// - u8: has_lens_from_parent (0 or 1)
+    /// - if has_lens_from_parent:
     ///   - u32: lens length
     ///   - bytes: lens
     /// - 16 bytes: rows_object_id
@@ -241,13 +275,14 @@ impl TableDescriptor {
         buf.extend_from_slice(&(policies_bytes.len() as u32).to_le_bytes());
         buf.extend_from_slice(&policies_bytes);
 
-        // Parent descriptors with their lenses
-        buf.extend_from_slice(&(self.parent_descriptors.len() as u32).to_le_bytes());
-        for (parent, lens) in self.parent_descriptors.iter().zip(self.lenses.iter()) {
-            buf.extend_from_slice(&u128::from(parent.as_object_id()).to_le_bytes());
+        // Lens from parent (optional)
+        if let Some(lens) = &self.lens_from_parent {
+            buf.push(1); // has lens
             let lens_bytes = lens.to_bytes();
             buf.extend_from_slice(&(lens_bytes.len() as u32).to_le_bytes());
             buf.extend_from_slice(&lens_bytes);
+        } else {
+            buf.push(0); // no lens
         }
 
         // rows_object_id
@@ -302,25 +337,14 @@ impl TableDescriptor {
             .map_err(|e| CatalogError::PolicyError(e.to_string()))?;
         pos += policies_len;
 
-        // Parent descriptors with lenses
-        if data.len() < pos + 4 {
+        // Lens from parent (optional)
+        if data.len() < pos + 1 {
             return Err(CatalogError::UnexpectedEof);
         }
-        let num_parents = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
-        pos += 4;
+        let has_lens = data[pos] != 0;
+        pos += 1;
 
-        let mut parent_descriptors = Vec::with_capacity(num_parents);
-        let mut lenses = Vec::with_capacity(num_parents);
-        for _ in 0..num_parents {
-            // DescriptorId (16 bytes - ObjectId)
-            if data.len() < pos + 16 {
-                return Err(CatalogError::UnexpectedEof);
-            }
-            let parent_bytes: [u8; 16] = data[pos..pos + 16].try_into().unwrap();
-            let parent_object_id = ObjectId::new(u128::from_le_bytes(parent_bytes));
-            parent_descriptors.push(DescriptorId::from_object_id(parent_object_id));
-            pos += 16;
-
+        let lens_from_parent = if has_lens {
             // Lens length
             if data.len() < pos + 4 {
                 return Err(CatalogError::UnexpectedEof);
@@ -334,9 +358,11 @@ impl TableDescriptor {
             }
             let (lens, _) = Lens::from_bytes(&data[pos..pos + lens_len])
                 .map_err(|e| CatalogError::LensError(e.to_string()))?;
-            lenses.push(lens);
             pos += lens_len;
-        }
+            Some(lens)
+        } else {
+            None
+        };
 
         // rows_object_id
         if data.len() < pos + 16 {
@@ -392,8 +418,7 @@ impl TableDescriptor {
         Ok(TableDescriptor {
             schema,
             policies,
-            parent_descriptors,
-            lenses,
+            lens_from_parent,
             rows_object_id,
             schema_object_id,
             index_object_ids,
@@ -463,101 +488,68 @@ impl std::error::Error for SchemaConflictError {}
 /// used when querying across branches with different schema versions - the
 /// result should use the "newest" schema.
 ///
+/// With branch-based versioning, all descriptors for a table share the same
+/// ObjectId. The "newest" is the one with the highest version number.
+///
 /// # Arguments
 ///
 /// * `descriptor_ids` - The descriptor IDs to consider (typically from branch names)
-/// * `descriptors` - All available descriptors indexed by ID (for DAG traversal)
+/// * `descriptors` - All available descriptors indexed by ID (unused in new model)
 ///
 /// # Returns
 ///
-/// The DescriptorId that is a descendant of all others, or an error if:
+/// The DescriptorId with the highest version, or an error if:
 /// - No descriptors provided
-/// - Descriptors have diverged (no common descendant)
-///
-/// # Algorithm
-///
-/// For each candidate, check if it's a descendant of all others by traversing
-/// the parent chain. The candidate that is a descendant of all others wins.
-///
-/// Note: For now, we don't support schema merges (multiple parents). If a
-/// descriptor has multiple parents, we follow all paths.
+/// - Descriptors are from different tables (different ObjectIds)
 pub fn find_target_schema(
     descriptor_ids: &[DescriptorId],
-    descriptors: &HashMap<DescriptorId, TableDescriptor>,
+    _descriptors: &HashMap<DescriptorId, TableDescriptor>,
 ) -> Result<DescriptorId, SchemaConflictError> {
     if descriptor_ids.is_empty() {
         return Err(SchemaConflictError::Empty);
     }
 
     if descriptor_ids.len() == 1 {
-        return Ok(descriptor_ids[0]);
+        return Ok(descriptor_ids[0].clone());
     }
 
-    // For each candidate, check if it's a descendant of all others
-    for &candidate in descriptor_ids {
-        let mut is_descendant_of_all = true;
-
-        for &other in descriptor_ids {
-            if candidate == other {
-                continue;
-            }
-
-            // Check if candidate is a descendant of other
-            if !is_descendant(candidate, other, descriptors) {
-                is_descendant_of_all = false;
-                break;
-            }
-        }
-
-        if is_descendant_of_all {
-            return Ok(candidate);
+    // Check all descriptors are for the same table (same ObjectId)
+    let first_obj_id = descriptor_ids[0].object_id;
+    for id in descriptor_ids.iter().skip(1) {
+        if id.object_id != first_obj_id {
+            // Different tables - can't resolve
+            return Err(SchemaConflictError::Diverged(descriptor_ids.to_vec()));
         }
     }
 
-    // No single descriptor is a descendant of all others - schemas have diverged
-    Err(SchemaConflictError::Diverged(descriptor_ids.to_vec()))
+    // Find the highest version (latest schema)
+    // Version format: "v1", "v2", etc. Higher number = newer
+    let target = descriptor_ids
+        .iter()
+        .max_by(|a, b| compare_versions(&a.version, &b.version))
+        .cloned()
+        .unwrap();
+
+    Ok(target)
 }
 
-/// Check if `descendant` is a descendant of `ancestor` in the descriptor DAG.
-///
-/// Traverses the parent chain from `descendant` looking for `ancestor`.
-fn is_descendant(
-    descendant: DescriptorId,
-    ancestor: DescriptorId,
-    descriptors: &HashMap<DescriptorId, TableDescriptor>,
-) -> bool {
-    if descendant == ancestor {
-        return true;
+/// Compare version strings for ordering.
+/// Supports "v1", "v2", etc. format.
+fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    let a_num = a.strip_prefix('v').and_then(|n| n.parse::<u32>().ok());
+    let b_num = b.strip_prefix('v').and_then(|n| n.parse::<u32>().ok());
+
+    match (a_num, b_num) {
+        (Some(an), Some(bn)) => an.cmp(&bn),
+        (Some(_), None) => std::cmp::Ordering::Greater, // "v1" > "custom"
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (None, None) => a.cmp(b), // Fall back to lexicographic
     }
-
-    // BFS through parent chain
-    let mut queue = std::collections::VecDeque::new();
-    let mut visited = std::collections::HashSet::new();
-
-    queue.push_back(descendant);
-    visited.insert(descendant);
-
-    while let Some(current) = queue.pop_front() {
-        if let Some(desc) = descriptors.get(&current) {
-            for &parent in &desc.parent_descriptors {
-                if parent == ancestor {
-                    return true;
-                }
-                if !visited.contains(&parent) {
-                    visited.insert(parent);
-                    queue.push_back(parent);
-                }
-            }
-        }
-    }
-
-    false
 }
 
 /// Get the lens to transform data from `source` schema to `target` schema.
 ///
-/// Finds the path from source to target in the descriptor DAG and composes
-/// the lenses along that path.
+/// Composes lenses along the version chain from source to target.
 ///
 /// # Arguments
 ///
@@ -569,61 +561,38 @@ fn is_descendant(
 ///
 /// The composed lens for the transformation, or None if no path exists.
 pub fn get_lens_path(
-    source: DescriptorId,
-    target: DescriptorId,
+    source: &DescriptorId,
+    target: &DescriptorId,
     descriptors: &HashMap<DescriptorId, TableDescriptor>,
 ) -> Option<Lens> {
     if source == target {
         return Some(Lens::identity());
     }
 
-    // Find path from target back to source (following parent chain)
-    // Then compose lenses in reverse order
-    let mut path = Vec::new();
-
-    // BFS to find path
-    let mut parent_map: HashMap<DescriptorId, (DescriptorId, usize)> = HashMap::new();
-    let mut queue = std::collections::VecDeque::new();
-    queue.push_back(target);
-
-    while let Some(id) = queue.pop_front() {
-        if id == source {
-            // Reconstruct path
-            let mut cur = source;
-            while cur != target {
-                if let Some(&(child, lens_idx)) = parent_map.get(&cur) {
-                    path.push((child, lens_idx));
-                    cur = child;
-                } else {
-                    break;
-                }
-            }
-            break;
-        }
-
-        if let Some(desc) = descriptors.get(&id) {
-            for (idx, &parent) in desc.parent_descriptors.iter().enumerate() {
-                if let std::collections::hash_map::Entry::Vacant(e) = parent_map.entry(parent) {
-                    e.insert((id, idx));
-                    queue.push_back(parent);
-                }
-            }
-        }
-    }
-
-    if path.is_empty() && source != target {
+    // Must be same table
+    if source.object_id != target.object_id {
         return None;
     }
 
-    // Compose lenses from source to target
-    // Path is in order from source toward target, each entry is (child_id, lens_index)
-    // The lens at child[lens_index] transforms from parent to child
+    // Get version numbers
+    let source_num = source.version.strip_prefix('v')?.parse::<u32>().ok()?;
+    let target_num = target.version.strip_prefix('v')?.parse::<u32>().ok()?;
+
+    if source_num >= target_num {
+        return None; // Source must be older than target
+    }
+
+    // Compose lenses from source+1 to target
+    // Each version has lens_from_parent that transforms from the previous version
     let mut composed = Lens::identity();
-    for (child_id, lens_idx) in path {
-        if let Some(child_desc) = descriptors.get(&child_id)
-            && let Some(lens) = child_desc.lenses.get(lens_idx)
-        {
-            composed = composed.compose(lens);
+    for v in (source_num + 1)..=target_num {
+        let version_id = DescriptorId::new(source.object_id, format!("v{}", v));
+        if let Some(desc) = descriptors.get(&version_id) {
+            if let Some(lens) = &desc.lens_from_parent {
+                composed = composed.compose(lens);
+            }
+        } else {
+            return None; // Missing intermediate version
         }
     }
 
@@ -639,11 +608,11 @@ mod tests {
     fn catalog_roundtrip() {
         let mut catalog = Catalog::new();
         // Create some test descriptor IDs
-        let desc_id1 = DescriptorId::from_object_id(ObjectId::new(1));
-        let desc_id2 = DescriptorId::from_object_id(ObjectId::new(2));
+        let desc_id1 = DescriptorId::new_v1(ObjectId::new(1));
+        let desc_id2 = DescriptorId::new(ObjectId::new(2), "v2");
 
-        catalog.tables.insert("users".to_string(), desc_id1);
-        catalog.tables.insert("posts".to_string(), desc_id2);
+        catalog.tables.insert("users".to_string(), desc_id1.clone());
+        catalog.tables.insert("posts".to_string(), desc_id2.clone());
 
         let bytes = catalog.to_bytes();
         let restored = Catalog::from_bytes(&bytes).unwrap();
@@ -677,8 +646,7 @@ mod tests {
         let descriptor = TableDescriptor {
             schema: schema.clone(),
             policies: TablePolicies::default(),
-            parent_descriptors: vec![],
-            lenses: vec![],
+            lens_from_parent: None,
             rows_object_id: ObjectId::new(100),
             schema_object_id: ObjectId::new(200),
             index_object_ids: index_ids,
@@ -689,8 +657,7 @@ mod tests {
 
         assert_eq!(restored.schema.name, "users");
         assert_eq!(restored.schema.columns.len(), 2);
-        assert_eq!(restored.parent_descriptors.len(), 0);
-        assert_eq!(restored.lenses.len(), 0);
+        assert!(restored.lens_from_parent.is_none());
         assert_eq!(restored.rows_object_id, ObjectId::new(100));
         assert_eq!(restored.schema_object_id, ObjectId::new(200));
         assert_eq!(
@@ -700,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn table_descriptor_with_parents_roundtrip() {
+    fn table_descriptor_with_lens_roundtrip() {
         use crate::sql::lens::ColumnTransform;
 
         let schema = TableSchema {
@@ -712,18 +679,13 @@ mod tests {
             }],
         };
 
-        let parent1 = DescriptorId::from_object_id(ObjectId::new(1));
-        let parent2 = DescriptorId::from_object_id(ObjectId::new(2));
-
-        // Create a lens for each parent
-        let lens1 = Lens::from_forward(vec![ColumnTransform::rename("old_name", "new_name")]);
-        let lens2 = Lens::identity();
+        // Create a lens from parent
+        let lens = Lens::from_forward(vec![ColumnTransform::rename("old_name", "new_name")]);
 
         let descriptor = TableDescriptor {
             schema: schema.clone(),
             policies: TablePolicies::default(),
-            parent_descriptors: vec![parent1, parent2],
-            lenses: vec![lens1.clone(), lens2.clone()],
+            lens_from_parent: Some(lens.clone()),
             rows_object_id: ObjectId::new(100),
             schema_object_id: ObjectId::new(200),
             index_object_ids: HashMap::new(),
@@ -732,44 +694,40 @@ mod tests {
         let bytes = descriptor.to_bytes();
         let restored = TableDescriptor::from_bytes(&bytes).unwrap();
 
-        assert_eq!(restored.parent_descriptors.len(), 2);
-        assert_eq!(restored.parent_descriptors[0], parent1);
-        assert_eq!(restored.parent_descriptors[1], parent2);
-        assert_eq!(restored.lenses.len(), 2);
-        // Check first lens has the rename transform
-        assert_eq!(restored.lenses[0].forward.len(), 1);
-        // Check second lens is identity (empty)
-        assert_eq!(restored.lenses[1].forward.len(), 0);
+        assert!(restored.lens_from_parent.is_some());
+        let restored_lens = restored.lens_from_parent.unwrap();
+        // Check lens has the rename transform
+        assert_eq!(restored_lens.forward.len(), 1);
     }
 
     #[test]
     fn descriptor_id_basics() {
-        // DescriptorId wraps ObjectId
+        // DescriptorId contains ObjectId + version
         let obj_id = ObjectId::new(12345);
-        let desc_id = DescriptorId::from_object_id(obj_id);
+        let desc_id = DescriptorId::new_v1(obj_id);
 
         assert_eq!(desc_id.as_object_id(), obj_id);
+        assert_eq!(desc_id.version(), "v1");
 
-        // Full display matches ObjectId display (26-char Crockford Base32)
-        let full = desc_id.to_string();
-        assert_eq!(full, obj_id.to_string());
-        assert_eq!(full.len(), 26);
-
-        // From/Into conversions
-        let desc_id2: DescriptorId = obj_id.into();
-        assert_eq!(desc_id, desc_id2);
-
-        let obj_id2: ObjectId = desc_id.into();
-        assert_eq!(obj_id, obj_id2);
+        // Display format: object_id@version
+        let display = desc_id.to_string();
+        assert!(display.contains("@v1"));
     }
 
     #[test]
-    fn descriptor_id_new_generates_unique() {
-        let id1 = DescriptorId::new();
-        let id2 = DescriptorId::new();
+    fn descriptor_id_next_version() {
+        let obj_id = ObjectId::new(12345);
+        let v1 = DescriptorId::new_v1(obj_id);
+        let v2 = v1.next_version();
+        let v3 = v2.next_version();
 
-        // New IDs should be different
-        assert_ne!(id1, id2);
+        assert_eq!(v1.version(), "v1");
+        assert_eq!(v2.version(), "v2");
+        assert_eq!(v3.version(), "v3");
+
+        // All share same object_id
+        assert_eq!(v1.object_id, v2.object_id);
+        assert_eq!(v2.object_id, v3.object_id);
     }
 
     // =============================================================================
@@ -787,12 +745,11 @@ mod tests {
         }
     }
 
-    fn make_test_descriptor(parents: Vec<DescriptorId>, lenses: Vec<Lens>) -> TableDescriptor {
+    fn make_test_descriptor(lens_from_parent: Option<Lens>) -> TableDescriptor {
         TableDescriptor {
             schema: make_test_schema("test"),
             policies: TablePolicies::default(),
-            parent_descriptors: parents,
-            lenses,
+            lens_from_parent,
             rows_object_id: ObjectId::new(100),
             schema_object_id: ObjectId::new(200),
             index_object_ids: HashMap::new(),
@@ -801,11 +758,11 @@ mod tests {
 
     #[test]
     fn find_target_schema_single_descriptor() {
-        let id = DescriptorId::from_object_id(ObjectId::new(1));
+        let id = DescriptorId::new_v1(ObjectId::new(1));
         let mut descriptors = HashMap::new();
-        descriptors.insert(id, make_test_descriptor(vec![], vec![]));
+        descriptors.insert(id.clone(), make_test_descriptor(None));
 
-        let result = find_target_schema(&[id], &descriptors);
+        let result = find_target_schema(std::slice::from_ref(&id), &descriptors);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), id);
     }
@@ -819,55 +776,52 @@ mod tests {
 
     #[test]
     fn find_target_schema_linear_chain() {
-        // v1 <- v2 <- v3
-        // v3 is the target (descendant of all)
-        let v1 = DescriptorId::from_object_id(ObjectId::new(1));
-        let v2 = DescriptorId::from_object_id(ObjectId::new(2));
-        let v3 = DescriptorId::from_object_id(ObjectId::new(3));
+        // Same table: v1, v2, v3
+        // v3 is the target (highest version)
+        let obj_id = ObjectId::new(1);
+        let v1 = DescriptorId::new(obj_id, "v1");
+        let v2 = DescriptorId::new(obj_id, "v2");
+        let v3 = DescriptorId::new(obj_id, "v3");
 
         let mut descriptors = HashMap::new();
-        descriptors.insert(v1, make_test_descriptor(vec![], vec![]));
-        descriptors.insert(v2, make_test_descriptor(vec![v1], vec![Lens::identity()]));
-        descriptors.insert(v3, make_test_descriptor(vec![v2], vec![Lens::identity()]));
+        descriptors.insert(v1.clone(), make_test_descriptor(None));
+        descriptors.insert(v2.clone(), make_test_descriptor(Some(Lens::identity())));
+        descriptors.insert(v3.clone(), make_test_descriptor(Some(Lens::identity())));
 
-        // v3 should be the target
-        let result = find_target_schema(&[v1, v2, v3], &descriptors);
+        // v3 should be the target (highest version number)
+        let result = find_target_schema(&[v1.clone(), v2.clone(), v3.clone()], &descriptors);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), v3);
 
         // Order shouldn't matter
-        let result2 = find_target_schema(&[v3, v1, v2], &descriptors);
+        let result2 = find_target_schema(&[v3.clone(), v1.clone(), v2.clone()], &descriptors);
         assert!(result2.is_ok());
         assert_eq!(result2.unwrap(), v3);
     }
 
     #[test]
-    fn find_target_schema_diverged_returns_error() {
-        // v1 <- v2
-        // v1 <- v3
-        // v2 and v3 are siblings (neither is ancestor of the other)
-        let v1 = DescriptorId::from_object_id(ObjectId::new(1));
-        let v2 = DescriptorId::from_object_id(ObjectId::new(2));
-        let v3 = DescriptorId::from_object_id(ObjectId::new(3));
+    fn find_target_schema_different_tables_returns_error() {
+        // Different tables (different ObjectIds) - can't compare
+        let v1 = DescriptorId::new_v1(ObjectId::new(1));
+        let v2 = DescriptorId::new_v1(ObjectId::new(2));
 
         let mut descriptors = HashMap::new();
-        descriptors.insert(v1, make_test_descriptor(vec![], vec![]));
-        descriptors.insert(v2, make_test_descriptor(vec![v1], vec![Lens::identity()]));
-        descriptors.insert(v3, make_test_descriptor(vec![v1], vec![Lens::identity()]));
+        descriptors.insert(v1.clone(), make_test_descriptor(None));
+        descriptors.insert(v2.clone(), make_test_descriptor(None));
 
-        // v2 and v3 are diverged
-        let result = find_target_schema(&[v2, v3], &descriptors);
+        // Different tables can't be resolved
+        let result = find_target_schema(&[v1, v2], &descriptors);
         assert!(matches!(result, Err(SchemaConflictError::Diverged(_))));
     }
 
     #[test]
     fn get_lens_path_identity() {
-        let id = DescriptorId::from_object_id(ObjectId::new(1));
+        let id = DescriptorId::new_v1(ObjectId::new(1));
         let mut descriptors = HashMap::new();
-        descriptors.insert(id, make_test_descriptor(vec![], vec![]));
+        descriptors.insert(id.clone(), make_test_descriptor(None));
 
         // Same source and target should return identity lens
-        let lens = get_lens_path(id, id, &descriptors);
+        let lens = get_lens_path(&id, &id, &descriptors);
         assert!(lens.is_some());
         assert!(lens.unwrap().forward.is_empty());
     }
@@ -876,9 +830,10 @@ mod tests {
     fn get_lens_path_linear_chain() {
         use crate::sql::lens::ColumnTransform;
 
-        let v1 = DescriptorId::from_object_id(ObjectId::new(1));
-        let v2 = DescriptorId::from_object_id(ObjectId::new(2));
-        let v3 = DescriptorId::from_object_id(ObjectId::new(3));
+        let obj_id = ObjectId::new(1);
+        let v1 = DescriptorId::new(obj_id, "v1");
+        let v2 = DescriptorId::new(obj_id, "v2");
+        let v3 = DescriptorId::new(obj_id, "v3");
 
         // v1 -> v2 (rename a -> b)
         // v2 -> v3 (rename b -> c)
@@ -886,12 +841,12 @@ mod tests {
         let lens2 = Lens::from_forward(vec![ColumnTransform::rename("b", "c")]);
 
         let mut descriptors = HashMap::new();
-        descriptors.insert(v1, make_test_descriptor(vec![], vec![]));
-        descriptors.insert(v2, make_test_descriptor(vec![v1], vec![lens1]));
-        descriptors.insert(v3, make_test_descriptor(vec![v2], vec![lens2]));
+        descriptors.insert(v1.clone(), make_test_descriptor(None));
+        descriptors.insert(v2.clone(), make_test_descriptor(Some(lens1)));
+        descriptors.insert(v3.clone(), make_test_descriptor(Some(lens2)));
 
         // Path from v1 to v3 should exist
-        let lens = get_lens_path(v1, v3, &descriptors);
+        let lens = get_lens_path(&v1, &v3, &descriptors);
         assert!(lens.is_some());
 
         // The composed lens should have 2 transforms
@@ -900,16 +855,25 @@ mod tests {
     }
 
     #[test]
-    fn get_lens_path_no_path() {
-        let v1 = DescriptorId::from_object_id(ObjectId::new(1));
-        let v2 = DescriptorId::from_object_id(ObjectId::new(2));
+    fn get_lens_path_no_path_different_tables() {
+        let v1 = DescriptorId::new_v1(ObjectId::new(1));
+        let v2 = DescriptorId::new_v1(ObjectId::new(2));
 
         let mut descriptors = HashMap::new();
-        descriptors.insert(v1, make_test_descriptor(vec![], vec![]));
-        descriptors.insert(v2, make_test_descriptor(vec![], vec![]));
+        descriptors.insert(v1.clone(), make_test_descriptor(None));
+        descriptors.insert(v2.clone(), make_test_descriptor(None));
 
-        // No path between unrelated descriptors
-        let lens = get_lens_path(v1, v2, &descriptors);
+        // No path between different tables
+        let lens = get_lens_path(&v1, &v2, &descriptors);
         assert!(lens.is_none());
+    }
+
+    #[test]
+    fn compare_versions_ordering() {
+        // v1 < v2 < v3
+        assert_eq!(compare_versions("v1", "v2"), std::cmp::Ordering::Less);
+        assert_eq!(compare_versions("v2", "v1"), std::cmp::Ordering::Greater);
+        assert_eq!(compare_versions("v1", "v1"), std::cmp::Ordering::Equal);
+        assert_eq!(compare_versions("v10", "v2"), std::cmp::Ordering::Greater);
     }
 }

@@ -1340,17 +1340,19 @@ impl LensContext {
 
     /// Get the direct lens from source to target (if registered).
     pub fn get_lens(&self, source: &DescriptorId, target: &DescriptorId) -> Option<&Lens> {
-        self.lenses.get(&(*source, *target))
+        self.lenses.get(&(source.clone(), target.clone()))
     }
 
     /// Get the reverse lens from target to source.
     ///
     /// Uses the backward transforms of the forward lens.
     pub fn get_reverse_lens(&self, target: &DescriptorId, source: &DescriptorId) -> Option<Lens> {
-        self.lenses.get(&(*source, *target)).map(|lens| {
-            // Create reverse lens by swapping forward/backward
-            Lens::new(lens.backward.clone(), lens.forward.clone())
-        })
+        self.lenses
+            .get(&(source.clone(), target.clone()))
+            .map(|lens| {
+                // Create reverse lens by swapping forward/backward
+                Lens::new(lens.backward.clone(), lens.forward.clone())
+            })
     }
 
     /// Transform a row from source schema to target schema.
@@ -1390,8 +1392,8 @@ impl LensContext {
     /// Check if a lens exists for the given source/target pair.
     pub fn has_lens(&self, source: &DescriptorId, target: &DescriptorId) -> bool {
         source == target
-            || self.lenses.contains_key(&(*source, *target))
-            || self.lenses.contains_key(&(*target, *source))
+            || self.lenses.contains_key(&(source.clone(), target.clone()))
+            || self.lenses.contains_key(&(target.clone(), source.clone()))
     }
 
     /// Get all registered lenses.
@@ -2205,12 +2207,12 @@ mod tests {
         let mut ctx = LensContext::new();
 
         // Create descriptor IDs
-        let id1 = DescriptorId::from_object_id(ObjectId::new(1));
-        let id2 = DescriptorId::from_object_id(ObjectId::new(2));
+        let id1 = DescriptorId::new_v1(ObjectId::new(1));
+        let id2 = DescriptorId::new_v1(ObjectId::new(2));
 
         // Register a lens
         let lens = Lens::from_forward(vec![ColumnTransform::rename("a", "b")]);
-        ctx.register_lens(id1, id2, lens.clone());
+        ctx.register_lens(id1.clone(), id2.clone(), lens.clone());
 
         // Should be able to get it
         assert!(ctx.get_lens(&id1, &id2).is_some());
@@ -2225,12 +2227,12 @@ mod tests {
         let mut ctx = LensContext::new();
 
         // Create descriptor IDs
-        let id_v1 = DescriptorId::from_object_id(ObjectId::new(1));
-        let id_v2 = DescriptorId::from_object_id(ObjectId::new(2));
+        let id_v1 = DescriptorId::new_v1(ObjectId::new(1));
+        let id_v2 = DescriptorId::new_v1(ObjectId::new(2));
 
         // Register rename lens (title → name)
         let lens = Lens::from_forward(vec![ColumnTransform::rename("title", "name")]);
-        ctx.register_lens(id_v1, id_v2, lens);
+        ctx.register_lens(id_v1.clone(), id_v2.clone(), lens);
 
         // Create a v1 row with 'title'
         let v1_desc = Arc::new(RowDescriptor::new([(
@@ -2252,7 +2254,7 @@ mod tests {
     fn test_lens_context_transform_same_version() {
         let ctx = LensContext::new();
 
-        let id = DescriptorId::from_object_id(ObjectId::new(1));
+        let id = DescriptorId::new_v1(ObjectId::new(1));
 
         // Create a row
         let desc = Arc::new(RowDescriptor::new([(
@@ -2274,12 +2276,12 @@ mod tests {
         let mut ctx = LensContext::new();
 
         // Create descriptor IDs
-        let id_v1 = DescriptorId::from_object_id(ObjectId::new(1));
-        let id_v2 = DescriptorId::from_object_id(ObjectId::new(2));
+        let id_v1 = DescriptorId::new_v1(ObjectId::new(1));
+        let id_v2 = DescriptorId::new_v1(ObjectId::new(2));
 
         // Register rename lens (title → name), only v1→v2
         let lens = Lens::from_forward(vec![ColumnTransform::rename("title", "name")]);
-        ctx.register_lens(id_v1, id_v2, lens);
+        ctx.register_lens(id_v1.clone(), id_v2.clone(), lens);
 
         // Create a v2 row with 'name'
         let v2_desc = Arc::new(RowDescriptor::new([(
@@ -2302,15 +2304,15 @@ mod tests {
         let mut lenses = LensContext::new();
 
         // Create descriptor IDs
-        let id_v1 = DescriptorId::from_object_id(ObjectId::new(1));
-        let id_v2 = DescriptorId::from_object_id(ObjectId::new(2));
+        let id_v1 = DescriptorId::new_v1(ObjectId::new(1));
+        let id_v2 = DescriptorId::new_v1(ObjectId::new(2));
 
         // Register lens
         let lens = Lens::from_forward(vec![ColumnTransform::rename("old", "new")]);
-        lenses.register_lens(id_v1, id_v2, lens);
+        lenses.register_lens(id_v1.clone(), id_v2.clone(), lens);
 
         // Create query context targeting v2
-        let query_ctx = QueryLensContext::with_lenses(id_v2, lenses);
+        let query_ctx = QueryLensContext::with_lenses(id_v2.clone(), lenses);
 
         // Should be able to transform v1 rows to v2
         assert!(query_ctx.can_transform(&id_v1));

@@ -459,11 +459,12 @@ impl DatabaseState {
 
     /// Load a TableDescriptor by its DescriptorId.
     ///
-    /// The DescriptorId is an ObjectId, so we can read the descriptor content
-    /// directly from the underlying LocalNode.
+    /// The DescriptorId contains both the ObjectId and version string,
+    /// so we read from the version branch on the descriptor object.
     pub fn load_descriptor_by_id(&self, descriptor_id: DescriptorId) -> Option<TableDescriptor> {
         let object_id = descriptor_id.as_object_id();
-        let data = self.node.read(object_id, "main").ok()??;
+        let version_branch = &descriptor_id.version;
+        let data = self.node.read(object_id, version_branch).ok()??;
         TableDescriptor::from_bytes(&data).ok()
     }
 
@@ -483,8 +484,9 @@ impl DatabaseState {
 
     /// Build a LensContext containing lenses for transforming between schema versions.
     ///
-    /// This traverses the descriptor chain for a table, collecting lenses
-    /// from each descriptor's parent relationships.
+    /// With branch-based versioning, this iterates through all version branches
+    /// on the descriptor object and collects lenses from each version's
+    /// `lens_from_parent` field.
     ///
     /// Returns an empty context if the table has no migrations.
     pub fn build_lens_context_for_table(&self, table: &str) -> crate::sql::lens::LensContext {
@@ -492,47 +494,53 @@ impl DatabaseState {
 
         let mut ctx = LensContext::new();
 
-        // Get current descriptor ID from the catalog
-        let catalog_bytes = match self.node.read(self.catalog_object_id, "main") {
-            Ok(Some(data)) => data,
-            _ => return ctx,
+        // Get descriptor object ID
+        let descriptor_objects = self.descriptor_objects.read().unwrap();
+        let Some(&desc_object_id) = descriptor_objects.get(table) else {
+            return ctx;
         };
-        let catalog = match Catalog::from_bytes(&catalog_bytes) {
-            Ok(c) => c,
-            Err(_) => return ctx,
-        };
-        let Some(current_desc_id) = catalog.get_descriptor_id(table) else {
+        drop(descriptor_objects);
+
+        // Get the object to read all branches
+        let Some(object) = self.node.get_object(desc_object_id) else {
             return ctx;
         };
 
-        // Load current descriptor
-        let Some(current_descriptor) = self.load_descriptor_by_id(current_desc_id) else {
-            return ctx;
-        };
+        // Collect all versions with their descriptors
+        let object_guard = object.read().unwrap();
+        let mut versions: Vec<(String, TableDescriptor)> = Vec::new();
 
-        // Build lens context by traversing parent chain
-        let mut visited = std::collections::HashSet::new();
-        let mut to_process = vec![(current_desc_id, current_descriptor)];
-
-        while let Some((desc_id, descriptor)) = to_process.pop() {
-            if visited.contains(&desc_id) {
-                continue;
+        for branch_name in object_guard.branch_names() {
+            // Read descriptor from this branch
+            if let Ok(Some(data)) = self.node.read(desc_object_id, branch_name)
+                && let Ok(descriptor) = TableDescriptor::from_bytes(&data)
+            {
+                versions.push((branch_name.to_string(), descriptor));
             }
-            visited.insert(desc_id);
+        }
+        drop(object_guard);
 
-            // Register lenses from this descriptor to its parents
-            for (i, parent_id) in descriptor.parent_descriptors.iter().enumerate() {
-                if let Some(lens) = descriptor.lenses.get(i) {
-                    // Register forward lens: parent → this descriptor
-                    ctx.register_lens(*parent_id, desc_id, lens.clone());
-                }
+        // Sort versions by version number (v1, v2, v3, ...)
+        versions.sort_by(|(a, _), (b, _)| {
+            let a_num = a.strip_prefix('v').and_then(|n| n.parse::<u32>().ok());
+            let b_num = b.strip_prefix('v').and_then(|n| n.parse::<u32>().ok());
+            match (a_num, b_num) {
+                (Some(an), Some(bn)) => an.cmp(&bn),
+                _ => a.cmp(b),
+            }
+        });
 
-                // Load parent descriptor to continue traversal
-                if !visited.contains(parent_id)
-                    && let Some(parent_desc) = self.load_descriptor_by_id(*parent_id)
-                {
-                    to_process.push((*parent_id, parent_desc));
-                }
+        // Register lenses between consecutive versions
+        for (version, descriptor) in &versions {
+            if let Some(lens) = &descriptor.lens_from_parent
+                && let Some(num) = version.strip_prefix('v')
+                && let Ok(n) = num.parse::<u32>()
+                && n > 1
+            {
+                let parent_version = format!("v{}", n - 1);
+                let parent_id = DescriptorId::new(desc_object_id, &parent_version);
+                let this_id = DescriptorId::new(desc_object_id, version);
+                ctx.register_lens(parent_id, this_id, lens.clone());
             }
         }
 
@@ -1221,10 +1229,10 @@ impl Database {
         }
 
         // Create table descriptor object with deterministic ID
-        // The DescriptorId uses the same ObjectId so catalog and storage are consistent
+        // Each schema version is a branch on this object (v1, v2, etc.)
         let descriptor_key = format!("descriptor:{}", schema.name);
         let descriptor_object_id = crate::ObjectId::from_key(&descriptor_key);
-        let desc_id = DescriptorId::from_object_id(descriptor_object_id);
+        let desc_id = DescriptorId::new_v1(descriptor_object_id);
 
         self.state
             .node
@@ -1233,14 +1241,15 @@ impl Database {
         let descriptor = TableDescriptor {
             schema: schema.clone(),
             policies: TablePolicies::default(),
-            parent_descriptors: vec![], // Initial schema has no parents
-            lenses: vec![],             // No lenses for root schema
+            lens_from_parent: None, // Initial schema (v1) has no parent
             rows_object_id: rows_id,
             schema_object_id: schema_id,
             index_object_ids,
         };
 
-        self.state
+        // Write initial schema to "main" branch first (required to create initial commit)
+        let initial_commit = self
+            .state
             .node
             .write(
                 descriptor_object_id,
@@ -1250,6 +1259,18 @@ impl Database {
                 timestamp_now(),
             )
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+
+        // Create "v1" branch from main at the initial commit
+        {
+            let object = self
+                .state
+                .node
+                .get_object(descriptor_object_id)
+                .ok_or_else(|| DatabaseError::Storage("descriptor object not found".to_string()))?;
+            let mut obj = object.write().unwrap();
+            obj.create_branch("v1", "main", &initial_commit)
+                .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+        }
 
         self.state
             .descriptor_objects
@@ -4303,22 +4324,7 @@ impl Database {
 
         // Get the current descriptor and its ID from the catalog
         let (old_descriptor, old_descriptor_id) = {
-            let descriptor_objects = self.state.descriptor_objects.read().unwrap();
-            let descriptor_object_id = descriptor_objects
-                .get(table)
-                .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
-
-            let data = self
-                .state
-                .node
-                .read(*descriptor_object_id, "main")
-                .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
-                .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
-
-            let descriptor = TableDescriptor::from_bytes(&data)
-                .map_err(|e| MigrationError::CatalogError(e.to_string()))?;
-
-            // Get the descriptor ID from the catalog
+            // Get the descriptor ID from the catalog first
             let catalog_bytes = self
                 .state
                 .node
@@ -4331,20 +4337,31 @@ impl Database {
                 .get_descriptor_id(table)
                 .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
 
+            // Read the descriptor from the version branch
+            let data = self
+                .state
+                .node
+                .read(old_id.as_object_id(), &old_id.version)
+                .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
+                .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+
+            let descriptor = TableDescriptor::from_bytes(&data)
+                .map_err(|e| MigrationError::CatalogError(e.to_string()))?;
+
             (descriptor, old_id)
         };
 
-        // Create new descriptor with parent pointer and lens
+        // Create new descriptor with lens from parent version
         let new_descriptor = TableDescriptor {
             schema: new_schema.clone(),
             policies: old_descriptor.policies.clone(),
-            parent_descriptors: vec![old_descriptor_id],
-            lenses: vec![lens.clone()],
+            lens_from_parent: Some(lens.clone()), // Transform from previous version
             rows_object_id: old_descriptor.rows_object_id,
             schema_object_id: old_descriptor.schema_object_id,
             index_object_ids: old_descriptor.index_object_ids.clone(),
         };
-        let new_descriptor_id = DescriptorId::new();
+        // New version on same object (e.g., v1 -> v2)
+        let new_descriptor_id = old_descriptor_id.next_version();
 
         // Read all current rows
         let rows = self.state.read_all_rows(table);
@@ -4404,21 +4421,42 @@ impl Database {
             }
         }
 
-        // Store the new descriptor at its new object ID
+        // Store the new descriptor on the new version branch
+        // (Same object, new branch for the new version)
         {
-            let new_desc_object_id = new_descriptor_id.as_object_id();
+            let desc_object_id = new_descriptor_id.as_object_id();
+            let new_version_branch = new_descriptor_id.version();
+            let old_version_branch = &old_descriptor_id.version;
 
-            // Ensure the object exists
-            self.state
-                .node
-                .ensure_object(new_desc_object_id, "descriptor");
+            // First, get the tip commit from the old version branch
+            let object =
+                self.state.node.get_object(desc_object_id).ok_or_else(|| {
+                    DatabaseError::Storage("descriptor object not found".to_string())
+                })?;
 
-            // Write the descriptor content
+            let tip_commit = {
+                let obj = object.read().unwrap();
+                let old_branch = obj.branch(old_version_branch).ok_or_else(|| {
+                    DatabaseError::Storage("old version branch not found".to_string())
+                })?;
+                *old_branch.frontier().first().ok_or_else(|| {
+                    DatabaseError::Storage("old version branch has no commits".to_string())
+                })?
+            };
+
+            // Create new version branch from old version's tip
+            {
+                let mut obj = object.write().unwrap();
+                obj.create_branch(new_version_branch, old_version_branch, &tip_commit)
+                    .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+            }
+
+            // Write the new descriptor content to the new version branch
             self.state
                 .node
                 .write(
-                    new_desc_object_id,
-                    "main",
+                    desc_object_id,
+                    new_version_branch,
                     &new_descriptor.to_bytes(),
                     "migration",
                     timestamp_now(),
@@ -4427,9 +4465,7 @@ impl Database {
                     DatabaseError::Storage(format!("failed to write descriptor: {:?}", e))
                 })?;
 
-            // Update descriptor_objects to point to the new object
-            let mut descriptor_objects = self.state.descriptor_objects.write().unwrap();
-            descriptor_objects.insert(table.to_string(), new_desc_object_id);
+            // descriptor_objects map stays the same (same ObjectId)
         }
 
         // Update the catalog
@@ -4443,7 +4479,7 @@ impl Database {
         let mut catalog = Catalog::from_bytes(&catalog_data)
             .map_err(|e| DatabaseError::Storage(e.to_string()))?;
 
-        catalog.update_table(table.to_string(), new_descriptor_id);
+        catalog.update_table(table.to_string(), new_descriptor_id.clone());
 
         self.state
             .node
@@ -4460,7 +4496,7 @@ impl Database {
         // This would invalidate queries and require re-building with new schema
 
         Ok(MigrationResult {
-            new_descriptor_id,
+            new_descriptor_id: new_descriptor_id.clone(),
             lens,
             migrated_count,
             invisible_count,
@@ -4490,10 +4526,14 @@ impl Database {
 
     /// Get the current descriptor for a table.
     pub fn get_descriptor(&self, table: &str) -> Option<TableDescriptor> {
-        let descriptor_objects = self.state.descriptor_objects.read().unwrap();
-        let descriptor_id = descriptor_objects.get(table)?;
-
-        let data = self.state.node.read(*descriptor_id, "main").ok()??;
+        // Get the current descriptor ID from catalog (includes version)
+        let desc_id = self.get_descriptor_id(table).ok()?;
+        // Read from the version branch
+        let data = self
+            .state
+            .node
+            .read(desc_id.as_object_id(), &desc_id.version)
+            .ok()??;
         TableDescriptor::from_bytes(&data).ok()
     }
 

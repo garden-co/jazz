@@ -692,9 +692,12 @@ impl SchemaRegistry {
     ///
     /// This is used when creating a new table (no parent schema).
     pub fn register_table(&mut self, table_name: String, descriptor: TableDescriptor) {
-        let id = DescriptorId::new();
-        self.descriptors.insert(id, descriptor);
-        self.catalog.tables.insert(table_name.clone(), id);
+        // Create deterministic object ID for the descriptor
+        let descriptor_key = format!("descriptor:{}", table_name);
+        let object_id = crate::ObjectId::from_key(&descriptor_key);
+        let id = DescriptorId::new_v1(object_id);
+        self.descriptors.insert(id.clone(), descriptor);
+        self.catalog.tables.insert(table_name.clone(), id.clone());
         self.schema_history.entry(table_name).or_default().push(id);
     }
 
@@ -724,37 +727,39 @@ impl SchemaRegistry {
         let current_descriptor = self
             .descriptors
             .get(&current_id)
-            .ok_or(SchemaRegistryError::DescriptorNotFound(current_id))?;
+            .ok_or_else(|| SchemaRegistryError::DescriptorNotFound(current_id.clone()))?;
 
         // Generate lens from schema diff
         let diff = diff_schemas(&current_descriptor.schema, &new_schema);
         let result = generate_lens(&diff, &options);
         let warnings: Vec<String> = result.warnings.iter().map(|w| w.message.clone()).collect();
 
-        // Create new descriptor
+        // Create new descriptor with lens from parent
         let new_descriptor = TableDescriptor {
             schema: new_schema,
             policies: current_descriptor.policies.clone(),
-            parent_descriptors: vec![current_id],
-            lenses: vec![result.lens.clone()],
+            lens_from_parent: Some(result.lens.clone()),
             rows_object_id: current_descriptor.rows_object_id,
             schema_object_id: current_descriptor.schema_object_id,
             index_object_ids: current_descriptor.index_object_ids.clone(),
         };
 
-        let new_id = DescriptorId::new();
+        // New version on same object (e.g., v1 -> v2)
+        let new_id = current_id.next_version();
 
         // Store new descriptor
-        self.descriptors.insert(new_id, new_descriptor);
+        self.descriptors.insert(new_id.clone(), new_descriptor);
 
         // Update catalog
-        self.catalog.tables.insert(table_name.to_string(), new_id);
+        self.catalog
+            .tables
+            .insert(table_name.to_string(), new_id.clone());
 
         // Update history
         self.schema_history
             .entry(table_name.to_string())
             .or_default()
-            .push(new_id);
+            .push(new_id.clone());
 
         Ok(SchemaDeployResult {
             descriptor_id: new_id,
@@ -807,7 +812,11 @@ impl SchemaRegistry {
         // Descriptors
         buf.extend_from_slice(&(self.descriptors.len() as u32).to_le_bytes());
         for (id, descriptor) in &self.descriptors {
+            // DescriptorId: object_id (16 bytes) + version_len (4 bytes) + version (variable)
             buf.extend_from_slice(&u128::from(id.as_object_id()).to_le_bytes());
+            let version_bytes = id.version.as_bytes();
+            buf.extend_from_slice(&(version_bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(version_bytes);
             let desc_bytes = descriptor.to_bytes();
             buf.extend_from_slice(&(desc_bytes.len() as u32).to_le_bytes());
             buf.extend_from_slice(&desc_bytes);
@@ -821,7 +830,11 @@ impl SchemaRegistry {
             buf.extend_from_slice(name_bytes);
             buf.extend_from_slice(&(history.len() as u32).to_le_bytes());
             for id in history {
+                // DescriptorId: object_id (16 bytes) + version_len (4 bytes) + version (variable)
                 buf.extend_from_slice(&u128::from(id.as_object_id()).to_le_bytes());
+                let version_bytes = id.version.as_bytes();
+                buf.extend_from_slice(&(version_bytes.len() as u32).to_le_bytes());
+                buf.extend_from_slice(version_bytes);
             }
         }
 
@@ -861,7 +874,7 @@ impl SchemaRegistry {
 
         let mut descriptors = HashMap::with_capacity(num_descriptors);
         for _ in 0..num_descriptors {
-            // DescriptorId (16 bytes - ObjectId)
+            // DescriptorId: object_id (16 bytes) + version_len (4 bytes) + version (variable)
             if data.len() < pos + 16 {
                 return Err(SchemaRegistryError::StorageError(
                     "unexpected EOF".to_string(),
@@ -869,8 +882,28 @@ impl SchemaRegistry {
             }
             let id_bytes: [u8; 16] = data[pos..pos + 16].try_into().unwrap();
             let object_id = ObjectId::new(u128::from_le_bytes(id_bytes));
-            let id = DescriptorId::from_object_id(object_id);
             pos += 16;
+
+            // Version length
+            if data.len() < pos + 4 {
+                return Err(SchemaRegistryError::StorageError(
+                    "unexpected EOF".to_string(),
+                ));
+            }
+            let version_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+            pos += 4;
+
+            // Version string
+            if data.len() < pos + version_len {
+                return Err(SchemaRegistryError::StorageError(
+                    "unexpected EOF".to_string(),
+                ));
+            }
+            let version = String::from_utf8(data[pos..pos + version_len].to_vec())
+                .map_err(|_| SchemaRegistryError::StorageError("invalid UTF-8".to_string()))?;
+            pos += version_len;
+
+            let id = DescriptorId::new(object_id, version);
 
             // Descriptor length
             if data.len() < pos + 4 {
@@ -934,6 +967,7 @@ impl SchemaRegistry {
 
             let mut history = Vec::with_capacity(history_len);
             for _ in 0..history_len {
+                // DescriptorId: object_id (16 bytes) + version_len (4 bytes) + version (variable)
                 if data.len() < pos + 16 {
                     return Err(SchemaRegistryError::StorageError(
                         "unexpected EOF".to_string(),
@@ -941,8 +975,29 @@ impl SchemaRegistry {
                 }
                 let id_bytes: [u8; 16] = data[pos..pos + 16].try_into().unwrap();
                 let object_id = ObjectId::new(u128::from_le_bytes(id_bytes));
-                history.push(DescriptorId::from_object_id(object_id));
                 pos += 16;
+
+                // Version length
+                if data.len() < pos + 4 {
+                    return Err(SchemaRegistryError::StorageError(
+                        "unexpected EOF".to_string(),
+                    ));
+                }
+                let version_len =
+                    u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+                pos += 4;
+
+                // Version string
+                if data.len() < pos + version_len {
+                    return Err(SchemaRegistryError::StorageError(
+                        "unexpected EOF".to_string(),
+                    ));
+                }
+                let version = String::from_utf8(data[pos..pos + version_len].to_vec())
+                    .map_err(|_| SchemaRegistryError::StorageError("invalid UTF-8".to_string()))?;
+                pos += version_len;
+
+                history.push(DescriptorId::new(object_id, version));
             }
 
             schema_history.insert(table_name, history);
@@ -1180,8 +1235,7 @@ mod tests {
         let descriptor = TableDescriptor {
             schema: schema.clone(),
             policies: TablePolicies::default(),
-            parent_descriptors: vec![],
-            lenses: vec![],
+            lens_from_parent: None,
             rows_object_id: ObjectId::new(1),
             schema_object_id: ObjectId::new(2),
             index_object_ids: HashMap::new(),
@@ -1220,8 +1274,7 @@ mod tests {
         let descriptor = TableDescriptor {
             schema: schema.clone(),
             policies: TablePolicies::default(),
-            parent_descriptors: vec![],
-            lenses: vec![],
+            lens_from_parent: None,
             rows_object_id: ObjectId::new(1),
             schema_object_id: ObjectId::new(2),
             index_object_ids: HashMap::new(),
@@ -1285,8 +1338,7 @@ mod tests {
         let descriptor = TableDescriptor {
             schema,
             policies: TablePolicies::default(),
-            parent_descriptors: vec![],
-            lenses: vec![],
+            lens_from_parent: None,
             rows_object_id: ObjectId::new(1),
             schema_object_id: ObjectId::new(2),
             index_object_ids: HashMap::new(),
