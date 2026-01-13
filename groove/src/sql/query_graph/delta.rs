@@ -8,54 +8,6 @@ use crate::object::ObjectId;
 use crate::sql::row_buffer::{OwnedRow, RowDescriptor};
 use crate::sql::schema::TableSchema;
 
-/// A change to commit topology on a branch.
-///
-/// Used by BranchMergeNode to track when commits are added/removed from branches.
-/// Unlike RowDelta which represents row-level changes, CommitDelta represents
-/// changes to the underlying commit graph that may affect merged row values.
-#[derive(Clone, Debug)]
-pub enum CommitDelta {
-    /// Object appeared or its commits changed on this branch.
-    ///
-    /// Contains the new frontier and decoded content for each frontier tip.
-    CommitsChanged {
-        /// The object ID affected.
-        object_id: ObjectId,
-        /// Branch this change occurred on.
-        branch: String,
-        /// New frontier commit IDs after this change.
-        new_frontier: Vec<CommitId>,
-        /// Decoded content for each frontier tip: (commit_id, timestamp, parents, row).
-        /// Parents are included to enable proper LCA computation across branches.
-        tip_contents: Vec<(CommitId, u64, Vec<CommitId>, OwnedRow)>,
-    },
-    /// Object was removed from this branch (all commits gone).
-    ObjectRemoved {
-        /// The object ID that was removed.
-        object_id: ObjectId,
-        /// Branch this removal occurred on.
-        branch: String,
-    },
-}
-
-impl CommitDelta {
-    /// Get the object ID affected by this delta.
-    pub fn object_id(&self) -> ObjectId {
-        match self {
-            CommitDelta::CommitsChanged { object_id, .. } => *object_id,
-            CommitDelta::ObjectRemoved { object_id, .. } => *object_id,
-        }
-    }
-
-    /// Get the branch this delta occurred on.
-    pub fn branch(&self) -> &str {
-        match self {
-            CommitDelta::CommitsChanged { branch, .. } => branch,
-            CommitDelta::ObjectRemoved { branch, .. } => branch,
-        }
-    }
-}
-
 /// Reference to prior row state via commit graph.
 ///
 /// Contains the frontier commit IDs before a write operation.

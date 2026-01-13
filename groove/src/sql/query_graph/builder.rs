@@ -132,40 +132,20 @@ impl QueryGraphBuilder {
         id
     }
 
-    /// Create CommitSource + BranchMerge nodes for branch-aware queries.
+    /// Create a BranchMerge node for branch-aware queries.
     ///
-    /// Creates one CommitSource node per branch, all feeding into a single
-    /// BranchMerge node that performs per-column LWW merge.
+    /// Creates a BranchMerge entry point that reads from multiple branches
+    /// and performs per-column LWW merge using pre-computed metadata.
     fn branch_merge_scan(&mut self) -> NodeId {
         let descriptor = Arc::new(RowDescriptor::from_table_schema(&self.primary_schema));
-        let num_branches = self.branches.len();
         let table = self.primary_table.clone();
-
-        // Clone branches to avoid borrow conflict
         let branches: Vec<String> = self.branches.clone();
 
-        // Create CommitSource for each branch
-        for (idx, branch) in branches.iter().enumerate() {
-            let id = self.alloc_id();
-            self.nodes.push(QueryNode::CommitSource {
-                table: table.clone(),
-                branch: branch.clone(),
-                branch_index: idx as u8,
-                descriptor: descriptor.clone(),
-                object_frontiers: HashMap::new(),
-                cached_content: HashMap::new(),
-            });
-            // Note: we don't use the id here since CommitSource feeds into BranchMerge
-            // via entry points, not via direct edges
-            let _ = id;
-        }
-
-        // Create BranchMerge node
+        // Create BranchMerge node (entry point, no separate CommitSource nodes needed)
         let merge_id = self.alloc_id();
         self.nodes.push(QueryNode::BranchMerge {
             table,
-            branch_names: branches.clone(),
-            num_branches,
+            branch_names: branches,
             descriptor,
             object_states: HashMap::new(),
         });

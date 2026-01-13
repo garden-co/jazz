@@ -216,8 +216,7 @@ impl QueryGraph {
                     None
                 }
                 QueryNode::TableScan { .. } | QueryNode::IndexLookup { .. } => None,
-                QueryNode::CommitSource { .. } => None, // Source node, no input
-                QueryNode::BranchMerge { .. } => None, // Receives from CommitSource via entry_points
+                QueryNode::BranchMerge { .. } => None, // Source node, no input
             };
 
             if let Some((input_node_id, port)) = input_info
@@ -1448,7 +1447,6 @@ impl QueryGraph {
                             InputPort::Right => format!("{}:Right", node_label),
                             InputPort::Outer => format!("{}:Outer", node_label),
                             InputPort::Inner => format!("{}:Inner", node_label),
-                            InputPort::Branch(i) => format!("{}:Branch({})", node_label, i),
                         }
                     })
                     .collect();
@@ -1487,7 +1485,6 @@ impl QueryGraph {
                         InputPort::Right => format!("{}:Right", node_label),
                         InputPort::Outer => format!("{}:Outer", node_label),
                         InputPort::Inner => format!("{}:Inner", node_label),
-                        InputPort::Branch(i) => format!("{}:Branch({})", node_label, i),
                     }
                 })
                 .collect();

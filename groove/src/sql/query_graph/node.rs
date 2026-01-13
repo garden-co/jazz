@@ -35,31 +35,13 @@ pub enum InputPort {
     Outer,
     /// Inner table input for ArrayAggregate (rows to aggregate into arrays)
     Inner,
-    /// Indexed branch input for BranchMerge nodes.
-    /// Each branch feeding into a merge has a unique index (0..N).
-    Branch(u8),
-}
-
-/// Input state from one branch for BranchMerge.
-#[derive(Clone, Debug)]
-pub struct BranchInput {
-    /// Current frontier commits from this branch.
-    pub frontier: Vec<CommitId>,
-    /// Decoded row content for each frontier tip: (commit_id, timestamp, parents, content).
-    /// Parents are included to enable proper LCA computation across branches.
-    pub tip_contents: Vec<(CommitId, u64, Vec<CommitId>, OwnedRow)>,
 }
 
 /// Per-object merge state in BranchMerge node.
 ///
-/// Simplified for metadata-based merge: we just cache the merged result.
-/// Branch input state is fetched on-demand from the actual Branch objects.
+/// Caches the merged result for early cutoff (skip re-emitting if unchanged).
 #[derive(Clone, Debug, Default)]
 pub struct MergedObjectState {
-    /// Per-branch input state. Index corresponds to branch_index.
-    /// None means no data from that branch yet.
-    /// DEPRECATED: Used by old CommitDelta-based flow.
-    pub branch_inputs: Vec<Option<BranchInput>>,
     /// Cached merged result.
     pub cached_merged: Option<OwnedRow>,
 }
@@ -285,43 +267,19 @@ pub enum QueryNode {
         cached_rows: HashMap<ObjectId, OwnedRow>,
     },
 
-    /// Source: track commits on a single branch for a table.
+    /// Entry point: merge commits from multiple branches using per-column LWW.
     ///
-    /// This node monitors commit topology on one branch and emits CommitDeltas
-    /// when commits are added. Used as input to BranchMerge nodes for
-    /// incremental multi-branch merging.
-    CommitSource {
-        /// Table this source watches.
-        table: String,
-        /// Branch name being watched (e.g., "main", "feature").
-        branch: String,
-        /// Branch index (position in the BranchMerge's input list).
-        branch_index: u8,
-        /// Row descriptor for decoding commit content.
-        descriptor: Arc<RowDescriptor>,
-        /// Per-object: known frontier commits.
-        object_frontiers: HashMap<ObjectId, HashSet<CommitId>>,
-        /// Per-object: cached decoded content for each frontier tip.
-        /// Maps: object_id -> (commit_id -> (timestamp, row))
-        cached_content: HashMap<ObjectId, HashMap<CommitId, (u64, OwnedRow)>>,
-    },
-
-    /// Transform: merge commits from multiple branches using per-column LWW.
-    ///
-    /// Acts as a smart entry point that reads branch data directly and merges
+    /// A smart entry point that reads branch data directly and merges
     /// using pre-computed per-column change metadata. Each branch tracks when
     /// each column was last changed (timestamp + author) for its frontier commits,
     /// enabling O(columns × frontiers) merge without LCA computation.
     ///
-    /// The old CommitDelta-based flow is deprecated in favor of the new
-    /// metadata-based merge via `evaluate_branch_merge_with_metadata()`.
+    /// Use `evaluate_branch_merge_with_metadata()` to evaluate this node.
     BranchMerge {
         /// Table being merged.
         table: String,
         /// Branch names to merge from.
         branch_names: Vec<String>,
-        /// Number of branch inputs (deprecated: use branch_names.len()).
-        num_branches: usize,
         /// Row descriptor for merged output rows.
         descriptor: Arc<RowDescriptor>,
         /// Per-object merge state.
@@ -344,7 +302,6 @@ impl QueryNode {
             QueryNode::ArrayAggregate { outer_table, .. } => outer_table,
             QueryNode::LimitOffset { table, .. } => table,
             QueryNode::Projection { table, .. } => table,
-            QueryNode::CommitSource { table, .. } => table,
             QueryNode::BranchMerge { table, .. } => table,
         }
     }
@@ -375,7 +332,6 @@ impl QueryNode {
             }
             QueryNode::LimitOffset { table, .. } => vec![table],
             QueryNode::Projection { table, .. } => vec![table],
-            QueryNode::CommitSource { table, .. } => vec![table],
             QueryNode::BranchMerge { table, .. } => vec![table],
         }
     }
@@ -392,7 +348,6 @@ impl QueryNode {
             QueryNode::ArrayAggregate { .. } => None,  // Uses outer_rows instead
             QueryNode::LimitOffset { visible_ids, .. } => Some(visible_ids),
             QueryNode::Projection { .. } => None, // Uses cached_rows HashMap instead
-            QueryNode::CommitSource { .. } => None, // Uses object_frontiers instead
             QueryNode::BranchMerge { .. } => None, // Uses object_states instead
         }
     }
@@ -409,7 +364,6 @@ impl QueryNode {
             QueryNode::ArrayAggregate { .. } => None,
             QueryNode::LimitOffset { visible_ids, .. } => Some(visible_ids),
             QueryNode::Projection { .. } => None,
-            QueryNode::CommitSource { .. } => None,
             QueryNode::BranchMerge { .. } => None,
         }
     }
@@ -488,8 +442,7 @@ impl QueryNode {
             QueryNode::ArrayAggregate { input, .. } => Some(*input),
             QueryNode::LimitOffset { input, .. } => Some(*input),
             QueryNode::Projection { input, .. } => Some(*input),
-            QueryNode::CommitSource { .. } => None, // Source node, no input
-            QueryNode::BranchMerge { .. } => None,  // Receives from CommitSource via ports
+            QueryNode::BranchMerge { .. } => None, // Entry point, no input node
         }
     }
 
@@ -629,29 +582,15 @@ impl QueryNode {
                 ],
             ),
 
-            QueryNode::CommitSource {
-                table,
-                branch,
-                branch_index,
-                object_frontiers,
-                ..
-            } => (
-                format!("CommitSource [{}]", table),
-                vec![
-                    format!("branch: {} (index {})", branch, branch_index),
-                    format!("tracking: {} objects", object_frontiers.len()),
-                ],
-            ),
-
             QueryNode::BranchMerge {
                 table,
-                num_branches,
+                branch_names,
                 object_states,
                 ..
             } => (
                 format!("BranchMerge [{}]", table),
                 vec![
-                    format!("branches: {}", num_branches),
+                    format!("branches: {:?}", branch_names),
                     format!("objects: {}", object_states.len()),
                 ],
             ),
@@ -709,15 +648,8 @@ impl QueryNode {
                 ..
             } => Self::eval_projection(column_map, output_descriptor, cached_rows, input),
 
-            QueryNode::CommitSource { .. } => {
-                // CommitSource nodes need special handling via evaluate_commit_source
-                // They receive commit notifications, not RowDeltas
-                DeltaBatch::new()
-            }
-
             QueryNode::BranchMerge { .. } => {
-                // BranchMerge nodes need special handling via evaluate_branch_merge
-                // They receive CommitDeltas, not RowDeltas
+                // BranchMerge is an entry point - use evaluate_branch_merge_with_metadata
                 DeltaBatch::new()
             }
         }
@@ -795,13 +727,8 @@ impl QueryNode {
                 ..
             } => Self::eval_projection(column_map, output_descriptor, cached_rows, input),
 
-            QueryNode::CommitSource { .. } => {
-                // CommitSource nodes need special handling via evaluate_commit_source
-                DeltaBatch::new()
-            }
-
             QueryNode::BranchMerge { .. } => {
-                // BranchMerge nodes need special handling via evaluate_branch_merge
+                // BranchMerge is an entry point - use evaluate_branch_merge_with_metadata
                 DeltaBatch::new()
             }
         }
@@ -2987,346 +2914,6 @@ impl QueryNode {
         (new_visible, changes)
     }
 
-    /// Evaluate a CommitSource node when a commit changes.
-    ///
-    /// This is called when commits are added/changed on the branch this node monitors.
-    /// Returns a CommitDelta to be sent to the BranchMerge node.
-    ///
-    /// # Arguments
-    ///
-    /// * `object_id` - The object whose commits changed
-    /// * `new_frontier` - New frontier commit IDs
-    /// * `tip_contents` - Content for each frontier tip: (commit_id, timestamp, parents, row)
-    ///   Parents are included to enable proper LCA computation in BranchMerge.
-    pub fn evaluate_commit_source(
-        &mut self,
-        object_id: ObjectId,
-        new_frontier: Vec<CommitId>,
-        tip_contents: Vec<(CommitId, u64, Vec<CommitId>, OwnedRow)>,
-    ) -> Option<crate::sql::query_graph::delta::CommitDelta> {
-        use crate::sql::query_graph::delta::CommitDelta;
-
-        match self {
-            QueryNode::CommitSource {
-                branch,
-                object_frontiers,
-                cached_content,
-                ..
-            } => {
-                // Check if frontier actually changed
-                let old_frontier: HashSet<CommitId> = object_frontiers
-                    .get(&object_id)
-                    .cloned()
-                    .unwrap_or_default();
-                let new_frontier_set: HashSet<CommitId> = new_frontier.iter().copied().collect();
-
-                if old_frontier == new_frontier_set {
-                    // No change - early cutoff
-                    return None;
-                }
-
-                // Update cached state
-                object_frontiers.insert(object_id, new_frontier_set);
-
-                // Update cached content (we don't need parents for caching)
-                let content_map = cached_content.entry(object_id).or_default();
-                content_map.clear();
-                for (commit_id, ts, _parents, row) in &tip_contents {
-                    content_map.insert(*commit_id, (*ts, row.clone()));
-                }
-
-                // Emit CommitDelta
-                Some(CommitDelta::CommitsChanged {
-                    object_id,
-                    branch: branch.clone(),
-                    new_frontier,
-                    tip_contents,
-                })
-            }
-            _ => None,
-        }
-    }
-
-    /// Evaluate a BranchMerge node when receiving a CommitDelta.
-    ///
-    /// This performs per-column LWW merge across all branches and emits
-    /// RowDeltas when the merged result changes.
-    pub fn evaluate_branch_merge(
-        &mut self,
-        delta: crate::sql::query_graph::delta::CommitDelta,
-        branch_index: u8,
-    ) -> DeltaBatch {
-        use crate::sql::query_graph::delta::CommitDelta;
-        use crate::sql::row_buffer::MergeCandidate;
-
-        match self {
-            QueryNode::BranchMerge {
-                num_branches,
-                descriptor,
-                object_states,
-                ..
-            } => {
-                let mut output = DeltaBatch::new();
-
-                match delta {
-                    CommitDelta::CommitsChanged {
-                        object_id,
-                        new_frontier,
-                        tip_contents,
-                        ..
-                    } => {
-                        // Get or create object state
-                        let state =
-                            object_states
-                                .entry(object_id)
-                                .or_insert_with(|| MergedObjectState {
-                                    branch_inputs: vec![None; *num_branches],
-                                    cached_merged: None,
-                                });
-
-                        // Ensure branch_inputs vector is large enough
-                        while state.branch_inputs.len() <= branch_index as usize {
-                            state.branch_inputs.push(None);
-                        }
-
-                        // Update this branch's input
-                        state.branch_inputs[branch_index as usize] = Some(BranchInput {
-                            frontier: new_frontier,
-                            tip_contents,
-                        });
-
-                        // Collect all tip contents across branches for merge
-                        // Build both candidates and commit info for LCA computation
-                        let all_tips: Vec<_> = state
-                            .branch_inputs
-                            .iter()
-                            .filter_map(|b| b.as_ref())
-                            .flat_map(|b| &b.tip_contents)
-                            .collect();
-
-                        let candidates: Vec<MergeCandidate<'_>> = all_tips
-                            .iter()
-                            .map(|(commit_id, ts, _parents, row)| {
-                                MergeCandidate::new(&row.buffer, *ts, *commit_id.as_bytes())
-                            })
-                            .collect();
-
-                        if candidates.is_empty() {
-                            return output;
-                        }
-
-                        // Compute LCA content using proper DAG traversal when possible,
-                        // falling back to heuristic when DAG info is insufficient.
-                        let lca_content =
-                            Self::compute_lca_content_with_dag(&all_tips, &candidates);
-
-                        // Merge using per-column LWW
-                        let merged = crate::sql::row_buffer::merge_per_column_lww(
-                            &candidates,
-                            &lca_content,
-                            descriptor,
-                        );
-
-                        // Early cutoff: check if result changed
-                        if let Some(prev) = &state.cached_merged
-                            && prev.buffer == merged.buffer
-                        {
-                            return output; // No change
-                        }
-
-                        let was_new = state.cached_merged.is_none();
-                        state.cached_merged = Some(merged.clone());
-
-                        if was_new {
-                            output.push(RowDelta::Added {
-                                id: object_id,
-                                row: merged,
-                            });
-                        } else {
-                            output.push(RowDelta::Updated {
-                                id: object_id,
-                                row: merged,
-                                prior: PriorState::empty(),
-                            });
-                        }
-                    }
-                    CommitDelta::ObjectRemoved { object_id, .. } => {
-                        // Remove this branch's input
-                        if let Some(state) = object_states.get_mut(&object_id) {
-                            if (branch_index as usize) < state.branch_inputs.len() {
-                                state.branch_inputs[branch_index as usize] = None;
-                            }
-
-                            // Check if any branches still have data
-                            let has_data = state.branch_inputs.iter().any(|b| b.is_some());
-
-                            if !has_data {
-                                // All branches empty - object removed
-                                if state.cached_merged.is_some() {
-                                    output.push(RowDelta::Removed {
-                                        id: object_id,
-                                        prior: PriorState::empty(),
-                                    });
-                                }
-                                object_states.remove(&object_id);
-                            } else {
-                                // Re-merge with remaining branches
-                                let all_tips: Vec<_> = state
-                                    .branch_inputs
-                                    .iter()
-                                    .filter_map(|b| b.as_ref())
-                                    .flat_map(|b| &b.tip_contents)
-                                    .collect();
-
-                                let candidates: Vec<MergeCandidate<'_>> = all_tips
-                                    .iter()
-                                    .map(|(commit_id, ts, _parents, row)| {
-                                        MergeCandidate::new(&row.buffer, *ts, *commit_id.as_bytes())
-                                    })
-                                    .collect();
-
-                                if candidates.is_empty() {
-                                    if state.cached_merged.is_some() {
-                                        output.push(RowDelta::Removed {
-                                            id: object_id,
-                                            prior: PriorState::empty(),
-                                        });
-                                    }
-                                    object_states.remove(&object_id);
-                                } else {
-                                    let lca_content =
-                                        Self::compute_lca_content_with_dag(&all_tips, &candidates);
-                                    let merged = crate::sql::row_buffer::merge_per_column_lww(
-                                        &candidates,
-                                        &lca_content,
-                                        descriptor,
-                                    );
-
-                                    if let Some(prev) = &state.cached_merged
-                                        && prev.buffer != merged.buffer
-                                    {
-                                        state.cached_merged = Some(merged.clone());
-                                        output.push(RowDelta::Updated {
-                                            id: object_id,
-                                            row: merged,
-                                            prior: PriorState::empty(),
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                output
-            }
-            _ => DeltaBatch::new(),
-        }
-    }
-
-    /// Compute LCA content using the commit DAG when possible.
-    ///
-    /// When merging commits from multiple branches, we need a "base" to diff against
-    /// to determine which columns each commit changed. The ideal base is the Lowest
-    /// Common Ancestor (LCA) of all the commits.
-    ///
-    /// This function uses the parent information in `all_tips` to build a mini-DAG
-    /// and compute the proper LCA. If the LCA is one of the frontier tips, we use
-    /// its content. Otherwise, we fall back to a heuristic (earliest commit's content).
-    ///
-    /// # Algorithm
-    ///
-    /// 1. If single commit: no base needed
-    /// 2. Build ancestor sets by following parent links
-    /// 3. Find commits that are ancestors of all tips
-    /// 4. The LCA is the common ancestor with no descendants that are also common ancestors
-    /// 5. If LCA is a frontier tip, use its content; otherwise use earliest tip as heuristic
-    fn compute_lca_content_with_dag(
-        all_tips: &[&(CommitId, u64, Vec<CommitId>, OwnedRow)],
-        candidates: &[crate::sql::row_buffer::MergeCandidate<'_>],
-    ) -> Vec<u8> {
-        if candidates.len() <= 1 {
-            // Single commit or empty: no base needed
-            return vec![];
-        }
-
-        // Build a map of commit_id -> (content, parents) for all tips
-        let tip_data: HashMap<CommitId, (&[u8], &[CommitId])> = all_tips
-            .iter()
-            .map(|(id, _ts, parents, row)| (*id, (row.buffer.as_slice(), parents.as_slice())))
-            .collect();
-
-        // Collect all tip commit IDs
-        let tip_ids: HashSet<CommitId> = tip_data.keys().copied().collect();
-
-        // For each tip, compute its ancestors (only those we know about)
-        // Since we only have one level of parents, ancestors = self + parents
-        let mut ancestors_per_tip: Vec<HashSet<CommitId>> = Vec::with_capacity(tip_ids.len());
-        for tip_id in &tip_ids {
-            let mut ancestors = HashSet::new();
-            ancestors.insert(*tip_id);
-            if let Some((_, parents)) = tip_data.get(tip_id) {
-                for parent in *parents {
-                    ancestors.insert(*parent);
-                }
-            }
-            ancestors_per_tip.push(ancestors);
-        }
-
-        // Find common ancestors (intersection of all ancestor sets)
-        let common_ancestors: HashSet<CommitId> = if ancestors_per_tip.is_empty() {
-            HashSet::new()
-        } else {
-            let mut common = ancestors_per_tip[0].clone();
-            for ancestors in &ancestors_per_tip[1..] {
-                common = common.intersection(ancestors).copied().collect();
-            }
-            common
-        };
-
-        // Try to find the LCA among common ancestors
-        // The LCA is the common ancestor that is not an ancestor of any other common ancestor
-        // With only one level of parents, we check if any common ancestor is a parent of another
-        let lca_candidates: Vec<CommitId> = common_ancestors
-            .iter()
-            .filter(|&candidate| {
-                // A commit is an LCA if no other common ancestor has it as a parent
-                !common_ancestors.iter().any(|other| {
-                    if other == candidate {
-                        return false;
-                    }
-                    tip_data
-                        .get(other)
-                        .is_some_and(|(_, parents)| parents.contains(candidate))
-                })
-            })
-            .copied()
-            .collect();
-
-        // If we found exactly one LCA and it's a frontier tip, use its content
-        if lca_candidates.len() == 1
-            && let Some((content, _)) = tip_data.get(&lca_candidates[0])
-        {
-            return content.to_vec();
-        }
-
-        // Fall back to heuristic: use earliest commit's content
-        // This handles cases where:
-        // - LCA is not among frontier tips (it's a parent we don't have content for)
-        // - Multiple LCA candidates exist
-        let earliest = candidates
-            .iter()
-            .min_by(|a, b| match a.timestamp.cmp(&b.timestamp) {
-                std::cmp::Ordering::Equal => a.commit_id.cmp(&b.commit_id),
-                other => other,
-            });
-
-        match earliest {
-            Some(candidate) => candidate.content.to_vec(),
-            None => vec![],
-        }
-    }
-
     /// Evaluate a BranchMerge node using pre-computed per-column metadata.
     ///
     /// This is the new metadata-based merge that replaces the old CommitDelta-based flow.
@@ -4127,144 +3714,5 @@ mod tests {
 
         assert_eq!(output.len(), 1, "Same version row should pass through");
         assert!(cached_ids.contains(&id));
-    }
-
-    // --- LCA computation tests ---
-
-    #[test]
-    fn lca_single_commit_returns_empty() {
-        use crate::sql::row_buffer::MergeCandidate;
-
-        let (_, row) = make_owned_row(1, "Alice", true);
-        let commit_id = CommitId::from_bytes([1; 32]);
-
-        let tip = (commit_id, 100u64, vec![], row.clone());
-        let tips = vec![&tip];
-        let candidates = vec![MergeCandidate::new(&row.buffer, 100, *commit_id.as_bytes())];
-
-        let lca_content = QueryNode::compute_lca_content_with_dag(&tips, &candidates);
-        assert!(
-            lca_content.is_empty(),
-            "Single commit should return empty LCA"
-        );
-    }
-
-    #[test]
-    fn lca_linear_history_uses_parent() {
-        use crate::sql::row_buffer::MergeCandidate;
-
-        // Scenario: parent -> child (linear history)
-        // LCA should be the parent
-        let parent_id = CommitId::from_bytes([1; 32]);
-        let child_id = CommitId::from_bytes([2; 32]);
-
-        // Parent commit (no parents)
-        let (_, parent_row) = make_owned_row(1, "Original", false);
-
-        // Child commit with parent as parent
-        let (_, child_row) = make_owned_row(1, "Updated", true);
-
-        // If we have parent and child in the frontier (shouldn't normally happen,
-        // but tests the LCA logic), parent is the LCA
-        let tips: Vec<(CommitId, u64, Vec<CommitId>, OwnedRow)> = vec![
-            (parent_id, 100, vec![], parent_row.clone()),
-            (child_id, 200, vec![parent_id], child_row.clone()),
-        ];
-        let tip_refs: Vec<_> = tips.iter().collect();
-
-        let candidates = vec![
-            MergeCandidate::new(&parent_row.buffer, 100, *parent_id.as_bytes()),
-            MergeCandidate::new(&child_row.buffer, 200, *child_id.as_bytes()),
-        ];
-
-        let lca_content = QueryNode::compute_lca_content_with_dag(&tip_refs, &candidates);
-
-        // LCA is the parent since child has parent as its parent
-        assert_eq!(
-            lca_content, parent_row.buffer,
-            "LCA should be parent commit's content"
-        );
-    }
-
-    #[test]
-    fn lca_forked_history_with_common_parent() {
-        use crate::sql::row_buffer::MergeCandidate;
-
-        // Scenario:
-        //     parent
-        //    /      \
-        // child_a  child_b
-        //
-        // Both children have parent as their parent.
-        // LCA should be the parent.
-
-        let parent_id = CommitId::from_bytes([1; 32]);
-        let child_a_id = CommitId::from_bytes([2; 32]);
-        let child_b_id = CommitId::from_bytes([3; 32]);
-
-        let (_, parent_row) = make_owned_row(1, "Original", false);
-        let (_, child_a_row) = make_owned_row(1, "Updated A", true);
-        let (_, child_b_row) = make_owned_row(1, "Updated B", false);
-
-        // Both children have parent as their parent
-        // We include parent in the frontier to test LCA detection
-        let tips: Vec<(CommitId, u64, Vec<CommitId>, OwnedRow)> = vec![
-            (parent_id, 100, vec![], parent_row.clone()),
-            (child_a_id, 200, vec![parent_id], child_a_row.clone()),
-            (child_b_id, 250, vec![parent_id], child_b_row.clone()),
-        ];
-        let tip_refs: Vec<_> = tips.iter().collect();
-
-        let candidates = vec![
-            MergeCandidate::new(&parent_row.buffer, 100, *parent_id.as_bytes()),
-            MergeCandidate::new(&child_a_row.buffer, 200, *child_a_id.as_bytes()),
-            MergeCandidate::new(&child_b_row.buffer, 250, *child_b_id.as_bytes()),
-        ];
-
-        let lca_content = QueryNode::compute_lca_content_with_dag(&tip_refs, &candidates);
-
-        assert_eq!(
-            lca_content, parent_row.buffer,
-            "LCA should be parent commit's content"
-        );
-    }
-
-    #[test]
-    fn lca_fallback_to_earliest_when_lca_not_in_tips() {
-        use crate::sql::row_buffer::MergeCandidate;
-
-        // Scenario: Two siblings with a common parent that is NOT in the tips
-        //     (missing parent)
-        //    /            \
-        // child_a      child_b
-        //
-        // LCA is not available in tips, so we fall back to earliest commit
-
-        let parent_id = CommitId::from_bytes([1; 32]); // Not in tips
-        let child_a_id = CommitId::from_bytes([2; 32]);
-        let child_b_id = CommitId::from_bytes([3; 32]);
-
-        let (_, child_a_row) = make_owned_row(1, "Updated A", true);
-        let (_, child_b_row) = make_owned_row(1, "Updated B", false);
-
-        // Both children have parent as their parent, but parent is not in tips
-        let tips: Vec<(CommitId, u64, Vec<CommitId>, OwnedRow)> = vec![
-            (child_a_id, 200, vec![parent_id], child_a_row.clone()),
-            (child_b_id, 250, vec![parent_id], child_b_row.clone()),
-        ];
-        let tip_refs: Vec<_> = tips.iter().collect();
-
-        let candidates = vec![
-            MergeCandidate::new(&child_a_row.buffer, 200, *child_a_id.as_bytes()),
-            MergeCandidate::new(&child_b_row.buffer, 250, *child_b_id.as_bytes()),
-        ];
-
-        let lca_content = QueryNode::compute_lca_content_with_dag(&tip_refs, &candidates);
-
-        // LCA (parent) is not in tips, so fall back to earliest commit (child_a at t=200)
-        assert_eq!(
-            lca_content, child_a_row.buffer,
-            "Should fall back to earliest commit when LCA not in tips"
-        );
     }
 }
