@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::sql::catalog::DescriptorId;
 use crate::sql::lens::QueryLensContext;
@@ -33,6 +34,28 @@ pub enum InputPort {
     Outer,
     /// Inner table input for ArrayAggregate (rows to aggregate into arrays)
     Inner,
+    /// Indexed branch input for BranchMerge nodes.
+    /// Each branch feeding into a merge has a unique index (0..N).
+    Branch(u8),
+}
+
+/// Input state from one branch for BranchMerge.
+#[derive(Clone, Debug)]
+pub struct BranchInput {
+    /// Current frontier commits from this branch.
+    pub frontier: Vec<CommitId>,
+    /// Decoded row content for each frontier tip: (commit_id, timestamp, content).
+    pub tip_contents: Vec<(CommitId, u64, OwnedRow)>,
+}
+
+/// Per-object merge state in BranchMerge node.
+#[derive(Clone, Debug, Default)]
+pub struct MergedObjectState {
+    /// Per-branch input state. Index corresponds to branch_index.
+    /// None means no data from that branch yet.
+    pub branch_inputs: Vec<Option<BranchInput>>,
+    /// Cached merged result.
+    pub cached_merged: Option<OwnedRow>,
 }
 
 /// Reason why a row is accessible in a RecursiveFilter.
@@ -255,6 +278,43 @@ pub enum QueryNode {
         /// Cached projected rows.
         cached_rows: HashMap<ObjectId, OwnedRow>,
     },
+
+    /// Source: track commits on a single branch for a table.
+    ///
+    /// This node monitors commit topology on one branch and emits CommitDeltas
+    /// when commits are added. Used as input to BranchMerge nodes for
+    /// incremental multi-branch merging.
+    CommitSource {
+        /// Table this source watches.
+        table: String,
+        /// Branch name being watched (e.g., "main", "feature").
+        branch: String,
+        /// Branch index (position in the BranchMerge's input list).
+        branch_index: u8,
+        /// Row descriptor for decoding commit content.
+        descriptor: Arc<RowDescriptor>,
+        /// Per-object: known frontier commits.
+        object_frontiers: HashMap<ObjectId, HashSet<CommitId>>,
+        /// Per-object: cached decoded content for each frontier tip.
+        /// Maps: object_id -> (commit_id -> (timestamp, row))
+        cached_content: HashMap<ObjectId, HashMap<CommitId, (u64, OwnedRow)>>,
+    },
+
+    /// Transform: merge commits from multiple branches using per-column LWW.
+    ///
+    /// Receives CommitDeltas from N CommitSource nodes (one per branch) and
+    /// produces merged rows using per-column Last-Write-Wins semantics.
+    /// Emits RowDeltas when the merged result changes.
+    BranchMerge {
+        /// Table being merged.
+        table: String,
+        /// Number of branch inputs.
+        num_branches: usize,
+        /// Row descriptor for merged output rows.
+        descriptor: Arc<RowDescriptor>,
+        /// Per-object merge state.
+        object_states: HashMap<ObjectId, MergedObjectState>,
+    },
 }
 
 impl QueryNode {
@@ -272,6 +332,8 @@ impl QueryNode {
             QueryNode::ArrayAggregate { outer_table, .. } => outer_table,
             QueryNode::LimitOffset { table, .. } => table,
             QueryNode::Projection { table, .. } => table,
+            QueryNode::CommitSource { table, .. } => table,
+            QueryNode::BranchMerge { table, .. } => table,
         }
     }
 
@@ -301,6 +363,8 @@ impl QueryNode {
             }
             QueryNode::LimitOffset { table, .. } => vec![table],
             QueryNode::Projection { table, .. } => vec![table],
+            QueryNode::CommitSource { table, .. } => vec![table],
+            QueryNode::BranchMerge { table, .. } => vec![table],
         }
     }
 
@@ -316,6 +380,8 @@ impl QueryNode {
             QueryNode::ArrayAggregate { .. } => None,  // Uses outer_rows instead
             QueryNode::LimitOffset { visible_ids, .. } => Some(visible_ids),
             QueryNode::Projection { .. } => None, // Uses cached_rows HashMap instead
+            QueryNode::CommitSource { .. } => None, // Uses object_frontiers instead
+            QueryNode::BranchMerge { .. } => None, // Uses object_states instead
         }
     }
 
@@ -331,6 +397,8 @@ impl QueryNode {
             QueryNode::ArrayAggregate { .. } => None,
             QueryNode::LimitOffset { visible_ids, .. } => Some(visible_ids),
             QueryNode::Projection { .. } => None,
+            QueryNode::CommitSource { .. } => None,
+            QueryNode::BranchMerge { .. } => None,
         }
     }
 
@@ -408,6 +476,8 @@ impl QueryNode {
             QueryNode::ArrayAggregate { input, .. } => Some(*input),
             QueryNode::LimitOffset { input, .. } => Some(*input),
             QueryNode::Projection { input, .. } => Some(*input),
+            QueryNode::CommitSource { .. } => None, // Source node, no input
+            QueryNode::BranchMerge { .. } => None,  // Receives from CommitSource via ports
         }
     }
 
@@ -546,6 +616,33 @@ impl QueryNode {
                     format!("cached: {} rows", cached_rows.len()),
                 ],
             ),
+
+            QueryNode::CommitSource {
+                table,
+                branch,
+                branch_index,
+                object_frontiers,
+                ..
+            } => (
+                format!("CommitSource [{}]", table),
+                vec![
+                    format!("branch: {} (index {})", branch, branch_index),
+                    format!("tracking: {} objects", object_frontiers.len()),
+                ],
+            ),
+
+            QueryNode::BranchMerge {
+                table,
+                num_branches,
+                object_states,
+                ..
+            } => (
+                format!("BranchMerge [{}]", table),
+                vec![
+                    format!("branches: {}", num_branches),
+                    format!("objects: {}", object_states.len()),
+                ],
+            ),
         }
     }
 
@@ -599,6 +696,18 @@ impl QueryNode {
                 cached_rows,
                 ..
             } => Self::eval_projection(column_map, output_descriptor, cached_rows, input),
+
+            QueryNode::CommitSource { .. } => {
+                // CommitSource nodes need special handling via evaluate_commit_source
+                // They receive commit notifications, not RowDeltas
+                DeltaBatch::new()
+            }
+
+            QueryNode::BranchMerge { .. } => {
+                // BranchMerge nodes need special handling via evaluate_branch_merge
+                // They receive CommitDeltas, not RowDeltas
+                DeltaBatch::new()
+            }
         }
     }
 
@@ -673,6 +782,16 @@ impl QueryNode {
                 cached_rows,
                 ..
             } => Self::eval_projection(column_map, output_descriptor, cached_rows, input),
+
+            QueryNode::CommitSource { .. } => {
+                // CommitSource nodes need special handling via evaluate_commit_source
+                DeltaBatch::new()
+            }
+
+            QueryNode::BranchMerge { .. } => {
+                // BranchMerge nodes need special handling via evaluate_branch_merge
+                DeltaBatch::new()
+            }
         }
     }
 
@@ -2854,6 +2973,225 @@ impl QueryNode {
         }
 
         (new_visible, changes)
+    }
+
+    /// Evaluate a CommitSource node when a commit changes.
+    ///
+    /// This is called when commits are added/changed on the branch this node monitors.
+    /// Returns a CommitDelta to be sent to the BranchMerge node.
+    pub fn evaluate_commit_source(
+        &mut self,
+        object_id: ObjectId,
+        new_frontier: Vec<CommitId>,
+        tip_contents: Vec<(CommitId, u64, OwnedRow)>,
+    ) -> Option<crate::sql::query_graph::delta::CommitDelta> {
+        use crate::sql::query_graph::delta::CommitDelta;
+
+        match self {
+            QueryNode::CommitSource {
+                branch,
+                object_frontiers,
+                cached_content,
+                ..
+            } => {
+                // Check if frontier actually changed
+                let old_frontier: HashSet<CommitId> = object_frontiers
+                    .get(&object_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let new_frontier_set: HashSet<CommitId> = new_frontier.iter().copied().collect();
+
+                if old_frontier == new_frontier_set {
+                    // No change - early cutoff
+                    return None;
+                }
+
+                // Update cached state
+                object_frontiers.insert(object_id, new_frontier_set);
+
+                // Update cached content
+                let content_map = cached_content.entry(object_id).or_default();
+                content_map.clear();
+                for (commit_id, ts, row) in &tip_contents {
+                    content_map.insert(*commit_id, (*ts, row.clone()));
+                }
+
+                // Emit CommitDelta
+                Some(CommitDelta::CommitsChanged {
+                    object_id,
+                    branch: branch.clone(),
+                    new_frontier,
+                    tip_contents,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Evaluate a BranchMerge node when receiving a CommitDelta.
+    ///
+    /// This performs per-column LWW merge across all branches and emits
+    /// RowDeltas when the merged result changes.
+    pub fn evaluate_branch_merge(
+        &mut self,
+        delta: crate::sql::query_graph::delta::CommitDelta,
+        branch_index: u8,
+    ) -> DeltaBatch {
+        use crate::sql::query_graph::delta::CommitDelta;
+        use crate::sql::row_buffer::MergeCandidate;
+
+        match self {
+            QueryNode::BranchMerge {
+                num_branches,
+                descriptor,
+                object_states,
+                ..
+            } => {
+                let mut output = DeltaBatch::new();
+
+                match delta {
+                    CommitDelta::CommitsChanged {
+                        object_id,
+                        new_frontier,
+                        tip_contents,
+                        ..
+                    } => {
+                        // Get or create object state
+                        let state =
+                            object_states
+                                .entry(object_id)
+                                .or_insert_with(|| MergedObjectState {
+                                    branch_inputs: vec![None; *num_branches],
+                                    cached_merged: None,
+                                });
+
+                        // Ensure branch_inputs vector is large enough
+                        while state.branch_inputs.len() <= branch_index as usize {
+                            state.branch_inputs.push(None);
+                        }
+
+                        // Update this branch's input
+                        state.branch_inputs[branch_index as usize] = Some(BranchInput {
+                            frontier: new_frontier,
+                            tip_contents,
+                        });
+
+                        // Collect all tip contents across branches for merge
+                        let candidates: Vec<MergeCandidate<'_>> = state
+                            .branch_inputs
+                            .iter()
+                            .filter_map(|b| b.as_ref())
+                            .flat_map(|b| &b.tip_contents)
+                            .map(|(commit_id, ts, row)| {
+                                MergeCandidate::new(&row.buffer, *ts, *commit_id.as_bytes())
+                            })
+                            .collect();
+
+                        if candidates.is_empty() {
+                            return output;
+                        }
+
+                        // Use an empty base for LCA (simplified - full LCA would need commit graph)
+                        // TODO: Proper LCA computation using commit graph
+                        let lca_content = vec![];
+
+                        // Merge using per-column LWW
+                        let merged = crate::sql::row_buffer::merge_per_column_lww(
+                            &candidates,
+                            &lca_content,
+                            descriptor,
+                        );
+
+                        // Early cutoff: check if result changed
+                        if let Some(prev) = &state.cached_merged
+                            && prev.buffer == merged.buffer
+                        {
+                            return output; // No change
+                        }
+
+                        let was_new = state.cached_merged.is_none();
+                        state.cached_merged = Some(merged.clone());
+
+                        if was_new {
+                            output.push(RowDelta::Added {
+                                id: object_id,
+                                row: merged,
+                            });
+                        } else {
+                            output.push(RowDelta::Updated {
+                                id: object_id,
+                                row: merged,
+                                prior: PriorState::empty(),
+                            });
+                        }
+                    }
+                    CommitDelta::ObjectRemoved { object_id, .. } => {
+                        // Remove this branch's input
+                        if let Some(state) = object_states.get_mut(&object_id) {
+                            if (branch_index as usize) < state.branch_inputs.len() {
+                                state.branch_inputs[branch_index as usize] = None;
+                            }
+
+                            // Check if any branches still have data
+                            let has_data = state.branch_inputs.iter().any(|b| b.is_some());
+
+                            if !has_data {
+                                // All branches empty - object removed
+                                if state.cached_merged.is_some() {
+                                    output.push(RowDelta::Removed {
+                                        id: object_id,
+                                        prior: PriorState::empty(),
+                                    });
+                                }
+                                object_states.remove(&object_id);
+                            } else {
+                                // Re-merge with remaining branches
+                                let candidates: Vec<MergeCandidate<'_>> = state
+                                    .branch_inputs
+                                    .iter()
+                                    .filter_map(|b| b.as_ref())
+                                    .flat_map(|b| &b.tip_contents)
+                                    .map(|(commit_id, ts, row)| {
+                                        MergeCandidate::new(&row.buffer, *ts, *commit_id.as_bytes())
+                                    })
+                                    .collect();
+
+                                if candidates.is_empty() {
+                                    if state.cached_merged.is_some() {
+                                        output.push(RowDelta::Removed {
+                                            id: object_id,
+                                            prior: PriorState::empty(),
+                                        });
+                                    }
+                                    object_states.remove(&object_id);
+                                } else {
+                                    let lca_content = vec![];
+                                    let merged = crate::sql::row_buffer::merge_per_column_lww(
+                                        &candidates,
+                                        &lca_content,
+                                        descriptor,
+                                    );
+
+                                    if let Some(prev) = &state.cached_merged
+                                        && prev.buffer != merged.buffer
+                                    {
+                                        state.cached_merged = Some(merged.clone());
+                                        output.push(RowDelta::Updated {
+                                            id: object_id,
+                                            row: merged,
+                                            prior: PriorState::empty(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                output
+            }
+            _ => DeltaBatch::new(),
+        }
     }
 }
 

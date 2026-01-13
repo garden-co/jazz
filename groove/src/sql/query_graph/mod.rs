@@ -45,9 +45,9 @@ pub mod registry;
 // Re-export main types
 pub use builder::QueryGraphBuilder;
 pub use cache::{BufferRowCache, RowCache};
-pub use delta::{BufferJoinedRow, DeltaBatch, PriorState, RowDelta};
+pub use delta::{BufferJoinedRow, CommitDelta, DeltaBatch, PriorState, RowDelta};
 pub use graph::{GraphId, GraphState, QueryGraph};
-pub use node::{AccessReason, InputPort, NodeId, QueryNode};
+pub use node::{AccessReason, BranchInput, InputPort, MergedObjectState, NodeId, QueryNode};
 pub use predicate::{Predicate, PredicateValue};
 
 // Re-export from parent for internal use
