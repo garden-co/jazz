@@ -11,14 +11,12 @@
   let { children } = $props();
 </script>
 
-{#snippet loading()}
-  <p>Loading...</p>
-{/snippet}
-
 <JazzSvelteProviderWithClerk
   {clerk}
   sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
-  fallback={loading}
 >
+  {#snippet fallback()}
+    <p>Loading...</p>
+  {/snippet}
   {@render children?.()}
 </JazzSvelteProviderWithClerk>
