@@ -609,10 +609,12 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
 
     // ignore codecs/pipes
     // even if they are optional and nullable
-    // @ts-expect-error
     if (
+      // @ts-expect-error
       fieldSchema?._def?.type === "pipe" ||
+      // @ts-expect-error
       fieldSchema?._def?.innerType?._def?.type === "pipe" ||
+      // @ts-expect-error
       fieldSchema?._def?.innerType?._def?.innerType?._def?.type === "pipe"
     ) {
       return z.any();
