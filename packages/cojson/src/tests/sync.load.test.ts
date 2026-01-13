@@ -1864,16 +1864,26 @@ describe("lazy storage load optimization", () => {
     const serverMap = jazzCloud.node.getCoValue(map.id);
     expect(serverMap.isAvailable()).toBe(true);
 
-    // Verify that the server did a full load from storage
-    const messages = SyncMessagesLog.getMessages({
-      ParentGroup: parentGroup.core,
-      Group: group.core,
-      Map: map.core,
-    });
-
-    // Should see storage -> server CONTENT messages indicating full load from storage
+    // Verify that the server did a full load from storage for all CoValues
+    // The snapshot shows the complete flow: loading Map triggers loading its dependencies
     expect(
-      messages.some((msg) => msg.includes("storage -> server | CONTENT Map")),
-    ).toBe(true);
+      SyncMessagesLog.getMessages({
+        ParentGroup: parentGroup.core,
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | CONTENT Map header: false new: After: 0 New: 1",
+        "server -> storage | LOAD Map sessions: empty",
+        "storage -> server | CONTENT ParentGroup header: true new: After: 0 New: 78 expectContentUntil: header/205",
+        "storage -> server | CONTENT Group header: true new: After: 0 New: 7",
+        "storage -> server | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> client | KNOWN Map sessions: header/2",
+        "server -> storage | CONTENT Map header: false new: After: 0 New: 1",
+        "storage -> server | CONTENT ParentGroup header: true new: After: 78 New: 73",
+        "storage -> server | CONTENT ParentGroup header: true new: After: 151 New: 54",
+      ]
+    `);
   });
 });
