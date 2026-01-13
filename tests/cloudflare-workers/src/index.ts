@@ -2,7 +2,6 @@ import "jazz-tools/load-edge-wasm";
 import { createWebSocketPeer } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { Hono } from "hono";
-import { CoMap, coField } from "jazz-tools";
 import { Account, co, z } from "jazz-tools";
 import { startWorker } from "jazz-tools/worker";
 

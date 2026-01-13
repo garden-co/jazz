@@ -34,7 +34,7 @@ import { AgentSecret, CryptoProvider } from "./crypto/crypto.js";
 import { AgentID, RawCoID, SessionID, isAgentID, isRawCoID } from "./ids.js";
 import { logger } from "./logger.js";
 import { StorageAPI } from "./storage/index.js";
-import { Peer, PeerID, SyncManager } from "./sync.js";
+import { Peer, PeerID, SyncManager, type SyncWhen } from "./sync.js";
 import { accountOrAgentIDfromSessionID } from "./typeUtils/accountOrAgentIDfromSessionID.js";
 import { expectGroup } from "./typeUtils/expectGroup.js";
 import { canBeBranched } from "./coValueCore/branching.js";
@@ -75,6 +75,7 @@ export class LocalNode {
     agentSecret: AgentSecret,
     currentSessionID: SessionID,
     crypto: CryptoProvider,
+    public readonly syncWhen?: SyncWhen,
   ) {
     this.agentSecret = agentSecret;
     this.currentSessionID = currentSessionID;
@@ -94,11 +95,13 @@ export class LocalNode {
 
   setStorage(storage: StorageAPI) {
     this.storage = storage;
+    this.syncManager.setStorage(storage);
   }
 
   removeStorage() {
     this.storage?.close();
     this.storage = undefined;
+    this.syncManager.removeStorage();
   }
 
   hasCoValue(id: RawCoID) {
@@ -178,12 +181,14 @@ export class LocalNode {
     crypto: CryptoProvider;
     initialAgentSecret?: AgentSecret;
     peers?: Peer[];
+    syncWhen?: SyncWhen;
     storage?: StorageAPI;
   }): RawAccount {
     const {
       crypto,
       initialAgentSecret = crypto.newRandomAgentSecret(),
       peers = [],
+      syncWhen,
     } = opts;
     const accountHeader = accountHeaderForInitialAgentSecret(
       initialAgentSecret,
@@ -195,6 +200,7 @@ export class LocalNode {
       initialAgentSecret,
       crypto.newRandomSessionID(accountID as RawAccountID),
       crypto,
+      syncWhen,
     );
 
     if (opts.storage) {
@@ -236,6 +242,7 @@ export class LocalNode {
   static async withNewlyCreatedAccount({
     creationProps,
     peers,
+    syncWhen,
     migration,
     crypto,
     initialAgentSecret = crypto.newRandomAgentSecret(),
@@ -243,6 +250,7 @@ export class LocalNode {
   }: {
     creationProps: { name: string };
     peers?: Peer[];
+    syncWhen?: SyncWhen;
     migration?: RawAccountMigration<AccountMeta>;
     crypto: CryptoProvider;
     initialAgentSecret?: AgentSecret;
@@ -257,6 +265,7 @@ export class LocalNode {
       crypto,
       initialAgentSecret,
       peers,
+      syncWhen,
       storage,
     });
     const node = account.core.node;
@@ -299,6 +308,7 @@ export class LocalNode {
     accountSecret,
     sessionID,
     peers,
+    syncWhen,
     crypto,
     migration,
     storage,
@@ -307,6 +317,7 @@ export class LocalNode {
     accountSecret: AgentSecret;
     sessionID: SessionID | undefined;
     peers: Peer[];
+    syncWhen?: SyncWhen;
     crypto: CryptoProvider;
     migration?: RawAccountMigration<AccountMeta>;
     storage?: StorageAPI;
@@ -318,6 +329,7 @@ export class LocalNode {
         accountSecret,
         sessionID || crypto.newRandomSessionID(accountID),
         crypto,
+        syncWhen,
       );
 
       if (storage) {
@@ -738,7 +750,10 @@ export class LocalNode {
       type: "comap",
       ruleset: { type: "group", initialAdmin: account.id },
       meta: null,
-      ...uniqueness,
+      ...(uniqueness.createdAt !== undefined
+        ? { createdAt: uniqueness.createdAt }
+        : {}),
+      uniqueness: uniqueness.uniqueness,
     });
 
     const group = expectGroup(groupCoValue.getCurrentContent());
@@ -814,9 +829,9 @@ export class LocalNode {
    *
    * @returns Promise of the current pending store operation, if any.
    */
-  gracefulShutdown(): Promise<unknown> | undefined {
-    this.syncManager.gracefulShutdown();
+  async gracefulShutdown(): Promise<unknown> {
     this.garbageCollector?.stop();
+    await this.syncManager.gracefulShutdown();
     return this.storage?.close();
   }
 }

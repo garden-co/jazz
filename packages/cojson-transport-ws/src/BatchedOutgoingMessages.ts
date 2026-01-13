@@ -7,7 +7,6 @@ import {
   cojsonInternals,
   logger,
 } from "cojson";
-import { addMessageToBacklog } from "./serialization.js";
 import type { AnyWebSocket } from "./types.js";
 import {
   hasWebSocketTooMuchBufferedData,
@@ -16,9 +15,8 @@ import {
   waitForWebSocketOpen,
 } from "./utils.js";
 
-const { CO_VALUE_PRIORITY, getContentMessageSize } = cojsonInternals;
-
-export const MAX_OUTGOING_MESSAGES_CHUNK_BYTES = 25_000;
+const { CO_VALUE_PRIORITY, getContentMessageSize, WEBSOCKET_CONFIG } =
+  cojsonInternals;
 
 export class BatchedOutgoingMessages
   implements CojsonInternalTypes.OutgoingPeerChannel
@@ -83,7 +81,9 @@ export class BatchedOutgoingMessages
 
     // Delay the initiation of the queue processing to accumulate messages
     // before sending them, in order to do prioritization and batching
-    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    await new Promise<void>((resolve) =>
+      setTimeout(resolve, WEBSOCKET_CONFIG.OUTGOING_MESSAGES_CHUNK_DELAY),
+    );
 
     let msg = this.queue.pull();
 
@@ -116,25 +116,33 @@ export class BatchedOutgoingMessages
       this.egressBytesCounter.add(getContentMessageSize(msg), this.meta);
     }
 
+    const stringifiedMsg = JSON.stringify(msg);
+
     if (!this.batching) {
-      this.websocket.send(JSON.stringify(msg));
+      this.websocket.send(stringifiedMsg);
       return;
     }
 
-    const payload = addMessageToBacklog(this.backlog, msg);
+    const msgSize = stringifiedMsg.length;
+    const newBacklogSize = this.backlog.length + msgSize;
 
-    const maxChunkSizeReached =
-      payload.length >= MAX_OUTGOING_MESSAGES_CHUNK_BYTES;
-    const backlogExists = this.backlog.length > 0;
+    // If backlog+message exceeds the chunk size, send the backlog and reset it
+    if (
+      this.backlog.length > 0 &&
+      newBacklogSize > WEBSOCKET_CONFIG.MAX_OUTGOING_MESSAGES_CHUNK_BYTES
+    ) {
+      this.sendMessagesInBulk();
+    }
 
-    if (maxChunkSizeReached && backlogExists) {
-      this.sendMessagesInBulk();
-      this.backlog = addMessageToBacklog("", msg);
-    } else if (maxChunkSizeReached) {
-      this.backlog = payload;
-      this.sendMessagesInBulk();
+    if (this.backlog.length > 0) {
+      this.backlog += `\n${stringifiedMsg}`;
     } else {
-      this.backlog = payload;
+      this.backlog = stringifiedMsg;
+    }
+
+    // If message itself exceeds the chunk size, send it immediately
+    if (msgSize >= WEBSOCKET_CONFIG.MAX_OUTGOING_MESSAGES_CHUNK_BYTES) {
+      this.sendMessagesInBulk();
     }
   }
 
@@ -143,6 +151,10 @@ export class BatchedOutgoingMessages
       this.websocket.send(this.backlog);
       this.backlog = "";
     }
+  }
+
+  drain() {
+    while (this.queue.pull()) {}
   }
 
   setBatching(enabled: boolean) {

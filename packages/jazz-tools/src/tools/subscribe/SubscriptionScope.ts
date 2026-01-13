@@ -16,7 +16,11 @@ import {
 } from "../internal.js";
 import { applyCoValueMigrations } from "../lib/migration.js";
 import { CoValueCoreSubscription } from "./CoValueCoreSubscription.js";
-import { JazzError, type JazzErrorIssue } from "./JazzError.js";
+import {
+  JazzError,
+  fillErrorWithJazzErrorInfo,
+  type JazzErrorIssue,
+} from "./JazzError.js";
 import type {
   BranchDefinition,
   SubscriptionValue,
@@ -312,7 +316,13 @@ export class SubscriptionScope<D extends CoValue> {
 
   private lastPromise: PromiseWithStatus<D> | undefined;
 
-  private getPromise() {
+  private getErrorOpts() {
+    return {
+      cause: this.callerStack,
+    };
+  }
+
+  getPromise() {
     const currentValue = this.getCurrentValue();
 
     if (currentValue.$isLoaded) {
@@ -322,9 +332,10 @@ export class SubscriptionScope<D extends CoValue> {
     if (currentValue.$jazz.loadingState !== CoValueLoadingState.LOADING) {
       const error = this.getError();
       return rejectedPromise<D>(
-        new Error(error?.toString() ?? "Unknown error", {
-          cause: this.callerStack,
-        }),
+        fillErrorWithJazzErrorInfo(
+          new Error("Unknown error", this.getErrorOpts()),
+          error,
+        ),
       );
     }
 
@@ -342,17 +353,11 @@ export class SubscriptionScope<D extends CoValue> {
           resolve(currentValue);
         } else {
           promise.status = "rejected";
-          promise.reason = new Error(
-            this.getError()?.toString() ?? "Unknown error",
-            {
-              cause: this.callerStack,
-            },
+          promise.reason = fillErrorWithJazzErrorInfo(
+            new Error("Unknown error", this.getErrorOpts()),
+            this.getError(),
           );
-          reject(
-            new Error(this.getError()?.toString() ?? "Unknown error", {
-              cause: this.callerStack,
-            }),
-          );
+          reject(promise.reason);
         }
 
         unsubscribe();
@@ -375,11 +380,9 @@ export class SubscriptionScope<D extends CoValue> {
         this.lastPromise.value = value;
       } else if (value.$jazz.loadingState !== CoValueLoadingState.LOADING) {
         this.lastPromise.status = "rejected";
-        this.lastPromise.reason = new Error(
-          this.getError()?.toString() ?? "Unknown error",
-          {
-            cause: this.callerStack,
-          },
+        this.lastPromise.reason = fillErrorWithJazzErrorInfo(
+          new Error("Unknown error", this.getErrorOpts()),
+          this.getError(),
         );
       } else if (this.lastPromise.status !== "pending") {
         // Value got into loading state, we need to suspend again

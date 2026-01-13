@@ -22,7 +22,7 @@ import {
 import type { SessionID } from "../ids.js";
 import { LocalNode } from "../localNode.js";
 import { connectedPeers } from "../streamUtils.js";
-import type { Peer, SyncMessage } from "../sync.js";
+import type { Peer, SyncMessage, SyncWhen } from "../sync.js";
 import { expectGroup } from "../typeUtils/expectGroup.js";
 import { toSimplifiedMessages } from "./messagesTestUtils.js";
 import { createAsyncStorage, createSyncStorage } from "./testStorage.js";
@@ -272,12 +272,11 @@ export function blockMessageTypeOnOutgoingPeer(
   },
 ) {
   const push = peer.outgoing.push;
-  const pushSpy = vi.spyOn(peer.outgoing, "push");
 
   const blockedMessages: SyncMessage[] = [];
   const blockedIds = new Set<string>();
 
-  pushSpy.mockImplementation(async (msg) => {
+  peer.outgoing.push = async (msg) => {
     if (
       typeof msg === "object" &&
       msg.action === messageType &&
@@ -288,9 +287,8 @@ export function blockMessageTypeOnOutgoingPeer(
       blockedIds.add(msg.id);
       return Promise.resolve();
     }
-
     return push.call(peer.outgoing, msg);
-  });
+  };
 
   return {
     blockedMessages,
@@ -300,7 +298,9 @@ export function blockMessageTypeOnOutgoingPeer(
       }
       blockedMessages.length = 0;
     },
-    unblock: () => pushSpy.mockRestore(),
+    unblock: () => {
+      peer.outgoing.push = push;
+    },
   };
 }
 
@@ -449,13 +449,14 @@ export function setupTestNode(
     isSyncServer?: boolean;
     connected?: boolean;
     secret?: AgentSecret;
+    syncWhen?: SyncWhen;
   } = {},
 ) {
   const [admin, session] = opts.secret
     ? agentAndSessionIDFromSecret(opts.secret)
     : randomAgentAndSessionID();
 
-  let node = new LocalNode(admin.agentSecret, session, Crypto);
+  let node = new LocalNode(admin.agentSecret, session, Crypto, opts.syncWhen);
 
   if (opts.isSyncServer) {
     syncServer.current = node;
@@ -527,7 +528,12 @@ export function setupTestNode(
     addAsyncStorage,
     restart: () => {
       node.gracefulShutdown();
-      ctx.node = node = new LocalNode(admin.agentSecret, session, Crypto);
+      ctx.node = node = new LocalNode(
+        admin.agentSecret,
+        session,
+        Crypto,
+        opts.syncWhen,
+      );
 
       if (opts.isSyncServer) {
         syncServer.current = node;
@@ -646,8 +652,8 @@ export async function setupTestAccount(
     connectToSyncServer();
   }
 
-  onTestFinished(() => {
-    ctx.node.gracefulShutdown();
+  onTestFinished(async () => {
+    await ctx.node.gracefulShutdown();
   });
 
   return {

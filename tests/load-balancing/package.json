@@ -1,0 +1,25 @@
+{
+  "name": "@jazz/load-balancing",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "seed": "node  --inspect --experimental-strip-types ./src/cli.ts seed",
+    "query": "node --experimental-strip-types ./src/cli.ts query",
+    "run": "node --inspect --experimental-strip-types ./src/cli.ts run",
+    "all": "node --experimental-strip-types ./src/cli.ts all"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.2.0",
+    "cojson": "workspace:*",
+    "cojson-storage-sqlite": "workspace:*",
+    "cojson-transport-ws": "workspace:*",
+    "jazz-run": "workspace:*",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "catalog:default"
+  }
+}
+

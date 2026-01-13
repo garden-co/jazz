@@ -315,6 +315,14 @@ export class CoValueCore {
     return this.getLoadingStateForPeer(peerId) === "errored";
   }
 
+  getErroredInPeerError(peerId: PeerID) {
+    const loadingState = this.loadingStatuses.get(peerId);
+    if (loadingState?.type === "errored") {
+      return loadingState.error;
+    }
+    return undefined;
+  }
+
   waitFor(opts: {
     predicate: (value: CoValueCore) => boolean;
     onSuccess: (value: CoValueCore) => void;

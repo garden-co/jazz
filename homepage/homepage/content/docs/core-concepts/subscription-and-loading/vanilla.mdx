@@ -1,0 +1,234 @@
+import { Alert, CodeGroup, ContentByFramework, FileName, ReactLogo, SvelteLogo, VanillaLogo, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
+
+export const metadata = {
+  description: "Learn how to subscribe to CoValues, specify loading depths, and handle loading states and inaccessible data."
+};
+
+# Subscriptions & Deep Loading
+
+Jazz's Collaborative Values (such as [CoMaps](/docs/core-concepts/covalues/comaps) or [CoLists](/docs/core-concepts/covalues/colists)) are reactive. You can subscribe to them to automatically receive updates whenever they change, either locally or remotely.
+
+You can also use subscriptions to load CoValues *deeply* by resolving nested values. You can specify exactly how much data you want to resolve and handle loading states and errors.
+
+You can load and subscribe to CoValues in one of two ways:
+
+- **shallowly**&hairsp;—&hairsp;all of the primitive fields are available (such as strings, numbers, dates), but the references to other CoValues are not loaded
+- **deeply**&hairsp;—&hairsp;some or all of the referenced CoValues have been loaded
+
+<Alert variant="info" title="Tip">
+  Jazz automatically deduplicates loading. If you subscribe to the same CoValue multiple times in your app, Jazz will only fetch it once. That means you don't need to deeply load a CoValue *just in case* you might need the data somewhere else in your app, and you don't have to worry about tracking every possible field your app needs in a top-level query. Instead, pass the CoValue ID to the child component and subscribe there&hairsp;—&hairsp;Jazz will only load what that component actually needs.
+</Alert>
+
+## Subscribing to changes
+
+If you have a CoValue's ID, you can subscribe to it anywhere in your code using `CoValue.subscribe()`.
+
+
+<CodeGroup preferWrap>
+```ts core-concepts/subscription-and-loading/index.ts#ManualSubscription
+```
+</CodeGroup>
+
+You can also subscribe to an existing CoValue instance using the `$jazz.subscribe` method.
+
+<CodeGroup preferWrap>
+```ts core-concepts/subscription-and-loading/index.ts#SubscriptionInstanceMethod
+```
+</CodeGroup>
+
+### Loading States
+
+When you load or subscribe to a CoValue through a hook (or directly), it can be either:
+
+- **Loaded** → The CoValue has been successfully loaded and all its data is available
+- **Not Loaded** → The CoValue is not yet available
+
+You can use the `$isLoaded` field to check whether a CoValue is loaded. For more detailed information about why a CoValue is not loaded, you can check `$jazz.loadingState`:
+
+- `"loading"` → The CoValue is still being fetched
+- `"unauthorized"` → The current user doesn't have permission to access this CoValue
+- `"unavailable"` → The CoValue couldn't be found or an error (e.g. a network timeout) occurred while loading
+
+See the examples above for practical demonstrations of how to handle these three states in your application.
+
+## Deep Loading
+
+When you're working with related CoValues (like tasks in a project), you often need to load nested references as well as the top-level CoValue.
+
+This is particularly the case when working with [CoMaps](/docs/core-concepts/covalues/comaps) that refer to other CoValues or [CoLists](/docs/core-concepts/covalues/colists) of CoValues. You can use `resolve` queries to tell Jazz what data you need to use.
+
+### Using Resolve Queries
+
+A `resolve` query tells Jazz how deeply to load data for your app to use. We can use `true` to tell Jazz to shallowly load the tasks list here. Note that this does *not* cause the tasks themselves to load, just the CoList that holds the tasks.
+
+<CodeGroup>
+```ts core-concepts/subscription-and-loading/ResolveQueries.ts#Basic
+```
+</CodeGroup>
+
+We can use an `$each` expression to tell Jazz to load the items in a list.
+
+<CodeGroup>
+```ts core-concepts/subscription-and-loading/ResolveQueries.ts#Each
+```
+</CodeGroup>
+We can also build a query that *deeply resolves* to multiple levels:
+
+<CodeGroup>
+```ts core-concepts/subscription-and-loading/ResolveQueries.ts#Deep
+```
+</CodeGroup>
+
+<Alert title="Always load data explicitly" variant="warning" className="my-4">
+If you access a reference that wasn't included in your `resolve` query, you may find that it is already loaded, potentially because some other part of your app has already loaded it. **You should not rely on this**.
+
+Expecting data to be there which is not explicitly included in your `resolve` query can lead to subtle, hard-to-diagnose bugs. Always include every nested CoValue you need to access in your `resolve` query.
+</Alert>
+
+### Where To Use Resolve Queries
+
+The syntax for resolve queries is shared throughout Jazz. As well as using them in `load` and `subscribe` method calls, you can also specify resolve queries at the schema level, using the `.resolved()` method. These queries will be used when loading CoValues from that schema (if no resolve query is provided by the user) and in types defined with [co.loaded](/docs/core-concepts/subscription-and-loading#type-safety-with-coloaded).
+<CodeGroup>
+```ts
+const TaskWithDescription = Task.resolved({
+  description: true,
+});
+const ProjectWithTasks = Project.resolved({
+  tasks: {
+    // Use `.resolveQuery` to get the resolve query from a schema and compose it in other queries
+    $each: TaskWithDescription.resolveQuery,
+  }
+});
+
+// .load() will use the resolve query from the schema
+const project = await ProjectWithTasks.load(projectId);
+if (!project.$isLoaded) throw new Error("Project not found or not accessible");
+// Both the tasks and the descriptions are loaded
+project.tasks[0].description; // CoPlainText
+```
+</CodeGroup>
+
+## Loading Errors
+
+A load operation will be successful **only** if all references requested (both optional and required) could be successfully loaded. If any reference cannot be loaded, the entire load operation will return a not-loaded CoValue to avoid potential inconsistencies.
+
+<CodeGroup preferWrap>
+```ts core-concepts/subscription-and-loading/ResolveQueries.ts#Unauthorized
+```
+</CodeGroup>
+
+This is also true if **any** element of a list is inaccessible, even if all the others can be loaded.
+
+<CodeGroup preferWrap>
+```ts core-concepts/subscription-and-loading/ResolveQueries.ts#NoCatch
+```
+</CodeGroup>
+
+Loading will be successful if all requested references are loaded. Non-requested references may or may not be available.
+
+<CodeGroup preferWrap>
+```ts core-concepts/subscription-and-loading/ResolveQueries.ts#ShallowNoCatch
+```
+</CodeGroup>
+
+### Catching loading errors
+
+We can use `$onError` to handle cases where some data you have requested is inaccessible, similar to a `try...catch` block in your query.
+
+For example, in case of a `project` (which the user can access) with three `task` items:
+
+<table>
+  <thead>
+    <tr>
+      <th>Task</th>
+      <th>User can access <code>task</code>?</th>
+      <th>User can access <code>task.description</code>?</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>0</td>
+      <td>✅</td>
+      <td>✅</td>
+    </tr>
+    <tr>
+      <td>1</td>
+      <td>✅</td>
+      <td>❌</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td>❌</td>
+      <td>❌</td>
+    </tr>
+  </tbody>
+</table>
+
+#### Scenario 1: Skip Inaccessible List Items
+
+If some of your list items may not be accessible, you can skip loading them by specifying `$onError: 'catch'`. Inaccessible items will be not-loaded CoValues, while accessible items load properly.
+<CodeGroup preferWrap>
+```ts core-concepts/subscription-and-loading/ResolveQueries.ts#SkipInaccessible
+```
+</CodeGroup>
+#### Scenario 2: Handling Inaccessible Nested References
+
+An `$onError` applies only in the block where it's defined. If you need to handle multiple potential levels of error, you can nest `$onError` handlers.
+
+This load will fail, because the `$onError` is defined only for the `task.description`, not for failures in loading the `task` itself.
+
+<CodeGroup preferWrap>
+```ts core-concepts/subscription-and-loading/ResolveQueries.ts#NestedInaccessible
+```
+</CodeGroup>
+We can fix this by adding handlers at both levels
+
+<CodeGroup preferWrap>
+```ts core-concepts/subscription-and-loading/ResolveQueries.ts#MultipleCatch
+```
+</CodeGroup>
+
+## Type safety with co.loaded
+
+You can tell your application how deeply your data is loaded by using the `co.loaded` type.
+
+The `co.loaded` type is especially useful when passing data between components, because it allows TypeScript to check at compile time whether data your application depends is properly loaded. The second argument lets you pass a `resolve` query to specify how deeply your data is loaded.
+ 
+<TabbedCodeGroup id="coloaded" default="react" savedPreferenceKey="framework">
+<TabbedCodeGroupItem label="Vanilla" value="vanilla" icon={<VanillaLogo />} preferWrap>
+```ts core-concepts/subscription-and-loading/vanilla.ts
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
+```tsx core-concepts/subscription-and-loading/TaskList.tsx 
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
+```svelte core-concepts/subscription-and-loading/TaskList.svelte
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+You can pass a `resolve` query of any complexity to `co.loaded`.
+
+
+## Ensuring data is loaded
+
+In most cases, you'll have specified the depth of data you need in a `resolve` query when you first load or subscribe to a CoValue. However, sometimes you might have a CoValue instance which is not loaded deeply enough, or you're not sure how deeply loaded it is. In this case, you need to make sure data is loaded before proceeding with an operation. The `$jazz.ensureLoaded` method lets you guarantee that a CoValue and its referenced data are loaded to a specific depth (i.e. with nested references resolved):
+
+<CodeGroup preferWrap>
+```ts core-concepts/subscription-and-loading/index.ts#EnsureLoaded
+```
+</CodeGroup>
+
+This can be useful if you have a shallowly loaded CoValue instance, and would like to load its references deeply.
+
+## Best practices
+
+- Load exactly what you need. Start shallow and add your nested references with care.
+- Always check `$isLoaded` before accessing CoValue data. Use `$jazz.loadingState` for more detailed information.
+- Use `$onError: 'catch'` at each level of your query that can fail to handle inaccessible data gracefully.
+<ContentByFramework framework="react">
+- Use selectors and an `equalityFn` to prevent unnecessary re-renders.
+</ContentByFramework>
+- Never rely on data being present unless it is requested in your `resolve` query.

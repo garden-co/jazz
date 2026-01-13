@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { LocalNode } from "cojson";
+import { CryptoProvider, LocalNode } from "cojson";
 import { getBetterSqliteStorage } from "cojson-storage-sqlite";
 import { createWebSocketPeer } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
@@ -13,13 +13,15 @@ export const startSyncServer = async ({
   port,
   inMemory,
   db,
+  crypto,
 }: {
   host: string | undefined;
   port: string | undefined;
   inMemory: boolean;
   db: string;
+  crypto?: CryptoProvider;
 }): Promise<SyncServer> => {
-  const crypto = await WasmCrypto.create();
+  crypto ??= await WasmCrypto.create();
 
   const server = createServer((req, res) => {
     if (req.url === "/health") {

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { PeerState } from "../PeerState.js";
 import { IncomingMessagesQueue } from "../queue/IncomingMessagesQueue.js";
 import { ConnectedPeerChannel } from "../streamUtils.js";
@@ -7,15 +7,6 @@ import {
   createTestMetricReader,
   tearDownTestMetricReader,
 } from "./testUtils.js";
-
-// Mock performance.now for consistent timing tests
-const mockPerformanceNow = vi.fn();
-Object.defineProperty(global, "performance", {
-  value: {
-    now: mockPerformanceNow,
-  },
-  writable: true,
-});
 
 function createMockPeer(id: string): Peer {
   return {
@@ -62,17 +53,14 @@ function createMockSyncMessage(
 }
 
 function setup() {
+  const processQueues = vi.fn();
   const metricReader = createTestMetricReader();
-  const queue = new IncomingMessagesQueue();
+  const queue = new IncomingMessagesQueue(processQueues);
   const peer1 = createMockPeerState("peer1");
   const peer2 = createMockPeerState("peer2");
 
-  return { queue, peer1, peer2, metricReader };
+  return { queue, peer1, peer2, metricReader, processQueues };
 }
-
-beforeEach(() => {
-  mockPerformanceNow.mockReturnValue(0);
-});
 
 afterEach(() => {
   tearDownTestMetricReader();
@@ -84,7 +72,6 @@ describe("IncomingMessagesQueue", () => {
       const { queue } = setup();
       expect(queue["queues"]).toEqual([]);
       expect(queue.currentQueue).toBe(0);
-      expect(queue.processing).toBe(false);
     });
   });
 
@@ -219,142 +206,6 @@ describe("IncomingMessagesQueue", () => {
     });
   });
 
-  describe("processQueue", () => {
-    test("should process all messages in queue", async () => {
-      const { queue, peer1, peer2 } = setup();
-      const msg1 = createMockSyncMessage("test1");
-      const msg2 = createMockSyncMessage("test2");
-      const msg3 = createMockSyncMessage("test3");
-
-      queue.push(msg1, peer1);
-      queue.push(msg2, peer1);
-      queue.push(msg3, peer2);
-
-      const processedMessages: Array<{ msg: SyncMessage; peer: PeerState }> =
-        [];
-
-      await queue.processQueue((msg, peer) => {
-        processedMessages.push({ msg, peer });
-      });
-
-      expect(processedMessages).toEqual([
-        { msg: msg1, peer: peer1 },
-        { msg: msg3, peer: peer2 },
-        { msg: msg2, peer: peer1 },
-      ]);
-      expect(queue.processing).toBe(false);
-    });
-
-    test("should set processing flag during execution", async () => {
-      const { queue, peer1 } = setup();
-      const msg = createMockSyncMessage("test");
-      queue.push(msg, peer1);
-
-      let processingFlagDuringExecution = false;
-      const processingPromise = queue.processQueue(() => {
-        processingFlagDuringExecution = queue.processing;
-      });
-
-      await processingPromise;
-      expect(processingFlagDuringExecution).toBe(true);
-      expect(queue.processing).toBe(false);
-    });
-
-    test("should handle empty queue", async () => {
-      const { queue } = setup();
-      const callback = vi.fn();
-
-      await queue.processQueue(callback);
-
-      expect(callback).not.toHaveBeenCalled();
-      expect(queue.processing).toBe(false);
-    });
-
-    test("should yield to event loop when processing takes too long", async () => {
-      const { queue, peer1 } = setup();
-      const msg1 = createMockSyncMessage("test1");
-      const msg2 = createMockSyncMessage("test2");
-
-      queue.push(msg1, peer1);
-      queue.push(msg2, peer1);
-
-      // Mock timing to simulate long processing
-      mockPerformanceNow
-        .mockReturnValueOnce(0) // Initial time
-        .mockReturnValueOnce(60); // After first message (60ms > 50ms threshold)
-
-      const setTimeoutSpy = vi.spyOn(global, "setTimeout");
-
-      await queue.processQueue(() => {
-        // Simulate some processing time
-      });
-
-      expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 0);
-    });
-
-    test("should not yield to event loop when processing is fast", async () => {
-      const { queue, peer1 } = setup();
-      const msg = createMockSyncMessage("test");
-      queue.push(msg, peer1);
-
-      // Mock timing to simulate fast processing
-      mockPerformanceNow
-        .mockReturnValueOnce(0) // Initial time
-        .mockReturnValueOnce(30); // After message (30ms < 50ms threshold)
-
-      const setTimeoutSpy = vi.spyOn(global, "setTimeout");
-
-      await queue.processQueue(() => {
-        // Simulate some processing time
-      });
-
-      expect(setTimeoutSpy).not.toHaveBeenCalled();
-    });
-
-    test("should handle callback errors gracefully", async () => {
-      const { queue, peer1 } = setup();
-      const msg = createMockSyncMessage("test");
-      queue.push(msg, peer1);
-
-      const error = new Error("Callback error");
-
-      await queue.processQueue(() => {
-        throw error;
-      });
-
-      // The processing flag should be reset even when an error occurs
-      expect(queue.processing).toBe(false);
-    });
-
-    test("should process messages in correct round-robin order", async () => {
-      const { queue, peer1, peer2 } = setup();
-      const msg1 = createMockSyncMessage("test1");
-      const msg2 = createMockSyncMessage("test2");
-      const msg3 = createMockSyncMessage("test3");
-      const msg4 = createMockSyncMessage("test4");
-
-      queue.push(msg1, peer1);
-      queue.push(msg2, peer1);
-      queue.push(msg3, peer2);
-      queue.push(msg4, peer2);
-
-      const processedMessages: Array<{ msg: SyncMessage; peer: PeerState }> =
-        [];
-
-      await queue.processQueue((msg, peer) => {
-        processedMessages.push({ msg, peer });
-      });
-
-      // Should process in round-robin: peer1, peer2, peer1, peer2
-      expect(processedMessages).toEqual([
-        { msg: msg1, peer: peer1 },
-        { msg: msg3, peer: peer2 },
-        { msg: msg2, peer: peer1 },
-        { msg: msg4, peer: peer2 },
-      ]);
-    });
-  });
-
   describe("edge cases", () => {
     test("should handle peer with multiple messages correctly", () => {
       const { queue, peer1 } = setup();
@@ -410,35 +261,6 @@ describe("IncomingMessagesQueue", () => {
       expect(queue.pull()).toEqual({ msg: contentMsg, peer: peer2 });
       expect(queue.pull()).toEqual({ msg: knownMsg, peer: peer1 });
       expect(queue.pull()).toEqual({ msg: doneMsg, peer: peer2 });
-    });
-  });
-
-  describe("concurrent operations", () => {
-    test("should prevent multiple concurrent processQueue calls", async () => {
-      const { queue, peer1 } = setup();
-      const msg = createMockSyncMessage("test");
-      queue.push(msg, peer1);
-
-      const firstProcessSpy = vi.fn();
-
-      const firstProcess = queue.processQueue((msg, peer) => {
-        firstProcessSpy(msg, peer);
-      });
-
-      const secondProcessSpy = vi.fn();
-
-      // Second process should not interfere
-      const secondProcess = queue.processQueue(() => {
-        secondProcessSpy();
-      });
-
-      await firstProcess;
-      await secondProcess;
-
-      expect(firstProcessSpy).toHaveBeenCalled();
-      expect(secondProcessSpy).not.toHaveBeenCalled();
-
-      expect(queue.processing).toBe(false);
     });
   });
 
@@ -595,32 +417,6 @@ describe("IncomingMessagesQueue", () => {
       expect(serverPushValue).toBe(0);
       expect(clientPullValue).toBe(0);
       expect(serverPullValue).toBe(0);
-    });
-
-    test("should track metrics during processQueue execution", async () => {
-      const { queue, peer1, metricReader } = setup();
-      const msg1 = createMockSyncMessage("test1");
-      const msg2 = createMockSyncMessage("test2");
-
-      queue.push(msg1, peer1);
-      queue.push(msg2, peer1);
-
-      await queue.processQueue(() => {
-        // Process messages
-      });
-
-      const pushValue = await metricReader.getMetricValue(
-        "jazz.messagequeue.incoming.pushed",
-        { peerRole: "client" },
-      );
-
-      const pullValue = await metricReader.getMetricValue(
-        "jazz.messagequeue.incoming.pulled",
-        { peerRole: "client" },
-      );
-
-      expect(pushValue).toBe(2);
-      expect(pullValue).toBe(2);
     });
   });
 });

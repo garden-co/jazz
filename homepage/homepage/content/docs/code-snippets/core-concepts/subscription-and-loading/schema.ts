@@ -2,7 +2,7 @@ import { co, z } from "jazz-tools";
 
 export const Task = co.map({
   title: z.string(),
-  description: z.string().optional(),
+  description: co.plainText().optional(),
   completed: z.boolean().optional(),
 });
 

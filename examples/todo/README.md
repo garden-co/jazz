@@ -85,7 +85,7 @@ Open [http://localhost:5173](http://localhost:5173) with your browser to see the
 
 ### Helpers
 
--   (not yet explained) Creating Invite Links/QR codes with `<InviteButton/>`: [`src/components/InviteButton.tsx`](./src/components/InviteButton.tsx)
+- (not yet explained) Creating Invite Links/QR codes with `<InviteButton/>`: [`src/components/InviteButton.tsx`](./src/components/InviteButton.tsx)
 
 This is the whole Todo List app!
 
@@ -95,6 +95,6 @@ If you have feedback, let us know on [Discord](https://discord.gg/utDMjHYg42) or
 
 ## Configuration: sync server
 
-By default, the example app uses [Jazz Cloud](https://jazz.tools/cloud) (`wss://cloud.jazz.tools`) - so cross-device use, invites and collaboration should just work.
+By default, the example app uses [Jazz Cloud](https://dashboard.jazz.tools) (`wss://cloud.jazz.tools`) - so cross-device use, invites and collaboration should just work.
 
 You can also run a local sync server by running`npx jazz-run sync`, and setting the `sync` parameter of`JazzReactProvider` in [./src/2_main.tsx](./src/2_main.tsx) to`{ peer: "ws://localhost:4200" }`.

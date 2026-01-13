@@ -28,4 +28,8 @@ export default defineConfig({
     sourcemap: true,
     minify: false,
   },
+  test: {
+    name: "community-jazz-vue",
+    include: ["src/**/*.test.ts"],
+  },
 });

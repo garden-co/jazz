@@ -65,12 +65,13 @@ import type { AgentID, RawCoID, SessionID } from "./ids.js";
 import type { JsonObject, JsonValue } from "./jsonValue.js";
 import type * as Media from "./media.js";
 import { isAccountRole } from "./permissions.js";
-import type { Peer, SyncMessage } from "./sync.js";
+import type { Peer, SyncMessage, SyncWhen } from "./sync.js";
 import {
   DisconnectedError,
   SyncManager,
   hwrServerPeerSelector,
 } from "./sync.js";
+import { setSyncStateTrackingBatchDelay } from "./UnsyncedCoValuesTracker.js";
 import { emptyKnownState } from "./knownState.js";
 
 import {
@@ -81,10 +82,13 @@ import { getDependedOnCoValuesFromRawData } from "./coValueCore/utils.js";
 import {
   CO_VALUE_LOADING_CONFIG,
   TRANSACTION_CONFIG,
+  WEBSOCKET_CONFIG,
   setCoValueLoadingMaxRetries,
   setCoValueLoadingRetryDelay,
   setCoValueLoadingTimeout,
   setIncomingMessagesTimeBudget,
+  setMaxOutgoingMessagesChunkBytes,
+  setOutgoingMessagesChunkDelay,
   setMaxRecommendedTxSize,
 } from "./config.js";
 import { LogLevel, logger } from "./logger.js";
@@ -125,6 +129,7 @@ export const cojsonInternals = {
   setCoValueLoadingRetryDelay,
   setCoValueLoadingMaxRetries,
   setCoValueLoadingTimeout,
+  setSyncStateTrackingBatchDelay,
   ConnectedPeerChannel,
   textEncoder,
   textDecoder,
@@ -133,6 +138,9 @@ export const cojsonInternals = {
   TRANSACTION_CONFIG,
   setMaxRecommendedTxSize,
   canBeBranched,
+  WEBSOCKET_CONFIG,
+  setMaxOutgoingMessagesChunkBytes,
+  setOutgoingMessagesChunkDelay,
 };
 
 export {
@@ -193,6 +201,7 @@ export type {
   AccountRole,
   AvailableCoValueCore,
   PeerState,
+  SyncWhen,
   CoValueHeader,
 };
 

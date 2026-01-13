@@ -1,7 +1,6 @@
 import type { CojsonInternalTypes, SyncMessage } from "cojson";
 import { cojsonInternals } from "cojson";
 import { type Mocked, afterEach, describe, expect, test, vi } from "vitest";
-import { MAX_OUTGOING_MESSAGES_CHUNK_BYTES } from "../BatchedOutgoingMessages.js";
 import {
   type CreateWebSocketPeerOpts,
   createWebSocketPeer,
@@ -10,7 +9,10 @@ import type { AnyWebSocket } from "../types.js";
 import { BUFFER_LIMIT, BUFFER_LIMIT_POLLING_INTERVAL } from "../utils.js";
 import { createTestMetricReader, tearDownTestMetricReader } from "./utils.js";
 
-const { CO_VALUE_PRIORITY } = cojsonInternals;
+const { CO_VALUE_PRIORITY, WEBSOCKET_CONFIG, setOutgoingMessagesChunkDelay } =
+  cojsonInternals;
+
+const { MAX_OUTGOING_MESSAGES_CHUNK_BYTES } = WEBSOCKET_CONFIG;
 
 function setup(opts: Partial<CreateWebSocketPeerOpts> = {}) {
   const listeners = new Map<string, (event: MessageEvent) => void>();
@@ -41,6 +43,10 @@ function setup(opts: Partial<CreateWebSocketPeerOpts> = {}) {
 function serializeMessages(messages: SyncMessage[]) {
   return messages.map((msg) => JSON.stringify(msg)).join("\n");
 }
+
+afterEach(() => {
+  setOutgoingMessagesChunkDelay(5);
+});
 
 describe("createWebSocketPeer", () => {
   test("should create a peer with correct properties", () => {
@@ -602,6 +608,97 @@ describe("createWebSocketPeer", () => {
           label: "value",
         }),
       ).toBe(encryptedChanges.length + trustingChanges.length);
+    });
+
+    test("should drain the outgoing queue on websocket close so pulled equals pushed", async () => {
+      setOutgoingMessagesChunkDelay(500);
+      const metricReader = createTestMetricReader();
+      const { peer, listeners } = setup();
+
+      const high: SyncMessage = {
+        action: "content",
+        id: "co_zhigh",
+        new: {},
+        priority: CO_VALUE_PRIORITY.HIGH,
+      };
+      const medium: SyncMessage = {
+        action: "content",
+        id: "co_zmedium",
+        new: {},
+        priority: CO_VALUE_PRIORITY.MEDIUM,
+      };
+      const low: SyncMessage = {
+        action: "content",
+        id: "co_zlow",
+        new: {},
+        priority: CO_VALUE_PRIORITY.LOW,
+      };
+
+      peer.outgoing.push(high);
+      peer.outgoing.push(medium);
+      peer.outgoing.push(low);
+
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.outgoing.pushed", {
+          priority: CO_VALUE_PRIORITY.HIGH,
+          peerRole: "client",
+        }),
+      ).toBe(1);
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.outgoing.pushed", {
+          priority: CO_VALUE_PRIORITY.MEDIUM,
+          peerRole: "client",
+        }),
+      ).toBe(1);
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.outgoing.pushed", {
+          priority: CO_VALUE_PRIORITY.LOW,
+          peerRole: "client",
+        }),
+      ).toBe(1);
+
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.outgoing.pulled", {
+          priority: CO_VALUE_PRIORITY.HIGH,
+          peerRole: "client",
+        }),
+      ).toBe(0);
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.outgoing.pulled", {
+          priority: CO_VALUE_PRIORITY.MEDIUM,
+          peerRole: "client",
+        }),
+      ).toBe(0);
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.outgoing.pulled", {
+          priority: CO_VALUE_PRIORITY.LOW,
+          peerRole: "client",
+        }),
+      ).toBe(0);
+
+      const closeHandler = listeners.get("close");
+      closeHandler?.(new MessageEvent("close"));
+
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.outgoing.pulled", {
+          priority: CO_VALUE_PRIORITY.HIGH,
+          peerRole: "client",
+        }),
+      ).toBe(1);
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.outgoing.pulled", {
+          priority: CO_VALUE_PRIORITY.MEDIUM,
+          peerRole: "client",
+        }),
+      ).toBe(1);
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.outgoing.pulled", {
+          priority: CO_VALUE_PRIORITY.LOW,
+          peerRole: "client",
+        }),
+      ).toBe(1);
+
+      vi.useRealTimers();
     });
   });
 });

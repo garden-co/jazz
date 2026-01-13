@@ -2,7 +2,7 @@ export const metadata = {
   description: "Passkey authentication is fully local-first and the most secure of the auth methods that Jazz provides because keys are managed by the device/operating system itself."
 };
 
-import { TabbedCodeGroup, TabbedCodeGroupItem, ContentByFramework, ReactLogo, SvelteLogo } from "@/components/forMdx";
+import { TabbedCodeGroup, TabbedCodeGroupItem, ContentByFramework, ReactLogo, SvelteLogo, VanillaLogo, RNLogo, ExpoLogo } from "@/components/forMdx";
 
 # Passkey Authentication
 
@@ -18,13 +18,17 @@ Passkey authentication is based on the [Web Authentication API](https://develope
 - **User-friendly**: Uses familiar biometric verification (FaceID/TouchID)
 - **Cross-device**: Works across devices with the same biometric authentication
 - **No password management**: Users don't need to remember or store anything
-- **Wide support**: Available in most modern browsers
+- **Wide support**: Available in most modern browsers and mobile platforms
 
 ## Implementation
 
 Using passkeys in Jazz is as easy as this:
 
 <TabbedCodeGroup default="react" savedPreferenceKey="framework" id="use-passkey-auth">
+  <TabbedCodeGroupItem icon={<VanillaLogo />} label="Vanilla" value="vanilla" preferWrap>
+  ```ts AuthModal.ts
+  ```
+  </TabbedCodeGroupItem>
 <TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
 ```tsx AuthModal.tsx#Basic
 ```
@@ -33,7 +37,48 @@ Using passkeys in Jazz is as easy as this:
 ```svelte AuthModal.svelte
 ```
 </TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<RNLogo />} label="React Native" value="react-native" preferWrap>
+```tsx AuthModalRN.tsx#Basic
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<ExpoLogo />} label="Expo" value="react-native-expo" preferWrap>
+```tsx AuthModalRN.tsx#Basic
+```
+</TabbedCodeGroupItem>
 </TabbedCodeGroup>
+
+<ContentByFramework framework={["react-native", "react-native-expo"]}>
+
+### React Native Setup
+
+Passkey authentication on React Native requires the `react-native-passkey` library and domain configuration:
+
+1. Install the peer dependency:
+   ```bash
+   npm install react-native-passkey
+   ```
+
+2. Configure your app's associated domains:
+   - **iOS**: Add an Associated Domains entitlement with `webcredentials:yourdomain.com` and host an Apple App Site Association (AASA) file at `https://yourdomain.com/.well-known/apple-app-site-association`
+   - **Android**: Host a Digital Asset Links file at `https://yourdomain.com/.well-known/assetlinks.json`
+
+3. **For React Native 0.76+ with New Architecture**: The `react-native-passkey` library uses the legacy `NativeModules` bridge pattern. You need to disable bridgeless mode while keeping New Architecture enabled.
+
+   Add this override to your `AppDelegate.swift`:
+
+   ```swift
+   class ReactNativeDelegate: RCTDefaultReactNativeFactoryDelegate {
+     // ... existing methods ...
+
+     override func bridgelessEnabled() -> Bool {
+       return false
+     }
+   }
+   ```
+
+See the [react-native-passkey documentation](https://github.com/f-23/react-native-passkey) for detailed setup instructions.
+
+</ContentByFramework>
 
 ## Examples
 
@@ -52,6 +97,18 @@ Passkeys are ideal when:
 - Requires hardware/OS support for biometric authentication
 - Not supported in older browsers (see browser support below)
 - Requires a fallback method for unsupported environments
+
+<ContentByFramework framework={["react-native", "react-native-expo"]}>
+
+### React Native Limitations
+
+- Requires `react-native-passkey` peer dependency
+- Passkeys require domain verification (AASA for iOS, assetlinks.json for Android)
+- Not available in Expo Go (requires a development build)
+- React Native 0.76+ with New Architecture requires disabling bridgeless mode (see setup instructions above)
+- Android builds may hang at `configureCMakeDebug` with NDK 27.x - use NDK 28.2+ to avoid this
+
+</ContentByFramework>
 
 ### Browser Support
 

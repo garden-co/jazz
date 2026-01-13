@@ -18,14 +18,12 @@
     "@changesets/cli": "^2.29.7",
     "@playwright/test": "^1.50.1",
     "@vitejs/plugin-react": "^4.5.1",
-    "@vitest/browser": "catalog:default",
-    "@vitest/coverage-istanbul": "catalog:default",
+    "@vitest/browser-playwright": "catalog:default",
     "@vitest/coverage-v8": "catalog:default",
     "@vitest/ui": "catalog:default",
     "happy-dom": "^17.4.4",
     "jazz-run": "workspace:*",
     "jazz-tools": "workspace:*",
-    "jazz-tools-codemod-0-18": "workspace:*",
     "lefthook": "^1.8.2",
     "pkg-pr-new": "^0.0.60",
     "playwright": "^1.50.1",
@@ -72,7 +70,8 @@
       "esbuild": "0.24.0",
       "form-data": ">=4.0.4",
       "happy-dom": ">=20.0.0",
-      "rfc6902": ">=5.0.0"
+      "rfc6902": ">=5.0.0",
+      "better-auth": "^1.4.7"
     },
     "onlyBuiltDependencies": [
       "@biomejs/biome",
