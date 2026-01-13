@@ -340,17 +340,22 @@ impl GraphRegistry {
                             return None;
                         }
 
-                        // Update cache with new row data
-                        for delta in branch_delta.iter() {
-                            match delta {
-                                RowDelta::Added { id, row } => {
-                                    cache.insert(table, *id, row.clone());
-                                }
-                                RowDelta::Removed { id, .. } => {
-                                    cache.mark_deleted(table, *id);
-                                }
-                                RowDelta::Updated { id, row, .. } => {
-                                    cache.insert(table, *id, row.clone());
+                        // Update RowCache with new row data, but only for non-BranchMerge paths.
+                        // BranchMerge maintains its own cache in object_states.cached_merged,
+                        // and collect_output reads from there for BranchMerge queries.
+                        // This avoids duplicating row storage between BranchMerge and RowCache.
+                        if !found_branch_merge {
+                            for delta in branch_delta.iter() {
+                                match delta {
+                                    RowDelta::Added { id, row } => {
+                                        cache.insert(table, *id, row.clone());
+                                    }
+                                    RowDelta::Removed { id, .. } => {
+                                        cache.mark_deleted(table, *id);
+                                    }
+                                    RowDelta::Updated { id, row, .. } => {
+                                        cache.insert(table, *id, row.clone());
+                                    }
                                 }
                             }
                         }

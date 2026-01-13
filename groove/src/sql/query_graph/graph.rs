@@ -1386,20 +1386,44 @@ impl QueryGraph {
                     .collect();
             }
 
-            // For single-table queries, use cached IDs
+            // For single-table queries with Filter, use cached IDs
             if let Some(ids) = self.nodes[input_idx].cached_ids() {
-                return ids
-                    .iter()
-                    .filter_map(|id| {
-                        cache
-                            .get(&self.table, *id)
-                            .flatten()
-                            .map(|row| (*id, row.clone()))
-                    })
-                    .collect();
+                // Check if there's a BranchMerge node to get rows from
+                // (BranchMerge maintains its own row cache in object_states)
+                let branch_merge_states = self.nodes.iter().find_map(|n| {
+                    if let QueryNode::BranchMerge { object_states, .. } = n {
+                        Some(object_states)
+                    } else {
+                        None
+                    }
+                });
+
+                if let Some(object_states) = branch_merge_states {
+                    // Get rows from BranchMerge's cache (single source of truth)
+                    return ids
+                        .iter()
+                        .filter_map(|id| {
+                            object_states
+                                .get(id)
+                                .and_then(|state| state.cached_merged.as_ref())
+                                .map(|row| (*id, row.clone()))
+                        })
+                        .collect();
+                } else {
+                    // Fall back to RowCache for non-BranchMerge queries
+                    return ids
+                        .iter()
+                        .filter_map(|id| {
+                            cache
+                                .get(&self.table, *id)
+                                .flatten()
+                                .map(|row| (*id, row.clone()))
+                        })
+                        .collect();
+                }
             }
 
-            // For BranchMerge queries, use object_states from the BranchMerge node
+            // For BranchMerge queries without Filter, use object_states directly
             if let QueryNode::BranchMerge { object_states, .. } = &self.nodes[input_idx] {
                 return object_states
                     .iter()
