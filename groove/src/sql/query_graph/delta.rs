@@ -25,8 +25,9 @@ pub enum CommitDelta {
         branch: String,
         /// New frontier commit IDs after this change.
         new_frontier: Vec<CommitId>,
-        /// Decoded content for each frontier tip: (commit_id, timestamp, row).
-        tip_contents: Vec<(CommitId, u64, OwnedRow)>,
+        /// Decoded content for each frontier tip: (commit_id, timestamp, parents, row).
+        /// Parents are included to enable proper LCA computation across branches.
+        tip_contents: Vec<(CommitId, u64, Vec<CommitId>, OwnedRow)>,
     },
     /// Object was removed from this branch (all commits gone).
     ObjectRemoved {

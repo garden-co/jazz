@@ -259,13 +259,27 @@ impl GraphRegistry {
     ///
     /// This is called when commits are added to an object's branch.
     /// Routes through CommitSource → BranchMerge nodes for incremental merge.
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table the object belongs to
+    /// * `branch` - The branch that changed
+    /// * `object_id` - The object whose commits changed
+    /// * `new_frontier` - New frontier commit IDs
+    /// * `tip_contents` - Content for each frontier tip: (commit_id, timestamp, parents, row)
+    ///   Parents are included to enable proper LCA computation in BranchMerge.
     pub fn notify_commit_change(
         &self,
         table: &str,
         branch: &str,
         object_id: ObjectId,
         new_frontier: Vec<crate::commit::CommitId>,
-        tip_contents: Vec<(crate::commit::CommitId, u64, OwnedRow)>,
+        tip_contents: Vec<(
+            crate::commit::CommitId,
+            u64,
+            Vec<crate::commit::CommitId>,
+            OwnedRow,
+        )>,
         _db: &DatabaseState,
     ) {
         use crate::sql::query_graph::delta::CommitDelta;
@@ -334,6 +348,90 @@ impl GraphRegistry {
                                     output_delta.extend(row_deltas);
                                     break;
                                 }
+                            }
+                        }
+
+                        // Route output through rest of graph
+                        if !output_delta.is_empty() {
+                            // TODO: Route through downstream nodes (Filter, Output, etc.)
+                            // For now, just return the merged result
+                        }
+
+                        if output_delta.is_empty() {
+                            return None;
+                        }
+
+                        let callbacks = query.get_callbacks();
+                        Some((output_delta, callbacks))
+                    })
+                })
+                .collect()
+        };
+
+        // Phase 2: Call callbacks without holding locks
+        for (output_delta, callbacks) in pending {
+            for callback in callbacks {
+                callback(&output_delta);
+            }
+        }
+    }
+
+    /// Notify that a branch changed using metadata-based merge (new approach).
+    ///
+    /// This is the simplified notification method that uses pre-computed per-column
+    /// change metadata from the branch's frontier_changes. It directly accesses
+    /// the Object to read branch data, avoiding the CommitSource → CommitDelta flow.
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table the object belongs to
+    /// * `object_id` - The object whose branch changed
+    /// * `object` - Reference to the Object (for reading branch data)
+    pub fn notify_branch_change_with_metadata(
+        &self,
+        table: &str,
+        object_id: ObjectId,
+        object: &crate::object::Object,
+    ) {
+        use crate::sql::query_graph::node::QueryNode;
+
+        // Find all graphs that depend on this table
+        let graph_ids: Vec<GraphId> = {
+            let index = self.table_index.read().unwrap();
+            index.get(table).cloned().unwrap_or_default()
+        };
+
+        if graph_ids.is_empty() {
+            return;
+        }
+
+        // Phase 1: Process graphs and collect output deltas + callbacks
+        let pending: Vec<(DeltaBatch, Vec<ArcCallback>)> = {
+            let _cache = self.cache.write().unwrap();
+            let mut queries = self.queries.write().unwrap();
+
+            graph_ids
+                .into_iter()
+                .filter_map(|graph_id| {
+                    queries.get_mut(&graph_id).and_then(|query| {
+                        // Only process branch-aware graphs
+                        if !query.graph.is_branch_aware() {
+                            return None;
+                        }
+
+                        // Find BranchMerge node and evaluate with metadata
+                        let mut output_delta = DeltaBatch::new();
+
+                        for node in query.graph.nodes_mut() {
+                            if let QueryNode::BranchMerge {
+                                table: node_table, ..
+                            } = node
+                                && node_table == table
+                            {
+                                let row_deltas =
+                                    node.evaluate_branch_merge_with_metadata(object_id, object);
+                                output_delta.extend(row_deltas);
+                                break;
                             }
                         }
 

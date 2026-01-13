@@ -164,6 +164,7 @@ impl QueryGraphBuilder {
         let merge_id = self.alloc_id();
         self.nodes.push(QueryNode::BranchMerge {
             table,
+            branch_names: branches.clone(),
             num_branches,
             descriptor,
             object_states: HashMap::new(),

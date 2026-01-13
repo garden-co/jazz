@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::commit::{Commit, CommitId};
 use crate::sql::DescriptorId;
+use crate::sql::row_buffer::{RowDescriptor, diff_columns};
 
 /// Error type for branch operations.
 #[derive(Debug, Clone, PartialEq)]
@@ -30,6 +31,24 @@ impl std::fmt::Display for BranchError {
 
 impl std::error::Error for BranchError {}
 
+/// Metadata about when a column was last changed.
+///
+/// This is tracked per-column for each frontier commit, enabling
+/// efficient per-column LWW merge without LCA computation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColumnChange {
+    /// Timestamp when this column was last modified.
+    pub timestamp: u64,
+    /// Author who made the change.
+    pub author: String,
+}
+
+/// Per-column change tracking for a commit.
+///
+/// Maps column name to its change metadata (when it was last changed and by whom).
+/// This is maintained for all frontier commits and rebuilt on load/sync.
+pub type ColumnChanges = HashMap<String, ColumnChange>;
+
 /// A named branch within an object.
 #[derive(Debug)]
 pub struct Branch {
@@ -44,6 +63,12 @@ pub struct Branch {
     /// Truncation point: if set, commits with parents before this point are rejected.
     /// The truncation point itself is kept; commits before it are considered pruned.
     pub(crate) truncation: Option<CommitId>,
+    /// Per-frontier-commit column change metadata.
+    ///
+    /// Only maintained for current frontier commits (not all historical commits).
+    /// For each frontier commit, tracks when each column was last changed and by whom.
+    /// Rebuilt on load/sync by replaying history in topological order.
+    pub(crate) frontier_changes: HashMap<CommitId, ColumnChanges>,
 }
 
 impl Branch {
@@ -55,6 +80,7 @@ impl Branch {
             children: HashMap::new(),
             frontier: Vec::new(),
             truncation: None,
+            frontier_changes: HashMap::new(),
         }
     }
 
@@ -340,6 +366,251 @@ impl Branch {
     /// Does NOT validate - use truncate_at() for validated truncation.
     pub fn set_truncation(&mut self, truncation: Option<CommitId>) {
         self.truncation = truncation;
+    }
+
+    /// Get the column change metadata for a frontier commit.
+    pub fn frontier_changes(&self) -> &HashMap<CommitId, ColumnChanges> {
+        &self.frontier_changes
+    }
+
+    /// Add a commit and track per-column change metadata.
+    ///
+    /// This method:
+    /// 1. Computes which columns changed vs parent(s) using diff_columns
+    /// 2. For changed columns: records (timestamp, author) from this commit
+    /// 3. For unchanged columns: inherits metadata from parent
+    /// 4. Updates frontier_changes (removes old frontier metadata, adds new)
+    ///
+    /// The descriptor is needed to interpret the row buffer for diffing.
+    pub fn add_commit_with_tracking(
+        &mut self,
+        commit: Commit,
+        descriptor: &RowDescriptor,
+    ) -> Result<CommitId, BranchError> {
+        // Build the column changes metadata before adding the commit
+        let mut changes = ColumnChanges::new();
+
+        if commit.parents.is_empty() {
+            // Root commit: all columns are "changed" by this commit
+            for col in &descriptor.columns {
+                changes.insert(
+                    col.name.clone(),
+                    ColumnChange {
+                        timestamp: commit.timestamp,
+                        author: commit.author.clone(),
+                    },
+                );
+            }
+        } else {
+            // For commits with parents, we need to:
+            // 1. Diff against parent(s) to find changed columns
+            // 2. For changed columns: use this commit's (timestamp, author)
+            // 3. For unchanged columns: inherit from parent
+
+            // Collect all changed columns from all parents
+            let mut all_changed_columns = HashSet::new();
+            for parent_id in &commit.parents {
+                if let Some(parent_commit) = self.commits.get(parent_id) {
+                    let changed = diff_columns(&parent_commit.content, &commit.content, descriptor);
+                    for col in changed {
+                        all_changed_columns.insert(col);
+                    }
+                }
+            }
+
+            // For changed columns: use this commit's metadata
+            for col_name in &all_changed_columns {
+                changes.insert(
+                    col_name.clone(),
+                    ColumnChange {
+                        timestamp: commit.timestamp,
+                        author: commit.author.clone(),
+                    },
+                );
+            }
+
+            // For unchanged columns: inherit from parent with latest timestamp
+            // (In case of multiple parents with differing metadata, pick the latest)
+            for col in &descriptor.columns {
+                if !all_changed_columns.contains(&col.name) {
+                    // Find the parent with the most recent change for this column
+                    let mut best_change: Option<ColumnChange> = None;
+
+                    for parent_id in &commit.parents {
+                        if let Some(parent_changes) = self.frontier_changes.get(parent_id)
+                            && let Some(parent_col_change) = parent_changes.get(&col.name)
+                        {
+                            match &best_change {
+                                None => {
+                                    best_change = Some(parent_col_change.clone());
+                                }
+                                Some(current_best)
+                                    if parent_col_change.timestamp > current_best.timestamp =>
+                                {
+                                    best_change = Some(parent_col_change.clone());
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    // If we found parent metadata, use it; otherwise this column hasn't been tracked
+                    // (This can happen during partial rebuilds or schema changes)
+                    if let Some(change) = best_change {
+                        changes.insert(col.name.clone(), change);
+                    }
+                }
+            }
+        }
+
+        // Store parents before adding (we need them for cleanup)
+        let parents = commit.parents.clone();
+
+        // Add the commit using existing method
+        let commit_id = self.try_add_commit(commit)?;
+
+        // Update frontier_changes:
+        // - Remove metadata for parents that are no longer in frontier
+        // - Add metadata for the new commit
+        for parent_id in &parents {
+            if !self.frontier.contains(parent_id) {
+                self.frontier_changes.remove(parent_id);
+            }
+        }
+        self.frontier_changes.insert(commit_id, changes);
+
+        Ok(commit_id)
+    }
+
+    /// Rebuild column change metadata for all frontier commits.
+    ///
+    /// Called after loading from storage or receiving sync data.
+    /// Replays history in topological order to reconstruct the per-column
+    /// change tracking metadata for current frontier commits.
+    pub fn rebuild_column_changes(&mut self, descriptor: &RowDescriptor) {
+        self.frontier_changes.clear();
+
+        if self.commits.is_empty() {
+            return;
+        }
+
+        // We need to process commits in topological order (parents before children)
+        // Build in-degree map for commits in this branch
+        let mut in_degree: HashMap<CommitId, usize> = HashMap::new();
+        for (id, commit) in &self.commits {
+            in_degree.entry(*id).or_insert(0);
+            for parent in &commit.parents {
+                // Only count parents that are in our commit set
+                if self.commits.contains_key(parent) {
+                    *in_degree.entry(*id).or_insert(0) += 1;
+                }
+            }
+        }
+
+        // Kahn's algorithm: start with commits that have no in-branch parents
+        let mut queue: VecDeque<CommitId> = in_degree
+            .iter()
+            .filter(|&(_, deg)| *deg == 0)
+            .map(|(&id, _)| id)
+            .collect();
+
+        // Temporary storage for all changes (not just frontier)
+        let mut all_changes: HashMap<CommitId, ColumnChanges> = HashMap::new();
+
+        while let Some(commit_id) = queue.pop_front() {
+            let commit = self.commits.get(&commit_id).unwrap();
+
+            let mut changes = ColumnChanges::new();
+
+            if commit.parents.is_empty()
+                || commit.parents.iter().all(|p| !self.commits.contains_key(p))
+            {
+                // Root commit (or all parents are outside our truncated view):
+                // all columns are "changed" by this commit
+                for col in &descriptor.columns {
+                    changes.insert(
+                        col.name.clone(),
+                        ColumnChange {
+                            timestamp: commit.timestamp,
+                            author: commit.author.clone(),
+                        },
+                    );
+                }
+            } else {
+                // Compute changed columns vs parents
+                let mut changed_columns = HashSet::new();
+                for parent_id in &commit.parents {
+                    if let Some(parent_commit) = self.commits.get(parent_id) {
+                        let changed =
+                            diff_columns(&parent_commit.content, &commit.content, descriptor);
+                        for col in changed {
+                            changed_columns.insert(col);
+                        }
+                    }
+                }
+
+                // For changed columns: use this commit's metadata
+                for col_name in &changed_columns {
+                    changes.insert(
+                        col_name.clone(),
+                        ColumnChange {
+                            timestamp: commit.timestamp,
+                            author: commit.author.clone(),
+                        },
+                    );
+                }
+
+                // For unchanged columns: inherit from parent with latest timestamp
+                for col in &descriptor.columns {
+                    if !changed_columns.contains(&col.name) {
+                        let mut best_change: Option<ColumnChange> = None;
+
+                        for parent_id in &commit.parents {
+                            if let Some(parent_changes) = all_changes.get(parent_id)
+                                && let Some(parent_col_change) = parent_changes.get(&col.name)
+                            {
+                                match &best_change {
+                                    None => {
+                                        best_change = Some(parent_col_change.clone());
+                                    }
+                                    Some(current_best)
+                                        if parent_col_change.timestamp > current_best.timestamp =>
+                                    {
+                                        best_change = Some(parent_col_change.clone());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+
+                        if let Some(change) = best_change {
+                            changes.insert(col.name.clone(), change);
+                        }
+                    }
+                }
+            }
+
+            all_changes.insert(commit_id, changes);
+
+            // Process children
+            if let Some(children) = self.children.get(&commit_id) {
+                for &child_id in children {
+                    if let Some(deg) = in_degree.get_mut(&child_id) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            queue.push_back(child_id);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Only keep metadata for frontier commits
+        for &frontier_id in &self.frontier {
+            if let Some(changes) = all_changes.remove(&frontier_id) {
+                self.frontier_changes.insert(frontier_id, changes);
+            }
+        }
     }
 }
 
