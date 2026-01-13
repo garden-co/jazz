@@ -127,7 +127,7 @@ describe("deleteCoValues", () => {
     expect(child.$jazz.raw.core.isDeleted).toBe(false);
   });
 
-  test("rejects deletion when a the value cannot be loaded", async () => {
+  test("rejects deletion when the value cannot be loaded", async () => {
     const Root = co.map({
       value: z.string(),
     });
