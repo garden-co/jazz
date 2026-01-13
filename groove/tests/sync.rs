@@ -2,6 +2,8 @@
 //!
 //! These tests verify the complete sync flow including LocalNode integration.
 
+#![cfg(feature = "sync-server")]
+
 use std::sync::Arc;
 use std::time::Duration;
 
