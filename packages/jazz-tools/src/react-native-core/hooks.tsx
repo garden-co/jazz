@@ -6,6 +6,7 @@ import { Linking } from "react-native";
 
 export {
   useCoState,
+  useCoStates,
   experimental_useInboxSender,
   useDemoAuth,
   usePassphraseAuth,
@@ -20,6 +21,7 @@ export {
   useAccountSubscription,
   useSubscriptionSelector,
   useSuspenseCoState,
+  useSuspenseCoStates,
   useSuspenseAccount,
 } from "jazz-tools/react-core";
 
