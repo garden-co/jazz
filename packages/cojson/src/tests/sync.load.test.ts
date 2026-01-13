@@ -1464,40 +1464,48 @@ describe("lazy storage load optimization", () => {
     map.set("hello", "world", "trusting");
     await map.core.waitForSync();
 
+    // Setup client and load the content (client now has everything)
+    const client = setupTestNode({
+      connected: true,
+    });
+    const mapOnClient = await loadCoValueOrFail(client.node, map.id);
+    expect(mapOnClient.get("hello")).toEqual("world");
+
+    // Disconnect client
+    client.disconnect();
+
     // Restart the server to clear memory (keeping storage)
+    // Now the server has no CoValues in memory, only in storage
     jazzCloud.restart();
     jazzCloud.node.setStorage(storage);
 
-    // Setup client
-    const client = setupTestNode();
-    client.addStorage({ ourName: "client" });
-
-    // Get knownState before restarting
-    const mapKnownState = map.core.knownState();
-    const groupKnownState = group.core.knownState();
-
-    // Connect client to server
-    client.connectToSyncServer();
-
-    // Client requests a load - since both sides have the same data,
-    // the server should respond with just "known" without loading from storage
     SyncMessagesLog.clear();
 
-    // Simulate that the client already has the full content by providing known state
-    // This mimics a client that already has the data
-    const peerId = Object.keys(client.node.syncManager.peers)[0]!;
-    client.node.syncManager.peers[peerId]!.combineWith(map.id, mapKnownState);
-    client.node.syncManager.peers[peerId]!.combineWith(
-      group.id,
-      groupKnownState,
-    );
+    // Reconnect client - it will send LOAD with its knownState
+    // Server should use LAZY_LOAD to check storage and see peer already has everything
+    client.connectToSyncServer();
 
-    // Trigger a load request from client
-    await loadCoValueOrFail(client.node, map.id);
+    await client.node.syncManager.waitForAllCoValuesSync();
 
-    // The server should have responded without needing to load full content
-    // This test verifies the optimization is working - server uses knownState check
-    expect(client.node.hasCoValue(map.id)).toBe(true);
+    // Verify the flow: LAZY_LOAD checks storage to get knownState,
+    // sees peer already has everything, responds with KNOWN (skips full LOAD)
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | LOAD Group sessions: header/3",
+        "client -> server | LOAD Map sessions: header/1",
+        "server -> storage | LAZY_LOAD Group",
+        "storage -> server | LAZY_LOAD_RESULT Group sessions: header/3",
+        "server -> client | KNOWN Group sessions: header/3",
+        "server -> storage | LAZY_LOAD Map",
+        "storage -> server | LAZY_LOAD_RESULT Map sessions: header/1",
+        "server -> client | KNOWN Map sessions: header/1",
+      ]
+    `);
   });
 
   test("handleLoad does full load when peer needs content", async () => {
@@ -1525,16 +1533,30 @@ describe("lazy storage load optimization", () => {
     const mapOnClient = await loadCoValueOrFail(client.node, map.id);
     expect(mapOnClient.get("hello")).toEqual("world");
 
-    // Verify the flow - server should have sent full content
-    const messages = SyncMessagesLog.getMessages({
-      Group: group.core,
-      Map: map.core,
-    });
-
-    // Should see CONTENT messages from server indicating full load happened
+    // Verify the flow:
+    // 1. Client sends LOAD with empty sessions
+    // 2. Server does LAZY_LOAD to check knownState from storage
+    // 3. Server sees peer needs content, so does full LOAD from storage
+    // 4. Server sends CONTENT to client
     expect(
-      messages.some((msg) => msg.includes("server -> client | CONTENT")),
-    ).toBe(true);
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | LOAD Map sessions: empty",
+        "server -> storage | LAZY_LOAD Map",
+        "storage -> server | LAZY_LOAD_RESULT Map sessions: header/1",
+        "server -> storage | LOAD Map sessions: empty",
+        "storage -> server | CONTENT Group header: true new: After: 0 New: 3",
+        "storage -> server | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 3",
+        "server -> client | CONTENT Map header: true new: After: 0 New: 1",
+        "client -> server | KNOWN Group sessions: header/3",
+        "client -> server | KNOWN Map sessions: header/1",
+      ]
+    `);
   });
 
   test("handleLoad falls back to peers when not in storage", async () => {
@@ -1615,67 +1637,21 @@ describe("lazy storage load optimization", () => {
     expect(serverMap.isAvailable()).toBe(true);
 
     // Verify that the server did a full load from storage
-    const messages = SyncMessagesLog.getMessages({
-      Group: group.core,
-      Map: map.core,
-    });
-
-    // Should see storage -> server CONTENT message indicating full load from storage
     expect(
-      messages.some((msg) => msg.includes("storage -> server | CONTENT Map")),
-    ).toBe(true);
-  });
-
-  test("server responds with known state when it has CoValue in storage but peer already has all content", async () => {
-    // This test verifies the lazy load optimization:
-    // When a client sends a LOAD with knownState that already has everything,
-    // the server should respond with KNOWN without doing a full storage load
-
-    // Setup server with storage
-    const { storage } = jazzCloud.addStorage({ ourName: "server" });
-
-    // Create content on server
-    const group = jazzCloud.node.createGroup();
-    const map = group.createMap();
-    map.set("hello", "world", "trusting");
-    await map.core.waitForSync();
-
-    // Restart the server to clear memory (forcing storage load path)
-    jazzCloud.restart();
-    jazzCloud.node.setStorage(storage);
-
-    // Setup first client and load the data
-    const client1 = setupTestNode({
-      connected: true,
-    });
-    const mapOnClient1 = await loadCoValueOrFail(client1.node, map.id);
-    expect(mapOnClient1.get("hello")).toEqual("world");
-
-    // Disconnect and reconnect client1 - this simulates the client already having the data
-    // and sending a LOAD request that includes their knownState
-    client1.disconnect();
-
-    SyncMessagesLog.clear();
-
-    client1.connectToSyncServer();
-
-    // Wait for reconciliation to complete
-    await client1.node.syncManager.waitForAllCoValuesSync();
-
-    // The messages should show that the server recognized the client already has the content
-    const messages = SyncMessagesLog.getMessages({
-      Group: group.core,
-      Map: map.core,
-    });
-
-    // The client should send LOAD with their current knownState
-    // The server should respond with KNOWN (not CONTENT) since peer already has everything
-    expect(
-      messages.some((msg) => msg.includes("client -> server | LOAD")),
-    ).toBe(true);
-    expect(
-      messages.some((msg) => msg.includes("server -> client | KNOWN")),
-    ).toBe(true);
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | CONTENT Map header: false new: After: 0 New: 1",
+        "server -> storage | LOAD Map sessions: empty",
+        "storage -> server | CONTENT Group header: true new: After: 0 New: 5",
+        "storage -> server | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> client | KNOWN Map sessions: header/2",
+        "server -> storage | CONTENT Map header: false new: After: 0 New: 1",
+      ]
+    `);
   });
 
   test("handleNewContent loads large CoValue from storage when garbage-collected", async () => {
@@ -1720,15 +1696,23 @@ describe("lazy storage load optimization", () => {
     expect(serverMap.isAvailable()).toBe(true);
 
     // Verify that the server did a full load from storage (with streaming for large data)
-    const messages = SyncMessagesLog.getMessages({
-      Group: group.core,
-      Map: largeMap.core,
-    });
-
-    // Should see storage -> server CONTENT messages indicating full load from storage
     expect(
-      messages.some((msg) => msg.includes("storage -> server | CONTENT Map")),
-    ).toBe(true);
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: largeMap.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | CONTENT Map header: false new: After: 0 New: 1",
+        "server -> storage | LOAD Map sessions: empty",
+        "storage -> server | CONTENT Group header: true new: After: 0 New: 5",
+        "storage -> server | CONTENT Map header: true new: After: 0 New: 73 expectContentUntil: header/201",
+        "server -> client | KNOWN Map sessions: header/74",
+        "server -> storage | CONTENT Map header: false new: After: 0 New: 1",
+        "storage -> server | CONTENT Map header: true new: After: 73 New: 73",
+        "storage -> server | CONTENT Map header: true new: After: 146 New: 54",
+      ]
+    `);
   });
 
   test("handleNewContent loads CoValue from storage when group is large and garbage-collected", async () => {
@@ -1742,7 +1726,7 @@ describe("lazy storage load optimization", () => {
     // Add large data to the group itself
     for (let i = 0; i < 200; i++) {
       const value = Buffer.alloc(1024, `value${i}`).toString("base64");
-      group.set(`key${i}` as any, value, "trusting");
+      group.set(`key${i}` as any, value as never, "trusting");
     }
 
     const map = group.createMap();
@@ -1788,18 +1772,25 @@ describe("lazy storage load optimization", () => {
     expect(serverMap.isAvailable()).toBe(true);
 
     // Verify that the server did a full load from storage
-    const messages = SyncMessagesLog.getMessages({
-      Group: group.core,
-      Map: map.core,
-    });
-
-    // Should see storage -> server CONTENT messages indicating full load from storage
+    // Note: No LAZY_LOAD here because the content message has no header (it's an update),
+    // so the server goes directly to full LOAD
     expect(
-      messages.some((msg) => msg.includes("storage -> server | CONTENT Map")),
-    ).toBe(true);
-    expect(
-      messages.some((msg) => msg.includes("storage -> server | CONTENT Group")),
-    ).toBe(true);
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | CONTENT Map header: false new: After: 0 New: 1",
+        "server -> storage | LOAD Map sessions: empty",
+        "storage -> server | CONTENT Group header: true new: After: 0 New: 78 expectContentUntil: header/205",
+        "storage -> server | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> client | KNOWN Map sessions: header/2",
+        "server -> storage | CONTENT Map header: false new: After: 0 New: 1",
+        "storage -> server | CONTENT Group header: true new: After: 78 New: 73",
+        "storage -> server | CONTENT Group header: true new: After: 151 New: 54",
+      ]
+    `);
   });
 
   test("handleNewContent loads CoValue from storage when parent group is large and garbage-collected", async () => {

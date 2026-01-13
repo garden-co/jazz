@@ -58,6 +58,8 @@ describe("sync after the garbage collector has run", () => {
     ).toMatchInlineSnapshot(`
       [
         "client -> server | LOAD Map sessions: empty",
+        "server -> storage | LAZY_LOAD Map",
+        "storage -> server | LAZY_LOAD_RESULT Map sessions: header/1",
         "server -> storage | LOAD Map sessions: empty",
         "storage -> server | CONTENT Group header: true new: After: 0 New: 3",
         "storage -> server | CONTENT Map header: true new: After: 0 New: 1",
@@ -158,6 +160,8 @@ describe("sync after the garbage collector has run", () => {
         "client -> edge | LOAD Map sessions: empty",
         "edge -> storage | CONTENT Map header: true new: After: 0 New: 1",
         "edge -> server | CONTENT Map header: true new: After: 0 New: 1",
+        "edge -> storage | LAZY_LOAD Map",
+        "storage -> edge | LAZY_LOAD_RESULT Map sessions: header/1",
         "edge -> storage | LOAD Map sessions: empty",
         "storage -> edge | CONTENT Group header: true new: After: 0 New: 5",
         "storage -> edge | CONTENT Map header: true new: After: 0 New: 1",
