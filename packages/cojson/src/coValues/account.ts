@@ -8,7 +8,7 @@ import {
   SignerID,
   SignerSecret,
 } from "../crypto/crypto.js";
-import { AgentID } from "../ids.js";
+import { AgentID, isAgentID } from "../ids.js";
 import { JsonObject } from "../jsonValue.js";
 import { LocalNode } from "../localNode.js";
 import { logger } from "../logger.js";
@@ -43,25 +43,23 @@ export class RawAccount<
   _cachedCurrentAgentID: AgentID | undefined;
 
   currentAgentID(): AgentID {
-    if (this._cachedCurrentAgentID) {
-      return this._cachedCurrentAgentID;
+    if (this._cachedCurrentAgentID) return this._cachedCurrentAgentID;
+
+    const header = this.core.verified.header;
+
+    if (header.ruleset.type !== "group") {
+      throw new Error("You can't get an agent id from a non-group value");
     }
 
-    const agents = this.keys()
-      .filter((k): k is AgentID => k.startsWith("sealer_"))
-      .sort(
-        (a, b) =>
-          (this.lastEditAt(a)?.at.getTime() || 0) -
-          (this.lastEditAt(b)?.at.getTime() || 0),
-      );
+    const initialAdmin = header.ruleset.initialAdmin;
 
-    if (agents.length !== 1) {
-      logger.warn("Account has " + agents.length + " agents", { id: this.id });
+    if (!isAgentID(initialAdmin)) {
+      throw new Error("You can read agent ids only from account values");
     }
 
-    this._cachedCurrentAgentID = agents[0];
+    this._cachedCurrentAgentID = initialAdmin;
 
-    return agents[0]!;
+    return initialAdmin;
   }
 
   override createInvite(_: AccountRole): InviteSecret {
