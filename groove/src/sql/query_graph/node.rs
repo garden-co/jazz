@@ -3152,6 +3152,12 @@ impl QueryNode {
 
                                 // Skip empty content (deleted objects)
                                 if commit.content.is_empty() {
+                                    #[cfg(debug_assertions)]
+                                    eprintln!(
+                                        "[BranchMerge] Skipping commit {:?} on branch '{}': \
+                                         empty content (deleted object)",
+                                        commit_id, branch_name
+                                    );
                                     continue;
                                 }
 
@@ -3173,19 +3179,43 @@ impl QueryNode {
                                     // Different schema: transform through lens
                                     let lens = match lens_context.get_lens(&source_id, target_id) {
                                         Some(l) => l,
-                                        None => continue, // No lens available - skip commit
+                                        None => {
+                                            #[cfg(debug_assertions)]
+                                            eprintln!(
+                                                "[BranchMerge] Skipping commit {:?} on branch '{}': \
+                                                 no lens found from {:?} to {:?}",
+                                                commit_id, branch_name, source_id, target_id
+                                            );
+                                            continue;
+                                        }
                                     };
 
                                     let src_desc = match descriptor_lookup(source_id) {
                                         Some(d) => d,
-                                        None => continue, // Descriptor not found - skip commit
+                                        None => {
+                                            #[cfg(debug_assertions)]
+                                            eprintln!(
+                                                "[BranchMerge] Skipping commit {:?} on branch '{}': \
+                                                 source descriptor {:?} not found",
+                                                commit_id, branch_name, source_id
+                                            );
+                                            continue;
+                                        }
                                     };
 
                                     let content = match lens
                                         .transform_buffer_forward(&commit.content, &src_desc)
                                     {
                                         Ok(c) => c,
-                                        Err(_) => continue, // Incompatible - skip commit
+                                        Err(e) => {
+                                            #[cfg(debug_assertions)]
+                                            eprintln!(
+                                                "[BranchMerge] Skipping commit {:?} on branch '{}': \
+                                                 lens transform failed: {:?}",
+                                                commit_id, branch_name, e
+                                            );
+                                            continue;
+                                        }
                                     };
 
                                     let changes = Self::transform_column_changes(&changes, lens);
@@ -4110,5 +4140,165 @@ mod tests {
         assert!(transformed.contains_key("unchanged"));
         assert!(!transformed.contains_key("old_name"));
         assert!(!transformed.contains_key("old_status"));
+    }
+
+    /// Test: Cross-schema branch merge gracefully handles missing lens
+    ///
+    /// When a lens is not available between schemas, the commit should be
+    /// skipped rather than causing a panic or incorrect results.
+    #[test]
+    fn branch_merge_skips_commits_when_lens_missing() {
+        use crate::branch::SchemaBranchName;
+        use crate::commit::Commit;
+        use crate::object::Object;
+        use crate::sql::RowBuilder;
+        use crate::sql::catalog::DescriptorId;
+        use crate::sql::lens::LensContext;
+        use crate::sql::row_buffer::RowDescriptor;
+        use crate::sql::schema::{ColumnDef, ColumnType, TableSchema};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        // Two different schemas (no lens between them)
+        let schema_v1 = TableSchema::new(
+            "documents",
+            vec![ColumnDef::required("title", ColumnType::String)],
+        );
+        let desc_v1 = Arc::new(RowDescriptor::from_table_schema(&schema_v1));
+        let desc_v1_id = DescriptorId::from_object_id(ObjectId::new(0x100));
+
+        let schema_v2 = TableSchema::new(
+            "documents",
+            vec![ColumnDef::required("name", ColumnType::String)],
+        );
+        let desc_v2 = Arc::new(RowDescriptor::from_table_schema(&schema_v2));
+        let desc_v2_id = DescriptorId::from_object_id(ObjectId::new(0x200));
+
+        // Create object with two branches (different schemas)
+        let branch_v1_name = SchemaBranchName::from_descriptor("dev", &desc_v1_id, "branch-v1");
+        let branch_v2_name = SchemaBranchName::from_descriptor("dev", &desc_v2_id, "branch-v2");
+
+        let mut object = Object::new(ObjectId::new(1), "documents");
+
+        // Add initial row to main
+        let initial_row = RowBuilder::new(desc_v1.clone())
+            .set_string_by_name("title", "Initial")
+            .build();
+
+        {
+            let mut main = object.branch_mut("main").unwrap();
+            main.add_commit_with_tracking(
+                Commit {
+                    parents: vec![],
+                    content: initial_row.buffer.clone().into_boxed_slice(),
+                    timestamp: 1000,
+                    author: "system".to_string(),
+                    meta: None,
+                },
+                &desc_v1,
+            )
+            .unwrap();
+        }
+
+        // Create branches
+        let main_tip = object.branch("main").unwrap().frontier()[0];
+        object
+            .create_branch(branch_v1_name.to_string(), "main", &main_tip)
+            .unwrap();
+        object
+            .create_branch(branch_v2_name.to_string(), "main", &main_tip)
+            .unwrap();
+
+        // Add a commit to v1 branch
+        let row_v1 = RowBuilder::new(desc_v1.clone())
+            .set_string_by_name("title", "V1 Value")
+            .build();
+
+        {
+            let mut branch_v1 = object.branch_mut(&branch_v1_name.to_string()).unwrap();
+            let parent = branch_v1.frontier()[0];
+            branch_v1
+                .add_commit_with_tracking(
+                    Commit {
+                        parents: vec![parent],
+                        content: row_v1.buffer.into_boxed_slice(),
+                        timestamp: 2000,
+                        author: "alice".to_string(),
+                        meta: None,
+                    },
+                    &desc_v1,
+                )
+                .unwrap();
+        }
+
+        // Add a commit to v2 branch (in v2 format)
+        let row_v2 = RowBuilder::new(desc_v2.clone())
+            .set_string_by_name("name", "V2 Value")
+            .build();
+
+        {
+            let mut branch_v2 = object.branch_mut(&branch_v2_name.to_string()).unwrap();
+            let parent = branch_v2.frontier()[0];
+            branch_v2
+                .add_commit_with_tracking(
+                    Commit {
+                        parents: vec![parent],
+                        content: row_v2.buffer.into_boxed_slice(),
+                        timestamp: 3000,
+                        author: "bob".to_string(),
+                        meta: None,
+                    },
+                    &desc_v2,
+                )
+                .unwrap();
+        }
+
+        // Create BranchMerge node targeting v2 schema
+        let mut node = QueryNode::BranchMerge {
+            table: "documents".to_string(),
+            branch_names: vec![branch_v1_name.to_string(), branch_v2_name.to_string()],
+            descriptor: desc_v2.clone(),
+            target_descriptor_id: Some(desc_v2_id),
+            object_states: HashMap::new(),
+        };
+
+        // Empty lens context - no lens available from v1 to v2!
+        let lens_context = LensContext::new();
+
+        // Descriptor lookup that returns our descriptors
+        let descriptor_lookup = |id: DescriptorId| -> Option<Arc<RowDescriptor>> {
+            if id == desc_v1_id {
+                Some(desc_v1.clone())
+            } else if id == desc_v2_id {
+                Some(desc_v2.clone())
+            } else {
+                None
+            }
+        };
+
+        // Evaluate - should NOT panic, and should skip the v1 commit (no lens)
+        let delta = node.evaluate_branch_merge_with_lenses(
+            ObjectId::new(1),
+            &object,
+            &lens_context,
+            descriptor_lookup,
+        );
+
+        // Should have exactly one row (from v2 branch only, v1 was skipped)
+        assert_eq!(delta.len(), 1, "Should have one row (v2 commit only)");
+
+        // Verify it's the v2 value
+        let deltas: Vec<_> = delta.into_iter().collect();
+        match &deltas[0] {
+            RowDelta::Added { row, .. } => {
+                let name = row.get_by_name("name");
+                assert_eq!(
+                    name,
+                    Some(crate::sql::row_buffer::RowValue::String("V2 Value")),
+                    "Should have v2 value since v1 commit was skipped (no lens)"
+                );
+            }
+            _ => panic!("Expected Added delta"),
+        }
     }
 }
