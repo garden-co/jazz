@@ -1,4 +1,4 @@
-import { BetterAuthDbSchema } from "better-auth/db";
+import { BetterAuthDBSchema } from "better-auth/db";
 import { CleanedWhere } from "better-auth/adapters";
 import { co, Account } from "jazz-tools";
 import { JazzRepository } from "./generic";
@@ -22,7 +22,7 @@ export class SessionRepository extends JazzRepository {
     databaseSchema: Database,
     databaseRoot: co.loaded<Database, { group: true }>,
     worker: Account,
-    betterAuthSchema: BetterAuthDbSchema = {},
+    betterAuthSchema: BetterAuthDBSchema = {},
     ensureSync: boolean = false,
   ) {
     super(databaseSchema, databaseRoot, worker, betterAuthSchema, ensureSync);

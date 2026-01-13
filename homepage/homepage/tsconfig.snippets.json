@@ -25,7 +25,13 @@
       "@clerk/clerk-expo/*": [
         "./content/docs/code-snippets/key-features/authentication/clerk/*"
       ],
+      "$lib/components/*": [
+        "./content/docs/code-snippets/key-features/authentication/clerk/*",
+        "./content/docs/code-snippets/permissions-and-sharing/quickstart/*",
+        "./content/docs/code-snippets/quickstart/*"
+      ],
       "$lib/*": [
+        "./content/docs/code-snippets/key-features/authentication/clerk/*",
         "./content/docs/code-snippets/key-features/authentication/quickstart/*",
         "./content/docs/code-snippets/permissions-and-sharing/quickstart/*",
         "./content/docs/code-snippets/quickstart/*",
@@ -38,10 +44,6 @@
         "./content/docs/code-snippets/quickstart/*",
         "./content/docs/code-snippets/server-side/quickstart/*",
         "./content/docs/code-snippets/server-side/ssr/*"
-      ],
-      "$lib/components/*": [
-        "./content/docs/code-snippets/permissions-and-sharing/quickstart/*",
-        "./content/docs/code-snippets/quickstart/*"
       ],
       "@/app/components/*": [
         "./content/docs/code-snippets/permissions-and-sharing/quickstart/*",

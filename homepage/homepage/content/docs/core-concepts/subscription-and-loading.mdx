@@ -92,7 +92,15 @@ To handle the various loading states, instead of checking `$isLoaded` or `$jazz.
 ```
 </CodeGroup>
 
-[Check out an example error boundary here](https://github.com/garden-co/jazz/blob/main/examples/music-player/src/components/ErrorBoundary.tsx).
+#### Use Suspense with Error Boundaries [!framework=react,react-native,react-native-expo]
+
+ An error boundary serves as a fallback for unrecoverable errors you cannot handle gracefully during rendering. If errors [can be handled locally](#loading-errors) in the component&hairsp;—&hairsp;for example, with `$onError: 'catch'` in a resolve query&hairsp;—&hairsp;it's generally better to do so. 
+ 
+ As a rule of thumb, it’s best to wrap only your routes or major components in error boundaries.
+ 
+When using an error boundary, you can handle errors thrown by the hooks by displaying a custom error message or UI. Jazz provides you with a `getJazzErrorType` helper which you can use in `getDerivedStateFromError` to allow you to determine what caused the error (for example, the CoValue may be unavailable, or the user may not have the appropriate permissions to access it).
+
+[Check out an example error boundary here](https://github.com/garden-co/jazz/blob/main/examples/music-player/src/components/ErrorBoundary.tsx), or read more about them in the [React documentation](https://react.dev/reference/react/Component#catching-rendering-errors-with-an-error-boundary).
 </ContentByFramework>
 
 ## Deep Loading
