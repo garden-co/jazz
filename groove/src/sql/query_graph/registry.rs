@@ -1205,4 +1205,184 @@ mod tests {
             "active should be from commit B"
         );
     }
+
+    /// Test: Cross-schema branch merge with lens transformation
+    ///
+    /// Branch A (v1 schema): has "title" column, edits title="My Title" at t=2000
+    /// Branch B (v2 schema): has "name" column (renamed from title), edits status=true at t=3000
+    ///
+    /// When querying with target schema v2:
+    /// - title from v1 should be transformed to name via lens
+    /// - Merge should combine: name="My Title" (from A, transformed), status=true (from B)
+    #[test]
+    fn cross_schema_branch_merge_with_lens() {
+        use crate::branch::SchemaBranchName;
+        use crate::commit::Commit;
+        use crate::object::Object;
+        use crate::sql::RowBuilder;
+        use crate::sql::lens::LensGenerationOptions;
+        use crate::sql::row_buffer::RowDescriptor;
+        use crate::sql::schema::{ColumnDef, ColumnType, TableSchema};
+        use std::sync::Arc;
+
+        // Create database and table with v1 schema: "title" and "status" columns
+        let db = Database::in_memory();
+        db.execute("CREATE TABLE documents (title STRING NOT NULL, status BOOL NOT NULL)")
+            .unwrap();
+
+        // Get v1 descriptor ID
+        let desc_v1_id = db.get_descriptor_id("documents").unwrap();
+        let schema_v1 = db.get_table("documents").unwrap();
+        let desc_v1 = Arc::new(RowDescriptor::from_table_schema(&schema_v1));
+
+        // Execute migration to v2: rename "title" → "name"
+        let schema_v2 = TableSchema::new(
+            "documents",
+            vec![
+                ColumnDef::required("name", ColumnType::String),
+                ColumnDef::required("status", ColumnType::Bool),
+            ],
+        );
+        let options = LensGenerationOptions {
+            confirmed_renames: vec![("title".into(), "name".into())],
+        };
+        db.execute_migration("documents", schema_v2.clone(), options)
+            .unwrap();
+
+        // Get v2 descriptor ID
+        let desc_v2_id = db.get_descriptor_id("documents").unwrap();
+        let desc_v2 = Arc::new(RowDescriptor::from_table_schema(&schema_v2));
+
+        // Verify lens context is set up correctly
+        let lens_context = db.state().build_lens_context_for_table("documents");
+        assert!(
+            lens_context.get_lens(&desc_v1_id, &desc_v2_id).is_some(),
+            "Lens should exist from v1 to v2"
+        );
+
+        // Create initial row (in v1 format)
+        let initial_row_v1 = RowBuilder::new(desc_v1.clone())
+            .set_string_by_name("title", "Initial")
+            .set_bool_by_name("status", false)
+            .build();
+
+        // Create object with default "main" branch
+        let branch_v1_name = SchemaBranchName::from_descriptor("dev", &desc_v1_id, "branch-v1");
+        let branch_v2_name = SchemaBranchName::from_descriptor("dev", &desc_v2_id, "branch-v2");
+
+        let mut object = Object::new(ObjectId::new(1), "documents");
+
+        // Add initial commit to main
+        {
+            let mut main_branch = object.branch_mut("main").unwrap();
+            main_branch
+                .add_commit_with_tracking(
+                    Commit {
+                        parents: vec![],
+                        content: initial_row_v1.buffer.clone().into_boxed_slice(),
+                        timestamp: 1000,
+                        author: "system".to_string(),
+                        meta: None,
+                    },
+                    &desc_v1,
+                )
+                .unwrap();
+        }
+
+        // Create v1 branch from main's tip
+        let main_tip = object.branch("main").unwrap().frontier()[0];
+        object
+            .create_branch(branch_v1_name.to_string(), "main", &main_tip)
+            .unwrap();
+
+        // Create v2 branch from main's tip (same starting point)
+        object
+            .create_branch(branch_v2_name.to_string(), "main", &main_tip)
+            .unwrap();
+
+        // Branch v1: Update title to "My Title" at t=2000
+        let row_v1_update = RowBuilder::new(desc_v1.clone())
+            .set_string_by_name("title", "My Title")
+            .set_bool_by_name("status", false) // unchanged
+            .build();
+
+        {
+            let mut branch_v1 = object.branch_mut(&branch_v1_name.to_string()).unwrap();
+            let parent = branch_v1.frontier()[0];
+            branch_v1
+                .add_commit_with_tracking(
+                    Commit {
+                        parents: vec![parent],
+                        content: row_v1_update.buffer.into_boxed_slice(),
+                        timestamp: 2000,
+                        author: "alice".to_string(),
+                        meta: None,
+                    },
+                    &desc_v1,
+                )
+                .unwrap();
+        }
+
+        // Branch v2: Update status to true at t=3000 (in v2 format)
+        let row_v2_update = RowBuilder::new(desc_v2.clone())
+            .set_string_by_name("name", "Initial") // unchanged (was "title" in v1)
+            .set_bool_by_name("status", true)
+            .build();
+
+        {
+            let mut branch_v2 = object.branch_mut(&branch_v2_name.to_string()).unwrap();
+            // The v2 branch was forked from v1's tip, so we need to find its frontier
+            let parent = branch_v2.frontier()[0];
+            branch_v2
+                .add_commit_with_tracking(
+                    Commit {
+                        parents: vec![parent],
+                        content: row_v2_update.buffer.into_boxed_slice(),
+                        timestamp: 3000,
+                        author: "bob".to_string(),
+                        meta: None,
+                    },
+                    &desc_v2,
+                )
+                .unwrap();
+        }
+
+        // Create a query targeting v2 schema, reading from both branches
+        let builder = QueryGraphBuilder::new("documents", schema_v2.clone()).with_branches(
+            vec![branch_v1_name.to_string(), branch_v2_name.to_string()],
+            desc_v2_id,
+        );
+        let graph = builder.build_branch_merge_query(GraphId(0));
+
+        let registry = GraphRegistry::new();
+        let graph_id = registry.register(graph);
+
+        // Notify to trigger evaluation
+        registry.notify_object_changed("documents", ObjectId::new(1), &object, db.state());
+
+        // Get output
+        let output = registry
+            .get_output(graph_id, db.state())
+            .expect("should have output");
+
+        assert_eq!(output.len(), 1, "Should have exactly one merged row");
+
+        let (id, row) = &output[0];
+        assert_eq!(*id, ObjectId::new(1));
+
+        // Verify: name from v1 (transformed from "title"), status from v2
+        let name = row.get_by_name("name");
+        let status = row.get_by_name("status");
+
+        assert_eq!(
+            name,
+            Some(crate::sql::row_buffer::RowValue::String("My Title")),
+            "name should be 'My Title' from v1 branch (transformed from title)"
+        );
+        assert_eq!(
+            status,
+            Some(crate::sql::row_buffer::RowValue::Bool(true)),
+            "status should be true from v2 branch"
+        );
+    }
 }
