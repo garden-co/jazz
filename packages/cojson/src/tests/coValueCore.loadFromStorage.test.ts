@@ -45,13 +45,13 @@ function createMockStorage(
     ) => void;
     stopTrackingSyncState?: (id: RawCoID) => void;
     close?: () => Promise<unknown> | undefined;
-    markCoValueAsDeleted?: (id: RawCoID) => void;
+    markDeleteAsValid?: (id: RawCoID) => void;
     enableDeletedCoValuesErasure?: () => void;
     eraseAllDeletedCoValues?: () => Promise<void>;
   } = {},
 ): StorageAPI {
   return {
-    markCoValueAsDeleted: opts.markCoValueAsDeleted || vi.fn(),
+    markDeleteAsValid: opts.markDeleteAsValid || vi.fn(),
     enableDeletedCoValuesErasure: opts.enableDeletedCoValuesErasure || vi.fn(),
     eraseAllDeletedCoValues: opts.eraseAllDeletedCoValues || vi.fn(),
     load: opts.load || vi.fn(),

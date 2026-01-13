@@ -254,10 +254,6 @@ export class StorageApiSync implements StorageAPI {
     return this.storeSingle(msg, correctionCallback);
   }
 
-  async eraseAllDeletedCoValues(): Promise<void> {
-    this.eraseDeletedCoValuesOnceBudgeted();
-  }
-
   /**
    * This function is called when the storage lacks the information required to store the incoming content.
    *
@@ -422,11 +418,19 @@ export class StorageApiSync implements StorageAPI {
 
   deletedValues = new Set<RawCoID>();
 
-  markCoValueAsDeleted(id: RawCoID) {
+  markDeleteAsValid(id: RawCoID) {
     this.deletedValues.add(id);
 
     if (this.deletedCoValuesEraserScheduler) {
       this.deletedCoValuesEraserScheduler.onEnqueueDeletedCoValue();
+    }
+  }
+
+  async eraseAllDeletedCoValues(): Promise<void> {
+    const ids = this.dbClient.getAllCoValuesWaitingForDelete();
+
+    for (const id of ids) {
+      this.dbClient.eraseCoValueButKeepTombstone(id);
     }
   }
 
@@ -437,6 +441,24 @@ export class StorageApiSync implements StorageAPI {
         this.eraseDeletedCoValuesOnceBudgeted(MAX_DELETE_SCHEDULE_DURATION_MS),
     });
     this.deletedCoValuesEraserScheduler.scheduleStartupDrain();
+  }
+
+  private eraseDeletedCoValuesOnceBudgeted(budgetMs?: number) {
+    const startedAt = Date.now();
+    const ids = this.dbClient.getAllCoValuesWaitingForDelete();
+
+    for (const id of ids) {
+      // Strict time budget for sync storage to avoid blocking.
+      if (budgetMs && Date.now() - startedAt >= budgetMs) {
+        break;
+      }
+
+      this.dbClient.eraseCoValueButKeepTombstone(id);
+    }
+
+    return {
+      hasMore: this.dbClient.getAllCoValuesWaitingForDelete().length > 0,
+    };
   }
 
   waitForSync(id: string, coValue: CoValueCore) {
@@ -465,28 +487,5 @@ export class StorageApiSync implements StorageAPI {
   close() {
     this.deletedCoValuesEraserScheduler?.dispose();
     return undefined;
-  }
-
-  private async eraseDeletedCoValuesOnceBudgeted(
-    budgetMs?: number,
-  ): Promise<{ hasMore: boolean }> {
-    const startedAt = Date.now();
-    const ids = this.dbClient.getAllCoValuesWaitingForDelete();
-
-    for (const id of ids) {
-      // Strict time budget for sync storage to avoid blocking.
-      if (budgetMs && Date.now() - startedAt >= budgetMs) {
-        break;
-      }
-
-      this.dbClient.transaction((tx) => {
-        tx.eraseCoValueButKeepTombstone(id);
-        tx.markCoValueDeletionDone(id);
-      });
-    }
-
-    return {
-      hasMore: this.dbClient.getAllCoValuesWaitingForDelete().length > 0,
-    };
   }
 }

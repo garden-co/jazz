@@ -244,10 +244,7 @@ export class StorageApiAsync implements StorageAPI {
         return;
       }
 
-      await this.dbClient.transaction(async (tx) => {
-        await tx.eraseCoValueButKeepTombstone(id);
-        await tx.markCoValueDeletionDone(id);
-      });
+      await this.dbClient.eraseCoValueButKeepTombstone(id);
     }
   }
 
@@ -430,7 +427,7 @@ export class StorageApiAsync implements StorageAPI {
 
   deletedValues = new Set<RawCoID>();
 
-  markCoValueAsDeleted(id: RawCoID) {
+  markDeleteAsValid(id: RawCoID) {
     this.deletedValues.add(id);
 
     if (this.deletedCoValuesEraserScheduler) {

@@ -61,26 +61,8 @@ export class IDBTransaction implements DBTransactionInterfaceAsync {
     );
   }
 
-  async markCoValueDeletionDone(id: RawCoID): Promise<void> {
-    await this.run((tx) =>
-      tx.getObjectStore("deletedCoValues").put({
-        coValueID: id,
-        status: "done",
-      } satisfies DeletedCoValueQueueEntry),
-    );
-  }
-
-  async eraseCoValueButKeepTombstone(coValueID: RawCoID): Promise<void> {
-    const coValue = await this.run((tx) =>
-      tx.getObjectStore("coValues").index("coValuesById").get(coValueID),
-    );
-
-    if (!coValue) {
-      console.warn(`CoValue ${coValueID} not found, skipping deletion`);
-      return;
-    }
-
-    const coValueRowID = (coValue as { rowID: number }).rowID;
+  async deleteCoValueContent(coValue: StoredCoValueRow): Promise<void> {
+    const coValueRowID = coValue.rowID;
 
     const sessions = await this.run((tx) =>
       tx
@@ -95,13 +77,26 @@ export class IDBTransaction implements DBTransactionInterfaceAsync {
       .filter((s) => !s.sessionID.endsWith("$"))
       .map((s) => s.rowID);
 
+    const ops: Promise<unknown>[] = [];
+
     for (const sessionRowID of sessionsToDelete) {
-      await this.#deleteAllBySesPrefix("transactions", sessionRowID);
-      await this.#deleteAllBySesPrefix("signatureAfter", sessionRowID);
-      await this.run((tx) =>
-        tx.getObjectStore("sessions").delete(sessionRowID),
+      ops.push(
+        this.#deleteAllBySesPrefix("transactions", sessionRowID),
+        this.#deleteAllBySesPrefix("signatureAfter", sessionRowID),
+        this.run((tx) => tx.getObjectStore("sessions").delete(sessionRowID)),
       );
     }
+
+    ops.push(
+      this.run((tx) =>
+        tx.getObjectStore("deletedCoValues").put({
+          coValueID: coValue.id,
+          status: "done",
+        } satisfies DeletedCoValueQueueEntry),
+      ),
+    );
+
+    await Promise.all(ops);
   }
 
   async #deleteAllBySesPrefix(
@@ -289,17 +284,6 @@ export class IDBClient implements DBClientInterfaceAsync {
     }).catch(() => this.getCoValueRowID(id));
   }
 
-  async markCoValueDeletionDone(id: RawCoID): Promise<void> {
-    await putIndexedDbStore<DeletedCoValueQueueEntry, number>(
-      this.db,
-      "deletedCoValues",
-      {
-        coValueID: id,
-        status: "done",
-      },
-    );
-  }
-
   async getAllCoValuesWaitingForDelete(): Promise<RawCoID[]> {
     const entries = await queryIndexedDbStore<DeletedCoValueQueueEntry[]>(
       this.db,
@@ -313,7 +297,7 @@ export class IDBClient implements DBClientInterfaceAsync {
   }
 
   async transaction(
-    operationsCallback: (tx: DBTransactionInterfaceAsync) => Promise<unknown>,
+    operationsCallback: (tx: IDBTransaction) => Promise<unknown>,
     storeNames?: StoreName[],
   ) {
     const tx = new CoJsonIDBTransaction(this.db, storeNames);
@@ -335,21 +319,20 @@ export class IDBClient implements DBClientInterfaceAsync {
 
     await this.transaction(
       async (tx) => {
-        const idbTx = tx as IDBTransaction;
         await Promise.all(
           updates.map(async (update) => {
-            const record = await idbTx.getUnsyncedCoValueRecord(
+            const record = await tx.getUnsyncedCoValueRecord(
               update.id,
               update.peerId,
             );
             if (update.synced) {
               // Delete
               if (record) {
-                await idbTx.deleteUnsyncedCoValueRecord(record.rowID);
+                await tx.deleteUnsyncedCoValueRecord(record.rowID);
               }
             } else {
               // Insert or update
-              await idbTx.putUnsyncedCoValueRecord(
+              await tx.putUnsyncedCoValueRecord(
                 record
                   ? {
                       rowID: record.rowID,
@@ -367,6 +350,17 @@ export class IDBClient implements DBClientInterfaceAsync {
       },
       ["unsyncedCoValues"],
     );
+  }
+
+  async eraseCoValueButKeepTombstone(coValueID: RawCoID): Promise<void> {
+    const coValue = await this.getCoValue(coValueID);
+
+    if (!coValue) {
+      console.warn(`CoValue ${coValueID} not found, skipping deletion`);
+      return;
+    }
+
+    await this.transaction((tx) => tx.deleteCoValueContent(coValue));
   }
 
   async getUnsyncedCoValueIDs(): Promise<RawCoID[]> {

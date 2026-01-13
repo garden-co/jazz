@@ -1059,7 +1059,9 @@ export class SyncManager {
     const value = this.local.getCoValue(content.id);
 
     if (value.isDeleted) {
-      storage.markCoValueAsDeleted(value.id);
+      // This doesn't persist the delete flag, it only signals the storage
+      // API that the delete transaction is valid
+      storage.markDeleteAsValid(value.id);
     }
 
     // Try to store the content as-is for performance

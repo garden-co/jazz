@@ -36,7 +36,7 @@ export interface StorageAPI {
    *
    * When the delete tx is stored, the storage will mark the coValue as deleted.
    */
-  markCoValueAsDeleted(id: RawCoID): void;
+  markDeleteAsValid(id: RawCoID): void;
 
   /**
    * Enable the background erasure scheduler that drains the `deletedCoValues` work queue.
@@ -131,15 +131,6 @@ export interface DBTransactionInterfaceAsync {
    */
   markCoValueAsDeleted(id: RawCoID): Promise<unknown>;
 
-  markCoValueDeletionDone(id: RawCoID): Promise<unknown>;
-
-  /**
-   * Physical deletion primitive: erase all persisted history for a deleted coValue,
-   * while preserving the tombstone (header + delete session(s)).
-   * Must run inside a single storage transaction.
-   */
-  eraseCoValueButKeepTombstone(coValueID: RawCoID): Promise<unknown>;
-
   addSessionUpdate({
     sessionUpdate,
     sessionRow,
@@ -176,12 +167,6 @@ export interface DBClientInterfaceAsync {
   ): Promise<number | undefined>;
 
   /**
-   * Mark a deleted coValue work-queue entry as processed (physically erased while keeping the tombstone).
-   * Implementations should set status to `"done"`. Idempotent.
-   */
-  markCoValueDeletionDone(id: RawCoID): Promise<unknown>;
-
-  /**
    * Enumerate all coValue IDs currently pending in the "deleted coValues" work queue.
    */
   getAllCoValuesWaitingForDelete(): Promise<RawCoID[]>;
@@ -210,6 +195,13 @@ export interface DBClientInterfaceAsync {
   getUnsyncedCoValueIDs(): Promise<RawCoID[]>;
 
   stopTrackingSyncState(id: RawCoID): Promise<void>;
+
+  /**
+   * Physical deletion primitive: erase all persisted history for a deleted coValue,
+   * while preserving the tombstone (header + delete session(s)).
+   * Must run inside a single storage transaction.
+   */
+  eraseCoValueButKeepTombstone(coValueID: RawCoID): Promise<unknown>;
 }
 
 export interface DBTransactionInterfaceSync {
@@ -224,15 +216,6 @@ export interface DBTransactionInterfaceSync {
    * This is expected to be idempotent (safe to call repeatedly).
    */
   markCoValueAsDeleted(id: RawCoID): unknown;
-
-  markCoValueDeletionDone(id: RawCoID): unknown;
-
-  /**
-   * Physical deletion primitive: erase all persisted history for a deleted coValue,
-   * while preserving the tombstone (header + delete session(s)).
-   * Must run inside a single storage transaction.
-   */
-  eraseCoValueButKeepTombstone(coValueID: RawCoID): unknown;
 
   addSessionUpdate({
     sessionUpdate,
@@ -265,12 +248,6 @@ export interface DBClientInterfaceSync {
   upsertCoValue(id: string, header?: CoValueHeader): number | undefined;
 
   /**
-   * Mark a deleted coValue work-queue entry as processed (physically erased while keeping the tombstone).
-   * Implementations should set status to `"done"`. Idempotent.
-   */
-  markCoValueDeletionDone(id: RawCoID): unknown;
-
-  /**
    * Enumerate all coValue IDs currently pending in the "deleted coValues" work queue.
    */
   getAllCoValuesWaitingForDelete(): RawCoID[];
@@ -297,4 +274,11 @@ export interface DBClientInterfaceSync {
   getUnsyncedCoValueIDs(): RawCoID[];
 
   stopTrackingSyncState(id: RawCoID): void;
+
+  /**
+   * Physical deletion primitive: erase all persisted history for a deleted coValue,
+   * while preserving the tombstone (header + delete session(s)).
+   * Must run inside a single storage transaction.
+   */
+  eraseCoValueButKeepTombstone(coValueID: RawCoID): unknown;
 }

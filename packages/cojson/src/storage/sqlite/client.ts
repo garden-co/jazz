@@ -156,18 +156,6 @@ export class SQLiteClient
     );
   }
 
-  markCoValueDeletionDone(id: RawCoID) {
-    this.db.run(
-      `INSERT INTO deletedCoValues (coValueID, status) VALUES (?, ?)
-       ON CONFLICT(coValueID) DO UPDATE SET status=?`,
-      [
-        id,
-        DeletedCoValueDeletionStatus.Done,
-        DeletedCoValueDeletionStatus.Done,
-      ],
-    );
-  }
-
   eraseCoValueButKeepTombstone(coValueId: RawCoID) {
     const coValueRow = this.db.get<{ rowID: number }>(
       "SELECT rowID FROM coValues WHERE id = ?",
@@ -179,36 +167,45 @@ export class SQLiteClient
       return;
     }
 
-    // Single-transaction primitive: delete non-delete sessions and their data,
-    // preserve header + delete sessions (tombstone).
-    //
-    // Note: `sessions.coValue` references `coValues.rowID`.
-    this.db.run(
-      `DELETE FROM transactions
+    this.transaction(() => {
+      this.db.run(
+        `DELETE FROM transactions
        WHERE ses IN (
          SELECT rowID FROM sessions
          WHERE coValue = ?
            AND sessionID NOT LIKE '%$'
        )`,
-      [coValueRow.rowID],
-    );
+        [coValueRow.rowID],
+      );
 
-    this.db.run(
-      `DELETE FROM signatureAfter
+      this.db.run(
+        `DELETE FROM signatureAfter
        WHERE ses IN (
          SELECT rowID FROM sessions
          WHERE coValue = ?
            AND sessionID NOT LIKE '%$'
        )`,
-      [coValueRow.rowID],
-    );
+        [coValueRow.rowID],
+      );
 
-    this.db.run(
-      `DELETE FROM sessions
+      this.db.run(
+        `DELETE FROM sessions
        WHERE coValue = ?
          AND sessionID NOT LIKE '%$'`,
-      [coValueRow.rowID],
-    );
+        [coValueRow.rowID],
+      );
+
+      // Mark the delete as done
+      this.db.run(
+        `INSERT INTO deletedCoValues (coValueID, status) VALUES (?, ?)
+       ON CONFLICT(coValueID) DO UPDATE SET status=?`,
+        [
+          coValueId,
+          DeletedCoValueDeletionStatus.Done,
+          DeletedCoValueDeletionStatus.Done,
+        ],
+      );
+    });
   }
 
   getAllCoValuesWaitingForDelete(): RawCoID[] {
