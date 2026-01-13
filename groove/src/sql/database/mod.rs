@@ -269,6 +269,73 @@ impl DatabaseState {
         }
     }
 
+    /// Set up the callback for sync-applied commits.
+    ///
+    /// This must be called after the DatabaseState is wrapped in Arc, passing a clone
+    /// of the Arc. The callback will be invoked when commits are applied via
+    /// `LocalNode::apply_commits`, which happens during sync.
+    ///
+    /// The callback:
+    /// 1. Looks up the table name from object metadata
+    /// 2. Rebuilds column change metadata for proper per-column LWW merge
+    /// 3. Notifies query graphs of the change
+    ///
+    /// Only available in native builds (not WASM).
+    #[cfg(not(feature = "wasm"))]
+    fn setup_sync_callback(state: Arc<DatabaseState>) {
+        let state_clone = Arc::clone(&state);
+        let callback = Arc::new(
+            move |object_id: ObjectId, branch: &str, _commits: &[crate::commit::Commit]| {
+                // Look up table name from object metadata
+                let table = {
+                    if let Some(obj_lock) = state_clone.node.get_object(object_id)
+                        && let Ok(obj) = obj_lock.read()
+                        && let Some(ref meta) = obj.meta
+                        && let Some(table_name) = meta.get("table")
+                    {
+                        table_name.clone()
+                    } else {
+                        // Object doesn't have table metadata - not a row object, skip
+                        return;
+                    }
+                };
+
+                // Rebuild column change metadata
+                if let Some(schema) = state_clone.get_schema(&table) {
+                    let descriptor = RowDescriptor::from_table_schema(&schema);
+                    if let Some(obj_lock) = state_clone.node.get_object(object_id)
+                        && let Ok(obj) = obj_lock.read()
+                        && let Some(branch_ref) = obj.branch_ref(branch)
+                        && let Ok(mut branch_guard) = branch_ref.write()
+                    {
+                        branch_guard.rebuild_column_changes(&descriptor);
+                    }
+                }
+
+                // Notify query graphs
+                state_clone.notify_object_changed_sync(&table, object_id);
+            },
+        );
+
+        state.node.set_on_commits_applied(Some(callback));
+    }
+
+    /// Notify query graphs about an object change (for sync-applied commits).
+    ///
+    /// This is similar to notify_object_changed_internal but doesn't require
+    /// going through Database since we're already in the callback context.
+    ///
+    /// Only available in native builds (not WASM).
+    #[cfg(not(feature = "wasm"))]
+    fn notify_object_changed_sync(&self, table: &str, object_id: ObjectId) {
+        if let Some(obj_lock) = self.node.get_object(object_id)
+            && let Ok(obj) = obj_lock.read()
+        {
+            self.graph_registry
+                .notify_object_changed(table, object_id, &obj, self);
+        }
+    }
+
     /// Get a table schema by name.
     fn get_schema(&self, table: &str) -> Option<TableSchema> {
         let tables = self.tables.read().unwrap();
@@ -780,17 +847,19 @@ impl Database {
     /// Create a new database with the given environment.
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(env: Arc<dyn Environment>) -> Self {
-        Database {
-            state: Arc::new(DatabaseState::new(env)),
-        }
+        let state = Arc::new(DatabaseState::new(env));
+        #[cfg(not(feature = "wasm"))]
+        DatabaseState::setup_sync_callback(Arc::clone(&state));
+        Database { state }
     }
 
     /// Create a new in-memory database (for testing).
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn in_memory() -> Self {
-        Database {
-            state: Arc::new(DatabaseState::in_memory()),
-        }
+        let state = Arc::new(DatabaseState::in_memory());
+        #[cfg(not(feature = "wasm"))]
+        DatabaseState::setup_sync_callback(Arc::clone(&state));
+        Database { state }
     }
 
     /// Create an in-memory database with a specific catalog ID.
@@ -798,9 +867,10 @@ impl Database {
     /// when synced, allowing INSERT/SELECT to work across clients.
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn in_memory_with_catalog(catalog_id: ObjectId) -> Self {
-        Database {
-            state: Arc::new(DatabaseState::in_memory_with_catalog(catalog_id)),
-        }
+        let state = Arc::new(DatabaseState::in_memory_with_catalog(catalog_id));
+        #[cfg(not(feature = "wasm"))]
+        DatabaseState::setup_sync_callback(Arc::clone(&state));
+        Database { state }
     }
 
     /// Restore database from an existing environment with a known catalog object ID.
@@ -939,9 +1009,10 @@ impl Database {
             graph_registry: GraphRegistry::new(),
         };
 
-        Ok(Database {
-            state: Arc::new(state),
-        })
+        let state = Arc::new(state);
+        #[cfg(not(feature = "wasm"))]
+        DatabaseState::setup_sync_callback(Arc::clone(&state));
+        Ok(Database { state })
     }
 
     /// Get the catalog object ID (for use with from_env).

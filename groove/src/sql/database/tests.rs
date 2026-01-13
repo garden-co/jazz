@@ -5329,3 +5329,95 @@ fn apply_synced_commits_rebuilds_column_metadata() {
         "Timestamp should match commit timestamp"
     );
 }
+
+#[test]
+fn sync_applied_commits_trigger_query_updates() {
+    // GCO-1102: Verify that commits applied via LocalNode.apply_commits
+    // trigger query graph updates through the callback mechanism.
+    use crate::commit::Commit;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL)")
+        .unwrap();
+
+    // Create an incremental query
+    let query = db.incremental_query("SELECT * FROM documents").unwrap();
+
+    // Initially no rows
+    assert_eq!(query.rows().len(), 0, "Should start with no rows");
+
+    // Track callback invocations
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let call_count_clone = call_count.clone();
+
+    let _sub_id = query.subscribe(Box::new(move |_deltas| {
+        call_count_clone.fetch_add(1, Ordering::SeqCst);
+    }));
+
+    // Initial subscription callback fires with empty result
+    assert_eq!(call_count.load(Ordering::SeqCst), 1, "Initial callback");
+
+    // Create a row object manually to simulate sync
+    let row_id = ObjectId::new(99999);
+    db.state().node.ensure_object(row_id, "row:documents");
+
+    // Set object metadata (table name) - this is what insert_row does
+    {
+        let obj_lock = db.state().node.get_object(row_id).unwrap();
+        let mut obj = obj_lock.write().unwrap();
+        let mut meta = std::collections::BTreeMap::new();
+        meta.insert("table".to_string(), "documents".to_string());
+        obj.set_meta(meta);
+    }
+
+    // Register the row in the row_table map (needed for query to see it)
+    db.state()
+        .row_table
+        .write()
+        .unwrap()
+        .insert(row_id, "documents".to_string());
+
+    // Add to table_rows (so the query knows about this row)
+    {
+        let mut table_rows = db.read_table_rows("documents").unwrap();
+        table_rows.add(row_id);
+        db.write_table_rows("documents", &table_rows).unwrap();
+    }
+
+    // Build a commit manually (simulating received from sync)
+    let schema = db.get_table("documents").unwrap();
+    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let row = RowBuilder::new(desc.clone())
+        .set_string_by_name("title", "Synced Document")
+        .build()
+        .with_id(row_id);
+
+    let commit = Commit {
+        parents: vec![],
+        content: row.buffer.clone().into(),
+        author: "sync-peer".to_string(),
+        timestamp: 2000,
+        meta: None,
+    };
+
+    // Apply commits via LocalNode.apply_commits (as sync would do)
+    // This should trigger the callback which notifies query graphs
+    db.state().node.apply_commits(row_id, "main", vec![commit]);
+
+    // Verify callback was triggered by the sync
+    assert!(
+        call_count.load(Ordering::SeqCst) >= 2,
+        "Callback should fire after sync commits applied (got {})",
+        call_count.load(Ordering::SeqCst)
+    );
+
+    // Verify the query now sees the row
+    let rows = query.rows();
+    assert_eq!(rows.len(), 1, "Query should now have 1 row");
+    assert_eq!(
+        rows[0].1.get_by_name("title"),
+        Some(RowValue::String("Synced Document")),
+        "Row should have correct title"
+    );
+}

@@ -11,6 +11,19 @@ use crate::object::{Object, ObjectId};
 use crate::sql::row_buffer::RowDescriptor;
 use crate::storage::{Environment, MemoryEnvironment};
 
+/// Callback type for when commits are applied to an object.
+///
+/// This callback is invoked after `apply_commits` adds commits to an object's branch.
+/// It receives the object ID, branch name, and the commits that were applied.
+///
+/// This is used by the Database layer to be notified when sync applies commits,
+/// allowing it to update query graphs and column change metadata.
+///
+/// Only available in native builds (not WASM) because it requires Send + Sync.
+#[cfg(not(feature = "wasm"))]
+pub type CommitsAppliedCallback =
+    Arc<dyn Fn(ObjectId, &str, &[crate::commit::Commit]) + Send + Sync>;
+
 /// Spawn an async task for background persistence.
 /// In WASM, uses spawn_local. In native, uses block_on (for now).
 #[cfg(target_arch = "wasm32")]
@@ -61,6 +74,11 @@ pub struct LocalNode {
     objects: RwLock<BTreeMap<ObjectId, Arc<RwLock<Object>>>>,
     listeners: ObjectListenerRegistry,
     env: Arc<dyn Environment>,
+    /// Optional callback invoked when commits are applied via `apply_commits`.
+    /// Used by Database to be notified of sync-applied commits.
+    /// Only available in native builds (not WASM).
+    #[cfg(not(feature = "wasm"))]
+    on_commits_applied: RwLock<Option<CommitsAppliedCallback>>,
 }
 
 impl Default for LocalNode {
@@ -85,7 +103,22 @@ impl LocalNode {
             objects: RwLock::new(BTreeMap::new()),
             listeners: ObjectListenerRegistry::new(),
             env,
+            #[cfg(not(feature = "wasm"))]
+            on_commits_applied: RwLock::new(None),
         }
+    }
+
+    /// Set a callback to be invoked when commits are applied via `apply_commits`.
+    ///
+    /// This is used by the Database layer to be notified when sync applies commits,
+    /// allowing it to update query graphs and rebuild column change metadata.
+    ///
+    /// The callback receives (object_id, branch, commits) after commits are successfully applied.
+    ///
+    /// Only available in native builds (not WASM).
+    #[cfg(not(feature = "wasm"))]
+    pub fn set_on_commits_applied(&self, callback: Option<CommitsAppliedCallback>) {
+        *self.on_commits_applied.write().unwrap() = callback;
     }
 
     /// Create a new LocalNode with an in-memory environment (for testing).
@@ -584,6 +617,15 @@ impl LocalNode {
 
         // Notify listeners synchronously
         self.notify_listeners(object_id, branch, &obj);
+
+        // Invoke the commits-applied callback if set (used by Database for query graph updates)
+        // Only available in native builds (not WASM).
+        #[cfg(not(feature = "wasm"))]
+        if !commits_to_persist.is_empty() {
+            if let Some(callback) = self.on_commits_applied.read().unwrap().as_ref() {
+                callback(object_id, branch, &commits_to_persist);
+            }
+        }
 
         // Persist asynchronously in background
         if !commits_to_persist.is_empty() {
