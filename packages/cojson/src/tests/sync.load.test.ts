@@ -1534,10 +1534,9 @@ describe("lazy storage load optimization", () => {
     expect(mapOnClient.get("hello")).toEqual("world");
 
     // Verify the flow:
-    // 1. Client sends LOAD with empty sessions
-    // 2. Server does LAZY_LOAD to check knownState from storage
-    // 3. Server sees peer needs content, so does full LOAD from storage
-    // 4. Server sends CONTENT to client
+    // 1. Client sends LOAD with empty sessions (no header)
+    // 2. Server skips LAZY_LOAD since peer has no content - goes directly to full LOAD
+    // 3. Server sends CONTENT to client
     expect(
       SyncMessagesLog.getMessages({
         Group: group.core,
@@ -1546,8 +1545,6 @@ describe("lazy storage load optimization", () => {
     ).toMatchInlineSnapshot(`
       [
         "client -> server | LOAD Map sessions: empty",
-        "server -> storage | LAZY_LOAD Map",
-        "storage -> server | LAZY_LOAD_RESULT Map sessions: header/1",
         "server -> storage | LOAD Map sessions: empty",
         "storage -> server | CONTENT Group header: true new: After: 0 New: 3",
         "storage -> server | CONTENT Map header: true new: After: 0 New: 1",

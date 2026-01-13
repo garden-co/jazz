@@ -592,7 +592,13 @@ export class SyncManager {
 
     const peerKnownState = peer.getOptimisticKnownState(msg.id);
 
-    // Check storage knownState before doing full load
+    // Fast path: Peer has no content at all - skip lazy load check, just load directly
+    if (!peerKnownState?.header) {
+      this.loadFromStorageAndRespond(msg.id, peer, coValue);
+      return;
+    }
+
+    // Check storage knownState before doing full load (lazy load optimization)
     coValue.getKnownStateFromStorage((storageKnownState) => {
       // Race condition: CoValue might have been loaded while we were waiting for storage
       if (coValue.isAvailable()) {
@@ -618,13 +624,25 @@ export class SyncManager {
       }
 
       // Peer needs content - do full load from storage
-      coValue.loadFromStorage((found) => {
-        if (found && coValue.isAvailable()) {
-          this.sendNewContent(msg.id, peer);
-        } else {
-          this.loadFromPeersAndRespond(msg.id, peer, coValue);
-        }
-      });
+      this.loadFromStorageAndRespond(msg.id, peer, coValue);
+    });
+  }
+
+  /**
+   * Helper to load from storage and respond appropriately.
+   * Falls back to peers if not found in storage.
+   */
+  private loadFromStorageAndRespond(
+    id: RawCoID,
+    peer: PeerState,
+    coValue: CoValueCore,
+  ) {
+    coValue.loadFromStorage((found) => {
+      if (found && coValue.isAvailable()) {
+        this.sendNewContent(id, peer);
+      } else {
+        this.loadFromPeersAndRespond(id, peer, coValue);
+      }
     });
   }
 
