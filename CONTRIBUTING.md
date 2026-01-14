@@ -71,7 +71,35 @@ You'll need Node.js 22.x installed (we're working on support for 23.x), and pnpm
    pnpm test
    ```
 
-### 6. Testing
+### 6. cojson-core Setup (Optional)
+
+If you need to work on the native cojson-core modules (NAPI, WASM, or React Native), you'll need additional dependencies.
+
+**Prerequisites:**
+- Rust (install from https://rustup.rs/)
+- cmake and ninja (macOS: `brew install cmake ninja`, Linux: `apt-get install cmake ninja-build`)
+- For Android: Android SDK/NDK with `ANDROID_HOME` or `ANDROID_SDK_ROOT` set
+- For iOS: Xcode Command Line Tools (macOS only)
+
+**Run the setup script:**
+```bash
+./scripts/setup-cojson-core.sh
+```
+
+This script will:
+- Verify all prerequisites are installed
+- Add required Rust targets for Android and iOS
+- Install cargo-ndk for Android builds
+
+**Build commands:**
+```bash
+pnpm build:napi     # Build Node.js NAPI bindings
+pnpm build:wasm     # Build WebAssembly module
+pnpm build:rn       # Build React Native native modules
+pnpm build:all-packages  # Build everything including native modules
+```
+
+### 7. Testing
 
 Please write tests for any new features or bug fixes. We use Vitest for unit tests, and Playwright for e2e tests. Make sure all tests pass before submitting a pull request.
 
@@ -81,7 +109,7 @@ pnpm test
 
 NB: You'll need to run `pnpm exec playwright install` to install the Playwright browsers before first run.
 
-### 7. Communication
+### 8. Communication
 
 - If you're unsure about anything, feel free to ask questions by opening a discussion, reaching out via issues, or on our [Discord](https://discord.gg/utDMjHYg42).
 - Be respectful and constructive, this is a welcoming community for everyone.

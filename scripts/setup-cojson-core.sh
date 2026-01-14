@@ -1,10 +1,10 @@
 #!/bin/bash
 set -e
 
-# Setup script for cojson-core-rn
+# Setup script for cojson-core
 # Based on: https://jhugman.github.io/uniffi-bindgen-react-native/guides/rn/pre-installation.html
 
-echo "=== cojson-core-rn Setup Script ==="
+echo "=== cojson-core Setup Script ==="
 echo ""
 
 # Colors for output
@@ -177,9 +177,4 @@ fi
 echo "=== Setup Complete ==="
 echo ""
 echo -e "${GREEN}All required dependencies are installed!${NC}"
-echo ""
-echo "You can now build cojson-core-rn:"
-echo "  pnpm build:rn        # Build for all platforms"
-echo "  pnpm build:rn:ios    # Build for iOS only"
-echo "  pnpm build:rn:android # Build for Android only (in crates/cojson-core-rn)"
 echo ""
