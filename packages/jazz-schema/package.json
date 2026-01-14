@@ -7,12 +7,16 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./runtime": {
+      "types": "./dist/runtime.d.ts",
       "import": "./dist/runtime.js",
-      "types": "./dist/runtime.d.ts"
+      "require": "./dist/runtime.js",
+      "default": "./dist/runtime.js"
     }
   },
   "files": ["dist"],

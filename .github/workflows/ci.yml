@@ -190,7 +190,7 @@ jobs:
 
       - name: Start groove-server
         run: |
-          ./target/release/groove-server &
+          ./crates/target/release/groove-server &
           sleep 2
 
       - name: Install Playwright browsers
