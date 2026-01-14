@@ -5340,7 +5340,10 @@ fn apply_synced_commits_rebuilds_column_metadata() {
     );
 }
 
+// This test only runs in non-WASM builds because the on_commits_applied
+// callback mechanism is disabled for WASM (cfg(not(feature = "wasm"))).
 #[test]
+#[cfg(not(feature = "wasm"))]
 fn sync_applied_commits_trigger_query_updates() {
     // GCO-1102: Verify that commits applied via LocalNode.apply_commits
     // trigger query graph updates through the callback mechanism.
