@@ -9,13 +9,13 @@ test("login & logout", async ({ page }) => {
 
   await page
     .getByRole("textbox", { name: "Email address" })
-    .fill("guido+clerk-test@garden.co");
+    .fill("joe+clerk-test@garden.co");
 
   await page.keyboard.press("Enter");
 
   await page
     .getByRole("textbox", { name: "Password" })
-    .fill("guido+clerk-test@garden.co");
+    .fill("joe+clerk-test@garden.co");
 
   await page.keyboard.press("Enter");
 

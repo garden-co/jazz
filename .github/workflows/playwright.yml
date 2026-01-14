@@ -37,12 +37,12 @@ jobs:
           # Parse shard information (e.g., "1/2" -> shard_num=1, total_shards=2)
           IFS='/' read -r shard_num total_shards <<< "${{ matrix.shard }}"
           shard_index=$((shard_num - 1))  # Convert to 0-based index
-          
+
           # Debug: Print parsed values
           echo "Parsed shard_num: $shard_num"
           echo "Parsed total_shards: $total_shards"
           echo "Calculated shard_index: $shard_index"
-          
+
           # Define all projects to test
           all_projects=(
             "tests/e2e"
@@ -50,6 +50,7 @@ jobs:
             "examples/chat-svelte"
             "examples/community-clerk-vue"
             "examples/clerk"
+            "examples/clerk-svelte"
             "examples/betterauth"
             "examples/file-share-svelte"
             "examples/form"
@@ -61,7 +62,7 @@ jobs:
             "starters/svelte-passkey-auth"
             "tests/jazz-svelte"
           )
-          
+
           # Calculate which projects this shard should run
           shard_projects=()
           for i in "${!all_projects[@]}"; do
@@ -69,21 +70,21 @@ jobs:
               shard_projects+=("${all_projects[i]}")
             fi
           done
-          
+
           # Track project results
           overall_exit_code=0
           failed_projects=()
           passed_projects=()
-          
+
           echo "=== Running tests for shard ${{ matrix.shard }} ==="
           echo "Projects in this shard:"
           printf '%s\n' "${shard_projects[@]}"
           echo
-          
+
           # Run tests for each project
           for project in "${shard_projects[@]}"; do
             echo "=== Testing project: $project ==="
-            
+
             # Check if project directory exists
             if [ ! -d "$project" ]; then
               echo "❌ FAILED: Project directory $project does not exist"
@@ -91,7 +92,7 @@ jobs:
               overall_exit_code=1
               continue
             fi
-            
+
             # Check if project has package.json
             if [ ! -f "$project/package.json" ]; then
               echo "❌ FAILED: No package.json found in $project"
@@ -99,15 +100,15 @@ jobs:
               overall_exit_code=1
               continue
             fi
-            
+
             # Build the project
             echo "🔨 Building $project..."
             cd "$project"
-            
+
             if [ -f .env.test ]; then
               cp .env.test .env
             fi
-            
+
             if ! pnpm turbo build; then
               echo "❌ BUILD FAILED: $project"
               failed_projects+=("$project (build failed)")
@@ -115,7 +116,7 @@ jobs:
               cd - > /dev/null
               continue
             fi
-            
+
             # Run Playwright tests
             echo "🧪 Running Playwright tests for $project..."
             if ! pnpm exec playwright test; then
@@ -126,34 +127,34 @@ jobs:
               echo "✅ TESTS PASSED: $project"
               passed_projects+=("$project")
             fi
-            
+
             cd - > /dev/null
             echo "=== Finished testing $project ==="
             echo
           done
-          
+
           # Print summary report
           echo "=========================================="
           echo "📊 TEST SUMMARY FOR SHARD ${{ matrix.shard }}"
           echo "=========================================="
-          
+
           if [ ${#passed_projects[@]} -gt 0 ]; then
             echo "✅ PASSED (${#passed_projects[@]}):"
             printf '  - %s\n' "${passed_projects[@]}"
             echo
           fi
-          
+
           if [ ${#failed_projects[@]} -gt 0 ]; then
             echo "❌ FAILED (${#failed_projects[@]}):"
             printf '  - %s\n' "${failed_projects[@]}"
             echo
           fi
-  
-          
+
+
           echo "Total projects in shard: ${#shard_projects[@]}"
           echo "Passed: ${#passed_projects[@]}"
           echo "Failed: ${#failed_projects[@]}"
           echo "=========================================="
-          
+
           # Exit with overall status
           exit $overall_exit_code
