@@ -332,12 +332,3 @@ class SessionLogAdapter implements SessionLogImpl {
     );
   }
 }
-function createTransactionFfiRn(
-  privacy: string,
-  encryptedChanges: Encrypted<JsonValue[], { in: RawCoID; tx: TransactionID }>,
-  keyUsed: string,
-  arg3: bigint,
-  meta: Encrypted<JsonObject, { in: RawCoID; tx: TransactionID }> | undefined,
-): UniffiFfiTransaction {
-  throw new Error("Function not implemented.");
-}
