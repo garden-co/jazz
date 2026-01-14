@@ -1,3 +1,9 @@
+
+Released Jazz 0.19.21:
+  - Added `useCoStates` & `useSuspenseCoStates` React hooks to load multiple CoValues at the same time
+  - Added Clerk authentication support for Svelte with `useClerkAuth` hook and `JazzSvelteProviderWithClerk` component
+  - Optimized initial CoValue sync, now if there is no content to be synced the sync-server won't load the CoValue in memory only their known state
+
 Released Jazz 0.19.20:
 - Added React Native passkey (WebAuthn) authentication support with new exports from `jazz-tools/react-native-core`:
   - `ReactNativePasskeyAuth`: Core auth class for passkey authentication
