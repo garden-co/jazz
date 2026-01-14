@@ -4,8 +4,11 @@ use std::sync::{Arc, RwLock};
 use crate::listener::ListenerId;
 use crate::node::{LocalNode, generate_object_id};
 use crate::object::ObjectId;
-use crate::sql::catalog::{Catalog, TableDescriptor};
+use crate::sql::catalog::{Catalog, DescriptorId, TableDescriptor};
 use crate::sql::index::RefIndex;
+use crate::sql::lens::{
+    Lens, LensError, LensGenerationOptions, LensWarning, diff_schemas, generate_lens,
+};
 use crate::sql::parser::{
     self, Condition, ConditionValue, Projection, Select, SelectExpr, Statement,
 };
@@ -14,7 +17,7 @@ use crate::sql::policy::{
 };
 use crate::sql::query_graph::registry::{GraphRegistry, OutputCallback};
 use crate::sql::query_graph::{
-    DeltaBatch, GraphId, Predicate, PredicateValue, PriorState, QueryGraphBuilder, RowDelta,
+    DeltaBatch, GraphId, Predicate, PredicateValue, QueryGraphBuilder, RowDelta,
 };
 use crate::sql::row::RowError;
 use crate::sql::row_buffer::{OwnedRow, RowBuilder, RowDescriptor, RowValue};
@@ -266,12 +269,90 @@ impl DatabaseState {
         }
     }
 
+    /// Set up the callback for sync-applied commits.
+    ///
+    /// This must be called after the DatabaseState is wrapped in Arc, passing a clone
+    /// of the Arc. The callback will be invoked when commits are applied via
+    /// `LocalNode::apply_commits`, which happens during sync.
+    ///
+    /// The callback:
+    /// 1. Looks up the table name from object metadata
+    /// 2. Rebuilds column change metadata for proper per-column LWW merge
+    /// 3. Notifies query graphs of the change
+    ///
+    /// Only available in native builds (not WASM).
+    #[cfg(not(feature = "wasm"))]
+    fn setup_sync_callback(state: Arc<DatabaseState>) {
+        let state_clone = Arc::clone(&state);
+        let callback = Arc::new(
+            move |object_id: ObjectId, branch: &str, _commits: &[crate::commit::Commit]| {
+                // Look up table name from object metadata
+                let table = {
+                    if let Some(obj_lock) = state_clone.node.get_object(object_id)
+                        && let Ok(obj) = obj_lock.read()
+                        && let Some(ref meta) = obj.meta
+                        && let Some(table_name) = meta.get("table")
+                    {
+                        table_name.clone()
+                    } else {
+                        // Object doesn't have table metadata - not a row object, skip
+                        return;
+                    }
+                };
+
+                // Rebuild column change metadata
+                if let Some(schema) = state_clone.get_schema(&table) {
+                    let descriptor = RowDescriptor::from_table_schema(&schema);
+                    if let Some(obj_lock) = state_clone.node.get_object(object_id)
+                        && let Ok(obj) = obj_lock.read()
+                        && let Some(branch_ref) = obj.branch_ref(branch)
+                        && let Ok(mut branch_guard) = branch_ref.write()
+                    {
+                        branch_guard.rebuild_column_changes(&descriptor);
+                    }
+                }
+
+                // Notify query graphs
+                state_clone.notify_object_changed_sync(&table, object_id);
+            },
+        );
+
+        state.node.set_on_commits_applied(Some(callback));
+    }
+
+    /// Notify query graphs about an object change (for sync-applied commits).
+    ///
+    /// This is similar to notify_object_changed_internal but doesn't require
+    /// going through Database since we're already in the callback context.
+    ///
+    /// Only available in native builds (not WASM).
+    #[cfg(not(feature = "wasm"))]
+    fn notify_object_changed_sync(&self, table: &str, object_id: ObjectId) {
+        if let Some(obj_lock) = self.node.get_object(object_id)
+            && let Ok(obj) = obj_lock.read()
+        {
+            self.graph_registry
+                .notify_object_changed(table, object_id, &obj, self);
+        }
+    }
+
     /// Get a table schema by name.
     fn get_schema(&self, table: &str) -> Option<TableSchema> {
         let tables = self.tables.read().unwrap();
         let schema_id = tables.get(table)?;
         let schemas = self.schemas.read().unwrap();
         schemas.get(schema_id).cloned()
+    }
+
+    /// Get an Object by ID from the underlying LocalNode.
+    ///
+    /// This provides access to objects for branch-aware queries that need
+    /// to read from the object's branches and perform per-column merging.
+    pub fn get_object(
+        &self,
+        id: ObjectId,
+    ) -> Option<std::sync::Arc<std::sync::RwLock<crate::object::Object>>> {
+        self.node.get_object(id)
     }
 
     /// Read all rows from a table in buffer format.
@@ -374,6 +455,96 @@ impl DatabaseState {
                 }
             })
             .collect()
+    }
+
+    /// Load a TableDescriptor by its DescriptorId.
+    ///
+    /// The DescriptorId contains both the ObjectId and version string,
+    /// so we read from the version branch on the descriptor object.
+    pub fn load_descriptor_by_id(&self, descriptor_id: DescriptorId) -> Option<TableDescriptor> {
+        let object_id = descriptor_id.as_object_id();
+        let version_branch = &descriptor_id.version;
+        let data = self.node.read(object_id, version_branch).ok()??;
+        TableDescriptor::from_bytes(&data).ok()
+    }
+
+    /// Load a RowDescriptor by its DescriptorId.
+    ///
+    /// Convenience method that loads the TableDescriptor and extracts
+    /// a RowDescriptor from its schema.
+    pub fn load_row_descriptor_by_id(
+        &self,
+        descriptor_id: DescriptorId,
+    ) -> Option<Arc<RowDescriptor>> {
+        let table_descriptor = self.load_descriptor_by_id(descriptor_id)?;
+        Some(Arc::new(RowDescriptor::from_table_schema(
+            &table_descriptor.schema,
+        )))
+    }
+
+    /// Build a LensContext containing lenses for transforming between schema versions.
+    ///
+    /// With branch-based versioning, this iterates through all version branches
+    /// on the descriptor object and collects lenses from each version's
+    /// `lens_from_parent` field.
+    ///
+    /// Returns an empty context if the table has no migrations.
+    pub fn build_lens_context_for_table(&self, table: &str) -> crate::sql::lens::LensContext {
+        use crate::sql::lens::LensContext;
+
+        let mut ctx = LensContext::new();
+
+        // Get descriptor object ID
+        let descriptor_objects = self.descriptor_objects.read().unwrap();
+        let Some(&desc_object_id) = descriptor_objects.get(table) else {
+            return ctx;
+        };
+        drop(descriptor_objects);
+
+        // Get the object to read all branches
+        let Some(object) = self.node.get_object(desc_object_id) else {
+            return ctx;
+        };
+
+        // Collect all versions with their descriptors
+        let object_guard = object.read().unwrap();
+        let mut versions: Vec<(String, TableDescriptor)> = Vec::new();
+
+        for branch_name in object_guard.branch_names() {
+            // Read descriptor from this branch
+            if let Ok(Some(data)) = self.node.read(desc_object_id, branch_name)
+                && let Ok(descriptor) = TableDescriptor::from_bytes(&data)
+            {
+                versions.push((branch_name.to_string(), descriptor));
+            }
+        }
+        drop(object_guard);
+
+        // Sort versions by version number (v1, v2, v3, ...)
+        versions.sort_by(|(a, _), (b, _)| {
+            let a_num = a.strip_prefix('v').and_then(|n| n.parse::<u32>().ok());
+            let b_num = b.strip_prefix('v').and_then(|n| n.parse::<u32>().ok());
+            match (a_num, b_num) {
+                (Some(an), Some(bn)) => an.cmp(&bn),
+                _ => a.cmp(b),
+            }
+        });
+
+        // Register lenses between consecutive versions
+        for (version, descriptor) in &versions {
+            if let Some(lens) = &descriptor.lens_from_parent
+                && let Some(num) = version.strip_prefix('v')
+                && let Ok(n) = num.parse::<u32>()
+                && n > 1
+            {
+                let parent_version = format!("v{}", n - 1);
+                let parent_id = DescriptorId::new(desc_object_id, &parent_version);
+                let this_id = DescriptorId::new(desc_object_id, version);
+                ctx.register_lens(parent_id, this_id, lens.clone());
+            }
+        }
+
+        ctx
     }
 }
 
@@ -489,6 +660,73 @@ pub enum DatabaseError {
         action: PolicyAction,
         reason: String,
     },
+    /// Migration error.
+    Migration(MigrationError),
+}
+
+/// Errors that can occur during schema migration.
+#[derive(Debug, Clone)]
+pub enum MigrationError {
+    /// Lens transformation failed for a row.
+    LensError { row_id: ObjectId, error: LensError },
+    /// Row was incompatible with the new schema.
+    IncompatibleRow { row_id: ObjectId, reason: String },
+    /// Catalog error during migration.
+    CatalogError(String),
+    /// Migration was partially completed.
+    PartialFailure {
+        migrated_count: usize,
+        failed_count: usize,
+        first_error: String,
+    },
+}
+
+impl std::fmt::Display for MigrationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MigrationError::LensError { row_id, error } => {
+                write!(f, "lens error for row {}: {}", row_id, error)
+            }
+            MigrationError::IncompatibleRow { row_id, reason } => {
+                write!(f, "row {} incompatible with new schema: {}", row_id, reason)
+            }
+            MigrationError::CatalogError(msg) => write!(f, "catalog error: {}", msg),
+            MigrationError::PartialFailure {
+                migrated_count,
+                failed_count,
+                first_error,
+            } => {
+                write!(
+                    f,
+                    "migration partially failed: {} migrated, {} failed, first error: {}",
+                    migrated_count, failed_count, first_error
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for MigrationError {}
+
+/// Result of a successful migration.
+#[derive(Debug, Clone)]
+pub struct MigrationResult {
+    /// The new descriptor ID.
+    pub new_descriptor_id: DescriptorId,
+    /// The generated lens.
+    pub lens: Lens,
+    /// Number of rows successfully migrated.
+    pub migrated_count: usize,
+    /// Number of rows that became invisible (incompatible with new schema).
+    pub invisible_count: usize,
+    /// Warnings from lens generation.
+    pub warnings: Vec<LensWarning>,
+}
+
+impl From<MigrationError> for DatabaseError {
+    fn from(e: MigrationError) -> Self {
+        DatabaseError::Migration(e)
+    }
 }
 
 impl std::fmt::Display for DatabaseError {
@@ -537,6 +775,7 @@ impl std::fmt::Display for DatabaseError {
             DatabaseError::PolicyDenied { action, reason } => {
                 write!(f, "{} denied: {}", action, reason)
             }
+            DatabaseError::Migration(e) => write!(f, "migration error: {}", e),
         }
     }
 }
@@ -616,17 +855,19 @@ impl Database {
     /// Create a new database with the given environment.
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(env: Arc<dyn Environment>) -> Self {
-        Database {
-            state: Arc::new(DatabaseState::new(env)),
-        }
+        let state = Arc::new(DatabaseState::new(env));
+        #[cfg(not(feature = "wasm"))]
+        DatabaseState::setup_sync_callback(Arc::clone(&state));
+        Database { state }
     }
 
     /// Create a new in-memory database (for testing).
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn in_memory() -> Self {
-        Database {
-            state: Arc::new(DatabaseState::in_memory()),
-        }
+        let state = Arc::new(DatabaseState::in_memory());
+        #[cfg(not(feature = "wasm"))]
+        DatabaseState::setup_sync_callback(Arc::clone(&state));
+        Database { state }
     }
 
     /// Create an in-memory database with a specific catalog ID.
@@ -634,9 +875,10 @@ impl Database {
     /// when synced, allowing INSERT/SELECT to work across clients.
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn in_memory_with_catalog(catalog_id: ObjectId) -> Self {
-        Database {
-            state: Arc::new(DatabaseState::in_memory_with_catalog(catalog_id)),
-        }
+        let state = Arc::new(DatabaseState::in_memory_with_catalog(catalog_id));
+        #[cfg(not(feature = "wasm"))]
+        DatabaseState::setup_sync_callback(Arc::clone(&state));
+        Database { state }
     }
 
     /// Restore database from an existing environment with a known catalog object ID.
@@ -679,9 +921,13 @@ impl Database {
         let mut policies = HashMap::new();
 
         // Restore each table from its descriptor
-        for (table_name, descriptor_id) in &catalog.tables {
+        for table_name in catalog.tables.keys() {
+            // Derive the ObjectId where the descriptor is stored (deterministic from table name)
+            let descriptor_key = format!("descriptor:{}", table_name);
+            let descriptor_object_id = crate::ObjectId::from_key(&descriptor_key);
+
             // Load descriptor object from Environment
-            node.load_object(*descriptor_id, format!("descriptor:{}", table_name), "main")
+            node.load_object(descriptor_object_id, descriptor_key, "main")
                 .await
                 .ok_or_else(|| {
                     DatabaseError::Storage(format!(
@@ -692,7 +938,7 @@ impl Database {
 
             // Read descriptor content
             let descriptor_bytes = node
-                .read(*descriptor_id, "main")
+                .read(descriptor_object_id, "main")
                 .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
                 .ok_or_else(|| {
                     DatabaseError::Storage(format!("descriptor for {} not found", table_name))
@@ -733,7 +979,7 @@ impl Database {
             tables.insert(table_name.clone(), descriptor.schema_object_id);
             schemas.insert(descriptor.schema_object_id, descriptor.schema.clone());
             table_rows_objects.insert(table_name.clone(), descriptor.rows_object_id);
-            descriptor_objects.insert(table_name.clone(), *descriptor_id);
+            descriptor_objects.insert(table_name.clone(), descriptor_object_id);
 
             // Restore policies
             if !descriptor.policies.is_empty() {
@@ -771,9 +1017,10 @@ impl Database {
             graph_registry: GraphRegistry::new(),
         };
 
-        Ok(Database {
-            state: Arc::new(state),
-        })
+        let state = Arc::new(state);
+        #[cfg(not(feature = "wasm"))]
+        DatabaseState::setup_sync_callback(Arc::clone(&state));
+        Ok(Database { state })
     }
 
     /// Get the catalog object ID (for use with from_env).
@@ -982,23 +1229,30 @@ impl Database {
         }
 
         // Create table descriptor object with deterministic ID
+        // Each schema version is a branch on this object (v1, v2, etc.)
         let descriptor_key = format!("descriptor:{}", schema.name);
-        let descriptor_id = crate::ObjectId::from_key(&descriptor_key);
+        let descriptor_object_id = crate::ObjectId::from_key(&descriptor_key);
+        let desc_id = DescriptorId::new_v1(descriptor_object_id);
+
         self.state
             .node
-            .ensure_object(descriptor_id, &descriptor_key);
+            .ensure_object(descriptor_object_id, &descriptor_key);
 
         let descriptor = TableDescriptor {
             schema: schema.clone(),
             policies: TablePolicies::default(),
+            lens_from_parent: None, // Initial schema (v1) has no parent
             rows_object_id: rows_id,
             schema_object_id: schema_id,
             index_object_ids,
         };
-        self.state
+
+        // Write initial schema to "main" branch first (required to create initial commit)
+        let initial_commit = self
+            .state
             .node
             .write(
-                descriptor_id,
+                descriptor_object_id,
                 "main",
                 &descriptor.to_bytes(),
                 "system",
@@ -1006,14 +1260,26 @@ impl Database {
             )
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
+        // Create "v1" branch from main at the initial commit
+        {
+            let object = self
+                .state
+                .node
+                .get_object(descriptor_object_id)
+                .ok_or_else(|| DatabaseError::Storage("descriptor object not found".to_string()))?;
+            let mut obj = object.write().unwrap();
+            obj.create_branch("v1", "main", &initial_commit)
+                .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+        }
+
         self.state
             .descriptor_objects
             .write()
             .unwrap()
-            .insert(schema.name.clone(), descriptor_id);
+            .insert(schema.name.clone(), descriptor_object_id);
 
-        // Update catalog with the new table
-        self.update_catalog_add_table(&schema.name, descriptor_id)?;
+        // Update catalog with the same descriptor ID
+        self.update_catalog_add_table(&schema.name, desc_id)?;
 
         // Cache schema
         self.state
@@ -1034,7 +1300,7 @@ impl Database {
     fn update_catalog_add_table(
         &self,
         table_name: &str,
-        descriptor_id: ObjectId,
+        descriptor_id: DescriptorId,
     ) -> Result<(), DatabaseError> {
         // Read current catalog
         let catalog_bytes = self
@@ -1229,15 +1495,20 @@ impl Database {
         // Inject the id into the row buffer at column 0
         let row_with_id = row.with_id(row_id);
 
-        // Store row data (including the id column)
+        // Create descriptor for per-column change tracking
+        let descriptor = RowDescriptor::from_table_schema(&schema);
+
+        // Store row data with per-column change tracking
+        // This enables proper per-column LWW merge for concurrent writes
         self.state
             .node
-            .write(
+            .write_with_tracking(
                 row_id,
                 "main",
                 &row_with_id.buffer,
                 "system",
                 timestamp_now(),
+                &descriptor,
             )
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
@@ -1268,14 +1539,7 @@ impl Database {
         }
 
         // Notify query graphs of the change
-        self.state.graph_registry.notify_row_change(
-            table,
-            RowDelta::Added {
-                id: row_id,
-                row: row_with_id,
-            },
-            &self.state,
-        );
+        self.notify_object_changed_internal(table, row_id);
 
         // Get the table rows object ID for sync purposes
         let table_rows_id = self
@@ -1422,21 +1686,7 @@ impl Database {
         }
 
         // Notify query graphs about the row change
-        // For new rows: Added, for existing rows: Updated
-        if let Some((_, row)) = self.get_row(&table_name, row_id) {
-            let delta = if is_new {
-                RowDelta::Added { id: row_id, row }
-            } else {
-                RowDelta::Updated {
-                    id: row_id,
-                    row,
-                    prior: PriorState::empty(), // No prior state available from sync
-                }
-            };
-            self.state
-                .graph_registry
-                .notify_row_change(&table_name, delta, &self.state);
-        }
+        self.notify_object_changed_internal(&table_name, row_id);
 
         Ok(())
     }
@@ -1472,21 +1722,7 @@ impl Database {
         }
 
         // Notify query graphs about the row change
-        // For new rows: Added, for existing rows: Updated
-        if let Some((_, row)) = self.get_row(table_name, row_id) {
-            let delta = if is_new {
-                RowDelta::Added { id: row_id, row }
-            } else {
-                RowDelta::Updated {
-                    id: row_id,
-                    row,
-                    prior: PriorState::empty(), // No prior state available from sync
-                }
-            };
-            self.state
-                .graph_registry
-                .notify_row_change(table_name, delta, &self.state);
-        }
+        self.notify_object_changed_internal(table_name, row_id);
 
         Ok(())
     }
@@ -1508,19 +1744,73 @@ impl Database {
             None => return Ok(false), // Row not known to us
         };
 
-        // Get the updated row and notify query graphs
-        if let Some((_, row)) = self.get_row(&table_name, row_id) {
-            let delta = RowDelta::Updated {
-                id: row_id,
-                row,
-                prior: PriorState::empty(), // No prior state available from sync
-            };
-            self.state
-                .graph_registry
-                .notify_row_change(&table_name, delta, &self.state);
-        }
+        // Notify query graphs about the update
+        self.notify_object_changed_internal(&table_name, row_id);
 
         Ok(true)
+    }
+
+    /// Internal helper to notify the registry after an object change.
+    ///
+    /// This is the unified notification method that should be called after any
+    /// write operation (insert, update, delete, sync) modifies an object.
+    fn notify_object_changed_internal(&self, table: &str, object_id: ObjectId) {
+        if let Some(obj) = self.state.node.get_object(object_id)
+            && let Ok(obj_guard) = obj.read()
+        {
+            self.state.graph_registry.notify_object_changed(
+                table,
+                object_id,
+                &obj_guard,
+                &self.state,
+            );
+        }
+    }
+
+    /// Apply synced commits to an object and notify branch-aware queries.
+    ///
+    /// This should be used by the sync layer when receiving commits for objects
+    /// that have branch-aware queries registered. It applies the commits to the
+    /// object's branch and notifies the GraphRegistry.
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table the object belongs to
+    /// * `object_id` - The object to apply commits to
+    /// * `branch` - The branch to apply commits to
+    /// * `commits` - The commits to apply
+    ///
+    /// # Returns
+    ///
+    /// The new frontier after applying commits.
+    pub fn apply_synced_commits(
+        &self,
+        table: &str,
+        object_id: ObjectId,
+        branch: &str,
+        commits: Vec<crate::commit::Commit>,
+    ) -> Vec<crate::commit::CommitId> {
+        // Apply commits to the object's branch via LocalNode
+        let frontier = self.state.node.apply_commits(object_id, branch, commits);
+
+        // Rebuild column change metadata for per-column LWW merge
+        // The low-level apply_commits doesn't track column changes, so we need to rebuild
+        // the metadata after syncing commits.
+        if let Some(schema) = self.get_table(table) {
+            let descriptor = RowDescriptor::from_table_schema(&schema);
+            if let Some(obj_lock) = self.state.node.get_object(object_id)
+                && let Ok(obj) = obj_lock.read()
+                && let Some(branch_ref) = obj.branch_ref(branch)
+                && let Ok(mut branch_guard) = branch_ref.write()
+            {
+                branch_guard.rebuild_column_changes(&descriptor);
+            }
+        }
+
+        // Notify queries about the change
+        self.notify_object_changed_internal(table, object_id);
+
+        frontier
     }
 
     /// Update a row by ID.
@@ -1554,12 +1844,13 @@ impl Database {
             }
         }
 
+        // Create descriptor for row operations and per-column change tracking
+        let descriptor = RowDescriptor::from_table_schema(&schema);
+        let descriptor_arc = Arc::new(descriptor.clone());
+
         // Read current row data for index updates (directly as OwnedRow)
         let old_row = match self.state.node.read(id, "main") {
-            Ok(Some(data)) => {
-                let descriptor = Arc::new(RowDescriptor::from_table_schema(&schema));
-                OwnedRow::new(descriptor, data)
-            }
+            Ok(Some(data)) => OwnedRow::new(descriptor_arc, data),
             Ok(None) => return Ok(false),
             Err(e) => return Err(DatabaseError::Storage(format!("{:?}", e))),
         };
@@ -1592,15 +1883,17 @@ impl Database {
         // Ensure the id column is set (preserve the original id)
         let new_row_with_id = new_row.with_id(id);
 
-        // Write updated row
+        // Write updated row with per-column change tracking
+        // This enables proper per-column LWW merge for concurrent writes
         self.state
             .node
-            .write(
+            .write_with_tracking(
                 id,
                 "main",
                 &new_row_with_id.buffer,
                 "system",
                 timestamp_now(),
+                &descriptor,
             )
             .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
 
@@ -1635,15 +1928,7 @@ impl Database {
         }
 
         // Notify query graphs of the change
-        self.state.graph_registry.notify_row_change(
-            table,
-            RowDelta::Updated {
-                id,
-                row: new_row_with_id,
-                prior: PriorState::empty(), // TODO: Get prior commit tips
-            },
-            &self.state,
-        );
+        self.notify_object_changed_internal(table, id);
 
         Ok(true)
     }
@@ -1730,14 +2015,7 @@ impl Database {
         self.write_table_rows(table, &table_rows)?;
 
         // Notify query graphs of the change
-        self.state.graph_registry.notify_row_change(
-            table,
-            RowDelta::Removed {
-                id,
-                prior: PriorState::empty(), // TODO: Get prior commit tips
-            },
-            &self.state,
-        );
+        self.notify_object_changed_internal(table, id);
 
         Ok(true)
     }
@@ -4002,6 +4280,278 @@ impl Database {
             .reduce(|a, b| a.and(b))
             .unwrap_or(Predicate::True);
         Ok(combined.optimize())
+    }
+
+    // =========================================================================
+    // Migration Execution
+    // =========================================================================
+
+    /// Execute a schema migration on a table.
+    ///
+    /// This transforms all rows from the old schema to the new schema using
+    /// a lens generated from the schema diff. The migration is executed eagerly,
+    /// transforming all existing data immediately.
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table to migrate
+    /// * `new_schema` - The new schema to migrate to
+    /// * `options` - Lens generation options (e.g., confirmed renames)
+    ///
+    /// # Returns
+    ///
+    /// A `MigrationResult` containing the new descriptor ID, lens, and statistics.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DatabaseError::Migration` if migration fails.
+    pub fn execute_migration(
+        &self,
+        table: &str,
+        new_schema: TableSchema,
+        options: LensGenerationOptions,
+    ) -> Result<MigrationResult, DatabaseError> {
+        // Get the current schema
+        let old_schema = self
+            .get_table(table)
+            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+
+        // Generate lens from schema diff
+        let diff = diff_schemas(&old_schema, &new_schema);
+        let lens_result = generate_lens(&diff, &options);
+        let lens = lens_result.lens;
+        let warnings = lens_result.warnings;
+
+        // Get the current descriptor and its ID from the catalog
+        let (old_descriptor, old_descriptor_id) = {
+            // Get the descriptor ID from the catalog first
+            let catalog_bytes = self
+                .state
+                .node
+                .read(self.state.catalog_object_id, "main")
+                .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
+                .ok_or_else(|| DatabaseError::Storage("catalog not found".to_string()))?;
+            let catalog = Catalog::from_bytes(&catalog_bytes)
+                .map_err(|e| DatabaseError::Storage(e.to_string()))?;
+            let old_id = catalog
+                .get_descriptor_id(table)
+                .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+
+            // Read the descriptor from the version branch
+            let data = self
+                .state
+                .node
+                .read(old_id.as_object_id(), &old_id.version)
+                .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
+                .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+
+            let descriptor = TableDescriptor::from_bytes(&data)
+                .map_err(|e| MigrationError::CatalogError(e.to_string()))?;
+
+            (descriptor, old_id)
+        };
+
+        // Create new descriptor with lens from parent version
+        let new_descriptor = TableDescriptor {
+            schema: new_schema.clone(),
+            policies: old_descriptor.policies.clone(),
+            lens_from_parent: Some(lens.clone()), // Transform from previous version
+            rows_object_id: old_descriptor.rows_object_id,
+            schema_object_id: old_descriptor.schema_object_id,
+            index_object_ids: old_descriptor.index_object_ids.clone(),
+        };
+        // New version on same object (e.g., v1 -> v2)
+        let new_descriptor_id = old_descriptor_id.next_version();
+
+        // Read all current rows
+        let rows = self.state.read_all_rows(table);
+
+        // Transform each row
+        let new_descriptor_arc = Arc::new(RowDescriptor::from_table_schema(&new_schema));
+        let mut migrated_count = 0;
+        let mut invisible_count = 0;
+
+        for (row_id, old_row) in rows {
+            // Apply lens forward transformation
+            match lens.apply_forward_owned(&old_row) {
+                Ok(mut new_row) => {
+                    // Ensure the new row has the correct descriptor
+                    new_row = OwnedRow::new(new_descriptor_arc.clone(), new_row.buffer);
+
+                    // Write the transformed row back
+                    self.state
+                        .node
+                        .write(
+                            row_id,
+                            "main",
+                            &new_row.buffer,
+                            "migration",
+                            timestamp_now(),
+                        )
+                        .map_err(|e| {
+                            DatabaseError::Storage(format!(
+                                "failed to write migrated row {}: {:?}",
+                                row_id, e
+                            ))
+                        })?;
+
+                    migrated_count += 1;
+                }
+                Err(LensError::Incompatible { .. }) => {
+                    // Row is incompatible with new schema - mark as invisible
+                    // For now, we just count it. In the future, we might want to:
+                    // - Move it to a separate branch
+                    // - Mark it with metadata
+                    // - Delete it
+                    invisible_count += 1;
+                }
+                Err(e) => {
+                    // Other lens errors are fatal
+                    return Err(MigrationError::LensError { row_id, error: e }.into());
+                }
+            }
+        }
+
+        // Update the schema in our caches
+        {
+            let tables = self.state.tables.read().unwrap();
+            if let Some(schema_id) = tables.get(table) {
+                let mut schemas = self.state.schemas.write().unwrap();
+                schemas.insert(*schema_id, new_schema.clone());
+            }
+        }
+
+        // Store the new descriptor on the new version branch
+        // (Same object, new branch for the new version)
+        {
+            let desc_object_id = new_descriptor_id.as_object_id();
+            let new_version_branch = new_descriptor_id.version();
+            let old_version_branch = &old_descriptor_id.version;
+
+            // First, get the tip commit from the old version branch
+            let object =
+                self.state.node.get_object(desc_object_id).ok_or_else(|| {
+                    DatabaseError::Storage("descriptor object not found".to_string())
+                })?;
+
+            let tip_commit = {
+                let obj = object.read().unwrap();
+                let old_branch = obj.branch(old_version_branch).ok_or_else(|| {
+                    DatabaseError::Storage("old version branch not found".to_string())
+                })?;
+                *old_branch.frontier().first().ok_or_else(|| {
+                    DatabaseError::Storage("old version branch has no commits".to_string())
+                })?
+            };
+
+            // Create new version branch from old version's tip
+            {
+                let mut obj = object.write().unwrap();
+                obj.create_branch(new_version_branch, old_version_branch, &tip_commit)
+                    .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?;
+            }
+
+            // Write the new descriptor content to the new version branch
+            self.state
+                .node
+                .write(
+                    desc_object_id,
+                    new_version_branch,
+                    &new_descriptor.to_bytes(),
+                    "migration",
+                    timestamp_now(),
+                )
+                .map_err(|e| {
+                    DatabaseError::Storage(format!("failed to write descriptor: {:?}", e))
+                })?;
+
+            // descriptor_objects map stays the same (same ObjectId)
+        }
+
+        // Update the catalog
+        let catalog_data = self
+            .state
+            .node
+            .read(self.state.catalog_object_id, "main")
+            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
+            .ok_or_else(|| DatabaseError::Storage("catalog not found".to_string()))?;
+
+        let mut catalog = Catalog::from_bytes(&catalog_data)
+            .map_err(|e| DatabaseError::Storage(e.to_string()))?;
+
+        catalog.update_table(table.to_string(), new_descriptor_id.clone());
+
+        self.state
+            .node
+            .write(
+                self.state.catalog_object_id,
+                "main",
+                &catalog.to_bytes(),
+                "migration",
+                timestamp_now(),
+            )
+            .map_err(|e| DatabaseError::Storage(format!("failed to write catalog: {:?}", e)))?;
+
+        // TODO: Notify query graphs about the schema change
+        // This would invalidate queries and require re-building with new schema
+
+        Ok(MigrationResult {
+            new_descriptor_id: new_descriptor_id.clone(),
+            lens,
+            migrated_count,
+            invisible_count,
+            warnings,
+        })
+    }
+
+    /// Preview a migration without executing it.
+    ///
+    /// Returns the lens that would be generated and any warnings,
+    /// without actually transforming any data.
+    pub fn preview_migration(
+        &self,
+        table: &str,
+        new_schema: &TableSchema,
+        options: &LensGenerationOptions,
+    ) -> Result<(Lens, Vec<LensWarning>), DatabaseError> {
+        let old_schema = self
+            .get_table(table)
+            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))?;
+
+        let diff = diff_schemas(&old_schema, new_schema);
+        let result = generate_lens(&diff, options);
+
+        Ok((result.lens, result.warnings))
+    }
+
+    /// Get the current descriptor for a table.
+    pub fn get_descriptor(&self, table: &str) -> Option<TableDescriptor> {
+        // Get the current descriptor ID from catalog (includes version)
+        let desc_id = self.get_descriptor_id(table).ok()?;
+        // Read from the version branch
+        let data = self
+            .state
+            .node
+            .read(desc_id.as_object_id(), &desc_id.version)
+            .ok()??;
+        TableDescriptor::from_bytes(&data).ok()
+    }
+
+    /// Get the current descriptor ID for a table from the catalog.
+    pub fn get_descriptor_id(&self, table: &str) -> Result<DescriptorId, DatabaseError> {
+        let catalog_bytes = self
+            .state
+            .node
+            .read(self.state.catalog_object_id, "main")
+            .map_err(|e| DatabaseError::Storage(format!("{:?}", e)))?
+            .ok_or_else(|| DatabaseError::Storage("catalog not found".to_string()))?;
+
+        let catalog = Catalog::from_bytes(&catalog_bytes)
+            .map_err(|e| DatabaseError::Storage(e.to_string()))?;
+
+        catalog
+            .get_descriptor_id(table)
+            .ok_or_else(|| DatabaseError::TableNotFound(table.to_string()))
     }
 }
 

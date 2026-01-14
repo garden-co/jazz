@@ -33,10 +33,10 @@ mod protocol;
 mod runtime;
 mod synced_node;
 
-#[cfg(feature = "sync-server")]
+#[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
 mod server;
 
-#[cfg(feature = "sync-server")]
+#[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
 pub mod test_harness;
 
 pub use client::*;
@@ -46,5 +46,5 @@ pub use protocol::*;
 pub use runtime::*;
 pub use synced_node::*;
 
-#[cfg(feature = "sync-server")]
+#[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
 pub use server::*;

@@ -1,12 +1,15 @@
 //! Query graph - the main computation DAG.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::object::ObjectId;
+use crate::sql::catalog::DescriptorId;
+use crate::sql::lens::QueryLensContext;
 use crate::sql::query_graph::cache::RowCache;
 use crate::sql::query_graph::delta::{DeltaBatch, RowDelta};
 use crate::sql::query_graph::node::{InputPort, NodeId, QueryNode};
-use crate::sql::row_buffer::OwnedRow;
+use crate::sql::row_buffer::{OwnedRow, RowDescriptor};
 use crate::sql::schema::TableSchema;
 
 use super::DatabaseState;
@@ -91,6 +94,19 @@ pub struct QueryGraph {
     /// Each edge specifies the target node and which input port to use.
     /// Empty list means terminal node (Output).
     successors: Vec<Vec<Edge>>,
+
+    /// Target descriptor ID for schema-aware queries.
+    /// When set, rows from older schema versions will be transformed before predicate evaluation.
+    target_descriptor: Option<DescriptorId>,
+
+    /// Lens context for transforming rows from different schema versions.
+    /// Contains lenses for all known schema version pairs for this table.
+    lens_context: Option<QueryLensContext>,
+
+    /// Branches to read from for branch-aware queries.
+    /// When set, rows are read from all specified branches and merged using per-column LWW.
+    /// If empty, defaults to reading from "main" only.
+    branches: Vec<String>,
 }
 
 impl std::fmt::Debug for QueryGraph {
@@ -201,6 +217,7 @@ impl QueryGraph {
                     None
                 }
                 QueryNode::TableScan { .. } | QueryNode::IndexLookup { .. } => None,
+                QueryNode::BranchMerge { .. } => None, // Source node, no input
             };
 
             if let Some((input_node_id, port)) = input_info
@@ -278,6 +295,7 @@ impl QueryGraph {
     /// Create a new single-table query graph.
     ///
     /// This is typically called by `QueryGraphBuilder::output()`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         id: GraphId,
         table: String,
@@ -285,6 +303,7 @@ impl QueryGraph {
         nodes: Vec<QueryNode>,
         node_indices: HashMap<NodeId, usize>,
         output_node: NodeId,
+        branches: Vec<String>,
     ) -> Self {
         let mut all_schemas = HashMap::new();
         all_schemas.insert(table.clone(), schema.clone());
@@ -337,6 +356,9 @@ impl QueryGraph {
             output_node,
             entry_points,
             successors,
+            target_descriptor: None,
+            lens_context: None,
+            branches,
         }
     }
 
@@ -355,6 +377,7 @@ impl QueryGraph {
         nodes: Vec<QueryNode>,
         node_indices: HashMap<NodeId, usize>,
         output_node: NodeId,
+        branches: Vec<String>,
     ) -> Self {
         use crate::sql::schema::ColumnDef;
 
@@ -441,6 +464,9 @@ impl QueryGraph {
             output_node,
             entry_points,
             successors,
+            target_descriptor: None,
+            lens_context: None,
+            branches,
         }
     }
 
@@ -479,6 +505,16 @@ impl QueryGraph {
         self.all_schemas.get(table)
     }
 
+    /// Get schema and row descriptor for a specific table.
+    ///
+    /// Returns both the table schema and an Arc<RowDescriptor> for creating rows.
+    pub fn get_table_schema(&self, table: &str) -> Option<(&TableSchema, Arc<RowDescriptor>)> {
+        self.all_schemas.get(table).map(|schema| {
+            let descriptor = Arc::new(RowDescriptor::from_table_schema(schema));
+            (schema, descriptor)
+        })
+    }
+
     /// Check if this is a join query.
     pub fn is_join(&self) -> bool {
         self.is_join
@@ -487,6 +523,56 @@ impl QueryGraph {
     /// Check if the graph is initialized.
     pub fn is_ready(&self) -> bool {
         self.state == GraphState::Ready
+    }
+
+    /// Set the target descriptor for schema-aware queries.
+    ///
+    /// When set, rows from older schema versions will be transformed
+    /// before predicate evaluation using the lens context.
+    pub fn set_target_descriptor(&mut self, descriptor_id: DescriptorId) {
+        self.target_descriptor = Some(descriptor_id);
+    }
+
+    /// Get the target descriptor ID.
+    pub fn target_descriptor(&self) -> Option<&DescriptorId> {
+        self.target_descriptor.as_ref()
+    }
+
+    /// Set the lens context for schema transformations.
+    ///
+    /// The lens context contains lenses for transforming rows between
+    /// different schema versions during query evaluation.
+    pub fn set_lens_context(&mut self, ctx: QueryLensContext) {
+        self.lens_context = Some(ctx);
+    }
+
+    /// Get the lens context for schema transformations.
+    pub fn lens_context(&self) -> Option<&QueryLensContext> {
+        self.lens_context.as_ref()
+    }
+
+    /// Check if this graph has lens context for schema transformations.
+    pub fn has_lens_context(&self) -> bool {
+        self.lens_context.is_some()
+    }
+
+    /// Get the branches this query reads from.
+    ///
+    /// Returns an empty slice if no branches specified (defaults to "main").
+    pub fn branches(&self) -> &[String] {
+        &self.branches
+    }
+
+    /// Check if this graph is branch-aware (reads from multiple branches).
+    pub fn is_branch_aware(&self) -> bool {
+        !self.branches.is_empty()
+    }
+
+    /// Get mutable access to the nodes for direct manipulation.
+    ///
+    /// Used by the registry to route CommitDeltas through CommitSource and BranchMerge nodes.
+    pub fn nodes_mut(&mut self) -> &mut [QueryNode] {
+        &mut self.nodes
     }
 
     /// Get current output rows in buffer format, initializing lazily if needed.
@@ -562,14 +648,24 @@ impl QueryGraph {
                 .iter()
                 .any(|n| matches!(n, QueryNode::ArrayAggregate { .. }));
 
+            // Check if this graph has a BranchMerge node (unified architecture)
+            let has_branch_merge = self
+                .nodes
+                .iter()
+                .any(|n| matches!(n, QueryNode::BranchMerge { .. }));
+
             if has_recursive {
                 // RecursiveFilter requires fixpoint iteration
                 self.init_recursive_query(cache, db, skip_id, skip_table);
             } else if has_array_aggregate {
                 // ArrayAggregate needs database access to look up inner rows
                 self.init_array_aggregate_query(cache, db, skip_id, skip_table);
+            } else if has_branch_merge {
+                // BranchMerge query: evaluate BranchMerge for each object
+                self.init_branch_merge_query(cache, db, skip_id, skip_table);
             } else {
-                // Single-table query: load all rows from the primary table
+                // Legacy single-table query: load all rows from the primary table
+                // (This branch should rarely be used with the unified architecture)
                 let rows = db.read_all_rows(&self.table);
                 let schema = self.schema.clone();
 
@@ -729,6 +825,86 @@ impl QueryGraph {
                     }
                 }
             }
+        }
+    }
+
+    /// Initialize a BranchMerge query by evaluating BranchMerge for each object.
+    ///
+    /// This is the unified initialization path for all queries in the new architecture.
+    /// For each row (object) in the table:
+    /// 1. Get the Object from LocalNode
+    /// 2. Evaluate BranchMerge node to get the merged row
+    /// 3. Route through downstream nodes (Filter, Projection, etc.)
+    fn init_branch_merge_query(
+        &mut self,
+        cache: &mut RowCache,
+        db: &DatabaseState,
+        skip_id: Option<ObjectId>,
+        skip_table: Option<&str>,
+    ) {
+        use crate::sql::lens::LensContext;
+
+        let table = self.table.clone();
+
+        // Get all row IDs for this table
+        let row_ids: Vec<ObjectId> = db
+            .read_all_rows(&table)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+
+        // Use empty lens context (no cross-schema transforms during init)
+        let lens_context = LensContext::new();
+
+        for row_id in row_ids {
+            // Skip the triggering row - it will be processed as a delta
+            if skip_table == Some(&table) && skip_id == Some(row_id) {
+                continue;
+            }
+
+            // Get the Object from DatabaseState
+            let object = match db.get_object(row_id) {
+                Some(obj) => obj,
+                None => continue,
+            };
+
+            let obj_guard = match object.read() {
+                Ok(guard) => guard,
+                Err(_) => continue,
+            };
+
+            // Find BranchMerge node and evaluate
+            let mut branch_delta = DeltaBatch::new();
+            for node in &mut self.nodes {
+                if let QueryNode::BranchMerge {
+                    table: node_table, ..
+                } = node
+                    && node_table == &table
+                {
+                    let row_deltas = node.evaluate_branch_merge_with_lenses(
+                        row_id,
+                        &obj_guard,
+                        &lens_context,
+                        |_desc_id| None, // No descriptor lookup during init
+                    );
+                    branch_delta.extend(row_deltas);
+                    break;
+                }
+            }
+
+            if branch_delta.is_empty() {
+                continue;
+            }
+
+            // Cache the merged row
+            for delta in branch_delta.iter() {
+                if let RowDelta::Added { id, row } = delta {
+                    cache.insert(&table, *id, row.clone());
+                }
+            }
+
+            // Route through downstream nodes (Filter, Projection, Output)
+            let _ = self.route_from_branch_merge(branch_delta, cache, db);
         }
     }
 
@@ -1103,6 +1279,24 @@ impl QueryGraph {
                 let schema = self.schema.clone();
                 node.evaluate_limit_offset(current, &schema, cache)
             }
+            QueryNode::Filter { .. } => {
+                // Use lens-aware evaluation if lens context is available
+                if let Some(lens_ctx) = &self.lens_context {
+                    // For now, use a simple descriptor lookup that returns the target descriptor
+                    // for all rows. This means no transformation will occur unless we have
+                    // row-specific descriptor tracking.
+                    //
+                    // TODO(GCO-1091): Implement row-specific descriptor tracking.
+                    // When a row is created/updated, store its source descriptor ID.
+                    // Then look it up here to enable proper lens transformation.
+                    let target = self.target_descriptor.clone();
+                    node.evaluate_with_lens(current, cache, Some(lens_ctx), move |_id| {
+                        target.clone()
+                    })
+                } else {
+                    node.evaluate(current, cache)
+                }
+            }
             _ => node.evaluate(current, cache),
         }
     }
@@ -1194,20 +1388,98 @@ impl QueryGraph {
                     .collect();
             }
 
-            // For single-table queries, use cached IDs
+            // For single-table queries with Filter, use cached IDs
             if let Some(ids) = self.nodes[input_idx].cached_ids() {
-                return ids
+                // Check if there's a BranchMerge node to get rows from
+                // (BranchMerge maintains its own row cache in object_states)
+                let branch_merge_states = self.nodes.iter().find_map(|n| {
+                    if let QueryNode::BranchMerge { object_states, .. } = n {
+                        Some(object_states)
+                    } else {
+                        None
+                    }
+                });
+
+                if let Some(object_states) = branch_merge_states {
+                    // Get rows from BranchMerge's cache (single source of truth)
+                    return ids
+                        .iter()
+                        .filter_map(|id| {
+                            object_states
+                                .get(id)
+                                .and_then(|state| state.cached_merged.as_ref())
+                                .map(|row| (*id, row.clone()))
+                        })
+                        .collect();
+                } else {
+                    // Fall back to RowCache for non-BranchMerge queries
+                    return ids
+                        .iter()
+                        .filter_map(|id| {
+                            cache
+                                .get(&self.table, *id)
+                                .flatten()
+                                .map(|row| (*id, row.clone()))
+                        })
+                        .collect();
+                }
+            }
+
+            // For BranchMerge queries without Filter, use object_states directly
+            if let QueryNode::BranchMerge { object_states, .. } = &self.nodes[input_idx] {
+                return object_states
                     .iter()
-                    .filter_map(|id| {
-                        cache
-                            .get(&self.table, *id)
-                            .flatten()
-                            .map(|row| (*id, row.clone()))
+                    .filter_map(|(id, state)| {
+                        state.cached_merged.as_ref().map(|row| (*id, row.clone()))
                     })
                     .collect();
             }
         }
         vec![]
+    }
+
+    /// Route a delta batch from a BranchMerge node through downstream nodes.
+    ///
+    /// This is used by the registry to process BranchMerge output through
+    /// Filter, Projection, and Output nodes.
+    ///
+    /// Returns the final output delta after processing through all downstream nodes.
+    pub fn route_from_branch_merge(
+        &mut self,
+        delta: DeltaBatch,
+        cache: &mut RowCache,
+        db: &DatabaseState,
+    ) -> DeltaBatch {
+        // Find the BranchMerge node
+        let branch_merge_idx = self
+            .nodes
+            .iter()
+            .position(|n| matches!(n, QueryNode::BranchMerge { .. }));
+
+        let Some(branch_merge_idx) = branch_merge_idx else {
+            return DeltaBatch::new();
+        };
+
+        if delta.is_empty() {
+            return DeltaBatch::new();
+        }
+
+        // Get successors for the BranchMerge node
+        let successors = self.successors[branch_merge_idx].clone();
+
+        // If no successors, return the delta directly (it's the output)
+        if successors.is_empty() {
+            return delta;
+        }
+
+        // Route through successor nodes
+        let mut result = DeltaBatch::new();
+        for edge in successors {
+            let output = self.process_from_node(edge.to, delta.clone(), edge.port, cache, db);
+            result.extend(output);
+        }
+
+        result
     }
 
     /// Process a row change, returning the output delta.
@@ -2045,7 +2317,7 @@ mod tests {
         assert!(diagram.contains("Query Graph"));
         assert!(diagram.contains("42")); // graph id
         assert!(diagram.contains("users")); // table name
-        assert!(diagram.contains("TableScan")); // node type
+        assert!(diagram.contains("BranchMerge")); // node type (unified architecture)
         assert!(diagram.contains("Filter")); // node type
         assert!(diagram.contains("Output")); // node type
         assert!(diagram.contains("active = TRUE")); // predicate

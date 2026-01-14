@@ -170,3 +170,170 @@ fn branch_ref_access() {
     // Branch ref sees the change
     assert_eq!(branch_ref.read().unwrap().len(), 1);
 }
+
+// =============================================================================
+// Per-Column LWW Merge Tests
+// =============================================================================
+
+use groove::sql::ColumnType;
+use groove::sql::row_buffer::{OwnedRow, RowBuilder, RowDescriptor, RowValue};
+use std::sync::Arc;
+
+fn make_test_descriptor() -> Arc<RowDescriptor> {
+    Arc::new(RowDescriptor::new([
+        ("name".to_string(), ColumnType::String, false),
+        ("status".to_string(), ColumnType::String, false),
+        ("count".to_string(), ColumnType::I32, false),
+    ]))
+}
+
+fn make_row_content(desc: &Arc<RowDescriptor>, name: &str, status: &str, count: i32) -> Vec<u8> {
+    let name_idx = desc.column_index("name").unwrap();
+    let status_idx = desc.column_index("status").unwrap();
+    let count_idx = desc.column_index("count").unwrap();
+
+    RowBuilder::new(desc.clone())
+        .set_string(name_idx, name)
+        .set_string(status_idx, status)
+        .set_i32(count_idx, count)
+        .build()
+        .buffer
+}
+
+#[test]
+fn read_sync_merged_single_tip() {
+    // When there's only one tip, read_sync_merged returns it directly
+    let obj = Object::new(ObjectId::new(1), "test");
+    let desc = make_test_descriptor();
+
+    let content = make_row_content(&desc, "Alice", "active", 10);
+    obj.write_sync("main", &content, "alice", 1000);
+
+    // Should return the single commit's content
+    let result = obj.read_sync_merged("main", &desc).unwrap();
+    let row = OwnedRow::new(desc.clone(), result);
+
+    assert_eq!(row.get_by_name("name"), Some(RowValue::String("Alice")));
+    assert_eq!(row.get_by_name("status"), Some(RowValue::String("active")));
+    assert_eq!(row.get_by_name("count"), Some(RowValue::I32(10)));
+}
+
+#[test]
+fn read_sync_merged_concurrent_disjoint_changes() {
+    // Test the main per-column LWW merge scenario:
+    // Two concurrent writes that change different columns should merge
+    let obj = Object::new(ObjectId::new(1), "test");
+    let desc = make_test_descriptor();
+
+    // Initial write
+    let initial = make_row_content(&desc, "Original", "draft", 0);
+    let id1 = obj.write_sync("main", &initial, "system", 1000);
+
+    // Now simulate concurrent writes by directly adding commits with the same parent
+
+    // Client A changes only the name column
+    let content_a = make_row_content(&desc, "Alice", "draft", 0);
+    let commit_a = Commit {
+        parents: vec![id1],
+        content: content_a.into_boxed_slice(),
+        author: "client-a".to_string(),
+        timestamp: 2000,
+        meta: None,
+    };
+
+    // Client B changes only the status column
+    let content_b = make_row_content(&desc, "Original", "active", 0);
+    let commit_b = Commit {
+        parents: vec![id1],
+        content: content_b.into_boxed_slice(),
+        author: "client-b".to_string(),
+        timestamp: 2500,
+        meta: None,
+    };
+
+    // Add both commits - this creates two frontier tips
+    {
+        let mut main = obj.branch_mut("main").unwrap();
+        main.add_commit(commit_a);
+        main.add_commit(commit_b);
+    }
+
+    // Verify we now have 2 tips
+    let main = obj.branch("main").unwrap();
+    assert_eq!(main.frontier().len(), 2, "Should have 2 concurrent tips");
+    drop(main);
+
+    // read_sync should return None (multiple tips)
+    assert!(obj.read_sync("main").is_none());
+
+    // read_sync_merged should merge per-column
+    let merged = obj.read_sync_merged("main", &desc).unwrap();
+    let merged_row = OwnedRow::new(desc.clone(), merged);
+
+    // name from client A (only A changed it)
+    assert_eq!(
+        merged_row.get_by_name("name"),
+        Some(RowValue::String("Alice")),
+        "name should come from client A"
+    );
+
+    // status from client B (only B changed it)
+    assert_eq!(
+        merged_row.get_by_name("status"),
+        Some(RowValue::String("active")),
+        "status should come from client B"
+    );
+
+    // count from LCA (nobody changed it)
+    assert_eq!(
+        merged_row.get_by_name("count"),
+        Some(RowValue::I32(0)),
+        "count should come from LCA (unchanged)"
+    );
+}
+
+#[test]
+fn read_sync_merged_concurrent_conflicting_changes() {
+    // Two concurrent writes to the same column - later timestamp wins
+    let obj = Object::new(ObjectId::new(1), "test");
+    let desc = make_test_descriptor();
+
+    // Initial write
+    let initial = make_row_content(&desc, "Original", "draft", 0);
+    let id1 = obj.write_sync("main", &initial, "system", 1000);
+
+    // Both clients change the name column
+    let content_a = make_row_content(&desc, "Alice", "draft", 0);
+    let commit_a = Commit {
+        parents: vec![id1],
+        content: content_a.into_boxed_slice(),
+        author: "client-a".to_string(),
+        timestamp: 2000, // Earlier
+        meta: None,
+    };
+
+    let content_b = make_row_content(&desc, "Bob", "draft", 0);
+    let commit_b = Commit {
+        parents: vec![id1],
+        content: content_b.into_boxed_slice(),
+        author: "client-b".to_string(),
+        timestamp: 3000, // Later - should win
+        meta: None,
+    };
+
+    {
+        let mut main = obj.branch_mut("main").unwrap();
+        main.add_commit(commit_a);
+        main.add_commit(commit_b);
+    }
+
+    let merged = obj.read_sync_merged("main", &desc).unwrap();
+    let merged_row = OwnedRow::new(desc.clone(), merged);
+
+    // Bob wins because of later timestamp
+    assert_eq!(
+        merged_row.get_by_name("name"),
+        Some(RowValue::String("Bob")),
+        "Later timestamp should win for conflicting column"
+    );
+}

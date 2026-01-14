@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock};
 use crate::branch::Branch;
 use crate::commit::{Commit, CommitId};
 use crate::merge::MergeStrategy;
+use crate::sql::row_buffer::RowDescriptor;
 
 // ========== ObjectId Type ==========
 
@@ -93,6 +94,11 @@ impl ObjectId {
     /// Create a new ObjectId from a u128 value.
     pub const fn new(value: u128) -> Self {
         ObjectId(value)
+    }
+
+    /// Create a new random ObjectId using UUID v7 (timestamp + random).
+    pub fn new_random() -> Self {
+        ObjectId(uuid::Uuid::now_v7().as_u128())
     }
 
     /// Create a deterministic ObjectId from a string key.
@@ -493,6 +499,9 @@ impl Object {
 
     /// Read content from the frontier of a branch (sync).
     /// Returns None if the branch is empty or has multiple tips.
+    ///
+    /// For automatic per-column LWW merge when there are multiple tips,
+    /// use `read_sync_merged` with a RowDescriptor.
     pub fn read_sync(&self, branch_name: &str) -> Option<Vec<u8>> {
         let branch = self.branches.get(branch_name)?.read().unwrap();
         let frontier = branch.frontier();
@@ -505,6 +514,79 @@ impl Object {
         let commit = branch.get_commit(&frontier[0])?;
         Some(commit.content.to_vec())
     }
+
+    /// Read content from the frontier of a branch, automatically merging
+    /// concurrent commits using per-column LWW (Last-Write-Wins).
+    ///
+    /// Unlike `read_sync`, this method handles multiple frontier tips by
+    /// finding the LCA (Lowest Common Ancestor) and performing a per-column
+    /// merge where each column's value comes from the commit that most
+    /// recently modified it.
+    ///
+    /// # Arguments
+    ///
+    /// * `branch_name` - The branch to read from
+    /// * `descriptor` - The row schema (required for per-column merge)
+    ///
+    /// # Returns
+    ///
+    /// - `Some(Vec<u8>)` - The merged row content
+    /// - `None` - If the branch is empty or doesn't exist
+    ///
+    /// # Algorithm
+    ///
+    /// 1. If single tip: return content directly (no merge needed)
+    /// 2. If multiple tips:
+    ///    - Find LCA of all frontier commits
+    ///    - For each column, pick value from commit with highest timestamp
+    ///    - Tie-breaker: lexicographically higher CommitId wins
+    pub fn read_sync_merged(
+        &self,
+        branch_name: &str,
+        descriptor: &crate::sql::row_buffer::RowDescriptor,
+    ) -> Option<Vec<u8>> {
+        use crate::sql::row_buffer::{MergeCandidate, merge_per_column_lww};
+
+        let branch = self.branches.get(branch_name)?.read().unwrap();
+        let frontier = branch.frontier();
+
+        if frontier.is_empty() {
+            return None;
+        }
+
+        // Single tip: no merge needed
+        if frontier.len() == 1 {
+            let commit = branch.get_commit(&frontier[0])?;
+            return Some(commit.content.to_vec());
+        }
+
+        // Multiple tips: need per-column LWW merge
+        // Step 1: Find LCA of all frontier commits
+        let lca_id = branch.find_frontier_lca()?;
+        let lca_commit = branch.get_commit(&lca_id)?;
+
+        // Step 2: Build merge candidates from frontier commits
+        let candidates: Vec<MergeCandidate<'_>> = frontier
+            .iter()
+            .filter_map(|commit_id| {
+                let commit = branch.get_commit(commit_id)?;
+                Some(MergeCandidate::new(
+                    &commit.content,
+                    commit.timestamp,
+                    *commit_id.as_bytes(),
+                ))
+            })
+            .collect();
+
+        // Step 3: Perform per-column LWW merge
+        let merged = merge_per_column_lww(&candidates, &lca_commit.content, descriptor);
+
+        Some(merged.buffer)
+    }
+
+    // NOTE: read_across_branches() has been removed.
+    // Branch-aware queries now go through QueryGraph with CommitSource + BranchMerge nodes
+    // for incremental computation. See query_graph/node.rs for CommitSource and BranchMerge.
 
     /// Write content to a branch (sync).
     /// Returns the new commit ID.
@@ -546,6 +628,45 @@ impl Object {
         };
 
         branch.add_commit(commit)
+    }
+
+    /// Write content to a branch with per-column change tracking.
+    ///
+    /// When a descriptor is provided, this method uses `add_commit_with_tracking`
+    /// to compute and store per-column LWW metadata. This enables proper per-column
+    /// merge behavior when the branch has concurrent writes.
+    ///
+    /// Returns the new commit ID.
+    pub fn write_sync_with_tracking(
+        &self,
+        branch_name: &str,
+        content: &[u8],
+        author: &str,
+        timestamp: u64,
+        meta: Option<std::collections::BTreeMap<String, String>>,
+        descriptor: &RowDescriptor,
+    ) -> CommitId {
+        let mut branch = self
+            .branches
+            .get(branch_name)
+            .expect("branch not found")
+            .write()
+            .unwrap();
+
+        let parents = branch.frontier().to_vec();
+
+        let commit = Commit {
+            parents,
+            content: content.to_vec().into_boxed_slice(),
+            author: author.to_string(),
+            timestamp,
+            meta,
+        };
+
+        // Use add_commit_with_tracking to compute per-column change metadata
+        branch
+            .add_commit_with_tracking(commit, descriptor)
+            .unwrap_or_else(|e| panic!("add_commit_with_tracking failed: {:?}", e))
     }
 
     /// Get the frontier commit IDs for a branch.

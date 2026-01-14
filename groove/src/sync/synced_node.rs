@@ -21,7 +21,7 @@ use super::protocol::{
 };
 use super::runtime::Runtime;
 
-#[cfg(feature = "sync-server")]
+#[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
 use super::server::{ClientIdentity, ClientSession, SessionId, SseSender, TokenValidator};
 
 // ============================================================================
@@ -271,7 +271,7 @@ impl<E: ClientEnv> UpstreamServers<E> {
 // Connected Clients (Server-side)
 // ============================================================================
 
-#[cfg(feature = "sync-server")]
+#[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
 /// Manager for connected client sessions (clients that sync FROM us).
 pub struct ConnectedClients {
     /// Active client sessions.
@@ -293,7 +293,7 @@ pub struct ConnectedClients {
     stale_states: HashMap<String, StaleClientState>,
 }
 
-#[cfg(feature = "sync-server")]
+#[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
 /// Stale client state kept for grace period after disconnect.
 pub struct StaleClientState {
     /// The client's known state at disconnect.
@@ -302,14 +302,14 @@ pub struct StaleClientState {
     pub removed_at: Instant,
 }
 
-#[cfg(feature = "sync-server")]
+#[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
 impl Default for ConnectedClients {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(feature = "sync-server")]
+#[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
 impl ConnectedClients {
     /// Create a new connected clients manager.
     pub fn new() -> Self {
@@ -526,7 +526,7 @@ pub struct SyncedNode<R: Runtime, E: ClientEnv> {
     upstream_servers: RwLock<UpstreamServers<E>>,
 
     /// Connected client sessions (server-side).
-    #[cfg(feature = "sync-server")]
+    #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
     connected_clients: RwLock<ConnectedClients>,
 
     /// Write buffer for batching upstream pushes.
@@ -543,7 +543,7 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
             node,
             runtime,
             upstream_servers: RwLock::new(UpstreamServers::new()),
-            #[cfg(feature = "sync-server")]
+            #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
             connected_clients: RwLock::new(ConnectedClients::new()),
             write_buffer: RwLock::new(WriteBuffer::new()),
             config: SyncConfig::default(),
@@ -556,7 +556,7 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
             node,
             runtime,
             upstream_servers: RwLock::new(UpstreamServers::new()),
-            #[cfg(feature = "sync-server")]
+            #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
             connected_clients: RwLock::new(ConnectedClients::new()),
             write_buffer: RwLock::new(WriteBuffer::new()),
             config,
@@ -613,7 +613,7 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
 
     // ========== Connected Clients API (Server-side) ==========
 
-    #[cfg(feature = "sync-server")]
+    #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
     /// Set the token validator for accepting client connections.
     pub fn set_token_validator(&self, validator: Arc<dyn TokenValidator>) {
         self.connected_clients
@@ -622,7 +622,7 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
             .set_token_validator(validator);
     }
 
-    #[cfg(feature = "sync-server")]
+    #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
     /// Accept a new client session.
     pub fn accept_client(&self, identity: ClientIdentity, sse_sender: SseSender) -> SessionId {
         self.connected_clients
@@ -631,7 +631,7 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
             .accept_session(identity, sse_sender)
     }
 
-    #[cfg(feature = "sync-server")]
+    #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
     /// Remove a client session.
     pub fn remove_client(&self, session_id: SessionId) {
         self.connected_clients
@@ -681,7 +681,7 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
         }
 
         // Broadcast to connected clients (for edge server scenario)
-        #[cfg(feature = "sync-server")]
+        #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
         {
             let event = SseEvent::Commits {
                 object_id,
@@ -693,7 +693,7 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
         }
     }
 
-    #[cfg(feature = "sync-server")]
+    #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
     /// Broadcast an event to all clients tracking an object.
     pub fn broadcast_to_clients(&self, object_id: ObjectId, event: &SseEvent) {
         let clients = self.connected_clients.read().unwrap();
@@ -707,7 +707,7 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
         }
     }
 
-    #[cfg(feature = "sync-server")]
+    #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
     /// Update last activity for a session (call on any client interaction).
     pub fn touch_session(&self, session_id: SessionId) {
         if let Some(session) = self
@@ -722,7 +722,7 @@ impl<R: Runtime, E: ClientEnv> SyncedNode<R, E> {
 }
 
 // Methods that spawn background tasks require 'static bounds
-#[cfg(feature = "sync-server")]
+#[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
 impl<R: Runtime, E: ClientEnv + 'static> SyncedNode<R, E> {
     /// Start the session timeout monitoring loop.
     ///

@@ -4,6 +4,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::object::ObjectId;
+use crate::sql::catalog::DescriptorId;
+use crate::sql::lens::QueryLensContext;
 use crate::sql::query_graph::graph::{GraphId, QueryGraph};
 use crate::sql::query_graph::node::{NodeId, QueryNode};
 use crate::sql::query_graph::predicate::Predicate;
@@ -60,6 +62,10 @@ pub struct QueryGraphBuilder {
     current_descriptor: Option<Arc<RowDescriptor>>,
     /// JOIN state (lazily populated when join() is called)
     join_state: Option<JoinState>,
+    /// Branches to read from for branch-aware queries.
+    branches: Vec<String>,
+    /// Target schema descriptor ID for branch-aware queries.
+    target_descriptor_id: Option<DescriptorId>,
 }
 
 impl QueryGraphBuilder {
@@ -72,7 +78,38 @@ impl QueryGraphBuilder {
             next_id: 0,
             current_descriptor: None,
             join_state: None,
+            branches: vec![],
+            target_descriptor_id: None,
         }
+    }
+
+    /// Set the branches to read from for branch-aware queries.
+    ///
+    /// When branches are specified, rows are read from all branches and
+    /// merged using per-column LWW before predicate evaluation.
+    ///
+    /// Branch names must follow the `[env]-[schemaVersion]-[userBranch]` format.
+    /// The target descriptor ID specifies which schema version to merge into.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let graph = QueryGraphBuilder::new("users", schema)
+    ///     .with_branches(
+    ///         vec!["prod-v1-main".into(), "staging-v2-feature".into()],
+    ///         target_descriptor_id,
+    ///     )
+    ///     .table_scan()
+    ///     ...
+    /// ```
+    pub fn with_branches(
+        mut self,
+        branches: Vec<String>,
+        target_descriptor_id: DescriptorId,
+    ) -> Self {
+        self.branches = branches;
+        self.target_descriptor_id = Some(target_descriptor_id);
+        self
     }
 
     /// Allocate a new node ID.
@@ -92,14 +129,45 @@ impl QueryGraphBuilder {
 
     /// Add a table scan source node.
     ///
-    /// This reads all rows from the table.
+    /// This reads all rows from the table using BranchMerge as the unified
+    /// entry point. When no branches are specified via `with_branches()`,
+    /// defaults to `["main"]` with no lens transforms.
+    ///
+    /// This architecture ensures all queries use the same notification
+    /// mechanism (`notify_object_changed`) regardless of branch configuration.
     pub fn table_scan(&mut self) -> NodeId {
-        let id = self.alloc_id();
-        self.nodes.push(QueryNode::TableScan {
-            table: self.primary_table.clone(),
-            cached_ids: HashSet::new(),
+        // Always use BranchMerge - default to ["main"] if no branches specified
+        if self.branches.is_empty() {
+            self.branches = vec!["main".to_string()];
+            // Note: target_descriptor_id stays None for simple single-branch queries
+        }
+        self.branch_merge_scan()
+    }
+
+    /// Create a BranchMerge node for branch-aware queries.
+    ///
+    /// Creates a BranchMerge entry point that reads from multiple branches
+    /// and performs per-column LWW merge using pre-computed metadata.
+    ///
+    /// When `target_descriptor_id` is None, no lens transforms are attempted.
+    /// This is the common case for single-branch queries (like reading from "main").
+    fn branch_merge_scan(&mut self) -> NodeId {
+        let descriptor = Arc::new(RowDescriptor::from_table_schema(&self.primary_schema));
+        let table = self.primary_table.clone();
+        let branches: Vec<String> = self.branches.clone();
+        let target_descriptor_id = self.target_descriptor_id.clone();
+
+        // Create BranchMerge node (entry point, no separate CommitSource nodes needed)
+        let merge_id = self.alloc_id();
+        self.nodes.push(QueryNode::BranchMerge {
+            table,
+            branch_names: branches,
+            descriptor,
+            target_descriptor_id,
+            object_states: HashMap::new(),
         });
-        id
+
+        merge_id
     }
 
     /// Add an index lookup source node.
@@ -455,6 +523,24 @@ impl QueryGraphBuilder {
         id
     }
 
+    /// Build a simple branch-aware query graph (BranchMerge → Output).
+    ///
+    /// This is a convenience method that creates a branch-merge query without
+    /// any filters or projections. Useful for tests and simple queries that
+    /// just want to read from multiple branches.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `with_branches` was not called to set up the branches.
+    pub fn build_branch_merge_query(mut self, graph_id: GraphId) -> QueryGraph {
+        assert!(
+            !self.branches.is_empty(),
+            "build_branch_merge_query requires branches to be set via with_branches"
+        );
+        let scan = self.branch_merge_scan();
+        self.output(scan, graph_id)
+    }
+
     /// Add the output node and build the graph.
     ///
     /// This consumes the builder and returns the constructed graph.
@@ -479,6 +565,7 @@ impl QueryGraphBuilder {
                 self.nodes,
                 node_indices,
                 output_id,
+                self.branches,
             ),
             Some(js) => QueryGraph::new_chain_join(
                 graph_id,
@@ -490,8 +577,34 @@ impl QueryGraphBuilder {
                 self.nodes,
                 node_indices,
                 output_id,
+                self.branches,
             ),
         }
+    }
+
+    /// Finalize the graph with the given output node and lens context.
+    ///
+    /// Similar to `output`, but also configures the graph with a lens context
+    /// for schema-aware query evaluation. This enables queries to work with
+    /// rows from different schema versions.
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - The node to use as the final output
+    /// * `graph_id` - The ID to assign to the graph
+    /// * `target_descriptor` - The target schema version for this query
+    /// * `lens_ctx` - Lens context containing transformations between schema versions
+    pub fn output_with_lens(
+        self,
+        input: NodeId,
+        graph_id: GraphId,
+        target_descriptor: DescriptorId,
+        lens_ctx: QueryLensContext,
+    ) -> QueryGraph {
+        let mut graph = self.output(input, graph_id);
+        graph.set_target_descriptor(target_descriptor);
+        graph.set_lens_context(lens_ctx);
+        graph
     }
 
     /// Build an inner descriptor that accounts for inner joins.

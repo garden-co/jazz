@@ -190,6 +190,16 @@ export class WasmDatabase {
    * Update a row's blob column.
    */
   update_row_blob(table: string, row_id: string, column: string, blob_handle_id: bigint): boolean;
+  /**
+   * Get the current schema for a table.
+   * Returns a JS object with column definitions.
+   */
+  getTableSchema(table: string): any;
+  /**
+   * Get the descriptor ID for a table.
+   * Returns the ObjectId string (Crockford Base32 encoded).
+   */
+  getDescriptorId(table: string): string;
 }
 
 export class WasmQueryHandle {
@@ -425,6 +435,8 @@ export interface InitOutput {
   readonly wasmdatabase_release_blob: (a: number, b: bigint) => void;
   readonly wasmdatabase_insert_with_blobs: (a: number, b: number, c: number, d: any, e: any) => [number, number, number, number];
   readonly wasmdatabase_update_row_blob: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: bigint) => [number, number, number];
+  readonly wasmdatabase_getTableSchema: (a: number, b: number, c: number) => [number, number, number];
+  readonly wasmdatabase_getDescriptorId: (a: number, b: number, c: number) => [number, number, number, number];
   readonly __wbg_wasmqueryhandle_free: (a: number, b: number) => void;
   readonly wasmqueryhandle_unsubscribe: (a: number) => void;
   readonly __wbg_wasmqueryhandlebinary_free: (a: number, b: number) => void;
@@ -472,8 +484,8 @@ export interface InitOutput {
   readonly wasmsyncclient_push: (a: number, b: number, c: number, d: any) => any;
   readonly wasmsyncclient_reconcile: (a: number, b: number, c: number, d: any) => any;
   readonly wasmsyncclient_disconnect: (a: number) => void;
-  readonly wasm_bindgen__convert__closures_____invoke__h20bec3cca755663f: (a: number, b: number, c: any) => void;
-  readonly wasm_bindgen__closure__destroy__h4df8827c3765d533: (a: number, b: number) => void;
+  readonly wasm_bindgen__convert__closures_____invoke__h783d3c595025ae9c: (a: number, b: number, c: any) => void;
+  readonly wasm_bindgen__closure__destroy__h28952e7d8d6ac40d: (a: number, b: number) => void;
   readonly wasm_bindgen__convert__closures_____invoke__h76dfe62a3b69c085: (a: number, b: number, c: any) => void;
   readonly wasm_bindgen__closure__destroy__h3d685ebc6ca20542: (a: number, b: number) => void;
   readonly wasm_bindgen__convert__closures_____invoke__h3097c68d921a6b39: (a: number, b: number, c: any, d: any) => void;

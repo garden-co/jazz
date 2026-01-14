@@ -1,12 +1,13 @@
 [workspace]
 members = [
     "groove",
+    "groove-cli",
     "groove-server",
     "groove-wasm",
     "docs/examples/rust-basic",
 ]
 # Only build groove by default (groove-wasm is WASM-only, groove-server is optional)
-default-members = ["groove"]
+default-members = ["groove", "groove-cli"]
 resolver = "2"
 
 # Dev profile with debug symbols for better WASM stack traces

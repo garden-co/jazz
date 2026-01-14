@@ -4141,6 +4141,180 @@ fn incremental_query_reverse_join_subscribe() {
     );
 }
 
+// ========== Migration Execution Tests ==========
+
+#[test]
+fn migration_rename_column() {
+    use crate::sql::lens::LensGenerationOptions;
+    use crate::sql::schema::{ColumnDef, ColumnType, TableSchema};
+
+    let db = Database::in_memory();
+
+    // Create table with 'title' column
+    db.execute("CREATE TABLE documents (title STRING NOT NULL)")
+        .unwrap();
+
+    // Insert a row
+    let schema = db.get_table("documents").unwrap();
+    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let row = RowBuilder::new(desc)
+        .set_string_by_name("title", "My Document")
+        .build();
+    let row_id = db.insert_row("documents", row).unwrap();
+
+    // Create new schema with 'name' instead of 'title'
+    let new_schema = TableSchema::new(
+        "documents",
+        vec![ColumnDef::required("name", ColumnType::String)],
+    );
+
+    // Execute migration with confirmed rename
+    let options = LensGenerationOptions {
+        confirmed_renames: vec![("title".into(), "name".into())],
+    };
+    let result = db
+        .execute_migration("documents", new_schema.clone(), options)
+        .unwrap();
+
+    // Verify migration results
+    assert_eq!(result.migrated_count, 1);
+    assert_eq!(result.invisible_count, 0);
+    assert!(result.warnings.is_empty());
+
+    // Verify the row has the new column name
+    let (_, migrated_row) = db.get("documents", row_id).unwrap().unwrap();
+    assert_eq!(
+        migrated_row.get_by_name("name"),
+        Some(RowValue::String("My Document"))
+    );
+    // Old column should not exist
+    assert_eq!(migrated_row.get_by_name("title"), None);
+
+    // Verify the schema was updated
+    let updated_schema = db.get_table("documents").unwrap();
+    assert!(updated_schema.column("name").is_some());
+    assert!(updated_schema.column("title").is_none());
+}
+
+#[test]
+fn migration_add_column() {
+    use crate::sql::lens::LensGenerationOptions;
+    use crate::sql::schema::{ColumnDef, ColumnType, TableSchema};
+
+    let db = Database::in_memory();
+
+    // Create table with 'name' column
+    db.execute("CREATE TABLE users (name STRING NOT NULL)")
+        .unwrap();
+
+    // Insert a row
+    let schema = db.get_table("users").unwrap();
+    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let row = RowBuilder::new(desc)
+        .set_string_by_name("name", "Alice")
+        .build();
+    let row_id = db.insert_row("users", row).unwrap();
+
+    // Create new schema with added 'email' column (nullable)
+    let new_schema = TableSchema::new(
+        "users",
+        vec![
+            ColumnDef::required("name", ColumnType::String),
+            ColumnDef::optional("email", ColumnType::String),
+        ],
+    );
+
+    // Execute migration
+    let result = db
+        .execute_migration("users", new_schema, LensGenerationOptions::default())
+        .unwrap();
+
+    // Verify migration results
+    assert_eq!(result.migrated_count, 1);
+    assert_eq!(result.invisible_count, 0);
+
+    // Verify the row has the new column (with NULL default)
+    let (_, migrated_row) = db.get("users", row_id).unwrap().unwrap();
+    assert_eq!(
+        migrated_row.get_by_name("name"),
+        Some(RowValue::String("Alice"))
+    );
+    assert_eq!(migrated_row.get_by_name("email"), Some(RowValue::Null));
+}
+
+#[test]
+fn migration_preview() {
+    use crate::sql::lens::{ColumnTransform, LensGenerationOptions};
+    use crate::sql::schema::{ColumnDef, ColumnType, TableSchema};
+
+    let db = Database::in_memory();
+
+    // Create table
+    db.execute("CREATE TABLE items (title STRING NOT NULL)")
+        .unwrap();
+
+    // Create new schema
+    let new_schema = TableSchema::new(
+        "items",
+        vec![ColumnDef::required("name", ColumnType::String)],
+    );
+
+    // Preview without executing
+    let options = LensGenerationOptions {
+        confirmed_renames: vec![("title".into(), "name".into())],
+    };
+    let (lens, warnings) = db
+        .preview_migration("items", &new_schema, &options)
+        .unwrap();
+
+    // Verify lens was generated correctly
+    assert_eq!(lens.forward.len(), 1);
+    assert!(matches!(
+        &lens.forward[0],
+        ColumnTransform::Rename { from, to } if from == "title" && to == "name"
+    ));
+    assert!(warnings.is_empty());
+}
+
+#[test]
+fn migration_descriptor_chain() {
+    use crate::sql::lens::LensGenerationOptions;
+    use crate::sql::schema::{ColumnDef, ColumnType, TableSchema};
+
+    let db = Database::in_memory();
+
+    // Create table
+    db.execute("CREATE TABLE notes (text STRING NOT NULL)")
+        .unwrap();
+
+    // Get initial descriptor
+    let desc_v1 = db.get_descriptor("notes").unwrap();
+    let id_v1 = db.get_descriptor_id("notes").unwrap();
+    // v1 has no parent (initial schema version)
+    assert!(desc_v1.lens_from_parent.is_none());
+    assert_eq!(id_v1.version, "v1");
+
+    // Migrate: add optional column
+    let new_schema = TableSchema::new(
+        "notes",
+        vec![
+            ColumnDef::required("text", ColumnType::String),
+            ColumnDef::optional("color", ColumnType::String),
+        ],
+    );
+
+    db.execute_migration("notes", new_schema, LensGenerationOptions::default())
+        .unwrap();
+
+    // Get new descriptor - should have lens from parent
+    let desc_v2 = db.get_descriptor("notes").unwrap();
+    let id_v2 = db.get_descriptor_id("notes").unwrap();
+    assert!(desc_v2.lens_from_parent.is_some());
+    // Same object_id for both versions, different version strings
+    assert_eq!(id_v2.object_id, id_v1.object_id);
+    assert_eq!(id_v2.version, "v2");
+}
+
 #[test]
 fn incremental_query_two_reverse_joins_combined_filters() {
     // Test that queries with TWO reverse joins work correctly
@@ -4873,5 +5047,390 @@ fn incremental_query_exact_typescript_sql_pattern() {
         *delta_count.lock().unwrap(),
         1,
         "Initial delta should contain 1 row"
+    );
+}
+
+#[test]
+fn build_lens_context_for_table_after_migration() {
+    // GCO-1096: Test that lens context is properly built after migration
+    use crate::sql::lens::LensGenerationOptions;
+    use crate::sql::schema::{ColumnDef, ColumnType, TableSchema};
+
+    let db = Database::in_memory();
+
+    // Create table with 'title' column
+    db.execute("CREATE TABLE documents (title STRING NOT NULL)")
+        .unwrap();
+
+    // Insert a row
+    let schema = db.get_table("documents").unwrap();
+    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let row = RowBuilder::new(desc)
+        .set_string_by_name("title", "My Document")
+        .build();
+    let _row_id = db.insert_row("documents", row).unwrap();
+
+    // Get initial descriptor ID
+    let desc_v1_id = db.get_descriptor_id("documents").unwrap();
+
+    // Verify lens context is empty before migration (no parents)
+    let ctx_before = db.state().build_lens_context_for_table("documents");
+    assert!(
+        ctx_before.get_lens(&desc_v1_id, &desc_v1_id).is_none(),
+        "No lens should exist for same schema version"
+    );
+
+    // Create new schema with 'name' instead of 'title'
+    let new_schema = TableSchema::new(
+        "documents",
+        vec![ColumnDef::required("name", ColumnType::String)],
+    );
+
+    // Execute migration with confirmed rename
+    let options = LensGenerationOptions {
+        confirmed_renames: vec![("title".into(), "name".into())],
+    };
+    db.execute_migration("documents", new_schema.clone(), options)
+        .unwrap();
+
+    // Get new descriptor ID
+    let desc_v2_id = db.get_descriptor_id("documents").unwrap();
+    assert_ne!(
+        desc_v1_id, desc_v2_id,
+        "New descriptor should have different ID"
+    );
+
+    // Verify lens context now has the lens from v1 → v2
+    let ctx_after = db.state().build_lens_context_for_table("documents");
+    let lens = ctx_after.get_lens(&desc_v1_id, &desc_v2_id);
+    assert!(
+        lens.is_some(),
+        "Lens should exist from old schema to new schema"
+    );
+
+    // Verify the descriptor has lens from parent
+    let desc_v2 = db.get_descriptor("documents").unwrap();
+    assert!(
+        desc_v2.lens_from_parent.is_some(),
+        "v2 descriptor should have lens from parent"
+    );
+    // Same object_id, different version
+    assert_eq!(desc_v2_id.object_id, desc_v1_id.object_id);
+    assert_eq!(desc_v2_id.version, "v2");
+    assert_eq!(desc_v1_id.version, "v1");
+
+    // Verify we can also load row descriptors by ID
+    let row_desc_v1 = db.state().load_row_descriptor_by_id(desc_v1_id.clone());
+    let row_desc_v2 = db.state().load_row_descriptor_by_id(desc_v2_id.clone());
+
+    assert!(
+        row_desc_v1.is_some(),
+        "Should be able to load v1 row descriptor"
+    );
+    assert!(
+        row_desc_v2.is_some(),
+        "Should be able to load v2 row descriptor"
+    );
+
+    // v1 should have 'title', v2 should have 'name'
+    assert!(
+        row_desc_v1.unwrap().column("title").is_some(),
+        "v1 descriptor should have 'title' column"
+    );
+    assert!(
+        row_desc_v2.unwrap().column("name").is_some(),
+        "v2 descriptor should have 'name' column"
+    );
+}
+
+#[test]
+fn insert_row_populates_column_change_metadata() {
+    // GCO-1097: Verify that insert_row populates per-column LWW metadata
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL, age I32 NOT NULL)")
+        .unwrap();
+
+    let schema = db.get_table("users").unwrap();
+    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+
+    let row = RowBuilder::new(desc)
+        .set_string_by_name("name", "Alice")
+        .set_i32_by_name("age", 30)
+        .build();
+
+    let row_id = db.insert_row("users", row).unwrap();
+
+    // Get the object and check its branch has column change metadata
+    let obj_lock = db
+        .state()
+        .node
+        .get_object(row_id)
+        .expect("object should exist");
+    let obj = obj_lock.read().unwrap();
+    let branch = obj.branch("main").expect("main branch should exist");
+    let frontier_changes = branch.frontier_changes();
+
+    // Should have exactly one frontier commit with metadata
+    assert_eq!(frontier_changes.len(), 1, "Should have one frontier commit");
+
+    let (commit_id, changes) = frontier_changes.iter().next().unwrap();
+
+    // Verify the commit is in the frontier
+    assert!(
+        branch.frontier().contains(commit_id),
+        "Commit should be in frontier"
+    );
+
+    // Should have metadata for all columns (id, name, age)
+    assert!(
+        changes.contains_key("id"),
+        "Should have change metadata for 'id' column"
+    );
+    assert!(
+        changes.contains_key("name"),
+        "Should have change metadata for 'name' column"
+    );
+    assert!(
+        changes.contains_key("age"),
+        "Should have change metadata for 'age' column"
+    );
+
+    // Metadata should have non-zero timestamps
+    assert!(
+        changes["id"].timestamp > 0,
+        "id column should have non-zero timestamp"
+    );
+    assert!(
+        changes["name"].timestamp > 0,
+        "name column should have non-zero timestamp"
+    );
+    assert!(
+        changes["age"].timestamp > 0,
+        "age column should have non-zero timestamp"
+    );
+}
+
+#[test]
+fn update_row_populates_column_change_metadata() {
+    // GCO-1097: Verify that update_row populates per-column LWW metadata
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE users (name STRING NOT NULL, age I32 NOT NULL)")
+        .unwrap();
+
+    // Insert initial row
+    let row_id = db
+        .insert_with("users", |b| {
+            b.set_string_by_name("name", "Alice")
+                .set_i32_by_name("age", 30)
+                .build()
+        })
+        .unwrap();
+
+    // Get initial timestamp
+    let initial_ts = {
+        let obj_lock = db
+            .state()
+            .node
+            .get_object(row_id)
+            .expect("object should exist");
+        let obj = obj_lock.read().unwrap();
+        let branch = obj.branch("main").expect("main branch should exist");
+        let frontier_changes = branch.frontier_changes();
+        let (_, changes) = frontier_changes.iter().next().unwrap();
+        changes["name"].timestamp
+    };
+
+    // Small delay to ensure different timestamp
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
+    // Update the row
+    let schema = db.get_table("users").unwrap();
+    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let updated_row = RowBuilder::new(desc)
+        .set_string_by_name("name", "Bob")
+        .set_i32_by_name("age", 30) // age unchanged
+        .build();
+
+    db.update_row("users", row_id, updated_row).unwrap();
+
+    // Check metadata after update
+    let obj_lock = db
+        .state()
+        .node
+        .get_object(row_id)
+        .expect("object should exist");
+    let obj = obj_lock.read().unwrap();
+    let branch = obj.branch("main").expect("main branch should exist");
+    let frontier_changes = branch.frontier_changes();
+
+    // Should still have one frontier commit (update creates child of previous)
+    assert_eq!(frontier_changes.len(), 1, "Should have one frontier commit");
+
+    let (_, changes) = frontier_changes.iter().next().unwrap();
+
+    // Name should have newer timestamp (it was changed)
+    assert!(
+        changes["name"].timestamp > initial_ts,
+        "name column should have newer timestamp after update (got {}, expected > {})",
+        changes["name"].timestamp,
+        initial_ts
+    );
+}
+
+#[test]
+fn apply_synced_commits_rebuilds_column_metadata() {
+    // GCO-1097: Verify that apply_synced_commits rebuilds column change metadata
+    use crate::commit::Commit;
+
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL)")
+        .unwrap();
+
+    // Create a row object manually to simulate sync
+    let row_id = ObjectId::new(12345);
+    db.state().node.ensure_object(row_id, "row:documents");
+
+    // Build a commit manually (simulating received from sync)
+    let schema = db.get_table("documents").unwrap();
+    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let row = RowBuilder::new(desc.clone())
+        .set_string_by_name("title", "Test Doc")
+        .build()
+        .with_id(row_id);
+
+    let commit = Commit {
+        parents: vec![],
+        content: row.buffer.clone().into(),
+        author: "sync".to_string(),
+        timestamp: 1000,
+        meta: None,
+    };
+
+    // Apply via the Database method (not directly to LocalNode)
+    db.apply_synced_commits("documents", row_id, "main", vec![commit]);
+
+    // Verify column change metadata was rebuilt
+    let obj_lock = db
+        .state()
+        .node
+        .get_object(row_id)
+        .expect("object should exist");
+    let obj = obj_lock.read().unwrap();
+    let branch = obj.branch("main").expect("main branch should exist");
+    let frontier_changes = branch.frontier_changes();
+
+    assert_eq!(
+        frontier_changes.len(),
+        1,
+        "Should have one frontier commit with metadata"
+    );
+
+    let (_, changes) = frontier_changes.iter().next().unwrap();
+    assert!(
+        changes.contains_key("id"),
+        "Should have metadata for 'id' column"
+    );
+    assert!(
+        changes.contains_key("title"),
+        "Should have metadata for 'title' column"
+    );
+    assert_eq!(
+        changes["title"].timestamp, 1000,
+        "Timestamp should match commit timestamp"
+    );
+}
+
+// This test only runs in non-WASM builds because the on_commits_applied
+// callback mechanism is disabled for WASM (cfg(not(feature = "wasm"))).
+#[test]
+#[cfg(not(feature = "wasm"))]
+fn sync_applied_commits_trigger_query_updates() {
+    // GCO-1102: Verify that commits applied via LocalNode.apply_commits
+    // trigger query graph updates through the callback mechanism.
+    use crate::commit::Commit;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let db = Database::in_memory();
+    db.execute("CREATE TABLE documents (title STRING NOT NULL)")
+        .unwrap();
+
+    // Create an incremental query
+    let query = db.incremental_query("SELECT * FROM documents").unwrap();
+
+    // Initially no rows
+    assert_eq!(query.rows().len(), 0, "Should start with no rows");
+
+    // Track callback invocations
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let call_count_clone = call_count.clone();
+
+    let _sub_id = query.subscribe(Box::new(move |_deltas| {
+        call_count_clone.fetch_add(1, Ordering::SeqCst);
+    }));
+
+    // Initial subscription callback fires with empty result
+    assert_eq!(call_count.load(Ordering::SeqCst), 1, "Initial callback");
+
+    // Create a row object manually to simulate sync
+    let row_id = ObjectId::new(99999);
+    db.state().node.ensure_object(row_id, "row:documents");
+
+    // Set object metadata (table name) - this is what insert_row does
+    {
+        let obj_lock = db.state().node.get_object(row_id).unwrap();
+        let mut obj = obj_lock.write().unwrap();
+        let mut meta = std::collections::BTreeMap::new();
+        meta.insert("table".to_string(), "documents".to_string());
+        obj.set_meta(meta);
+    }
+
+    // Register the row in the row_table map (needed for query to see it)
+    db.state()
+        .row_table
+        .write()
+        .unwrap()
+        .insert(row_id, "documents".to_string());
+
+    // Add to table_rows (so the query knows about this row)
+    {
+        let mut table_rows = db.read_table_rows("documents").unwrap();
+        table_rows.add(row_id);
+        db.write_table_rows("documents", &table_rows).unwrap();
+    }
+
+    // Build a commit manually (simulating received from sync)
+    let schema = db.get_table("documents").unwrap();
+    let desc = Arc::new(RowDescriptor::from_table_schema(&schema));
+    let row = RowBuilder::new(desc.clone())
+        .set_string_by_name("title", "Synced Document")
+        .build()
+        .with_id(row_id);
+
+    let commit = Commit {
+        parents: vec![],
+        content: row.buffer.clone().into(),
+        author: "sync-peer".to_string(),
+        timestamp: 2000,
+        meta: None,
+    };
+
+    // Apply commits via LocalNode.apply_commits (as sync would do)
+    // This should trigger the callback which notifies query graphs
+    db.state().node.apply_commits(row_id, "main", vec![commit]);
+
+    // Verify callback was triggered by the sync
+    assert!(
+        call_count.load(Ordering::SeqCst) >= 2,
+        "Callback should fire after sync commits applied (got {})",
+        call_count.load(Ordering::SeqCst)
+    );
+
+    // Verify the query now sees the row
+    let rows = query.rows();
+    assert_eq!(rows.len(), 1, "Query should now have 1 row");
+    assert_eq!(
+        rows[0].1.get_by_name("title"),
+        Some(RowValue::String("Synced Document")),
+        "Row should have correct title"
     );
 }

@@ -590,6 +590,43 @@ impl WasmDatabase {
             })
             .map_err(|e| JsValue::from_str(&format!("{:?}", e)))
     }
+
+    // ==================== Schema Introspection APIs ====================
+
+    /// Get the current schema for a table.
+    /// Returns a JS object with column definitions.
+    #[wasm_bindgen(js_name = getTableSchema)]
+    pub fn get_table_schema(&self, table: &str) -> Result<JsValue, JsValue> {
+        let schema = self
+            .db
+            .get_table(table)
+            .ok_or_else(|| JsValue::from_str(&format!("table not found: {}", table)))?;
+
+        let columns: Vec<JsColumnDef> = schema
+            .columns
+            .iter()
+            .map(|col| JsColumnDef {
+                name: col.name.clone(),
+                column_type: format!("{:?}", col.ty),
+                nullable: col.nullable,
+            })
+            .collect();
+
+        serde_wasm_bindgen::to_value(&columns)
+            .map_err(|e| JsValue::from_str(&format!("serialization error: {:?}", e)))
+    }
+
+    /// Get the descriptor ID for a table.
+    /// Returns the ObjectId string (Crockford Base32 encoded).
+    #[wasm_bindgen(js_name = getDescriptorId)]
+    pub fn get_descriptor_id(&self, table: &str) -> Result<String, JsValue> {
+        let descriptor_id = self
+            .db
+            .get_descriptor_id(table)
+            .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
+
+        Ok(descriptor_id.to_string())
+    }
 }
 
 fn row_to_strings(row: &OwnedRow) -> Vec<String> {
@@ -605,6 +642,17 @@ fn row_to_strings(row: &OwnedRow) -> Vec<String> {
             }
         })
         .collect()
+}
+
+// ==================== Schema Helper Types ====================
+
+/// Column definition for JS interop (used by get_table_schema).
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JsColumnDef {
+    name: String,
+    column_type: String,
+    nullable: bool,
 }
 
 /// Handle to an incremental query subscription.

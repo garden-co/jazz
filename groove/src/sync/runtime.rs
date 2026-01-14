@@ -42,11 +42,11 @@ pub trait Runtime: Clone + 'static {
 /// Tokio-based runtime for native environments.
 ///
 /// Uses `tokio::spawn` to spawn tasks on the tokio runtime.
-#[cfg(feature = "sync-server")]
+#[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
 #[derive(Clone, Debug, Default)]
 pub struct TokioRuntime;
 
-#[cfg(feature = "sync-server")]
+#[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
 impl Runtime for TokioRuntime {
     fn spawn<F>(&self, future: F)
     where

@@ -5,25 +5,29 @@
 //! - POST /sync/unsubscribe - Stop receiving updates for a query
 //! - POST /sync/push - Send new commits for an object
 //! - POST /sync/reconcile - Request full reconciliation for an object
+//! - GET /api/schema/:table - Get current schema for a table
+//! - POST /api/schema/:table/deploy - Deploy a new schema version
 
 use std::sync::Arc;
 
 use axum::{
-    Router,
+    Json, Router,
     body::Body,
-    extract::State,
+    extract::{Path, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use futures::stream::StreamExt;
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use groove::Environment;
+use groove::sql::{ColumnDef, ColumnType, LensGenerationOptions, TableSchema};
 use groove::sync::{
     ActiveQuery, ClientIdentity, Decode, Encode, PushRequest, PushResponse, QueryId,
-    ReconcileRequest, ServerEnv, SseEvent, SubscribeRequest, SyncServer, TokenValidator,
-    UnsubscribeRequest,
+    ReconcileRequest, SchemaRegistry, ServerEnv, SseEvent, SubscribeRequest, SyncServer,
+    TokenValidator, UnsubscribeRequest,
 };
 
 use crate::AxumServerEnv;
@@ -35,12 +39,26 @@ use crate::AxumServerEnv;
 /// Shared state for the sync server.
 pub struct AppState<E: Environment> {
     pub server: RwLock<SyncServer<E>>,
+    pub schema_registry: RwLock<SchemaRegistry>,
 }
 
 impl<E: Environment> AppState<E> {
     pub fn new(env: Arc<E>, token_validator: Arc<dyn TokenValidator>) -> Self {
         Self {
             server: RwLock::new(SyncServer::new(env, token_validator)),
+            schema_registry: RwLock::new(SchemaRegistry::new()),
+        }
+    }
+
+    /// Create app state with a custom schema registry (e.g., with API key validator).
+    pub fn with_schema_registry(
+        env: Arc<E>,
+        token_validator: Arc<dyn TokenValidator>,
+        schema_registry: SchemaRegistry,
+    ) -> Self {
+        Self {
+            server: RwLock::new(SyncServer::new(env, token_validator)),
+            schema_registry: RwLock::new(schema_registry),
         }
     }
 }
@@ -54,6 +72,12 @@ pub fn sync_router<E: Environment + 'static>() -> Router<Arc<AppState<E>>> {
         .route("/sync/push", post(handle_push::<E>))
         .route("/sync/reconcile", post(handle_reconcile::<E>))
         .route("/sync/events", get(handle_events::<E>))
+        // Schema management endpoints
+        .route("/api/schema/{table}", get(handle_schema_get::<E>))
+        .route(
+            "/api/schema/{table}/deploy",
+            post(handle_schema_deploy::<E>),
+        )
 }
 
 /// Health check endpoint for load balancers and orchestration tools.
@@ -565,6 +589,215 @@ struct EventsParams {
 fn web_sys_log(_msg: &str) {
     #[cfg(debug_assertions)]
     eprintln!("{}", _msg);
+}
+
+// ============================================================================
+// Schema Management Types
+// ============================================================================
+
+/// Response for GET /api/schema/:table
+#[derive(Debug, Serialize)]
+pub struct SchemaResponse {
+    pub descriptor_id: String,
+    pub columns: Vec<ColumnInfo>,
+    /// Whether this schema version has a parent (i.e., is not the initial v1)
+    pub has_parent: bool,
+}
+
+/// Column information in schema response
+#[derive(Debug, Serialize)]
+pub struct ColumnInfo {
+    pub name: String,
+    pub column_type: String,
+    pub nullable: bool,
+}
+
+/// Request for POST /api/schema/:table/deploy
+#[derive(Debug, Deserialize)]
+pub struct DeployRequest {
+    pub schema: SchemaForDeploy,
+    pub environment: String,
+    #[serde(default)]
+    pub lens: Option<LensForDeploy>,
+}
+
+/// Schema definition for deployment
+#[derive(Debug, Deserialize)]
+pub struct SchemaForDeploy {
+    pub columns: Vec<ColumnForDeploy>,
+}
+
+/// Column definition for deployment
+#[derive(Debug, Deserialize)]
+pub struct ColumnForDeploy {
+    pub name: String,
+    pub column_type: String,
+    pub nullable: bool,
+}
+
+/// Optional lens override for deployment
+#[derive(Debug, Deserialize)]
+pub struct LensForDeploy {
+    pub forward: Vec<TransformForDeploy>,
+    pub backward: Vec<TransformForDeploy>,
+}
+
+/// Transform definition for lens
+#[derive(Debug, Deserialize)]
+pub struct TransformForDeploy {
+    pub transform_type: String,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub column: Option<String>,
+    pub default_value: Option<String>,
+}
+
+/// Response for POST /api/schema/:table/deploy
+#[derive(Debug, Serialize)]
+pub struct DeployResponse {
+    pub new_descriptor_id: String,
+    pub rows_migrated: u64,
+    pub warnings: Vec<WarningInfo>,
+}
+
+/// Warning information in deploy response
+#[derive(Debug, Serialize)]
+pub struct WarningInfo {
+    pub kind: String,
+    pub message: String,
+    pub column: Option<String>,
+}
+
+// ============================================================================
+// Schema Management Handlers
+// ============================================================================
+
+/// Handle GET /api/schema/:table
+///
+/// Returns the current schema for a table.
+async fn handle_schema_get<E: Environment>(
+    State(state): State<Arc<AppState<E>>>,
+    Path(table): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<SchemaResponse>, (StatusCode, String)> {
+    // Optional authentication (read access may be public)
+    let _token = extract_bearer_token(&headers);
+
+    let registry = state.schema_registry.read().await;
+
+    // Get current descriptor ID
+    let descriptor_id = registry.get_current_descriptor_id(&table).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            format!("Table '{}' not found", table),
+        )
+    })?;
+
+    // Get descriptor
+    let descriptor = registry.get_descriptor(&descriptor_id).ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Descriptor not found".to_string(),
+        )
+    })?;
+
+    // Build response
+    let columns: Vec<ColumnInfo> = descriptor
+        .schema
+        .columns
+        .iter()
+        .map(|col| ColumnInfo {
+            name: col.name.clone(),
+            column_type: format!("{:?}", col.ty),
+            nullable: col.nullable,
+        })
+        .collect();
+
+    Ok(Json(SchemaResponse {
+        descriptor_id: descriptor_id.to_string(),
+        columns,
+        has_parent: descriptor.lens_from_parent.is_some(),
+    }))
+}
+
+/// Handle POST /api/schema/:table/deploy
+///
+/// Deploys a new schema version for a table.
+async fn handle_schema_deploy<E: Environment>(
+    State(state): State<Arc<AppState<E>>>,
+    Path(table): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<DeployRequest>,
+) -> Result<Json<DeployResponse>, (StatusCode, String)> {
+    // Extract API key from Authorization header
+    let api_key = extract_bearer_token(&headers).ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            "Missing or invalid Authorization header".to_string(),
+        )
+    })?;
+
+    // Parse schema from request
+    let columns: Vec<ColumnDef> = request
+        .schema
+        .columns
+        .iter()
+        .map(|col| {
+            let ty = parse_column_type(&col.column_type);
+            ColumnDef::new(col.name.clone(), ty, col.nullable)
+        })
+        .collect();
+
+    let new_schema = TableSchema::new(&table, columns);
+
+    // Deploy schema
+    let mut registry = state.schema_registry.write().await;
+    let result = registry
+        .deploy_schema(
+            &table,
+            new_schema,
+            LensGenerationOptions::default(),
+            Some(api_key),
+            Some(&request.environment),
+        )
+        .map_err(|e| {
+            let status = match &e {
+                groove::sync::SchemaRegistryError::TableNotFound(_) => StatusCode::NOT_FOUND,
+                groove::sync::SchemaRegistryError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+                groove::sync::SchemaRegistryError::InvalidEnvironment(_) => StatusCode::BAD_REQUEST,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, e.to_string())
+        })?;
+
+    // Build response
+    let warnings: Vec<WarningInfo> = result
+        .warnings
+        .iter()
+        .map(|msg| WarningInfo {
+            kind: "lens_generation".to_string(),
+            message: msg.clone(),
+            column: None,
+        })
+        .collect();
+
+    Ok(Json(DeployResponse {
+        new_descriptor_id: result.descriptor_id.to_string(),
+        rows_migrated: 0, // TODO: Actually migrate rows when Database is integrated
+        warnings,
+    }))
+}
+
+/// Parse column type from string
+fn parse_column_type(s: &str) -> ColumnType {
+    match s.to_uppercase().as_str() {
+        "I64" => ColumnType::I64,
+        "F64" => ColumnType::F64,
+        "STRING" => ColumnType::String,
+        "BOOL" => ColumnType::Bool,
+        "BYTES" => ColumnType::Bytes,
+        _ => ColumnType::String, // fallback
+    }
 }
 
 #[cfg(test)]
