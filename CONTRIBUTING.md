@@ -21,7 +21,7 @@ We welcome all ideas! If you have suggestions, feel free to open an issue marked
 
 1. **Fork the repository** and create your feature branch (see [GitHub's guide on forking a repository](https://docs.github.com/en/get-started/quickstart/fork-a-repo) if you're unfamiliar with the process):
 
-2. **Make your changes**, ensuring that you follow our coding standards (`pnpm format` (prettier) and `pnpm lint` (eslint) will automatically let you know there are issues).
+2. **Make your changes**, ensuring that you follow our coding standards (`pnpm format` (Biome) and `pnpm lint` (eslint) will automatically let you know there are issues).
 
 3. **Commit your changes** with a descriptive commit message.
 
@@ -31,7 +31,7 @@ We welcome all ideas! If you have suggestions, feel free to open an issue marked
 
 ### 4. Code Style Guidelines
 
-- We use [Prettier](https://prettier.io/) for formatting. Please ensure your code is formatted before submitting.
+- We use [Biome](https://biomejs.dev/) for formatting. Please ensure your code is formatted before submitting.
 - Write descriptive comments where necessary.
 
 ### 5. Local Setup
