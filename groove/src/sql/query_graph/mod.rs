@@ -1,5 +1,7 @@
 //! Incremental query graph system.
 //!
+//! See: docs/content/docs/internals/incremental-queries.mdx
+//!
 //! This module provides a computation graph for evaluating SQL queries
 //! incrementally. Instead of re-evaluating entire queries on every change,
 //! deltas propagate through the graph, with early cutoff when a node's

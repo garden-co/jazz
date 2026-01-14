@@ -1,0 +1,223 @@
+---
+title: Sorted Chunk Indices
+description: Scalable index structure for indices larger than memory
+status: future
+---
+
+<StatusBadge status="future" />
+
+This spec describes a scalable index structure that supports indices larger than memory through sorted, chunked storage with binary search access.
+
+## Problem
+
+The current `RefIndex` stores all entries in a single `HashMap<ObjectId, HashSet<ObjectId>>`:
+- Must deserialize the entire index to look up one key
+- Panics when serialized size exceeds `INLINE_THRESHOLD` (1KB)
+- Cannot scale to large datasets
+
+## Goals
+
+1. **Scale beyond memory**: Only load chunks needed for a query
+2. **Efficient lookups**: O(log N) to find the right chunk
+3. **Incremental updates**: Modify only affected chunks
+4. **Query graph integration**: Work with sync evaluation via caching
+5. **Future range queries**: Enable ORDER BY, WHERE col > X, etc.
+
+## Data Structure
+
+### Index Root Object
+
+Each index has a root object (small, always loadable) containing:
+
+```rust
+struct IndexRoot {
+    /// Number of entries across all chunks
+    entry_count: u64,
+
+    /// First key in each chunk (for binary search)
+    boundaries: Vec<IndexKey>,
+
+    /// Content hashes for each chunk
+    chunk_hashes: Vec<ChunkHash>,
+
+    /// Target entries per chunk (for split/merge decisions)
+    target_chunk_size: usize,  // e.g., 64KB worth of entries
+}
+
+struct IndexKey {
+    target_id: ObjectId,
+    source_id: ObjectId,
+}
+```
+
+### Index Chunks
+
+Each chunk is stored in the `ContentStore` (content-addressed by hash):
+
+```rust
+struct IndexChunk {
+    /// Sorted entries: (target_id, source_id) pairs
+    entries: Vec<(ObjectId, ObjectId)>,
+}
+```
+
+Binary layout: 32 bytes per entry (16 + 16). A 64KB chunk holds ~2000 entries.
+
+### Visual Structure
+
+```
+Index Root Object (small, inline)
++-------------------------------------------------------------+
+| entry_count: 50000                                          |
+| boundaries: [(T_0, S_0), (T_100, S_x), (T_200, S_y)...]     |
+| chunk_hashes: [hash_0, hash_1, hash_2, ...]                 |
++-------------------------------------------------------------+
+           |              |              |
+           v              v              v
+      +---------+    +---------+    +---------+
+      | Chunk 0 |    | Chunk 1 |    | Chunk 2 |
+      | T_0-T_99|    |T_100-199|    |T_200-299|
+      | ~2000   |    | ~2000   |    | ~2000   |
+      | entries |    | entries |    | entries |
+      +---------+    +---------+    +---------+
+       (in ContentStore, loaded on demand)
+```
+
+## Operations
+
+### Lookup: find_referencing(target_id)
+
+```rust
+async fn find_referencing(&self, target_id: ObjectId) -> Vec<ObjectId> {
+    // 1. Binary search boundaries to find chunk index (sync)
+    let chunk_idx = root.boundaries
+        .binary_search_by(|key| key.target_id.cmp(&target_id))
+        .unwrap_or_else(|i| i.saturating_sub(1));
+
+    // 2. Load chunk if not cached (async)
+    let chunk = cache.get_or_load(root.chunk_hashes[chunk_idx]).await;
+
+    // 3. Binary search within chunk for target_id (sync)
+    let start = chunk.entries.binary_search_by(|(t, _)| t.cmp(&target_id));
+
+    // 4. Collect all entries with matching target_id
+    chunk.entries[start..].iter()
+        .take_while(|(t, _)| *t == target_id)
+        .map(|(_, s)| *s)
+        .collect()
+}
+```
+
+**Complexity**: O(log C) to find chunk + O(log E) within chunk.
+
+### Insert and Delete
+
+- Find the appropriate chunk via binary search
+- Modify the chunk in memory
+- If chunk is too large, split it
+- If chunk is too small, merge with neighbor
+- Write modified chunk(s) to ContentStore
+- Update root object
+
+### Chunk Splitting
+
+When a chunk exceeds `2 * target_chunk_size`:
+
+```rust
+fn split_chunk(chunk: IndexChunk) -> (IndexChunk, IndexChunk) {
+    let mid = chunk.entries.len() / 2;
+    let (left, right) = chunk.entries.split_at(mid);
+    (IndexChunk { entries: left.to_vec() }, IndexChunk { entries: right.to_vec() })
+}
+```
+
+## Query Graph Integration
+
+The key challenge: the query graph evaluates synchronously, but chunk loading is async.
+
+### Two-Phase Delta Evaluation
+
+```rust
+impl QueryGraph {
+    async fn apply_delta(&mut self, delta: DeltaBatch) {
+        // Phase 1: Analyze which chunks are needed (sync)
+        let needed_chunks = self.analyze_needed_chunks(&delta);
+
+        // Phase 2: Ensure all needed chunks are loaded (async)
+        for chunk_hash in needed_chunks {
+            self.chunk_cache.get_or_load(chunk_hash).await;
+        }
+
+        // Phase 3: Evaluate with all chunks available (sync)
+        self.evaluate_sync(&delta);
+    }
+}
+```
+
+### Chunk Cache
+
+```rust
+struct ChunkCache {
+    chunks: HashMap<ChunkHash, IndexChunk>,
+    lru: LruList<ChunkHash>,
+    max_size: usize,
+}
+
+impl ChunkCache {
+    fn get(&self, hash: &ChunkHash) -> Option<&IndexChunk>;
+    async fn get_or_load(&self, hash: ChunkHash) -> &IndexChunk;
+}
+```
+
+## Performance Characteristics
+
+| Operation | Current RefIndex | Sorted Chunk Index |
+|-----------|------------------|-------------------|
+| Lookup | O(1) hash + deserialize all | O(log C + log E) + load 1 chunk |
+| Insert | Deserialize all, modify, serialize all | Load 1 chunk, modify, write 1 chunk |
+| Memory | Must fit entire index | Only cached chunks |
+| Sync | Entire index per sync | Only changed chunks |
+
+## Future Extensions
+
+### Range Queries
+
+```sql
+SELECT * FROM issues WHERE project > 'P100' ORDER BY project
+```
+
+With sorted chunks:
+1. Binary search for starting chunk
+2. Scan chunks in order
+3. Stop when past range end
+
+### Composite Indices
+
+For multi-column indices, extend `IndexKey`:
+
+```rust
+struct IndexKey {
+    values: Vec<Value>,  // Multiple column values
+}
+```
+
+### Covering Indices
+
+Store additional column values in index entries to avoid row lookups.
+
+## Implementation Plan
+
+1. Define data structures: `IndexRoot`, `IndexChunk`, serialization
+2. Implement basic operations: lookup, insert, delete with splitting
+3. Add ChunkCache: LRU cache with sync/async access
+4. Integrate with query graph: Two-phase evaluation
+5. Add incremental chunk updates
+6. Migration: Parallel operation, switchover, cleanup
+7. Testing: Scale tests with indices larger than memory
+
+## Open Questions
+
+1. **Chunk size tuning**: What's the optimal chunk size?
+2. **Cache eviction policy**: LRU? LFU? Workload-dependent?
+3. **Concurrent modifications**: How to handle multiple writers to the same chunk?
+4. **Transaction integration**: How do chunk updates participate in multi-row transactions?

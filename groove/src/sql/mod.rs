@@ -1,3 +1,7 @@
+//! SQL layer for Jazz.
+//!
+//! See: docs/content/docs/internals/sql-layer.mdx
+
 mod binary;
 mod catalog;
 mod database;

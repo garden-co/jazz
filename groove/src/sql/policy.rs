@@ -1,5 +1,7 @@
 //! ReBAC policy types and evaluation.
 //!
+//! See: docs/content/docs/internals/rebac-policies.mdx
+//!
 //! Policies define who can SELECT, INSERT, UPDATE, or DELETE rows in a table.
 //! Permissions can be inherited through foreign key references using INHERITS clauses.
 

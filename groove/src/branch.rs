@@ -1,3 +1,7 @@
+//! Branch management with commit history and truncation.
+//!
+//! See: docs/content/docs/internals/deletes-and-truncation.mdx
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 

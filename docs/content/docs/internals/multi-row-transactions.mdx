@@ -1,0 +1,227 @@
+---
+title: Multi-Row Transactions
+description: MVCC-based transactions with optimistic concurrency control
+status: future
+---
+
+<StatusBadge status="future" />
+
+An opt-in transaction system layered on top of Jazz's eventually-consistent, per-row sync model. Transactions provide multi-row atomicity with serializable isolation when needed.
+
+## Design Principles
+
+1. **Opt-in complexity**: Most edits remain transaction-free (eventually consistent)
+2. **Edges as resolvers**: Core never validates transactions, only manages leases
+3. **No lease revocation**: Leases expire naturally (TTL-based)
+4. **Sync-confirmed commits**: Transactions only succeed after server confirmation
+
+## Architecture
+
+```
++-----------------------------------------------------------------+
+|                           CORE                                   |
+|                    (Lease Authority Only)                        |
+|                                                                  |
+|   - Grants/renews leases                                        |
+|   - Tracks lease ownership                                      |
+|   - NEVER resolves transactions                                 |
++-----------------------------------------------------------------+
+        |                    |                    |
+        v                    v                    v
++----------------+    +----------------+    +----------------+
+|   Edge EU      |<-->|   Edge US      |<-->|   Edge JP      |
+| Resolves txns  |    | Resolves txns  |    | Resolves txns  |
+| Lease Cache    |    | Lease Cache    |    | Lease Cache    |
++----------------+    +----------------+    +----------------+
+```
+
+## Two Modes of Operation
+
+### Mode 1: No Transaction (Default)
+
+Current Jazz behavior - write locally, sync eventually:
+
+```rust
+// Single-row edit - no transaction, eventually consistent
+db.update("users", user_id, &[("name", "Alice")])?;
+```
+
+### Mode 2: Explicit Transaction (Sync-Confirmed)
+
+When strong consistency is needed across rows:
+
+```rust
+let tx = db.begin_transaction().await?;
+
+// Read (tracked in read set for validation)
+let user = tx.read("users", user_id)?;
+let account = tx.read("accounts", account_id)?;
+
+// Write (buffered until commit)
+tx.update("users", user_id, &[("balance", new_balance)])?;
+tx.insert("audit_log", &[("user", user_id), ("action", "transfer")])?;
+
+// Commit - sends to edge(s), waits for confirmation
+tx.commit().await?;
+```
+
+## MVCC Using Commit Graphs
+
+### Hybrid Logical Clocks (HLC)
+
+HLC provides causality ordering without synchronized clocks:
+
+```rust
+struct HybridTimestamp {
+    physical: u64,  // Wall clock (milliseconds)
+    logical: u16,   // Counter for same-millisecond events
+}
+```
+
+### Snapshot Reads
+
+A transaction reads a consistent snapshot across rows:
+
+```
+Row A: [commit@T1] -> [commit@T5] -> [commit@T10]
+Row B: [commit@T2] -> [commit@T7]
+
+Transaction at snapshot T6: sees A@T5, B@T2
+```
+
+## Optimistic Concurrency Control (OCC)
+
+### Read Set and Write Set
+
+```rust
+struct Transaction {
+    start_ts: HybridTimestamp,
+    read_set: HashMap<(String, ObjectId), CommitId>,
+    write_set: HashMap<(String, ObjectId), WriteOp>,
+}
+```
+
+### Validation Flow
+
+At commit time on the edge:
+
+```rust
+fn validate(&self, tx: &Transaction) -> Result<(), Conflict> {
+    for ((table, id), version_read) in &tx.read_set {
+        let current = self.current_version(table, id);
+        if current != version_read {
+            return Err(Conflict::VersionMismatch { table, id });
+        }
+    }
+    Ok(())
+}
+```
+
+## Lease System
+
+### Lease Structure
+
+```rust
+struct Lease {
+    row_id: ObjectId,
+    holder: EdgeId,
+    granted_at: HybridTimestamp,
+    expires_at: HybridTimestamp,
+}
+```
+
+### No Lease Revocation
+
+Leases are never forcibly revoked - they only expire naturally.
+
+**Benefits:**
+- Simpler protocol (no revocation coordination)
+- Edge can rely on lease for full TTL
+- No distributed consensus needed
+
+**Trade-off:**
+- Edge crash blocks rows until lease expires
+
+## Transaction Flow
+
+### Single-Edge Transaction (Fast Path)
+
+All rows leased to the coordinating edge:
+
+```
+Client --> Edge EU
+           - tx touches {A, B}
+           - I hold leases for both
+           - Validate locally
+           - Commit locally
+           - Done
+
+Latency: ~1-5ms
+```
+
+### Multi-Edge Transaction
+
+Rows span multiple edges:
+
+```
+Client --> Edge EU (coordinator)
+           - tx touches {A, D}
+           - A: I hold lease
+           - D: Cache says Edge US holds
+           |
+           |--> Edge US: Validate(D)
+           |         - Check version
+           |         - Mark pending (5s TTL)
+           |         - Return OK
+           |
+           |--> Local: Validate(A)
+           |
+           | All valid?
+           |
+           |--> Edge US: Commit(D)
+           |--> Local: Commit(A)
+           |
+           --> Done
+
+Latency: ~10-50ms
+```
+
+## CAP Trade-offs
+
+| | Single-Edge Txns | Multi-Edge Txns |
+|---|---|---|
+| Availability | Available if edge is up | Needs ALL edges |
+| Partition Tolerance | Tolerant | Fails on partition |
+| Speed | Fast (local) | Slower (network) |
+
+## Transaction Guarantees
+
+| Property | Guarantee |
+|----------|-----------|
+| Atomicity | All writes succeed or none do |
+| Consistency | Application invariants maintained |
+| Isolation | Serializable |
+| Durability | Commit returns only after edge(s) persist |
+
+## Prior Art
+
+| System | Similarity |
+|--------|------------|
+| **FoundationDB** | Single-threaded resolvers, OCC validation |
+| **Google Chubby** | Lease-based distributed locks |
+| **CockroachDB** | HLC timestamps for MVCC |
+| **Spanner** | Sync-confirmed commits |
+
+## Implementation Phases
+
+1. **Phase 1**: Local multi-row transactions (single node)
+2. **Phase 2**: HLC timestamps (replace wall clock)
+3. **Phase 3**: Distributed OCC (cross-edge validation)
+4. **Phase 4**: Lease system (Core + edge leases)
+5. **Phase 5**: Backpressure and monitoring
+
+## Open Questions
+
+1. **Conflict granularity**: Row-level vs column-level?
+2. **Read-only transactions**: Skip validation entirely?
+3. **Deadlock handling**: Detection vs prevention?

@@ -1,0 +1,124 @@
+---
+title: Binary Data and Blobs
+description: BLOB column types for storing and streaming binary data
+status: implemented
+implements:
+  - groove/src/sql/schema.rs
+  - groove-wasm/src/lib.rs
+  - groove-wasm/blob-helpers.ts
+---
+
+<StatusBadge status="implemented" />
+
+Support for `BLOB` and `BLOB[]` column types enables streaming binary data within rows.
+
+## Implementation Status
+
+**Core Types:**
+- `BLOB` and `BLOB[]` column types in schema
+- `Value::Blob(ContentRef)` and `Value::BlobArray(Vec<ContentRef>)` variants
+- Row encoding/decoding for blob columns
+- SQL parser recognizes `BLOB` and `BLOB[]` keywords
+
+**WASM Handle-based API:**
+- `BlobRegistry` for tracking blob handles across WASM boundary
+- `create_blob(data)` - Create blob from raw bytes
+- `create_blob_writer()` - Streaming blob creation
+- `read_blob(handle)` - Read entire blob
+- `read_blob_chunk(handle, idx)` - Stream chunks
+- `get_blob_info(handle)` - Get blob metadata
+- `release_blob(handle)` - Free blob handle
+
+**JavaScript Helpers:**
+- `blobToReadableStream()` - Convert blob handle to ReadableStream
+- `readableStreamToBlob()` - Create blob from ReadableStream
+- `GrooveBlob` - Wrapper class for convenient blob access
+- `GrooveBlobWriter` - Wrapper for streaming blob creation
+
+**Pending:**
+- Blob chunk garbage collection when rows deleted
+- Persistent chunk storage (currently in-memory only per session)
+
+## Column Types
+
+```sql
+CREATE TABLE documents (
+    id,
+    title STRING,
+    content BLOB,           -- Single blob
+    attachments BLOB[]      -- List of blobs
+);
+```
+
+## Blob Identity and Addressing
+
+Blobs are identified by their content hash, with full qualified ID combining the owning row's ObjectId with the content hash:
+
+```
+<object_id>/<content_hash>
+```
+
+This makes ownership explicit and enables permission inheritance.
+
+## Permission Semantics
+
+Blobs inherit permissions from their owning row:
+- **Sync permissions**: If a user can sync a row, they can sync its blobs
+- **Creation permissions**: If a user can insert/update a row, they can attach blobs
+- **No standalone access**: Blobs cannot be accessed without going through their row
+
+## Storage Model
+
+Blobs reuse the existing chunked content storage:
+- Content > 1KB is automatically chunked
+- Chunks are stored in `ContentStore`
+- Row encoding stores a blob reference that may be one or many chunk IDs
+
+## Row Encoding
+
+The `BLOB` type is abstract from the user's perspective - they stream bytes in and out.
+
+- 1 byte: presence flag (for nullable)
+- If present: serialized blob reference (inline bytes for small blobs, or list of chunk hashes for large blobs)
+
+For a `BLOB[]` column:
+- 4 bytes: count (u32)
+- For each blob: serialized blob reference
+
+## Streaming API
+
+### Rust API
+
+```rust
+// Writing a blob
+let blob = db.create_blob(&object_id, stream).await?;
+db.update(&object_id, |row| {
+    row.set("content", blob);
+});
+
+// Reading a blob
+let stream = db.read_blob(&object_id, "content").await?;
+```
+
+### JavaScript API
+
+```typescript
+import { blobToReadableStream, readableStreamToBlob } from 'groove-wasm/blob-helpers';
+
+// Write blob from file
+const writer = db.create_blob_writer();
+await readableStreamToBlob(writer, file.stream());
+await db.update_row_blob(rowId, 'content', writer.handle);
+
+// Read blob as stream
+const stream = blobToReadableStream(db, rowId, 'content');
+const response = new Response(stream);
+const blob = await response.blob();
+```
+
+## Open Questions
+
+- Should blobs support partial updates (byte ranges)?
+- How do blob changes affect row commit history?
+- Should we support blob deduplication across rows/tables?
+- Maximum blob size limits (if any)?

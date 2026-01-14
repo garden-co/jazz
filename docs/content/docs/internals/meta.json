@@ -1,4 +1,21 @@
 {
-  "title": "Internals",
-  "pages": ["index", "architecture", "incremental-queries", "sync-protocol"]
+  "title": "Deep Dives",
+  "pages": [
+    "index",
+    "---Core Architecture---",
+    "architecture",
+    "sql-layer",
+    "incremental-queries",
+    "streaming-and-persistence",
+    "sync-protocol",
+    "---Features---",
+    "array-subquery",
+    "binary-data-and-blobs",
+    "deletes-and-truncation",
+    "rebac-policies",
+    "---Future---",
+    "sorted-chunk-indices",
+    "multi-row-transactions",
+    "external-data-migrations"
+  ]
 }

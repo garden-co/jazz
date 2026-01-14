@@ -1,0 +1,308 @@
+---
+title: ReBAC Policy System
+description: Relationship-Based Access Control with SQL-like policy expressions
+status: planned
+implements:
+  - groove/src/sql/policy.rs
+---
+
+<StatusBadge status="planned" />
+
+Relationship-Based Access Control (ReBAC) for Jazz2, where permissions are derived from relationships in the data itself. Policies are expressed as SQL-like conditions and attached to tables.
+
+## Goals
+
+1. **Declarative policies** - Express who can SELECT/INSERT/UPDATE/DELETE as conditions
+2. **Relationship inheritance** - Inherit permissions through foreign key references
+3. **Query integration** - Combine policies with user queries into efficient incremental computation graphs
+4. **Sync-aware** - Same policies determine what data syncs to each client
+
+## Syntax
+
+### SELECT Policy
+
+Defines which rows a user can read:
+
+```sql
+CREATE POLICY ON documents FOR SELECT
+  WHERE author_id = @viewer
+     OR INHERITS SELECT FROM folder_id;
+```
+
+### INSERT Policy
+
+Defines whether a user can create new rows:
+
+```sql
+CREATE POLICY ON documents FOR INSERT
+  CHECK (
+    INHERITS UPDATE FROM @new.folder_id
+    AND @new.author_id = @viewer
+  );
+```
+
+### UPDATE Policy
+
+Defines which rows a user can modify:
+
+```sql
+CREATE POLICY ON documents FOR UPDATE
+  WHERE author_id = @viewer
+     OR INHERITS UPDATE FROM folder_id
+  CHECK (@new.author_id = @old.author_id);  -- can't change author
+```
+
+### DELETE Policy
+
+Defines which rows a user can delete:
+
+```sql
+CREATE POLICY ON documents FOR DELETE
+  WHERE author_id = @viewer;
+```
+
+**Default**: If no DELETE policy is specified, falls back to the UPDATE policy.
+
+## Special Variables
+
+| Variable | Available In | Meaning |
+|----------|--------------|---------|
+| `@viewer` | All policies | The user ID evaluating the policy |
+| `@new` | INSERT CHECK, UPDATE CHECK | The incoming/new row data |
+| `@old` | UPDATE CHECK | The existing row data before update |
+
+## INHERITS Clause
+
+The `INHERITS` clause enables permission inheritance through foreign key references:
+
+```sql
+INHERITS <action> FROM <column>
+INHERITS <action> FROM @new.<column>  -- in CHECK clauses
+```
+
+### Semantics
+
+`INHERITS SELECT FROM folder_id` means:
+1. Look up the row referenced by `folder_id`
+2. Evaluate that table's SELECT policy for `@viewer`
+3. If it passes, this clause evaluates to true
+4. If `folder_id` is NULL, evaluates to false
+
+### Cross-Action Inheritance
+
+You can inherit a different action than you're defining:
+
+```sql
+-- "Anyone who can UPDATE the folder can INSERT documents into it"
+CREATE POLICY ON documents FOR INSERT
+  CHECK (INHERITS UPDATE FROM @new.folder_id);
+```
+
+Common patterns:
+
+| Child Action | Inherits From Parent | Use Case |
+|--------------|---------------------|----------|
+| INSERT | UPDATE | Create children in containers you can edit |
+| INSERT | SELECT | Create children in containers you can see |
+| SELECT | SELECT | Standard read inheritance |
+| UPDATE | UPDATE | Standard write inheritance |
+| DELETE | UPDATE | Default behavior |
+
+### Recursive Inheritance
+
+For self-referential tables (e.g., folders containing folders):
+
+```sql
+CREATE TABLE folders (
+  parent_id TEXT REFERENCES folders(id),
+  owner_id TEXT
+);
+
+CREATE POLICY ON folders FOR SELECT
+  WHERE owner_id = @viewer
+     OR INHERITS SELECT FROM parent_id;
+```
+
+The system walks up the tree until it finds a base case or reaches a NULL reference.
+
+**Cycle detection**: Track visited row IDs during evaluation. If we revisit an ID, return false.
+
+**Depth limit**: Configurable `max_policy_inheritance_depth` (default: 100).
+
+## Query Integration
+
+Policies are combined with user queries at graph construction time:
+
+```
+User Query: SELECT * FROM tasks WHERE project_id = ?
+
+Policy: WHERE assignee_id = @viewer OR INHERITS SELECT FROM project_id
+
+Combined Graph:
+  TableScan(tasks)
+       |
+       v
+  Filter(project_id = ?)  <-- User's filter
+       |
+       v
+  Filter(assignee_id = @viewer OR ...)  <-- Policy filter
+       |
+       v
+    Output
+```
+
+The query planner should:
+1. Merge policy predicates with user predicates
+2. Order filters by selectivity (most restrictive first)
+3. Use indexes where available
+
+## Sync Integration
+
+At sync time, the same policies determine what commits to send:
+
+1. For each row the client might need, evaluate SELECT policy
+2. Only sync rows where policy passes for that client's `@viewer`
+3. Policies evaluate against current state only
+
+## Testing and Debugging
+
+### EXPLAIN POLICY
+
+```sql
+EXPLAIN POLICY ON documents FOR SELECT
+  WHERE id = '01ABC...'
+  AS @viewer = '01XYZ...';
+
+-- Output:
+-- ALLOWED via: INHERITS SELECT FROM folder_id
+--   folder '01DEF...' allowed via: owner_id = @viewer
+```
+
+### Programmatic Testing
+
+```rust
+db.check_policy(
+    table: "documents",
+    action: PolicyAction::Select,
+    row_id: doc_id,
+    viewer: user_id,
+) -> PolicyResult;
+
+pub enum PolicyResult {
+    Allowed { via: String },
+    Denied { reason: String },
+}
+```
+
+## Implementation
+
+### AST Types
+
+```rust
+pub enum PolicyAction {
+    Select,
+    Insert,
+    Update,
+    Delete,
+}
+
+pub struct Policy {
+    pub table: String,
+    pub action: PolicyAction,
+    pub where_clause: Option<PolicyExpr>,
+    pub check_clause: Option<PolicyExpr>,
+}
+
+pub enum PolicyExpr {
+    Eq(PolicyValue, PolicyValue),
+    And(Vec<PolicyExpr>),
+    Or(Vec<PolicyExpr>),
+    Not(Box<PolicyExpr>),
+    Inherits {
+        action: PolicyAction,
+        column: PolicyColumnRef,
+    },
+}
+```
+
+### Evaluation
+
+```rust
+pub struct PolicyEvaluator<'a> {
+    db: &'a Database,
+    viewer: ObjectId,
+    visited: HashSet<(String, ObjectId)>,  // Cycle detection
+    depth: usize,
+}
+
+impl PolicyEvaluator<'_> {
+    pub fn check_select(&mut self, table: &str, row_id: ObjectId) -> bool;
+    pub fn check_insert(&mut self, table: &str, new_row: &Row) -> bool;
+    pub fn check_update(&mut self, table: &str, row_id: ObjectId, new_row: &Row) -> bool;
+    pub fn check_delete(&mut self, table: &str, row_id: ObjectId) -> bool;
+}
+```
+
+## Example: Document Sharing
+
+```sql
+CREATE TABLE folders (
+  name TEXT,
+  owner_id TEXT REFERENCES users(id),
+  parent_id TEXT REFERENCES folders(id)
+);
+
+CREATE TABLE documents (
+  title TEXT,
+  content TEXT,
+  folder_id TEXT REFERENCES folders(id),
+  author_id TEXT REFERENCES users(id)
+);
+
+-- Folder policies
+CREATE POLICY ON folders FOR SELECT
+  WHERE owner_id = @viewer
+     OR INHERITS SELECT FROM parent_id;
+
+CREATE POLICY ON folders FOR UPDATE
+  WHERE owner_id = @viewer;
+
+-- Document policies
+CREATE POLICY ON documents FOR SELECT
+  WHERE INHERITS SELECT FROM folder_id;
+
+CREATE POLICY ON documents FOR INSERT
+  CHECK (
+    INHERITS UPDATE FROM @new.folder_id
+    AND @new.author_id = @viewer
+  );
+
+CREATE POLICY ON documents FOR UPDATE
+  WHERE author_id = @viewer
+     OR INHERITS UPDATE FROM folder_id;
+```
+
+## Implementation Phases
+
+### Phase 1: Core Types and Parser
+- `PolicyAction`, `Policy`, `PolicyExpr` types
+- SQL parser for CREATE POLICY
+- Store policies in TableSchema
+
+### Phase 2: Evaluation Engine
+- `PolicyEvaluator` with cycle detection and depth limit
+- Basic expression evaluation
+- INHERITS evaluation with recursive lookup
+
+### Phase 3: Write Policies
+- INSERT policy evaluation
+- UPDATE policy evaluation
+- DELETE policy evaluation
+
+### Phase 4: Query Integration
+- Combine policy predicates with user queries
+- Integrate with incremental query graph builder
+
+### Phase 5: Testing and Debugging
+- EXPLAIN POLICY command
+- `check_policy()` programmatic API

@@ -1,40 +1,61 @@
 ---
-title: Internal Design
-description: Deep dive into Jazz's architecture and design decisions
+title: Deep Dives
+description: Technical specifications and internal design documentation
 ---
 
-This section covers the internal design decisions and architecture of Jazz. It's intended for contributors and those who want to understand how Jazz works under the hood.
+This section contains technical specifications for Jazz's internal systems. Each spec has a status badge indicating implementation progress.
+
+## Status Legend
+
+| Badge | Meaning |
+|-------|---------|
+| <StatusBadge status="implemented" /> | Core functionality complete |
+| <StatusBadge status="partial" /> | Some features done, others in progress |
+| <StatusBadge status="planned" /> | Design complete, implementation started |
+| <StatusBadge status="future" /> | Design document only |
+
+## Core Architecture
+
+| Spec | Status | Description |
+|------|--------|-------------|
+| [Architecture](/docs/internals/architecture) | - | High-level system overview |
+| [SQL Layer](/docs/internals/sql-layer) | <StatusBadge status="implemented" /> | SQL interface on distributed commit graphs |
+| [Incremental Queries](/docs/internals/incremental-queries) | <StatusBadge status="partial" /> | Delta propagation through query graphs |
+| [Streaming & Persistence](/docs/internals/streaming-and-persistence) | <StatusBadge status="partial" /> | Content chunking and storage backends |
+| [Sync Protocol](/docs/internals/sync-protocol) | - | Client-server sync mechanism |
+
+## Features
+
+| Spec | Status | Description |
+|------|--------|-------------|
+| [ARRAY Subqueries](/docs/internals/array-subquery) | <StatusBadge status="implemented" /> | Eager loading with ARRAY(SELECT ...) |
+| [Binary Data & Blobs](/docs/internals/binary-data-and-blobs) | <StatusBadge status="implemented" /> | BLOB column types and streaming |
+| [Deletes & Truncation](/docs/internals/deletes-and-truncation) | <StatusBadge status="implemented" /> | Soft delete and history pruning |
+| [ReBAC Policies](/docs/internals/rebac-policies) | <StatusBadge status="planned" /> | Relationship-based access control |
+
+## Future
+
+| Spec | Status | Description |
+|------|--------|-------------|
+| [Sorted Chunk Indices](/docs/internals/sorted-chunk-indices) | <StatusBadge status="future" /> | Scalable indices beyond memory |
+| [Multi-Row Transactions](/docs/internals/multi-row-transactions) | <StatusBadge status="future" /> | MVCC with optimistic concurrency |
+| [External Migrations](/docs/internals/external-data-migrations) | <StatusBadge status="future" /> | Import data from external APIs |
 
 ## Design Principles
 
 1. **Local-first**: Data lives on the client first, server is a peer
 2. **SQL interface**: Familiar query language, not a new API to learn
-3. **Incremental**: Queries update efficiently, not from scratch
+3. **Incremental**: Queries update efficiently via delta propagation
 4. **Fine-grained**: Sync, permissions, and versioning at row level
 
-## Architecture Overview
+## Source Code
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Application Layer                     │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
-│  │ @jazz/react  │  │ @jazz/client │  │   groove     │   │
-│  └──────────────┘  └──────────────┘  └──────────────┘   │
-├─────────────────────────────────────────────────────────┤
-│                      Core (Rust/WASM)                    │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
-│  │  SQL Layer   │  │ Query Graph  │  │ Object Store │   │
-│  └──────────────┘  └──────────────┘  └──────────────┘   │
-├─────────────────────────────────────────────────────────┤
-│                      Storage Layer                       │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
-│  │  IndexedDB   │  │    SQLite    │  │     S3       │   │
-│  └──────────────┘  └──────────────┘  └──────────────┘   │
-└─────────────────────────────────────────────────────────┘
-```
+Key modules in `groove/src/`:
 
-## Key Design Documents
+- `sql/` - SQL parser, database, schema
+- `sql/query_graph/` - Incremental query computation
+- `storage.rs` - Content and commit storage
+- `sql/policy.rs` - ReBAC permission policies
+- `branch.rs` - Branch management with delete support
 
-- [SQL Layer Design](/docs/internals/architecture)
-- [Incremental Query System](/docs/internals/incremental-queries)
-- [Sync Protocol](/docs/internals/sync-protocol)
+Each module links to its corresponding spec in header comments.

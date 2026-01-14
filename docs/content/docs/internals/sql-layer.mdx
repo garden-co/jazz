@@ -1,4 +1,17 @@
-# SQL Layer Design
+---
+title: SQL Layer Design
+description: Relational SQL interface on top of Jazz's distributed commit graph
+status: implemented
+implements:
+  - groove/src/sql/database/mod.rs
+  - groove/src/sql/parser.rs
+  - groove/src/sql/schema.rs
+  - groove/src/sql/binary.rs
+---
+
+<StatusBadge status="implemented" />
+
+The SQL layer provides a relational interface on top of Jazz's distributed commit graph. Each table is a schema definition object, and each row is a separate Object with its own commit graph. This enables fine-grained sync and per-row conflict resolution.
 
 ## Implementation Status
 
@@ -11,7 +24,7 @@
 - ObjectId newtype with Crockford Base32 encoding
 - Value coercion (String→Ref) at execution time
 - WASM bindings (groove-wasm)
-- DELETE via SQL with soft delete semantics (see `deletes-and-truncation.md`)
+- DELETE via SQL with soft delete semantics (see [Deletes and Truncation](/docs/internals/deletes-and-truncation))
 - DELETE ... HARD for soft delete + history truncation
 
 **Not yet implemented:**
@@ -19,10 +32,6 @@
 - ORDER BY, LIMIT, OFFSET
 - Schema migrations
 - Composite indexes
-
-## Overview
-
-The SQL layer provides a relational interface on top of Jazz's distributed commit graph. Each table is a schema definition object, and each row is a separate Object with its own commit graph. This enables fine-grained sync and per-row conflict resolution.
 
 ## Architecture
 
@@ -521,12 +530,25 @@ pub enum ExecuteResult {
 
 ## Open Questions
 
-1. ~~**Tombstones vs hard delete**~~: Resolved - see `deletes-and-truncation.md`. Soft delete uses metadata marker `deleted=true`, with optional history truncation via `DELETE ... HARD`.
+1. **Schema changes**: Future work - how to handle adding/removing/modifying columns?
 
-2. **Schema changes**: Future work - how to handle adding/removing/modifying columns?
+2. **Composite indexes**: Future work - indexes on multiple columns?
 
-3. **Composite indexes**: Future work - indexes on multiple columns?
+3. **Additional operators**: Currently only `=` is supported. Future: `<`, `>`, `!=`, `LIKE`, `IN`
 
-4. **Additional operators**: Currently only `=` is supported. Future: `<`, `>`, `!=`, `LIKE`, `IN`
+4. **ORDER BY / LIMIT**: Not yet implemented.
 
-5. **ORDER BY / LIMIT**: Not yet implemented.
+## Implementation Notes
+
+### Key Commits
+
+- `6c08586` - Migration system: Content-addressed descriptors, lenses, and schema diff (GCO-1083)
+- `d7d4809` - Phase 5: Unified Query Architecture - all queries are branch-aware
+- `72b056d` - GCO-1097: Populate per-column LWW metadata for branches
+- `1620f6e` - Query graph: Add typed edges with input ports (GCO-1086)
+
+### Related Linear Issues
+
+- [GCO-1083](https://linear.app/garden-co/issue/GCO-1083) - Migration system implementation
+- [GCO-1086](https://linear.app/garden-co/issue/GCO-1086) - Query graph architecture improvements
+- [GCO-1097](https://linear.app/garden-co/issue/GCO-1097) - Per-column LWW metadata

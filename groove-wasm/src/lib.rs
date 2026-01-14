@@ -1,3 +1,19 @@
+//! groove-wasm - WASM bindings for Groove database
+//!
+//! Browser-side database with:
+//! - `WasmDatabase` - In-memory or IndexedDB-backed database
+//! - `WasmQueryHandle*` - Incremental query subscriptions (string, binary, delta)
+//! - `WasmBlobWriter` - Streaming blob creation
+//! - `WasmSyncClient` - WebSocket sync client
+//! - `WasmSyncedLocalNode` - Synced local node wrapper
+//! - `IndexedDbEnvironment` - Persistent storage backend
+//!
+//! ## Modules
+//!
+//! - `indexeddb` - IndexedDB storage implementation
+//! - `sync` - WebSocket sync client
+//! - `synced_local_node` - High-level synced node API
+
 use bytes::Bytes;
 use groove::ListenerId;
 use groove::sql::{

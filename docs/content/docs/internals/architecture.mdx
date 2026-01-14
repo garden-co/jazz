@@ -12,9 +12,13 @@ Jazz is built in layers, with Rust at the core compiled to WebAssembly for brows
 The `groove` crate contains:
 
 - **SQL parser and executor**: Full SQL support with query planning
+  - See: [SQL Layer Design](/docs/internals/sql-layer)
 - **Object system**: ObjectId generation, commit graphs, branching/merging
+  - See: [Deletes & Truncation](/docs/internals/deletes-and-truncation)
 - **Query graph**: Incremental query computation
+  - See: [Incremental Query System](/docs/internals/incremental-queries)
 - **Storage traits**: Abstract storage for different backends
+  - See: [Streaming & Persistence](/docs/internals/streaming-and-persistence)
 
 ### groove-wasm
 
