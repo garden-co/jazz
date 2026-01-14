@@ -254,22 +254,6 @@ const FileUploadIllustration = () => (
   </div>
 );
 
-const ReactionsIllustration = () => (
-  <div className="flex bg-stone-100 h-full flex-col items-center justify-center dark:bg-transparent">
-    <div className="inline-flex justify-center gap-1.5 mx-auto">
-      {["😍", "😮", "🤩", "😂", "👍"].map((emoji) => (
-        <button
-          type="button"
-          key={emoji}
-          className="size-10 text-xl rounded-sm shadow-xs bg-white leading-none"
-        >
-          {emoji}
-        </button>
-      ))}
-    </div>
-  </div>
-);
-
 const MultiCursorIllustration = () => (
   <div className="flex bg-stone-100 h-full flex-col items-center justify-center dark:bg-transparent p-4">
     <div className=" bg-white min-w-64 md:aspect-3/2 flex flex-col rounded-md shadow-xl shadow-stone-400/20 dark:shadow-none">

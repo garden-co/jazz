@@ -1,7 +1,7 @@
 import { Pricing } from "@/components/Pricing";
 import { LatencyMap } from "@/components/cloud/latencyMap";
 import { GridCard } from "@garden-co/design-system/src/components/atoms/GridCard";
-import { H2, H3 } from "@garden-co/design-system/src/components/atoms/Headings";
+import { H2 } from "@garden-co/design-system/src/components/atoms/Headings";
 import { P } from "@garden-co/design-system/src/components/atoms/Paragraph";
 import { GappedGrid } from "@garden-co/design-system/src/components/molecules/GappedGrid";
 import { HeroHeader } from "@garden-co/design-system/src/components/molecules/HeroHeader";

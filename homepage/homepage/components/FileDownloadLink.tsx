@@ -1,9 +1,7 @@
 "use client";
 
-import Link from "next/link";
 import { AnchorHTMLAttributes, DetailedHTMLProps } from "react";
 
-import { Button } from "@garden-co/design-system/src/components/atoms/Button";
 import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
 
 export function FileDownloadLink(

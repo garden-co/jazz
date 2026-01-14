@@ -53,6 +53,9 @@ describe("processHeadingNode", () => {
     expect(frameworkVisibility).toEqual({
       [id!]: ["react", "vue"],
     });
-    expect((node.children?.[0] as Text).value).toBe("Test Header");
+    expect(node.children).toBeDefined();
+
+    const firstChild = node.children![0] as Text;
+    expect(firstChild.value).toBe("Test Header");
   });
 });

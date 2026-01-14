@@ -57,7 +57,7 @@ function Iframe(
     className?: string;
   },
 ) {
-  const { src, user, className } = props;
+  const { src, className } = props;
 
   return (
     <div

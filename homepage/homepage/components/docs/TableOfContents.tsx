@@ -105,7 +105,7 @@ export function TableOfContents({
         }
       }
 
-      current && setCurrentId(current);
+      if (current) setCurrentId(current);
     };
 
     window.addEventListener("scroll", onScroll, { passive: true });

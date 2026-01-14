@@ -1,12 +1,9 @@
 import { ChatDemoSection } from "@/components/home/ChatDemoSection";
-import { CollaborationFeaturesSection } from "@/components/home/CollaborationFeaturesSection";
 import { EarlyAdopterSection } from "@/components/home/EarlyAdopterSection";
-import { EncryptionSection } from "@/components/home/EncryptionSection";
 import { FeaturesSection } from "@/components/home/FeaturesSection";
 import { HeroSection } from "@/components/home/HeroSection";
 import { LocalFirstFeaturesSection } from "@/components/home/LocalFirstFeaturesSection";
 import ProblemStatementSection from "@/components/home/ProblemStatementSection";
-import { SupportedEnvironmentsSection } from "@/components/home/SupportedEnvironmentsSection";
 import { LatencyMap } from "@/components/cloud/latencyMap";
 import { Pricing } from "@/components/Pricing";
 

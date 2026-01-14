@@ -2,9 +2,7 @@
 
 import { marketingCopy } from "@/content/marketingCopy";
 import { H1 } from "@garden-co/design-system/src/components/atoms/Headings";
-import { Kicker } from "@garden-co/design-system/src/components/atoms/Kicker";
 import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
-import Link from "next/link";
 import { CodeTabs } from "@/components/home/CodeTabs";
 import { JazzSyncs } from "@/components/icons/JazzSyncs";
 import NpxCreateJazzApp from "@/components/home/NpxCreateJazzApp.mdx";

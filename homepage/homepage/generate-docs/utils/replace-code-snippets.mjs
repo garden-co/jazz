@@ -3,12 +3,13 @@ import fs from "node:fs";
 import path from "node:path";
 
 const COMMENT_STYLES = {
-  jsStyle: (pattern) => `//\\s*${pattern}`,
-  htmlStyle: (pattern) => `<!--\\s*${pattern}\\s*-->`,
-  jsxStyle: (pattern) => `\\{\\s*\\/\\*\\s*${pattern}\\s*\\*\\/\\s*\\}`,
+  jsStyle: (/** @type {string} */ pattern) => `//\\s*${pattern}`,
+  htmlStyle: (/** @type {string} */ pattern) => `<!--\\s*${pattern}\\s*-->`,
+  jsxStyle: (/** @type {string} */ pattern) =>
+    `\\{\\s*\\/\\*\\s*${pattern}\\s*\\*\\/\\s*\\}`,
 };
 
-function createMultiStylePattern(pattern, flags = "") {
+function createMultiStylePattern(/** @type {string} */ pattern, flags = "") {
   return [
     new RegExp(`^\\s*${COMMENT_STYLES.jsStyle(pattern)}`, flags),
     new RegExp(`^\\s*${COMMENT_STYLES.htmlStyle(pattern)}`, flags),
@@ -16,7 +17,10 @@ function createMultiStylePattern(pattern, flags = "") {
   ];
 }
 
-function matchesAnyPattern(line, patterns) {
+function matchesAnyPattern(
+  /** @type {string} */ line,
+  /** @type {string} */ patterns,
+) {
   for (const pattern of patterns) {
     const match = line.match(pattern);
     if (match) return match;
@@ -225,7 +229,7 @@ export function replaceCodeSnippets(source, filePath) {
   // Matches: ```ts snippet=path/to/file.ts or ```tsx path/to/file.ts#Region
   const codeFenceRegex = /```(\w+)\s+([^\n]+)\n([\s\S]*?)```/g;
 
-  return source.replace(codeFenceRegex, (match, lang, meta, content) => {
+  return source.replace(codeFenceRegex, (match, lang, meta) => {
     const params = parseMeta(meta);
 
     // If no snippet parameter, leave it unchanged

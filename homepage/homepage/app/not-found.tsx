@@ -1,11 +1,9 @@
 "use client";
-import { Button } from "@garden-co/design-system/src/components/atoms/Button";
 import { SiDiscord } from "@icons-pack/react-simple-icons";
 import { JazzMobileNav } from "@/components/nav";
 import { usePathname } from "next/navigation";
 import { JazzNav } from "@/components/nav";
 import { SearchBoxWithResults } from "@/components/SearchBoxWithResults";
-import Link from "next/link";
 
 export default function NotFound() {
   const path = usePathname();

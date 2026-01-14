@@ -133,13 +133,13 @@ export const useFramework = () => {
                 if ("scrollRestoration" in window.history) {
                   window.history.scrollRestoration = "auto";
                 }
-              } catch (e) {
+              } catch {
                 // Ignore security errors
               }
               resetScrollRestorationTimeout = null;
             }, 3000);
           }
-        } catch (e) {
+        } catch {
           // Ignore security errors when setting scrollRestoration
         }
       }
@@ -208,13 +208,13 @@ export const useFramework = () => {
               if ("scrollRestoration" in window.history) {
                 window.history.scrollRestoration = "auto";
               }
-            } catch (e) {
+            } catch {
               // Ignore security errors
             }
             resetScrollRestorationTimeout = null;
           }, 3000);
         }
-      } catch (e) {
+      } catch {
         // Ignore security errors when setting scrollRestoration
       }
     }

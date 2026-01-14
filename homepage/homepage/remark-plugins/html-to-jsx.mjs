@@ -10,7 +10,7 @@ import { SKIP } from "unist-util-visit";
  */
 export function remarkHtmlToJsx() {
   return (tree) => {
-    visit(tree, "html", (node, index, parent) => {
+    visit(tree, "html", (node) => {
       const escapedHtml = JSON.stringify(node.value);
       const jsx = `<CodeWithInterpolation highlightedCode={${escapedHtml}}/>`;
       const rawHtmlNode = fromMarkdown(jsx, {

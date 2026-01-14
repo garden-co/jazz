@@ -12,14 +12,6 @@ type Params = {
   slug?: string[];
 };
 
-type Frontmatter = {
-  title: string;
-  description: string;
-  image?: string;
-  topic?: string;
-  subtopic?: string;
-};
-
 export async function generateMetadata({
   params,
 }: {
@@ -29,6 +21,7 @@ export async function generateMetadata({
   const framework = awaitedParams.framework;
   const slug = awaitedParams.slug ?? [];
 
+  // TODO: this returns something different to the Promise<Metadata> Next expects
   const docMeta = await getDocMetadata(framework, slug);
 
   return generateOGMetadata(framework, slug, docMeta.fm);

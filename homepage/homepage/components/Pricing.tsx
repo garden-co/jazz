@@ -12,7 +12,6 @@ import {
   LucideUsers,
   LucideCloud,
   LucideDatabaseZap,
-  LucideImagePlay,
   LucideFileDown,
   LucideAppWindowMac,
 } from "lucide-react";
@@ -23,7 +22,6 @@ import {
   EnterpriseTierLogo,
 } from "./TierLogos";
 import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
-import { H2 } from "@garden-co/design-system/src/components/atoms/Headings";
 
 export function ListItem({
   variant = "blue",
