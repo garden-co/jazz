@@ -1,7 +1,7 @@
 packages:
   - "packages/*"
-  - "demo-app"
-  - "sync-demo"
-  - "groove-wasm/pkg"
+  - "examples/demo-app"
+  - "examples/sync-demo"
+  - "crates/groove-wasm/pkg"
   - "docs"
-  - "docs/examples/react"
+  - "examples/docs/react"

@@ -5,4 +5,4 @@ edition = "2024"
 publish = false
 
 [dependencies]
-groove = { path = "../../../groove" }
+groove = { path = "../../../crates/groove" }

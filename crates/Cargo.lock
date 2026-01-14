@@ -310,13 +310,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "docs-rust-examples"
-version = "0.1.0"
-dependencies = [
- "groove",
-]
-
-[[package]]
 name = "encoding_rs"
 version = "0.8.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"

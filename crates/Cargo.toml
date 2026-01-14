@@ -4,7 +4,6 @@ members = [
     "groove-cli",
     "groove-server",
     "groove-wasm",
-    "docs/examples/rust-basic",
 ]
 # Only build groove by default (groove-wasm is WASM-only, groove-server is optional)
 default-members = ["groove", "groove-cli"]

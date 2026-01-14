@@ -4,15 +4,15 @@
 //!
 //! - `object` - ObjectId (UUIDv7, Crockford Base32), object primitives
 //! - `commit` - Commit graph nodes, CommitId
-//! - `branch` - Branch management, delete/truncation → [spec](../../../docs/content/docs/internals/deletes-and-truncation.mdx)
+//! - `branch` - Branch management, delete/truncation → spec: docs/content/docs/internals/deletes-and-truncation.mdx
 //! - `node` - LocalNode for managing objects
-//! - `storage` - Content/commit storage traits → [spec](../../../docs/content/docs/internals/streaming-and-persistence.mdx)
+//! - `storage` - Content/commit storage traits → spec: docs/content/docs/internals/streaming-and-persistence.mdx
 //! - `listener` - Sync callback subscriptions
 //! - `merge` - Merge strategies (LWW)
-//! - `sql/` - SQL layer → [spec](../../../docs/content/docs/internals/sql-layer.mdx)
-//!   - `sql/query_graph/` - Incremental queries → [spec](../../../docs/content/docs/internals/incremental-queries.mdx)
-//!   - `sql/policy.rs` - ReBAC policies → [spec](../../../docs/content/docs/internals/rebac-policies.mdx)
-//!   - `sql/binary.rs` - Binary encoding → [spec](../../../docs/content/docs/internals/binary-data-and-blobs.mdx)
+//! - `sql/` - SQL layer → spec: docs/content/docs/internals/sql-layer.mdx
+//!   - `sql/query_graph/` - Incremental queries → spec: docs/content/docs/internals/incremental-queries.mdx
+//!   - `sql/policy.rs` - ReBAC policies → spec: docs/content/docs/internals/rebac-policies.mdx
+//!   - `sql/binary.rs` - Binary encoding → spec: docs/content/docs/internals/binary-data-and-blobs.mdx
 //! - `sync/` - Sync protocol
 
 mod branch;

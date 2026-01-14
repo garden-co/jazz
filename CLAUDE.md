@@ -7,18 +7,20 @@ Distributed database syncing across frontend/backend/cloud. Core "Groove" in Rus
 ## Structure
 
 ```
-groove/           # Core Rust — see groove/src/lib.rs
-groove-wasm/      # WASM bindings — see groove-wasm/src/lib.rs
-groove-cli/       # CLI tools — see groove-cli/src/main.rs
-groove-server/    # Server — see groove-server/src/lib.rs
-packages/
-  jazz-client/    # TS client — see packages/jazz-client/src/index.ts
-  jazz-react/     # React hooks — see packages/jazz-react/src/index.ts
-  jazz-schema/    # Schema codegen — see packages/jazz-schema/src/index.ts
-docs/             # Fumadocs site
-  examples/       # Typechecked code examples
-demo-app/         # Example React app
-sync-demo/        # Sync demonstration
+crates/                # Rust workspace
+  groove/              # Core library — see crates/groove/src/lib.rs
+  groove-wasm/         # WASM bindings — see crates/groove-wasm/src/lib.rs
+  groove-cli/          # CLI tools — see crates/groove-cli/src/main.rs
+  groove-server/       # Server — see crates/groove-server/src/lib.rs
+packages/              # TS packages
+  jazz-client/         # Client — see packages/jazz-client/src/index.ts
+  jazz-react/          # React hooks — see packages/jazz-react/src/index.ts
+  jazz-schema/         # Schema codegen — see packages/jazz-schema/src/index.ts
+examples/              # All example apps
+  demo-app/            # React demo app
+  sync-demo/           # Sync demonstration
+  docs/                # Typechecked doc examples (symlinked to docs/examples)
+docs/                  # Fumadocs site
 ```
 
 Each entry point has module overview in its header comments.
@@ -26,10 +28,10 @@ Each entry point has module overview in its header comments.
 ## Building
 
 ```bash
-cargo test                                      # Rust tests
-cd groove-wasm && wasm-pack build --target web  # WASM
-pnpm install && pnpm build                      # TS packages (required before docs build)
-cd demo-app && npm run dev                      # Demo app
+cd crates && cargo test                                   # Rust tests
+cd crates/groove-wasm && wasm-pack build --target web     # WASM
+pnpm install && pnpm build                                # TS packages (required before docs build)
+cd examples/demo-app && npm run dev                       # Demo app
 ```
 
 **Important**: `pnpm build` at repo root before docs build — TS packages must be built for workspace resolution.
@@ -69,7 +71,7 @@ Source of truth. Linear references specs, not vice versa.
 
 **Testing**: Assert concrete values, not just structure. `assert_eq!(user.name, "Alice")` not `assert!(user.name.len() > 0)`. Makes tests rigid and readable.
 
-**Docs**: Code examples from `docs/examples/`. Use `<include>` with `// #region` markers. Exceptions: SQL, ASCII diagrams, comparison snippets.
+**Docs**: Code examples from `examples/docs/`. Use `<include>` with `// #region` markers. Exceptions: SQL, ASCII diagrams, comparison snippets.
 
 **Shortcuts**: Document in (1) code comments, (2) Linear issue, (3) task summary.
 
