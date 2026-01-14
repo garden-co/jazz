@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test';
 test('login & reload', async ({ page }) => {
   await page.goto('/');
 
-  expect(page.getByText("You're not logged in")).toBeVisible();
+  await expect(page.getByText("You're not logged in")).toBeVisible();
 
   await page.getByRole('button', { name: 'Sign in' }).click();
 
@@ -17,13 +17,9 @@ test('login & reload', async ({ page }) => {
 
   await page.waitForURL('/');
 
-  await page.getByText("You're logged in").waitFor({ state: 'visible', timeout: 10_000 });
-
-  expect(page.getByText("You're logged in")).toBeVisible();
+  await expect(page.getByText("You're logged in")).toBeVisible();
 
   await page.reload();
 
-  await page.getByText("You're logged in").waitFor({ state: 'visible', timeout: 10_000 });
-
-  expect(page.getByText("You're logged in")).toBeVisible();
+  await expect(page.getByText("You're logged in")).toBeVisible();
 });
