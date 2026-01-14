@@ -73,8 +73,11 @@ pub fn sync_router<E: Environment + 'static>() -> Router<Arc<AppState<E>>> {
         .route("/sync/reconcile", post(handle_reconcile::<E>))
         .route("/sync/events", get(handle_events::<E>))
         // Schema management endpoints
-        .route("/api/schema/:table", get(handle_schema_get::<E>))
-        .route("/api/schema/:table/deploy", post(handle_schema_deploy::<E>))
+        .route("/api/schema/{table}", get(handle_schema_get::<E>))
+        .route(
+            "/api/schema/{table}/deploy",
+            post(handle_schema_deploy::<E>),
+        )
 }
 
 /// Health check endpoint for load balancers and orchestration tools.

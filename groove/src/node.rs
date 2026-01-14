@@ -618,6 +618,11 @@ impl LocalNode {
         // Notify listeners synchronously
         self.notify_listeners(object_id, branch, &obj);
 
+        // Drop the object read lock before calling the callback.
+        // The callback may need to acquire its own lock on the same object,
+        // and std::sync::RwLock is not guaranteed to be re-entrant.
+        drop(obj);
+
         // Invoke the commits-applied callback if set (used by Database for query graph updates)
         // Only available in native builds (not WASM).
         #[cfg(not(feature = "wasm"))]
