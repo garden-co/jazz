@@ -23,6 +23,7 @@ export class OutgoingLoadQueue {
   private inFlightLoads: Map<CoValueCore, number> = new Map();
   private pendingHigh: LinkedList<PendingLoad> = new LinkedList(); // Unavailable
   private pendingLow: LinkedList<PendingLoad> = new LinkedList(); // Available
+  private requestedSet: Set<CoValueCore["id"]> = new Set();
   private timeoutHandle: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private peerId: PeerID) {}
@@ -77,6 +78,7 @@ export class OutgoingLoadQueue {
           peerId: this.peerId,
         });
         this.inFlightLoads.delete(coValue);
+        this.requestedSet.delete(coValue.id);
         coValue.markNotFoundInPeer(this.peerId);
         this.processQueue();
       } else {
@@ -97,6 +99,7 @@ export class OutgoingLoadQueue {
   trackComplete(coValue: CoValueCore): void {
     if (this.inFlightLoads.has(coValue)) {
       this.inFlightLoads.delete(coValue);
+      this.requestedSet.delete(coValue.id);
       this.processQueue();
     }
   }
@@ -104,11 +107,19 @@ export class OutgoingLoadQueue {
   /**
    * Enqueue a load request.
    * Immediately processes the queue to send requests if capacity is available.
+   * Skips CoValues that are already in-flight or pending.
    *
    * @param coValue - The CoValue to load
    * @param sendCallback - Callback to send the request when ready
    */
   enqueue(coValue: CoValueCore, sendCallback: () => void): void {
+    // Skip if already in-flight or pending
+    if (this.inFlightLoads.has(coValue) || this.requestedSet.has(coValue.id)) {
+      return;
+    }
+
+    this.requestedSet.add(coValue.id);
+
     const pending: PendingLoad = { value: coValue, sendCallback };
 
     if (coValue.isAvailable()) {
@@ -160,6 +171,7 @@ export class OutgoingLoadQueue {
       this.timeoutHandle = null;
     }
     this.inFlightLoads.clear();
+    this.requestedSet.clear();
     this.pendingHigh = new LinkedList();
     this.pendingLow = new LinkedList();
   }

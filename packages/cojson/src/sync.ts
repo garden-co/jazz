@@ -703,9 +703,6 @@ export class SyncManager {
   handleKnownState(msg: KnownStateMessage, peer: PeerState) {
     const coValue = this.local.getCoValue(msg.id);
 
-    // Mark load request as complete when we receive a known state response
-    peer.trackLoadRequestComplete(coValue);
-
     peer.combineWith(msg.id, knownStateFrom(msg));
 
     // The header is a boolean value that tells us if the other peer has information about the header.
@@ -719,6 +716,9 @@ export class SyncManager {
     if (coValue.isAvailable()) {
       this.sendNewContent(msg.id, peer);
     }
+
+    // Mark load request as complete when we receive a known state response
+    peer.trackLoadRequestComplete(coValue);
   }
 
   recordTransactionsSize(newTransactions: Transaction[], source: string) {
@@ -742,6 +742,7 @@ export class SyncManager {
     if (peer) {
       peer.trackLoadRequestComplete(coValue);
     }
+
     const sourceRole =
       from === "storage"
         ? "storage"
@@ -978,8 +979,6 @@ export class SyncManager {
       peer.trackToldKnownState(msg.id);
     }
 
-    const syncedPeers = [];
-
     /**
      * Store the content and propagate it to the server peers and the subscribed client peers
      */
@@ -1006,7 +1005,6 @@ export class SyncManager {
       // We directly forward the new content to peers that have an active subscription
       if (peer.isCoValueSubscribedToPeer(coValue.id)) {
         this.sendNewContent(coValue.id, peer);
-        syncedPeers.push(peer);
       } else if (peer.role === "server") {
         peer.sendLoadRequest(coValue);
       }

@@ -189,6 +189,83 @@ describe("OutgoingLoadQueue", () => {
     });
   });
 
+  describe("request deduplication", () => {
+    test("should skip duplicate enqueue while pending", () => {
+      setMaxInFlightLoadsPerPeer(1);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      const blockerMap = group.createMap();
+      const targetMap = group.createMap();
+
+      let targetCallbackCount = 0;
+      let duplicateCallbackCount = 0;
+
+      queue.enqueue(blockerMap.core, () => {});
+
+      queue.enqueue(targetMap.core, () => {
+        targetCallbackCount += 1;
+      });
+      queue.enqueue(targetMap.core, () => {
+        duplicateCallbackCount += 1;
+      });
+
+      expect(queue.pendingLowCount).toBe(1);
+      expect(targetCallbackCount).toBe(0);
+      expect(duplicateCallbackCount).toBe(0);
+
+      queue.trackComplete(blockerMap.core);
+
+      expect(targetCallbackCount).toBe(1);
+      expect(duplicateCallbackCount).toBe(0);
+    });
+
+    test("should skip duplicate enqueue while in-flight", () => {
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      const map = group.createMap();
+      let duplicateCallbackCount = 0;
+
+      queue.enqueue(map.core, () => {});
+      queue.enqueue(map.core, () => {
+        duplicateCallbackCount += 1;
+      });
+
+      expect(queue.inFlightCount).toBe(1);
+      expect(duplicateCallbackCount).toBe(0);
+    });
+
+    test("should skip duplicate enqueue across availability tiers", () => {
+      setMaxInFlightLoadsPerPeer(1);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const otherNode = createTestNode();
+      const group = node.createGroup();
+
+      const availableMap = group.createMap();
+      const unavailableCoValue = otherNode.getCoValue(availableMap.id);
+
+      queue.enqueue(availableMap.core, () => {});
+      queue.trackComplete(availableMap.core);
+
+      // Block capacity so the next enqueue stays pending
+      const blockerMap = group.createMap();
+      queue.enqueue(blockerMap.core, () => {});
+
+      let duplicateCallbackCount = 0;
+      queue.enqueue(availableMap.core, () => {});
+      queue.enqueue(unavailableCoValue, () => {
+        duplicateCallbackCount += 1;
+      });
+
+      expect(queue.pendingLowCount + queue.pendingHighCount).toBe(1);
+      expect(duplicateCallbackCount).toBe(0);
+    });
+  });
+
   describe("timeout behavior", () => {
     test("should mark CoValue as not found in peer after timeout", async () => {
       vi.useFakeTimers();
@@ -280,6 +357,32 @@ describe("OutgoingLoadQueue", () => {
       expect(coValue3.getLoadingStateForPeer(TEST_PEER_ID)).toBe("unavailable");
       expect(queue.inFlightCount).toBe(0);
     });
+
+    test("should allow re-enqueue after timeout", async () => {
+      vi.useFakeTimers();
+      CO_VALUE_LOADING_CONFIG.TIMEOUT = 1000;
+      setMaxInFlightLoadsPerPeer(1);
+
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+
+      const coValue = node.getCoValue("co_zTestTimeoutReenqueue0001" as any);
+
+      let secondCallbackCount = 0;
+
+      queue.enqueue(coValue, () => {});
+      await vi.advanceTimersByTimeAsync(1001);
+
+      expect(queue.inFlightCount).toBe(0);
+      expect(coValue.getLoadingStateForPeer(TEST_PEER_ID)).toBe("unavailable");
+
+      queue.enqueue(coValue, () => {
+        secondCallbackCount += 1;
+      });
+
+      expect(queue.inFlightCount).toBe(1);
+      expect(secondCallbackCount).toBe(1);
+    });
   });
 
   describe("trackComplete", () => {
@@ -326,6 +429,34 @@ describe("OutgoingLoadQueue", () => {
       queue.trackComplete(unknownCoValue);
 
       expect(queue.inFlightCount).toBe(1);
+    });
+
+    test("should allow re-enqueue after completion", () => {
+      setMaxInFlightLoadsPerPeer(1);
+      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
+      const node = createTestNode();
+      const group = node.createGroup();
+
+      const map = group.createMap();
+
+      let firstCallbackCount = 0;
+      let secondCallbackCount = 0;
+
+      queue.enqueue(map.core, () => {
+        firstCallbackCount += 1;
+      });
+
+      expect(queue.inFlightCount).toBe(1);
+      expect(firstCallbackCount).toBe(1);
+
+      queue.trackComplete(map.core);
+
+      queue.enqueue(map.core, () => {
+        secondCallbackCount += 1;
+      });
+
+      expect(queue.inFlightCount).toBe(1);
+      expect(secondCallbackCount).toBe(1);
     });
   });
 
