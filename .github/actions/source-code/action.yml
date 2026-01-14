@@ -1,5 +1,11 @@
 name: Get and Build Source Code
 
+inputs:
+  cache:
+    description: 'Enable caching'
+    required: false
+    default: 'true'
+
 runs:
   using: "composite"
   steps:
@@ -16,14 +22,16 @@ runs:
       uses: useblacksmith/setup-node@v5
       with:
         node-version-file: '.node-version'
-        cache: 'pnpm'
+        cache: ${{ inputs.cache == 'true' && 'pnpm' || '' }}
 
     - name: Get pnpm store directory
+      if: inputs.cache == 'true'
       shell: bash
       run: |
         echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
 
     - uses: useblacksmith/cache@v5
+      if: inputs.cache == 'true'
       name: Setup pnpm cache
       with:
         path: ${{ env.STORE_PATH }}
