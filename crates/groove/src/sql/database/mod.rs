@@ -3247,6 +3247,14 @@ impl Database {
                     position: 0,
                 }))
             }
+            // CONTAINS and IN require runtime claim evaluation
+            PolicyExpr::Contains(_, _) | PolicyExpr::In(_, _) => {
+                Err(DatabaseError::Parse(parser::ParseError {
+                    message: "CONTAINS/IN on claims cannot be converted to static predicate"
+                        .to_string(),
+                    position: 0,
+                }))
+            }
         }
     }
 

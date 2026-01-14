@@ -39,6 +39,13 @@ mod server;
 #[cfg(all(feature = "sync-server", not(target_arch = "wasm32")))]
 pub mod test_harness;
 
+#[cfg(all(
+    feature = "jwt-auth",
+    feature = "sync-server",
+    not(target_arch = "wasm32")
+))]
+pub mod jwt;
+
 pub use client::*;
 pub use env::*;
 pub use negotiation::*;

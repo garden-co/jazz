@@ -26,13 +26,128 @@ pub struct SessionId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct QueryId(pub u32);
 
+/// A typed value from JWT claims.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClaimValue {
+    /// String value
+    String(String),
+    /// Numeric value (f64 for JSON compatibility)
+    Number(f64),
+    /// Boolean value
+    Bool(bool),
+    /// Array of claim values
+    Array(Vec<ClaimValue>),
+    /// Null value
+    Null,
+}
+
+impl ClaimValue {
+    /// Check if this claim value contains a specific value (for CONTAINS operator).
+    /// Returns true if self is an array containing the target value.
+    pub fn contains(&self, target: &ClaimValue) -> bool {
+        match self {
+            ClaimValue::Array(arr) => arr.iter().any(|v| v == target),
+            _ => false,
+        }
+    }
+
+    /// Check if this claim value is contained in an array (for IN operator).
+    /// Returns true if target is an array containing self.
+    pub fn is_in(&self, target: &ClaimValue) -> bool {
+        target.contains(self)
+    }
+
+    /// Try to get as a string reference.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            ClaimValue::String(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Try to get as a number.
+    pub fn as_number(&self) -> Option<f64> {
+        match self {
+            ClaimValue::Number(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// Try to get as a boolean.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            ClaimValue::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+}
+
 /// Identity of an authenticated client.
 #[derive(Debug, Clone)]
 pub struct ClientIdentity {
-    /// Unique identifier for the client/user
-    pub id: String,
+    /// External user ID from the auth provider (e.g., JWT `sub` claim).
+    /// This is the primary identifier from the external auth system.
+    pub external_id: String,
+    /// Resolved Jazz User ObjectId (for @viewer in policies).
+    /// None if the user hasn't been provisioned yet.
+    pub user_id: Option<ObjectId>,
     /// Optional display name
     pub name: Option<String>,
+    /// JWT claims for policy evaluation.
+    /// Keys are claim names (e.g., "orgId", "subscriptionTier", "roles").
+    pub claims: HashMap<String, ClaimValue>,
+    /// Token expiration timestamp (Unix epoch seconds).
+    /// None if the token doesn't have an expiration.
+    pub expires_at: Option<u64>,
+}
+
+impl ClientIdentity {
+    /// Create a simple identity with just an external ID.
+    /// Used for testing and backward compatibility.
+    pub fn simple(id: impl Into<String>) -> Self {
+        Self {
+            external_id: id.into(),
+            user_id: None,
+            name: None,
+            claims: HashMap::new(),
+            expires_at: None,
+        }
+    }
+
+    /// Create an identity with an external ID and user ObjectId.
+    pub fn with_user_id(external_id: impl Into<String>, user_id: ObjectId) -> Self {
+        Self {
+            external_id: external_id.into(),
+            user_id: Some(user_id),
+            name: None,
+            claims: HashMap::new(),
+            expires_at: None,
+        }
+    }
+
+    /// Get a claim value by name.
+    pub fn get_claim(&self, name: &str) -> Option<&ClaimValue> {
+        self.claims.get(name)
+    }
+
+    /// Check if a claim exists.
+    pub fn has_claim(&self, name: &str) -> bool {
+        self.claims.contains_key(name)
+    }
+
+    /// Get the effective user ID for policy evaluation.
+    /// Returns the Jazz ObjectId if set, or a deterministic ID derived from external_id.
+    pub fn effective_user_id(&self) -> ObjectId {
+        self.user_id
+            .unwrap_or_else(|| ObjectId::from_key(&format!("user:{}", self.external_id)))
+    }
+
+    /// Legacy accessor for backward compatibility.
+    /// Returns the external_id (equivalent to old `id` field).
+    #[deprecated(note = "Use external_id directly")]
+    pub fn id(&self) -> &str {
+        &self.external_id
+    }
 }
 
 /// Trait for validating authentication tokens.
@@ -46,10 +161,7 @@ pub struct AcceptAllTokens;
 
 impl TokenValidator for AcceptAllTokens {
     fn validate(&self, token: &str) -> Option<ClientIdentity> {
-        Some(ClientIdentity {
-            id: token.to_string(),
-            name: None,
-        })
+        Some(ClientIdentity::simple(token))
     }
 }
 
@@ -338,7 +450,7 @@ impl<E: Environment> SyncServer<E> {
 
         // Track identity -> session mapping
         self.identity_sessions
-            .entry(identity.id.clone())
+            .entry(identity.external_id.clone())
             .or_default()
             .insert(id);
 
@@ -361,10 +473,13 @@ impl<E: Environment> SyncServer<E> {
             }
 
             // Clean up identity_sessions reverse index
-            if let Some(sessions) = self.identity_sessions.get_mut(&session.identity.id) {
+            if let Some(sessions) = self
+                .identity_sessions
+                .get_mut(&session.identity.external_id)
+            {
                 sessions.remove(&session_id);
                 if sessions.is_empty() {
-                    self.identity_sessions.remove(&session.identity.id);
+                    self.identity_sessions.remove(&session.identity.external_id);
                 }
             }
         }
@@ -1034,10 +1149,8 @@ mod tests {
         let mut server = make_server();
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
 
-        let identity = ClientIdentity {
-            id: "user1".to_string(),
-            name: Some("User One".to_string()),
-        };
+        let mut identity = ClientIdentity::simple("user1");
+        identity.name = Some("User One".to_string());
 
         let session_id = server.create_session(identity, tx);
         assert!(server.get_session(&session_id).is_some());
@@ -1048,10 +1161,7 @@ mod tests {
         let mut server = make_server();
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
 
-        let identity = ClientIdentity {
-            id: "user1".to_string(),
-            name: None,
-        };
+        let identity = ClientIdentity::simple("user1");
 
         let session_id = server.create_session(identity, tx);
         server.remove_session(session_id);
@@ -1063,10 +1173,7 @@ mod tests {
         let mut server = make_server();
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
 
-        let identity = ClientIdentity {
-            id: "user1".to_string(),
-            name: None,
-        };
+        let identity = ClientIdentity::simple("user1");
 
         let session_id = server.create_session(identity, tx);
         let session = server.get_session_mut(&session_id).unwrap();
@@ -1097,10 +1204,7 @@ mod tests {
         let mut server = make_server();
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
 
-        let identity = ClientIdentity {
-            id: "user1".to_string(),
-            name: None,
-        };
+        let identity = ClientIdentity::simple("user1");
 
         let session_id = server.create_session(identity, tx);
         let obj = ObjectId(42);
@@ -1125,20 +1229,8 @@ mod tests {
         let (tx1, mut rx1) = tokio::sync::mpsc::channel(16);
         let (tx2, mut rx2) = tokio::sync::mpsc::channel(16);
 
-        let s1 = server.create_session(
-            ClientIdentity {
-                id: "u1".to_string(),
-                name: None,
-            },
-            tx1,
-        );
-        let s2 = server.create_session(
-            ClientIdentity {
-                id: "u2".to_string(),
-                name: None,
-            },
-            tx2,
-        );
+        let s1 = server.create_session(ClientIdentity::simple("u1"), tx1);
+        let s2 = server.create_session(ClientIdentity::simple("u2"), tx2);
 
         let obj = ObjectId(42);
         server.register_object_session(obj, s1);

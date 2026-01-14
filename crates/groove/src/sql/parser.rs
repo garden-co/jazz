@@ -1039,6 +1039,18 @@ impl<'a> Parser<'a> {
             return Ok(PolicyExpr::IsNull(left));
         }
 
+        // Check for CONTAINS: @viewer.claims.roles CONTAINS 'admin'
+        if self.try_keyword("CONTAINS") {
+            let right = self.parse_policy_value()?;
+            return Ok(PolicyExpr::Contains(left, right));
+        }
+
+        // Check for IN: team_id IN @viewer.claims.groups
+        if self.try_keyword("IN") {
+            let right = self.parse_policy_value()?;
+            return Ok(PolicyExpr::In(left, right));
+        }
+
         // Check for comparison operators
         let op = self.parse_comparison_op()?;
         let right = self.parse_policy_value()?;
@@ -1101,7 +1113,28 @@ impl<'a> Parser<'a> {
             let ident = self.parse_identifier()?;
 
             match ident.to_lowercase().as_str() {
-                "viewer" => return Ok(PolicyValue::Viewer),
+                "viewer" => {
+                    // Check for @viewer.external_id or @viewer.claims.*
+                    if self.peek_char() == Some('.') {
+                        self.consume_char();
+                        let prop = self.parse_identifier()?;
+                        match prop.to_lowercase().as_str() {
+                            "external_id" => return Ok(PolicyValue::ViewerExternalId),
+                            "claims" => {
+                                self.expect_char('.')?;
+                                let claim_name = self.parse_identifier()?;
+                                return Ok(PolicyValue::ViewerClaim(claim_name));
+                            }
+                            _ => {
+                                return Err(self.error(format!(
+                                    "unknown @viewer property '{}'. Use @viewer.external_id or @viewer.claims.<name>",
+                                    prop
+                                )));
+                            }
+                        }
+                    }
+                    return Ok(PolicyValue::Viewer);
+                }
                 "old" => {
                     self.expect_char('.')?;
                     let col = self.parse_identifier()?;

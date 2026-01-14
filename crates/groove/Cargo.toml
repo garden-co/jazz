@@ -9,6 +9,8 @@ wasm = ["uuid/js", "getrandom/js", "dep:web-time"]
 # sync-server feature enables server-side sync types (SyncServer, etc.)
 # but NOT the axum handlers - those live in groove-server crate
 sync-server = ["dep:tokio", "dep:tokio-stream"]
+# jwt-auth feature enables JWT token validation for authentication
+jwt-auth = ["dep:jsonwebtoken", "dep:serde", "dep:serde_json"]
 
 [dependencies]
 blake3 = "1"
@@ -23,6 +25,11 @@ web-time = { version = "1", optional = true }
 # Sync server dependencies (optional)
 tokio = { version = "1", features = ["sync", "rt", "time"], optional = true }
 tokio-stream = { version = "0.1", optional = true }
+
+# JWT authentication dependencies (optional)
+jsonwebtoken = { version = "9", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
