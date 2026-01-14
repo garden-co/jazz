@@ -398,13 +398,7 @@ export class SyncManager {
         // If the coValue is unavailable and we never tried this peer
         // we try to load it from the peer
         if (!peer.loadRequestSent.has(coValue.id)) {
-          peer.trackLoadRequestSent(coValue.id);
-          this.trySendToPeer(peer, {
-            action: "load",
-            header: false,
-            id: coValue.id,
-            sessions: {},
-          });
+          peer.sendLoadRequest(coValue);
         }
       } else {
         // Build the list of coValues ordered by dependency
@@ -425,11 +419,7 @@ export class SyncManager {
        * - Start the sync process in case we or the other peer
        *   lacks some transactions
        */
-      peer.trackLoadRequestSent(coValue.id);
-      this.trySendToPeer(peer, {
-        action: "load",
-        ...coValue.knownState(),
-      });
+      peer.sendLoadRequest(coValue);
     }
   }
 
@@ -713,6 +703,9 @@ export class SyncManager {
   handleKnownState(msg: KnownStateMessage, peer: PeerState) {
     const coValue = this.local.getCoValue(msg.id);
 
+    // Mark load request as complete when we receive a known state response
+    peer.trackLoadRequestComplete(coValue);
+
     peer.combineWith(msg.id, knownStateFrom(msg));
 
     // The header is a boolean value that tells us if the other peer has information about the header.
@@ -744,6 +737,11 @@ export class SyncManager {
   ) {
     const coValue = this.local.getCoValue(msg.id);
     const peer = from === "storage" || from === "import" ? undefined : from;
+
+    // Mark load request as complete when we receive content
+    if (peer) {
+      peer.trackLoadRequestComplete(coValue);
+    }
     const sourceRole =
       from === "storage"
         ? "storage"
@@ -1009,24 +1007,8 @@ export class SyncManager {
       if (peer.isCoValueSubscribedToPeer(coValue.id)) {
         this.sendNewContent(coValue.id, peer);
         syncedPeers.push(peer);
-      } else if (
-        peer.role === "server" &&
-        !peer.loadRequestSent.has(coValue.id)
-      ) {
-        const state = coValue.getLoadingStateForPeer(peer.id);
-
-        // Check if there is a inflight load operation and we
-        // are waiting for other peers to send the load request
-        if (state === "unknown") {
-          // Sending a load message to the peer to get to know how much content is missing
-          // before sending the new content
-          this.trySendToPeer(peer, {
-            action: "load",
-            ...coValue.knownStateWithStreaming(),
-          });
-          peer.trackLoadRequestSent(coValue.id);
-          syncedPeers.push(peer);
-        }
+      } else if (peer.role === "server") {
+        peer.sendLoadRequest(coValue);
       }
     }
   }

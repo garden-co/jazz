@@ -87,6 +87,7 @@ import {
   setCoValueLoadingRetryDelay,
   setCoValueLoadingTimeout,
   setIncomingMessagesTimeBudget,
+  setMaxInFlightLoadsPerPeer,
   setMaxOutgoingMessagesChunkBytes,
   setOutgoingMessagesChunkDelay,
   setMaxRecommendedTxSize,
@@ -141,6 +142,7 @@ export const cojsonInternals = {
   WEBSOCKET_CONFIG,
   setMaxOutgoingMessagesChunkBytes,
   setOutgoingMessagesChunkDelay,
+  setMaxInFlightLoadsPerPeer,
 };
 
 export {

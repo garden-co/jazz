@@ -26,6 +26,7 @@ export const CO_VALUE_LOADING_CONFIG = {
   MAX_RETRIES: 1,
   TIMEOUT: 30_000,
   RETRY_DELAY: 3000,
+  MAX_IN_FLIGHT_LOADS_PER_PEER: 100,
 };
 
 export function setCoValueLoadingMaxRetries(maxRetries: number) {
@@ -72,4 +73,8 @@ export function setMaxOutgoingMessagesChunkBytes(bytes: number) {
 
 export function setOutgoingMessagesChunkDelay(delay: number) {
   WEBSOCKET_CONFIG.OUTGOING_MESSAGES_CHUNK_DELAY = delay;
+}
+
+export function setMaxInFlightLoadsPerPeer(limit: number) {
+  CO_VALUE_LOADING_CONFIG.MAX_IN_FLIGHT_LOADS_PER_PEER = limit;
 }

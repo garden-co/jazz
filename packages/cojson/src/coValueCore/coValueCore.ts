@@ -1562,18 +1562,6 @@ export class CoValueCore {
       return;
     }
 
-    /**
-     * On reconnection persistent peers will automatically fire the load request
-     * as part of the reconnection process.
-     */
-    if (!peer.closed) {
-      peer.pushOutgoingMessage({
-        action: "load",
-        ...this.knownState(),
-      });
-      peer.trackLoadRequestSent(this.id);
-    }
-
     const markNotFound = () => {
       if (this.getLoadingStateForPeer(peer.id) === "pending") {
         logger.warn("Timeout waiting for peer to load coValue", {
@@ -1584,10 +1572,18 @@ export class CoValueCore {
       }
     };
 
-    const timeout = setTimeout(markNotFound, CO_VALUE_LOADING_CONFIG.TIMEOUT);
+    // Close listener for non-persistent peers
     const removeCloseListener = peer.persistent
       ? undefined
       : peer.addCloseListener(markNotFound);
+
+    /**
+     * On reconnection persistent peers will automatically fire the load request
+     * as part of the reconnection process.
+     */
+    if (!peer.closed) {
+      peer.sendLoadRequest(this);
+    }
 
     this.subscribe((state, unsubscribe) => {
       const peerState = state.getLoadingStateForPeer(peer.id);
@@ -1599,7 +1595,6 @@ export class CoValueCore {
       ) {
         unsubscribe();
         removeCloseListener?.();
-        clearTimeout(timeout);
       }
     }, true);
   }
