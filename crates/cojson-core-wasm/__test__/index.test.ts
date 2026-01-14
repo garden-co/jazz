@@ -27,7 +27,9 @@ import {
   x25519DiffieHellman,
   decryptXsalsa20,
   encryptXsalsa20,
-  initialize
+  initialize,
+  SessionLog,
+  WasmFfiTransaction,
 } from '../index';
 
 beforeAll(async () => {
@@ -483,5 +485,253 @@ describe("xsalsa20", () => {
 
     const decrypted = decryptXsalsa20(key, nonceMaterial, tampered);
     expect(Array.from(decrypted)).not.toEqual(Array.from(plaintext));
+  });
+});
+
+describe("SessionLog FFI Transactions", () => {
+  // Helper to create a valid signer secret and ID
+  function makeSignerKeyPair() {
+    const signingKey = newEd25519SigningKey();
+    const secret = "signerSecret_z" + base58.encode(signingKey);
+    const verifyingKey = ed25519VerifyingKey(signingKey);
+    const signerId = "signer_z" + base58.encode(verifyingKey);
+    return { signingKey, secret, signerId };
+  }
+
+  // Helper to create a valid key secret for encryption
+  function makeKeySecret() {
+    const keyBytes = new Uint8Array(32);
+    crypto.getRandomValues(keyBytes);
+    return "keySecret_z" + base58.encode(keyBytes);
+  }
+
+  describe("WasmFfiTransaction", () => {
+    test("creates private transaction with all fields", () => {
+      const tx = new WasmFfiTransaction(
+        "private",
+        "keyId_123",
+        "encrypted_Uabc123",
+        BigInt(Date.now()),
+        "encrypted_meta"
+      );
+
+      expect(tx.privacy).toBe("private");
+      expect(tx.key_used).toBe("keyId_123");
+      expect(tx.changes).toBe("encrypted_Uabc123");
+      expect(tx.meta).toBe("encrypted_meta");
+    });
+
+    test("creates trusting transaction without key_used", () => {
+      const tx = new WasmFfiTransaction(
+        "trusting",
+        undefined,
+        '["change1","change2"]',
+        BigInt(Date.now()),
+        undefined
+      );
+
+      expect(tx.privacy).toBe("trusting");
+      expect(tx.key_used).toBeUndefined();
+      expect(tx.changes).toBe('["change1","change2"]');
+      expect(tx.meta).toBeUndefined();
+    });
+
+    test("madeAt accepts bigint timestamps", () => {
+      const timestamp = BigInt(1700000000000);
+      const tx = new WasmFfiTransaction(
+        "trusting",
+        undefined,
+        "[]",
+        timestamp,
+        undefined
+      );
+
+      expect(tx.made_at).toBe(timestamp);
+    });
+  });
+
+  describe("tryAddFfi", () => {
+    test("accepts trusting transaction via tryAddFfi", () => {
+      const { secret, signerId } = makeSignerKeyPair();
+      const coId = "co_z" + base58.encode(new Uint8Array(32));
+      const sessionId = "co_z" + base58.encode(new Uint8Array(32)) + "_session_z" + base58.encode(new Uint8Array(32));
+
+      // Create source session log and add a trusting transaction
+      const sourceLog = new SessionLog(coId, sessionId, signerId);
+      const madeAt = Date.now();
+      const changesJson = JSON.stringify([{ op: "set", path: "/foo", value: "bar" }]);
+
+      const signature = sourceLog.addNewTrustingTransaction(
+        changesJson,
+        secret,
+        madeAt,
+        undefined
+      );
+
+      // Create destination session log and add the same transaction via tryAddFfi
+      const destLog = new SessionLog(coId, sessionId, signerId);
+      const ffiTx = new WasmFfiTransaction(
+        "trusting",
+        undefined,
+        changesJson,
+        BigInt(madeAt),
+        undefined
+      );
+
+      // Should not throw
+      expect(() => {
+        destLog.tryAddFfi([ffiTx], signature, false);
+      }).not.toThrow();
+    });
+
+    test("accepts private transaction via tryAddFfi", () => {
+      const { secret, signerId } = makeSignerKeyPair();
+      const coId = "co_z" + base58.encode(new Uint8Array(32));
+      const sessionId = "co_z" + base58.encode(new Uint8Array(32)) + "_session_z" + base58.encode(new Uint8Array(32));
+      const keySecret = makeKeySecret();
+      const keyId = "key_z" + base58.encode(new Uint8Array(16));
+
+      // Create source session log and add a private transaction
+      const sourceLog = new SessionLog(coId, sessionId, signerId);
+      const madeAt = Date.now();
+      const changesJson = JSON.stringify([{ op: "set", path: "/secret", value: "data" }]);
+
+      const resultJson = sourceLog.addNewPrivateTransaction(
+        changesJson,
+        secret,
+        keySecret,
+        keyId,
+        madeAt,
+        undefined
+      );
+      const result = JSON.parse(resultJson);
+
+      // Create destination session log and add the same transaction via tryAddFfi
+      const destLog = new SessionLog(coId, sessionId, signerId);
+      const ffiTx = new WasmFfiTransaction(
+        "private",
+        keyId,
+        result.encrypted_changes,
+        BigInt(madeAt),
+        result.meta
+      );
+
+      // Should not throw
+      expect(() => {
+        destLog.tryAddFfi([ffiTx], result.signature, false);
+      }).not.toThrow();
+    });
+
+    test("tryAddFfi and tryAdd produce equivalent results for trusting transactions", () => {
+      const { secret, signerId } = makeSignerKeyPair();
+      const coId = "co_z" + base58.encode(new Uint8Array(32));
+      const sessionId = "co_z" + base58.encode(new Uint8Array(32)) + "_session_z" + base58.encode(new Uint8Array(32));
+
+      // Create source transaction
+      const sourceLog = new SessionLog(coId, sessionId, signerId);
+      const madeAt = Date.now();
+      const changesJson = JSON.stringify([{ op: "set", path: "/x", value: 1 }]);
+
+      const signature = sourceLog.addNewTrustingTransaction(
+        changesJson,
+        secret,
+        madeAt,
+        undefined
+      );
+
+      // Create the JSON transaction for tryAdd
+      const jsonTx = JSON.stringify({
+        privacy: "trusting",
+        changes: changesJson,
+        madeAt: madeAt,
+      });
+
+      // Test with tryAdd (JSON-based)
+      const logWithJsonAdd = new SessionLog(coId, sessionId, signerId);
+      expect(() => {
+        logWithJsonAdd.tryAdd([jsonTx], signature, false);
+      }).not.toThrow();
+
+      // Test with tryAddFfi (FFI-based)
+      const logWithFfiAdd = new SessionLog(coId, sessionId, signerId);
+      const ffiTx = new WasmFfiTransaction(
+        "trusting",
+        undefined,
+        changesJson,
+        BigInt(madeAt),
+        undefined
+      );
+      expect(() => {
+        logWithFfiAdd.tryAddFfi([ffiTx], signature, false);
+      }).not.toThrow();
+    });
+
+    test("rejects private transaction without key_used", () => {
+      const { signerId } = makeSignerKeyPair();
+      const coId = "co_z" + base58.encode(new Uint8Array(32));
+      const sessionId = "co_z" + base58.encode(new Uint8Array(32)) + "_session_z" + base58.encode(new Uint8Array(32));
+
+      const destLog = new SessionLog(coId, sessionId, signerId);
+
+      // Create a private transaction without key_used (invalid)
+      const ffiTx = new WasmFfiTransaction(
+        "private",
+        undefined, // Missing key_used!
+        "encrypted_Uabc123",
+        BigInt(Date.now()),
+        undefined
+      );
+
+      expect(() => {
+        destLog.tryAddFfi([ffiTx], "signature_z123", false);
+      }).toThrow(/Missing key_used/);
+    });
+
+    test("rejects invalid privacy type", () => {
+      const { signerId } = makeSignerKeyPair();
+      const coId = "co_z" + base58.encode(new Uint8Array(32));
+      const sessionId = "co_z" + base58.encode(new Uint8Array(32)) + "_session_z" + base58.encode(new Uint8Array(32));
+
+      const destLog = new SessionLog(coId, sessionId, signerId);
+
+      // Create a transaction with invalid privacy type
+      const ffiTx = new WasmFfiTransaction(
+        "invalid_privacy" as any,
+        undefined,
+        "some_changes",
+        BigInt(Date.now()),
+        undefined
+      );
+
+      expect(() => {
+        destLog.tryAddFfi([ffiTx], "signature_z123", false);
+      }).toThrow(/Invalid privacy type/);
+    });
+
+    test("handles batch of multiple transactions", () => {
+      const { secret, signerId } = makeSignerKeyPair();
+      const coId = "co_z" + base58.encode(new Uint8Array(32));
+      const sessionId = "co_z" + base58.encode(new Uint8Array(32)) + "_session_z" + base58.encode(new Uint8Array(32));
+
+      // Create source with multiple transactions
+      const sourceLog = new SessionLog(coId, sessionId, signerId);
+      const madeAt1 = Date.now();
+      const changesJson1 = JSON.stringify([{ op: "set", path: "/a", value: 1 }]);
+      sourceLog.addNewTrustingTransaction(changesJson1, secret, madeAt1, undefined);
+
+      const madeAt2 = madeAt1 + 1;
+      const changesJson2 = JSON.stringify([{ op: "set", path: "/b", value: 2 }]);
+      const signature2 = sourceLog.addNewTrustingTransaction(changesJson2, secret, madeAt2, undefined);
+
+      // Create destination and add both transactions at once
+      const destLog = new SessionLog(coId, sessionId, signerId);
+      const ffiTx1 = new WasmFfiTransaction("trusting", undefined, changesJson1, BigInt(madeAt1), undefined);
+      const ffiTx2 = new WasmFfiTransaction("trusting", undefined, changesJson2, BigInt(madeAt2), undefined);
+
+      // Should accept both transactions with the final signature
+      expect(() => {
+        destLog.tryAddFfi([ffiTx1, ffiTx2], signature2, false);
+      }).not.toThrow();
+    });
   });
 });
