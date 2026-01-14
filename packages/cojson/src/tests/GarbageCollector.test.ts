@@ -1,7 +1,12 @@
 import { assert, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { setGarbageCollectorMaxAge } from "../config";
-import { TEST_NODE_CONFIG, setupTestAccount, setupTestNode } from "./testUtils";
+import {
+  blockMessageTypeOnOutgoingPeer,
+  TEST_NODE_CONFIG,
+  setupTestAccount,
+  setupTestNode,
+} from "./testUtils";
 import { createSyncStorage } from "./testStorage.js";
 
 // We want to simulate a real world communication that happens asynchronously
@@ -78,6 +83,38 @@ describe("garbage collector", () => {
       ourName: "client",
     });
     client.node.enableGarbageCollector();
+    const { peer: serverPeer } = client.connectToSyncServer();
+    // Block sync with server
+    const blocker = blockMessageTypeOnOutgoingPeer(serverPeer, "content", {});
+
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    map.set("hello", "world", "trusting");
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    client.node.garbageCollector?.collect();
+
+    expect(client.node.getCoValue(map.id).isAvailable()).toBe(true);
+
+    // Resume sync with server
+    blocker.sendBlockedMessages();
+    blocker.unblock();
+    await client.node.syncManager.waitForAllCoValuesSync();
+
+    // The coValue should now be collected
+    client.node.garbageCollector?.collect();
+
+    expect(client.node.getCoValue(map.id).isAvailable()).toBe(false);
+  });
+
+  test("coValues are garbage collected if there are no server peers", async () => {
+    const client = setupTestNode();
+
+    client.addStorage({
+      ourName: "client",
+    });
+    client.node.enableGarbageCollector();
     // Client is not connected to the sync server
 
     const group = client.node.createGroup();
@@ -86,15 +123,6 @@ describe("garbage collector", () => {
 
     await client.node.syncManager.waitForAllCoValuesSync();
 
-    client.node.garbageCollector?.collect();
-
-    expect(client.node.getCoValue(map.id).isAvailable()).toBe(true);
-
-    // Connect to the sync server
-    client.connectToSyncServer();
-    await client.node.syncManager.waitForAllCoValuesSync();
-
-    // The coValue should now be collected
     client.node.garbageCollector?.collect();
 
     expect(client.node.getCoValue(map.id).isAvailable()).toBe(false);

@@ -110,4 +110,57 @@ describe("sync after the garbage collector has run", () => {
       ]
     `);
   });
+
+  test("syncing a coValue that was removed by the garbage collector", async () => {
+    const client = setupTestNode();
+    client.addStorage({
+      ourName: "client",
+    });
+    client.node.enableGarbageCollector();
+
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    map.set("hello", "updated", "trusting");
+
+    // force the garbage collector to run before the transaction is synced
+    client.node.garbageCollector?.collect();
+    expect(client.node.getCoValue(map.id).isAvailable()).toBe(false);
+
+    SyncMessagesLog.clear();
+
+    client.connectToSyncServer();
+
+    // Wait for unsynced coValues to be resumed and synced after connecting to server
+    await client.node.syncManager.waitForAllCoValuesSync();
+
+    // The storage should work even after the coValue is unmounted, so the load should be successful
+    const mapOnServer = await loadCoValueOrFail(jazzCloud.node, map.id);
+    expect(mapOnServer.get("hello")).toEqual("updated");
+
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | LOAD Map sessions: empty",
+        "client -> server | LOAD Group sessions: header/3",
+        "client -> storage | CONTENT Group header: true new: After: 0 New: 3",
+        "client -> server | CONTENT Group header: true new: After: 0 New: 3",
+        "client -> storage | CONTENT Map header: true new: After: 0 New: 1",
+        "client -> server | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> storage | LOAD Map sessions: empty",
+        "storage -> server | KNOWN Map sessions: empty",
+        "server -> client | KNOWN Map sessions: empty",
+        "server -> storage | GET_KNOWN_STATE Group",
+        "storage -> server | GET_KNOWN_STATE_RESULT Group sessions: empty",
+        "server -> client | KNOWN Group sessions: empty",
+        "server -> client | KNOWN Group sessions: header/3",
+        "server -> storage | CONTENT Group header: true new: After: 0 New: 3",
+        "server -> client | KNOWN Map sessions: header/1",
+        "server -> storage | CONTENT Map header: true new: After: 0 New: 1",
+      ]
+    `);
+  });
 });
