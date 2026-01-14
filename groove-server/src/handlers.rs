@@ -597,7 +597,8 @@ fn web_sys_log(_msg: &str) {
 pub struct SchemaResponse {
     pub descriptor_id: String,
     pub columns: Vec<ColumnInfo>,
-    pub parent_descriptors: Option<Vec<String>>,
+    /// Whether this schema version has a parent (i.e., is not the initial v1)
+    pub has_parent: bool,
 }
 
 /// Column information in schema response
@@ -709,22 +710,10 @@ async fn handle_schema_get<E: Environment>(
         })
         .collect();
 
-    let parent_descriptors = if descriptor.parent_descriptors.is_empty() {
-        None
-    } else {
-        Some(
-            descriptor
-                .parent_descriptors
-                .iter()
-                .map(|id| id.to_string())
-                .collect(),
-        )
-    };
-
     Ok(Json(SchemaResponse {
         descriptor_id: descriptor_id.to_string(),
         columns,
-        parent_descriptors,
+        has_parent: descriptor.lens_from_parent.is_some(),
     }))
 }
 
