@@ -9,51 +9,17 @@ Jazz queries are live subscriptions that update automatically when data changes.
 
 Use `useAll` to subscribe to multiple rows:
 
-```typescript
-import { useAll } from '@jazz/react';
-import { app } from './generated/client';
-
-function TaskList() {
-  const [tasks, loading] = useAll(app.tasks);
-
-  if (loading) return <div>Loading...</div>;
-
-  return (
-    <ul>
-      {tasks.map(task => (
-        <li key={task.id}>{task.title}</li>
-      ))}
-    </ul>
-  );
-}
-```
+<include>../../../examples/react/src/concepts/queries.tsx#use-all-basic</include>
 
 Use `useOne` to subscribe to a single row by ID:
 
-```typescript
-import { useOne } from '@jazz/react';
-
-function TaskDetail({ taskId }: { taskId: string }) {
-  const [task, loading] = useOne(app.tasks, taskId);
-
-  if (loading) return <div>Loading...</div>;
-  if (!task) return <div>Not found</div>;
-
-  return <h1>{task.title}</h1>;
-}
-```
+<include>../../../examples/react/src/concepts/queries.tsx#use-one-basic</include>
 
 ## Filtering
 
 Use `where` to filter results:
 
-```typescript
-// All incomplete tasks
-const [tasks] = useAll(app.tasks.where({ completed: false }));
-
-// Tasks assigned to a specific user
-const [myTasks] = useAll(app.tasks.where({ assignee: userId }));
-```
+<include>../../../examples/react/src/concepts/queries.tsx#filtering</include>
 
 Currently supported: equality filters (`=`, `!=`). Range operators coming soon.
 
@@ -61,29 +27,11 @@ Currently supported: equality filters (`=`, `!=`). Range operators coming soon.
 
 Use `with` to eagerly load related rows:
 
-```typescript
-// Load tasks with their assignee
-const [tasks] = useAll(
-  app.tasks.with({ assignee: true })
-);
-
-// Now task.assignee is a full User object, not just an ID
-tasks.map(task => (
-  <li key={task.id}>
-    {task.title} - {task.assignee?.name}
-  </li>
-));
-```
+<include>../../../examples/react/src/concepts/queries.tsx#with-includes</include>
 
 You can chain `where` and `with`:
 
-```typescript
-const [tasks] = useAll(
-  app.tasks
-    .where({ completed: false })
-    .with({ assignee: true })
-);
-```
+<include>../../../examples/react/src/concepts/queries.tsx#chained-where-with</include>
 
 ## How It Works
 

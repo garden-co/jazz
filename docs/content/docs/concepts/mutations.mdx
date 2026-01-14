@@ -9,54 +9,17 @@ Jazz mutations apply instantly to local state. Changes sync to the server and ot
 
 Use the generated `create` method:
 
-```typescript
-import { app } from './generated/client';
-import { useJazz } from '@jazz/react';
-
-function CreateTask() {
-  const db = useJazz();
-
-  const handleCreate = () => {
-    app.tasks.create(db, {
-      title: "Buy groceries",
-      completed: false
-    });
-  };
-
-  return <button onClick={handleCreate}>Add Task</button>;
-}
-```
+<include>../../../examples/react/src/concepts/mutations.tsx#create-task</include>
 
 The `create` method returns the new row's `ObjectId`:
 
-```typescript
-const taskId = app.tasks.create(db, { title: "New task", completed: false });
-console.log(taskId); // "01JGXYZ123ABC456DEF789GHIJ"
-```
+<include>../../../examples/react/src/concepts/mutations.tsx#create-returns-id</include>
 
 ## Updating Data
 
 Use the `update` method with a row ID:
 
-```typescript
-function ToggleTask({ taskId }: { taskId: string }) {
-  const db = useJazz();
-  const [task] = useOne(app.tasks, taskId);
-
-  const handleToggle = () => {
-    app.tasks.update(db, taskId, {
-      completed: !task?.completed
-    });
-  };
-
-  return (
-    <label>
-      <input type="checkbox" checked={task?.completed} onChange={handleToggle} />
-      {task?.title}
-    </label>
-  );
-}
-```
+<include>../../../examples/react/src/concepts/mutations.tsx#toggle-task</include>
 
 Updates are partial - only include the fields you want to change.
 
@@ -64,17 +27,7 @@ Updates are partial - only include the fields you want to change.
 
 Use the `delete` method:
 
-```typescript
-function DeleteTask({ taskId }: { taskId: string }) {
-  const db = useJazz();
-
-  const handleDelete = () => {
-    app.tasks.delete(db, taskId);
-  };
-
-  return <button onClick={handleDelete}>Delete</button>;
-}
-```
+<include>../../../examples/react/src/concepts/mutations.tsx#delete-task</include>
 
 Deletes are "soft" by default - the row is marked as deleted but its history is preserved. This allows undo and sync consistency.
 
@@ -82,33 +35,12 @@ Deletes are "soft" by default - the row is marked as deleted but its history is 
 
 All mutations apply instantly to local state:
 
-```typescript
-// This is synchronous - no await needed
-app.tasks.create(db, { title: "Task 1", completed: false });
-app.tasks.create(db, { title: "Task 2", completed: false });
-
-// Both tasks are already in local state
-// UI updates immediately via subscriptions
-```
+<include>../../../examples/react/src/concepts/mutations.tsx#instant-updates</include>
 
 The sync server receives changes in the background. If you're offline, changes queue locally and sync when you reconnect.
 
 ## With References
 
-When a column is a `REFERENCES`, you can pass either an ObjectId string or the full object:
+When a column is a `REFERENCES`, pass an ObjectId string:
 
-```typescript
-// By ID
-app.tasks.create(db, {
-  title: "Review PR",
-  completed: false,
-  assignee: "01JGXYZ123ABC456DEF789GHIJ"
-});
-
-// Or with a user object
-app.tasks.create(db, {
-  title: "Review PR",
-  completed: false,
-  assignee: currentUser.id
-});
-```
+<include>../../../examples/react/src/concepts/mutations.tsx#with-references</include>

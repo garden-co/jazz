@@ -9,13 +9,7 @@ Jazz is a database that runs in your app and syncs automatically. Data lives loc
 
 Instead of fetching data from a server, you read and write to a local database. Jazz handles syncing behind the scenes:
 
-```typescript
-// Subscribe to tasks - data is local, updates are instant
-const [tasks] = useAll(app.tasks.where({ completed: false }));
-
-// Create a task - no API call, instant UI update
-app.tasks.create(db, { title: "Buy groceries", completed: false });
-```
+<include>../../../examples/react/src/concepts/intro.tsx#core-idea</include>
 
 The sync server is a peer, not the source of truth. If you're offline, everything still works.
 

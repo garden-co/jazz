@@ -70,7 +70,7 @@ Source of truth. Linear references specs, not vice versa.
 
 **Testing**: Assert concrete values, not just structure. `assert_eq!(user.name, "Alice")` not `assert!(user.name.len() > 0)`. Makes tests rigid and readable.
 
-**Docs**: Code examples from `examples/docs/`. Use `<include>` with `// #region` markers. Exceptions: SQL, ASCII diagrams, comparison snippets.
+**Docs**: All code examples MUST be in external files and included via `<include>` with region markers (`// #region` for TS/JS, `// #region` for Rust). TypeScript examples go in `examples/docs/`, Rust examples go in `crates/*/examples/`. Inline code examples are forbidden - they can't be typechecked or tested. Exceptions: SQL, ASCII diagrams, comparison snippets that can't be typechecked.
 
 **Shortcuts**: Document in (1) code comments, (2) Linear issue, (3) task summary.
 
