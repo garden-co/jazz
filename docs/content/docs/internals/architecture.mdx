@@ -1,21 +1,64 @@
 ---
 title: Architecture
-description: How Jazz is structured internally
+description: Core design principles and system architecture
 ---
 
-Jazz is built in layers, with Rust at the core compiled to WebAssembly for browser use.
+## Core Principles
+
+- **Local-first DX**: Data looks and feels like local reactive state
+- **Trusted sync server**: Server stores data in plaintext by default
+- **E2EE opt-in**: Encryption available for sensitive data, not mandatory
+- **SQL everywhere**: Query language for both local and server operations
+- **Git-style history**: Per-object commit graphs with compressed snapshots
+
+## Data Model
+
+### Objects
+
+The fundamental unit, identified by UUIDv7 (Crockford Base32 encoded). Each object has:
+- A commit graph (history as compressed snapshots with parent references)
+- Optional named branches (default: "main")
+- Schema-defined structure
+
+### Tables and Rows
+
+Primary use case: each object represents a table row.
+
+- Schema defines tables (SQL CREATE TABLE)
+- Each row is an object with its own commit history
+- References between rows are foreign keys to other objects
+- Fine-grained sync and conflict resolution at row level
+
+### Commits
+
+Each commit contains:
+- Snapshot of object state (semantically full, delta-encoded + compressed)
+- Parent reference(s) - typically relative pointers
+- Author and timestamp
+
+Commit IDs are content hashes (BLAKE3). Content storage:
+- **Inline** (up to 1KB): Stored directly in commit
+- **Chunked** (above 1KB): Split via FastCDC, stored separately
+
+### Branches
+
+First-class abstraction on the commit graph:
+- Named branches (like git)
+- Most objects stay on "main" branch
+- Explicit merge operations when needed
+- Migrations modeled as branching operations
 
 ## Layer Overview
 
 ### Groove (Rust Core)
 
-The `groove` crate contains:
+The `groove` crate provides:
 
 - **SQL parser and executor**: Full SQL support with query planning
   - See: [SQL Layer Design](/docs/internals/sql-layer)
 - **Object system**: ObjectId generation, commit graphs, branching/merging
   - See: [Deletes & Truncation](/docs/internals/deletes-and-truncation)
-- **Query graph**: Incremental query computation
+- **Query graph**: Incremental query computation with delta propagation
   - See: [Incremental Query System](/docs/internals/incremental-queries)
 - **Storage traits**: Abstract storage for different backends
   - See: [Streaming & Persistence](/docs/internals/streaming-and-persistence)
@@ -25,7 +68,7 @@ The `groove` crate contains:
 WebAssembly bindings exposing Groove to JavaScript:
 
 - Compiles Groove to WASM
-- Provides JS-friendly API
+- Provides JS-friendly API with callback integration
 - Handles serialization between Rust and JS
 
 ### @jazz/client
@@ -46,13 +89,29 @@ React integration:
 
 ## Why Rust + WASM?
 
-1. **Performance**: SQL execution and query computation in native-speed WASM
+1. **Performance**: SQL execution and query computation at native speed
 2. **Shared code**: Same logic runs in browser and on server
 3. **Memory safety**: Rust prevents entire classes of bugs
 4. **Size**: WASM compresses well (~200KB gzipped)
 
-## Trade-offs
+### Trade-offs
 
-- **Build complexity**: Requires wasm-pack toolchain
-- **Debugging**: WASM stack traces less readable than JS
-- **Bundle size**: Adds to initial page load
+- Build complexity: Requires wasm-pack toolchain
+- Debugging: WASM stack traces less readable than JS
+- Bundle size: Adds to initial page load
+
+## Changes from Legacy Jazz
+
+Jazz2 is a clean break from [legacy Jazz](https://jazz.tools). Key changes:
+
+| Area | Legacy | New |
+|------|--------|-----|
+| Trust | E2EE by default, untrusted server | Trusted server, E2EE opt-in |
+| Queries | Reactive subscriptions with dependency loading | SQL for queries, server can use indices |
+| Identity | Crypto-first (Agent keypairs required) | Server-authenticated accounts |
+| Permissions | Groups with fixed role hierarchy | ReBAC with SQL-like policies |
+| History | CRDTs replayed on each load | Git-style commit graphs, snapshots |
+| Storage | Platform-specific adapters | Simple KV interface (RocksDB, SQLite, IndexedDB) |
+| Schema | Zod-like runtime schemas | Build-time codegen with migrations |
+
+The goal: keep the local-first DX while simplifying everything else.

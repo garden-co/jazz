@@ -40,7 +40,7 @@ cd examples/demo-app && npm run dev                       # Demo app
 
 Source of truth. Linear references specs, not vice versa.
 
-**Architecture**: [new-jazz-no-context.md](new-jazz-no-context.md), [from-legacy-to-new-jazz.md](from-legacy-to-new-jazz.md)
+**Architecture**: [docs/content/docs/internals/architecture.mdx](docs/content/docs/internals/architecture.mdx)
 
 **Deep dives** in [docs/content/docs/internals/](docs/content/docs/internals/):
 
