@@ -42,10 +42,10 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Check Rust formatting
-        run: cargo fmt --all -- --check
+        run: cargo fmt --all --manifest-path crates/Cargo.toml -- --check
 
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features --manifest-path crates/Cargo.toml -- -D warnings
 
       - name: Run Biome
         run: pnpm lint
@@ -64,12 +64,12 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
-            groove
-            groove-server
-            groove-wasm
+            crates/groove
+            crates/groove-server
+            crates/groove-wasm
 
       - name: Run Rust tests (all features)
-        run: cargo test --all-features --workspace --exclude groove-wasm
+        run: cargo test --all-features --workspace --exclude groove-wasm --manifest-path crates/Cargo.toml
 
   ts-build:
     name: TypeScript Build
@@ -86,7 +86,7 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: groove-wasm
+          workspaces: crates/groove-wasm
 
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
@@ -104,7 +104,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build WASM
-        run: cd groove-wasm && wasm-pack build --target web
+        run: cd crates/groove-wasm && wasm-pack build --target web
 
       - name: Build TypeScript packages
         run: pnpm build
@@ -118,7 +118,7 @@ jobs:
           name: build-artifacts
           path: |
             packages/*/dist
-            groove-wasm/pkg
+            crates/groove-wasm/pkg
           retention-days: 1
 
   ts-lib-tests:
@@ -165,7 +165,7 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: groove-server
+          workspaces: crates/groove-server
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -186,7 +186,7 @@ jobs:
           path: .
 
       - name: Build groove-server
-        run: cargo build --release -p groove-server
+        run: cargo build --release -p groove-server --manifest-path crates/Cargo.toml
 
       - name: Start groove-server
         run: |
@@ -194,17 +194,17 @@ jobs:
           sleep 2
 
       - name: Install Playwright browsers
-        run: cd sync-demo && pnpm exec playwright install --with-deps
+        run: cd examples/sync-demo && pnpm exec playwright install --with-deps
 
       - name: Run sync-demo E2E tests
-        run: cd sync-demo && pnpm test
+        run: cd examples/sync-demo && pnpm test
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: sync-demo-playwright-report
-          path: sync-demo/playwright-report
+          path: examples/sync-demo/playwright-report
           retention-days: 7
 
   demo-app-tests:
@@ -233,21 +233,21 @@ jobs:
           path: .
 
       - name: Generate schema
-        run: cd demo-app && pnpm generate
+        run: cd examples/demo-app && pnpm generate
 
       - name: Install Playwright browsers
-        run: cd demo-app && pnpm exec playwright install --with-deps chromium
+        run: cd examples/demo-app && pnpm exec playwright install --with-deps chromium
 
       - name: Run unit tests
-        run: cd demo-app && pnpm test
+        run: cd examples/demo-app && pnpm test
 
       - name: Run E2E tests
-        run: cd demo-app && pnpm test:e2e
+        run: cd examples/demo-app && pnpm test:e2e
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: demo-app-playwright-report
-          path: demo-app/playwright-report
+          path: examples/demo-app/playwright-report
           retention-days: 7
