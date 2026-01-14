@@ -25,10 +25,11 @@ export default defineConfig({
       reuseExistingServer: !process.env.CI,
     },
     {
-      command: "cargo run -p groove-server -- --port 8080",
+      command:
+        "cargo run -p groove-server --manifest-path crates/Cargo.toml -- --port 8080",
       url: "http://localhost:8080",
       reuseExistingServer: !process.env.CI,
-      cwd: "..",
+      cwd: "../..",
       timeout: 120000, // Rust build can take a while
     },
   ],
