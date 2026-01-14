@@ -23,6 +23,16 @@ Each object maintains a commit graph (similar to git) that tracks all changes:
              D --- E (branch)
 ```
 
+Concurrent edits create multiple tips within a branch:
+
+```
+     A --- B --- C (tip 1)
+            \
+             D (tip 2, concurrent edit)
+```
+
+When tips exist, Jazz automatically merges them using per-column last-writer-wins.
+
 This enables:
 
 - **Branching**: Create experimental changes without affecting the main state

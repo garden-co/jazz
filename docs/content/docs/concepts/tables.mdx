@@ -11,19 +11,19 @@ Tables are defined using Groove's SQL DDL syntax:
 
 ```sql title="schema.sql"
 CREATE TABLE Users (
-    id STRING NOT NULL,
     name STRING NOT NULL,
     email STRING NOT NULL
 );
 
 CREATE TABLE Tasks (
-    id STRING NOT NULL,
     title STRING NOT NULL,
     description STRING,
     completed BOOL NOT NULL,
     user REFERENCES Users NOT NULL
 );
 ```
+
+Note: Each row automatically gets an `id` column (ObjectId, UUIDv7) - you don't need to declare it.
 
 ### Supported Column Types
 
@@ -56,7 +56,7 @@ Unlike traditional databases where the entire table is a single unit, in Jazz:
 - Each row has its own ObjectId (auto-generated UUIDv7)
 - Rows can be synced independently
 - Conflicts are resolved per-row, not per-table
-- Permissions can be set per-row via policies
+- Permissions can be set per-row via [ReBAC policies](/docs/internals/rebac-policies)
 
 ## Generated Client Code
 

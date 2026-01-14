@@ -8,15 +8,24 @@ Jazz synchronizes data automatically across all connected clients and servers. T
 ## Sync Architecture
 
 ```
-┌─────────┐     ┌─────────┐     ┌─────────┐
-│ Client  │ ←─→ │  Sync   │ ←─→ │ Client  │
-│    A    │     │ Server  │     │    B    │
-└─────────┘     └─────────┘     └─────────┘
-                     ↑
-                     ↓
-               ┌─────────┐
-               │ Storage │
-               └─────────┘
+┌─────────────────┐           ┌─────────────────┐
+│    Client A     │           │    Client B     │
+│  ┌───────────┐  │           │  ┌───────────┐  │
+│  │ IndexedDB │  │           │  │ IndexedDB │  │
+│  └───────────┘  │           │  └───────────┘  │
+└────────┬────────┘           └────────┬────────┘
+         │                             │
+         └──────────┬──────────────────┘
+                    ↓
+              ┌───────────┐
+              │   Sync    │
+              │  Server   │
+              └─────┬─────┘
+                    ↓
+              ┌───────────┐
+              │  Storage  │
+              │ (RocksDB) │
+              └───────────┘
 ```
 
 ## How It Works
@@ -28,8 +37,9 @@ Jazz synchronizes data automatically across all connected clients and servers. T
 
 ## Conflict Resolution
 
-When two clients edit the same data concurrently, Jazz uses CRDT-based merge strategies:
+When two clients edit the same row concurrently, Jazz uses per-column last-writer-wins:
 
-- **Last-writer-wins** for simple scalar values
-- **Set union** for collection additions
-- **Custom resolvers** for complex merge logic
+- Each column tracks its last modification timestamp
+- When merging concurrent edits, the most recent value for each column wins
+- Changes to different columns merge cleanly (no conflict)
+- Ties are broken deterministically by commit ID

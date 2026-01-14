@@ -17,8 +17,15 @@ description: Core design principles and system architecture
 
 The fundamental unit, identified by UUIDv7 (Crockford Base32 encoded). Each object has:
 - A commit graph (history as compressed snapshots with parent references)
-- Optional named branches (default: "main")
-- Schema-defined structure
+- Named branches with format `[env]-[schemaVersion]-[userBranch]` (e.g., `prod-01JGXYZ123ABC456DEF789GHIJ@v1-main`)
+
+Objects store different kinds of data:
+- **Rows** - Table data (the primary use case)
+- **Catalog** - Database directory mapping table names to descriptors
+- **Table descriptors** - Schema definitions and access policies
+- **Schemas** - Column type definitions
+- **Indices** - RefIndex for backlink lookups
+- **TableRows** - Sets of row IDs per table
 
 ### Tables and Rows
 
@@ -27,26 +34,24 @@ Primary use case: each object represents a table row.
 - Schema defines tables (SQL CREATE TABLE)
 - Each row is an object with its own commit history
 - References between rows are foreign keys to other objects
-- Fine-grained sync and conflict resolution at row level
+- Sync at object level, per-column LWW conflict resolution
 
 ### Commits
 
 Each commit contains:
-- Snapshot of object state (semantically full, delta-encoded + compressed)
-- Parent reference(s) - typically relative pointers
+- Snapshot of object state (delta-encoded and compressed, see [Compression](/docs/internals/compression))
+- Parent reference(s)
 - Author and timestamp
 
-Commit IDs are content hashes (BLAKE3). Content storage:
-- **Inline** (up to 1KB): Stored directly in commit
-- **Chunked** (above 1KB): Split via FastCDC, stored separately
+Commit IDs are content hashes (BLAKE3). For large binary content, use BLOB columns which handle chunking separately (see [Binary Data & Blobs](/docs/internals/binary-data-and-blobs)).
 
 ### Branches
 
 First-class abstraction on the commit graph:
 - Named branches (like git)
-- Most objects stay on "main" branch
+- Within a schema version, most objects stay on "main"
 - Explicit merge operations when needed
-- Migrations modeled as branching operations
+- Migrations modeled as branching operations (each schema version = new branch)
 
 ## Layer Overview
 
@@ -62,6 +67,10 @@ The `groove` crate provides:
   - See: [Incremental Query System](/docs/internals/incremental-queries)
 - **Storage traits**: Abstract storage for different backends
   - See: [Streaming & Persistence](/docs/internals/streaming-and-persistence)
+- **ReBAC policies**: Relationship-based access control
+  - See: [ReBAC Policies](/docs/internals/rebac-policies)
+- **Sync protocol**: Client-server synchronization
+  - See: [Sync Protocol](/docs/internals/sync-protocol)
 
 ### groove-wasm
 
@@ -92,13 +101,7 @@ React integration:
 1. **Performance**: SQL execution and query computation at native speed
 2. **Shared code**: Same logic runs in browser and on server
 3. **Memory safety**: Rust prevents entire classes of bugs
-4. **Size**: WASM compresses well (~200KB gzipped)
-
-### Trade-offs
-
-- Build complexity: Requires wasm-pack toolchain
-- Debugging: WASM stack traces less readable than JS
-- Bundle size: Adds to initial page load
+4. **Size**: WASM compresses well (see [WASM Optimization](/docs/internals/wasm-optimization))
 
 ## Changes from Legacy Jazz
 

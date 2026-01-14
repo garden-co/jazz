@@ -37,7 +37,7 @@ const orders = await db.collection('orders')
 
 ## Conflict Resolution
 
-**Jazz**: CRDT-based automatic merge with configurable strategies per field.
+**Jazz**: Per-column last-writer-wins. Changes to different columns merge cleanly.
 
 **Firebase**: Last-writer-wins at document level. Transactions for atomic updates but require network.
 

@@ -16,6 +16,8 @@
     "---Future---",
     "sorted-chunk-indices",
     "multi-row-transactions",
-    "external-data-migrations"
+    "external-data-migrations",
+    "compression",
+    "wasm-optimization"
   ]
 }

@@ -46,18 +46,17 @@ Client A                    Sync Server                  Client B
 
 When commits have different parents (concurrent edits):
 
-1. **Detect**: Commit has multiple parents after merge
-2. **Auto-resolve**: Use CRDT merge strategies
-3. **Manual resolve**: For conflicts that can't be auto-merged
+1. **Detect**: Branch has multiple frontier commits (tips)
+2. **Auto-resolve**: Per-column last-writer-wins merge
+3. **Result**: Merged commit with values from highest-timestamp per column
 
-## CRDT Strategies
+## Merge Strategy
 
-| Data Type | Strategy |
-|-----------|----------|
-| Scalars | Last-writer-wins (by timestamp) |
-| Sets | Union of additions, intersection of deletions |
-| Counters | Sum of increments/decrements |
-| Text | Operational transformation |
+| Scenario | Resolution |
+|----------|------------|
+| Same column edited | Higher timestamp wins |
+| Different columns edited | Both changes kept |
+| Timestamp tie | Lexicographically higher CommitId wins |
 
 ## Wire Protocol
 
