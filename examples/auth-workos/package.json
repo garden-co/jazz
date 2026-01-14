@@ -1,0 +1,27 @@
+{
+  "name": "auth-workos-demo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@jazz/client": "workspace:*",
+    "@jazz/react": "workspace:*",
+    "@workos-inc/authkit-js": "^0.10.0",
+    "groove-wasm": "workspace:*",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.2.0",
+    "typescript": "^5.9.3",
+    "vite": "^5.0.0",
+    "vite-plugin-top-level-await": "^1.4.0",
+    "vite-plugin-wasm": "^3.3.0"
+  }
+}
