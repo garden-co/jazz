@@ -1,0 +1,114 @@
+---
+title: Mutations
+description: Creating, updating, and deleting data
+---
+
+Jazz mutations apply instantly to local state. Changes sync to the server and other clients in the background.
+
+## Creating Data
+
+Use the generated `create` method:
+
+```typescript
+import { app } from './generated/client';
+import { useJazz } from '@jazz/react';
+
+function CreateTask() {
+  const db = useJazz();
+
+  const handleCreate = () => {
+    app.tasks.create(db, {
+      title: "Buy groceries",
+      completed: false
+    });
+  };
+
+  return <button onClick={handleCreate}>Add Task</button>;
+}
+```
+
+The `create` method returns the new row's `ObjectId`:
+
+```typescript
+const taskId = app.tasks.create(db, { title: "New task", completed: false });
+console.log(taskId); // "01JGXYZ123ABC456DEF789GHIJ"
+```
+
+## Updating Data
+
+Use the `update` method with a row ID:
+
+```typescript
+function ToggleTask({ taskId }: { taskId: string }) {
+  const db = useJazz();
+  const [task] = useOne(app.tasks, taskId);
+
+  const handleToggle = () => {
+    app.tasks.update(db, taskId, {
+      completed: !task?.completed
+    });
+  };
+
+  return (
+    <label>
+      <input type="checkbox" checked={task?.completed} onChange={handleToggle} />
+      {task?.title}
+    </label>
+  );
+}
+```
+
+Updates are partial - only include the fields you want to change.
+
+## Deleting Data
+
+Use the `delete` method:
+
+```typescript
+function DeleteTask({ taskId }: { taskId: string }) {
+  const db = useJazz();
+
+  const handleDelete = () => {
+    app.tasks.delete(db, taskId);
+  };
+
+  return <button onClick={handleDelete}>Delete</button>;
+}
+```
+
+Deletes are "soft" by default - the row is marked as deleted but its history is preserved. This allows undo and sync consistency.
+
+## Instant Updates
+
+All mutations apply instantly to local state:
+
+```typescript
+// This is synchronous - no await needed
+app.tasks.create(db, { title: "Task 1", completed: false });
+app.tasks.create(db, { title: "Task 2", completed: false });
+
+// Both tasks are already in local state
+// UI updates immediately via subscriptions
+```
+
+The sync server receives changes in the background. If you're offline, changes queue locally and sync when you reconnect.
+
+## With References
+
+When a column is a `REFERENCES`, you can pass either an ObjectId string or the full object:
+
+```typescript
+// By ID
+app.tasks.create(db, {
+  title: "Review PR",
+  completed: false,
+  assignee: "01JGXYZ123ABC456DEF789GHIJ"
+});
+
+// Or with a user object
+app.tasks.create(db, {
+  title: "Review PR",
+  completed: false,
+  assignee: currentUser.id
+});
+```

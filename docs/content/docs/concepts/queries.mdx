@@ -1,77 +1,118 @@
 ---
-title: Incremental Queries
-description: Efficient reactive queries that update incrementally
+title: Queries
+description: Reading data with reactive subscriptions
 ---
 
-Jazz queries are not just one-time operations—they're live computation graphs that update efficiently when underlying data changes.
+Jazz queries are live subscriptions that update automatically when data changes. You subscribe once, and your UI stays in sync.
 
-## How Incremental Queries Work
+## Basic Queries
 
-Traditional approach:
-```
-Data changes → Re-run entire query → New result
-```
+Use `useAll` to subscribe to multiple rows:
 
-Jazz approach:
-```
-Data changes → Propagate delta through graph → Update only affected parts
-```
+```typescript
+import { useAll } from '@jazz/react';
+import { app } from './generated/client';
 
-## Query Subscriptions
+function TaskList() {
+  const [tasks, loading] = useAll(app.tasks);
 
-When you subscribe to a query, Jazz:
+  if (loading) return <div>Loading...</div>;
 
-1. Executes the query and returns initial results
-2. Tracks which rows contributed to the result
-3. When those rows change, recomputes only affected parts
-4. Pushes updated results to your callback
-
-## Example
-
-<include>../../../examples/react/src/components/IncrementalQuery.tsx#incremental-query-hook</include>
-
-Usage in a component:
-
-<include>../../../examples/react/src/components/IncrementalQuery.tsx#incremental-query-component</include>
-
-## Query Graph
-
-Jazz builds a computation graph for each query:
-
-```
-TableScan(tasks) → Filter(isCompleted=false) → Output
+  return (
+    <ul>
+      {tasks.map(task => (
+        <li key={task.id}>{task.title}</li>
+      ))}
+    </ul>
+  );
+}
 ```
 
-When a task row changes:
-- If it now matches the filter → add to results
-- If it no longer matches → remove from results
-- If other fields changed → update in place
+Use `useOne` to subscribe to a single row by ID:
 
-## Performance Benefits
+```typescript
+import { useOne } from '@jazz/react';
 
-For a query joining 1000 users with 10000 tasks:
+function TaskDetail({ taskId }: { taskId: string }) {
+  const [task, loading] = useOne(app.tasks, taskId);
 
-| Approach | Time on single row update |
-|----------|--------------------------|
-| Re-run full query | ~100ms |
-| Incremental update | ~0.1ms |
+  if (loading) return <div>Loading...</div>;
+  if (!task) return <div>Not found</div>;
 
-The incremental approach scales to large datasets because it only processes the changed row(s), not the entire result set.
+  return <h1>{task.title}</h1>;
+}
+```
 
-## Supported Query Operations
+## Filtering
 
-The query graph currently supports:
+Use `where` to filter results:
 
-- **Filtering**: Equality conditions on columns
-- **Joins**: Inner joins via foreign key references
-- **Eager loading**: `ARRAY(SELECT ...)` subqueries for loading related data (`with()` is syntactic sugar)
-- **Pagination**: LIMIT and OFFSET
+```typescript
+// All incomplete tasks
+const [tasks] = useAll(app.tasks.where({ completed: false }));
 
-### Not Yet Implemented
+// Tasks assigned to a specific user
+const [myTasks] = useAll(app.tasks.where({ assignee: userId }));
+```
+
+Currently supported: equality filters (`=`, `!=`). Range operators coming soon.
+
+## Including Related Data
+
+Use `with` to eagerly load related rows:
+
+```typescript
+// Load tasks with their assignee
+const [tasks] = useAll(
+  app.tasks.with({ assignee: true })
+);
+
+// Now task.assignee is a full User object, not just an ID
+tasks.map(task => (
+  <li key={task.id}>
+    {task.title} - {task.assignee?.name}
+  </li>
+));
+```
+
+You can chain `where` and `with`:
+
+```typescript
+const [tasks] = useAll(
+  app.tasks
+    .where({ completed: false })
+    .with({ assignee: true })
+);
+```
+
+## How It Works
+
+When you call `useAll` or `useOne`:
+
+1. Jazz executes the query against local data
+2. Returns results immediately (or loading state if not yet loaded)
+3. Subscribes to changes affecting the query
+4. Re-renders your component when results change
+
+This is different from traditional "fetch on mount" patterns. Your query stays live for as long as the component is mounted.
+
+## Incremental Updates
+
+Jazz doesn't re-run the entire query when data changes. Instead, it tracks which rows contribute to your results and updates incrementally:
+
+- Row added that matches filter → add to results
+- Row updated, no longer matches → remove from results
+- Row updated, still matches → update in place
+
+This makes large result sets efficient - only the delta is processed.
+
+## Not Yet Implemented
 
 The following SQL features are not yet available:
 
-- ORDER BY (results are ordered by ObjectId/insertion time)
-- Aggregate functions (COUNT, SUM, AVG, MIN, MAX)
-- GROUP BY and HAVING
+- ORDER BY (results ordered by creation time)
+- Aggregate functions (COUNT, SUM, etc.)
+- GROUP BY
 - LEFT/RIGHT/OUTER JOINs
+
+See [Queries spec](/docs/internals/queries) for implementation details.

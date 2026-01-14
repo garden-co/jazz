@@ -18,22 +18,23 @@ Firebase is a popular backend-as-a-service with real-time capabilities. Here's h
 
 **Jazz**:
 ```sql
-SELECT u.name, COUNT(o.id) as order_count
-FROM users u
-LEFT JOIN orders o ON u.id = o.user_id
-WHERE o.created_at > date('now', '-30 days')
-GROUP BY u.id
+-- Join users with their tasks
+SELECT users.*, tasks.*
+FROM tasks
+JOIN users ON tasks.assignee = users.id
+WHERE tasks.completed = false
 ```
 
 **Firebase**:
 ```javascript
 // Can't do JOINs - must denormalize or make multiple queries
-const users = await db.collection('users').get();
-const orders = await db.collection('orders')
-  .where('createdAt', '>', thirtyDaysAgo)
+const tasks = await db.collection('tasks')
+  .where('completed', '==', false)
   .get();
-// Manual aggregation in client code...
+// Then fetch each user separately, or denormalize user data into tasks
 ```
+
+Note: Jazz currently supports INNER JOINs. LEFT/RIGHT/OUTER JOINs and aggregates (COUNT, GROUP BY) are not yet implemented.
 
 ## Conflict Resolution
 

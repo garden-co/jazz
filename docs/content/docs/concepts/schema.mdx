@@ -1,0 +1,88 @@
+---
+title: Schema
+description: Defining tables with SQL
+---
+
+Jazz uses SQL to define your database schema. Tables are defined with `CREATE TABLE`, and relationships use `REFERENCES`.
+
+## Defining Tables
+
+```sql
+CREATE TABLE Tasks (
+    title STRING NOT NULL,
+    completed BOOL NOT NULL
+);
+```
+
+Every table automatically gets an `id` column - a unique identifier (UUIDv7) that you don't need to declare.
+
+## Column Types
+
+| Type | Description |
+|------|-------------|
+| `BOOL` | Boolean (true/false) |
+| `I64` | 64-bit signed integer |
+| `F64` | 64-bit floating point |
+| `STRING` | UTF-8 text |
+| `BYTES` | Binary data |
+| `BLOB` | Large binary data (streamed) |
+| `BLOB[]` | Array of blobs |
+| `REFERENCES TableName` | Foreign key to another table |
+
+## Nullability
+
+Columns are nullable by default. Use `NOT NULL` to require a value:
+
+```sql
+CREATE TABLE Tasks (
+    title STRING NOT NULL,      -- Required
+    description STRING,         -- Optional (nullable)
+    completed BOOL NOT NULL
+);
+```
+
+## Relationships
+
+Use `REFERENCES` to create foreign keys:
+
+```sql
+CREATE TABLE Users (
+    name STRING NOT NULL,
+    email STRING NOT NULL
+);
+
+CREATE TABLE Tasks (
+    title STRING NOT NULL,
+    completed BOOL NOT NULL,
+    assignee REFERENCES Users    -- Foreign key to Users table
+);
+```
+
+## Generated Types
+
+After defining your schema, run the code generator to create TypeScript types:
+
+```bash
+npx jazz-schema generate schema.sql -o src/generated
+```
+
+This generates type-safe interfaces:
+
+```typescript
+interface Task {
+  id: string;           // Auto-generated ObjectId
+  title: string;
+  completed: boolean;
+  assignee: string | null;  // ObjectId reference to User
+}
+```
+
+## Row-Level Versioning
+
+Unlike traditional databases, each row in Jazz is a separate "Object" with its own commit history. This means:
+
+- Rows sync independently
+- Each row can have different permissions
+- Conflicts are resolved per-row, not per-table
+
+For more on how this works, see [Sync](/docs/concepts/sync).

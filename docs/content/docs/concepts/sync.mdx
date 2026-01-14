@@ -1,11 +1,11 @@
 ---
 title: Sync
-description: How Jazz synchronizes data across clients and servers
+description: How Jazz synchronizes data
 ---
 
-Jazz synchronizes data automatically across all connected clients and servers. This page explains how sync works.
+Jazz syncs data automatically between clients and servers. You don't need to manage API calls or handle network state.
 
-## Sync Architecture
+## Architecture
 
 ```
 ┌─────────────────┐           ┌─────────────────┐
@@ -20,26 +20,85 @@ Jazz synchronizes data automatically across all connected clients and servers. T
               ┌───────────┐
               │   Sync    │
               │  Server   │
-              └─────┬─────┘
-                    ↓
-              ┌───────────┐
-              │  Storage  │
-              │ (RocksDB) │
               └───────────┘
 ```
 
-## How It Works
+Each client has a local database (IndexedDB in browsers). The sync server relays changes between clients.
 
-1. **Local mutations** are applied immediately to local state
-2. **Commits** are created for each mutation
-3. **Sync server** receives commits and broadcasts to other clients
-4. **Merge** occurs automatically when concurrent commits are received
+## How Sync Works
+
+1. **Mutations apply locally** - Changes are written to local storage instantly
+2. **Commits are created** - Each mutation becomes a commit in the row's history
+3. **Server receives commits** - Commits are sent to the sync server
+4. **Server broadcasts** - Other clients receive the commits
+5. **Clients merge** - Incoming commits are merged into local state
+
+## Offline Support
+
+Jazz works fully offline:
+
+- All data is in local storage
+- Mutations apply immediately
+- Changes queue until you're back online
+- Sync resumes automatically when reconnected
+
+There's no "offline mode" - it's just how Jazz works.
 
 ## Conflict Resolution
 
-When two clients edit the same row concurrently, Jazz uses per-column last-writer-wins:
+When two clients edit the same row concurrently:
 
-- Each column tracks its last modification timestamp
-- When merging concurrent edits, the most recent value for each column wins
-- Changes to different columns merge cleanly (no conflict)
-- Ties are broken deterministically by commit ID
+```
+Client A: title = "Meeting" → title = "Team Meeting"
+Client B: title = "Meeting" → completed = true
+```
+
+Jazz resolves conflicts per-column:
+
+1. Each column tracks when it was last modified
+2. On merge, the newest value for each column wins
+3. In this case: title = "Team Meeting", completed = true
+
+Both changes are preserved because they touched different columns.
+
+### Same Column Conflicts
+
+When both clients edit the same column:
+
+```
+Client A: title = "Team Meeting"    (timestamp: T1)
+Client B: title = "Standup Meeting" (timestamp: T2, where T2 > T1)
+```
+
+The higher timestamp wins. Client B's title is kept.
+
+Ties (same timestamp) are broken by commit ID for deterministic results.
+
+## What Syncs
+
+Jazz syncs at the **row level**, not the table level:
+
+- Only changed rows are sent over the network
+- Each row has its own commit history
+- Clients can subscribe to specific rows or queries
+
+This makes sync efficient - you don't download entire tables.
+
+## Sync Server
+
+The sync server is a relay, not a primary database. It:
+
+- Receives commits from clients
+- Stores commits for history and offline clients
+- Broadcasts commits to connected clients
+- Does NOT validate or transform data
+
+Business logic runs on clients. The server is just infrastructure.
+
+## Current Limitations
+
+- No reconnection with exponential backoff (coming soon)
+- No bandwidth optimization for large objects
+- No query-based subscriptions (sync all matching rows)
+
+See [Sync spec](/docs/internals/sync) for protocol details.
