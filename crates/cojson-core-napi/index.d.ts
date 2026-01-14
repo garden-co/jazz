@@ -10,9 +10,24 @@ export declare class Blake3Hasher {
 export declare class SessionLog {
   constructor(coId: string, sessionId: string, signerId?: string | undefined | null)
   clone(): SessionLog
-  tryAdd(transactionsJson: Array<string>, newSignatureStr: string, skipVerify: boolean): void
   addNewPrivateTransaction(changesJson: string, signerSecret: string, encryptionKey: string, keyId: string, madeAt: number, meta?: string | undefined | null): string
   addNewTrustingTransaction(changesJson: string, signerSecret: string, madeAt: number, meta?: string | undefined | null): string
+  /**
+   * Add an existing private transaction to the staging area.
+   * The transaction is NOT committed until validateSignature() succeeds.
+   */
+  addExistingPrivateTransaction(encryptedChanges: string, keyUsed: string, madeAt: bigint, meta?: string | undefined | null): void
+  /**
+   * Add an existing trusting transaction to the staging area.
+   * The transaction is NOT committed until validateSignature() succeeds.
+   */
+  addExistingTrustingTransaction(changes: string, madeAt: bigint, meta?: string | undefined | null): void
+  /**
+   * Commit pending transactions to the main state.
+   * If skip_validate is false, validates the signature first.
+   * If skip_validate is true, commits without validation.
+   */
+  commitTransactions(newSignatureStr: string, skipValidate: boolean): void
   decryptNextTransactionChangesJson(txIndex: number, encryptionKey: string): string
   decryptNextTransactionMetaJson(txIndex: number, encryptionKey: string): string | null
 }

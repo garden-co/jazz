@@ -3,7 +3,10 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@scure/base": "^1.2.1",
     "cojson": "workspace:*",
+    "cojson-core-napi": "workspace:*",
+    "cojson-core-wasm": "workspace:*",
     "cronometro": "^5.3.0",
     "jazz-tools": "workspace:*",
     "vitest": "catalog:default"
