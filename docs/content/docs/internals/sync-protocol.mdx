@@ -1,9 +1,63 @@
 ---
 title: Sync Protocol
-description: How Jazz synchronizes data between clients
+description: How Jazz synchronizes data between clients and server
+status: partial
+implements:
+  - groove/src/sync/protocol.rs
+  - groove/src/sync/client.rs
+  - groove/src/sync/server.rs
+  - groove-server/src/lib.rs
+  - groove-wasm/src/sync.rs
 ---
 
-Jazz uses a commit-based sync protocol inspired by git.
+<StatusBadge status="partial" />
+
+Jazz uses a commit-based sync protocol inspired by git. Each object has its own commit graph that syncs independently.
+
+## Implementation Status
+
+**Implemented:**
+- Protocol types: `SubscribeRequest`, `PushRequest`, `SseEvent`, etc.
+- Binary serialization for all message types
+- Negotiation logic: frontier comparison, commit discovery
+- `SyncClient<E: ClientEnv>` - generic client with transport abstraction
+- `SyncServer<E: ServerEnv>` - server-side sync logic
+- HTTP handlers: `/sync/subscribe`, `/sync/push`, `/sync/unsubscribe`, `/sync/reconcile`
+- SSE streaming with keep-alive
+- IndexedDB persistence for browser (groove-wasm)
+- `SyncStateStore` for persistent unsynced object tracking
+
+**Not yet implemented:**
+- Query result tracking with multi-query reference counting
+- Reactive query updates when row changes affect results
+- Reconnection handling with exponential backoff
+- Push all unsynced objects on reconnect
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      groove crate                           │
+│  ┌─────────────────┐  ┌─────────────────┐                  │
+│  │   SyncClient<E> │  │  SyncServer<E>  │                  │
+│  │  (sync logic)   │  │  (sync logic)   │                  │
+│  └────────┬────────┘  └────────┬────────┘                  │
+│           │                    │                            │
+│  ┌────────▼────────┐  ┌────────▼────────┐                  │
+│  │   ClientEnv     │  │   ServerEnv     │  (traits)        │
+│  │   (trait)       │  │   (trait)       │                  │
+│  └─────────────────┘  └─────────────────┘                  │
+└─────────────────────────────────────────────────────────────┘
+           │                      │
+           ▼                      ▼
+┌─────────────────────┐  ┌─────────────────────┐
+│   groove-wasm       │  │   groove-server     │
+│  ┌───────────────┐  │  │  ┌───────────────┐  │
+│  │ WasmClientEnv │  │  │  │ AxumServerEnv │  │
+│  │ (fetch + SSE) │  │  │  │ (axum HTTP)   │  │
+│  └───────────────┘  │  └───────────────────┘ │
+└─────────────────────┘  └─────────────────────┘
+```
 
 ## Overview
 
@@ -11,7 +65,18 @@ Each object in Jazz has a commit graph. Sync involves:
 
 1. **Exchanging commit hashes**: What commits do we each have?
 2. **Sending missing commits**: Ship commits the other side lacks
-3. **Merging**: Combine concurrent changes
+3. **Merging**: Combine concurrent changes using per-column LWW
+
+## Transport
+
+Sync uses HTTP POST + Server-Sent Events (SSE):
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/sync/subscribe` | POST | Subscribe to objects, returns SSE stream |
+| `/sync/push` | POST | Push local commits to server |
+| `/sync/unsubscribe` | POST | Unsubscribe from objects |
+| `/sync/reconcile` | POST | Reconcile frontiers after reconnect |
 
 ## Commit Structure
 
@@ -27,18 +92,22 @@ Each object in Jazz has a commit graph. Sync involves:
 └─────────────────────────────┘
 ```
 
-## Sync Algorithm
+## Sync Flow
 
 ```
-Client A                    Sync Server                  Client B
+Client                      Sync Server                  Other Clients
+   │                             │                           │
+   │ ── Subscribe (object_ids) ─►│                           │
+   │                             │                           │
+   │ ◄── SSE: Initial state ──── │                           │
    │                             │                           │
    │ ── Push commits ──────────► │                           │
    │                             │                           │
-   │                             │ ── Broadcast ───────────► │
+   │                             │ ── SSE: Broadcast ──────► │
    │                             │                           │
    │                             │ ◄── Push commits ──────── │
    │                             │                           │
-   │ ◄── Broadcast ────────────  │                           │
+   │ ◄── SSE: Broadcast ──────── │                           │
    │                             │                           │
 ```
 
@@ -58,10 +127,28 @@ When commits have different parents (concurrent edits):
 | Different columns edited | Both changes kept |
 | Timestamp tie | Lexicographically higher CommitId wins |
 
-## Wire Protocol
+## Files
 
-Sync uses a binary protocol over WebSocket:
+**Core protocol** (`groove/src/sync/`):
+- `env.rs` - ClientEnv, ServerEnv traits
+- `client.rs` - SyncClient implementation
+- `server.rs` - SyncServer implementation
+- `protocol.rs` - Wire protocol types
 
-- Message framing with length prefix
-- Efficient commit serialization
-- Compression for large payloads
+**Server** (`groove-server/src/`):
+- Axum HTTP server with SSE streaming
+- Session management
+
+**Client** (`groove-wasm/src/`):
+- `sync.rs` - WasmClientEnv using fetch/EventSource
+
+## Open Questions
+
+1. **Reconnection strategy**: Exponential backoff with jitter? How to handle long disconnects?
+2. **Query result tracking**: Reference counting for multi-query subscriptions
+3. **Bandwidth optimization**: Delta compression for large objects?
+
+## Related
+
+- [GCO-1044](https://linear.app/garden-co/issue/GCO-1044) - Implementation tracking
+- [GCO-1045](https://linear.app/garden-co/issue/GCO-1045) - Sync scenario tests

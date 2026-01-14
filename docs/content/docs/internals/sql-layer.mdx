@@ -530,13 +530,19 @@ pub enum ExecuteResult {
 
 ## Open Questions
 
-1. **Schema changes**: Future work - how to handle adding/removing/modifying columns?
+1. **Schema changes**: See [Migration System](/docs/internals/migration-system) for lens-based schema evolution.
 
-2. **Composite indexes**: Future work - indexes on multiple columns?
+2. **Composite indexes**: Indexes on multiple columns?
 
 3. **Additional operators**: Currently `=` and `!=` are supported. Future: `<`, `>`, `<=`, `>=`, `LIKE`, `IN`
 
 4. **ORDER BY**: Not yet implemented (LIMIT/OFFSET are implemented).
+
+5. **Enum support (GCO-1067)**: Add enum column types without Postgres-style mutation complexity. Options: inline definitions in CREATE TABLE, or separate CREATE TYPE with easier mutation.
+
+6. **Column selection (GCO-1079)**: Support `SELECT col1, col2` instead of always `SELECT *`. Would use a Projection node before Output.
+
+7. **History API (GCO-1059)**: Expose commit graph metadata through virtual columns (`_commit_id`, `_author`, `_timestamp`, `_deleted`) and special filters (`WHERE _as_of = '...'`).
 
 ## Implementation Notes
 

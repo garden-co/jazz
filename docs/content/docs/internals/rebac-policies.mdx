@@ -316,9 +316,12 @@ CREATE POLICY ON documents FOR UPDATE
 - UPDATE policy evaluation (WHERE + CHECK)
 - DELETE policy evaluation (falls back to UPDATE)
 
-### Phase 4: Query Integration (not started)
-- Combine policy predicates with user queries
-- Integrate with incremental query graph builder
+### Phase 4: Query Integration ✓
+- `policy_expr_to_predicate` converts simple policies to Predicate for efficient filtering
+- INHERITS flattened to JOINs for true incremental evaluation
+- RecursiveFilter for self-referential INHERITS (e.g., folder→parent_folder→...→root)
+- Nested INHERITS chains of arbitrary depth via chained JOINs
+- Integration with incremental query graph builder (`incremental_query_as` method)
 
 ### Phase 5: Testing and Debugging (partial)
 - `check_select()`, `check_insert()`, `check_update()`, `check_delete()` APIs ✓
@@ -326,3 +329,11 @@ CREATE POLICY ON documents FOR UPDATE
 
 ### Phase 6: SQL Parser (not started)
 - `CREATE POLICY` SQL syntax parsing
+
+## Open Questions
+
+### Identity: @viewer Binding (GCO-1052)
+How to extract authenticated user ID from context and make it available in policy expressions?
+
+### Server-Authenticated Accounts (GCO-1051)
+Account creation, authentication flow, and session handling.

@@ -8,6 +8,7 @@
     "incremental-queries",
     "streaming-and-persistence",
     "sync-protocol",
+    "migration-system",
     "---Features---",
     "array-subquery",
     "binary-data-and-blobs",

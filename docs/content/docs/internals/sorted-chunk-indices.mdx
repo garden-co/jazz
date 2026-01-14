@@ -222,3 +222,10 @@ Store additional column values in index entries to avoid row lookups.
 2. **Cache eviction policy**: LRU? LFU? Workload-dependent?
 3. **Concurrent modifications**: How to handle multiple writers to the same chunk?
 4. **Transaction integration**: How do chunk updates participate in multi-row transactions?
+5. **Auto-truncate index objects (GCO-1061)**: Indexes only care about current state. Should we always truncate on update?
+6. **Index optimization beyond brute-force (GCO-1056)**: B-tree, LSM-tree, partial indexes, index-only scans.
+
+## Related
+
+- [GCO-1062](https://linear.app/garden-co/issue/GCO-1062) - Design discussion
+- [GCO-1056](https://linear.app/garden-co/issue/GCO-1056) - Index optimization tracking

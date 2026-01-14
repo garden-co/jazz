@@ -225,3 +225,4 @@ Latency: ~10-50ms
 1. **Conflict granularity**: Row-level vs column-level?
 2. **Read-only transactions**: Skip validation entirely?
 3. **Deadlock handling**: Detection vs prevention?
+4. **Index updates in transactions (GCO-1063)**: Index chunk updates should be buffered during transaction and applied atomically on commit.

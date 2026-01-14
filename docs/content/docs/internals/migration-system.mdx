@@ -1,0 +1,126 @@
+---
+title: Migration System
+description: Schema evolution with content-addressed descriptors and bidirectional lenses
+status: implemented
+implements:
+  - groove/src/sql/lens.rs
+  - groove/src/sql/catalog.rs
+  - groove/src/branch.rs
+---
+
+<StatusBadge status="implemented" />
+
+The migration system enables schema evolution while preserving data and supporting gradual rollouts across distributed clients.
+
+## Implementation Status
+
+**Implemented:**
+- Descriptors with parent pointers (using ObjectId)
+- Lens data structure (Rename, Add, Remove, Transform)
+- Schema diff to lens generation
+- Schema-aware branch naming
+- Lens application on rows
+- Server-side migration execution
+- Query evaluation with lens context
+- Client-side lens application (WASM)
+- Centralized catalogue and access control
+
+**Not yet implemented:**
+- Client-side schema experimentation (DX improvement)
+- Migration rollback flow
+- Centralized catalog UI
+
+## Core Concepts
+
+### Branch Naming
+
+Branches encode environment and schema version:
+
+```
+[env]-[schemaVersion]-[userBranch]
+```
+
+- **schemaVersion**: Full DescriptorId (26-char Crockford Base32 ObjectId)
+- **Example**: `prod-01JGXYZ123ABC456DEF789GHIJ@v1-main`
+
+Rows have branches per environment and schema version. Migrations fork branches (v2 branches fork from v1, preserving history).
+
+### Descriptors
+
+Descriptors use regular ObjectIds (not content-addressed hashes):
+- Server is authoritative for schemas
+- Schema deduplication unlikely to matter in practice
+- Parent pointer DAG provides versioning semantics
+- Makes schemas "just objects" like everything else
+
+### Bidirectional Lenses
+
+Lenses are auto-generated from schema diffs as SQL transforms:
+
+```rust
+enum Lens {
+    Rename { from: String, to: String },
+    Add { column: String, default: SqlExpr },
+    Remove { column: String },
+    Transform { column: String, expr: SqlExpr },
+}
+```
+
+- Auto-generated from schema diff
+- "Ignore row" default when transform impossible
+- SQL expressions for custom cases
+
+### Migration Execution
+
+1. Developer defines migration, deploys via CLI (`jazz migrate push`)
+2. Server executes eagerly (transforms all data on deploy)
+3. Clients execute locally on unsynced data
+4. Server rejects unknown branches with exponential backoff until schema deployed
+
+## Sync Behavior
+
+- Server applies lenses for query evaluation (filtering, index lookup)
+- Server syncs raw rows as-is (preserves source of truth)
+- Clients apply lenses locally
+
+## Multi-Schema Rows
+
+Rows can exist on multiple schema branches independently:
+- Writer clients create explicit merge commits (cross-branch parents)
+- Read-only clients preview merge
+- Per-column merge strategy (defined in schema, LWW default)
+
+## Server Architecture
+
+| Mode | Description |
+|------|-------------|
+| Standalone | Single app, one catalogue |
+| Jazz Cloud | Multi-tenant with namespace separation + per-tenant encryption |
+
+1:1 relationship between app and catalogue. Environments (dev/staging/prod) are internal to catalogue via branch namespacing.
+
+## CLI
+
+```bash
+jazz migrate status <table>              # Show current schema from server
+jazz migrate diff <table> -f schema.sql  # Preview schema changes
+jazz migrate push <table> -f schema.sql  # Deploy migration
+```
+
+## Files
+
+- `groove/src/sql/lens.rs` - Lens types, diff, application (~1200 lines)
+- `groove/src/sql/catalog.rs` - Descriptors with ObjectId
+- `groove/src/branch.rs` - Schema-aware branch naming
+- `groove-cli/` - Rust CLI for migrations
+
+## Open Questions
+
+1. **Client-side schema experimentation**: How to enable DX improvements for local schema iteration?
+2. **Migration rollback**: What's the rollback flow when a migration causes issues?
+3. **Jazz Cloud multi-tenancy**: Detailed design for namespace separation and encryption
+4. **Performance**: Indexing strategies for lensed queries
+
+## Related
+
+- [GCO-1083](https://linear.app/garden-co/issue/GCO-1083) - Implementation tracking

@@ -382,5 +382,53 @@ Use RefIndex for efficient starting points instead of table scans.
 
 ### Related Linear Issues
 
-- [GCO-1086](https://linear.app/garden-co/issue/GCO-1086) - Query graph architecture improvements
-- [GCO-1083](https://linear.app/garden-co/issue/GCO-1083) - Migration system with lens integration
+- [GCO-1086](https://linear.app/garden-co/issue/GCO-1086) - Query graph DAG routing (done)
+- [GCO-1035-1037](https://linear.app/garden-co/issue/GCO-1035) - Implementation phases (done)
+
+## Open Questions
+
+### Streaming Join Architecture (GCO-1080)
+
+Current streaming join approach has tradeoffs:
+
+**Memory Overhead:**
+- `right_index` stores ALL right rows in memory, not just those needed
+- `left_index` stores pending left rows waiting for matches
+- Previous approach only looked up what was needed on-demand
+
+**Initialization Order:**
+- Right tables MUST be loaded before left tables
+- Graph structure must be correct for multi-hop chains
+
+**Potential Improvements:**
+1. Lazy right_index loading (only load referenced rows)
+2. Index eviction for old entries
+3. Index consolidation (merge `reverse_index` and `right_index`)
+
+### Projection Nodes (GCO-1072)
+
+Should we add explicit Projection nodes for:
+- Column aliasing in joins
+- User-specified column selection (`SELECT col1, col2`)
+- De-aliasing after joins
+
+### SQL → Query Graph Refactoring (GCO-1065)
+
+Key pain points in current translation:
+- Forward/reverse JOIN asymmetry
+- Ad-hoc table alias handling
+- String-encoded metadata (qualified columns, join direction)
+- Implicit state during node evaluation
+
+Future redesign should consider:
+- Explicit join direction types
+- Schema-aware nodes
+- Centralized table/alias resolution
+- Typed column references
+
+### One-Shot vs Incremental Consolidation (GCO-1076)
+
+Should we eliminate one-shot query APIs entirely?
+- Dual implementations cause test coverage gaps
+- Could use `once()` helper that subscribes, gets first update, unsubscribes
+- Simplifies codebase but may have performance implications for simple queries
