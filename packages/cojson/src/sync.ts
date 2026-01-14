@@ -1077,8 +1077,7 @@ export class SyncManager {
   private trackSyncState(coValueId: RawCoID): void {
     const peers = this.getPersistentServerPeers(coValueId);
 
-    const isSyncRequired = this.local.syncWhen !== "never";
-    if (isSyncRequired && peers.length === 0) {
+    if (this.isSyncRequired && peers.length === 0) {
       this.unsyncedTracker.add(coValueId);
 
       // Mark CoValue as synced once a persistent server peer is added and
@@ -1148,7 +1147,15 @@ export class SyncManager {
    * Returns true if the local CoValue changes have been synced to all persistent server peers
    */
   isSyncedToServerPeers(id: RawCoID): boolean {
-    return !this.unsyncedTracker.has(id);
+    const peers = this.getPersistentServerPeers(id);
+    if (this.isSyncRequired && peers.length === 0) {
+      return false;
+    }
+    return peers.every((peer) => this.syncState.isSynced(peer, id));
+  }
+
+  private get isSyncRequired(): boolean {
+    return this.local.syncWhen !== "never";
   }
 
   waitForSyncWithPeer(peerId: PeerID, id: RawCoID, timeout: number) {
