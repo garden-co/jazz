@@ -7,28 +7,23 @@ test('login & reload', async ({ page }) => {
 
   await page.getByRole('button', { name: 'Sign in' }).click();
 
-  await page
-    .getByRole('textbox', { name: 'Email address' })
-    .fill('joe+clerk-test@garden.co');
+  await page.getByRole('textbox', { name: 'Email address' }).fill('joe+clerk-test@garden.co');
 
   await page.keyboard.press('Enter');
 
-  await page
-    .getByRole('textbox', { name: 'Password' })
-    .fill('joe+clerk-test@garden.co');
+  await page.getByRole('textbox', { name: 'Password' }).fill('joe+clerk-test@garden.co');
 
   await page.keyboard.press('Enter');
 
   await page.waitForURL('/');
 
-  await page.getByText("You're logged in").waitFor({ state: 'visible' });
+  await page.getByText("You're logged in").waitFor({ state: 'visible', timeout: 10_000 });
 
   expect(page.getByText("You're logged in")).toBeVisible();
 
   await page.reload();
 
-  await page.getByText("You're logged in").waitFor({ state: 'visible' });
+  await page.getByText("You're logged in").waitFor({ state: 'visible', timeout: 10_000 });
 
   expect(page.getByText("You're logged in")).toBeVisible();
 });
-

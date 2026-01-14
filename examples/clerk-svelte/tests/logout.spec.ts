@@ -7,15 +7,11 @@ test('login & logout', async ({ page }) => {
 
   await page.getByRole('button', { name: 'Sign in' }).click();
 
-  await page
-    .getByRole('textbox', { name: 'Email address' })
-    .fill('joe+clerk-test@garden.co');
+  await page.getByRole('textbox', { name: 'Email address' }).fill('joe+clerk-test@garden.co');
 
   await page.keyboard.press('Enter');
 
-  await page
-    .getByRole('textbox', { name: 'Password' })
-    .fill('joe+clerk-test@garden.co');
+  await page.getByRole('textbox', { name: 'Password' }).fill('joe+clerk-test@garden.co');
 
   await page.keyboard.press('Enter');
 
@@ -27,8 +23,7 @@ test('login & logout', async ({ page }) => {
 
   await page.getByRole('button', { name: 'Logout' }).click();
 
-  await page.getByText("You're not logged in").waitFor({ state: 'visible' });
+  await page.getByText("You're not logged in").waitFor({ state: 'visible', timeout: 10_000 });
 
   expect(page.getByText("You're not logged in")).toBeVisible();
 });
-
