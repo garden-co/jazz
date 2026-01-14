@@ -72,11 +72,9 @@ These claims come from:
 3. Configure at least one SSO connection (or use test user)
 4. Note your Client ID for the JWKS URL
 
-### 2. Set Environment Variables
+### 2. Environment Variables
 
-```bash
-export VITE_WORKOS_CLIENT_ID="client_01H..."
-```
+The client ID is already configured in the demo. No environment variables needed.
 
 ### 3. Install Dependencies
 
@@ -87,11 +85,11 @@ pnpm install
 
 ### 4. Start groove-server
 
-Edit `groove-server.toml` with your WorkOS client ID:
+The `groove-server.toml` is already configured:
 
 ```toml
 [auth.jwt]
-jwks_url = "https://api.workos.com/sso/jwks/client_01H..."
+jwks_url = "https://api.workos.com/sso/jwks/client_01JX28XKCGFWXHBMX2FW66JTRM"
 ```
 
 Then start the server:
@@ -142,7 +140,7 @@ CREATE POLICY ON projects FOR SELECT
 provider = "workos"
 
 [auth.jwt]
-jwks_url = "https://api.workos.com/sso/jwks/client_01H..."
+jwks_url = "https://api.workos.com/sso/jwks/client_01JX28XKCGFWXHBMX2FW66JTRM"
 issuer = "https://api.workos.com/"
 user_id_claim = "sub"
 

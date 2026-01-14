@@ -11,8 +11,7 @@ provider = "workos"
 
 [auth.jwt]
 # WorkOS JWKS endpoint
-# Replace CLIENT_ID with your actual WorkOS client ID
-jwks_url = "https://api.workos.com/sso/jwks/client_01H..."
+jwks_url = "https://api.workos.com/sso/jwks/client_01JX28XKCGFWXHBMX2FW66JTRM"
 # WorkOS issuer
 issuer = "https://api.workos.com/"
 # WorkOS uses 'sub' for user ID

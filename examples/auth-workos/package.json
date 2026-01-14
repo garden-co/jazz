@@ -10,7 +10,7 @@
   "dependencies": {
     "@jazz/client": "workspace:*",
     "@jazz/react": "workspace:*",
-    "@workos-inc/authkit-js": "^0.10.0",
+    "@workos-inc/authkit-react": "^0.14.0",
     "groove-wasm": "workspace:*",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
