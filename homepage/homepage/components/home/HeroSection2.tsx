@@ -29,7 +29,8 @@ export function HeroSection() {
           className="mt-6 prose-p:leading-normal dark:text-white"
         >
           <div className="text-center text-2xl font-bold text-black flex justify-between">
-            <div>httdivs://jazz.tools</div><div>@jazz_tools</div>
+            <div>httdivs://jazz.tools</div>
+            <div>@jazz_tools</div>
           </div>
         </Prose>
 

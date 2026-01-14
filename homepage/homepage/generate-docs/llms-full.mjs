@@ -81,7 +81,7 @@ async function generateGenericFile(fullPath, relativePath) {
   const genericPath = path.join(
     CWD,
     "public/docs",
-    relativePath.replace(/\.mdx$/, ".md")
+    relativePath.replace(/\.mdx$/, ".md"),
   );
   await writeMarkdownFile(genericPath, genericContent);
 
@@ -93,7 +93,7 @@ async function generateGenericFile(fullPath, relativePath) {
       CWD,
       "public/docs",
       framework,
-      relativePath.replace(/\.mdx$/, ".md")
+      relativePath.replace(/\.mdx$/, ".md"),
     );
     await writeMarkdownFile(frameworkPath, frameworkContent);
   }
@@ -101,7 +101,7 @@ async function generateGenericFile(fullPath, relativePath) {
 
 async function generateFrameworkIndexFiles() {
   const indexPath = path.join(CWD, "content/docs/index.mdx");
-  
+
   for (const framework of FRAMEWORKS) {
     try {
       const content = await mdxToMd(indexPath, framework);
@@ -143,7 +143,8 @@ async function generateMarkdownFiles() {
 
 async function readMdxContent(url, framework = null) {
   try {
-    const relativePath = url === "/docs" ? "index.mdx" : url.replace(/^\/docs\/?/, "");
+    const relativePath =
+      url === "/docs" ? "index.mdx" : url.replace(/^\/docs\/?/, "");
     const fullPath = path.join(CWD, "content/docs", relativePath);
 
     if (EXCLUDE_PATTERNS.some((pattern) => pattern.test(fullPath))) {
@@ -156,14 +157,14 @@ async function readMdxContent(url, framework = null) {
       if (stats.isDirectory()) {
         const files = await fs.readdir(fullPath);
         let mdxFiles = files.filter(
-          (f) => f.endsWith(".mdx") && !EXCLUDE_PATTERNS.some((p) => p.test(f))
+          (f) => f.endsWith(".mdx") && !EXCLUDE_PATTERNS.some((p) => p.test(f)),
         );
-        
+
         // Filter framework-specific files
         mdxFiles = mdxFiles.filter((file) => {
           const fileBasename = path.basename(file, ".mdx");
           const isFrameworkFile = FRAMEWORKS.includes(fileBasename);
-          
+
           if (framework) {
             // Include if: matches current framework OR not a framework-specific file
             return fileBasename === framework || !isFrameworkFile;
@@ -172,11 +173,11 @@ async function readMdxContent(url, framework = null) {
             return !isFrameworkFile;
           }
         });
-        
+
         if (mdxFiles.length === 0) return null;
 
         const contents = await Promise.all(
-          mdxFiles.map((file) => mdxToMd(path.join(fullPath, file), framework))
+          mdxFiles.map((file) => mdxToMd(path.join(fullPath, file), framework)),
         );
         return contents.join("\n\n---\n\n");
       }
@@ -215,9 +216,7 @@ async function appendExampleCode(output, exampleName) {
 function initializeOutputs() {
   return {
     generic: ["# Jazz\n"],
-    ...Object.fromEntries(
-      FRAMEWORKS.map((fw) => [fw, [`# Jazz (${fw})\n`]])
-    ),
+    ...Object.fromEntries(FRAMEWORKS.map((fw) => [fw, [`# Jazz (${fw})\n`]])),
   };
 }
 
@@ -245,7 +244,7 @@ async function buildDocumentationContent(outputs) {
       // Append content to respective outputs
       if (genericContent) outputs.generic.push(genericContent);
       outputs.generic.push("\n");
-      
+
       FRAMEWORKS.forEach((framework, i) => {
         if (frameworkContents[i]) outputs[framework].push(frameworkContents[i]);
         outputs[framework].push("\n");
@@ -258,7 +257,7 @@ async function buildDocumentationContent(outputs) {
     outputs,
     "## Resources\n",
     "- [Documentation](https://jazz.tools/docs): Detailed documentation about Jazz",
-    "- [Examples](https://jazz.tools/examples): Code examples and tutorials\n"
+    "- [Examples](https://jazz.tools/examples): Code examples and tutorials\n",
   );
 }
 
@@ -266,8 +265,8 @@ async function writeOutputFiles(outputs) {
   // Ensure framework directories exist upfront
   await Promise.all(
     FRAMEWORKS.map((fw) =>
-      fs.mkdir(path.join(CWD, "public", fw), { recursive: true })
-    )
+      fs.mkdir(path.join(CWD, "public", fw), { recursive: true }),
+    ),
   );
 
   // Write generic files
@@ -283,9 +282,15 @@ async function writeOutputFiles(outputs) {
       const frameworkOutput = [...outputs[framework]];
       await writeDocsFile(`${framework}/llms.txt`, frameworkOutput.join("\n"));
       const frameworkOutputWithExample = [...frameworkOutput];
-      await appendExampleCode(frameworkOutputWithExample, FRAMEWORK_EXAMPLES[framework]);
-      await writeDocsFile(`${framework}/llms-full.txt`, frameworkOutputWithExample.join("\n"));
-    })
+      await appendExampleCode(
+        frameworkOutputWithExample,
+        FRAMEWORK_EXAMPLES[framework],
+      );
+      await writeDocsFile(
+        `${framework}/llms-full.txt`,
+        frameworkOutputWithExample.join("\n"),
+      );
+    }),
   );
 }
 
@@ -296,7 +301,7 @@ async function generateDocs() {
   console.log("Building LLM documentation content...");
   const outputs = initializeOutputs();
   await buildDocumentationContent(outputs);
-  
+
   console.log("Writing output files...");
   await writeOutputFiles(outputs);
 }

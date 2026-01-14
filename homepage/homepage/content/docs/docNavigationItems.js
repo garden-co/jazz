@@ -17,8 +17,8 @@ export const docNavigationItems = [
         done: {
           react: 100,
           svelte: 100,
-          vanilla: 100
-        }
+          vanilla: 100,
+        },
       },
       {
         name: "Installation",
@@ -250,7 +250,7 @@ export const docNavigationItems = [
             done: {
               react: 100,
               svelte: 100,
-              vanilla: 100
+              vanilla: 100,
             },
           },
 
@@ -265,8 +265,8 @@ export const docNavigationItems = [
             done: {
               react: 100,
               svelte: 100,
-              vanilla: 100
-            }
+              vanilla: 100,
+            },
           },
           {
             name: "Passphrase",
@@ -307,7 +307,7 @@ export const docNavigationItems = [
               react: 100,
               svelte: 100,
               vanilla: 100,
-            }
+            },
           },
           {
             name: "Sharing",
@@ -325,7 +325,7 @@ export const docNavigationItems = [
         name: "Version control",
         href: "/docs/key-features/version-control",
         done: {
-          react: 100
+          react: 100,
         },
       },
       {
@@ -344,8 +344,8 @@ export const docNavigationItems = [
         href: "/docs/server-side/quickstart",
         done: {
           react: 100,
-          svelte: 100
-        }
+          svelte: 100,
+        },
       },
       {
         name: "Setup",
@@ -378,8 +378,8 @@ export const docNavigationItems = [
             name: "Inbox API",
             href: "/docs/server-side/communicating-with-workers/inbox",
             done: {
-              react: 100
-            }
+              react: 100,
+            },
           },
         ],
       },
@@ -388,8 +388,8 @@ export const docNavigationItems = [
         href: "/docs/server-side/ssr",
         done: {
           react: 100,
-          svelte: 100
-        }
+          svelte: 100,
+        },
       },
     ],
   },
@@ -400,7 +400,7 @@ export const docNavigationItems = [
       {
         name: "Providers",
         href: "/docs/project-setup/providers",
-        done: 100
+        done: 100,
       },
     ],
   },
@@ -461,7 +461,7 @@ export const docNavigationItems = [
                 name: "Forms",
                 href: "/docs/reference/design-patterns/form",
                 done: {
-                  react: 100
+                  react: 100,
                 },
               },
               {

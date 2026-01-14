@@ -19,13 +19,13 @@ let lastWindowScrollY = 0;
 let shouldRestoreScroll = false;
 let resetScrollRestorationTimeout: ReturnType<typeof setTimeout> | null = null;
 
-/* 
+/*
  * This hook does the following:
  * 1. Lazily initialises the user's preferred framework from localStorage
- * 2. Defines a `setFramework` function which updates the framework in storage 
- *    and dispatches a `TAB_CHANGE_EVENT` 
+ * 2. Defines a `setFramework` function which updates the framework in storage
+ *    and dispatches a `TAB_CHANGE_EVENT`
  * 3. Looks up whether the URL specifies a framework
- * 4. Registers an event listener for the `TAB_CHANGE_EVENT` emitted from a 
+ * 4. Registers an event listener for the `TAB_CHANGE_EVENT` emitted from a
  *    TabbedCodeGroup
  * 5. Builds an appropriate URL to redirect to, and completes the redirect.
  */
@@ -58,15 +58,23 @@ export const useFramework = () => {
     );
   }, []);
 
-  const urlFramework = framework && isValidFramework(framework) ? framework : null;
+  const urlFramework =
+    framework && isValidFramework(framework) ? framework : null;
 
   // Restore window scroll position after framework change
   useLayoutEffect(() => {
-    if (shouldRestoreScroll && typeof window !== "undefined" && lastWindowScrollY > 0) {
+    if (
+      shouldRestoreScroll &&
+      typeof window !== "undefined" &&
+      lastWindowScrollY > 0
+    ) {
       // Single, precise scroll restoration
-      const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+      const maxScroll = Math.max(
+        0,
+        document.documentElement.scrollHeight - window.innerHeight,
+      );
       const scrollY = Math.min(lastWindowScrollY, maxScroll);
-      window.scrollTo({ top: scrollY, behavior: 'instant' });
+      window.scrollTo({ top: scrollY, behavior: "instant" });
       shouldRestoreScroll = false;
     }
   }, [pathname, urlFramework]);
@@ -82,10 +90,8 @@ export const useFramework = () => {
       }
     };
     window.addEventListener(TAB_CHANGE_EVENT, handleTabChange);
-    return () =>
-      window.removeEventListener(TAB_CHANGE_EVENT, handleTabChange);
+    return () => window.removeEventListener(TAB_CHANGE_EVENT, handleTabChange);
   }, []);
-
 
   useEffect(() => {
     if (!pathname.startsWith("/docs") || isRedirecting) {
@@ -111,21 +117,21 @@ export const useFramework = () => {
         shouldRestoreScroll = true;
         // Set scroll restoration to manual and debounce reset to auto
         try {
-          if ('scrollRestoration' in window.history) {
+          if ("scrollRestoration" in window.history) {
             // Clear any existing reset timeout
             if (resetScrollRestorationTimeout) {
               clearTimeout(resetScrollRestorationTimeout);
               resetScrollRestorationTimeout = null;
             }
             // Set to manual (only if not already manual to avoid unnecessary API calls)
-            if (window.history.scrollRestoration !== 'manual') {
-              window.history.scrollRestoration = 'manual';
+            if (window.history.scrollRestoration !== "manual") {
+              window.history.scrollRestoration = "manual";
             }
             // Debounce reset to auto after 3 seconds of inactivity
             resetScrollRestorationTimeout = setTimeout(() => {
               try {
-                if ('scrollRestoration' in window.history) {
-                  window.history.scrollRestoration = 'auto';
+                if ("scrollRestoration" in window.history) {
+                  window.history.scrollRestoration = "auto";
                 }
               } catch (e) {
                 // Ignore security errors
@@ -159,7 +165,7 @@ export const useFramework = () => {
         lastRedirectedFramework = null;
         return;
       }
-      // Otherwise update localStorage and the saved framework (manually, not 
+      // Otherwise update localStorage and the saved framework (manually, not
       // using the helper otherwise we'll trigger a new loop)
       localStorage.setItem("_tcgpref_framework", urlFramework);
       setSavedFramework(urlFramework);
@@ -177,26 +183,30 @@ export const useFramework = () => {
 
     // Capture scroll position before route change (only if this is a framework change, not initial load)
     // Only capture if we're already on a docs page (not initial load)
-    if (typeof window !== "undefined" && pathname.startsWith("/docs/") && window.scrollY > 0) {
+    if (
+      typeof window !== "undefined" &&
+      pathname.startsWith("/docs/") &&
+      window.scrollY > 0
+    ) {
       lastWindowScrollY = window.scrollY;
       shouldRestoreScroll = true;
       // Set scroll restoration to manual and debounce reset to auto
       try {
-        if ('scrollRestoration' in window.history) {
+        if ("scrollRestoration" in window.history) {
           // Clear any existing reset timeout
           if (resetScrollRestorationTimeout) {
             clearTimeout(resetScrollRestorationTimeout);
             resetScrollRestorationTimeout = null;
           }
           // Set to manual (only if not already manual to avoid unnecessary API calls)
-          if (window.history.scrollRestoration !== 'manual') {
-            window.history.scrollRestoration = 'manual';
+          if (window.history.scrollRestoration !== "manual") {
+            window.history.scrollRestoration = "manual";
           }
           // Debounce reset to auto after 3 seconds of inactivity
           resetScrollRestorationTimeout = setTimeout(() => {
             try {
-              if ('scrollRestoration' in window.history) {
-                window.history.scrollRestoration = 'auto';
+              if ("scrollRestoration" in window.history) {
+                window.history.scrollRestoration = "auto";
               }
             } catch (e) {
               // Ignore security errors

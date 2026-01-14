@@ -49,16 +49,9 @@
         "./content/docs/code-snippets/permissions-and-sharing/quickstart/*",
         "./content/docs/code-snippets/quickstart/*"
       ],
-      "@react-navigation/*": [
-        "./content/docs/code-snippets/project-setup/*"
-      ]
+      "@react-navigation/*": ["./content/docs/code-snippets/project-setup/*"]
     }
   },
-  "include": [
-    "content/docs/code-snippets/**/*"
-  ],
-  "exclude": [
-    "node_modules",
-    "**/*test*/**"
-  ]
+  "include": ["content/docs/code-snippets/**/*"],
+  "exclude": ["node_modules", "**/*test*/**"]
 }

@@ -33,7 +33,7 @@ export function HeroSection() {
           </p>
           <p>
             Efficiently sync data, files and LLM streams. Use them like reactive
-             local JSON state.
+            local JSON state.
           </p>
         </Prose>
 

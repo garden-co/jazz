@@ -4,7 +4,6 @@ import { useFramework } from "@/lib/use-framework";
 import { useEffect, useState } from "react";
 import { TAB_CHANGE_EVENT } from "@garden-co/design-system/src/types/tabbed-code-group";
 
-
 export interface ContentByFrameworkProps {
   framework: string;
   children: React.ReactNode;

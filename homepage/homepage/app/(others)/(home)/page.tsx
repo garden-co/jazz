@@ -15,7 +15,6 @@ export default function Home() {
     <>
       <HeroSection />
 
-
       <ChatDemoSection />
 
       <div className="container grid gap-8 pt-12">

@@ -45,7 +45,13 @@ interface Props {
   upCountOverTime: [number[], number[]];
   isUp?: boolean;
 }
-export default function LatencyChart({ latencyOverTime, upOverTime, upCountOverTime, intervalMin, isUp = true }: Props) {
+export default function LatencyChart({
+  latencyOverTime,
+  upOverTime,
+  upCountOverTime,
+  intervalMin,
+  isUp = true,
+}: Props) {
   const series = useMemo(() => {
     return latencyOverTime[1].map((value, index) => ({
       ts: latencyOverTime[0][index],
@@ -67,17 +73,18 @@ export default function LatencyChart({ latencyOverTime, upOverTime, upCountOverT
         </HoverCard.Trigger>
         <HoverCard.Content className="border border-stone-500 bg-white dark:bg-black shadow-lg absolute w-[150px] -ml-[75px] l-[50%] rounded-md p-2">
           <HoverCard.Arrow className="fill-stone-500" />
-          <p className="text-sm text-center">
-            No data
-          </p>
+          <p className="text-sm text-center">No data</p>
         </HoverCard.Content>
       </HoverCard.Root>
       {series.map(({ value, ts, up, upCount }, index) => {
         const isLast = index === series.length - 1;
         const upPercentage = up / upCount;
-        
+
         // If this is the last bar and we're down, override the colour to red
-        const valueClass = getClassForLatencyAndUp(value, isLast && !isUp ? 0 : upPercentage);
+        const valueClass = getClassForLatencyAndUp(
+          value,
+          isLast && !isUp ? 0 : upPercentage,
+        );
 
         const downtimeMin = (1 - upPercentage) * intervalMin;
 
@@ -93,15 +100,14 @@ export default function LatencyChart({ latencyOverTime, upOverTime, upCountOverT
           timeZone: "UTC",
         }).formatToParts(to);
 
-
         // remove the (PM) or (AM) if the "from" if its the same as the "to"
-        if(fromH[2].value === toH[2].value) {
-          fromH = fromH.filter(({type}) => type !== "literal").slice(0, 1);
+        if (fromH[2].value === toH[2].value) {
+          fromH = fromH.filter(({ type }) => type !== "literal").slice(0, 1);
         }
-        
+
         return (
           <HoverCard.Root key={ts} openDelay={0} closeDelay={0}>
-            <HoverCard.Trigger asChild >
+            <HoverCard.Trigger asChild>
               <div className="p-[0.5px]">
                 <div
                   className={cn(
@@ -113,67 +119,65 @@ export default function LatencyChart({ latencyOverTime, upOverTime, upCountOverT
             </HoverCard.Trigger>
             <HoverCard.Content className="border border-stone-500 bg-white dark:bg-black shadow-lg absolute w-[180px] -ml-[90px] l-[50%] rounded-md py-1 px-2">
               <HoverCard.Arrow className="fill-stone-500" />
-                <div className="text-right">
-                  <time
-                    className="text-xs flex justify-between"
-                    dateTime={from.toISOString()}
-                    >
-                      <span>
-                        {Intl.DateTimeFormat("en-US", {
-                          dateStyle: "medium",
-                          timeZone: "UTC",
-                        }).format(from)}
-                      </span>
+              <div className="text-right">
+                <time
+                  className="text-xs flex justify-between"
+                  dateTime={from.toISOString()}
+                >
+                  <span>
+                    {Intl.DateTimeFormat("en-US", {
+                      dateStyle: "medium",
+                      timeZone: "UTC",
+                    }).format(from)}
+                  </span>
 
-                      <span className="whitespace-nowrap">
-                        {fromH.map((part, index) => (
-                          <span key={index}>{part.value}</span>
-                        ))}
-                        {' – '}
-                        {toH.map((part, index) => (
-                          <span key={index}>{part.value}</span>
-                        ))}
-                      </span>
-                  </time>
-                </div>
+                  <span className="whitespace-nowrap">
+                    {fromH.map((part, index) => (
+                      <span key={index}>{part.value}</span>
+                    ))}
+                    {" – "}
+                    {toH.map((part, index) => (
+                      <span key={index}>{part.value}</span>
+                    ))}
+                  </span>
+                </time>
+              </div>
+              <div className="text-sm text-right flex items-center justify-between">
+                <span className="flex items-center">
+                  <span
+                    className={cn(
+                      "rounded-md size-2.5 inline-block mr-1",
+                      getClassForLatencyAndUp(value, 1),
+                    )}
+                  />
+                  Latency
+                </span>
+                <span>
+                  <span className="font-semibold">{value}</span> ms
+                </span>
+              </div>
+              {upPercentage < 0.99 && (
                 <div className="text-sm text-right flex items-center justify-between">
                   <span className="flex items-center">
                     <span
                       className={cn(
                         "rounded-md size-2.5 inline-block mr-1",
-                        getClassForLatencyAndUp(value, 1),
+                        getClassForLatencyAndUp(0, upPercentage),
                       )}
                     />
-                    Latency
+                    Downtime
                   </span>
                   <span>
-                    <span className="font-semibold">{value}</span> ms
-                    
+                    <span className="font-semibold">
+                      {Math.round(downtimeMin)}
+                    </span>{" "}
+                    min
                   </span>
                 </div>
-                {upPercentage < 0.99 && (
-                  <div className="text-sm text-right flex items-center justify-between">
-                    <span className="flex items-center">
-                      <span
-                        className={cn(
-                          "rounded-md size-2.5 inline-block mr-1",
-                          getClassForLatencyAndUp(0, upPercentage),
-                        )}
-                      />
-                      Downtime
-                      </span>
-                    <span>
-                    <span className="font-semibold">
-                      {Math.round(downtimeMin)}</span> min
-                    </span>
-                </div>
-                  
-                )}
-                
-                <p className="text-sm text-right">
-                  
-                </p>                
-              </HoverCard.Content>
+              )}
+
+              <p className="text-sm text-right"></p>
+            </HoverCard.Content>
           </HoverCard.Root>
         );
       })}

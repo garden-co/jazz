@@ -1,5 +1,9 @@
 import { Framework, frameworks } from "@/content/framework";
-import { DocPage, generateOGMetadata, getDocMetadata } from "@/lib/docMdxContent";
+import {
+  DocPage,
+  generateOGMetadata,
+  getDocMetadata,
+} from "@/lib/docMdxContent";
 import fs from "fs";
 import path from "path";
 
@@ -16,7 +20,11 @@ type Frontmatter = {
   subtopic?: string;
 };
 
-export async function generateMetadata({ params }: { params: Promise<Params> }) {
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<Params>;
+}) {
   const awaitedParams = await params;
   const framework = awaitedParams.framework;
   const slug = awaitedParams.slug ?? [];
@@ -85,7 +93,7 @@ function getAllDocPaths() {
 
   // Don't generate empty slugs here - those are handled by /docs/[framework]/page.tsx
   // The required catch-all [...slug] only handles paths with at least one segment
-  return allPaths.filter(path => path.slug.length > 0);
+  return allPaths.filter((path) => path.slug.length > 0);
 }
 
 export async function generateStaticParams() {
