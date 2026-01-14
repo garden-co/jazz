@@ -6,13 +6,15 @@
  */
 
 import { createAuthClient } from "better-auth/client";
+import { jwtClient } from "better-auth/client/plugins";
 
 // Auth server URL
 const AUTH_URL = "http://localhost:3001";
 
-// Create the BetterAuth client
+// Create the BetterAuth client with JWT plugin
 export const authClient = createAuthClient({
   baseURL: AUTH_URL,
+  plugins: [jwtClient()],
 });
 
 // Types for auth state
@@ -37,19 +39,13 @@ export interface AuthState {
  */
 export async function getJazzToken(): Promise<string | null> {
   try {
-    const session = await authClient.getSession();
-    if (!session?.data) return null;
-
-    // BetterAuth provides the token in the session
-    // For JWT plugin, we need to get it from the session endpoint
-    const response = await fetch(`${AUTH_URL}/api/auth/token`, {
-      credentials: "include",
-    });
-
-    if (!response.ok) return null;
-
-    const data = await response.json();
-    return data.token || null;
+    // Use the JWT plugin's token method
+    const result = await authClient.token();
+    if (result.error || !result.data) {
+      console.error("Failed to get JWT token:", result.error);
+      return null;
+    }
+    return result.data.token;
   } catch (error) {
     console.error("Failed to get Jazz token:", error);
     return null;

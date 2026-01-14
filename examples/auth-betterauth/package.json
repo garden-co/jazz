@@ -5,9 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently \"npm run dev:auth\" \"npm run dev:client\"",
-    "dev:auth": "tsx server/auth-server.ts",
+    "dev:auth": "npm run db:migrate && tsx server/auth-server.ts",
     "dev:client": "vite",
-    "build": "vite build"
+    "build": "vite build",
+    "db:migrate": "npx @better-auth/cli migrate --config server/auth-server.ts -y",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui"
   },
   "dependencies": {
     "@jazz/client": "workspace:*",
@@ -21,6 +24,7 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.57.0",
     "@types/better-sqlite3": "^7.6.12",
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.1",

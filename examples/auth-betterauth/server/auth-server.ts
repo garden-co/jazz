@@ -9,20 +9,17 @@
  */
 
 import { betterAuth } from "better-auth";
+import { toNodeHandler } from "better-auth/node";
+import { jwt } from "better-auth/plugins";
 import Database from "better-sqlite3";
 import cors from "cors";
 import express from "express";
 
-// Initialize SQLite database for BetterAuth
-const db = new Database("auth.db");
-
-// Configure BetterAuth
+// Configure BetterAuth with SQLite database
 export const auth = betterAuth({
-  database: {
-    type: "sqlite",
-    // BetterAuth will use the db instance directly
-    db,
-  },
+  database: new Database("auth.db"),
+  // Trust the React client origin
+  trustedOrigins: ["http://localhost:5173"],
   emailAndPassword: {
     enabled: true,
   },
@@ -32,23 +29,26 @@ export const auth = betterAuth({
     // Refresh when 1 day remaining
     updateAge: 60 * 60 * 24,
   },
-  // JWT configuration for token-based auth with Jazz
-  jwt: {
-    // Custom payload for Jazz policy evaluation
-    definePayload: async ({ user, session }) => {
-      return {
-        sub: user.id,
-        email: user.email,
-        name: user.name,
-        // Custom claims for Jazz policies
-        subscriptionTier: (user as any).subscriptionTier || "free",
-        // Organization ID if in an org context
-        orgId: (session as any).activeOrganizationId || null,
-        // Roles array for CONTAINS checks
-        roles: (user as any).roles || ["member"],
-      };
-    },
-  },
+  plugins: [
+    jwt({
+      // Custom payload for Jazz policy evaluation
+      jwt: {
+        definePayload: async ({ user }) => {
+          // User type from BetterAuth may have additional fields
+          const userRecord = user as Record<string, unknown>;
+          return {
+            sub: user.id,
+            email: user.email,
+            name: user.name,
+            // Custom claims for Jazz policies
+            subscriptionTier: (userRecord.subscriptionTier as string) || "free",
+            // Roles array for CONTAINS checks
+            roles: (userRecord.roles as string[]) || ["member"],
+          };
+        },
+      },
+    }),
+  ],
 });
 
 // Create Express app
@@ -62,13 +62,12 @@ app.use(
   }),
 );
 
-app.use(express.json());
+// Mount BetterAuth routes using the Node.js adapter
+// Important: Don't use express.json() before this handler
+app.all("/api/auth/*", toNodeHandler(auth));
 
-// Mount BetterAuth routes
-app.all("/api/auth/*", (req, res, _next) => {
-  // BetterAuth handles all /api/auth/* routes
-  return auth.handler(req, res);
-});
+// Use express.json() only for non-BetterAuth routes
+app.use(express.json());
 
 // Health check
 app.get("/health", (_req, res) => {
