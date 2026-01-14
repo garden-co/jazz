@@ -46,16 +46,15 @@ Source of truth. Linear references specs, not vice versa.
 
 | Spec | Status |
 |------|--------|
-| [SQL Layer](docs/content/docs/internals/sql-layer.mdx) | Implemented |
-| [Incremental Queries](docs/content/docs/internals/incremental-queries.mdx) | Partial |
-| [Streaming & Persistence](docs/content/docs/internals/streaming-and-persistence.mdx) | Partial |
-| [ARRAY Subqueries](docs/content/docs/internals/array-subquery.mdx) | Implemented |
-| [Binary Data & Blobs](docs/content/docs/internals/binary-data-and-blobs.mdx) | Implemented |
-| [Deletes & Truncation](docs/content/docs/internals/deletes-and-truncation.mdx) | Implemented |
-| [ReBAC Policies](docs/content/docs/internals/rebac-policies.mdx) | Planned |
-| [Sorted Chunk Indices](docs/content/docs/internals/sorted-chunk-indices.mdx) | Future |
-| [Multi-Row Transactions](docs/content/docs/internals/multi-row-transactions.mdx) | Future |
-| [External Migrations](docs/content/docs/internals/external-data-migrations.mdx) | Future |
+| [Data Model](docs/content/docs/internals/data-model.mdx) | Implemented |
+| [Queries](docs/content/docs/internals/queries.mdx) | Partial |
+| [Sync](docs/content/docs/internals/sync.mdx) | Partial |
+| [Storage](docs/content/docs/internals/storage.mdx) | Partial |
+| [Schema Evolution](docs/content/docs/internals/schema-evolution.mdx) | Implemented |
+| [Access Control](docs/content/docs/internals/access-control.mdx) | Partial |
+| [Deletes](docs/content/docs/internals/deletes.mdx) | Implemented |
+| [Indices](docs/content/docs/internals/indices.mdx) | Future |
+| [Transactions](docs/content/docs/internals/transactions.mdx) | Future |
 
 ## Key Concepts
 

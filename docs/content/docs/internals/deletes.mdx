@@ -1,5 +1,5 @@
 ---
-title: Deletes and History Truncation
+title: Deletes
 description: Soft delete semantics and commit history pruning in a distributed system
 status: implemented
 implements:
@@ -205,3 +205,8 @@ Valid if the merge commit is an LCA of the current frontier:
 1. **Secondary index for soft-deleted rows (GCO-1064)**: Maintain separate index including deleted objects for "show deleted items" UI, undelete flows, and admin queries.
 
 2. **UPDATE HARD modifier (GCO-1058)**: Should UPDATE support HARD like DELETE? Would allow truncating history after any mutation.
+
+## Files
+
+- `groove/src/branch.rs` - Branch with truncation support
+- `groove/src/sql/database/mod.rs` - DELETE SQL execution

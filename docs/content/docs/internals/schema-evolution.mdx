@@ -1,6 +1,6 @@
 ---
-title: Migration System
-description: Schema evolution with content-addressed descriptors and bidirectional lenses
+title: Schema Evolution
+description: Schema evolution with bidirectional lenses and external data migrations
 status: implemented
 implements:
   - groove/src/sql/lens.rs
@@ -10,7 +10,7 @@ implements:
 
 <StatusBadge status="implemented" />
 
-The migration system enables schema evolution while preserving data and supporting gradual rollouts across distributed clients.
+The schema evolution system enables schema changes while preserving data and supporting gradual rollouts across distributed clients.
 
 ## Implementation Status
 
@@ -29,6 +29,7 @@ The migration system enables schema evolution while preserving data and supporti
 - Client-side schema experimentation (DX improvement)
 - Migration rollback flow
 - Centralized catalog UI
+- External data migrations
 
 ## Core Concepts
 
@@ -107,6 +108,60 @@ jazz migrate diff <table> -f schema.sql  # Preview schema changes
 jazz migrate push <table> -f schema.sql  # Deploy migration
 ```
 
+## External Data Migrations (Future)
+
+<StatusBadge status="future" />
+
+Migrations could also transform and populate data from external URL endpoints, enabling easy server-side lambdas for pulling data from external systems.
+
+### Use Cases
+
+**One-time data import:**
+```sql
+-- Migration: 001_import_legacy_users.sql
+CREATE TABLE users (id, name STRING, email STRING, created_at I64);
+
+IMPORT INTO users FROM 'https://api.example.com/export/users'
+    WITH AUTH 'env:LEGACY_API_KEY';
+```
+
+**External enrichment:**
+```sql
+-- Migration: 005_enrich_with_geo.sql
+UPDATE users
+SET country = EXTERNAL('https://geoip.example.com/lookup', ip_address)
+WHERE country IS NULL;
+```
+
+### Proposed Syntax
+
+```sql
+IMPORT INTO <table> FROM '<url>'
+    [WITH AUTH '<auth_spec>']
+    [WITH HEADERS (<header_list>)]
+    [MAPPING (<column_mapping>)]
+    [ON CONFLICT SKIP|UPDATE|FAIL];
+```
+
+**Auth Spec Options:**
+- `env:VAR_NAME` - Use environment variable
+- `bearer:TOKEN` - Bearer token
+- `basic:USER:PASS` - Basic auth
+
+### Execution Context
+
+External migrations only run on the server (not in browser/client):
+- Server has network access to external APIs
+- Server has access to secrets/environment variables
+- Client receives the migrated data through normal sync
+
+### Security Considerations
+
+- Auth credentials must never be logged or synced
+- URLs must be validated (no localhost/internal IPs by default)
+- Rate limiting to prevent abuse
+- Sandboxed execution for untrusted schemas
+
 ## Files
 
 - `groove/src/sql/lens.rs` - Lens types, diff, application (~1200 lines)
@@ -120,6 +175,7 @@ jazz migrate push <table> -f schema.sql  # Deploy migration
 2. **Migration rollback**: What's the rollback flow when a migration causes issues?
 3. **Jazz Cloud multi-tenancy**: Detailed design for namespace separation and encryption
 4. **Performance**: Indexing strategies for lensed queries
+5. **External migrations**: How does this interact with ReBAC policies? (Imported data needs ownership)
 
 ## Related
 

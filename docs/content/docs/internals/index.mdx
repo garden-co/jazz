@@ -11,38 +11,27 @@ This section contains technical specifications for Jazz's internal systems. Each
 |-------|---------|
 | <StatusBadge status="implemented" /> | Core functionality complete |
 | <StatusBadge status="partial" /> | Some features done, others in progress |
-| <StatusBadge status="planned" /> | Design complete, implementation started |
 | <StatusBadge status="future" /> | Design document only |
 
-## Core Architecture
+## Core Specs
 
 | Spec | Status | Description |
 |------|--------|-------------|
 | [Architecture](/docs/internals/architecture) | - | High-level system overview |
-| [SQL Layer](/docs/internals/sql-layer) | <StatusBadge status="implemented" /> | SQL interface on distributed commit graphs |
-| [Incremental Queries](/docs/internals/incremental-queries) | <StatusBadge status="partial" /> | Delta propagation through query graphs |
-| [Streaming & Persistence](/docs/internals/streaming-and-persistence) | <StatusBadge status="partial" /> | Content chunking and storage backends |
-| [Sync Protocol](/docs/internals/sync-protocol) | - | Client-server sync mechanism |
-| [Migration System](/docs/internals/migration-system) | <StatusBadge status="implemented" /> | Schema evolution with lenses |
-
-## Features
-
-| Spec | Status | Description |
-|------|--------|-------------|
-| [ARRAY Subqueries](/docs/internals/array-subquery) | <StatusBadge status="implemented" /> | Eager loading with ARRAY(SELECT ...) |
-| [Binary Data & Blobs](/docs/internals/binary-data-and-blobs) | <StatusBadge status="implemented" /> | BLOB column types and streaming |
-| [Deletes & Truncation](/docs/internals/deletes-and-truncation) | <StatusBadge status="implemented" /> | Soft delete and history pruning |
-| [ReBAC Policies](/docs/internals/rebac-policies) | <StatusBadge status="partial" /> | Relationship-based access control |
+| [Data Model](/docs/internals/data-model) | <StatusBadge status="implemented" /> | Objects, commits, column types, row encoding, binary data |
+| [Queries](/docs/internals/queries) | <StatusBadge status="partial" /> | SQL syntax, incremental query graphs, ARRAY subqueries |
+| [Sync](/docs/internals/sync) | <StatusBadge status="partial" /> | Client-server synchronization protocol |
+| [Storage](/docs/internals/storage) | <StatusBadge status="partial" /> | Content storage, chunking, compression, persistence |
+| [Schema Evolution](/docs/internals/schema-evolution) | <StatusBadge status="implemented" /> | Bidirectional lenses for schema changes |
+| [Access Control](/docs/internals/access-control) | <StatusBadge status="partial" /> | ReBAC policies with SQL-like expressions |
+| [Deletes](/docs/internals/deletes) | <StatusBadge status="implemented" /> | Soft delete and history truncation |
 
 ## Future
 
 | Spec | Status | Description |
 |------|--------|-------------|
-| [Sorted Chunk Indices](/docs/internals/sorted-chunk-indices) | <StatusBadge status="future" /> | Scalable indices beyond memory |
-| [Multi-Row Transactions](/docs/internals/multi-row-transactions) | <StatusBadge status="future" /> | MVCC with optimistic concurrency |
-| [External Migrations](/docs/internals/external-data-migrations) | <StatusBadge status="future" /> | Import data from external APIs |
-| [Compression](/docs/internals/compression) | <StatusBadge status="future" /> | Delta encoding and compression |
-| [WASM Optimization](/docs/internals/wasm-optimization) | <StatusBadge status="future" /> | Bundle size optimization |
+| [Indices](/docs/internals/indices) | <StatusBadge status="future" /> | Scalable sorted chunk indices beyond memory |
+| [Transactions](/docs/internals/transactions) | <StatusBadge status="future" /> | MVCC-based multi-row transactions |
 
 ## Design Principles
 

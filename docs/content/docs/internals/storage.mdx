@@ -1,6 +1,6 @@
 ---
-title: Streaming and Persistence
-description: Content storage, chunking, and persistence backends for large data
+title: Storage
+description: Content storage, chunking, compression, and persistence backends
 status: partial
 implements:
   - groove/src/storage.rs
@@ -9,7 +9,7 @@ implements:
 
 <StatusBadge status="partial" />
 
-The streaming and persistence layer handles large content, memory-constrained devices, and persistent storage backends.
+The storage layer handles large content, memory-constrained devices, and persistent storage backends.
 
 ## Implementation Status
 
@@ -28,22 +28,7 @@ The streaming and persistence layer handles large content, memory-constrained de
 - Native persistence backends (SQLite, RocksDB)
 - Memory budget / cache eviction
 - Prefetching
-
-## Problem Statement
-
-Current implementation assumes all commits and content fit in memory. This breaks for:
-- Large files (GB+)
-- Long history (millions of commits)
-- Memory-constrained devices (mobile, browser)
-
-## Object Loading States
-
-An object can be in one of four states:
-
-1. **Metadata only**: Just know the object exists, its ID, type prefix, frontier commit IDs
-2. **Frontier loaded**: Latest state in memory, history on disk/remote
-3. **Partial history**: Some commits in memory, rest on demand
-4. **Fully loaded**: Everything in memory (current behavior, for small objects)
+- Compression
 
 ## Content Storage Architecture
 
@@ -64,7 +49,16 @@ enum ContentRef {
 }
 ```
 
-**Inline threshold**: Currently 1MB (temporary - will be reduced to 1KB when [sorted chunk indices](/docs/internals/sorted-chunk-indices) are implemented). Below this, store content directly to avoid hash lookup overhead. Most simple table rows will be inline.
+**Inline threshold**: Currently 1MB (temporary - will be reduced to 1KB when [sorted chunk indices](/docs/internals/indices) are implemented). Below this, store content directly to avoid hash lookup overhead. Most simple table rows will be inline.
+
+## Object Loading States
+
+An object can be in one of four states:
+
+1. **Metadata only**: Just know the object exists, its ID, type prefix, frontier commit IDs
+2. **Frontier loaded**: Latest state in memory, history on disk/remote
+3. **Partial history**: Some commits in memory, rest on demand
+4. **Fully loaded**: Everything in memory (current behavior, for small objects)
 
 ## Content-Defined Chunking (CDC)
 
@@ -153,6 +147,29 @@ pub trait CommitStore: Send + Sync {
 pub trait Environment: ContentStore + CommitStore + Send + Sync + Debug {}
 ```
 
+## Compression
+
+<StatusBadge status="future" />
+
+Compression reduces storage and network transfer overhead.
+
+### Design Considerations
+
+1. **Compress after chunking**: Apply compression to individual chunks rather than before chunking. This preserves CDC deduplication benefits.
+
+2. **Algorithm selection**:
+   - **zstd**: Good balance of speed and ratio (~500 MB/s compression, ~1.5 GB/s decompression)
+   - **lz4**: Fastest (~3 GB/s), lower ratio
+   - Per-chunk algorithm markers for flexibility
+
+3. **Delta encoding**: For commit content, delta-encode against parent commit. Works well for incremental row updates.
+
+### Open Questions
+
+1. Should compression be mandatory or opt-in?
+2. Per-object compression settings?
+3. Dictionary compression for similar content types?
+
 ## Sync Implications
 
 Default sync behavior:
@@ -171,7 +188,12 @@ This optimizes for the common case (latest state) while allowing history access 
 
 1. **Cache eviction details**: Pure LRU, or weighted by object size?
 2. **Prefetching**: When streaming, should we prefetch next chunks?
-3. **Compression**: Compress before or after chunking? (After is more common)
+3. **Native backends**: SQLite vs RocksDB for different use cases?
+
+## Files
+
+- `groove/src/storage.rs` - Storage traits
+- `groove/src/content.rs` - ContentRef, chunking
 
 ## Sources
 

@@ -1,5 +1,5 @@
 ---
-title: ReBAC Policy System
+title: Access Control
 description: Relationship-Based Access Control with SQL-like policy expressions
 status: partial
 implements:
@@ -20,10 +20,12 @@ Relationship-Based Access Control (ReBAC) for Jazz2, where permissions are deriv
 - WHERE and CHECK clause evaluation
 - Policy serialization/deserialization
 - DELETE falling back to UPDATE policy when not defined
+- Query integration with `policy_expr_to_predicate` for efficient filtering
+- INHERITS flattened to JOINs for incremental evaluation
+- RecursiveFilter for self-referential INHERITS
 
 **Not yet implemented:**
 - SQL parser for `CREATE POLICY` syntax
-- Query integration (combining policies with user queries)
 - Sync integration (policy-filtered data sync)
 - `EXPLAIN POLICY` command
 
@@ -299,36 +301,9 @@ CREATE POLICY ON documents FOR UPDATE
      OR INHERITS UPDATE FROM folder_id;
 ```
 
-## Implementation Phases
+## Files
 
-### Phase 1: Core Types ✓
-- `PolicyAction`, `Policy`, `PolicyExpr` types
-- `PolicyValue`, `PolicyColumnRef` for expression values
-- `TablePolicies` collection with serialization
-
-### Phase 2: Evaluation Engine ✓
-- `PolicyEvaluator` with cycle detection and depth limit
-- Basic expression evaluation (all comparison operators)
-- INHERITS evaluation with recursive lookup
-
-### Phase 3: Write Policies ✓
-- INSERT policy evaluation (CHECK clause)
-- UPDATE policy evaluation (WHERE + CHECK)
-- DELETE policy evaluation (falls back to UPDATE)
-
-### Phase 4: Query Integration ✓
-- `policy_expr_to_predicate` converts simple policies to Predicate for efficient filtering
-- INHERITS flattened to JOINs for true incremental evaluation
-- RecursiveFilter for self-referential INHERITS (e.g., folder→parent_folder→...→root)
-- Nested INHERITS chains of arbitrary depth via chained JOINs
-- Integration with incremental query graph builder (`incremental_query_as` method)
-
-### Phase 5: Testing and Debugging (partial)
-- `check_select()`, `check_insert()`, `check_update()`, `check_delete()` APIs ✓
-- EXPLAIN POLICY command (not started)
-
-### Phase 6: SQL Parser (not started)
-- `CREATE POLICY` SQL syntax parsing
+- `groove/src/sql/policy.rs` - Policy types and evaluation
 
 ## Open Questions
 

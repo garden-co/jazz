@@ -2,23 +2,17 @@
   "title": "Deep Dives",
   "pages": [
     "index",
-    "---Core Architecture---",
+    "---Core---",
     "architecture",
-    "sql-layer",
-    "incremental-queries",
-    "streaming-and-persistence",
-    "sync-protocol",
-    "migration-system",
-    "---Features---",
-    "array-subquery",
-    "binary-data-and-blobs",
-    "deletes-and-truncation",
-    "rebac-policies",
+    "data-model",
+    "queries",
+    "sync",
+    "storage",
+    "schema-evolution",
+    "access-control",
+    "deletes",
     "---Future---",
-    "sorted-chunk-indices",
-    "multi-row-transactions",
-    "external-data-migrations",
-    "compression",
-    "wasm-optimization"
+    "indices",
+    "transactions"
   ]
 }
