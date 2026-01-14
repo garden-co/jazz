@@ -21,11 +21,11 @@ In a distributed commit-graph database, traditional "hard delete" is problematic
 - `DELETE FROM table WHERE ... HARD` SQL statement (soft delete + truncate)
 - Truncation validation (must be ancestor of all frontier commits)
 - Rejection of commits with parents before truncation point
+- Deleted rows filtered from SELECT queries (row ID removed from table_rows on delete)
 
 **Not yet implemented:**
 - Distributed GC protocol for content cleanup after truncation
 - More graceful handling of orphan commits (rebase instead of reject)
-- Filtering deleted rows from SELECT queries (currently still visible)
 
 ## Soft Delete
 
@@ -198,6 +198,4 @@ Valid if the merge commit is an LCA of the current frontier:
 
 2. **Distributed GC Protocol**: Coordinate content cleanup across nodes after truncation convergence
 
-3. **Query Filtering**: Automatically exclude deleted rows from SELECT results
-
-4. **Per-Table Truncation Policies**: Configure automatic truncation based on age or commit count
+3. **Per-Table Truncation Policies**: Configure automatic truncation based on age or commit count

@@ -14,17 +14,18 @@ The streaming and persistence layer handles large content, memory-constrained de
 ## Implementation Status
 
 **Implemented:**
-- ContentRef (Inline up to 1KB, Chunked above 1KB)
+- ContentRef (Inline up to 1MB, Chunked above 1MB) - threshold is temporary, will be reduced to 1KB when sorted chunk indices are done
 - ContentStore and CommitStore traits
 - Environment trait combining all storage capabilities
 - MemoryEnvironment for testing
 - Async read/write with automatic chunking
 - Streaming read/write for large content
-- Fixed-size chunking (1KB chunks)
+- Fixed-size chunking (1MB chunks)
+- IndexedDB persistence backend for WASM/browser (groove-wasm)
 
 **Not yet implemented:**
 - FastCDC (content-defined chunking)
-- Persistence backends (SQLite, RocksDB, IndexedDB)
+- Native persistence backends (SQLite, RocksDB)
 - Memory budget / cache eviction
 - Prefetching
 
@@ -58,12 +59,12 @@ struct Commit {
 }
 
 enum ContentRef {
-    Inline(Box<[u8]>),        // For small content (<= 1KB)
+    Inline(Box<[u8]>),        // For small content (<= threshold)
     Chunked(Vec<ChunkHash>),  // For larger content
 }
 ```
 
-**Inline threshold**: 1KB. Below this, store content directly to avoid hash lookup overhead. Most simple table rows will be inline.
+**Inline threshold**: Currently 1MB (temporary - will be reduced to 1KB when [sorted chunk indices](/docs/internals/sorted-chunk-indices) are implemented). Below this, store content directly to avoid hash lookup overhead. Most simple table rows will be inline.
 
 ## Content-Defined Chunking (CDC)
 

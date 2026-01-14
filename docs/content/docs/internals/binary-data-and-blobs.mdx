@@ -70,7 +70,7 @@ Blobs inherit permissions from their owning row:
 ## Storage Model
 
 Blobs reuse the existing chunked content storage:
-- Content > 1KB is automatically chunked
+- Content > 1MB is automatically chunked (threshold is temporary - will be 1KB when [sorted chunk indices](/docs/internals/sorted-chunk-indices) are implemented)
 - Chunks are stored in `ContentStore`
 - Row encoding stores a blob reference that may be one or many chunk IDs
 

@@ -12,8 +12,9 @@ This spec describes a scalable index structure that supports indices larger than
 
 The current `RefIndex` stores all entries in a single `HashMap<ObjectId, HashSet<ObjectId>>`:
 - Must deserialize the entire index to look up one key
-- Panics when serialized size exceeds `INLINE_THRESHOLD` (1KB)
+- Panics when serialized size exceeds `INLINE_THRESHOLD` (currently 1MB, temporarily raised from 1KB)
 - Cannot scale to large datasets
+- Prevents reducing inline threshold back to 1KB (better for sync granularity)
 
 ## Goals
 

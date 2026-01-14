@@ -1,14 +1,31 @@
 ---
 title: ReBAC Policy System
 description: Relationship-Based Access Control with SQL-like policy expressions
-status: planned
+status: partial
 implements:
   - groove/src/sql/policy.rs
 ---
 
-<StatusBadge status="planned" />
+<StatusBadge status="partial" />
 
 Relationship-Based Access Control (ReBAC) for Jazz2, where permissions are derived from relationships in the data itself. Policies are expressed as SQL-like conditions and attached to tables.
+
+## Implementation Status
+
+**Implemented:**
+- Core types (`Policy`, `PolicyExpr`, `PolicyValue`, `PolicyColumnRef`)
+- Policy evaluation engine (`PolicyEvaluator`) with cycle detection and depth limiting
+- INHERITS clause evaluation for permission inheritance
+- All CRUD policy checks (`check_select`, `check_insert`, `check_update`, `check_delete`)
+- WHERE and CHECK clause evaluation
+- Policy serialization/deserialization
+- DELETE falling back to UPDATE policy when not defined
+
+**Not yet implemented:**
+- SQL parser for `CREATE POLICY` syntax
+- Query integration (combining policies with user queries)
+- Sync integration (policy-filtered data sync)
+- `EXPLAIN POLICY` command
 
 ## Goals
 
@@ -284,25 +301,28 @@ CREATE POLICY ON documents FOR UPDATE
 
 ## Implementation Phases
 
-### Phase 1: Core Types and Parser
+### Phase 1: Core Types ✓
 - `PolicyAction`, `Policy`, `PolicyExpr` types
-- SQL parser for CREATE POLICY
-- Store policies in TableSchema
+- `PolicyValue`, `PolicyColumnRef` for expression values
+- `TablePolicies` collection with serialization
 
-### Phase 2: Evaluation Engine
+### Phase 2: Evaluation Engine ✓
 - `PolicyEvaluator` with cycle detection and depth limit
-- Basic expression evaluation
+- Basic expression evaluation (all comparison operators)
 - INHERITS evaluation with recursive lookup
 
-### Phase 3: Write Policies
-- INSERT policy evaluation
-- UPDATE policy evaluation
-- DELETE policy evaluation
+### Phase 3: Write Policies ✓
+- INSERT policy evaluation (CHECK clause)
+- UPDATE policy evaluation (WHERE + CHECK)
+- DELETE policy evaluation (falls back to UPDATE)
 
-### Phase 4: Query Integration
+### Phase 4: Query Integration (not started)
 - Combine policy predicates with user queries
 - Integrate with incremental query graph builder
 
-### Phase 5: Testing and Debugging
-- EXPLAIN POLICY command
-- `check_policy()` programmatic API
+### Phase 5: Testing and Debugging (partial)
+- `check_select()`, `check_insert()`, `check_update()`, `check_delete()` APIs ✓
+- EXPLAIN POLICY command (not started)
+
+### Phase 6: SQL Parser (not started)
+- `CREATE POLICY` SQL syntax parsing

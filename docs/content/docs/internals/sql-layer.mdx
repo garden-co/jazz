@@ -26,10 +26,11 @@ The SQL layer provides a relational interface on top of Jazz's distributed commi
 - WASM bindings (groove-wasm)
 - DELETE via SQL with soft delete semantics (see [Deletes and Truncation](/docs/internals/deletes-and-truncation))
 - DELETE ... HARD for soft delete + history truncation
+- LIMIT and OFFSET clauses
 
 **Not yet implemented:**
-- Additional operators beyond `=` in WHERE clauses
-- ORDER BY, LIMIT, OFFSET
+- Comparison operators (`<`, `>`, `<=`, `>=`) in WHERE clauses (only `=` and `!=` supported)
+- ORDER BY
 - Schema migrations
 - Composite indexes
 
@@ -112,23 +113,24 @@ Each row is a separate Object with:
 
 ### Row Binary Format
 
-The format is type-less (schema provides types) with a length-prefix header for O(1) column access.
+The format is type-less (schema provides types) with an offset table for O(1) column access.
 
 **Structure:**
 ```
-[length-prefix header][column values in schema order]
+[fixed-size columns][u32 offset₂][u32 offset₃]...[var_data₁][var_data₂][var_data₃]...
 ```
 
-**Length-prefix header:**
-- One varint per variable-size column (String, Bytes)
-- Encodes the byte length of that column's content (including presence flag if nullable)
-- Fixed-size columns have no header entry
+**Layout:**
+- Fixed-size columns come first, packed contiguously
+- For N variable-size columns, N-1 u32 offsets are stored (little-endian)
+  - First variable column starts immediately after offset table
+  - Last variable column ends at buffer end
+- Variable-size data follows the offset table
 
-**Column values:**
-- Written in schema order
-- Fixed-size: just the value bytes
-- Variable-size: just the data bytes (length is in header)
-- Nullable columns: prepend 1-byte presence flag (0x00 = null, 0x01 = present)
+**Nullable columns:**
+- 1-byte presence flag (0x00 = null, 0x01 = present)
+- For fixed-size: flag followed by value bytes (or zeros if null, to maintain fixed offsets)
+- For variable-size: if null, length is 0
 
 ### Size Reference
 
@@ -138,37 +140,35 @@ The format is type-less (schema provides types) with a length-prefix header for 
 | I64    | 8 bytes    | Little-endian |
 | F64    | 8 bytes    | IEEE 754 little-endian |
 | Ref    | 16 bytes   | ObjectId, little-endian |
-| String | variable   | varint len in header, UTF-8 data in body |
-| Bytes  | variable   | varint len in header, raw data in body |
+| String | variable   | Offset in table, UTF-8 data in variable section |
+| Bytes  | variable   | Offset in table, raw data in variable section |
 
 ### Example
 
 Schema: `(id: Ref NOT NULL, count: I64 NULL, name: String NOT NULL, bio: String NULL)`
 
-Variable columns: `name`, `bio` (2 header entries)
-Fixed columns: `id` (16), `count` (1 + 8 = 9 with null flag)
+Fixed columns: `id` (16 bytes), `count` (1 + 8 = 9 with null flag)
+Variable columns: `name`, `bio` (1 offset entry for 2 columns)
 
 Row data for `id=abc..., count=42, name="Alice", bio=NULL`:
 ```
-[5]           <- name content length (5 bytes for "Alice")
-[1]           <- bio content length (1 byte for null flag only)
-[id: 16 bytes]
-[0x01][42 as i64: 8 bytes]   <- count: present + value
-[Alice: 5 bytes]              <- name: just data (not nullable)
-[0x00]                        <- bio: null flag only
+[id: 16 bytes]                <- fixed section start
+[0x01][42 as i64: 8 bytes]    <- count: present + value
+[offset: u32 = 5]             <- bio starts at byte 5 of variable section
+[Alice: 5 bytes]              <- name: starts after offsets
+[0x00]                        <- bio: null flag (length 0)
 ```
 
 Row data for `id=abc..., count=NULL, name="Bob", bio="Hello"`:
 ```
-[3]           <- name content length
-[6]           <- bio content length (1 + 5)
-[id: 16 bytes]
-[0x00][padding: 8 bytes]      <- count: null (value bytes still present for fixed offset)
-[Bob: 3 bytes]
+[id: 16 bytes]                <- fixed section start
+[0x00][zeros: 8 bytes]        <- count: null (zeros maintain offset)
+[offset: u32 = 3]             <- bio starts at byte 3 of variable section
+[Bob: 3 bytes]                <- name
 [0x01][Hello: 5 bytes]        <- bio: present + value
 ```
 
-**Note on nullable fixed-size columns:** Even when null, fixed-size columns keep their value bytes (can be zeroed) to maintain fixed offsets. Only the presence flag indicates null.
+**Note on nullable fixed-size columns:** Even when null, fixed-size columns keep their value bytes (zeros) to maintain fixed offsets. Only the presence flag indicates null.
 
 ### Benefits of This Format
 
@@ -534,9 +534,9 @@ pub enum ExecuteResult {
 
 2. **Composite indexes**: Future work - indexes on multiple columns?
 
-3. **Additional operators**: Currently only `=` is supported. Future: `<`, `>`, `!=`, `LIKE`, `IN`
+3. **Additional operators**: Currently `=` and `!=` are supported. Future: `<`, `>`, `<=`, `>=`, `LIKE`, `IN`
 
-4. **ORDER BY / LIMIT**: Not yet implemented.
+4. **ORDER BY**: Not yet implemented (LIMIT/OFFSET are implemented).
 
 ## Implementation Notes
 
