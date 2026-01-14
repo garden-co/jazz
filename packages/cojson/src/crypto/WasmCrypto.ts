@@ -15,13 +15,13 @@ import {
   sign,
   unseal,
   verify,
+  WasmFfiTransaction,
 } from "cojson-core-wasm";
 import { base64URLtoBytes, bytesToBase64url } from "../base64url.js";
 import { RawCoID, SessionID, TransactionID } from "../ids.js";
 import { Stringified, stableStringify } from "../jsonStringify.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { logger } from "../logger.js";
-import { toWasmFfiTransaction } from "./ffiTransaction.js";
 import {
   CryptoProvider,
   Encrypted,
@@ -68,6 +68,26 @@ export async function initWasmCrypto() {
   } catch (e) {
     throw new Error(wasmCryptoErrorMessage(e), { cause: e });
   }
+}
+
+function toWasmFfiTransaction(tx: Transaction): WasmFfiTransaction {
+  if (tx.privacy === "private") {
+    return new WasmFfiTransaction(
+      tx.privacy,
+      tx.keyUsed,
+      tx.encryptedChanges,
+      BigInt(tx.madeAt),
+      tx.meta,
+    );
+  }
+
+  return new WasmFfiTransaction(
+    tx.privacy,
+    undefined,
+    tx.changes,
+    BigInt(tx.madeAt),
+    tx.meta,
+  );
 }
 
 /**

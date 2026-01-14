@@ -9,17 +9,18 @@ import {
   getSignerId,
   newEd25519SigningKey,
   newX25519PrivateKey,
+  createTransactionFfi,
   seal,
   sign,
   unseal,
   verify,
+  NapiFfiTransaction,
 } from "cojson-core-napi";
 import { base64URLtoBytes, bytesToBase64url } from "../base64url.js";
 import { RawCoID, SessionID, TransactionID } from "../ids.js";
 import { Stringified, stableStringify } from "../jsonStringify.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { logger } from "../logger.js";
-import { toNapiFfiTransaction } from "./ffiTransaction.js";
 import {
   CryptoProvider,
   Encrypted,
@@ -44,6 +45,26 @@ import {
 } from "../coValueCore/verifiedState.js";
 
 type Blake3State = Blake3Hasher;
+
+function toNapiFfiTransaction(tx: Transaction): NapiFfiTransaction {
+  if (tx.privacy === "private") {
+    return createTransactionFfi(
+      tx.privacy,
+      tx.encryptedChanges,
+      tx.keyUsed,
+      BigInt(tx.madeAt),
+      tx.meta,
+    );
+  }
+
+  return createTransactionFfi(
+    tx.privacy,
+    tx.changes,
+    undefined,
+    BigInt(tx.madeAt),
+    tx.meta,
+  );
+}
 
 /**
  * N-API implementation of the CryptoProvider interface using cojson-core-napi.

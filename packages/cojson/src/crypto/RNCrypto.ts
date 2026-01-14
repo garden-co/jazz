@@ -11,7 +11,6 @@ import { TransactionID } from "../ids.js";
 import { stableStringify } from "../jsonStringify.js";
 import { JsonObject } from "../jsonValue.js";
 import { logger } from "../logger.js";
-import { toUniffiFfiTransaction } from "./ffiTransaction.js";
 import { ControlledAccountOrAgent } from "../coValues/account.js";
 import {
   PrivateTransaction,
@@ -20,6 +19,7 @@ import {
 } from "../coValueCore/verifiedState.js";
 import {
   CryptoProvider,
+  Encrypted,
   KeyID,
   KeySecret,
   Sealed,
@@ -47,8 +47,29 @@ import {
   unseal,
   Blake3Hasher,
   SessionLog,
+  UniffiFfiTransaction,
+  createTransactionFfi,
 } from "cojson-core-rn";
-import { WasmCrypto } from "./WasmCrypto.js";
+
+export function toUniffiFfiTransaction(tx: Transaction): UniffiFfiTransaction {
+  if (tx.privacy === "private") {
+    return createTransactionFfi(
+      tx.privacy,
+      tx.encryptedChanges,
+      tx.keyUsed,
+      BigInt(tx.madeAt),
+      tx.meta,
+    );
+  }
+
+  return createTransactionFfi(
+    tx.privacy,
+    tx.changes,
+    undefined,
+    BigInt(tx.madeAt),
+    tx.meta,
+  );
+}
 
 type Blake3State = Blake3Hasher;
 
@@ -310,4 +331,13 @@ class SessionLogAdapter implements SessionLogImpl {
       this.sessionLog.cloneSessionLog() as SessionLog,
     );
   }
+}
+function createTransactionFfiRn(
+  privacy: string,
+  encryptedChanges: Encrypted<JsonValue[], { in: RawCoID; tx: TransactionID }>,
+  keyUsed: string,
+  arg3: bigint,
+  meta: Encrypted<JsonObject, { in: RawCoID; tx: TransactionID }> | undefined,
+): UniffiFfiTransaction {
+  throw new Error("Function not implemented.");
 }
