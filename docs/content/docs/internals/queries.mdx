@@ -1,0 +1,464 @@
+---
+title: Queries
+description: SQL syntax, incremental query graphs, and ARRAY subqueries
+status: partial
+implements:
+  - groove/src/sql/database/mod.rs
+  - groove/src/sql/parser.rs
+  - groove/src/sql/query_graph/mod.rs
+  - groove/src/sql/query_graph/node.rs
+  - groove/src/sql/query_graph/graph.rs
+  - groove/src/sql/query_graph/registry.rs
+---
+
+<StatusBadge status="partial" />
+
+Jazz provides a SQL interface for querying data with incremental, reactive updates. Queries compile to computation graphs that propagate deltas efficiently—when a row changes, only affected parts of the query re-evaluate.
+
+## Implementation Status
+
+**Implemented:**
+- Full SQL parser (CREATE TABLE, INSERT, UPDATE, DELETE, SELECT with JOIN)
+- Database with CRUD operations
+- Reactive queries with synchronous callbacks
+- LIMIT and OFFSET clauses
+- ARRAY(SELECT ...) subqueries for eager loading
+- Incremental query graphs with delta propagation
+- JoinNode for multi-table queries
+- ArrayAggregate node for nested collections
+- Branch-aware queries with schema transformation
+
+**Partial:**
+- Optimized predicate ordering by selectivity
+
+**Not yet implemented:**
+- Comparison operators (`<`, `>`, `<=`, `>=`) in WHERE clauses (only `=` and `!=` supported)
+- ORDER BY
+- LEFT/RIGHT/OUTER JOINs
+- Nested ARRAY expressions
+- Shared subgraph detection
+- Batched delta propagation
+
+## SQL Syntax
+
+### CREATE TABLE
+
+```sql
+CREATE TABLE users (
+    name STRING NOT NULL,
+    email STRING,
+    age I64,
+    active BOOL NOT NULL
+);
+
+CREATE TABLE posts (
+    author REFERENCES users NOT NULL,
+    title STRING NOT NULL,
+    body STRING,
+    published BOOL
+);
+```
+
+Every table implicitly has an `id` column (the ObjectId / UUIDv7 primary key). See [Data Model](/docs/internals/data-model) for column types.
+
+### INSERT
+
+```sql
+INSERT INTO users (name, email, age, active)
+VALUES ('Alice', 'alice@example.com', 30, true);
+
+-- With Ref column (ObjectId as string literal)
+INSERT INTO posts (author, title, body, published)
+VALUES ('0000000000000034NBSM938NKR', 'Hello World', NULL, false);
+```
+
+### UPDATE
+
+```sql
+UPDATE users SET email = 'new@example.com', age = 31
+WHERE id = '0000000000000034NBSM938NKR';
+```
+
+### DELETE
+
+```sql
+-- Soft delete: creates delete commit, preserves history
+DELETE FROM users WHERE id = '0000000000000034NBSM938NKR';
+
+-- Hard delete: soft delete + truncate history
+DELETE FROM users WHERE id = '0000000000000034NBSM938NKR' HARD;
+```
+
+See [Deletes](/docs/internals/deletes) for soft delete semantics and history truncation.
+
+### SELECT
+
+```sql
+-- All rows
+SELECT * FROM users;
+
+-- Filter by column
+SELECT * FROM users WHERE active = true;
+
+-- Join tables
+SELECT comments.*
+FROM comments
+JOIN posts ON comments.post = posts.id
+WHERE comments.author = '0000000000000034NBSM938NKR' AND posts.published = true;
+
+-- Eager loading with ARRAY subqueries
+SELECT f.*, ARRAY(SELECT n FROM notes n WHERE n.folder_id = f.id) as notes
+FROM folders f;
+
+-- Pagination
+SELECT * FROM users LIMIT 10 OFFSET 20;
+```
+
+### Grammar
+
+```
+statement     = create_table | insert | update | delete | select
+
+create_table  = "CREATE" "TABLE" identifier "(" column_defs ")"
+column_defs   = column_def ("," column_def)*
+column_def    = identifier type nullable?
+type          = "BOOL" | "I64" | "F64" | "STRING" | "BYTES"
+              | "REFERENCES" identifier
+nullable      = "NOT" "NULL" | "NULL"
+
+insert        = "INSERT" "INTO" identifier "(" columns ")" "VALUES" "(" values ")"
+update        = "UPDATE" identifier "SET" assignments where_clause?
+delete        = "DELETE" "FROM" identifier where_clause? "HARD"?
+
+select        = "SELECT" projection "FROM" from_clause where_clause? limit_clause?
+projection    = "*" | table_star | projection_exprs
+projection_expr = qualified_column | array_subquery
+array_subquery  = "ARRAY" "(" select ")" ["AS" identifier]
+
+from_clause   = identifier join_clause*
+join_clause   = "JOIN" identifier "ON" join_condition
+where_clause  = "WHERE" conditions
+limit_clause  = "LIMIT" number ["OFFSET" number]
+
+value         = string_lit | number_lit | bool_lit | "NULL"
+identifier    = [a-zA-Z_][a-zA-Z0-9_]*
+```
+
+## Query API
+
+### Table Operations
+
+```rust
+impl Database {
+    pub fn create_table(&self, schema: TableSchema) -> Result<SchemaId>;
+    pub fn get_table(&self, name: &str) -> Option<TableSchema>;
+    pub fn list_tables(&self) -> Vec<String>;
+}
+```
+
+### Row Operations
+
+```rust
+impl Database {
+    pub fn insert(&self, table: &str, columns: &[&str], values: Vec<Value>) -> Result<ObjectId>;
+    pub fn get(&self, table: &str, id: ObjectId) -> Result<Option<Row>>;
+    pub fn update(&self, table: &str, id: ObjectId, assignments: &[(&str, Value)]) -> Result<bool>;
+    pub fn delete(&self, table: &str, id: ObjectId) -> Result<bool>;
+}
+```
+
+### Query Execution
+
+```rust
+impl Database {
+    pub fn execute(&self, sql: &str) -> Result<ExecuteResult>;
+    pub fn reactive_query(&self, sql: &str) -> Result<ReactiveQuery>;
+}
+
+pub enum ExecuteResult {
+    Created(SchemaId),
+    Inserted(ObjectId),
+    Updated(usize),
+    Selected(Vec<Row>),
+}
+```
+
+### Value Coercion
+
+The parser produces `Value::String` for all string literals. The executor coerces to the appropriate type:
+
+```rust
+fn coerce_value(value: Value, ty: &ColumnType) -> Value {
+    match (&value, ty) {
+        (Value::String(s), ColumnType::Ref(_)) => {
+            if let Ok(id) = s.parse::<ObjectId>() {
+                Value::Ref(id)
+            } else {
+                value
+            }
+        }
+        _ => value,
+    }
+}
+```
+
+## Incremental Query Graphs
+
+### The Problem
+
+Traditional query execution re-scans entire tables on every change:
+
+```
+Row changes → Re-scan table → Re-join → Re-filter → Return complete result
+```
+
+This is O(n) work for O(1) changes.
+
+### The Solution
+
+Jazz builds a directed acyclic graph (DAG) of query operators:
+
+```
+  +--------------+
+  | TableScan    |  ← Reads from tasks table
+  | (tasks)      |
+  +------+-------+
+         |
+  +------v-------+
+  | FilterNode   |  ← WHERE completed = false
+  | (completed)  |
+  +------+-------+
+         |
+  +------v-------+
+  | Output       |  ← Terminal node
+  +--------------+
+```
+
+When a row changes:
+
+1. **Identify**: Which scan nodes read this row?
+2. **Compute**: What changed? (insert, delete, update)
+3. **Propagate**: Push delta through downstream nodes
+4. **Apply**: Update cached results incrementally
+
+### Architecture
+
+```
++-----------------------------------------------------------------+
+|                      IncrementalQuery                            |
+|   (user-facing handle with subscribe/get methods)               |
++-----------------------------------------------------------------+
+                                |
+                                v
++-----------------------------------------------------------------+
+|                       GraphRegistry                              |
+|   - Manages all active QueryGraphs                               |
+|   - Routes row changes to relevant graphs                        |
+|   - Owns shared RowCache                                         |
++-----------------------------------------------------------------+
+                                |
+        +---------------+-------+-----------------------+
+        v                       v                       v
++---------------+     +-----------------+     +-----------------+
+|  TableScan    |     |     Filter      |     |     Output      |
+| (source node) |     | (predicate)     |     | (terminal)      |
++---------------+     +-----------------+     +-----------------+
+```
+
+### Core Types
+
+**RowDelta** - A change to a single row:
+
+```rust
+pub struct PriorState {
+    pub prior_tips: Vec<CommitId>,
+}
+
+pub enum RowDelta {
+    Added(Row),
+    Removed { id: ObjectId, prior: PriorState },
+    Updated { id: ObjectId, new: Row, prior: PriorState },
+}
+```
+
+**Predicate** - Filter conditions:
+
+```rust
+pub enum Predicate {
+    True,
+    False,
+    Eq { column: String, value: Value },
+    Ne { column: String, value: Value },
+    And(Vec<Predicate>),
+    Or(Vec<Predicate>),
+    Not(Box<Predicate>),
+}
+```
+
+**QueryNode** - Nodes in the computation graph:
+
+```rust
+pub enum QueryNode {
+    TableScan { table: String, cached_ids: HashSet<ObjectId> },
+    IndexLookup { table: String, index_key: IndexKey, target_id: ObjectId, cached_ids: HashSet<ObjectId> },
+    Filter { table: String, input: NodeId, predicate: Predicate, cached_ids: HashSet<ObjectId> },
+    Output { table: String, input: NodeId },
+    ArrayAggregate { /* ... */ },
+}
+```
+
+### Node Evaluation
+
+Each node processes input deltas and produces output deltas:
+
+**Filter node logic:**
+```
+For each delta:
+  Added(row):
+    if predicate.matches(row):
+      cached_ids.insert(row.id)
+      emit Added(row)
+
+  Removed { id, prior }:
+    if cached_ids.remove(id):
+      emit Removed { id, prior }
+
+  Updated { id, new, prior }:
+    was_match = cached_ids.contains(id)
+    is_match = predicate.matches(new)
+
+    match (was_match, is_match):
+      (false, true)  → emit Added(new)
+      (true, false)  → emit Removed { id, prior }
+      (true, true)   → emit Updated { id, new, prior }
+      (false, false) → (early cutoff - no output)
+```
+
+### IncrementalQuery API
+
+```rust
+pub struct IncrementalQuery {
+    graph_id: GraphId,
+    registry: Arc<GraphRegistry>,
+}
+
+impl IncrementalQuery {
+    pub fn get(&self) -> Vec<Row>;
+    pub fn subscribe(&self, callback: impl Fn(&DeltaBatch)) -> ListenerId;
+    pub fn subscribe_rows(&self, callback: impl Fn(Vec<Row>)) -> ListenerId;
+}
+```
+
+## ARRAY Subqueries
+
+ARRAY subqueries enable ORM-style eager loading:
+
+```sql
+SELECT f.*, ARRAY(SELECT n FROM notes n WHERE n.folder_id = f.id) as notes
+FROM folders f
+```
+
+### Syntax
+
+Following PostgreSQL, the subquery can return a single column or a table alias:
+
+```sql
+-- Single scalar column
+ARRAY(SELECT title FROM notes WHERE folder_id = f.id)
+-- Returns: Value::Array([Value::String("A"), Value::String("B")])
+
+-- Table alias returns full rows
+ARRAY(SELECT n FROM notes n WHERE n.folder_id = f.id)
+-- Returns: Value::Array([Value::Row(...), Value::Row(...)])
+```
+
+### Value Types
+
+```rust
+pub enum Value {
+    // ... existing variants ...
+    Row(Vec<Value>),     // Composite row value
+    Array(Vec<Value>),   // Array of values
+}
+```
+
+### ArrayAggregate Node
+
+The `ArrayAggregate` query node handles incremental updates:
+
+```rust
+QueryNode::ArrayAggregate {
+    outer_table: String,
+    outer_column: String,
+    inner_table: String,
+    inner_ref_column: String,
+    inner_schema: TableSchema,
+    cached_arrays: HashMap<ObjectId, Vec<Row>>,
+    inner_to_outer: HashMap<ObjectId, ObjectId>,
+}
+```
+
+**Delta propagation:**
+- Inner row added → Add to cached_arrays, emit Updated for outer row
+- Inner row removed → Remove from cached_arrays, emit Updated for outer row
+- Outer row added → Initialize empty array, scan for matching inner rows
+
+### TypeScript Integration
+
+```typescript
+interface Folder {
+  id: string;
+  name: string;
+  notes: Note[];  // From ARRAY subquery
+}
+
+// Depth types for controlling eager loading
+type FolderDepth = { notes?: NoteDepth };
+type FolderLoaded<D extends FolderDepth> = {
+  id: string;
+  name: string;
+  notes: D['notes'] extends object ? NoteLoaded<D['notes']>[] : never;
+};
+```
+
+### Limitations
+
+1. No ORDER BY in subquery
+2. No LIMIT in subquery
+3. Single correlation column only (`WHERE inner.ref = outer.id`)
+4. No nested ARRAY expressions
+5. Full array replacement (no granular array deltas)
+
+## Open Questions
+
+1. **Enum support (GCO-1067)**: Add enum column types without Postgres-style mutation complexity.
+
+2. **Column selection (GCO-1079)**: Support `SELECT col1, col2` instead of always `SELECT *`.
+
+3. **History API (GCO-1059)**: Expose commit graph metadata through virtual columns (`_commit_id`, `_author`, `_timestamp`, `_deleted`).
+
+4. **Streaming Join Architecture (GCO-1080)**: Current approach stores ALL right rows in memory. Consider lazy loading or index eviction.
+
+5. **Projection Nodes (GCO-1072)**: Should we add explicit Projection nodes for column aliasing and selection?
+
+6. **SQL → Query Graph Refactoring (GCO-1065)**: Key pain points include forward/reverse JOIN asymmetry and ad-hoc table alias handling.
+
+7. **One-Shot vs Incremental Consolidation (GCO-1076)**: Should we eliminate one-shot query APIs and use `once()` helper instead?
+
+## Files
+
+- `groove/src/sql/database/mod.rs` - Database API
+- `groove/src/sql/parser.rs` - SQL parser
+- `groove/src/sql/query_graph/mod.rs` - Public API exports
+- `groove/src/sql/query_graph/delta.rs` - RowDelta, DeltaBatch
+- `groove/src/sql/query_graph/predicate.rs` - Predicate matching
+- `groove/src/sql/query_graph/node.rs` - QueryNode variants
+- `groove/src/sql/query_graph/graph.rs` - QueryGraph, GraphState
+- `groove/src/sql/query_graph/builder.rs` - QueryGraphBuilder
+- `groove/src/sql/query_graph/registry.rs` - GraphRegistry
+
+## Related
+
+- [Data Model](/docs/internals/data-model) - Column types, row encoding, ObjectId
+- [Deletes](/docs/internals/deletes) - Soft delete semantics
+- [Indices](/docs/internals/indices) - Reverse index structure

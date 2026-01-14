@@ -1,4 +1,4 @@
 {
   "title": "Key Concepts",
-  "pages": ["index", "objects", "tables", "sync", "queries"]
+  "pages": ["index", "schema", "mutations", "queries", "sync"]
 }

@@ -1,40 +1,53 @@
 ---
-title: Internal Design
-description: Deep dive into Jazz's architecture and design decisions
+title: Deep Dives
+description: Technical specifications and internal design documentation
 ---
 
-This section covers the internal design decisions and architecture of Jazz. It's intended for contributors and those who want to understand how Jazz works under the hood.
+This section contains technical specifications for Jazz's internal systems. Each spec has a status badge indicating implementation progress.
+
+## Status Legend
+
+| Badge | Meaning |
+|-------|---------|
+| <StatusBadge status="implemented" /> | Core functionality complete |
+| <StatusBadge status="partial" /> | Some features done, others in progress |
+| <StatusBadge status="future" /> | Design document only |
+
+## Core Specs
+
+| Spec | Status | Description |
+|------|--------|-------------|
+| [Architecture](/docs/internals/architecture) | - | High-level system overview |
+| [Data Model](/docs/internals/data-model) | <StatusBadge status="implemented" /> | Objects, commits, column types, row encoding, binary data |
+| [Queries](/docs/internals/queries) | <StatusBadge status="partial" /> | SQL syntax, incremental query graphs, ARRAY subqueries |
+| [Sync](/docs/internals/sync) | <StatusBadge status="partial" /> | Client-server synchronization protocol |
+| [Storage](/docs/internals/storage) | <StatusBadge status="partial" /> | Content storage, chunking, compression, persistence |
+| [Schema Evolution](/docs/internals/schema-evolution) | <StatusBadge status="implemented" /> | Bidirectional lenses for schema changes |
+| [Access Control](/docs/internals/access-control) | <StatusBadge status="partial" /> | ReBAC policies with SQL-like expressions |
+| [Deletes](/docs/internals/deletes) | <StatusBadge status="implemented" /> | Soft delete and history truncation |
+
+## Future
+
+| Spec | Status | Description |
+|------|--------|-------------|
+| [Indices](/docs/internals/indices) | <StatusBadge status="future" /> | Scalable sorted chunk indices beyond memory |
+| [Transactions](/docs/internals/transactions) | <StatusBadge status="future" /> | MVCC-based multi-row transactions |
 
 ## Design Principles
 
 1. **Local-first**: Data lives on the client first, server is a peer
 2. **SQL interface**: Familiar query language, not a new API to learn
-3. **Incremental**: Queries update efficiently, not from scratch
+3. **Incremental**: Queries update efficiently via delta propagation
 4. **Fine-grained**: Sync, permissions, and versioning at row level
 
-## Architecture Overview
+## Source Code
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Application Layer                     │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
-│  │ @jazz/react  │  │ @jazz/client │  │   groove     │   │
-│  └──────────────┘  └──────────────┘  └──────────────┘   │
-├─────────────────────────────────────────────────────────┤
-│                      Core (Rust/WASM)                    │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
-│  │  SQL Layer   │  │ Query Graph  │  │ Object Store │   │
-│  └──────────────┘  └──────────────┘  └──────────────┘   │
-├─────────────────────────────────────────────────────────┤
-│                      Storage Layer                       │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
-│  │  IndexedDB   │  │    SQLite    │  │     S3       │   │
-│  └──────────────┘  └──────────────┘  └──────────────┘   │
-└─────────────────────────────────────────────────────────┘
-```
+Key modules in `groove/src/`:
 
-## Key Design Documents
+- `sql/` - SQL parser, database, schema
+- `sql/query_graph/` - Incremental query computation
+- `storage.rs` - Content and commit storage
+- `sql/policy.rs` - ReBAC permission policies
+- `branch.rs` - Branch management with delete support
 
-- [SQL Layer Design](/docs/internals/architecture)
-- [Incremental Query System](/docs/internals/incremental-queries)
-- [Sync Protocol](/docs/internals/sync-protocol)
+Each module links to its corresponding spec in header comments.

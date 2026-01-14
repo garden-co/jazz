@@ -6,7 +6,7 @@ pre-commit:
     # Formatting (runs first, in parallel)
     rust-format:
       glob: "*.rs"
-      run: cargo fmt --all && git add {staged_files}
+      run: cargo fmt --all --manifest-path crates/Cargo.toml && git add {staged_files}
       stage_fixed: true
       priority: 1
     biome-format:
@@ -17,7 +17,7 @@ pre-commit:
     # Linting (runs after formatting)
     rust-lint:
       glob: "*.rs"
-      run: cargo clippy --all-targets --all-features -- -D warnings
+      run: cargo clippy --all-targets --all-features --manifest-path crates/Cargo.toml -- -D warnings
       priority: 2
     biome-lint:
       glob: "*.{js,ts,tsx,jsx}"

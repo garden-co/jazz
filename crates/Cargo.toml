@@ -1,0 +1,21 @@
+[workspace]
+members = [
+    "groove",
+    "groove-cli",
+    "groove-server",
+    "groove-wasm",
+]
+# Only build groove by default (groove-wasm is WASM-only, groove-server is optional)
+default-members = ["groove", "groove-cli"]
+resolver = "2"
+
+# Dev profile with debug symbols for better WASM stack traces
+[profile.dev]
+debug = true
+opt-level = 0
+
+[profile.release]
+opt-level = "s"
+lto = true
+
+

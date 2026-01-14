@@ -1,0 +1,258 @@
+---
+title: Data Model
+description: Objects, commits, column types, row encoding, and binary data
+status: implemented
+implements:
+  - groove/src/object.rs
+  - groove/src/sql/schema.rs
+  - groove/src/sql/row_buffer.rs
+  - groove-wasm/src/lib.rs
+---
+
+<StatusBadge status="implemented" />
+
+Jazz stores data as Objects with git-like commit graphs. Each table row is an Object with its own history, enabling fine-grained sync and per-row conflict resolution.
+
+## Objects and ObjectId
+
+Every piece of data in Jazz is an Object identified by an ObjectId:
+
+```rust
+/// Object identifier using Crockford Base32 encoding.
+/// Based on UUIDv7 - includes timestamp, so IDs sort by creation time.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ObjectId(pub u128);
+
+// Display: "0000000000000034NBSM938NKR" (26 chars)
+// FromStr: case-insensitive, I/L→1, O→0
+```
+
+**Properties:**
+- UUIDv7-based: IDs sort by creation time
+- Crockford Base32 encoded: compact, URL-safe, excludes I/L/O/U
+- Globally unique: no collisions across distributed systems
+
+## Commit Graph
+
+Each Object maintains a git-like commit graph:
+
+```
+     c1
+    /  \
+   c2   c3   <- concurrent edits create branches
+    \  /
+     c4      <- merge commit
+```
+
+- **Parents**: Each commit references parent commit(s)
+- **Content**: Commit stores the row data (or delta)
+- **Metadata**: Timestamp, author, delete marker
+
+See [Sync](/docs/internals/sync) for conflict resolution via per-column LWW.
+
+## Schema Objects
+
+Tables are schema definition Objects:
+
+```rust
+struct TableSchema {
+    name: String,
+    columns: Vec<ColumnDef>,
+}
+
+struct ColumnDef {
+    name: String,
+    ty: ColumnType,
+    nullable: bool,
+}
+```
+
+Each schema gets a `SchemaId` (ObjectId of schema object). Rows reference their schema by this ID.
+
+## Column Types
+
+| Type | Size | Notes |
+|------|------|-------|
+| `Bool` | 1 byte | 0x00 = false, 0x01 = true |
+| `I64` | 8 bytes | Little-endian signed integer |
+| `F64` | 8 bytes | IEEE 754 little-endian |
+| `String` | variable | UTF-8 encoded |
+| `Bytes` | variable | Raw binary data |
+| `Ref(table)` | 16 bytes | ObjectId reference to another row |
+| `BLOB` | variable | Chunked binary content |
+| `BLOB[]` | variable | Array of blobs |
+
+```rust
+enum ColumnType {
+    Bool,
+    I64,
+    F64,
+    String,
+    Bytes,
+    Ref(String),      // References row in named table
+    Blob,
+    BlobArray,
+}
+```
+
+## Row Binary Format
+
+Rows use a compact binary format with O(1) column access:
+
+```
+[fixed-size columns][u32 offset₂][u32 offset₃]...[var_data₁][var_data₂][var_data₃]...
+```
+
+**Layout:**
+- Fixed-size columns come first, packed contiguously
+- For N variable-size columns, N-1 u32 offsets stored (little-endian)
+- Variable-size data follows the offset table
+
+**Nullable columns:**
+- 1-byte presence flag (0x00 = null, 0x01 = present)
+- Fixed-size: flag + value bytes (zeros if null, to maintain offsets)
+- Variable-size: if null, length is 0
+
+### Example
+
+Schema: `(id: Ref NOT NULL, count: I64 NULL, name: String NOT NULL, bio: String NULL)`
+
+```
+Row: id=abc..., count=42, name="Alice", bio=NULL
+
+[id: 16 bytes]                <- fixed section
+[0x01][42 as i64: 8 bytes]    <- count: present + value
+[offset: u32 = 5]             <- bio starts at byte 5 of var section
+[Alice: 5 bytes]              <- name data
+[0x00]                        <- bio: null flag
+```
+
+### Benefits
+
+1. **O(1) column access**: Offset table gives exact positions
+2. **Efficient diffing**: Column-by-column comparison for merge
+3. **Compact**: No type tags, no field names
+4. **Streamable**: Can skip columns without reading full row
+
+## Index Objects
+
+Indexes enable efficient reverse lookups for reference columns:
+
+```rust
+struct RefIndex {
+    // Maps target_id -> Vec<source_row_id>
+    entries: BTreeMap<ObjectId, Vec<ObjectId>>,
+}
+```
+
+**Granularity:** One index per `(source_table, source_column)` pair.
+
+**Example:** Table `posts` has `author: Ref(users)`:
+- Index: `posts.author`
+- Insert `post_123` with `author = user_456` → Index adds `user_456 -> [post_123]`
+- Query "posts by user_456" reads index directly
+
+See [Indices](/docs/internals/indices) for future scalable index design.
+
+## BLOB Columns
+
+Binary Large Objects for streaming large data:
+
+```sql
+CREATE TABLE documents (
+    title STRING,
+    content BLOB,           -- Single blob
+    attachments BLOB[]      -- Array of blobs
+);
+```
+
+### Identity and Addressing
+
+Blobs identified by content hash, with full ID combining row ObjectId:
+
+```
+<object_id>/<content_hash>
+```
+
+### Permission Semantics
+
+Blobs inherit permissions from their owning row:
+- **Sync**: If user can sync row, they can sync its blobs
+- **Creation**: If user can insert/update row, they can attach blobs
+- **No standalone access**: Must go through row
+
+### Storage
+
+Blobs reuse chunked content storage:
+- Content > 1MB is automatically chunked (temporary threshold - will be 1KB)
+- Chunks stored in `ContentStore`
+- Row stores blob reference (inline bytes or chunk hash list)
+
+### Row Encoding
+
+```
+BLOB column:
+- 1 byte: presence flag (for nullable)
+- If present: serialized ContentRef (inline or chunk hashes)
+
+BLOB[] column:
+- 4 bytes: count (u32)
+- For each: serialized ContentRef
+```
+
+### Streaming API
+
+**Rust:**
+```rust
+let blob = db.create_blob(&object_id, stream).await?;
+db.update(&object_id, |row| row.set("content", blob));
+
+let stream = db.read_blob(&object_id, "content").await?;
+```
+
+**JavaScript:**
+```typescript
+import { blobToReadableStream, readableStreamToBlob } from 'groove-wasm/blob-helpers';
+
+const writer = db.create_blob_writer();
+await readableStreamToBlob(writer, file.stream());
+await db.update_row_blob(rowId, 'content', writer.handle);
+
+const stream = blobToReadableStream(db, rowId, 'content');
+```
+
+## Value Types
+
+Runtime value representation:
+
+```rust
+pub enum Value {
+    Null,
+    Bool(bool),
+    I64(i64),
+    F64(f64),
+    String(String),
+    Bytes(Vec<u8>),
+    Ref(ObjectId),
+    Blob(ContentRef),
+    BlobArray(Vec<ContentRef>),
+    Row(Vec<Value>),      // For ARRAY subquery results
+    Array(Vec<Value>),    // For nested arrays
+}
+```
+
+## Open Questions
+
+1. **Composite indexes**: Indexes on multiple columns?
+2. **Blob partial updates**: Should blobs support byte-range updates?
+3. **Blob deduplication**: Dedupe across rows/tables?
+4. **Maximum blob size**: Any limits?
+
+## Files
+
+- `groove/src/object.rs` - ObjectId type
+- `groove/src/sql/schema.rs` - TableSchema, ColumnType
+- `groove/src/sql/row_buffer.rs` - Row binary format
+- `groove/src/sql/index.rs` - RefIndex
+- `groove-wasm/src/lib.rs` - BLOB WASM API
+- `groove-wasm/blob-helpers.ts` - JavaScript blob helpers

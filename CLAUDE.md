@@ -1,120 +1,92 @@
 # Jazz2 (Groove)
 
-This is a work-in-progress redesign of Jazz, a distributed database that syncs across frontend, backend, and cloud. The core library is called "Groove" and lives in the `groove/` directory.
+Distributed database syncing across frontend/backend/cloud. Core "Groove" in Rust, TypeScript bindings via WASM.
 
-**Status**: Active development. Many features are implemented but the system is not yet production-ready.
+**Status**: Active development, not production-ready.
 
-## Project Structure
+## Structure
 
 ```
-groove/           # Core Rust library
-groove-wasm/      # WASM bindings for browser
-demo-app/         # Example React app using groove-wasm
-specs/            # Design documents
+crates/                # Rust workspace
+  groove/              # Core library — see crates/groove/src/lib.rs
+  groove-wasm/         # WASM bindings — see crates/groove-wasm/src/lib.rs
+  groove-cli/          # CLI tools — see crates/groove-cli/src/main.rs
+  groove-server/       # Server — see crates/groove-server/src/lib.rs
+packages/              # TS packages
+  jazz-client/         # Client — see packages/jazz-client/src/index.ts
+  jazz-react/          # React hooks — see packages/jazz-react/src/index.ts
+  jazz-schema/         # Schema codegen — see packages/jazz-schema/src/index.ts
+examples/              # All example apps
+  demo-app/            # React demo app
+  sync-demo/           # Sync demonstration
+  docs/                # Typechecked doc examples (symlinked to docs/examples)
+docs/                  # Fumadocs site
 ```
 
-## Design Documents
-
-Read these to understand the architecture:
-
-- [new-jazz-no-context.md](new-jazz-no-context.md) - Overview of the new Jazz design principles
-- [from-legacy-to-new-jazz.md](from-legacy-to-new-jazz.md) - Why we're redesigning and what's changing
-- [specs/sql-layer.md](specs/sql-layer.md) - SQL interface design and status
-- [specs/incremental-queries.md](specs/incremental-queries.md) - Incremental query computation graphs
-- [specs/streaming-and-persistence.md](specs/streaming-and-persistence.md) - Content storage and streaming
-- [specs/rebac-policies.md](specs/rebac-policies.md) - ReBAC permission policies
-
-## Key Concepts
-
-- **Objects**: Fundamental unit, identified by ObjectId (UUIDv7 with Crockford Base32 encoding). Each object has a commit graph (git-like history).
-- **Tables/Rows**: Each table row is an Object with its own commit history, enabling fine-grained sync and per-row conflict resolution.
-- **SQL Interface**: CREATE TABLE, INSERT, UPDATE, SELECT with JOIN support. Queries can be incremental (only recompute affected parts on change).
-- **Incremental Queries**: Computation graphs that propagate deltas efficiently instead of re-evaluating entire queries.
+Each entry point has module overview in its header comments.
 
 ## Building
 
 ```bash
-# Run all tests
-cargo test
-
-# Build WASM package
-cd groove-wasm && wasm-pack build --target web
-
-# Run demo app
-cd demo-app && npm install && npm run dev
+cd crates && cargo test                                   # Rust tests
+cd crates/groove-wasm && wasm-pack build --target web     # WASM
+pnpm install && pnpm build                                # TS packages (required before docs build)
+cd examples/demo-app && npm run dev                       # Demo app
 ```
 
-## Testing Guidelines
+**Important**: `pnpm build` at repo root before docs build — TS packages must be built for workspace resolution.
 
-- Always check specific properties of collection items in tests, not just the collection length. For example, after asserting `rows.len() == 2`, also verify the actual row values like names, titles, or IDs.
+## Specs
 
-## Documentation Guidelines
+Source of truth. Linear references specs, not vice versa.
 
-- **All code examples in docs must come from typechecked example apps whenever possible.** Use the `<include>` directive to pull code from `docs/examples/` rather than writing inline code snippets. This ensures examples are always valid and up-to-date with the actual API.
-  - Example: `<include>../../../examples/react/src/components/TaskList.tsx#task-list-basic</include>`
-  - Mark regions in example files with `// #region <name>` and `// #endregion <name>` comments
-  - Exceptions: SQL schema examples, ASCII diagrams, and comparison snippets showing other products' APIs may be inline
+**Architecture**: [docs/content/docs/internals/architecture.mdx](docs/content/docs/internals/architecture.mdx)
 
-## Code Quality Guidelines
+**Deep dives** in [docs/content/docs/internals/](docs/content/docs/internals/):
 
-- When taking any shortcut or simplification, loudly document it in: (1) code comments at the site, (2) a Linear issue for tracking, and (3) the final summary when completing a task.
+| Spec | Status |
+|------|--------|
+| [Data Model](docs/content/docs/internals/data-model.mdx) | Implemented |
+| [Queries](docs/content/docs/internals/queries.mdx) | Partial |
+| [Sync](docs/content/docs/internals/sync.mdx) | Partial |
+| [Storage](docs/content/docs/internals/storage.mdx) | Partial |
+| [Schema Evolution](docs/content/docs/internals/schema-evolution.mdx) | Implemented |
+| [Access Control](docs/content/docs/internals/access-control.mdx) | Partial |
+| [Deletes](docs/content/docs/internals/deletes.mdx) | Implemented |
+| [Indices](docs/content/docs/internals/indices.mdx) | Future |
+| [Transactions](docs/content/docs/internals/transactions.mdx) | Future |
 
-## Generated Code Guidelines
+## Key Concepts
 
-**IMPORTANT**: Never edit generated files directly. Instead, edit the generators that produce them:
+**Objects**: Fundamental unit, ObjectId (UUIDv7, Crockford Base32). Each has git-like commit graph.
 
-- `demo-app/src/generated/*.ts` - Generated by `@jazz/schema` from the SQL schema. Edit the generator in `packages/jazz-schema/src/codegen/` instead.
-- `packages/jazz-client/src/generated/*.ts` - Similar pattern. Look for source templates or generator scripts.
-- Generated decoder functions (e.g., `decodeIssue`) - These are generated by `packages/jazz-schema/src/codegen/from-sql.ts`. Edit that file to change how decoders work.
+**Tables/Rows**: Each row is an Object. Fine-grained sync, per-row conflict resolution.
 
-When making changes to how binary encoding/decoding works:
-1. Update the Rust encoder in `groove/src/sql/binary.rs`
-2. Update the decoder generator in `packages/jazz-schema/src/codegen/from-sql.ts`
-3. Update the dynamic decoder (for includes) in `packages/jazz-client/src/decoder.ts`
-4. Regenerate client code with `npm run generate` in `demo-app/`
+**SQL**: CREATE TABLE, INSERT, UPDATE, SELECT with JOINs. Queries can be incremental.
 
-## Module Overview
+**Incremental Queries**: Computation graphs propagate deltas instead of full re-evaluation.
 
-Key modules in `groove/src/`:
+## Guidelines
 
-- `object.rs` - ObjectId type and object primitives
-- `sql/` - SQL parser, database, schema, query execution
-- `sql/query_graph/` - Incremental query computation system
-- `storage.rs` - Content and commit storage traits
-- `node.rs` - LocalNode for managing objects
-- `listener.rs` - Synchronous callback subscriptions
+**Testing**: Assert concrete values, not just structure. `assert_eq!(user.name, "Alice")` not `assert!(user.name.len() > 0)`. Makes tests rigid and readable.
 
-## Linear Integration
+**Docs**: All code examples MUST be in external files and included via `<include>` with region markers (`// #region` for TS/JS, `// #region` for Rust). TypeScript examples go in `examples/docs/`, Rust examples go in `crates/*/examples/`. Inline code examples are forbidden - they can't be typechecked or tested. Exceptions: SQL, ASCII diagrams, comparison snippets that can't be typechecked.
 
-**IMPORTANT**: All task tracking happens in Linear. When working on this project:
-- **Create issues** for new tasks, bugs, and ideas
-- **Update issue status** as you make progress
-- **Log design decisions** and blockers in issue comments
-- **Check existing issues** before starting work to avoid duplicates
+**Shortcuts**: Document in (1) code comments, (2) Linear issue, (3) task summary.
+
+**Generated code**: Never edit directly. Edit generators in `packages/jazz-schema/src/codegen/`.
+
+## Linear
 
 Project: [Jazz2 prototype](https://linear.app/garden-co/project/jazz2-prototype-ad7779f29620)
 
-### Setup
+Issues reference specs. PRs link to both Linear and spec. Don't duplicate spec content.
 
-To interact with Linear via the GraphQL API, set the `LINEAR_API_KEY` environment variable:
-
-```bash
-# Add to ~/.zshrc or ~/.bashrc
-export LINEAR_API_KEY="lin_api_..."
-```
-
-Get your API key from https://linear.app/settings/api
-
-If a team member tries to interact with Linear but doesn't have this set up, walk them through creating an API key and adding it to their shell profile.
-
-### Fetching Issues
-
-**Always use the Linear GraphQL API** to fetch issues (not the web UI). Example:
+**Setup**: `export LINEAR_API_KEY="lin_api_..."` from https://linear.app/settings/api
 
 ```bash
 curl -s -X POST https://api.linear.app/graphql \
   -H "Content-Type: application/json" \
   -H "Authorization: $LINEAR_API_KEY" \
-  -d '{"query": "query { issue(id: \"GCO-1071\") { id identifier title description state { name } comments { nodes { body createdAt user { name } } } } }"}'
+  -d '{"query": "query { issue(id: \"GCO-1071\") { id identifier title description state { name } } }"}'
 ```
-

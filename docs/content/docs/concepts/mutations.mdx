@@ -1,0 +1,46 @@
+---
+title: Mutations
+description: Creating, updating, and deleting data
+---
+
+Jazz mutations apply instantly to local state. Changes sync to the server and other clients in the background.
+
+## Creating Data
+
+Use the generated `create` method:
+
+<include>../../../examples/react/src/concepts/mutations.tsx#create-task</include>
+
+The `create` method returns the new row's `ObjectId`:
+
+<include>../../../examples/react/src/concepts/mutations.tsx#create-returns-id</include>
+
+## Updating Data
+
+Use the `update` method with a row ID:
+
+<include>../../../examples/react/src/concepts/mutations.tsx#toggle-task</include>
+
+Updates are partial - only include the fields you want to change.
+
+## Deleting Data
+
+Use the `delete` method:
+
+<include>../../../examples/react/src/concepts/mutations.tsx#delete-task</include>
+
+Deletes are "soft" by default - the row is marked as deleted but its history is preserved. This allows undo and sync consistency.
+
+## Instant Updates
+
+All mutations apply instantly to local state:
+
+<include>../../../examples/react/src/concepts/mutations.tsx#instant-updates</include>
+
+The sync server receives changes in the background. If you're offline, changes queue locally and sync when you reconnect.
+
+## With References
+
+When a column is a `REFERENCES`, pass an ObjectId string:
+
+<include>../../../examples/react/src/concepts/mutations.tsx#with-references</include>

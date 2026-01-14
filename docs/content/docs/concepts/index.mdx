@@ -1,31 +1,50 @@
 ---
-title: Key Concepts
-description: Understanding the core concepts behind Jazz
+title: What is Jazz?
+description: A local-first database that syncs
 ---
 
-Jazz is built on a few fundamental concepts that enable real-time sync and collaboration.
+Jazz is a database that runs in your app and syncs automatically. Data lives locally first, so your UI is always fast and works offline. Changes sync to a server and other clients in the background.
 
-## Objects
+## The Core Idea
 
-The fundamental unit in Jazz is an **Object**, identified by an `ObjectId` (UUIDv7 with Crockford Base32 encoding). Each object has its own commit graph—like a miniature git repository—enabling fine-grained sync and conflict resolution.
+Instead of fetching data from a server, you read and write to a local database. Jazz handles syncing behind the scenes:
 
-## Tables and Rows
+<include>../../../examples/react/src/concepts/intro.tsx#core-idea</include>
 
-Jazz provides a SQL-like interface where each table row is an Object with its own commit history. This enables:
+The sync server is a peer, not the source of truth. If you're offline, everything still works.
 
-- Per-row conflict resolution
-- Fine-grained sync (only changed rows propagate)
-- Row-level permissions
+## Key Features
 
-## Incremental Queries
+**Instant UI** - Data is local, so reads and writes are fast. No loading spinners for cached data.
 
-Queries in Jazz are not just one-time operations—they're computation graphs that propagate changes efficiently. When underlying data changes, only affected parts of the query result are recomputed.
+**Offline by default** - Full functionality without network. Changes sync when you reconnect.
 
-## Local-First Architecture
+**SQL interface** - Define tables with SQL, query with familiar syntax.
 
-Data lives on the client first:
+**Incremental queries** - Subscribe to query results that update efficiently when data changes.
 
-1. Mutations apply instantly to local state
-2. UI updates immediately (no loading spinners)
-3. Changes sync to other clients and servers in the background
-4. Conflicts are resolved automatically using CRDTs
+**Automatic sync** - Changes propagate to server and other clients automatically.
+
+**Conflict resolution** - Concurrent edits merge using per-column last-writer-wins.
+
+## How It Works
+
+Under the hood, each row in your database is an "Object" with a git-like commit history. This enables:
+
+- **Fine-grained sync** - Only changed rows sync, not entire tables
+- **Per-row versioning** - Each row tracks its own history
+- **Automatic merging** - Concurrent edits to different columns merge cleanly
+
+When two clients edit the same row:
+
+1. Both edits apply locally and sync to the server
+2. The server broadcasts both changes
+3. Each client merges using per-column last-writer-wins
+4. The highest timestamp per column wins
+
+## Next Steps
+
+- [Schema](/docs/concepts/schema) - Define your tables
+- [Mutations](/docs/concepts/mutations) - Create, update, delete data
+- [Queries](/docs/concepts/queries) - Read data with subscriptions
+- [Sync](/docs/concepts/sync) - Understand how sync works

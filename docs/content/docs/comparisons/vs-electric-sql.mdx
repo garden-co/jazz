@@ -34,7 +34,7 @@ ElectricSQL is another local-first sync solution. Both share the goal of bringin
 
 ## Conflict Resolution
 
-**Jazz**: CRDT-based with multiple strategies. Per-field conflict resolution.
+**Jazz**: Per-column last-writer-wins. Each column tracks its last update timestamp.
 
 **ElectricSQL**: Rich-CRDTs for automatic merge. Similar capabilities.
 

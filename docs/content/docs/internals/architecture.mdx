@@ -1,27 +1,101 @@
 ---
 title: Architecture
-description: How Jazz is structured internally
+description: Core design principles and system architecture
 ---
 
-Jazz is built in layers, with Rust at the core compiled to WebAssembly for browser use.
+## Core Principles
+
+- **Local-first DX**: Data looks and feels like local reactive state
+- **Trusted sync server**: Server stores data in plaintext by default
+- **E2EE opt-in**: Encryption available for sensitive data, not mandatory
+- **SQL everywhere**: Query language for both local and server operations
+- **Git-style history**: Per-object commit graphs with compressed snapshots
+
+## Spec Overview
+
+| Spec | Status | Description |
+|------|--------|-------------|
+| [Data Model](/docs/internals/data-model) | Implemented | Objects, commits, column types, row encoding, binary data |
+| [Queries](/docs/internals/queries) | Partial | SQL syntax, incremental query graphs, ARRAY subqueries |
+| [Sync](/docs/internals/sync) | Partial | Client-server synchronization protocol |
+| [Storage](/docs/internals/storage) | Partial | Content storage, chunking, compression, persistence |
+| [Schema Evolution](/docs/internals/schema-evolution) | Implemented | Bidirectional lenses for schema changes |
+| [Access Control](/docs/internals/access-control) | Partial | ReBAC policies with SQL-like expressions |
+| [Deletes](/docs/internals/deletes) | Implemented | Soft delete and history truncation |
+| [Indices](/docs/internals/indices) | Future | Scalable sorted chunk indices |
+| [Transactions](/docs/internals/transactions) | Future | MVCC-based multi-row transactions |
+
+## Data Model
+
+### Objects
+
+The fundamental unit, identified by UUIDv7 (Crockford Base32 encoded). Each object has:
+- A commit graph (history as compressed snapshots with parent references)
+- Named branches with format `[env]-[schemaVersion]-[userBranch]` (e.g., `prod-01JGXYZ123ABC456DEF789GHIJ@v1-main`)
+
+Objects store different kinds of data:
+- **Rows** - Table data (the primary use case)
+- **Catalog** - Database directory mapping table names to descriptors
+- **Table descriptors** - Schema definitions and access policies
+- **Schemas** - Column type definitions
+- **Indices** - RefIndex for backlink lookups
+- **TableRows** - Sets of row IDs per table
+
+See [Data Model](/docs/internals/data-model) for column types, row encoding, and binary data handling.
+
+### Tables and Rows
+
+Primary use case: each object represents a table row.
+
+- Schema defines tables (SQL CREATE TABLE)
+- Each row is an object with its own commit history
+- References between rows are foreign keys to other objects
+- Sync at object level, per-column LWW conflict resolution
+
+### Commits
+
+Each commit contains:
+- Snapshot of object state (delta-encoded and compressed)
+- Parent reference(s)
+- Author and timestamp
+
+Commit IDs are content hashes (BLAKE3). For large binary content, use BLOB columns which handle chunking separately (see [Data Model](/docs/internals/data-model#blob-columns)).
+
+### Branches
+
+First-class abstraction on the commit graph:
+- Named branches (like git)
+- Within a schema version, most objects stay on "main"
+- Explicit merge operations when needed
+- Migrations modeled as branching operations (each schema version = new branch)
+
+See [Schema Evolution](/docs/internals/schema-evolution) for migration system details.
 
 ## Layer Overview
 
 ### Groove (Rust Core)
 
-The `groove` crate contains:
+The `groove` crate provides:
 
 - **SQL parser and executor**: Full SQL support with query planning
+  - See: [Queries](/docs/internals/queries)
 - **Object system**: ObjectId generation, commit graphs, branching/merging
-- **Query graph**: Incremental query computation
+  - See: [Deletes](/docs/internals/deletes)
+- **Query graph**: Incremental query computation with delta propagation
+  - See: [Queries](/docs/internals/queries#incremental-query-graphs)
 - **Storage traits**: Abstract storage for different backends
+  - See: [Storage](/docs/internals/storage)
+- **ReBAC policies**: Relationship-based access control
+  - See: [Access Control](/docs/internals/access-control)
+- **Sync protocol**: Client-server synchronization
+  - See: [Sync](/docs/internals/sync)
 
 ### groove-wasm
 
 WebAssembly bindings exposing Groove to JavaScript:
 
 - Compiles Groove to WASM
-- Provides JS-friendly API
+- Provides JS-friendly API with callback integration
 - Handles serialization between Rust and JS
 
 ### @jazz/client
@@ -42,13 +116,23 @@ React integration:
 
 ## Why Rust + WASM?
 
-1. **Performance**: SQL execution and query computation in native-speed WASM
+1. **Performance**: SQL execution and query computation at native speed
 2. **Shared code**: Same logic runs in browser and on server
 3. **Memory safety**: Rust prevents entire classes of bugs
 4. **Size**: WASM compresses well (~200KB gzipped)
 
-## Trade-offs
+## Changes from Legacy Jazz
 
-- **Build complexity**: Requires wasm-pack toolchain
-- **Debugging**: WASM stack traces less readable than JS
-- **Bundle size**: Adds to initial page load
+Jazz2 is a clean break from [legacy Jazz](https://jazz.tools). Key changes:
+
+| Area | Legacy | New |
+|------|--------|-----|
+| Trust | E2EE by default, untrusted server | Trusted server, E2EE opt-in |
+| Queries | Reactive subscriptions with dependency loading | SQL for queries, server can use indices |
+| Identity | Crypto-first (Agent keypairs required) | Server-authenticated accounts |
+| Permissions | Groups with fixed role hierarchy | ReBAC with SQL-like policies |
+| History | CRDTs replayed on each load | Git-style commit graphs, snapshots |
+| Storage | Platform-specific adapters | Simple KV interface (RocksDB, SQLite, IndexedDB) |
+| Schema | Zod-like runtime schemas | Build-time codegen with migrations |
+
+The goal: keep the local-first DX while simplifying everything else.

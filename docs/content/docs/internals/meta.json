@@ -1,4 +1,18 @@
 {
-  "title": "Internals",
-  "pages": ["index", "architecture", "incremental-queries", "sync-protocol"]
+  "title": "Deep Dives",
+  "pages": [
+    "index",
+    "---Core---",
+    "architecture",
+    "data-model",
+    "queries",
+    "sync",
+    "storage",
+    "schema-evolution",
+    "access-control",
+    "deletes",
+    "---Future---",
+    "indices",
+    "transactions"
+  ]
 }
