@@ -118,6 +118,14 @@ interface NativeModuleInterface {
     context: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
+  ubrn_uniffi_cojson_core_rn_fn_func_create_transaction_ffi(
+    privacy: Uint8Array,
+    changes: Uint8Array,
+    keyUsed: Uint8Array,
+    madeAt: bigint,
+    meta: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
   ubrn_uniffi_cojson_core_rn_fn_func_decrypt(
     ciphertext: Uint8Array,
     keySecret: Uint8Array,
@@ -232,6 +240,7 @@ interface NativeModuleInterface {
   ): Uint8Array;
   ubrn_uniffi_cojson_core_rn_checksum_func_blake3_hash_once(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_blake3_hash_once_with_context(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_func_create_transaction_ffi(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_decrypt(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_decrypt_xsalsa20(): number;
   ubrn_uniffi_cojson_core_rn_checksum_func_ed25519_sign(): number;

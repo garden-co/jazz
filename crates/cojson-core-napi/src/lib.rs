@@ -64,16 +64,31 @@ struct PrivateTransactionResult {
 pub struct NapiFfiTransaction {
   /// "private" or "trusting"
   pub privacy: String,
-  /// For private transactions
-  pub encrypted_changes: Option<String>,
+  pub changes: String,
   /// For private transactions
   pub key_used: Option<String>,
   /// For trusting transactions
-  pub changes: Option<String>,
   /// Timestamp (milliseconds) - BigInt for full u64 support
   pub made_at: BigInt,
   /// Optional meta (encrypted or stringified)
   pub meta: Option<String>,
+}
+
+#[napi(js_name = "createTransactionFfi")]
+pub fn create_transaction(
+  privacy: String,
+  changes: String,
+  key_used: Option<String>,
+  made_at: BigInt,
+  meta: Option<String>,
+) -> napi::Result<NapiFfiTransaction> {
+  Ok(NapiFfiTransaction {
+    privacy,
+    changes,
+    key_used,
+    made_at,
+    meta,
+  })
 }
 
 fn to_transaction(tx: NapiFfiTransaction) -> napi::Result<Transaction> {
@@ -82,12 +97,6 @@ fn to_transaction(tx: NapiFfiTransaction) -> napi::Result<Transaction> {
 
   match tx.privacy.as_str() {
     "private" => {
-      let encrypted_changes = tx.encrypted_changes.ok_or_else(|| {
-        napi::Error::new(
-          napi::Status::InvalidArg,
-          "Missing encrypted_changes for private transaction".to_string(),
-        )
-      })?;
       let key_used = tx.key_used.ok_or_else(|| {
         napi::Error::new(
           napi::Status::InvalidArg,
@@ -96,28 +105,19 @@ fn to_transaction(tx: NapiFfiTransaction) -> napi::Result<Transaction> {
       })?;
 
       Ok(Transaction::Private(PrivateTransaction {
-        encrypted_changes: Encrypted::new(encrypted_changes),
+        encrypted_changes: Encrypted::new(tx.changes),
         key_used: KeyID(key_used),
         made_at: Number::from(made_at),
         meta: tx.meta.map(Encrypted::new),
         privacy: "private".to_string(),
       }))
     }
-    "trusting" => {
-      let changes = tx.changes.ok_or_else(|| {
-        napi::Error::new(
-          napi::Status::InvalidArg,
-          "Missing changes for trusting transaction".to_string(),
-        )
-      })?;
-
-      Ok(Transaction::Trusting(TrustingTransaction {
-        changes,
-        made_at: Number::from(made_at),
-        meta: tx.meta,
-        privacy: "trusting".to_string(),
-      }))
-    }
+    "trusting" => Ok(Transaction::Trusting(TrustingTransaction {
+      changes: tx.changes,
+      made_at: Number::from(made_at),
+      meta: tx.meta,
+      privacy: "trusting".to_string(),
+    })),
     other => Err(napi::Error::new(
       napi::Status::InvalidArg,
       format!("Invalid privacy type: {other}"),

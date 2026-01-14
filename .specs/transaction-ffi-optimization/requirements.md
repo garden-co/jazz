@@ -9,6 +9,11 @@ The goal is to eliminate JSON serialization by passing transaction data directly
 - **NAPI** (Node.js native via `napi-rs`)
 - **React Native** (mobile via `uniffi-bindgen-react-native`)
 
+Additionally, we want to standardize the transaction payload shape across all bindings to reduce complexity in TypeScript and Rust:
+- Use a single `changes` field for both private and trusting transactions (for private transactions it contains the encrypted changes string).
+- Avoid exposing separate `encrypted_changes` / `encryptedChanges` fields in any public FFI types.
+- Keep only two optional fields: `key_used`/`keyUsed` (required for private, absent for trusting) and `meta`.
+
 ## User Stories
 
 ### US-1: Zero-Copy Transaction Passing
@@ -33,6 +38,9 @@ The goal is to eliminate JSON serialization by passing transaction data directly
 - The FFI Transaction types work with `uniffi` for React Native builds
 - The TypeScript interface is consistent across all platforms
 - No platform-specific code is needed in application code
+- The public FFI transaction payload shape uses a single `changes` field across WASM/NAPI/RN (no `encrypted_changes` / `encryptedChanges`)
+- For `privacy === "private"`, `key_used`/`keyUsed` is required and `changes` contains the encrypted changes string
+- For `privacy === "trusting"`, `key_used`/`keyUsed` must be omitted/undefined and `changes` contains the stringified JSON changes
 
 ### US-3: Type Safety
 **As a** Jazz application developer  
@@ -44,6 +52,7 @@ The goal is to eliminate JSON serialization by passing transaction data directly
 - The TypeScript types match the existing `Transaction`, `PrivateTransaction`, and `TrustingTransaction` types
 - Invalid transaction structures cause TypeScript compilation errors
 - Runtime validation exists for edge cases (e.g., missing required fields)
+- The TypeScript types encode the privacy-dependent requirements as much as possible (e.g. a discriminated union where private requires `keyUsed`, and both variants require `changes`)
 
 ### US-4: Backward Compatibility
 **As a** Jazz application developer  

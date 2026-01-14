@@ -237,7 +237,7 @@ class SessionLogAdapter {
   ): void {
     // Backward-compatible fallback (older wasm package without tryAddFfi)
     this.sessionLog.tryAddFfi(
-      transactions.map((tx) => toWasmFfiTransaction(tx)),
+      transactions.map(toWasmFfiTransaction),
       newSignature,
       skipVerify,
     );

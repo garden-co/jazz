@@ -44,49 +44,49 @@ pub struct UniffiFfiTransaction {
     /// "private" or "trusting"
     pub privacy: String,
     /// For private transactions
-    pub encrypted_changes: Option<String>,
-    /// For private transactions
     pub key_used: Option<String>,
-    /// For trusting transactions
-    pub changes: Option<String>,
+    /// Transaction payload:
+    /// - for private transactions: the encrypted changes string (e.g., "encrypted_U...")
+    /// - for trusting transactions: the stringified changes JSON
+    pub changes: String,
     /// Timestamp (milliseconds)
     pub made_at: u64,
     /// Optional meta (encrypted or stringified)
     pub meta: Option<String>,
 }
 
+#[uniffi::export]
+pub fn create_transaction_ffi(
+    privacy: String,
+    changes: String,
+    key_used: Option<String>,
+    made_at: u64,
+    meta: Option<String>,
+) -> UniffiFfiTransaction {
+    UniffiFfiTransaction { privacy, changes, key_used, made_at, meta }
+}
+
 fn to_transaction(tx: UniffiFfiTransaction) -> Result<Transaction, SessionLogError> {
     match tx.privacy.as_str() {
         "private" => {
-            let encrypted_changes = tx.encrypted_changes.ok_or_else(|| {
-                SessionLogError::Generic(
-                    "Missing encrypted_changes for private transaction".to_string(),
-                )
-            })?;
             let key_used = tx.key_used.ok_or_else(|| {
                 SessionLogError::Generic("Missing key_used for private transaction".to_string())
             })?;
 
             Ok(Transaction::Private(PrivateTransaction {
-                encrypted_changes: Encrypted::new(encrypted_changes),
+                encrypted_changes: Encrypted::new(tx.changes),
                 key_used: KeyID(key_used),
                 made_at: Number::from(tx.made_at),
                 meta: tx.meta.map(Encrypted::new),
                 privacy: "private".to_string(),
             }))
         }
-        "trusting" => {
-            let changes = tx.changes.ok_or_else(|| {
-                SessionLogError::Generic("Missing changes for trusting transaction".to_string())
-            })?;
-
-            Ok(Transaction::Trusting(TrustingTransaction {
-                changes,
-                made_at: Number::from(tx.made_at),
-                meta: tx.meta,
-                privacy: "trusting".to_string(),
-            }))
-        }
+        "trusting" => Ok(Transaction::Trusting(TrustingTransaction {
+            changes: tx.changes,
+            made_at: Number::from(tx.made_at),
+            meta: tx.meta,
+            privacy: "trusting".to_string(),
+        })),
         other => Err(SessionLogError::Generic(format!(
             "Invalid privacy type: {other}"
         ))),

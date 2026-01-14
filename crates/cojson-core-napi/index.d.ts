@@ -35,6 +35,8 @@ export declare function blake3HashOnce(data: Uint8Array): Uint8Array
  */
 export declare function blake3HashOnceWithContext(data: Uint8Array, context: Uint8Array): Uint8Array
 
+export declare function createTransactionFfi(privacy: string, changes: string, keyUsed: string | undefined | null, madeAt: bigint, meta?: string | undefined | null): NapiFfiTransaction
+
 /**
  * NAPI-exposed function to decrypt bytes with a key secret and nonce material.
  * - `ciphertext`: The encrypted bytes to decrypt
@@ -158,13 +160,13 @@ export declare function getSignerId(secret: Uint8Array): string
 export interface NapiFfiTransaction {
   /** "private" or "trusting" */
   privacy: string
-  /** For private transactions */
-  encryptedChanges?: string
+  changes: string
   /** For private transactions */
   keyUsed?: string
-  /** For trusting transactions */
-  changes?: string
-  /** Timestamp (milliseconds) - BigInt for full u64 support */
+  /**
+   * For trusting transactions
+   * Timestamp (milliseconds) - BigInt for full u64 support
+   */
   madeAt: bigint
   /** Optional meta (encrypted or stringified) */
   meta?: string

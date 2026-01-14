@@ -113,6 +113,29 @@ export function blake3HashOnceWithContext(
     )
   );
 }
+export function createTransactionFfi(
+  privacy: string,
+  changes: string,
+  keyUsed: string | undefined,
+  madeAt: /*u64*/ bigint,
+  meta: string | undefined
+): UniffiFfiTransaction {
+  return FfiConverterTypeUniffiFfiTransaction.lift(
+    uniffiCaller.rustCall(
+      /*caller:*/ (callStatus) => {
+        return nativeModule().ubrn_uniffi_cojson_core_rn_fn_func_create_transaction_ffi(
+          FfiConverterString.lower(privacy),
+          FfiConverterString.lower(changes),
+          FfiConverterOptionalString.lower(keyUsed),
+          FfiConverterUInt64.lower(madeAt),
+          FfiConverterOptionalString.lower(meta),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    )
+  );
+}
 /**
  * Uniffi-exposed function to decrypt bytes with a key secret and nonce material.
  * - `ciphertext`: The encrypted bytes to decrypt
@@ -697,19 +720,17 @@ export type UniffiFfiTransaction = {
   /**
    * For private transactions
    */
-  encryptedChanges: string | undefined;
-  /**
-   * For private transactions
-   */
   keyUsed: string | undefined;
   /**
-   * For trusting transactions
+   * Transaction payload:
+   * - for private transactions: the encrypted changes string (e.g., "encrypted_U...")
+   * - for trusting transactions: the stringified changes JSON
    */
-  changes: string | undefined;
+  changes: string;
   /**
-   * Timestamp
+   * Timestamp (milliseconds)
    */
-  madeAt: /*f64*/ number;
+  madeAt: /*u64*/ bigint;
   /**
    * Optional meta (encrypted or stringified)
    */
@@ -753,28 +774,25 @@ const FfiConverterTypeUniffiFfiTransaction = (() => {
     read(from: RustBuffer): TypeName {
       return {
         privacy: FfiConverterString.read(from),
-        encryptedChanges: FfiConverterOptionalString.read(from),
         keyUsed: FfiConverterOptionalString.read(from),
-        changes: FfiConverterOptionalString.read(from),
-        madeAt: FfiConverterFloat64.read(from),
+        changes: FfiConverterString.read(from),
+        madeAt: FfiConverterUInt64.read(from),
         meta: FfiConverterOptionalString.read(from),
       };
     }
     write(value: TypeName, into: RustBuffer): void {
       FfiConverterString.write(value.privacy, into);
-      FfiConverterOptionalString.write(value.encryptedChanges, into);
       FfiConverterOptionalString.write(value.keyUsed, into);
-      FfiConverterOptionalString.write(value.changes, into);
-      FfiConverterFloat64.write(value.madeAt, into);
+      FfiConverterString.write(value.changes, into);
+      FfiConverterUInt64.write(value.madeAt, into);
       FfiConverterOptionalString.write(value.meta, into);
     }
     allocationSize(value: TypeName): number {
       return (
         FfiConverterString.allocationSize(value.privacy) +
-        FfiConverterOptionalString.allocationSize(value.encryptedChanges) +
         FfiConverterOptionalString.allocationSize(value.keyUsed) +
-        FfiConverterOptionalString.allocationSize(value.changes) +
-        FfiConverterFloat64.allocationSize(value.madeAt) +
+        FfiConverterString.allocationSize(value.changes) +
+        FfiConverterUInt64.allocationSize(value.madeAt) +
         FfiConverterOptionalString.allocationSize(value.meta)
       );
     }
@@ -2186,6 +2204,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_func_blake3_hash_once_with_context'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_func_create_transaction_ffi() !==
+    1749
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_func_create_transaction_ffi'
     );
   }
   if (

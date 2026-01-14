@@ -53,12 +53,12 @@ impl From<CojsonCoreWasmError> for JsValue {
 pub struct WasmFfiTransaction {
     /// "private" or "trusting"
     pub privacy: String,
-    /// For private transactions: the encrypted changes string (e.g., "encrypted_U...")
-    pub encrypted_changes: Option<String>,
     /// For private transactions: the key ID used for encryption
     pub key_used: Option<String>,
-    /// For trusting transactions: the stringified changes JSON
-    pub changes: Option<String>,
+    /// Transaction payload:
+    /// - for private transactions: the encrypted changes string (e.g., "encrypted_U...")
+    /// - for trusting transactions: the stringified changes JSON
+    pub changes: String,
     /// Timestamp when the transaction was made (milliseconds)
     pub made_at: u64,
     /// Optional meta (encrypted for private, stringified for trusting)
@@ -70,15 +70,13 @@ impl WasmFfiTransaction {
     #[wasm_bindgen(constructor)]
     pub fn new(
         privacy: String,
-        encrypted_changes: Option<String>,
         key_used: Option<String>,
-        changes: Option<String>,
+        changes: String,
         made_at: u64,
         meta: Option<String>,
     ) -> WasmFfiTransaction {
         WasmFfiTransaction {
             privacy,
-            encrypted_changes,
             key_used,
             changes,
             made_at,
@@ -92,11 +90,6 @@ impl WasmFfiTransaction {
 fn to_transaction(wasm: WasmFfiTransaction) -> Result<Transaction, CojsonCoreWasmError> {
     match wasm.privacy.as_str() {
         "private" => {
-            let encrypted_changes = wasm.encrypted_changes.ok_or_else(|| {
-                CojsonCoreWasmError::Js(JsValue::from_str(
-                    "Missing encrypted_changes for private transaction",
-                ))
-            })?;
             let key_used = wasm.key_used.ok_or_else(|| {
                 CojsonCoreWasmError::Js(JsValue::from_str(
                     "Missing key_used for private transaction",
@@ -104,27 +97,19 @@ fn to_transaction(wasm: WasmFfiTransaction) -> Result<Transaction, CojsonCoreWas
             })?;
 
             Ok(Transaction::Private(PrivateTransaction {
-                encrypted_changes: Encrypted::new(encrypted_changes),
+                encrypted_changes: Encrypted::new(wasm.changes),
                 key_used: KeyID(key_used),
                 made_at: Number::from(wasm.made_at),
                 meta: wasm.meta.map(Encrypted::new),
                 privacy: "private".to_string(),
             }))
         }
-        "trusting" => {
-            let changes = wasm.changes.ok_or_else(|| {
-                CojsonCoreWasmError::Js(JsValue::from_str(
-                    "Missing changes for trusting transaction",
-                ))
-            })?;
-
-            Ok(Transaction::Trusting(TrustingTransaction {
-                changes,
-                made_at: Number::from(wasm.made_at),
-                meta: wasm.meta,
-                privacy: "trusting".to_string(),
-            }))
-        }
+        "trusting" => Ok(Transaction::Trusting(TrustingTransaction {
+            changes: wasm.changes,
+            made_at: Number::from(wasm.made_at),
+            meta: wasm.meta,
+            privacy: "trusting".to_string(),
+        })),
         _ => Err(CojsonCoreWasmError::Js(JsValue::from_str(&format!(
             "Invalid privacy type: {}",
             wasm.privacy

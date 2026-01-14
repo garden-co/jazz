@@ -10,6 +10,13 @@ This design eliminates JSON serialization overhead by introducing FFI-compatible
 
 Each binding layer defines its own FFI struct and converts **directly** to `PrivateTransaction` or `TrustingTransaction`. No intermediate types in `cojson-core`.
 
+This iteration also standardizes the FFI transaction payload shape across all bindings:
+- A single `changes` string is used for both privacy modes:
+  - For `"private"` it contains the encrypted changes string (e.g. `"encrypted_U..."`)
+  - For `"trusting"` it contains the stringified JSON changes
+- `key_used`/`keyUsed` is **required** for `"private"` and **absent/undefined** for `"trusting"`
+- `meta` remains optional for both privacy modes
+
 ## Architecture
 
 ```
@@ -90,9 +97,8 @@ Uses `#[wasm_bindgen]` struct with constructor. JavaScript creates instances via
 #[wasm_bindgen(getter_with_clone)]
 pub struct WasmFfiTransaction {
     pub privacy: String,
-    pub encrypted_changes: Option<String>,
     pub key_used: Option<String>,
-    pub changes: Option<String>,
+    pub changes: String,
     pub made_at: u64,
     pub meta: Option<String>,
 }
@@ -102,13 +108,12 @@ impl WasmFfiTransaction {
     #[wasm_bindgen(constructor)]
     pub fn new(
         privacy: String,
-        encrypted_changes: Option<String>,
         key_used: Option<String>,
-        changes: Option<String>,
+        changes: String,
         made_at: u64,
         meta: Option<String>,
     ) -> WasmFfiTransaction {
-        WasmFfiTransaction { privacy, encrypted_changes, key_used, changes, made_at, meta }
+        WasmFfiTransaction { privacy, key_used, changes, made_at, meta }
     }
 }
 
@@ -116,14 +121,11 @@ impl WasmFfiTransaction {
 fn to_transaction(wasm: WasmFfiTransaction) -> Result<Transaction, CojsonCoreWasmError> {
     match wasm.privacy.as_str() {
         "private" => {
-            let encrypted_changes = wasm.encrypted_changes.ok_or_else(|| {
-                CojsonCoreWasmError::Js(JsValue::from_str("Missing encrypted_changes for private transaction"))
-            })?;
             let key_used = wasm.key_used.ok_or_else(|| {
                 CojsonCoreWasmError::Js(JsValue::from_str("Missing key_used for private transaction"))
             })?;
             Ok(Transaction::Private(PrivateTransaction {
-                encrypted_changes: Encrypted::new(encrypted_changes),
+                encrypted_changes: Encrypted::new(wasm.changes),
                 key_used: KeyID(key_used),
                 made_at: Number::from(wasm.made_at),
                 meta: wasm.meta.map(Encrypted::new),
@@ -131,11 +133,8 @@ fn to_transaction(wasm: WasmFfiTransaction) -> Result<Transaction, CojsonCoreWas
             }))
         }
         "trusting" => {
-            let changes = wasm.changes.ok_or_else(|| {
-                CojsonCoreWasmError::Js(JsValue::from_str("Missing changes for trusting transaction"))
-            })?;
             Ok(Transaction::Trusting(TrustingTransaction {
-                changes,
+                changes: wasm.changes,
                 made_at: Number::from(wasm.made_at),
                 meta: wasm.meta,
                 privacy: "trusting".to_string(),
@@ -176,9 +175,8 @@ use napi::bindgen_prelude::BigInt;
 #[napi(object)]
 pub struct NapiFfiTransaction {
     pub privacy: String,
-    pub encrypted_changes: Option<String>,
     pub key_used: Option<String>,
-    pub changes: Option<String>,
+    pub changes: String,
     pub made_at: BigInt,  // BigInt for full u64 support
     pub meta: Option<String>,
 }
@@ -189,14 +187,11 @@ fn to_transaction(tx: NapiFfiTransaction) -> napi::Result<Transaction> {
 
     match tx.privacy.as_str() {
         "private" => {
-            let encrypted_changes = tx.encrypted_changes.ok_or_else(|| {
-                napi::Error::new(napi::Status::InvalidArg, "Missing encrypted_changes for private transaction")
-            })?;
             let key_used = tx.key_used.ok_or_else(|| {
                 napi::Error::new(napi::Status::InvalidArg, "Missing key_used for private transaction")
             })?;
             Ok(Transaction::Private(PrivateTransaction {
-                encrypted_changes: Encrypted::new(encrypted_changes),
+                encrypted_changes: Encrypted::new(tx.changes),
                 key_used: KeyID(key_used),
                 made_at: Number::from(made_at),
                 meta: tx.meta.map(Encrypted::new),
@@ -204,11 +199,8 @@ fn to_transaction(tx: NapiFfiTransaction) -> napi::Result<Transaction> {
             }))
         }
         "trusting" => {
-            let changes = tx.changes.ok_or_else(|| {
-                napi::Error::new(napi::Status::InvalidArg, "Missing changes for trusting transaction")
-            })?;
             Ok(Transaction::Trusting(TrustingTransaction {
-                changes,
+                changes: tx.changes,
                 made_at: Number::from(made_at),
                 meta: tx.meta,
                 privacy: "trusting".to_string(),
@@ -248,9 +240,8 @@ Uses `#[derive(uniffi::Record)]` which accepts plain JavaScript objects:
 #[derive(uniffi::Record)]
 pub struct UniffiFfiTransaction {
     pub privacy: String,
-    pub encrypted_changes: Option<String>,
     pub key_used: Option<String>,
-    pub changes: Option<String>,
+    pub changes: String,
     pub made_at: u64,
     pub meta: Option<String>,
 }
@@ -258,14 +249,11 @@ pub struct UniffiFfiTransaction {
 fn to_transaction(tx: UniffiFfiTransaction) -> Result<Transaction, SessionLogError> {
     match tx.privacy.as_str() {
         "private" => {
-            let encrypted_changes = tx.encrypted_changes.ok_or_else(|| {
-                SessionLogError::Generic("Missing encrypted_changes for private transaction".to_string())
-            })?;
             let key_used = tx.key_used.ok_or_else(|| {
                 SessionLogError::Generic("Missing key_used for private transaction".to_string())
             })?;
             Ok(Transaction::Private(PrivateTransaction {
-                encrypted_changes: Encrypted::new(encrypted_changes),
+                encrypted_changes: Encrypted::new(tx.changes),
                 key_used: KeyID(key_used),
                 made_at: Number::from(tx.made_at),
                 meta: tx.meta.map(Encrypted::new),
@@ -273,11 +261,8 @@ fn to_transaction(tx: UniffiFfiTransaction) -> Result<Transaction, SessionLogErr
             }))
         }
         "trusting" => {
-            let changes = tx.changes.ok_or_else(|| {
-                SessionLogError::Generic("Missing changes for trusting transaction".to_string())
-            })?;
             Ok(Transaction::Trusting(TrustingTransaction {
-                changes,
+                changes: tx.changes,
                 made_at: Number::from(tx.made_at),
                 meta: tx.meta,
                 privacy: "trusting".to_string(),
@@ -324,9 +309,8 @@ import { WasmFfiTransaction } from "cojson-core-wasm";
  */
 export type FfiTransactionObject = {
   privacy: "private" | "trusting";
-  encryptedChanges?: string;
   keyUsed?: string;
-  changes?: string;
+  changes: string;
   madeAt: bigint;
   meta?: string;
 };
@@ -335,8 +319,8 @@ export function toFfiTransactionObject(tx: Transaction): FfiTransactionObject {
   if (tx.privacy === "private") {
     return {
       privacy: "private",
-      encryptedChanges: tx.encryptedChanges,
       keyUsed: tx.keyUsed,
+      changes: tx.encryptedChanges,
       madeAt: BigInt(tx.madeAt),
       meta: tx.meta,
     };
@@ -356,9 +340,8 @@ export function toNapiFfiTransaction(tx: Transaction): NapiFfiTransaction {
 export function toWasmFfiTransaction(tx: Transaction): WasmFfiTransaction {
   return new WasmFfiTransaction(
     tx.privacy,
-    tx.privacy === "private" ? tx.encryptedChanges : undefined,
     tx.privacy === "private" ? tx.keyUsed : undefined,
-    tx.privacy === "trusting" ? tx.changes : undefined,
+    tx.privacy === "private" ? tx.encryptedChanges : tx.changes,
     BigInt(tx.madeAt),  // Convert to bigint for WASM u64
     tx.meta,
   );
@@ -416,13 +399,12 @@ class SessionLogAdapter {
 | TypeScript Field | Rust FFI Field | Target Rust Type | Notes |
 |-----------------|----------------|------------------|-------|
 | `privacy` | `privacy: String` | `Transaction::Private` or `Transaction::Trusting` | Discriminator |
-| `encryptedChanges` | `encrypted_changes: Option<String>` | `PrivateTransaction.encrypted_changes.value` | Required for private |
 | `keyUsed` | `key_used: Option<String>` | `PrivateTransaction.key_used.0` | Required for private |
-| `changes` | `changes: Option<String>` | `TrustingTransaction.changes` | Required for trusting |
+| `changes` | `changes: String` | `PrivateTransaction.encrypted_changes.value` OR `TrustingTransaction.changes` | Required for both; meaning depends on `privacy` |
 | `madeAt` | `made_at: u64/BigInt` | `*.made_at` as `Number` | bigint in JS, u64 in Rust |
 | `meta` | `meta: Option<String>` | `*.meta` | Optional for both |
 
-**Note:** TypeScript uses camelCase (`encryptedChanges`), Rust uses snake_case (`encrypted_changes`). The binding generators handle the conversion automatically.
+**Note:** TypeScript uses camelCase (`keyUsed`, `madeAt`), Rust uses snake_case (`key_used`, `made_at`). The binding generators handle the conversion automatically.
 
 ### Direct Conversion Flow
 
@@ -454,9 +436,9 @@ Conversion errors are handled **at each binding layer** using platform-specific 
 
 ### 1. Missing Required Fields
 When converting FFI struct to `Transaction`, missing required fields throw binding-specific errors:
-- **WASM**: `CojsonCoreWasmError::Js(JsValue::from_str("Missing encrypted_changes..."))`
-- **NAPI**: `napi::Error::new(napi::Status::InvalidArg, "Missing encrypted_changes...")`
-- **Uniffi**: `SessionLogError::Generic("Missing encrypted_changes...".to_string())`
+- **WASM**: `CojsonCoreWasmError::Js(JsValue::from_str("Missing key_used..."))` (private only)
+- **NAPI**: `napi::Error::new(napi::Status::InvalidArg, "Missing key_used...")` (private only)
+- **Uniffi**: `SessionLogError::Generic("Missing key_used...".to_string())` (private only)
 
 ### 2. Invalid Privacy Type
 If `privacy` is not "private" or "trusting":

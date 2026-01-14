@@ -1,43 +1,26 @@
 /* tslint:disable */
 /* eslint-disable */
 /**
- * WASM-exposed function for XSalsa20 decryption without authentication.
- * - `key`: 32-byte key for decryption (must match encryption key)
- * - `nonce_material`: Raw bytes used to generate a 24-byte nonce (must match encryption)
- * - `ciphertext`: Encrypted bytes to decrypt
- * Returns the decrypted bytes or throws a JsError if decryption fails.
- * Note: This function does not provide authentication. Use decrypt_xsalsa20_poly1305 for authenticated decryption.
+ * WASM-exposed function to derive a signer ID from a signing key.
+ * - `secret`: Raw Ed25519 signing key bytes
+ * Returns base58-encoded verifying key with "signer_z" prefix or throws JsError if derivation fails.
  */
-export function decryptXsalsa20(key: Uint8Array, nonce_material: Uint8Array, ciphertext: Uint8Array): Uint8Array;
+export function getSignerId(secret: Uint8Array): string;
 /**
- * WASM-exposed function for XSalsa20 encryption without authentication.
- * - `key`: 32-byte key for encryption
- * - `nonce_material`: Raw bytes used to generate a 24-byte nonce via BLAKE3
- * - `plaintext`: Raw bytes to encrypt
- * Returns the encrypted bytes or throws a JsError if encryption fails.
- * Note: This function does not provide authentication. Use encrypt_xsalsa20_poly1305 for authenticated encryption.
+ * WASM-exposed function to sign a message using Ed25519.
+ * - `message`: Raw bytes to sign
+ * - `secret`: Raw Ed25519 signing key bytes
+ * Returns base58-encoded signature with "signature_z" prefix or throws JsError if signing fails.
  */
-export function encryptXsalsa20(key: Uint8Array, nonce_material: Uint8Array, plaintext: Uint8Array): Uint8Array;
+export function sign(message: Uint8Array, secret: Uint8Array): string;
 /**
- * WASM-exposed function for unsealing a message using X25519 + XSalsa20-Poly1305.
- * Provides authenticated decryption with perfect forward secrecy.
- * - `sealed_message`: The sealed bytes to decrypt
- * - `recipient_secret`: Base58-encoded recipient's private key with "sealerSecret_z" prefix
- * - `sender_id`: Base58-encoded sender's public key with "sealer_z" prefix
- * - `nonce_material`: Raw bytes used to generate the nonce (must match sealing)
- * Returns unsealed bytes or throws JsError if unsealing fails.
+ * WASM-exposed function to verify an Ed25519 signature.
+ * - `signature`: Raw signature bytes
+ * - `message`: Raw bytes that were signed
+ * - `id`: Raw Ed25519 verifying key bytes
+ * Returns true if signature is valid, false otherwise, or throws JsError if verification fails.
  */
-export function unseal(sealed_message: Uint8Array, recipient_secret: string, sender_id: string, nonce_material: Uint8Array): Uint8Array;
-/**
- * WASM-exposed function for sealing a message using X25519 + XSalsa20-Poly1305.
- * Provides authenticated encryption with perfect forward secrecy.
- * - `message`: Raw bytes to seal
- * - `sender_secret`: Base58-encoded sender's private key with "sealerSecret_z" prefix
- * - `recipient_id`: Base58-encoded recipient's public key with "sealer_z" prefix
- * - `nonce_material`: Raw bytes used to generate the nonce
- * Returns sealed bytes or throws JsError if sealing fails.
- */
-export function seal(message: Uint8Array, sender_secret: string, recipient_id: string, nonce_material: Uint8Array): Uint8Array;
+export function verify(signature: Uint8Array, message: Uint8Array, id: Uint8Array): boolean;
 /**
  * Generate a 24-byte nonce from input material using BLAKE3.
  * - `nonce_material`: Raw bytes to derive the nonce from
@@ -61,6 +44,26 @@ export function blake3HashOnce(data: Uint8Array): Uint8Array;
  */
 export function blake3HashOnceWithContext(data: Uint8Array, context: Uint8Array): Uint8Array;
 /**
+ * WASM-exposed function for unsealing a message using X25519 + XSalsa20-Poly1305.
+ * Provides authenticated decryption with perfect forward secrecy.
+ * - `sealed_message`: The sealed bytes to decrypt
+ * - `recipient_secret`: Base58-encoded recipient's private key with "sealerSecret_z" prefix
+ * - `sender_id`: Base58-encoded sender's public key with "sealer_z" prefix
+ * - `nonce_material`: Raw bytes used to generate the nonce (must match sealing)
+ * Returns unsealed bytes or throws JsError if unsealing fails.
+ */
+export function unseal(sealed_message: Uint8Array, recipient_secret: string, sender_id: string, nonce_material: Uint8Array): Uint8Array;
+/**
+ * WASM-exposed function for sealing a message using X25519 + XSalsa20-Poly1305.
+ * Provides authenticated encryption with perfect forward secrecy.
+ * - `message`: Raw bytes to seal
+ * - `sender_secret`: Base58-encoded sender's private key with "sealerSecret_z" prefix
+ * - `recipient_id`: Base58-encoded recipient's public key with "sealer_z" prefix
+ * - `nonce_material`: Raw bytes used to generate the nonce
+ * Returns sealed bytes or throws JsError if sealing fails.
+ */
+export function seal(message: Uint8Array, sender_secret: string, recipient_id: string, nonce_material: Uint8Array): Uint8Array;
+/**
  * WASM-exposed function to encrypt bytes with a key secret and nonce material.
  * - `value`: The raw bytes to encrypt
  * - `key_secret`: A base58-encoded key secret with "keySecret_z" prefix
@@ -76,6 +79,24 @@ export function encrypt(value: Uint8Array, key_secret: string, nonce_material: U
  * Returns the decrypted bytes or throws a JsError if decryption fails.
  */
 export function decrypt(ciphertext: Uint8Array, key_secret: string, nonce_material: Uint8Array): Uint8Array;
+/**
+ * WASM-exposed function for XSalsa20 decryption without authentication.
+ * - `key`: 32-byte key for decryption (must match encryption key)
+ * - `nonce_material`: Raw bytes used to generate a 24-byte nonce (must match encryption)
+ * - `ciphertext`: Encrypted bytes to decrypt
+ * Returns the decrypted bytes or throws a JsError if decryption fails.
+ * Note: This function does not provide authentication. Use decrypt_xsalsa20_poly1305 for authenticated decryption.
+ */
+export function decryptXsalsa20(key: Uint8Array, nonce_material: Uint8Array, ciphertext: Uint8Array): Uint8Array;
+/**
+ * WASM-exposed function for XSalsa20 encryption without authentication.
+ * - `key`: 32-byte key for encryption
+ * - `nonce_material`: Raw bytes used to generate a 24-byte nonce via BLAKE3
+ * - `plaintext`: Raw bytes to encrypt
+ * Returns the encrypted bytes or throws a JsError if encryption fails.
+ * Note: This function does not provide authentication. Use encrypt_xsalsa20_poly1305 for authenticated encryption.
+ */
+export function encryptXsalsa20(key: Uint8Array, nonce_material: Uint8Array, plaintext: Uint8Array): Uint8Array;
 /**
  * WASM-exposed function to derive an X25519 public key from a private key.
  * - `private_key`: 32 bytes of private key material
@@ -101,27 +122,6 @@ export function getSealerId(secret: Uint8Array): string;
  * This key can be reused for multiple Diffie-Hellman exchanges.
  */
 export function newX25519PrivateKey(): Uint8Array;
-/**
- * WASM-exposed function to derive a signer ID from a signing key.
- * - `secret`: Raw Ed25519 signing key bytes
- * Returns base58-encoded verifying key with "signer_z" prefix or throws JsError if derivation fails.
- */
-export function getSignerId(secret: Uint8Array): string;
-/**
- * WASM-exposed function to sign a message using Ed25519.
- * - `message`: Raw bytes to sign
- * - `secret`: Raw Ed25519 signing key bytes
- * Returns base58-encoded signature with "signature_z" prefix or throws JsError if signing fails.
- */
-export function sign(message: Uint8Array, secret: Uint8Array): string;
-/**
- * WASM-exposed function to verify an Ed25519 signature.
- * - `signature`: Raw signature bytes
- * - `message`: Raw bytes that were signed
- * - `id`: Raw Ed25519 verifying key bytes
- * Returns true if signature is valid, false otherwise, or throws JsError if verification fails.
- */
-export function verify(signature: Uint8Array, message: Uint8Array, id: Uint8Array): boolean;
 /**
  * WASM-exposed function to derive the public key from an Ed25519 signing key.
  * - `signing_key`: 32 bytes of signing key material
@@ -207,19 +207,11 @@ export class SessionLog {
  */
 export class WasmFfiTransaction {
   free(): void;
-  constructor(privacy: string, encrypted_changes: string | null | undefined, key_used: string | null | undefined, changes: string | null | undefined, made_at: bigint, meta?: string | null);
+  constructor(privacy: string, key_used: string | null | undefined, changes: string, made_at: bigint, meta?: string | null);
   /**
    * "private" or "trusting"
    */
   privacy: string;
-  /**
-   * For private transactions: the encrypted changes string (e.g., "encrypted_U...")
-   */
-  get encrypted_changes(): string | undefined;
-  /**
-   * For private transactions: the encrypted changes string (e.g., "encrypted_U...")
-   */
-  set encrypted_changes(value: string | null | undefined);
   /**
    * For private transactions: the key ID used for encryption
    */
@@ -229,13 +221,11 @@ export class WasmFfiTransaction {
    */
   set key_used(value: string | null | undefined);
   /**
-   * For trusting transactions: the stringified changes JSON
+   * Transaction payload:
+   * - for private transactions: the encrypted changes string (e.g., "encrypted_U...")
+   * - for trusting transactions: the stringified changes JSON
    */
-  get changes(): string | undefined;
-  /**
-   * For trusting transactions: the stringified changes JSON
-   */
-  set changes(value: string | null | undefined);
+  changes: string;
   /**
    * Timestamp when the transaction was made (milliseconds)
    */
@@ -255,14 +245,12 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly __wbg_get_wasmffitransaction_changes: (a: number) => [number, number];
-  readonly __wbg_get_wasmffitransaction_encrypted_changes: (a: number) => [number, number];
   readonly __wbg_get_wasmffitransaction_key_used: (a: number) => [number, number];
   readonly __wbg_get_wasmffitransaction_made_at: (a: number) => bigint;
   readonly __wbg_get_wasmffitransaction_meta: (a: number) => [number, number];
   readonly __wbg_get_wasmffitransaction_privacy: (a: number) => [number, number];
   readonly __wbg_sessionlog_free: (a: number, b: number) => void;
   readonly __wbg_set_wasmffitransaction_changes: (a: number, b: number, c: number) => void;
-  readonly __wbg_set_wasmffitransaction_encrypted_changes: (a: number, b: number, c: number) => void;
   readonly __wbg_set_wasmffitransaction_key_used: (a: number, b: number, c: number) => void;
   readonly __wbg_set_wasmffitransaction_made_at: (a: number, b: bigint) => void;
   readonly __wbg_set_wasmffitransaction_meta: (a: number, b: number, c: number) => void;
@@ -276,11 +264,10 @@ export interface InitOutput {
   readonly sessionlog_new: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
   readonly sessionlog_tryAdd: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
   readonly sessionlog_tryAddFfi: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
-  readonly wasmffitransaction_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: bigint, j: number, k: number) => number;
-  readonly decryptXsalsa20: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
-  readonly encryptXsalsa20: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
-  readonly seal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
-  readonly unseal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
+  readonly wasmffitransaction_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: bigint, h: number, i: number) => number;
+  readonly getSignerId: (a: number, b: number) => [number, number, number, number];
+  readonly sign: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+  readonly verify: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
   readonly __wbg_blake3hasher_free: (a: number, b: number) => void;
   readonly blake3HashOnce: (a: number, b: number) => [number, number];
   readonly blake3HashOnceWithContext: (a: number, b: number, c: number, d: number) => [number, number];
@@ -291,11 +278,12 @@ export interface InitOutput {
   readonly generateNonce: (a: number, b: number) => [number, number];
   readonly decrypt: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
   readonly encrypt: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+  readonly seal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
+  readonly unseal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
+  readonly decryptXsalsa20: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+  readonly encryptXsalsa20: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
   readonly getSealerId: (a: number, b: number) => [number, number, number, number];
-  readonly getSignerId: (a: number, b: number) => [number, number, number, number];
   readonly newX25519PrivateKey: () => [number, number];
-  readonly sign: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-  readonly verify: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
   readonly x25519DiffieHellman: (a: number, b: number, c: number, d: number) => [number, number, number, number];
   readonly x25519PublicKey: (a: number, b: number) => [number, number, number, number];
   readonly ed25519Sign: (a: number, b: number, c: number, d: number) => [number, number, number, number];
