@@ -1,7 +1,7 @@
 import { Account } from "jazz-tools";
 import { createImage } from "jazz-tools/media";
 import { useSuspenseAccount, useSuspenseCoState } from "jazz-tools/react";
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { Chat, Message } from "./schema.ts";
 import {
   BubbleBody,
@@ -25,7 +25,6 @@ export function ChatScreen(props: { chatID: string }) {
   const [showNLastMessages, setShowNLastMessages] = useState(
     INITIAL_MESSAGES_TO_SHOW,
   );
-  const initialLoadCompletedRef = useRef(false);
 
   const messageIds = Array.from(chat.$jazz.refs)
     // We call slice before reverse to avoid mutating the original array
@@ -35,19 +34,6 @@ export function ChatScreen(props: { chatID: string }) {
     .map((msgRef) => msgRef.id);
 
   const messages = useCoStates(Message, messageIds);
-
-  // The initial messages should be loaded all at once, so we can avoid flickering
-  // Only gate the initial render, not subsequent renders when new messages arrive
-  if (!initialLoadCompletedRef.current) {
-    const initialMessagesLoaded = messages
-      .slice(0, INITIAL_MESSAGES_TO_SHOW)
-      .every((msg) => msg.$isLoaded);
-    if (initialMessagesLoaded) {
-      initialLoadCompletedRef.current = true;
-    } else {
-      return null;
-    }
-  }
 
   const sendImage = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.currentTarget.files?.[0];

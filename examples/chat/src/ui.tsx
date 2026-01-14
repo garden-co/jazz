@@ -105,11 +105,14 @@ export function BubbleImage(props: { image: ImageDefinition }) {
 export function BubbleInfo(props: { by: string | undefined; madeAt: number }) {
   const by = useCoState(Account, props.by, { resolve: { profile: true } });
   return (
-    <div className="text-xs text-neutral-500 mb-1.5">
-      {by.$isLoaded ? by.profile.name : ""} ·{" "}
-      {new Date(props.madeAt).toLocaleTimeString("en-US", {
-        hour12: false,
-      })}
+    <div className="text-xs text-neutral-500 mb-1.5 h-4">
+      {by.$isLoaded
+        ? by.profile.name +
+          " · " +
+          new Date(props.madeAt).toLocaleTimeString("en-US", {
+            hour12: false,
+          })
+        : ""}
     </div>
   );
 }
