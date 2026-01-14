@@ -55,6 +55,18 @@ export interface StorageAPI {
    */
   stopTrackingSyncState(id: RawCoID): void;
 
+  /**
+   * Load only the knownState (header presence + session counters) for a CoValue.
+   * This is more efficient than load() when we only need to check if a peer needs new content.
+   *
+   * @param id - The CoValue ID
+   * @param callback - Called with the knownState, or undefined if CoValue not found
+   */
+  loadKnownState(
+    id: string,
+    callback: (knownState: CoValueKnownState | undefined) => void,
+  ): void;
+
   close(): Promise<unknown> | undefined;
 }
 
@@ -152,6 +164,14 @@ export interface DBClientInterfaceAsync {
   getUnsyncedCoValueIDs(): Promise<RawCoID[]>;
 
   stopTrackingSyncState(id: RawCoID): Promise<void>;
+
+  /**
+   * Get the knownState for a CoValue without loading transactions.
+   * Returns undefined if the CoValue doesn't exist.
+   */
+  getCoValueKnownState(
+    coValueId: string,
+  ): Promise<CoValueKnownState | undefined>;
 }
 
 export interface DBTransactionInterfaceSync {
@@ -212,4 +232,10 @@ export interface DBClientInterfaceSync {
   getUnsyncedCoValueIDs(): RawCoID[];
 
   stopTrackingSyncState(id: RawCoID): void;
+
+  /**
+   * Get the knownState for a CoValue without loading transactions.
+   * Returns undefined if the CoValue doesn't exist.
+   */
+  getCoValueKnownState(coValueId: string): CoValueKnownState | undefined;
 }

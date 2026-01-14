@@ -4,7 +4,7 @@ import {
   CO_VALUE_LOADING_CONFIG,
   setCoValueLoadingRetryDelay,
 } from "../config";
-import { RawCoMap } from "../exports";
+import { CojsonInternalTypes, RawCoMap, SessionID } from "../exports";
 import {
   SyncMessagesLog,
   TEST_NODE_CONFIG,
@@ -1450,5 +1450,487 @@ describe("loading coValues from server", () => {
 
     expect(shardedCoreNode.hasCoValue(map.id)).toBe(true);
     expect(shardedCoreNode.hasCoValue(group.id)).toBe(false);
+  });
+});
+
+describe("lazy storage load optimization", () => {
+  test("handleLoad skips full load when peer already has all content", async () => {
+    // Setup server with storage
+    const { storage } = jazzCloud.addStorage({ ourName: "server" });
+
+    // Create content on server and sync to storage
+    const group = jazzCloud.node.createGroup();
+    const map = group.createMap();
+    map.set("hello", "world", "trusting");
+    await map.core.waitForSync();
+
+    // Setup client and load the content (client now has everything)
+    const client = setupTestNode({
+      connected: true,
+    });
+    const mapOnClient = await loadCoValueOrFail(client.node, map.id);
+    expect(mapOnClient.get("hello")).toEqual("world");
+
+    // Disconnect client
+    client.disconnect();
+
+    // Restart the server to clear memory (keeping storage)
+    // Now the server has no CoValues in memory, only in storage
+    jazzCloud.restart();
+    jazzCloud.node.setStorage(storage);
+
+    SyncMessagesLog.clear();
+
+    // Reconnect client - it will send LOAD with its knownState
+    // Server should use LAZY_LOAD to check storage and see peer already has everything
+    client.connectToSyncServer();
+
+    await client.node.syncManager.waitForAllCoValuesSync();
+
+    // Verify the flow: LAZY_LOAD checks storage to get knownState,
+    // sees peer already has everything, responds with KNOWN (skips full LOAD)
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | LOAD Group sessions: header/3",
+        "client -> server | LOAD Map sessions: header/1",
+        "server -> storage | GET_KNOWN_STATE Group",
+        "storage -> server | GET_KNOWN_STATE_RESULT Group sessions: header/3",
+        "server -> client | KNOWN Group sessions: header/3",
+        "server -> storage | GET_KNOWN_STATE Map",
+        "storage -> server | GET_KNOWN_STATE_RESULT Map sessions: header/1",
+        "server -> client | KNOWN Map sessions: header/1",
+      ]
+    `);
+  });
+
+  test("handleLoad does full load when peer needs content", async () => {
+    // Setup server with storage
+    const { storage } = jazzCloud.addStorage({ ourName: "server" });
+
+    // Create content on server and sync to storage
+    const group = jazzCloud.node.createGroup();
+    const map = group.createMap();
+    map.set("hello", "world", "trusting");
+    await map.core.waitForSync();
+
+    // Restart the server to clear memory (keeping storage)
+    jazzCloud.restart();
+    jazzCloud.node.setStorage(storage);
+
+    SyncMessagesLog.clear();
+
+    // Setup client without any data
+    const client = setupTestNode({
+      connected: true,
+    });
+
+    // Client requests a load - server needs to load from storage and send content
+    const mapOnClient = await loadCoValueOrFail(client.node, map.id);
+    expect(mapOnClient.get("hello")).toEqual("world");
+
+    // Verify the flow:
+    // 1. Client sends LOAD with empty sessions (no header)
+    // 2. Server skips LAZY_LOAD since peer has no content - goes directly to full LOAD
+    // 3. Server sends CONTENT to client
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | LOAD Map sessions: empty",
+        "server -> storage | LOAD Map sessions: empty",
+        "storage -> server | CONTENT Group header: true new: After: 0 New: 3",
+        "storage -> server | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 3",
+        "server -> client | CONTENT Map header: true new: After: 0 New: 1",
+        "client -> server | KNOWN Group sessions: header/3",
+        "client -> server | KNOWN Map sessions: header/1",
+      ]
+    `);
+  });
+
+  test("handleLoad falls back to peers when not in storage", async () => {
+    // Setup server WITHOUT storage
+    // Create content on server (in memory only)
+    const group = jazzCloud.node.createGroup();
+    const map = group.createMap();
+    map.set("hello", "world", "trusting");
+
+    SyncMessagesLog.clear();
+
+    // Setup client
+    const client = setupTestNode({
+      connected: true,
+    });
+
+    // Client requests a load - server should respond from memory
+    const mapOnClient = await loadCoValueOrFail(client.node, map.id);
+    expect(mapOnClient.get("hello")).toEqual("world");
+
+    // Verify the content was delivered
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | LOAD Map sessions: empty",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 3",
+        "server -> client | CONTENT Map header: true new: After: 0 New: 1",
+        "client -> server | KNOWN Group sessions: header/3",
+        "client -> server | KNOWN Map sessions: header/1",
+      ]
+    `);
+  });
+
+  test("handleNewContent loads from storage for garbage-collected CoValues", async () => {
+    // Setup server with storage
+    jazzCloud.addStorage({ ourName: "server" });
+
+    // Create content on server and sync to storage
+    const group = jazzCloud.node.createGroup();
+    group.addMember("everyone", "writer");
+    const map = group.createMap();
+    map.set("initial", "value", "trusting");
+    await map.core.waitForSync();
+
+    // Verify storage has the data
+    expect(jazzCloud.node.storage).toBeDefined();
+
+    // Load the content on a client first to get the knownState
+    const client1 = setupTestNode({
+      connected: true,
+    });
+    const mapOnClient1 = await loadCoValueOrFail(client1.node, map.id);
+    expect(mapOnClient1.get("initial")).toEqual("value");
+
+    // Now simulate the CoValue being garbage collected from server memory
+    // by removing it and then receiving new content from a different client
+    jazzCloud.node.internalDeleteCoValue(map.id);
+
+    // Clear messages to track what happens next
+    SyncMessagesLog.clear();
+
+    // Have client1 make an update - this should trigger handleNewContent
+    // which should load from storage since the CoValue was "garbage collected"
+    mapOnClient1.set("new", "update", "trusting");
+
+    await waitFor(() => {
+      // The server should have reloaded from storage and processed the update
+      const serverMap = jazzCloud.node.getCoValue(map.id);
+      return serverMap.isAvailable();
+    });
+
+    // Verify the server has the updated content
+    const serverMap = jazzCloud.node.getCoValue(map.id);
+    expect(serverMap.isAvailable()).toBe(true);
+
+    // Verify that the server did a full load from storage
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | CONTENT Map header: false new: After: 0 New: 1",
+        "server -> storage | LOAD Map sessions: empty",
+        "storage -> server | CONTENT Group header: true new: After: 0 New: 5",
+        "storage -> server | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> client | KNOWN Map sessions: header/2",
+        "server -> storage | CONTENT Map header: false new: After: 0 New: 1",
+      ]
+    `);
+  });
+
+  test("handleNewContent loads large CoValue from storage when garbage-collected", async () => {
+    // Setup server with storage
+    jazzCloud.addStorage({ ourName: "server" });
+
+    // Create a large map on server and sync to storage
+    const group = jazzCloud.node.createGroup();
+    group.addMember("everyone", "writer");
+    const largeMap = group.createMap();
+    fillCoMapWithLargeData(largeMap);
+    await largeMap.core.waitForSync();
+
+    // Verify storage has the data
+    expect(jazzCloud.node.storage).toBeDefined();
+
+    // Load the content on a client first
+    const client1 = setupTestNode({
+      connected: true,
+    });
+    const mapOnClient1 = await loadCoValueOrFail(client1.node, largeMap.id);
+    await mapOnClient1.core.waitForFullStreaming();
+
+    // Simulate the CoValue being garbage collected from server memory
+    jazzCloud.node.internalDeleteCoValue(largeMap.id);
+
+    // Clear messages to track what happens next
+    SyncMessagesLog.clear();
+
+    // Have client1 make an update - this should trigger handleNewContent
+    // which should load from storage (streaming) since the CoValue was "garbage collected"
+    mapOnClient1.set("new", "update", "trusting");
+
+    await waitFor(() => {
+      // The server should have reloaded from storage and processed the update
+      const serverMap = jazzCloud.node.getCoValue(largeMap.id);
+      return serverMap.isAvailable();
+    });
+
+    // Verify the server has the updated content
+    const serverMap = jazzCloud.node.getCoValue(largeMap.id);
+    expect(serverMap.isAvailable()).toBe(true);
+
+    // Verify that the server did a full load from storage (with streaming for large data)
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: largeMap.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | CONTENT Map header: false new: After: 0 New: 1",
+        "server -> storage | LOAD Map sessions: empty",
+        "storage -> server | CONTENT Group header: true new: After: 0 New: 5",
+        "storage -> server | CONTENT Map header: true new: After: 0 New: 73 expectContentUntil: header/201",
+        "server -> client | KNOWN Map sessions: header/74",
+        "server -> storage | CONTENT Map header: false new: After: 0 New: 1",
+        "storage -> server | CONTENT Map header: true new: After: 73 New: 73",
+        "storage -> server | CONTENT Map header: true new: After: 146 New: 54",
+      ]
+    `);
+  });
+
+  test("handleNewContent loads CoValue from storage when group is large and garbage-collected", async () => {
+    // Setup server with storage
+    jazzCloud.addStorage({ ourName: "server" });
+
+    // Create a group with large data
+    const group = jazzCloud.node.createGroup();
+    group.addMember("everyone", "writer");
+
+    // Add large data to the group itself
+    for (let i = 0; i < 200; i++) {
+      const value = Buffer.alloc(1024, `value${i}`).toString("base64");
+      group.set(`key${i}` as any, value as never, "trusting");
+    }
+
+    const map = group.createMap();
+    map.set("initial", "value", "trusting");
+
+    await map.core.waitForSync();
+    await group.core.waitForSync();
+
+    // Verify storage has the data
+    expect(jazzCloud.node.storage).toBeDefined();
+
+    // Load the content on a client first
+    const client1 = setupTestNode({
+      connected: true,
+    });
+    const mapOnClient1 = await loadCoValueOrFail(client1.node, map.id);
+    expect(mapOnClient1.get("initial")).toEqual("value");
+
+    // Wait for the group to finish streaming
+    const groupOnClient1 = client1.node.getCoValue(group.id);
+    await groupOnClient1.waitForAvailableOrUnavailable();
+
+    // Simulate the map being garbage collected from server memory
+    // The group should also be deleted to force reload from storage
+    jazzCloud.node.internalDeleteCoValue(map.id);
+    jazzCloud.node.internalDeleteCoValue(group.id);
+
+    // Clear messages to track what happens next
+    SyncMessagesLog.clear();
+
+    // Have client1 make an update - this should trigger handleNewContent
+    // which should load from storage (with the large group streaming)
+    mapOnClient1.set("new", "update", "trusting");
+
+    await waitFor(() => {
+      // The server should have reloaded from storage and processed the update
+      const serverMap = jazzCloud.node.getCoValue(map.id);
+      return serverMap.isAvailable();
+    });
+
+    // Verify the server has the updated content
+    const serverMap = jazzCloud.node.getCoValue(map.id);
+    expect(serverMap.isAvailable()).toBe(true);
+
+    // Verify that the server did a full load from storage
+    // Note: No LAZY_LOAD here because the content message has no header (it's an update),
+    // so the server goes directly to full LOAD
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | CONTENT Map header: false new: After: 0 New: 1",
+        "server -> storage | LOAD Map sessions: empty",
+        "storage -> server | CONTENT Group header: true new: After: 0 New: 78 expectContentUntil: header/205",
+        "storage -> server | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> client | KNOWN Map sessions: header/2",
+        "server -> storage | CONTENT Map header: false new: After: 0 New: 1",
+        "storage -> server | CONTENT Group header: true new: After: 78 New: 73",
+        "storage -> server | CONTENT Group header: true new: After: 151 New: 54",
+      ]
+    `);
+  });
+
+  test("handleNewContent loads CoValue from storage when parent group is large and garbage-collected", async () => {
+    // Setup server with storage
+    jazzCloud.addStorage({ ourName: "server" });
+
+    // Create parent group with large data
+    const parentGroup = jazzCloud.node.createGroup();
+    parentGroup.addMember("everyone", "reader");
+
+    // Add large data to the parent group
+    fillCoMapWithLargeData(parentGroup);
+
+    // Create child group that extends parent
+    const group = jazzCloud.node.createGroup();
+    group.addMember("everyone", "writer");
+    group.extend(parentGroup);
+
+    const map = group.createMap();
+    map.set("initial", "value", "trusting");
+
+    await map.core.waitForSync();
+    await group.core.waitForSync();
+    await parentGroup.core.waitForSync();
+
+    // Verify storage has the data
+    expect(jazzCloud.node.storage).toBeDefined();
+
+    // Load the content on a client first
+    const client1 = setupTestNode({
+      connected: true,
+    });
+    const mapOnClient1 = await loadCoValueOrFail(client1.node, map.id);
+    expect(mapOnClient1.get("initial")).toEqual("value");
+
+    // Wait for the parent group to finish streaming
+    const parentGroupOnClient1 = client1.node.getCoValue(parentGroup.id);
+    await parentGroupOnClient1.waitForAvailableOrUnavailable();
+    if (parentGroupOnClient1.isAvailable()) {
+      await parentGroupOnClient1.waitForFullStreaming();
+    }
+
+    // Simulate CoValues being garbage collected from server memory
+    jazzCloud.node.internalDeleteCoValue(map.id);
+    jazzCloud.node.internalDeleteCoValue(group.id);
+    jazzCloud.node.internalDeleteCoValue(parentGroup.id);
+
+    // Clear messages to track what happens next
+    SyncMessagesLog.clear();
+
+    // Have client1 make an update - this should trigger handleNewContent
+    // which should load from storage (with the large parent group streaming)
+    mapOnClient1.set("new", "update", "trusting");
+
+    await waitFor(() => {
+      // The server should have reloaded from storage and processed the update
+      const serverMap = jazzCloud.node.getCoValue(map.id);
+      return serverMap.isAvailable();
+    });
+
+    // Verify the server has the updated content
+    const serverMap = jazzCloud.node.getCoValue(map.id);
+    expect(serverMap.isAvailable()).toBe(true);
+
+    // Verify that the server did a full load from storage for all CoValues
+    // The snapshot shows the complete flow: loading Map triggers loading its dependencies
+    expect(
+      SyncMessagesLog.getMessages({
+        ParentGroup: parentGroup.core,
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | CONTENT Map header: false new: After: 0 New: 1",
+        "server -> storage | LOAD Map sessions: empty",
+        "storage -> server | CONTENT ParentGroup header: true new: After: 0 New: 78 expectContentUntil: header/205",
+        "storage -> server | CONTENT Group header: true new: After: 0 New: 7",
+        "storage -> server | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> client | KNOWN Map sessions: header/2",
+        "server -> storage | CONTENT Map header: false new: After: 0 New: 1",
+        "storage -> server | CONTENT ParentGroup header: true new: After: 78 New: 73",
+        "storage -> server | CONTENT ParentGroup header: true new: After: 151 New: 54",
+      ]
+    `);
+  });
+
+  test("handles gracefully when CoValue is garbage collected mid-stream from storage", async () => {
+    // This test verifies the edge case where:
+    // 1. Storage is streaming a large CoValue in chunks
+    // 2. The CoValue is garbage collected mid-stream
+    // 3. Subsequent chunks from storage (without header) should be handled gracefully
+
+    // Setup server with storage
+    jazzCloud.addStorage({ ourName: "server" });
+
+    // Create a large CoValue that will stream
+    const group = jazzCloud.node.createGroup();
+    group.addMember("everyone", "writer");
+    const largeMap = group.createMap();
+    fillCoMapWithLargeData(largeMap);
+    await largeMap.core.waitForSync();
+
+    // Get the sessions from the largeMap to create a realistic streaming chunk
+    const sessions = Object.entries(largeMap.core.knownState().sessions);
+    const [sessionId, txCount] = sessions[0]!;
+
+    // Simulate receiving a streaming chunk from storage for a non-existent CoValue
+    // This happens when:
+    // 1. A large CoValue starts streaming from storage
+    // 2. The CoValue gets garbage collected mid-stream
+    // 3. Remaining chunks arrive with no header (they're continuation chunks)
+
+    // First, ensure the CoValue doesn't exist in server memory
+    jazzCloud.node.internalDeleteCoValue(largeMap.id);
+    expect(jazzCloud.node.hasCoValue(largeMap.id)).toBe(false);
+
+    // Now simulate a streaming chunk arriving from storage without a header
+    // This is what happens when GC runs between streaming chunks
+    const streamingChunk = {
+      action: "content" as const,
+      id: largeMap.id,
+      header: undefined, // No header - it's a continuation chunk
+      priority: 0 as const,
+      new: {
+        [sessionId as SessionID]: {
+          after: Math.floor(txCount / 2), // Middle of the stream
+          newTransactions: [],
+          lastSignature: "test" as CojsonInternalTypes.Signature,
+        },
+      },
+    };
+
+    // Call handleNewContent directly with the storage message
+    // This should NOT crash, just log a warning and return early
+    jazzCloud.node.syncManager.handleNewContent(streamingChunk, "storage");
+
+    // The CoValue entry gets created by getOrCreateCoValue, but it should
+    // NOT be available (the chunk was ignored because it had no header)
+    const coValue = jazzCloud.node.getCoValue(largeMap.id);
+    expect(coValue).toBeDefined();
+    expect(coValue?.isAvailable()).toBe(false);
+
+    // Test passes if we reach here without crashing
   });
 });

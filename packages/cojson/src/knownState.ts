@@ -141,6 +141,30 @@ export function isKnownStateSubsetOf(
 }
 
 /**
+ * Check if the peer already has all the content from storage.
+ * Returns true if the peer has at least as many transactions as storage for all sessions.
+ */
+export function peerHasAllContent(
+  storageKnownState: CoValueKnownState,
+  peerKnownState: CoValueKnownState | undefined,
+): boolean {
+  if (!peerKnownState) {
+    return false;
+  }
+
+  // Check if peer has the header
+  if (!peerKnownState.header && storageKnownState.header) {
+    return false;
+  }
+
+  // Check all sessions - peer must have at least as many transactions as storage
+  return isKnownStateSubsetOf(
+    storageKnownState.sessions,
+    peerKnownState.sessions,
+  );
+}
+
+/**
  * Returns the record with the sessions that need to be sent to the target
  */
 export function getKnownStateToSend(

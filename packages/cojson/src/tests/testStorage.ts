@@ -150,6 +150,44 @@ function trackStorageMessages(
 ) {
   const originalStore = storage.store;
   const originalLoad = storage.load;
+  const originalLoadKnownState = storage.loadKnownState;
+
+  storage.loadKnownState = function (id, callback) {
+    SyncMessagesLog.add({
+      from: nodeName,
+      to: storageName,
+      msg: {
+        action: "lazyLoad",
+        id: id as RawCoID,
+      },
+    });
+
+    return originalLoadKnownState.call(storage, id, (knownState) => {
+      if (knownState) {
+        SyncMessagesLog.add({
+          from: storageName,
+          to: nodeName,
+          msg: {
+            action: "lazyLoadResult",
+            ...knownState,
+          },
+        });
+      } else {
+        SyncMessagesLog.add({
+          from: storageName,
+          to: nodeName,
+          msg: {
+            action: "lazyLoadResult",
+            id: id as RawCoID,
+            header: false,
+            sessions: {},
+          },
+        });
+      }
+
+      return callback(knownState);
+    });
+  };
 
   storage.store = function (data, correctionCallback) {
     SyncMessagesLog.add({

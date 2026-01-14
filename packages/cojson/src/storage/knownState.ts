@@ -25,6 +25,18 @@ export class StorageKnownState {
     return knownState;
   }
 
+  /**
+   * Get a cached knownState if it exists and has a header.
+   * Unlike getKnownState, this doesn't create an empty state if one doesn't exist.
+   */
+  getCachedKnownState(id: string): CoValueKnownState | undefined {
+    const knownState = this.knownStates.get(id);
+    if (knownState?.header) {
+      return knownState;
+    }
+    return undefined;
+  }
+
   setKnownState(id: string, knownState: CoValueKnownState) {
     this.knownStates.set(id, knownState);
   }

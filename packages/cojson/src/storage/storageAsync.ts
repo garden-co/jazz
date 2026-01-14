@@ -36,6 +36,12 @@ export class StorageApiAsync implements StorageAPI {
 
   private loadedCoValues = new Set<RawCoID>();
 
+  // Track pending loads to deduplicate concurrent requests
+  private pendingKnownStateLoads = new Map<
+    string,
+    Promise<CoValueKnownState | undefined>
+  >();
+
   constructor(dbClient: DBClientInterfaceAsync) {
     this.dbClient = dbClient;
   }
@@ -44,6 +50,51 @@ export class StorageApiAsync implements StorageAPI {
 
   getKnownState(id: string): CoValueKnownState {
     return this.knownStates.getKnownState(id);
+  }
+
+  loadKnownState(
+    id: string,
+    callback: (knownState: CoValueKnownState | undefined) => void,
+  ): void {
+    // Check in-memory cache first
+    const cached = this.knownStates.getCachedKnownState(id);
+    if (cached) {
+      callback(cached);
+      return;
+    }
+
+    // Check if there's already a pending load for this ID (deduplication)
+    const pending = this.pendingKnownStateLoads.get(id);
+    if (pending) {
+      // Ensure callback is always called, even if pending fails unexpectedly
+      pending.then(callback, () => callback(undefined));
+      return;
+    }
+
+    // Start new load and track it for deduplication
+    const loadPromise = this.dbClient
+      .getCoValueKnownState(id)
+      .then((knownState) => {
+        if (knownState) {
+          // Cache for future use
+          this.knownStates.setKnownState(id, knownState);
+        }
+        return knownState;
+      })
+      .catch((err) => {
+        // Error handling contract:
+        // - Log warning
+        // - Behave like "not found" so callers can fall back (full load / load from peers)
+        logger.warn("Failed to load knownState from storage", { id, err });
+        return undefined;
+      })
+      .finally(() => {
+        // Remove from pending map after completion (success or failure)
+        this.pendingKnownStateLoads.delete(id);
+      });
+
+    this.pendingKnownStateLoads.set(id, loadPromise);
+    loadPromise.then(callback);
   }
 
   async load(

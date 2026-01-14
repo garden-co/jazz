@@ -1506,6 +1506,32 @@ export class CoValueCore {
     );
   }
 
+  /**
+   * Lazily load only the knownState from storage without loading full transaction data.
+   * This is useful for checking if a peer needs new content before committing to a full load.
+   *
+   * Caching and deduplication are handled at the storage layer.
+   *
+   * @param done - Callback with the storage knownState, or undefined if not found in storage
+   */
+  getKnownStateFromStorage(
+    done: (knownState: CoValueKnownState | undefined) => void,
+  ) {
+    if (!this.node.storage) {
+      done(undefined);
+      return;
+    }
+
+    // If already available in memory, return the current knownState
+    if (this.isAvailable()) {
+      done(this.knownState());
+      return;
+    }
+
+    // Delegate to storage - caching is handled at storage level
+    this.node.storage.loadKnownState(this.id, done);
+  }
+
   loadFromPeers(peers: PeerState[]) {
     if (peers.length === 0) {
       return;

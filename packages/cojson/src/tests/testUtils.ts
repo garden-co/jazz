@@ -19,7 +19,7 @@ import {
   type RawCoValue,
   StorageAPI,
 } from "../exports.js";
-import type { SessionID } from "../ids.js";
+import type { RawCoID, SessionID } from "../ids.js";
 import { LocalNode } from "../localNode.js";
 import { connectedPeers } from "../streamUtils.js";
 import type { Peer, SyncMessage, SyncWhen } from "../sync.js";
@@ -679,10 +679,22 @@ export async function setupTestAccount(
   };
 }
 
+export type LazyLoadMessage = {
+  action: "lazyLoad";
+  id: RawCoID;
+};
+
+export type LazyLoadResultMessage = {
+  action: "lazyLoadResult";
+  id: RawCoID;
+  header: boolean;
+  sessions: { [sessionID: string]: number };
+};
+
 export type SyncTestMessage = {
   from: string;
   to: string;
-  msg: SyncMessage;
+  msg: SyncMessage | LazyLoadMessage | LazyLoadResultMessage;
 };
 
 export function connectedPeersWithMessagesTracking(opts: {
