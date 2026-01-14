@@ -1144,6 +1144,13 @@ export class SyncManager {
     });
   }
 
+  /**
+   * Returns true if the local CoValue changes have been synced to all persistent server peers
+   */
+  isSyncedToServerPeers(id: RawCoID): boolean {
+    return !this.unsyncedTracker.has(id);
+  }
+
   waitForSyncWithPeer(peerId: PeerID, id: RawCoID, timeout: number) {
     const peerState = this.peers[peerId];
 

@@ -2,6 +2,9 @@ import { CoValueCore } from "./coValueCore/coValueCore.js";
 import { GARBAGE_COLLECTOR_CONFIG } from "./config.js";
 import { RawCoID } from "./ids.js";
 
+/**
+ * TTL-based garbage collector for removing unused CoValues from memory.
+ */
 export class GarbageCollector {
   private readonly interval: ReturnType<typeof setInterval>;
 
