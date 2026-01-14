@@ -10,19 +10,17 @@ interface PendingLoad {
 }
 
 /**
- * A queue that manages outgoing load requests with throttling and prioritization.
+ * A queue that manages outgoing load requests with throttling.
  *
  * Features:
  * - Limits concurrent in-flight load requests per peer
- * - Prioritizes unavailable CoValues over already-available ones (sync requests)
- * - FIFO order within each priority tier
+ * - FIFO order for pending requests
  * - O(1) enqueue and dequeue operations using LinkedList
  * - Manages timeouts for in-flight loads with a single timer
  */
 export class OutgoingLoadQueue {
   private inFlightLoads: Map<CoValueCore, number> = new Map();
-  private pendingHigh: LinkedList<PendingLoad> = new LinkedList(); // Unavailable
-  private pendingLow: LinkedList<PendingLoad> = new LinkedList(); // Available
+  private pending: LinkedList<PendingLoad> = new LinkedList();
   private requestedSet: Set<CoValueCore["id"]> = new Set();
   private timeoutHandle: ReturnType<typeof setTimeout> | null = null;
 
@@ -120,20 +118,13 @@ export class OutgoingLoadQueue {
 
     this.requestedSet.add(coValue.id);
 
-    const pending: PendingLoad = { value: coValue, sendCallback };
-
-    if (coValue.isAvailable()) {
-      this.pendingLow.push(pending);
-    } else {
-      this.pendingHigh.push(pending);
-    }
+    this.pending.push({ value: coValue, sendCallback });
     this.processQueue();
   }
 
   private processing = false;
   /**
    * Process all pending load requests while capacity is available.
-   * Prioritizes unavailable CoValues (high) over available ones (low).
    */
   private processQueue(): void {
     if (this.processing || !this.canSend()) {
@@ -142,13 +133,7 @@ export class OutgoingLoadQueue {
     this.processing = true;
 
     while (this.canSend()) {
-      // Try high priority first (unavailable CoValues)
-      let next = this.pendingHigh.shift();
-
-      // Fall back to low priority (available CoValues)
-      if (!next) {
-        next = this.pendingLow.shift();
-      }
+      const next = this.pending.shift();
 
       if (!next) {
         break;
@@ -172,8 +157,7 @@ export class OutgoingLoadQueue {
     }
     this.inFlightLoads.clear();
     this.requestedSet.clear();
-    this.pendingHigh = new LinkedList();
-    this.pendingLow = new LinkedList();
+    this.pending = new LinkedList();
   }
 
   /**
@@ -184,16 +168,9 @@ export class OutgoingLoadQueue {
   }
 
   /**
-   * Get the number of pending high priority loads (for testing/debugging).
+   * Get the number of pending loads (for testing/debugging).
    */
-  get pendingHighCount(): number {
-    return this.pendingHigh.length;
-  }
-
-  /**
-   * Get the number of pending low priority loads (for testing/debugging).
-   */
-  get pendingLowCount(): number {
-    return this.pendingLow.length;
+  get pendingCount(): number {
+    return this.pending.length;
   }
 }

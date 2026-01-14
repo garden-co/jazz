@@ -55,49 +55,8 @@ describe("OutgoingLoadQueue", () => {
     });
   });
 
-  describe("priority ordering", () => {
-    test("should process unavailable CoValues before available ones", () => {
-      setMaxInFlightLoadsPerPeer(1);
-      const queue = new OutgoingLoadQueue(TEST_PEER_ID);
-      const node = createTestNode();
-      const group = node.createGroup();
-
-      // Create an available CoValue
-      const availableMap = group.createMap();
-
-      // Get an unavailable CoValue (doesn't exist locally)
-      const unavailableCoValue = node.getCoValue(
-        "co_zTestUnavailableCoValueId1234" as any,
-      );
-
-      const order: string[] = [];
-
-      // First enqueue available, then unavailable
-      // But block processing by filling the queue first
-      const blockerMap = group.createMap();
-      queue.enqueue(blockerMap.core, () => {
-        order.push("blocker");
-      });
-
-      // Now queue is at capacity, enqueue available then unavailable
-      queue.enqueue(availableMap.core, () => {
-        order.push("available");
-      });
-      queue.enqueue(unavailableCoValue, () => {
-        order.push("unavailable");
-      });
-
-      expect(queue.pendingHighCount).toBe(1); // unavailable
-      expect(queue.pendingLowCount).toBe(1); // available
-
-      // Complete the blocker to start processing
-      queue.trackComplete(blockerMap.core);
-
-      // Unavailable should be processed first (high priority)
-      expect(order).toEqual(["blocker", "unavailable"]);
-    });
-
-    test("should maintain FIFO order within each priority tier", () => {
+  describe("FIFO ordering", () => {
+    test("should maintain FIFO order for pending requests", () => {
       setMaxInFlightLoadsPerPeer(1);
       const queue = new OutgoingLoadQueue(TEST_PEER_ID);
       const node = createTestNode();
@@ -107,29 +66,23 @@ describe("OutgoingLoadQueue", () => {
       const blockerMap = group.createMap();
       queue.enqueue(blockerMap.core, () => {});
 
-      // Enqueue multiple unavailable CoValues
-      const unavailable1 = node.getCoValue(
-        "co_zTestUnavailable00000001" as any,
-      );
-      const unavailable2 = node.getCoValue(
-        "co_zTestUnavailable00000002" as any,
-      );
-      const unavailable3 = node.getCoValue(
-        "co_zTestUnavailable00000003" as any,
-      );
+      // Enqueue multiple CoValues
+      const map1 = group.createMap();
+      const map2 = group.createMap();
+      const map3 = group.createMap();
 
       const order: string[] = [];
 
-      queue.enqueue(unavailable1, () => order.push("unavailable1"));
-      queue.enqueue(unavailable2, () => order.push("unavailable2"));
-      queue.enqueue(unavailable3, () => order.push("unavailable3"));
+      queue.enqueue(map1.core, () => order.push("map1"));
+      queue.enqueue(map2.core, () => order.push("map2"));
+      queue.enqueue(map3.core, () => order.push("map3"));
 
       // Complete requests one by one
       queue.trackComplete(blockerMap.core);
-      queue.trackComplete(unavailable1);
-      queue.trackComplete(unavailable2);
+      queue.trackComplete(map1.core);
+      queue.trackComplete(map2.core);
 
-      expect(order).toEqual(["unavailable1", "unavailable2", "unavailable3"]);
+      expect(order).toEqual(["map1", "map2", "map3"]);
     });
   });
 
@@ -155,7 +108,7 @@ describe("OutgoingLoadQueue", () => {
       // First two should be in flight
       expect(queue.inFlightCount).toBe(2);
       // Third should be pending
-      expect(queue.pendingLowCount).toBe(1);
+      expect(queue.pendingCount).toBe(1);
       expect(callback3Called).toBe(false);
     });
 
@@ -185,7 +138,7 @@ describe("OutgoingLoadQueue", () => {
       // Third should now be processed
       expect(callback3Called).toBe(true);
       expect(queue.inFlightCount).toBe(2);
-      expect(queue.pendingLowCount).toBe(0);
+      expect(queue.pendingCount).toBe(0);
     });
   });
 
@@ -211,7 +164,7 @@ describe("OutgoingLoadQueue", () => {
         duplicateCallbackCount += 1;
       });
 
-      expect(queue.pendingLowCount).toBe(1);
+      expect(queue.pendingCount).toBe(1);
       expect(targetCallbackCount).toBe(0);
       expect(duplicateCallbackCount).toBe(0);
 
@@ -238,7 +191,7 @@ describe("OutgoingLoadQueue", () => {
       expect(duplicateCallbackCount).toBe(0);
     });
 
-    test("should skip duplicate enqueue across availability tiers", () => {
+    test("should skip duplicate enqueue for same CoValue ID", () => {
       setMaxInFlightLoadsPerPeer(1);
       const queue = new OutgoingLoadQueue(TEST_PEER_ID);
       const node = createTestNode();
@@ -246,7 +199,7 @@ describe("OutgoingLoadQueue", () => {
       const group = node.createGroup();
 
       const availableMap = group.createMap();
-      const unavailableCoValue = otherNode.getCoValue(availableMap.id);
+      const sameIdCoValue = otherNode.getCoValue(availableMap.id);
 
       queue.enqueue(availableMap.core, () => {});
       queue.trackComplete(availableMap.core);
@@ -257,11 +210,11 @@ describe("OutgoingLoadQueue", () => {
 
       let duplicateCallbackCount = 0;
       queue.enqueue(availableMap.core, () => {});
-      queue.enqueue(unavailableCoValue, () => {
+      queue.enqueue(sameIdCoValue, () => {
         duplicateCallbackCount += 1;
       });
 
-      expect(queue.pendingLowCount + queue.pendingHighCount).toBe(1);
+      expect(queue.pendingCount).toBe(1);
       expect(duplicateCallbackCount).toBe(0);
     });
   });
@@ -476,13 +429,12 @@ describe("OutgoingLoadQueue", () => {
       queue.enqueue(map3.core, () => {});
 
       expect(queue.inFlightCount).toBe(2);
-      expect(queue.pendingLowCount).toBe(1);
+      expect(queue.pendingCount).toBe(1);
 
       queue.clear();
 
       expect(queue.inFlightCount).toBe(0);
-      expect(queue.pendingLowCount).toBe(0);
-      expect(queue.pendingHighCount).toBe(0);
+      expect(queue.pendingCount).toBe(0);
     });
 
     test("should cancel any pending timeout", async () => {
