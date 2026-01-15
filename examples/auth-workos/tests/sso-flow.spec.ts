@@ -7,13 +7,34 @@ import { type Page, expect, test } from "@playwright/test";
  * - WORKOS_TEST_EMAIL: The test user's email
  * - WORKOS_TEST_PASSWORD: The test user's password
  *
+ * In CI: Tests will FAIL if credentials are missing
+ * Locally: Tests will be SKIPPED with a warning if credentials are missing
+ *
  * Run with: WORKOS_TEST_EMAIL=user@example.com WORKOS_TEST_PASSWORD=secret npm test
  */
 
 const testEmail = process.env.WORKOS_TEST_EMAIL;
 const testPassword = process.env.WORKOS_TEST_PASSWORD;
+const isCI = !!process.env.CI;
 
 const hasCredentials = testEmail && testPassword;
+
+// In CI, fail early if credentials are missing
+if (isCI && !hasCredentials) {
+  throw new Error(
+    "WORKOS_TEST_EMAIL and WORKOS_TEST_PASSWORD environment variables are required in CI. " +
+      "Please configure these secrets in GitHub Actions.",
+  );
+}
+
+// Locally, warn if credentials are missing
+if (!isCI && !hasCredentials) {
+  console.warn(
+    "\n⚠️  WARNING: WorkOS SSO flow tests will be skipped.\n" +
+      "   Set WORKOS_TEST_EMAIL and WORKOS_TEST_PASSWORD to run these tests.\n" +
+      "   Example: WORKOS_TEST_EMAIL=user@example.com WORKOS_TEST_PASSWORD=secret npm test\n",
+  );
+}
 
 /**
  * Helper to complete the full SSO authentication flow
@@ -72,9 +93,10 @@ test.describe("WorkOS Full SSO Flow", () => {
   // Run serially to avoid rate limiting issues with WorkOS
   test.describe.configure({ mode: "serial" });
 
+  // Skip locally if credentials are missing (CI will have already failed above)
   test.skip(
     !hasCredentials,
-    "Skipping SSO flow tests - set WORKOS_TEST_EMAIL and WORKOS_TEST_PASSWORD env vars",
+    "Skipping SSO flow tests locally - set WORKOS_TEST_EMAIL and WORKOS_TEST_PASSWORD env vars",
   );
 
   test("completes full SSO authentication flow", async ({ page }) => {
