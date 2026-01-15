@@ -33,6 +33,45 @@ use crate::indexeddb::IndexedDbEnvironment;
 use crate::sync::WasmClientEnv;
 
 // ============================================================================
+// Async Helpers
+// ============================================================================
+
+/// Sleep for the given number of milliseconds using JavaScript setTimeout.
+async fn sleep_ms(ms: u32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        let window = web_sys::window().unwrap();
+        window
+            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms as i32)
+            .unwrap();
+    });
+    wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
+}
+
+/// Calculate reconnection delay with exponential backoff.
+fn calculate_reconnect_delay(attempt: u32) -> u32 {
+    const INITIAL_DELAY_MS: u32 = 1000;
+    const MAX_DELAY_MS: u32 = 30000;
+    const BACKOFF_MULTIPLIER: f64 = 1.5;
+
+    let delay = (INITIAL_DELAY_MS as f64) * BACKOFF_MULTIPLIER.powi(attempt as i32);
+    (delay as u32).min(MAX_DELAY_MS)
+}
+
+/// Calculate reconnection delay with jitter to prevent thundering herd.
+fn calculate_reconnect_delay_with_jitter(attempt: u32) -> u32 {
+    let base_delay = calculate_reconnect_delay(attempt);
+    // Add jitter: 0 to 25% of base delay
+    let jitter_range = base_delay / 4;
+    if jitter_range > 0 {
+        // Simple pseudo-random using js_sys
+        let random = (js_sys::Math::random() * jitter_range as f64) as u32;
+        base_delay + random
+    } else {
+        base_delay
+    }
+}
+
+// ============================================================================
 // Connection State
 // ============================================================================
 
@@ -66,8 +105,8 @@ struct SyncedState {
     on_state_change: Option<Function>,
     /// Callback for sync errors
     on_error: Option<Function>,
-    /// Callback for data changes (called when sync applies changes)
-    on_data_change: Option<Function>,
+    /// Flag to stop reconnection loop
+    should_disconnect: bool,
 }
 
 impl SyncedState {
@@ -87,12 +126,6 @@ impl SyncedState {
     fn report_error(&self, message: &str) {
         if let Some(ref cb) = self.on_error {
             let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(message));
-        }
-    }
-
-    fn notify_data_change(&self) {
-        if let Some(ref cb) = self.on_data_change {
-            let _ = cb.call0(&JsValue::NULL);
         }
     }
 
@@ -144,7 +177,7 @@ impl WasmSyncedLocalNode {
                 pending_objects: HashSet::new(),
                 on_state_change: None,
                 on_error: None,
-                on_data_change: None,
+                should_disconnect: false,
             })),
         }
     }
@@ -195,7 +228,7 @@ impl WasmSyncedLocalNode {
                     pending_objects: HashSet::new(),
                     on_state_change: None,
                     on_error: None,
-                    on_data_change: None,
+                    should_disconnect: false,
                 })),
             }))
         })
@@ -217,69 +250,44 @@ impl WasmSyncedLocalNode {
         self.state.borrow_mut().on_error = Some(callback);
     }
 
-    /// Set callback for data changes (called when sync applies remote changes).
-    ///
-    /// Callback receives: no arguments
-    #[wasm_bindgen(js_name = setOnDataChange)]
-    pub fn set_on_data_change(&self, callback: Function) {
-        self.state.borrow_mut().on_data_change = Some(callback);
-    }
-
     /// Get current sync state.
     #[wasm_bindgen(getter, js_name = syncState)]
     pub fn sync_state(&self) -> SyncState {
         self.state.borrow().sync_state
     }
 
+    /// Disconnect from the sync server and stop reconnection attempts.
+    #[wasm_bindgen]
+    pub fn disconnect(&self) {
+        let mut state = self.state.borrow_mut();
+        state.should_disconnect = true;
+        state.set_sync_state(SyncState::Disconnected);
+    }
+
     /// Connect to the sync server and start receiving updates.
     ///
     /// This subscribes to the given query and starts an SSE stream
-    /// to receive real-time updates from other clients.
+    /// to receive real-time updates from other clients. The connection
+    /// automatically reconnects with exponential backoff on disconnection.
     #[wasm_bindgen]
     pub fn connect(&self, query: String) -> Promise {
         let state = Rc::clone(&self.state);
 
         future_to_promise(async move {
-            state.borrow_mut().set_sync_state(SyncState::Connecting);
-
-            let env = state.borrow().client_env();
-
-            let request = SubscribeRequest {
-                query,
-                options: SubscriptionOptions::default(),
-            };
-
-            match env.subscribe(request).await {
-                Ok(mut stream) => {
-                    state.borrow_mut().set_sync_state(SyncState::Connected);
-
-                    // Spawn a task to process incoming events
-                    let state_clone = Rc::clone(&state);
-                    wasm_bindgen_futures::spawn_local(async move {
-                        while let Some(result) = stream.next().await {
-                            match result {
-                                Ok(event) => {
-                                    handle_sse_event(&state_clone, &event);
-                                }
-                                Err(e) => {
-                                    state_clone.borrow().report_error(&e.message);
-                                    break;
-                                }
-                            }
-                        }
-
-                        state_clone
-                            .borrow_mut()
-                            .set_sync_state(SyncState::Disconnected);
-                    });
-
-                    Ok(JsValue::TRUE)
-                }
-                Err(e) => {
-                    state.borrow_mut().set_sync_state(SyncState::Disconnected);
-                    Err(JsValue::from_str(&e.message))
-                }
+            {
+                let mut state_ref = state.borrow_mut();
+                state_ref.should_disconnect = false;
+                state_ref.set_sync_state(SyncState::Connecting);
             }
+
+            // Spawn the reconnecting event loop
+            let state_clone = Rc::clone(&state);
+            let query_clone = query.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                sync_event_loop(&state_clone, &query_clone).await;
+            });
+
+            Ok(JsValue::TRUE)
         })
     }
 
@@ -622,6 +630,96 @@ impl SyncedQueryHandle {
 // Sync Helpers
 // ============================================================================
 
+/// Main sync event loop with automatic reconnection.
+///
+/// This mirrors the native `upstream_event_loop` in SyncedNode, providing
+/// symmetric behavior between WASM and native implementations.
+async fn sync_event_loop(state: &Rc<RefCell<SyncedState>>, query: &str) {
+    let mut reconnect_attempt: u32 = 0;
+
+    loop {
+        // Check if we should stop reconnecting
+        if state.borrow().should_disconnect {
+            web_sys::console::log_1(&JsValue::from_str("Sync loop stopped (disconnect requested)"));
+            return;
+        }
+
+        // Set appropriate state for this connection attempt
+        if reconnect_attempt == 0 {
+            state.borrow_mut().set_sync_state(SyncState::Connecting);
+        } else {
+            state.borrow_mut().set_sync_state(SyncState::Reconnecting);
+        }
+
+        let env = state.borrow().client_env();
+        let request = SubscribeRequest {
+            query: query.to_string(),
+            options: SubscriptionOptions::default(),
+        };
+
+        match env.subscribe(request).await {
+            Ok(mut stream) => {
+                // Connection successful - reset reconnect counter
+                reconnect_attempt = 0;
+                state.borrow_mut().set_sync_state(SyncState::Connected);
+
+                web_sys::console::log_1(&JsValue::from_str("Connected to sync server"));
+
+                // Process events until stream ends or disconnect is requested
+                while let Some(result) = stream.next().await {
+                    // Check for disconnect request
+                    if state.borrow().should_disconnect {
+                        web_sys::console::log_1(&JsValue::from_str(
+                            "Sync loop stopped (disconnect requested)",
+                        ));
+                        return;
+                    }
+
+                    match result {
+                        Ok(event) => {
+                            handle_sse_event(state, &event);
+                        }
+                        Err(e) => {
+                            state.borrow().report_error(&format!("Stream error: {}", e.message));
+                            break;
+                        }
+                    }
+                }
+
+                // Check again before reconnecting
+                if state.borrow().should_disconnect {
+                    return;
+                }
+
+                web_sys::console::log_1(&JsValue::from_str("Sync stream ended, will reconnect"));
+            }
+            Err(e) => {
+                web_sys::console::log_1(&JsValue::from_str(&format!(
+                    "Connection failed: {}",
+                    e.message
+                )));
+                state.borrow().report_error(&format!("Connection failed: {}", e.message));
+            }
+        }
+
+        // Check before sleeping
+        if state.borrow().should_disconnect {
+            return;
+        }
+
+        // Calculate delay with jitter and wait before reconnecting
+        let delay = calculate_reconnect_delay_with_jitter(reconnect_attempt);
+        web_sys::console::log_1(&JsValue::from_str(&format!(
+            "Reconnecting in {}ms (attempt {})",
+            delay,
+            reconnect_attempt + 1
+        )));
+
+        sleep_ms(delay).await;
+        reconnect_attempt = reconnect_attempt.saturating_add(1);
+    }
+}
+
 /// Handle an SSE event from the server.
 fn handle_sse_event(state: &Rc<RefCell<SyncedState>>, event: &SseEvent) {
     match event {
@@ -833,7 +931,3 @@ async fn push_pending_objects(state: &Rc<RefCell<SyncedState>>) {
     }
 }
 
-fn row_to_strings(row: &(groove::ObjectId, groove::sql::OwnedRow)) -> Vec<String> {
-    // Return id and a debug representation of the row buffer
-    vec![row.0.to_string(), format!("{} bytes", row.1.buffer.len())]
-}

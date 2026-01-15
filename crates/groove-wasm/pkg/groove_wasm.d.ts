@@ -330,16 +330,15 @@ export class WasmSyncedLocalNode {
    */
   setOnError(callback: Function): void;
   /**
-   * Set callback for data changes (called when sync applies remote changes).
-   *
-   * Callback receives: no arguments
+   * Disconnect from the sync server and stop reconnection attempts.
    */
-  setOnDataChange(callback: Function): void;
+  disconnect(): void;
   /**
    * Connect to the sync server and start receiving updates.
    *
    * This subscribes to the given query and starts an SSE stream
-   * to receive real-time updates from other clients.
+   * to receive real-time updates from other clients. The connection
+   * automatically reconnects with exponential backoff on disconnection.
    */
   connect(query: string): Promise<any>;
   /**
@@ -458,8 +457,8 @@ export interface InitOutput {
   readonly wasmsyncedlocalnode_withIndexedDb: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
   readonly wasmsyncedlocalnode_setOnStateChange: (a: number, b: any) => void;
   readonly wasmsyncedlocalnode_setOnError: (a: number, b: any) => void;
-  readonly wasmsyncedlocalnode_setOnDataChange: (a: number, b: any) => void;
   readonly wasmsyncedlocalnode_syncState: (a: number) => number;
+  readonly wasmsyncedlocalnode_disconnect: (a: number) => void;
   readonly wasmsyncedlocalnode_connect: (a: number, b: number, c: number) => any;
   readonly wasmsyncedlocalnode_execute: (a: number, b: number, c: number) => [number, number, number];
   readonly wasmsyncedlocalnode_selectBinary: (a: number, b: number, c: number) => [number, number, number];

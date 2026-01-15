@@ -46,8 +46,8 @@ export const wasmsyncedlocalnode_new: (a: number, b: number, c: number, d: numbe
 export const wasmsyncedlocalnode_withIndexedDb: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
 export const wasmsyncedlocalnode_setOnStateChange: (a: number, b: any) => void;
 export const wasmsyncedlocalnode_setOnError: (a: number, b: any) => void;
-export const wasmsyncedlocalnode_setOnDataChange: (a: number, b: any) => void;
 export const wasmsyncedlocalnode_syncState: (a: number) => number;
+export const wasmsyncedlocalnode_disconnect: (a: number) => void;
 export const wasmsyncedlocalnode_connect: (a: number, b: number, c: number) => any;
 export const wasmsyncedlocalnode_execute: (a: number, b: number, c: number) => [number, number, number];
 export const wasmsyncedlocalnode_selectBinary: (a: number, b: number, c: number) => [number, number, number];
