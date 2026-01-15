@@ -82,15 +82,12 @@ export class LocalNode {
     this.crypto = crypto;
   }
 
-  enableGarbageCollector(opts?: { garbageCollectGroups?: boolean }) {
+  enableGarbageCollector() {
     if (this.garbageCollector) {
       return;
     }
 
-    this.garbageCollector = new GarbageCollector(
-      this.coValues,
-      opts?.garbageCollectGroups ?? false,
-    );
+    this.garbageCollector = new GarbageCollector(this.coValues);
   }
 
   setStorage(storage: StorageAPI) {
